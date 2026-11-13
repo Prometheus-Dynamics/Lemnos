@@ -19,6 +19,7 @@ mod pio_i2c;
 mod pio_out;
 mod pwm;
 mod spi;
+mod stable;
 mod uart;
 mod usb;
 
@@ -40,6 +41,7 @@ pub use i2c::I2cBus;
 pub use module::{ModuleClocks, ModuleDma, ModuleInterrupt, ModuleRegisters, ModuleReset};
 pub use pwm::SysfsPwm;
 pub use spi::{SpiMode, Spidev};
+pub use stable::{GpioChip, gpio_chips};
 pub use uart::TtyUart;
 
 /// The hardware of the machine this runs on.
@@ -122,10 +124,7 @@ impl LinuxBoard {
         let Some(node) = self.module.clone() else {
             return Ok(None);
         };
-        let Some((chip, offset)) = split(need) else {
-            return Ok(None);
-        };
-        let Some(Ok(chip)) = chip.strip_prefix(GPIO).map(str::parse) else {
+        let Some((chip, offset)) = self.gpio_number(need) else {
             return Ok(None);
         };
         served(module::ModuleLine::open(node, chip, offset))
@@ -161,14 +160,27 @@ impl LinuxBoard {
         })
     }
 
-    /// The line a name like `gpiochip0:17` means.
-    fn line_node(&self, need: &str) -> Option<(PathBuf, u32)> {
+    /// The chip number and line a GPIO name means: `gpiochip0:17` as it is, or `gpio:LABEL:17`
+    /// once the chip with that label is found. Resolved now, not kept: the kernel may renumber.
+    fn gpio_number(&self, need: &str) -> Option<(u32, u32)> {
+        if let Some(stable::Stable::Gpio { label, line }) = stable::parse(need) {
+            return Some((stable::gpio_chip_number(&self.dev, label)?, line));
+        }
         let (chip, offset) = split(need)?;
-        Some((self.node(chip, GPIO)?, offset))
+        Some((chip.strip_prefix(GPIO)?.parse().ok()?, offset))
     }
 
-    /// The chip directory and channel a name like `pwmchip0:1` means.
+    /// The line a name like `gpiochip0:17` or `gpio:pinctrl-rp1:17` means.
+    fn line_node(&self, need: &str) -> Option<(PathBuf, u32)> {
+        let (chip, offset) = self.gpio_number(need)?;
+        Some((self.node(&format!("{GPIO}{chip}"), GPIO)?, offset))
+    }
+
+    /// The chip directory and channel a name like `pwmchip0:1` or `pwm:/axi/...:1` means.
     fn pwm_node(&self, need: &str) -> Option<(PathBuf, u32)> {
+        if let Some(stable::Stable::Pwm { node, channel }) = stable::parse(need) {
+            return Some((stable::pwm_chip_dir(&self.sys, node)?, channel));
+        }
         let (chip, channel) = split(need)?;
         let valid = chip.len() > PWM.len() && chip.starts_with(PWM) && !chip.contains('/');
         valid.then(|| (self.sys.join("class/pwm").join(chip), channel))

@@ -28,6 +28,7 @@ controller = "pio"
 
 [[hardware]]
 controller = "csi0"
+module = "pisp_be"
 
 [[hardware]]
 name = "udc:7000.usb"
@@ -37,7 +38,7 @@ controller = "usb"
 controller = "wdt"
 
 [[lines]]
-line = "gpio:9"
+line = "gpio:gpio-test:9"
 boot = "high"
 reason = "held high from power-on until the fan driver takes it"
 

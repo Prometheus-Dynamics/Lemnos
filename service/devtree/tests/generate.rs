@@ -194,6 +194,7 @@ fn run_check(dir: &Path, board_text: &str, map_text: &str) -> Vec<String> {
         &check::Live {
             tree: &dir.join("tree"),
             sys: &dir.join("sys"),
+            gpio_chips: &[("gpio-test".to_string(), 16)],
         },
     )
 }
@@ -273,6 +274,210 @@ fn a_stock_driver_bound_where_the_module_must_own_the_node_is_named() {
         problems
             .iter()
             .any(|p| p.contains("stock driver stock-csi is bound to 6000.csi")),
+        "{problems:?}"
+    );
+}
+
+// The three outputs of the reference board are complete: every device is traceable to something
+// the outputs make, and what each one makes is in them.
+
+/// The board's devices, each with what its needs must produce in the outputs.
+const REFERENCE_DEVICES: &[(&str, &str)] = &[
+    // The ring's PIO block: the node enabled, with its reason.
+    ("ring", "pio: the RP1 PIO block"),
+    // The IMU and the sensor: their buses' nodes enabled and aliased.
+    ("imu", "alias i2c1, the name \"i2c-1\""),
+    ("sensor", "alias i2c10, the name \"i2c-10\""),
+    // The camera power switch: the regulator's node disabled, its line freed, and the module
+    // owns the receiver it powers.
+    ("cam0-power", "disabled: base \"module-io\" /cam0_reg"),
+    // The fan: the PWM block with the pin set of its channel.
+    ("fan", "pwm: a PWM channel on RP1"),
+];
+
+#[test]
+fn every_device_of_the_reference_board_is_traceable_to_an_output() {
+    let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
+    let board = board::parse(REFERENCE_BOARD).unwrap();
+    for device in &board.devices {
+        let wanted = REFERENCE_DEVICES
+            .iter()
+            .find(|(id, _)| *id == device.id)
+            .unwrap_or_else(|| panic!("device {:?} has no expected output", device.id));
+        let found = out.overlay.contains(wanted.1)
+            || out.boot.contains(wanted.1)
+            || out.modprobe.contains(wanted.1);
+        assert!(
+            found,
+            "device {:?}: {:?} is in no output",
+            device.id, wanted.1
+        );
+    }
+}
+
+#[test]
+fn the_reference_boards_module_configuration_is_golden() {
+    let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
+    assert_eq!(out.modprobe, golden("reference-modprobe.conf"));
+    assert!(out.modprobe.contains(
+        "options lemnos owned=raspberrypi,pispbe,raspberrypi,rp1-cfe pisp_be=raspberrypi,pispbe\n"
+    ));
+    assert!(out.modprobe.contains("blacklist rp1-cfe\n"));
+    assert!(out.modprobe.contains("blacklist pispbe\n"));
+}
+
+#[test]
+fn the_reference_boards_boot_fragment_covers_each_boot_line() {
+    let board = board::parse(REFERENCE_BOARD).unwrap();
+    let boots = board.lines.iter().filter(|l| l.boot.is_some()).count();
+    let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
+    let gpio_lines = out.boot.lines().filter(|l| l.starts_with("gpio=")).count();
+    assert_eq!(boots, gpio_lines);
+    assert!(out.boot.contains("gpio=45=op,dh"));
+    assert!(out.boot.contains("# gpio:pinctrl-rp1:45: boot high:"));
+}
+
+#[test]
+fn a_device_that_makes_nothing_is_refused() {
+    // A line with neither a base holder nor a boot state frees nothing.
+    let board = format!(
+        "{ALL_KINDS_BOARD}\n[[lines]]\nline = \"gpio:gpio-test:4\"\n\n[[devices]]\nid = \"switch\"\ndriver = \"switch\"\nuses = {{ line = \"gpio:gpio-test:4\" }}\n"
+    );
+    assert!(
+        refused(&board).contains("makes nothing"),
+        "{}",
+        refused(&board)
+    );
+}
+
+#[test]
+fn a_device_with_no_hardware_name_is_refused_unless_its_driver_needs_nothing() {
+    let board = format!("{ALL_KINDS_BOARD}\n[[devices]]\nid = \"lonely\"\ndriver = \"lonely\"\n");
+    assert!(refused(&board).contains("has no hardware name"));
+    let composed = format!(
+        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"group\"\ndriver = \"composed\"\nuses = {{ imu = \"imu\" }}\n"
+    );
+    assert!(generated(&composed, ALL_KINDS_MAP).is_ok());
+}
+
+#[test]
+fn a_device_names_only_what_the_generator_makes() {
+    let board = ALL_KINDS_BOARD.replace("bus = \"i2c-0\"", "bus = \"ttyAMA0\"");
+    assert!(refused(&board).contains("makes nothing of that name"));
+}
+
+#[test]
+fn a_stable_line_name_needs_a_known_chip() {
+    let board = ALL_KINDS_BOARD.replace("gpio:gpio-test:9", "gpio:nope:9");
+    assert!(refused(&board).contains("no GPIO chip labelled \"nope\""));
+}
+
+#[test]
+fn a_numbered_line_name_is_refused_with_the_stable_form() {
+    let board = ALL_KINDS_BOARD.replace("gpio:gpio-test:9", "gpiochip0:9");
+    let message = refused(&board);
+    assert!(message.contains("gpio:LABEL:LINE"), "{message}");
+}
+
+#[test]
+fn a_device_on_a_stable_gpio_line_needs_the_line_given_to_lemnos() {
+    let board = format!(
+        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"switch\"\ndriver = \"gpio-switch\"\nuses = {{ line = \"gpio:gpio-test:4\" }}\n"
+    );
+    assert!(refused(&board).contains("which no [[lines]] entry gives to Lemnos"));
+}
+
+#[test]
+fn a_pwm_name_needs_its_block_in_the_map_and_the_board() {
+    let board = format!(
+        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\nuses = {{ pwm = \"pwm:/bus/nope@1:0\" }}\n"
+    );
+    assert!(refused(&board).contains("the map has no PWM block at /bus/nope@1"));
+    let board = ALL_KINDS_BOARD.replace("[[hardware]]\ncontroller = \"pwm0\"\npins = \"a\"\n", "")
+        .replace("[[devices]]\nid = \"ring\"", "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\nuses = { pwm = \"pwm:/bus/pwm@4000:0\" }\n\n[[devices]]\nid = \"ring\"");
+    assert!(refused(&board).contains("needs the PWM block"));
+}
+
+#[test]
+fn a_module_node_needs_a_compatible_and_a_role_the_map_gives_it() {
+    let board = ALL_KINDS_BOARD.replace("module = \"pisp_be\"", "module = \"gsdma\"");
+    assert!(refused(&board).contains("has module role \"gsdma\""));
+    let map = ALL_KINDS_MAP.replace("compatible = \"test,csi\"\n", "");
+    let message = generated(ALL_KINDS_BOARD, &map).unwrap_err();
+    assert!(message.contains("no `compatible`"), "{message}");
+}
+
+#[test]
+fn the_all_kinds_module_configuration_names_each_option_and_blacklist() {
+    let out = generated(ALL_KINDS_BOARD, ALL_KINDS_MAP).unwrap();
+    assert_eq!(out.modprobe, golden("all-kinds-modprobe.conf"));
+    assert!(out.modprobe.contains("owned=test,csi pisp_be=test,csi"));
+    assert!(out.modprobe.contains("blacklist stock-csi"));
+}
+
+#[test]
+fn a_pwm_channel_the_board_names_must_be_an_enabled_node() {
+    let dir = fixture_dir("pwm-name");
+    let tree = dir.join("tree");
+    let board = ALL_KINDS_BOARD.replace(
+        "[[devices]]\nid = \"ring\"",
+        "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\nuses = { pwm = \"pwm:/bus/pwm@4000:0\" }\n\n[[devices]]\nid = \"ring\"",
+    );
+    node(&tree, "/bus/pwm@4000", None, Some("disabled"), None);
+    let problems = run_check(&dir, &board, ALL_KINDS_MAP);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("pwm:/bus/pwm@4000:0: node disabled: /bus/pwm@4000")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
+    let dir = fixture_dir("gpio-chips");
+    let tree = dir.join("tree");
+    node(&tree, "/bus/i2c@1000", None, Some("okay"), None);
+    node(&tree, "/pins/i2c0a", Some(0x10), None, None);
+    let problems = run_check(&dir, ALL_KINDS_BOARD, ALL_KINDS_MAP);
+    assert!(
+        !problems.iter().any(|p| p.contains("gpio-test")),
+        "{problems:?}"
+    );
+    // The line 9 of the board is past a 4-line chip.
+    let board = board::parse(ALL_KINDS_BOARD).unwrap();
+    let map = SocMap::parse(ALL_KINDS_MAP).unwrap();
+    let small = [("gpio-test".to_string(), 4u32)];
+    let problems = check(
+        &board,
+        &map,
+        &check::Live {
+            tree: &tree,
+            sys: &dir.join("sys"),
+            gpio_chips: &small,
+        },
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("line 9 is past the 4 lines of the chip labelled \"gpio-test\"")),
+        "{problems:?}"
+    );
+    // No chip of that label at all: named with the chips there are.
+    let other = [("pinctrl-rp1".to_string(), 54u32)];
+    let problems = check(
+        &board,
+        &map,
+        &check::Live {
+            tree: &tree,
+            sys: &dir.join("sys"),
+            gpio_chips: &other,
+        },
+    );
+    assert!(
+        problems.iter().any(|p| p.contains(
+            "no GPIO chip labelled \"gpio-test\" on this machine (the chips are: pinctrl-rp1)"
+        )),
         "{problems:?}"
     );
 }

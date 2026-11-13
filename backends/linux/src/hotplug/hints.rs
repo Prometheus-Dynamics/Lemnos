@@ -54,6 +54,10 @@ const RESCAN_EVERY: Duration = Duration::from_secs(1);
 enum Fits {
     /// A USB device, by port or by vendor and product: the name itself says which.
     Usb,
+    /// Any event of one subsystem. A stable name (`gpio:LABEL:LINE`, `pwm:NODE:CHANNEL`) names a
+    /// chip by its label or device-tree node, which an event does not carry, so every chip of
+    /// the subsystem is announced for it. A hint says only "look again", so this costs a retry.
+    Subsystem(&'static str),
     /// A device of one of these subsystems whose devpath ends in one of these names. Unused
     /// places are empty.
     Node {
@@ -94,6 +98,21 @@ fn node(subsystems: [&'static str; 2], ends: [String; 2], within: bool) -> Fits 
 fn fits_for(name: &str) -> Option<Fits> {
     if UsbName::parse(name).is_some() {
         return Some(Fits::Usb);
+    }
+    // A stable name: a GPIO line by its chip's label, a PWM channel by its chip's node.
+    if let Some(rest) = name.strip_prefix("gpio:")
+        && rest
+            .rsplit_once(':')
+            .is_some_and(|(label, line)| !label.is_empty() && number(line))
+    {
+        return Some(Fits::Subsystem("gpio"));
+    }
+    if let Some(rest) = name.strip_prefix("pwm:")
+        && rest
+            .rsplit_once(':')
+            .is_some_and(|(node, channel)| node.starts_with('/') && number(channel))
+    {
+        return Some(Fits::Subsystem("pwm"));
     }
     if name.contains('/') {
         return None;
@@ -290,6 +309,7 @@ fn hints_for(event: &UeventMsg<'_>, watched: &[Watched], report: &mut dyn FnMut(
     for watched in watched {
         let fits = match &watched.fits {
             Fits::Usb => usb && usb_fits(&watched.name, port, product),
+            Fits::Subsystem(wanted) => subsystem == *wanted,
             Fits::Node {
                 subsystems,
                 ends,
@@ -354,6 +374,42 @@ mod tests {
     }
 
     const USB_DEVICE: [(&str, &str); 2] = [("SUBSYSTEM", "usb"), ("DEVTYPE", "usb_device")];
+
+    #[test]
+    fn a_stable_gpio_or_pwm_name_is_hinted_by_its_subsystem_as_the_numbered_one_is() {
+        let names = [
+            "gpio:pinctrl-rp1:34",
+            "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1",
+            "gpiochip0:17",
+            "pwmchip0:1",
+        ];
+        let gpio = [("SUBSYSTEM", "gpio")];
+        assert_eq!(
+            hints_among(
+                &names,
+                "add",
+                "/devices/platform/soc/1f000d0000.gpio/gpiochip4",
+                &gpio
+            ),
+            ["Changed(\"gpio:pinctrl-rp1:34\")"],
+        );
+        let pwm = [("SUBSYSTEM", "pwm")];
+        assert_eq!(
+            hints_among(
+                &names,
+                "change",
+                "/devices/platform/soc/fe20c000.pwm/pwm/pwmchip2/pwm1",
+                &pwm
+            ),
+            ["Changed(\"pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1\")"],
+        );
+        // An event of another subsystem hints neither stable name.
+        let other = [("SUBSYSTEM", "i2c")];
+        assert!(hints_among(&names, "add", "/devices/platform/i2c-9", &other).is_empty());
+        // Malformed stable names are not watched at all.
+        assert_eq!(fits_for("gpio:pinctrl-rp1"), None);
+        assert_eq!(fits_for("pwm:axi/pwm@9c000:1"), None);
+    }
 
     #[test]
     fn an_event_for_a_port_hints_the_name_that_gives_the_port() {

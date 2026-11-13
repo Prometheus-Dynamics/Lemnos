@@ -88,7 +88,7 @@
 			status = "okay";
 		};
 	};
-	// disabled: base "b" /bus/regulator: a regulator on the line; the board gives gpio:9 to Lemnos
+	// disabled: base "b" /bus/regulator: a regulator on the line; the board gives gpio:gpio-test:9 to Lemnos
 	fragment@11 {
 		target-path = "/bus/regulator";
 		__overlay__ {

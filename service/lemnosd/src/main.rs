@@ -45,9 +45,14 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile) {
             return;
         }
     };
+    let chips: Vec<(String, u32)> = lemnos_linux::gpio_chips(std::path::Path::new("/dev"))
+        .into_iter()
+        .map(|chip| (chip.label, chip.lines))
+        .collect();
     let live = lemnos_devtree::check::Live {
         tree: std::path::Path::new("/proc/device-tree"),
         sys: std::path::Path::new("/sys/bus/platform/devices"),
+        gpio_chips: &chips,
     };
     for problem in lemnos_devtree::check(board, &map, &live) {
         let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");
