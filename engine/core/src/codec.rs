@@ -53,6 +53,16 @@ impl<'a> Writer<'a> {
         self.len == 0
     }
 
+    /// What has been written so far.
+    pub fn written(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    /// Forgets what was written, so the buffer can be filled again from the start.
+    pub const fn clear(&mut self) {
+        self.len = 0;
+    }
+
     /// The room left.
     pub fn remaining(&self) -> usize {
         self.buf.len() - self.len

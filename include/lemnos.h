@@ -1,5 +1,5 @@
 /*
- * The Lemnos C surface, version 1.1: the client of lemnosd.
+ * The Lemnos C surface, version 1.3: the client of lemnosd.
  *
  * Every call returns an int32_t status: 0 success, -1 to -4095 a negated Linux
  * errno, LEMNOS_E_* (-4096 and below) Lemnos's own codes, and a positive value
@@ -27,8 +27,8 @@ extern "C" {
 #endif
 
 #define LEMNOS_ABI_MAJOR 1
-#define LEMNOS_ABI_MINOR 2
-#define LEMNOS_LAYOUT_HASH 0x87298e01dabc373fULL
+#define LEMNOS_ABI_MINOR 3
+#define LEMNOS_LAYOUT_HASH 0xaeea810d49efc35bULL
 
 #define LEMNOS_VERSION_INIT \
     { sizeof(LemnosAbiVersion), LEMNOS_ABI_MAJOR, LEMNOS_ABI_MINOR, LEMNOS_LAYOUT_HASH }
@@ -68,6 +68,9 @@ extern "C" {
 #define LEMNOS_STREAM_WRITABLE (1u << 0)
 #define LEMNOS_STREAM_BUFFER_HANDLES (1u << 1)
 #define LEMNOS_STREAM_OPEN (1u << 2)
+/* LemnosJobEvent.kind */
+#define LEMNOS_JOB_PROGRESS 0
+#define LEMNOS_JOB_DONE 1
 
 typedef struct LemnosDeviceInfo {
     uint32_t struct_size;
@@ -127,6 +130,18 @@ typedef struct LemnosFrame {
     uint64_t timestamp_ns; /* CLOCK_MONOTONIC nanoseconds; 0 when the producer had no time */
 } LemnosFrame;
 
+/* What happened to a long job. Progress: done of total (total 0 when not known).
+ * Done: status is how it ended and len the result's length. */
+typedef struct LemnosJobEvent {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint64_t job;
+    uint64_t done;
+    uint64_t total;
+    LemnosStatus status;
+    uint32_t len;
+} LemnosJobEvent;
+
 LemnosAbiVersion lemnos_version(void);
 LemnosStatus lemnos_check_version(const LemnosAbiVersion *caller);
 
@@ -149,6 +164,19 @@ LemnosStatus lemnos_open(LemnosHandle client, const char *device, const char *ta
 LemnosStatus lemnos_call(LemnosHandle client, uint32_t opened, uint16_t method, const uint8_t *args,
                          size_t args_len, uint8_t *reply, size_t reply_capacity,
                          LemnosMessageSink sink);
+
+/* Starts a long job: a method the description marks as one. Its progress and its end come
+ * from lemnos_job_next. */
+LemnosStatus lemnos_job_start(LemnosHandle client, uint32_t opened, uint16_t method,
+                              const uint8_t *args, size_t args_len, uint64_t *job,
+                              LemnosMessageSink sink);
+/* The job then ends with -125 (ECANCELED), or with what it reached first. */
+LemnosStatus lemnos_job_cancel(LemnosHandle client, uint64_t job, LemnosMessageSink sink);
+/* Returns 1 with an event, 0 when timeout_ms passed without one. A job the connection lost
+ * ends with -4 (EINTR). A result longer than capacity returns
+ * LEMNOS_E_BUFFER_TOO_SMALL with the event filled in and the result dropped. */
+LemnosStatus lemnos_job_next(LemnosHandle client, uint32_t timeout_ms, LemnosJobEvent *event,
+                             uint8_t *result, size_t capacity);
 
 LemnosStatus lemnos_subscribe(LemnosHandle client, uint32_t opened, uint16_t method,
                               uint64_t period_us, uint32_t only_changes,

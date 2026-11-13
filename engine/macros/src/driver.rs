@@ -158,6 +158,20 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::caller_gone(self, __caller)
             }
 
+            const JOBS: bool = <Self as ::lemnos_core::Lifecycle>::JOBS;
+
+            fn job(
+                &mut self,
+                __job: ::lemnos_core::JobId,
+                __result: &mut ::lemnos_core::Reply<'_>,
+            ) -> ::lemnos_core::JobState {
+                <Self as ::lemnos_core::Lifecycle>::job(self, __job, __result)
+            }
+
+            fn job_cancel(&mut self, __job: ::lemnos_core::JobId) {
+                <Self as ::lemnos_core::Lifecycle>::job_cancel(self, __job)
+            }
+
             fn dispatch(
                 &mut self,
                 __method: ::lemnos_core::MethodId,

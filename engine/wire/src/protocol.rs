@@ -25,8 +25,11 @@ pub mod feature {
     pub const STREAM_HANDLES: u64 = 1;
     /// The host takes Packages, and answers it with what became of its driver packages.
     pub const PACKAGES: u64 = 2;
+    /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
+    /// whoever started them.
+    pub const JOBS: u64 = 4;
     /// Every bit this build knows.
-    pub const ALL: u64 = STREAM_HANDLES | PACKAGES;
+    pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS;
 }
 
 /// The most buffer descriptors a stream may have when each buffer, or each plane of a buffer,
@@ -240,6 +243,21 @@ frames! {
     /// `mode` is one of [`package_mode`]. `note` is empty, or says why the package directory
     /// could not be used at all.
     26 PackagesDone { id: u32, mode: u8, note: &'a str }
+    /// Starts a long job: a method the contract marks as one. Sent only to a host whose
+    /// Welcome set [`feature::JOBS`]. Answered with JobStarted, or Refusal.
+    27 CallJob { id: u32, device: u32, contract: u8, method: u16, args: &'a [u8] }
+    /// The job is running, under this number. JobProgress and JobDone for it go to this
+    /// connection alone.
+    28 JobStarted { id: u32, job: u64 }
+    /// How far a job has come: `done` of `total` (0 when not known), in the contract's unit.
+    /// Only the latest matters: a host may drop one a client hasn't read yet.
+    29 JobProgress { job: u64, done: u64, total: u64 }
+    /// A job is over. `bytes` is its result when `status` is 0, and empty otherwise. Never
+    /// dropped.
+    30 JobDone { job: u64, status: i32, bytes: &'a [u8] }
+    /// Cancels a job this connection started. Answered with an empty Reply, and the job's
+    /// JobDone follows.
+    31 JobCancel { id: u32, job: u64 }
 }
 
 /// How many descriptors StreamHandles carries for a stream of `buffers` buffers of `planes`

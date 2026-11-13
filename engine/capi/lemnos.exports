@@ -9,6 +9,9 @@ lemnos_device_info
 lemnos_device_text
 lemnos_open
 lemnos_call
+lemnos_job_start
+lemnos_job_cancel
+lemnos_job_next
 lemnos_subscribe
 lemnos_unsubscribe
 lemnos_next_value

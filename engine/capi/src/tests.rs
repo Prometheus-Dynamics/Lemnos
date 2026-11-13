@@ -2,8 +2,8 @@ use core::mem::{offset_of, size_of};
 use std::process::Command;
 
 use crate::surface::{
-    DeviceInfo, Frame, ItemInfo, LAYOUT, PackageInfo, STREAM_BUFFER_HANDLES, STREAM_OPEN,
-    STREAM_WRITABLE, StreamInfo, Subscription, VERSION, Value,
+    DeviceInfo, Frame, ItemInfo, JOB_DONE, JOB_PROGRESS, JobEvent, LAYOUT, PackageInfo,
+    STREAM_BUFFER_HANDLES, STREAM_OPEN, STREAM_WRITABLE, StreamInfo, Subscription, VERSION, Value,
 };
 
 const HEADER: &str = include_str!("../../../include/lemnos.h");
@@ -136,6 +136,16 @@ fn a_c_compiler_agrees_on_every_layout() {
         identity,
         timestamp_ns
     );
+    source += &check!(
+        "LemnosJobEvent",
+        JobEvent,
+        kind,
+        job,
+        done,
+        total,
+        status,
+        len
+    );
     let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("check.c");
@@ -152,4 +162,10 @@ fn a_c_compiler_agrees_on_every_layout() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn the_job_event_kinds_match() {
+    assert_eq!(define("LEMNOS_JOB_PROGRESS"), JOB_PROGRESS.to_string());
+    assert_eq!(define("LEMNOS_JOB_DONE"), JOB_DONE.to_string());
 }

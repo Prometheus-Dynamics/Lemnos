@@ -1,4 +1,7 @@
-use crate::{Config, ContractInfo, Description, Need, Resources, Result, Status, Writer};
+use crate::{
+    Config, ContractInfo, Decode, Description, Encode, Need, Reader, Resources, Result, Shape,
+    Status, Writer,
+};
 use lemnos_hal::register::AddressWidth;
 
 /// A driver's reply buffer.
@@ -105,6 +108,14 @@ pub trait Driver: Sized {
     fn caller(&mut self, _caller: CallerId) {}
     /// See [`Lifecycle::caller_gone`].
     fn caller_gone(&mut self, _caller: CallerId) {}
+    /// Whether the driver runs long jobs. See [`Lifecycle::JOBS`].
+    const JOBS: bool = false;
+    /// See [`Lifecycle::job`].
+    fn job(&mut self, _job: JobId, _result: &mut Reply<'_>) -> JobState {
+        JobState::Finished(Status::NOT_FOUND)
+    }
+    /// See [`Lifecycle::job_cancel`].
+    fn job_cancel(&mut self, _job: JobId) {}
 }
 
 /// The part of a driver its author writes when using `#[driver]`.
@@ -171,6 +182,56 @@ pub trait Lifecycle: Sized {
     /// `caller` has gone, by closing its connection or by dying. Give up what it held. Runs on
     /// the driver's lane, one call at a time with its methods, and must not block.
     fn caller_gone(&mut self, _caller: CallerId) {}
+    /// Set this to `true` for a driver with long jobs: methods its contracts mark
+    /// `#[method(N, job)]`, which start work and return a [`JobId`] at once. The work itself is
+    /// done a step at a time from [`Lifecycle::tick`], so such a driver ticks too.
+    const JOBS: bool = false;
+    /// How job `job` stands. The host asks after every method, tick and cancel on this driver,
+    /// for each job still open, and passes what changed to the job's starter. Answer
+    /// [`JobState::Finished`] once, with the job's result written to `result`; the host forgets
+    /// the job then. A number the driver doesn't know is finished with `NOT_FOUND`. Runs on the
+    /// driver's lane and must not block.
+    fn job(&mut self, _job: JobId, _result: &mut Reply<'_>) -> JobState {
+        JobState::Finished(Status::NOT_FOUND)
+    }
+    /// Stop job `job` as soon as it can, undoing what a half-done job would leave, and answer
+    /// [`JobState::Finished`] with [`Status::CANCELLED`] from then on. The host calls this when
+    /// the starter cancels and when the starter goes. Must not block.
+    fn job_cancel(&mut self, _job: JobId) {}
+}
+
+/// A long job, by the number its driver gave it when it started.
+///
+/// A contract method marked `#[method(N, job)]` returns one. The host keeps the job on the books
+/// for whoever started it, asks the driver how it stands ([`Driver::job`]), and carries its
+/// progress and its result to that caller. A driver's numbers are its own: it may reuse one once
+/// it has answered [`JobState::Finished`] for it. A client sees the host's number for the job
+/// instead, which is never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct JobId(pub u64);
+
+impl Encode for JobId {
+    const SHAPE: Shape = Shape::U64;
+    fn encode(&self, out: &mut Writer<'_>) -> Result<()> {
+        self.0.encode(out)
+    }
+}
+
+impl Decode<'_> for JobId {
+    fn decode(from: &mut Reader<'_>) -> Result<Self> {
+        u64::decode(from).map(Self)
+    }
+}
+
+/// How a long job stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    /// Still going: `done` of `total`, in whatever unit the contract says (bytes, steps).
+    /// `total` is 0 when it isn't known yet.
+    Running { done: u64, total: u64 },
+    /// Over. On success the result the contract defines is in the reply. A job that was
+    /// cancelled ends with [`Status::CANCELLED`]. The host never asks about it again.
+    Finished(Status),
 }
 
 /// Time as the host sees it, supplied by the backend so a simulated board can

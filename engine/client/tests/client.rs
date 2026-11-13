@@ -377,3 +377,116 @@ fn a_polled_call_on_an_old_handle_is_stale() {
     });
     assert_eq!(session.send_call(&handle, 1, &[], 8), Err(Error::Stale));
 }
+
+#[contract("example.counter", version = 1)]
+pub trait Jobbing {
+    #[method(2, job)]
+    fn run(&mut self, how: u8) -> Result<lemnos_core::JobId>;
+}
+
+fn jobs_host() -> FakeHost {
+    let host = FakeHost::start();
+    host.control
+        .features
+        .store(lemnos_wire::feature::JOBS, Ordering::SeqCst);
+    host
+}
+
+#[test]
+fn a_job_reports_progress_and_its_result() {
+    let host = jobs_host();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let job = client.open::<dyn Jobbing>("one").unwrap().run(0).unwrap();
+    let mut seen = Vec::new();
+    let end = client.wait_job(job.0, Duration::from_secs(5), &mut |d, t| seen.push((d, t)));
+    assert_eq!(end, Some((Status::OK, vec![0])));
+    assert_eq!(seen, [(1, 2)]);
+}
+
+#[test]
+fn a_job_that_ends_before_it_is_said_to_have_started_still_ends_once() {
+    let host = jobs_host();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let job = client.open::<dyn Jobbing>("one").unwrap().run(1).unwrap();
+    let end = client.wait_job(job.0, Duration::from_secs(5), &mut |_, _| {});
+    assert_eq!(end, Some((Status::OK, vec![1])));
+    // Not left open: its late JobStarted didn't open it again.
+    assert_eq!(
+        client.wait_job(job.0, Duration::ZERO, &mut |_, _| {}),
+        Some((Status::NOT_FOUND, Vec::new()))
+    );
+}
+
+#[test]
+fn a_cancelled_job_ends_as_the_service_says() {
+    let host = jobs_host();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let job = client.open::<dyn Jobbing>("one").unwrap().run(2).unwrap();
+    assert_eq!(
+        client.wait_job(job.0, Duration::from_millis(20), &mut |_, _| {}),
+        None
+    );
+    client.cancel_job(job.0).unwrap();
+    assert_eq!(*host.control.cancels.lock().unwrap(), [job.0]);
+    let end = client.wait_job(job.0, Duration::from_secs(5), &mut |_, _| {});
+    assert_eq!(end, Some((Status::CANCELLED, Vec::new())));
+}
+
+#[test]
+fn an_open_job_ends_as_interrupted_when_the_connection_goes() {
+    let host = jobs_host();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let job = client.open::<dyn Jobbing>("one").unwrap().run(2).unwrap();
+    host.restart();
+    let end = client.wait_job(job.0, Duration::from_secs(5), &mut |_, _| {});
+    assert_eq!(end, Some((Status::INTERRUPTED, Vec::new())));
+}
+
+#[test]
+fn a_service_without_jobs_is_never_sent_one() {
+    let host = FakeHost::start();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let err = client
+        .open::<dyn Jobbing>("one")
+        .unwrap()
+        .run(0)
+        .unwrap_err();
+    assert_eq!(err, Status::NOT_SUPPORTED);
+    // The connection is fine.
+    client.list().unwrap();
+    assert_eq!(host.control.connections.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_polled_job_is_started_and_followed_by_poll() {
+    let host = jobs_host();
+    let mut session = Session::connect_polled(&host.path, "t").unwrap();
+    let handle = session.open("", TAG).unwrap();
+    let id = session.send_job(&handle, 2, &[0, 7]).unwrap();
+    let mut started = None;
+    let mut events = Vec::new();
+    eventually(|| {
+        session.poll(&mut |incoming| match incoming {
+            Incoming::JobStarted { id: got, job } if got == id => started = Some(job),
+            Incoming::Job(event) => events.push(event.clone()),
+            _ => {}
+        });
+        events.len() == 2
+    });
+    let job = started.expect("JobStarted came");
+    assert_eq!(
+        events,
+        [
+            lemnos_client::JobEvent::Progress {
+                job,
+                done: 1,
+                total: 2
+            },
+            lemnos_client::JobEvent::Done {
+                job,
+                status: Status::OK,
+                result: vec![0, 7]
+            },
+        ]
+    );
+}

@@ -29,6 +29,8 @@ impl Status {
     pub const INVALID_ARGUMENT: Self = Self(-22);
     pub const NOT_SUPPORTED: Self = Self(-95);
     pub const TIMED_OUT: Self = Self(-110);
+    /// `ECANCELED`: what a long job that was cancelled ends with.
+    pub const CANCELLED: Self = Self(-125);
 
     /// The first of this crate's own codes; errnos stay above it.
     pub const LEMNOS_BASE: i32 = -4096;

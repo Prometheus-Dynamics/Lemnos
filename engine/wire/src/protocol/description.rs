@@ -40,6 +40,8 @@ pub struct OwnedMethod {
     pub params: Vec<OwnedParam>,
     pub returns: OwnedShape,
     pub has_out_buffer: bool,
+    /// The method starts a long job (CallJob), and isn't called.
+    pub job: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +196,21 @@ pub fn encode_description(
         method.encode(&mut out)?;
         item.field.encode(&mut out)?;
     }
+    // Appended after the description's first form: which methods start a long job. A reader
+    // from before it stops at the items.
+    let jobs = manifest
+        .provides
+        .iter()
+        .flat_map(|contract| contract.methods.iter())
+        .filter(|method| method.job)
+        .count();
+    (jobs as u16).encode(&mut out)?;
+    for (index, contract) in manifest.provides.iter().enumerate() {
+        for method in contract.methods.iter().filter(|method| method.job) {
+            (index as u8).encode(&mut out)?;
+            method.id.encode(&mut out)?;
+        }
+    }
     Ok(out.len())
 }
 
@@ -221,6 +238,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 params,
                 returns,
                 has_out_buffer,
+                job: false,
             });
         }
         contracts.push(OwnedContract { tag, methods });
@@ -244,6 +262,18 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             method: u16::decode(from)?,
             field: Option::<&str>::decode(from)?.map(str::to_string),
         });
+    }
+    // A host from before job methods ends here.
+    if from.remaining() > 0 {
+        for _ in 0..u16::decode(from)? {
+            let contract = u8::decode(from)?;
+            let method = u16::decode(from)?;
+            let found = contracts
+                .get_mut(usize::from(contract))
+                .and_then(|c| c.methods.iter_mut().find(|m| m.id == method))
+                .ok_or(Status::INVALID_ARGUMENT)?;
+            found.job = true;
+        }
     }
     Ok(DeviceDescription { contracts, items })
 }

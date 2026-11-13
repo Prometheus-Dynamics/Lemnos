@@ -19,6 +19,9 @@ pub struct MethodInfo {
     pub returns: Shape,
     /// The method also fills a caller-supplied byte buffer.
     pub has_out_buffer: bool,
+    /// The method starts a long job and returns its [`JobId`](crate::JobId): it is started with
+    /// the host's job form, not called.
+    pub job: bool,
 }
 
 /// A contract as data.
@@ -40,6 +43,11 @@ pub trait Caller {
     fn args(&mut self) -> &mut [u8];
     /// Sends `args()[..args_len]` as `method` and fills `reply`.
     fn call(&mut self, method: u16, args_len: usize, reply: &mut [u8]) -> Result<usize>;
+    /// Starts `args()[..args_len]` as job method `method` and returns the job's number. Only
+    /// a client of the service runs jobs: one driver can't start another's.
+    fn start_job(&mut self, _method: u16, _args_len: usize) -> Result<crate::JobId> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// A contract's client, over any way of reaching the device.

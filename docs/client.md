@@ -77,6 +77,11 @@ What a client can do:
   [protocol](wire.md) says.
 - **`subscribe`, `next_value`**: the daemon reads a method at a period and sends each value.
 - **`set_power`**: off and on.
+- **`start_job`, `wait_job`, `cancel_job`**: a long job. A typed handle's job method starts it and
+  returns its number. `wait_job` passes each progress report to a closure and returns the job's
+  status and result when it ends. Progress may skip steps: only the latest is kept. A `Session`
+  starts one with `send_job` and sees `Incoming::JobStarted` and `Incoming::Job` from `poll`. A job
+  open when the connection is lost ends as `INTERRUPTED`.
 - **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). `close_stream`
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing
   the client gives up every stream it holds.
@@ -111,6 +116,7 @@ function, struct and code is there with its rule.
 | `lemnos_device_count`, `lemnos_device_info`, `lemnos_device_text` | The device list |
 | `lemnos_open` | Open a contract on a device, by tag |
 | `lemnos_call` | Call a method by number, with its arguments and reply as bytes |
+| `lemnos_job_start`, `lemnos_job_cancel`, `lemnos_job_next` | Long jobs: start one, cancel it, and read its progress and its end |
 | `lemnos_subscribe`, `lemnos_unsubscribe`, `lemnos_next_value` | Values at a period |
 | `lemnos_set_power` | Off and on |
 | `lemnos_item_count`, `lemnos_item_info`, `lemnos_item_text` | What a device says about itself |

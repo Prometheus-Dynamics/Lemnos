@@ -1,0 +1,13 @@
+error: a job method returns Result<JobId>
+ --> tests/fail/job_wrong_return.rs:3:49
+  |
+3 | pub trait T { #[method(1, job)] fn a(&mut self) -> Result<u32>; }
+  |                                                 ^
+
+warning: unused import: `Result`
+ --> tests/fail/job_wrong_return.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

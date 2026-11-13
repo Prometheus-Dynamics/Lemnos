@@ -177,6 +177,13 @@ pub fn serve(client: &Client, job: &Job) -> Result<String, Failure> {
     } else {
         find_method(&description, wanted).map_err(Failure::Refused)?
     };
+    if method.job {
+        // A long job's end comes later, on the connection that started it, and some jobs wait
+        // for more calls from that connection: a client runs them, not an action.
+        return Err(Failure::Refused(format!(
+            "{wanted} is a long job: a lemnos client starts it (start_job) and follows it"
+        )));
+    }
     let args = encode_args(&method.params, values).map_err(Failure::Refused)?;
     let tag = &description.contracts[contract].tag;
     let mut handle = client.open_tag(&device.name, tag).map_err(failed)?;

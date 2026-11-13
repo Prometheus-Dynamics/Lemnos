@@ -182,7 +182,7 @@ static const LemnosPackageContract CONTRACTS[] = {
 static const LemnosPackageDriver DRIVER = {
     { NAME, { NEEDS, 1 }, { CONTRACTS, 1 } },
     { sizeof(LemnosDriverTable), 0, bind, describe, health, dispatch, tick, caller, caller,
-      drop_driver },
+      drop_driver, NULL, NULL },
 };
 
 static LemnosStatus register_driver(LemnosSlice *driver) {

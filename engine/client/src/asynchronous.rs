@@ -10,7 +10,9 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::DeviceDescription;
 use crate::error::Error;
-use crate::session::{DeviceEntry, Handle, Mode, PackageList, Session, Subscription, ValueInfo};
+use crate::session::{
+    DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Subscription, ValueInfo,
+};
 use crate::stream::{FrameStream, StreamPlatform};
 
 /// [`Session`] for a tokio program. It waits on the socket's readiness and
@@ -141,6 +143,42 @@ impl AsyncClient {
         self.settle().await?;
         let (id, pick) = self.session.op_call(handle, method, args, reply)?;
         self.wait(id, pick).await
+    }
+
+    /// See [`Session::start_job`]. A stale handle gets [`Error::Stale`]; open it again.
+    pub async fn start_job(
+        &mut self,
+        handle: &Handle,
+        method: u16,
+        args: &[u8],
+    ) -> Result<u64, Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_start_job(handle, method, args)?;
+        self.wait(id, pick).await
+    }
+
+    /// See [`Session::cancel_job`].
+    pub async fn cancel_job(&mut self, job: u64) -> Result<(), Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_cancel_job(job)?;
+        self.wait(id, pick).await
+    }
+
+    /// See [`Session::wait_job`]. `None` after `timeout`, with the job still running.
+    pub async fn wait_job(
+        &mut self,
+        job: u64,
+        timeout: Duration,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Option<(lemnos_core::Status, Vec<u8>)> {
+        self.until(timeout, |s| s.try_job(None, job, progress))
+            .await
+            .ok()
+    }
+
+    /// See [`Session::next_job_event`]. Doesn't wait.
+    pub fn next_job_event(&mut self) -> Option<JobEvent> {
+        self.session.next_job_event()
     }
 
     pub async fn subscribe(

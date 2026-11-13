@@ -7,6 +7,8 @@
 //! [`StreamPlatform`] for what only the operating system can do. A stream whose buffers the
 //! consumer fills (a job's input image, a configuration) is taken with
 //! [`Session::open_stream_writable`] and filled with [`FrameStream::write`].
+//! A long job (a method its contract marks as one) is started with [`Session::start_job`],
+//! and its progress and end come from [`Session::next_job_event`] or [`Session::wait_job`].
 //! The `tokio` feature adds `AsyncClient`. All three share one connection
 //! core, which reconnects by itself, restores subscriptions, and finds handles
 //! again by name and tag after the service restarts.
@@ -27,7 +29,7 @@ pub use client::{Client, RemoteCaller};
 pub use error::Error;
 pub use lemnos_wire::DeviceDescription;
 pub use session::{
-    DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, PackageEntry, PackageList,
-    PackageMode, Session, Subscription, ValueInfo, follow,
+    DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, JobEvent, PackageEntry,
+    PackageList, PackageMode, Session, Subscription, ValueInfo, follow,
 };
 pub use stream::{FrameStream, HeldFrame, StreamPlatform};

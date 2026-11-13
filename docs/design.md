@@ -306,8 +306,19 @@ pub trait Lifecycle: Sized {
     const TRACKS_CALLERS: bool = false; // true to be told who is calling, and when they go
     fn caller(&mut self, caller: CallerId) {} // just before each method
     fn caller_gone(&mut self, caller: CallerId) {} // give up what it held
+    const JOBS: bool = false; // true when a method is marked #[method(N, job)]
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState { .. } // how a long job stands
+    fn job_cancel(&mut self, job: JobId) {} // stop it; `job` then answers Finished(CANCELLED)
     const HOST_OWNED: HostOwned = HostOwned::Refused; // whether it may bind to a host-owned device
 }
+
+// A long job: a method marked #[method(N, job)] returns Result<JobId> at once and the work goes
+// on in tick. The host keeps the job for its starter, asks `job` after each call and tick, and
+// sends Running { done, total } as progress and Finished(status) with the result as the end.
+// The starter can cancel it, and it is cancelled when the starter goes. A restart ends it as
+// INTERRUPTED: drivers keep nothing across one.
+pub struct JobId(pub u64);
+pub enum JobState { Running { done: u64, total: u64 }, Finished(Status) }
 
 // A method is its contract's position in `provides`, plus the number the contract declared.
 pub struct MethodId { pub contract: u8, pub method: u16 }
@@ -328,6 +339,10 @@ impl Client {
     fn find(&self, tag: &str) -> Result<Option<DeviceEntry>, Error>;
     fn open<C: Contract + ?Sized>(&self, name: &str) -> Result<Bound<C, RemoteCaller>, Error>;
     fn describe(&self, device: u32) -> Result<DeviceDescription, Error>;
+    fn start_job(&self, handle: &mut Handle, method: u16, args: &[u8]) -> Result<u64, Error>;
+    fn cancel_job(&self, job: u64) -> Result<(), Error>;
+    fn wait_job(&self, job: u64, timeout: Duration, progress: &mut dyn FnMut(u64, u64))
+        -> Option<(Status, Vec<u8>)>;
 }
 ```
 

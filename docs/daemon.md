@@ -146,6 +146,8 @@ lemnos-ctl read counter count
 
 Calls any method by name, whether or not an item names it. When two contracts on the device have a
 method of the same name, write `TAG:NAME`. The reply is printed unless the method returns nothing.
+A long job (`describe` shows it as `-> job`) prints its number, then its progress as it comes, then
+its result in hex when it ends. Interrupting the tool ends the connection, which cancels the job.
 
 ```sh
 lemnos-ctl call counter peek

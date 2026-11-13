@@ -21,6 +21,7 @@ const INFO: ContractInfo = ContractInfo {
         params: &[],
         returns: Shape::U8,
         has_out_buffer: false,
+        job: false,
     }],
 };
 
@@ -257,6 +258,7 @@ mod package {
                     ],
                     returns: Shape::Bytes,
                     has_out_buffer: true,
+                    job: false,
                 }],
             },
         ],

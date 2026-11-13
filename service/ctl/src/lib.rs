@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
-use lemnos_core::ItemKind;
+use lemnos_core::{ItemKind, Status};
 use lemnos_wire::text::{
     encode_args, find_item, find_method, method_of, render, render_reply, shape_name,
 };
@@ -19,7 +19,9 @@ lemnos-ctl [--socket PATH] COMMAND
   read DEVICE [ITEM]             one value, or all of them
   watch DEVICE ITEM [--period-ms N] [--count N]
   set DEVICE ITEM [VALUE...]     a control or an action
-  call DEVICE METHOD [ARG...]    any method, as NAME or TAG:NAME
+  call DEVICE METHOD [ARG...]    any method, as NAME or TAG:NAME; a job method runs as a
+                                 long job, its progress printed until it ends (interrupting
+                                 the tool cancels it)
   off DEVICE | on DEVICE
   packages                       driver packages: which loaded, which were refused and why
   validate BOARD                 check a board file and show the host settings it gives, with no
@@ -28,6 +30,9 @@ lemnos-ctl [--socket PATH] COMMAND
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
 const WATCH_WAIT: Duration = Duration::from_secs(2);
+/// How long `call` waits for a long job between looks at its progress. It waits as long as
+/// the job runs.
+const JOB_WAIT: Duration = Duration::from_secs(1);
 
 type Outcome = Result<(), String>;
 
@@ -251,7 +256,11 @@ impl Tool<'_> {
                     .map(|p| format!("{}: {}", p.name, shape_name(&p.shape)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let returns = shape_name(&method.returns);
+                let returns = if method.job {
+                    "job".to_string()
+                } else {
+                    shape_name(&method.returns)
+                };
                 line(
                     self.out,
                     format_args!("  {}({params}) -> {returns}", method.name),
@@ -369,6 +378,60 @@ impl Tool<'_> {
         Ok(())
     }
 
+    /// Runs a job method as a long job: prints its number, its progress as it comes, and its
+    /// result in hex, and fails if it ends with anything but success.
+    fn job(
+        &mut self,
+        device: &str,
+        description: &DeviceDescription,
+        contract: usize,
+        method: &OwnedMethod,
+        args: &[u8],
+    ) -> Outcome {
+        let tag = &description.contracts[contract].tag;
+        let mut handle = self.client.open_tag(device, tag).map_err(text)?;
+        let job = self
+            .client
+            .start_job(&mut handle, method.id, args)
+            .map_err(text)?;
+        line(self.out, format_args!("job {job:#x} started"))?;
+        loop {
+            let mut shown = Ok(());
+            let out = &mut *self.out;
+            let ended = self.client.wait_job(job, JOB_WAIT, &mut |done, total| {
+                if shown.is_ok() {
+                    shown = if total == 0 {
+                        line(out, format_args!("progress {done}"))
+                    } else {
+                        line(out, format_args!("progress {done}/{total}"))
+                    };
+                }
+            });
+            shown?;
+            let Some((status, result)) = ended else {
+                continue;
+            };
+            if !status.is_ok() {
+                let how = match status {
+                    Status::CANCELLED => " (cancelled)",
+                    Status::INTERRUPTED => " (interrupted)",
+                    _ => "",
+                };
+                return Err(format!("job {job:#x} failed: status {}{how}", status.0));
+            }
+            let hex = result
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return if hex.is_empty() {
+                line(self.out, format_args!("job {job:#x} done"))
+            } else {
+                line(self.out, format_args!("job {job:#x} done: {hex}"))
+            };
+        }
+    }
+
     fn set(&mut self, name: &str, wanted: &str, values: &[String]) -> Outcome {
         let (_, description) = self.description(name)?;
         let item = find_item(&description, wanted)?;
@@ -377,6 +440,9 @@ impl Tool<'_> {
         }
         let (contract, method) = method_of(&description, item)?;
         let args = encode_args(&method.params, values)?;
+        if method.job {
+            return self.job(name, &description, contract, method, &args);
+        }
         self.invoke(name, &description, contract, method, &args)?;
         Ok(())
     }
@@ -385,6 +451,9 @@ impl Tool<'_> {
         let (_, description) = self.description(name)?;
         let (contract, method) = find_method(&description, wanted)?;
         let args = encode_args(&method.params, values)?;
+        if method.job {
+            return self.job(name, &description, contract, method, &args);
+        }
         let reply = self.invoke(name, &description, contract, method, &args)?;
         if method.returns != OwnedShape::Unit {
             let value = render_reply(method, &reply)?;

@@ -31,6 +31,46 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         ),
         ("list", Frame::List { id: 1 }),
         (
+            "call-job",
+            Frame::CallJob {
+                id: 15,
+                device: 3,
+                contract: 0,
+                method: 4,
+                args: &[0xaa],
+            },
+        ),
+        (
+            "job-started",
+            Frame::JobStarted {
+                id: 15,
+                job: 0x1_0000_0002,
+            },
+        ),
+        (
+            "job-progress",
+            Frame::JobProgress {
+                job: 0x1_0000_0002,
+                done: 5,
+                total: 10,
+            },
+        ),
+        (
+            "job-done",
+            Frame::JobDone {
+                job: 0x1_0000_0002,
+                status: 0,
+                bytes: &[7],
+            },
+        ),
+        (
+            "job-cancel",
+            Frame::JobCancel {
+                id: 16,
+                job: 0x1_0000_0002,
+            },
+        ),
+        (
             "device",
             Frame::Device {
                 id: 1,
@@ -486,19 +526,30 @@ mod description {
 
     const CONTRACT: ContractInfo = ContractInfo {
         tag: Tag::new("example.thing/1"),
-        methods: &[MethodInfo {
-            id: 3,
-            name: "read",
-            params: &[Param {
-                name: "n",
-                shape: Shape::Option(&Shape::U16),
-            }],
-            returns: Shape::Record(&[Field {
-                name: "x",
-                shape: Shape::Array(&Shape::F32, 2),
-            }]),
-            has_out_buffer: true,
-        }],
+        methods: &[
+            MethodInfo {
+                id: 3,
+                name: "read",
+                params: &[Param {
+                    name: "n",
+                    shape: Shape::Option(&Shape::U16),
+                }],
+                returns: Shape::Record(&[Field {
+                    name: "x",
+                    shape: Shape::Array(&Shape::F32, 2),
+                }]),
+                has_out_buffer: true,
+                job: false,
+            },
+            MethodInfo {
+                id: 5,
+                name: "rebuild",
+                params: &[],
+                returns: Shape::U32,
+                has_out_buffer: false,
+                job: true,
+            },
+        ],
     };
 
     #[test]
@@ -542,6 +593,30 @@ mod description {
         assert_eq!((item.exponent, item.min, item.max), (-3, Some(-1), Some(1)));
         assert_eq!((item.contract, item.method), (0, 3));
         assert_eq!(item.field.as_deref(), Some("x"));
+        let jobs: Vec<_> = back.contracts[0]
+            .methods
+            .iter()
+            .map(|m| (m.id, m.job))
+            .collect();
+        assert_eq!(jobs, [(3, false), (5, true)]);
+    }
+
+    #[test]
+    fn a_description_from_before_job_methods_reads_as_having_none() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[CONTRACT],
+        };
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &Description::new(), &mut buf).unwrap();
+        // The appended part: a count of one, then contract 0, method 5.
+        assert_eq!(buf[n - 5..n], [1, 0, 0, 5, 0]);
+        let back = decode_description(&buf[..n - 5]).unwrap();
+        assert!(back.contracts[0].methods.iter().all(|m| !m.job));
+        // One that names a method the contracts don't have can't be trusted.
+        buf[n - 2] = 9;
+        assert!(decode_description(&buf[..n]).is_err());
     }
 
     #[test]

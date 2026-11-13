@@ -275,7 +275,8 @@ pub struct PackageMethod {
     pub id: u16,
     /// Not 0: the method also fills a caller-supplied byte buffer.
     pub has_out_buffer: u16,
-    pub reserved: u32,
+    /// [`METHOD_JOB`]. Other bits are 0.
+    pub flags: u32,
     pub name: Str<'static>,
     pub params: Slice<'static, PackageField>,
     pub returns: PackageShape,
@@ -390,6 +391,35 @@ pub const DRIVER_TICKS: u32 = 1;
 /// [`DriverTable::flags`]: the host should call `caller` and `caller_gone`.
 pub const DRIVER_TRACKS_CALLERS: u32 = 2;
 
+/// [`DriverTable::flags`]: the driver runs long jobs, so the host calls `job` and `job_cancel`.
+pub const DRIVER_JOBS: u32 = 4;
+/// [`PackageMethod::flags`]: the method starts a long job and returns its number, a `u64`.
+pub const METHOD_JOB: u32 = 1;
+
+/// How a long job stands, as [`DriverTable::job`] writes it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackageJobState {
+    /// Not 0: the job is over, with `status`, and its result is in the reply.
+    pub finished: u32,
+    /// How it ended, when finished.
+    pub status: Status,
+    /// How far it has come, while running: `done` of `total` (0 when not known).
+    pub done: u64,
+    pub total: u64,
+}
+
+impl Default for PackageJobState {
+    fn default() -> Self {
+        Self {
+            finished: 0,
+            status: Status::OK,
+            done: 0,
+            total: 0,
+        }
+    }
+}
+
 /// [`DriverTable::tick`]'s answer when the driver wants no tick.
 pub const NO_TICK: u64 = u64::MAX;
 
@@ -437,6 +467,17 @@ pub struct DriverTable {
     pub caller_gone: extern "C" fn(driver: *mut c_void, caller: u64) -> Status,
     /// Lets go of the driver and everything it holds.
     pub drop: extern "C" fn(driver: *mut c_void) -> Status,
+    /// How long job `job` stands, into `state`. When it has finished, its result is in `result`
+    /// and its length in `len`. Called only with [`DRIVER_JOBS`].
+    pub job: extern "C" fn(
+        driver: *mut c_void,
+        job: u64,
+        result: SliceMut<'_, u8>,
+        len: Out<'_, usize>,
+        state: Out<'_, PackageJobState>,
+    ) -> Status,
+    /// Stops job `job`. Called only with [`DRIVER_JOBS`].
+    pub job_cancel: extern "C" fn(driver: *mut c_void, job: u64) -> Status,
 }
 
 /// What a package's driver calls on the host. The table lives as long as the process.
@@ -522,7 +563,7 @@ use tables::shape;
 /// crate's own [`LAYOUT_HASH`](crate::LAYOUT_HASH). The types hold pointers, so the hash follows
 /// the target's pointer width, which a package and its host share.
 pub const PACKAGE_LAYOUT_HASH: u64 = {
-    let parts: [&[u64]; 19] = [
+    let parts: [&[u64]; 20] = [
         &[crate::LAYOUT_HASH],
         shape!(Str<'static>, ptr, len),
         shape!(Slice<'static, u8>, ptr, len),
@@ -535,11 +576,12 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             PackageMethod,
             id,
             has_out_buffer,
-            reserved,
+            flags,
             name,
             params,
             returns
         ),
+        shape!(PackageJobState, finished, status, done, total),
         shape!(PackageContract, tag, methods),
         shape!(PackageManifest, name, needs, provides),
         shape!(PackageHealth, kind, reserved, reason),
@@ -577,7 +619,9 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             tick,
             caller,
             caller_gone,
-            drop
+            drop,
+            job,
+            job_cancel
         ),
         shape!(
             HostTable,

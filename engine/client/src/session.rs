@@ -25,6 +25,8 @@ const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_CAP: Duration = Duration::from_secs(8);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENTS: usize = 64;
+/// Job events kept for a reader that hasn't taken them. Past it the oldest go, progress first.
+const MAX_JOB_EVENTS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -176,6 +178,31 @@ pub struct Event {
     pub reason: String,
 }
 
+/// What happened to a long job this session started ([`Session::start_job`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobEvent {
+    /// `done` of `total` (0 when not known), in the unit the contract says.
+    Progress { job: u64, done: u64, total: u64 },
+    /// The job is over. `result` is what the contract says it finishes with, when `status` is
+    /// success, and empty otherwise. `CANCELLED` for a job that was cancelled; `INTERRUPTED`
+    /// for one whose driver was lost, or whose connection ended: the service keeps nothing of a
+    /// job across a restart, so a job the connection was lost under is over.
+    Done {
+        job: u64,
+        status: Status,
+        result: Vec<u8>,
+    },
+}
+
+impl JobEvent {
+    /// The job it is about.
+    pub const fn job(&self) -> u64 {
+        match self {
+            Self::Progress { job, .. } | Self::Done { job, .. } => *job,
+        }
+    }
+}
+
 /// What [`Session::poll`] delivers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Incoming<'a> {
@@ -193,6 +220,13 @@ pub enum Incoming<'a> {
         stamp_ns: u64,
         bytes: &'a [u8],
     },
+    /// The answer to [`Session::send_job`]: request `id` started job `job`.
+    JobStarted {
+        id: u32,
+        job: u64,
+    },
+    /// Something happened to a long job.
+    Job(&'a JobEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +260,11 @@ struct Shared {
     sub_retry: Option<(Instant, Duration)>,
     values: ValueQueue,
     events: VecDeque<Event>,
+    /// Long jobs started on this connection and not over yet.
+    jobs: Vec<u64>,
+    /// Jobs that ended before their JobStarted was read, so it doesn't open them again.
+    ended_early: VecDeque<u64>,
+    job_events: VecDeque<JobEvent>,
     host: String,
     /// What the service said it can do, in its Welcome.
     features: u64,
@@ -275,6 +314,28 @@ impl Shared {
                 sub.state = SubState::Waiting;
             }
         }
+    }
+
+    fn job_event(&mut self, event: JobEvent) {
+        if let JobEvent::Progress { job, .. } = event
+            && let Some(queued) = self
+                .job_events
+                .iter_mut()
+                .rev()
+                .find(|queued| queued.job() == job)
+            && matches!(queued, JobEvent::Progress { .. })
+        {
+            *queued = event;
+            return;
+        }
+        if self.job_events.len() >= MAX_JOB_EVENTS {
+            let progress = self
+                .job_events
+                .iter()
+                .position(|queued| matches!(queued, JobEvent::Progress { .. }));
+            self.job_events.remove(progress.unwrap_or(0));
+        }
+        self.job_events.push_back(event);
     }
 
     fn sub_refused(&mut self) {
@@ -375,6 +436,34 @@ impl Shared {
                 }
                 true
             }
+            Frame::JobStarted { job, .. } => {
+                if let Some(at) = self.ended_early.iter().position(|ended| *ended == job) {
+                    self.ended_early.remove(at);
+                } else {
+                    self.jobs.push(job);
+                }
+                true
+            }
+            Frame::JobProgress { job, done, total } => {
+                self.job_event(JobEvent::Progress { job, done, total });
+                false
+            }
+            Frame::JobDone { job, status, bytes } => {
+                if let Some(at) = self.jobs.iter().position(|open| *open == job) {
+                    self.jobs.swap_remove(at);
+                } else {
+                    if self.ended_early.len() >= MAX_JOB_EVENTS {
+                        self.ended_early.pop_front();
+                    }
+                    self.ended_early.push_back(job);
+                }
+                self.job_event(JobEvent::Done {
+                    job,
+                    status: Status(status),
+                    result: bytes.to_vec(),
+                });
+                false
+            }
             Frame::Event {
                 device,
                 state,
@@ -415,6 +504,7 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::StreamHandles { id, .. }
         | Frame::Package { id, .. }
         | Frame::PackagesDone { id, .. }
+        | Frame::JobStarted { id, .. }
         | Frame::Refusal { id, .. } => Some(id),
         _ => None,
     }
@@ -479,6 +569,9 @@ impl Session {
                 sub_retry: None,
                 values: ValueQueue::new(),
                 events: VecDeque::new(),
+                jobs: Vec::new(),
+                ended_early: VecDeque::new(),
+                job_events: VecDeque::new(),
                 host: String::new(),
                 features: 0,
                 unheard: Vec::new(),
@@ -521,6 +614,36 @@ impl Session {
         self.shared.events.pop_front()
     }
 
+    /// The oldest thing that happened to a long job this session started, if any has.
+    pub fn next_job_event(&mut self) -> Option<JobEvent> {
+        self.shared.job_events.pop_front()
+    }
+
+    /// The oldest thing that happened to a long job this session started, waiting up to
+    /// `timeout` for one.
+    pub fn wait_job_event(&mut self, timeout: Duration) -> Option<JobEvent> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(event) = self.shared.job_events.pop_front() {
+                return Some(event);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let wait = match self.mode {
+                Mode::Blocking => Some(left),
+                Mode::Polled => self.wait_slice(),
+            };
+            self.turn(wait, &mut |_| false);
+        }
+    }
+
+    /// Jobs this session started that haven't ended.
+    pub fn open_jobs(&self) -> &[u64] {
+        &self.shared.jobs
+    }
+
     #[cfg(feature = "tokio")]
     pub(crate) fn stream(&self) -> Option<&UnixStream> {
         self.connection.as_ref().map(|c| &c.stream)
@@ -536,6 +659,16 @@ impl Session {
     }
 
     fn lost(&mut self) {
+        // The service cancels a job when its starter's connection ends, and keeps nothing of
+        // one across a restart: every open job is over.
+        for job in core::mem::take(&mut self.shared.jobs) {
+            self.shared.job_event(JobEvent::Done {
+                job,
+                status: Status::INTERRUPTED,
+                result: Vec::new(),
+            });
+        }
+        self.shared.ended_early.clear();
         self.connection = None;
         self.shared.ready = false;
         self.shared.features = 0;
@@ -961,6 +1094,46 @@ impl Session {
         }))
     }
 
+    pub(crate) fn op_start_job(
+        &mut self,
+        handle: &Handle,
+        method: u16,
+        args: &[u8],
+    ) -> Result<(u32, impl Pick<u64> + use<>), Error> {
+        if handle.generation != self.generation {
+            return Err(Error::Stale);
+        }
+        // Only a service that said so knows the request. To any other it is an unknown kind,
+        // which ends the connection.
+        if self.shared.features & feature::JOBS == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not run long jobs".to_string(),
+            });
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::CallJob {
+            id,
+            device: handle.device,
+            contract: handle.contract,
+            method,
+            args,
+        })?;
+        Ok((id, |frame: Frame<'_>| match frame {
+            Frame::JobStarted { job, .. } => Some(Ok(job)),
+            _ => None,
+        }))
+    }
+
+    pub(crate) fn op_cancel_job(
+        &mut self,
+        job: u64,
+    ) -> Result<(u32, impl Pick<()> + use<>), Error> {
+        let id = self.shared.id();
+        self.queue(&Frame::JobCancel { id, job })?;
+        Ok((id, ack))
+    }
+
     pub(crate) fn op_subscribe(
         &mut self,
         handle: &Handle,
@@ -1128,6 +1301,98 @@ impl Session {
         self.wait(id, pick)
     }
 
+    /// Starts a long job: a method the contract marks as one. Returns the job's number at once;
+    /// what the job does after comes from [`Session::next_job_event`] or
+    /// [`Session::wait_job`]. The job is the service's to run and this connection's to own: it
+    /// is cancelled if the connection ends, and then reported [`Status::INTERRUPTED`] here.
+    pub fn start_job(
+        &mut self,
+        handle: &mut Handle,
+        method: u16,
+        args: &[u8],
+    ) -> Result<u64, Error> {
+        if !self.shared.ready {
+            self.settle()?;
+        }
+        if handle.generation != self.generation {
+            *handle = self.open(&handle.name.clone(), &handle.tag.clone())?;
+        }
+        let (id, pick) = self.op_start_job(handle, method, args)?;
+        self.wait(id, pick)
+    }
+
+    /// Asks the service to stop a job this session started. Its [`JobEvent::Done`] follows.
+    pub fn cancel_job(&mut self, job: u64) -> Result<(), Error> {
+        self.settle()?;
+        let (id, pick) = self.op_cancel_job(job)?;
+        self.wait(id, pick)
+    }
+
+    /// Takes job `job`'s queued events: its progress goes to `progress`, and its end is
+    /// returned. Other jobs' events stay queued.
+    fn take_job(
+        &mut self,
+        job: u64,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Option<(Status, Vec<u8>)> {
+        while let Some(at) = self
+            .shared
+            .job_events
+            .iter()
+            .position(|event| event.job() == job)
+        {
+            match self.shared.job_events.remove(at) {
+                Some(JobEvent::Progress { done, total, .. }) => progress(done, total),
+                Some(JobEvent::Done { status, result, .. }) => return Some((status, result)),
+                None => break,
+            }
+        }
+        None
+    }
+
+    /// One step of waiting for job `job`'s end. `Some` means it ended.
+    pub(crate) fn try_job(
+        &mut self,
+        wait: Option<Duration>,
+        job: u64,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Option<(Status, Vec<u8>)> {
+        if let Some(end) = self.take_job(job, progress) {
+            return Some(end);
+        }
+        if !self.shared.jobs.contains(&job) {
+            // Neither open nor ended here: a number this connection never had, or one whose
+            // end was already taken.
+            return Some((Status::NOT_FOUND, Vec::new()));
+        }
+        self.turn(wait, &mut |_| false);
+        self.take_job(job, progress)
+    }
+
+    /// Waits until job `job` is over, giving its progress to `progress` as it comes, and
+    /// returns how it ended and its result. `None` after `timeout`, with the job still running.
+    pub fn wait_job(
+        &mut self,
+        job: u64,
+        timeout: Duration,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Option<(Status, Vec<u8>)> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let wait = match self.mode {
+                Mode::Blocking => Some(left.max(Duration::from_millis(1))),
+                Mode::Polled => self.wait_slice(),
+            };
+            if let Some(end) = self.try_job(wait, job, progress) {
+                return Some(end);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     /// One step of waiting for a value. `Some` means finished.
     pub(crate) fn try_value(
         &mut self,
@@ -1194,6 +1459,19 @@ impl Session {
             reply_capacity,
             args,
         })?;
+        if let Some(connection) = self.connection.as_mut()
+            && connection.flush().is_err()
+        {
+            self.lost();
+            return Err(Error::Disconnected);
+        }
+        Ok(id)
+    }
+
+    /// Starts a long job without waiting: [`Session::poll`] gives [`Incoming::JobStarted`] or
+    /// [`Incoming::Refused`] with the id returned here, then the job's [`Incoming::Job`] events.
+    pub fn send_job(&mut self, handle: &Handle, method: u16, args: &[u8]) -> Result<u32, Error> {
+        let (id, _) = self.op_start_job(handle, method, args)?;
         if let Some(connection) = self.connection.as_mut()
             && connection.flush().is_err()
         {
@@ -1457,6 +1735,10 @@ impl Session {
                 sink(Incoming::Reply { id, bytes });
                 true
             }
+            Frame::JobStarted { id, job } => {
+                sink(Incoming::JobStarted { id, job });
+                true
+            }
             Frame::Refusal { id, status, text } => {
                 sink(Incoming::Refused {
                     id,
@@ -1467,6 +1749,9 @@ impl Session {
             }
             _ => false,
         });
+        while let Some(event) = self.shared.job_events.pop_front() {
+            sink(Incoming::Job(&event));
+        }
         while self
             .shared
             .values

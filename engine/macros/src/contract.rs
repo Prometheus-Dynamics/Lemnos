@@ -37,13 +37,38 @@ struct Param {
 
 struct Method {
     id: u16,
+    job: bool,
     ident: Ident,
     params: Vec<Param>,
     out: Option<Ident>,
     returns: Type,
 }
 
-fn remove_method_id(method: &mut TraitItemFn) -> Result<u16> {
+/// `#[method(N)]`, or `#[method(N, job)]` for a method that starts a long job.
+struct MethodArgs {
+    id: LitInt,
+    job: bool,
+}
+
+impl Parse for MethodArgs {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let id = input.parse()?;
+        let mut job = false;
+        if input.parse::<Option<Token![,]>>()?.is_some() {
+            let word: Ident = input.parse()?;
+            if word != "job" {
+                return Err(Error::new(
+                    word.span(),
+                    "expected #[method(N)] or #[method(N, job)]",
+                ));
+            }
+            job = true;
+        }
+        Ok(Self { id, job })
+    }
+}
+
+fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool)> {
     let position = method
         .attrs
         .iter()
@@ -55,7 +80,12 @@ fn remove_method_id(method: &mut TraitItemFn) -> Result<u16> {
             )
         })?;
     let attr = method.attrs.remove(position);
-    attr.parse_args::<LitInt>()?.base10_parse()
+    let args = attr.parse_args::<MethodArgs>()?;
+    Ok((args.id.base10_parse()?, args.job))
+}
+
+fn is_job_id(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "JobId"))
 }
 
 fn ok_type(output: &ReturnType) -> Result<Type> {
@@ -106,8 +136,14 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             "a contract method can't be generic",
         ));
     }
-    let id = remove_method_id(method)?;
+    let (id, job) = remove_method_id(method)?;
     let returns = ok_type(&method.sig.output)?;
+    if job && !is_job_id(&returns) {
+        return Err(Error::new(
+            method.sig.output.span(),
+            "a job method returns Result<JobId>",
+        ));
+    }
     let mut inputs = method.sig.inputs.iter_mut();
     match inputs.next() {
         Some(FnArg::Receiver(r)) if matches!(r.kind, ReceiverKind::Reference(_, _, Some(_))) => {}
@@ -153,8 +189,15 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             });
         }
     }
+    if job && out.is_some() {
+        return Err(Error::new(
+            method.sig.ident.span(),
+            "a job method has no #[out] buffer: its result comes when it finishes",
+        ));
+    }
     Ok(Method {
         id,
+        job,
         ident: method.sig.ident.clone(),
         params,
         out,
@@ -197,6 +240,9 @@ fn client_method(method: &Method, sig: &syn::Signature) -> TokenStream {
         }
     });
     let finish = match &method.out {
+        _ if method.job => quote! {
+            self.caller.start_job(#id, __len)
+        },
         Some(out) => quote! {
             self.caller.call(#id, __len, #out)
         },
@@ -230,6 +276,7 @@ fn method_info(method: &Method) -> TokenStream {
     let types: Vec<_> = method.params.iter().map(|p| &p.ty).collect();
     let returned = &method.returns;
     let has_out = method.out.is_some();
+    let job = method.job;
     // The reply to an #[out] method is the bytes themselves.
     let returns = if has_out {
         quote! { ::lemnos_core::Shape::Bytes }
@@ -246,6 +293,7 @@ fn method_info(method: &Method) -> TokenStream {
             }),*],
             returns: #returns,
             has_out_buffer: #has_out,
+            job: #job,
         }
     }
 }
