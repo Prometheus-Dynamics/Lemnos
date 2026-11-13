@@ -82,7 +82,8 @@ What a client can do:
   status and result when it ends. Progress may skip steps: only the latest is kept. A `Session`
   starts one with `send_job` and sees `Incoming::JobStarted` and `Incoming::Job` from `poll`. A job
   open when the connection is lost ends as `INTERRUPTED`.
-- **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). `close_stream`
+- **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). The stream says its buffer length (`buffer_len`) and count (`buffer_count`).
+  `close_stream`
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing
   the client gives up every stream it holds.
 - **`packages`**: what became of the daemon's driver packages.

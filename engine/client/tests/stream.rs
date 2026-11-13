@@ -65,6 +65,9 @@ fn a_good_stream_delivers_frames_and_reads_them_from_shared_memory() {
     let (_host, mut session) = host_with(layout(), 3, fds);
     let mut stream = session.open_stream(7, "s", platform()).unwrap();
     assert_eq!(stream.layout(), &layout());
+    // The buffer length the stream open carried, for a consumer to size and check frames by.
+    assert_eq!(stream.buffer_len(), 128);
+    assert_eq!(stream.buffer_count(), 2);
     pool.write_bytes(4096, &[5, 6, 7]).unwrap();
     assert!(
         producer
@@ -340,6 +343,8 @@ fn a_stream_of_handles_reads_each_frame_from_its_own_buffers_memory() {
     assert_eq!(opens(&host), [KIND_STREAM_OPEN_HANDLES]);
     assert!(stream.has_buffer_handles());
     assert_eq!(stream.layout(), &layout);
+    assert_eq!(stream.buffer_len(), 128);
+    assert_eq!(stream.buffer_count(), 3);
     for (buffer, map) in maps.iter().enumerate() {
         map.write_bytes(0, &[buffer as u8 + 10; 128]).unwrap();
     }

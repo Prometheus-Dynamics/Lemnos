@@ -269,6 +269,7 @@ impl Rig {
             Ov9782Needs {
                 bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
                 values: Some(lemnos_core::Held::boxed(Box::new(RingEnd(producer)))),
+                _receiver: None,
             },
             &Config::new(no_config),
         )
@@ -543,7 +544,10 @@ fn a_job_posted_during_recovery_is_dropped_not_applied_after_the_restart() {
     assert_eq!(mode_writes, 2, "the sensor restarted once");
     assert_eq!(rig.launched().0.len(), 0);
     assert_eq!(rig.applied_identity(), None);
-    assert_eq!(Driver::health(&rig.sensor), Health::Ok);
+    assert_eq!(
+        Driver::health(&rig.sensor),
+        Health::Degraded(super::tests::NO_RECEIVER)
+    );
 }
 
 /// A job posted while stopped is dropped by the next start, and never applied.

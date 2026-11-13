@@ -127,9 +127,15 @@ fn trace(args: &[String]) -> Result<bool, String> {
         log: log.clone(),
     })));
     let entries = [("continuous_clock", ConfigValue::Bool(continuous))];
-    let mut s =
-        <Ov9782 as Lifecycle>::start(Ov9782Needs { bus, values: None }, &Config::new(&entries))
-            .map_err(|e| format!("bind: {e:?}"))?;
+    let mut s = <Ov9782 as Lifecycle>::start(
+        Ov9782Needs {
+            bus,
+            values: None,
+            _receiver: None,
+        },
+        &Config::new(&entries),
+    )
+    .map_err(|e| format!("bind: {e:?}"))?;
     let mut steps = Vec::new();
     let mut step = |name: &str, r: lemnos_core::Result<()>| {
         steps.push(format!("{name}: {r:?}"));

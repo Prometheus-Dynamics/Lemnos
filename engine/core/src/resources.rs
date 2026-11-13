@@ -133,6 +133,12 @@ pub trait Provider {
         name == found
     }
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller>;
+    /// The device the board's `link` names, if it has the contract `tag`. Only a host that
+    /// binds drivers from its own table can name one; the default refuses.
+    fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
+        let _ = tag;
+        Err(Status::NOT_SUPPORTED)
+    }
 
     fn i2c(&mut self, _need: &str) -> Result<I2c> {
         Err(Status::NOT_SUPPORTED)
@@ -194,6 +200,16 @@ impl<'a> Resources<'a> {
         self.link
     }
 
+    /// The device the board's `link` names, as contract `C`. `None` when the board names no link.
+    /// Refused with `NO_DEVICE` while that device is not running, so a bind that needs it is
+    /// retried like one that needs a device it `uses`.
+    pub fn link_device<C: Contract + ?Sized>(&mut self) -> Result<Option<Dev<C>>> {
+        if self.link.is_none() {
+            return Ok(None);
+        }
+        self.provider.link_device(C::TAG).map(|d| Some(Dev::new(d)))
+    }
+
     pub fn provided(&self, need: &str) -> bool {
         self.provider.provided(need)
     }
@@ -213,6 +229,13 @@ pub trait Resource: Sized {
     const OPTIONAL: bool = false;
 
     fn take(res: &mut Resources<'_>, need: &str) -> Result<Self>;
+
+    /// Takes what the board's `link` names, for a field marked `#[link]`. Only a device can be
+    /// linked; anything else refuses.
+    fn take_link(res: &mut Resources<'_>) -> Result<Self> {
+        let _ = res;
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 macro_rules! resources {
@@ -254,6 +277,12 @@ impl<C: Contract + ?Sized> Resource for Dev<C> {
     fn take(res: &mut Resources<'_>, need: &str) -> Result<Self> {
         res.device::<C>(need)
     }
+
+    /// `NOT_FOUND` when the board names no link: an `Option` field is how a driver takes a link
+    /// it can do without.
+    fn take_link(res: &mut Resources<'_>) -> Result<Self> {
+        res.link_device::<C>()?.ok_or(Status::NOT_FOUND)
+    }
 }
 
 impl<T: Resource> Resource for Option<T> {
@@ -263,6 +292,15 @@ impl<T: Resource> Resource for Option<T> {
     fn take(res: &mut Resources<'_>, need: &str) -> Result<Self> {
         if res.provided(need) {
             T::take(res, need).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// `None` when the board names no link, so the driver can tell that from a link it can't reach.
+    fn take_link(res: &mut Resources<'_>) -> Result<Self> {
+        if res.link().is_some() {
+            T::take_link(res).map(Some)
         } else {
             Ok(None)
         }

@@ -92,6 +92,27 @@ pub fn plan(t: &Topology, channel: u32) -> Result<Plan> {
     })
 }
 
+/// The sensor entity upstream of MIPI `channel`'s capture node in the receiver's graph `t`, by
+/// name: the walk follows enabled data links from the node, one entity at a time, until it meets a
+/// sensor or runs out. `None` when the node is missing, the walk ends elsewhere, or it loops.
+#[must_use]
+pub fn sensor(t: &Topology, channel: u32) -> Option<String> {
+    let name = STREAM_ENTITIES.get(usize::try_from(channel).ok()?)?;
+    let mut at = t.entity_by_name(name)?.id;
+    for _ in 0..t.entities.len() {
+        let link = t
+            .links_to(at)
+            .into_iter()
+            .find(|l| l.flags.contains(LinkFlags::ENABLED))?;
+        at = link.source.entity;
+        let entity = t.entity(at)?;
+        if entity.function == EntityFunction::CAM_SENSOR {
+            return Some(entity.name.clone());
+        }
+    }
+    None
+}
+
 /// Whether the receiver's graph `t` has MIPI capture entities: what tells a receiver's media
 /// device from others.
 pub fn is_receiver(t: &Topology) -> bool {

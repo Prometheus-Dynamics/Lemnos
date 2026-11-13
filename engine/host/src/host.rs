@@ -1410,6 +1410,22 @@ impl Binding<'_> {
         let id = self.slot.spec.uses.get(need)?;
         self.inner.slot_by_id(id)
     }
+
+    /// A call route to `target`'s contract `tag`: refused while it is not running.
+    fn caller_of(&self, target: &Slot, tag: Tag) -> Result<LocalCaller> {
+        if !target.is_running() {
+            return Err(Status::NO_DEVICE);
+        }
+        let contract = target.contract_index(tag).ok_or(Status::INVALID_ARGUMENT)?;
+        let router: &'static dyn Router = match self.inner.reading.get() {
+            Some(reading) if self.guest() => *reading,
+            // Never without one once the host has started; refuse rather than hand a
+            // host-owned device a way to change another.
+            None if self.guest() => return Err(Status::NOT_PERMITTED),
+            _ => self.inner,
+        };
+        Ok(LocalCaller::new(router, target.index, contract))
+    }
 }
 
 macro_rules! buses {
@@ -1447,18 +1463,13 @@ impl Provider for Binding<'_> {
 
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller> {
         let target = self.target(need).ok_or(Status::NOT_FOUND)?;
-        if !target.is_running() {
-            return Err(Status::NO_DEVICE);
-        }
-        let contract = target.contract_index(tag).ok_or(Status::INVALID_ARGUMENT)?;
-        let router: &'static dyn Router = match self.inner.reading.get() {
-            Some(reading) if self.guest() => *reading,
-            // Never without one once the host has started; refuse rather than hand a
-            // host-owned device a way to change another.
-            None if self.guest() => return Err(Status::NOT_PERMITTED),
-            _ => self.inner,
-        };
-        Ok(LocalCaller::new(router, target.index, contract))
+        self.caller_of(&target, tag)
+    }
+
+    fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
+        let id = self.slot.spec.link.as_deref().ok_or(Status::NOT_FOUND)?;
+        let target = self.inner.slot_by_id(id).ok_or(Status::NOT_FOUND)?;
+        self.caller_of(&target, tag)
     }
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {

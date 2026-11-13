@@ -106,16 +106,20 @@ pub struct LinkConfig {
     pub link_rate_mbps: u32,
 }
 
-/// How a configured receiver writes each frame.
+/// How a configured receiver writes each frame. It is single-plane: a raw frame is one run of lines.
+///
+/// `stride` is the bytes per line the block writes, which can be more than the line's pixels take
+/// (padding). It is what the kernel reports for the frame, or what the block is programmed to write,
+/// never a figure the driver assumes. Where the kernel reports another stride, the receiver refuses to start.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameLayout {
     pub width: u32,
     pub height: u32,
     pub bit_depth: u8,
     pub packing: Packing,
-    /// Bytes per line in a buffer.
+    /// Bytes per line in a buffer, as the block writes them: padding included.
     pub stride: u32,
-    /// Bytes per frame at most.
+    /// Bytes per frame at most: `stride` times `height`.
     pub size: u32,
 }
 
@@ -182,4 +186,21 @@ pub trait CameraReceiver {
     /// lines answers 0 and publishes nothing.
     #[method(9)]
     fn embedded_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+
+    /// The sensor whose frames arrive on this receiver's input, as the kernel names it: the name
+    /// the sensor's own `identity` answers, as UTF-8 into `into`, returning its length. `into`
+    /// holds at least [`MAX_FEED_NAME`] bytes.
+    ///
+    /// Three answers, which a consumer must keep apart. A name is the sensor on the input.
+    /// Length 0 is nothing wired to the input. `NOT_SUPPORTED` is unknown: the receiver's kernel
+    /// does not describe its input, so it cannot say what is wired to it, and a consumer must not
+    /// take that for a match. Any other error is a read that failed now.
+    #[method(10)]
+    fn source(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// The layout `configure` set, or `None` before one is set: the same `FrameLayout`. Its `size`
+    /// is the most bytes one frame takes in a buffer of the `frames` stream, so a consumer checks
+    /// it against the stream's buffer length (`FrameStream::buffer_len` in the client) before or
+    /// after opening the stream.
+    #[method(11)]
+    fn layout(&mut self) -> Result<Option<FrameLayout>>;
 }

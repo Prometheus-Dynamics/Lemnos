@@ -114,6 +114,8 @@ fn the_tag_and_numbers_are_stable() {
             ("counters", 7),
             ("feeds", 8),
             ("embedded_stream", 9),
+            ("source", 10),
+            ("layout", 11),
         ]
     );
     assert!(INFO.methods[3].has_out_buffer);
@@ -122,6 +124,10 @@ fn the_tag_and_numbers_are_stable() {
     assert_eq!(INFO.methods[3].returns, Shape::Bytes);
     assert!(INFO.methods[7].has_out_buffer);
     assert_eq!(INFO.methods[7].returns, Shape::Bytes);
+    assert!(INFO.methods[8].has_out_buffer);
+    assert!(INFO.methods[9].has_out_buffer);
+    assert_eq!(INFO.methods[9].returns, Shape::Bytes);
+    assert!(matches!(INFO.methods[10].returns, Shape::Option(_)));
 }
 
 fn link() -> LinkConfig {
@@ -198,6 +204,9 @@ struct Mock {
     link: Option<LinkConfig>,
     packing: Packing,
     streaming: bool,
+    layout: Option<FrameLayout>,
+    /// What `source` answers: `None` is unknown.
+    source: Option<&'static str>,
 }
 
 impl CameraReceiver for Mock {
@@ -219,14 +228,28 @@ impl CameraReceiver for Mock {
         }
         self.link = Some(link);
         self.packing = packing;
-        Ok(FrameLayout {
+        let layout = FrameLayout {
             width: link.width,
             height: link.height,
             bit_depth: link.bit_depth,
             packing,
-            stride: link.width * 2,
-            size: link.width * link.height * 2,
-        })
+            // Lines padded to 64 bytes, as a block with an alignment rule writes them.
+            stride: (link.width * 2).div_ceil(64) * 64,
+            size: (link.width * 2).div_ceil(64) * 64 * link.height,
+        };
+        self.layout = Some(layout);
+        Ok(layout)
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        Ok(self.layout)
+    }
+
+    fn source(&mut self, into: &mut [u8]) -> Result<usize> {
+        match self.source {
+            Some(name) => copy_name(name, into),
+            None => Err(Status::NOT_SUPPORTED),
+        }
     }
 
     fn link(&mut self) -> Result<Option<LinkConfig>> {
@@ -270,6 +293,61 @@ fn client() -> Bound<dyn CameraReceiver, Direct<Mock>> {
         driver: Mock::default(),
         args: [0; LOCAL_ARGS],
     })
+}
+
+fn client_wired_to(source: Option<&'static str>) -> Bound<dyn CameraReceiver, Direct<Mock>> {
+    Bound::new(Direct {
+        driver: Mock {
+            source,
+            ..Mock::default()
+        },
+        args: [0; LOCAL_ARGS],
+    })
+}
+
+#[test]
+fn a_caller_reads_the_layout_it_configured() {
+    let mut receiver = client();
+    assert_eq!(receiver.layout(), Ok(None), "before configure");
+    let set = receiver.configure(link(), Packing::Unpacked16).unwrap();
+    assert_eq!(receiver.layout(), Ok(Some(set)));
+    assert_eq!(
+        set.size,
+        set.stride * set.height,
+        "the bytes a frame takes in a buffer"
+    );
+}
+
+#[test]
+fn a_padded_stride_is_what_the_layout_reports_and_frames_are_sized_by_it() {
+    let mut receiver = client();
+    // 1000 pixels at 2 bytes is 2000 bytes a line: padded to 2048.
+    let narrow = LinkConfig {
+        width: 1000,
+        ..link()
+    };
+    let set = receiver.configure(narrow, Packing::Unpacked16).unwrap();
+    assert_eq!(set.stride, 2048, "the line is padded");
+    assert_eq!(receiver.layout(), Ok(Some(set)));
+    assert_eq!(set.size, set.stride * set.height, "a frame is its lines");
+    assert!(set.stride > 1000 * 2, "more than the pixels take");
+}
+
+#[test]
+fn a_caller_asks_what_is_wired_to_the_input_and_gets_three_answers() {
+    let mut name = [0; MAX_FEED_NAME];
+    // A name: the sensor on the input.
+    let mut wired = client_wired_to(Some("ov9782 10-0036"));
+    let len = wired.source(&mut name).unwrap();
+    assert_eq!(&name[..len], b"ov9782 10-0036");
+    // Nothing wired: a length of 0, which is not unknown.
+    let mut unwired = client_wired_to(Some(""));
+    assert_eq!(unwired.source(&mut name), Ok(0));
+    // Unknown: the receiver's kernel does not describe its input.
+    let mut unknown = client_wired_to(None);
+    assert_eq!(unknown.source(&mut name), Err(Status::NOT_SUPPORTED));
+    let mut small = [0; 3];
+    assert_eq!(wired.source(&mut small), Err(Status::BUFFER_TOO_SMALL));
 }
 
 #[test]

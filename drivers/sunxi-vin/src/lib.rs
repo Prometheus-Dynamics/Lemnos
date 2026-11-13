@@ -405,4 +405,24 @@ impl CameraReceiver for SunxiVin {
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// The sensor at the head of the graph chain into the capture node. Unknown when the graph
+    /// has no sensor there: the kernel does not describe this input's source, and nothing is
+    /// positively unwired either, since the walk follows only enabled links.
+    fn source(&mut self, into: &mut [u8]) -> Result<usize> {
+        let feeds = SunxiVin::feeds(self)?;
+        let name = feeds
+            .sensor
+            .as_deref()
+            .map(str::as_bytes)
+            .ok_or(Status::NOT_SUPPORTED)?;
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        Ok(self.layout)
+    }
 }

@@ -1,6 +1,6 @@
 use lemnos_contract_camera_sensor::{
     BayerOrder, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, LinkConfig,
-    Mode, Rect, SensorInfo,
+    MAX_IDENTITY_NAME, Mode, Rect, SensorInfo,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -109,10 +109,13 @@ fn the_tag_and_numbers_are_stable() {
             ("applied", 9),
             ("set_flips", 10),
             ("set_test_pattern", 11),
+            ("identity", 12),
         ]
     );
     assert_eq!(INFO.methods[9].returns, Shape::U8);
-    assert!(INFO.methods.iter().all(|m| !m.has_out_buffer));
+    assert!(INFO.methods[..11].iter().all(|m| !m.has_out_buffer));
+    assert!(INFO.methods[11].has_out_buffer);
+    assert_eq!(INFO.methods[11].returns, Shape::Bytes);
 }
 
 #[test]
@@ -409,6 +412,25 @@ impl CameraSensor for Mock {
             Ok(())
         }
     }
+
+    fn identity(&mut self, into: &mut [u8]) -> Result<usize> {
+        // Named by the kernel only when a kernel driver binds it; this mock is one.
+        let name = b"ov9782 10-0036";
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+}
+
+#[test]
+fn a_caller_reads_the_name_the_kernel_knows_the_sensor_by() {
+    let mut sensor = client();
+    let mut name = [0; MAX_IDENTITY_NAME];
+    let len = sensor.identity(&mut name).unwrap();
+    assert_eq!(&name[..len], b"ov9782 10-0036");
+    let mut small = [0; 4];
+    assert_eq!(sensor.identity(&mut small), Err(Status::BUFFER_TOO_SMALL));
 }
 
 fn client() -> Bound<dyn CameraSensor, Direct<Mock>> {

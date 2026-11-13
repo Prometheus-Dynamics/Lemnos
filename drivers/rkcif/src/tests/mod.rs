@@ -764,3 +764,71 @@ fn the_steady_state_allocates_nothing() {
     assert_eq!(allocated, 0, "the route check");
     assert_eq!(d.health(), Health::Ok);
 }
+
+// Which sensor feeds the channel's capture node, read off the receiver's graph.
+
+const SENSOR: u32 = 30;
+const SENSOR_SRC: u32 = 31;
+const CSI_SINK: u32 = 32;
+const SENSOR_TO_CSI: u32 = 6;
+
+/// The receiver's graph with a sensor feeding the CSI-2 host's sink over a link that is `on`.
+fn wired_to_sensor(on: bool) -> Topology {
+    let mut t = receiver(ON, OFF, OFF);
+    t.entities
+        .push(entity(SENSOR, "ov9782 10-0036", EntityFunction::CAM_SENSOR));
+    t.pads.push(pad(SENSOR_SRC, SENSOR, 0));
+    t.pads.push(pad(CSI_SINK, CSI_A, 0));
+    t.links.push(link(
+        SENSOR_TO_CSI,
+        SENSOR_SRC,
+        CSI_SINK,
+        if on { ON } else { OFF },
+    ));
+    t
+}
+
+#[test]
+fn source_names_the_sensor_upstream_of_the_channels_capture_node() {
+    let (mut d, _hw) = driver_on(wired_to_sensor(true));
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut [0u8; 64]),
+        Err(Status::NOT_SUPPORTED),
+        "unknown before a link is configured"
+    );
+    CameraReceiver::configure(&mut d, raw10(), Packing::Packed).unwrap();
+    let mut name = [0u8; 64];
+    let len = CameraReceiver::source(&mut d, &mut name).unwrap();
+    assert_eq!(&name[..len], b"ov9782 10-0036");
+    let mut small = [0u8; 3];
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut small),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+}
+
+#[test]
+fn source_is_unknown_when_the_graph_has_no_sensor_on_the_path() {
+    // The graph describes no sensor: the kernel does not name what is wired, so it's unknown.
+    let (mut d, _hw) = driver();
+    CameraReceiver::configure(&mut d, raw10(), Packing::Packed).unwrap();
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut [0u8; 64]),
+        Err(Status::NOT_SUPPORTED)
+    );
+    // A sensor whose link is off feeds nothing now: the walk ends, unknown again.
+    let (mut off, _hw) = driver_on(wired_to_sensor(false));
+    CameraReceiver::configure(&mut off, raw10(), Packing::Packed).unwrap();
+    assert_eq!(
+        CameraReceiver::source(&mut off, &mut [0u8; 64]),
+        Err(Status::NOT_SUPPORTED)
+    );
+}
+
+#[test]
+fn layout_is_what_configure_set() {
+    let (mut d, _hw) = driver();
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
+    let set = CameraReceiver::configure(&mut d, raw10(), Packing::Packed).unwrap();
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}

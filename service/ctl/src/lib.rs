@@ -107,6 +107,23 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
 fn validate(path: &str, out: &mut dyn Write) -> Outcome {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let board = lemnos_host::board::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    // A link names a device of this board, and not the device itself. Whether the two ends agree
+    // is only known to a running host, which checks it at bind.
+    for device in &board.devices {
+        let Some(link) = &device.link else { continue };
+        if link == &device.id {
+            return Err(format!(
+                "{path}: device {:?} is linked to itself",
+                device.id
+            ));
+        }
+        if !board.devices.iter().any(|d| &d.id == link) {
+            return Err(format!(
+                "{path}: device {:?} is linked to {link:?}, which the board doesn't have",
+                device.id
+            ));
+        }
+    }
     let options = board.host.apply(lemnos_host::Options::default());
     line(
         out,
@@ -191,16 +208,18 @@ impl Tool<'_> {
         let width = chain.iter().map(|d| d.name.len()).max().unwrap_or(0);
         for d in &chain {
             let tags = d.tags.join(",");
-            line(
-                self.out,
-                format_args!(
-                    "{:width$}  {}  {}  {}  {tags}",
-                    d.name,
-                    d.driver,
-                    state_name(d.state),
-                    health_name(d.health),
-                ),
-            )?;
+            let mut row = format!(
+                "{:width$}  {}  {}  {}  {tags}",
+                d.name,
+                d.driver,
+                state_name(d.state),
+                health_name(d.health),
+            );
+            // Why it is not ok, as the host says it: a link that is not confirmed, for one.
+            if !d.reason.is_empty() {
+                row.push_str(&format!("  ({})", d.reason));
+            }
+            line(self.out, format_args!("{row}"))?;
         }
         // Where it ends says why: nothing further, a name the board doesn't have, or a circle.
         match &last.link {

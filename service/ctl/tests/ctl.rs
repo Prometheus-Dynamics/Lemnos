@@ -496,3 +496,32 @@ fn a_job_method_runs_as_a_job_with_its_progress() {
     drop(running);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn validate_refuses_a_link_to_a_device_the_board_does_not_have() {
+    let error = validate(&format!(
+        "{HEAD}[[devices]]\nid = \"cam0-sensor\"\ndriver = \"ov9782\"\nlink = \"cam0-recevier\"\n"
+    ))
+    .unwrap_err();
+    assert!(error.contains("\"cam0-sensor\""), "{error}");
+    assert!(error.contains("\"cam0-recevier\""), "{error}");
+    assert!(error.contains("doesn't have"), "{error}");
+}
+
+#[test]
+fn validate_refuses_a_link_to_the_device_itself() {
+    let error = validate(&format!(
+        "{HEAD}[[devices]]\nid = \"a\"\ndriver = \"x\"\nlink = \"a\"\n"
+    ))
+    .unwrap_err();
+    assert!(error.contains("linked to itself"), "{error}");
+}
+
+#[test]
+fn validate_accepts_links_between_devices_the_board_has() {
+    validate(&format!(
+        "{HEAD}[[devices]]\nid = \"s\"\ndriver = \"x\"\nlink = \"r\"\n\
+         [[devices]]\nid = \"r\"\ndriver = \"x\"\n"
+    ))
+    .unwrap();
+}

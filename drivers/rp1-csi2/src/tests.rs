@@ -657,3 +657,23 @@ fn no_isp_takes_the_frames_in_hardware() {
     assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
     assert_eq!(CameraReceiver::feeds(&mut d, &mut []), Ok(0));
 }
+
+#[test]
+fn the_module_does_not_know_the_sensor_so_the_link_is_unknown() {
+    let frames = MockStream::with_bytes(4, 4096);
+    let (mut d, _hw) = driver_on(&frames);
+    let mut name = [0u8; 64];
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut name),
+        Err(Status::NOT_SUPPORTED)
+    );
+}
+
+#[test]
+fn layout_is_what_configure_set_and_nothing_before() {
+    let frames = MockStream::with_bytes(4, 4096);
+    let (mut d, _hw) = driver_on(&frames);
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
+    let set = d.configure(raw10(), Packing::Packed).unwrap();
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}

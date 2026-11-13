@@ -294,6 +294,20 @@ impl FrameStream {
         self.ring.layout()
     }
 
+    /// Bytes in each buffer of the stream: the most a frame in one can hold, so a frame's
+    /// [`HeldFrame::len`] is at most this. A consumer checks a receiver's frame size against it
+    /// before it reads frames.
+    #[must_use]
+    pub const fn buffer_len(&self) -> usize {
+        self.ring.layout().buffer_bytes as usize
+    }
+
+    /// Buffers in the stream, which is how many frames can be held at once.
+    #[must_use]
+    pub const fn buffer_count(&self) -> u32 {
+        self.ring.layout().buffers
+    }
+
     /// Whether the host has ended this stream.
     #[must_use]
     pub fn is_open(&self) -> bool {
