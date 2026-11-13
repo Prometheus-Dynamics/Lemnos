@@ -439,7 +439,7 @@ buffer_bytes = 1048576         # the size of each
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:fe980000.usb" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "function ffs\ninterface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\nfunction ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\nfunction acm\n" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "function ffs\ninterface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\nfunction ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos%d\nfunction acm\n" }
 
 [devices.streams.data]
 buffers = 8
@@ -547,11 +547,24 @@ the link `serial`.
 
 The gadget's `interfaces` text lists its functions in configfs link order, one per line: `function ffs`
 (the FunctionFS link the daemon serves; the default, first, when no line names it), `function ncm
-host=MAC device=MAC` or `function ncm derive` (a CDC network function; both MACs unicast and
-different), and `function acm` (a serial console, `ttyGS0` for the first). The `interface`,
-`alternate` and `endpoint` lines describe the FunctionFS function. Each kind is listed at most once.
-`host=MAC device=MAC` gives the board's own addresses. `derive` takes both from the board's identity,
-so every board of a type gets its own pair (see below).
+host=MAC device=MAC [ifname=TEMPLATE]` or `function ncm derive [ifname=TEMPLATE]` (a CDC network
+function; both MACs unicast and different), and `function acm` (a serial console, `ttyGS0` for the
+first). The `interface`, `alternate` and `endpoint` lines describe the FunctionFS function. Each kind
+is listed at most once. `host=MAC device=MAC` gives the board's own addresses. `derive` takes both
+from the board's identity, so every board of a type gets its own pair (see below).
+
+`ifname=TEMPLATE` (optional, once per NCM line) names the network interface the host side gets. The
+template is one to 15 bytes of printable ASCII with exactly one `%d`, which the kernel replaces with
+the first free number: `lemnos%d` gives `lemnos0`. A fixed name such as `lemnos0`, a template with
+two numbers, a `/`, a `:` or a space is refused when the board file is read. The kernel's own rule
+is the same (`gether_set_ifname` in `f_ncm`). Without `ifname` the kernel names the interface `usb<N>`,
+as it always has. The name needs Linux 5.12 or later: before it, `ifname` is read-only (3.17 to
+5.11) or missing (before 3.17), and the privileged setup refuses a board that names an interface
+with `Unsupported` and the reason `this kernel's NCM function can't be given an interface name`.
+Nothing else is set up for that gadget.
+
+Once the gadget is bound the driver reads the name the kernel gave back, and describes it as the
+item `ifname` (text), and the `usb.function` contract's method 11, `ifname`, returns the same text. It is absent while the gadget is down, and absent when the gadget has no NCM function.
 
 ### Identity-derived addresses and the USB serial
 

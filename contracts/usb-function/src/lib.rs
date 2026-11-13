@@ -341,4 +341,12 @@ pub trait UsbFunction {
     fn cancel(&mut self, endpoint: u8) -> Result<u32>;
     #[method(10)]
     fn counters(&mut self) -> Result<Counters>;
+    /// The network interface the host side of the NCM function got, as text: the name the
+    /// kernel gave it once the gadget is up. `NOT_FOUND` while the gadget is not up or has no NCM
+    /// function. `into` holds [`MAX_IFNAME_TEXT`] bytes.
+    #[method(11, reading = text)]
+    fn ifname(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }
+
+/// The buffer the `ifname` method needs: a kernel interface name, 15 bytes at the most.
+pub const MAX_IFNAME_TEXT: usize = 16;

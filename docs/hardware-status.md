@@ -176,6 +176,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E36.md`](../testing/board-runs/E36.md) | `usb-gadget` served by a caller: control replies, 64 MiB each way, cancel, unbind |
 | [`R1.md`](../testing/board-runs/R1.md) | The gadget's NCM and ACM functions, the root phase's configfs tree and FunctionFS mount, and the UDC attribute the daemon writes after the drop |
 | [`R1d.md`](../testing/board-runs/R1d.md) | The gadget's unit capability in its drop-in, and three hardening candidates to try on a board |
+| [`R1e.md`](../testing/board-runs/R1e.md) | The NCM interface's name (`ifname=`): the kernel takes it from 5.12 on, the setup refuses older kernels by name, and the read-back is reported as `ifname` |
 | [`H4b.md`](../testing/board-runs/H4b.md) | Isochronous streams both ways: `uvc` with several transfers queued, and a gadget's isochronous endpoints in an alternate setting |
 
 ## Cameras

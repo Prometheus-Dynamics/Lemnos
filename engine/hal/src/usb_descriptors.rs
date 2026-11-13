@@ -69,10 +69,57 @@ pub enum GadgetFunction {
     /// The FunctionFS function: the link the daemon serves through `ep0` and its endpoint files.
     Ffs,
     /// A CDC network function (`ncm.usb0`). `host` is the host side's address, `device` the
-    /// gadget's, each a unicast 6-byte MAC.
-    Ncm { host: [u8; 6], device: [u8; 6] },
+    /// gadget's, each a unicast 6-byte MAC. `ifname` names the network interface the host side
+    /// gets, or `None` to let the kernel name it `usb<N>`.
+    Ncm {
+        host: [u8; 6],
+        device: [u8; 6],
+        ifname: Option<IfName>,
+    },
     /// A CDC ACM serial function (`acm.GS0`, the console).
     Acm,
+}
+
+/// The most bytes an interface name may take: the kernel's `IFNAMSIZ` less the NUL.
+pub const MAX_IFNAME: usize = 15;
+
+/// A network interface name for the NCM function, as the kernel takes it: a template with
+/// exactly one `%d`, which the kernel replaces with the first free number, so `lemnos%d` gives
+/// `lemnos0` on a host with no such interface. A fixed name is not a template: the kernel's
+/// own rule (`gether_set_ifname`) refuses it, and so does [`IfName::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IfName {
+    bytes: [u8; MAX_IFNAME],
+    len: u8,
+}
+
+impl IfName {
+    /// The name for `template`, or `None` when it is not one: more than [`MAX_IFNAME`] bytes,
+    /// not exactly one `%d`, or a byte that is not printable ASCII or is a `/` or `:` (which the
+    /// kernel's name rules refuse).
+    pub fn new(template: &str) -> Option<Self> {
+        let text = template.as_bytes();
+        let fits = (1..=MAX_IFNAME).contains(&text.len());
+        let plain = text
+            .iter()
+            .all(|&b| b.is_ascii_graphic() && b != b'/' && b != b':');
+        let one_number = template.contains("%d") && template.matches('%').count() == 1;
+        if !(fits && plain && one_number) {
+            return None;
+        }
+        let mut bytes = [0u8; MAX_IFNAME];
+        bytes[..text.len()].copy_from_slice(text);
+        Some(Self {
+            bytes,
+            len: text.len() as u8,
+        })
+    }
+
+    /// The template as written.
+    pub fn as_str(&self) -> &str {
+        // Only printable ASCII is stored, so this is UTF-8.
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
+    }
 }
 
 /// What the device descriptor says, in the host's byte order.

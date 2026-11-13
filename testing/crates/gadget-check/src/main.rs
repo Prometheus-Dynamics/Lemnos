@@ -8,7 +8,9 @@
 //!    configfs tree (`lemnosd::gadget::privileged_start`).
 //! 2. The tree holds the derived NCM addresses and the board serial as the USB serial.
 //! 3. The gadget is enabled on `dummy_udc.0` the way the daemon enables it
-//!    (`lemnos_linux::FunctionFsGadget`), and waits for the host to configure it.
+//!    (`lemnos_linux::FunctionFsGadget`), and waits for the host to configure it. The NCM
+//!    function's interface is named from the board's `ifname=lemnos%d` template, and the name the
+//!    kernel gave it is read back and checked against `lemnos0` in the guest.
 //! 4. The host side, a child process, finds the device in sysfs and reads its descriptors over
 //!    usbfs: a vendor-class interface, a CDC NCM pair and a CDC ACM pair.
 //! 5. The host claims the vendor interface and sends bytes out of the bulk OUT endpoint; the
@@ -47,7 +49,7 @@ config = { serial = "cmdline", serial_key = "lemnos.serial" }
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:dummy_udc.0" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 gadget-check\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive\nfunction acm\n" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 gadget-check\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive ifname=lemnos%d\nfunction acm\n" }
 "#;
 
 /// The serial the command line gives, and the addresses it derives for board `lemnos-qemu`.
@@ -245,6 +247,23 @@ fn main() -> ExitCode {
     ) {
         return ExitCode::FAILURE;
     }
+
+    // The NCM interface has the name the board's template gives, and the kernel's choice is
+    // read back: the first free `lemnos<N>` on a fresh guest is `lemnos0`.
+    let mut name = [0u8; 16];
+    let named = gadget
+        .interface_name(&mut name)
+        .ok()
+        .flatten()
+        .map(|len| String::from_utf8_lossy(&name[..len]).into_owned());
+    check(
+        named.as_deref() == Some("lemnos0"),
+        "the NCM interface is named by the board's template, and the name is read back",
+    );
+    check(
+        Path::new("/sys/class/net/lemnos0").exists(),
+        "the guest has a network interface lemnos0",
+    );
 
     // 4 and 5. The host runs beside us, and we serve the bulk pair until it is done.
     let configured = wait_configured(&mut gadget);

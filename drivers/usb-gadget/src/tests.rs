@@ -661,6 +661,7 @@ fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
             Ncm {
                 host: [2, 0, 0, 0, 0, 1],
                 device: [2, 0, 0, 0, 0, 2],
+                ifname: None,
             },
             Ffs,
         ])
@@ -673,6 +674,7 @@ fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
             Ncm {
                 host: [2, 0, 0, 0, 0, 1],
                 device: [2, 0, 0, 0, 0, 2],
+                ifname: None,
             },
             Acm,
         ])
@@ -835,6 +837,7 @@ fn derive_takes_the_addresses_from_the_board_identity_and_fails_without_one() {
     assert!(functions.as_slice().contains(&GadgetFunction::Ncm {
         host: pair.host,
         device: pair.device,
+        ifname: None,
     }));
     assert_ne!(pair.host, pair.device);
 
@@ -961,4 +964,137 @@ fn the_hold_ends_when_the_controller_lets_go_of_the_gadget() {
     // Enabled again: a new hold is possible, for anyone.
     rig.step();
     assert_eq!(lent(&mut rig, 2), Ok(()));
+}
+
+#[test]
+fn an_ncm_line_may_name_its_interface_with_a_template() {
+    use crate::description::{Fault, functions};
+    use lemnos_hal::usb_descriptors::GadgetFunction::{Ffs, Ncm};
+    use lemnos_hal::usb_descriptors::IfName;
+
+    let ncm = |line: &str| {
+        functions(
+            &std::format!("{line}\ninterface 0xff 0 0 link\nendpoint in bulk\n"),
+            None,
+        )
+        .map(|f| f.as_slice().to_vec())
+    };
+    let named = IfName::new("lemnos%d");
+    assert_eq!(
+        ncm("function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos%d"),
+        Ok(std::vec![
+            Ffs,
+            Ncm {
+                host: [2, 0, 0, 0, 0, 1],
+                device: [2, 0, 0, 0, 0, 2],
+                ifname: named,
+            }
+        ])
+    );
+    // Any order of the words, and the name may come first.
+    assert_eq!(
+        ncm("function ncm ifname=lemnos%d device=02:00:00:00:00:02 host=02:00:00:00:00:01"),
+        ncm("function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos%d")
+    );
+    // A name on a line without one is unchanged: no name, the kernel's `usb<N>`.
+    assert_eq!(
+        ncm("function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02"),
+        Ok(std::vec![
+            Ffs,
+            Ncm {
+                host: [2, 0, 0, 0, 0, 1],
+                device: [2, 0, 0, 0, 0, 2],
+                ifname: None,
+            }
+        ])
+    );
+    // A bad name is refused by its line, as a name.
+    assert_eq!(
+        ncm("function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos0"),
+        Err(Fault::InterfaceName(1))
+    );
+    // A name is given once, and `derive` takes it too.
+    for bad in [
+        "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=a%d ifname=b%d",
+        "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=",
+        "function ncm derive host=02:00:00:00:00:01",
+    ] {
+        assert!(ncm(bad).is_err(), "{bad}");
+    }
+    let pair = pair_for_alpha();
+    let derived = functions(
+        "function ncm derive ifname=usb%d\ninterface 0xff 0 0 link\nendpoint in bulk\n",
+        Some(pair),
+    )
+    .map(|f| f.as_slice().to_vec());
+    assert_eq!(
+        derived,
+        Ok(std::vec![
+            Ffs,
+            Ncm {
+                host: pair.host,
+                device: pair.device,
+                ifname: IfName::new("usb%d"),
+            }
+        ])
+    );
+}
+
+/// The addresses of a fixed identity, for the name tests.
+fn pair_for_alpha() -> crate::derive::Macs {
+    crate::derive::macs("alpha", "00000001").unwrap()
+}
+
+#[test]
+fn the_ncm_interface_is_described_once_the_kernel_has_named_it() {
+    use lemnos_contract_usb_function::UsbFunction as Contract;
+    use lemnos_core::{Description, Status};
+
+    let host = MockUsbFunction::new();
+    host.set_interface_name(Some("lemnos0"));
+    let mut entries = settings();
+    entries.retain(|(k, _)| *k != "interfaces");
+    entries.push((
+        "interfaces",
+        ConfigValue::Str(
+            "function ffs\ninterface 0xff 0 0 link\nendpoint in bulk\nendpoint out bulk\n\
+             function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos%d\n",
+        ),
+    ));
+    let mut driver = bind(&host, &entries).expect("bind");
+
+    // Not bound yet: nothing is named.
+    let mut described = Description::new();
+    Driver::describe(&driver, &mut described);
+    assert!(described.find("ifname").is_none());
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        Contract::ifname(&mut driver, &mut buffer),
+        Err(Status::NOT_FOUND)
+    );
+
+    // Bound: the name the kernel gave is described and readable through the contract.
+    Driver::tick(&mut driver, 0).expect("the first tick enables it");
+    let mut described = Description::new();
+    Driver::describe(&driver, &mut described);
+    assert!(described.find("ifname").is_some());
+    assert_eq!(Contract::ifname(&mut driver, &mut buffer), Ok(7));
+    assert_eq!(&buffer[..7], b"lemnos0");
+    assert_eq!(
+        Contract::ifname(&mut driver, &mut [0u8; 3]),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+}
+
+#[test]
+fn a_gadget_without_an_ncm_function_describes_no_interface_name() {
+    use lemnos_core::Description;
+
+    let host = MockUsbFunction::new();
+    // The backend names nothing when the gadget has no NCM function.
+    let mut driver = bind(&host, &settings()).expect("bind");
+    Driver::tick(&mut driver, 0).expect("the first tick enables it");
+    let mut described = Description::new();
+    Driver::describe(&driver, &mut described);
+    assert!(described.find("ifname").is_none());
 }
