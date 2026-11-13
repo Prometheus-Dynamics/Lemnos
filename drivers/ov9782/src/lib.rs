@@ -20,16 +20,30 @@
 //! against the selected mode's limits before anything is written, including an exposure already
 //! held against a shortened frame.
 //!
+//! Timing. `post_values` writes the exposure, gain and frame length in one group, and the group is
+//! launched at the next vertical blanking. A group whose launch completes during frame `F` is
+//! latched at the start of frame `F + 1` and shows on frame `F + 2`: all three controls have a
+//! delay of 2 in every mode, so they show together (see `contracts/camera-sensor`'s timing rule and
+//! `testing/board-runs/D10.md`). The driver does not stagger, and it cannot know `F`: it sees no
+//! frame boundary, only its own registers.
+//!
 //! Values from a ring. A board that gives the sensor a `values` stream (`[devices.streams.values]`
 //! in its board entry, with `job_bytes` of at least 64) takes values as jobs: the consumer pushes an
 //! encoded `FrameValues` on that stream's job queue, and the driver reads the queue every
 //! `VALUES_POLL_NS` while streaming. Each poll applies the last decodable job it read, under group
-//! hold and launched at the next vertical blanking, exactly as `post_values` does. A value is not
-//! written until the poll that reads it, so it can reach a frame only if its group completes before
-//! that frame starts. A consumer that needs a value on a given frame posts it at least one poll and
-//! one group write (six register transactions) before that frame's start. Jobs that are read while
-//! the sensor is stopped or recovering, or that the limits refuse, are dropped and never kept, and a
-//! `start` drops whatever was posted before it. The driver keeps no value across a restart.
+//! hold and launched at the next vertical blanking, exactly as `post_values` does, so the same
+//! timing applies from the group's write. A value is not written until the poll that reads it: the
+//! write completes inside a frame at most one poll later than the post, and that frame is `F`. A
+//! consumer that needs a value on a given frame `N` posts it by the frame `N - 2`, at least one poll
+//! and one group write (six register transactions) earlier. Jobs that are read while the sensor is
+//! stopped or recovering, or that the limits refuse, are dropped and never kept, and a `start` drops
+//! whatever was posted before it. The driver keeps no value across a restart.
+//!
+//! Gain. Analogue gain codes are sixteenths: `0x10` is a gain of one and the law is linear
+//! (`GainLaw::Linear`). The sensor has no digital gain the contract can reach.
+//!
+//! Embedded data. None: `SensorInfo::embedded_data` is `None`, and the driver has no read-back of
+//! the values in force for a frame. A caller checks its posts from the timing rule above.
 //!
 //! The first frame after a start is dropped at the sensor (one frame masked through the frame
 //! control block), so `Mode::drop_frames` is 0.

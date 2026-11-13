@@ -186,7 +186,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
 | `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern | `ov9782` |
-| `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
+| `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
 | `camera.isp/1` | 1 info, 2 config_layout, 3 set_input, 4 set_output, 5 clear_output, 6 config_stream, 7 statistics_stream, 8 input_stream, 9 output_stream, 10 start, 11 stop, 12 counters | `pisp-be`, `pisp-fe`, `rkisp`, `isp600`, `k230isp` |
 | `isp.pisp/1` | 1 info, 2 set_front_end_compression, 3 enable_temporal_denoise, 4 reset_temporal_denoise, 5 set_line_event | `pisp-be`, `pisp-fe` |
 | `isp.isp600/1` | 1 info, 2 load_region, 3 statistics_region | `isp600` |
@@ -201,6 +201,14 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board
 file's `link` to its receiver and from there to its ISP. A USB camera is one device with
 `camera.frames/1`.
+
+The sensor contract's timing, gain law and read-back rules are in
+[`contracts/camera-sensor`](../contracts/camera-sensor/src/lib.rs). In short: a post's controls
+show on the frame `F + delay` for each control, where `F` is the frame in progress when its group
+launches. Frames are named by sequence (receivers publish identity 0). `ov9782` has no embedded
+data, so a caller checks its posts from the timing rule. The simulated sensor in the camera proof
+has configurable delays, masked frames and embedded data, and its schedule test checks a 1,000-step
+run with unequal delays.
 
 Exposure, white balance, tuning and the rest of a camera pipeline are the caller's. So is every
 codec's bitstream work and every model: the contracts carry the caller's bytes to the block.

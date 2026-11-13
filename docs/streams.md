@@ -129,6 +129,20 @@ The clock stops while the system is suspended. A timestamp of 0 means the produc
 the frame: a job that failed, or one dropped before it ran. On a microcontroller the timestamp is on
 the firmware's monotonic clock, and on the simulated board on the simulated clock.
 
+A camera receiver is a producer that takes no jobs, so it has nothing to name a frame by: its
+frames carry identity 0 and the sequence number is the frame's name. Its sequence counts from the
+receiver's start.
+
+### Embedded data
+
+A sensor may carry the register values in force for each frame (`camera.sensor/1`,
+`SensorInfo::embedded_data`). A receiver whose sensor does publishes them on a second stream,
+named by `embedded_stream` (`camera.receiver/1`): one buffer per frame, with that frame's sequence
+number, in the sensor's own layout, which the sensor's library crate decodes. A receiver that
+captures none answers an empty name. In the tree, no receiver captures embedded lines yet
+(`rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture`), and no sensor on a board carries them, so the
+path is exercised only by the simulated camera. See [Hardware status](hardware-status.md).
+
 ## Jobs
 
 A job is a small message from the consumer, at most `job_bytes` long. At most `job_slots` can

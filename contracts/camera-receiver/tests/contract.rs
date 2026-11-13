@@ -1,6 +1,6 @@
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_FEED_NAME,
-    MAX_STREAM_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig,
+    MAX_EMBEDDED_STREAM_NAME, MAX_FEED_NAME, MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -113,6 +113,7 @@ fn the_tag_and_numbers_are_stable() {
             ("stop", 6),
             ("counters", 7),
             ("feeds", 8),
+            ("embedded_stream", 9),
         ]
     );
     assert!(INFO.methods[3].has_out_buffer);
@@ -258,6 +259,10 @@ impl CameraReceiver for Mock {
             Ok(0)
         }
     }
+
+    fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        copy_name("embedded", into)
+    }
 }
 
 fn client() -> Bound<dyn CameraReceiver, Direct<Mock>> {
@@ -291,6 +296,14 @@ fn a_caller_asks_which_isp_the_hardware_feeds() {
     assert_eq!(&name[..len], b"isp-vir0");
     let mut small = [0; 3];
     assert_eq!(receiver.feeds(&mut small), Err(Status::BUFFER_TOO_SMALL));
+}
+
+#[test]
+fn a_caller_finds_the_embedded_stream() {
+    let mut receiver = client();
+    let mut name = [0; MAX_EMBEDDED_STREAM_NAME];
+    let len = receiver.embedded_stream(&mut name).unwrap();
+    assert_eq!(&name[..len], b"embedded");
 }
 
 #[test]

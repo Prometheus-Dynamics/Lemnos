@@ -1,5 +1,6 @@
 use lemnos_contract_camera_sensor::{
-    BayerOrder, CameraSensor, Controls, FrameValues, GainRange, LinkConfig, Mode, Rect, SensorInfo,
+    BayerOrder, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, LinkConfig,
+    Mode, Rect, SensorInfo,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -153,6 +154,7 @@ const GAIN: GainRange = GainRange {
     max: 255,
     unity: 16,
     step: 1,
+    law: GainLaw::Linear,
 };
 
 fn mode() -> Mode {
@@ -214,9 +216,20 @@ fn every_type_round_trips() {
         array_width: 1280,
         array_height: 800,
         test_patterns: 4,
+        embedded_data: EmbeddedData::Registers,
     });
     round_trip(mode());
     round_trip(GAIN);
+    round_trip(GainRange {
+        law: GainLaw::Reciprocal { full: 0x1000 },
+        ..GAIN
+    });
+    round_trip(GainRange {
+        law: GainLaw::Decibel {
+            milli_db_per_code: 300,
+        },
+        ..GAIN
+    });
     round_trip(Rect {
         x: 1,
         y: 2,
@@ -277,6 +290,27 @@ fn a_bad_present_flag_or_order_is_refused() {
     );
 }
 
+#[test]
+fn a_gain_law_or_embedded_flag_that_is_not_defined_is_refused() {
+    // The law's tag is 0 linear, 1 reciprocal, 2 decibel; a linear law has no parameter and the
+    // other two need a non-zero one.
+    let refused = |tag: u8, param: u32| {
+        let mut bytes = [0u8; 5];
+        bytes[0] = tag;
+        bytes[1..].copy_from_slice(&param.to_le_bytes());
+        GainLaw::decode(&mut Reader::new(&bytes)).err()
+    };
+    assert_eq!(refused(0, 0), None);
+    assert_eq!(refused(0, 1), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(refused(1, 0), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(refused(2, 0), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(refused(3, 1), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        EmbeddedData::decode(&mut Reader::new(&[2])).err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
+}
+
 #[derive(Default)]
 struct Mock {
     selected: Option<u16>,
@@ -294,6 +328,7 @@ impl CameraSensor for Mock {
             array_width: 1280,
             array_height: 800,
             test_patterns: 2,
+            embedded_data: EmbeddedData::None,
         })
     }
 
