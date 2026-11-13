@@ -160,6 +160,26 @@ impl Client {
                 self.stream_open(id, device, name, true)
             }
             Frame::StreamClose { id, device, name } => self.stream_close(id, device, name),
+            Frame::StreamTicket {
+                id,
+                device,
+                name,
+                held,
+                hold_ms,
+                import,
+            } => self.stream_ticket(id, device, name, held, hold_ms, import),
+            Frame::StreamTicketState {
+                id,
+                device,
+                name,
+                slot,
+            } => self.stream_ticket_state(id, device, name, slot),
+            Frame::StreamUnticket {
+                id,
+                device,
+                name,
+                slot,
+            } => self.stream_unticket(id, device, name, slot),
             Frame::CallJob {
                 id,
                 device,
@@ -551,6 +571,95 @@ impl Client {
                 true
             }
             Err(status) => self.refuse(id, status, "can't close the endpoints"),
+        }
+    }
+
+    /// A reader slot for a third process on the stream this connection has open: the descriptors go in
+    /// the answer, read-only where the stream shares them. If this connection has gone, the descriptors
+    /// close here and the reader's liveness pipe hangs up, so the slot is freed.
+    fn stream_ticket(
+        &self,
+        id: u32,
+        device: u32,
+        name: &str,
+        held: u32,
+        hold_ms: u32,
+        import: bool,
+    ) -> Keep {
+        let ticket =
+            match self
+                .core
+                .host
+                .stream_ticket(device, name, self.conn.id, held, hold_ms, import)
+            {
+                Ok(ticket) => ticket,
+                Err(refused) => return self.refuse(id, refused.status, &refused.text),
+            };
+        let layout = ticket.layout;
+        let Ok(descriptors) = u8::try_from(ticket.descriptors.len()) else {
+            let _ = self
+                .core
+                .host
+                .stream_unticket(device, name, self.conn.id, ticket.slot);
+            return self.refuse(id, Status::IO, "too many descriptors");
+        };
+        let mut plane_bytes = [0; PLANE_LENGTH_BYTES * MAX_PLANES as usize];
+        let plane_len = ticket.planes.encode(&mut plane_bytes);
+        self.conn.answer_with_descriptors(
+            &Frame::StreamTicketRings {
+                id,
+                slot: ticket.slot,
+                buffers: layout.buffers,
+                buffer_bytes: layout.buffer_bytes,
+                frame_slots: layout.frame_slots,
+                job_slots: layout.job_slots,
+                job_bytes: layout.job_bytes,
+                held: ticket.held,
+                hold_ms: ticket.hold_ms,
+                tail_bytes: ticket.tail_bytes,
+                rights: ticket.rights,
+                descriptors,
+                plane_bytes: plane_bytes.get(..plane_len).unwrap_or(&[]),
+            },
+            ticket.descriptors,
+        );
+        true
+    }
+
+    /// What the host knows of a reader slot this connection's stream granted.
+    fn stream_ticket_state(&self, id: u32, device: u32, name: &str, slot: u32) -> Keep {
+        match self
+            .core
+            .host
+            .stream_ticket_state(device, name, self.conn.id, slot)
+        {
+            Ok(state) => {
+                self.conn.answer(&Frame::StreamTicketInfo {
+                    id,
+                    slot,
+                    live: state.live,
+                    reason: state.reason,
+                    cut_at_ns: state.cut_at_ns,
+                    cuts: state.cuts,
+                });
+                true
+            }
+            Err(status) => self.refuse(id, status, "no such reader slot on the stream"),
+        }
+    }
+
+    /// Gives back a reader slot this connection's stream granted.
+    fn stream_unticket(&self, id: u32, device: u32, name: &str, slot: u32) -> Keep {
+        match self
+            .core
+            .host
+            .stream_unticket(device, name, self.conn.id, slot)
+        {
+            Ok(()) => {
+                self.conn.answer(&Frame::Reply { id, bytes: &[] });
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't give the reader slot back"),
         }
     }
 

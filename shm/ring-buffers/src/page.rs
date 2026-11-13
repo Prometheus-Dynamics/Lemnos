@@ -114,12 +114,28 @@ pub fn still<M: Mem>(mem: &M, buffer: BufferIndex, ticket: u32) -> bool {
     self::ticket(mem, buffer) as u32 == ticket
 }
 
-/// Publisher: cuts reader `slot` off. It is told the next time it looks.
-pub fn cut_off(mem: &impl MemMut, buffers: u32, slot: u32) {
+/// Why a reader was cut off: the nonzero value of its cut-off word.
+pub mod cut {
+    /// It held more buffers than its limit allows, counted at one instant.
+    pub const HELD: u64 = 1;
+    /// It held one buffer longer than its hold-time limit.
+    pub const HOLD_TIME: u64 = 2;
+    /// Its marks could not be counted at one instant for longer than its hold-time limit: it is
+    /// stuck part way through a change.
+    pub const UNCOUNTED: u64 = 3;
+    /// Its liveness pipe hung up: the reader is gone.
+    pub const HUNG_UP: u64 = 4;
+    /// The service that gave it a slot released it.
+    pub const RELEASED: u64 = 5;
+}
+
+/// Publisher: cuts reader `slot` off with `reason` (one of [`cut`]). It is told the next time it
+/// looks, through the same word.
+pub fn cut_off(mem: &impl MemMut, buffers: u32, slot: u32, reason: u64) {
     if slot < MAX_READERS {
         mem.store(
             TICKETS_AT + buffers as usize + slot as usize,
-            1,
+            reason.max(1),
             Ordering::Release,
         );
     }
@@ -136,14 +152,23 @@ pub fn clear_cut_off(mem: &impl MemMut, buffers: u32, slot: u32) {
     }
 }
 
+/// Reader: why reader `slot` has been cut off, a [`cut`] reason, or zero while it has not.
+#[must_use]
+pub fn cut_off_reason(mem: &impl Mem, buffers: u32, slot: u32) -> u64 {
+    if slot < MAX_READERS {
+        mem.load(
+            TICKETS_AT + buffers as usize + slot as usize,
+            Ordering::Acquire,
+        )
+    } else {
+        0
+    }
+}
+
 /// Reader: whether reader `slot` has been cut off.
 #[must_use]
 pub fn is_cut_off(mem: &impl Mem, buffers: u32, slot: u32) -> bool {
-    slot < MAX_READERS
-        && mem.load(
-            TICKETS_AT + buffers as usize + slot as usize,
-            Ordering::Acquire,
-        ) != 0
+    cut_off_reason(mem, buffers, slot) != 0
 }
 
 #[cfg(test)]

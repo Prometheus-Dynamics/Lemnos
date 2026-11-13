@@ -957,6 +957,12 @@ mod layout {
         assert_eq!(PART_BITS, [1, 2, 4, 8, 16]);
         assert_eq!(feature::EVERY, 31);
         assert_eq!(PARTS, 5);
+        // The shared-rings part folds the ticket's descriptor order and rights too, not only the rings'.
+        assert_ne!(
+            crate::ring::fold_shared_rings(0),
+            crate::ring::fds::fold_constants(0),
+            "the ticket's descriptors and rights are folded into the shared-rings part"
+        );
     }
 
     #[test]

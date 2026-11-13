@@ -24,6 +24,21 @@ pub trait BufferSource: Send + Sync {
     /// descriptor that hardware and a consumer can take and that can be mapped. An error fails
     /// the attachment that asked: nothing else is tried in its place.
     fn allocate(&self, heap: &str, bytes: u64, count: u32) -> io::Result<Vec<OwnedFd>>;
+
+    /// As [`allocate`](Self::allocate), but with `read_only` each descriptor is a read-only file:
+    /// the buffers are for a stream that has reader slots. A source that can't make read-only
+    /// buffers keeps this default, which gives writable ones; a ticket on such a stream is then
+    /// refused (the host checks each descriptor's access mode).
+    fn allocate_for(
+        &self,
+        heap: &str,
+        bytes: u64,
+        count: u32,
+        read_only: bool,
+    ) -> io::Result<Vec<OwnedFd>> {
+        let _ = read_only;
+        self.allocate(heap, bytes, count)
+    }
 }
 
 /// The kernel's dma-heaps: a heap is the character device of its name in one directory.
@@ -48,13 +63,23 @@ impl Default for DmaHeaps {
 
 impl BufferSource for DmaHeaps {
     fn allocate(&self, heap: &str, bytes: u64, count: u32) -> io::Result<Vec<OwnedFd>> {
+        self.allocate_for(heap, bytes, count, false)
+    }
+
+    fn allocate_for(
+        &self,
+        heap: &str,
+        bytes: u64,
+        count: u32,
+        read_only: bool,
+    ) -> io::Result<Vec<OwnedFd>> {
         // The board file's check, again: the name is one file in `dir`.
         if heap.is_empty() || heap == "." || heap == ".." || heap.contains('/') {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let heap = File::open(self.dir.join(heap))?;
         (0..count)
-            .map(|_| dma_heap::allocate(heap.as_fd(), bytes))
+            .map(|_| dma_heap::allocate_with(heap.as_fd(), bytes, read_only))
             .collect()
     }
 }
@@ -129,6 +154,18 @@ impl StreamAllocator for ServiceStreams {
         heap: &str,
         planes: &Planes,
     ) -> Result<Buffers, Status> {
+        self.allocate_planes_for(name, layout, heap, planes, false, 0)
+    }
+
+    fn allocate_planes_for(
+        &self,
+        name: &str,
+        layout: &Layout,
+        heap: &str,
+        planes: &Planes,
+        read_only: bool,
+        tail: u32,
+    ) -> Result<Buffers, Status> {
         // More could not be handed to the consumer in the one message the answer is.
         if handle_descriptors(layout.buffers, planes.count()).is_none() {
             return Err(Status::INVALID_ARGUMENT);
@@ -142,9 +179,10 @@ impl StreamAllocator for ServiceStreams {
         let mut per_plane: Vec<std::vec::IntoIter<OwnedFd>> = Vec::with_capacity(lengths.len());
         let mut sync = true;
         for length in &lengths {
+            // The tail is slack past the plane, for an importer that reads a little beyond it.
             let made = self
                 .source
-                .allocate(heap, *length, layout.buffers)
+                .allocate_for(heap, *length + u64::from(tail), layout.buffers, read_only)
                 .map_err(|error| heap_status(&error))?;
             if made.len() != layout.buffers as usize {
                 return Err(Status::IO);

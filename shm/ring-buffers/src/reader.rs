@@ -32,6 +32,8 @@ struct Shared<K> {
 pub struct Held<K: Marker = NoMarks> {
     shared: Arc<Shared<K>>,
     buffers: [BufferIndex; MAX_PER_FRAME],
+    /// The ticket each buffer was published with: the one the frame's entry carries.
+    tickets: [u32; MAX_PER_FRAME],
     count: usize,
 }
 
@@ -52,6 +54,14 @@ impl<K: Marker> Held<K> {
     #[must_use]
     pub fn buffer(&self, index: usize) -> Option<BufferIndex> {
         self.buffers[..self.count].get(index).copied()
+    }
+
+    /// The ticket buffer `index` had when the frame was published into it, as the entry carries it.
+    /// A reader that re-checks it after reading the bytes learns whether the buffer was reused
+    /// meanwhile (see `shm_ring_buffers::page::still`).
+    #[must_use]
+    pub fn ticket(&self, index: usize) -> Option<u32> {
+        self.tickets[..self.count].get(index).copied()
     }
 
     /// The bytes of the frame's buffer `index`, in place.
@@ -278,6 +288,7 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         let mut held = Held {
             shared: self.shared.clone(),
             buffers: [BufferIndex(0); MAX_PER_FRAME],
+            tickets: [0; MAX_PER_FRAME],
             count: 0,
         };
         for (buffer, ticket) in &entry.buffers[..entry.count] {
@@ -290,6 +301,7 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
                 return Step::Limited;
             }
             held.buffers[held.count] = *buffer;
+            held.tickets[held.count] = *ticket;
             held.count += 1;
             if !page::still(pool.page(), *buffer, *ticket) {
                 return Step::Gone;

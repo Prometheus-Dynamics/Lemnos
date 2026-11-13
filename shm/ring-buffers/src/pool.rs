@@ -171,6 +171,33 @@ impl Pool {
             .into_iter()
     }
 
+    /// Makes the pool's descriptors and its page something readers can be handed and nothing can
+    /// write through (see [`shm_ring::share_read_only`]). The publisher's own writable mappings
+    /// keep working. Refused for a pool of dma-bufs, which cannot be sealed.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError`] if a descriptor can't be sealed.
+    pub fn share_read_only(&self) -> Result<(), RingError> {
+        shm_ring::share_read_only(self.page.fd())?;
+        match &self.backing {
+            // A dma-buf can't be sealed. It is read-only when it was allocated so, and then
+            // nothing needs doing; a writable one is refused, because a reader could map it writable.
+            Backing::Device(fds) => fds.iter().try_for_each(|fd| {
+                if shm_ring::is_read_only(fd.as_fd())? {
+                    Ok(())
+                } else {
+                    Err(RingError::Malformed(
+                        "a buffer's descriptor is writable, so readers can't have it read-only",
+                    ))
+                }
+            }),
+            Backing::Memory(maps) => maps
+                .iter()
+                .try_for_each(|map| shm_ring::share_read_only(map.fd())),
+        }
+    }
+
     /// The pool page, read-only, to send to subscribers.
     ///
     /// # Errors
@@ -327,6 +354,21 @@ impl PoolView {
 
     pub(crate) const fn page(&self) -> &ReadMap {
         &self.page
+    }
+
+    /// Why reader `slot` of this pool was cut off, as a [`page::cut`](crate::page::cut) reason, or
+    /// zero while it has not been. Read after the buffers were read, so a cut-off that landed
+    /// before the read is seen.
+    #[must_use]
+    pub fn cut_off_reason(&self, slot: u32) -> u64 {
+        page::cut_off_reason(&self.page, self.buffers.len() as u32, slot)
+    }
+
+    /// Whether `buffer` still holds the frame published with `ticket`: a fence, then the check. A
+    /// reader calls it after reading the frame's bytes; see [`crate::page::still`].
+    #[must_use]
+    pub fn still(&self, buffer: BufferIndex, ticket: u32) -> bool {
+        page::still(&self.page, buffer, ticket)
     }
 
     /// The bytes of `buffer`, to read. Only while the frame that names it is held, for a

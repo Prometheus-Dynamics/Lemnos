@@ -40,6 +40,14 @@ pub enum BoardError {
     #[error("device {0:?} stream {1:?}: `heap` is only for `memory = \"dma-buf\"`")]
     StreamHeapUnused(String, String),
     #[error(
+        "device {0:?} stream {1:?}: `readers` is 0 to {MAX_READER_SLOTS}, `reader_held_max` is 1 \
+         to the stream's buffers, `reader_hold_ms_max` is 1 to {MAX_READER_HOLD_MS}, and \
+         `tail_bytes` is 0 to {MAX_TAIL_BYTES}, only with `memory = \"dma-buf\"`"
+    )]
+    StreamReaders(String, String),
+    #[error("device {0:?} stream {1:?}: {2}")]
+    StreamWriter(String, String, String),
+    #[error(
         "device {0:?} stream {1:?}: `planes` are only for `memory = \"dma-buf\"`, 1 to \
          {MAX_PLANES} of them, none empty, adding up to `buffer_bytes`, and at most \
          {MAX_HANDLE_BUFFERS} descriptors over every buffer's planes"
@@ -193,7 +201,68 @@ pub struct StreamSpec {
     /// copied. The memory is still made anew after each consumer leaves.
     #[serde(default)]
     pub standby: bool,
+    /// How many outside readers the stream's consumer may give a slot to at once, beyond itself:
+    /// 0 to 63. A reader is a third process that reads the stream's own ring and buffers, read-only,
+    /// with no connection to the daemon. Left out: 4 for a stream of shared memory, and 0 for a stream
+    /// of dma-bufs (their buffers are then writable, as they always were; see `writer`).
+    #[serde(default)]
+    pub readers: Option<u32>,
+    /// Who writes a stream of dma-bufs on the CPU: `"hardware"` (the default: a device, or a kernel
+    /// driver through its own mapping, fills the buffers; nothing maps them writable here) or
+    /// `"consumer"` (the consumer maps them writable and fills them). Only with `memory = "dma-buf"`.
+    /// A stream of dma-bufs that readers may read is `"hardware"`: a read-only buffer can't be filled by
+    /// a CPU writer. The daemon never writes a dma-buf on the CPU, so there is no daemon writer.
+    #[serde(default)]
+    pub writer: StreamWriter,
+    /// The most buffers any one outside reader may be granted at once, 1 to the stream's
+    /// `buffers`. A reader asks for fewer; the producer always keeps at least two buffers.
+    #[serde(default)]
+    pub reader_held_max: Option<u32>,
+    /// The longest any one outside reader may be granted to hold one buffer, in milliseconds,
+    /// 1 to 10000. A reader that holds one longer is cut off.
+    #[serde(default = "default_reader_hold_ms_max")]
+    pub reader_hold_ms_max: u32,
+    /// Whether readers may import this stream's dma-bufs (hand their descriptors to a device) while the
+    /// daemon runs in signed mode. Importing lets the importer write the frame for every other reader, so
+    /// it defaults to off. With the daemon's signed mode off, imports are granted regardless. Only with
+    /// `memory = "dma-buf"`.
+    #[serde(default)]
+    pub reader_import: bool,
+    /// Bytes of slack past each buffer, for an importer (a GPU wants 256): 0 to 4096, and only
+    /// with `memory = "dma-buf"`. Each dma-buf plane is allocated this much longer.
+    #[serde(default)]
+    pub tail_bytes: u32,
 }
+
+/// The most outside readers one stream can have: the pool page's cut-off words, less the consumer's.
+pub const MAX_READER_SLOTS: u32 = shm_ring_buffers::MAX_READERS - 1;
+/// The longest a reader may hold one buffer.
+pub const MAX_READER_HOLD_MS: u32 = 10_000;
+
+/// The default number of outside readers of a stream of shared memory.
+const DEFAULT_SHARED_READERS: u32 = 4;
+
+/// Who writes a stream of dma-bufs on the CPU. See [`StreamSpec::writer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum StreamWriter {
+    /// A device, or a kernel driver through its own mapping, fills the buffers.
+    #[default]
+    #[serde(rename = "hardware")]
+    Hardware,
+    /// The consumer maps the buffers writable and fills them.
+    #[serde(rename = "consumer")]
+    Consumer,
+}
+
+/// The most buffers a reader is granted when the board doesn't say: four, or the stream's buffers if fewer.
+const DEFAULT_RESERVED_HELD_MAX: u32 = 4;
+
+const fn default_reader_hold_ms_max() -> u32 {
+    2000
+}
+
+/// The most slack a buffer may have past its end.
+pub const MAX_TAIL_BYTES: u32 = 4096;
 
 const fn default_job_slots() -> u32 {
     4
@@ -257,9 +326,87 @@ impl StreamSpec {
         }
     }
 
+    /// Checks the reader limits: the slots, and what one reader may hold, and for how long.
+    fn check_readers(&self, device: &str, name: &str) -> Result<(), BoardError> {
+        let readers = self.readers();
+        let fits = readers <= MAX_READER_SLOTS
+            && self
+                .reader_held_max
+                .is_none_or(|max| (1..=self.buffers).contains(&max))
+            && (1..=MAX_READER_HOLD_MS).contains(&self.reader_hold_ms_max)
+            && self.tail_bytes <= MAX_TAIL_BYTES
+            && (self.tail_bytes == 0 || self.memory == StreamMemory::DmaBuf);
+        if !fits {
+            return Err(BoardError::StreamReaders(
+                device.to_string(),
+                name.to_string(),
+            ));
+        }
+        if self.reader_import && self.memory == StreamMemory::Shared {
+            return Err(BoardError::StreamWriter(
+                device.to_string(),
+                name.to_string(),
+                "`reader_import` is only for `memory = \"dma-buf\"`".to_string(),
+            ));
+        }
+        if self.writer == StreamWriter::Consumer && self.memory == StreamMemory::Shared {
+            return Err(BoardError::StreamWriter(
+                device.to_string(),
+                name.to_string(),
+                "`writer` is only for `memory = \"dma-buf\"`".to_string(),
+            ));
+        }
+        // Readers need buffers nothing maps writable on the CPU. A stream the consumer fills is mapped
+        // writable, so it can't also be read by readers.
+        if self.memory == StreamMemory::DmaBuf
+            && self.writer == StreamWriter::Consumer
+            && readers > 0
+        {
+            return Err(BoardError::StreamWriter(
+                device.to_string(),
+                name.to_string(),
+                format!(
+                    "`readers = {readers}` needs read-only buffers, and a stream the consumer \
+                     fills (`writer = \"consumer\"`) is mapped writable: set `readers = 0`"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// How many outside readers the stream takes: `readers` as the board file gives it, or the
+    /// default for the stream's memory.
+    #[must_use]
+    pub fn readers(&self) -> u32 {
+        self.readers.unwrap_or(match self.memory {
+            StreamMemory::Shared => DEFAULT_SHARED_READERS,
+            StreamMemory::DmaBuf => 0,
+        })
+    }
+
+    /// The most buffers one reader may be granted: `reader_held_max`, or four, and never more than the
+    /// stream's buffers.
+    #[must_use]
+    pub fn reader_held_max(&self) -> u32 {
+        self.reader_held_max
+            .unwrap_or(DEFAULT_RESERVED_HELD_MAX)
+            .min(self.buffers)
+    }
+
+    /// Whether the stream's dma-bufs are allocated read-only: a stream of dma-bufs that has reader
+    /// slots and is filled by hardware. Nothing maps them writable on the CPU, so no reader can be
+    /// given a writable one.
+    #[must_use]
+    pub fn read_only_buffers(&self) -> bool {
+        self.memory == StreamMemory::DmaBuf
+            && self.writer == StreamWriter::Hardware
+            && self.readers() > 0
+    }
+
     /// Checks what [`Layout`] doesn't: the memory the stream asks for.
     fn check_memory(&self, device: &str, name: &str) -> Result<(), BoardError> {
         self.check_planes(device, name)?;
+        self.check_readers(device, name)?;
         let (device, name) = (device.to_string(), name.to_string());
         match (self.memory, &self.heap) {
             (StreamMemory::Shared, None) => Ok(()),
@@ -790,6 +937,40 @@ mod tests {
         assert_eq!(stream.job_bytes, 256);
         assert_eq!(stream.memory, StreamMemory::Shared);
         assert_eq!(stream.heap, None);
+    }
+
+    /// The reader rules, class by class: who writes a stream decides whether its buffers are read-only
+    /// and whether readers may have them.
+    #[test]
+    fn who_writes_a_dma_buf_stream_decides_whether_readers_may_have_it() {
+        // Hardware fills it, and nothing maps it writable: read-only, with readers.
+        let hardware =
+            stream("memory = \"dma-buf\"\nreaders = 2\n").expect("hardware with readers");
+        assert!(hardware.read_only_buffers() && hardware.readers() == 2);
+        // Hardware fills it and nobody reads it: the buffers stay writable, as they always were.
+        let plain = stream("memory = \"dma-buf\"\n").expect("the default");
+        assert!(
+            !plain.read_only_buffers() && plain.readers() == 0,
+            "no readers by default for dma-bufs"
+        );
+        // The consumer fills it: writable, and no readers.
+        let consumer =
+            stream("memory = \"dma-buf\"\nwriter = \"consumer\"\n").expect("consumer, no readers");
+        assert!(!consumer.read_only_buffers() && consumer.readers() == 0);
+        // The consumer fills it and readers are asked for: refused, and says why.
+        let refused = stream("memory = \"dma-buf\"\nwriter = \"consumer\"\nreaders = 2\n");
+        assert!(
+            matches!(&refused, Err(BoardError::StreamWriter(_, _, why)) if why.contains("mapped writable")),
+            "{refused:?}"
+        );
+        // A writer on a stream of shared memory is refused: it is always writable there.
+        let shared = stream("writer = \"consumer\"\n");
+        assert!(
+            matches!(&shared, Err(BoardError::StreamWriter(..))),
+            "{shared:?}"
+        );
+        // Shared memory keeps its default of four readers.
+        assert_eq!(stream("").expect("shared").readers(), 4);
     }
 
     fn stream(keys: &str) -> Result<StreamSpec, BoardError> {

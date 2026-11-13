@@ -207,6 +207,9 @@ impl Service {
         if keeps_alive {
             host.set_liveness(Arc::clone(&liveness) as Arc<dyn HostLiveness>);
         }
+        // Readers may import dma-bufs only under the daemon's signed mode with the stream's say-so;
+        // open packages are the one setting that lifts that.
+        host.set_signed_mode(packages.mode != packages::PackageMode::Open);
         let core = Arc::new(Core {
             packages,
             host,
