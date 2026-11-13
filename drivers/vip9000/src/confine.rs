@@ -42,15 +42,17 @@
 //! registers (`gcdREGISTER_READ_FROM_USER` 1 in `kernel/inc/gc_hal_options.h`). Its submission
 //! path was not audited; [`GALCORE`] has gaps.
 //!
-//! # What would close it
+//! # What closes it: the block in `lemnos.ko`
 //!
-//! A kernel path of Lemnos's own for the block that (1) gives each job a page table holding only
-//! that job's buffers and its command buffer, and empties it between jobs; (2) keeps the register
-//! window and the command ring to itself, with no register, physical-address or page-table
-//! request from user space; (3) holds the block for one claim at a time. With per-job tables the
-//! slots can also sit at fixed device addresses ([`slot_address`]), so a caller's tooling can emit
-//! a program that names its slots without Lemnos reading the program, which the vendor's runtime
-//! otherwise does by parsing it.
+//! With the block named in the module's `vip9000` parameter, the module drives it
+//! (`kernel/lemnos_vip.c`): (1) one root table, whose entries while a job runs lead to the module's
+//! copy of the job's program (read-only) and to the job's slots, each from a dma-buf registered on
+//! the stream, and are cleared when the job ends; (2) the register window, interrupt and MMU
+//! stay in the kernel, and a program is checked at load to hold no command that reaches the
+//! block's control registers, the MMU's set-up or the command fetcher; (3) one stream on the
+//! block at a time. [`LEMNOS`] has no gap. Slots sit at fixed device addresses
+//! ([`slot_address`]), so a caller's tooling can emit a program that names its slots without
+//! Lemnos reading the program, which the vendor's runtime otherwise does by parsing it.
 
 /// What the block's address translation is shared by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +104,19 @@ pub const GALCORE: Facts = Facts {
     raw_physical: false,
     shared_open: true,
     audited: false,
+};
+
+/// `lemnos.ko` with the block named in its `vip9000` parameter (see the module docs). The one
+/// thing mapped between jobs is the window of the module's command buffer, which holds only the
+/// copy of the job's own program while a job runs, read-only: it is the job's command buffer, not
+/// memory of anyone else's.
+pub const LEMNOS: Facts = Facts {
+    table: Table::Job,
+    mapped_at_start: false,
+    register_access: false,
+    raw_physical: false,
+    shared_open: false,
+    audited: true,
 };
 
 /// Ways a job reaches past its own buffers. A set of bits.
@@ -215,17 +230,23 @@ pub fn check_reach(mapped: &[Range], own: &[Range]) -> Result<(), Range> {
     Ok(())
 }
 
-/// Device address of slot 0 in a per-job table.
-pub const SLOT_BASE: u64 = 1 << 32;
+/// Slots a job may name (`LEMNOS_VIP_SLOTS`).
+pub const SLOTS: u16 = 13;
 
-/// Device address span of each slot in a per-job table: a slot's buffer is mapped at
-/// [`slot_address`] and may be at most this long.
-pub const SLOT_SPAN: u64 = 1 << 32;
+/// Device address of slot 0 in a job's table (`LEMNOS_VIP_SLOT_ADDR(0)`).
+pub const SLOT_BASE: u64 = 1 << 28;
 
-/// The device address slot `slot` is mapped at in a per-job table, for a buffer of `bytes`. `None`
-/// for an empty buffer or one longer than [`SLOT_SPAN`].
+/// Device address span of each slot in a job's table (`LEMNOS_VIP_SLOT_SPAN`): a slot's buffer
+/// is mapped at [`slot_address`] and may be at most this long.
+pub const SLOT_SPAN: u64 = 1 << 28;
+
+/// Where the block sees the job's program (`LEMNOS_VIP_PROGRAM_ADDR`).
+pub const PROGRAM_ADDRESS: u64 = 0x0010_0000;
+
+/// The device address slot `slot` is mapped at in a job's table, for a buffer of `bytes`. `None`
+/// for a slot past [`SLOTS`], an empty buffer or one longer than [`SLOT_SPAN`].
 pub const fn slot_address(slot: u16, bytes: u64) -> Option<Range> {
-    if bytes == 0 || bytes > SLOT_SPAN {
+    if slot >= SLOTS || bytes == 0 || bytes > SLOT_SPAN {
         return None;
     }
     Some(Range {

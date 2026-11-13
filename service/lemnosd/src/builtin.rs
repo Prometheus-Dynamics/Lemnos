@@ -49,6 +49,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_uvc::Uvc>(),
         entry::<lemnos_driver_vcm::Vcm>(),
         entry::<lemnos_driver_vglite::VgliteDriver>(),
+        entry::<lemnos_driver_vip9000::Vip9000Driver>(),
         entry::<lemnos_driver_ws2812::Ws2812>(),
     ]
 }

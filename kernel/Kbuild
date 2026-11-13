@@ -5,7 +5,7 @@ ccflags-y := -Werror
 ccflags-y += $(LEMNOS_EXTRA_CFLAGS)
 
 obj-m += lemnos.o
-lemnos-y := lemnos_core.o lemnos_claims.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_bus.o lemnos_gpio.o lemnos_pwm.o lemnos_power.o lemnos_events.o
+lemnos-y := lemnos_core.o lemnos_claims.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_bus.o lemnos_gpio.o lemnos_pwm.o lemnos_power.o lemnos_events.o
 # The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
 ifneq ($(CONFIG_RP1_PIO),)
 ccflags-y += -DLEMNOS_HAVE_PIO

@@ -30,8 +30,6 @@ lists what they showed. Every other check under `testing/board-runs/` has no res
 Each of these is refused or cut down today because the vendor kernel's interface lets a job reach
 memory that is not the caller's. They need a path through `lemnos.ko`, or cannot be closed at all.
 
-- [ ] **VIP9000 NPU** (`drivers/vip9000`): refuses to load a program. The block has one page table
-      for every opener. Needs a kernel path that gives each job its own.
 - [ ] **K230 KPU** (`drivers/k230-kpu`): refuses to load a program. No IOMMU and no bus
       protection, so no kernel path of ours closes it without reading the program. Open until the
       chip offers something.

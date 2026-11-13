@@ -106,7 +106,7 @@ impl JobTable {
             own.push(slot_address(slot as u16, bytes).unwrap());
         }
         own.push(Range {
-            start: 0x1000,
+            start: confine::PROGRAM_ADDRESS,
             len: commands,
         });
         self.maps.extend_from_slice(&own);
@@ -298,6 +298,9 @@ fn vipcore_has_every_gap_read_from_its_source() {
     }
     assert!(!gaps.contains(Gaps::NOT_AUDITED));
     assert!(confine::GALCORE.gaps().contains(Gaps::NOT_AUDITED));
+    // The module's own path has none.
+    assert!(confine::LEMNOS.gaps().is_empty());
+    assert_eq!(Kernel::Lemnos.facts(), Some(confine::LEMNOS));
     assert!(confine::GALCORE.gaps().contains(Gaps::MAPPED_AT_START));
 }
 
@@ -402,8 +405,14 @@ fn slots_sit_at_fixed_addresses_that_never_overlap() {
     assert_eq!(a.end(), Some(b.start));
     assert_eq!(slot_address(2, SLOT_SPAN + 1), None);
     assert_eq!(slot_address(2, 0), None);
-    let last = slot_address(u16::MAX, SLOT_SPAN).unwrap();
-    assert!(last.end().is_some());
+    // The module's layout: slot n at (n + 1) << 28, 13 of them, the last ending at 0xe000_0000.
+    assert_eq!(a.start, 0x1000_0000);
+    let last = slot_address(confine::SLOTS - 1, SLOT_SPAN).unwrap();
+    assert_eq!(last.start, 0xd000_0000);
+    assert_eq!(last.end(), Some(0xe000_0000));
+    assert_eq!(slot_address(confine::SLOTS, 1), None);
+    // The program's window is below every slot.
+    assert!(confine::PROGRAM_ADDRESS + (1 << 20) <= a.start);
     // A slot's buffer is never in another slot's range.
     assert!(!a.holds(&b) && !b.holds(&a));
 }

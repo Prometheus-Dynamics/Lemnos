@@ -65,6 +65,7 @@ lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
 lemnos-driver-uvc = { path = "../../drivers/uvc" }
 lemnos-driver-vcm = { path = "../../drivers/vcm" }
 lemnos-driver-vglite = { path = "../../drivers/vglite" }
+lemnos-driver-vip9000 = { path = "../../drivers/vip9000" }
 lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 # generated: end drivers
 

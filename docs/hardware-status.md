@@ -213,7 +213,8 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 |---|---|
 | [`E32.md`](../testing/board-runs/E32.md) | `rknpu`: a domain per program, fault handling, whether a program can reach the IOMMU's own registers, a real program |
 | [`G2.md`](../testing/board-runs/G2.md) | `rknpu` in the daemon: bound from a board file, a run through `lemnos-ctl`, a caller that goes, the node unbound and bound again |
-| [`E33.md`](../testing/board-runs/E33.md) | `vip9000`: confirms the facts behind its refusal to run |
+| [`H7a.md`](../testing/board-runs/H7a.md) | `vip9000` through `lemnos.ko`: the chip and its MMU set-up, the program check against real compiled programs, a fault that writes nowhere and recovers, a run in the daemon |
+| [`E33.md`](../testing/board-runs/E33.md) | `vip9000` on the vendor's node: confirms the facts behind its refusal to run there |
 | [`E34.md`](../testing/board-runs/E34.md) | `k230-kpu`: confirms the facts behind its refusal to run |
 | [`E10.md`](../testing/board-runs/E10.md) | `rkaiisp`: layouts, node order, what the kernel refuses |
 

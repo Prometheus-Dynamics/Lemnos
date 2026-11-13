@@ -230,6 +230,11 @@ struct lem_gd *lem_gd_probe(struct platform_device *pdev);
 void lem_gd_remove(struct lem_gd *g);
 long lem_gd_create(struct lem_gd *g, struct device *dev, void *args);
 
+struct lem_vip;
+struct lem_vip *lem_vip_probe(struct platform_device *pdev);
+void lem_vip_remove(struct lem_vip *l);
+long lem_vip_create(struct lem_vip *l, struct device *dev, void *args);
+
 int lem_rp1_csi2_register(void);
 void lem_rp1_csi2_unregister(void);
 
