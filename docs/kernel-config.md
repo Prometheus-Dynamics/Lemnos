@@ -8,6 +8,52 @@ Every value below was read from the kernel sources of the reference SoC's tree (
 from its `.config`, or from mainline where the row says so. Nothing here was loaded on a board
 (see [Hardware status](hardware-status.md)).
 
+## Slot board: built in
+
+The chain a slot's root is opened through, and what each piece of it must be in the kernel that
+boots a slot (`docs/slots.md`). "Must be built in" is `yes` for a symbol the boot needs on every
+slot board; `optional` is logged and the boot carries on; `per SoC` names the storage host of the
+board's SoC; `NAND only` and `stock only` say which route needs it.
+
+"checked by slot-init (I5h)" marks the symbols `lemnos-slot-init`'s self-check names when it finds
+one absent (`service/slot-init/src/kernel.rs` in PR I5h). That self-check is not on `next` until
+I5h lands; the gate checks the two lists agree once it is. From I5h, the initramfs carries no
+kernel modules and slot-init loads none, so every `yes` row here must be built in. Until I5h lands,
+`lemnos-slot-init` still loads `dm-mod`, `dm-bufio` and `dm-verity` when they are missing: the
+table is the requirement that I5h makes the whole boot depend on.
+
+Tree each row was resolved against: the reference board's kernel (raspberrypi/linux at
+`53679a5788f7912272b412fd78029bccae6f2b1a`, `bcm2712_defconfig`, see Dependencies) or mainline
+v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`, the tag the harness pins), with the arm64
+or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were resolved there.
+
+| Symbol | Needed for | Must be built in (=y) | Tree resolved against |
+| --- | --- | --- | --- |
+| `CONFIG_BLOCK` | the block layer under every row | yes | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_DM` | device-mapper, which holds the verity device; checked by slot-init (I5h) through `/proc/misc` (`device-mapper`) | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
+| `CONFIG_DM_BUFIO` | the buffer layer under dm-verity; `DM_VERITY` selects it | yes (selected by `DM_VERITY`) | reference; mainline arm64 and riscv |
+| `CONFIG_DM_VERITY` | the verity target over the slot's image; checked by slot-init (I5h) through `DM_LIST_VERSIONS` (`verity`) | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
+| `CONFIG_CRYPTO` | the crypto API the verity target allocates its hash from | yes | reference; mainline arm64 and riscv |
+| `CONFIG_CRYPTO_SHA256` | the `sha256` shash dm-verity uses for the image's hashes; checked by slot-init (I5h) through `/proc/crypto` (`sha256`). `DM_VERITY` does not select it (it selects the SHA-256 library, `CRYPTO_LIB_SHA256`, which registers no shash), so it must be set. On mainline arm64 the only generic `sha256` shash is this symbol; a SoC's hardware crypto driver that registers `sha256` also satisfies the check | yes, checked by slot-init (I5h) | reference (`.config` `=y`); mainline arm64 (no arch SHA-256 shash in `arch/arm64/crypto`) |
+| `CONFIG_EROFS_FS` | the slot's root filesystem, an EROFS image; checked by slot-init (I5h) through `/proc/filesystems` | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
+| `CONFIG_EXT4_FS` | the data partition's filesystem (stock route); checked by slot-init (I5h) | yes, checked by slot-init (I5h) (stock route) | reference; mainline arm64 and riscv |
+| `CONFIG_VFAT_FS` | the boot partition with the boot records; slot-init carries on without it and logs the absence | optional, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_LOOP` | the image file read through a loop device (stock route); checked by slot-init (I5h) through `/proc/devices` (`loop`) | yes, checked by slot-init (I5h) (stock route) | reference; mainline arm64 and riscv |
+| `CONFIG_MMC_BLOCK` | the SD and eMMC block devices, which hold the data partition; named by slot-init when no storage block device exists | per SoC, checked by slot-init (I5h) (named in its storage message) | reference (`.config` `=y`) |
+| `CONFIG_BLK_DEV_NVME` | NVMe storage for the data partition; named by slot-init in its storage message | per SoC, checked by slot-init (I5h) (named in its storage message) | reference (`.config` not set); mainline arm64 |
+| `CONFIG_MMC_SDHCI_BRCMSTB` | the reference SoC's SD host | per SoC: the reference SoC | reference (`.config` `=y`) |
+| `CONFIG_MMC_DW_ROCKCHIP` | the rk3566 and rk3588 SD host (the Rockchip DW MMC extension; the SoC's device-tree compatible not read) | per SoC: rk3566, rk3588 | mainline arm64: symbol present, `depends on MMC_DW`; not verified |
+| `CONFIG_MMC_SUNXI` | the sun60i-a733 SD and eMMC host (the Allwinner SD/MMC host; the A733 compatible not read) | per SoC: sun60i-a733 | mainline arm64: symbol present, `depends on ARCH_SUNXI` and `SUNXI_CCU`; not verified for A733 |
+| `CONFIG_MTD_UBI` | the UBI device on raw NAND; checked by slot-init (I5h) | NAND only, checked by slot-init (I5h) | reference; mainline arm64 |
+| `CONFIG_UBIFS_FS` | the data and boot volumes on raw NAND; checked by slot-init (I5h) | NAND only, checked by slot-init (I5h) | reference; mainline arm64 |
+| `CONFIG_MTD_UBI_BLOCK` | the image volume as a read-only block device (`ubiblock`) on raw NAND; slot-init names it only when the block device does not appear | NAND only | reference; mainline arm64 |
+| `CONFIG_DEVTMPFS` | `/dev`, where the partitions and UBI nodes appear without udev | yes | reference; mainline arm64 and riscv |
+| `CONFIG_PROC_FS` | `/proc`, mounted by slot-init, where the kernel command line and the kernel's filesystem and device lists are | yes | reference; mainline arm64 and riscv |
+| `CONFIG_SYSFS` | `/sys`, mounted by slot-init, where the block devices and partitions are found | yes | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_INITRD` | the slot initramfs | yes | reference; mainline arm64 and riscv |
+| `CONFIG_RD_GZIP` | the decompressor of the slot initramfs. The image's own compression is not known here: the harness uses gzip, and an image that uses another decompressor sets that one instead (`RD_XZ`, `RD_ZSTD`, ...) | yes: the decompressor the image's initramfs uses | reference (harness `=y`); mainline arm64 |
+| `CONFIG_MODULES` | not needed: slot-init loads no modules | no | reference; mainline arm64 |
+
 ## Built in, for an image with no modules
 
 An image with no loadable modules needs every symbol it uses at `=y`. Two routes build `lemnos.ko`:
@@ -331,7 +377,14 @@ eventfds.
 
 Per SoC, the driver behind each generic symbol, for the SoCs the tree has maps for
 (`socs/*.toml`). "Verified" means the row was found in the Kconfig or Makefile of the named tree, or
-(for mainline) in the driver's source, read on the web. "Fallback only" means the driver is
+(for mainline) in the driver's source. The rows for K230, RK3566, RK3588 and sun60i-a733 were
+resolved against mainline v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`), with the
+arm64 defconfig for the Rockchip and Allwinner rows and the riscv defconfig for K230, not against
+the reference tree: their dependency closures are the Dependencies rows, recomputed there (the
+same as the reference's for every symbol of these rows except two: `CONFIG_SPI_DW_MMIO`, which needs
+`CONFIG_SPI_DESIGNWARE` on the riscv tree, and `CONFIG_PINCTRL_SUNXI`: its mainline closure is none because the mainline arm64 defconfig
+sets `CONFIG_ARCH_SUNXI=y`, which `bcm2712_defconfig` does not). The driver sources were read on the web at
+that tag. "Fallback only" means the driver is
 found but the SoC's own compatible string is not in it, so the SoC's device tree must name a
 compatible the driver does match. "Not verified" means it was not found; the row is a candidate,
 not a claim.
@@ -347,26 +400,26 @@ not a claim.
 | reference SoC: `bcm2712-rp1` | PCIe host (the root port the RP1 sits behind) | `CONFIG_PCIE_BRCMSTB` | `drivers/pci/controller/pcie-brcmstb.c` | the SoC's PCIe root port | verified (reference `.config`, and its Kconfig depends on `PCI_MSI`). Not a Kconfig dependency of `MFD_RP1`, but the RP1 is not reached without it: state it in the board's fragment |
 | reference SoC: `bcm2712-rp1` | PIO | `CONFIG_RP1_PIO` | `drivers/misc/rp1-pio.c`, `include/linux/pio_rp1.h` | the RP1 PIO node | verified (reference tree source); needs `FIRMWARE_RP1` and `MBOX_RP1` |
 | reference SoC: `bcm2712-rp1` | SPI | none | none | no SPI controller in the map | not applicable |
-| k230 | I2C | `CONFIG_I2C_DESIGNWARE_PLATFORM` | `i2c-designware-platdrv.c` | `snps,designware-i2c` | fallback only: the driver is verified, the K230 string is not checked |
-| k230 | SPI | `CONFIG_SPI_DW_MMIO` | `spi-dw-mmio.c` | `canaan,k210-spi` only | not verified: mainline has no K230 string |
-| k230 | GPIO | `CONFIG_GPIO_DWAPB` | `gpio-dwapb.c` | `snps,dw-apb-gpio` only | not verified: mainline has no `canaan,k230-apb-gpio` |
+| k230 | I2C | `CONFIG_I2C_DESIGNWARE_PLATFORM` | `i2c-designware-platdrv.c` | `snps,designware-i2c` | fallback only (mainline v7.3.3, riscv): `i2c-designware-platdrv.c` matches `snps,designware-i2c`; no K230 string |
+| k230 | SPI | `CONFIG_SPI_DW_MMIO` | `spi-dw-mmio.c` | `canaan,k210-spi` only | not verified (mainline v7.3.3, riscv): `spi-dw-mmio.c` matches `canaan,k210-spi` only, not a K230 string. `CONFIG_SPI_DW_MMIO` also needs `CONFIG_SPI_DESIGNWARE` on this tree, which the riscv defconfig does not state |
+| k230 | GPIO | `CONFIG_GPIO_DWAPB` | `gpio-dwapb.c` | `snps,dw-apb-gpio` only | not verified (mainline v7.3.3, riscv): `gpio-dwapb.c` matches `snps,dw-apb-gpio` only, not a K230 string |
 | k230 | PWM | none | none | the map's `pwm` is kind `block` | not applicable (no stock route) |
-| k230 | watchdog | `CONFIG_DW_WATCHDOG` | `drivers/watchdog/dw_wdt.c` | `snps,dw-wdt` | verified (mainline source) |
-| rk3566 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only: `rk3566` is not in the driver |
-| rk3566 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only: `rk3566` is not in the driver |
-| rk3566 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | not verified |
-| rk3566 | PWM | `CONFIG_PWM_ROCKCHIP` | `pwm-rockchip.c` | `rockchip,rk3328-pwm` (fallback) | fallback only: `rk3566` is not in the driver |
-| rk3566 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | not verified |
-| rk3588 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only: `rk3588` is not in the driver |
-| rk3588 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only: `rk3588` is not in the driver |
-| rk3588 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | not verified |
-| rk3588 | PWM | `CONFIG_PWM_ROCKCHIP` | `pwm-rockchip.c` | `rockchip,rk3328-pwm` (fallback) | fallback only: `rk3588` is not in the driver |
-| rk3588 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | not verified |
-| sun60i-a733 | I2C | `CONFIG_I2C_MV64XXX` | `i2c-mv64xxx.c` | `allwinner,sun4i-a10-i2c`, `allwinner,sun6i-a31-i2c` | not verified for A733: no A733 string |
-| sun60i-a733 | SPI | `CONFIG_SPI_SUN6I` | `spi-sun6i.c` | `allwinner,sun55i-a523-spi` (the nearest) | not verified for A733 |
-| sun60i-a733 | GPIO | `CONFIG_PINCTRL_SUNXI` | pinctrl for A733 | `allwinner,sun60i-a733-pinctrl` | not verified: only a 2025 RFC, not in mainline as read |
-| sun60i-a733 | PWM | `CONFIG_PWM_SUN20I` | `pwm-sun20i.c` (D1, T113, R329 family) | not read | not verified for A733: the file could not be read, and no A733 PWM was found |
-| sun60i-a733 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | not verified |
+| k230 | watchdog | `CONFIG_DW_WATCHDOG` | `drivers/watchdog/dw_wdt.c` | `snps,dw-wdt` | verified (mainline v7.3.3, riscv): `dw_wdt.c` matches `snps,dw-wdt` |
+| rk3566 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only (mainline v7.3.3, arm64): `i2c-rk3x.c` matches `rockchip,rk3399-i2c`; no rk3566 string |
+| rk3566 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only (mainline v7.3.3, arm64): `spi-rockchip.c` matches `rockchip,rk3066-spi` and the other listed strings; no rk3566 string |
+| rk3566 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | generic only (mainline v7.3.3, arm64): `gpio-rockchip.c` matches the generic `rockchip,gpio-bank`; the SoC's own compatible is not read: not verified for rk3566 |
+| rk3566 | PWM | `CONFIG_PWM_ROCKCHIP` | `pwm-rockchip.c` | `rockchip,rk3328-pwm` (fallback) | fallback only (mainline v7.3.3, arm64): `pwm-rockchip.c` matches `rockchip,rk3328-pwm`; no rk3566 string |
+| rk3566 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | generic only (mainline v7.3.3, arm64): `8250_dw.c` matches `snps,dw-apb-uart`; the SoC's compatible is not read: not verified |
+| rk3588 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only (mainline v7.3.3, arm64): `i2c-rk3x.c` matches `rockchip,rk3399-i2c`; no rk3588 string |
+| rk3588 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only (mainline v7.3.3, arm64): `spi-rockchip.c` matches `rockchip,rk3066-spi` and the other listed strings; no rk3588 string |
+| rk3588 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | generic only (mainline v7.3.3, arm64): `gpio-rockchip.c` matches the generic `rockchip,gpio-bank`; the SoC's own compatible is not read: not verified for rk3588 |
+| rk3588 | PWM | `CONFIG_PWM_ROCKCHIP` | `pwm-rockchip.c` | `rockchip,rk3328-pwm` (fallback) | fallback only (mainline v7.3.3, arm64): `pwm-rockchip.c` matches `rockchip,rk3328-pwm`; no rk3588 string |
+| rk3588 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | generic only (mainline v7.3.3, arm64): `8250_dw.c` matches `snps,dw-apb-uart`; the SoC's compatible is not read: not verified |
+| sun60i-a733 | I2C | `CONFIG_I2C_MV64XXX` | `i2c-mv64xxx.c` | `allwinner,sun4i-a10-i2c`, `allwinner,sun6i-a31-i2c` | not verified for A733 (mainline v7.3.3, arm64): `i2c-mv64xxx.c` matches `allwinner,sun4i-a10-i2c` and `allwinner,sun6i-a31-i2c` only |
+| sun60i-a733 | SPI | `CONFIG_SPI_SUN6I` | `spi-sun6i.c` | `allwinner,sun55i-a523-spi` (the nearest) | not verified for A733 (mainline v7.3.3, arm64): `spi-sun6i.c` matches `allwinner,sun55i-a523-spi` (the nearest), not A733 |
+| sun60i-a733 | GPIO | `CONFIG_PINCTRL_SUNXI` | pinctrl for A733 | `allwinner,sun60i-a733-pinctrl` | not verified (mainline v7.3.3, arm64): no A733 pinctrl in its Kconfig (`drivers/pinctrl/sunxi/Kconfig`) |
+| sun60i-a733 | PWM | `CONFIG_PWM_SUN20I` | `pwm-sun20i.c` (D1, T113, R329 family) | not read | not verified (mainline v7.3.3, arm64): no `PWM_SUN20I` symbol and no `pwm-sun20i.c` in this tree |
+| sun60i-a733 | UART | `CONFIG_SERIAL_8250_DW` | not read | not read | generic only (mainline v7.3.3, arm64): `8250_dw.c` matches `snps,dw-apb-uart`; A733's compatible not read: not verified |
 
 The rows that need a board, or a kernel that is not mainline, are candidates until a board run
 confirms them. See [Hardware status](hardware-status.md).
@@ -383,6 +436,14 @@ this same tree's Kconfig, not against their own trees: they are not resolved aga
 The earlier statement that this chain "drops out" on the board was wrong: on this tree `PCI_MSI`
 resolves to `y`, and the board's real `.config` has it set. What the table records is the explicit
 statement a fragment needs, not a fault on the board.
+
+Where `PCI_MSI` comes from. It is selected by the architecture, not by `bcm2712_defconfig`:
+`arch/arm64/Kconfig`, `config ARM64`, has `select ARM_GIC_V2M if PCI`, and `ARM_GIC_V2M` (a symbol
+with no prompt; `=y` in the reference `.config`) has `select PCI_MSI`. The same two lines are in
+mainline v7.3.3 (`arch/arm64/Kconfig` line 105 and `drivers/irqchip/Kconfig`). So every arm64 kernel
+with `PCI=y` has `PCI_MSI=y`, and no fragment needs to state it; the rows above that depend on it
+are met whenever `PCI` is on. This was resolved with the tree's own Kconfig and the reference
+`.config`, not from the defconfig.
 
 Each symbol this document names, with the Kconfig symbols it depends on that a board's
 `bcm2712_defconfig` does not state (the reference SoC's defconfig, read from its tree). The rule is
@@ -404,12 +465,17 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_ARCH_SUNXI` | Cross-check against the reference SoC's configuration | none |
 | `CONFIG_BCM2835_WDT` | The SoC drivers | none |
 | `CONFIG_BLK_DEV_DM` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_BLK_DEV_INITRD` | Slot board | none |
 | `CONFIG_BLK_DEV_LOOP` | Slot path | `CONFIG_BLK_DEV` `CONFIG_BLOCK` |
+| `CONFIG_BLK_DEV_NVME` | Slot board | `CONFIG_BLOCK` |
+| `CONFIG_BLOCK` | Slot board | none |
 | `CONFIG_CMA` | Symbols of lemnos.ko | none |
 | `CONFIG_CMA_SIZE_MBYTES` | dma-heaps and CMA | none |
 | `CONFIG_COMMON_CLK` | Symbols of lemnos.ko | none |
 | `CONFIG_CONFIGFS_FS` | USB gadget | none |
 | `CONFIG_CPU_BIG_ENDIAN` | Symbols of lemnos.ko | none |
+| `CONFIG_CRYPTO` | Slot board | none |
+| `CONFIG_CRYPTO_SHA256` | Slot board | `CONFIG_CRYPTO` |
 | `CONFIG_DEVTMPFS` | Hotplug uevents | none |
 | `CONFIG_DMABUF_HEAPS` | dma-heaps and CMA | none |
 | `CONFIG_DMABUF_HEAPS_CMA` | dma-heaps and CMA | none |
@@ -440,6 +506,10 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_MEDIA_SUPPORT` | V4L2 capture and media controller | none |
 | `CONFIG_MEMFD_CREATE` | eventfd and memfd (streams) | none |
 | `CONFIG_MFD_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |
+| `CONFIG_MMC_BLOCK` | Slot board | `CONFIG_BLOCK` |
+| `CONFIG_MMC_DW_ROCKCHIP` | Slot board | `CONFIG_MMC_DW` |
+| `CONFIG_MMC_SDHCI_BRCMSTB` | Slot board | none |
+| `CONFIG_MMC_SUNXI` | Slot board | `CONFIG_SUNXI_CCU` |
 | `CONFIG_MODULES` | Built in, for an image with no modules | none |
 | `CONFIG_MTD_UBI` | Slot path | none |
 | `CONFIG_MTD_UBI_BLOCK` | Slot path | `CONFIG_BLOCK` |
@@ -450,10 +520,12 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_PINCTRL_RP1` | The SoC drivers | `CONFIG_OF` `CONFIG_PCI_MSI` `CONFIG_PINCTRL` |
 | `CONFIG_PINCTRL_SUNXI` | The SoC drivers | `CONFIG_ARCH_SUNXI` |
 | `CONFIG_PM` | Symbols of lemnos.ko | none |
+| `CONFIG_PROC_FS` | Slot board | none |
 | `CONFIG_PWM` | Symbols of lemnos.ko | none |
 | `CONFIG_PWM_ROCKCHIP` | The SoC drivers | none |
 | `CONFIG_PWM_RP1` | The SoC drivers | none |
 | `CONFIG_PWM_SUN20I` | The SoC drivers | (not in this tree) |
+| `CONFIG_RD_GZIP` | Slot board | none |
 | `CONFIG_REGULATOR` | Symbols of lemnos.ko | none |
 | `CONFIG_RESET_CONTROLLER` | Symbols of lemnos.ko | none |
 | `CONFIG_RP1_PIO` | Built in, for an image with no modules | `CONFIG_PCI_MSI` |
@@ -461,10 +533,12 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_SERIAL_8250_DW` | The SoC drivers | none |
 | `CONFIG_SHMEM` | eventfd and memfd (streams) | none |
 | `CONFIG_SPI` | Symbols of lemnos.ko | none |
+| `CONFIG_SPI_DESIGNWARE` | Cross-check against the reference SoC's configuration | none |
 | `CONFIG_SPI_DW_MMIO` | The SoC drivers | none |
 | `CONFIG_SPI_ROCKCHIP` | The SoC drivers | none |
 | `CONFIG_SPI_SPIDEV` | SPI | none |
 | `CONFIG_SPI_SUN6I` | The SoC drivers | `CONFIG_RESET_CONTROLLER` |
+| `CONFIG_SYSFS` | Slot board | none |
 | `CONFIG_THERMAL` | Symbols of lemnos.ko | none |
 | `CONFIG_THERMAL_HWMON` | hwmon and thermal | `CONFIG_THERMAL` |
 | `CONFIG_THERMAL_OF` | hwmon and thermal | `CONFIG_OF` `CONFIG_THERMAL` |
