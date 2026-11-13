@@ -42,6 +42,9 @@ jobs:
           path: ${{ runner.temp }}/kernel
           key: qemu-kernel-${{ hashFiles('testing/qemu/build-kernel.sh', 'testing/qemu/kernel.config') }}
       - run: testing/qemu/build-kernel.sh "$RUNNER_TEMP/kernel"
+      # The required symbols of lemnos.ko, followed through this kernel's Kconfig files: a dependency
+      # the build leaves unset must be listed in the doc (docs/kernel-config.md, Dependencies).
+      - run: python3 scripts/check-kernel-config.py --tree "$RUNNER_TEMP/kernel/linux-7.3.3" --config "$RUNNER_TEMP/kernel/build/.config" --arch x86
       # Saved before the checks run, so a failing check doesn't cost the next run a kernel build.
       - uses: actions/cache/save@v4
         if: steps.kernel.outputs.cache-hit != 'true'
@@ -75,6 +78,7 @@ jobs:
           path: ${{ runner.temp }}/kernel-modules-off
           key: qemu-kernel-modules-off-${{ hashFiles('testing/qemu/build-kernel.sh', 'testing/qemu/kernel-modules-off.config') }}
       - run: testing/qemu/build-kernel.sh "$RUNNER_TEMP/kernel-modules-off" --modules-off
+      - run: python3 scripts/check-kernel-config.py --tree "$RUNNER_TEMP/kernel-modules-off/linux-7.3.3" --config "$RUNNER_TEMP/kernel-modules-off/build/.config" --arch x86
       # Saved before the checks run, so a failing check doesn't cost the next run a kernel build.
       - uses: actions/cache/save@v4
         if: steps.kernel.outputs.cache-hit != 'true'
