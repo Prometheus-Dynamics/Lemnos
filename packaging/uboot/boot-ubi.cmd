@@ -1,5 +1,7 @@
 # Starts the board's slot on raw NAND from the record the slot driver keeps (record = "ubi").
 # Build: mkimage -A <arch> -O linux -T script -C none -d boot-ubi.cmd boot.scr
+# Install as BOOT/boot.scr: the built script at the root of the boot medium U-Boot loads it from (packaging/files.txt).
+# Only on a board that boots from raw NAND; boot.cmd is for the others.
 # It takes the MTD partition that holds UBI from ubi_mtd (the board's default environment sets
 # it), and needs the ubi and ubifsmount commands, sysboot over UBIFS, env import and export, and
 # test. The record is the static volume boot-record; the slots' kernels and extlinux.conf files

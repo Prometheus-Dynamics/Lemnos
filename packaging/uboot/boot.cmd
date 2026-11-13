@@ -1,5 +1,7 @@
 # Starts the board's slot from the record the slot driver keeps (record = "uboot").
 # Build: mkimage -A <arch> -O linux -T script -C none -d boot.cmd boot.scr
+# Install as BOOT/boot.scr: the built script at the root of the boot partition (BOOT is that partition's
+# root; packaging/files.txt). A board that boots from raw NAND takes boot-ubi.cmd instead.
 # It takes devtype, devnum and distro_bootpart from U-Boot's standard boot flow, and needs
 # sysboot, env import and export, test, and write support for the boot partition (save).
 # It never uses the saved U-Boot environment or a boot count.

@@ -2,23 +2,21 @@
 
 How lemnosd and the Orion bridge run on a board: a systemd unit or a BusyBox init script, one privilege
 path for both, the device-node rules, and the settings files. This directory ships the files; an OS's
-image build installs them where the table says. Nothing here names a board or an OS.
+image build installs them where `files.txt` says. Nothing here names a board or an OS.
 `scripts/check-packaging.sh` checks every file, and the gate runs it. It installs nothing, enables
 nothing, and starts nothing.
 
-| File | Installed as | What it is | Who installs it |
-|---|---|---|---|
-| `systemd/lemnosd.service` | `/usr/lib/systemd/system/lemnosd.service` | The daemon. | Always, with systemd |
-| `systemd/lemnos-orion.service` | `/usr/lib/systemd/system/lemnos-orion.service` | The Orion bridge (`lemnos-orion`). | Only an image that ships `lemnos-orion` |
-| `systemd/lemnos.conf` | `/usr/lib/sysusers.d/lemnos.conf` | The `lemnos` and `lemnos-orion` users. | With systemd, where sysusers runs |
-| `systemd/lemnosd.env.example` | `/etc/lemnos/lemnosd.env` | Optional settings for the daemon. | Always, edited as needed |
-| `systemd/lemnos-orion.env.example` | `/etc/lemnos/lemnos-orion.env` | The bridge's identity, node and socket settings. | Only an image that ships `lemnos-orion` |
-| `systemd/lemnos-module.conf` | `/usr/lib/modules-load.d/lemnos.conf` | Loads `lemnos.ko` at boot. **Optional.** | Only an image that ships `lemnos.ko` |
-| `udev/70-lemnos.rules` | `/usr/lib/udev/rules.d/70-lemnos.rules` | Gives group `lemnos` the device nodes lemnosd opens. | With systemd (or any udev) |
-| `lemnos-ctl tree BOARD --udev FILE` (generated) | `/usr/lib/udev/rules.d/71-lemnos-board.rules` | Gives group `lemnos` the board's own nodes: the module's, and each dma-heap the board uses. | With systemd (or any udev) |
-| `init/S50lemnosd` | `/etc/init.d/S50lemnosd` (mode 0755) | BusyBox init script for the daemon, in place of its unit. | Only an image without systemd |
-| `init/S51lemnos-orion` | `/etc/init.d/S51lemnos-orion` (mode 0755) | BusyBox init script for the bridge. | Only an image without systemd that ships `lemnos-orion` |
-| `init/mdev.conf.fragment` | appended to `/etc/mdev.conf` | Device-node rules for mdev, the BusyBox counterpart of the udev rules. | Only an image without systemd |
+**What an image installs is listed in [`files.txt`](files.txt)**, one line per file under this directory:
+its source, the path it installs to, its mode, and when (`always`, `systemd`, `busybox`, `udev`, `orion`,
+`gadget`, `kmod`, `uboot`, `ubi`), or `never` for the documents and the lists themselves. A packager reads that
+list and nothing else for the files. The programs are in [`shipped.txt`](shipped.txt). The gate's
+`scripts/check-packaging-files.py` fails when a file under this directory is not listed, when a listed file is
+missing, or when a condition is not in the vocabulary, so the list cannot fall behind the files.
+
+One file a packager installs is generated rather than copied from here: `lemnos-ctl tree BOARD --udev FILE` writes the
+board's own device-node rules, for `/usr/lib/udev/rules.d/71-lemnos-board.rules`, beside `70-lemnos.rules`.
+It is not in `files.txt`, because it depends on the board, and it is produced by the tree command, not copied
+from here (see [docs/boards.md](../docs/boards.md#the-daemons-device-permissions)).
 
 The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, the board file
 at `/etc/lemnos/board.toml` (see [docs/boards.md](../docs/boards.md)), and the Orion node's group name
@@ -60,7 +58,9 @@ the daemon's uid and gid, and chowns each `UDC` attribute to it. The daemon then
 after the drop. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
 The gadget's three unit settings are in an optional drop-in, `packaging/systemd/lemnosd.service.d/gadget.conf`,
 not in the base unit. Install it as `/etc/systemd/system/lemnosd.service.d/gadget.conf` on a board whose
-board file has a `usb-gadget` device, and only then. Its settings: `CAP_SYS_ADMIN` in
+board file has a `usb-gadget` device, and only then (its `when` in `files.txt` is `gadget`). The board file is the
+source: a `[[devices]]` table with `driver = "usb-gadget"` (see [docs/boards.md](../docs/boards.md)). `lemnos-ctl tree`
+does not write this drop-in, and does not say whether a board has a gadget. Its settings: `CAP_SYS_ADMIN` in
 `CapabilityBoundingSet` (the FunctionFS mount and its unmount need it; the daemon drops it with the rest
 after the root phase, `backends/linux-sys/src/privilege.rs` `drop_to`), `mount umount2` in
 `SystemCallFilter` (not in `@system-service`), and `ReadWritePaths=-/sys/kernel/config/usb_gadget`, which
