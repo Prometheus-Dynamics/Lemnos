@@ -106,7 +106,7 @@ impl RawWatchdog for Fake {
 
 /// A driver over `fake` asking for `wanted_s`, with no sysfs tree.
 fn driver(fake: &Fake, wanted_s: u32) -> HwWatchdog {
-    HwWatchdog::new(Held::boxed(Box::new(fake.clone())), wanted_s)
+    HwWatchdog::new(Held::boxed(Box::new(fake.clone())), wanted_s, (None, None))
 }
 
 /// Ticks at `at` (ns), with the fake's clock at the same time.
@@ -290,4 +290,26 @@ fn a_steady_feed_allocates_nothing() {
         }
     });
     assert_eq!(count, 0, "allocations in 1000 feeds");
+}
+
+#[test]
+fn the_device_gives_the_timeout_range_read_at_bind() {
+    use lemnos_core::{Description, Driver};
+    let mut with_range = HwWatchdog::new(
+        Held::boxed(Box::new(Fake::new(15))),
+        15,
+        (Some(1), Some(60)),
+    );
+    // Every attribute the device has: its timeout and time left take the device's range.
+    with_range.present = [true; ATTRIBUTES.len()];
+    let mut out = Description::new();
+    Driver::describe(&with_range, &mut out);
+    let timeout = out.find("timeout").unwrap();
+    assert_eq!(
+        (timeout.min, timeout.max, timeout.step),
+        (Some(1), Some(60), Some(1))
+    );
+    let left = out.find("timeleft").unwrap();
+    assert_eq!((left.min, left.max), (Some(0), Some(60)));
+    assert_eq!(out.find("state").unwrap().min, None);
 }

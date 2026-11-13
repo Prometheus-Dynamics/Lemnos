@@ -19,7 +19,7 @@ retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rul
 id = "power0"
 driver = "ina2xx"
 bus = "i2c-1"
-config = { chip = "ina238", address = 0x40, shunt_ohms = 0.010, max_current_a = 2.0 }
+config = { chip = "ina238", address = 0x40, shunt_ohms = 0.010, max_current_a = 2.0, bus_warn_below_v = 10.8, bus_warn_above_v = 13.5 }
 
 # An I2C bus made from two GPIO lines by the RP1's PIO block. `hz` is optional.
 [[devices]]
@@ -87,7 +87,7 @@ auto_off_after = 5
 id = "fan"
 driver = "hwmon-fan"
 owner = "host"
-config = { name = "pwmfan" }
+config = { name = "pwmfan", max_rpm = 3000, warn_below_rpm = 200 }
 
 # The daemon's keep-alive: a hardware watchdog, set to 15 s. The daemon feeds it only while it is
 # healthy; see docs/daemon.md, "If the daemon dies".
@@ -103,7 +103,7 @@ config = { device = "watchdog0", timeout_s = 15 }
 id = "channel-fan"
 driver = "pwm-channel-fan"
 uses = { pwm = "pwmchip0:1", tach = "gpiochip0:20" }
-config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500, pulses_per_rev = 2 }
+config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500, pulses_per_rev = 2, max_rpm = 3000, warn_below_rpm = 200 }
 
 # A USB device by the port it is plugged into, or by vendor and product (`usb:1a2b:3c4d`).
 # `[devices.streams.NAME]` gives the device a frame stream of shared memory.

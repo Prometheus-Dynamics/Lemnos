@@ -111,6 +111,9 @@ struct Shape {
     min_duty: u16,
     kick_ns: u64,
     pulses_per_rev: u32,
+    /// The board's limits on the speed, in rpm (see `max_rpm` and `warn_below_rpm`).
+    max_rpm: Option<i64>,
+    warn_below_rpm: Option<i64>,
 }
 
 #[driver("pwm-channel-fan", provides = [Fan])]
@@ -169,7 +172,16 @@ impl Lifecycle for PwmChannelFan {
 
     fn describe(&self, out: &mut Description) {
         if self.tach.is_some() {
-            out.add(Item::value("rpm", RPM).unit(Unit::RevolutionPerMinute, 0));
+            let mut rpm = Item::value("rpm", RPM)
+                .unit(Unit::RevolutionPerMinute, 0)
+                .step(1);
+            if let Some(max) = self.shape.max_rpm {
+                rpm = rpm.range(0, max);
+            }
+            if let Some(low) = self.shape.warn_below_rpm {
+                rpm = rpm.warn_below(low);
+            }
+            out.add(rpm);
         }
         // Duty is per mille: from 0 to FULL, one step is one per mille.
         out.add(
@@ -341,7 +353,11 @@ fn shape(cfg: &Config<'_>) -> Result<Shape> {
     let min_duty = int(cfg, "min_duty", 0, i64::from(FULL), 0)? as u16;
     let kick_ms = int(cfg, "kick_ms", 0, MAX_KICK_MS, 0)? as u64;
     let pulses_per_rev = int(cfg, "pulses_per_rev", 1, 64, 2)? as u32;
+    let max_rpm = optional_int(cfg, "max_rpm")?;
+    let warn_below_rpm = optional_int(cfg, "warn_below_rpm")?;
     Ok(Shape {
+        max_rpm,
+        warn_below_rpm,
         period_ns: period_ns(frequency),
         polarity,
         min_duty,
@@ -351,6 +367,15 @@ fn shape(cfg: &Config<'_>) -> Result<Shape> {
 }
 
 /// A whole-number setting in `low..=high`, or `default` when it is not set.
+/// A non-negative setting, or `None` when it is not set.
+fn optional_int(cfg: &Config<'_>, key: &str) -> Result<Option<i64>> {
+    match cfg.get(key) {
+        None => Ok(None),
+        Some(ConfigValue::Int(value)) if value >= 0 => Ok(Some(value)),
+        Some(_) => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
 fn int(cfg: &Config<'_>, key: &str, low: i64, high: i64, default: i64) -> Result<i64> {
     match cfg.get(key) {
         None => Ok(default),

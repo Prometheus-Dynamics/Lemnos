@@ -300,3 +300,64 @@ kernel name, so its link is always `Degraded` on today's boards.
 
 Exposure, white balance, tuning and the rest of a camera pipeline are the caller's. So is every
 codec's bitstream work and every model: the contracts carry the caller's bytes to the block.
+
+## Ranges, steps and limits of the built-in items
+
+Every item a built-in driver describes, with what it knows of its unit, range, step and warning
+limits, and where each figure comes from. A figure is one of:
+
+- **chip**: a constant of the chip or of the driver's scale (a register's full scale, a per-mille
+  duty, a code table), in the driver;
+- **board**: a key of the device's `config` in the board file (named in the row), which the board
+  states once and the description carries;
+- **bind**: read from the device or its sysfs when the driver binds (named in the row);
+- **unknown**: no source. The reason is in the row. An unknown figure is left out, never guessed.
+
+A value that the driver reads as a float (`f32`) has no integer raw scale, so its range is given
+only where the bounds are exact in the item's unit (a temperature in degrees, a duty in per mille);
+a float value whose bounds need a finer unit than the read returns is left unknown.
+
+| Driver | Item | Unit | Range | Step | Warning limits | Source |
+|---|---|---|---|---|---|---|
+| `ina2xx` | `bus_voltage` | V (nano) | 0 to the chip's bus full scale | the bus LSB | `bus_warn_below_v`, `bus_warn_above_v` (board) | chip for the range and step (`chip.rs`); board for the limits |
+| `ina2xx` | `shunt_voltage` | V (nano) | ±the shunt full scale; absent for `ina260` and for an attached chip | the shunt LSB | none | chip, from board `shunt_ohms`/`shunt_micro_ohms` and `max_current_a` |
+| `ina2xx` | `current` | A (nano) | ±the current full scale | the current LSB | `current_warn_above_a` (board) | chip, from board `max_current_a` (`ina260`: fixed 1.25 mA) |
+| `ina2xx` | `power` | W (nano) | 0 to the power full scale | the power LSB | none | chip, from the current LSB (`ina260`: fixed 10 mW) |
+| `bmi088` | `acceleration.x/y/z` | m/s² | ±the full scale of `accel_range` (default 6 g) | the scale per count, rounded | none | chip (`chip.rs`), range from board `accel_range` |
+| `bmi088` | `angular_rate.x/y/z` | rad/s | ±the full scale of `gyro_range` (default 2000 dps) | the scale per count, rounded | none | chip (`chip.rs`), range from board `gyro_range` |
+| `bmm150` | `magnetic_field.x/y/z` | T | unknown: the chip's ±1300 µT (x, y) and ±2500 µT (z) cannot be an integer bound in tesla, and the read is a float | none | none | unknown: the read is in tesla as `f32`; a range needs a finer unit than the read gives |
+| `generic-sensor` (every kind, I2C and Modbus) | the kind's items (`acceleration`, `angular_rate`, `magnetic_field`, `temperature`, `bus_voltage`, `shunt_voltage`, `current`, `power`) | the SI unit | unknown | none | none | unknown: the reads are `f32` in the SI unit and no board key gives a range |
+| `orientation` | `roll`, `pitch`, `yaw` | rad | unknown | none | none | unknown: the fused attitude is a float in radians; no integer bound fits its unit |
+| `fan-control` | `duty`, `demand` | per mille | 0 to 1000 | 1 | none | chip: the per-mille scale of the fan law (`law::FULL`) |
+| `hwmon-fan` | `rpm` | rpm | 0 to `max_rpm` (board) | 1 | `warn_below_rpm` (board, a stall) | board for the range and the limit; the tachometer counts whole rpm |
+| `hwmon-fan` | `duty` | per mille | 0 to 1000 | 1 | none | chip: the per-mille scale (`MAX_DUTY`) |
+| `pwm-channel-fan` | `rpm` (with a tachometer) | rpm | 0 to `max_rpm` (board) | 1 | `warn_below_rpm` (board, a stall) | board, as for `hwmon-fan` |
+| `pwm-channel-fan` | `duty` | per mille | 0 to 1000 | 1 | none | chip: the per-mille scale (`FULL`) |
+| `thermal-zone` | `temperature` | °C | `min_c` to `max_c` (board) | none | `warn_below_c`, `warn_above_c` (board) | board: the zone's trusted range and the limits; the zone's own trip points are not read |
+| `hw-watchdog` | `timeout` | s | the device's `min_timeout` to `max_timeout` | 1 | none | bind: read from sysfs when the driver binds |
+| `hw-watchdog` | `timeleft` | s | 0 to the device's `max_timeout` | 1 | none | bind: read from sysfs when the driver binds |
+| `ov9782` | `exposure` (value and control) | line | 1 line to the selected mode's frame length less 25 lines; unknown before a mode is selected | 1 | none | chip: the mode table (`MODES`) and `EXPOSURE_MARGIN` |
+| `ov9782` | `frame_length` (value and control) | line | the selected mode's frame length min to max; unknown before a mode is selected | 1 | none | chip: the mode table |
+| `ov9782` | `analogue_gain` (value and control) | (none) | `0x10` to `0xff` (16 to 255), the codes in every mode | 1 | none | chip: `ANALOGUE_GAIN_RANGE` |
+| `vcm` | `position` | (none) | `min` (board, default 0) to `max` (board, default 2^bits − 1 of the chip) | 1 | none | board for `min` and `max`; chip for the default (1023 or 4095) |
+| `gpio-power-switch` | `power.on`, `power.fault` | switch | (none) | none | none | a switch: no figure |
+| `host-clock` | `clock_source`, `rtc`, `rtc_hctosys` | switch or text | (none) | none | none | bind: kernel attributes (no figure) |
+| `system-identity` | `serial`, `family`, `model`, `facts` | text | (none) | none | none | bind and board: the serial and the board's name (no figure) |
+| `ws2812` | `pixels` | (none) | (none) | none | none | a count of pixels (board `count`); the item has no range and no step, and its reading is the number of pixels |
+| `status-light` | `layout` | (none) | (none) | none | none | a structure of `pixels` (board `count`) and a constant of four layers; no figure of its own |
+| `uvc` | `frames`, `dropped`, `errors` | (none) | unknown: the counters have no bound | 1 | none | unknown: counted by the driver since the stream started |
+| `gpu-lease` | `state` | (none) | (none) | none | none | the driver's own state (no figure) |
+
+The drivers whose items are only `start` and `stop` (actions) carry no figure: `isp600`,
+`k230-capture`, `k230isp` (both items), `ov9782` (its actions), `pisp` (both blocks), `rkcif`,
+`rkisp`, `rp1-csi2`, `sunxi-vin`. The drivers that describe no item at all are `indicator`, the
+image and codec blocks (`a733-di`, `a733-video`, `g2d`, `m2m-decode`, `rga`, `rk-iep`, `rk-mpp-codec`,
+`rknpu`, `rkvpss`, `nonai2d`, `vglite`, `vip9000`, `k230-vpu`), `coral-loader`, `raw-bus`,
+`system-slots` (its two drivers) and `usb-gadget`. Their figures are the caller's, or the devices'
+configuration, not an item.
+
+Limits without a board key, by design: no built-in driver gives a warning limit unless the board
+says so. The board keys are `max_rpm` and `warn_below_rpm` (`hwmon-fan`, `pwm-channel-fan`),
+`min_c`, `max_c`, `warn_below_c` and `warn_above_c` (`thermal-zone`), and `bus_warn_below_v`,
+`bus_warn_above_v` and `current_warn_above_a` (`ina2xx`). Each is optional; an absent key is no
+figure.

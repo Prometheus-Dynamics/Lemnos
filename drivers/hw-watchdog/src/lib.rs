@@ -200,6 +200,8 @@ pub struct HwWatchdog {
     #[needs(optional)]
     watchdog: Option<Watchdog>,
     /// Which of [`ATTRIBUTES`] existed at bind.
+    /// The device's limits on its timeout, in seconds, from `min_timeout` and `max_timeout`.
+    timeout_range: (Option<u32>, Option<u32>),
     present: [bool; ATTRIBUTES.len()],
     /// The timeout to set, after clamping to the device's range.
     wanted_s: u32,
@@ -236,14 +238,26 @@ impl Lifecycle for HwWatchdog {
         };
         let (min, max) = node.timeout_range();
         let wanted_s = clamp(requested, min.map(u64::from), max.map(u64::from));
-        Ok(Self::new(node, wanted_s))
+        Ok(Self::new(node, wanted_s, (min, max)))
     }
 
     fn describe(&self, out: &mut Description) {
+        // The device's own limits on the timeout, read from sysfs at bind. Time left is never more
+        // than the timeout, and never less than 0.
+        let (min, max) = self.timeout_range;
         for ((attr, unit), present) in ATTRIBUTES.into_iter().zip(self.present) {
-            if present {
-                out.add(Item::value(attr, FACT).unit(unit, 0));
+            if !present {
+                continue;
             }
+            let mut item = Item::value(attr, FACT).unit(unit, 0);
+            if attr == "timeout" {
+                if let (Some(min), Some(max)) = (min, max) {
+                    item = item.range(i64::from(min), i64::from(max)).step(1);
+                }
+            } else if let (true, Some(max)) = (attr == "timeleft", max) {
+                item = item.range(0, i64::from(max)).step(1);
+            }
+            out.add(item);
         }
     }
 
@@ -285,7 +299,7 @@ impl HwWatchdog {
     }
 
     /// A driver over `node`, asking for `wanted_s`.
-    fn new(mut node: Watchdog, wanted_s: u32) -> Self {
+    fn new(mut node: Watchdog, wanted_s: u32, timeout_range: (Option<u32>, Option<u32>)) -> Self {
         let mut present = [false; ATTRIBUTES.len()];
         for (slot, (attr, _)) in present.iter_mut().zip(ATTRIBUTES) {
             *slot = node.has_attribute(attr);
@@ -293,6 +307,7 @@ impl HwWatchdog {
         Self {
             watchdog: Some(node),
             present,
+            timeout_range,
             wanted_s,
             unset: true,
             applied_s: None,

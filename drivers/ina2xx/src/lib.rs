@@ -56,6 +56,41 @@ pub struct Ina2xx {
     verified: bool,
     /// The operating system's driver runs the chip: read it, never set it up.
     host_owned: bool,
+    /// The board's warning limits, in nano-units (the items' raw scale). Unset means none.
+    warn: Warnings,
+}
+
+/// The rail's warning limits from the board file: `bus_warn_below_v` and `bus_warn_above_v` for the
+/// bus voltage, `current_warn_above_a` for the current, in volts and amps. Set by the board, which
+/// knows its rail; an unset limit is no limit.
+#[derive(Debug, Clone, Copy, Default)]
+struct Warnings {
+    bus_below_nv: Option<i64>,
+    bus_above_nv: Option<i64>,
+    current_above_na: Option<i64>,
+}
+
+/// A value in volts or amps as nano-units, rounded to the nearest.
+fn nano_units(value: f64) -> i64 {
+    let scaled = value * 1e9;
+    (if scaled < 0.0 {
+        scaled - 0.5
+    } else {
+        scaled + 0.5
+    }) as i64
+}
+
+fn warnings(cfg: &Config<'_>) -> Result<Warnings> {
+    let nano = |key: &str| match cfg.float(key) {
+        None => Ok(None),
+        Some(value) if value.is_finite() => Ok(Some(nano_units(value))),
+        Some(_) => Err(Status::INVALID_ARGUMENT),
+    };
+    Ok(Warnings {
+        bus_below_nv: nano("bus_warn_below_v")?,
+        bus_above_nv: nano("bus_warn_above_v")?,
+        current_above_na: nano("current_warn_above_a")?,
+    })
 }
 
 impl Lifecycle for Ina2xx {
@@ -71,6 +106,7 @@ impl Lifecycle for Ina2xx {
             chip: chip_from_config(cfg)?,
             verified: false,
             host_owned: cfg.host_owned(),
+            warn: warnings(cfg)?,
         })
     }
 
@@ -78,11 +114,17 @@ impl Lifecycle for Ina2xx {
         // Every span is in nano-units (the register scale of the chip, see `Setup::spans`).
         let spans = self.chip.setup.spans(self.chip.attached());
         out.set_address(self.chip.address());
-        let bus = Item::value("bus_voltage", READ)
+        let mut bus = Item::value("bus_voltage", READ)
             .unit(Unit::Volt, -9)
             .field("bus_v")
             .range(0, spans.bus_max_nv)
             .step(spans.bus_lsb_nv);
+        if let Some(low) = self.warn.bus_below_nv {
+            bus = bus.warn_below(low);
+        }
+        if let Some(high) = self.warn.bus_above_nv {
+            bus = bus.warn_above(high);
+        }
         out.add(bus);
         let shunt = Item::value("shunt_voltage", READ)
             .unit(Unit::Volt, -9)
@@ -91,13 +133,15 @@ impl Lifecycle for Ina2xx {
             (Some(max), Some(step)) => shunt.range(-max, max).step(step),
             _ => shunt,
         });
-        out.add(
-            Item::value("current", READ)
-                .unit(Unit::Ampere, -9)
-                .field("current_a")
-                .range(-spans.current_max_na, spans.current_max_na)
-                .step(spans.current_lsb_na),
-        );
+        let mut current = Item::value("current", READ)
+            .unit(Unit::Ampere, -9)
+            .field("current_a")
+            .range(-spans.current_max_na, spans.current_max_na)
+            .step(spans.current_lsb_na);
+        if let Some(high) = self.warn.current_above_na {
+            current = current.warn_above(high);
+        }
+        out.add(current);
         out.add(
             Item::value("power", READ)
                 .unit(Unit::Watt, -9)
