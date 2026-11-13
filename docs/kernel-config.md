@@ -343,6 +343,8 @@ not a claim.
 | reference SoC: `bcm2712-rp1` | PWM | `CONFIG_PWM_RP1` | `drivers/pwm/pwm-rp1.c` | `raspberrypi,rp1-pwm` | verified (reference tree source) |
 | reference SoC: `bcm2712-rp1` | USB device | `CONFIG_USB_DWC2` | `drivers/usb/dwc2/` | `brcm,bcm2835-usb` (`params.c`) | verified (reference tree source); dual-role, `USB_DWC2_PERIPHERAL` unset |
 | reference SoC: `bcm2712-rp1` | watchdog | `CONFIG_BCM2835_WDT` | `drivers/watchdog/bcm2835_wdt.c` | not read | verified (reference `.config`) |
+| reference SoC: `bcm2712-rp1` | RP1 MFD (the bus the RP1 blocks hang on) | `CONFIG_MFD_RP1` | `drivers/mfd/Kconfig` | the RP1 endpoint | verified (reference tree source). Depends on `CONFIG_PCI_MSI`, which `bcm2712_defconfig` does not state: the whole RP1 chain drops out without it (see Dependencies) |
+| reference SoC: `bcm2712-rp1` | PCIe host (the root port the RP1 sits behind) | `CONFIG_PCIE_BRCMSTB` | `drivers/pci/controller/pcie-brcmstb.c` | the SoC's PCIe root port | verified (reference `.config`, and its Kconfig depends on `PCI_MSI`). Not a Kconfig dependency of `MFD_RP1`, but the RP1 is not reached without it: state it in the board's fragment |
 | reference SoC: `bcm2712-rp1` | PIO | `CONFIG_RP1_PIO` | `drivers/misc/rp1-pio.c`, `include/linux/pio_rp1.h` | the RP1 PIO node | verified (reference tree source); needs `FIRMWARE_RP1` and `MBOX_RP1` |
 | reference SoC: `bcm2712-rp1` | SPI | none | none | no SPI controller in the map | not applicable |
 | k230 | I2C | `CONFIG_I2C_DESIGNWARE_PLATFORM` | `i2c-designware-platdrv.c` | `snps,designware-i2c` | fallback only: the driver is verified, the K230 string is not checked |
@@ -369,20 +371,132 @@ not a claim.
 The rows that need a board, or a kernel that is not mainline, are candidates until a board run
 confirms them. See [Hardware status](hardware-status.md).
 
+## Dependencies
+
+Each symbol this document names, with the Kconfig symbols it depends on that a board's
+`bcm2712_defconfig` does not state (the reference SoC's defconfig, read from its tree). The rule is
+about what a fragment or defconfig must state explicitly: a dependency that a `default` or a
+`select` supplies when a full build resolves the configuration is still listed, because a merged
+fragment does not get it. A dependency that is only a prompt-less symbol, set by the architecture
+(`HAS_IOMEM`, `HAVE_PCI`, `HAS_DMA`, `IRQ_DOMAIN`), is not listed: no fragment sets those by hand.
+
+Where a symbol depends on `FIRMWARE_RP1 || COMPILE_TEST` (`RP1_PIO`) or on another alternative, the
+alternatives are followed, not listed, since the board may mean any of them. The table is
+regenerated, from a defconfig file and a kernel tree, with
+`scripts/check-kernel-config.py --print-table <tree> <defconfig> --arch arm64`. The gate checks that
+every symbol this document names has a row, and that each dependency listed for a `lemnos.ko`
+required symbol is enabled in both harness configurations. CI checks the same closure against the
+harness kernel's own `.config`, after the build.
+
+| Symbol | Section | Depends on (not stated in bcm2712_defconfig) |
+|---|---|---|
+| `CONFIG_ARCH_SUNXI` | Cross-check against the reference SoC's configuration | none |
+| `CONFIG_BCM2835_WDT` | The SoC drivers | none |
+| `CONFIG_BLK_DEV_DM` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_BLK_DEV_LOOP` | Slot path | `CONFIG_BLK_DEV` `CONFIG_BLOCK` |
+| `CONFIG_CMA` | Symbols of lemnos.ko | none |
+| `CONFIG_CMA_SIZE_MBYTES` | dma-heaps and CMA | none |
+| `CONFIG_COMMON_CLK` | Symbols of lemnos.ko | none |
+| `CONFIG_CONFIGFS_FS` | USB gadget | none |
+| `CONFIG_CPU_BIG_ENDIAN` | Symbols of lemnos.ko | none |
+| `CONFIG_DEVTMPFS` | Hotplug uevents | none |
+| `CONFIG_DMABUF_HEAPS` | dma-heaps and CMA | none |
+| `CONFIG_DMABUF_HEAPS_CMA` | dma-heaps and CMA | none |
+| `CONFIG_DMABUF_HEAPS_SYSTEM` | dma-heaps and CMA | none |
+| `CONFIG_DMA_CMA` | Symbols of lemnos.ko | none |
+| `CONFIG_DMA_SHARED_BUFFER` | Symbols of lemnos.ko | none |
+| `CONFIG_DM_BUFIO` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_DM_VERITY` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_DW_WATCHDOG` | The SoC drivers | none |
+| `CONFIG_EROFS_FS` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_EVENTFD` | Symbols of lemnos.ko | none |
+| `CONFIG_EXT4_FS` | Slot path | none |
+| `CONFIG_FIRMWARE_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |
+| `CONFIG_GPIOLIB` | Symbols of lemnos.ko | none |
+| `CONFIG_GPIO_CDEV` | GPIO | `CONFIG_GPIOLIB` |
+| `CONFIG_GPIO_DWAPB` | The SoC drivers | `CONFIG_GPIOLIB` |
+| `CONFIG_GPIO_ROCKCHIP` | The SoC drivers | `CONFIG_GPIOLIB` |
+| `CONFIG_HWMON` | hwmon and thermal | none |
+| `CONFIG_I2C` | Symbols of lemnos.ko | none |
+| `CONFIG_I2C_CHARDEV` | I2C | none |
+| `CONFIG_I2C_DESIGNWARE_PLATFORM` | I2C | none |
+| `CONFIG_I2C_MV64XXX` | The SoC drivers | none |
+| `CONFIG_I2C_RK3X` | The SoC drivers | `CONFIG_COMMON_CLK` `CONFIG_OF` |
+| `CONFIG_IOMMU_SUPPORT` | Symbols of lemnos.ko | none |
+| `CONFIG_LEMNOS` | Built in, for an image with no modules | `CONFIG_COMMON_CLK` `CONFIG_GPIOLIB` `CONFIG_OF` `CONFIG_RESET_CONTROLLER` `CONFIG_THERMAL` |
+| `CONFIG_MBOX_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |
+| `CONFIG_MEDIA_CONTROLLER` | V4L2 capture and media controller | none |
+| `CONFIG_MEDIA_SUPPORT` | V4L2 capture and media controller | none |
+| `CONFIG_MEMFD_CREATE` | eventfd and memfd (streams) | none |
+| `CONFIG_MFD_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |
+| `CONFIG_MODULES` | Built in, for an image with no modules | none |
+| `CONFIG_MTD_UBI` | Slot path | none |
+| `CONFIG_MTD_UBI_BLOCK` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_NET` | Hotplug uevents | none |
+| `CONFIG_OF` | Symbols of lemnos.ko | none |
+| `CONFIG_PCIE_BRCMSTB` | The SoC drivers | `CONFIG_OF` `CONFIG_PCI_MSI` |
+| `CONFIG_PCI_MSI` | The SoC drivers | none |
+| `CONFIG_PINCTRL_RP1` | The SoC drivers | `CONFIG_OF` `CONFIG_PCI_MSI` `CONFIG_PINCTRL` |
+| `CONFIG_PINCTRL_SUNXI` | The SoC drivers | `CONFIG_ARCH_SUNXI` |
+| `CONFIG_PM` | Symbols of lemnos.ko | none |
+| `CONFIG_PWM` | Symbols of lemnos.ko | none |
+| `CONFIG_PWM_ROCKCHIP` | The SoC drivers | none |
+| `CONFIG_PWM_RP1` | The SoC drivers | none |
+| `CONFIG_PWM_SUN20I` | The SoC drivers | (not in this tree) |
+| `CONFIG_REGULATOR` | Symbols of lemnos.ko | none |
+| `CONFIG_RESET_CONTROLLER` | Symbols of lemnos.ko | none |
+| `CONFIG_RP1_PIO` | Built in, for an image with no modules | `CONFIG_PCI_MSI` |
+| `CONFIG_SERIAL_8250` | UART | none |
+| `CONFIG_SERIAL_8250_DW` | The SoC drivers | none |
+| `CONFIG_SHMEM` | eventfd and memfd (streams) | none |
+| `CONFIG_SPI` | Symbols of lemnos.ko | none |
+| `CONFIG_SPI_DW_MMIO` | The SoC drivers | none |
+| `CONFIG_SPI_ROCKCHIP` | The SoC drivers | none |
+| `CONFIG_SPI_SPIDEV` | SPI | none |
+| `CONFIG_SPI_SUN6I` | The SoC drivers | `CONFIG_RESET_CONTROLLER` |
+| `CONFIG_THERMAL` | Symbols of lemnos.ko | none |
+| `CONFIG_THERMAL_HWMON` | hwmon and thermal | `CONFIG_THERMAL` |
+| `CONFIG_THERMAL_OF` | hwmon and thermal | `CONFIG_OF` `CONFIG_THERMAL` |
+| `CONFIG_TMPFS` | eventfd and memfd (streams) | `CONFIG_SHMEM` |
+| `CONFIG_TTY` | UART | none |
+| `CONFIG_UBIFS_FS` | Slot path | none |
+| `CONFIG_UNIX` | Hotplug uevents | none |
+| `CONFIG_USB` | USB host | `CONFIG_USB_SUPPORT` |
+| `CONFIG_USB_CONFIGFS` | USB gadget | none |
+| `CONFIG_USB_CONFIGFS_ACM` | USB gadget | `CONFIG_TTY` |
+| `CONFIG_USB_CONFIGFS_F_FS` | USB gadget | none |
+| `CONFIG_USB_CONFIGFS_NCM` | USB gadget | none |
+| `CONFIG_USB_DWC2` | The SoC drivers | `CONFIG_USB_SUPPORT` |
+| `CONFIG_USB_F_FS` | USB gadget | none |
+| `CONFIG_USB_GADGET` | USB gadget | none |
+| `CONFIG_USB_LIBCOMPOSITE` | USB gadget | none |
+| `CONFIG_V4L2_FWNODE` | V4L2 capture and media controller | none |
+| `CONFIG_V4L2_MEM2MEM_DEV` | V4L2 capture and media controller | none |
+| `CONFIG_VFAT_FS` | Slot path | none |
+| `CONFIG_VIDEO_DEV` | V4L2 capture and media controller | none |
+| `CONFIG_VIDEO_V4L2_SUBDEV_API` | V4L2 capture and media controller | `CONFIG_MEDIA_CONTROLLER` `CONFIG_VIDEO_DEV` |
+| `CONFIG_WATCHDOG` | Watchdog | none |
+| `CONFIG_WATCHDOG_CORE` | Watchdog | none |
+
 ## Cross-check against the reference SoC's configuration
 
-The reference SoC's `.config` was read, read-only, and every row of the `lemnos.ko` table has the
-value below. Every required symbol is set, and `CONFIG_CPU_BIG_ENDIAN` is unset, so the list
-does not disagree with a configuration that worked on a board. `CONFIG_LEMNOS` does not exist in
-that configuration: it is the new switch.
+The reference SoC's real `.config` (read-only, from its tree) was checked against every symbol this
+document names, with the same closure as the Dependencies table, on the real configuration (which
+is complete, so nothing is implied by a default). Result:
 
-| Symbol | Reference |
-| --- | --- |
-| `CONFIG_MODULES`, `CONFIG_PM`, `CONFIG_OF`, `CONFIG_I2C`, `CONFIG_SPI`, `CONFIG_SPI_MASTER`, `CONFIG_GPIOLIB`, `CONFIG_GPIOLIB_LEGACY`, `CONFIG_PWM`, `CONFIG_REGULATOR`, `CONFIG_THERMAL`, `CONFIG_RESET_CONTROLLER`, `CONFIG_COMMON_CLK`, `CONFIG_DMA_SHARED_BUFFER`, `CONFIG_EVENTFD` | `y` |
-| `CONFIG_CPU_BIG_ENDIAN` | unset (absent) |
-| `CONFIG_RP1_PIO`, `CONFIG_FIRMWARE_RP1`, `CONFIG_MBOX_RP1` | `m` (so the board's PIO part is a module, which a no-modules image cannot use) |
-| `CONFIG_IOMMU_SUPPORT`, `CONFIG_IOMMU_API`, `CONFIG_CMA`, `CONFIG_DMA_CMA` | `y` |
+- Every required symbol of the `lemnos.ko` table is set, except `CONFIG_CPU_BIG_ENDIAN`, which is
+  unset, as required. `CONFIG_LEMNOS` is not set: it is the new in-tree switch.
+- The RP1 chain is set: `CONFIG_MFD_RP1=y`, `CONFIG_PCI_MSI=y`, `CONFIG_PCIE_BRCMSTB=y`. The real
+  configuration has `PCI_MSI` at `y`, although `bcm2712_defconfig` does not state it.
+- Unset dependencies on the real configuration: `CONFIG_MTD_UBI` (needed by `CONFIG_MTD_UBI_BLOCK`
+  and `CONFIG_UBIFS_FS`, NAND only; this SoC has no NAND), `CONFIG_ARCH_SUNXI` (needed by
+  `CONFIG_PINCTRL_SUNXI`, another SoC), and `CONFIG_SERIAL_8250` (needed by `CONFIG_SERIAL_8250_DW`,
+  a UART the reference board does not use). Nothing a `lemnos.ko` required symbol depends on is unset.
+- Unset on the real configuration, not used by this SoC: `CONFIG_DW_WATCHDOG`, `CONFIG_GPIO_DWAPB`,
+  `CONFIG_GPIO_ROCKCHIP`, `CONFIG_I2C_MV64XXX`, `CONFIG_I2C_RK3X`, `CONFIG_PINCTRL_SUNXI`,
+  `CONFIG_PWM_ROCKCHIP`, `CONFIG_SPI_ROCKCHIP`, `CONFIG_SPI_SUN6I`, `CONFIG_SERIAL_8250`,
+  `CONFIG_MTD_UBI`, `CONFIG_MTD_UBI_BLOCK`, `CONFIG_UBIFS_FS`, `CONFIG_LEMNOS`.
 
-Where the reference's values differ from what a no-modules image needs: `CONFIG_RP1_PIO`,
+The reference's values that differ from what a no-modules image needs: `CONFIG_RP1_PIO`,
 `CONFIG_FIRMWARE_RP1` and `CONFIG_MBOX_RP1` are `m`, and the spidev, i2c-dev and configfs
 functions are `m`, so an image without modules must set them to `y`.
