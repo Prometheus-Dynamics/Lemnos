@@ -207,8 +207,7 @@ pub struct DeviceInfo {
     pub link: Option<String>,
     /// Goes up with every change to this device's state, after the change, so a reader that
     /// saw an earlier revision knows what it holds is out of date. It never goes back. Health is
-    /// read from the driver on each look and does not move it: a change of health alone is
-    /// reported with the device's next state change.
+    /// not part of it: see [`Host::look`], which is how a change of health is found.
     pub revision: u64,
 }
 
@@ -1287,30 +1286,43 @@ impl Inner {
     }
 
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
-        let own = {
-            let state = lock(&slot.state).clone();
-            match state {
-                DeviceState::Running => match slot.instance.try_lock() {
-                    Ok(mut guard) => match guard.as_mut() {
-                        Some(instance) => catch_unwind(AssertUnwindSafe(|| instance.health()))
+        self.health_of(slot, depth).0
+    }
+
+    /// A device's health, and whether it is settled: `false` when its driver is in a call right
+    /// now, so its own health is not known until the call returns. An unsettled device reads as
+    /// [`Health::Ok`], as it always has, and its needs are read as they are. Allocates nothing.
+    fn health_of(&self, slot: &Slot, depth: u32) -> (Health, bool) {
+        // Read under the state's lock only, which is released before the driver is asked.
+        let fixed = match &*lock(&slot.state) {
+            DeviceState::Running => None,
+            DeviceState::Backoff { .. } => Some(Health::Failed("retrying")),
+            DeviceState::Off(_) => Some(Health::Failed("off")),
+        };
+        let (own, mut settled) = match fixed {
+            Some(health) => (health, true),
+            None => match slot.instance.try_lock() {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(instance) => (
+                        catch_unwind(AssertUnwindSafe(|| instance.health()))
                             .unwrap_or(Health::Failed("the driver panicked")),
-                        None => Health::Failed("not running"),
-                    },
-                    // In a call right now, so it's alive.
-                    Err(_) if slot.hung.load(Ordering::Acquire) => {
-                        Health::Failed("a call never returned")
-                    }
-                    Err(_) => Health::Ok,
+                        true,
+                    ),
+                    None => (Health::Failed("not running"), true),
                 },
-                DeviceState::Backoff { .. } => Health::Failed("retrying"),
-                DeviceState::Off(_) => Health::Failed("off"),
-            }
+                // A call that never came back holds its driver for good: that is a failure.
+                Err(_) if slot.hung.load(Ordering::Acquire) => {
+                    (Health::Failed("a call never returned"), true)
+                }
+                // In a call right now, so it's alive, and what it reports is not known yet.
+                Err(_) => (Health::Ok, false),
+            },
         };
         if depth == 0 || matches!(own, Health::Failed(_) | Health::Gone(_)) {
-            return own;
+            return (own, settled);
         }
         let Some(entry) = slot.entry else {
-            return own;
+            return (own, settled);
         };
         let mut combined = own;
         for need in entry.manifest.needs {
@@ -1323,13 +1335,17 @@ impl Inner {
                 .get(need.name)
                 .and_then(|id| self.slot_by_id(id));
             let child_health = match &child {
-                Some(child) => self.device_health(child, depth - 1),
+                Some(child) => {
+                    let (health, child_settled) = self.health_of(child, depth - 1);
+                    settled &= child_settled;
+                    health
+                }
                 None => Health::Failed("missing"),
             };
             let named = slot.spec.uses.contains_key(need.name);
             match (child_health, need.optional) {
                 (Health::Failed(_) | Health::Gone(_), false) => {
-                    return Health::Failed("a required device failed");
+                    return (Health::Failed("a required device failed"), settled);
                 }
                 (Health::Failed(_) | Health::Gone(_), true) if named && combined == Health::Ok => {
                     combined = Health::Degraded("an optional device is missing");
@@ -1340,7 +1356,7 @@ impl Inner {
                 _ => {}
             }
         }
-        combined
+        (combined, settled)
     }
 }
 
@@ -2016,6 +2032,31 @@ impl Host {
     /// [`Host::devices`] is worth reading again.
     pub fn changes(&self) -> u64 {
         self.inner.changes.load(Ordering::Acquire)
+    }
+
+    /// How many devices the host runs. Their indexes are `0..device_count()`.
+    pub fn device_count(&self) -> usize {
+        self.inner
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// The device's state revision (see [`DeviceInfo::revision`]) and its health as the host
+    /// reports it now, for a caller that watches for a change of health. `None` when there is no
+    /// such device, or when its driver is in a call right now: its health is not known until the
+    /// call returns, so the caller looks again then. Health is read from the driver at each look,
+    /// so the caller decides how often to look: the host never looks on its own, and a look
+    /// allocates nothing.
+    pub fn look(&self, index: u32) -> Option<(u64, Health)> {
+        let slot = self.inner.slot(index)?;
+        // The revision is read first, as in `info`.
+        let revision = slot.revision.load(Ordering::Acquire);
+        match self.inner.health_of(&slot, MAX_DEPTH) {
+            (health, true) => Some((revision, health)),
+            (_, false) => None,
+        }
     }
 
     /// Switches a device off and lets go of its hardware.

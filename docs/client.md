@@ -87,11 +87,12 @@ What a client can do:
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing
   the client gives up every stream it holds.
 - **`packages`**: what became of the daemon's driver packages.
-- **`next_event`**: a device's state or reason changed, with its health. Events come when the
-  client asked for them in its Hello (the default). They are read off the socket inside any call
-  and in `next_value`, and `next_event` only takes what has arrived by then. After a list, a client
-  gets every later change of each device's state or reason, including a device that comes up after
-  the list. An event may repeat a state the client has; the newest one is current. Up to 64 events
+- **`next_event`**: a device's state, reason or health changed. Events come when the client asked
+  for them in its Hello (the default). They are read off the socket inside any call and in
+  `next_value`, and `next_event` only takes what has arrived by then. After a list, a client gets
+  every later change of each device's state, reason or health, including a change of health with
+  no change of state (about a quarter of a second after it), and a device that comes up after the
+  list. An event may repeat a state the client has; the newest one is current. Up to 64 events
   queue. Past that the oldest go, so a client that stops reading should list the devices again.
 
 The connection looks after itself. If the daemon restarts, the client reconnects, subscribes again
