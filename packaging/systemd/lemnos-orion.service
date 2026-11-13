@@ -1,5 +1,8 @@
 # The Orion bridge: publishes every device lemnosd serves to an Orion node. A lemnosd client, and
-# an Orion client; it reads and writes no files. Installed as /usr/lib/systemd/system/lemnos-orion.service.
+# an Orion client. It writes files only into the directories LEMNOS_ORION_FILES names, for the
+# devices that take files sent through Orion; with ProtectSystem=strict a drop-in must add each as
+# ReadWritePaths= (a slot device's .incoming is mode 0770, group lemnos, one of LEMNOS_ORION_GROUPS).
+# Installed as /usr/lib/systemd/system/lemnos-orion.service.
 # Built from service/orion (binary lemnos-orion). See packaging/README.md.
 #
 # Starts as root and drops to the identity in /etc/lemnos/lemnos-orion.env (LEMNOS_ORION_USER and

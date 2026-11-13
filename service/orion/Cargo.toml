@@ -21,8 +21,10 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-wire = { path = "../../engine/wire" }
 # Orion is not published: its one client crate, pinned to a revision of its `next` branch.
-orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133", default-features = false, features = ["provider"] }
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133", default-features = false, features = ["provider", "files"] }
 # Already in the tree through Orion's client: waits on the Orion session and the wake-up together.
+# The SHA-256 a file sent to a device is checked against; already in the tree.
+sha2 = { version = "0.10", default-features = false }
 rustix = { version = "1", default-features = false, features = ["std", "event"] }
 
 [dev-dependencies]
@@ -32,6 +34,7 @@ orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev =
 orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

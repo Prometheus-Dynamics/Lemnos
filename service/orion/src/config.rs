@@ -18,6 +18,8 @@ pub struct Config {
     /// Who the service runs as, when it starts as root: `LEMNOS_ORION_USER`. `None` runs it as it
     /// was started.
     pub run_as: Option<RunAs>,
+    /// Devices that take files sent through Orion, and the directory each one's go into.
+    pub files: Vec<(String, PathBuf)>,
 }
 
 /// The unprivileged identity the service drops to: a user, a primary group, and the supplementary
@@ -33,11 +35,13 @@ pub struct RunAs {
 }
 
 impl Config {
-    /// Reads `LEMNOSD_SOCKET`, `ORION_ADDRESS` and `ORION_NODE_ID`.
+    /// Reads `LEMNOSD_SOCKET`, `ORION_ADDRESS`, `ORION_NODE_ID`, `LEMNOS_ORION_USER`, `_GROUP`, `_GROUPS` and
+    /// `LEMNOS_ORION_FILES`.
     ///
     /// # Errors
     ///
-    /// When `ORION_ADDRESS` is not an address.
+    /// When `ORION_ADDRESS` is not an address, or `LEMNOS_ORION_FILES` isn't a list of
+    /// `device=directory`.
     pub fn from_env() -> Result<Self, String> {
         Ok(Self {
             lemnosd_socket: std::env::var_os("LEMNOSD_SOCKET")
@@ -49,6 +53,7 @@ impl Config {
                 std::env::var("LEMNOS_ORION_GROUP").ok().as_deref(),
                 std::env::var("LEMNOS_ORION_GROUPS").ok().as_deref(),
             ),
+            files: files(std::env::var("LEMNOS_ORION_FILES").ok().as_deref())?,
         })
     }
 }
@@ -90,9 +95,49 @@ pub fn node_id(value: Option<&str>) -> Option<String> {
     value.filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
+/// `LEMNOS_ORION_FILES` as devices and their directories: `device=/a/dir`, comma separated.
+/// Unset or empty means no device takes files.
+///
+/// # Errors
+///
+/// When an entry isn't `device=absolute directory`.
+pub fn files(value: Option<&str>) -> Result<Vec<(String, PathBuf)>, String> {
+    let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    text.split(',')
+        .map(str::trim)
+        .map(|entry| {
+            let (device, dir) = entry
+                .split_once('=')
+                .filter(|(device, dir)| !device.is_empty() && dir.starts_with('/'))
+                .ok_or_else(|| {
+                    format!("LEMNOS_ORION_FILES {entry:?}: want device=/absolute/directory")
+                })?;
+            Ok((device.to_owned(), PathBuf::from(dir)))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_name_each_device_and_its_directory() {
+        assert_eq!(files(None), Ok(Vec::new()));
+        assert_eq!(files(Some(" ")), Ok(Vec::new()));
+        assert_eq!(
+            files(Some("slots=/data/slots/.incoming, other=/x")),
+            Ok(vec![
+                ("slots".to_owned(), PathBuf::from("/data/slots/.incoming")),
+                ("other".to_owned(), PathBuf::from("/x")),
+            ])
+        );
+        assert!(files(Some("slots")).is_err());
+        assert!(files(Some("slots=relative")).is_err());
+        assert!(files(Some("=/x")).is_err());
+    }
 
     #[test]
     fn an_unset_or_empty_node_id_is_any_node() {

@@ -254,6 +254,39 @@ device's entry and its description.
 
 A sample's time is the wall clock when the bridge read it, as Orion's own publishers stamp them.
 
+**Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
+that job:
+
+- **Progress.** Each step of the job comes back as the run's progress:
+  - `percent`;
+  - the message `"<done> of <total>"`;
+  - the data `done` and `total`, as two little-endian `u64`s.
+- **End.** The job's end is the run's end. Its result is the output: text when it is UTF-8,
+  hex otherwise.
+- **Cancel.** Cancelling the run cancels the job, and the run then ends `Cancelled`.
+- **Lost lemnosd.** If lemnosd goes away, the run ends `Failed`.
+
+**Files for a device.** `LEMNOS_ORION_FILES` names each device that takes files sent through
+Orion, and the directory those files go into, for example
+`slots=/data/slots/.incoming,other=/var/lib/x`. For each one, the bridge is Orion's receiver
+(a files sink) of every file sent to `lemnos/<device>/<name>`. The node never keeps a copy.
+
+- **Before the file is taken**, the device's `accept` method, if its description has one, is
+  called with the file's size. If the device refuses, the transfer is rejected with the
+  device's words, before a byte is sent.
+- **While it arrives**, the file is written under a hidden name, `.orion-<transfer>.part`.
+- **When the sender commits**, it is checked against the SHA-256 it was sent with, then synced
+  and renamed to `<name>`.
+- **Deleted** are a file that fails the check, one with a bad name (one part of
+  `[A-Za-z0-9._-]`, not starting with a dot), one that stops arriving for 10 minutes, and what an
+  earlier run left half-written.
+
+The sender then runs the device's action that uses the file, such as `.call install_file <name>
+false false` on a slot device ([Slots](slots.md#over-orion)). A transfer that is begun again
+resumes from where it stopped.
+
+The bridge needs to be able to write into the directory. See `packaging/README.md`.
+
 When lemnosd stops or comes back with another device list, the bridge publishes `state = gone`
 on every status topic, withdraws every resource (their records are deleted) and ends its Orion
 session, which is how Orion tells each subscriber
@@ -264,9 +297,13 @@ device again when lemnosd's event says it is running (see [Events](wire.md#event
 Orion comm core restarts, the bridge connects again and says every topic, action and resource
 again. Both sides retry forever.
 
-It reads `LEMNOSD_SOCKET`, `ORION_ADDRESS` (any address the Orion client takes; the board's own
-`/run/orion/orion.sock` when unset) and `ORION_NODE_ID` (when set, a comm core that is any other
-node gets nothing). It has been run against a real Orion node on a PC
+It reads:
+
+- `LEMNOSD_SOCKET`;
+- `ORION_ADDRESS`: any address the Orion client takes. When it is unset, the board's own
+  `/run/orion/orion.sock`;
+- `ORION_NODE_ID`: when it is set, a comm core that is any other node gets nothing;
+- `LEMNOS_ORION_FILES`, described above. It has been run against a real Orion node on a PC
 ([`B20.md`](../testing/board-runs/B20.md) has that run); not yet on a board.
 
 ```sh

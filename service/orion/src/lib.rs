@@ -1,11 +1,12 @@
 //! `lemnos-orion`: every device lemnosd serves, published to Orion as a resource.
 //!
-//! Three threads share one [`Shared`]. [`source`] keeps one lemnosd connection: it reads the
+//! Four threads share one [`Shared`]. [`source`] keeps one lemnosd connection: it reads the
 //! device list and each device's description, subscribes to its value items and writes what
 //! arrives into the mirror. [`calls`] keeps a second lemnosd connection and runs what Orion's
 //! actions ask of a device. [`publish`] owns the Orion session: it describes each device as a
 //! resource with its topics and actions, publishes what the mirror says has changed, and hands
-//! the runs of its actions to [`calls`]. None of them knows what a device is: the resource, its
+//! the runs of its actions to [`calls`]. [`files`] keeps an Orion session of its own and receives
+//! files sent to a device that takes them, into the directory the board gives for it. None of them knows what a device is: the resource, its
 //! labels, its topics' fields and its actions come from the device's entry and description.
 //!
 //! Each half retries forever with the same backoff. Losing lemnosd withdraws its devices from
@@ -15,6 +16,7 @@
 pub mod backoff;
 pub mod calls;
 pub mod config;
+pub mod files;
 pub mod mirror;
 pub mod privilege;
 pub mod publish;
@@ -27,7 +29,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::calls::Done;
+use crate::calls::{Done, Progress};
 use crate::mirror::Mirror;
 
 /// The name this service gives lemnosd when it connects.
@@ -46,6 +48,8 @@ pub const RESOURCE_KIND: &str = "lemnos.device";
 pub struct Shared {
     mirror: Mutex<Mirror>,
     done: Mutex<Vec<Done>>,
+    /// The newest progress of each long job a run is following, not yet passed on.
+    progress: Mutex<Vec<Progress>>,
     /// Written by the other threads when there is something for the publisher. A byte waiting
     /// there is a wake-up; one is enough, so a full socket is not an error.
     bell: UnixStream,
@@ -65,6 +69,7 @@ impl Shared {
         Ok(Self {
             mirror: Mutex::new(Mirror::new()),
             done: Mutex::new(Vec::new()),
+            progress: Mutex::new(Vec::new()),
             bell,
             woken,
             stop: AtomicBool::new(false),
@@ -91,6 +96,25 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
             .push(done);
         self.changed();
+    }
+
+    /// How far a run's long job has got. Only the newest of each run is kept.
+    pub fn progressed(&self, progress: Progress) {
+        let mut waiting = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+        match waiting
+            .iter_mut()
+            .find(|p| p.session == progress.session && p.call == progress.call)
+        {
+            Some(older) => *older = progress,
+            None => waiting.push(progress),
+        }
+        drop(waiting);
+        self.changed();
+    }
+
+    /// Takes the progress not yet passed on into `into`.
+    pub fn take_progress(&self, into: &mut Vec<Progress>) {
+        into.append(&mut self.progress.lock().unwrap_or_else(PoisonError::into_inner));
     }
 
     /// Takes the calls that ended into `into`.
