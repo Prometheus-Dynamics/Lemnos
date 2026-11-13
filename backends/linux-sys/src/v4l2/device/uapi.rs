@@ -52,6 +52,22 @@ pub struct v4l2_fmtdesc {
     pub reserved: [u32; 3],
 }
 
+/// `struct v4l2_input`: one video input, from `VIDIOC_ENUMINPUT`. `std` is a `v4l2_std_id`, at
+/// offset 48 where the 8-byte alignment puts it; the structure is 80 bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct v4l2_input {
+    pub index: u32,
+    pub name: [u8; 32],
+    pub type_: u32,
+    pub audioset: u32,
+    pub tuner: u32,
+    pub std_: u64,
+    pub status: u32,
+    pub capabilities: u32,
+    pub reserved: [u32; 3],
+}
+
 /// `struct v4l2_frmsizeenum`; the discrete/stepwise union is `u` (discrete uses `u[0..2]`).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -423,6 +439,7 @@ pub struct v4l2_control {
 pod!(
     v4l2_capability,
     v4l2_fmtdesc,
+    v4l2_input,
     v4l2_frmsizeenum,
     v4l2_frmivalenum,
     v4l2_pix_format,
@@ -549,7 +566,9 @@ ioctls! {
     VIDIOC_S_CTRL: v4l2_control = iowr(b'V', 28);
     VIDIOC_QUERYCTRL: v4l2_queryctrl = iowr(b'V', 36);
     VIDIOC_QUERYMENU: v4l2_querymenu = iowr(b'V', 37);
+    VIDIOC_G_INPUT: libc::c_int = ior(b'V', 38);
     VIDIOC_S_INPUT: libc::c_int = iowr(b'V', 39);
+    VIDIOC_ENUMINPUT: v4l2_input = iowr(b'V', 26);
     VIDIOC_ENUM_FRAMESIZES: v4l2_frmsizeenum = iowr(b'V', 74);
     VIDIOC_ENUM_FRAMEINTERVALS: v4l2_frmivalenum = iowr(b'V', 75);
     VIDIOC_EXPBUF: v4l2_exportbuffer = iowr(b'V', 16);

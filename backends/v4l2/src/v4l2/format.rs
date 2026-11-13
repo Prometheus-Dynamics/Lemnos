@@ -5,10 +5,11 @@ use std::os::fd::AsFd;
 
 use lemnos_linux_sys::v4l2::device::{
     VIDEO_MAX_PLANES, VIDIOC_ENUM_FMT, VIDIOC_ENUM_FRAMEINTERVALS, VIDIOC_ENUM_FRAMESIZES,
-    VIDIOC_G_FMT, VIDIOC_G_PARM, VIDIOC_G_SELECTION, VIDIOC_S_FMT, VIDIOC_S_INPUT, VIDIOC_S_PARM,
-    VIDIOC_S_SELECTION, VIDIOC_TRY_FMT, v4l2_captureparm, v4l2_fmtdesc, v4l2_format,
-    v4l2_frmivalenum, v4l2_frmsizeenum, v4l2_meta_format, v4l2_pix_format, v4l2_pix_format_mplane,
-    v4l2_plane_pix_format, v4l2_selection, v4l2_streamparm, zeroed,
+    VIDIOC_ENUMINPUT, VIDIOC_G_FMT, VIDIOC_G_INPUT, VIDIOC_G_PARM, VIDIOC_G_SELECTION,
+    VIDIOC_S_FMT, VIDIOC_S_INPUT, VIDIOC_S_PARM, VIDIOC_S_SELECTION, VIDIOC_TRY_FMT,
+    v4l2_captureparm, v4l2_fmtdesc, v4l2_format, v4l2_frmivalenum, v4l2_frmsizeenum, v4l2_input,
+    v4l2_meta_format, v4l2_pix_format, v4l2_pix_format_mplane, v4l2_plane_pix_format,
+    v4l2_selection, v4l2_streamparm, zeroed,
 };
 
 use super::{BufType, VideoDevice};
@@ -33,6 +34,19 @@ flags! {
 }
 
 /// A format a queue supports (`VIDIOC_ENUM_FMT`).
+/// One of a device's video inputs (`struct v4l2_input`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputInfo {
+    /// The index to pass to [`VideoDevice::set_input`].
+    pub index: u32,
+    /// The input's name.
+    pub name: String,
+    /// Its kind: `V4L2_INPUT_TYPE_TUNER` (1), `_CAMERA` (2) or `_TOUCH` (3).
+    pub kind: u32,
+    /// Its status flags (`V4L2_IN_ST_*`).
+    pub status: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatDesc {
     /// Enumeration index.
@@ -522,6 +536,27 @@ impl VideoDevice {
     pub fn set_input(&self, index: u32) -> Result<()> {
         let mut raw = index.cast_signed();
         node::ioctl(self.as_fd(), VIDIOC_S_INPUT, &mut raw)
+    }
+
+    /// The device's selected video input (`VIDIOC_G_INPUT`).
+    pub fn input(&self) -> Result<u32> {
+        let mut raw: i32 = 0;
+        node::ioctl(self.as_fd(), VIDIOC_G_INPUT, &mut raw)?;
+        Ok(raw.cast_unsigned())
+    }
+
+    /// Describes one of the device's video inputs (`VIDIOC_ENUMINPUT`). The driver answers an
+    /// index past its last input with `EINVAL`, which is how a caller counts them.
+    pub fn enum_input(&self, index: u32) -> Result<InputInfo> {
+        let mut raw: v4l2_input = zeroed();
+        raw.index = index;
+        node::ioctl(self.as_fd(), VIDIOC_ENUMINPUT, &mut raw)?;
+        Ok(InputInfo {
+            index: raw.index,
+            name: cstr_field(&raw.name),
+            kind: raw.type_,
+            status: raw.status,
+        })
     }
 
     /// The streaming parameters of a queue (`VIDIOC_G_PARM`).

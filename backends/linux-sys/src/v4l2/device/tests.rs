@@ -19,6 +19,13 @@ fn structure_sizes_match_the_kernel_header() {
         224
     );
     assert_eq!(size_of::<v4l2_fmtdesc>(), 64);
+    // The C compiler's layout of `struct v4l2_input` (80 bytes, `std` at 48).
+    assert_eq!(size_of::<v4l2_input>(), 80);
+    assert_eq!(core::mem::offset_of!(v4l2_input, name), 4);
+    assert_eq!(core::mem::offset_of!(v4l2_input, type_), 36);
+    assert_eq!(core::mem::offset_of!(v4l2_input, std_), 48);
+    assert_eq!(core::mem::offset_of!(v4l2_input, status), 56);
+    assert_eq!(core::mem::offset_of!(v4l2_input, reserved), 64);
     assert_eq!(size_of::<v4l2_frmsizeenum>(), 44);
     assert_eq!(size_of::<v4l2_frmivalenum>(), 52);
     assert_eq!(size_of::<v4l2_pix_format>(), 48);
@@ -98,7 +105,9 @@ fn request_numbers_match_the_kernel_header() {
     assert_eq!(VIDIOC_G_CTRL.nr(), 0xc008_561b);
     assert_eq!(VIDIOC_S_CTRL.nr(), 0xc008_561c);
     assert_eq!(VIDIOC_QUERYMENU.nr(), 0xc02c_5625);
+    assert_eq!(VIDIOC_G_INPUT.nr(), 0x8004_5626);
     assert_eq!(VIDIOC_S_INPUT.nr(), 0xc004_5627);
+    assert_eq!(VIDIOC_ENUMINPUT.nr(), 0xc050_561a);
     assert_eq!(VIDIOC_G_EXT_CTRLS.nr(), 0xc020_5647);
     assert_eq!(VIDIOC_S_EXT_CTRLS.nr(), 0xc020_5648);
     assert_eq!(VIDIOC_TRY_EXT_CTRLS.nr(), 0xc020_5649);
