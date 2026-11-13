@@ -1,0 +1,86 @@
+# The kernel options a slot board must be built with. This file is the machine-read source of the
+# "Slot board: built in" table in docs/kernel-config.md: scripts/check-kernel-config.py checks the table
+# and the two harness kernel configurations against it, and an image builder reads it from the locked tree.
+#
+# Names are written without the CONFIG_ prefix: BLOCK is CONFIG_BLOCK.
+#
+# Reading rules, for any build that reads this file:
+#   - version must be 1. Any other value: refuse the file.
+#   - A key this reader does not know, at any level, is refused too: it means a newer version.
+#     Every key below is required at its level.
+#   - A build for image kind K checks exactly these, from this file:
+#       always.all                       each symbol =y on every slot board
+#       kind.K.all                       each symbol =y for the kind K
+#       kind.K.one_of                    each inner list: at least one of its symbols =y
+#       initramfs.<compression>          the decompressor symbol =y for the image's initramfs compression
+#                                        ("" means none: the initramfs is not compressed, no symbol)
+#   - optional.all is named, not enforced: a missing one is logged and the boot carries on.
+#   - boot_check.checked is the set of symbols slot-init checks when it boots and names when one is
+#     absent. It must equal the names slot-init's self-check gives.
+#   - The image kinds are the first-flash image kinds: "disk" (a slot image is a file on the ext4 data
+#     partition, attached through a loop device) and "mtd" (raw NAND: the slot image is a UBI volume,
+#     read through a ubiblock device, and the data is on UBIFS). A raw-NAND board needs neither
+#     kind.disk.* (no storage block device holds its data, and it uses neither ext4 nor a loop device).
+#   - Per-SoC storage hosts (for example MMC_SDHCI_BRCMSTB) are not here: they are board data.
+#     MODULES is not required and is not listed: slot-init loads no modules.
+
+version = 1
+
+[always]
+all = [
+  "BLOCK",
+  "BLK_DEV_DM",
+  "DM_BUFIO",
+  "DM_VERITY",
+  "CRYPTO",
+  "CRYPTO_SHA256",
+  "EROFS_FS",
+  "DEVTMPFS",
+  "PROC_FS",
+  "SYSFS",
+  "BLK_DEV_INITRD",
+]
+
+[kind.disk]
+all = [
+  "EXT4_FS",
+  "BLK_DEV_LOOP",
+]
+one_of = [
+  ["MMC_BLOCK", "BLK_DEV_NVME"],
+]
+
+[kind.mtd]
+all = [
+  "MTD_UBI",
+  "UBIFS_FS",
+  "MTD_UBI_BLOCK",
+]
+one_of = []
+
+[optional]
+all = [
+  "VFAT_FS",
+]
+
+[initramfs]
+gzip = "RD_GZIP"
+xz = "RD_XZ"
+zstd = "RD_ZSTD"
+lz4 = "RD_LZ4"
+none = ""
+
+[boot_check]
+checked = [
+  "BLK_DEV_DM",
+  "DM_VERITY",
+  "CRYPTO_SHA256",
+  "EROFS_FS",
+  "EXT4_FS",
+  "BLK_DEV_LOOP",
+  "VFAT_FS",
+  "MMC_BLOCK",
+  "BLK_DEV_NVME",
+  "MTD_UBI",
+  "UBIFS_FS",
+]

@@ -22,12 +22,15 @@ A dependency is one a configuration must state explicitly: a symbol set by a `de
 `select` is not counted, because a merged fragment does not get it. Symbols with no prompt
 (set only by other symbols) are not reported, since no configuration sets them by hand.
 
-4. The slot-board table ("Slot board: built in"): every row whose must-be-built-in cell starts
-   with `yes` is `=y` in both harness configurations, and the symbols marked "checked by
-   slot-init" are exactly the option names `service/slot-init/src/kernel.rs` gives (its
-   `option:` strings and the `CONFIG_` names in its storage message): one list, checked both ways.
+4. The slot-board requirements are read from contracts/slot-kernel.toml, the machine-read source.
+   The slot-board table must agree with that file, symbol by symbol: its "When" cell names the same
+   group as the file (always.all, kind.disk.all, kind.disk.one_of, kind.mtd.all, optional.all,
+   initramfs), and its "Checked at boot" cell says yes exactly when boot_check.checked lists the symbol.
+   Both harness configurations set every symbol of always.all and kind.disk.all to =y, and each list in
+   kind.disk.one_of has one symbol =y. The names in boot_check.checked are exactly the option names
+   `service/slot-init/src/kernel.rs` gives, when that file is on the branch.
 
-Kernel tree (CI): the slot-board rows marked `yes` are roots too, and each must be `=y` in the
+Kernel tree (CI): the always.all and kind.disk.all symbols are roots too, and each must be `=y` in the
 configuration (`m` is not enough for a slot board).
 
 Exits 1 and says what is wrong; 0 when all hold.
@@ -36,6 +39,7 @@ import os
 import pathlib
 import re
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "kernel-config.md"
@@ -49,8 +53,14 @@ SYMBOL = re.compile(r"(?<![A-Za-z0-9_])(CONFIG_[A-Z0-9_]+)")
 ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|]+?)\s*\|")
 DEP_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|]*?)\s*\|\s*$")
 SLOT_SECTION = "## Slot board: built in"
-SLOT_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
+SLOT_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
 SLOT_CODE = ROOT / "service" / "slot-init" / "src" / "kernel.rs"
+CONTRACT = ROOT / "contracts" / "slot-kernel.toml"
+CONTRACT_VERSION = 1
+# The groups a row of the slot-board table can name (its "When" cell), and the cells that name no group.
+WHEN_GROUPS = ("always.all", "kind.disk.all", "kind.disk.one_of", "kind.mtd.all", "kind.mtd.one_of",
+               "optional.all", "initramfs")
+WHEN_BOARD = ("board", "none")
 
 
 # ---- Kconfig: symbols, their dependencies, and the closure ----------------------------------
@@ -315,13 +325,137 @@ def doc_symbols():
 
 
 def slot_table():
-    """symbol -> its must-be-built-in cell, from the slot-board table."""
+    """symbol -> (When cell, Checked at boot cell), from the slot-board table."""
     rows = {}
     for line in section_text(SLOT_SECTION).splitlines():
         match = SLOT_ROW.match(line)
         if match:
-            rows[match.group(1)] = match.group(3).strip()
+            rows[match.group(1)] = (match.group(3).strip(), match.group(4).strip())
     return rows
+
+
+def _keys(table, keys, where, prefix):
+    if not isinstance(table, dict):
+        sys.exit(f"{where}: {prefix.rstrip('.') or 'the file'} must be a table")
+    unknown = sorted(set(table) - set(keys))
+    if unknown:
+        sys.exit(f"{where}: unknown key(s) {', '.join(prefix + k for k in unknown)}: a newer version of the file; refusing it")
+    missing = [k for k in keys if k not in table]
+    if missing:
+        sys.exit(f"{where}: missing key(s) {', '.join(prefix + k for k in missing)}")
+
+
+def _strings(value, where, name):
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        sys.exit(f"{where}: {name} must be a list of symbol names")
+    return value
+
+
+def contract():
+    """contracts/slot-kernel.toml, read and refused unless it is a version and shape this reader knows."""
+    where = CONTRACT.relative_to(ROOT)
+    try:
+        data = tomllib.loads(CONTRACT.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        sys.exit(f"{where}: cannot be read: {err}")
+    if data.get("version") != CONTRACT_VERSION:
+        sys.exit(f"{where}: version {data.get('version')!r} is not one this reader knows (it reads {CONTRACT_VERSION}); refusing the file")
+    _keys(data, ("version", "always", "kind", "optional", "initramfs", "boot_check"), where, "")
+    _keys(data["always"], ("all",), where, "always.")
+    _keys(data["kind"], ("disk", "mtd"), where, "kind.")
+    for kind in ("disk", "mtd"):
+        _keys(data["kind"][kind], ("all", "one_of"), where, f"kind.{kind}.")
+    _keys(data["optional"], ("all",), where, "optional.")
+    _keys(data["initramfs"], ("gzip", "xz", "zstd", "lz4", "none"), where, "initramfs.")
+    _keys(data["boot_check"], ("checked",), where, "boot_check.")
+    return data
+
+
+def contract_groups(data):
+    """symbol -> its group path in the file (always.all, kind.disk.all, ..., initramfs). A symbol in
+    two groups, or a name that is not a Kconfig name, is an error."""
+    where = CONTRACT.relative_to(ROOT)
+    group = {}
+
+    def add(name, path):
+        if not re.fullmatch(r"[A-Z0-9_]+", name):
+            sys.exit(f"{where}: {name!r} is not a symbol name (write it without CONFIG_)")
+        if name in group:
+            sys.exit(f"{where}: {name} is listed twice ({group[name]} and {path})")
+        group[name] = path
+
+    for name in _strings(data["always"]["all"], where, "always.all"):
+        add(name, "always.all")
+    for kind in ("disk", "mtd"):
+        for name in _strings(data["kind"][kind]["all"], where, f"kind.{kind}.all"):
+            add(name, f"kind.{kind}.all")
+        if not isinstance(data["kind"][kind]["one_of"], list):
+            sys.exit(f"{where}: kind.{kind}.one_of must be a list of lists")
+        for alternatives in data["kind"][kind]["one_of"]:
+            for name in _strings(alternatives, where, f"kind.{kind}.one_of"):
+                add(name, f"kind.{kind}.one_of")
+    for name in _strings(data["optional"]["all"], where, "optional.all"):
+        add(name, "optional.all")
+    for value in data["initramfs"].values():
+        if not isinstance(value, str):
+            sys.exit(f"{where}: [initramfs] values are symbol names (strings), not {value!r}")
+        if value:
+            add(value, "initramfs")
+    return group
+
+
+def slot_contract_checks(problems):
+    """The slot-board table against contracts/slot-kernel.toml, both ways, symbol by symbol."""
+    data = contract()
+    group = contract_groups(data)
+    checked = set(_strings(data["boot_check"]["checked"], CONTRACT.relative_to(ROOT), "boot_check.checked"))
+    doc, where = DOC.relative_to(ROOT), CONTRACT.relative_to(ROOT)
+    rows = slot_table()
+    section = section_text(SLOT_SECTION)
+    initramfs_names = {v for v in data["initramfs"].values() if v}
+    for name in sorted(checked - set(group) - initramfs_names):
+        problems.append(f"{name} is in boot_check.checked in {where} but is in no group of that file")
+    for name, path in sorted(group.items()):
+        if path == "initramfs":
+            # A decompressor is named in the table's prose; its row, when it has one, is checked below.
+            if not re.search(rf"(?<![A-Za-z0-9]){name}(?![A-Za-z0-9])", section):
+                problems.append(f"{name} is an initramfs decompressor in {where} but the slot-board section of {doc} does not name it")
+        elif f"CONFIG_{name}" not in rows:
+            problems.append(f"{name} is in {path} in {where} but has no row in the slot-board table of {doc}")
+    for key, (when, checked_cell) in sorted(rows.items()):
+        name = key[len("CONFIG_"):]
+        path = group.get(name)
+        if path is None:
+            if when in WHEN_GROUPS:
+                problems.append(f"{key} says {when} in the slot-board table of {doc} but {where} does not list it")
+            elif when not in WHEN_BOARD:
+                problems.append(f"{key}: the When cell {when!r} of the slot-board table is not a group name or board/none")
+        elif when != path:
+            problems.append(f"{key} is in {path} in {where} but its When cell in {doc} says {when!r}")
+        if checked_cell not in ("yes", "no"):
+            problems.append(f"{key}: the Checked at boot cell must be yes or no, not {checked_cell!r}")
+        elif (checked_cell == "yes") != (name in checked):
+            problems.append(
+                f"{key}: its row in {doc} says Checked at boot {checked_cell}, but {where} boot_check.checked "
+                f"{'lists' if name in checked else 'does not list'} it")
+    return data, group, checked
+
+
+def harness_checks(data, problems):
+    """Each harness configuration: always.all and kind.disk.all =y, and one symbol =y from each kind.disk.one_of list."""
+    where = CONTRACT.relative_to(ROOT)
+    for path in (HARNESS, MODULES_OFF):
+        values = fragment(path)
+        for name in data["always"]["all"] + data["kind"]["disk"]["all"]:
+            if values.get(f"CONFIG_{name}") != "y":
+                problems.append(
+                    f"CONFIG_{name} must be built in for a slot board ({where}) "
+                    f"but {path.relative_to(ROOT)} does not set it to y")
+        for alternatives in data["kind"]["disk"]["one_of"]:
+            if not any(values.get(f"CONFIG_{name}") == "y" for name in alternatives):
+                problems.append(
+                    f"{path.relative_to(ROOT)} sets none of {', '.join('CONFIG_' + n for n in alternatives)} to y: "
+                    f"a disk slot board needs one storage driver ({where}, kind.disk.one_of)")
 
 
 def slot_code_names():
@@ -348,23 +482,16 @@ def fragment(path=HARNESS):
 
 
 def slot_checks(problems):
-    slot = slot_table()
-    for name, must in sorted(slot.items()):
-        if must.startswith("yes"):
-            for path in (HARNESS, MODULES_OFF):
-                if fragment(path).get(name) != "y":
-                    problems.append(
-                        f"{name} must be built in for a slot board (the slot-board table) "
-                        f"but {path.relative_to(ROOT)} does not set it to y")
+    data, group, checked = slot_contract_checks(problems)
+    harness_checks(data, problems)
     if not SLOT_CODE.exists():
         # slot-init's self-check (kernel.rs) is not on this branch yet: its names are checked once it is.
         return
-    checked = {name[len("CONFIG_"):] for name, must in slot.items() if "checked by slot-init" in must}
     code = slot_code_names()
     for option in sorted(checked - code):
-        problems.append(f"{option} is marked checked by slot-init in {DOC.relative_to(ROOT)} but {SLOT_CODE.relative_to(ROOT)} does not name it")
+        problems.append(f"{option} is in boot_check.checked in {CONTRACT.relative_to(ROOT)} but {SLOT_CODE.relative_to(ROOT)} does not name it")
     for option in sorted(code - checked):
-        problems.append(f"{SLOT_CODE.relative_to(ROOT)} names {option} but the slot-board table does not mark it checked by slot-init")
+        problems.append(f"{SLOT_CODE.relative_to(ROOT)} names {option} but {CONTRACT.relative_to(ROOT)} does not list it in boot_check.checked")
 
 
 def plain_checks(problems):
@@ -403,10 +530,9 @@ def tree_checks(tree, config_path, arch, problems):
     syms = parse_tree(tree, extra=extra, arch=arch)
     config = read_config(config_path)
     deps = dependency_table()
-    for key, must in slot_table().items():
-        if not must.startswith("yes"):
-            continue
-        bare = key[len("CONFIG_"):]
+    data = contract()
+    for bare in data["always"]["all"] + data["kind"]["disk"]["all"]:
+        key = f"CONFIG_{bare}"
         if bare not in syms:
             problems.append(f"{key} has no Kconfig symbol in {tree}")
             continue

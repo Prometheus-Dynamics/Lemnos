@@ -11,48 +11,79 @@ from its `.config`, or from mainline where the row says so. Nothing here was loa
 ## Slot board: built in
 
 The chain a slot's root is opened through, and what each piece of it must be in the kernel that
-boots a slot (`docs/slots.md`). "Must be built in" is `yes` for a symbol the boot needs on every
-slot board; `optional` is logged and the boot carries on; `per SoC` names the storage host of the
-board's SoC; `NAND only` and `stock only` say which route needs it.
+boots a slot (`docs/slots.md`). The requirements themselves are the machine-read file
+[contracts/slot-kernel.toml](../contracts/slot-kernel.toml); this table is checked against it, and
+the gate fails on a difference, naming the symbol. The **When** column names the group of the file
+that holds the symbol: `always.all` (every slot board), `kind.disk.all` and `kind.disk.one_of` (an image of
+kind `disk`), `kind.mtd.all` and `kind.mtd.one_of` (an image of kind `mtd`, raw NAND), `optional.all`
+(named, not enforced), `initramfs` (the decompressor of the image's initramfs), `board` (a per-SoC storage
+host, board data, not in the file) or `none` (not needed). **Checked at boot** is `yes` exactly for the
+symbols slot-init checks when it boots (`boot_check.checked` in the file); slot-init names one it finds
+absent.
 
-"checked by slot-init (I5h)" marks the symbols `lemnos-slot-init`'s self-check names when it finds
-one absent (`service/slot-init/src/kernel.rs` in PR I5h). That self-check is not on `next` until
-I5h lands; the gate checks the two lists agree once it is. From I5h, the initramfs carries no
-kernel modules and slot-init loads none, so every `yes` row here must be built in. Until I5h lands,
-`lemnos-slot-init` still loads `dm-mod`, `dm-bufio` and `dm-verity` when they are missing: the
-table is the requirement that I5h makes the whole boot depend on.
+"checked by slot-init (I5h)" in a row's prose refers to that same list. slot-init's self-check
+(`service/slot-init/src/kernel.rs`) is not on `next` until I5h lands; the gate checks the two lists agree
+once it is. From I5h, the initramfs carries no kernel modules and slot-init loads none, so every
+symbol in an `always.all`, `kind.disk.all` or `kind.mtd.all` row must be built in.
 
 Tree each row was resolved against: the reference board's kernel (raspberrypi/linux at
 `53679a5788f7912272b412fd78029bccae6f2b1a`, `bcm2712_defconfig`, see Dependencies) or mainline
 v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`, the tag the harness pins), with the arm64
 or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were resolved there.
 
-| Symbol | Needed for | Must be built in (=y) | Tree resolved against |
-| --- | --- | --- | --- |
-| `CONFIG_BLOCK` | the block layer under every row | yes | reference; mainline arm64 and riscv |
-| `CONFIG_BLK_DEV_DM` | device-mapper, which holds the verity device; checked by slot-init (I5h) through `/proc/misc` (`device-mapper`) | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
-| `CONFIG_DM_BUFIO` | the buffer layer under dm-verity; `DM_VERITY` selects it | yes (selected by `DM_VERITY`) | reference; mainline arm64 and riscv |
-| `CONFIG_DM_VERITY` | the verity target over the slot's image; checked by slot-init (I5h) through `DM_LIST_VERSIONS` (`verity`) | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
-| `CONFIG_CRYPTO` | the crypto API the verity target allocates its hash from | yes | reference; mainline arm64 and riscv |
-| `CONFIG_CRYPTO_SHA256` | the `sha256` shash dm-verity uses for the image's hashes; checked by slot-init (I5h) through `/proc/crypto` (`sha256`). `DM_VERITY` does not select it (it selects the SHA-256 library, `CRYPTO_LIB_SHA256`, which registers no shash), so it must be set. On mainline arm64 the only generic `sha256` shash is this symbol; a SoC's hardware crypto driver that registers `sha256` also satisfies the check | yes, checked by slot-init (I5h) | reference (`.config` `=y`); mainline arm64 (no arch SHA-256 shash in `arch/arm64/crypto`) |
-| `CONFIG_EROFS_FS` | the slot's root filesystem, an EROFS image; checked by slot-init (I5h) through `/proc/filesystems` | yes, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
-| `CONFIG_EXT4_FS` | the data partition's filesystem (stock route); checked by slot-init (I5h) | yes, checked by slot-init (I5h) (stock route) | reference; mainline arm64 and riscv |
-| `CONFIG_VFAT_FS` | the boot partition with the boot records; slot-init carries on without it and logs the absence | optional, checked by slot-init (I5h) | reference; mainline arm64 and riscv |
-| `CONFIG_BLK_DEV_LOOP` | the image file read through a loop device (stock route); checked by slot-init (I5h) through `/proc/devices` (`loop`) | yes, checked by slot-init (I5h) (stock route) | reference; mainline arm64 and riscv |
-| `CONFIG_MMC_BLOCK` | the SD and eMMC block devices, which hold the data partition; named by slot-init when no storage block device exists | per SoC, checked by slot-init (I5h) (named in its storage message) | reference (`.config` `=y`) |
-| `CONFIG_BLK_DEV_NVME` | NVMe storage for the data partition; named by slot-init in its storage message | per SoC, checked by slot-init (I5h) (named in its storage message) | reference (`.config` not set); mainline arm64 |
-| `CONFIG_MMC_SDHCI_BRCMSTB` | the reference SoC's SD host | per SoC: the reference SoC | reference (`.config` `=y`) |
-| `CONFIG_MMC_DW_ROCKCHIP` | the rk3566 and rk3588 SD host (the Rockchip DW MMC extension; the SoC's device-tree compatible not read) | per SoC: rk3566, rk3588 | mainline arm64: symbol present, `depends on MMC_DW`; not verified |
-| `CONFIG_MMC_SUNXI` | the sun60i-a733 SD and eMMC host (the Allwinner SD/MMC host; the A733 compatible not read) | per SoC: sun60i-a733 | mainline arm64: symbol present, `depends on ARCH_SUNXI` and `SUNXI_CCU`; not verified for A733 |
-| `CONFIG_MTD_UBI` | the UBI device on raw NAND; checked by slot-init (I5h) | NAND only, checked by slot-init (I5h) | reference; mainline arm64 |
-| `CONFIG_UBIFS_FS` | the data and boot volumes on raw NAND; checked by slot-init (I5h) | NAND only, checked by slot-init (I5h) | reference; mainline arm64 |
-| `CONFIG_MTD_UBI_BLOCK` | the image volume as a read-only block device (`ubiblock`) on raw NAND; slot-init names it only when the block device does not appear | NAND only | reference; mainline arm64 |
-| `CONFIG_DEVTMPFS` | `/dev`, where the partitions and UBI nodes appear without udev | yes | reference; mainline arm64 and riscv |
-| `CONFIG_PROC_FS` | `/proc`, mounted by slot-init, where the kernel command line and the kernel's filesystem and device lists are | yes | reference; mainline arm64 and riscv |
-| `CONFIG_SYSFS` | `/sys`, mounted by slot-init, where the block devices and partitions are found | yes | reference; mainline arm64 and riscv |
-| `CONFIG_BLK_DEV_INITRD` | the slot initramfs | yes | reference; mainline arm64 and riscv |
-| `CONFIG_RD_GZIP` | the decompressor of the slot initramfs. The image's own compression is not known here: the harness uses gzip, and an image that uses another decompressor sets that one instead (`RD_XZ`, `RD_ZSTD`, ...) | yes: the decompressor the image's initramfs uses | reference (harness `=y`); mainline arm64 |
-| `CONFIG_MODULES` | not needed: slot-init loads no modules | no | reference; mainline arm64 |
+| Symbol | Needed for | When | Checked at boot | Tree resolved against |
+| --- | --- | --- | --- | --- |
+| `CONFIG_BLOCK` | the block layer under every row | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_DM` | device-mapper, which holds the verity device; slot-init finds it through `/proc/misc` (`device-mapper`) | always.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_DM_BUFIO` | the buffer layer under dm-verity; `DM_VERITY` selects it | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_DM_VERITY` | the verity target over the slot's image; slot-init finds it through `DM_LIST_VERSIONS` (`verity`) | always.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_CRYPTO` | the crypto API the verity target allocates its hash from | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_CRYPTO_SHA256` | the `sha256` shash dm-verity uses for the image's hashes; slot-init finds it through `/proc/crypto` (`sha256`). `DM_VERITY` does not select it (it selects the SHA-256 library, `CRYPTO_LIB_SHA256`, which registers no shash), so it must be set. On mainline arm64 the only generic `sha256` shash is this symbol; a SoC's hardware crypto driver that registers `sha256` also satisfies the check | always.all | yes | reference (`.config` `=y`); mainline arm64 (no arch SHA-256 shash in `arch/arm64/crypto`) |
+| `CONFIG_EROFS_FS` | the slot's root filesystem, an EROFS image; slot-init finds it through `/proc/filesystems` | always.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_EXT4_FS` | the data partition's filesystem of a `disk` slot board (the slot image is a file on it); slot-init finds it through `/proc/filesystems` | kind.disk.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_VFAT_FS` | the boot partition with the boot records; slot-init carries on without it and logs the absence | optional.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_LOOP` | the loop device the image file is read through on a `disk` slot board; slot-init finds it through `/proc/devices` (`loop`) | kind.disk.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_MMC_BLOCK` | the SD and eMMC block devices that hold the data partition of a `disk` board; named by slot-init when no storage block device exists | kind.disk.one_of | yes | reference (`.config` `=y`) |
+| `CONFIG_BLK_DEV_NVME` | NVMe storage for the data partition of a `disk` board; named by slot-init in its storage message | kind.disk.one_of | yes | reference (`.config` not set); mainline arm64 |
+| `CONFIG_MMC_SDHCI_BRCMSTB` | the reference SoC's SD host | board | no | reference: per SoC, the reference SoC |
+| `CONFIG_MMC_DW_ROCKCHIP` | the rk3566 and rk3588 SD host (the Rockchip DW MMC extension; the SoC's device-tree compatible not read) | board | no | mainline arm64: symbol present, `depends on MMC_DW`; not verified |
+| `CONFIG_MMC_SUNXI` | the sun60i-a733 SD and eMMC host (the Allwinner SD/MMC host; the A733 compatible not read) | board | no | mainline arm64: symbol present, `depends on ARCH_SUNXI` and `SUNXI_CCU`; not verified for A733 |
+| `CONFIG_MTD_UBI` | the UBI device on raw NAND, where the slot image is a UBI volume | kind.mtd.all | yes | reference; mainline arm64 |
+| `CONFIG_UBIFS_FS` | the data and boot volumes on raw NAND | kind.mtd.all | yes | reference; mainline arm64 |
+| `CONFIG_MTD_UBI_BLOCK` | the image volume as a read-only block device (`ubiblock`) on raw NAND; slot-init names it only when the block device does not appear | kind.mtd.all | no | reference; mainline arm64 |
+| `CONFIG_DEVTMPFS` | `/dev`, where the partitions and UBI nodes appear without udev | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_PROC_FS` | `/proc`, mounted by slot-init, where the kernel command line and the kernel's filesystem and device lists are | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_SYSFS` | `/sys`, mounted by slot-init, where the block devices and partitions are found | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_BLK_DEV_INITRD` | the slot initramfs | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_RD_GZIP` | the decompressor of the slot initramfs when it is gzip-compressed (the harness's). An image whose initramfs uses another compression sets that decompressor instead: `RD_XZ`, `RD_ZSTD` or `RD_LZ4` (the file's `[initramfs]` table names each one) | initramfs | no | reference (harness `=y`); mainline arm64 |
+| `CONFIG_MODULES` | not needed: slot-init loads no modules | none | no | reference; mainline arm64 |
+
+### The requirements file
+
+`contracts/slot-kernel.toml` is the source of this table. A build reads the file, not the table. The
+gate (`scripts/check-kernel-config.py`) fails when the table, the file or the two harness configurations
+disagree, naming the symbol. To change a requirement, change the file first, then its row here. The
+harness configurations (`testing/qemu/kernel.config` and `testing/qemu/kernel-modules-off.config`) must
+set every `always.all` and `kind.disk.all` symbol to `=y`, and one symbol from each `kind.disk.one_of` list.
+
+Symbols in the file are written without the `CONFIG_` prefix. A build for image kind `K`
+(`disk` or `mtd`) and initramfs compression `C` checks exactly these keys:
+
+```text
+version               must be 1. Any other value: refuse the file.
+always.all            each symbol =y on every slot board.
+kind.K.all            each symbol =y for the image kind K.
+kind.K.one_of         each inner list: at least one of its symbols =y.
+initramfs.C           the decompressor symbol =y for the initramfs compression C; "" means none.
+optional.all          named only, not enforced: a missing one is logged and the boot carries on.
+boot_check.checked    the symbols slot-init checks when it boots and names when one is absent.
+```
+
+Any key the reader does not know, at any level, means a newer version of the file: refuse the file. Every
+key listed is required. The image kinds are `disk` (a slot image is a file on the ext4 data partition,
+attached through a loop device) and `mtd` (raw NAND: the slot image is a UBI volume read through a ubiblock
+device, the data is on UBIFS). A raw-NAND board needs neither `kind.disk` symbol: its boot uses no ext4,
+no loop device and no storage block driver.
 
 ## Built in, for an image with no modules
 

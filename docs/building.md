@@ -7,7 +7,9 @@ listed in `packaging/files.txt`, which is the one place a packager reads for the
 table. The image builder builds them `--locked --offline` from vendored sources, with the
 `service` profile, for each target below. The kernel module is built separately:
 [kernel-module.md](kernel-module.md), "For an image builder", and the symbols a board kernel needs, in
-[kernel-config.md](kernel-config.md).
+[kernel-config.md](kernel-config.md). The slot board's kernel requirements are the machine-read file
+[contracts/slot-kernel.toml](../contracts/slot-kernel.toml), which an image builder reads from the tree
+(the table in kernel-config.md is checked against it).
 
 ## The lock file
 
