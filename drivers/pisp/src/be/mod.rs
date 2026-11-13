@@ -16,6 +16,7 @@
 //! enabled with an empty table rather than run it.
 
 pub mod curve;
+pub mod defaults;
 pub mod lsc;
 pub mod ops;
 mod prepare;
@@ -30,8 +31,19 @@ use crate::uapi::*;
 /// decompressor; not an image-quality setting.
 const TDN_COMPRESS_OFFSET: u16 = 2048;
 
+pub use defaults::{Encoding, ResampleFilter};
 pub use prepare::PrepareError;
 pub use slices::{SplitJobs, split_tiles, split_tiles_into};
+
+/// Extra CAC state the tiles need: the image's offset in the CAC grid (libpisp
+/// `pisp_be_cac_extra`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BeCacExtra {
+    /// Offset of the image's first pixel in the grid cells, x.
+    pub offset_x: u16,
+    /// Offset of the image's first pixel in the grid cells, y.
+    pub offset_y: u16,
+}
 
 /// Maximum tile width of the BCM2712 back end (libpisp `BackEndMaxTileWidth`).
 pub const MAX_TILE_WIDTH: u16 = 640;
@@ -46,6 +58,13 @@ pub fn coeff_s4_10(v: f64) -> i16 {
     math::round(v * 1024.0).clamp(-8192.0, 8191.0) as i16
 }
 
+/// Whether a format is YUV: any chroma subsampling, or a planar or semi-planar layout.
+fn is_yuv(format: u32) -> bool {
+    use crate::uapi::image_format as f;
+    format & f::SAMPLING_MASK != f::SAMPLING_444
+        || format & f::PLANARITY_MASK != f::PLANARITY_INTERLEAVED
+}
+
 /// Builds `pisp_be_tiles_config` buffers.
 #[derive(Clone, Debug)]
 pub struct BackEnd {
@@ -57,6 +76,7 @@ pub struct BackEnd {
     /// Fixed resampler steps (4.12) in place of the corner-aligned ones.
     resample_step: [Option<(u16, u16)>; BE_NUM_OUTPUTS],
     lsc_extra: BeLscExtra,
+    cac_extra: BeCacExtra,
     max_tile_width: u16,
     max_stripe_height: u16,
 }
@@ -71,14 +91,25 @@ impl BackEnd {
     /// A back end with every block zeroed and nothing enabled: the caller supplies the tables
     /// of the blocks it enables.
     pub fn new() -> Self {
+        // The parameters of each block sit at the libpisp defaults, so enabling a block with
+        // its default is one call; the enables themselves start off.
+        let mut cfg = BeConfig {
+            debin: defaults::DEBIN_DEFAULT,
+            demosaic: defaults::DEMOSAIC_DEFAULT,
+            false_colour: defaults::FALSE_COLOUR_DEFAULT,
+            sharpen: defaults::SHARPEN_DEFAULT,
+            ..BeConfig::default()
+        };
+        cfg.sh_fc_combine.y_factor = defaults::SHFC_Y_FACTOR_DEFAULT;
         Self {
-            cfg: BeConfig::default(),
+            cfg,
             crop: Default::default(),
             downscale_extra: Default::default(),
             resample_extra: Default::default(),
             smart_resize: Default::default(),
             resample_step: Default::default(),
             lsc_extra: BeLscExtra::default(),
+            cac_extra: BeCacExtra::default(),
             max_tile_width: MAX_TILE_WIDTH,
             max_stripe_height: MAX_STRIPE_HEIGHT,
         }
@@ -243,11 +274,139 @@ impl BackEnd {
         self.cfg.gamma = curve::gamma_from_curve(points);
     }
 
-    /// The YCbCr matrices used inside the pipeline (for sharpening/false colour): `forward` is
-    /// RGB to YCbCr, `inverse` the way back. The caller chooses the encoding.
-    pub fn set_ycbcr(&mut self, forward: BeCcmConfig, inverse: BeCcmConfig) {
+    /// Sets or turns off (`None`) the YCbCr conversion inside the pipeline, which sharpening and
+    /// false colour work in: `Some((forward, inverse))` is RGB to YCbCr and back, the pair of one
+    /// colour encoding (see [`Encoding`]).
+    pub fn set_ycbcr(&mut self, pair: Option<(BeCcmConfig, BeCcmConfig)>) {
+        let on = pair.is_some();
+        let (forward, inverse) = pair.unwrap_or_default();
         self.cfg.ycbcr = forward;
         self.cfg.ycbcr_inverse = inverse;
+        self.enable_rgb(rgb_enable::YCBCR, on);
+        self.enable_rgb(rgb_enable::YCBCR_INVERSE, on);
+    }
+
+    /// The YCbCr conversion of one colour encoding, or off (`None`).
+    pub fn set_ycbcr_encoding(&mut self, e: Option<Encoding>) {
+        self.set_ycbcr(e.map(|e| (e.forward(), e.inverse())));
+    }
+
+    fn enable_rgb(&mut self, bits: u32, on: bool) {
+        if on {
+            self.cfg.global.rgb_enables |= bits;
+        } else {
+            self.cfg.global.rgb_enables &= !bits;
+        }
+    }
+
+    /// Input decompression (`None`: off). Needed when the input is compressed; the configuration
+    /// library refuses a mismatch with the input format.
+    pub fn set_input_decompress(&mut self, d: Option<DecompressConfig>) {
+        let on = d.is_some();
+        self.cfg.decompress = d.unwrap_or_default();
+        self.enable_bayer(bayer_enable::DECOMPRESS, on);
+    }
+
+    /// Debinning (`None`: off). Both directions are enabled by the caller's table; see
+    /// [`defaults::DEBIN_DEFAULT`] for libpisp's filter.
+    pub fn set_debin(&mut self, d: Option<BeDebinConfig>) -> Result<(), &'static str> {
+        if d.is_some_and(|d| !(0..=1).contains(&d.h_enable) || !(0..=1).contains(&d.v_enable)) {
+            return Err("debin enables are 0 or 1");
+        }
+        let on = d.is_some();
+        if let Some(d) = d {
+            self.cfg.debin = d;
+        }
+        self.enable_bayer(bayer_enable::DEBIN, on);
+        Ok(())
+    }
+
+    /// Demosaic (`None`: off). The colour orders only; [`defaults::DEMOSAIC_DEFAULT`] is the
+    /// libpisp setting.
+    pub fn set_demosaic(&mut self, d: Option<BeDemosaicConfig>) {
+        let on = d.is_some();
+        if let Some(d) = d {
+            self.cfg.demosaic = d;
+        }
+        self.enable_bayer(bayer_enable::DEMOSAIC, on);
+    }
+
+    /// Chromatic aberration correction (`None`: off), with the image's offset in the CAC grid.
+    pub fn set_cac(&mut self, cac: Option<BeCacConfig>, extra: BeCacExtra) {
+        let on = cac.is_some();
+        if let Some(c) = cac {
+            self.cfg.cac = c;
+        }
+        self.cac_extra = extra;
+        self.enable_bayer(bayer_enable::CAC, on);
+    }
+
+    /// Tone mapping (`None`: off). The LUT is the caller's; an all-zero LUT would map every pixel
+    /// to black and is refused when enabled.
+    pub fn set_tonemap(&mut self, t: Option<BeTonemapConfig>) -> Result<(), &'static str> {
+        if t.is_some_and(|t| t.lut.iter().all(|&v| v == 0)) {
+            return Err("tone map LUT is all zero");
+        }
+        let on = t.is_some();
+        if let Some(t) = t {
+            self.cfg.tonemap = t;
+        }
+        self.enable_bayer(bayer_enable::TONEMAP, on);
+        Ok(())
+    }
+
+    /// Saturation control (`None`: off).
+    pub fn set_sat_control(&mut self, s: Option<BeSatControlConfig>) {
+        let on = s.is_some();
+        if let Some(s) = s {
+            self.cfg.sat_control = s;
+        }
+        self.enable_rgb(rgb_enable::SAT_CONTROL, on);
+    }
+
+    /// Sharpening (`None`: off). `enables` selects which of the five filters run, bits 0 to 4.
+    /// [`defaults::SHARPEN_DEFAULT`] is libpisp's set of filters and thresholds.
+    pub fn set_sharpen(&mut self, s: Option<BeSharpenConfig>) -> Result<(), &'static str> {
+        if s.is_some_and(|s| s.enables > 0x1f) {
+            return Err("sharpen enables take bits 0 to 4");
+        }
+        let on = s.is_some();
+        if let Some(s) = s {
+            self.cfg.sharpen = s;
+        }
+        self.enable_rgb(rgb_enable::SHARPEN, on);
+        Ok(())
+    }
+
+    /// The sharpen/false colour combine factors. Not an enable: it applies while sharpening
+    /// or false colour runs.
+    pub fn set_sh_fc_combine(&mut self, c: BeShFcCombineConfig) {
+        self.cfg.sh_fc_combine = c;
+    }
+
+    /// False colour suppression (`None`: off). [`defaults::FALSE_COLOUR_DEFAULT`] is libpisp's.
+    pub fn set_false_colour(&mut self, f: Option<BeFalseColourConfig>) {
+        let on = f.is_some();
+        if let Some(f) = f {
+            self.cfg.false_colour = f;
+        }
+        self.enable_rgb(rgb_enable::FALSE_COLOUR, on);
+    }
+
+    /// Histogram of oriented gradients (`None`: off). The configuration library does not size the
+    /// HOG output yet, so an enabled HOG is refused by [`Self::prepare`].
+    pub fn set_hog(&mut self, h: Option<BeHogConfig>) {
+        let on = h.is_some();
+        if let Some(h) = h {
+            self.cfg.hog = h;
+        }
+        self.enable_rgb(rgb_enable::HOG, on);
+    }
+
+    /// Output `i` resampler filter from the libpisp set, with the coefficients in
+    /// [`defaults::ResampleFilter`].
+    pub fn set_resample_default(&mut self, i: Branch, f: ResampleFilter) {
+        self.set_resample_filter(i, f.coefficients());
     }
 
     /// Output `i` format; width, height and strides left at zero are computed.
@@ -262,10 +421,18 @@ impl BackEnd {
         self.crop[i] = c;
     }
 
-    /// Output `i` colour space conversion.
-    pub fn set_csc(&mut self, i: Branch, c: BeCcmConfig) {
+    /// Output `i` colour space conversion (`None`: off). A YUV output needs its RGB to YCbCr
+    /// matrix here; [`Self::simple_bayer`] supplies the libpisp default when the caller gives none.
+    pub fn set_csc(&mut self, i: Branch, c: Option<BeCcmConfig>) {
         let i = i.index();
-        self.cfg.csc[i] = c;
+        let on = c.is_some();
+        self.cfg.csc[i] = c.unwrap_or_default();
+        self.enable_rgb(rgb_enable::csc(i), on);
+    }
+
+    /// Output `i` colour space conversion to a colour encoding's RGB to YCbCr matrix.
+    pub fn set_csc_encoding(&mut self, i: Branch, e: Encoding) {
+        self.set_csc(i, Some(e.forward()));
     }
 
     /// Output `i` size, choosing downscaler and resampler automatically ("smart resize").
@@ -314,9 +481,9 @@ impl BackEnd {
     }
 
     /// A fixed Bayer-to-output pipeline: black level, white balance gains, demosaic (colour
-    /// orders only), CCM ([`IDENTITY_CCM`] when `None`), and output 0 in `format` (a
-    /// [`crate::format::formats`] value) at the input size. `csc`, when given, is the output 0
-    /// colour space conversion a YUV `format` needs; the matrix is the caller's. Gamma,
+    /// orders only, with libpisp's defaults), CCM ([`IDENTITY_CCM`] when `None`), and output 0 in
+    /// `format` (a [`crate::format::formats`] value) at the input size. A YUV `format` gets output
+    /// 0's colour space conversion: `csc` when given, else libpisp's full-range BT.601. Gamma,
     /// sharpening, denoise and the rest are off until the caller sets and enables them.
     pub fn simple_bayer(
         input: ImageFormatConfig,
@@ -337,8 +504,11 @@ impl BackEnd {
         if bayer != BayerOrder::Greyscale {
             bayer_en |= bayer_enable::DEMOSAIC;
         }
+        // A YUV output with no matrix from the caller gets libpisp's full-range BT.601 (`jpeg`):
+        // without it the output's colours are wrong, so the default is the only safe choice.
+        let csc = csc.or_else(|| is_yuv(format).then(|| Encoding::Jpeg.forward()));
         if let Some(csc) = csc {
-            be.set_csc(Branch::Zero, csc);
+            be.set_csc(Branch::Zero, Some(csc));
             rgb_en |= rgb_enable::CSC0;
         }
         be.set_global(bayer_en, rgb_en, bayer);
@@ -356,5 +526,7 @@ impl BackEnd {
     }
 }
 
+#[cfg(test)]
+mod block_tests;
 #[cfg(test)]
 mod tests;

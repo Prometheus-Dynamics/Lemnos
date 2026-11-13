@@ -190,6 +190,9 @@ the job's identity. Every job the block reads gets exactly one completion.
 A job the hardware cannot run completes as failed, or is counted as dropped, as its contract says.
 It is not run in software and not run again.
 
+The camera ISP's job sequence, step by step, as the reference board runs it, is in
+[`drivers/pisp/README.md`](../drivers/pisp/README.md#running-a-job-live).
+
 ## Faults
 
 Neither side trusts the ring. Each value is read once and checked.
