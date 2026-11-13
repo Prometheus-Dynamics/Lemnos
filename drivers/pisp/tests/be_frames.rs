@@ -105,7 +105,7 @@ fn board(input_memory: &str, output_memory: &str) -> String {
          [devices.streams.config]\nbuffers = 2\nbuffer_bytes = {CONFIG_BYTES}\n\
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.input]\nbuffers = {BUFFERS}\nbuffer_bytes = {INPUT_BYTES}\n{input_memory}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n\
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n\
          {output_memory}\n"
     )
 }

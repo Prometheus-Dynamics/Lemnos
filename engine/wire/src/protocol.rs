@@ -395,6 +395,10 @@ frames! {
         16 SetPower { id: u32, device: u32, on: bool }
         17 StreamOpen { id: u32, device: u32, name: &'a str }
         /// `descriptors` file descriptors travel with this frame over `SCM_RIGHTS`.
+        /// `working` is the stream's producer working set (`docs/streams.md`, "The margin"): the
+        /// buffers the producer keeps in its own hands when it asks for its next one. The
+        /// consumer's margin is `buffers - 1 - working`. A trailing value: a host from before it
+        /// sends none, which reads as 0.
         18 StreamRings {
             id: u32,
             buffers: u32,
@@ -403,6 +407,10 @@ frames! {
             frame_slots: u32,
             job_slots: u32,
             job_bytes: u32,
+            working: Tail<u32>,
+            /// 0 for a free-running stream, 1 for a job-driven one (`StreamKind`). Trailing: a host
+            /// from before it sends none, which reads as 0, the only kind it has.
+            kind: Tail<u32>,
         }
         19 Event { device: u32, state: u8, health: u8, reason: &'a str }
         /// The answer to any request that could not be done.
@@ -431,6 +439,8 @@ frames! {
             job_slots: u32,
             job_bytes: u32,
             plane_bytes: &'a [u8],
+            working: Tail<u32>,
+            kind: Tail<u32>,
         }
     }
     // The packages part: driver packages the host runs. Sent only to a host whose Welcome set

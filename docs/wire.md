@@ -47,12 +47,12 @@ closes the connection on a larger length, without reading it.
 | 15 | Value | subscription u64, stamp_ns u64, bytes | to client |
 | 16 | SetPower | id u32, device u32, on bool | to host |
 | 17 | StreamOpen | id u32, device u32, name str | to host |
-| 18 | StreamRings | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
+| 18 | StreamRings | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, working Tail u32, kind Tail u32 | to client |
 | 19 | Event | device u32, state u8, health u8, reason str | to client |
 | 20 | Refusal | id u32, status i32, text str | to client |
 | 21 | StreamClose | id u32, device u32, name str | to host |
 | 22 | StreamOpenHandles | id u32, device u32, name str | to host |
-| 23 | StreamRingHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, plane_bytes bytes | to client |
+| 23 | StreamRingHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, plane_bytes bytes, working Tail u32, kind Tail u32 | to client |
 | 24 | Packages | id u32 | to host |
 | 25 | Package | id u32, path str, driver str, reason str | to client |
 | 26 | PackagesDone | id u32, mode u8, note str | to client |
@@ -716,11 +716,11 @@ client reads that as `link: ""`.
 
 ### stream-ready
 
-`StreamRings { id: 11, buffers: 4, descriptors: 8, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
+`StreamRings { id: 11, buffers: 4, descriptors: 8, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, working: 1, kind: 0 }`
 
 <!-- vector: stream-rings -->
 ```hex
-1b 00 00 00 12 00 0b 00 00 00 04 00 00 00 08 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
+23 00 00 00 12 00 0b 00 00 00 04 00 00 00 08 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 01 00 00 00 00 00 00 00
 ```
 
 ### stream-close
@@ -743,20 +743,20 @@ client reads that as `link: ""`.
 
 ### stream-handles
 
-`StreamRingHandles { id: 13, buffers: 4, descriptors: 11, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, plane_bytes: [] }`
+`StreamRingHandles { id: 13, buffers: 4, descriptors: 11, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, plane_bytes: [], working: 1, kind: 0 }`
 
 <!-- vector: stream-ring-handles -->
 ```hex
-1f 00 00 00 17 00 0d 00 00 00 04 00 00 00 0b 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 00 00 00 00
+27 00 00 00 17 00 0d 00 00 00 04 00 00 00 0b 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
 ```
 
 ### stream-handles-planes
 
-`StreamRingHandles { id: 14, buffers: 2, descriptors: 11, buffer_bytes: 256, frame_slots: 2, job_slots: 1, job_bytes: 0, plane_bytes: [192 as u32 LE, 64 as u32 LE] }`
+`StreamRingHandles { id: 14, buffers: 2, descriptors: 11, buffer_bytes: 256, frame_slots: 2, job_slots: 1, job_bytes: 0, plane_bytes: [192 as u32 LE, 64 as u32 LE], working: 0, kind: 0 }`
 
 <!-- vector: stream-ring-handles-planes -->
 ```hex
-27 00 00 00 17 00 0e 00 00 00 02 00 00 00 0b 00 01 00 00 02 00 00 00 01 00 00 00 00 00 00 00 08 00 00 00 c0 00 00 00 40 00 00 00
+2f 00 00 00 17 00 0e 00 00 00 02 00 00 00 0b 00 01 00 00 02 00 00 00 01 00 00 00 00 00 00 00 08 00 00 00 c0 00 00 00 40 00 00 00 00 00 00 00 00 00 00 00
 ```
 
 ### packages

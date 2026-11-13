@@ -505,6 +505,10 @@ impl Client {
                     job_slots: layout.job_slots,
                     job_bytes: layout.job_bytes,
                     plane_bytes: plane_bytes.get(..plane_len).unwrap_or(&[]),
+                    working: Tail(lease.working),
+                    kind: Tail(u32::from(
+                        lease.kind == lemnos_host::stream::StreamKind::JobDriven,
+                    )),
                 },
                 lease.descriptors,
             );
@@ -525,6 +529,10 @@ impl Client {
                 frame_slots: layout.frame_slots,
                 job_slots: layout.job_slots,
                 job_bytes: layout.job_bytes,
+                working: Tail(lease.working),
+                kind: Tail(u32::from(
+                    lease.kind == lemnos_host::stream::StreamKind::JobDriven,
+                )),
             },
             lease.descriptors,
         );

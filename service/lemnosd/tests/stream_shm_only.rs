@@ -25,8 +25,9 @@ const DEVICE: u32 = 0;
 const NAME: &str = "frames";
 const BUFFER_BYTES: u32 = 4096;
 const BUFFERS: u32 = 4;
+const WORKING: u32 = 1;
 const BOARD: &str = "[[devices]]\nid = \"s\"\ndriver = \"fake-counter\"\n\
-                     [devices.streams.frames]\nbuffers = 4\nbuffer_bytes = 4096\n";
+                     [devices.streams.frames]\nbuffers = 4\nbuffer_bytes = 4096\nworking = 1\n";
 /// A capture time, CLOCK_MONOTONIC in nanoseconds: far from the time the test runs.
 const CAPTURED_NS: u64 = 1_234_567_890_123;
 const PAYLOAD: [u8; 5] = [7, 8, 9, 10, 11];
@@ -116,16 +117,26 @@ fn a_process_with_only_the_shm_crates_reads_a_lemnosd_stream() {
             frame_slots,
             job_slots,
             job_bytes,
+            working,
             ..
         } => {
             // Shared memory: the seven base descriptors and the pool's one.
             assert_eq!(descriptors, 8);
-            Some((buffers, buffer_bytes, frame_slots, job_slots, job_bytes))
+            Some((
+                buffers,
+                buffer_bytes,
+                frame_slots,
+                job_slots,
+                job_bytes,
+                working.0,
+            ))
         }
         _ => None,
     });
     assert_eq!(layout.0, BUFFERS);
     assert_eq!(layout.1, BUFFER_BYTES);
+    // The working set the board declares: a foreign reader's margin is BUFFERS - 1 - it.
+    assert_eq!(layout.5, WORKING);
     assert_eq!(wire.fds.len(), 8, "eight descriptors came with it");
     let mut all = std::mem::take(&mut wire.fds);
     let buffer_fd = all.remove(fds::BUFFERS);
