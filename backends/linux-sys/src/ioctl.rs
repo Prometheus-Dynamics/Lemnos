@@ -104,6 +104,8 @@ pub unsafe trait Pod: Copy {}
 unsafe impl Pod for i32 {}
 // SAFETY: plain integers: every bit pattern is a value.
 unsafe impl Pod for u32 {}
+// SAFETY: plain integers: every bit pattern is a value.
+unsafe impl Pod for i64 {}
 // SAFETY: an array of `Pod` values has no other bytes than theirs.
 unsafe impl<T: Pod, const N: usize> Pod for [T; N] {}
 

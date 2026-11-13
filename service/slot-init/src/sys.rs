@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use lemnos_linux_sys::rootfs::{self, Loop, MountFlags};
 use lemnos_slot_store::manifest::{BLOCK, Verity};
+use lemnos_slot_store::ubi::{self, Ubi};
 
 use crate::boot::INIT;
 use crate::ops::Ops;
@@ -28,6 +29,15 @@ impl System {
             loops: RefCell::new(Vec::new()),
         }
     }
+}
+
+/// The major and minor numbers in a `dev_t` (glibc's and musl's encoding).
+fn libc_major(rdev: u64) -> u64 {
+    ((rdev >> 32) & 0xffff_f000) | ((rdev >> 8) & 0x0fff)
+}
+
+fn libc_minor(rdev: u64) -> u64 {
+    ((rdev >> 12) & 0xffff_ff00) | (rdev & 0x00ff)
 }
 
 /// A module's name as the kernel compares it: `-` and `_` are the same.
@@ -114,9 +124,17 @@ impl Ops for System {
     }
 
     fn open_verity(&self, image: &Path, name: &str, verity: &Verity) -> Result<String, String> {
-        let lo = rootfs::attach_loop(&self.dev, image)
-            .map_err(|e| format!("a loop device over {}: {e}", image.display()))?;
-        let table = verity.table(&format!("{}:{}", lo.major, lo.minor));
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let meta = fs::metadata(image).map_err(|e| format!("{}: {e}", image.display()))?;
+        let (device, lo) = if meta.file_type().is_block_device() {
+            let rdev = meta.rdev();
+            (format!("{}:{}", libc_major(rdev), libc_minor(rdev)), None)
+        } else {
+            let lo = rootfs::attach_loop(&self.dev, image)
+                .map_err(|e| format!("a loop device over {}: {e}", image.display()))?;
+            (format!("{}:{}", lo.major, lo.minor), Some(lo))
+        };
+        let table = verity.table(&device);
         let params = table
             .split_once(" verity ")
             .map(|(_, params)| params)
@@ -124,8 +142,27 @@ impl Ops for System {
         let sectors = verity.data_blocks * (BLOCK / 512);
         let node =
             rootfs::create_verity(&self.dev, name, sectors, params).map_err(|e| e.to_string())?;
-        self.loops.borrow_mut().push(lo);
+        self.loops.borrow_mut().extend(lo);
         Ok(node.display().to_string())
+    }
+
+    fn ubi_block(&self, ubi: &Ubi, name: &str) -> Result<PathBuf, String> {
+        use lemnos_slot_store::ubi::UbiWrite;
+        let node = ubi::System { ubi: ubi.clone() }
+            .block(name)
+            .map_err(|e| e.to_string())?;
+        // udev isn't running: devtmpfs makes the node, a moment after the ioctl.
+        for _ in 0..50 {
+            if node.exists() {
+                return Ok(node);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!("{} didn't appear", node.display()))
+    }
+
+    fn ubi_replace(&self, ubi: &Ubi, name: &str, bytes: &[u8]) -> Result<(), String> {
+        ubi::replace(ubi, &ubi::System { ubi: ubi.clone() }, name, bytes).map_err(|e| e.to_string())
     }
 
     fn kernel_log(&self) -> String {
@@ -172,6 +209,17 @@ mod tests {
             ["kernel/drivers/md/dm-mod.ko.xz"]
         );
         assert_eq!(load_order(dep, "dm-crypt"), None);
+    }
+
+    #[test]
+    fn a_device_number_splits_as_libc_does() {
+        // makedev(254, 3) and makedev(4097, 300000) in glibc's and musl's encoding.
+        assert_eq!((libc_major(0xfe03), libc_minor(0xfe03)), (254, 3));
+        let rdev = ((4097u64 & 0xffff_f000) << 32)
+            | ((4097 & 0xfff) << 8)
+            | ((300_000u64 & 0xffff_ff00) << 12)
+            | (300_000 & 0xff);
+        assert_eq!((libc_major(rdev), libc_minor(rdev)), (4097, 300_000));
     }
 
     #[test]

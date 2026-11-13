@@ -13,6 +13,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 
 use crate::boot::{BootRecord, Restarter};
 use crate::store::{Layout, replace, sync_dir, valid_id};
@@ -141,11 +144,15 @@ fn files_under(dir: &Path) -> io::Result<Vec<String>> {
     Ok(out)
 }
 
-/// The `uboot` record over the boot partition at `boot`.
-#[derive(Debug, Clone)]
+/// The `uboot` record over the boot partition at `boot`. On raw NAND (`record = "ubi"`) the
+/// record is the static UBI volume `boot-record` instead of the file, replaced whole by a rename
+/// ([`lemnos_slot_store::ubi::replace`]); `packaging/uboot/boot-ubi.cmd` reads it.
+#[derive(Clone)]
 pub struct Uboot {
     pub boot: PathBuf,
     pub restarter: Restarter,
+    /// The UBI device and what changes it, when the record is a volume.
+    pub volume: Option<(Ubi, Arc<dyn UbiWrite>)>,
 }
 
 impl Uboot {
@@ -155,13 +162,26 @@ impl Uboot {
 
     /// The record as it stands; an unreadable one is empty.
     pub fn read(&self) -> Record {
-        fs::read_to_string(self.path())
-            .map(|text| Record::parse(&text))
-            .unwrap_or_default()
+        let text = match &self.volume {
+            Some((device, _)) => device
+                .read(ubi::RECORD_VOLUME)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok()),
+            None => fs::read_to_string(self.path()).ok(),
+        };
+        text.map(|text| Record::parse(&text)).unwrap_or_default()
     }
 
     fn write(&self, record: &Record) -> io::Result<()> {
-        replace(&self.path(), record.text().as_bytes())
+        match &self.volume {
+            Some((device, writer)) => ubi::replace(
+                device,
+                &**writer,
+                ubi::RECORD_VOLUME,
+                record.text().as_bytes(),
+            ),
+            None => replace(&self.path(), record.text().as_bytes()),
+        }
     }
 }
 

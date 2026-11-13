@@ -17,5 +17,8 @@ path = "src/main.rs"
 # Lean on purpose: a static initramfs program. No serde, no async; the system calls are
 # lemnos-linux-sys's safe wrappers.
 [dependencies]
-lemnos-slot-store = { path = "../../drivers/slot-store" }
+lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[dev-dependencies]
+lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }

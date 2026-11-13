@@ -14,13 +14,14 @@ lemnos-contract-system-slots = { path = "../../contracts/system-slots" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 # The slot files, shared with lemnos-slot-init.
-lemnos-slot-store = { path = "../slot-store" }
+lemnos-slot-store = { path = "../slot-store", features = ["linux"] }
 # Both already in the tree through lemnos-package: the signature check and the hashes.
 ed25519-dalek = { version = "2.2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 libc.workspace = true
 
 [dev-dependencies]
+lemnos-slot-store = { path = "../slot-store", features = ["linux", "fake"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 ed25519-dalek = { version = "2.2", default-features = false }

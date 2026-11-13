@@ -17,6 +17,7 @@ use crate::manifest::BLOCK;
 use crate::store::{Layout, Meta, State};
 use crate::tar::tests::archive;
 use crate::{SystemSlots, TrustedKey};
+use lemnos_slot_store::ubi::{Fake, Ubi, UbiWrite, image_volume};
 
 pub struct TempDir(pub PathBuf);
 
@@ -181,19 +182,31 @@ struct Board {
 impl Board {
     /// A board with slot `first` installed, the default and running, as a fresh board is.
     fn new(first: &str) -> Self {
-        let dir = TempDir::new("board");
-        let layout = layout(&dir.0);
+        Self::with(first, TempDir::new("board"), None)
+    }
+
+    /// The same board on raw NAND: its images in volumes of a fake UBI device with `free` bytes.
+    fn on_nand(first: &str, free: u64) -> (Self, Arc<Fake>) {
+        let dir = TempDir::new("nand");
+        let fake = Arc::new(Fake::new(nand(&dir.0), free));
+        (Self::with(first, dir, Some(fake.clone())), fake)
+    }
+
+    fn with(first: &str, dir: TempDir, fake: Option<Arc<Fake>>) -> Self {
+        let mut layout = layout(&dir.0);
+        layout.ubi = fake.as_ref().map(|f| f.ubi.clone());
         fs::create_dir_all(layout.images()).unwrap();
         fs::create_dir_all(layout.boot.join("slots")).unwrap();
         let told = Told::default();
         let mut board = Self {
-            slots: SystemSlots::new(
+            slots: SystemSlots::with_volumes(
                 layout.clone(),
                 Box::new(told.clone()),
                 vec![TrustedKey {
                     key: key().verifying_key(),
                     owner: "the build key".into(),
                 }],
+                fake.map(|f| f as Arc<dyn UbiWrite>),
             ),
             dir,
             told,
@@ -292,9 +305,14 @@ impl Board {
 }
 
 fn layout(dir: &Path) -> Layout {
-    Layout {
-        data: dir.join("data"),
-        boot: dir.join("boot"),
+    Layout::new(dir.join("data"), dir.join("boot"))
+}
+
+fn nand(dir: &Path) -> Ubi {
+    Ubi {
+        sys: dir.join("sys"),
+        dev: dir.join("dev"),
+        device: "ubi0".into(),
     }
 }
 
@@ -935,6 +953,7 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
         restarter: crate::boot::Restarter {
             systemctl: "/bin/true".into(),
         },
+        volume: None,
     });
     board.install_ok("os-2");
     let kept = fs::read_to_string(board.layout().boot_list("os-2")).unwrap();
@@ -1357,4 +1376,136 @@ fn the_verity_conventions_match_veritysetup() {
             assert_eq!(hex(&h.finalize()), root, "{blocks} blocks: top level first");
         }
     }
+}
+
+/// The volume names on a NAND board's fake UBI device.
+fn volumes(fake: &Fake) -> Vec<String> {
+    fake.ubi.volumes().into_iter().map(|v| v.name).collect()
+}
+
+#[test]
+fn on_nand_an_install_writes_its_image_into_a_volume_and_renames_it_into_place() {
+    let (mut board, fake) = Board::on_nand("os-1", 64 << 20);
+    board.install_ok("os-2");
+    let image = Bundle::new("os-2").image;
+    assert_eq!(fake.ubi.read(&image_volume("os-2")).unwrap(), image);
+    assert_eq!(volumes(&fake), [image_volume("os-1"), image_volume("os-2")]);
+    // No image file on the data side, and the slot counts as installed from its volume.
+    assert!(!board.layout().image("os-2").exists());
+    assert!(board.layout().installed("os-2"));
+    assert_eq!(board.layout().image_size("os-2"), Some(image.len() as u64));
+    // Its command line finds the data volume, not a partition.
+    let kept = crate::boot::kept(board.layout(), "os-2").unwrap();
+    let cmdline = kept.iter().find(|(_, n)| n == "cmdline.txt").unwrap();
+    let cmdline = fs::read_to_string(board.layout().bootfiles().join(&cmdline.0)).unwrap();
+    assert!(cmdline.contains(" board.data=UBI=ubi0:data "), "{cmdline}");
+    let list = board.slots.list_json();
+    assert!(
+        list.contains(&format!(
+            "\"size\":{},\"verity\":true,\"intact\":true",
+            image.len()
+        )),
+        "{list}"
+    );
+    assert!(!board.work_left());
+}
+
+#[test]
+fn on_nand_a_refused_or_cancelled_install_leaves_no_work_volume() {
+    let (mut board, fake) = Board::on_nand("os-1", 64 << 20);
+    let mut wrong = Bundle::new("os-2");
+    wrong.manifest_image_sha = Some(sha(b"something else"));
+    assert_eq!(
+        board.stream(1, &wrong.pack(), 4096).0,
+        Status::INVALID_ARGUMENT
+    );
+    assert_eq!(volumes(&fake), [image_volume("os-1")]);
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board
+        .slots
+        .write(0, &bundle[..bundle.len() - 2048])
+        .unwrap();
+    assert_eq!(volumes(&fake).len(), 2, "the work volume while it comes");
+    board.slots.job_cancel(job);
+    assert_eq!(volumes(&fake), [image_volume("os-1")]);
+    assert!(!board.layout().installed("os-2"));
+}
+
+#[test]
+fn on_nand_a_restart_mid_install_removes_the_work_volume() {
+    let (mut board, fake) = Board::on_nand("os-1", 64 << 20);
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board
+        .slots
+        .write(0, &bundle[..bundle.len() - 2048])
+        .unwrap();
+    assert!(volumes(&fake).iter().any(|v| v.starts_with("slot-new-")));
+    let again = SystemSlots::with_volumes(
+        board.layout().clone(),
+        Box::new(Told::default()),
+        Vec::new(),
+        Some(fake.clone()),
+    );
+    assert_eq!(volumes(&fake), [image_volume("os-1")]);
+    assert!(State::load(&again.layout).error.contains("interrupted"));
+}
+
+#[test]
+fn on_nand_remove_takes_the_volume_and_gives_its_room_back() {
+    let (mut board, fake) = Board::on_nand("os-1", 64 << 20);
+    let before = fake.ubi.free().unwrap();
+    board.install_ok("os-2");
+    assert!(fake.ubi.free().unwrap() < before);
+    board.slots.remove("os-2").unwrap();
+    assert_eq!(fake.ubi.free().unwrap(), before);
+    assert_eq!(volumes(&fake), [image_volume("os-1")]);
+    assert!(!board.layout().installed("os-2"));
+}
+
+#[test]
+fn on_nand_room_is_the_ubi_devices() {
+    let (mut board, _fake) = Board::on_nand("os-1", 1 << 20);
+    // 1 MiB of erase blocks, the first slot's volume in one of them.
+    assert_eq!(board.slots.accept(512 << 10), Ok(()));
+    assert_eq!(board.slots.accept(2 << 20), Err(crate::install::NO_SPACE));
+    assert!(
+        board.state().error.contains("no room"),
+        "{}",
+        board.state().error
+    );
+}
+
+#[test]
+fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
+    let dir = TempDir::new("nand-record");
+    let fake = Arc::new(Fake::new(nand(&dir.0), 1 << 20));
+    let mut record = crate::uboot::Uboot {
+        boot: dir.0.join("boot"),
+        restarter: crate::boot::Restarter {
+            systemctl: "/nonexistent/systemctl".into(),
+        },
+        volume: Some((fake.ubi.clone(), fake.clone() as Arc<dyn UbiWrite>)),
+    };
+    record.set_default("os-1").unwrap();
+    record.set_trial("os-2").unwrap();
+    assert_eq!(
+        fake.ubi.read("boot-record").unwrap(),
+        b"default=os-1\ntrial=os-2\ntrial_armed=1\n"
+    );
+    assert_eq!(volumes(&fake), ["boot-record"]);
+    assert!(!dir.0.join("boot/boot-record.env").exists());
+    // A replacement that can't finish leaves the record as it was.
+    fake.refuse.lock().unwrap().push("rename");
+    assert!(record.set_default("os-2").is_err());
+    assert_eq!(record.read().default, "os-1");
 }

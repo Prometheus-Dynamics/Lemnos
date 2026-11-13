@@ -13,6 +13,11 @@
 //! 5. Read `slots/<id>.json` and refuse it when its id isn't the slot, its root hash isn't the
 //!    command line's, the image isn't `image.size` bytes, or `kernel` names another kernel.
 //! 6. Load the device-mapper modules, open the image through dm-verity, mount it read-only.
+//!
+//! On raw NAND (`<prefix>.data=UBI=ubi0:data`) the data and boot partitions are the UBIFS
+//! volumes `data` and `boot` on that UBI device, the image is the static volume `slot-<id>`
+//! opened through a `ubiblock` device, and the U-Boot record is the volume `boot-record`
+//! ([`lemnos_slot_store::ubi`]).
 //! 7. Move `/data` into it, write `booted` (and `trial-started` for a trial), and
 //!    `switch_root` into `/sbin/init`.
 //!
@@ -29,6 +34,7 @@ use std::time::Duration;
 use lemnos_slot_store::manifest::Manifest;
 use lemnos_slot_store::records::{file, tryboot, uboot};
 use lemnos_slot_store::store::{self, Layout, Meta, State, read_line, valid_id};
+use lemnos_slot_store::ubi::{self, Ubi};
 
 use crate::cmdline::Args;
 use crate::decide::{Candidate, Failure, Next, after_failure};
@@ -73,17 +79,26 @@ impl Env {
     }
 }
 
-/// Which boot record the boot partition holds: what a fallback writes its trial into.
+/// Which boot record the board holds: what a fallback writes its trial into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Record {
     Tryboot,
     File,
     Uboot,
+    /// The U-Boot record as a UBI volume, on raw NAND.
+    UbiVolume,
 }
 
 impl Record {
-    fn on(boot: &Path) -> Self {
-        if boot.join(uboot::RECORD_FILE).is_file() {
+    fn on(layout: &Layout) -> Self {
+        let boot = &layout.boot;
+        if layout
+            .ubi
+            .as_ref()
+            .is_some_and(|ubi| ubi.volume(ubi::RECORD_VOLUME).is_some())
+        {
+            Self::UbiVolume
+        } else if boot.join(uboot::RECORD_FILE).is_file() {
             Self::Uboot
         } else if boot.join(file::FILE).is_file() {
             Self::File
@@ -126,10 +141,7 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
     let mut boot = Boot {
         ops,
         env,
-        layout: Layout {
-            data: env.at("data"),
-            boot: env.at("boot"),
-        },
+        layout: Layout::new(env.at("data"), env.at("boot")),
         slot: String::new(),
         trial: false,
         data: None,
@@ -147,8 +159,17 @@ impl Boot<'_> {
         self.ops.log(&format!("slot-init: {message}"));
     }
 
-    fn boot_dev(&self) -> Option<PathBuf> {
+    /// The boot partition and its filesystem: partition 1 beside the data partition, or on
+    /// raw NAND the UBIFS volume `boot`.
+    fn boot_dev(&self) -> Option<(&'static str, PathBuf)> {
+        if let Some(ubi) = &self.layout.ubi {
+            return Some((
+                "ubifs",
+                PathBuf::from(format!("{}:{}", ubi.device, ubi::BOOT_VOLUME)),
+            ));
+        }
         partition::boot_beside(&self.env.sys, &self.env.dev, self.data.as_ref()?)
+            .map(|dev| ("vfat", dev))
     }
 
     /// Mounts the boot partition at `boot`, read-write or not.
@@ -156,12 +177,12 @@ impl Boot<'_> {
         if self.boot_mounted.get() {
             self.unmount_boot();
         }
-        let dev = self
+        let (fstype, dev) = self
             .boot_dev()
             .ok_or("no partition 1 beside the data partition")?;
         let opts = if writable { "rw" } else { "ro" };
         self.ops
-            .mount("vfat", opts, &dev, &self.layout.boot)
+            .mount(fstype, opts, &dev, &self.layout.boot)
             .map_err(|error| format!("{}: {error}", dev.display()))?;
         self.boot_mounted.set(true);
         Ok(())
@@ -293,7 +314,7 @@ impl Boot<'_> {
             }
             Next::Wait(reason) => self.rescue(&format!("{why}; {reason}")),
             Next::Trial(id) => {
-                let record = Record::on(&self.layout.boot);
+                let record = Record::on(&self.layout);
                 if let Err(error) = self.write_trial(record, &id) {
                     return self.rescue(&format!("{why}; couldn't write the trial: {error}"));
                 }
@@ -331,18 +352,29 @@ impl Boot<'_> {
                 record.armed = true;
                 store::replace(&path, record.text().as_bytes())
             }
+            Record::UbiVolume => {
+                let Some(device) = &self.layout.ubi else {
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+                };
+                let text = String::from_utf8_lossy(&device.read(ubi::RECORD_VOLUME)?).into_owned();
+                let mut record = uboot::Record::parse(&text);
+                record.trial = id.to_string();
+                record.armed = true;
+                self.ops
+                    .ubi_replace(device, ubi::RECORD_VOLUME, record.text().as_bytes())
+                    .map_err(std::io::Error::other)
+            }
         }
     }
 
     /// The data partition, by `spec`, else the one labelled `data`, for up to `wait`: the card
     /// or eMMC can take a moment to show up.
-    fn find_data(&self, spec: &str) -> Result<Part, String> {
-        let spec = Spec::parse(spec)?;
+    fn find_data(&self, spec: &Spec) -> Result<Part, String> {
         let label = Spec::Label("data".into());
         let tries = (self.env.wait.as_millis() / 100).max(1);
         let mut last = String::new();
         for _ in 0..tries {
-            match partition::find(&spec, &self.env.sys, &self.env.dev) {
+            match partition::find(spec, &self.env.sys, &self.env.dev) {
                 Ok(part) => return Ok(part),
                 Err(error) => last = error,
             }
@@ -356,6 +388,31 @@ impl Boot<'_> {
             self.ops.sleep(Duration::from_millis(100));
         }
         Err(last)
+    }
+
+    /// On raw NAND: the UBI device once its volume `volume` shows up, for up to `wait`.
+    fn find_volume(&self, device: &str, volume: &str) -> Result<Ubi, String> {
+        let ubi = Ubi {
+            sys: self.env.sys.clone(),
+            dev: self.env.dev.clone(),
+            device: device.to_string(),
+        };
+        let tries = (self.env.wait.as_millis() / 100).max(1);
+        for _ in 0..tries {
+            if ubi.volume(volume).is_some() {
+                return Ok(ubi);
+            }
+            self.ops.sleep(Duration::from_millis(100));
+        }
+        Err(if ubi.present() {
+            let names: Vec<String> = ubi.volumes().into_iter().map(|v| v.name).collect();
+            format!(
+                "{device} has no volume {volume}; it has {}",
+                names.join(", ")
+            )
+        } else {
+            format!("no UBI device {device}: is ubi.mtd= on the command line?")
+        })
     }
 
     /// With a `file` record: the slot it picks, whether that is a trial, and its root hash.
@@ -402,21 +459,43 @@ impl Boot<'_> {
             Err(error) => return self.rescue(&error),
         };
         self.slot = args.slot.clone();
-        let data = match self.find_data(&args.data) {
-            Ok(part) => part,
-            Err(seen) => {
-                self.log(&seen);
-                return self.rescue(&format!("no data partition {}", args.data));
-            }
+        let spec = match Spec::parse(&args.data) {
+            Ok(spec) => spec,
+            Err(error) => return self.rescue(&error),
         };
-        let data_dev = self.env.dev.join(&data.name);
-        self.data = Some(data);
-        let mut opts = "noatime,errors=remount-ro";
-        if partition::head(&data_dev).is_some_and(|head| partition::ext_has_errors(&head)) {
-            self.log("the data partition's filesystem records errors; mounting it read-only: repair it off the board");
-            opts = "ro,noatime";
-        }
-        if let Err(error) = self.ops.mount("ext4", opts, &data_dev, &self.layout.data) {
+        let (fstype, opts, data_dev) = if let Spec::Ubi { device, volume } = &spec {
+            match self.find_volume(device, volume) {
+                Ok(ubi) => {
+                    self.layout.ubi = Some(ubi);
+                    (
+                        "ubifs",
+                        "noatime",
+                        PathBuf::from(format!("{device}:{volume}")),
+                    )
+                }
+                Err(seen) => {
+                    self.log(&seen);
+                    return self.rescue(&format!("no data volume {}", args.data));
+                }
+            }
+        } else {
+            let data = match self.find_data(&spec) {
+                Ok(part) => part,
+                Err(seen) => {
+                    self.log(&seen);
+                    return self.rescue(&format!("no data partition {}", args.data));
+                }
+            };
+            let data_dev = self.env.dev.join(&data.name);
+            self.data = Some(data);
+            let mut opts = "noatime,errors=remount-ro";
+            if partition::head(&data_dev).is_some_and(|head| partition::ext_has_errors(&head)) {
+                self.log("the data partition's filesystem records errors; mounting it read-only: repair it off the board");
+                opts = "ro,noatime";
+            }
+            ("ext4", opts, data_dev)
+        };
+        if let Err(error) = self.ops.mount(fstype, opts, &data_dev, &self.layout.data) {
             return self.rescue(&format!(
                 "can't mount the data partition {}: {error}",
                 data_dev.display()
@@ -469,17 +548,19 @@ impl Boot<'_> {
         if manifest.verity.root_hash != roothash {
             return self.fail("its manifest's root hash isn't the one on its command line");
         }
-        let image = self.layout.image(&slot);
-        let size = fs::metadata(&image).map(|m| m.len());
-        match size {
-            Err(_) => return self.fail(&format!("no image {}", image.display())),
-            Ok(size) if size != manifest.image_size => {
+        let image = match &self.layout.ubi {
+            Some(ubi) => PathBuf::from(format!("{}:{}", ubi.device, ubi::image_volume(&slot))),
+            None => self.layout.image(&slot),
+        };
+        match self.layout.image_size(&slot) {
+            None => return self.fail(&format!("no image {}", image.display())),
+            Some(size) if size != manifest.image_size => {
                 return self.fail(&format!(
                     "the image is {size} bytes, its manifest says {}: damaged or cut short",
                     manifest.image_size
                 ));
             }
-            Ok(_) => {}
+            Some(_) => {}
         }
         let release = fs::read_to_string(self.env.at("proc/sys/kernel/osrelease"))
             .map(|s| s.trim().to_string())
@@ -495,6 +576,18 @@ impl Boot<'_> {
                 self.log(&format!("{module}: {error}"));
             }
         }
+        let image = match &self.layout.ubi {
+            Some(ubi) => match self.ops.ubi_block(ubi, &ubi::image_volume(&slot)) {
+                Ok(node) => node,
+                Err(error) => {
+                    return self.fail(&format!(
+                        "no block device over {}: {error}",
+                        image.display()
+                    ));
+                }
+            },
+            None => image,
+        };
         let dm = match self.ops.open_verity(&image, "slot", &manifest.verity) {
             Ok(dm) => dm,
             Err(error) => return self.fail(&format!("dm-verity refused the image: {error}")),
