@@ -11,7 +11,13 @@
 //! takes one. Settings, from the device's `config`:
 //!
 //! - `path` (required): the target, a block device such as `/dev/mmcblk0`.
-//! - `kind`: `"block"` by default; `"file"` for a regular file, for tests and dev boards only.
+//! - `kind`: `"block"` by default; `"file"` for a regular file, for tests and dev boards only;
+//!   `"mtd"` for a raw NAND partition (`/dev/mtdN`), written in erase blocks (see `nand`).
+//! - `image` (mtd only): `"raw"` by default, a linear partition image, or `"ubi"`, a UBI image of
+//!   whole erase blocks. The board's format string is then `mtd-raw` or `mtd-ubi`.
+//! - `mark_bad` (mtd only): `false` by default; when true, an erase or write failure marks its block bad.
+//! - `sysfs` (mtd only): the sysfs root (`/sys`), and `erase_size`, `write_size`, `subpage_size`,
+//!   `bad_blocks` (a file of erase-block indices) and `mtd_index` are test overrides for a regular-file target.
 //! - `allow_first_flash`: `false` by default. A write is refused unless it is `true`. Only a
 //!   flasher's board file sets it.
 //! - `max_dict_mb`: 8 by default (1 to 8, the ceiling): the largest xz dictionary a stream may
@@ -47,6 +53,7 @@
 pub mod crc;
 pub mod lzma;
 pub mod manifest;
+pub mod nand;
 pub mod target;
 pub mod xz;
 
@@ -63,6 +70,7 @@ use lemnos_slot_store::json::quoted;
 use sha2::{Digest, Sha256};
 
 use manifest::{Manifest, Outcome, RECORD_LEN, TrustedKey};
+use nand::{Chip, Geometry, Image};
 use target::{Found, Kind};
 use xz::Decoder;
 
@@ -86,12 +94,54 @@ struct Accepted {
 enum Work {
     Write(Box<Writer>),
     Verify(Checker),
+    Nand(Box<nand::Verifier>),
+}
+
+/// The raw NAND settings of a `kind = "mtd"` target.
+#[derive(Debug, Clone)]
+struct Mtd {
+    image: Image,
+    mark_bad: bool,
+    sysfs: std::path::PathBuf,
+    /// The test overrides, when the target is a regular file standing in for the partition.
+    fake: Option<FakeNand>,
+}
+
+/// A stand-in partition: its geometry and bad blocks are given, not read from sysfs.
+#[derive(Debug, Clone)]
+struct FakeNand {
+    erase: u64,
+    write: u64,
+    subpage: u64,
+    bad: Option<std::path::PathBuf>,
+    index: Option<u32>,
+}
+
+/// Where a write's bytes go: the target file, or a NAND partition's sink.
+enum Out {
+    File(File),
+    Nand(Box<nand::Sink>),
+}
+
+/// A write that finished: its byte count, the hash its target must hold (the image's own, or for
+/// UBI the hash of the image as written, with the erase counts carried), and the ECC corrections.
+struct Finished {
+    bytes: u64,
+    expect: [u8; 32],
+    corrected: u64,
+}
+
+/// The image a write finished with, and the hash `verify` checks the target against.
+#[derive(Debug, Clone)]
+struct Written {
+    manifest: Manifest,
+    expect: [u8; 32],
 }
 
 /// The write job's state: the decoder (for xz), the target and the hash of what is written.
 struct Writer {
     decoder: Option<Decoder>,
-    file: File,
+    out: Out,
     manifest: Manifest,
     written: u64,
     hasher: Sha256,
@@ -152,10 +202,20 @@ impl Writer {
             self.refused = Some("the stream holds more than the manifest's image size".into());
             return Err(Status::INVALID_ARGUMENT);
         }
-        if let Err(error) = self.file.write_all_at(bytes, self.written) {
-            let (status, sentence) = io_failure(&error, "the target can't be written");
-            self.refused = Some(sentence);
-            return Err(status);
+        match &mut self.out {
+            Out::File(file) => {
+                if let Err(error) = file.write_all_at(bytes, self.written) {
+                    let (status, sentence) = io_failure(&error, "the target can't be written");
+                    self.refused = Some(sentence);
+                    return Err(status);
+                }
+            }
+            Out::Nand(sink) => {
+                if let Err((status, sentence)) = sink.push(bytes) {
+                    self.refused = Some(sentence);
+                    return Err(status);
+                }
+            }
         }
         self.hasher.update(bytes);
         self.written += bytes.len() as u64;
@@ -197,6 +257,10 @@ pub struct SystemFlash {
     shown: Option<(&'static str, u16)>,
     path: std::path::PathBuf,
     kind: Kind,
+    /// The raw NAND settings, when the target is a `mtd` partition.
+    mtd: Option<Mtd>,
+    /// The board's own format string: `disk`, `mtd-raw` or `mtd-ubi`. The signed message uses it.
+    format: &'static str,
     allow_first_flash: bool,
     max_dict: u64,
     board_id: String,
@@ -205,8 +269,10 @@ pub struct SystemFlash {
     mountinfo: std::path::PathBuf,
     /// The manifest the next write uses.
     manifest: Option<Accepted>,
-    /// The manifest of the last write that finished: what `verify` checks the target against.
-    written: Option<Manifest>,
+    /// The image of the last write that finished: what `verify` checks the target against.
+    written: Option<Written>,
+    /// The ECC corrections counted by the last NAND write or verify.
+    corrected: u64,
     /// The last manifest call's outcome (`""` before any call), and its reason.
     last_signed: &'static str,
     last_reason: String,
@@ -227,30 +293,119 @@ impl SystemFlash {
     }
 
     /// Why the target can't take a write now, or `None` when it can. The running-system check
-    /// reads the mount table; a table that can't be read refuses the write.
+    /// reads the mount table, for the target's device and, for NAND, its `mtdblock` device and the
+    /// UBI volumes attached from it; a table that can't be read refuses the write.
     fn unwritable(&self, found: &Found) -> Option<String> {
         if !self.allow_first_flash {
             return Some(
                 "allow_first_flash is not set: only a flasher's board file sets it".into(),
             );
         }
-        match fs::read_to_string(&self.mountinfo) {
-            Ok(table) => {
-                let on =
-                    target::mounted_on(&table, target::major_minor(found.dev), &target::sysfs_disk);
-                on.map(|mount| {
-                    format!("the target holds the running system: {mount} is mounted from it")
-                })
+        let table = match fs::read_to_string(&self.mountinfo) {
+            Ok(table) => table,
+            Err(error) => {
+                return Some(format!(
+                    "the mount table can't be read, so the running system can't be checked: {error}"
+                ));
             }
-            Err(error) => Some(format!(
-                "the mount table can't be read, so the running system can't be checked: {error}"
-            )),
+        };
+        let mut devices = vec![target::major_minor(found.dev)];
+        if let (Some(mtd), Some(index)) = (self.mtd.as_ref(), self.mtd_index()) {
+            devices.extend(target::mtd_devices(&mtd.sysfs, index));
+        }
+        devices
+            .into_iter()
+            .find_map(|dev| target::mounted_on(&table, dev, &target::sysfs_disk))
+            .map(|mount| format!("the target holds the running system: {mount} is mounted from it"))
+    }
+
+    /// The target as it is now, or the reason it isn't there. A test target for NAND is a regular file.
+    fn target(&self) -> std::result::Result<Found, String> {
+        target::find(&self.path, self.find_kind())
+    }
+
+    /// The kind `find` checks the target as: a NAND stand-in is a regular file.
+    fn find_kind(&self) -> Kind {
+        match &self.mtd {
+            Some(Mtd { fake: Some(_), .. }) => Kind::File,
+            _ => self.kind,
         }
     }
 
-    /// The target as it is now, or the reason it isn't there.
-    fn target(&self) -> std::result::Result<Found, String> {
-        target::find(&self.path, self.kind)
+    /// The MTD index of the partition: from its `/dev/mtdN` path, or the test's `mtd_index`.
+    fn mtd_index(&self) -> Option<u32> {
+        match &self.mtd.as_ref()?.fake {
+            Some(fake) => fake.index,
+            None => nand::index_of(&self.path).ok(),
+        }
+    }
+
+    /// The NAND geometry of the target: from its sysfs node, or the test's overrides.
+    fn mtd_geometry(&self, found: &Found) -> std::result::Result<Geometry, String> {
+        let mtd = self
+            .mtd
+            .as_ref()
+            .ok_or("the target is not a NAND partition")?;
+        match &mtd.fake {
+            Some(fake) => Ok(Geometry {
+                erase: fake.erase,
+                write: fake.write,
+                subpage: fake.subpage,
+                size: found.size,
+                oob: 0,
+            }),
+            None => nand::sysfs_geometry(&mtd.sysfs, nand::index_of(&self.path)?),
+        }
+    }
+
+    /// The target opened as a NAND chip: the character device, or a stand-in with its bad blocks.
+    fn open_chip(&self, found: &Found, write: bool) -> std::result::Result<Box<dyn Chip>, String> {
+        let file = target::open(found, write)
+            .map_err(|error| format!("the target can't be opened: {error}"))?;
+        let mtd = self
+            .mtd
+            .as_ref()
+            .ok_or("the target is not a NAND partition")?;
+        match &mtd.fake {
+            None => Ok(Box::new(nand::Device::new(file))),
+            Some(fake) => {
+                let bad = match &fake.bad {
+                    None => Vec::new(),
+                    Some(path) => {
+                        let text = fs::read_to_string(path)
+                            .map_err(|e| format!("the bad blocks file can't be read: {e}"))?;
+                        text.split_whitespace()
+                            .map(|t| t.parse::<u64>())
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .map_err(|_| {
+                                "the bad blocks file is not erase-block indices".to_string()
+                            })?
+                    }
+                };
+                Ok(Box::new(nand::Fake::new(file, fake.erase, bad)))
+            }
+        }
+    }
+
+    /// The NAND writer for a write of `image_size` bytes: the plan is made here, before any erase,
+    /// and refuses by name.
+    fn nand_out(
+        &self,
+        found: &Found,
+        image_size: u64,
+    ) -> std::result::Result<Out, (Status, String)> {
+        let mtd = self.mtd.as_ref().ok_or((
+            Status::INVALID_ARGUMENT,
+            "the target is not a NAND partition".to_string(),
+        ))?;
+        let geometry = self
+            .mtd_geometry(found)
+            .map_err(|why| (Status::INVALID_ARGUMENT, why))?;
+        let mut chip = self
+            .open_chip(found, true)
+            .map_err(|why| (Status::IO, why))?;
+        let plan = nand::Plan::new(chip.as_mut(), geometry, mtd.image, image_size, mtd.mark_bad)?;
+        Ok(Out::Nand(Box::new(nand::Sink::new(chip, plan))))
     }
 
     /// Ends the running job with `end` and records the state.
@@ -325,8 +480,9 @@ impl SystemFlash {
     }
 
     /// The stream is all taken: the decoder must have ended cleanly, the image must be the size and
-    /// hash the manifest gives, the file's record must be the one given, and the target is synced.
-    fn finish_write(writer: &mut Writer) -> std::result::Result<u64, (Status, String)> {
+    /// hash the manifest gives, the file's record must be the one given, and the target is finished
+    /// (synced, or its last erase blocks written and checked).
+    fn finish_write(writer: &mut Writer) -> std::result::Result<Finished, (Status, String)> {
         if let Some(mut decoder) = writer.decoder.take() {
             decoder.finish().map_err(|e| (e.status(), e.sentence()))?;
             writer.streams = decoder.streams();
@@ -348,17 +504,35 @@ impl SystemFlash {
                 "the image's SHA-256 is not the manifest's".to_string(),
             ));
         }
-        writer
-            .file
-            .sync_all()
-            .map_err(|e| io_failure(&e, "the target can't be synced"))?;
-        Ok(writer.written)
+        let bytes = writer.written;
+        match &mut writer.out {
+            Out::File(file) => {
+                file.sync_all()
+                    .map_err(|e| io_failure(&e, "the target can't be synced"))?;
+                Ok(Finished {
+                    bytes,
+                    expect: writer.manifest.sha256,
+                    corrected: 0,
+                })
+            }
+            Out::Nand(sink) => {
+                let (expect, corrected) = sink.finish()?;
+                Ok(Finished {
+                    bytes,
+                    expect,
+                    corrected,
+                })
+            }
+        }
     }
 
     /// The write's last piece is in: the stream and the image are checked (`finish_write`).
     fn finish_job_write(
         &mut self,
-    ) -> (std::result::Result<u64, (Status, String)>, Option<Manifest>) {
+    ) -> (
+        std::result::Result<Finished, (Status, String)>,
+        Option<Manifest>,
+    ) {
         let Some(job) = self.job.as_mut() else {
             return (Err((Status::NOT_FOUND, String::new())), None);
         };
@@ -372,15 +546,19 @@ impl SystemFlash {
     /// Ends the write with what `finish_job_write` found.
     fn conclude_write(
         &mut self,
-        end: std::result::Result<u64, (Status, String)>,
+        end: std::result::Result<Finished, (Status, String)>,
         manifest: Option<Manifest>,
     ) -> Result<()> {
         match (end, manifest) {
-            (Ok(written), Some(manifest)) => {
-                self.written = Some(manifest);
+            (Ok(done), Some(manifest)) => {
+                self.corrected = done.corrected;
+                self.written = Some(Written {
+                    manifest,
+                    expect: done.expect,
+                });
                 self.error.clear();
                 self.note_partition_table();
-                self.end_job(Ok(written), "written");
+                self.end_job(Ok(done.bytes), "written");
                 Ok(())
             }
             (Err((status, sentence)), _) => {
@@ -391,10 +569,16 @@ impl SystemFlash {
         }
     }
 
-    /// Advances a verify job by one chunk. True while it has more to read.
+    /// Advances a verify job by one chunk (or one erase block of a NAND target). True while it has
+    /// more to read.
     fn verify_step(&mut self) -> bool {
-        // The chunk is read and hashed under one borrow of the job; how it ends is decided after
-        // it, when the job is no longer borrowed.
+        // The step is decided under one borrow of the job; how it ends is decided after it, when the
+        // job is no longer borrowed.
+        enum Step {
+            More,
+            Done { bytes: u64, corrected: u64 },
+            Failed(Status, String),
+        }
         let step = {
             let Some(job) = self.job.as_mut() else {
                 return false;
@@ -402,41 +586,72 @@ impl SystemFlash {
             if job.end.is_some() {
                 return false;
             }
-            let Work::Verify(checker) = &mut job.work else {
-                return false;
-            };
-            let want = (checker.image_size - checker.read).min(CHUNK as u64) as usize;
-            match checker.file.read_at(&mut checker.buf[..want], checker.read) {
-                Ok(0) => Err((
-                    Status::IO,
-                    "the target ends before the image does".to_string(),
-                )),
-                Ok(n) => {
-                    checker.hasher.update(&checker.buf[..n]);
-                    checker.read += n as u64;
-                    job.got = checker.read;
-                    if checker.read < checker.image_size {
-                        return true;
+            let size = job.size;
+            match &mut job.work {
+                Work::Write(_) => return false,
+                Work::Nand(verifier) => match verifier.step() {
+                    Ok(true) => {
+                        job.got = verifier.progress().0;
+                        Step::More
                     }
-                    let digest = checker.hasher.clone().finalize();
-                    if digest.as_slice() == checker.expect {
-                        Ok(Ok(checker.image_size))
-                    } else {
-                        Err((
-                            Status::INVALID_ARGUMENT,
-                            "the target does not hold the image: its SHA-256 is not the manifest's"
-                                .to_string(),
-                        ))
+                    Ok(false) => {
+                        job.got = size;
+                        Step::Done {
+                            bytes: size,
+                            corrected: verifier.corrected,
+                        }
+                    }
+                    Err((status, sentence)) => Step::Failed(status, sentence),
+                },
+                Work::Verify(checker) => {
+                    let want = (checker.image_size - checker.read).min(CHUNK as u64) as usize;
+                    match checker.file.read_at(&mut checker.buf[..want], checker.read) {
+                        Ok(0) => Step::Failed(
+                            Status::IO,
+                            "the target ends before the image does".to_string(),
+                        ),
+                        Ok(n) => {
+                            checker.hasher.update(&checker.buf[..n]);
+                            checker.read += n as u64;
+                            job.got = checker.read;
+                            if checker.read < checker.image_size {
+                                Step::More
+                            } else {
+                                let digest = checker.hasher.clone().finalize();
+                                if digest.as_slice() == checker.expect {
+                                    Step::Done {
+                                        bytes: checker.image_size,
+                                        corrected: 0,
+                                    }
+                                } else {
+                                    Step::Failed(
+                                        Status::INVALID_ARGUMENT,
+                                        "the target does not hold the image: its SHA-256 is not the manifest's"
+                                            .to_string(),
+                                    )
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let (status, sentence) = io_failure(&error, "the target can't be read");
+                            Step::Failed(status, sentence)
+                        }
                     }
                 }
-                Err(error) => Err(io_failure(&error, "the target can't be read")),
             }
         };
         match step {
-            Ok(Ok(bytes)) => self.end_job(Ok(bytes), "verified"),
-            Ok(Err(refused)) | Err(refused) => self.end_job(Err(refused), "failed"),
+            Step::More => true,
+            Step::Done { bytes, corrected } => {
+                self.corrected = corrected;
+                self.end_job(Ok(bytes), "verified");
+                false
+            }
+            Step::Failed(status, sentence) => {
+                self.end_job(Err((status, sentence)), "failed");
+                false
+            }
         }
-        false
     }
 }
 
@@ -456,6 +671,49 @@ fn io_failure(error: &io::Error, what: &str) -> (Status, String) {
     (Status::IO, format!("{what}: {error}"))
 }
 
+impl Mtd {
+    /// The NAND settings of a `kind = "mtd"` board file. The test overrides (`erase_size` and the
+    /// rest) make the target a regular file standing in for the partition.
+    fn from_config(cfg: &Config<'_>) -> Result<Self> {
+        let image = match cfg.str("image") {
+            None => Image::Raw,
+            Some(text) => Image::parse(text).ok_or(Status::INVALID_ARGUMENT)?,
+        };
+        let positive = |n: i64| {
+            u64::try_from(n)
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(Status::INVALID_ARGUMENT)
+        };
+        let fake = match cfg.int("erase_size") {
+            None => None,
+            Some(erase) => {
+                let write = positive(cfg.int("write_size").unwrap_or(2048))?;
+                let subpage = match cfg.int("subpage_size") {
+                    None => write,
+                    Some(sub) => positive(sub)?,
+                };
+                Some(FakeNand {
+                    erase: positive(erase)?,
+                    write,
+                    subpage,
+                    bad: cfg.str("bad_blocks").map(Into::into),
+                    index: match cfg.int("mtd_index") {
+                        None => None,
+                        Some(n) => Some(u32::try_from(n).map_err(|_| Status::INVALID_ARGUMENT)?),
+                    },
+                })
+            }
+        };
+        Ok(Self {
+            image,
+            mark_bad: cfg.bool("mark_bad").unwrap_or(false),
+            sysfs: cfg.str("sysfs").unwrap_or("/sys").into(),
+            fake,
+        })
+    }
+}
+
 impl Lifecycle for SystemFlash {
     type Needs = SystemFlashNeeds;
     const TRACKS_CALLERS: bool = true;
@@ -466,6 +724,12 @@ impl Lifecycle for SystemFlash {
         let path = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
         let kind =
             Kind::parse(cfg.str("kind").unwrap_or("block")).ok_or(Status::INVALID_ARGUMENT)?;
+        let mtd = match kind {
+            Kind::Mtd => Some(Mtd::from_config(cfg)?),
+            _ if cfg.str("image").is_some() => return Err(Status::INVALID_ARGUMENT),
+            _ => None,
+        };
+        let format = mtd.as_ref().map_or(manifest::DISK, |m| m.image.format());
         let max_mb = cfg.int("max_dict_mb").unwrap_or(8);
         if !(1..=8).contains(&max_mb) {
             return Err(Status::INVALID_ARGUMENT);
@@ -481,6 +745,8 @@ impl Lifecycle for SystemFlash {
             shown: None,
             path: path.into(),
             kind,
+            mtd,
+            format,
             allow_first_flash: cfg.bool("allow_first_flash").unwrap_or(false),
             max_dict: (max_mb as u64) << 20,
             board_id: cfg.board().to_string(),
@@ -492,6 +758,7 @@ impl Lifecycle for SystemFlash {
                 .into(),
             manifest: None,
             written: None,
+            corrected: 0,
             last_signed: "",
             last_reason: String::new(),
             state: "idle",
@@ -566,6 +833,37 @@ impl Lifecycle for SystemFlash {
     }
 }
 
+impl SystemFlash {
+    /// The NAND fields of `info`: the image kind, the erase block, the bad blocks, the good blocks
+    /// the image needs and the ones the target has, and the ECC corrections counted.
+    fn nand_fields(&self, found: &std::result::Result<Found, String>) -> String {
+        let (mut erase, mut bad, mut available) = (0, 0, 0);
+        if let Ok(found) = found
+            && self.mtd.is_some()
+            && let Ok(geometry) = self.mtd_geometry(found)
+        {
+            erase = geometry.erase;
+            if let Ok(mut chip) = self.open_chip(found, false)
+                && let Ok(good) = nand::good_blocks(chip.as_mut(), &geometry)
+            {
+                available = good.len() as u64;
+                bad = geometry.blocks() - available;
+            }
+        }
+        let image_size = self.manifest.as_ref().map_or(0, |a| a.manifest.image_size);
+        let needed = if erase == 0 {
+            0
+        } else {
+            image_size.div_ceil(erase)
+        };
+        let image = self.mtd.as_ref().map_or("raw", |m| m.image.word());
+        format!(
+            ",\"image\":\"{image}\",\"erase_size\":{erase},\"bad_blocks\":{bad},\"needed\":{needed},\"available\":{available},\"corrected_bits\":{}",
+            self.corrected
+        )
+    }
+}
+
 impl Flash for SystemFlash {
     fn info(&mut self, into: &mut [u8]) -> Result<usize> {
         let found = self.target();
@@ -616,11 +914,15 @@ impl Flash for SystemFlash {
         quoted(&self.last_reason, &mut out);
         out.push('}');
         out.push_str(&format!(
-            ",\"allow_first_flash\":{},\"require_signed\":{},\"max_dict_mb\":{}}}",
+            ",\"allow_first_flash\":{},\"require_signed\":{},\"max_dict_mb\":{}",
             self.allow_first_flash,
             self.require_signed,
             self.max_dict >> 20
         ));
+        if self.kind == Kind::Mtd {
+            out.push_str(&self.nand_fields(&found));
+        }
+        out.push('}');
         let bytes = out.as_bytes();
         let slot = into
             .get_mut(..bytes.len())
@@ -640,7 +942,7 @@ impl Flash for SystemFlash {
             }
         };
         // The board is checked first, and nothing about the signature is looked at for another one.
-        let (parsed, field) = match manifest::parse(text, &self.board_id) {
+        let (parsed, field) = match manifest::parse_for(text, &self.board_id, self.format) {
             Ok(parsed) => parsed,
             Err((status, sentence)) => return Err(self.reject(status, sentence, "")),
         };
@@ -712,12 +1014,19 @@ impl Flash for SystemFlash {
             );
             return Err(self.refuse(NO_SPACE, sentence));
         }
-        let file = match target::open(&found, true) {
-            Ok(file) => file,
-            Err(error) => {
-                let (status, sentence) =
-                    io_failure(&error, "the target can't be opened for writing");
-                return Err(self.refuse(status, sentence));
+        let out = if self.kind == Kind::Mtd {
+            match self.nand_out(&found, manifest.image_size) {
+                Ok(out) => out,
+                Err((status, sentence)) => return Err(self.refuse(status, sentence)),
+            }
+        } else {
+            match target::open(&found, true) {
+                Ok(file) => Out::File(file),
+                Err(error) => {
+                    let (status, sentence) =
+                        io_failure(&error, "the target can't be opened for writing");
+                    return Err(self.refuse(status, sentence));
+                }
             }
         };
         self.next_job += 1;
@@ -728,7 +1037,7 @@ impl Flash for SystemFlash {
             starter: self.calling,
             work: Work::Write(Box::new(Writer {
                 decoder,
-                file,
+                out,
                 manifest,
                 written: 0,
                 hasher: Sha256::new(),
@@ -831,28 +1140,46 @@ impl Flash for SystemFlash {
             Ok(found) => found,
             Err(sentence) => return Err(self.refuse(Status::NO_DEVICE, sentence)),
         };
-        let file = match target::open(&found, false) {
-            Ok(file) => file,
-            Err(error) => {
-                let (status, sentence) = io_failure(&error, "the target can't be opened");
-                return Err(self.refuse(status, sentence));
+        let image_size = written.manifest.image_size;
+        let work = if self.kind == Kind::Mtd {
+            let made = self
+                .mtd_geometry(&found)
+                .map_err(|why| (Status::INVALID_ARGUMENT, why))
+                .and_then(|geometry| {
+                    let chip = self
+                        .open_chip(&found, false)
+                        .map_err(|why| (Status::IO, why))?;
+                    nand::Verifier::new(chip, geometry, image_size, written.expect)
+                });
+            match made {
+                Ok(verifier) => Work::Nand(Box::new(verifier)),
+                Err((status, sentence)) => return Err(self.refuse(status, sentence)),
             }
+        } else {
+            let file = match target::open(&found, false) {
+                Ok(file) => file,
+                Err(error) => {
+                    let (status, sentence) = io_failure(&error, "the target can't be opened");
+                    return Err(self.refuse(status, sentence));
+                }
+            };
+            Work::Verify(Checker {
+                file,
+                buf: vec![0; CHUNK],
+                read: 0,
+                hasher: Sha256::new(),
+                expect: written.expect,
+                image_size,
+            })
         };
         self.next_job += 1;
         let id = JobId(self.next_job);
         self.job = Some(Job {
             id,
             starter: self.calling,
-            work: Work::Verify(Checker {
-                file,
-                buf: vec![0; CHUNK],
-                read: 0,
-                hasher: Sha256::new(),
-                expect: written.sha256,
-                image_size: written.image_size,
-            }),
+            work,
             code: 0,
-            size: written.image_size,
+            size: image_size,
             got: 0,
             end: None,
         });

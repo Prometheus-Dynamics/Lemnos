@@ -20,6 +20,8 @@ pub enum Kind {
     Block,
     /// A regular file: for tests and dev boards only, named `kind = "file"` in the board file.
     File,
+    /// An MTD character device (`/dev/mtdN`): raw NAND, written in erase blocks (see `nand`).
+    Mtd,
 }
 
 impl Kind {
@@ -27,6 +29,7 @@ impl Kind {
         match text {
             "block" => Some(Self::Block),
             "file" => Some(Self::File),
+            "mtd" => Some(Self::Mtd),
             _ => None,
         }
     }
@@ -35,6 +38,7 @@ impl Kind {
         match self {
             Self::Block => "block",
             Self::File => "file",
+            Self::Mtd => "mtd",
         }
     }
 }
@@ -62,6 +66,7 @@ pub fn find(path: &Path, kind: Kind) -> Result<Found, Unusable> {
         .map_err(|e| format!("the target {} is not there: {e}", path.display()))?;
     let (is_kind, dev) = match kind {
         Kind::Block => (meta.file_type().is_block_device(), meta.rdev()),
+        Kind::Mtd => (meta.file_type().is_char_device(), meta.rdev()),
         Kind::File => (meta.file_type().is_file(), meta.dev()),
     };
     if !is_kind {
@@ -73,7 +78,7 @@ pub fn find(path: &Path, kind: Kind) -> Result<Found, Unusable> {
     }
     let size = match kind {
         Kind::File => meta.len(),
-        Kind::Block => {
+        Kind::Block | Kind::Mtd => {
             let mut file =
                 File::open(path).map_err(|e| format!("the target can't be opened: {e}"))?;
             io::Seek::seek(&mut file, io::SeekFrom::End(0))
@@ -138,6 +143,53 @@ pub fn mounted_on(
     None
 }
 
+/// The device numbers the running system could be on, for the partition with MTD index `index`:
+/// its `mtdblock` device, and the UBI volumes attached from it (`/class/ubi/ubiN` with `mtd_num`
+/// equal to `index`, and their `ubiN_M` volumes, whose `dev` file gives the number).
+pub fn mtd_devices(sysroot: &Path, index: u32) -> Vec<(u32, u32)> {
+    let mut devices = vec![(MTDBLOCK_MAJOR, index)];
+    let ubi = sysroot.join("class").join("ubi");
+    let Ok(entries) = fs::read_dir(&ubi) else {
+        return devices;
+    };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    for device in names.iter().filter(|n| is_ubi_device(n)) {
+        let mtd = fs::read_to_string(ubi.join(device).join("mtd_num"))
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok());
+        if mtd != Some(index) {
+            continue;
+        }
+        for volume in names
+            .iter()
+            .filter(|n| n.starts_with(&format!("{device}_")))
+        {
+            let dev = fs::read_to_string(ubi.join(volume).join("dev")).ok();
+            if let Some(pair) = dev.as_deref().and_then(parse_dev) {
+                devices.push(pair);
+            }
+        }
+    }
+    devices
+}
+
+/// The major of `mtdblock` devices.
+pub const MTDBLOCK_MAJOR: u32 = 31;
+
+/// Whether `name` is a UBI device (`ubiN`, not a volume `ubiN_M`).
+fn is_ubi_device(name: &str) -> bool {
+    name.strip_prefix("ubi")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `major:minor`, as a sysfs `dev` file holds it.
+fn parse_dev(text: &str) -> Option<(u32, u32)> {
+    let (major, minor) = text.trim().split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
 /// The whole disk a partition belongs to, read from sysfs, or `None` for a whole disk.
 pub fn sysfs_disk((major, minor): (u32, u32)) -> Option<(u32, u32)> {
     let dir = format!("/sys/dev/block/{major}:{minor}");
@@ -145,8 +197,7 @@ pub fn sysfs_disk((major, minor): (u32, u32)) -> Option<(u32, u32)> {
         return None;
     }
     let text = fs::read_to_string(Path::new(&dir).join("..").join("dev")).ok()?;
-    let (major, minor) = text.trim().split_once(':')?;
-    Some((major.parse().ok()?, minor.parse().ok()?))
+    parse_dev(&text)
 }
 
 /// Whether the target's first 4 KiB hold anything but zeros (what `info` reports as `holds_data`).
@@ -205,6 +256,22 @@ mod tests {
             Some("/"),
             "the running root"
         );
+    }
+
+    #[test]
+    fn the_devices_of_an_mtd_partition_include_its_ubi_volumes() {
+        let root = std::env::temp_dir().join(format!("lemnos-flash-sysfs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let class = root.join("class");
+        fs::create_dir_all(class.join("ubi/ubi0_1")).unwrap();
+        fs::create_dir_all(class.join("ubi/ubi0")).unwrap();
+        fs::create_dir_all(class.join("ubi/ubi1")).unwrap();
+        fs::write(class.join("ubi/ubi0/mtd_num"), "4\n").unwrap();
+        fs::write(class.join("ubi/ubi1/mtd_num"), "5\n").unwrap();
+        fs::write(class.join("ubi/ubi0_1/dev"), "254:3\n").unwrap();
+        let devices = mtd_devices(&root, 4);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(devices, vec![(31, 4), (254, 3)]);
     }
 
     #[test]

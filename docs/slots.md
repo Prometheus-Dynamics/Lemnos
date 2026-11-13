@@ -560,7 +560,8 @@ writes them and invents none of them.
 
 Settings (`system-flash`'s `config`): `path` (the one target, a block device: the only place a path
 comes from), `allow_first_flash` (`false` by default: a write is refused unless it is `true`, which
-only a flasher's board file sets), `kind` (`block`, or `file` for a regular file in tests),
+only a flasher's board file sets), `kind` (`block`, `file` for a regular file in tests, or `mtd`
+for a raw NAND partition: see "Raw NAND" below),
 `max_dict_mb` (8 by default; 1 to 8, the ceiling: a board file may lower it, never raise it),
 `keys` (the trusted keys: one per line, 64 hex digits, a space, then the owner), `require_signed`
 (`false` by default: the policy table below), and `mountinfo` (the mount table the running-system
@@ -712,10 +713,42 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
 
 A push that breaks is begun again from zero; a streamed image is not resumed.
 
+### Raw NAND
+
+`kind = "mtd"`: `path` is `/dev/mtdN`, one driver per MTD partition, and a method never takes a
+device path. The board file also sets `image` (`"raw"` by default: a linear partition image; or
+`"ubi"`: a UBI image of whole erase blocks), and `mark_bad` (`false` by default: when true, a block
+whose erase or write fails is marked bad in the chip's table; a wrongly marked block is permanent).
+The board's format string, which the signed message is built from, is `mtd-ubi` or `mtd-raw`; a
+manifest's `format` must equal it, else it is refused by name (`NOT_SUPPORTED`). The `write`
+format argument is still the compression (1 xz, 0 raw).
+
+- Geometry (erase block, write unit, sub-page, size) is read from `/sys/class/mtd/mtdN`. Erase
+  blocks up to 8 MiB, write units up to 64 KiB.
+- Image erase block `i` goes to the `i`-th good erase block; bad blocks come from the chip
+  (`MEMGETBADBLOCK`). An image that needs more good blocks than the chip has is refused with
+  `NO_SPACE` before any erase.
+- UBI: each image block must carry a valid erase-counter header (magic `UBI#`, version 1, the
+  header CRC), with the VID and data offsets for the target's sub-page and page sizes. A header
+  for another size is refused by name. The first block is checked before anything is erased; each
+  later block is checked before its own erase. A target block with a valid header keeps its count:
+  it is carried forward (+1, the CRC recomputed). A block with no valid header takes the mean of
+  the counts seen on the chip, or the image's own count on a blank chip. Good blocks the image does
+  not cover are erased at the end, so no stale volume survives on them for UBI to attach.
+- Raw: linear, the last page padded with 0xFF. UBI: trailing erased pages of a block are not
+  written, so UBI sees them as free.
+- Each good block is erased right before its bytes are written, written page by page, and read
+  back in full: ECC-corrected bit flips are counted (`corrected_bits` in `info`); an uncorrectable
+  read, or a page that differs, fails the job by name, as does a failed erase or write.
+- Running-system check: the partition's `mtdblock` device and any UBI volume attached from it
+  (`/sys/class/ubi/ubiN` with `mtd_num`, and its volumes' `dev`) are looked up in the mount table.
+- A cut or a cancel leaves the target undefined. A re-run erases and writes from the first good
+  block; nothing is kept across a restart.
+- Memory: the write holds one erase block and one page beyond the decoder's bound.
+
 ### Not delivered
 
-- **Raw NAND (MTD and UBI) first flash.** `kind = "mtd"` and `"ubi"` are refused `-95`. Its design is
-  in the brief (W1b).
+- A UBI attach of the written partition on a board was not run (see `testing/board-runs/W1b.md`).
 
 ### After the write
 

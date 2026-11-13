@@ -237,3 +237,17 @@ fn the_decoder_stays_bounded_over_a_two_stream_file() {
     assert_eq!(record, data("vector-record.bin"));
     assert!(peak <= (8 << 20) + (256 << 10), "peak {peak} bytes");
 }
+
+#[test]
+fn the_signed_and_unsigned_builder_files_decode_in_the_builders_piece_sizes() {
+    // The image builders' files (signed.img.xz: image and record; small.img.xz: unsigned) must decode
+    // to the same bytes whether they arrive in 1-, 7-, 4096-byte or whole pieces.
+    let small = data("small.img");
+    for piece in [1, 7, 4096, usize::MAX] {
+        let (image, record) = decode_both(&data("signed.img.xz"), piece, EIGHT_MIB).unwrap();
+        assert_eq!(image, small, "signed image at {piece}");
+        assert_eq!(record.len(), 108, "signed record at {piece}");
+        let unsigned = decode(&data("crc64.img.xz"), piece, EIGHT_MIB).unwrap();
+        assert_eq!(unsigned, small, "unsigned image at {piece}");
+    }
+}
