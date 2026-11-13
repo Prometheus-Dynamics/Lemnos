@@ -1,20 +1,12 @@
 //! A board's identity facts (`docs/identity.md`): the values the daemon's `system.identity/1`
-//! serves and the bridge publishes as `hello.<fact>`. A library: it ships no program.
+//! serves and the bridge publishes as `hello.<fact>`. A library: it ships no program and reads no
+//! files of a board. The driver that serves the facts reads them and hands them in as plain values.
 //!
-//! The board file says where the board's serial comes from ([`SerialSource`]); this library reads
-//! it from there, normalises it, and gathers the facts Lemnos owns: `family`, `serial` and `model`
-//! from the board file, and `version.slot`, `version.product` and `version.os` from the slot files
-//! on the data partition. `version.lemnos` and `offers` belong to the daemon, so the caller adds
-//! them with [`Facts::set`].
-//!
-//! Nothing here knows what a board is. A fact that cannot be known is absent, never guessed, and
-//! [`Gathered::notes`] says why.
+//! [`SerialSource`] says where a serial is read from; [`Facts`] holds each fact after its format is
+//! checked. A fact that cannot be known is never set, so it is absent.
 
-pub mod board;
 pub mod facts;
-pub mod json;
 pub mod serial;
 
-pub use board::{BoardFile, BoardSection, parse_board};
-pub use facts::{Facts, Gathered, MAX_FACTS, MAX_VALUE_BYTES, gather};
+pub use facts::{Facts, MAX_FACTS, MAX_VALUE_BYTES, NAMES};
 pub use serial::{ByteOrder, SerialError, SerialSource, normalise};

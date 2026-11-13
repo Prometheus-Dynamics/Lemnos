@@ -13,6 +13,7 @@ pub struct Config<'a> {
     entries: &'a [(&'a str, ConfigValue<'a>)],
     host_owned: bool,
     board: &'a str,
+    host_version: &'a str,
 }
 
 impl<'a> Config<'a> {
@@ -21,6 +22,7 @@ impl<'a> Config<'a> {
             entries,
             host_owned: false,
             board: "",
+            host_version: "",
         }
     }
 
@@ -35,6 +37,19 @@ impl<'a> Config<'a> {
     /// where nothing says (a driver package, or a test that sets none).
     pub const fn board(&self) -> &'a str {
         self.board
+    }
+
+    /// The same settings, with the daemon's own version: the `version.lemnos` identity fact.
+    #[must_use]
+    pub const fn on_host_version(mut self, version: &'a str) -> Self {
+        self.host_version = version;
+        self
+    }
+
+    /// The version of the daemon that runs this driver (its package version). Empty where the
+    /// host was started without one (a test, or a driver package on its own).
+    pub const fn host_version(&self) -> &'a str {
+        self.host_version
     }
 
     /// The same settings, for a device the board file gives to the host (`owner = "host"`).

@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-driver-system-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-identity = { path = "../../engine/identity" }
+lemnos-contract-system-identity = { path = "../../contracts/system-identity" }
+# The slot manifest parser (schema 3). Moves to lemnos-slot-store with I5d, same API.
+lemnos-driver-system-slots = { path = "../system-slots" }
+
+[package.metadata.lemnos]
+driver = "Identity"

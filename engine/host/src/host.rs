@@ -356,6 +356,8 @@ struct Rule {
 struct Inner {
     /// The board file's `[board] id`, given to every driver as it binds.
     board: String,
+    /// The daemon's package version, given to every driver as it binds.
+    daemon_version: &'static str,
     /// Devices are only ever added, so a device's index stays its own.
     slots: RwLock<Vec<Arc<Slot>>>,
     rules: Vec<Rule>,
@@ -1225,7 +1227,9 @@ impl Inner {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_value()))
                 .collect();
-            let config = Config::new(&entries).on_board(&self.board);
+            let config = Config::new(&entries)
+                .on_board(&self.board)
+                .on_host_version(self.daemon_version);
             let config = if guest {
                 config.for_host_owned()
             } else {
@@ -1584,6 +1588,20 @@ impl Host {
         options: Options,
         allocator: Arc<dyn StreamAllocator>,
     ) -> core::result::Result<Self, HostError> {
+        Self::start_versioned("", board, drivers, backend, clock, options, allocator)
+    }
+
+    /// [`Host::start_with_streams`] for a daemon: `daemon_version` is its package version, which
+    /// every driver is given as [`Config::host_version`] (the `version.lemnos` fact).
+    pub fn start_versioned(
+        daemon_version: &'static str,
+        board: &BoardFile,
+        drivers: &[DriverEntry],
+        backend: Box<dyn Provider + Send>,
+        clock: Arc<dyn HostClock>,
+        options: Options,
+        allocator: Arc<dyn StreamAllocator>,
+    ) -> core::result::Result<Self, HostError> {
         let options = board.host.apply(options);
         let order = bind_order(&board.devices)?;
         let table: BTreeMap<_, _> = drivers
@@ -1617,6 +1635,7 @@ impl Host {
         // `shutdown` lets every device go.
         let inner: &'static Inner = Box::leak(Box::new(Inner {
             board: board.board.id.clone(),
+            daemon_version,
             slots: RwLock::new(slots),
             rules,
             lanes: Mutex::new(HashMap::new()),

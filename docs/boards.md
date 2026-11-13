@@ -76,9 +76,9 @@ and a longer value is refused. There is no host-wide auto-off: only a device's o
 
 ## `[board]` identity
 
-The `[board]` table also names the board's identity: `name` and `revision` are the `model` fact, and
-`[board.serial]` says where the serial comes from. The table and the four source kinds are in
-[Identity facts](identity.md#board-file-syntax).
+`[board] id` is the board's family, and the driver `system-identity` reads the rest of the
+identity from its device's `config`: the serial source, the display name and the revision. See
+[Identity facts](identity.md#serial-source-settings).
 
 ## `bus` and `uses`
 

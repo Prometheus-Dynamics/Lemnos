@@ -185,7 +185,8 @@ impl Service {
         }
         listener.set_nonblocking(true).map_err(StartError::Socket)?;
         let clock = Arc::new(MonotonicClock::new());
-        let host = Host::start_with_streams(
+        let host = Host::start_versioned(
+            env!("CARGO_PKG_VERSION"),
             &config.board,
             &config.drivers,
             config.backend,
