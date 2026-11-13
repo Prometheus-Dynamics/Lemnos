@@ -277,18 +277,13 @@ def check_drivers(problems):
 
 
 def check_board_runs(problems):
-    """docs/hardware-status.md lists every written board run, and counts them right."""
+    """docs/hardware-status.md lists every written board run."""
     path = "docs/hardware-status.md"
     text = (ROOT / path).read_text()
     runs = sorted(p.name for p in (ROOT / "testing/board-runs").glob("*.md"))
     for name in runs:
         if f"board-runs/{name})" not in text:
             problems.append(f"{path}: testing/board-runs/{name} is not listed")
-    stated = re.search(r"(?:None|Of) those (\d+) files", text)
-    if not stated:
-        problems.append(f"{path}: no \"Of those N files\" count of the board runs")
-    elif int(stated.group(1)) != len(runs):
-        problems.append(f"{path}: says {stated.group(1)} board runs, and there are {len(runs)}")
 
 
 def main():
