@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backoff::Backoff;
 use crate::config::Config;
+use crate::stream::Streamer;
 use crate::{Shared, log};
 
 /// The name this thread gives Orion.
@@ -286,6 +287,7 @@ struct Taker {
     prefix: String,
     sink: Sink,
     receiver: Receiver,
+    streamer: Streamer,
 }
 
 /// Receives files for the devices `config.files` names, until the service stops.
@@ -312,12 +314,21 @@ pub fn run(config: &Config, shared: &Shared) {
         for (device, dir) in &config.files {
             let prefix = format!("{DESTINATION_PREFIX}{device}/");
             match orion.files().sink(&prefix) {
-                Ok(sink) => takers.push(Taker {
-                    device: device.clone(),
-                    prefix,
-                    sink,
-                    receiver: Receiver::new(dir),
-                }),
+                Ok(sink) => {
+                    let names = config
+                        .streams
+                        .iter()
+                        .find(|(d, _)| d == device)
+                        .map(|(_, names)| names.clone())
+                        .unwrap_or_default();
+                    takers.push(Taker {
+                        device: device.clone(),
+                        prefix,
+                        sink,
+                        receiver: Receiver::new(dir),
+                        streamer: Streamer::new(device, dir, names, &config.lemnosd_socket),
+                    });
+                }
                 Err(error) => log(&format!("files: Orion refused {prefix}: {error}")),
             }
         }
@@ -352,6 +363,19 @@ fn serve(
                     destination,
                     size,
                     digest,
+                } if taker
+                    .streamer
+                    .takes(destination.strip_prefix(&taker.prefix).unwrap_or("")) =>
+                {
+                    // A stream: its bytes go to the device's job as they arrive.
+                    let name = destination.strip_prefix(&taker.prefix).unwrap_or("");
+                    (transfer, taker.streamer.begin(transfer, name, size, digest))
+                }
+                Handed::Begin {
+                    transfer,
+                    destination,
+                    size,
+                    digest,
                 } => {
                     let name = destination.strip_prefix(&taker.prefix).unwrap_or("");
                     let device = taker.device.clone();
@@ -374,7 +398,17 @@ fn serve(
                     transfer,
                     offset,
                     data,
+                } if taker.streamer.owns(transfer) => {
+                    (transfer, taker.streamer.chunk(transfer, offset, &data))
+                }
+                Handed::Chunk {
+                    transfer,
+                    offset,
+                    data,
                 } => (transfer, taker.receiver.chunk(transfer, offset, &data)),
+                Handed::Commit { transfer } if taker.streamer.owns(transfer) => {
+                    (transfer, taker.streamer.commit(transfer))
+                }
                 Handed::Commit { transfer } => (transfer, taker.receiver.commit(transfer)),
             };
             taker

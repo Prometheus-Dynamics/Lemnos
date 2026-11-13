@@ -370,6 +370,15 @@ driver = "indicator"
 uses = { pixels = "ring-pixels" }
 config = { brightness = 128, "state.failed" = "blink #ff0000 period=400" }
 
+# A first-flash target: a flasher's board names its block device here and sets
+# `allow_first_flash = true`. A board that is not a flasher leaves it false, and a write is refused.
+# `uses` names the indicator that shows the write's states (an optional need).
+[[devices]]
+id = "first-flash"
+driver = "system-flash"
+uses = { indicator = "status-indicator" }
+config = { path = "/dev/mmcblk0", allow_first_flash = false, max_dict_mb = 8 }
+
 # `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
 # row. Every other device is retried forever.
 [[devices]]

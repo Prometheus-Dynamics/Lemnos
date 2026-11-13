@@ -26,6 +26,7 @@ pub mod mirror;
 pub mod privilege;
 pub mod publish;
 pub mod source;
+pub mod stream;
 pub mod values;
 
 use std::io::{Read, Write};

@@ -139,6 +139,7 @@ fn bridge_config(lemnosd_socket: &Path, orion: &Path) -> Config {
         run_as: None,
         files: Vec::new(),
         links: Vec::new(),
+        streams: Vec::new(),
     }
 }
 

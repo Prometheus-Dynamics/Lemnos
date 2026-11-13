@@ -393,6 +393,14 @@ Orion, and the directory those files go into, for example
   `[A-Za-z0-9._-]`, not starting with a dot), one that stops arriving for 10 minutes, and what an
   earlier run left half-written.
 
+**Streams for a device.** `LEMNOS_ORION_STREAMS` names files a device takes as a stream, for example
+`flash=image.img.xz+image.img` (each name must also be a name the device's directory takes). A transfer
+with one of those names is not written to disk: the bridge reads its transport manifest (`<name>.json`,
+pushed first like any file; its optional `signature` field is the signature record), calls the device's
+`manifest`, starts its `write` job on the bridge's own lemnosd connection, and gives each chunk to the
+job's `data` before acknowledging it. The commit checks the stream's SHA-256 and answers with the job's result
+([First flash](slots.md#first-flash)).
+
 The sender then runs the device's action that uses the file, such as `.call install_file <name>
 false false` on a slot device ([Slots](slots.md#over-orion)). A transfer that is begun again
 resumes from where it stopped.
