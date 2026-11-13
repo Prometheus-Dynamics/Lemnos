@@ -1,7 +1,7 @@
 //! The vendor kernel's `rkisp` driver's parameter and statistics buffers for three ISP
 //! generations, as `#[repr(C)]` layouts: ISP21 ([`isp21`], `rk-isp21-config.h`), ISP30
-//! ([`isp3x`], `rk-isp3-config.h`) and ISP35 ([`isp35`], `rk-isp35-config.h`), with the module
-//! bits ISP21 and ISP30 read from `module_ens` / `module_en_update` / `module_cfg_update`.
+//! ([`isp3x`], `rk-isp3-config.h`) and ISP35 ([`isp35`], `rk-isp35-config.h`), and the module bits
+//! each one's `module_ens` / `module_en_update` / `module_cfg_update` masks take.
 //!
 //! Layouts only: no device code, no tuning, no statistics math. A caller that fills a parameter
 //! buffer or reads a statistics buffer uses these; the driver carries the bytes and only needs
@@ -15,11 +15,17 @@
 //! `scripts/rkisp-bindgen.sh`); the one change is that the structures no longer derive
 //! `bytemuck`'s traits, so the crate has no dependency.
 //!
-//! Unsafe code: only bindgen's bitfield accessors in [`isp35`], unsafe by bindgen's design; the
-//! module's header allows the two lints they break, and nothing else in the crate is unsafe.
+//! Byte views: [`bytes::Bytes`] converts each buffer structure to and from its bytes, so a caller
+//! writes a field at its offset with no `unsafe` of its own. [`module35`] holds the ISP35 module
+//! bits, next to the ISP21 and ISP30 ones in [`module`].
+//!
+//! Unsafe code: bindgen's bitfield accessors in [`isp35`] (unsafe by bindgen's design; the module's
+//! header allows the two lints they break), and the byte view's three operations in [`bytes`],
+//! each with a `SAFETY` comment.
 
 #![no_std]
 
+pub mod bytes;
 pub mod isp21;
 pub mod isp35;
 pub mod isp3x;
@@ -105,6 +111,192 @@ pub mod module {
     pub const CSM: u64 = 1 << 43;
     /// Colour gain clip.
     pub const CGC: u64 = 1 << 44;
+    /// Force: the ISP21 and ISP30 buffers' force-all bit (`ISP2X_MODULE_FORCE`, `ISP2X_ID_MAX`).
+    pub const FORCE: u64 = 1 << 63;
+    /// Every bit this table names.
+    pub const ALL: u64 = DPCC
+        | BLS
+        | SDG
+        | LSC
+        | AWB_GAIN
+        | BDM
+        | CCM
+        | GOC
+        | CPROC
+        | RAWAF
+        | RAWAE0
+        | RAWAE1
+        | RAWAE2
+        | RAWAE3
+        | RAWAWB
+        | RAWHIST0
+        | RAWHIST1
+        | RAWHIST2
+        | RAWHIST3
+        | GIC
+        | DHAZ
+        | GAIN
+        | DEBAYER
+        | BAYNR
+        | BAY3D
+        | YNR
+        | CNR
+        | SHARP
+        | DRC
+        | CSM
+        | CGC
+        | FORCE;
+}
+
+/// A module's bit in an ISP35 parameter buffer's `module_*` masks (`ISP35_MODULE_*` of
+/// `rk-isp35-config.h`, resolved through the ISP33, ISP39 and ISP3X names it aliases, and the
+/// ISP2X bits of `rk-isp2-config.h` and `rk-isp21-config.h`). The ISP35 header names its modules
+/// through those aliases; the values below are the bits they finally resolve to.
+///
+/// Provenance: rockchip-linux/kernel `develop-6.1`, `include/uapi/linux/rk-isp35-config.h`,
+/// `rk-isp33-config.h`, `rk-isp39-config.h`, `rk-isp3-config.h`, `rk-isp2-config.h`,
+/// `rk-isp21-config.h` (`(GPL-2.0+ WITH Linux-syscall-note) OR MIT`); only the names and bit
+/// numbers are used here. The layout check in `layout.rs` pins each value against the C compiler.
+pub mod module35 {
+    /// Defect pixel cluster correction.
+    pub const DPCC: u64 = 1 << 0;
+    /// Black level subtraction.
+    pub const BLS: u64 = 1 << 1;
+    /// Sensor degamma.
+    pub const SDG: u64 = 1 << 2;
+    /// Lens shading correction.
+    pub const LSC: u64 = 1 << 4;
+    /// White balance gains.
+    pub const AWB_GAIN: u64 = 1 << 5;
+    /// Bayer demosaic.
+    pub const BDM: u64 = 1 << 7;
+    /// Colour correction matrix.
+    pub const CCM: u64 = 1 << 8;
+    /// Gamma out.
+    pub const GOC: u64 = 1 << 9;
+    /// Colour processing.
+    pub const CPROC: u64 = 1 << 10;
+    /// Image enhancement.
+    pub const IE: u64 = 1 << 13;
+    /// Raw autofocus statistics.
+    pub const RAWAF: u64 = 1 << 17;
+    /// Raw exposure statistics, unit 0.
+    pub const RAWAE0: u64 = 1 << 18;
+    /// Raw exposure statistics, unit 1.
+    pub const RAWAE1: u64 = 1 << 19;
+    /// Raw exposure statistics, unit 2.
+    pub const RAWAE2: u64 = 1 << 20;
+    /// Raw exposure statistics, unit 3.
+    pub const RAWAE3: u64 = 1 << 21;
+    /// Raw white balance statistics.
+    pub const RAWAWB: u64 = 1 << 22;
+    /// Raw histogram, unit 0.
+    pub const RAWHIST0: u64 = 1 << 23;
+    /// Raw histogram, unit 1.
+    pub const RAWHIST1: u64 = 1 << 24;
+    /// Raw histogram, unit 2.
+    pub const RAWHIST2: u64 = 1 << 25;
+    /// Raw histogram, unit 3.
+    pub const RAWHIST3: u64 = 1 << 26;
+    /// HDR merge.
+    pub const HDRMGE: u64 = 1 << 27;
+    /// Raw noise reduction.
+    pub const RAWNR: u64 = 1 << 28;
+    /// Green imbalance correction.
+    pub const GIC: u64 = 1 << 30;
+    /// Dehaze.
+    pub const DHAZ: u64 = 1 << 31;
+    /// 3D lookup table.
+    pub const LUT3D: u64 = 1 << 32;
+    /// Lens distortion correction.
+    pub const LDCH: u64 = 1 << 33;
+    /// Gain.
+    pub const GAIN: u64 = 1 << 34;
+    /// Debayer.
+    pub const DEBAYER: u64 = 1 << 35;
+    /// Bayer noise reduction.
+    pub const BAYNR: u64 = 1 << 36;
+    /// Bayer 3D noise reduction.
+    pub const BAY3D: u64 = 1 << 37;
+    /// Luma noise reduction.
+    pub const YNR: u64 = 1 << 38;
+    /// Chroma noise reduction.
+    pub const CNR: u64 = 1 << 39;
+    /// Sharpening.
+    pub const SHARP: u64 = 1 << 40;
+    /// Dynamic range compression.
+    pub const DRC: u64 = 1 << 41;
+    /// Chromatic aberration correction.
+    pub const CAC: u64 = 1 << 42;
+    /// Colour space matrix.
+    pub const CSM: u64 = 1 << 43;
+    /// Colour gain clip.
+    pub const CGC: u64 = 1 << 44;
+    /// RGB-IR.
+    pub const RGBIR: u64 = 1 << 47;
+    /// HSV.
+    pub const HSV: u64 = 1 << 48;
+    /// Enhancement.
+    pub const ENH: u64 = 1 << 49;
+    /// Histogram.
+    pub const HIST: u64 = 1 << 50;
+    /// AI statistics.
+    pub const AI: u64 = 1 << 51;
+    /// AI white balance.
+    pub const AIAWB: u64 = 1 << 52;
+    /// AWB synchronisation.
+    pub const AWBSYNC: u64 = 1 << 53;
+    /// Second Bayer 3D noise reduction unit.
+    pub const BAY3D_L2: u64 = 1 << 54;
+    /// Force: the ISP35 buffer's force-all bit (`ISP2X_MODULE_FORCE`).
+    pub const FORCE: u64 = 1 << 63;
+    /// Every bit this table names.
+    pub const ALL: u64 = DPCC
+        | BLS
+        | SDG
+        | LSC
+        | AWB_GAIN
+        | BDM
+        | CCM
+        | GOC
+        | CPROC
+        | IE
+        | RAWAF
+        | RAWAE0
+        | RAWAE1
+        | RAWAE2
+        | RAWAE3
+        | RAWAWB
+        | RAWHIST0
+        | RAWHIST1
+        | RAWHIST2
+        | RAWHIST3
+        | HDRMGE
+        | RAWNR
+        | GIC
+        | DHAZ
+        | LUT3D
+        | LDCH
+        | GAIN
+        | DEBAYER
+        | BAYNR
+        | BAY3D
+        | YNR
+        | CNR
+        | SHARP
+        | DRC
+        | CAC
+        | CSM
+        | CGC
+        | RGBIR
+        | HSV
+        | ENH
+        | HIST
+        | AI
+        | AIAWB
+        | AWBSYNC
+        | BAY3D_L2
+        | FORCE;
 }
 
 #[cfg(test)]
