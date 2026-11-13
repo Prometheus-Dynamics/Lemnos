@@ -314,10 +314,15 @@ fn updates_survive_a_cut_at_each_step_and_recover() {
 #[test]
 fn precreated_files_are_valid_at_sequence_one_and_refuse_unknown_kinds() {
     let files = precreate(&[(Kind::TRIAL, b"x"), (Kind::SECURITY, b"gen=0")]).unwrap();
-    assert_eq!(files[0].0, "TRIAL.REC");
-    assert_eq!(files[1].0, "SECURE.REC");
+    assert_eq!(files[0].0, b"TRIAL   REC");
+    assert_eq!(files[1].0, b"SECURE  REC");
     for (name, bytes) in &files {
-        assert_eq!(bytes.len(), 2 * SECTOR, "{name} is two sectors");
+        assert_eq!(
+            bytes.len(),
+            2 * SECTOR,
+            "{} is two sectors",
+            String::from_utf8_lossy(name.as_slice())
+        );
     }
     let mut dev = Cutting::new(files[0].1.clone());
     let cur = Pair::at(0).read(&mut dev, Kind::TRIAL).unwrap().unwrap();
