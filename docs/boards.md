@@ -673,17 +673,22 @@ fragment`). The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=`
 so systemd filters no device and the unit names no heap.
 
 `lemnos-ctl tree BOARD --mdev FILE` writes the same permissions for a BusyBox image, as `/etc/mdev.conf`
-lines: one per node, `<regex> root:lemnos 0660`, where the regex is the node's path under `/dev`
-(`^lemnos$`, `^lemnos-.*$`, `^dma_heap/linux,cma$`). Both outputs come from one list of facts in
-`service/devtree/src/permissions.rs`, and the tests parse both back and compare them for every board file
-in the repository (`service/devtree/tests/permissions_agree.rs`). The BusyBox form is the plain one
-`mdev.txt` gives first: a device regex, owner and group, an octal mode, with no `ENV=regex;` prefix.
-Two differences from the udev rules, both stated in the file's header: mdev matches the device name only,
-so the udev `SUBSYSTEM==` condition is not written; and the board's lines go after the packaged kinds in
-`packaging/init/mdev.conf.fragment`, before any catch-all line, because mdev takes the first line that
-matches. The packaged kinds (serial ports, buses, cameras, usbfs, the watchdog) are not generated from the
-board file: they are in `packaging/udev/70-lemnos.rules` and `packaging/init/mdev.conf.fragment`, kept by
-hand in both forms.
+lines, one per node, in BusyBox's env-match form: `SUBSYSTEM=^misc$;^lemnos$ root:lemnos 0660`, where
+`SUBSYSTEM=^misc$;` is the udev `SUBSYSTEM=="misc"` condition and `^lemnos$` is the node's path under
+`/dev` (`^dma_heap/linux,cma$` for a heap). Both outputs come from one list of facts in
+`service/devtree/src/permissions.rs`, and the tests parse both back and compare them, subsystem included,
+for every board file in the repository (`service/devtree/tests/permissions_agree.rs`).
+
+The lines are run by BusyBox 1.37.0 and 1.38.0 in the gate (`testing/mdev/check.sh`): both mdevs are built
+from their release tarballs, sha256 pinned in `testing/mdev/build-busybox.sh`, and each runs against the
+generated file for every board with a SoC, in a namespace with a fake sysfs. Each node's owner, group and
+mode is checked against the udev rule for the same device, and a decoy device in another subsystem must be
+left alone. The check reports the one way the heap rule fails: a uevent without `DEVNAME`. mdev matches the
+device's `DEVNAME` (the kernel writes `dma_heap/<name>` for a heap; this machine's
+`/sys/dev/char/250:0/uevent` says so), and without it falls back to the basename, which the path rule does
+not match. The packaged kinds (serial ports, buses, cameras, usbfs, the watchdog) are not generated from
+the board file: they are in `packaging/udev/70-lemnos.rules` and `packaging/init/mdev.conf.fragment`, kept
+by hand in both forms; they match by name, as before.
 
 ## The self-test of a board
 

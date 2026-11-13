@@ -45,7 +45,7 @@ fn the_reference_board_gives_its_mdev_lines() {
 fn a_heap_name_is_escaped_so_that_its_dot_is_a_dot() {
     let text = fragment(&host("dma_heaps = [\"a.b\"]\n"));
     assert!(
-        text.contains("\n^dma_heap/a\\.b$ root:lemnos 0660\n"),
+        text.contains("\nSUBSYSTEM=^dma_heap$;^dma_heap/a\\.b$ root:lemnos 0660\n"),
         "{text}"
     );
     assert!(!text.contains("a.b$"), "{text}");
@@ -62,7 +62,18 @@ fn a_glob_becomes_a_star_of_any_characters_and_nothing_else_is_special() {
 #[test]
 fn a_board_with_no_heaps_has_the_module_lines_and_no_heap_line() {
     let text = fragment(&host("dma_heaps = []\n"));
-    assert!(text.contains("\n^lemnos$ root:lemnos 0660\n"), "{text}");
-    assert!(text.contains("\n^lemnos-.*$ root:lemnos 0660\n"), "{text}");
-    assert!(!text.contains("dma_heap"), "{text}");
+    assert!(
+        text.contains("\nSUBSYSTEM=^misc$;^lemnos$ root:lemnos 0660\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nSUBSYSTEM=^misc$;^lemnos-.*$ root:lemnos 0660\n"),
+        "{text}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("SUBSYSTEM=^dma_heap$")),
+        "{text}"
+    );
 }

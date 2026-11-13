@@ -26,4 +26,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # dtc and fdtoverlay: the device-tree loader tests (service/devtree/tests/apply.rs) run them.
       - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      # The mdev check (testing/mdev/check.sh) runs the BusyBox 1.37.0 and 1.38.0 mdev, built from their
+      # release tarballs (sha256 pinned in testing/mdev/build-busybox.sh) with zig as the C compiler: the
+      # pinned ziglang wheel, in a venv of its own.
+      - run: python3 -m venv "$RUNNER_TEMP/zig" && "$RUNNER_TEMP/zig/bin/pip" install ziglang==0.15.2
+      # Cached on the build script, as the kernel job caches its build: a warm cache builds nothing.
+      - uses: actions/cache/restore@v4
+        id: busybox
+        with:
+          path: ${{ runner.temp }}/busybox
+          key: busybox-${{ hashFiles('testing/mdev/build-busybox.sh') }}
+      - run: |
+          testing/mdev/build-busybox.sh "$RUNNER_TEMP/busybox/1.37.0" 1.37.0
+          testing/mdev/build-busybox.sh "$RUNNER_TEMP/busybox/1.38.0" 1.38.0
+        env:
+          ZIG_CC: ${{ runner.temp }}/zig/bin/python -m ziglang cc
+      - uses: actions/cache/save@v4
+        if: steps.busybox.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/busybox
+          key: ${{ steps.busybox.outputs.cache-primary-key }}
       - run: ./scripts/gate.sh
+        env:
+          BUSYBOX_DIR: ${{ runner.temp }}/busybox
+          ZIG_CC: ${{ runner.temp }}/zig/bin/python -m ziglang cc

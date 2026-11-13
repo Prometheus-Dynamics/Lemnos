@@ -20,7 +20,8 @@ from here (see [docs/boards.md](../docs/boards.md#the-daemons-device-permissions
 
 The mdev counterpart is generated the same way: `lemnos-ctl tree BOARD --mdev FILE` writes the
 board's own lines, appended to `/etc/mdev.conf` after `init/mdev.conf.fragment` (the packaged kinds,
-which stay in that file). It is not in `files.txt`, for the same reason as the udev file.
+which stay in that file). Its lines are run against BusyBox 1.37.0 and 1.38.0 in the gate, which is the
+version range they are known to work with. It is not in `files.txt`, for the same reason as the udev file.
 See [docs/boards.md](../docs/boards.md#the-daemons-device-permissions).
 
 The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, the board file

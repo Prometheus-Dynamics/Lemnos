@@ -73,5 +73,9 @@ step shipped scripts/check-shipped.sh
 step kernel-config scripts/check-kernel-config.py
 # Every command in the documents runs against the simulated board, and every link leads somewhere.
 step documents scripts/check-docs.py
+# The mdev.conf that `lemnos-ctl tree --mdev` writes is run by BusyBox 1.37.0 and 1.38.0 (their
+# mdev, built from the pinned release tarballs), in a namespace, and each node's owner, group and mode
+# are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
+step mdev testing/mdev/check.sh
 
 echo "gate passed"

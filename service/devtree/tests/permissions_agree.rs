@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use lemnos_devtree::{mdev, udev};
 use lemnos_host::board::{self, BoardFile};
 
-/// A node as the test compares it: its path under `/dev` (a glob with `*`), owner, group and mode.
-type Node = (String, String, String, String);
+/// A rule as the test compares it: the SUBSYSTEM it matches, its node path under `/dev` (a glob with
+/// `*`), owner, group and mode.
+type Node = (String, String, String, String, String);
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -49,14 +50,28 @@ fn parse_udev(line: &str) -> Node {
     }
     let subsystem = subsystem.expect(line);
     let node = format!("{}{}", dir_of(&subsystem), kernel.expect(line));
-    (node, owner, group.expect(line), mode.expect(line))
+    (
+        subsystem,
+        node,
+        owner,
+        group.expect(line),
+        mode.expect(line),
+    )
 }
 
-/// `^regex$ owner:group mode`, with the regex read back to a node path: `\X` is X and `.*` is `*`.
+/// `SUBSYSTEM=^s$;^regex$ owner:group mode`: the subsystem is read from the env match, and the regex
+/// back to a node path (`\X` is X and `.*` is `*`).
 fn parse_mdev(line: &str) -> Node {
     let fields: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(fields.len(), 3, "not a mdev line: {line:?}");
-    let pattern = fields[0]
+    let (env, rule) = fields[0]
+        .split_once(';')
+        .unwrap_or_else(|| panic!("no SUBSYSTEM env match: {line:?}"));
+    let subsystem = env
+        .strip_prefix("SUBSYSTEM=^")
+        .and_then(|s| s.strip_suffix('$'))
+        .unwrap_or_else(|| panic!("not a SUBSYSTEM match: {line:?}"));
+    let pattern = rule
         .strip_prefix('^')
         .and_then(|p| p.strip_suffix('$'))
         .unwrap_or_else(|| panic!("not anchored: {line:?}"));
@@ -74,6 +89,7 @@ fn parse_mdev(line: &str) -> Node {
     }
     let (owner, group) = fields[1].split_once(':').expect(line);
     (
+        subsystem.to_owned(),
         node,
         owner.to_owned(),
         group.to_owned(),
@@ -135,10 +151,16 @@ fn every_board_file_gives_the_same_nodes_and_modes_in_both_renderings() {
         let from_udev = udev_nodes(&board);
         let from_mdev = mdev_nodes(&board);
         assert!(
-            from_udev.iter().any(|(node, ..)| node == "lemnos"),
+            from_udev.iter().any(|(_, node, ..)| node == "lemnos"),
             "{name}: the module's node is missing from the udev rules"
         );
         assert_eq!(from_udev, from_mdev, "{name}: the two renderings differ");
+        assert!(
+            from_mdev
+                .iter()
+                .all(|(subsystem, ..)| !subsystem.is_empty()),
+            "{name}: a rule without its SUBSYSTEM"
+        );
         compared.push(name);
     }
     assert!(compared.len() >= 8, "only {compared:?} were compared");
