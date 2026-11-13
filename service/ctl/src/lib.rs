@@ -184,10 +184,14 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
             )?;
         }
     }
-    let problems = match (&board.board.soc, live) {
+    let findings = match (&board.board.soc, live) {
         (Some(_), true) => live_problems(&board, socs)?,
-        _ => Vec::new(),
+        _ => lemnos_devtree::check::Findings::default(),
     };
+    let problems = findings.problems;
+    for note in &findings.notes {
+        line(out, format_args!("live note: {note}"))?;
+    }
     validate_settings(path, &board, out)?;
     if !problems.is_empty() {
         for problem in &problems {
@@ -219,11 +223,12 @@ fn driver_manifests() -> Vec<lemnos_core::Manifest> {
         .collect()
 }
 
-/// The problems the live device tree and platform devices have against the board's hardware.
+/// The problems the live device tree and platform devices have against the board's hardware, and
+/// the facts the operator must confirm on the board.
 fn live_problems(
     board: &lemnos_host::board::BoardFile,
     socs: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<lemnos_devtree::check::Findings, String> {
     let map = load_map(board, socs)?;
     let chips: Vec<(String, u32)> = lemnos_linux::gpio_chips(std::path::Path::new("/dev"))
         .into_iter()
@@ -237,6 +242,8 @@ fn live_problems(
             sys: std::path::Path::new("/sys/bus/platform/devices"),
             gpio_chips: &chips,
             udc: std::path::Path::new("/sys/class/udc"),
+            gpio_debug: std::path::Path::new("/sys/kernel/debug/gpio"),
+            regulators: std::path::Path::new("/sys/class/regulator"),
         },
     ))
 }

@@ -1,0 +1,47 @@
+// A base tree with the nodes the generated RK3588 device-port overlay names, at the paths and
+// labels the SoC map gives (the mainline rk3588-base.dtsi layout, v6.12), and a 5 V OTG regulator on
+// the OTG port's phy-supply. Test fixture only: it stands in for a board tree's USB nodes.
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	model = "fixture: RK3588 device-port base";
+
+	vcc5v0_otg_vbus: regulator-vcc5v0-otg-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_otg";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+	};
+
+	usb@fc000000 {
+		compatible = "rockchip,rk3588-dwc3";
+		reg = <0xfc000000 0x400000>;
+		status = "disabled";
+	};
+
+	syscon@fd5d0000 {
+		compatible = "syscon", "simple-mfd";
+		reg = <0xfd5d0000 0x100>;
+
+		usb2phy@0 {
+			compatible = "rockchip,rk3588-usb2phy";
+			reg = <0x4000 0x10>;
+			status = "disabled";
+
+			u2phy0_otg: otg-port {
+				#phy-cells = <0>;
+				status = "disabled";
+				phy-supply = <&vcc5v0_otg_vbus>;
+			};
+		};
+	};
+
+	usbdp_phy0: phy@fed80000 {
+		compatible = "rockchip,rk3588-usbdp-phy";
+		reg = <0xfed80000 0x10000>;
+		#phy-cells = <1>;
+		status = "disabled";
+	};
+};

@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use lemnos_host::board::BoardFile;
 
-use crate::map::{Controller, Kind, PinSet, SocMap};
+use crate::generate::{NO_VBUS_NODE, VbusPlan, vbus_plan};
+use crate::map::{Base, Controller, Kind, PinSet, SocMap};
 
 /// What the check reads: the live device tree and the platform device directory.
 pub struct Live<'a> {
@@ -20,12 +21,33 @@ pub struct Live<'a> {
     pub gpio_chips: &'a [(String, u32)],
     /// The USB device controllers the kernel lists, as `/sys/class/udc` shows them.
     pub udc: &'a Path,
+    /// The kernel's GPIO state, as debugfs shows it (`/sys/kernel/debug/gpio`): the level of each
+    /// line a driver has requested. Read for a board's VBUS line.
+    pub gpio_debug: &'a Path,
+    /// The kernel's regulators, as `/sys/class/regulator` shows them (`name`, `state`, `num_users`).
+    pub regulators: &'a Path,
 }
 
-/// Every problem with the live system against the board, one message each. Empty when it matches.
-pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
+/// What the check found: each problem names what is wrong and where, and each note is a fact the
+/// operator must confirm on the board (a supply that is enabled, a line that cannot be read here).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Findings {
+    /// Each mismatch with the board. Empty when the live system matches.
+    pub problems: Vec<String>,
+    /// Facts the check cannot settle from the live system.
+    pub notes: Vec<String>,
+}
+
+/// Every problem with the live system against the board, and the notes. Empty when it matches.
+pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Findings {
     let mut problems = Vec::new();
+    let mut notes = Vec::new();
     let phandles = phandles(live.tree);
+    let base = board
+        .board
+        .base
+        .as_deref()
+        .and_then(|name| map.bases.get(name).map(|b| (name, b)));
     for hardware in &board.hardware {
         let Some(controller) = map.controllers.get(&hardware.controller) else {
             problems.push(format!(
@@ -47,14 +69,17 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
             problems.push(format!("{label}: node disabled: {}", controller.path));
         }
         if controller.kind == Kind::UsbPeripheral {
-            problems.extend(usb_port(
+            let findings = usb_port(
                 hardware,
                 &hardware.controller,
                 controller,
                 &node,
                 live,
                 &phandles,
-            ));
+                base,
+            );
+            problems.extend(findings.problems);
+            notes.extend(findings.notes);
         }
         // A node the board gives to the module must not be bound by the stock driver the map names.
         if let Some(role) = &hardware.module
@@ -152,11 +177,12 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
             }
         }
     }
-    problems
+    Findings { problems, notes }
 }
 
-/// What a USB device port needs live: its node in peripheral mode, each node it needs enabled, and,
-/// for a named port, the UDC the kernel lists under `/sys/class/udc` for the gadget.
+/// What a USB device port needs live: its node in peripheral mode, each node it needs enabled, its
+/// VBUS as the board states it, and, for a named port, the UDC the kernel lists under
+/// `/sys/class/udc` for the gadget.
 fn usb_port(
     hardware: &lemnos_host::board::HardwareSpec,
     key: &str,
@@ -164,8 +190,10 @@ fn usb_port(
     node: &Path,
     live: &Live<'_>,
     phandles: &BTreeMap<u32, String>,
-) -> Vec<String> {
+    base: Option<(&str, &Base)>,
+) -> Findings {
     let mut problems = Vec::new();
+    let mut notes = Vec::new();
     let linked: Vec<u32> = fs::read(node.join("phys"))
         .map(|bytes| {
             bytes
@@ -236,7 +264,198 @@ fn usb_port(
             live.udc.display()
         ));
     }
-    problems
+    vbus(
+        hardware,
+        key,
+        controller,
+        live,
+        phandles,
+        base,
+        &who,
+        &mut problems,
+        &mut notes,
+    );
+    Findings { problems, notes }
+}
+
+/// The VBUS of a device port, live. The board's statement must be one the generator accepts for the
+/// base tree's supply (the same rule, [`vbus_plan`]). Then the PHY's `phy-supply` must be the stand-in
+/// or absent, or else the board's line must read its off level. A board that holds VBUS by a line is
+/// checked on the line; an always-on supply that is enabled is reported as a note, for a meter.
+#[allow(clippy::too_many_arguments)]
+fn vbus(
+    hardware: &lemnos_host::board::HardwareSpec,
+    key: &str,
+    controller: &Controller,
+    live: &Live<'_>,
+    phandles: &BTreeMap<u32, String>,
+    base: Option<(&str, &Base)>,
+    who: &str,
+    problems: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    let fact = base.and_then(|(_, b)| b.vbus.get(key));
+    let base_name = base.map(|(name, _)| name);
+    let runtime = hardware.name.as_deref().unwrap_or("");
+    let plan = match vbus_plan(runtime, key, hardware, base_name, fact) {
+        Ok(plan) => plan,
+        Err(why) => {
+            problems.push(why);
+            return;
+        }
+    };
+    let Some(phy) = controller
+        .needs
+        .iter()
+        .find(|n| n.phy.as_deref() == Some("usb2-phy"))
+    else {
+        return;
+    };
+    let phy_dir = live.tree.join(phy.path.trim_start_matches('/'));
+    if phy_dir.is_dir() {
+        let supply = fs::read(phy_dir.join("phy-supply")).ok().and_then(|bytes| {
+            let four = <[u8; 4]>::try_from(bytes.as_slice()).ok()?;
+            phandles.get(&u32::from_be_bytes(four)).cloned()
+        });
+        match (supply.as_deref(), &plan) {
+            (None, _) => {}
+            (Some(path), _) if path == NO_VBUS_NODE => {}
+            // A board that holds VBUS by a line: the supply is acceptable while the line reads
+            // its off level, which `hold` checks below.
+            (Some(_), VbusPlan::Hold { .. }) => {}
+            (Some(path), _) => problems.push(format!(
+                "{who}: PHY {} still has phy-supply {path}, which the generated overlay replaces with \
+                 the stand-in that supplies nothing; this tree was not made from the board file",
+                phy.path
+            )),
+        }
+    }
+    if let VbusPlan::Hold { line, off, .. } = &plan {
+        hold(line, off, who, live, problems, notes);
+    }
+    if let Some(fact) = fact
+        && fact.always_on
+        && let Some(name) = fact.regulator_name.as_deref()
+    {
+        regulator(name, who, &plan, live, notes);
+    }
+}
+
+/// The level a `vbus` line reads, against its off level: a mismatch is a problem; a line no driver
+/// has requested cannot be read here, which is a note for a meter.
+fn hold(
+    line: &str,
+    off: &str,
+    who: &str,
+    live: &Live<'_>,
+    problems: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    let Some((label, number)) = line
+        .strip_prefix("gpio:")
+        .and_then(|rest| rest.rsplit_once(':'))
+        .and_then(|(label, n)| Some((label, n.parse::<u32>().ok()?)))
+    else {
+        problems.push(format!("{who}: VBUS line {line:?} is not gpio:LABEL:LINE"));
+        return;
+    };
+    let want = if off == "high" { "hi" } else { "lo" };
+    match gpio_level(live.gpio_debug, label, number) {
+        Err(why) => problems.push(format!("{who}: VBUS line {line}: {why}")),
+        Ok(None) => notes.push(format!(
+            "{who}: VBUS line {line} is held {off} from power-on by the firmware; no driver has \
+             requested it, so its level cannot be read here: measure VBUS in device mode"
+        )),
+        Ok(Some(level)) if level == want => {}
+        Ok(Some(level)) => problems.push(format!(
+            "{who}: VBUS line {line} reads {level}, but the board says its off level is {off}: VBUS may \
+             be on"
+        )),
+    }
+}
+
+/// An always-on supply the base names, read from `/sys/class/regulator`: enabled is a note, with
+/// what the board says about it.
+fn regulator(name: &str, who: &str, plan: &VbusPlan, live: &Live<'_>, notes: &mut Vec<String>) {
+    let found = fs::read_dir(live.regulators).ok().and_then(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|dir| {
+                fs::read_to_string(dir.join("name"))
+                    .map(|n| n.trim() == name)
+                    .unwrap_or(false)
+            })
+    });
+    let Some(dir) = found else {
+        notes.push(format!(
+            "{who}: always-on regulator {name:?} is not listed under {}; its state is not read here",
+            live.regulators.display()
+        ));
+        return;
+    };
+    let state = fs::read_to_string(dir.join("state"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let users = fs::read_to_string(dir.join("num_users"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "?".into());
+    if state == "enabled" {
+        let says = match plan {
+            VbusPlan::Undriven { .. } => "the board says this port is not driven by it",
+            VbusPlan::Hold { .. } => "the board says VBUS is switched by a line",
+            VbusPlan::NoSupply => "the base has no supply on this port",
+        };
+        notes.push(format!(
+            "{who}: always-on regulator {name:?} is enabled (num_users {users}); {says}: measure VBUS"
+        ));
+    }
+}
+
+/// The level of a GPIO line, from the kernel's debugfs GPIO listing: `lo` or `hi`, or `None` when no
+/// driver has requested the line (so the listing has no entry for it). The listing names each line
+/// by its global number, the chip's base plus the line, under the chip's header with its label.
+pub fn gpio_level(debug: &Path, label: &str, line: u32) -> Result<Option<String>, String> {
+    let text = fs::read_to_string(debug).map_err(|e| {
+        format!(
+            "cannot read the GPIO levels from {} ({e}); run as root with debugfs mounted",
+            debug.display()
+        )
+    })?;
+    let mut base = None;
+    for raw in text.lines() {
+        if raw.contains(": GPIOs ") {
+            let header = raw.trim_end().trim_end_matches(':');
+            let chip = header.rsplit(", ").find(|part| *part != "can sleep");
+            base = match (chip, header.split("GPIOs ").nth(1)) {
+                (Some(chip), Some(range)) if chip == label => range
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|first| first.parse::<u32>().ok()),
+                _ => None,
+            };
+            continue;
+        }
+        let Some(first) = base else {
+            continue;
+        };
+        let Some(rest) = raw.trim_start().strip_prefix("gpio-") else {
+            continue;
+        };
+        let number = rest
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse::<u32>().ok());
+        if number != Some(first + line) {
+            continue;
+        }
+        let after = rest.rfind(')').map(|i| &rest[i + 1..]).unwrap_or_default();
+        return Ok(after
+            .split_whitespace()
+            .find(|word| matches!(*word, "lo" | "hi"))
+            .map(str::to_string));
+    }
+    Ok(None)
 }
 
 /// The `status` a node has. A node with no `status` is enabled.

@@ -83,12 +83,19 @@
 			status = "okay";
 		};
 	};
-	// needed by usb-otg0 (usb-peripheral): the OTG port of that USB 2 PHY, the one the controller is wired to (its phys)
+	// the stand-in for a device port's VBUS supply: a fixed regulator with no enable pin, no GPIO and no voltage; it supplies nothing
 	fragment@10 {
+		target-path = "/";
+		__overlay__ {
+			lemnos_no_vbus: regulator-lemnos-no-vbus { compatible = "regulator-fixed"; regulator-name = "lemnos-no-vbus"; regulator-min-microvolt = <0>; regulator-max-microvolt = <0>; };
+		};
+	};
+	// needed by usb-otg0 (usb-peripheral): the OTG port of that USB 2 PHY, the one the controller is wired to (its phys); its phy-supply is replaced by the stand-in, so this PHY drives no VBUS
+	fragment@11 {
 		target-path = "/usb2phy@fe8a0000/otg-port";
 		__overlay__ {
 			status = "okay";
+			phy-supply = <&lemnos_no_vbus>;
 		};
 	};
-	// No base named: lines the board gives to Lemnos are not checked against the base tree.
 };

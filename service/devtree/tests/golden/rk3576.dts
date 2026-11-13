@@ -51,22 +51,30 @@
 			status = "okay";
 		};
 	};
-	// needed by usb-drd0 (usb-peripheral): the OTG port of USB 2 PHY 0, the one controller 0 is wired to (its phys)
+	// the stand-in for a device port's VBUS supply: a fixed regulator with no enable pin, no GPIO and no voltage; it supplies nothing
 	fragment@6 {
+		target-path = "/";
+		__overlay__ {
+			lemnos_no_vbus: regulator-lemnos-no-vbus { compatible = "regulator-fixed"; regulator-name = "lemnos-no-vbus"; regulator-min-microvolt = <0>; regulator-max-microvolt = <0>; };
+		};
+	};
+	// needed by usb-drd0 (usb-peripheral): the OTG port of USB 2 PHY 0, the one controller 0 is wired to (its phys); its phy-supply is replaced by the stand-in, so this PHY drives no VBUS
+	fragment@7 {
 		target-path = "/soc/syscon@2602e000/usb2-phy@0/otg-port";
 		__overlay__ {
 			status = "okay";
+			phy-supply = <&lemnos_no_vbus>;
 		};
 	};
 	// needed by usb-drd0 (usb-peripheral): the USBDP combo PHY (rockchip,rk3576-usbdp-phy), the SuperSpeed side of controller 0; the board names usb3 (its phys, PHY_TYPE_USB3)
-	fragment@7 {
+	fragment@8 {
 		target-path = "/soc/phy@2b010000";
 		__overlay__ {
 			status = "okay";
 		};
 	};
 	// watchdog: the hardware watchdog on the RK3576 (rockchip,rk3576-wdt, snps,dw-wdt)
-	fragment@8 {
+	fragment@9 {
 		target-path = "/soc/watchdog@2ace0000";
 		__overlay__ {
 			status = "okay";

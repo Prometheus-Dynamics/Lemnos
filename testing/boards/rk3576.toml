@@ -7,6 +7,7 @@ schema_version = 1
 [board]
 id = "rk3576"
 soc = "rk3576"
+base = "usb-always-on-vbus"
 
 [[hardware]]
 name = "i2c-1"
@@ -18,12 +19,14 @@ name = "spidev0.0"
 controller = "spi0"
 
 # The USB device port: DRD controller 0, with its SuperSpeed lanes wired (`usb3`). The gadget below is
-# its only user.
+# its only user. Its base VBUS regulator is always on, and this board does not drive VBUS on this port.
 [[hardware]]
 name = "udc:23000000.usb"
 controller = "usb-drd0"
 role = "peripheral"
 options = ["usb3"]
+vbus_undriven = true
+vbus_reason = "fixture: this port's VBUS is not driven on this board (from the schematic; a meter confirms it)"
 
 [[hardware]]
 controller = "watchdog"

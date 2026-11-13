@@ -24,4 +24,6 @@ jobs:
       # rust-toolchain.toml selects the toolchain and its components.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # dtc and fdtoverlay: the device-tree loader tests (service/devtree/tests/apply.rs) run them.
+      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
       - run: ./scripts/gate.sh

@@ -47,6 +47,11 @@ pub struct Chip {
     /// What the chip is, for a message that names it.
     #[serde(default)]
     pub reason: String,
+    /// The SoC's GPIO number of the chip's line 0, which the boot fragment's `gpio=N` takes. Zero
+    /// for a chip numbered from 0 (the Raspberry Pi's RP1); a bank of a Rockchip SoC is 32 times its
+    /// bank number.
+    #[serde(default)]
+    pub number_base: u32,
 }
 
 /// The kernel module's options a node may be given, besides `owned`, which every module-owned
@@ -180,13 +185,45 @@ pub struct PinSet {
     pub gpios: Vec<u16>,
 }
 
-/// A base tree's own nodes that matter to a board: the nodes that hold a line.
+/// A base tree's own nodes that matter to a board: the nodes that hold a line, and the VBUS supply
+/// each USB device port has in the base tree.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Base {
     /// Each line (`rp1:34`) and the base-tree nodes that drive it.
     #[serde(default)]
     pub lines: BTreeMap<String, LineHolders>,
+    /// The VBUS supply of each USB device port (a `usb-peripheral` controller of the map), by the
+    /// controller's name. A port the base does not describe has no fact here, and the generator
+    /// then refuses it unless the board file states how its VBUS is handled.
+    #[serde(default)]
+    pub vbus: BTreeMap<String, Vbus>,
+}
+
+/// What the base tree says about the VBUS supply of one device port: the regulator its USB 2 PHY's
+/// OTG port names in `phy-supply` (a host VBUS supply on a device port is a hazard, so the generator
+/// replaces it), and how that regulator is switched. Every fact is the base tree's, not the board's.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vbus {
+    /// The base-tree regulator the port's `phy-supply` names, by its path. Left out: the port has
+    /// no VBUS supply in the base tree.
+    #[serde(default)]
+    pub regulator: Option<String>,
+    /// The regulator's `regulator-name`, which the kernel lists it under in `/sys/class/regulator`.
+    /// Needed with `regulator`.
+    #[serde(default)]
+    pub regulator_name: Option<String>,
+    /// The regulator is `regulator-always-on`: the kernel keeps it on whatever the PHY does, so
+    /// detaching `phy-supply` does not stop VBUS. Exclusive with `switch`.
+    #[serde(default)]
+    pub always_on: bool,
+    /// The GPIO line that switches the regulator (its enable pin), as `gpio:LABEL:LINE`. Exclusive
+    /// with `always_on`. Needs `regulator`.
+    #[serde(default)]
+    pub switch: Option<String>,
+    /// Why the base tree has this supply, for a message that names it.
+    pub reason: String,
 }
 
 /// The base-tree nodes that hold one line.
@@ -301,6 +338,65 @@ impl SocMap {
                         ));
                     }
                     seen.push(*gpio);
+                }
+            }
+        }
+        for (base_name, base) in &map.bases {
+            for (port, vbus) in &base.vbus {
+                let who = format!("base {base_name:?} port {port:?}");
+                match map.controllers.get(port) {
+                    Some(c) if c.kind == Kind::UsbPeripheral => {}
+                    Some(c) => {
+                        return Err(format!(
+                            "{who}: the controller is {}, and only a usb-peripheral port has a VBUS fact",
+                            c.kind.name()
+                        ));
+                    }
+                    None => return Err(format!("{who}: the map has no such controller")),
+                }
+                match &vbus.regulator {
+                    None => {
+                        if vbus.always_on || vbus.switch.is_some() || vbus.regulator_name.is_some()
+                        {
+                            return Err(format!(
+                                "{who}: no regulator, so no always_on, switch or regulator_name"
+                            ));
+                        }
+                    }
+                    Some(path) => {
+                        if !path.starts_with('/') {
+                            return Err(format!("{who}: the regulator's path must be absolute"));
+                        }
+                        if vbus
+                            .regulator_name
+                            .as_deref()
+                            .unwrap_or_default()
+                            .is_empty()
+                        {
+                            return Err(format!("{who}: a regulator needs its regulator_name"));
+                        }
+                        if vbus.always_on && vbus.switch.is_some() {
+                            return Err(format!(
+                                "{who}: a regulator is always_on or switched by a line, not both"
+                            ));
+                        }
+                    }
+                }
+                if let Some(line) = &vbus.switch {
+                    let label = line
+                        .strip_prefix("gpio:")
+                        .and_then(|rest| rest.rsplit_once(':'))
+                        .map(|(label, _)| label)
+                        .unwrap_or_default();
+                    if map.chip_labelled(label).is_none() {
+                        return Err(format!(
+                            "{who}: switch {line:?} names no GPIO chip of the map; it has: {}",
+                            map.chip_labels()
+                        ));
+                    }
+                }
+                if vbus.reason.is_empty() {
+                    return Err(format!("{who}: a VBUS fact needs its reason"));
                 }
             }
         }

@@ -216,8 +216,11 @@ fn run_check(dir: &Path, board_text: &str, map_text: &str) -> Vec<String> {
             sys: &dir.join("sys"),
             gpio_chips: &[("gpio-test".to_string(), 16)],
             udc: &dir.join("udc"),
+            gpio_debug: &dir.join("gpio"),
+            regulators: &dir.join("regulators"),
         },
     )
+    .problems
 }
 
 #[test]
@@ -523,8 +526,11 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
             sys: &dir.join("sys"),
             gpio_chips: &small,
             udc: &dir.join("udc"),
+            gpio_debug: &dir.join("gpio"),
+            regulators: &dir.join("regulators"),
         },
-    );
+    )
+    .problems;
     assert!(
         problems
             .iter()
@@ -541,8 +547,11 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
             sys: &dir.join("sys"),
             gpio_chips: &other,
             udc: &dir.join("udc"),
+            gpio_debug: &dir.join("gpio"),
+            regulators: &dir.join("regulators"),
         },
-    );
+    )
+    .problems;
     assert!(
         problems.iter().any(|p| p.contains(
             "no GPIO chip labelled \"gpio-test\" on this machine (the chips are: pinctrl-rp1)"
@@ -662,8 +671,19 @@ fn a_gadget_makes_its_usb_port_a_peripheral_with_the_phy_it_needs() {
     assert!(
         fragment_for(&out.overlay, "/usb2phy@fe8a0000/otg-port").contains("status = \"okay\";")
     );
-    // The device port is only ever the one the board names: no host VBUS supply is written for it.
-    assert!(!out.overlay.contains("phy-supply"), "{}", out.overlay);
+    // The port's PHY never keeps a VBUS supply: its phy-supply is the stand-in, which supplies nothing.
+    assert!(
+        fragment_for(&out.overlay, "/usb2phy@fe8a0000/otg-port")
+            .contains("phy-supply = <&lemnos_no_vbus>;"),
+        "{}",
+        out.overlay
+    );
+    assert_eq!(
+        out.overlay.matches("phy-supply =").count(),
+        1,
+        "{}",
+        out.overlay
+    );
 }
 
 #[test]

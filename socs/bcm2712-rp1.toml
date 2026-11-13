@@ -137,3 +137,11 @@ reason = "the hardware watchdog, on for a managed board"
 [bases.module-io.lines."gpio:pinctrl-rp1:34"]
 holders = ["/cam0_reg"]
 reason = "the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it"
+
+# The module's device port (`usb`, the DWC2 controller at 0x480000) has no VBUS supply in the base tree.
+# Its PHY is a plain USB PHY (`usbphy`, `usb-nop-xceiv`) with no supply, and no board tree of rpi-7.2.y
+# sets one on the port: `usb@480000` in bcm2712-ds.dtsi, and the `&usb` blocks of the board trees that
+# include it set only its power domain. The port has no PHY node in this map, so nothing is
+# replaced; a board that drives VBUS on the port states it (`vbus` or `vbus_undriven`).
+[bases.module-io.vbus.usb]
+reason = "the DWC2 device port's PHY is a plain USB PHY with no supply in the base tree (rpi-7.2.y)"

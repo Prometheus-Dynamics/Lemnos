@@ -6,6 +6,7 @@ schema_version = 1
 [board]
 id = "rk3588"
 soc = "rk3588"
+base = "usb-gpio-vbus"
 
 [[hardware]]
 name = "i2c-0"
@@ -28,12 +29,16 @@ pins = "m0"
 [[hardware]]
 controller = "vpu121"
 
-# The USB 3 device port (port 0). Its SuperSpeed lanes are wired, so the board names `usb3`.
+# The USB 3 device port (port 0). Its SuperSpeed lanes are wired, so the board names `usb3`. Its VBUS
+# regulator is switched by GPIO4 line 11 (the base's): held low, which is off, from power-on.
 [[hardware]]
 name = "udc:fc000000.usb"
 controller = "usb-otg0"
 role = "peripheral"
 options = ["usb3"]
+vbus = "gpio:gpio4:11"
+vbus_off = "low"
+vbus_reason = "the OTG port's 5 V regulator is enabled by GPIO4 line 11; low is off"
 
 [[devices]]
 id = "imu"
