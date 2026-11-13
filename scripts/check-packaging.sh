@@ -24,9 +24,22 @@ combined=lemnosd-gadget.service
 work="$(mktemp -d "${TMPDIR:-/tmp}/lemnos-packaging.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+# The generated fragment (`lemnos-ctl tree --udev`) for the reference board is checked the same way,
+# and its group must be the one packaging/systemd/lemnos.conf creates: the daemon's user and group.
+generated=service/devtree/tests/golden/reference-udev.rules
+groups=$(grep -o 'GROUP="[^"]*"' "$generated" | sort -u)
+if [ "$(printf '%s\n' "$groups" | grep -c .)" != 1 ] || ! grep -q '^u lemnos ' packaging/systemd/lemnos.conf; then
+  echo "==> generated udev rules: the group in $generated is not the daemon's group" >&2
+  exit 1
+fi
+if [ "$groups" != 'GROUP="lemnos"' ]; then
+  echo "==> generated udev rules: $generated gives $groups, the daemon's group is lemnos" >&2
+  exit 1
+fi
+
 if command -v udevadm >/dev/null; then
   echo "==> udev rules"
-  udevadm verify --resolve-names=never --no-summary packaging/udev/*.rules
+  udevadm verify --resolve-names=never --no-summary packaging/udev/*.rules "$generated"
 else
   echo "==> udev rules: skipped, udevadm is not installed"
 fi

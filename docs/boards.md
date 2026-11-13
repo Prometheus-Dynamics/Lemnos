@@ -71,6 +71,7 @@ In `[host]`, every key optional. Each one left out keeps the default:
 | `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go |
 | `retry_first_ms` | 1000 | 1 to the cap | The wait before a device that failed is bound again. It doubles with each failure in a row |
 | `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long a driver must stay up before its wait starts again from the first |
+| `dma_heaps` | `["linux,cma"]` | heap names | The dma-heaps the daemon's own drivers allocate from, by name under `/dev/dma_heap`: each is one file name. Each dma-buf stream's heap is added to them. Gives `lemnos-ctl tree --udev` its rules, and the daemon's start check its nodes. `[]` names none |
 
 The cap can be shorter than 8 s but never longer: that is [the failure rule](concepts.md#the-failure-rule),
 and a longer value is refused. There is no host-wide auto-off: only a device's own
@@ -320,6 +321,7 @@ id = "example"                 # the name the service gives itself to clients
 call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
 retry_first_ms = 1000          # the first wait before a failed device is bound again
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 [[devices]]
@@ -646,3 +648,15 @@ driver the module takes over) for a loadable `lemnos.ko`. `--cmdline FILE` is th
 as one line of `lemnos.<name>=<value>` words, for a module built into the kernel, which takes
 them from the kernel command line and has no modprobe. The `blacklist` has no command-line form.
 See [kernel-config.md](kernel-config.md#parameters-from-the-command-line) for the length limit.
+
+## The daemon's device permissions
+
+The daemon drops to user `lemnos` after its root phase, so each node it opens must give that group
+read and write. `lemnos-ctl tree BOARD --udev FILE` writes the udev rules for the board's own list:
+`/dev/lemnos` and `/dev/lemnos-*` (the module's nodes), and each dma-heap the board uses
+(`/dev/dma_heap/<name>`, from `[host] dma_heaps` and the dma-buf streams). Install it as
+`/usr/lib/udev/rules.d/71-lemnos-board.rules`, beside `70-lemnos.rules`. The daemon checks, after its
+drop, each of those nodes that exists, and refuses to start when the group cannot read and write one,
+naming it (`/dev/dma_heap/linux,cma: not readable/writable by group lemnos: install the generated udev
+fragment`). The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=` or `DevicePolicy=`,
+so systemd filters no device and the unit names no heap.

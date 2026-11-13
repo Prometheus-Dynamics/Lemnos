@@ -33,12 +33,13 @@ lemnos-ctl [--socket PATH] COMMAND
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
-                                 [--modprobe FILE] [--cmdline FILE]
+                                 [--modprobe FILE] [--cmdline FILE] [--udev FILE]
                                  write the device-tree overlay for a board (stdout by default),
                                  its firmware boot fragment, its U-Boot fragment (`gpio set`
-                                 and `gpio clear` for a boot script), and the kernel module's
+                                 and `gpio clear` for a boot script), the kernel module's
                                  modprobe configuration, and for a module built into the kernel
-                                 the same parameters as kernel command-line words, with no daemon";
+                                 the same parameters as kernel command-line words, and the udev
+                                 rules that give the daemon's nodes to its group, with no daemon";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -271,6 +272,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut uboot_out = None;
     let mut modprobe_out = None;
     let mut cmdline_out = None;
+    let mut udev_out = None;
     let mut board_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -283,6 +285,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--uboot", Some(file)) => uboot_out = Some(file),
             ("--modprobe", Some(file)) => modprobe_out = Some(file),
             ("--cmdline", Some(file)) => cmdline_out = Some(file),
+            ("--udev", Some(file)) => udev_out = Some(file),
             (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
                 board_path = Some(flag.to_string());
                 i += 1;
@@ -325,6 +328,10 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     if let Some(file) = cmdline_out {
         let line = kernel_cmdline(&generated.modprobe);
         std::fs::write(&file, line).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = udev_out {
+        std::fs::write(&file, lemnos_devtree::udev::fragment(&board))
+            .map_err(|e| format!("{file}: {e}"))?;
     }
     Ok(())
 }

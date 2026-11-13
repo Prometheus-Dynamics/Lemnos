@@ -7,6 +7,7 @@
  * Copyright (c) 2026 the Lemnos authors.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -146,6 +147,38 @@ static const char *cma_heap(void)
 		if (!access(heaps[i], R_OK))
 			return heaps[i];
 	return heaps[1];
+}
+
+/* The daemon's group in the gadget check (DAEMON_ID in testing/crates/gadget-check), which that
+ * check's start drops to. The guest runs no udev: the nodes the daemon opens by name are given to
+ * the group here, the way the board's generated udev fragment (`lemnos-ctl tree --udev`) gives
+ * them, before the start check reads them. */
+#define DAEMON_GID 999
+
+static void give_to_daemon_group(const char *path)
+{
+	if (access(path, F_OK))
+		return;
+	check(!chown(path, 0, DAEMON_GID) && !chmod(path, 0660),
+	      "node given to the daemon group");
+}
+
+static void give_module_nodes_to_daemon_group(void)
+{
+	DIR *dev = opendir("/dev");
+	struct dirent *entry;
+
+	if (!dev)
+		return;
+	while ((entry = readdir(dev))) {
+		char path[256];
+
+		if (strcmp(entry->d_name, "lemnos") && strncmp(entry->d_name, "lemnos-", 7))
+			continue;
+		snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
+		give_to_daemon_group(path);
+	}
+	closedir(dev);
 }
 
 #define SIM "/sys/kernel/config/gpio-sim/lemnos"
@@ -498,6 +531,8 @@ int main(void)
 	if (mount("configfs", "/sys/kernel/config", "configfs", 0, NULL) && errno != EBUSY)
 		check(0, "configfs mounted");
 	mkdir("/dev/usb-ffs", 0755);
+	give_module_nodes_to_daemon_group();
+	give_to_daemon_group(cma_heap());
 	check(!run((char *const[]){ "/lemnos-gadget-check", NULL }), "lemnos_gadget_check");
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);

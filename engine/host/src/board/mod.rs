@@ -68,7 +68,7 @@ pub const MAX_RETRY_CAP_MS: u64 = MAX_RETRY_CAP.as_millis() as u64;
 /// keeps what the host was started with, which for `lemnosd` is the default in the table of
 /// `docs/boards.md`. Nothing here can turn a device off: that is each device's own
 /// `auto_off_after`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSpec {
     /// How long one driver call may run, in milliseconds: 1 to [`MAX_CALL_DEADLINE_MS`].
@@ -82,7 +82,16 @@ pub struct HostSpec {
     /// also how long a driver must stay up before its wait starts again from the shortest.
     #[serde(default)]
     pub retry_cap_ms: Option<u64>,
+    /// The dma-heaps the daemon opens, by name under `/dev/dma_heap`: the heaps its own drivers
+    /// allocate from, which are not named by a stream. Left out, it is [`DEFAULT_HOST_HEAP`];
+    /// an empty list names none. Each is one file name, as a stream's `heap` is. The generated
+    /// udev fragment and the daemon's start check read the set with [`BoardFile::dma_heaps`].
+    #[serde(default)]
+    pub dma_heaps: Option<Vec<String>>,
 }
+
+/// The dma-heap a board's drivers allocate from when its `[host]` section names none: the CMA heap.
+pub const DEFAULT_HOST_HEAP: &str = "linux,cma";
 
 impl HostSpec {
     /// `options` with what this section sets put over it.
@@ -126,6 +135,14 @@ impl HostSpec {
             return out(
                 "retry_first_ms",
                 &format!("{first} is not from 1 to the cap, {cap}"),
+            );
+        }
+        if let Some(heaps) = &self.dma_heaps
+            && let Some(bad) = heaps.iter().find(|name| !is_heap_name(name))
+        {
+            return out(
+                "dma_heaps",
+                &format!("{bad:?} is not the name of a heap: one file name under /dev/dma_heap"),
             );
         }
         Ok(())
@@ -271,6 +288,32 @@ impl StreamSpec {
             job_slots: 1,
             job_bytes: 0,
         })
+    }
+}
+
+impl BoardFile {
+    /// Every dma-heap the daemon opens for this board, by name, sorted and without repeats: the
+    /// `[host]` section's `dma_heaps` (or [`DEFAULT_HOST_HEAP`]), and the heap of each dma-buf
+    /// stream of every device and `[[each]]` entry. A stream that names no heap is on
+    /// [`DEFAULT_HEAP`], which is what the daemon allocates from for it.
+    #[must_use]
+    pub fn dma_heaps(&self) -> Vec<String> {
+        let mut heaps = std::collections::BTreeSet::new();
+        match &self.host.dma_heaps {
+            Some(named) => heaps.extend(named.iter().cloned()),
+            None => {
+                heaps.insert(DEFAULT_HOST_HEAP.to_owned());
+            }
+        }
+        let streams = self
+            .devices
+            .iter()
+            .flat_map(|device| device.streams.values())
+            .chain(self.each.iter().flat_map(|each| each.streams.values()));
+        for stream in streams.filter(|s| s.memory == StreamMemory::DmaBuf) {
+            heaps.insert(stream.heap_name().to_owned());
+        }
+        heaps.into_iter().collect()
     }
 }
 
@@ -1013,6 +1056,42 @@ mod tests {
 
     fn host(keys: &str) -> Result<BoardFile, BoardError> {
         parse(&format!("{HEAD}[host]\n{keys}"))
+    }
+
+    #[test]
+    fn the_dma_heaps_are_the_host_section_or_the_cma_heap_plus_every_dma_buf_stream() {
+        // Left out: the CMA heap the daemon's drivers allocate from.
+        let board = host("retry_first_ms = 100\n").unwrap();
+        assert_eq!(board.dma_heaps(), vec![DEFAULT_HOST_HEAP.to_string()]);
+        // Named: exactly those, and nothing else.
+        let board = host("dma_heaps = [\"system\"]\n").unwrap();
+        assert_eq!(board.dma_heaps(), vec!["system".to_string()]);
+        let board = host("dma_heaps = []\n").unwrap();
+        assert!(board.dma_heaps().is_empty());
+        // A dma-buf stream's heap is added, once; a shared stream adds none.
+        let text = format!(
+            "{HEAD}[host]\ndma_heaps = [\"linux,cma\"]\n\
+             [[devices]]\nid = \"cam\"\ndriver = \"x\"\n\
+             [devices.streams.a]\nbuffers = 2\nbuffer_bytes = 64\nmemory = \"dma-buf\"\nheap = \"linux,cma\"\n\
+             [devices.streams.b]\nbuffers = 2\nbuffer_bytes = 64\nmemory = \"dma-buf\"\n\
+             [devices.streams.c]\nbuffers = 2\nbuffer_bytes = 64\n"
+        );
+        let board = parse(&text).unwrap();
+        assert_eq!(
+            board.dma_heaps(),
+            vec!["linux,cma".to_string(), "system".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_dma_heap_the_host_section_names_is_one_file_name() {
+        for bad in ["\"\"", "\"../x\"", "\"a/b\"", "\"a b\""] {
+            let error = host(&format!("dma_heaps = [{bad}]\n")).unwrap_err();
+            assert!(
+                matches!(error, BoardError::Host("dma_heaps", _)),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]
