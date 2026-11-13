@@ -103,7 +103,14 @@ impl Lifecycle for Vcm {
     }
 
     fn describe(&self, out: &mut Description) {
-        out.add(Item::value("position", POSITION).unit(Unit::One, 0));
+        out.set_address(self.address);
+        // The span the board's configured limits allow; one step is one code.
+        out.add(
+            Item::value("position", POSITION)
+                .unit(Unit::One, 0)
+                .range(i64::from(self.min), i64::from(self.max))
+                .step(1),
+        );
     }
 
     fn health(&self) -> Health {

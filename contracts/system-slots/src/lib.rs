@@ -34,7 +34,7 @@
 
 use lemnos_core::{JobId, Result, contract};
 
-#[contract("system.slots", version = 1)]
+#[contract("system.slots", version = 1, kind = "system")]
 pub trait Slots {
     /// The installed slots, the pointers and the free space, as JSON (see the crate's
     /// documentation). Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.

@@ -107,7 +107,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("image.blend", version = 1)]
+#[contract("image.blend", version = 1, kind = "compute")]
 pub trait ImageBlend {
     #[method(1)]
     fn info(&mut self) -> Result<BlendInfo>;

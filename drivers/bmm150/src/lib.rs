@@ -89,12 +89,18 @@ impl Lifecycle for Bmm150 {
     }
 
     fn describe(&self, out: &mut Description) {
+        out.set_address(self.address);
         for (name, field) in [
             ("magnetic_field.x", "x"),
             ("magnetic_field.y", "y"),
             ("magnetic_field.z", "z"),
         ] {
-            out.add(Item::value(name, READ).unit(Unit::Tesla, 0).field(field));
+            out.add(
+                Item::value(name, READ)
+                    .unit(Unit::Tesla, 0)
+                    .field(field)
+                    .group("magnetic_field"),
+            );
         }
     }
 

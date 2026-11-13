@@ -429,6 +429,11 @@ mod tests {
             contract: 0,
             method,
             field: field.map(str::to_owned),
+            reading: None,
+            step: None,
+            warn_low: None,
+            warn_high: None,
+            group: None,
         }
     }
 
@@ -436,6 +441,7 @@ mod tests {
         DeviceDescription {
             contracts: vec![OwnedContract {
                 tag: "example.thing/1".to_owned(),
+                kind: "other".to_owned(),
                 hash: 0,
                 methods: vec![
                     method(1, 0, OwnedShape::U32, false),
@@ -458,6 +464,7 @@ mod tests {
                 item(ItemKind::Value, "x", 5, Some("x")),
                 item(ItemKind::Value, "whole", 5, None),
             ],
+            ..DeviceDescription::default()
         }
     }
 

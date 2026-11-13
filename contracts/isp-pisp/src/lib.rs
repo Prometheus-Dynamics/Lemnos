@@ -43,7 +43,7 @@ pub struct PispInfo {
     pub stalled: u64,
 }
 
-#[contract("isp.pisp", version = 1)]
+#[contract("isp.pisp", version = 1, kind = "camera")]
 pub trait IspPisp {
     #[method(1)]
     fn info(&mut self) -> Result<PispInfo>;

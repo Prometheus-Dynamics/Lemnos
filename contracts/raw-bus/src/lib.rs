@@ -18,7 +18,7 @@
 
 use lemnos_core::{Result, contract};
 
-#[contract("raw-bus", version = 1)]
+#[contract("raw-bus", version = 1, kind = "bus")]
 pub trait RawBus {
     /// An I2C transaction to the 7-bit `address`: the bytes in `write`, then, if `read_len` is not 0,
     /// a repeated start and `read_len` bytes. The bytes read go into `into`, which must hold

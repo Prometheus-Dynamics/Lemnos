@@ -321,7 +321,7 @@ pub struct FrameValues {
     pub controls: Controls,
 }
 
-#[contract("camera.sensor", version = 1)]
+#[contract("camera.sensor", version = 1, kind = "camera")]
 pub trait CameraSensor {
     #[method(1)]
     fn info(&mut self) -> Result<SensorInfo>;

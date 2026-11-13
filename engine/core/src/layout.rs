@@ -151,6 +151,7 @@ mod tests {
         ($fields:expr) => {
             ContractInfo {
                 tag: Tag::new("t/1"),
+                kind: "other",
                 methods: &[MethodInfo {
                     id: 1,
                     name: "run",
@@ -161,6 +162,7 @@ mod tests {
                     returns: Shape::Unit,
                     has_out_buffer: false,
                     job: false,
+                    reading: None,
                 }],
             }
         };

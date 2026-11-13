@@ -9,9 +9,9 @@ use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
-    CORE_HASH, Frame, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES, PLANE_LENGTH_BYTES,
-    Tail, VERSION, WireError, decode, encode_description, feature, handle_descriptors,
-    package_mode,
+    CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
+    PLANE_LENGTH_BYTES, Tail, VERSION, WireError, decode, encode_description, feature,
+    handle_descriptors, package_mode,
 };
 
 use crate::Core;
@@ -283,8 +283,26 @@ impl Client {
             Ok(description) => description,
             Err(status) => return self.refuse(id, status, "the device isn't running"),
         };
+        // The identity the board and the host give: its label, bus and state. Read after the
+        // description, so a state that changed in between is the one reported.
+        let Some(info) = self
+            .core
+            .host
+            .devices()
+            .into_iter()
+            .find(|i| i.index == device)
+        else {
+            return self.refuse(id, Status::NOT_FOUND, "no such device");
+        };
+        let (state, _, reason) = wire_state(&info);
+        let identity = Identity {
+            label: &info.label,
+            bus: info.bus.as_deref().unwrap_or(""),
+            state,
+            reason: &reason,
+        };
         let mut bytes = vec![0; DESCRIPTION_MAX];
-        match encode_description(&manifest, &description, &mut bytes) {
+        match encode_description(&manifest, &description, &identity, &mut bytes) {
             Ok(n) => self.conn.answer(&Frame::Description {
                 id,
                 bytes: &bytes[..n],

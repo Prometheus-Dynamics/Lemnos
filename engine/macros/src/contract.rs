@@ -12,6 +12,7 @@ use syn::{
 struct Args {
     name: LitStr,
     version: LitInt,
+    kind: Option<LitStr>,
 }
 
 impl Parse for Args {
@@ -23,12 +24,39 @@ impl Parse for Args {
             return Err(Error::new(key.span(), "expected `version = N`"));
         }
         input.parse::<Token![=]>()?;
+        let version = input.parse()?;
+        // `kind = "sensor"`, after the version, when the contract has a grouping.
+        let mut kind = None;
+        if input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
+            let key: Ident = input.parse()?;
+            if key != "kind" {
+                return Err(Error::new(key.span(), "expected `kind = \"...\"`"));
+            }
+            input.parse::<Token![=]>()?;
+            kind = Some(input.parse()?);
+        }
         Ok(Self {
             name,
-            version: input.parse()?,
+            version,
+            kind,
         })
     }
 }
+
+/// The kinds a contract can declare. A kind groups devices for a tool with no code for them.
+const KINDS: &[&str] = &[
+    "sensor", "actuator", "camera", "power", "system", "light", "bus", "compute", "other",
+];
+
+/// The readings a method can declare, by the names [`Reading`](lemnos_core::Reading) is written with.
+const READINGS: &[(&str, &str)] = &[
+    ("number", "Number"),
+    ("range", "Range"),
+    ("switch", "Switch"),
+    ("text", "Text"),
+    ("colour_array", "ColourArray"),
+    ("three_axes", "ThreeAxes"),
+];
 
 struct Param {
     ident: Ident,
@@ -38,37 +66,45 @@ struct Param {
 struct Method {
     id: u16,
     job: bool,
+    reading: Option<Ident>,
     ident: Ident,
     params: Vec<Param>,
     out: Option<Ident>,
     returns: Type,
 }
 
-/// `#[method(N)]`, or `#[method(N, job)]` for a method that starts a long job.
+/// `#[method(N)]`, `#[method(N, job)]` for a method that starts a long job, and
+/// `#[method(N, reading = switch)]` for the reading its value shows as.
 struct MethodArgs {
     id: LitInt,
     job: bool,
+    reading: Option<Ident>,
 }
 
 impl Parse for MethodArgs {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let id = input.parse()?;
         let mut job = false;
-        if input.parse::<Option<Token![,]>>()?.is_some() {
+        let mut reading = None;
+        while input.parse::<Option<Token![,]>>()?.is_some() {
             let word: Ident = input.parse()?;
-            if word != "job" {
+            if word == "job" {
+                job = true;
+            } else if word == "reading" {
+                input.parse::<Token![=]>()?;
+                reading = Some(input.parse::<Ident>()?);
+            } else {
                 return Err(Error::new(
                     word.span(),
-                    "expected #[method(N)] or #[method(N, job)]",
+                    "expected #[method(N)], #[method(N, job)] or #[method(N, reading = ...)]",
                 ));
             }
-            job = true;
         }
-        Ok(Self { id, job })
+        Ok(Self { id, job, reading })
     }
 }
 
-fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool)> {
+fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, Option<Ident>)> {
     let position = method
         .attrs
         .iter()
@@ -81,7 +117,7 @@ fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool)> {
         })?;
     let attr = method.attrs.remove(position);
     let args = attr.parse_args::<MethodArgs>()?;
-    Ok((args.id.base10_parse()?, args.job))
+    Ok((args.id.base10_parse()?, args.job, args.reading))
 }
 
 fn is_job_id(ty: &Type) -> bool {
@@ -136,7 +172,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             "a contract method can't be generic",
         ));
     }
-    let (id, job) = remove_method_id(method)?;
+    let (id, job, reading) = remove_method_id(method)?;
     let returns = ok_type(&method.sig.output)?;
     if job && !is_job_id(&returns) {
         return Err(Error::new(
@@ -195,9 +231,26 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             "a job method has no #[out] buffer: its result comes when it finishes",
         ));
     }
+    let reading = match reading {
+        None => None,
+        Some(word) => {
+            let name = word.to_string();
+            let (_, variant) = READINGS
+                .iter()
+                .find(|(written, _)| *written == name)
+                .ok_or_else(|| {
+                    Error::new(
+                        word.span(),
+                        "expected a reading: number, range, switch, text, colour_array or three_axes",
+                    )
+                })?;
+            Some(format_ident!("{}", variant))
+        }
+    };
     Ok(Method {
         id,
         job,
+        reading,
         ident: method.sig.ident.clone(),
         params,
         out,
@@ -277,6 +330,10 @@ fn method_info(method: &Method) -> TokenStream {
     let returned = &method.returns;
     let has_out = method.out.is_some();
     let job = method.job;
+    let reading = match &method.reading {
+        Some(variant) => quote! { ::core::option::Option::Some(::lemnos_core::Reading::#variant) },
+        None => quote! { ::core::option::Option::None },
+    };
     // The reply to an #[out] method is the bytes themselves.
     let returns = if has_out {
         quote! { ::lemnos_core::Shape::Bytes }
@@ -294,12 +351,26 @@ fn method_info(method: &Method) -> TokenStream {
             returns: #returns,
             has_out_buffer: #has_out,
             job: #job,
+            reading: #reading,
         }
     }
 }
 
 pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let args: Args = parse2(args)?;
+    let kind = match &args.kind {
+        None => "other".to_string(),
+        Some(kind) => {
+            let value = kind.value();
+            if !KINDS.contains(&value.as_str()) {
+                return Err(Error::new(
+                    kind.span(),
+                    format!("a contract's kind is one of {}", KINDS.join(", ")),
+                ));
+            }
+            value
+        }
+    };
     let mut input: ItemTrait = parse2(item)?;
     if !input.generics.params.is_empty() {
         return Err(Error::new(
@@ -362,6 +433,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             const TAG: ::lemnos_core::Tag = ::lemnos_core::Tag::new(#tag);
             const INFO: ::lemnos_core::ContractInfo = ::lemnos_core::ContractInfo {
                 tag: ::lemnos_core::Tag::new(#tag),
+                kind: #kind,
                 methods: &[#(#infos),*],
             };
             const HASH: u64 = ::lemnos_core::layout::contract_hash(&Self::INFO);

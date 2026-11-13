@@ -15,6 +15,7 @@ const READ: MethodId = MethodId {
 
 const INFO: ContractInfo = ContractInfo {
     tag: Tag::new("example.thing/1"),
+    kind: "other",
     methods: &[MethodInfo {
         id: 1,
         name: "read",
@@ -22,6 +23,7 @@ const INFO: ContractInfo = ContractInfo {
         returns: Shape::U8,
         has_out_buffer: false,
         job: false,
+        reading: None,
     }],
 };
 
@@ -243,6 +245,7 @@ mod package {
             super::INFO,
             ContractInfo {
                 tag: Tag::new("example.more/12"),
+                kind: "other",
                 methods: &[MethodInfo {
                     id: 7,
                     name: "fill",
@@ -259,6 +262,7 @@ mod package {
                     returns: Shape::Bytes,
                     has_out_buffer: true,
                     job: false,
+                    reading: None,
                 }],
             },
         ],

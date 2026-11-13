@@ -156,7 +156,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("camera.receiver", version = 1)]
+#[contract("camera.receiver", version = 1, kind = "camera")]
 pub trait CameraReceiver {
     #[method(1)]
     fn limits(&mut self) -> Result<Limits>;

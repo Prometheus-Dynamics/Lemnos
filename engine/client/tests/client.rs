@@ -204,6 +204,7 @@ fn a_typed_contract_whose_encoding_differs_on_the_device_is_refused() {
     // must refuse it before anything is called.
     const WIDER: ContractInfo = ContractInfo {
         tag: Tag::new(TAG),
+        kind: "other",
         methods: &[MethodInfo {
             id: 1,
             name: "add",
@@ -214,6 +215,7 @@ fn a_typed_contract_whose_encoding_differs_on_the_device_is_refused() {
             returns: Shape::U32,
             has_out_buffer: false,
             job: false,
+            reading: None,
         }],
     };
     let host = FakeHost::start();

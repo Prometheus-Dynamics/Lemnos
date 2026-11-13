@@ -230,6 +230,10 @@ pub enum DeviceState {
 pub struct DeviceInfo {
     pub index: u32,
     pub id: String,
+    /// The board's `label`, or the id when the board names none.
+    pub label: String,
+    /// The bus or block the board names for the device, as written.
+    pub bus: Option<String>,
     pub driver: String,
     pub tags: Vec<Tag>,
     pub state: DeviceState,
@@ -1915,6 +1919,12 @@ impl Host {
             index: slot.index,
             revision,
             id: slot.spec.id.clone(),
+            label: slot
+                .spec
+                .label
+                .clone()
+                .unwrap_or_else(|| slot.spec.id.clone()),
+            bus: slot.spec.bus.clone(),
             driver: slot.spec.driver.clone(),
             tags: slot
                 .entry

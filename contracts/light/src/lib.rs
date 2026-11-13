@@ -16,7 +16,7 @@ pub struct Layout {
     pub layers: u8,
 }
 
-#[contract("light", version = 1)]
+#[contract("light", version = 1, kind = "light")]
 pub trait Light {
     #[method(1)]
     fn layout(&mut self) -> Result<Layout>;
@@ -30,6 +30,6 @@ pub trait Light {
     #[method(4)]
     fn clear_all(&mut self) -> Result<()>;
     /// Scales everything shown, 0 to 255.
-    #[method(5)]
+    #[method(5, reading = range)]
     fn set_brightness(&mut self, level: u8) -> Result<()>;
 }

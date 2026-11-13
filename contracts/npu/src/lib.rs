@@ -111,7 +111,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("npu", version = 1)]
+#[contract("npu", version = 1, kind = "compute")]
 pub trait Npu {
     #[method(1)]
     fn info(&mut self) -> Result<NpuInfo>;

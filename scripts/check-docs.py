@@ -210,7 +210,7 @@ def first_line(body):
 
 
 DRIVER = re.compile(r'#\[driver\("([^"]+)", provides = \[([^\]]*)\]\)\]\s*(?:#\[[^\]]*\]\s*)*pub struct (\w+)')
-CONTRACT = re.compile(r'#\[contract\("([^"]+)", version = (\d+)\)\]\s*(?:#\[[^\]]*\]\s*)*pub trait (\w+)')
+CONTRACT = re.compile(r'#\[contract\("([^"]+)", version = (\d+)(?:, kind = "[^"]*")?\)\]\s*(?:#\[[^\]]*\]\s*)*pub trait (\w+)')
 NOT_BUILT_IN = re.compile(r"not registered in `lemnosd`|not built into (the daemon|`lemnosd`)|nothing is registered in `lemnosd`")
 
 

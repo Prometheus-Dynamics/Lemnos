@@ -508,6 +508,41 @@ it as a package, do what `engine/package/tests` does: build the `cdylib`, load i
 every kind of resource from a package against the simulated board, and `tests/merged_driver.rs`
 runs one driver both ways.
 
+## What a driver describes
+
+A device's description is what a tool with no code for it shows. Lemnos fills in the name, the
+kind, the bus and the state itself, from the board file and the host; the driver fills in what only
+it knows, one `Item` at a time (`engine/core/src/description.rs`):
+
+| Field | Set by | Unknown when |
+|---|---|---|
+| Label | the board file's `label`, else the device id | never (the id is always there) |
+| Kind | the contract crate, `kind = "..."` on `#[contract]` | the contract says `other` |
+| Bus | the board file's `bus` | the device has none |
+| Address | `out.set_address(addr)`: the 7-bit I2C address | the driver serves several addresses, or none |
+| State and reason | the host | never |
+| Unit | `Item::…().unit(Unit, exponent)` | `One` (dimensionless) is the default |
+| Range | `.range(min, max)`, raw, in the item's exponent | left out: no range known |
+| Step | `.step(n)`: one count, in raw units | left out |
+| Limit | `.warn_below(raw)`, `.warn_above(raw)` | left out: no threshold |
+| Reading | `.reading(Reading::…)`, else the method's, else the shape's | never: the shape always suggests one |
+| Group | `.group("name")` on each part of a vector, with the axis in `.field(...)` | not a vector |
+
+The readings are `number`, `range` (a settable number within its bounds), `switch`, `text`,
+`colour array` and `three axes`. A contract declares a method's reading with
+`#[method(N, reading = switch)]`, and the kind with `#[contract("tag", version = 1, kind = "sensor")]`
+(`sensor`, `actuator`, `camera`, `power`, `system`, `light`, `bus`, `compute` or `other`). A control's
+`method` is the one that sets it; a value's is the one that reads it. Neither the kind nor the
+reading is part of a contract's layout hash: both are for description only.
+
+A driver fills in a range only when it knows one: a sensor's full scale from its configured range,
+a fan's duty from its per-mille limits. Where it does not know, it leaves the item without one. An
+unknown figure is never a guess.
+
+The wire carries these as an appended trailer on the description ([Wire](wire.md#description)).
+A driver package does not yet carry the reading, step, limit, group or contract kind: its items read
+as unknown for them until its item table is extended ([the package form](#the-package-form)).
+
 ## Compatibility: what must match, and what need not
 
 > **Status:** the core and the wire parts are checked as described here (T1c). The per-contract
@@ -603,3 +638,5 @@ Doc comments, method bodies and the driver's own state don't move any hash.
 - Hardware you could not reach is marked `untested on board` in the crate's documentation, with
   the check written to a file under `testing/board-runs/` ([Testing](testing.md#board-runs)).
 - The driver has a row in [Drivers and contracts](drivers.md) that says what state it is in.
+- Every value it describes has a unit, and a range, a step and a limit wherever it knows them. A
+  test on the simulated bus shows the description has no item without a reading type.

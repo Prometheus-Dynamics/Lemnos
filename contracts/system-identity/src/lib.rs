@@ -14,16 +14,16 @@ pub const MAX_TEXT: usize = 256;
 /// The buffer `facts` needs: every fact of the node, one line each.
 pub const MAX_FACTS_TEXT: usize = 2048;
 
-#[contract("system.identity", version = 1)]
+#[contract("system.identity", version = 1, kind = "system")]
 pub trait SystemIdentity {
     /// The board's serial, in the normalised format (lowercase hex, 8 to 32 digits).
-    #[method(1)]
+    #[method(1, reading = text)]
     fn serial(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// The board's family: its `[board] id`.
-    #[method(2)]
+    #[method(2, reading = text)]
     fn family(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// The board's display name, with its revision after it.
-    #[method(3)]
+    #[method(3, reading = text)]
     fn model(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// Every fact the driver knows, as `name=value` lines. `into` holds [`MAX_FACTS_TEXT`] bytes.
     #[method(4)]

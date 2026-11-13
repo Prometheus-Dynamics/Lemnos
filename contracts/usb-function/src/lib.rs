@@ -294,7 +294,7 @@ pub struct Counters {
     pub requests_unanswered: u64,
 }
 
-#[contract("usb.function", version = 1)]
+#[contract("usb.function", version = 1, kind = "bus")]
 pub trait UsbFunction {
     #[method(1)]
     fn info(&mut self) -> Result<FunctionInfo>;

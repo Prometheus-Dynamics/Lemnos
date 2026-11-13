@@ -530,14 +530,15 @@ fn frames_round_trip() {
 
 mod description {
     use lemnos_core::{
-        ContractInfo, Description, Field, Item, Manifest, MethodId, MethodInfo, Param, Shape, Tag,
-        Unit,
+        ContractInfo, Description, Field, Item, Manifest, MethodId, MethodInfo, Param, Reading,
+        Shape, Tag, Unit,
     };
 
-    use super::{OwnedShape, decode_description, encode_description};
+    use super::{Identity, OwnedShape, decode_description, encode_description};
 
     const CONTRACT: ContractInfo = ContractInfo {
         tag: Tag::new("example.thing/1"),
+        kind: "sensor",
         methods: &[
             MethodInfo {
                 id: 3,
@@ -552,6 +553,7 @@ mod description {
                 }]),
                 has_out_buffer: true,
                 job: false,
+                reading: None,
             },
             MethodInfo {
                 id: 5,
@@ -560,9 +562,19 @@ mod description {
                 returns: Shape::U32,
                 has_out_buffer: false,
                 job: true,
+                reading: Some(Reading::Switch),
             },
         ],
     };
+
+    fn identity() -> Identity<'static> {
+        Identity {
+            label: "front",
+            bus: "i2c-1",
+            state: crate::state::BACKOFF,
+            reason: "bus error",
+        }
+    }
 
     #[test]
     fn a_description_round_trips() {
@@ -580,14 +592,28 @@ mod description {
             Item::value("level", method)
                 .unit(Unit::Volt, -3)
                 .range(-1, 1)
+                .step(1)
+                .warn_below(-1)
+                .warn_above(1)
+                .group("pair")
                 .field("x"),
         );
+        description.add(Item::value("on", method).field("x"));
+        description.set_address(0x40);
         let mut buf = [0; 512];
-        let n = encode_description(&manifest, &description, &mut buf).unwrap();
+        let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
         let back = decode_description(&buf[..n]).unwrap();
+
+        assert_eq!(
+            (back.label.as_str(), back.bus.as_str(), back.kind.as_str()),
+            ("front", "i2c-1", "sensor")
+        );
+        assert_eq!((back.state, back.reason.as_str()), (Some(1), "bus error"));
+        assert_eq!(back.address, Some(0x40));
 
         let m = &back.contracts[0].methods[0];
         assert_eq!(back.contracts[0].tag, "example.thing/1");
+        assert_eq!(back.contracts[0].kind, "sensor");
         assert_eq!((m.id, m.name.as_str(), m.has_out_buffer), (3, "read", true));
         assert_eq!(
             m.params[0].shape,
@@ -605,12 +631,30 @@ mod description {
         assert_eq!((item.exponent, item.min, item.max), (-3, Some(-1), Some(1)));
         assert_eq!((item.contract, item.method), (0, 3));
         assert_eq!(item.field.as_deref(), Some("x"));
+        // The item's own reading, else its method's, else one its shape suggests: a number here.
+        assert_eq!(item.reading, Some(Reading::Number));
+        assert_eq!(
+            (item.step, item.warn_low, item.warn_high),
+            (Some(1), Some(-1), Some(1))
+        );
+        assert_eq!(item.group.as_deref(), Some("pair"));
+        assert_eq!(back.items[1].reading, Some(Reading::Number));
+        assert_eq!(back.items[1].group, None);
         let jobs: Vec<_> = back.contracts[0]
             .methods
             .iter()
             .map(|m| (m.id, m.job))
             .collect();
         assert_eq!(jobs, [(3, false), (5, true)]);
+    }
+
+    /// The identity trailer's length for `description`, measured by encoding it alone.
+    fn trailer_len(manifest: &Manifest, description: &Description) -> usize {
+        let mut tail = [0; 512];
+        let mut out = lemnos_core::Writer::new(&mut tail);
+        super::super::description::encode_trailer(manifest, description, &identity(), &mut out)
+            .unwrap();
+        out.len()
     }
 
     #[test]
@@ -620,15 +664,38 @@ mod description {
             needs: &[],
             provides: &[CONTRACT],
         };
+        let description = Description::new();
         let mut buf = [0; 512];
-        let n = encode_description(&manifest, &Description::new(), &mut buf).unwrap();
-        // The appended part: a count of one, then contract 0, method 5, as a block of three bytes.
-        assert_eq!(buf[n - 9..n], [1, 0, 3, 0, 0, 0, 0, 5, 0]);
-        let back = decode_description(&buf[..n - 9]).unwrap();
+        let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
+        // The job list sits just before the identity trailer: a count of one, then one job record,
+        // a block of 3 bytes (contract 0, method 5), its length first.
+        let jobs_end = n - trailer_len(&manifest, &description);
+        assert_eq!(buf[jobs_end - 9..jobs_end], [1, 0, 3, 0, 0, 0, 0, 5, 0]);
+        // A reader from before the job list stops at the items.
+        let back = decode_description(&buf[..jobs_end - 9]).unwrap();
         assert!(back.contracts[0].methods.iter().all(|m| !m.job));
         // One that names a method the contracts don't have can't be trusted.
-        buf[n - 2] = 9;
+        buf[jobs_end - 2] = 9;
         assert!(decode_description(&buf[..n]).is_err());
+    }
+
+    #[test]
+    fn a_description_from_before_the_identity_reads_with_none() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[CONTRACT],
+        };
+        let description = Description::new();
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
+        let back = decode_description(&buf[..n - trailer_len(&manifest, &description)]).unwrap();
+        assert_eq!(
+            (back.label.as_str(), back.state, back.kind.as_str()),
+            ("", None, "")
+        );
+        assert_eq!(back.contracts[0].kind, "");
+        assert_eq!(back.contracts[0].methods.len(), 2);
     }
 
     #[test]

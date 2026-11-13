@@ -34,7 +34,7 @@ pub use contract::{
     Bound, Caller, Contract, ContractInfo, Dev, LOCAL_ARGS, LocalCaller, MethodInfo, Param,
     REPLY_INLINE, Router,
 };
-pub use description::{Description, Item, ItemKind, MAX_ITEMS, Unit};
+pub use description::{Description, Item, ItemKind, MAX_ITEMS, Reading, Unit};
 pub use driver::{
     BoardDevice, BoardView, CallerId, Driver, Health, HostClock, HostOwned, JobId, JobState,
     Lifecycle, Manifest, MethodId, Origin, Reply,

@@ -171,11 +171,18 @@ impl Lifecycle for PwmChannelFan {
         if self.tach.is_some() {
             out.add(Item::value("rpm", RPM).unit(Unit::RevolutionPerMinute, 0));
         }
-        out.add(Item::value("duty", DUTY).unit(Unit::One, -3));
+        // Duty is per mille: from 0 to FULL, one step is one per mille.
+        out.add(
+            Item::value("duty", DUTY)
+                .unit(Unit::One, -3)
+                .range(0, i64::from(FULL))
+                .step(1),
+        );
         out.add(
             Item::control("duty", SET_DUTY)
                 .unit(Unit::One, -3)
-                .range(0, i64::from(FULL)),
+                .range(0, i64::from(FULL))
+                .step(1),
         );
         out.add(Item::action("release", RELEASE));
     }

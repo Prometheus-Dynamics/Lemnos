@@ -68,7 +68,7 @@ macro_rules! fake_vector {
                     method: 1,
                 };
                 for (name, field) in [("x", "x"), ("y", "y"), ("z", "z")] {
-                    out.add(Item::value(name, read).unit(Unit::$unit, 0).field(field));
+                    out.add(Item::value(name, read).unit(Unit::$unit, 0).field(field).group($tag));
                 }
             }
         }

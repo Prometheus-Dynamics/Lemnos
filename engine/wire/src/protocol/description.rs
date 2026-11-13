@@ -6,8 +6,8 @@
 //! record carries is written with [`encode_shape`], whose codes are in [`shape_code`].
 
 use lemnos_core::{
-    ContractInfo, Decode, Description, Encode, ItemKind, Manifest, MethodId, Reader, Result, Shape,
-    Status, Writer,
+    ContractInfo, Decode, Description, Encode, Item, ItemKind, Manifest, MethodId, MethodInfo,
+    Reader, Reading, Result, Shape, Status, Tail, Writer,
 };
 
 use crate::hash;
@@ -86,6 +86,9 @@ pub struct OwnedMethod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedContract {
     pub tag: String,
+    /// What the contract is for, such as `sensor`. `other` when it names none; empty from a host
+    /// that sends no kinds.
+    pub kind: String,
     /// The contract's encoding hash ([`lemnos_core::layout::contract_hash`]): equal on both sides
     /// when every argument and result type is laid out the same.
     pub hash: u64,
@@ -103,13 +106,51 @@ pub struct OwnedItem {
     pub contract: u8,
     pub method: u16,
     pub field: Option<String>,
+    /// How the value reads. `None` from a host that sends no readings, or for a reading this
+    /// build does not know.
+    pub reading: Option<Reading>,
+    /// The smallest change the item can take, in raw units.
+    pub step: Option<i64>,
+    /// Raw values beyond these are warnings.
+    pub warn_low: Option<i64>,
+    pub warn_high: Option<i64>,
+    /// The vector this item is one part of, when it is one.
+    pub group: Option<String>,
 }
 
 /// Everything a tool with no code for a device needs to use it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceDescription {
+    /// The device's name for people: its board `label`, or its id when the board names none.
+    /// Empty from a host that sends no identity.
+    pub label: String,
+    /// The grouping the device's contracts give it: the first contract kind that is not
+    /// `other`, else `other`. Empty from a host that sends no identity.
+    pub kind: String,
+    /// The bus or block the device sits on, as the board names it. Empty when it names none.
+    pub bus: String,
+    /// The 7-bit I2C address the driver named, if it named one.
+    pub address: Option<u8>,
+    /// The device's state, as [`crate::state`] numbers it, and why it is in that state (empty
+    /// when it is running). `None` from a host that sends no identity.
+    pub state: Option<u8>,
+    pub reason: String,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
+}
+
+/// What the host knows about a device and tells a reader of its description: the parts of a
+/// device's identity that come from the board file and the host's state, not from the driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Identity<'a> {
+    /// The board's `label`, or the device id when the board names none.
+    pub label: &'a str,
+    /// The bus or block the board names for the device, empty when none.
+    pub bus: &'a str,
+    /// A [`crate::state`] number.
+    pub state: u8,
+    /// Why the device is not running, or its last failure; empty when there is none.
+    pub reason: &'a str,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -154,6 +195,35 @@ struct DescItem<'a> {
 struct DescJob {
     contract: u8,
     method: u16,
+}
+
+/// The identity, appended after the job list as a [`Tail`]: a host from before it sends none, and
+/// the fields are the device's label, bus, state, reason, address and kind. It is an addition, so
+/// it is left out of the core hash (see `docs/wire.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
+struct DescIdentity<'a> {
+    label: &'a str,
+    bus: &'a str,
+    state: Option<u8>,
+    reason: &'a str,
+    address: Option<u8>,
+    kind: &'a str,
+}
+
+/// One contract's kind, appended after the identity: one per contract, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
+struct DescContractKind<'a> {
+    kind: &'a str,
+}
+
+/// One item's extra fields, appended after the contract kinds: one per item, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
+struct DescItemExtra<'a> {
+    reading: u8,
+    step: Option<i64>,
+    warn_low: Option<i64>,
+    warn_high: Option<i64>,
+    group: Option<&'a str>,
 }
 
 /// Folds the description's framing into `hash`: its record names and shapes, its shape codes and
@@ -249,6 +319,56 @@ fn decode_shape(from: &mut Reader<'_>, depth: u32) -> Result<OwnedShape> {
     })
 }
 
+/// The kind a device gets from its contracts: the first one that is not `other`.
+#[must_use]
+pub fn device_kind(manifest: &Manifest) -> &'static str {
+    manifest
+        .provides
+        .iter()
+        .map(|contract| contract.kind)
+        .find(|kind| *kind != "other")
+        .unwrap_or("other")
+}
+
+/// The reading an item shows as: the item's own, else its method's (the contract's), else one
+/// its shape suggests: a control is a range, a switch a switch, a string text.
+#[must_use]
+pub fn effective_reading(manifest: &Manifest, item: &Item) -> Reading {
+    if let Some(reading) = item.reading {
+        return reading;
+    }
+    let MethodId { contract, method } = item.method;
+    let info = manifest
+        .provides
+        .get(usize::from(contract))
+        .and_then(|c| c.methods.iter().find(|m| m.id == method));
+    if let Some(reading) = info.and_then(|m| m.reading) {
+        return reading;
+    }
+    if item.kind == ItemKind::Control {
+        return Reading::Range;
+    }
+    shape_reading(info, item.field)
+}
+
+fn shape_reading(info: Option<&MethodInfo>, field: Option<&str>) -> Reading {
+    let Some(info) = info else {
+        return Reading::Number;
+    };
+    let shape = match (&info.returns, field) {
+        (Shape::Record(fields), Some(field)) => fields
+            .iter()
+            .find(|f| f.name == field)
+            .map_or(&info.returns, |f| &f.shape),
+        (shape, _) => shape,
+    };
+    match shape {
+        Shape::Bool => Reading::Switch,
+        Shape::Str => Reading::Text,
+        _ => Reading::Number,
+    }
+}
+
 fn encode_contract(contract: &ContractInfo, out: &mut Writer<'_>) -> Result<()> {
     DescContract {
         tag: contract.tag.as_str(),
@@ -283,10 +403,11 @@ fn kind_code(kind: ItemKind) -> u8 {
     }
 }
 
-/// Writes a device's manifest and description. Returns the length.
+/// Writes a device's manifest, description and identity. Returns the length.
 pub fn encode_description(
     manifest: &Manifest,
     description: &Description,
+    identity: &Identity<'_>,
     buf: &mut [u8],
 ) -> Result<usize> {
     let mut out = Writer::new(buf);
@@ -328,7 +449,46 @@ pub fn encode_description(
             .encode(&mut out)?;
         }
     }
+    encode_trailer(manifest, description, identity, &mut out)?;
     Ok(out.len())
+}
+
+/// The identity and the per-contract and per-item extras, appended after the job list. A reader
+/// from before them stops at the job list.
+pub(crate) fn encode_trailer(
+    manifest: &Manifest,
+    description: &Description,
+    identity: &Identity<'_>,
+    out: &mut Writer<'_>,
+) -> Result<()> {
+    DescIdentity {
+        label: identity.label,
+        bus: identity.bus,
+        state: Some(identity.state),
+        reason: identity.reason,
+        address: description.address(),
+        kind: device_kind(manifest),
+    }
+    .encode(out)?;
+    (manifest.provides.len() as u16).encode(out)?;
+    for contract in manifest.provides {
+        DescContractKind {
+            kind: contract.kind,
+        }
+        .encode(out)?;
+    }
+    (description.items().count() as u16).encode(out)?;
+    for item in description.items() {
+        DescItemExtra {
+            reading: effective_reading(manifest, item).code(),
+            step: item.step,
+            warn_low: item.warn_low,
+            warn_high: item.warn_high,
+            group: item.group,
+        }
+        .encode(out)?;
+    }
+    Ok(())
 }
 
 /// Reads what [`encode_description`] wrote.
@@ -358,6 +518,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         }
         contracts.push(OwnedContract {
             tag: header.tag.to_string(),
+            kind: String::new(),
             hash: header.hash,
             methods,
         });
@@ -381,6 +542,11 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             contract: item.contract,
             method: item.method,
             field: item.field.map(str::to_string),
+            reading: None,
+            step: None,
+            warn_low: None,
+            warn_high: None,
+            group: None,
         });
     }
     // A host from before job methods ends here.
@@ -394,5 +560,37 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             found.job = true;
         }
     }
-    Ok(DeviceDescription { contracts, items })
+    let mut out = DeviceDescription {
+        contracts,
+        items,
+        ..DeviceDescription::default()
+    };
+    // A host from before the identity ends here: its fields read as unknown.
+    if from.remaining() > 0 {
+        let identity = Tail::<DescIdentity>::decode(from)?.0;
+        out.label = identity.label.to_string();
+        out.bus = identity.bus.to_string();
+        out.state = identity.state;
+        out.reason = identity.reason.to_string();
+        out.address = identity.address;
+        out.kind = identity.kind.to_string();
+        for index in 0..usize::from(u16::decode(from)?) {
+            let kind = DescContractKind::decode(from)?.kind.to_string();
+            if let Some(contract) = out.contracts.get_mut(index) {
+                contract.kind = kind;
+            }
+        }
+        let items = usize::from(u16::decode(from)?);
+        for index in 0..items {
+            let extra = DescItemExtra::decode(from)?;
+            if let Some(item) = out.items.get_mut(index) {
+                item.reading = Reading::from_code(extra.reading);
+                item.step = extra.step;
+                item.warn_low = extra.warn_low;
+                item.warn_high = extra.warn_high;
+                item.group = extra.group.map(str::to_string);
+            }
+        }
+    }
+    Ok(out)
 }

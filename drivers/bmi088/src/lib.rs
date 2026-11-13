@@ -594,6 +594,9 @@ impl Lifecycle for Bmi088 {
     }
 
     fn describe(&self, out: &mut Description) {
+        // Each axis spans the die's full scale, one count is a step; milli-units.
+        let accel = &self.accel.setting;
+        let gyro = &self.gyro.setting;
         for (name, field) in [
             ("acceleration.x", "x"),
             ("acceleration.y", "y"),
@@ -601,8 +604,10 @@ impl Lifecycle for Bmi088 {
         ] {
             out.add(
                 Item::value(name, ACCEL_READ)
-                    .unit(Unit::MetrePerSecondSquared, 0)
-                    .field(field),
+                    .unit(Unit::MetrePerSecondSquared, -3)
+                    .field(field)
+                    .group("acceleration")
+                    .range_of_scale(accel.full_scale_milli(), accel.step_milli()),
             );
         }
         for (name, field) in [
@@ -612,8 +617,10 @@ impl Lifecycle for Bmi088 {
         ] {
             out.add(
                 Item::value(name, GYRO_READ)
-                    .unit(Unit::RadianPerSecond, 0)
-                    .field(field),
+                    .unit(Unit::RadianPerSecond, -3)
+                    .field(field)
+                    .group("angular_rate")
+                    .range_of_scale(gyro.full_scale_milli(), gyro.step_milli()),
             );
         }
     }

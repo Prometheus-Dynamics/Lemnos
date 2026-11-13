@@ -325,6 +325,11 @@ pub fn render_reply(method: &OwnedMethod, reply: &[u8]) -> Result<String, String
         contract: 0,
         method: 0,
         field: None,
+        reading: None,
+        step: None,
+        warn_low: None,
+        warn_high: None,
+        group: None,
     };
     render(&method.returns, method.has_out_buffer, reply, &bare)
 }
@@ -418,6 +423,11 @@ mod tests {
             contract: 0,
             method: 0,
             field: field.map(str::to_string),
+            reading: None,
+            step: None,
+            warn_low: None,
+            warn_high: None,
+            group: None,
         }
     }
 

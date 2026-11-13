@@ -163,6 +163,19 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
 
 impl<E: fmt::Debug> core::error::Error for Error<E> {}
 
+/// The span and step of each reading, in nano-units. See [`Setup::spans`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Spans {
+    pub(crate) bus_lsb_nv: i64,
+    pub(crate) bus_max_nv: i64,
+    pub(crate) shunt_lsb_nv: Option<i64>,
+    pub(crate) shunt_max_nv: Option<i64>,
+    pub(crate) current_lsb_na: i64,
+    pub(crate) current_max_na: i64,
+    pub(crate) power_lsb_nw: i64,
+    pub(crate) power_max_nw: i64,
+}
+
 /// Register writes and scale factors derived from a model and [`Calibration`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Setup {
@@ -266,6 +279,31 @@ impl Setup {
 
     pub(crate) fn writes(&self) -> &[RegWrite] {
         &self.writes[..self.len]
+    }
+
+    /// The span each reading can take, as the chip's register scale puts it: each full-scale
+    /// register count times its scale. `None` for a reading the model has no register for.
+    /// Every value is in nano-units of its item's base unit (volts, amperes, watts).
+    pub(crate) fn spans(&self, attached: bool) -> Spans {
+        let current = i64::from(self.current_lsb_na);
+        let (bus_lsb_nv, power_lsb_nw, shunt) = match self.model {
+            Model::Ina226 => (1_250_000, 25 * current, Some(i64::from(self.shunt_lsb_nv))),
+            Model::Ina238 => (3_125_000, current / 5, Some(i64::from(self.shunt_lsb_nv))),
+            Model::Ina260 => (1_250_000, 10_000_000, None),
+        };
+        // An attached chip's shunt range is the one its owner set, which the model can't see.
+        let shunt = if attached { None } else { shunt };
+        Spans {
+            // Bus voltage is unsigned: 15 bits of counts above zero.
+            bus_lsb_nv,
+            bus_max_nv: 32_767 * bus_lsb_nv,
+            shunt_lsb_nv: shunt,
+            shunt_max_nv: shunt.map(|lsb| 32_767 * lsb),
+            current_lsb_na: current,
+            current_max_na: 32_767 * current,
+            power_lsb_nw,
+            power_max_nw: 65_535 * power_lsb_nw,
+        }
     }
 
     /// The registers the readings need, in read order: (pointer, bytes).
@@ -468,6 +506,11 @@ impl Ina {
     }
 
     /// Reads the manufacturer and device IDs.
+    /// Whether the chip is someone else's, set up by its owner ([`attach`](Self::attach)).
+    pub(crate) fn attached(&self) -> bool {
+        self.owned.is_some()
+    }
+
     pub fn ids<B: I2c>(&self, bus: &mut B) -> Result<(u16, u16), Error<B::Error>> {
         let mut regs = I2cRegisters::new(bus, self.address, AddressWidth::Bits8);
         let manufacturer = regs.read(u16::from(self.model.manufacturer_register()), 2)?;

@@ -121,6 +121,19 @@ pub(crate) struct Setting {
     pub(crate) period_ns: u64,
 }
 
+impl Setting {
+    /// The full scale of one axis, in milli-units (m/s² or rad/s): the signed 16-bit count's
+    /// span, `32768` counts of `scale`.
+    pub(crate) fn full_scale_milli(&self) -> i64 {
+        (f64::from(self.scale) * 32_768.0 * 1000.0).round() as i64
+    }
+
+    /// One count, in milli-units, at least 1.
+    pub(crate) fn step_milli(&self) -> i64 {
+        ((f64::from(self.scale) * 1000.0).round() as i64).max(1)
+    }
+}
+
 /// The accelerometer's full scale (`range_g`: 3, 6, 12 or 24) and output data
 /// rate (`rate_hz`: 12.5 to 1600). `None` for any other value.
 pub(crate) fn accel_setting(range_g: i64, rate_hz: f64) -> Option<Setting> {
