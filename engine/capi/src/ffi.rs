@@ -10,7 +10,7 @@ pub(crate) use crate::surface::{
     lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame, lemnos_stream_open,
     lemnos_stream_plane, lemnos_stream_plane_handle, lemnos_stream_pool_page,
     lemnos_stream_post_job, lemnos_stream_read, lemnos_stream_region, lemnos_stream_release,
-    lemnos_stream_write, lemnos_subscribe,
+    lemnos_stream_skipped, lemnos_stream_write, lemnos_subscribe,
 };
 
 #[cfg(feature = "shared")]
@@ -191,6 +191,11 @@ mod shared {
             client: Handle,
             stream: Handle,
             generation: *mut u32,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_skipped(
+            client: Handle,
+            stream: Handle,
+            skipped: *mut u64,
         ) -> Status;
         pub(crate) safe fn lemnos_stream_close(
             client: Handle,

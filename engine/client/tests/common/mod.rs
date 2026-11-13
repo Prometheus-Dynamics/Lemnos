@@ -655,6 +655,12 @@ impl StreamHost {
         free
     }
 
+    /// Rings the consumer's bell, as the host does after each frame it publishes: a sleeping
+    /// consumer wakes. `publish` does not ring, so a test that wants a sleeper woken rings after it.
+    pub fn ring(&mut self) {
+        self.bell.ring();
+    }
+
     /// Ends the stream with `state`, and rings the consumer's bell.
     pub fn end(&mut self, state: u32) {
         self.ring.set_end(state);

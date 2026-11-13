@@ -36,4 +36,5 @@ lemnos_stream_plane_handle
 lemnos_stream_region
 lemnos_stream_pool_page
 lemnos_stream_generation
+lemnos_stream_skipped
 lemnos_stream_close

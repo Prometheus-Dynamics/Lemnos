@@ -10,8 +10,10 @@
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
+use std::time::Duration;
 
 use lemnos_linux_sys::dma_buf::{SYNC_END, SYNC_READ, SYNC_START, SYNC_WRITE, sync};
+use lemnos_linux_sys::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, PollFd, poll_many};
 use lemnos_linux_sys::scm;
 
 /// Which way a CPU access to a dma-buf goes.
@@ -37,6 +39,19 @@ impl LinuxStreams {
         scm::recv_with_fds(socket, buf, fds)
     }
 
+    /// Waits until `fd` is readable or `timeout` passes. `false` on the timeout and on `EINTR`:
+    /// the caller looks at its ring and waits again with what is left of its deadline. The wait is
+    /// one `ppoll`, which a signal never restarts, so no time is lost to a retry here.
+    pub fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+        let mut fds = [PollFd::new(fd, POLLIN)];
+        poll_many(&mut fds, Some(timeout))?;
+        let events = fds[0].revents();
+        if events & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+            return Err(io::Error::other("the descriptor failed or hung up"));
+        }
+        Ok(events & POLLIN != 0)
+    }
+
     /// Starts (`begin`) or ends an access of `access` to the dma-buf `fd`.
     pub fn dma_sync(&self, fd: BorrowedFd<'_>, access: Access, begin: bool) -> io::Result<()> {
         let direction = match access {
@@ -57,6 +72,10 @@ impl lemnos_client::StreamPlatform for LinuxStreams {
         fds: &mut Vec<OwnedFd>,
     ) -> io::Result<usize> {
         LinuxStreams::recv_with_descriptors(self, socket, buf, fds)
+    }
+
+    fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+        LinuxStreams::wait_readable(self, fd, timeout)
     }
 
     fn dma_sync(

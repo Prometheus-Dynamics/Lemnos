@@ -100,6 +100,13 @@ pub trait StreamPlatform: Debug + Send + Sync {
         let _ = (fd, access, begin);
         Ok(())
     }
+
+    /// Waits until `fd` (the stream's doorbell) is readable, or `timeout` passes. Returns `true`
+    /// when it is readable. `false` when the time is up, or when a signal interrupted the wait: the
+    /// caller then looks at the ring and waits again with what is left of its own deadline, so an
+    /// implementation returns early on `EINTR` and must not restart the full timeout. An error is
+    /// one the wait can't recover from (a descriptor that failed or hung up).
+    fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool>;
 }
 
 /// One frame taken from a stream, held until it's given back with [`FrameStream::release`]. Only
@@ -378,34 +385,46 @@ impl FrameStream {
     }
 
     /// The next frame, if one has arrived. Never waits and allocates nothing.
+    ///
+    /// A frame lost before the reader got to it is passed over, not reported as nothing: a frame
+    /// pending behind the losses comes back in this same call. So `None` means that no frame is
+    /// pending, and a caller that sleeps on the stream's doorbell afterwards sleeps only with
+    /// nothing to read (`docs/streams.md`, "Waiting on the doorbell"). The losses are counted in
+    /// [`skipped`](Self::skipped).
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
         let planes = self.planes.count();
         let buffer_bytes = self.layout().buffer_bytes as usize;
-        let taken = match self.consumer.frames_mut().next() {
-            NextBatch::Batch(batch) => {
-                let info = FrameInfo::decode(batch.meta).ok_or(Error::Stream(RingError::Broken))?;
-                let first = batch
-                    .held
-                    .buffer(0)
-                    .ok_or(Error::Stream(RingError::Broken))?;
-                let buffer = first.0 / planes;
-                let timestamp_ns = batch.time.as_nanos();
-                let held = batch.held;
-                if info.bytes as usize > buffer_bytes {
+        let taken = loop {
+            match self.consumer.frames_mut().next() {
+                NextBatch::Batch(batch) => {
+                    let info =
+                        FrameInfo::decode(batch.meta).ok_or(Error::Stream(RingError::Broken))?;
+                    let first = batch
+                        .held
+                        .buffer(0)
+                        .ok_or(Error::Stream(RingError::Broken))?;
+                    let buffer = first.0 / planes;
+                    let timestamp_ns = batch.time.as_nanos();
+                    let held = batch.held;
+                    if info.bytes as usize > buffer_bytes {
+                        return Err(Error::Stream(RingError::Broken));
+                    }
+                    break Some(HeldFrame {
+                        buffer,
+                        bytes: info.bytes,
+                        sequence: info.sequence,
+                        identity: info.identity,
+                        timestamp_ns,
+                        _held: held,
+                    });
+                }
+                NextBatch::Empty => break None,
+                // Lost before this reader read them, and counted by the reader: look again for the
+                // frame parked behind them, or for nothing.
+                NextBatch::Skipped(_) | NextBatch::Limited => {}
+                NextBatch::PoolChanged { .. } | NextBatch::CutOff => {
                     return Err(Error::Stream(RingError::Broken));
                 }
-                Some(HeldFrame {
-                    buffer,
-                    bytes: info.bytes,
-                    sequence: info.sequence,
-                    identity: info.identity,
-                    timestamp_ns,
-                    _held: held,
-                })
-            }
-            NextBatch::Empty | NextBatch::Skipped(_) | NextBatch::Limited => None,
-            NextBatch::PoolChanged { .. } | NextBatch::CutOff => {
-                return Err(Error::Stream(RingError::Broken));
             }
         };
         if let Some(frame) = taken.as_ref() {
@@ -417,7 +436,20 @@ impl FrameStream {
         Ok(taken)
     }
 
+    /// How many frames this stream's reader was too late for, in total: frames overwritten in the
+    /// ring, or whose buffers the producer took back, before a read got to them. A reader that
+    /// keeps up never counts one. [`try_next`](Self::try_next) and [`next_frame`](Self::next_frame)
+    /// pass them over and count them here.
+    #[must_use]
+    pub fn skipped(&self) -> u64 {
+        self.consumer.frames().missed()
+    }
+
     /// The next frame, or `None` after `timeout` passes or the host ends the stream.
+    ///
+    /// The wait is on the stream's doorbell and lasts at most `timeout` in all: a signal that
+    /// interrupts a sleep ends it early, and the ring is looked at again with what is left of the
+    /// time. An error from the wait itself is returned as an error, never as no frame.
     pub fn next_frame(&mut self, timeout: Duration) -> Result<Option<HeldFrame>, Error> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -431,10 +463,31 @@ impl FrameStream {
             if left.is_zero() {
                 return Ok(None);
             }
-            if self.consumer.wait(left).is_err() {
-                return Ok(None);
-            }
+            self.sleep_for_frame(left)?;
         }
+    }
+
+    /// Sleeps on the doorbell for at most `timeout`, unless a frame is already there. The doorbell
+    /// is armed first and the ring is looked at once more, so a frame published before the sleep
+    /// is not slept through. The doorbell is disarmed on every way out.
+    fn sleep_for_frame(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.consumer.doorbell().arm();
+        if self.frame_waiting() {
+            self.consumer.doorbell().disarm();
+            return Ok(());
+        }
+        let woke = self
+            .platform
+            .wait_readable(self.consumer.doorbell().as_fd(), timeout);
+        self.consumer.doorbell().disarm();
+        woke.map(|_| ())
+            .map_err(|error| Error::StreamWait(error.kind()))
+    }
+
+    /// Whether the ring has an entry the reader has not looked at yet, or the stream has ended.
+    fn frame_waiting(&self) -> bool {
+        let frames = self.consumer.frames();
+        frames.pending() > 0 || frames.end() != 0
     }
 
     /// The bytes of a frame this stream handed out. On a stream whose buffers are several

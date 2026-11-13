@@ -11,6 +11,8 @@ pub const SIGTERM: i32 = libc::SIGTERM;
 pub const SIGINT: i32 = libc::SIGINT;
 /// `SIGHUP`: often a request to reload.
 pub const SIGHUP: i32 = libc::SIGHUP;
+/// `SIGUSR1`: free for a program to use. The tests of the waits that retry on `EINTR` send it.
+pub const SIGUSR1: i32 = libc::SIGUSR1;
 
 /// Pending signals as a descriptor.
 #[derive(Debug)]
@@ -82,6 +84,45 @@ impl AsFd for SignalFd {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
+}
+
+/// Installs a handler for `signum` that does nothing, without `SA_RESTART`: a
+/// blocking call on this process (`poll`, `read`) returns `EINTR` when the
+/// signal is delivered to its thread. For the tests of the waits that retry on
+/// `EINTR`; a program has no use for it.
+pub fn catch_without_restart(signum: i32) -> io::Result<()> {
+    extern "C" fn nothing(_signum: libc::c_int) {}
+    // SAFETY: an all-zero `sigaction` is a valid value of the type; its fields are set below.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = nothing as *const () as libc::sighandler_t;
+    action.sa_flags = 0;
+    // SAFETY: `action.sa_mask` is a live, writable `sigset_t`.
+    if unsafe { libc::sigemptyset(&raw mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `action` is initialized and the old action is not asked for.
+    if unsafe { libc::sigaction(signum, &raw const action, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Delivers `signum` to the calling thread after `delay`, from a helper thread.
+/// The caller must still be running when the delay ends: join the returned
+/// handle before the thread returns. For the tests of the waits that retry on
+/// `EINTR`.
+pub fn interrupt_this_thread_after(
+    signum: i32,
+    delay: std::time::Duration,
+) -> std::thread::JoinHandle<()> {
+    // SAFETY: `pthread_self` has no preconditions. The id travels as an integer: on some targets
+    // `pthread_t` is a pointer, which is not `Send`.
+    let me = unsafe { libc::pthread_self() } as usize;
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        // SAFETY: `me` is the thread that asked, which the caller keeps running until it has joined this helper.
+        unsafe { libc::pthread_kill(me as libc::pthread_t, signum) };
+    })
 }
 
 #[cfg(test)]

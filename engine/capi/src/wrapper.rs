@@ -464,6 +464,16 @@ impl Stream<'_> {
         Ok(generation)
     }
 
+    /// The frames the reader was too late for (see `lemnos_stream_skipped`).
+    pub fn skipped(&self) -> Result<u64, Status> {
+        let mut skipped = 0;
+        // SAFETY: `skipped` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_skipped(self.client.handle, self.handle, &mut skipped)
+        })?;
+        Ok(skipped)
+    }
+
     /// The part of the held frame in `buffer` that is in plane `plane`, on a
     /// stream whose buffers are in planes ([`info`](Self::info)'s `planes`).
     pub fn plane(&self, buffer: u32, plane: u32) -> Result<&[u8], Status> {

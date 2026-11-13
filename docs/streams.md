@@ -362,6 +362,31 @@ while let Some(frame) = stream.next_frame(Duration::from_secs(1))? {
 own descriptor, for handing the frame to something else that takes memory that way. The
 [C API](client.md#the-c-api) has the same calls.
 
+### Waiting on the doorbell
+
+`next_frame(timeout)` sleeps on the stream's doorbell, and the whole call lasts at most `timeout`. A
+signal that interrupts the sleep does not end the wait: the ring is looked at again, and the sleep
+goes on for what is left of the time. An error from the wait itself (a doorbell that failed) is
+returned as one, never as no frame.
+
+`try_next` never reports a loss as nothing pending. A frame the reader lost, because the ring
+overwrote it or the producer took its buffer back before the reader read it, is passed over and
+counted: `skipped()` says how many, in total. The frame still in the ring behind the losses comes
+back from the same call. So `None` from `try_next` means that no frame is pending.
+
+A program that sleeps on the doorbell descriptor itself follows the same rule. After any wake, and
+after any look at the ring, it must see the ring come up empty before it sleeps:
+
+1. Take frames until the ring is empty: `try_next` returns `None`, or with the shm crates
+   `BufferReader::next` returns `Empty`. A reported skip is not empty, so look again.
+2. Arm the doorbell (`shm_ring_doorbell::Doorbell::arm`), then look at the ring once more. If a
+   frame is there, disarm, and go back to 1.
+3. Sleep on the descriptor. When it wakes, disarm the doorbell and go back to 1.
+
+Step 2 is what keeps a frame published just before the sleep from being slept through: a
+publisher rings only a doorbell that is armed. Step 3's disarm keeps the doorbell from staying rung
+with nothing left to read.
+
 ## Where a buffer's memory is
 
 `region(buffer, plane)` says where one plane of a buffer is in memory, for a consumer that maps
@@ -422,7 +447,8 @@ cargo test -q -p lemnosd --test stream --test stream_fill --test stream_dma
 ## Reading with the shm crates alone
 
 A program that has the descriptors of a stream can read its frames with the shm crates
-(`shm-ring`, `shm-ring-buffers`, `shm-ring-holds`, `shm-ring-doorbell`) and nothing of Lemnos. The
+(`shm-ring`, `shm-ring-buffers`, `shm-ring-holds`, `shm-ring-doorbell`) and nothing of Lemnos. Before
+it sleeps on the doorbell it follows [Waiting on the doorbell](#waiting-on-the-doorbell). The
 descriptors come in this order (`lemnos_wire::ring::fds`):
 
 | Index | Descriptor | Map it as |

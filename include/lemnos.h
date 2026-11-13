@@ -293,6 +293,10 @@ LemnosStatus lemnos_stream_pool_page(LemnosHandle client, LemnosHandle stream, i
 /* The pool's generation: it changes whenever the host makes a new pool for the
  * stream, so an older lease is on a pool that is gone. */
 LemnosStatus lemnos_stream_generation(LemnosHandle client, LemnosHandle stream, uint32_t *generation);
+/* How many frames the stream's reader was too late for, in total: frames overwritten, or whose
+ * buffers the producer took back, before a lemnos_stream_next_frame read them. A reader that keeps
+ * up never counts one; a lost frame never stops the frame behind it from being returned. */
+LemnosStatus lemnos_stream_skipped(LemnosHandle client, LemnosHandle stream, uint64_t *skipped);
 /* Releases every frame still held and gives the stream back. */
 LemnosStatus lemnos_stream_close(LemnosHandle client, LemnosHandle stream, LemnosMessageSink sink);
 

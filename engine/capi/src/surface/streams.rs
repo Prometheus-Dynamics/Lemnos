@@ -593,6 +593,28 @@ pub unsafe extern "C" fn lemnos_stream_generation(
     })
 }
 
+/// How many frames the stream's reader was too late for, in total (see `FrameStream::skipped`).
+///
+/// # Safety
+/// `skipped` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_skipped(
+    client: Handle,
+    stream: Handle,
+    skipped: *mut u64,
+) -> Status {
+    guard(|| {
+        if skipped.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { skipped.write(s.stream.skipped()) };
+            Status::OK
+        })
+    })
+}
+
 #[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub extern "C" fn lemnos_stream_close(client: Handle, stream: Handle, sink: MessageSink) -> Status {
     guard(|| {

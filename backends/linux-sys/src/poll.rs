@@ -5,7 +5,7 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `POLLIN`.
 pub const POLLIN: i16 = libc::POLLIN;
@@ -31,11 +31,14 @@ pub fn open_nonblocking(path: &Path) -> io::Result<File> {
 }
 
 /// Waits until `fd` reports one of `events` or `timeout` passes (`None`:
-/// forever). Returns the reported events (0 on timeout). Retries on `EINTR`
-/// (restarting the full timeout).
+/// forever). Returns the reported events (0 on timeout). An interrupted wait
+/// (`EINTR`) is retried for what is left of the timeout: the deadline is taken
+/// once, before the first call, so a signal never stretches the wait.
 pub fn poll_one(fd: BorrowedFd<'_>, events: i16, timeout: Option<Duration>) -> io::Result<i16> {
-    let timeout_ms = timeout_ms(timeout);
+    let deadline = timeout.map(|t| Instant::now() + t);
     loop {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let timeout_ms = timeout_ms(left);
         let mut pfd = libc::pollfd {
             fd: fd.as_raw_fd(),
             events,
@@ -228,13 +231,16 @@ impl Wait {
     }
 }
 
-/// [`poll_many`], restarting on `EINTR` (with the full timeout again).
+/// [`poll_many`], restarting on `EINTR` for what is left of the timeout (the
+/// deadline is taken once, before the first call).
 fn poll_restarting(fds: &mut [PollFd], timeout: Option<Duration>) -> io::Result<()> {
     let count = libc::nfds_t::try_from(fds.len())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let spec = timeout.map(timespec);
-    let spec_ptr = spec.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+    let deadline = timeout.map(|t| Instant::now() + t);
     loop {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let spec = left.map(timespec);
+        let spec_ptr = spec.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
         for fd in fds.iter_mut() {
             fd.revents = 0;
         }
@@ -466,5 +472,51 @@ mod tests {
         drop(peer);
         let revents = poll_one(quiet.as_fd(), POLLIN, Some(Duration::from_secs(5))).unwrap();
         assert_ne!(revents & POLLHUP, 0, "a hang-up is reported");
+    }
+}
+
+#[cfg(test)]
+mod interrupted {
+    use super::*;
+    use crate::signal::{SIGUSR1, catch_without_restart, interrupt_this_thread_after};
+    use std::os::fd::AsFd;
+    use std::time::Instant;
+
+    // A 1.5 s wait with a signal at 0.5 s returns at 1.5 s. Restarting the whole timeout on the
+    // signal would return at 2.0 s, so the bounds sit between the two.
+    fn bounds() -> (Duration, Duration) {
+        (Duration::from_millis(1500), Duration::from_millis(1750))
+    }
+
+    #[test]
+    fn an_interrupted_poll_one_waits_for_what_is_left_of_its_timeout() {
+        let (r, _w) = std::io::pipe().unwrap();
+        catch_without_restart(SIGUSR1).unwrap();
+        let signal = interrupt_this_thread_after(SIGUSR1, Duration::from_millis(500));
+        let start = Instant::now();
+        let events = poll_one(r.as_fd(), POLLIN, Some(Duration::from_millis(1500))).unwrap();
+        let took = start.elapsed();
+        signal.join().unwrap();
+        let (least, most) = bounds();
+        assert_eq!(events, 0, "nothing was written");
+        assert!(took >= least && took < most, "poll_one took {took:?}");
+    }
+
+    #[test]
+    fn an_interrupted_poll_ready_waits_for_what_is_left_of_its_timeout() {
+        let (r, _w) = std::io::pipe().unwrap();
+        catch_without_restart(SIGUSR1).unwrap();
+        let signal = interrupt_this_thread_after(SIGUSR1, Duration::from_millis(500));
+        let start = Instant::now();
+        let ready = poll_ready(
+            &[(r.as_fd(), Wait::READABLE)],
+            Some(Duration::from_millis(1500)),
+        )
+        .unwrap();
+        let took = start.elapsed();
+        signal.join().unwrap();
+        let (least, most) = bounds();
+        assert_eq!(ready, vec![Ready::default()], "nothing was written");
+        assert!(took >= least && took < most, "poll_ready took {took:?}");
     }
 }

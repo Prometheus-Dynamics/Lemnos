@@ -80,6 +80,12 @@ static int frames(LemnosHandle client) {
         if (status != LEMNOS_OK) return fail("release", status);
     }
     printf("frames 6 in place, by copy and by handle\n");
+    {
+        /* The skip count is there to read; the frames above were all returned, whatever it says. */
+        uint64_t skipped = 0;
+        status = lemnos_stream_skipped(client, stream, &skipped);
+        if (status != LEMNOS_OK) return fail("skipped", status);
+    }
 
     /* A buffer's region: its own memory at its offset holds the frame's bytes, and the pool page and
        generation are there for a second reader. The frame is held while the region is read. */
