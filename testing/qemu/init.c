@@ -70,6 +70,12 @@ static int unload(const char *name)
 	return r;
 }
 
+/* An unload the test expects to be refused: the caller checks the errno, nothing is printed. */
+static int unload_expect_busy(const char *name)
+{
+	return (int)syscall(SYS_delete_module, name, O_NONBLOCK);
+}
+
 /* 0, or the errno of the failed open or write. */
 static int put(const char *path, const char *text)
 {
@@ -465,7 +471,8 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
 				    (char *)cma_heap(), "wedge", NULL }),
 	      "lemnos_pisp_be_check wedge");
-	check(unload("lemnos") && errno == EAGAIN, "a wedged block keeps the module loaded");
+	check(unload_expect_busy("lemnos") && errno == EAGAIN,
+	      "a wedged block keeps the module loaded");
 	/* The test block's devices go with it; a wedged block's memory stays pinned regardless. */
 	check(!put(UNBIND, PISP), "wedged PiSP block unbound");
 	check(!put(UNBIND, GSDMA), "wedged graphics DMA engine unbound");

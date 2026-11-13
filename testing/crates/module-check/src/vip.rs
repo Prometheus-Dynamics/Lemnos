@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-use lemnos_contract_npu::{RunJob, RunResult, RunStatus};
+use lemnos_contract_npu::{JOB_BYTES, RESULT_BYTES, RunJob, RunResult, RunStatus};
 use lemnos_core::{Decode, Encode, Reader, Status, Writer};
 use lemnos_driver_vip9000::claim::{Claim, Service};
 use lemnos_driver_vip9000::linux::{LinuxModule, Settings};
@@ -37,15 +37,19 @@ fn slot(n: u16) -> u32 {
 }
 
 fn post(stream: &MockStream, identity: u64, program: u32, result: u32) {
-    let mut bytes = [0u8; 16];
+    // Sized by the contract's own job size, and the encode must succeed: a job cut short decodes
+    // as a result of 0 on the driver's side, which hides the cause.
+    let mut bytes = [0u8; JOB_BYTES];
     let mut writer = Writer::new(&mut bytes);
-    let _ = RunJob {
+    RunJob {
         identity,
         program,
         result,
     }
-    .encode(&mut writer);
+    .encode(&mut writer)
+    .expect("a job fits its job size");
     let used = writer.len();
+    assert_eq!(used, JOB_BYTES, "a run is a job of the contract's size");
     stream.post_job(&bytes[..used]);
 }
 
@@ -55,9 +59,13 @@ fn one(claim: &mut Claim<LinuxModule>, stream: &mut MockStream) -> Option<(u64, 
         return None;
     }
     let frame = stream.take_frame()?;
-    let status = RunResult::decode(&mut Reader::new(stream.contents(frame.buffer).get(..1)?))
-        .ok()?
-        .status;
+    // The record is as long as the driver says it wrote, not a guessed size.
+    let contents = stream.contents(frame.buffer);
+    let record = contents.get(..frame.bytes as usize)?;
+    if frame.bytes as usize != RESULT_BYTES {
+        return None;
+    }
+    let status = RunResult::decode(&mut Reader::new(record)).ok()?.status;
     stream.return_buffer(frame.buffer);
     Some((frame.identity, status))
 }
@@ -147,7 +155,7 @@ pub fn run(device: &str, heap: &str) -> u32 {
                     stream.return_buffer(f.buffer);
                     f.bytes
                 });
-                if served != Ok(1) || done != Some(1) {
+                if served != Ok(1) || done != Some(RESULT_BYTES as u32) {
                     report.failures += 1;
                 }
             }
