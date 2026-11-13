@@ -49,6 +49,7 @@ lemnos-driver-nonai2d = { path = "../../drivers/nonai2d" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
+lemnos-driver-pwm-channel-fan = { path = "../../drivers/pwm-channel-fan" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-rga = { path = "../../drivers/rga" }
 lemnos-driver-rk-iep = { path = "../../drivers/rk-iep" }

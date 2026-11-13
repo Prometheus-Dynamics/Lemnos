@@ -1,6 +1,12 @@
 //! A Linux hwmon fan (`pwm1`, `pwm1_enable`, `fan1_input`) served as `fan/1`. Duty is per
 //! mille, 0 to 1000.
 //!
+//! Use this for a fan the kernel exposes through a hwmon device, such as one behind an embedded
+//! controller. A fan on a PWM channel of the board is `pwm-channel-fan`, which needs no kernel
+//! driver in between. This driver is not a safety net: the kernel's governor does not keep the fan
+//! safe, and nothing here runs when the daemon stops. The fan's safe state is set by the controller
+//! (`fan-control` runs it at full duty on a stale input).
+//!
 //! Settings come from the device's `config` in the board file:
 //!
 //! - `hwmon`: the name of the hwmon directory, such as `"hwmon2"`. Or

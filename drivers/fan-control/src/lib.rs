@@ -40,12 +40,16 @@
 //! - A temperature read that fails keeps the last good reading for `max_age_ms`, then the input is
 //!   stale and the fan runs at full duty and the driver reports `Degraded`. A reading comes back
 //!   and the curves take over again.
-//! - A failed fan write hands the fan back (`release`), and the next attempt waits 1 s, 2 s, 4 s,
-//!   then 8 s, and stays at 8 s. The driver reports `Degraded` meanwhile. It never gives up.
-//! - A disabled controller hands the fan back and makes no writes until it is enabled. A failed
-//!   hand-back is tried again each second.
-//! - Dropping the driver (its device stops, is rebound, or a call into it panics) hands the fan
-//!   back.
+//! - A failed fan write releases the fan (`release`, which puts it at full duty), and the next
+//!   attempt waits 1 s, 2 s, 4 s, then 8 s, and stays at 8 s. The driver reports `Degraded`
+//!   meanwhile. It never gives up.
+//! - A disabled controller releases the fan and makes no writes until it is enabled. A failed
+//!   release is tried again each second.
+//! - Dropping the driver (its device stops, is rebound, or a call into it panics) releases the fan.
+//!
+//! The fan's safe state is full duty, and it is the fan driver's to keep: `pwm-channel-fan` starts
+//! there and goes there on release. This controller only decides when it asks for less. Nothing
+//! outside the daemon is relied on to cool the board when the daemon's view fails.
 //!
 //! # State
 //!
@@ -197,7 +201,7 @@ impl FanController {
         }
     }
 
-    /// Hands the fan back. If that fails, the control law tries again in a second.
+    /// Releases the fan (its safe state). If that fails, the control law tries again in a second.
     fn hand_back(&mut self, now_ns: u64) {
         match self.fan.release() {
             Ok(()) => self.control.released(),
@@ -208,8 +212,8 @@ impl FanController {
 
 impl Drop for FanController {
     fn drop(&mut self) {
-        // Nothing can report an error from here. For `hwmon-fan`, a release of a fan that was never
-        // taken is a no-op.
+        // Nothing can report an error from here. A release is the fan's safe state, so it is
+        // harmless on a fan this controller never drove.
         let _ = self.fan.release();
     }
 }
