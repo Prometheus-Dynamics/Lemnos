@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR]
-//!                  [--rate N --seconds S] [--checks 1]
+//!                  [--rate N --seconds S] [--checks 1] [--sharpen 1] [--resample WxH]
 //! ```
 //!
 //! `--input` is one packed RAW10 frame from the receiver (1280x800, 1600 bytes a line, as
@@ -21,6 +21,17 @@
 //!
 //! With `--rate` and `--seconds`, jobs at that rate for that long with two queued: every job must
 //! finish, in order, with no drop and no error.
+//!
+//! With `--sharpen 1`, the default sharpening (the configuration library's `SHARPEN_DEFAULT`, all
+//! five filters) is enabled as well: the same job is run without it and with it, the sharpened
+//! luma's eighths and its mean absolute difference from the plain run are printed, and a zero
+//! difference fails the run (the sharpen made no change).
+//!
+//! With `--resample WxH`, output 0 is WxH (NV12) instead of the input size, through the
+//! configuration library's smart resize with the resampler filter for that downscale
+//! (`ResampleFilter::for_downscale`). It prints the output's stride and size, checks the size is
+//! stride times height times 1.5 and that the frame holds exactly that, and prints the luma eighths
+//! of the resized frame. A size the library refuses is printed with the library's reason.
 //!
 //! With `--checks 1` (the board file needs two `config` buffers and two `input` buffers), what the
 //! driver must not run, each followed by a job that must: a configuration with a byte set in its
@@ -41,10 +52,10 @@ use lemnos_contract_camera_isp::{CameraIsp, IspInput, IspJob, IspOutput, NO_BUFF
 use lemnos_contract_camera_sensor::CameraSensor;
 use lemnos_contract_isp_pisp::LAYOUT_BACK_END;
 use lemnos_core::{Encode, Writer};
-use lemnos_driver_pisp::be::BackEnd;
+use lemnos_driver_pisp::be::{BackEnd, ResampleFilter, defaults::SHARPEN_DEFAULT};
 use lemnos_driver_pisp::format::{compute_stride_align, formats};
 use lemnos_driver_pisp::uapi::{
-    BayerOrder as Order, BeCcmConfig, BeTilesConfig, ImageFormatConfig, Wire,
+    BayerOrder as Order, BeCcmConfig, BeTilesConfig, Branch, ImageFormatConfig, WbgConfig, Wire,
 };
 use lemnos_linux_stream::LinuxStreams;
 
@@ -70,6 +81,8 @@ struct Args {
     rate: u32,
     seconds: u32,
     checks: bool,
+    sharpen: bool,
+    resample: Option<(u32, u32)>,
 }
 
 fn parse() -> Option<Args> {
@@ -83,6 +96,8 @@ fn parse() -> Option<Args> {
         rate: 0,
         seconds: 0,
         checks: false,
+        sharpen: false,
+        resample: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -97,6 +112,19 @@ fn parse() -> Option<Args> {
             "--rate" => args.rate = value.parse().ok()?,
             "--seconds" => args.seconds = value.parse().ok()?,
             "--checks" => args.checks = value != "0",
+            "--sharpen" => args.sharpen = value != "0",
+            "--resample" => {
+                let (w, h) = value.split_once('x')?;
+                let size = (w.parse().ok()?, h.parse().ok()?);
+                if size.0 == 0
+                    || size.1 == 0
+                    || size.0 > u32::from(u16::MAX)
+                    || size.1 > u32::from(u16::MAX)
+                {
+                    return None;
+                }
+                args.resample = Some(size);
+            }
             _ => return None,
         }
     }
@@ -192,21 +220,29 @@ fn post_on(
     }
 }
 
-/// The luma of the first frame: each eighth's middle, and the lines equal to the middle one.
-fn luma(y: &[u8], stride: usize) -> (Vec<u8>, usize) {
-    let line = |row: usize| y.get(row * stride..row * stride + WIDTH as usize);
-    let middle = line(HEIGHT as usize / 2).unwrap_or(&[]);
-    let eighth = WIDTH as usize / 8;
+/// The luma of a frame of `width` by `height`, `stride` bytes a line: each eighth's middle, and the
+/// lines equal to the middle one.
+fn luma(y: &[u8], stride: usize, width: usize, height: usize) -> (Vec<u8>, usize) {
+    let line = |row: usize| y.get(row * stride..row * stride + width);
+    let middle = line(height / 2).unwrap_or(&[]);
+    if middle.len() != width {
+        // The frame is shorter than its size: nothing to read, not a frame of zeros.
+        return (vec![0; 8], 0);
+    }
+    let eighth = width / 8;
+    // The middle half of each eighth, so the edges of a bar are left out at any width. (A fixed
+    // 40-pixel margin, right for 1280 wide, left nothing of a 640-wide eighth: all bars read 0.)
+    let margin = eighth / 4;
     let bars = (0..8)
         .map(|b| {
             let part = middle
-                .get(b * eighth + 40..b * eighth + eighth - 40)
+                .get(b * eighth + margin..b * eighth + eighth - margin)
                 .unwrap_or(&[]);
             let sum: usize = part.iter().map(|&v| usize::from(v)).sum();
             u8::try_from(sum / part.len().max(1)).unwrap_or(u8::MAX)
         })
         .collect();
-    let same = (0..HEIGHT as usize)
+    let same = (0..height)
         .filter(|&row| {
             line(row).is_some_and(|l| l.iter().zip(middle).all(|(a, b)| a.abs_diff(*b) <= 2))
         })
@@ -214,8 +250,89 @@ fn luma(y: &[u8], stride: usize) -> (Vec<u8>, usize) {
     (bars, same)
 }
 
+/// The luma rows of a frame, packed: `height` rows of `width` bytes.
+fn plane(y: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    (0..height)
+        .flat_map(|row| {
+            y.get(row * stride..row * stride + width)
+                .unwrap_or(&[])
+                .iter()
+                .copied()
+        })
+        .collect()
+}
+
+/// The mean of the absolute differences of two packed planes of the same size.
+fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)))
+        .sum();
+    sum as f64 / a.len().max(1) as f64
+}
+
+/// The back end's configuration for the input, with output 0 at `out` (NV12). Sharpening is off
+/// unless asked for. The library's refusal is returned as it says it.
+fn build(
+    input: ImageFormatConfig,
+    bayer: BayerOrder,
+    out: (u32, u32),
+    sharpen: bool,
+) -> Result<BeTilesConfig, String> {
+    let mut be = BackEnd::simple_bayer(
+        input,
+        order(bayer),
+        BLACK,
+        (1.6, 1.0, 1.6),
+        None,
+        formats::NV12,
+        Some(CSC),
+    );
+    if out != (WIDTH, HEIGHT) {
+        // Smart resize: the library's resampler, with its filter for this downscale.
+        let (w, h) = (
+            u16::try_from(out.0).unwrap_or(u16::MAX),
+            u16::try_from(out.1).unwrap_or(u16::MAX),
+        );
+        be.set_smart_resize(Branch::Zero, w, h);
+        be.set_resample_default(
+            Branch::Zero,
+            ResampleFilter::for_downscale(f64::from(WIDTH) / f64::from(out.0)),
+        );
+    }
+    if sharpen {
+        be.set_sharpen(Some(SHARPEN_DEFAULT))
+            .map_err(|e| format!("the configuration library refused sharpen: {e}"))?;
+    }
+    be.prepare()
+        .map_err(|e| format!("the configuration library refused: {e:?}"))
+}
+
+/// One job on config buffer 0, input 0 and output 0: the frame's luma plane, packed.
+fn one_plane(
+    cfg: &mut FrameStream,
+    output: &mut FrameStream,
+    identity: &mut u64,
+    stride: usize,
+    (width, height): (usize, usize),
+) -> Result<Vec<u8>, String> {
+    post(cfg, *identity, 0, 0)?;
+    *identity += 1;
+    let frame = output
+        .next_frame(Duration::from_secs(2))
+        .map_err(|e| format!("output0: {e:?}"))?
+        .ok_or("no frame for the comparison job")?;
+    let packed = plane(output.bytes(&frame), stride, width, height);
+    output
+        .release(frame)
+        .map_err(|e| format!("release: {e:?}"))?;
+    Ok(packed)
+}
+
 #[allow(clippy::too_many_lines)]
 fn run(args: &Args) -> Result<bool, String> {
+    let (out_w, out_h) = args.resample.unwrap_or((WIDTH, HEIGHT));
     let client = Client::connect(&args.socket, "lemnos-isp-proof")
         .map_err(|e| format!("{}: {e}", args.socket))?;
     client.set_timeout(Duration::from_secs(5));
@@ -248,17 +365,7 @@ fn run(args: &Args) -> Result<bool, String> {
     compute_stride_align(&mut input, 64);
     let input_stride = input.stride as usize;
     let image = unpack(&raw, input_stride);
-    let config: BeTilesConfig = BackEnd::simple_bayer(
-        input,
-        order(bayer),
-        BLACK,
-        (1.6, 1.0, 1.6),
-        None,
-        formats::NV12,
-        Some(CSC),
-    )
-    .prepare()
-    .map_err(|e| format!("the configuration library refused: {e:?}"))?;
+    let config = build(input, bayer, (out_w, out_h), false)?;
     let y_stride = config.config.output_format[0].image.stride as usize;
     let mut config_bytes = vec![0u8; BeTilesConfig::SIZE];
     config
@@ -283,17 +390,29 @@ fn run(args: &Args) -> Result<bool, String> {
         .set_output(
             0,
             IspOutput {
-                width: WIDTH,
-                height: HEIGHT,
+                width: out_w,
+                height: out_h,
                 fourcc: u32::from_le_bytes(*b"NV12"),
                 pad_bytes: 0,
             },
         )
         .map_err(|s| format!("set_output: {s:?}"))?;
+    let nv12 = u64::from(layout.stride) * u64::from(out_h) * 3 / 2;
     out(format_args!(
-        "output 0: stride {} size {}",
+        "output 0: {out_w}x{out_h} NV12, stride {} size {} (stride x height x 1.5 = {nv12})",
         layout.stride, layout.size
     ));
+    // The size check is for a resized output; the default run's output is as it always was.
+    let mut ok = args.resample.is_none()
+        || (layout.stride as usize == y_stride && u64::from(layout.size) == nv12);
+    if args.resample.is_some() {
+        out(format_args!(
+            "resampled output 0: stride {} size {}, the configuration's stride {y_stride}, size check {}",
+            layout.stride,
+            layout.size,
+            if ok { "ok" } else { "FAILED" }
+        ));
+    }
 
     let platform = Arc::new(LinuxStreams);
     let mut cfg = client
@@ -343,24 +462,37 @@ fn run(args: &Args) -> Result<bool, String> {
     };
     let next_identity = first.identity() + 1;
     let y = output.bytes(&first);
-    let (bars, same) = luma(y, y_stride);
+    let (bars, same) = luma(y, y_stride, out_w as usize, out_h as usize);
     let chroma: Vec<u8> = (0..8)
         .map(|b| {
-            let at = y_stride * HEIGHT as usize + y_stride * (HEIGHT as usize / 4) + b * 160 + 80;
+            let at = y_stride * out_h as usize + y_stride * (out_h as usize / 4) + b * 160 + 80;
             y.get(at).copied().unwrap_or(0)
         })
         .collect();
     out(format_args!(
-        "first frame: identity {} buffer {} bytes {}; luma by eighths {bars:?}; lines equal to the middle one (within 2): {same} of {HEIGHT}; Cb by eighths {chroma:?}",
+        "first frame: identity {} buffer {} bytes {}; luma by eighths {bars:?}; lines equal to the middle one (within 2): {same} of {out_h}; Cb by eighths {chroma:?}",
         first.identity(),
         first.buffer(),
         first.len()
     ));
+    if args.resample.is_some() {
+        ok &= first.len() as u64 == u64::from(layout.size);
+        let peak = y
+            .get(..y_stride * out_h as usize)
+            .and_then(|s| s.iter().max())
+            .copied()
+            .unwrap_or(0);
+        out(format_args!(
+            "resampled frame: {} bytes, the output's size {}, stride {y_stride}, peak luma {peak}, luma eighths {bars:?}",
+            first.len(),
+            layout.size
+        ));
+    }
     if let Some(dir) = &args.save {
-        let mut pgm = format!("P5\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
-        for row in 0..HEIGHT as usize {
+        let mut pgm = format!("P5\n{out_w} {out_h}\n255\n").into_bytes();
+        for row in 0..out_h as usize {
             pgm.extend_from_slice(
-                y.get(row * y_stride..row * y_stride + WIDTH as usize)
+                y.get(row * y_stride..row * y_stride + out_w as usize)
                     .unwrap_or(&[]),
             );
         }
@@ -374,13 +506,52 @@ fn run(args: &Args) -> Result<bool, String> {
         seen.dedup_by(|a, b| a.abs_diff(*b) < 4);
         seen.len()
     };
+    let base_plane = plane(y, y_stride, out_w as usize, out_h as usize);
     output
         .release(first)
         .map_err(|e| format!("release: {e:?}"))?;
 
+    let mut identity = next_identity;
+    if args.sharpen {
+        // The same job again with the default sharpening, then the plain configuration back in
+        // every config buffer (no job is in flight here).
+        let sharp = build(input, bayer, (out_w, out_h), true)?;
+        let mut sharp_bytes = vec![0u8; BeTilesConfig::SIZE];
+        sharp
+            .write_to(&mut sharp_bytes)
+            .map_err(|_| "configuration size".to_string())?;
+        for buffer in 0..configs {
+            cfg.write(buffer, 0, &sharp_bytes)
+                .map_err(|e| format!("config write: {e:?}"))?;
+        }
+        let sharp_plane = one_plane(
+            &mut cfg,
+            &mut output,
+            &mut identity,
+            y_stride,
+            (out_w as usize, out_h as usize),
+        )?;
+        for buffer in 0..configs {
+            cfg.write(buffer, 0, &config_bytes)
+                .map_err(|e| format!("config write: {e:?}"))?;
+        }
+        let (sharp_bars, _) = luma(&sharp_plane, out_w as usize, out_w as usize, out_h as usize);
+        let diff = mean_abs_diff(&base_plane, &sharp_plane);
+        let changed = diff > 0.0;
+        out(format_args!(
+            "sharpen (default filters, enables {}): luma eighths {sharp_bars:?}; mean absolute luma difference from the same run without sharpen: {diff:.3}{}",
+            SHARPEN_DEFAULT.enables,
+            if changed {
+                ""
+            } else {
+                "; the sharpen made no change"
+            }
+        ));
+        ok &= changed;
+    }
+
     // One job at a time: post to frame.
     let mut times = Vec::with_capacity(args.jobs as usize);
-    let mut identity = next_identity;
     for n in 0..args.jobs {
         let posted = now_ns();
         post(&mut cfg, identity, 0, n % outputs)?;
@@ -462,7 +633,7 @@ fn run(args: &Args) -> Result<bool, String> {
     ));
     let counters = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
     out(format_args!("back end counters: {counters:?}"));
-    let mut ok = distinct >= 6 && same > HEIGHT as usize * 9 / 10 && in_order && done == args.jobs;
+    ok &= distinct >= 6 && same > out_h as usize * 9 / 10 && in_order && done == args.jobs;
 
     if args.rate > 0 && args.seconds > 0 {
         let jobs = args.rate * args.seconds;
@@ -555,19 +726,35 @@ fn one(
     out_buffer: u32,
     wait: Duration,
 ) -> Result<Option<u64>, String> {
-    post_on(cfg, *identity, cfg_buffer, 0, out_buffer)?;
+    let id = *identity;
+    post_on(cfg, id, cfg_buffer, 0, out_buffer)?;
     *identity += 1;
-    let Some(frame) = output
-        .next_frame(wait)
-        .map_err(|e| format!("output0: {e:?}"))?
-    else {
-        return Ok(None);
-    };
-    let h = hash(output.bytes(&frame));
-    output
-        .release(frame)
-        .map_err(|e| format!("release: {e:?}"))?;
-    Ok(Some(h))
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let Some(frame) = output
+            .next_frame(left)
+            .map_err(|e| format!("output0: {e:?}"))?
+        else {
+            return Ok(None);
+        };
+        if frame.identity() == id {
+            let h = hash(output.bytes(&frame));
+            output
+                .release(frame)
+                .map_err(|e| format!("release: {e:?}"))?;
+            return Ok(Some(h));
+        }
+        // A frame of an earlier job that came late: released, and not this job's.
+        output
+            .release(frame)
+            .map_err(|e| format!("release: {e:?}"))?;
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+    }
 }
 
 /// D15 check 3 and D17 checks 3, 4 and 6: what the driver must not run.
@@ -607,8 +794,25 @@ fn checks(
     // rewritten configuration, and rewriting it back gives the reference again. The client never
     // writes a configuration while a job holds it (rule 1); the driver's copy at accept (rule 5)
     // is what the tests of each driver pin.
-    let mut zeroed = good.to_vec();
-    zeroed.iter_mut().skip(112).for_each(|b| *b = 0);
+    // The same configuration with its three white-balance gains zero: the driver's check does not
+    // refuse it (only reserved bytes, tile count, HOG and the TDN flags), and the frame changes.
+    // Its known output is black luma: the gains multiply each colour to zero, and the full-range
+    // BT.601 luma offset is zero, so every Y byte is 0 (the all-zero check counts this as expected
+    // for this configuration only, never for the white-balanced one).
+    let mut parsed = BeTilesConfig::default();
+    parsed
+        .read_from(good)
+        .map_err(|_| "configuration size".to_string())?;
+    parsed.config.wbg = WbgConfig {
+        gain_r: 0,
+        gain_g: 0,
+        gain_b: 0,
+        pad: [0; 2],
+    };
+    let mut zeroed = vec![0u8; BeTilesConfig::SIZE];
+    parsed
+        .write_to(&mut zeroed)
+        .map_err(|_| "configuration size".to_string())?;
     cfg.write(1, 0, good)
         .map_err(|e| format!("config write: {e:?}"))?;
     let first = one(cfg, output, identity, 1, 0, Duration::from_secs(2))?;
@@ -679,7 +883,7 @@ fn checks(
 fn main() -> ExitCode {
     let Some(args) = parse() else {
         out(format_args!(
-            "usage: lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR] [--rate N --seconds S] [--checks 1]"
+            "usage: lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR] [--rate N --seconds S] [--checks 1] [--sharpen 1] [--resample WxH]"
         ));
         return ExitCode::from(2);
     };
@@ -690,5 +894,96 @@ fn main() -> ExitCode {
             out(format_args!("lemnos-isp-proof: {e}"));
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resampled_configuration_is_valid_for_the_driver() {
+        let mut input = ImageFormatConfig {
+            width: WIDTH as u16,
+            height: HEIGHT as u16,
+            format: formats::BAYER16,
+            ..Default::default()
+        };
+        compute_stride_align(&mut input, 64);
+        let config = build(input, BayerOrder::Rggb, (640, 400), false).expect("prepare");
+        let image = config.config.output_format[0].image;
+        assert_eq!((image.width, image.height), (640, 400));
+        assert!(image.stride >= 640);
+        let bytes = lemnos_driver_pisp::be_job::image_bytes(&image).expect("size");
+        assert_eq!(bytes, u64::try_from(image.stride).unwrap() * 400 * 3 / 2);
+        lemnos_driver_pisp::be_job::check(&config).expect("driver check");
+    }
+
+    #[test]
+    fn sharpened_and_zero_gain_configurations_are_valid_for_the_driver() {
+        let mut input = ImageFormatConfig {
+            width: WIDTH as u16,
+            height: HEIGHT as u16,
+            format: formats::BAYER16,
+            ..Default::default()
+        };
+        compute_stride_align(&mut input, 64);
+        let sharp = build(input, BayerOrder::Rggb, (WIDTH, HEIGHT), true).expect("prepare");
+        lemnos_driver_pisp::be_job::check(&sharp).expect("driver check");
+        assert_ne!(sharp.config.sharpen.enables, 0);
+        let plain = build(input, BayerOrder::Rggb, (WIDTH, HEIGHT), false).expect("prepare");
+        let mut zero = plain;
+        zero.config.wbg = WbgConfig {
+            gain_r: 0,
+            gain_g: 0,
+            gain_b: 0,
+            pad: [0; 2],
+        };
+        lemnos_driver_pisp::be_job::check(&zero).expect("driver check");
+    }
+
+    /// A 640x400 NV12 frame: luma rows of 50, then the chroma plane of 128 (as the block writes it).
+    fn nv12_640x400() -> Vec<u8> {
+        let mut frame = vec![50u8; 640 * 400];
+        frame.extend(std::iter::repeat_n(128u8, 640 * 200));
+        frame
+    }
+
+    #[test]
+    fn resized_luma_reads_the_luma_plane() {
+        let frame = nv12_640x400();
+        let (bars, same) = luma(&frame, 640, 640, 400);
+        assert_eq!(bars, vec![50; 8]);
+        assert_eq!(same, 400);
+    }
+
+    #[test]
+    fn the_full_size_readout_of_a_resized_frame_reads_chroma() {
+        // The board run's bug: the readout used the 1280x800 size for a 640x400 frame. Its middle
+        // row (400) is the first chroma row, so the eighths read 128, not the luma.
+        let frame = nv12_640x400();
+        let (bars, _) = luma(&frame, 640, 1280, 800);
+        assert_eq!(bars, vec![128; 8]);
+    }
+
+    #[test]
+    fn a_1280_wide_readout_keeps_its_margins() {
+        // The same bars as before the change at 1280: a frame of 50 with 128 beside each bar's edge.
+        let mut row = vec![128u8; 1280];
+        for b in 0..8 {
+            row[b * 160 + 40..b * 160 + 120].fill(50);
+        }
+        let mut frame = row.clone();
+        frame.extend(std::iter::repeat_n(50u8, 1280 * 799));
+        let (bars, _) = luma(&frame, 1280, 1280, 800);
+        assert_eq!(bars, vec![50; 8]);
+    }
+
+    #[test]
+    fn a_short_frame_reads_as_no_lines_not_as_zero_luma_from_a_wrong_size() {
+        let frame = nv12_640x400();
+        let (bars, same) = luma(&frame[..1000], 640, 640, 400);
+        assert_eq!(bars, vec![0; 8]);
+        assert_eq!(same, 0);
     }
 }
