@@ -140,6 +140,13 @@ pub trait Router: Sync {
         let _ = (caller, job, result);
         Err(Status::NOT_SUPPORTED)
     }
+    /// Whether a caller other than `caller` is using `device`: one that has called it and has not
+    /// gone (see the host's `caller_gone`). Only the answer is given, never who the callers are.
+    /// `NOT_SUPPORTED` in a router that counts no callers.
+    fn others_use(&self, caller: CallerId, device: u32) -> Result<bool> {
+        let _ = (caller, device);
+        Err(Status::NOT_SUPPORTED)
+    }
     /// Cancels job `job` for its owner `caller`, as [`Driver::job_cancel`] does.
     fn cancel_job(&self, caller: CallerId, job: u64) -> Result<()> {
         let _ = (caller, job);
@@ -193,6 +200,13 @@ impl core::fmt::Debug for LocalCaller {
             .field("contract", &self.contract)
             .field("caller", &self.caller)
             .finish()
+    }
+}
+
+impl LocalCaller {
+    /// Whether a caller other than this one is using the device. See [`Router::others_use`].
+    pub fn others_use(&self) -> Result<bool> {
+        self.router.others_use(self.caller, self.device)
     }
 }
 
