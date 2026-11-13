@@ -307,8 +307,13 @@ fn run(args: &Args) -> Result<bool, String> {
         .map_err(|e| format!("output0 stream: {e}"))?;
     let outputs = output.layout().buffers;
     isp.start().map_err(|s| format!("start: {s:?}"))?;
-    cfg.write(0, 0, &config_bytes)
-        .map_err(|e| format!("config write: {e:?}"))?;
+    // Every config buffer holds the same configuration: jobs in flight together each name their
+    // own, since the driver refuses a job naming a config buffer another job still holds.
+    let configs = cfg.layout().buffers;
+    for buffer in 0..configs {
+        cfg.write(buffer, 0, &config_bytes)
+            .map_err(|e| format!("config write: {e:?}"))?;
+    }
     // The same picture in every input buffer, so queued jobs can each read their own.
     let inputs = inp.layout().buffers;
     for buffer in 0..inputs {
@@ -409,7 +414,13 @@ fn run(args: &Args) -> Result<bool, String> {
     let (mut posted, mut done, mut in_order) = (0u32, 0u32, true);
     let mut expect = identity;
     while posted < 2 {
-        post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+        post_on(
+            &mut cfg,
+            identity,
+            posted % configs,
+            posted % inputs,
+            posted % outputs,
+        )?;
         identity += 1;
         posted += 1;
     }
@@ -432,7 +443,13 @@ fn run(args: &Args) -> Result<bool, String> {
         done += 1;
         if posted < args.jobs {
             // Round the buffers: each named was last used by a job that has finished.
-            post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+            post_on(
+                &mut cfg,
+                identity,
+                posted % configs,
+                posted % inputs,
+                posted % outputs,
+            )?;
             identity += 1;
             posted += 1;
         }
@@ -455,7 +472,13 @@ fn run(args: &Args) -> Result<bool, String> {
         let (mut posted, mut done, mut in_order) = (0u32, 0u32, true);
         let mut expect = identity;
         while posted < 2 {
-            post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+            post_on(
+                &mut cfg,
+                identity,
+                posted % configs,
+                posted % inputs,
+                posted % outputs,
+            )?;
             identity += 1;
             posted += 1;
         }
@@ -478,7 +501,13 @@ fn run(args: &Args) -> Result<bool, String> {
                 if let Some(wait) = due.checked_sub(started.elapsed()) {
                     std::thread::sleep(wait);
                 }
-                post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+                post_on(
+                    &mut cfg,
+                    identity,
+                    posted % configs,
+                    posted % inputs,
+                    posted % outputs,
+                )?;
                 identity += 1;
                 posted += 1;
             }
