@@ -330,9 +330,6 @@ pub struct Finish<'a> {
     /// Refuse a bundle not signed by a trusted key. Off, such a bundle installs and its slot
     /// shows as untrusted or unsigned.
     pub require_signed: bool,
-    /// What the slot's initramfs finds the data partition by: `PARTUUID=<id>`, or
-    /// `UBI=<device>:data` on raw NAND. Empty when it isn't known.
-    pub data: &'a str,
     pub boot_args: &'a str,
     /// The board file's `[board] id`: a slot built for another board is refused.
     pub board_id: &'a str,
@@ -600,21 +597,32 @@ impl Install {
             }
         }
         let boot_dir = unpack.work.join("boot");
-        let base = fs::read_to_string(boot_dir.join("cmdline.txt"))
-            .map_err(|_| bad("the bundle has no boot/cmdline.txt"))?;
-        let base = base.split_whitespace().collect::<Vec<_>>().join(" ");
-        if board.data.is_empty() {
-            return Err((
-                Status::NO_DEVICE,
-                "the data partition's PARTUUID isn't known".into(),
-            ));
-        }
         let args = board.boot_args;
         if args.is_empty() || !args.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             return Err((
                 Status::NO_DEVICE,
                 "the board file names no boot_args for the slot's initramfs".into(),
             ));
+        }
+        // The command line that boots is the bundle's, byte for byte: its hash is in the signed
+        // manifest's boot files, so nothing is written into it here. The bundle names its own slot
+        // and root hash; a bundle whose line does not is refused.
+        let line = fs::read_to_string(boot_dir.join("cmdline.txt"))
+            .map_err(|_| bad("the bundle has no boot/cmdline.txt"))?;
+        let cmdline = line.trim_end_matches(['\r', '\n']).to_string();
+        let names = |key: &str, value: &str| {
+            let word = format!("{args}.{key}={value}");
+            cmdline.split_ascii_whitespace().any(|w| w == word)
+        };
+        if !names("slot", &id) {
+            return Err(bad(format!(
+                "boot/cmdline.txt doesn't name its slot: it needs {args}.slot={id}"
+            )));
+        }
+        if !names("roothash", root_hash) {
+            return Err(bad(format!(
+                "boot/cmdline.txt doesn't carry the root hash slot.json names: it needs {args}.roothash={root_hash}"
+            )));
         }
         // The boot side, kept on the data partition. A slot whose directory is already on the
         // boot partition (installed again) gets its new files there now.
@@ -628,11 +636,6 @@ impl Install {
             )
             .map_err(&io)?;
         }
-        let cmdline = format!(
-            "{base} {args}.slot={id} {args}.roothash={root_hash} {args}.data={} panic=5",
-            board.data
-        );
-        fs::write(boot_dir.join("cmdline.txt"), format!("{cmdline}\n")).map_err(&io)?;
         board
             .record
             .prepare(&boot_dir, &id, &cmdline)

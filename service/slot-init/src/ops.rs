@@ -39,4 +39,11 @@ pub trait Ops {
     /// Into the new root, as PID 1. On a board it returns only when it couldn't.
     fn switch_root(&self, new_root: &Path) -> Result<(), String>;
     fn sleep(&self, time: Duration);
+    /// A file on the boot partition, `path` relative to its root, read without a mount: the FAT
+    /// volume at `dev` is read raw ([`lemnos_slot_store::bootcheck::fat_read`]). `None` when the file
+    /// is not there. The tests read their tree of files instead.
+    fn read_boot_file(&self, dev: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
+        let mut file = std::fs::File::open(dev).map_err(|e| format!("{}: {e}", dev.display()))?;
+        lemnos_slot_store::bootcheck::fat_read(&mut file, path)
+    }
 }

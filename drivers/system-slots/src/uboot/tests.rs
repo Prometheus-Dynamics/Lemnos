@@ -242,6 +242,7 @@ fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
     let mut record = Uboot {
         boot: layout.boot.clone(),
         restarter: Restarter {
+            check: None,
             systemctl: "/nonexistent/systemctl".into(),
         },
         volume: None,

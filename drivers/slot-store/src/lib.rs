@@ -9,11 +9,14 @@
 //! - [`json`]: the small JSON reader both use.
 //! - [`twocopy`]: two-copy records, written one sector at a time; [`bootfat`] places their files.
 //! - [`signing`]: the signature policy both signed installs apply (slot bundles and first flash).
+//! - [`bootfat`] also reads a boot file through its chain, and [`bootcheck`] hashes each slot's
+//!   boot files against the manifest (every boot, and lemnosd's check).
 //!
 //! Plain `std`, so the initramfs program stays small; the `linux` feature adds the UBI ioctls.
 
 pub mod arrival;
 pub mod boot_raw;
+pub mod bootcheck;
 pub mod bootfat;
 pub mod boots;
 pub mod fallback;

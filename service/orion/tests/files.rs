@@ -76,9 +76,15 @@ fn tree_bytes(blocks: usize) -> usize {
 fn bundle(id: &str, data_blocks: usize) -> Vec<u8> {
     let len = data_blocks * BLOCK + tree_bytes(data_blocks);
     let image: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    // The command line is the bundle's, byte for byte: it names its own slot and root hash (the
+    // board's `boot_args` prefix is `os`).
+    let cmdline = format!(
+        "console=tty1 rootwait os.slot={id} os.roothash={} panic=5\n",
+        "ab".repeat(32)
+    );
     let boot: [(&str, &[u8]); 3] = [
         ("kernel8.img", b"kernel"),
-        ("cmdline.txt", b"console=tty1 rootwait\n"),
+        ("cmdline.txt", cmdline.as_bytes()),
         ("initramfs", b"initramfs"),
     ];
     let files: Vec<String> = boot

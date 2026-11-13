@@ -1,5 +1,5 @@
-//! Finds a pre-created record file's sector on a FAT16 or FAT32 partition, reading the volume
-//! only: no mount, no write. A record file must be one contiguous run of clusters whose size is
+//! Finds a pre-created record file's sector on a FAT16 or FAT32 partition, and reads a file's
+//! bytes through its cluster chain ([`read_file`]), reading the volume only: no mount, no write. A record file must be one contiguous run of clusters whose size is
 //! exactly the size the image builder wrote, so a record's copies are two sectors at a known LBA.
 //! Anything else (missing, fragmented, a different size, FAT12, a bad boot sector) is refused by
 //! name: the caller writes nothing.
@@ -51,6 +51,17 @@ pub enum Refusal {
     Fragmented,
     /// The device failed.
     Io(io::Error),
+    /// A directory, cluster chain or entry is not what the FAT says it must be (a loop, a free or
+    /// bad cluster in a chain, a chain that disagrees with its size, a path component that is not
+    /// a directory). The reader names the fault and reads nothing more.
+    Corrupt(&'static str),
+    /// The file is larger than the caller will read.
+    TooLarge {
+        /// The size on the volume.
+        found: u64,
+        /// The most the caller reads.
+        limit: u64,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -66,6 +77,10 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Fragmented => write!(f, "record file is fragmented or moved: refused"),
             Refusal::Io(e) => write!(f, "boot partition read failed: {e}"),
+            Refusal::Corrupt(why) => write!(f, "boot partition's FAT is corrupt: {why}"),
+            Refusal::TooLarge { found, limit } => {
+                write!(f, "file is {found} bytes, more than the {limit} allowed")
+            }
         }
     }
 }
@@ -275,6 +290,248 @@ pub fn locate<D: ReadAt>(dev: &mut D, name: &[u8; 11], want: u64) -> Result<Foun
     Ok(Found {
         first_lba: v.data_start + (first - 2) * v.spc,
     })
+}
+
+/// The file attribute bits the reader looks at.
+const ATTR_DIR: u8 = 0x10;
+const ATTR_VOLUME: u8 = 0x08;
+const ATTR_LFN: u8 = 0x0F;
+/// Where the 13 UCS-2 characters of a long-name entry sit in its 32 bytes.
+const LFN_AT: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+
+/// A directory to read from: the FAT16 fixed root, or a directory's first cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Root,
+    Cluster(u64),
+}
+
+/// A directory entry that matched.
+#[derive(Debug, Clone, Copy)]
+struct Hit {
+    attr: u8,
+    first: u64,
+    size: u32,
+}
+
+/// Follows a FAT chain from `first`, at most `limit` clusters. A free, bad or out-of-range
+/// cluster, a loop, or a chain longer than `limit` is refused; so is a chain that ends early
+/// only when the caller checks the length.
+fn cluster_chain<D: ReadAt>(
+    dev: &mut D,
+    v: &Volume,
+    first: u64,
+    limit: u64,
+) -> Result<Vec<u64>, Refusal> {
+    let mut out = Vec::new();
+    let mut c = first;
+    loop {
+        if c < 2 || c >= v.clusters + 2 {
+            return Err(Refusal::Corrupt(
+                "a chain names a cluster outside the volume",
+            ));
+        }
+        if out.len() as u64 >= limit {
+            return Err(Refusal::Corrupt("a chain is longer than its size or loops"));
+        }
+        out.push(c);
+        let next = fat_entry(dev, v, c)?;
+        if is_end(v, next) {
+            return Ok(out);
+        }
+        c = next;
+    }
+}
+
+/// Reads the clusters of `chain` whole, in order, appending them to `out`.
+fn read_clusters<D: ReadAt>(
+    dev: &mut D,
+    v: &Volume,
+    chain: &[u64],
+    out: &mut Vec<u8>,
+) -> Result<(), Refusal> {
+    let cluster_bytes = (v.spc * 512) as usize;
+    for &c in chain {
+        let at = (v.data_start + (c - 2) * v.spc) * 512;
+        let start = out.len();
+        out.resize(start + cluster_bytes, 0);
+        dev.read_at(at, &mut out[start..])?;
+    }
+    Ok(())
+}
+
+/// The bytes of a directory: the fixed FAT16 root, or its chain.
+fn dir_bytes<D: ReadAt>(dev: &mut D, v: &Volume, dir: Dir) -> Result<Vec<u8>, Refusal> {
+    match dir {
+        Dir::Root if !v.fat32 => {
+            let mut buf = vec![0u8; (v.root_entries * 32) as usize];
+            dev.read_at(v.root_start, &mut buf)?;
+            Ok(buf)
+        }
+        Dir::Root => {
+            let chain = cluster_chain(dev, v, u64::from(v.root_cluster), v.clusters)?;
+            let mut out = Vec::new();
+            read_clusters(dev, v, &chain, &mut out)?;
+            Ok(out)
+        }
+        Dir::Cluster(first) => {
+            let chain = cluster_chain(dev, v, first, v.clusters)?;
+            let mut out = Vec::new();
+            read_clusters(dev, v, &chain, &mut out)?;
+            Ok(out)
+        }
+    }
+}
+
+/// The 8-bit checksum of an 8.3 name, which a long name's entries carry (FAT specification).
+fn short_checksum(name: &[u8]) -> u8 {
+    name.iter().fold(0u8, |sum, &b| {
+        (sum >> 1)
+            .wrapping_add(if sum & 1 != 0 { 0x80 } else { 0 })
+            .wrapping_add(b)
+    })
+}
+
+/// The 8.3 name as text: `NAME.EXT`, spaces dropped.
+fn short_name(e: &[u8]) -> String {
+    let base = String::from_utf8_lossy(&e[0..8]).trim_end().to_string();
+    let ext = String::from_utf8_lossy(&e[8..11]).trim_end().to_string();
+    if ext.is_empty() {
+        base
+    } else {
+        format!("{base}.{ext}")
+    }
+}
+
+/// The long name the entries before a short entry carry, when they are one run in order (1, 2,
+/// ..., last flagged) with the short entry's checksum.
+fn long_name(parts: &[(u8, [u16; 13])]) -> Option<String> {
+    let mut sorted: Vec<&(u8, [u16; 13])> = parts.iter().collect();
+    sorted.sort_by_key(|(seq, _)| *seq);
+    let mut units: Vec<u16> = Vec::new();
+    for (i, (seq, chars)) in sorted.iter().enumerate() {
+        if usize::from(*seq) != i + 1 {
+            return None;
+        }
+        for &u in chars {
+            if u == 0x0000 || u == 0xFFFF {
+                break;
+            }
+            units.push(u);
+        }
+    }
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// The first directory entry in `dir` whose long or short name is `want` (ASCII case-insensitive).
+fn find_entry(dir: &[u8], want: &str) -> Option<Hit> {
+    let mut parts: Vec<(u8, [u16; 13])> = Vec::new();
+    let mut sum: Option<u8> = None;
+    for e in dir.as_chunks::<32>().0 {
+        if e[0] == 0x00 {
+            return None;
+        }
+        if e[0] == 0xE5 {
+            parts.clear();
+            sum = None;
+            continue;
+        }
+        if e[11] == ATTR_LFN {
+            if e[0] & 0x40 != 0 {
+                parts.clear();
+                sum = Some(e[13]);
+            }
+            let seq = e[0] & 0x1F;
+            if seq == 0 || sum != Some(e[13]) {
+                parts.clear();
+                sum = None;
+                continue;
+            }
+            let mut chars = [0xFFFFu16; 13];
+            for (k, &at) in LFN_AT.iter().enumerate() {
+                chars[k] = u16::from_le_bytes([e[at], e[at + 1]]);
+            }
+            parts.push((seq, chars));
+            continue;
+        }
+        let run = std::mem::take(&mut parts);
+        let run_sum = sum.take();
+        if e[11] & ATTR_VOLUME != 0 {
+            continue;
+        }
+        let long = match run_sum {
+            Some(s) if s == short_checksum(&e[0..11]) && !run.is_empty() => long_name(&run),
+            _ => None,
+        };
+        let matched = long.is_some_and(|l| l.eq_ignore_ascii_case(want))
+            || short_name(e).eq_ignore_ascii_case(want);
+        if matched {
+            let hi = u64::from(u16::from_le_bytes([e[20], e[21]]));
+            let lo = u64::from(u16::from_le_bytes([e[26], e[27]]));
+            return Some(Hit {
+                attr: e[11],
+                first: (hi << 16) | lo,
+                size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
+            });
+        }
+    }
+    None
+}
+
+/// Reads the file at `path` (`/`-separated, relative to the root; a component is a long or short
+/// name, ASCII case-insensitive) without mounting, writing nothing. The file must be at most
+/// `limit` bytes. Its chain is followed, so a fragmented file reads; a chain that loops, leaves
+/// the volume, holds a free or bad cluster, or disagrees with the file's size is refused.
+///
+/// # Errors
+///
+/// [`Refusal::Missing`] when a component is not there, [`Refusal::Corrupt`] for what the FAT
+/// gets wrong, [`Refusal::TooLarge`] past `limit`, and the device's own failure.
+pub fn read_file<D: ReadAt>(dev: &mut D, path: &str, limit: u64) -> Result<Vec<u8>, Refusal> {
+    let v = volume(dev)?;
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(Refusal::Corrupt("a path has an empty component"));
+    }
+    let mut dir = Dir::Root;
+    for (i, part) in parts.iter().enumerate() {
+        let bytes = dir_bytes(dev, &v, dir)?;
+        let hit = find_entry(&bytes, part).ok_or(Refusal::Missing)?;
+        if i + 1 < parts.len() {
+            if hit.attr & ATTR_DIR == 0 {
+                return Err(Refusal::Corrupt("a path component is not a directory"));
+            }
+            if hit.first < 2 {
+                return Err(Refusal::Corrupt("a directory entry names no cluster"));
+            }
+            dir = Dir::Cluster(hit.first);
+            continue;
+        }
+        if hit.attr & ATTR_DIR != 0 {
+            return Err(Refusal::Corrupt("the path names a directory, not a file"));
+        }
+        let size = u64::from(hit.size);
+        if size > limit {
+            return Err(Refusal::TooLarge { found: size, limit });
+        }
+        let cluster_bytes = v.spc * 512;
+        let needed = size.div_ceil(cluster_bytes);
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        if hit.first < 2 {
+            return Err(Refusal::Corrupt("a file entry names no cluster"));
+        }
+        let chain = cluster_chain(dev, &v, hit.first, needed)?;
+        if chain.len() as u64 != needed {
+            return Err(Refusal::Corrupt("a file's chain is shorter than its size"));
+        }
+        let mut out = Vec::with_capacity((needed * cluster_bytes) as usize);
+        read_clusters(dev, &v, &chain, &mut out)?;
+        out.truncate(size as usize);
+        return Ok(out);
+    }
+    Err(Refusal::Missing)
 }
 
 #[cfg(test)]

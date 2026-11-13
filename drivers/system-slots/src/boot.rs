@@ -13,10 +13,12 @@
 //! the pointers are written, so a power cut at any point leaves the old pointers with their
 //! directories or the new ones with theirs.
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -83,13 +85,30 @@ pub fn clear_reason(boot: &Path) {
 
 /// Runs the system's restart: `<systemctl> reboot`, with `--reboot-argument=0 tryboot` for a
 /// trial when the firmware takes one.
+/// The check lemnosd makes before its own restarts, and on a slow period (see
+/// [`crate::boot_guard`]). Called with `true` before a restart: an `Err` refuses the restart. With
+/// `false` on a slow period, its `Ok` carries a note of what it did.
+#[derive(Clone)]
+pub struct Check(pub Arc<dyn Fn(bool) -> Result<Option<String>, String> + Send + Sync>);
+
+impl fmt::Debug for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Check")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Restarter {
     pub systemctl: PathBuf,
+    /// Checked before the restart runs: a refused check means no restart.
+    pub check: Option<Check>,
 }
 
 impl Restarter {
     pub fn run(&self, argument: Option<&str>) -> io::Result<()> {
+        if let Some(check) = &self.check {
+            (check.0)(true).map_err(io::Error::other)?;
+        }
         let mut command = Command::new(&self.systemctl);
         command.arg("reboot");
         if let Some(argument) = argument {
@@ -545,6 +564,7 @@ mod tests {
         let mut record = Tryboot {
             boot: dir.0.clone(),
             restarter: Restarter {
+                check: None,
                 systemctl: "/nonexistent/systemctl".into(),
             },
         };
@@ -574,6 +594,7 @@ mod tests {
         let mut record = Tryboot {
             boot: dir.0.clone(),
             restarter: Restarter {
+                check: None,
                 systemctl: "/nonexistent/systemctl".into(),
             },
         };
@@ -597,6 +618,7 @@ mod tests {
         let mut record = FileRecord {
             boot: dir.0.clone(),
             restarter: Restarter {
+                check: None,
                 systemctl: "/nonexistent/systemctl".into(),
             },
         };

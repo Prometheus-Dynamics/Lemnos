@@ -28,7 +28,14 @@ or the new pointers with theirs.
 
 The slot's initramfs opens the image through dm-verity. The root hash it checks against comes
 from the bundle's manifest, and the slot's kernel command line carries it:
-`<boot_args>.slot=<id> <boot_args>.roothash=<hex> <boot_args>.data=PARTUUID=<uuid> panic=5`.
+`<boot_args>.slot=<id> <boot_args>.roothash=<hex> ... panic=5`. The command line that boots is the
+bundle's `boot/cmdline.txt`, byte for byte: nothing is appended at install. Its hash is in the
+signed manifest's `boot.files`, so every boot file, the command line included, is checked against
+one signed manifest. A bundle whose line does not name its own slot and root hash is refused by
+name. The data partition is not on the command line (see `lemnos-slot-init`, below).
+
+**Breaking, declared (I5i4):** the bundle's command line is not edited at install, and the
+`<boot_args>.data=` argument is gone. A bundle built for an earlier layout is refused.
 
 ## A bundle
 
@@ -397,7 +404,8 @@ and `record = "ubi"`. The volumes on that UBI device are:
   U-Boot's `ubi write` of the record isn't atomic. A power cut in it leaves the volume
   unreadable, and the script then boots the root copy, which is the default's.
 - **The kernel** attaches UBI itself: a slot's `boot/cmdline.txt` must carry `ubi.mtd=<n>`.
-  `lemnos-slot-init` reads `<boot_args>.data=UBI=ubi0:data`. It mounts the data and boot
+  When the UBI device `ubi0` is attached, `lemnos-slot-init` takes its volume `data` as the data
+  partition (no command-line argument names it). It mounts the data and boot
   volumes as UBIFS, makes a read-only `ubiblock` device over `slot-<id>`, and opens dm-verity on
   it. A fallback writes its trial into `boot-record` the same atomic way.
 
@@ -459,11 +467,12 @@ Nothing in the initramfs makes up for it.
 
 1. It mounts `/proc`, `/sys` and `/dev`, and reads the slot arguments from the kernel command
    line. The prefix is whatever stands before `.slot=` (the driver's `boot_args`).
-2. It finds the data partition from `<prefix>.data=`, `PARTUUID=` (MBR or GPT), `LABEL=` (ext4) or
-   `UBI=<device>:<volume>` (raw NAND, below),
-   from `/sys/class/block` and the disks themselves. It waits up to 10 s, and if nothing answers it
-   takes the partition labelled `data`. A filesystem whose superblock records errors is mounted
-   read-only. There is no fsck here.
+2. It finds the data partition by a fixed rule, not from the command line. On raw NAND, when the
+   UBI device `ubi0` is attached, it is the UBI volume `data` (below). Otherwise it is the ext4
+   partition labelled `lemnos-data` (`/sys/class/block` and the superblocks). The image builder sets
+   that label. It waits up to 10 s for it; a board with two partitions carrying the label is refused
+   at once, by name, since it cannot say which is its data. A filesystem whose superblock records
+   errors is mounted read-only. There is no fsck here.
 3. It reads the boot partition (partition 1 of the same disk) read-only. If a `boot-record` file
    is there, the record picks the slot: its `trial=`, which is cleared before the slot starts,
    else its `default=`. The root hash is then the one on that slot's own
@@ -474,7 +483,8 @@ Nothing in the initramfs makes up for it.
    - its manifest is missing, isn't schema 3 or is for another slot;
    - the manifest's root hash isn't the command line's;
    - the image isn't exactly `image.size` bytes;
-   - `kernel` names a kernel other than the running one.
+   - `kernel` names a kernel other than the running one;
+   - a boot file of the slot doesn't match the manifest's hash (see "Boot-file checks" below).
 6. It opens the image through a read-only loop device and dm-verity with the table above, and
    mounts it read-only as EROFS.
 7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
@@ -557,6 +567,33 @@ it, but the trial is still written to the boot partition.
 
 **Untested on board.** The tests run the whole flow over a temporary directory that stands in
 for `/`, with a fake for every system call. `testing/board-runs/I5d.md` is the board run.
+
+## Boot-file checks
+
+Every boot file a slot has (kernel, device trees, overlays, `cmdline.txt`, initramfs) is listed in
+the signed manifest's `boot.files` with its SHA-256. The checks compare what is on the boot
+partition with that list.
+
+- **Every boot, by `lemnos-slot-init`.** Before the image is opened, the booted slot's files are read
+  raw through the FAT volume (`lemnos_slot_store::bootfat`: directory walk with long and short
+  names, cluster chains followed, bounds and loop checks; a damaged chain is refused by name). No
+  mount is made to read them. On raw NAND, where the boot partition is UBIFS, the read goes through
+  its read-only mount. A default that does not match goes to the existing failure path, which
+  starts another verified slot on trial; a trial that does not match fails the trial.
+- **Before a restart and on a slow period, by lemnosd.** The default's files are checked against its
+  manifest, read from the boot partition where the running system has it mounted (lemnosd does not
+  mount it). When the default does not match and the previous does, the default is marked failed
+  and the boot record is pointed at the previous, before the restart. When neither matches, the
+  restart is refused and the board stays up. The slow period runs at once and then every ten
+  minutes; it repoints the same way and otherwise only reports.
+
+Not covered, and known: an edit followed by a power cut, or by a plain `reboot` that bypasses
+Lemnos, is caught by the next boot's check, not before it. On the U-Boot form the `extlinux.conf`
+that Lemnos generates from the command line is not in the manifest, so an edit to that file is not
+caught. The repoint from the lemnosd check is a whole-file write of the record, not the one-sector
+write the design names for the Raspberry Pi pointer files; the residual window is the same as for a
+set_default (see the records section). The fall-back on a slot-init mismatch uses the existing
+candidates, not a pointer write.
 
 ## How a trial resolves
 

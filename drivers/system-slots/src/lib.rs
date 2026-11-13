@@ -71,6 +71,9 @@
 //! the restart cut short is cleared when the driver starts and reported as interrupted.
 
 pub mod boot;
+mod boot_guard;
+#[cfg(test)]
+mod boot_guard_tests;
 mod install;
 mod resolve;
 pub use lemnos_slot_store::{json, manifest, store};
@@ -83,7 +86,7 @@ mod tests;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
@@ -94,7 +97,7 @@ use lemnos_core::{
     Result, Status, driver,
 };
 
-use boot::{BootRecord, FileRecord, Restarter, Tryboot};
+use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
@@ -156,12 +159,81 @@ pub struct SystemSlots {
     /// The last install's signature result, and the slot it made (`""` when it was refused):
     /// `info` shows it.
     last_signed: Option<(String, std::result::Result<Outcome, String>)>,
+    /// The boot-file check before lemnosd's own restarts and on a slow period (see
+    /// [`boot_guard`]), and when the next slow-period check is due.
+    check: Option<Check>,
+    next_check_ns: u64,
 }
 
-fn restarter(cfg: &Config<'_>) -> Restarter {
+/// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
+fn layout_of(cfg: &Config<'_>) -> (Layout, Option<Arc<dyn UbiWrite>>) {
+    let mut layout = Layout::new(
+        PathBuf::from(cfg.str("data").unwrap_or("/data")),
+        PathBuf::from(cfg.str("boot").unwrap_or("/boot/firmware")),
+    );
+    layout.ubi = cfg.str("ubi").map(|device| Ubi {
+        sys: PathBuf::from("/sys"),
+        dev: PathBuf::from("/dev"),
+        device: device.to_string(),
+    });
+    let ubi_write: Option<Arc<dyn UbiWrite>> = layout
+        .ubi
+        .clone()
+        .map(|ubi| Arc::new(ubi::System { ubi }) as Arc<dyn UbiWrite>);
+    (layout, ubi_write)
+}
+
+fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
     Restarter {
         systemctl: PathBuf::from(cfg.str("systemctl").unwrap_or("systemctl")),
+        check,
     }
+}
+
+/// The boot record the `record` setting names, with its restarter (checked when `check` is given).
+fn record_for(
+    cfg: &Config<'_>,
+    layout: &Layout,
+    ubi_write: &Option<Arc<dyn UbiWrite>>,
+    check: Option<Check>,
+) -> Result<Box<dyn BootRecord>> {
+    let restarter = restarter(cfg, check);
+    Ok(match cfg.str("record").unwrap_or("tryboot") {
+        "tryboot" => Box::new(Tryboot {
+            boot: layout.boot.clone(),
+            restarter,
+        }),
+        "file" => Box::new(FileRecord {
+            boot: layout.boot.clone(),
+            restarter,
+        }),
+        "uboot" => Box::new(Uboot {
+            boot: layout.boot.clone(),
+            restarter,
+            volume: None,
+        }),
+        "ubi" => match (&layout.ubi, ubi_write) {
+            (Some(device), Some(writer)) => Box::new(Uboot {
+                boot: layout.boot.clone(),
+                restarter,
+                volume: Some((device.clone(), writer.clone())),
+            }),
+            _ => return Err(Status::INVALID_ARGUMENT),
+        },
+        _ => return Err(Status::INVALID_ARGUMENT),
+    })
+}
+
+/// The check over a record of its own: [`boot_guard::check`], which may point the record at the
+/// previous slot.
+fn guard_check(layout: Layout, record: Box<dyn BootRecord>) -> Check {
+    let record = Mutex::new(record);
+    Check(Arc::new(move |restart| {
+        let mut record = record
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        boot_guard::check(&layout, record.as_mut(), restart)
+    }))
 }
 
 impl SystemSlots {
@@ -211,6 +283,8 @@ impl SystemSlots {
             boots_keep: boots::DEFAULT_KEEP,
             reset_reason: None,
             last_signed: None,
+            check: None,
+            next_check_ns: 0,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -317,7 +391,6 @@ impl SystemSlots {
             layout: &self.layout,
             keys: &self.keys,
             require_signed: self.require_signed,
-            data: &self.data_spec(),
             boot_args: &self.boot_args,
             board_id: &self.board_id,
             guard: Guard {
@@ -397,15 +470,6 @@ impl SystemSlots {
         );
         let _ = self.save(&state);
         Err(Status::NOT_PERMITTED)
-    }
-
-    /// What the slot's initramfs finds the data partition by.
-    fn data_spec(&self) -> String {
-        match &self.layout.ubi {
-            Some(device) => format!("UBI={}:{}", device.device, ubi::DATA_VOLUME),
-            None if self.partuuid.is_empty() => String::new(),
-            None => format!("PARTUUID={}", self.partuuid),
-        }
     }
 
     /// The bytes free where images go: the data partition, or the UBI device.
@@ -1104,10 +1168,8 @@ impl Lifecycle for SystemSlots {
             .filter(|install| install.end.is_none() && install.source.is_some())
             .map(|_| now_ns);
         let settle = self.settle(now_ns);
-        match (install, settle) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let slow = self.slow_check(now_ns);
+        [install, settle, slow].into_iter().flatten().min()
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
@@ -1130,43 +1192,12 @@ impl Lifecycle for SystemSlots {
     }
 
     fn start(needs: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let mut layout = Layout::new(
-            PathBuf::from(cfg.str("data").unwrap_or("/data")),
-            PathBuf::from(cfg.str("boot").unwrap_or("/boot/firmware")),
-        );
-        layout.ubi = cfg.str("ubi").map(|device| Ubi {
-            sys: PathBuf::from("/sys"),
-            dev: PathBuf::from("/dev"),
-            device: device.to_string(),
-        });
-        let ubi_write: Option<Arc<dyn UbiWrite>> = layout
-            .ubi
-            .clone()
-            .map(|ubi| Arc::new(ubi::System { ubi }) as Arc<dyn UbiWrite>);
-        let record: Box<dyn BootRecord> = match cfg.str("record").unwrap_or("tryboot") {
-            "tryboot" => Box::new(Tryboot {
-                boot: layout.boot.clone(),
-                restarter: restarter(cfg),
-            }),
-            "file" => Box::new(FileRecord {
-                boot: layout.boot.clone(),
-                restarter: restarter(cfg),
-            }),
-            "uboot" => Box::new(Uboot {
-                boot: layout.boot.clone(),
-                restarter: restarter(cfg),
-                volume: None,
-            }),
-            "ubi" => match (&layout.ubi, &ubi_write) {
-                (Some(device), Some(writer)) => Box::new(Uboot {
-                    boot: layout.boot.clone(),
-                    restarter: restarter(cfg),
-                    volume: Some((device.clone(), writer.clone())),
-                }),
-                _ => return Err(Status::INVALID_ARGUMENT),
-            },
-            _ => return Err(Status::INVALID_ARGUMENT),
-        };
+        let (layout, ubi_write) = layout_of(cfg);
+        // Two records: the check holds one (to point the default at the previous slot), and the
+        // driver's own is built with the check in its restarter, so every restart is checked.
+        let base = record_for(cfg, &layout, &ubi_write, None)?;
+        let check = guard_check(layout.clone(), base);
+        let record = record_for(cfg, &layout, &ubi_write, Some(check.clone()))?;
         // A key file that can't be read leaves the board trusting no bundle, which every
         // install then says; it is read again when the driver is bound again.
         let keys = cfg
@@ -1175,6 +1206,7 @@ impl Lifecycle for SystemSlots {
             .and_then(|text| parse_keys(&text).ok())
             .unwrap_or_default();
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
+        slots.check = Some(check);
         slots.policy = trial_policy(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         slots.sources =
             health_sources(&slots.policy.health).map_err(|_| Status::INVALID_ARGUMENT)?;
@@ -1357,6 +1389,8 @@ impl Slots for SystemSlots {
         if id == self.running() {
             return Err(Status::BUSY);
         }
+        // Before anything is written: a trial is not armed when the restart it needs is refused.
+        self.restart_check()?;
         let mut meta = Meta::load(&self.layout, id);
         if meta.failed() && !force {
             return Err(Status::NOT_PERMITTED);
@@ -1448,8 +1482,11 @@ impl Lifecycle for SystemReboot {
     }
 
     fn start(_: SystemRebootNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let (layout, ubi_write) = layout_of(cfg);
+        let base = record_for(cfg, &layout, &ubi_write, None)?;
+        let check = guard_check(layout, base);
         Ok(Self {
-            restarter: restarter(cfg),
+            restarter: restarter(cfg, Some(check)),
             data: PathBuf::from(cfg.str("data").unwrap_or("/data")),
             calling: CallerId::LOCAL,
         })
@@ -1501,5 +1538,42 @@ impl SystemSlots {
         {
             let _ = fs::remove_file(self.layout.marker(boot::REQUEST_FILE));
         }
+    }
+}
+
+impl SystemSlots {
+    /// The slow-period boot-file check: at once, then every ten minutes. It repoints the default
+    /// when the default's files no longer match, and otherwise only reports.
+    fn slow_check(&mut self, now_ns: u64) -> Option<u64> {
+        const PERIOD_NS: u64 = 600 * 1_000_000_000;
+        let check = self.check.clone()?;
+        if now_ns >= self.next_check_ns {
+            self.next_check_ns = now_ns.saturating_add(PERIOD_NS);
+            match (check.0)(false) {
+                Ok(Some(note)) => self.note(note),
+                Ok(None) => {}
+                Err(why) => self.note(why),
+            }
+        }
+        Some(self.next_check_ns)
+    }
+
+    /// Writes `text` as the state's error (what `info` and `list` show).
+    fn note(&self, text: String) {
+        let mut state = self.state();
+        state.error = text;
+        let _ = self.save(&state);
+    }
+
+    /// Refuses a restart whose boot files don't match (see [`boot_guard`]); the reason is the
+    /// state's error.
+    fn restart_check(&self) -> Result<()> {
+        let Some(check) = &self.check else {
+            return Ok(());
+        };
+        (check.0)(true).map(drop).map_err(|why| {
+            self.note(why);
+            Status::IO
+        })
     }
 }

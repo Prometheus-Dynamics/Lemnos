@@ -1,11 +1,13 @@
-//! The kernel command line's slot arguments. The driver writes them into each slot's
-//! `cmdline.txt` under one prefix, its `boot_args` setting:
+//! The kernel command line's slot arguments. The bundle writes them into each slot's
+//! `cmdline.txt` under one prefix, its `boot_args` setting, and the command line that boots is
+//! that file byte for byte (its hash is in the signed manifest):
 //!
 //! ```text
-//! <prefix>.slot=<id> <prefix>.roothash=<64 hex> <prefix>.data=PARTUUID=<id>|LABEL=<name>
+//! <prefix>.slot=<id> <prefix>.roothash=<64 hex> ... panic=5
 //! ```
 //!
-//! The prefix is whatever comes before `.slot=`, so the initramfs needs no setting of its own.
+//! The prefix is whatever comes before `.slot=`, so the initramfs needs no setting of its own. The
+//! data partition is not named here: it is found by a fixed rule ([`crate::boot`]).
 
 /// The value of `key=` on `cmdline`, the last one when it is given twice (as the kernel takes
 /// it).
@@ -23,13 +25,12 @@ pub struct Args {
     pub slot: String,
     /// `""` when missing: the slot then fails, and falls back.
     pub roothash: String,
-    pub data: String,
 }
 
 impl Args {
     /// # Errors
     ///
-    /// No `<prefix>.slot=` or no `<prefix>.data=`: without them nothing can be found.
+    /// No `<prefix>.slot=`: without it nothing can be found.
     pub fn parse(cmdline: &str) -> Result<Self, String> {
         let prefix = cmdline
             .split_ascii_whitespace()
@@ -39,16 +40,12 @@ impl Args {
             })
             .ok_or("no <prefix>.slot= on the kernel command line")?;
         let slot = arg(cmdline, &format!("{prefix}.slot")).unwrap_or_default();
-        let data = arg(cmdline, &format!("{prefix}.data"))
-            .filter(|d| !d.is_empty())
-            .ok_or_else(|| format!("no {prefix}.data= on the kernel command line"))?;
         Ok(Self {
             prefix: prefix.to_string(),
             slot: slot.to_string(),
             roothash: arg(cmdline, &format!("{prefix}.roothash"))
                 .unwrap_or_default()
                 .to_string(),
-            data: data.to_string(),
         })
     }
 
@@ -66,22 +63,19 @@ mod tests {
 
     #[test]
     fn the_prefix_is_what_comes_before_slot() {
-        let args = Args::parse(
-            "console=tty1 os.slot=os-2 os.roothash=ab os.data=PARTUUID=1234abcd-02 panic=5",
-        )
-        .unwrap();
+        let args = Args::parse("console=tty1 os.slot=os-2 os.roothash=ab panic=5").unwrap();
         assert_eq!(args.prefix, "os");
         assert_eq!(args.slot, "os-2");
         assert_eq!(args.roothash, "ab");
-        assert_eq!(args.data, "PARTUUID=1234abcd-02");
         assert_eq!(args.roothash_in("x os.roothash=cd y"), "cd");
         assert_eq!(arg("a=1 a=2", "a"), Some("2"));
     }
 
     #[test]
-    fn slot_and_data_are_needed() {
+    fn the_slot_is_needed_and_no_data_argument_is_read() {
         assert!(Args::parse("console=tty1").is_err());
-        assert!(Args::parse("os.slot=a os.roothash=b").is_err());
-        assert!(Args::parse("os.slot=a os.data=").is_err());
+        assert!(Args::parse("os.roothash=b").is_err());
+        let args = Args::parse("os.slot=a os.roothash=b os.data=PARTUUID=old-02").unwrap();
+        assert_eq!(args.slot, "a");
     }
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use lemnos_slot_store::bootcheck::sha256_hex;
 use lemnos_slot_store::manifest::{BLOCK, Verity, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
@@ -143,10 +144,19 @@ impl Ops for Fake {
             let _ = self.call(format!("sleep {}", time.as_secs()));
         }
     }
+
+    /// The boot partition's files are plain files in the tree here (the fake volume is no FAT).
+    fn read_boot_file(&self, _dev: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
+        match fs::read(self.root.join("boot").join(path)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
 /// A board: one disk with a boot partition and a data partition (PARTUUID `1234abcd-02`,
-/// labelled `data`), slots `os-1` (previous) and `os-2` (default), booting `os-2`.
+/// labelled `lemnos-data`), slots `os-1` (previous) and `os-2` (default), booting `os-2`.
 struct Board {
     _dir: Root,
     env: Env,
@@ -189,7 +199,7 @@ impl Board {
         mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
         board.write("dev/mmcblk0", &mbr);
         board.write("dev/mmcblk0p1", &[0u8; 2048]);
-        board.write("dev/mmcblk0p2", &ext("data", false));
+        board.write("dev/mmcblk0p2", &ext("lemnos-data", false));
         for n in 1..=2 {
             let name = format!("mmcblk0p{n}");
             board.write(
@@ -246,15 +256,22 @@ impl Board {
     fn cmdline(&self, slot: &str, roothash: &str) {
         self.write(
             "proc/cmdline",
-            format!(
-                "console=tty1 rootwait os.slot={slot} os.roothash={roothash} os.data=PARTUUID=1234abcd-02 panic=5\n"
-            )
-            .as_bytes(),
+            format!("console=tty1 rootwait os.slot={slot} os.roothash={roothash} panic=5\n")
+                .as_bytes(),
         );
     }
 
     /// An installed slot: manifest, image, record, and boot directory.
     fn slot(&self, id: &str, seq: u64) {
+        // The boot partition's copy first: the manifest's hash is of these bytes.
+        self.write(
+            &format!("boot/slots/{id}/cmdline.txt"),
+            format!(
+                "console=tty1 os.slot={id} os.roothash={} panic=5\n",
+                hash(id)
+            )
+            .as_bytes(),
+        );
         self.manifest(id, id, "");
         let size = BLOCK + tree_bytes(1);
         assert_eq!(tree_bytes(1), 0, "one data block has no tree");
@@ -263,23 +280,18 @@ impl Board {
             &format!("data/board/slots/{id}.meta"),
             format!("GOOD=yes\nSEQ={seq}\n").as_bytes(),
         );
-        self.write(
-            &format!("boot/slots/{id}/cmdline.txt"),
-            format!(
-                "console=tty1 os.slot={id} os.roothash={} os.data=PARTUUID=1234abcd-02\n",
-                hash(id)
-            )
-            .as_bytes(),
-        );
     }
 
     fn manifest(&self, file: &str, id: &str, extra: &str) {
         let sha = hash("x0");
+        // The command line's hash is the bytes the slot's boot partition holds, when it holds them.
+        let cmdline = fs::read(self.env.at(&format!("boot/slots/{id}/cmdline.txt")))
+            .map_or_else(|_| sha.clone(), |bytes| sha256_hex(&bytes));
         let text = format!(
             "{{\"schema\":3,\"id\":\"{id}\",\"product\":\"an-os\",\"version\":\"2.0\",\"board\":\"board-a\",{extra}\
              \"image\":{{\"size\":{},\"sha256\":\"{sha}\"}},\
              \"verity\":{{\"root_hash\":\"{}\",\"salt\":\"{sha}\",\"data_blocks\":1,\"hash_offset\":{BLOCK}}},\
-             \"boot\":{{\"files\":{{\"cmdline.txt\":\"{sha}\"}}}}}}",
+             \"boot\":{{\"files\":{{\"cmdline.txt\":\"{cmdline}\"}}}}}}",
             BLOCK + tree_bytes(1),
             hash(id),
         );
@@ -332,11 +344,7 @@ impl Board {
         fs::remove_file(board.env.at("boot/default.txt")).unwrap();
         board.write(
             "proc/cmdline",
-            format!(
-                "os.slot=os-2 os.roothash={} os.data=UBI=ubi0:data",
-                hash("os-2")
-            )
-            .as_bytes(),
+            format!("os.slot=os-2 os.roothash={}", hash("os-2")).as_bytes(),
         );
         board.layout.ubi = Some(ubi.clone());
         board.nand = Some(ubi);
@@ -408,44 +416,57 @@ fn the_default_slot_boots_through_dm_verity() {
 #[test]
 fn a_data_partition_with_errors_mounts_read_only() {
     let board = Board::new();
-    board.write("dev/mmcblk0p2", &ext("data", true));
+    board.write("dev/mmcblk0p2", &ext("lemnos-data", true));
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "");
     assert!(fake.called("mount ext4 ro,noatime dev/mmcblk0p2 data"));
 }
 
 #[test]
-fn the_data_partition_is_found_by_its_label_when_the_partuuid_doesnt_answer() {
+fn the_data_partition_is_found_by_the_fixed_label_lemnos_data() {
     let board = Board::new();
-    board.write(
-        "proc/cmdline",
-        format!(
-            "os.slot=os-2 os.roothash={} os.data=PARTUUID=deadbeef-02",
-            hash("os-2")
-        )
-        .as_bytes(),
-    );
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "");
     assert!(fake.called("mount ext4 noatime,errors=remount-ro dev/mmcblk0p2 data"));
 }
 
 #[test]
-fn no_data_partition_waits_and_restarts() {
+fn no_partition_labelled_lemnos_data_waits_and_restarts() {
     let board = Board::new();
     board.write("dev/mmcblk0p2", &ext("other", false));
-    board.write(
-        "proc/cmdline",
-        format!(
-            "os.slot=os-2 os.roothash={} os.data=PARTUUID=deadbeef-02",
-            hash("os-2")
-        )
-        .as_bytes(),
-    );
     let (fake, why) = board.boot(&[]);
     assert!(why.contains("no data partition"), "{why}");
+    assert!(why.contains("labelled lemnos-data"), "{why}");
     assert!(!fake.called("mount ext4"));
     assert!(fake.called("sleep 30"));
+    assert_eq!(fake.last(), "restart");
+}
+
+#[test]
+fn two_partitions_labelled_lemnos_data_are_refused_at_once_by_name() {
+    // The disk has a second partition with the same label: slot-init must not guess which is data.
+    let board = Board::new();
+    board.write("dev/mmcblk0p1", &ext("lemnos-data", false));
+    let (fake, why) = board.boot(&[]);
+    assert!(
+        why.contains("2 partitions are labelled lemnos-data"),
+        "{why}"
+    );
+    assert!(
+        why.contains("mmcblk0p1") && why.contains("mmcblk0p2"),
+        "{why}"
+    );
+    assert!(!fake.called("mount ext4"));
+    // Waiting for a label that is absent says so; a duplicate is refused on the first look.
+    assert!(
+        !fake
+            .logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("no partition is labelled")),
+        "{:?}",
+        fake.logs.borrow()
+    );
     assert_eq!(fake.last(), "restart");
 }
 
@@ -923,37 +944,11 @@ fn on_nand_a_verity_failure_falls_back_and_the_default_stays() {
 }
 
 #[test]
-fn on_nand_a_missing_data_volume_waits_and_restarts() {
-    let board = Board::nand();
-    board.write(
-        "proc/cmdline",
-        format!(
-            "os.slot=os-2 os.roothash={} os.data=UBI=ubi0:other",
-            hash("os-2")
-        )
-        .as_bytes(),
-    );
-    let (fake, why) = board.boot(&[]);
-    assert!(why.contains("no data volume"), "{why}");
-    assert!(
-        fake.logs
-            .borrow()
-            .iter()
-            .any(|l| l.contains("has no volume other"))
-    );
-    assert_eq!(fake.last(), "restart");
-}
-
-#[test]
 fn on_nand_a_failed_trial_restarts_plainly_and_leaves_the_record() {
     let board = Board::nand();
     board.write(
         "proc/cmdline",
-        format!(
-            "os.slot=os-1 os.roothash={} os.data=UBI=ubi0:data",
-            hash("os-1")
-        )
-        .as_bytes(),
+        format!("os.slot=os-1 os.roothash={}", hash("os-1")).as_bytes(),
     );
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(fake.last(), "restart");
@@ -1188,4 +1183,79 @@ fn a_uboot_trial_held_for_a_kernel_gap_is_withdrawn_with_its_attempt_given_back(
             .read("boot/trial-reason")
             .contains("the kernel lacks CONFIG_DM_VERITY")
     );
+}
+
+/// Appends one argument to a slot's boot `cmdline.txt` in place, as an in-place edit did.
+fn append_argument(board: &Board, slot: &str) {
+    let path = board.env.at(&format!("boot/slots/{slot}/cmdline.txt"));
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("panic=5", "panic=5 mem=128M")).unwrap();
+}
+
+#[test]
+fn a_command_line_changed_by_one_argument_does_not_match() {
+    let board = Board::new();
+    append_argument(&board, "os-2");
+    let (fake, why) = board.boot(&[]);
+    assert!(
+        why.contains("cmdline.txt doesn't match its manifest"),
+        "{why}"
+    );
+    assert!(!fake.called("switch_root"), "{:?}", fake.calls());
+    assert!(!fake.called("verity"), "{:?}", fake.calls());
+}
+
+#[test]
+fn an_untouched_slot_passes_the_every_boot_check() {
+    let board = Board::new();
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(fake.called("switch_root"));
+}
+
+#[test]
+fn default_boot_files_that_do_not_match_fall_back_to_previous() {
+    // The default's files changed: it is not started, the previous is put on trial, and the
+    // default itself is not rewritten (the fall-back is a trial, as for any failed slot).
+    let board = Board::new();
+    append_argument(&board, "os-2");
+    let (fake, _) = board.boot(&[]);
+    assert!(!fake.called("switch_root"));
+    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(board.meta("os-2").get("FAILED"), "yes");
+    assert_eq!(board.read("boot/default.txt"), "os_prefix=slots/os-2/\n");
+    assert_eq!(fake.last(), "restart");
+}
+
+#[test]
+fn trial_boot_files_that_do_not_match_fail_the_trial() {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    append_argument(&board, "os-2");
+    let (fake, _) = board.boot(&[]);
+    assert!(!fake.called("switch_root"));
+    assert_eq!(board.meta("os-2").get("FAILED"), "yes");
+    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(fake.last(), "restart");
+}
+
+#[test]
+fn default_and_previous_both_bad_stay_and_report() {
+    // Both slots' files changed, and the fall-backs are used up: nothing starts; the reason names
+    // the mismatch and the board waits and reports, rather than starting a slot that doesn't match.
+    let board = Board::new();
+    append_argument(&board, "os-2");
+    append_argument(&board, "os-1");
+    board.write(
+        "data/board/slots/fallbacks",
+        format!("{MAX_FALLBACKS}\n").as_bytes(),
+    );
+    let (fake, why) = board.boot(&[]);
+    assert!(!fake.called("switch_root"), "{:?}", fake.calls());
+    assert!(why.contains("don't match its manifest"), "{why}");
+    assert!(why.contains("in a row"), "{why}");
+    assert!(fake.called("sleep 30"));
 }

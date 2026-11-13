@@ -167,7 +167,13 @@ impl Bundle {
             image: image_of(id, 2),
             boot: vec![
                 ("kernel8.img".into(), format!("kernel of {id}").into_bytes()),
-                ("cmdline.txt".into(), b"console=tty1  rootwait\n".to_vec()),
+                (
+                    "cmdline.txt".into(),
+                    format!(
+                        "console=tty1 rootwait board.slot={id} board.roothash={ROOT_HASH} panic=5\n"
+                    )
+                    .into_bytes(),
+                ),
                 ("initramfs".into(), b"initramfs".to_vec()),
                 ("overlays/README".into(), b"readme".to_vec()),
             ],
@@ -448,15 +454,13 @@ fn a_signed_bundle_streams_in_and_is_put_where_the_boot_chain_looks() {
         (state.staged.as_str(), state.state.as_str()),
         ("os-2", "staged")
     );
-    // Its boot files are kept on the data partition, its command line naming the slot, its
-    // root hash and the data partition; nothing is on the boot partition until it is tried.
+    // Its boot files are kept on the data partition; its command line is the bundle's, byte for
+    // byte; nothing is on the boot partition until it is tried.
     let kept = crate::boot::kept(&layout, "os-2").unwrap();
     let cmdline = kept.iter().find(|(_, n)| n == "cmdline.txt").unwrap();
     assert_eq!(
         fs::read_to_string(layout.bootfiles().join(&cmdline.0)).unwrap(),
-        format!(
-            "console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.data=PARTUUID=1234abcd-02 panic=5\n"
-        )
+        format!("console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} panic=5\n")
     );
     assert!(kept.iter().any(|(_, n)| n == "slot.json"));
     assert!(!layout.boot_dir("os-2").exists());
@@ -1319,6 +1323,7 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     board.slots.record = Box::new(crate::uboot::Uboot {
         boot: boot.clone(),
         restarter: crate::boot::Restarter {
+            check: None,
             systemctl: "/bin/true".into(),
         },
         volume: None,
@@ -1336,7 +1341,7 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     assert!(conf.contains("  initrd /slots/os-2/initramfs\n"), "{conf}");
     assert!(
         conf.contains(&format!(
-            "  append console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.data=PARTUUID=1234abcd-02 panic=5\n"
+            "  append console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} panic=5\n"
         )),
         "{conf}"
     );
@@ -1766,11 +1771,11 @@ fn on_nand_an_install_writes_its_image_into_a_volume_and_renames_it_into_place()
     assert!(!board.layout().image("os-2").exists());
     assert!(board.layout().installed("os-2"));
     assert_eq!(board.layout().image_size("os-2"), Some(image.len() as u64));
-    // Its command line finds the data volume, not a partition.
+    // Its command line is the bundle's: the data volume is not named on it (slot-init finds it).
     let kept = crate::boot::kept(board.layout(), "os-2").unwrap();
     let cmdline = kept.iter().find(|(_, n)| n == "cmdline.txt").unwrap();
     let cmdline = fs::read_to_string(board.layout().bootfiles().join(&cmdline.0)).unwrap();
-    assert!(cmdline.contains(" board.data=UBI=ubi0:data "), "{cmdline}");
+    assert!(!cmdline.contains("board.data="), "{cmdline}");
     let list = board.slots.list_json();
     assert!(
         list.contains(&format!(
@@ -1864,6 +1869,7 @@ fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
     let mut record = crate::uboot::Uboot {
         boot: dir.0.join("boot"),
         restarter: crate::boot::Restarter {
+            check: None,
             systemctl: "/nonexistent/systemctl".into(),
         },
         volume: Some((fake.ubi.clone(), fake.clone() as Arc<dyn UbiWrite>)),
@@ -2909,5 +2915,67 @@ fn check_config_names_the_bad_setting() {
         .unwrap_err()
         .key,
         "record"
+    );
+}
+
+#[test]
+fn a_bundle_whose_command_line_lacks_its_own_slot_or_root_hash_is_refused_by_name() {
+    // The command line is the bundle's, byte for byte: nothing is appended at install, so a
+    // bundle that names another slot or another root hash is refused before anything is written.
+    let mut board = Board::new("os-1");
+    let mut wrong_slot = Bundle::new("os-2");
+    wrong_slot.boot[1].1 =
+        format!("console=tty1 board.slot=os-9 board.roothash={ROOT_HASH} panic=5\n").into_bytes();
+    assert_eq!(
+        board.stream(1, &wrong_slot.pack(), 4096).0,
+        Status::INVALID_ARGUMENT
+    );
+    assert!(
+        board.state().error.contains("board.slot=os-2"),
+        "{}",
+        board.state().error
+    );
+    let mut wrong_hash = Bundle::new("os-2");
+    wrong_hash.boot[1].1 = format!(
+        "console=tty1 board.slot=os-2 board.roothash={} panic=5\n",
+        "0".repeat(64)
+    )
+    .into_bytes();
+    assert_eq!(
+        board.stream(1, &wrong_hash.pack(), 4096).0,
+        Status::INVALID_ARGUMENT
+    );
+    assert!(
+        board.state().error.contains("roothash"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+#[test]
+fn a_trial_is_not_armed_when_the_restart_it_needs_is_refused() {
+    // A refused check (the default and previous both differ from their manifests) arms nothing:
+    // the trial record is not written, nothing restarts, and the reason is the state's error.
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    board.told.take();
+    board.slots.check = Some(crate::boot::Check(std::sync::Arc::new(|_| {
+        Err("both slots' boot files differ from their manifests".to_string())
+    })));
+    assert_eq!(
+        board.slots.trial("os-2", false, false, false),
+        Err(Status::IO)
+    );
+    assert!(board.told.take().is_empty());
+    assert_eq!(board.state().trial, "");
+    assert!(
+        board
+            .state()
+            .error
+            .contains("both slots' boot files differ"),
+        "{}",
+        board.state().error
     );
 }

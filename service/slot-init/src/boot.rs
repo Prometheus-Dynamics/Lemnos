@@ -11,13 +11,18 @@
 //! 4. Tell a trial: the firmware's tryboot flag, the `file` record's trial, or a slot that isn't
 //!    the board's default. A trial writes `trial-init`.
 //! 5. Read `slots/<id>.json` and refuse it when its id isn't the slot, its root hash isn't the
-//!    command line's, the image isn't `image.size` bytes, or `kernel` names another kernel.
+//!    command line's, the image isn't `image.size` bytes, or `kernel` names another kernel. Then
+//!    every boot file of the slot (kernel, DTBs, overlays, `cmdline.txt`, initramfs) is read as
+//!    it sits on the boot partition, raw ([`lemnos_slot_store::bootcheck`], no mount), and hashed
+//!    against the manifest. A mismatch goes to [`Boot::fail`].
 //! 6. Load the device-mapper modules, open the image through dm-verity, mount it read-only.
 //!
-//! On raw NAND (`<prefix>.data=UBI=ubi0:data`) the data and boot partitions are the UBIFS
-//! volumes `data` and `boot` on that UBI device, the image is the static volume `slot-<id>`
-//! opened through a `ubiblock` device, and the U-Boot record is the volume `boot-record`
-//! ([`lemnos_slot_store::ubi`]).
+//! The data partition is found by a fixed rule, not from the command line (the command line is
+//! the bundle's, and it is the same on every board): the ext4 partition labelled [`DATA_LABEL`],
+//! which the image builder sets, and exactly one must carry it. On raw NAND, when the UBI device
+//! [`UBI_DEVICE`] is attached, the data and boot partitions are the UBIFS volumes `data` and
+//! `boot` on that device, the image is the static volume `slot-<id>` opened through a `ubiblock`
+//! device, and the U-Boot record is the volume `boot-record` ([`lemnos_slot_store::ubi`]).
 //! 7. Move `/data` into it, write `booted` (and `trial-started` for a trial), and
 //!    `switch_root` into `/sbin/init`.
 //!
@@ -31,6 +36,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use lemnos_slot_store::bootcheck;
 use lemnos_slot_store::manifest::Manifest;
 use lemnos_slot_store::records::{
     KERNEL_GAP, MAX_ATTEMPTS, REASON_FILE, attempts, file, tryboot, uboot,
@@ -45,10 +51,14 @@ use crate::decide::{
 };
 use crate::kernel::{self, Route};
 use crate::ops::Ops;
-use crate::partition::{self, Part, Spec};
+use crate::partition::{self, Part};
 
 /// The program the slot's own system starts with.
 pub const INIT: &str = "/sbin/init";
+/// The ext4 label of the data partition the image builder sets (it is not on the command line).
+pub const DATA_LABEL: &str = "lemnos-data";
+/// The UBI device of a raw NAND board, when attached: its volume `data` is the data partition.
+pub const UBI_DEVICE: &str = "ubi0";
 /// The kernel log kept on the boot partition after a failure.
 pub const BOOT_LOG: &str = "slot-init.log";
 /// The kernel log kept on the data partition after a failure.
@@ -400,25 +410,65 @@ impl Boot<'_> {
 
     /// The data partition, by `spec`, else the one labelled `data`, for up to `wait`: the card
     /// or eMMC can take a moment to show up.
-    fn find_data(&self, spec: &Spec) -> Result<Part, String> {
-        let label = Spec::Label("data".into());
+    fn find_data(&self) -> Result<Part, String> {
         let tries = (self.env.wait.as_millis() / 100).max(1);
         let mut last = String::new();
         for _ in 0..tries {
-            match partition::find(spec, &self.env.sys, &self.env.dev) {
-                Ok(part) => return Ok(part),
-                Err(error) => last = error,
-            }
-            if let Ok(part) = partition::find(&label, &self.env.sys, &self.env.dev) {
-                self.log(&format!(
-                    "nothing answers to the data partition on the command line; using {}, labelled data",
-                    part.name
-                ));
-                return Ok(part);
+            let (mut hits, seen) = partition::labelled(DATA_LABEL, &self.env.sys, &self.env.dev);
+            match hits.len() {
+                1 => return Ok(hits.remove(0)),
+                0 => {
+                    last = format!(
+                        "no partition is labelled {DATA_LABEL}; saw {}",
+                        seen.join("; ")
+                    );
+                }
+                n => {
+                    // Two of them is a board that can't say which is its data: refused now, not waited on.
+                    let names: Vec<&str> = hits.iter().map(|p| p.name.as_str()).collect();
+                    return Err(format!(
+                        "{n} partitions are labelled {DATA_LABEL} ({}): refusing to guess",
+                        names.join(", ")
+                    ));
+                }
             }
             self.ops.sleep(Duration::from_millis(100));
         }
         Err(last)
+    }
+
+    /// The every-boot check: every boot file the manifest lists, read as it sits on the boot
+    /// partition. Raw FAT on a board (no mount); on raw NAND, through the boot partition's
+    /// read-only mount, since its UBIFS volume has no raw reader here.
+    fn verify_boot_files(&self, slot: &str, manifest: &Manifest) -> Result<(), String> {
+        let found = if self.layout.ubi.is_some() {
+            self.mount_boot(false)?;
+            let root = self.layout.boot.clone();
+            let found = bootcheck::check(slot, &manifest.boot_files, |path| {
+                match fs::read(root.join(path)) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                }
+            });
+            self.unmount_boot();
+            found
+        } else {
+            let (_, dev) = self
+                .boot_dev()
+                .ok_or("no partition 1 beside the data partition")?;
+            bootcheck::check(slot, &manifest.boot_files, |path| {
+                self.ops.read_boot_file(&dev, path)
+            })
+        };
+        if found.is_empty() {
+            return Ok(());
+        }
+        let list: Vec<String> = found.iter().map(|m| m.to_string()).collect();
+        Err(format!(
+            "its boot files don't match its manifest: {}",
+            list.join("; ")
+        ))
     }
 
     /// On raw NAND: the UBI device once its volume `volume` shows up, for up to `wait`.
@@ -721,12 +771,14 @@ impl Boot<'_> {
             Err(error) => return self.rescue(&error),
         };
         self.slot = args.slot.clone();
-        let spec = match Spec::parse(&args.data) {
-            Ok(spec) => spec,
-            Err(error) => return self.rescue(&error),
-        };
-        let (fstype, opts, data_dev) = if let Spec::Ubi { device, volume } = &spec {
-            match self.find_volume(device, volume) {
+        let on_nand = Ubi {
+            sys: self.env.sys.clone(),
+            dev: self.env.dev.clone(),
+            device: UBI_DEVICE.into(),
+        }
+        .present();
+        let (fstype, opts, data_dev) = if on_nand {
+            match self.find_volume(UBI_DEVICE, ubi::DATA_VOLUME) {
                 Ok(ubi) => {
                     self.layout.ubi = Some(ubi);
                     if let Some(why) = self.check_kernel(Route::Nand) {
@@ -735,16 +787,17 @@ impl Boot<'_> {
                     (
                         "ubifs",
                         "noatime",
-                        PathBuf::from(format!("{device}:{volume}")),
+                        PathBuf::from(format!("{UBI_DEVICE}:{}", ubi::DATA_VOLUME)),
                     )
                 }
                 Err(seen) => {
                     self.log(&seen);
-                    return self.rescue(&format!("no data volume {}", args.data));
+                    return self
+                        .rescue(&format!("no data volume {UBI_DEVICE}:{}", ubi::DATA_VOLUME));
                 }
             }
         } else {
-            let data = match self.find_data(&spec) {
+            let data = match self.find_data() {
                 Ok(part) => part,
                 Err(seen) => {
                     let seen = if self.storage_present() {
@@ -753,7 +806,7 @@ impl Boot<'_> {
                         kernel::storage_message()
                     };
                     self.log(&seen);
-                    return self.rescue(&format!("no data partition {}", args.data));
+                    return self.rescue(&format!("no data partition: {seen}"));
                 }
             };
             let data_dev = self.env.dev.join(&data.name);
@@ -857,6 +910,9 @@ impl Boot<'_> {
                 ));
             }
             Some(_) => {}
+        }
+        if let Err(why) = self.verify_boot_files(&slot, &manifest) {
+            return self.fail(&why);
         }
         let release = self.release();
         if !manifest.kernel.is_empty() && manifest.kernel != release {
