@@ -152,3 +152,56 @@ fn a_panic_when_told_is_contained_and_the_device_comes_back() {
     assert_eq!(host.device("h").unwrap().state, DeviceState::Running);
     assert_eq!(held(&host), 0);
 }
+
+/// Whether a caller other than `caller` is using the device `h`.
+fn others_use(host: &Host, caller: CallerId) -> bool {
+    let device = host.device("h").unwrap().index;
+    host.others_use(caller, device).unwrap()
+}
+
+#[test]
+fn a_caller_that_has_called_is_a_user_until_it_goes() {
+    let (host, _) = host();
+    assert!(!others_use(&host, CallerId(7)), "nobody has called");
+    take(&host, CallerId(7));
+    assert!(others_use(&host, CallerId(8)), "another caller uses it");
+    assert!(
+        !others_use(&host, CallerId(7)),
+        "the caller itself is not another user"
+    );
+    host.caller_gone(CallerId(7));
+    assert!(!others_use(&host, CallerId(8)), "the caller has gone");
+}
+
+#[test]
+fn a_call_from_the_local_caller_is_a_user_too() {
+    let (host, _) = host();
+    let device = host.device("h").unwrap().index;
+    host.call(device, method(1), &[], &mut []).unwrap();
+    assert!(
+        others_use(&host, CallerId(7)),
+        "an in-process driver uses it"
+    );
+    assert!(!others_use(&host, CallerId::LOCAL));
+}
+
+#[test]
+fn a_device_with_more_callers_than_it_keeps_is_in_use_for_every_asker() {
+    let (host, _) = host();
+    for id in 100..(100 + 16) {
+        take(&host, CallerId(id));
+    }
+    // Sixteen callers is the set's size: an asker that is not among them is still answered "in use".
+    assert!(others_use(&host, CallerId(7)));
+    // The asker that is one of them is answered by the others that are kept.
+    assert!(others_use(&host, CallerId(100)));
+}
+
+#[test]
+fn an_unknown_device_is_not_found() {
+    let (host, _) = host();
+    assert_eq!(
+        host.others_use(CallerId(7), 99),
+        Err(lemnos_core::Status::NOT_FOUND)
+    );
+}

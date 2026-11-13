@@ -296,6 +296,10 @@ struct Slot {
     open_jobs: AtomicU32,
     /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
     end: Mutex<Option<EndHold>>,
+    /// The callers that have called this device and have not gone, for [`Router::others_use`]. A
+    /// full set holds at least `MAX_USERS - 1` callers, so a caller that does not fit is not kept:
+    /// the answer for any asker is the same.
+    users: Mutex<[Option<CallerId>; MAX_USERS]>,
 }
 
 /// The END descriptor of a hold: a pipe whose write end the host keeps for the hold. Each copy
@@ -324,7 +328,38 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How many distinct callers a device keeps track of for [`Router::others_use`].
+const MAX_USERS: usize = 16;
+
 impl Slot {
+    /// `caller` has called this device, so it is a user until it goes.
+    fn note_user(&self, caller: CallerId) {
+        let mut users = lock(&self.users);
+        if users.contains(&Some(caller)) {
+            return;
+        }
+        if let Some(free) = users.iter_mut().find(|user| user.is_none()) {
+            *free = Some(caller);
+        }
+    }
+
+    /// `caller` has gone: it is no longer a user of this device.
+    fn forget_user(&self, caller: CallerId) {
+        for user in lock(&self.users).iter_mut() {
+            if *user == Some(caller) {
+                *user = None;
+            }
+        }
+    }
+
+    /// Whether a caller other than `caller` is a user of this device.
+    fn others_use(&self, caller: CallerId) -> bool {
+        lock(&self.users)
+            .iter()
+            .flatten()
+            .any(|user| *user != caller)
+    }
+
     /// The reason a link to this device is refused when it does not serve `tag`: what the link
     /// needs, what this device serves, and where the link goes.
     fn serves_message(&self, id: &str, tag: Tag) -> String {
@@ -392,6 +427,7 @@ impl Slot {
             hinted: AtomicBool::new(false),
             made,
             open_jobs: AtomicU32::new(0),
+            users: Mutex::new([None; MAX_USERS]),
         })
     }
 
@@ -1326,6 +1362,7 @@ impl Inner {
         if slot.hung.load(Ordering::Acquire) {
             return Err(Status::NO_DEVICE);
         }
+        slot.note_user(caller);
         match (slot.starts_job(method), as_job) {
             // A job is started with the job form, which keeps it on the books; a plain call
             // would leave it running with no one to tell.
@@ -1847,6 +1884,11 @@ impl Router for Inner {
             None => Health::Failed("missing"),
         }
     }
+
+    fn others_use(&self, caller: CallerId, device: u32) -> Result<bool> {
+        let slot = self.slot(device).ok_or(Status::NOT_FOUND)?;
+        Ok(slot.others_use(caller))
+    }
 }
 
 /// Deepest chain of devices health is passed up through.
@@ -2286,6 +2328,12 @@ impl Host {
         self.call_as(CallerId::LOCAL, device, method, args, reply)
     }
 
+    /// Whether a caller other than `caller` is using `device`: one that has called it and has not
+    /// gone. See [`Router::others_use`].
+    pub fn others_use(&self, caller: CallerId, device: u32) -> Result<bool> {
+        Router::others_use(self.inner, caller, device)
+    }
+
     /// [`Host::call`], for a caller that can go away. Tell the host when it does, with
     /// [`Host::caller_gone`].
     pub fn call_as(
@@ -2394,6 +2442,7 @@ impl Host {
         let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {
             index += 1;
+            slot.forget_user(caller);
             slot.end_close_for(caller);
             let started = slot.open_jobs.load(Ordering::Acquire) > 0
                 && self
