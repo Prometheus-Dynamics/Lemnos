@@ -49,6 +49,11 @@ impl Facts {
         Ok(())
     }
 
+    /// Takes `name` away, so it is absent again. A name that is not set is left alone.
+    pub fn remove(&mut self, name: &str) {
+        self.pairs.retain(|(n, _)| *n != name);
+    }
+
     /// The value of `name`, when it is known.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {

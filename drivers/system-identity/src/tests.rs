@@ -194,3 +194,41 @@ fn an_nvmem_cell_is_read_at_its_offset() {
     let mut buf = [0u8; MAX_FACTS_TEXT];
     assert_eq!(text(id.serial(&mut buf), &buf), "123456789abc");
 }
+
+#[test]
+fn the_running_slot_is_read_again_on_each_facts_call() {
+    let tree = Tree::new("reread");
+    tree.write("data/board/slots/booted", b"os-2\n");
+    tree.write("data/slots/os-2.json", manifest().as_bytes());
+    let data = tree.path("data");
+    let mut id = start_on(&[("data", ConfigValue::Str(&data))], "alpha-1", "2.0.1").unwrap();
+    let mut buf = [0u8; MAX_FACTS_TEXT];
+    assert!(text(id.facts(&mut buf), &buf).contains("version.slot=os-2\n"));
+
+    // The boot marker moves to another slot, with no rebind of the device.
+    let next = manifest()
+        .replace("os-2", "os-3")
+        .replace("an-os", "other-os");
+    tree.write("data/board/slots/booted", b"os-3\n");
+    tree.write("data/slots/os-3.json", next.as_bytes());
+    let facts = text(id.facts(&mut buf), &buf);
+    assert!(facts.contains("version.slot=os-3\n"), "{facts}");
+    assert!(facts.contains("version.product=other-os\n"), "{facts}");
+    assert!(!facts.contains("os-2"), "{facts}");
+    assert!(facts.starts_with("family=alpha-1\n"), "{facts}");
+}
+
+#[test]
+fn a_slot_file_that_cannot_be_read_now_leaves_only_its_facts_absent() {
+    let tree = Tree::new("slot-gone");
+    tree.write("data/board/slots/booted", b"os-2\n");
+    tree.write("data/slots/os-2.json", manifest().as_bytes());
+    let data = tree.path("data");
+    let mut id = start_on(&[("data", ConfigValue::Str(&data))], "alpha-1", "2.0.1").unwrap();
+    // The marker is replaced by something that is not a file the reader can use: a directory.
+    fs::remove_file(tree.0.join("data/board/slots/booted")).unwrap();
+    fs::create_dir_all(tree.0.join("data/board/slots/booted")).unwrap();
+    let mut buf = [0u8; MAX_FACTS_TEXT];
+    let facts = text(id.facts(&mut buf), &buf);
+    assert_eq!(facts, "family=alpha-1\nversion.lemnos=2.0.1\n", "{facts}");
+}

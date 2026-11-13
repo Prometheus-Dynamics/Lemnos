@@ -35,6 +35,7 @@ orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = 
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
+lemnos-driver-system-identity = { path = "../../drivers/system-identity" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

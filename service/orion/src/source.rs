@@ -5,12 +5,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use lemnos_client::{Client, DeviceEntry, DeviceState, Error};
+use std::time::Instant;
+
+use lemnos_client::{Client, DeviceEntry, DeviceState, Error, Handle};
 use lemnos_core::ItemKind;
 use lemnos_wire::text::{method_of, shape_name};
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
 use crate::backoff::Backoff;
+use crate::hello;
 use crate::mirror::{ControlSpec, DeviceSpec, ItemSpec, Status};
 use crate::values::{self, Plain, plain_of};
 use crate::{LEMNOSD_NAME, Shared, log};
@@ -23,6 +26,12 @@ const WAIT: Duration = Duration::from_millis(200);
 const PERIOD_US: u64 = 1;
 /// The largest reply lemnos-ctl reads. Items reply with a few bytes.
 const REPLY_MAX: usize = 64 * 1024;
+/// How long a `BUSY` description is asked again: `BUSY_TRIES` times, `BUSY_WAIT` apart.
+const BUSY_WAIT: Duration = Duration::from_millis(2);
+const BUSY_TRIES: u32 = 500;
+/// How often the identity device's facts are read again. Its slot files are read on each read,
+/// so a change of the running slot reaches Orion within this time.
+const FACTS_EVERY: Duration = Duration::from_secs(2);
 
 /// How to turn one subscription's reply into a value for one item.
 #[derive(Debug)]
@@ -34,6 +43,67 @@ struct Route {
     exponent: i8,
     /// Whether a reply that did not read has been logged, so a bad device logs once.
     reported: bool,
+}
+
+/// The identity device's `facts` method, asked for on a timer: what the board's `hello.*`
+/// facts are now.
+struct IdentityRead {
+    device: String,
+    handle: Handle,
+    method: u16,
+    next: Instant,
+    /// Whether a failure to read has been logged, so a device that stays absent logs once.
+    reported: bool,
+}
+
+impl IdentityRead {
+    /// Opens the identity device's contract. `None` when the call is not possible now.
+    fn open(client: &Client, device: &str, method: u16) -> Result<Option<Self>, Error> {
+        match client.open_tag(device, hello::IDENTITY_TAG) {
+            Ok(handle) => Ok(Some(Self {
+                device: device.to_owned(),
+                handle,
+                method,
+                next: Instant::now(),
+                reported: false,
+            })),
+            Err(error) if transient(&error) => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn due(&self) -> bool {
+        Instant::now() >= self.next
+    }
+
+    /// Reads the facts now. `None` when they cannot be read: then none of the identity facts is
+    /// published. A lost connection is an error, as it is for values.
+    fn read(
+        &mut self,
+        client: &Client,
+        reply: &mut [u8],
+    ) -> Result<Option<Vec<(String, String)>>, Error> {
+        self.next = Instant::now() + FACTS_EVERY;
+        // An out-buffer method takes its capacity first, as the typed client sends it.
+        let args = hello::FACTS_CAPACITY.to_le_bytes();
+        match client.call(&mut self.handle, self.method, &args, reply) {
+            Ok(len) => {
+                self.reported = false;
+                Ok(std::str::from_utf8(&reply[..len]).ok().map(hello::parse))
+            }
+            Err(error) if transient(&error) => Err(error),
+            Err(error) => {
+                if !self.reported {
+                    self.reported = true;
+                    log(&format!(
+                        "{}: facts not read ({error}); its facts are not published until they are",
+                        self.device
+                    ));
+                }
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// Keeps the mirror in step with lemnosd until the shared state is stopped. Each time the
@@ -52,7 +122,7 @@ pub fn run(socket: &Path, shared: &Shared) {
         }
         shared.with(|mirror| {
             if !mirror.is_empty() {
-                mirror.set_devices(Vec::new());
+                mirror.set_devices(Vec::new(), None);
             }
         });
         shared.changed();
@@ -73,11 +143,21 @@ enum Ended {
 
 /// One connection's life: discover, then forward values and events until the connection ends.
 fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<Ended, Error> {
-    let (specs, mut routes, undescribed) = discover(client)?;
-    shared.with(|mirror| mirror.set_devices(specs));
+    let (specs, mut routes, undescribed, identity_device) = discover(client)?;
+    let mut reply = vec![0; REPLY_MAX];
+    // The identity device's facts are read before the list is published, so the first list
+    // Orion sees already carries them.
+    let mut identity = match identity_device {
+        Some((device, method)) => IdentityRead::open(client, &device, method)?,
+        None => None,
+    };
+    let facts = match identity.as_mut() {
+        Some(read) => read.read(client, &mut reply)?,
+        None => None,
+    };
+    shared.with(|mirror| mirror.set_devices(specs, facts));
     shared.changed();
     backoff.reset();
-    let mut reply = vec![0; REPLY_MAX];
     while !shared.stopping() {
         if !client.is_connected() {
             return Err(Error::Disconnected);
@@ -89,6 +169,13 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
             shared.with(|mirror| {
                 mirror.set_status(event.device, event.state, event.health, &event.reason);
             });
+            shared.changed();
+        }
+        if let Some(read) = identity.as_mut()
+            && read.due()
+        {
+            let facts = read.read(client, &mut reply)?;
+            shared.with(|mirror| mirror.set_identity(facts));
             shared.changed();
         }
         let Some(value) = client.next_value(&mut reply, WAIT)? else {
@@ -125,18 +212,34 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
 /// not hold back the rest.
 /// The indexes of devices that could not be described come back too: lemnosd describes only a
 /// running device, and an event says when one starts running, which is when it is read again.
+/// The identity device, when one is described, comes back with the name it is called and the
+/// method number of its `facts`.
 #[allow(clippy::type_complexity)]
-fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>, Vec<u32>), Error> {
+fn discover(
+    client: &Client,
+) -> Result<
+    (
+        Vec<DeviceSpec>,
+        HashMap<u64, Route>,
+        Vec<u32>,
+        Option<(String, u16)>,
+    ),
+    Error,
+> {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
     let mut undescribed = Vec::new();
+    let mut identity = None;
     for entry in client.list()? {
         let position = specs.len();
         let mut items = Vec::new();
         let mut controls = Vec::new();
-        match client.describe(entry.index) {
+        match describe(client, entry.index) {
             Ok(description) => {
                 controls = controls_of(&description);
+                if identity.is_none() && entry.tags.iter().any(|t| t == hello::IDENTITY_TAG) {
+                    identity = facts_method(&description).map(|id| (entry.name.clone(), id));
+                }
                 for item in description
                     .items
                     .iter()
@@ -196,7 +299,43 @@ fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>, Ve
             controls,
         });
     }
-    Ok((specs, routes, undescribed))
+    Ok((specs, routes, undescribed, identity))
+}
+
+/// A device's description. lemnosd answers `BUSY` while a call or a value read holds the device,
+/// which is a moment, not a failure; the answer is asked again (see [`describe_when_free`]).
+pub fn describe(client: &Client, device: u32) -> Result<DeviceDescription, Error> {
+    describe_when_free(|| client.describe(device))
+}
+
+/// Asks for a description again while the device answers `BUSY`, for a bounded time. Any other
+/// answer, or a `BUSY` that lasts, is returned as it is.
+pub fn describe_when_free(
+    mut ask: impl FnMut() -> Result<DeviceDescription, Error>,
+) -> Result<DeviceDescription, Error> {
+    let mut tries = 0;
+    loop {
+        match ask() {
+            Err(Error::Refused { status, .. })
+                if status == lemnos_core::Status::BUSY && tries < BUSY_TRIES =>
+            {
+                tries += 1;
+                std::thread::sleep(BUSY_WAIT);
+            }
+            answer => return answer,
+        }
+    }
+}
+
+/// The method number of the identity device's `facts`, from its description.
+fn facts_method(description: &DeviceDescription) -> Option<u16> {
+    let item = description
+        .items
+        .iter()
+        .find(|item| item.kind == ItemKind::Value && item.name == hello::FACTS_METHOD)?;
+    method_of(description, item)
+        .ok()
+        .map(|(_, method)| method.id)
 }
 
 /// The contract tag and method that read a value item, and what it publishes as, when the
@@ -261,6 +400,7 @@ const fn transient(error: &Error) -> bool {
 mod tests {
     use super::*;
     use lemnos_wire::{OwnedContract, OwnedParam};
+    use std::cell::Cell;
 
     fn method(id: u16, params: usize, returns: OwnedShape, out: bool) -> OwnedMethod {
         OwnedMethod {
@@ -364,5 +504,54 @@ mod tests {
             status: lemnos_core::Status::NOT_SUPPORTED,
             text: String::new(),
         }));
+    }
+
+    #[test]
+    fn a_busy_description_is_asked_again_and_any_other_answer_is_not() {
+        let busy = || Error::Refused {
+            status: lemnos_core::Status::BUSY,
+            text: "the device isn't running".to_owned(),
+        };
+        let asked = Cell::new(0);
+        let answer = describe_when_free(|| {
+            asked.set(asked.get() + 1);
+            if asked.get() < 3 {
+                Err(busy())
+            } else {
+                Ok(description())
+            }
+        });
+        assert_eq!(answer, Ok(description()));
+        assert_eq!(asked.get(), 3, "two BUSY answers, then the description");
+
+        let asked = Cell::new(0);
+        let answer = describe_when_free(|| {
+            asked.set(asked.get() + 1);
+            Err(Error::Refused {
+                status: lemnos_core::Status::NO_DEVICE,
+                text: String::new(),
+            })
+        });
+        assert!(matches!(
+            answer,
+            Err(Error::Refused { status, .. }) if status == lemnos_core::Status::NO_DEVICE
+        ));
+        assert_eq!(
+            asked.get(),
+            1,
+            "a refusal that is not BUSY is not asked again"
+        );
+
+        let asked = Cell::new(0);
+        let answer = describe_when_free(|| {
+            asked.set(asked.get() + 1);
+            Err(busy())
+        });
+        assert!(answer.is_err());
+        assert_eq!(
+            asked.get(),
+            BUSY_TRIES + 1,
+            "a BUSY that lasts is given up at the bound"
+        );
     }
 }

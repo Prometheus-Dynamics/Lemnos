@@ -17,10 +17,12 @@
 //! The `family` fact is the board file's `[board] id`, which the host hands the driver as
 //! `Config::board()`. `version.lemnos` is the daemon's package version, `Config::host_version()`.
 //!
-//! Binding reads the serial and the running slot once. A source that cannot be read at all (a
-//! missing file, an I/O error) fails the bind, so the host retries it with the failure rule's
-//! backoff. A value that is read but does not fit its format, and a slot that is not installed
-//! yet, leave their fact absent: the device is `Degraded` and the bind succeeds.
+//! Binding reads the serial and the running slot. A source that cannot be read at all (a missing
+//! file, an I/O error) fails the bind, so the host retries it with the failure rule's backoff. A
+//! value that is read but does not fit its format, and a slot that is not installed yet, leave
+//! their fact absent: the device is `Degraded` and the bind succeeds. Each `facts` call reads the
+//! running slot again, so a change of the boot marker shows without a rebind; the serial and the
+//! board's own facts are read once.
 
 #[cfg(test)]
 mod tests;
@@ -54,8 +56,8 @@ const FACTS: MethodId = MethodId {
 #[driver("system-identity", provides = [SystemIdentity])]
 pub struct Identity {
     facts: Facts,
-    /// `name=value` lines, built once at bind.
-    lines: String,
+    /// The data partition the running slot is read from again on each `facts` call.
+    data: PathBuf,
     /// No serial could be read or fit its format: the device is `Degraded`.
     missing_serial: bool,
 }
@@ -99,10 +101,9 @@ impl Lifecycle for Identity {
             set(&mut facts, "version.lemnos", cfg.host_version());
         }
 
-        let lines: String = facts.iter().map(|(n, v)| format!("{n}={v}\n")).collect();
         Ok(Self {
             facts,
-            lines,
+            data,
             missing_serial,
         })
     }
@@ -142,8 +143,24 @@ impl SystemIdentity for Identity {
         copy(self.facts.get("model"), into)
     }
 
+    /// The running slot is read again on every call: its boot marker moves when the board
+    /// boots a slot, and a reader that asks again then gets the new slot without a rebind. A
+    /// slot file that cannot be read now makes its three facts absent for this answer; the
+    /// rest are still given.
     fn facts(&mut self, into: &mut [u8]) -> Result<usize> {
-        copy(Some(&self.lines), into)
+        if slot_facts(&self.data, &mut self.facts).is_err() {
+            remove_slot_facts(&mut self.facts);
+        }
+        // In the order `docs/identity.md` lists the facts, whatever order they were set in.
+        let lines: String = FACTS_ORDER
+            .iter()
+            .filter_map(|name| {
+                self.facts
+                    .get(name)
+                    .map(|value| format!("{name}={value}\n"))
+            })
+            .collect();
+        copy(Some(&lines), into)
     }
 }
 
@@ -215,6 +232,8 @@ fn serial_source(cfg: &Config<'_>) -> Result<Option<SerialSource>> {
 /// The running slot's `version.slot`, `version.product` and `version.os`, from its manifest.
 /// A slot that is not installed yet leaves all three absent. An unreadable file fails the bind.
 fn slot_facts(data: &Path, facts: &mut Facts) -> Result<()> {
+    // What the marker says now replaces what it said before; an absent one leaves none.
+    remove_slot_facts(facts);
     let booted = match read(&data.join("board/slots/booted"))? {
         Some(text) => text,
         None => return Ok(()),
@@ -238,6 +257,24 @@ fn slot_facts(data: &Path, facts: &mut Facts) -> Result<()> {
     let _ = facts.set("version.product", &manifest.product);
     let _ = facts.set("version.os", &manifest.version);
     Ok(())
+}
+
+/// The order `facts` writes them in.
+const FACTS_ORDER: [&str; 7] = [
+    "family",
+    "serial",
+    "model",
+    "version.slot",
+    "version.product",
+    "version.os",
+    "version.lemnos",
+];
+
+/// Takes the three running-slot facts away.
+fn remove_slot_facts(facts: &mut Facts) {
+    for name in ["version.slot", "version.product", "version.os"] {
+        facts.remove(name);
+    }
 }
 
 /// Reads a file: `None` when it does not exist, the failure's status for any other error.
