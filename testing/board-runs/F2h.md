@@ -111,18 +111,100 @@ frame length) is right for the line. The frame period they imply is VTS x HTS; u
 that plus 1456 - HTS sysclk per frame (691 sysclk gated, 728 continuous), which the contract does not model. The
 rate check below fails on that, as it should until it is decided.
 
-## The first board step (decides between the candidates; read-only except the sensor's own run)
+## The board step (for whoever holds the board; not run here)
 
-1. Read back over SCCB (read-only): 0x382E (bit 2 = `r_tc_hts_blank`), 0x382C and 0x382D (`hts_global_tx`), 0x380C
-   to 0x380F (HTS, VTS), 0x3828 and 0x3829 (fractional VTS), 0x382A (`vts_auto_en`), and the PLL registers
-   0x0300 to 0x0306 and 0x030B to 0x030F. This shows whether bit 2 is set on the board and the actual sysclk.
-2. Set VTS by `lemnos-rate-proof --asked-milli 60000 --lines N` at N = 2092 - 10, 2092 - 1, 2092, 2092 + 1, 2092 + 10
-   (gated), and at N = 2198 - 10, 2198 - 1, 2198, 2198 + 1, 2198 + 10 (continuous). Five means per mode give the slope
-   (= line time: 7 968.75 and 7 583.33 ns, to 9 ppm) and the intercept directly. An intercept of 1456 sysclk less
-   HTS (691 gated, 728 continuous) is B1; an intercept of one line (765 gated, 728 continuous) is A; 0 is M0.
-3. If bit 2 is 1 on the board: change 0x382C/D to 1456 + 80 (0x0600) with `r_tc_hts_blank` set, and see the
-   intercept move by 80 sysclk (833 ns) per frame. If it does not move, B1 is not the mechanism.
-4. Clock: a frequency counter on XVCLK (the 24 MHz input). A 9 ppm error there confirms the common slope.
+Prerequisites: the board lock; the F2 camera board file in its gated-clock form (`link` to the receiver, the
+`continuous_clock` config unset) for the gated runs, and in its continuous form (`continuous_clock = true`) for
+the continuous runs, with `lemnosd` built from this PR. The lemnosd socket is the default. Mode 1 is 1280x800 RAW8 (`MODES[1]` in `drivers/ov9782/src/chip.rs`), the mode every number above
+was taken in.
+
+Register access. The sensor's I2C bus (i2c-10) is shared by every device on it (`docs/concepts.md`), so a
+`raw-bus` device on the same bus can read the sensor's registers without any new method. Add two devices to
+the board file for this session only (not to the product file). The read device has no `writes`, so it
+cannot write; the write device is used once, in step 3:
+
+```toml
+[[devices]]
+id = "cam0-regs-read"
+driver = "raw-bus"
+uses = { i2c = "i2c-10" }
+config = { allow_i2c = "0x60" }
+
+[[devices]]
+id = "cam0-regs-write"
+driver = "raw-bus"
+uses = { i2c = "i2c-10" }
+config = { writes = true, allow_i2c = "0x60" }
+```
+
+`i2c_transfer` takes the 7-bit address (96 = 0x60), the bytes to write (the 2-byte register address, then
+the value for a write), the number of bytes to read, and the reply buffer size. A read is
+`lemnos-ctl call cam0-regs-read i2c_transfer 96 <reg> <n> 16`. If the bind fails because the bus is held,
+stop there and report the bind error: the shared-bus rule is what the readback relies on.
+
+Step 1: readback, read-only.
+
+```sh
+for r in 382e 382c 382d 380c 380d 380e 380f 3828 3829 382a 0300 0301 0302 0303 0304 0305 0306 030b 030c 030d 030e 030f; do
+  echo "$r: $(lemnos-ctl call cam0-regs-read i2c_transfer 96 $r 1 16)"
+done | tee readback.txt
+```
+
+Bit 2 of 0x382E is `r_tc_hts_blank`: 1 means the global transfer uses `hts_global_tx`. Its value sets the
+`--bit2` argument of the judge below.
+
+Step 2: the frame length runs, each one with its own log. Gated first (`board-gated.toml`), then continuous
+(`board-cc.toml`), each run stopping the stream when done:
+
+```sh
+for n in 2082 2091 2092 2093 2102; do
+  lemnos-rate-proof --sensor cam0-sensor --mode 1 --asked-milli 60000 --lines $n --frames 5000 > gated-$n.log
+done
+# continuous clock: the same loop with cont- prefix and 2188 2197 2198 2199 2208
+```
+
+Each log's output includes `mean interval <ns> ns over <k> intervals at <N> lines, line time <ps> ps`. The
+`rate proof: FAILED` line is expected unless B1 holds: the judge, not that line, decides.
+
+Expected for each candidate (the judge prints the same numbers):
+
+| candidate | gated intercept | continuous intercept | slope | residual per run |
+|---|---|---|---|---|
+| B1: (N - 1) x HTS + 1456 sysclk | 691 sysclk = 7 197.9 ns | 728 sysclk = 7 583.3 ns | HTS x T (7 968.75 / 7 583.33 ns) | about +9 ppm (one common clock term) |
+| A: (N + 1) x HTS | 765 sysclk = 7 968.75 ns | 728 sysclk = 7 583.3 ns | HTS x T | gated -97 to -37 ppm |
+| M0: N x HTS (the contract) | 0 | 0 | HTS x T | +440 to +1 000 ppm |
+
+The continuous intercepts of B1 and A coincide (1456 = 2 x 728), so only the gated runs separate them.
+
+Step 3: the one write. The tool stops the stream after each run, so the write happens in standby. Before it:
+`cp gated-2092.log write-before.log`. Then write 0x382C/D to 0x0600 (1536), run the same frame once more, and
+restore the reset values:
+
+```sh
+lemnos-ctl call cam0-regs-write i2c_transfer 96 382c06 0 16    # 0x382C = 0x06
+lemnos-ctl call cam0-regs-write i2c_transfer 96 382d00 0 16    # 0x382D = 0x00: hts_global_tx = 1536
+lemnos-rate-proof --sensor cam0-sensor --mode 1 --asked-milli 60000 --lines 2092 --frames 5000 > write-after.log
+lemnos-ctl call cam0-regs-write i2c_transfer 96 382c05 0 16    # restore 0x382C = 0x05
+lemnos-ctl call cam0-regs-write i2c_transfer 96 382db0 0 16    # restore 0x382D = 0xB0 (1456)
+```
+
+Under B1 (with bit 2 = 1) the mean moves by +833 ns (80 sysclk, one global line). Under A or M0 it does not
+move. If bit 2 reads 0, the datasheet says the global line is not used, so the move should be 0: a move of
++833 ns then means the default is not what the datasheet says, and the judge's `--bit2 0` check fails it.
+
+Step 4: the judge, read-only, on this directory's logs:
+
+```sh
+python3 testing/board-runs/F2h-judge.py <logdir> --bit2 <bit 2 of 0x382E: 0 or 1>
+```
+
+It prints `PASS` or `FAIL` per check, and exits 0 only when every check passes: the gated intercept matches
+B1 and nothing else (within 150 ns), the continuous intercept matches A or B1, the write moved the gated mean
+by +833 ns within 100 ns, and bit 2 is 1. Only then is B1 the mechanism. The judge was checked on synthetic logs
+made from B1 (all checks pass) and from A (the gated check fails).
+
+Step 5, read-only: a frequency counter on XVCLK (the 24 MHz input, pin 38 of the sensor). A 9 ppm error there
+is the common clock term in every residual above. Without it, the 9 ppm stays a measured term, not a fact.
 
 ## The check (in the tool)
 

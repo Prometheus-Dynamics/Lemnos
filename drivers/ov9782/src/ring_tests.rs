@@ -563,20 +563,17 @@ fn a_job_posted_before_a_start_is_dropped_by_it() {
     assert_eq!(rig.applied_identity(), None);
 }
 
-/// Of two posts in one poll, the later is refused by its limits: nothing is applied, and the
-/// earlier one is not applied either.
+/// Of two posts in one poll, a later one past its limit is clamped, not refused: both are applied, the later
+/// at the longest exposure its frame allows.
 #[test]
-fn a_later_post_refused_by_its_limits_drops_the_earlier_one_too() {
+fn a_later_post_past_its_limit_is_clamped_and_applied_with_the_earlier() {
     let mut rig = Rig::new();
     rig.post(rig.at(5, MS + 200_000), 1, SHORT);
-    // 1875 lines is past this frame's exposure limit: 1822 lines less the 25-line margin.
+    // 1875 lines is past this frame's exposure limit: 1822 lines less the 25-line margin, so 1797.
     rig.post(rig.at(5, MS + 500_000), 2, 1875 << EXPOSURE_FRACTION_BITS);
     rig.run_to(rig.at(9, 0));
-    assert_eq!(rig.launched().0.len(), 0);
-    assert_eq!(rig.applied_identity(), None);
-    for frame in 0..9 {
-        assert_eq!(rig.shows(frame), BASE_EXPOSURE);
-    }
+    assert_eq!(rig.applied_identity(), Some(2));
+    assert_eq!(rig.shows(8), (1822 - 25) << EXPOSURE_FRACTION_BITS);
 }
 
 impl Rig {

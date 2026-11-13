@@ -5,7 +5,8 @@ use super::*;
 use chip::{CHIP_ID, DEFAULT_ADDRESS, OTP_PROGRAM};
 use lemnos_contract_camera_receiver::{CameraReceiver, FrameStarts};
 use lemnos_contract_camera_sensor::{
-    AppliedLanding, BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
+    AppliedLanding, BayerOrder, CLAMP_ANALOGUE_GAIN, CLAMP_EXPOSURE, CLAMP_FRAME_LENGTH,
+    EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
 };
 use lemnos_core::{Config, Contract, Dev, Driver, Health, I2c, Lifecycle, Result, Status};
 use lemnos_hal::ErrorKind;
@@ -763,11 +764,13 @@ fn fractional_exposure_math_at_the_boundaries() {
         write_exposure(&mut s, &bus, 16),
         (Ok(()), vec![(0x3500, 0x00), (0x3501, 0x00), (0x3502, 0x10)])
     );
-    // Below one line: refused, nothing written.
+    // Below one line: clamped to one line, and reported.
     assert_eq!(
         write_exposure(&mut s, &bus, 15),
-        (Err(Status::INVALID_ARGUMENT), vec![])
+        (Ok(()), vec![(0x3500, 0x00), (0x3501, 0x00), (0x3502, 0x10)])
     );
+    assert_eq!(s.in_force().unwrap().exposure_lines, Some(1));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_EXPOSURE);
     // A fraction of a line: 1 + 5/16 lines.
     assert_eq!(
         write_exposure(&mut s, &bus, 21),
@@ -779,10 +782,17 @@ fn fractional_exposure_math_at_the_boundaries() {
         write_exposure(&mut s, &bus, max),
         (Ok(()), vec![(0x3500, 0x00), (0x3501, 0x70), (0x3502, 0x50)])
     );
-    // One sixteenth over: refused.
+    // One sixteenth over: clamped to the longest exposure the frame allows, and reported.
     assert_eq!(
         write_exposure(&mut s, &bus, max + 1),
-        (Err(Status::INVALID_ARGUMENT), vec![])
+        (Ok(()), vec![(0x3500, 0x00), (0x3501, 0x70), (0x3502, 0x50)])
+    );
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_EXPOSURE);
+    assert_eq!(write_exposure(&mut s, &bus, 21).0, Ok(()));
+    assert_eq!(
+        s.in_force().unwrap().clamped,
+        0,
+        "a request in range reports nothing"
     );
 
     // Exposure reaches 20 bits only at the longest frame, and never spills past it.
@@ -800,104 +810,109 @@ fn fractional_exposure_math_at_the_boundaries() {
 }
 
 #[test]
-fn limits_are_refused_before_any_write() {
+fn limits_are_clamped_to_the_nearest_value_and_reported() {
     let (mut s, bus) = sensor();
-    let bad = [
-        // No mode selected: no limits.
-        Controls {
+    // No mode selected: there are no limits to clamp to, so the request is refused as a state.
+    assert_eq!(
+        s.set_controls(Controls {
             exposure: Some(100),
             ..Controls::default()
-        },
-    ];
-    for controls in bad {
-        assert_eq!(s.set_controls(controls), Err(Status::INVALID_ARGUMENT));
-    }
+        }),
+        Err(Status::INVALID_ARGUMENT)
+    );
     assert_eq!(writes(&bus), vec![]);
 
     s.select_mode(0).unwrap();
-    let check = |s: &mut Ov9782, controls: Controls| {
-        assert_eq!(
-            s.set_controls(controls),
-            Err(Status::INVALID_ARGUMENT),
-            "{controls:?}"
-        );
-    };
-    // Gain out of range.
-    check(
-        &mut s,
-        Controls {
-            analogue_gain: Some(0x0f),
-            ..Controls::default()
-        },
+    // Gain below the range and above the top code: applied at the nearest limit, and reported.
+    s.set_controls(Controls {
+        analogue_gain: Some(0x0f),
+        ..Controls::default()
+    })
+    .unwrap();
+    assert_eq!(s.in_force().unwrap().analogue_gain, Some(0x10));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_ANALOGUE_GAIN);
+    clear(&bus);
+    s.set_controls(Controls {
+        analogue_gain: Some(0x100),
+        ..Controls::default()
+    })
+    .unwrap();
+    assert_eq!(writes(&bus), vec![(0x3509, 0xff)]);
+    assert_eq!(s.in_force().unwrap().analogue_gain, Some(0xff));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_ANALOGUE_GAIN);
+
+    // Frame length below the mode's minimum (910 for 1280x800): the rate's ceiling. Applied at 910.
+    clear(&bus);
+    s.set_controls(Controls {
+        frame_length: Some(909),
+        ..Controls::default()
+    })
+    .unwrap();
+    assert_eq!(writes(&bus), vec![(0x380e, 0x03), (0x380f, 0x8e)]);
+    assert_eq!(s.in_force().unwrap().frame_length, Some(910));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_FRAME_LENGTH);
+    // Frame length above the maximum (800 + 51540 = 52340): the rate's floor.
+    clear(&bus);
+    s.set_controls(Controls {
+        frame_length: Some(52_341),
+        ..Controls::default()
+    })
+    .unwrap();
+    let longest = 52_340u32;
+    assert_eq!(
+        writes(&bus),
+        vec![(0x380e, (longest >> 8) as u8), (0x380f, longest as u8)]
     );
-    check(
-        &mut s,
-        Controls {
-            analogue_gain: Some(0x100),
-            ..Controls::default()
-        },
-    );
-    // The sensor has no digital gain reachable through the contract.
-    check(
-        &mut s,
-        Controls {
+    assert_eq!(s.in_force().unwrap().frame_length, Some(longest));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_FRAME_LENGTH);
+
+    // The sensor has no digital gain reachable through the contract: that is not a range, so it stays
+    // refused, and nothing is written.
+    clear(&bus);
+    assert_eq!(
+        s.set_controls(Controls {
             digital_gain: Some(0x10),
             ..Controls::default()
-        },
+        }),
+        Err(Status::INVALID_ARGUMENT)
     );
-    // Frame length out of range for 1280x800.
-    check(
-        &mut s,
-        Controls {
-            frame_length: Some(909),
-            ..Controls::default()
-        },
-    );
-    check(
-        &mut s,
-        Controls {
-            frame_length: Some(52_341),
-            ..Controls::default()
-        },
-    );
-    // Shortening the frame past a held exposure is refused too: 1000 lines held needs a frame
-    // of at least 1025 lines.
+    assert_eq!(writes(&bus), vec![]);
+
+    // A frame shorter than the held exposure allows: 1000 lines held, frame asked for 1000. The exposure
+    // is pulled in to the 975 lines that frame allows, and its register write comes before the frame's.
     s.set_controls(Controls {
         exposure: Some(1000 << 4),
         ..Controls::default()
     })
     .unwrap();
     clear(&bus);
-    check(
-        &mut s,
-        Controls {
-            frame_length: Some(1024),
-            ..Controls::default()
-        },
-    );
-    // An exposure over the new frame's limit is refused, and one line under it is accepted.
-    check(
-        &mut s,
-        Controls {
-            exposure: Some(((1025 - 25) << 4) + 1),
-            frame_length: Some(1025),
-            ..Controls::default()
-        },
-    );
-    assert_eq!(writes(&bus), vec![]);
     s.set_controls(Controls {
-        exposure: Some((1025 - 25) << 4),
-        frame_length: Some(1025),
+        frame_length: Some(1000),
         ..Controls::default()
     })
     .unwrap();
+    assert_eq!(
+        writes(&bus),
+        vec![
+            (0x3500, 0x00),
+            (0x3501, 0x3c),
+            (0x3502, 0xf0),
+            (0x380e, 0x03),
+            (0x380f, 0xe8),
+        ]
+    );
+    let in_force = s.in_force().unwrap();
+    assert_eq!(in_force.exposure_lines, Some(975));
+    assert_eq!(in_force.frame_length, Some(1000));
+    // 1000 lines is inside the frame range, so only the exposure was clamped.
+    assert_eq!(in_force.clamped, CLAMP_EXPOSURE);
 
-    // Not streaming: post_values is refused.
+    // Not streaming: post_values is refused as a state, not a range.
     assert_eq!(
         s.post_values(FrameValues::default()),
         Err(Status::INVALID_ARGUMENT)
     );
-    // Validation on post_values too.
+    // Streaming: a gain of 5 is below the range; it is posted, applied at the minimum, and reported.
     start_up(&mut s);
     clear(&bus);
     assert_eq!(
@@ -908,9 +923,11 @@ fn limits_are_refused_before_any_write() {
                 ..Controls::default()
             },
         }),
-        Err(Status::INVALID_ARGUMENT)
+        Ok(())
     );
-    assert_eq!(writes(&bus), vec![]);
+    assert_eq!(s.in_force().unwrap().analogue_gain, Some(0x10));
+    assert_eq!(s.in_force().unwrap().clamped, CLAMP_ANALOGUE_GAIN);
+    assert!(writes(&bus).contains(&(0x3509, 0x10)), "{:?}", writes(&bus));
 }
 
 #[test]
@@ -1418,6 +1435,7 @@ fn with_a_mode_selected_the_items_carry_its_ranges_and_the_values_in_force() {
             exposure_lines: Some(DEFAULT_EXPOSURE_LINES),
             analogue_gain: Some(0x10),
             frame_length: Some(frame),
+            clamped: 0,
         })
     );
     let mut out = Description::new();

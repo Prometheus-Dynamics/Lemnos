@@ -42,7 +42,7 @@ python3 scripts/generate-builtins.py --check
 | `ws2812` | `pixels/1` | `bus`: SPI device, or a `pio-out` name (PIO state machine running the strip's 800 kHz program) | Serves its contract. The PIO program's timing is untested on board (`Q1.md`) |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
 | `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm`, `uart` | Serves its contract. Closed by default: writes and each bus are allowed only by `config`. A UART's frame is set at bind; reading it needs no `writes` |
-| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and refusal, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`) |
+| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and the clamp of a value outside the limits, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`) |
 
 ## Devices with no bus of their own
 

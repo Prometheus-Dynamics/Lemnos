@@ -222,6 +222,15 @@ fn run(args: &Args) -> Result<bool, String> {
     ));
     let gaps = intervals(&stamps.0);
     shape(&gaps);
+    if let (Some(&first), Some(&last)) = (stamps.0.first(), stamps.0.last()) {
+        // The mean interval is (last - first) / (N - 1): the figure testing/board-runs/F2h-judge.py reads.
+        let spans = (stamps.0.len() as u64).saturating_sub(1).max(1);
+        out(format_args!(
+            "mean interval {} ns over {spans} intervals at {lines} lines, line time {} ps",
+            last.saturating_sub(first) / spans,
+            mode.line_time_ps
+        ));
+    }
     out(format_args!(
         "first 200 intervals (ns): {:?}",
         gaps.iter().take(200).collect::<Vec<_>>()

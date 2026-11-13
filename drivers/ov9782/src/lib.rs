@@ -25,8 +25,9 @@
 //! Exposure is in sixteenths of a line (the sensor's register format). `set_controls` writes at
 //! once with no group hold; `post_values` writes the same registers inside a group hold (group 0,
 //! launched at the next vertical blanking) so they take effect together. Values are checked
-//! against the selected mode's limits before anything is written, including an exposure already
-//! held against a shortened frame.
+//! clamped to the selected mode's limits before anything is written, including an exposure already
+//! held against a shortened frame: a value outside the limits is applied at the nearest limit, and
+//! `in_force` reports the applied values and which controls were clamped (`InForce::clamped`).
 //!
 //! Timing. `post_values` writes the exposure, gain and frame length in one group, and the group is
 //! launched at the next vertical blanking. A group whose launch completes during frame `F` is
@@ -51,7 +52,7 @@
 //! write completes inside a frame at most one poll later than the post, and that frame is `F`. A
 //! consumer that needs a value on a given frame `N` posts it by the frame `N - 2`, at least one poll
 //! and one group write (six register transactions) earlier. Jobs that are read while the sensor is
-//! stopped or recovering, or that the limits refuse, are dropped and never kept, and a `start` drops
+//! stopped or recovering are dropped and never kept (limits clamp, they do not drop), and a `start` drops
 //! whatever was posted before it. The driver keeps no value across a restart.
 //!
 //! Gain. Analogue gain codes are sixteenths: `0x10` is a gain of one and the law is linear
@@ -95,8 +96,9 @@ use chip::{
 };
 use lemnos_contract_camera_receiver::{CameraReceiver, FrameStarts, MAX_FEED_NAME};
 use lemnos_contract_camera_sensor::{
-    AppliedLanding, BayerOrder, CameraSensor, Controls, FrameValues, InForce, Landing, LinkCheck,
-    Mode, SensorInfo, check_link, landing_of, launch_frame,
+    AppliedLanding, BayerOrder, CLAMP_ANALOGUE_GAIN, CLAMP_EXPOSURE, CLAMP_FRAME_LENGTH,
+    CameraSensor, Controls, FrameValues, InForce, Landing, LinkCheck, Mode, SensorInfo, check_link,
+    landing_of, launch_frame,
 };
 use lemnos_core::{
     CallerId, Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle,
@@ -191,6 +193,8 @@ struct Current {
     exposure: u32,
     analogue_gain: u32,
     frame_length: u32,
+    /// The `CLAMP_*` bits of the last request that changed a value to a limit.
+    clamped: u8,
 }
 
 impl Current {
@@ -199,28 +203,72 @@ impl Current {
             exposure: DEFAULT_EXPOSURE_LINES << EXPOSURE_FRACTION_BITS,
             analogue_gain: chip::ANALOGUE_GAIN_RANGE.unity,
             frame_length: mode.frame_length_default(),
+            clamped: 0,
         }
     }
 
-    /// `controls` over these values, if the result is in `mode`'s limits. Nothing is written.
+    /// `controls` over these values, each clamped to `mode`'s limits, and the clamp bits. Nothing is
+    /// written. The frame length is clamped first, because the exposure's limit depends on it: an
+    /// exposure the new frame cannot hold is pulled in to the longest it allows, even when the request
+    /// did not name the exposure.
     fn merged(self, controls: &Controls, mode: &ModeEntry) -> Result<Self> {
-        // The sensor has no digital gain the contract can reach: its range is all zero.
+        // The sensor has no digital gain the contract can reach, so the control is not there at all.
         if controls.digital_gain.is_some() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let merged = Self {
-            exposure: controls.exposure.unwrap_or(self.exposure),
-            analogue_gain: controls.analogue_gain.unwrap_or(self.analogue_gain),
-            frame_length: controls.frame_length.unwrap_or(self.frame_length),
-        };
+        let mut clamped = 0;
+        let frame_length = clamp_to(
+            controls.frame_length.unwrap_or(self.frame_length),
+            mode.frame_length_min(),
+            mode.frame_length_max(),
+            CLAMP_FRAME_LENGTH,
+            &mut clamped,
+        );
         let gain = chip::ANALOGUE_GAIN_RANGE;
-        if !(mode.frame_length_min()..=mode.frame_length_max()).contains(&merged.frame_length)
-            || !(gain.min..=gain.max).contains(&merged.analogue_gain)
-            || !(EXPOSURE_MIN..=chip::exposure_max(merged.frame_length)).contains(&merged.exposure)
-        {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        Ok(merged)
+        let analogue_gain = clamp_to(
+            controls.analogue_gain.unwrap_or(self.analogue_gain),
+            gain.min,
+            gain.max,
+            CLAMP_ANALOGUE_GAIN,
+            &mut clamped,
+        );
+        let exposure = clamp_to(
+            controls.exposure.unwrap_or(self.exposure),
+            EXPOSURE_MIN,
+            chip::exposure_max(frame_length),
+            CLAMP_EXPOSURE,
+            &mut clamped,
+        );
+        Ok(Self {
+            exposure,
+            analogue_gain,
+            frame_length,
+            clamped,
+        })
+    }
+}
+
+/// `value` within `min..=max`, and the bit `flag` set in `clamped` when it had to move.
+fn clamp_to(value: u32, min: u32, max: u32, flag: u8, clamped: &mut u8) -> u32 {
+    let applied = value.clamp(min, max);
+    if applied != value {
+        *clamped |= flag;
+    }
+    applied
+}
+
+/// The registers one request writes: each control it named at its applied value, and the exposure too
+/// when a frame change has pulled the held exposure in, so the sensor never holds one longer than its
+/// frame allows.
+fn registers_for(controls: &Controls, current: &Current, merged: &Current) -> Controls {
+    Controls {
+        exposure: (controls.exposure.is_some() || merged.exposure != current.exposure)
+            .then_some(merged.exposure),
+        analogue_gain: (controls.analogue_gain.is_some()
+            || merged.analogue_gain != current.analogue_gain)
+            .then_some(merged.analogue_gain),
+        digital_gain: None,
+        frame_length: controls.frame_length.map(|_| merged.frame_length),
     }
 }
 
@@ -509,8 +557,8 @@ impl Ov9782 {
     }
 
     /// Reads every job the poll finds and applies the last one that decodes. A job that does not
-    /// decode is skipped. A job the limits refuse, or a bus error, drops it: the earlier jobs of the
-    /// same poll are dropped with it, as the later one is the one the sensor would latch.
+    /// decode is skipped. A bus error drops the job: the earlier jobs of the same poll are dropped with
+    /// it, as the later one is the one the sensor would latch. A value outside the limits is clamped.
     fn take_values(&mut self) {
         let Some(values) = self.values.as_mut() else {
             return;
@@ -578,6 +626,7 @@ impl Ov9782 {
         let (entry, current) = self.mode_entry()?;
         self.check_not_recovering()?;
         let merged = current.merged(&values.controls, entry)?;
+        let registers = registers_for(&values.controls, &current, &merged);
         let mode = entry.describe(self.continuous_clock);
         let delays = [
             mode.exposure_delay,
@@ -592,7 +641,7 @@ impl Ov9782 {
                 Probe::Unsupported => return Err(Status::NOT_SUPPORTED),
             }
         }
-        match self.write_group(&values.controls) {
+        match self.write_group(&registers) {
             Ok(()) => {
                 self.keep(merged);
                 self.applied = Some(values);
@@ -877,7 +926,8 @@ impl CameraSensor for Ov9782 {
         self.check_not_recovering()?;
         let merged = current.merged(&controls, entry)?;
         let shortening = merged.frame_length < current.frame_length;
-        match self.write_controls(&controls, shortening) {
+        let registers = registers_for(&controls, &current, &merged);
+        match self.write_controls(&registers, shortening) {
             Ok(()) => {
                 self.keep(merged);
                 Ok(())
@@ -918,6 +968,7 @@ impl CameraSensor for Ov9782 {
                 exposure_lines: Some(current.exposure >> EXPOSURE_FRACTION_BITS),
                 analogue_gain: Some(current.analogue_gain),
                 frame_length: Some(current.frame_length),
+                clamped: current.clamped,
             },
             None => InForce::default(),
         })
@@ -926,9 +977,8 @@ impl CameraSensor for Ov9782 {
     // Each setter is a post of one control, so it lands as `post_values_at` lands it: the same
     // refusals, and the same frame.
     fn set_exposure(&mut self, lines: u32) -> Result<Landing> {
-        if lines > u32::MAX >> EXPOSURE_FRACTION_BITS {
-            return Err(Status::INVALID_ARGUMENT);
-        }
+        // Clamped to the mode's limits like every control, so a huge request only has to fit the type.
+        let lines = lines.min(u32::MAX >> EXPOSURE_FRACTION_BITS);
         let controls = Controls {
             exposure: Some(lines << EXPOSURE_FRACTION_BITS),
             ..Controls::default()

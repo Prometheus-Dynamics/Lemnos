@@ -338,7 +338,21 @@ pub struct InForce {
     pub exposure_lines: Option<u32>,
     pub analogue_gain: Option<u32>,
     pub frame_length: Option<u32>,
+    /// Which controls the last request had clamped to the selected mode's limits: the `CLAMP_*` bits.
+    /// A request outside the limits is applied at the nearest limit, never refused (the reply is the
+    /// values in force, so the caller reads what was applied and why it differs from what it asked).
+    pub clamped: u8,
 }
+
+/// `InForce::clamped` bit: the exposure was clamped, to the shortest exposure or to the longest the
+/// frame allows (its frame length less the margin), either by the request or by a shorter frame.
+pub const CLAMP_EXPOSURE: u8 = 1;
+/// `InForce::clamped` bit: the analogue gain was clamped to the mode's gain range.
+pub const CLAMP_ANALOGUE_GAIN: u8 = 2;
+/// `InForce::clamped` bit: the frame length was clamped to the mode's frame length range, which fixes the
+/// rate's ceiling and floor: a rate above the ceiling asks for a frame below the minimum, and below the
+/// floor for one above the maximum.
+pub const CLAMP_FRAME_LENGTH: u8 = 4;
 
 /// Controls for one frame and the caller's name for that frame.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -365,7 +379,9 @@ pub trait CameraSensor {
     fn start(&mut self) -> Result<()>;
     #[method(6)]
     fn stop(&mut self) -> Result<()>;
-    /// Writes `controls` at once. `INVALID_ARGUMENT` for a code outside the selected mode's limits.
+    /// Writes `controls` at once. A value outside the selected mode's limits is applied at the nearest
+    /// limit and reported by `in_force` (its `clamped` bits), not refused. `INVALID_ARGUMENT` only
+    /// when no mode is selected or a control the sensor does not have (digital gain) is set.
     #[method(7)]
     fn set_controls(&mut self, controls: Controls) -> Result<()>;
     /// Posts values as one group, with group hold where the sensor has it. Each control shows on
