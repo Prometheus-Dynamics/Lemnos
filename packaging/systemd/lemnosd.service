@@ -1,0 +1,69 @@
+# The Lemnos daemon: owns the hardware, serves every program over one Unix socket.
+# Installed as /usr/lib/systemd/system/lemnosd.service. See packaging/README.md.
+#
+# Runs as the lemnos user (lemnos.conf), not root. Device nodes are reached through group
+# `lemnos` (packaging/udev/70-lemnos.rules). The one capability is CAP_SYS_RAWIO, for mapping a
+# block's registers through /dev/lemnos (kernel/lemnos_core.c checks it); nothing else.
+# Change this unit with a drop-in (/etc/systemd/system/lemnosd.service.d/*.conf), not an edited copy.
+
+[Unit]
+Description=Lemnos hardware daemon
+# The board file is the OS's: /etc/lemnos/board.toml. Without it there is nothing to run.
+ConditionPathExists=/etc/lemnos/board.toml
+StartLimitIntervalSec=0
+
+[Service]
+# Type=notify: lemnosd sends READY=1 once every driver is started and the socket listens, and
+# WATCHDOG=1 from its event loop (service/lemnosd/src/notify.rs).
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/lemnosd --board /etc/lemnos/board.toml
+# Settings for the daemon's environment: socket, packages, package keys. Optional. A flag in
+# ExecStart (--board here) wins over its environment variable.
+EnvironmentFile=-/etc/lemnos/lemnosd.env
+
+User=lemnos
+Group=lemnos
+# /run/lemnos, owned by lemnos:lemnos. lemnosd makes the socket at start and removes it at stop.
+# Clients in group lemnos may open the directory and connect to the socket.
+RuntimeDirectory=lemnos
+RuntimeDirectoryMode=0750
+
+# Stopping drops every driver, which releases the hardware. Give that time.
+TimeoutStopSec=30s
+WatchdogSec=30s
+Restart=always
+RestartSec=1s
+RestartSteps=5
+RestartMaxDelaySec=30s
+
+# Kept with the daemon: only the one capability, for the module's register mapping.
+CapabilityBoundingSet=CAP_SYS_RAWIO
+AmbientCapabilities=CAP_SYS_RAWIO
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Not PrivateDevices=: the device nodes are the daemon's whole job. Not PrivateNetwork=: the
+# kernel's uevent socket is the host network namespace's.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectProc=invisible
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# AF_UNIX: the socket. AF_NETLINK: the kernel's uevent socket for hotplug. Nothing else.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

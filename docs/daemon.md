@@ -68,6 +68,16 @@ For a board, add `--target aarch64-unknown-linux-musl` (after `rustup target add
 statically linked `lemnosd` cannot load driver packages and says so; build for a glibc target to
 use them.
 
+## Running under systemd
+
+`packaging/systemd/lemnosd.service` runs the daemon as the `lemnos` user, not root, with the device
+nodes given to group `lemnos` by `packaging/udev/70-lemnos.rules`. Its one capability is
+`CAP_SYS_RAWIO`, for register mapping through `/dev/lemnos`. The unit starts only when the OS has
+supplied the board file at `/etc/lemnos/board.toml`. The OS installs the unit files and supplies the
+`lemnosd` binary and the board file. [`packaging/README.md`](../packaging/README.md) has the install
+table, what each unit needs and what it does not. The PWM and USB gadget drivers write sysfs and
+configfs, which only root may do, so a board that uses them needs a drop-in that runs the daemon as root.
+
 ## lemnos-ctl
 
 ```text
