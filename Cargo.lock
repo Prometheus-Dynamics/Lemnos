@@ -839,7 +839,18 @@ name = "lemnos-driver-hw-watchdog"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
+ "lemnos-driver-hw-watchdog-sys",
+ "lemnos-host",
  "lemnos-measure",
+ "lemnos-sim",
+]
+
+[[package]]
+name = "lemnos-driver-hw-watchdog-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
 ]
 
 [[package]]

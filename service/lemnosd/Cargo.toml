@@ -20,6 +20,7 @@ fake-devices = ["dep:lemnos-fake-devices"]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-wire = { path = "../../engine/wire" }
+lemnos-client = { path = "../../engine/client" }
 lemnos-package = { path = "../../engine/package" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-linux = { path = "../../backends/linux" }
@@ -73,7 +74,6 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 # generated: end drivers
 
 [dev-dependencies]
-lemnos-client = { path = "../../engine/client" }
 lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }

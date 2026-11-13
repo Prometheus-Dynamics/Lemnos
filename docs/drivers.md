@@ -56,7 +56,7 @@ python3 scripts/generate-builtins.py --check
 | `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
 | `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
-| `hw-watchdog` | no contract | `device`: a watchdog node | Runs. Opening the node arms the watchdog; the driver feeds it. It never sets the timeout |
+| `hw-watchdog` | no contract | `device`: a watchdog node, and `keepalive = true` on the device | Sets the timeout (`timeout_s`, default 15 s, clamped to the device's range) and reads it back. Feeds the node at half the timeout, only while the daemon is healthy (see [If the daemon dies](daemon.md#if-the-daemon-dies)). Never writes the magic close |
 
 ## The board's own system
 

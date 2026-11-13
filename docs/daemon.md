@@ -104,6 +104,40 @@ no file capability and no `setcap`. The hardware watchdog is the escalation on
 both init systems: the daemon feeds it, and the OS must not give it to systemd. [`packaging/README.md`](../packaging/README.md)
 has the user's passwd and group lines, the mdev rules, and what the unit gives that the script does not.
 
+## If the daemon dies
+
+`lemnosd` is not allowed to go down. In this stack it plays the part of the kernel, so nothing is
+designed around the daemon being stopped or dead. If it dies, the device is dead: the daemon is
+restarted at once, and if it is not healthy again within a short bound, the board's hardware
+watchdog resets the board.
+
+- **Restart at once.** The unit restarts the daemon one second after it exits (`RestartSec=1s`),
+  and does not hold the restart back. A driver that panics or hangs is never a reason to restart:
+  it is contained on its own lane (see [Drivers](drivers.md)).
+- **The bound.** The board's watchdog is set by its `hw-watchdog` device, to `timeout_s` seconds
+  (15 by default, clamped to the range the device reports, and read back). Feeding stops whenever
+  the daemon is not healthy, so the board resets `timeout_s` seconds after the last feed.
+- **Healthy** means both of these hold. The main loop finished a pass within 10 s. The control
+  socket answered a handshake within 5 s; a probe asks it every second, and an answer comes from
+  the serving thread, so a wedged socket counts. A driver that panics or hangs does not make the
+  daemon unhealthy: the host ticks the watchdog on its own lane, so the feed goes on.
+- **A deliberate restart.** A restart is inside the bound only if the new daemon's socket answers
+  before the timeout runs out. The board check measures it (see
+  [`testing/board-runs/S1b.md`](../testing/board-runs/S1b.md), check 4); no figure is claimed here.
+- **Clean shutdown.** A reboot or power-off stops the feeding and leaves the watchdog armed. The
+  daemon never writes the magic close, so a shutdown that hangs still resets the board. Stopping
+  the daemon without a restart also resets the board once the timeout runs out; that is the rule.
+
+The board file names the watchdog as the daemon's keep-alive:
+
+```toml
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true               # ticked only while the daemon is healthy
+config = { device = "watchdog0", timeout_s = 15 }
+```
+
 ## lemnos-ctl
 
 ```text
