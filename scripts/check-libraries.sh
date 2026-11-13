@@ -14,6 +14,7 @@ libraries=(
   lemnos-driver-k230isp lemnos-driver-k230isp-sys
   lemnos-driver-isp600 lemnos-driver-isp600-sys
   lemnos-linux-hotplug
+  lemnos-identity
   lemnos-wire lemnos-linux-stream
   # The shared-memory ring family (docs/ring.md): standalone, so no Lemnos crate at all.
   shm-sample-time shm-ring shm-ring-latest shm-ring-time shm-ring-doorbell shm-ring-buffers

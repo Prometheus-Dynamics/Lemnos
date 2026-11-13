@@ -301,6 +301,15 @@ pub enum Owner {
 #[serde(deny_unknown_fields)]
 pub struct BoardInfo {
     pub id: String,
+    /// The display name, the `model` identity fact with the revision after it (`docs/identity.md`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The hardware revision, appended to `name`.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Where the board's serial is read from. Checked here; read by `lemnos-identity`.
+    #[serde(default)]
+    pub serial: Option<lemnos_identity::SerialSource>,
 }
 
 /// One device.

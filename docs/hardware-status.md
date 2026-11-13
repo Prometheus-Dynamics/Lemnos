@@ -238,3 +238,4 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B20.md`](../testing/board-runs/B20.md) | `lemnos-orion` against a node on a board: every device a resource, with its topics and actions |
 | [`B22.md`](../testing/board-runs/B22.md) | The bench's reference set, measured for real |
 | [`A17.md`](../testing/board-runs/A17.md) | The hardware performance counters on the reference board's cores |
+| [`P1.md`](../testing/board-runs/P1.md) | The identity facts on the reference board: the serial from the device tree equals cpuinfo's `Serial`, and the daemon serves the same serial |

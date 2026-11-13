@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A board's identity facts (family, serial, model, running slot) read from its board file and the slot files, as a library: no daemon, no device code"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+toml = { workspace = true, features = ["parse", "serde", "std"] }
+thiserror = { workspace = true, features = ["std"] }
