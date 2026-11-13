@@ -1300,3 +1300,156 @@ fn applied_landing_is_the_last_post_and_where_it_landed() {
     // The count was 12 at the launch: frame 11, and the delay of 2 lands it on 13.
     assert_eq!(later.landing.latest, 13);
 }
+
+fn item_named<'a>(
+    out: &'a Description,
+    name: &str,
+    kind: lemnos_core::ItemKind,
+) -> &'a lemnos_core::Item {
+    out.items()
+        .find(|item| item.name == name && item.kind == kind)
+        .expect("the item the sensor describes")
+}
+
+#[test]
+fn before_a_mode_is_selected_the_ranges_of_exposure_and_frame_length_are_unknown() {
+    let (mut s, _bus) = sensor();
+    let mut out = Description::new();
+    Lifecycle::describe(&s, &mut out);
+    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    assert_eq!(
+        (exposure.min, exposure.max, exposure.step),
+        (None, None, None)
+    );
+    assert_eq!(exposure.unit, Unit::Line);
+    assert_eq!(
+        exposure.method,
+        MethodId {
+            contract: 0,
+            method: 16
+        }
+    );
+    // The gain's codes are the same in every mode, so its range is known from the start.
+    let gain = item_named(&out, "analogue_gain", lemnos_core::ItemKind::Control);
+    assert_eq!(
+        (gain.min, gain.max, gain.step),
+        (Some(0x10), Some(0xff), Some(1))
+    );
+    assert_eq!(
+        gain.method,
+        MethodId {
+            contract: 0,
+            method: 17
+        }
+    );
+    assert_eq!(s.in_force(), Ok(InForce::default()));
+}
+
+#[test]
+fn with_a_mode_selected_the_items_carry_its_ranges_and_the_values_in_force() {
+    let (mut s, _bus) = sensor();
+    s.select_mode(0).unwrap();
+    let frame = Current::defaults(&MODES[0]).frame_length;
+    let mode = MODES[0].describe(false);
+    assert_eq!(
+        s.in_force(),
+        Ok(InForce {
+            exposure_lines: Some(DEFAULT_EXPOSURE_LINES),
+            analogue_gain: Some(0x10),
+            frame_length: Some(frame),
+        })
+    );
+    let mut out = Description::new();
+    Lifecycle::describe(&s, &mut out);
+    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    // One line up to the frame length less the margin: the most the register takes.
+    assert_eq!(
+        (exposure.min, exposure.max, exposure.step),
+        (
+            Some(1),
+            Some(i64::from(frame - chip::EXPOSURE_MARGIN)),
+            Some(1)
+        )
+    );
+    let value = item_named(&out, "exposure", lemnos_core::ItemKind::Value);
+    assert_eq!(value.field, Some("exposure_lines"));
+    assert_eq!(
+        value.method,
+        MethodId {
+            contract: 0,
+            method: 15
+        }
+    );
+    let length = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+    assert_eq!(
+        (length.min, length.max),
+        (
+            Some(i64::from(mode.frame_length_min)),
+            Some(i64::from(mode.frame_length_max))
+        )
+    );
+}
+
+#[test]
+fn a_set_through_an_item_lands_on_the_frame_post_values_at_gives() {
+    // Two sensors, each with a receiver that counts frames from the same script: the frame
+    // launched in is 4, and exposure's delay is 2, so the exposure lands on frame 6.
+    let script = || vec![starts(5), starts(5)];
+    let (mut by_item, _bus) = streaming_sensor(Some(counting_receiver(script())));
+    let (mut by_post, _bus) = streaming_sensor(Some(counting_receiver(script())));
+    let landing = by_item.set_exposure(40).unwrap();
+    let posted = by_post
+        .post_values_at(FrameValues {
+            identity: 0,
+            controls: Controls {
+                exposure: Some(40 << EXPOSURE_FRACTION_BITS),
+                ..Controls::default()
+            },
+        })
+        .unwrap();
+    assert_eq!(landing, posted);
+    assert_eq!(landing.exposure, Some(6));
+    assert_eq!(by_item.in_force().unwrap().exposure_lines, Some(40));
+    assert_eq!(
+        by_item.applied().unwrap().unwrap().controls.exposure,
+        Some(40 << EXPOSURE_FRACTION_BITS)
+    );
+}
+
+#[test]
+fn the_gain_and_frame_length_setters_land_as_their_posts_do() {
+    let script = || vec![starts(5), starts(5), starts(9), starts(9)];
+    let (mut by_item, _bus) = streaming_sensor(Some(counting_receiver(script())));
+    let (mut by_post, _bus) = streaming_sensor(Some(counting_receiver(script())));
+    let gain = by_item.set_analogue_gain(0x20).unwrap();
+    let gain_post = by_post
+        .post_values_at(FrameValues {
+            identity: 0,
+            controls: Controls {
+                analogue_gain: Some(0x20),
+                ..Controls::default()
+            },
+        })
+        .unwrap();
+    assert_eq!(gain, gain_post);
+    assert_eq!(gain.analogue_gain, Some(6));
+    let length = by_item.set_frame_length(1000).unwrap();
+    // The launch is in frame 8 (the count was 9 at both reads), and the frame length delay is 2.
+    assert_eq!(length.frame_length, Some(10));
+    assert_eq!(by_item.in_force().unwrap().frame_length, Some(1000));
+}
+
+#[test]
+fn a_setter_while_stopped_is_refused_and_writes_nothing() {
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    clear(&bus);
+    assert_eq!(s.set_exposure(40), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(s.set_analogue_gain(0x20), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(s.set_frame_length(1000), Err(Status::INVALID_ARGUMENT));
+    assert!(
+        writes(&bus).is_empty(),
+        "nothing written: {:?}",
+        writes(&bus)
+    );
+}

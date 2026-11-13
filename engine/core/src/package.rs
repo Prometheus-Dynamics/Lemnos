@@ -78,7 +78,7 @@ const BUSES: [BusKind; 15] = [
     BusKind::Watchdog,
 ];
 
-const UNITS: [Unit; 13] = [
+const UNITS: [Unit; 14] = [
     Unit::One,
     Unit::MetrePerSecondSquared,
     Unit::RadianPerSecond,
@@ -92,6 +92,7 @@ const UNITS: [Unit; 13] = [
     Unit::Pascal,
     Unit::Hertz,
     Unit::Second,
+    Unit::Line,
 ];
 
 const ITEM_KINDS: [ItemKind; 3] = [ItemKind::Value, ItemKind::Control, ItemKind::Action];

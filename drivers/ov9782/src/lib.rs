@@ -87,12 +87,12 @@ use chip::{
 };
 use lemnos_contract_camera_receiver::{CameraReceiver, FrameStarts, MAX_FEED_NAME};
 use lemnos_contract_camera_sensor::{
-    AppliedLanding, BayerOrder, CameraSensor, Controls, FrameValues, Landing, LinkCheck, Mode,
-    SensorInfo, check_link, landing_of, launch_frame,
+    AppliedLanding, BayerOrder, CameraSensor, Controls, FrameValues, InForce, Landing, LinkCheck,
+    Mode, SensorInfo, check_link, landing_of, launch_frame,
 };
 use lemnos_core::{
     Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle, MethodId, Reader,
-    Result, Status, StreamHandle, driver,
+    Result, Status, StreamHandle, Unit, driver,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
@@ -106,6 +106,24 @@ const START: MethodId = MethodId {
 const STOP: MethodId = MethodId {
     contract: 0,
     method: 6,
+};
+/// The controls in force, and the three setters the items for exposure, analogue gain and frame
+/// length call (`camera.sensor` methods 15 to 18).
+const IN_FORCE: MethodId = MethodId {
+    contract: 0,
+    method: 15,
+};
+const SET_EXPOSURE: MethodId = MethodId {
+    contract: 0,
+    method: 16,
+};
+const SET_ANALOGUE_GAIN: MethodId = MethodId {
+    contract: 0,
+    method: 17,
+};
+const SET_FRAME_LENGTH: MethodId = MethodId {
+    contract: 0,
+    method: 18,
 };
 
 /// First delay between recovery attempts.
@@ -272,6 +290,57 @@ impl Lifecycle for Ov9782 {
     fn describe(&self, out: &mut Description) {
         out.add(Item::action("start", START));
         out.add(Item::action("stop", STOP));
+        // The controls in force, and their setters. Exposure and frame length take their ranges
+        // from the selected mode, so they have none before a mode is selected. Analogue gain's
+        // codes are the same in every mode.
+        let gain = chip::ANALOGUE_GAIN_RANGE;
+        let (exposure_max, frame) = match self.selected {
+            Some((index, current)) => {
+                let mode = MODES[usize::from(index)].describe(self.continuous_clock);
+                (
+                    Some(i64::from(
+                        chip::exposure_max(current.frame_length) >> EXPOSURE_FRACTION_BITS,
+                    )),
+                    Some((
+                        i64::from(mode.frame_length_min),
+                        i64::from(mode.frame_length_max),
+                    )),
+                )
+            }
+            None => (None, None),
+        };
+        let lines = i64::from(EXPOSURE_MIN >> EXPOSURE_FRACTION_BITS);
+        let mut exposure = Item::value("exposure", IN_FORCE)
+            .field("exposure_lines")
+            .unit(Unit::Line, 0);
+        let mut exposure_set = Item::control("exposure", SET_EXPOSURE).unit(Unit::Line, 0);
+        if let Some(max) = exposure_max {
+            exposure = exposure.range(lines, max).step(1);
+            exposure_set = exposure_set.range(lines, max).step(1);
+        }
+        out.add(exposure);
+        out.add(exposure_set);
+        let mut frame_value = Item::value("frame_length", IN_FORCE)
+            .field("frame_length")
+            .unit(Unit::Line, 0);
+        let mut frame_set = Item::control("frame_length", SET_FRAME_LENGTH).unit(Unit::Line, 0);
+        if let Some((min, max)) = frame {
+            frame_value = frame_value.range(min, max).step(1);
+            frame_set = frame_set.range(min, max).step(1);
+        }
+        out.add(frame_value);
+        out.add(frame_set);
+        out.add(
+            Item::value("analogue_gain", IN_FORCE)
+                .field("analogue_gain")
+                .range(i64::from(gain.min), i64::from(gain.max))
+                .step(i64::from(gain.step)),
+        );
+        out.add(
+            Item::control("analogue_gain", SET_ANALOGUE_GAIN)
+                .range(i64::from(gain.min), i64::from(gain.max))
+                .step(i64::from(gain.step)),
+        );
     }
 
     fn health(&self) -> Health {
@@ -706,6 +775,55 @@ impl CameraSensor for Ov9782 {
 
     fn applied(&mut self) -> Result<Option<FrameValues>> {
         Ok(self.applied)
+    }
+
+    fn in_force(&mut self) -> Result<InForce> {
+        Ok(match self.selected {
+            Some((_, current)) => InForce {
+                exposure_lines: Some(current.exposure >> EXPOSURE_FRACTION_BITS),
+                analogue_gain: Some(current.analogue_gain),
+                frame_length: Some(current.frame_length),
+            },
+            None => InForce::default(),
+        })
+    }
+
+    // Each setter is a post of one control, so it lands as `post_values_at` lands it: the same
+    // refusals, and the same frame.
+    fn set_exposure(&mut self, lines: u32) -> Result<Landing> {
+        if lines > u32::MAX >> EXPOSURE_FRACTION_BITS {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let controls = Controls {
+            exposure: Some(lines << EXPOSURE_FRACTION_BITS),
+            ..Controls::default()
+        };
+        self.post_values_at(FrameValues {
+            identity: 0,
+            controls,
+        })
+    }
+
+    fn set_analogue_gain(&mut self, code: u32) -> Result<Landing> {
+        let controls = Controls {
+            analogue_gain: Some(code),
+            ..Controls::default()
+        };
+        self.post_values_at(FrameValues {
+            identity: 0,
+            controls,
+        })
+    }
+
+    fn set_frame_length(&mut self, lines: u32) -> Result<Landing> {
+        let controls = Controls {
+            frame_length: Some(lines),
+            ..Controls::default()
+        };
+        self.post_values_at(FrameValues {
+            identity: 0,
+            controls,
+        })
     }
 
     fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
