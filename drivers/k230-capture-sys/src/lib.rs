@@ -9,7 +9,9 @@
 //! - [`mipi`]: the `vvcam-mipi` request and its structure, and a checked builder for it.
 //! - `capture` (Linux): [`Capture`], which writes the table's registers, and alone writes the
 //!   memory interface's address registers, from memory it holds; see its module documentation for
-//!   every path by which a caller's number reaches the block and the check on each.
+//!   every path by which a caller's number reaches the block and the check on each. It reaches
+//!   the block through the vendor's `vvcam-isp` ([`Capture::open`]) or through the block's own
+//!   register window and interrupt from the host ([`Capture::on_block`]), the same way on both.
 //! - `node` (Linux): [`MipiNode`], and the `vvcam-isp` requests, crate-private.
 //!
 //! # Why the checks are here
@@ -52,7 +54,10 @@ mod node;
 pub mod regs;
 
 #[cfg(target_os = "linux")]
-pub use capture::{Capture, CaptureError, Dma, EID_MIV2_MIS, MiEvent, Output, RELEASE_AFTER, RING};
+pub use capture::{
+    BlockInterrupt, BlockRegisters, Capture, CaptureError, Dma, EID_MIV2_MIS, MiEvent, Output,
+    RELEASE_AFTER, RING,
+};
 pub use memory::{FrameMemory, MemoryError, Plane, Planes};
 #[cfg(target_os = "linux")]
 pub use node::MipiNode;

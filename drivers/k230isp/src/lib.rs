@@ -37,6 +37,8 @@ pub mod stats;
 
 #[cfg(all(test, feature = "device", target_os = "linux"))]
 mod driver_tests;
+#[cfg(all(test, feature = "device", target_os = "linux"))]
+mod module_tests;
 #[cfg(test)]
 mod tests;
 
@@ -48,7 +50,7 @@ pub use driver::{
 #[cfg(all(feature = "device", target_os = "linux"))]
 pub use hw::LinuxHardware;
 #[cfg(feature = "device")]
-pub use hw::{DEVICE_PATH, Event, Hardware, Settings};
+pub use hw::{DEVICE_PATH, Event, Hardware, ModuleHardware, Settings};
 
 pub use config::{CONFIG_BYTES, LAYOUT_WRITES, MAX_WRITES};
 /// The register map, from the sys crate.

@@ -124,6 +124,30 @@ regions are mapped only when the module says the block's registers may be (its D
 an IOMMU); otherwise they are refused with `ACCESS`. A clock or reset name the block doesn't have is
 refused when the device binds. Each is held by one device at a time.
 
+A block the module was told to map though no IOMMU confines it (its `unconfined=` parameter, see
+[the kernel module](kernel-module.md)) has its registers mapped too: the driver that holds them
+then alone keeps the block's DMA inside its own memory. Only a built-in driver that checks every
+register it writes against a table, and points every address register only at memory it holds,
+is given such a block: `k230isp` and `k230-capture`. A driver that takes these names says which in
+its crate, and the board file chooses between them and the driver's vendor node. For example, an
+ISP bound to the module:
+
+```toml
+[[devices]]
+id = "capture"
+driver = "k230-capture"
+[devices.uses]
+regs = "regs:90000000.isp"
+irq = "irq:90000000.isp/0"
+dma = "dma:90000000.isp"
+clocks = "clocks:90000000.isp/core,axi"
+resets = "resets:90000000.isp/rst"
+
+[devices.streams.frames]
+buffers = 4
+buffer_bytes = 4147200
+```
+
 On the simulated board (`lemnosd --sim`) there are no buses. A device that needs one is listed as
 `retrying`. Tests that need a simulated bus build a `SimBoard` in code and add named resources to
 it. On a microcontroller the names are whatever the firmware calls its buses.

@@ -8,19 +8,22 @@ use std::sync::{Arc, Mutex};
 
 use lemnos_driver_k230isp_sys::uapi::{EVENT_IRQ_TYPE, Event};
 use lemnos_hal::ErrorKind;
+use lemnos_hal::blocks::Interrupt as _;
 use lemnos_hal::blocks::{DmaBuffer, DmaBuffers};
-use lemnos_hal::mock::MockDma;
+use lemnos_hal::mock::{MockDma, MockInterrupt, MockRegisters};
 
 use crate::access::{READ_ONLY, WRITABLE, allowed, readable, writable};
+use crate::capture::{Port, vendor_event};
 use crate::memory::{FrameMemory, MemoryError, Plane, Planes};
 use crate::mipi::{
     DATA_RAW8, DATA_RAW10, DATA_RAW12, DevAttr, Interface, LinkError, MipiAttr, RESET,
     SET_DEV_ATTR, SET_STREAM,
 };
 use crate::regs::{
-    ADDRESS_REGISTERS, ISP_CTRL, ISP_CTRL_ENABLE, ISP_CTRL_GEN_CFG_UPD, MIV2_CTRL, MIV2_IMSC,
-    MP_CB_BASE_AD_INIT, MP_CB_BASE_AD_INIT2, MP_CB_OFFS_CNT_INIT, MP_CB_SIZE_INIT,
-    MP_CR_BASE_AD_INIT, MP_CR_BASE_AD_INIT2, MP_CR_OFFS_CNT_INIT, MP_CR_SIZE_INIT, MP_CTRL, MP_FMT,
+    ADDRESS_REGISTERS, ISP_CTRL, ISP_CTRL_ENABLE, ISP_CTRL_GEN_CFG_UPD, MIS_MP_FRAME_END,
+    MIS_MP_RAW_FRAME_END, MIV2_CTRL, MIV2_ICR, MIV2_IMSC, MIV2_MIS, MP_CB_BASE_AD_INIT,
+    MP_CB_BASE_AD_INIT2, MP_CB_OFFS_CNT_INIT, MP_CB_SIZE_INIT, MP_CR_BASE_AD_INIT,
+    MP_CR_BASE_AD_INIT2, MP_CR_OFFS_CNT_INIT, MP_CR_SIZE_INIT, MP_CTRL, MP_FMT,
     MP_JDP_BASE_AD_INIT, MP_JDP_OFFS_CNT_INIT, MP_JDP_SIZE_INIT, MP_RAW_BASE_AD_INIT,
     MP_RAW_BASE_AD_SHD, MP_RAW_OFFS_CNT_INIT, MP_RAW_SIZE_INIT, MP_Y_BASE_AD_INIT,
     MP_Y_BASE_AD_INIT2, MP_Y_BASE_AD_SHD, MP_Y_LLENGTH, MP_Y_OFFS_CNT_INIT, MP_Y_SIZE_INIT,
@@ -83,6 +86,24 @@ impl FakePort {
 
     fn set(&self, addr: u32, value: u32) {
         self.with(|s| s.regs.insert(addr, value));
+    }
+}
+
+impl Port for FakePort {
+    fn read_raw(&mut self, addr: u32) -> Result<u32, CaptureError> {
+        Ok(FakePort::read_raw(self, addr)?)
+    }
+
+    fn write_raw(&mut self, addr: u32, value: u32) -> Result<(), CaptureError> {
+        Ok(FakePort::write_raw(self, addr, value)?)
+    }
+
+    fn watch(&mut self) -> Result<(), CaptureError> {
+        Ok(self.subscribe(EID_MIV2_MIS)?)
+    }
+
+    fn next_event(&mut self) -> Result<Option<MiEvent>, CaptureError> {
+        vendor_event(|| self.dequeue())
     }
 }
 
@@ -187,7 +208,7 @@ impl DmaBuffers for FakeDma {
 fn capture() -> (Capture, FakePort, FakeDma) {
     let port = FakePort::default();
     let dma = FakeDma::new();
-    let capture = Capture::with_port(port.clone(), Box::new(dma.clone()));
+    let capture = Capture::with_port(Box::new(port.clone()), Box::new(dma.clone()));
     (capture, port, dma)
 }
 
@@ -321,7 +342,7 @@ fn no_address_extent_or_path_register_is_writable() {
 
 #[test]
 fn a_write_outside_the_table_or_a_mask_never_reaches_the_device() {
-    let (capture, port, _) = capture();
+    let (mut capture, port, _) = capture();
     for (addr, value) in [
         (MP_Y_BASE_AD_INIT, 0x8000_0000),
         (MP_Y_SIZE_INIT, 0x1000_0000),
@@ -349,7 +370,7 @@ fn a_write_outside_the_table_or_a_mask_never_reaches_the_device() {
 
 #[test]
 fn a_masked_write_keeps_the_other_bits() {
-    let (capture, port, _) = capture();
+    let (mut capture, port, _) = capture();
     port.set(ISP_CTRL, 1 << 11);
     capture
         .write(ISP_CTRL, ISP_CTRL_ENABLE | ISP_CTRL_GEN_CFG_UPD)
@@ -603,7 +624,7 @@ fn a_frame_is_read_back_only_inside_its_planes() {
 
 #[test]
 fn frame_ends_arrive_as_events_and_the_rest_are_passed_over() {
-    let (capture, port, _) = capture();
+    let (mut capture, port, _) = capture();
     capture.watch_frames().unwrap();
     assert_eq!(port.with(|s| s.subscribed.clone()), [EID_MIV2_MIS]);
     assert_eq!(port.writes(), [(MIV2_IMSC, 0x3)]);
@@ -625,4 +646,144 @@ fn frame_ends_arrive_as_events_and_the_rest_are_passed_over() {
         })
     );
     assert_eq!(capture.next_event().unwrap(), None);
+}
+
+// The block's own window and interrupt, from the host.
+
+fn on_block() -> (Capture, MockRegisters, MockInterrupt, FakeDma) {
+    let regs = MockRegisters::new(WINDOW_BYTES as usize);
+    let irq = MockInterrupt::new();
+    let dma = FakeDma::new();
+    let Ok(capture) = Capture::on_block(
+        Box::new(regs.clone()),
+        Box::new(irq.clone()),
+        Box::new(dma.clone()),
+    ) else {
+        panic!("the ISP's window was refused");
+    };
+    (capture, regs, irq, dma)
+}
+
+/// The writes that reached the window, as `(register, value)`.
+fn window_writes(regs: &MockRegisters) -> Vec<(u32, u32)> {
+    regs.writes()
+        .into_iter()
+        .map(|(offset, value)| (offset as u32, value))
+        .collect()
+}
+
+#[test]
+fn a_window_smaller_than_the_isps_is_refused_and_the_memory_comes_back() {
+    let dma = FakeDma::new();
+    let refused = Capture::on_block(
+        Box::new(MockRegisters::new(WINDOW_BYTES as usize - 4)),
+        Box::new(MockInterrupt::new()),
+        Box::new(dma.clone()),
+    );
+    let Err((CaptureError::Block(ErrorKind::InvalidInput), mut back)) = refused else {
+        panic!("a small window was taken");
+    };
+    assert!(
+        back.allocate(16).is_ok(),
+        "the memory is the caller's again"
+    );
+}
+
+#[test]
+fn on_the_blocks_window_the_capture_clears_and_enables_the_interrupt_itself() {
+    let (mut capture, regs, mut irq, _) = on_block();
+    regs.set(MIV2_MIS as usize, 0x40);
+    capture.watch_frames().unwrap();
+    // What was pending is cleared before the interrupt is taken; then frame ends may raise it.
+    assert_eq!(
+        window_writes(&regs),
+        [(MIV2_ICR, 0x40), (MIV2_IMSC, MIS_MP_FRAME_END)]
+    );
+    assert!(irq.enabled());
+    assert_eq!(capture.next_event().unwrap(), None, "nothing fired");
+    // The interrupt fires: the status is read and cleared, and the interrupt enabled again.
+    regs.set(MIV2_MIS as usize, MIS_MP_RAW_FRAME_END);
+    irq.fire(10);
+    irq.disable().unwrap();
+    assert_eq!(
+        capture.next_event().unwrap(),
+        Some(MiEvent {
+            status: MIS_MP_RAW_FRAME_END,
+            timestamp_ns: 10
+        })
+    );
+    assert_eq!(
+        window_writes(&regs)[2..],
+        [(MIV2_ICR, MIS_MP_RAW_FRAME_END)]
+    );
+    assert!(irq.enabled());
+    assert_eq!(capture.next_event().unwrap(), None);
+}
+
+#[test]
+fn on_the_blocks_window_every_address_comes_from_memory_held_and_the_table_still_holds() {
+    let (mut capture, regs, _, dma) = on_block();
+    for (addr, value) in [
+        (MP_Y_BASE_AD_INIT, 0x8000_0000),
+        (MIV2_CTRL, 1),
+        (MIV2_ICR, 1),
+        (WINDOW_BYTES, 0),
+    ] {
+        assert!(matches!(
+            capture.write(addr, value),
+            Err(CaptureError::Refused)
+        ));
+    }
+    assert!(regs.writes().is_empty());
+    capture.provide(384).unwrap();
+    capture.start(Output::YCbCr, nv12()).unwrap();
+    let writes = window_writes(&regs);
+    assert_eq!(writes.first(), Some(&(MIV2_CTRL, 0)));
+    assert_eq!(writes.last(), Some(&(MIV2_CTRL, 1)));
+    let mut addressed = 0;
+    for (addr, value) in &writes {
+        if ADDRESS_REGISTERS.contains(addr) && *value >= 0x4000_0000 {
+            addressed += 1;
+            assert!((0x4000_0000..0x4000_0000 + 0x1000 * 2 + 384).contains(value));
+        }
+    }
+    // Eight base registers for each of the two memories armed.
+    assert_eq!(addressed, 2 * 8);
+    assert_eq!(dma.with(|s| s.to_device.clone()), [1, 2, 3]);
+    regs.set(MP_Y_BASE_AD_SHD as usize, 0x4000_1000);
+    assert_eq!(capture.active().unwrap(), Some(1));
+    capture.stop().unwrap();
+    assert!(!capture.running());
+}
+
+#[test]
+fn a_window_that_fails_reports_the_hosts_reason() {
+    struct Gone;
+    impl lemnos_hal::blocks::Registers for Gone {
+        type Error = ErrorKind;
+        fn size(&self) -> usize {
+            WINDOW_BYTES as usize
+        }
+        fn read32(&mut self, _offset: usize) -> Result<u32, ErrorKind> {
+            Err(ErrorKind::Unavailable)
+        }
+        fn write32(&mut self, _offset: usize, _value: u32) -> Result<(), ErrorKind> {
+            Err(ErrorKind::Unavailable)
+        }
+    }
+    let Ok(mut capture) = Capture::on_block(
+        Box::new(Gone),
+        Box::new(MockInterrupt::new()),
+        Box::new(FakeDma::new()),
+    ) else {
+        panic!("the ISP's window was refused");
+    };
+    assert!(matches!(
+        capture.watch_frames(),
+        Err(CaptureError::Block(ErrorKind::Unavailable))
+    ));
+    assert!(matches!(
+        capture.stop(),
+        Err(CaptureError::Block(ErrorKind::Unavailable))
+    ));
 }

@@ -286,6 +286,9 @@ pub const MIV2_IMSC: u32 = 0x16C0;
 /// `MIV2_MIS`: masked interrupt status, read and cleared by the vendor's interrupt handler, which
 /// queues it as the `VVCAM_EID_MIV2_MIS` event. Read only here.
 pub const MIV2_MIS: u32 = 0x16D0;
+/// `MIV2_ICR`: writing a bit clears it in [`MIV2_MIS`], as the vendor's interrupt handler does.
+/// Written only by [`Capture`](crate::Capture) on the block's own window, never by a caller.
+pub const MIV2_ICR: u32 = 0x16D8;
 /// `mp_ycbcr_frame_end`.
 pub const MIS_MP_YCBCR_FRAME_END: u32 = 0x0000_0001;
 /// `mp_raw_frame_end`.

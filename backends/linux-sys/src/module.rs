@@ -336,6 +336,9 @@ pub const EVENT_BLOCK_UNBOUND: u32 = 2;
 
 /// `LEMNOS_INFO_MMIO_MAPPABLE`: the block's registers may be mapped.
 pub const INFO_MMIO_MAPPABLE: u32 = 1 << 0;
+/// `LEMNOS_INFO_MMIO_UNCONFINED`: they may be mapped only because the module was loaded with the
+/// block in `unconfined=`: no IOMMU confines its DMA, so its driver alone keeps it in bounds.
+pub const INFO_MMIO_UNCONFINED: u32 = 1 << 1;
 
 /// `LEMNOS_POWER_NAME`: room for a clock's or reset's name and its NUL.
 pub const POWER_NAME: usize = 32;
@@ -1079,6 +1082,7 @@ mod tests {
         );
         assert_eq!(fields("lemnos_release"), ["__u32 block", "__u32 handle"]);
         assert!(defined("LEMNOS_INFO_MMIO_MAPPABLE", "(1u << 0)"));
+        assert!(defined("LEMNOS_INFO_MMIO_UNCONFINED", "(1u << 1)"));
         assert!(defined("LEMNOS_POWER_NAME", "32"));
         assert!(defined(
             "LEMNOS_IOC_REGION",

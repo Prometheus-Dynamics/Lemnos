@@ -1,7 +1,10 @@
 //! The `camera.isp/1` driver: the ISP's tuning registers in, its statistics registers out.
 //!
-//! The vendor kernel driver owns the block; this driver reaches it only through the register
-//! requests and the interrupt events of `vvcam-isp`. It does no 3A and holds no tuning: a
+//! It reaches the block one of two ways, and the board file chooses which (see Settings): through
+//! the register requests and the interrupt events of the vendor kernel's `vvcam-isp`, or through
+//! the block's own register window and interrupt from the host, which on Linux are the Lemnos
+//! kernel module's, with the ISP bound to the module. Either way every register access goes
+//! through the sys crate's table. It does no 3A and holds no tuning: a
 //! configuration is a list of register writes ([`config`](crate::config)) whose values it never
 //! reads, and statistics are the statistics registers copied out unread
 //! ([`stats`](crate::stats)).
@@ -50,8 +53,19 @@
 //!
 //! # Settings
 //!
-//! From the device's `config` in the board file: `device`, the vendor driver's node, default
-//! `/dev/vvcam-isp.0`.
+//! The way to the block is the board file's, and there is no falling back from one to the other:
+//!
+//! - **The module's resources**: the device's `uses` names `regs` (the ISP's register window, such
+//!   as `regs:90000000.isp`) and `irq` (the ISP core's interrupt, such as `irq:90000000.isp/0`),
+//!   and optionally `clocks` and `resets` (`clocks:90000000.isp/NAME,...`, every one turned on,
+//!   and `resets:...`, every line pulsed, at each open). See
+//!   [`ModuleHardware`](crate::hw::ModuleHardware). `device` must not be set.
+//! - **The vendor device**: none of those named; `config` may give `device`, the vendor driver's
+//!   node, default `/dev/vvcam-isp.0`.
+//!
+//! `regs` without `irq`, `irq`, `clocks` or `resets` without `regs`, or `regs` with `device`, is
+//! refused when the device binds (`INVALID_ARGUMENT`). A resource the host can't give fails the
+//! bind with the host's reason; nothing else is tried.
 //!
 //! # Failures
 //!
@@ -65,14 +79,14 @@ use lemnos_contract_camera_isp::{
     NO_BUFFER, OutputLayout,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    ClocksHandle, Config, Decode, Description, Health, InterruptHandle, Item, Lifecycle, MethodId,
+    Reader, RegistersHandle, ResetHandle, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_k230isp_sys::regs::{CTRL_GEN_CFG_UPD, ISP_CTRL, MIS_FRAME_OUT};
 use lemnos_hal::blocks::StreamFrame;
 
 use crate::config::{self, CONFIG_BYTES, LAYOUT_WRITES};
-use crate::hw::{Hardware, LinuxHardware, Settings};
+use crate::hw::{Hardware, LinuxHardware, ModuleHardware, Settings};
 use crate::stats::{self, LAYOUT_STATISTICS, STATISTICS_BYTES};
 
 const START: MethodId = MethodId {
@@ -176,13 +190,27 @@ fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
     Ok(())
 }
 
-/// The ISP behind `vvcam-isp` as `camera.isp/1`.
+/// The ISP, behind `vvcam-isp` or through the host's resources for it, as `camera.isp/1`.
 #[driver("k230isp", provides = [CameraIsp])]
 pub struct K230Isp {
     #[needs]
     config: StreamHandle,
     #[needs]
     statistics: StreamHandle,
+    /// The block's own resources, for the module's way. Moved into the hardware at bind; what is
+    /// left here is `None`. Declared here so the host provides them.
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    regs: Option<RegistersHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    irq: Option<InterruptHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    clocks: Option<ClocksHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    resets: Option<ResetHandle>,
     hw: Box<dyn Hardware>,
     state: State,
     counters: Counters,
@@ -203,12 +231,18 @@ impl Lifecycle for K230Isp {
     type Needs = K230IspNeeds;
     const TICKS: bool = true;
 
-    fn start(needs: K230IspNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let settings = Settings::new(cfg.str("device"))?;
-        Ok(Self::with_hardware(
-            Box::new(LinuxHardware::new(settings)),
-            needs,
-        ))
+    fn start(mut needs: K230IspNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let hw: Box<dyn Hardware> = match (needs.regs.take(), needs.irq.take()) {
+            (Some(regs), Some(irq)) if cfg.str("device").is_none() => Box::new(
+                ModuleHardware::new(regs, irq, needs.clocks.take(), needs.resets.take()),
+            ),
+            (None, None) if needs.clocks.is_none() && needs.resets.is_none() => {
+                Box::new(LinuxHardware::new(Settings::new(cfg.str("device"))?))
+            }
+            // Half of one way, or both at once: the board file is wrong, and nothing is guessed.
+            _ => return Err(Status::INVALID_ARGUMENT),
+        };
+        Ok(Self::with_hardware(hw, needs))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -271,6 +305,10 @@ impl K230Isp {
         Self {
             config: needs.config,
             statistics: needs.statistics,
+            regs: None,
+            irq: None,
+            clocks: None,
+            resets: None,
             hw,
             state: State::Stopped,
             counters: Counters::default(),

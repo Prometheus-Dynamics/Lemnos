@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 89 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 90 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -157,6 +157,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E39.md`](../testing/board-runs/E39.md) | Capture straight into a stream's dma-bufs, and whether the vendor capture drivers take them at all |
 | [`E11.md`](../testing/board-runs/E11.md) | `k230isp`: the register window, the request numbers, refusals, statistics |
 | [`E30.md`](../testing/board-runs/E30.md) | `k230-capture`: nodes, the link, guard pages, formats, stop and restart |
+| [`H1.md`](../testing/board-runs/H1.md) | `k230isp` and `k230-capture` on the ISP's registers and interrupt through the kernel module (`unconfined=`) |
 
 ## Frame streams on dma-bufs
 

@@ -5,14 +5,15 @@ use std::os::fd::OwnedFd;
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::Registers;
 use lemnos_linux_sys::mmap::{Mapping, page_size};
-use lemnos_linux_sys::module::{self as sys, BlockInfo, INFO_MMIO_MAPPABLE};
+use lemnos_linux_sys::module::{self as sys, BlockInfo, INFO_MMIO_MAPPABLE, INFO_MMIO_UNCONFINED};
 
 use super::Node;
 use crate::kind_of;
 
 /// One register region of a block bound to the module, mapped shared and uncached by the module
 /// (`regs:<block>/<n>`). Only a block the module says may be mapped is: one whose DMA its IOMMU
-/// confines, so the registers can't be used to reach memory outside the block's own.
+/// confines, so the registers can't be used to reach memory outside the block's own, or one the
+/// module was told to map though nothing confines it (`unconfined=`, see [`Self::unconfined`]).
 ///
 /// Each access is one aligned 32-bit load or store, inside the region. Nothing allocates.
 ///
@@ -21,6 +22,7 @@ use crate::kind_of;
 pub struct ModuleRegisters {
     map: Mapping,
     size: usize,
+    unconfined: bool,
     _claim: OwnedFd,
 }
 
@@ -62,8 +64,17 @@ impl ModuleRegisters {
             map,
             // Access stops at the region's own end, though the mapping runs to the end of a page.
             size: usize::try_from(region.size).map_err(|_| ErrorKind::Failed)?,
+            unconfined: info.flags & INFO_MMIO_UNCONFINED != 0,
             _claim: claim,
         })
+    }
+
+    /// Whether the module maps these only because it was loaded with the block in
+    /// `unconfined=`: no IOMMU confines the block's DMA, so the driver writing these registers
+    /// alone keeps it inside the block's own memory.
+    #[must_use]
+    pub fn unconfined(&self) -> bool {
+        self.unconfined
     }
 }
 

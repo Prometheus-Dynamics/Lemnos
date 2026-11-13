@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * The control node's two test-only paths, on a bound block with the module
- * loaded test_map_unconfined=1 test_irq_inject=1:
- * - the registers through mmap (read only: region 0's first word);
+ * The registers of a block listed in unconfined= and the test-only interrupt
+ * path, on a bound block with the module loaded unconfined=<its compatible>
+ * test_irq_inject=1:
+ * - the registers through mmap, the module saying they are mappable only
+ *   because of unconfined= (read only: region 0's first word);
  * - interrupts: one set pending at the controller reaches read() when
  *   enabled, waits while masked and arrives on enable, and the time from the
  *   injection to the handler and to user space, over many.
@@ -83,6 +85,9 @@ int main(int argc, char **argv)
 	CHECK(!ioctl(fd, LEMNOS_IOC_INFO, &info) && info.irqs >= 1,
 	      "info: %u irqs, registers %smappable", info.irqs,
 	      info.flags & LEMNOS_INFO_MMIO_MAPPABLE ? "" : "not ");
+	CHECK((info.flags & (LEMNOS_INFO_MMIO_MAPPABLE | LEMNOS_INFO_MMIO_UNCONFINED)) ==
+		      (LEMNOS_INFO_MMIO_MAPPABLE | LEMNOS_INFO_MMIO_UNCONFINED),
+	      "mappable through unconfined= alone: flags 0x%x", info.flags);
 
 	long page = sysconf(_SC_PAGESIZE);
 	struct lemnos_region r = { .block = block };

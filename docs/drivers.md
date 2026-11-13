@@ -67,8 +67,8 @@ python3 scripts/generate-builtins.py --check
 | `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
 | `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |
 | `isp600` | `camera.isp/1`, `isp.isp600/1` | the vendor kernel's nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream |
-| `k230-capture` | `camera.receiver/1` | `dma`: `dma:BLOCK` from the kernel module; `frames` stream | Serves its contract. The register facts it relies on are unconfirmed |
-| `k230isp` | `camera.isp/1` | the vendor node; `config`, `statistics` streams | Refuses to run frames. Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written |
+| `k230-capture` | `camera.receiver/1` | `dma`: `dma:BLOCK` from the kernel module; `frames` stream; the vendor's ISP node, or `regs` and `irq` (optional `clocks`, `resets`) from the module | Serves its contract. The board file chooses the way to the ISP: the vendor node, or the module's resources with the ISP bound to the module. The register facts it relies on are unconfirmed |
+| `k230isp` | `camera.isp/1` | `config`, `statistics` streams; the vendor node, or `regs` and `irq` (optional `clocks`, `resets`) from the module | Refuses to run frames. Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written. The board file chooses the way, as for `k230-capture` |
 
 ## Image blocks
 
@@ -114,6 +114,23 @@ A board file cannot name these.
 | `v4l2-capture` | A capture node that fills a stream's own buffers | Used by `rkcif` and `sunxi-vin` |
 | `hevc` | A parameter-set and slice-header parser | Used by the library decoder in `m2m-decode`. IDR slices only |
 | `soc` | Chip description tables | Data |
+
+## Which drivers take a block's own resources
+
+A driver that programs a block itself (writes its registers, takes its interrupt, turns its
+clocks on) can take those from the host by the board file's names `regs:`, `irq:`, `clocks:` and
+`resets:` (see [Board files](boards.md#resource-names)). On Linux they are the
+[kernel module](kernel-module.md)'s, with the block bound to it. `k230isp` and `k230-capture` take
+them, and their vendor node otherwise: each driver's crate says which `uses` names choose the
+module's way, and naming half of it, or both ways, is refused when the device binds. Neither
+falls back from one way to the other.
+
+The other block drivers keep the kernel driver's own interface, because there the kernel driver
+programs the block and Lemnos carries the caller's work to it: the V4L2 and media-graph drivers,
+the codec and NPU command services, and `a733-video`, which only reads registers through its
+vendor node and writes none. `rp1-csi2`, `pisp-fe`, `pisp-be` and the graphics DMA engine under
+`k230-gsdma` are driven inside the module, because their DMA must be checked there, so their
+registers never reach user space.
 
 Crates named `drivers/<name>-sys` hold a driver's kernel interface: structures, request numbers
 and the `unsafe` that issues them. They are not drivers.

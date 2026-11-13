@@ -26,8 +26,8 @@ as soon as the module loads.
 | Parameter | Meaning |
 | --- | --- |
 | `owned` | Compatibles the module may claim, as comma-separated `vendor,name` pairs. Empty by default: nothing is claimed. |
-| `confined` | Compatibles whose DMA their IOMMU really confines. Registers of any other block can't be mapped. Empty by default. |
-| `test_map_unconfined` | Test only. Allows mapping the registers of a block not in `confined`. |
+| `confined` | Compatibles whose DMA their IOMMU really confines. Registers of any other block can't be mapped, unless it is in `unconfined`. Empty by default. |
+| `unconfined` | Compatibles whose registers may be mapped though no IOMMU confines their DMA. The driver in user space alone then keeps the block's DMA inside its own memory, so list only a block whose driver points every address register only at memory the module allocated for it, and whose stock driver already gives user space the same access. `LEMNOS_IOC_INFO` reports such a block with `LEMNOS_INFO_MMIO_UNCONFINED`, and the kernel log says so when it binds. Empty by default. |
 | `test_irq_inject` | Test only. Enables `LEMNOS_IOC_TEST_IRQ`. |
 | `pisp_be` | Compatibles driven as the PiSP back end (`lemnos_pisp_be.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |

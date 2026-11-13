@@ -74,7 +74,9 @@ pub trait DmaBuffers {
     fn sync_for_cpu(&mut self, id: u32) -> Result<(), Self::Error>;
 }
 
-/// The clocks a block needs, by the index a board or chip table gives them.
+/// The clocks a block needs, by the index a board or chip table gives them. An index past the
+/// last clock is `NotFound`, so a driver can take every clock the board names without knowing how
+/// many it names.
 pub trait Clocks {
     type Error: HalError;
 
@@ -85,12 +87,49 @@ pub trait Clocks {
     fn set_rate_hz(&mut self, clock: u32, hz: u64) -> Result<u64, Self::Error>;
 }
 
-/// The reset lines of a block.
+/// The reset lines of a block, by index the same way: an index past the last line is `NotFound`.
 pub trait Reset {
     type Error: HalError;
 
     fn assert(&mut self, line: u32) -> Result<(), Self::Error>;
     fn deassert(&mut self, line: u32) -> Result<(), Self::Error>;
+}
+
+/// Most clocks or reset lines [`enable_clocks`] and [`pulse_resets`] go through.
+pub const MAX_LINES: u32 = 32;
+
+/// Turns on every clock `clocks` has, index 0 first, stopping at the first index that is
+/// `NotFound` (or at [`MAX_LINES`]). Returns how many it turned on. Any other failure ends it.
+pub fn enable_clocks<C: Clocks + ?Sized>(clocks: &mut C) -> Result<u32, C::Error> {
+    for clock in 0..MAX_LINES {
+        match clocks.enable(clock) {
+            Ok(()) => {}
+            Err(e) if e.kind() == crate::ErrorKind::NotFound => return Ok(clock),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(MAX_LINES)
+}
+
+/// Asserts every reset line `reset` has, index 0 first, then releases them in the same order:
+/// the block starts from its reset state. Lines are counted as [`enable_clocks`] counts clocks.
+/// Returns how many lines there are.
+pub fn pulse_resets<R: Reset + ?Sized>(reset: &mut R) -> Result<u32, R::Error> {
+    let mut lines = MAX_LINES;
+    for line in 0..MAX_LINES {
+        match reset.assert(line) {
+            Ok(()) => {}
+            Err(e) if e.kind() == crate::ErrorKind::NotFound => {
+                lines = line;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    for line in 0..lines {
+        reset.deassert(line)?;
+    }
+    Ok(lines)
 }
 
 /// A serial port.

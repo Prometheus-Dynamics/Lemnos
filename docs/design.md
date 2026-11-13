@@ -364,7 +364,9 @@ The reference set (`testing/bench` is its harness):
   capability exists.
 - The GPU stays with Mesa. Lemnos holds only an advisory lease.
 - USB on Linux stays on `usbfs`.
-- K230 capture is direct through `/dev/vvcam-isp.0`. The vendor daemon is never used.
+- K230 capture programs the ISP directly, through `/dev/vvcam-isp.0` or through the kernel
+  module's resources for the ISP (`unconfined=`), as the board file chooses. The vendor daemon is
+  never used.
 - No vendor library lives in Lemnos (see the block rule). The dynamic loader is used for one thing:
   Lemnos's own driver packages.
 - Hardware's work is never done in software in its place. A job a block cannot do fails.
