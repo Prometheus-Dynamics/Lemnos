@@ -36,6 +36,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use crate::calls::{Done, Progress};
 use crate::mirror::Mirror;
@@ -58,6 +59,9 @@ pub struct Shared {
     done: Mutex<Vec<Done>>,
     /// The newest progress of each long job a run is following, not yet passed on.
     progress: Mutex<Vec<Progress>>,
+    /// When a file or stream chunk was last accepted: a transfer making progress renews the caller
+    /// leases (see [`crate::calls`]).
+    transferred: Mutex<Option<Instant>>,
     /// Written by the other threads when there is something for the publisher. A byte waiting
     /// there is a wake-up; one is enough, so a full socket is not an error.
     bell: UnixStream,
@@ -78,6 +82,7 @@ impl Shared {
             mirror: Mutex::new(Mirror::new()),
             done: Mutex::new(Vec::new()),
             progress: Mutex::new(Vec::new()),
+            transferred: Mutex::new(None),
             bell,
             woken,
             stop: AtomicBool::new(false),
@@ -88,6 +93,22 @@ impl Shared {
     pub fn with<R>(&self, f: impl FnOnce(&mut Mirror) -> R) -> R {
         let mut mirror = self.mirror.lock().unwrap_or_else(PoisonError::into_inner);
         f(&mut mirror)
+    }
+
+    /// A file or stream chunk was accepted now.
+    pub fn transferred(&self) {
+        *self
+            .transferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// When a chunk was last accepted, if one ever was.
+    pub fn last_transfer(&self) -> Option<Instant> {
+        *self
+            .transferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Tells the publisher there may be something for it.

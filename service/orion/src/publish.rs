@@ -168,6 +168,7 @@ const fn text_field(name: &'static str) -> Field<'static> {
 /// Publishes what lemnosd has, for as long as the process runs or until `shared` is stopped.
 /// Runs of the devices' actions go to `jobs`, and come back through `shared`.
 pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
+    shared.with(|mirror| mirror.set_lease(config.lease.map(|lease| lease.as_secs())));
     let mut backoff = Backoff::new();
     let mut number = 0u64;
     let mut changes = Changes::default();

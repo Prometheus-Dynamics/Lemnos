@@ -54,12 +54,22 @@ pub fn offers<'a>(tags: impl Iterator<Item = &'a str>) -> String {
 /// The facts to publish, in order: the identity device's facts, then `offers`. Each one that
 /// does not fit the limits is left out and logged; the rest are kept.
 pub fn document(identity: Option<&[(String, String)]>, offers: &str) -> Vec<(String, String)> {
+    document_with(identity, offers, &[])
+}
+
+/// [`document`], with the bridge's own facts after `offers`, held to the same limits.
+pub fn document_with(
+    identity: Option<&[(String, String)]>,
+    offers: &str,
+    bridge: &[(&str, String)],
+) -> Vec<(String, String)> {
     let mut facts: Vec<(String, String)> = Vec::new();
     let candidates = identity
         .unwrap_or(&[])
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
-        .chain((!offers.is_empty()).then_some((OFFERS, offers)));
+        .chain((!offers.is_empty()).then_some((OFFERS, offers)))
+        .chain(bridge.iter().map(|(name, value)| (*name, value.as_str())));
     for (name, value) in candidates {
         if facts.iter().any(|(kept, _)| kept == name) {
             log(&format!("hello.{name} not published: named twice"));

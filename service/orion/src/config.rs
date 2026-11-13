@@ -1,6 +1,7 @@
 //! The service's environment.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use orion::Address;
 
@@ -23,6 +24,12 @@ pub struct Config {
     /// USB function devices whose bulk endpoints are offered to the comm core, each as the link
     /// it is for: `LEMNOS_ORION_LINKS`.
     pub links: Vec<Link>,
+    /// How long a file or stream may go without a chunk before it is dropped, with the device job
+    /// it feeds. The default is the files' idle bound, [`crate::files::IDLE`].
+    pub stall: Duration,
+    /// How long a caller's holds last after its last silence: `LEMNOS_ORION_LEASE`, in whole seconds.
+    /// `None` when it is 0: no lease, and the bridge says nothing about one. See [`crate::calls`].
+    pub lease: Option<Duration>,
     /// The files each device takes as a stream, fed to its long job as they arrive
     /// (`LEMNOS_ORION_STREAMS`).
     pub streams: Vec<(String, Vec<String>)>,
@@ -71,6 +78,8 @@ impl Config {
             files: files(std::env::var("LEMNOS_ORION_FILES").ok().as_deref())?,
             links: links(std::env::var("LEMNOS_ORION_LINKS").ok().as_deref())?,
             streams: streams(std::env::var("LEMNOS_ORION_STREAMS").ok().as_deref())?,
+            lease: lease(std::env::var("LEMNOS_ORION_LEASE").ok().as_deref())?,
+            stall: crate::files::IDLE,
         })
     }
 }
@@ -165,6 +174,27 @@ pub fn streams(value: Option<&str>) -> Result<Vec<(String, Vec<String>)>, String
 }
 
 /// `device=link` pairs, comma-separated, from `LEMNOS_ORION_LINKS`.
+/// The lease when `LEMNOS_ORION_LEASE` is unset: a caller's holds last a minute after its last request.
+pub const LEASE: Duration = Duration::from_secs(60);
+
+/// `LEMNOS_ORION_LEASE`: whole seconds. Unset is [`LEASE`]; `0` turns the lease off (`None`).
+///
+/// # Errors
+///
+/// When the value is not a whole number of seconds.
+pub fn lease(value: Option<&str>) -> Result<Option<Duration>, String> {
+    let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
+        return Ok(Some(LEASE));
+    };
+    match text.trim().parse::<u64>() {
+        Ok(0) => Ok(None),
+        Ok(seconds) => Ok(Some(Duration::from_secs(seconds))),
+        _ => Err(format!(
+            "LEMNOS_ORION_LEASE {text:?}: want whole seconds (0 turns the lease off)"
+        )),
+    }
+}
+
 pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
     let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
         return Ok(Vec::new());
@@ -187,6 +217,16 @@ pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lease_is_whole_seconds_with_a_minute_by_default() {
+        assert_eq!(lease(None), Ok(Some(LEASE)));
+        assert_eq!(lease(Some("  ")), Ok(Some(LEASE)));
+        assert_eq!(lease(Some("5")), Ok(Some(Duration::from_secs(5))));
+        assert_eq!(lease(Some("0")), Ok(None), "0 turns the lease off");
+        assert!(lease(Some("1.5")).is_err());
+        assert!(lease(Some("soon")).is_err());
+    }
 
     #[test]
     fn streams_name_the_files_each_device_takes_as_a_stream() {

@@ -7,7 +7,7 @@
 //! `accept` method, when its description has one, is called with the file's size: a device that
 //! has no room refuses it there. The file is written under a hidden name, checked against its
 //! SHA-256 when the sender commits it, and only then renamed to `<name>`. A file that fails the
-//! check, is refused, or stops arriving for [`IDLE`] is deleted.
+//! check, is refused, or stops arriving for [`IDLE`] (`Config::stall`) is deleted.
 //!
 //! Nothing here knows what a device does with the file: the board says which device takes
 //! files, and the device's own method says whether it has room. A sender then runs the
@@ -353,7 +353,8 @@ fn serve(
     let look = LOOK / u32::try_from(takers.len()).unwrap_or(1).max(1);
     while !shared.stopping() {
         for taker in takers.iter_mut() {
-            taker.receiver.expire(IDLE);
+            taker.receiver.expire(config.stall);
+            taker.streamer.expire(config.stall);
             let Some(handed) = taker.sink.next(look)? else {
                 continue;
             };
@@ -398,14 +399,18 @@ fn serve(
                     transfer,
                     offset,
                     data,
-                } if taker.streamer.owns(transfer) => {
-                    (transfer, taker.streamer.chunk(transfer, offset, &data))
-                }
+                } if taker.streamer.owns(transfer) => (
+                    transfer,
+                    accepted(shared, taker.streamer.chunk(transfer, offset, &data)),
+                ),
                 Handed::Chunk {
                     transfer,
                     offset,
                     data,
-                } => (transfer, taker.receiver.chunk(transfer, offset, &data)),
+                } => (
+                    transfer,
+                    accepted(shared, taker.receiver.chunk(transfer, offset, &data)),
+                ),
                 Handed::Commit { transfer } if taker.streamer.owns(transfer) => {
                     (transfer, taker.streamer.commit(transfer))
                 }
@@ -417,6 +422,18 @@ fn serve(
         }
     }
     Ok(())
+}
+
+/// A chunk the bridge answers as still receiving renews the caller leases: a transfer making progress
+/// is a caller alive (see [`crate::calls`]). Pinned Orion does not say which session sent a chunk, so
+/// every caller's lease is renewed, not only the sender's; a dead caller's holds survive while any
+/// transfer is being accepted.
+// ORION-R2 (C33): the files events gain the sending session, and only that caller's lease is renewed.
+fn accepted(shared: &Shared, answer: Answer) -> Answer {
+    if answer.state == FileState::Receiving {
+        shared.transferred();
+    }
+    answer
 }
 
 /// The SHA-256 of a file, for tests and tools.

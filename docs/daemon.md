@@ -473,9 +473,8 @@ each running) each description measures, with `encode_description` of its manife
 devices. The full-board example's devices need hardware, so their descriptions cannot be measured on
 this machine, and are not measured here. The measurement is `the_description_of_each_device_on_the_walk_board_is_measured_against_the_bound`.
 
-The bridge does not yet serve `describe` through `.call`. Its client decodes a description and keeps no
-bytes of it, and the manifest that re-encodes one is held by lemnosd, so the bridge cannot send the
-frame as it is. A text form of the description, made by lemnosd, is the step that is not built.
+`.call describe` answers the description as text, through the bridge, from the description the bridge
+decodes (see "The description through `.call`" above). The bytes the client drops are not kept.
 
 **Out-buffer replies through `.call`.** An out-buffer method takes the same optional size word as
 `lemnos-ctl call` (see above). The bridge's default size is 61440 bytes, not the frame limit, and a
@@ -501,7 +500,8 @@ and `lemnos_orion::description::parse` reads it back:
   `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`,
   `colour_array`, `three_axes`, `true`, `false`). A figure the device does not give is `unknown`; an option
   that is not set is `none`. The quoted text `"none"` is a value, not the absent option.
-- `device generation label kind bus address location state reason`: `generation` is the device's
+- `device generation lease_seconds label kind bus address location state reason`: `lease_seconds` is the
+  bridge's caller lease (the hello fact `lease.seconds`); `generation` is the device's
   description generation, the same number as its `lemnos.<device>.description` topic (the two come from one
   field, so a change moves both), or `unknown` before the device has one.
 - `contract index tag kind hash methods`; `method contract id name params returns out_buffer job`, where
@@ -540,14 +540,63 @@ unchanged; a status change, or a fact, is stamped when the bridge sees it. The b
 nothing. Orion's `orion.time` says how far each board's wall clock is from its monotonic one, for
 whoever wants a wall time.
 
-**Callers.** Each Orion caller has a lemnosd connection of its own, so a driver that tracks callers
-(`TRACKS_CALLERS`) sees each one as its own `CallerId`. A cancel cancels its run and nothing else:
-the job is cancelled on lemnosd, and the caller's connection and the driver's holds for it stay.
-The bridge does not send `caller_gone` yet. At Orion's pinned revision a cancel does not say why it
-was sent, and the same cancel comes when the caller stops the run, when the caller's session ends,
-when a deadline passes and when the node stops, so a caller that is still there cannot be told from
-one that is gone. When Orion says why (its reason 2, the caller's session ended), the bridge will
-close the caller's connection, and lemnosd will tell the drivers that caller is gone.
+**Callers.** Each Orion caller has a lemnosd connection of its own, one per Orion caller identity
+(`local:<uid>` and the others), not per session: Orion names every local session of one user the same
+caller. A driver that tracks callers (`TRACKS_CALLERS`) sees each caller as its own `CallerId`. A cancel
+cancels its run and nothing else: the job is cancelled on lemnosd, and the caller's connection and the
+driver's holds for it stay.
+
+**Leases.** At Orion's pinned revision the bridge learns of a session's end only as a cancel of a run in
+progress, and that cancel does not say why it was sent. A silent live session cannot be told from a dead
+one, so the bridge bounds the holds of a caller by a lease instead. When a caller has been silent for the
+lease, the bridge drops that caller's lemnosd connection, its jobs end with it, and lemnosd tells the
+drivers the caller is gone (`caller_gone`), which releases what it held. The lease is `LEMNOS_ORION_LEASE`
+seconds, default 60. `LEMNOS_ORION_LEASE=0` turns the lease off: no caller is dropped for silence, and the
+bridge says nothing of a lease (see below).
+
+**Only silence expires a lease.** A caller's lease is renewed by each of these, and by nothing else:
+
+- every request of the caller: a `call`, `set` or `power` run, a `cancel` of its run, and a request
+  refused for its arguments. At Orion's pinned revision a cancel does not say who sent it, so a session's
+  end that arrives as a cancel renews too;
+- the end or cancel of one of its runs, which starts the lease from that moment;
+- every progress report of a long job the caller started (the job's progress is news of its run);
+- every file or stream chunk the bridge accepts, that is, one it answers as still receiving. Pinned Orion
+  does not say which session sent a chunk, so an accepted chunk renews every caller's lease, not only its
+  sender's. A dead caller's holds therefore survive while any transfer is being accepted.
+  `ORION-R2 (C33)` marks where the sending session is named.
+
+**A caller with a run in flight is alive.** A caller with any run in flight (started by it, not yet
+finished and not cancelled) is not dropped for silence, whether or not the run reports progress, so a
+healthy silent job (a verify, a self-test) keeps its caller's holds. The comm core cancels the runs of a
+session that ends (a reason-less Cancel for a non-detached run), and a cancelled run no longer counts, so
+a dead caller's run stops shielding it. The one residual case: a DETACHED run from a dead caller is not
+cancelled by the comm core, and the bridge cannot see the detached flag, so it shields that caller's holds
+until the run itself ends. The later protocol revision closes that (`ORION-R2 (C33)` in
+`service/orion/src/calls.rs`).
+
+Not renewed: the bridge's own housekeeping (its publishing of the hello document, its ticks), and Orion's
+own traffic to the caller (its topic subscriptions and its pings), which the bridge does not see.
+
+**The lease is readable.** While the lease is on, the hello document carries `lease.seconds` (the lease
+in whole seconds, so no client hard-codes it) and `leases.ended` (how many callers' leases have ended
+since the bridge started), and the describe reply's device record carries `lease_seconds`. With
+`LEMNOS_ORION_LEASE=0` all three are absent: a client reads the lease as off when `lease.seconds` is not in
+the hello document, which is also what an image without the lease says. Each drop is logged by the caller's
+class (`local`, `operator`, `peer`, `device` or `anonymous`, never its key or uid), with one connection released.
+
+**This is a breaking change for clients, and it is breaking for a silent holder.** A client that holds
+state on a device (a lease, a claim, a hold taken through `.call`) renews it with any request before the
+lease runs out. `.call describe` is the renewal with nothing else to do: a client holding state and
+otherwise silent sends it at least every lease divided by three, or keeps a run in flight, or a
+push that keeps sending. A silent holder, one that renews nothing for the lease and has no run in flight, loses its holds when the
+lease runs out, whether it is alive or not. The bridge cannot tell the two apart at this revision.
+
+A caller that is detached from its run cannot be told apart from a live one at this revision (the bridge
+does not see the detached flag), so its holds last as long as its run's progress does. When Orion's cancel
+says why it was sent, the connection will be closed at once on a session's end and the lease will not be
+needed for it (`ORION-R2 (C33)` in `service/orion/src/calls.rs`). Power and the boot holds of VBUS are not
+caller holds and are not released by a lease.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:
@@ -587,6 +636,13 @@ job's `data` before acknowledging it. The commit checks the stream's SHA-256 and
 The sender then runs the device's action that uses the file, such as `.call install_file <name>
 false false` on a slot device ([Slots](slots.md#over-orion)). A transfer that is begun again
 resumes from where it stopped.
+
+A transfer or stream that gets no chunk for the files' idle bound (600 seconds, the same bound after which
+the receiver deletes a partial file) is dropped with its device job, so a sender that went quiet does not
+hold the device. The bound is not set by the environment. The bridge sees chunks, not reads: Orion's
+sender packs its reads into 32 KiB chunks, so a sender keeps its stream alive by sending a chunk within
+the bound, and each chunk restarts it. The bridge does not tell the sender; the same bound applies whether
+the sender is alive or gone, because Orion says nothing when a session ends except for a run in progress.
 
 The bridge needs to be able to write into the directory. See `packaging/README.md`.
 

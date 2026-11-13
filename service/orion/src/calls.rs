@@ -22,16 +22,19 @@
 //! apart by connection, so a driver that tracks callers sees each Orion caller as its own.
 //!
 //! A cancel stops the run and nothing else: the job is cancelled on lemnosd, and the caller's
-//! connection stays, so the drivers keep what the caller holds. At Orion's pinned revision a cancel
-//! does not say why it was sent. Orion sends the same `Cancel` when the caller stops the run, when
-//! the caller's session ends, when the run's deadline passes and when the node stops, and a caller
-//! that is still there cannot be told from one that is gone. So lemnosd is not told a caller is gone
-//! at all until Orion says why (see the `ORION-R2` note in `cancel`).
+//! connection stays for now, so the drivers keep what the caller holds. At Orion's pinned revision a
+//! cancel does not say why it was sent. Orion sends the same `Cancel` when the caller stops the run,
+//! when the caller's session ends, when the run's deadline passes and when the node stops, and a caller
+//! that is still there cannot be told from one that is gone. So the connection is closed when the
+//! caller's lease runs out (see [`expire`]): a caller silent for the lease is gone, and lemnosd then
+//! tells the drivers so. Only silence expires a lease: a request, a transfer chunk or a run's progress
+//! renews it (see [`expire`] for the list). The `ORION-R2 (C33)` notes mark where Orion's
+//! reason replaces the lease.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
+use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, Error, JobEvent};
 use lemnos_core::{ItemKind, Status};
@@ -41,7 +44,7 @@ use lemnos_wire::text::{
 };
 use orion::actions::Outcome;
 
-use crate::{LEMNOSD_CALLS_NAME, Shared};
+use crate::{LEMNOSD_CALLS_NAME, Shared, log};
 
 /// The largest reply read, as `lemnos-ctl` reads it.
 const REPLY_MAX: usize = 64 * 1024;
@@ -149,11 +152,29 @@ struct Running {
     caller: String,
 }
 
+/// A caller's lemnosd connection, and when the caller last had a request: a run, a run's end or a
+/// cancel. Its holds last for the lease after that, while no run of the caller is in progress.
+struct Lemnosd {
+    client: Client,
+    seen: Instant,
+}
+
+impl Lemnosd {
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            seen: Instant::now(),
+        }
+    }
+}
+
 /// The lemnosd connections the calls go on, by caller.
-type Callers = HashMap<String, Client>;
+type Callers = HashMap<CallerKey, Lemnosd>;
 
 /// How long the call thread waits for a job's news before it looks for new runs again.
 const JOB_WAIT: Duration = Duration::from_millis(50);
+/// How often the call thread looks for a caller whose lease has run out, when no run is going.
+const LEASE_TICK: Duration = Duration::from_millis(200);
 
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,21 +192,28 @@ pub struct Done {
 ///
 /// Each caller's connection is made when a run from it comes and none is up, so a call made just
 /// after lemnosd comes back reaches it, rather than waiting out a retry delay from while it was
-/// away.
-pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared) {
+/// away. A connection is kept for as long as the caller's lease lasts ([`expire`]).
+pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: Option<Duration>) {
     let mut clients: Callers = HashMap::new();
     let mut running: Vec<Running> = Vec::new();
     loop {
-        let message = if running.is_empty() {
+        expire(&mut clients, &mut running, lease, Instant::now(), shared);
+        let message = if !running.is_empty() {
+            match messages.try_recv() {
+                Ok(message) => Some(message),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        } else if clients.is_empty() {
             match messages.recv() {
                 Ok(message) => Some(message),
                 Err(_) => return,
             }
         } else {
-            match messages.try_recv() {
+            match messages.recv_timeout(LEASE_TICK) {
                 Ok(message) => Some(message),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
             }
         };
         match message {
@@ -195,14 +223,105 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared) {
             Some(Message::Cancel { session, call }) => {
                 cancel(&mut clients, &mut running, session, call, shared);
             }
-            None => follow(&mut clients, &mut running, shared),
+            None if !running.is_empty() => follow(&mut clients, &mut running, shared),
+            None => {}
         }
     }
 }
 
+/// The key a caller's lemnosd connection is kept under: the Orion caller's identity.
+// ORION-R2 (C33): the key becomes the session token Orion gives each Claim (`Claim.session`), so a
+// session's connection is kept apart from another session of the same identity. This alias is the
+// one place the key type is named.
+pub type CallerKey = String;
+
+/// The class of a caller, as its identity names it: `local`, `operator`, `peer`, `device` or
+/// `anonymous`. The class is all a log line or the hello document says of a caller; never its key.
+pub fn caller_class(caller: &str) -> &'static str {
+    match caller.split(':').next() {
+        Some("local") => "local",
+        Some("operator") => "operator",
+        Some("peer") => "peer",
+        Some("device") => "device",
+        _ => "anonymous",
+    }
+}
+
+/// Drops the connection of each caller whose lease has run out, when the lease is on. Each one is
+/// released through [`release`], and its jobs end with its connection.
+///
+/// Only silence expires a lease. A caller's last renewal is the latest of:
+///
+/// - a request of it: a `call`, `set` or `power` run, or a `cancel` of its run;
+/// - the end of one of its runs (its job's last news);
+/// - a progress report of a long job it started (`Progress` news of its run);
+/// - a file or stream chunk the bridge accepted (its answer says it is still receiving). Pinned Orion
+///   does not say which session sent a chunk, so an accepted chunk renews every caller's lease.
+///
+/// The bridge's own housekeeping (its publishing, its hello document, its ticks) renews nothing, and
+/// neither does a topic published to a caller. A caller with a run in flight is not dropped for silence
+/// (see the rule below), and the run's own progress renews it.
+///
+/// A holder keeps its holds by renewing them: `<resource>.call describe` is the renewal with nothing
+/// else to do.
+// ORION-R2 (C33): the lease is removed at R2. Orion's CALLER_GONE, sent once for each session that
+// ends, releases that session's connection at once, idle or busy; this function is then not called.
+// The lease is kept only as the documented behaviour against an Orion older than R2.
+fn expire(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    lease: Option<Duration>,
+    now: Instant,
+    shared: &Shared,
+) {
+    let Some(lease) = lease else {
+        return;
+    };
+    let transferred = shared.last_transfer();
+    let ended: Vec<CallerKey> = clients
+        .iter()
+        .filter(|(caller, held)| {
+            // ORION-R2 (C33): a caller with any run in flight is alive, whether or not the run reports
+            // progress. The comm core cancels the runs of a session that ends (a reason-less Cancel for
+            // a non-detached run), and a cancelled run no longer counts; a DETACHED run from a dead
+            // caller is not cancelled and the bridge cannot see the flag, so it holds that caller's
+            // holds until the run itself ends. The later protocol revision closes that.
+            if running.iter().any(|r| r.caller == **caller) {
+                return false;
+            }
+            let renewed = transferred.map_or(held.seen, |at| at.max(held.seen));
+            now.saturating_duration_since(renewed) >= lease
+        })
+        .map(|(caller, _)| caller.clone())
+        .collect();
+    for caller in ended {
+        ended_with(
+            &caller,
+            running,
+            shared,
+            "its lease ran out; the job ended with its connection",
+        );
+        release(clients, &caller, "its lease ran out", shared);
+    }
+}
+
+// ORION-R2 (C33): the one trigger that releases a caller's holds. Dropping the connection closes it
+// on lemnosd, which calls `caller_gone` on the drivers. At R2 the trigger is CALLER_GONE for the
+// session token; the drop, the log and the count below stay.
+fn release(clients: &mut Callers, caller: &str, why: &str, shared: &Shared) {
+    if clients.remove(caller).is_some() {
+        log(&format!(
+            "caller of class {} dropped: {why}; its connection to lemnosd closed, and lemnosd released what it held (1 connection)",
+            caller_class(caller)
+        ));
+        shared.with(|mirror| mirror.note_lease_end());
+    }
+}
+
 /// Stops run `call` of `session`. A long job is cancelled on lemnosd, and the run ends as cancelled
-/// at once: nothing else would answer it. The caller's connection is kept.
-// ORION-R2: Orion's Cancel gains `reason` (0 not said, 1 caller asked, 2 caller's session ended,
+/// at once: nothing else would answer it. The caller's connection is kept, and its lease starts
+/// from now: a caller whose session ended is gone within a lease of its cancel.
+// ORION-R2 (C33): Orion's Cancel gains `reason` (0 not said, 1 caller asked, 2 caller's session ended,
 // 3 deadline, 4 node stopping). With reason 2 only, the caller's lemnosd connection is closed here
 // after its job is cancelled (`clients.remove`), which is what tells lemnosd's drivers the caller
 // is gone. Every other reason keeps the connection, as this does now.
@@ -220,9 +339,10 @@ fn cancel(
         return;
     };
     let r = running.remove(at);
-    if let Some(client) = clients.get(&r.caller) {
+    if let Some(lemnosd) = clients.get_mut(&r.caller) {
         // Its end, cancelled or not, comes as the job's news, which finds no run and is dropped.
-        let _ = client.cancel_job(r.job);
+        let _ = lemnosd.client.cancel_job(r.job);
+        lemnosd.seen = Instant::now();
     }
     shared.finished(Done {
         session: r.session,
@@ -231,6 +351,13 @@ fn cancel(
         output: String::new(),
         detail: "cancelled".to_owned(),
     });
+}
+
+/// Connects the caller's connection to lemnosd, when it can be made.
+fn connect(socket: &Path, clients: &mut Callers, caller: &str) {
+    if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
+        clients.insert(caller.to_owned(), Lemnosd::new(client));
+    }
 }
 
 /// Runs one job: answered now, or followed as a long job.
@@ -242,26 +369,31 @@ fn run_one(
     shared: &Shared,
 ) {
     let caller = job.caller.as_str();
-    if !clients.get(caller).is_some_and(Client::is_connected) {
+    if let Some(lemnosd) = clients.get_mut(caller) {
+        lemnosd.seen = Instant::now();
+    }
+    if !clients.get(caller).is_some_and(|l| l.client.is_connected()) {
         // Jobs on the connection that went are over: lemnosd ended them with it.
         lost(caller, running, shared);
         clients.remove(caller);
-        if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
-            clients.insert(caller.to_owned(), client);
-        }
+        connect(socket, clients, caller);
     }
     let mut served = match clients.get(caller) {
-        Some(client) => serve(client, job, shared),
+        Some(lemnosd) => serve(&lemnosd.client, job, shared),
         None => Err(Failure::Failed("lemnosd is not there".to_owned())),
     };
     // A connection that went quiet with lemnosd is found dead only when used: connect
     // again and run the job once more: the call never reached the lemnosd that is there now.
-    if served.is_err() && clients.get(caller).is_some_and(|c| !c.is_connected()) {
+    if served.is_err()
+        && clients
+            .get(caller)
+            .is_some_and(|l| !l.client.is_connected())
+    {
         lost(caller, running, shared);
         clients.remove(caller);
         if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
             served = serve(&client, job, shared);
-            clients.insert(caller.to_owned(), client);
+            clients.insert(caller.to_owned(), Lemnosd::new(client));
         }
     }
     let (outcome, output, detail) = match served {
@@ -296,10 +428,10 @@ fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
     let wait = JOB_WAIT / u32::try_from(clients.len()).unwrap_or(u32::MAX);
     let mut news = Vec::new();
     let mut gone = Vec::new();
-    for (caller, client) in clients.iter() {
-        match client.wait_job_event(wait) {
+    for (caller, lemnosd) in clients.iter() {
+        match lemnosd.client.wait_job_event(wait) {
             Some(event) => news.push((caller.clone(), event)),
-            None if !client.is_connected() => gone.push(caller.clone()),
+            None if !lemnosd.client.is_connected() => gone.push(caller.clone()),
             None => {}
         }
     }
@@ -310,13 +442,17 @@ fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
     for (caller, event) in news {
         match event {
             JobEvent::Progress { job, done, total } => {
-                if let Some(r) = running.iter().find(|r| r.job == job) {
+                // A long job that reports progress is its caller alive: the progress renews its lease.
+                if let Some(r) = running.iter().find(|r| r.job == job && r.caller == caller) {
                     shared.progressed(Progress {
                         session: r.session,
                         call: r.call,
                         done,
                         total,
                     });
+                    if let Some(lemnosd) = clients.get_mut(&caller) {
+                        lemnosd.seen = Instant::now();
+                    }
                 }
             }
             JobEvent::Done {
@@ -331,6 +467,9 @@ fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
                     continue;
                 };
                 let r = running.remove(at);
+                if let Some(lemnosd) = clients.get_mut(&caller) {
+                    lemnosd.seen = Instant::now();
+                }
                 shared.finished(job_done(&r, status, &result));
             }
         }
@@ -370,6 +509,16 @@ pub fn result_text(result: &[u8]) -> String {
 /// Ends the followed jobs of one caller as failed: its lemnosd connection went, and its jobs
 /// with it.
 fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
+    ended_with(
+        caller,
+        running,
+        shared,
+        "lemnosd went away; the job ended with it",
+    );
+}
+
+/// Ends the followed jobs of one caller as failed, with `detail` as the reason.
+fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail: &str) {
     let mut kept = Vec::with_capacity(running.len());
     for r in running.drain(..) {
         if r.caller != caller {
@@ -381,7 +530,7 @@ fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
             call: r.call,
             outcome: Outcome::Failed,
             output: String::new(),
-            detail: "lemnosd went away; the job ended with it".to_owned(),
+            detail: detail.to_owned(),
         });
     }
     *running = kept;
@@ -467,8 +616,13 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
             return Err(Failure::Refused("describe takes no arguments".to_owned()));
         }
         // The generation comes from the mirror, the field the device's topic publishes.
-        let generation = shared.with(|mirror| mirror.description_generation(&device.name));
-        let text = crate::description::render(&description, generation);
+        let (generation, lease) = shared.with(|mirror| {
+            (
+                mirror.description_generation(&device.name),
+                mirror.lease_seconds(),
+            )
+        });
+        let text = crate::description::render(&description, generation, lease);
         if text.len() > ORION_REPLY_MAX as usize {
             return Err(Failure::Failed(format!(
                 "the description is {} bytes; the reply carries at most {ORION_REPLY_MAX}, and a partial one is never sent",
@@ -510,6 +664,21 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_caller_is_named_by_its_class_never_its_key() {
+        assert_eq!(caller_class("local:1000"), "local");
+        assert_eq!(caller_class("operator:0f3a-secret"), "operator");
+        assert_eq!(caller_class("peer:node-7"), "peer");
+        assert_eq!(caller_class("device:imu"), "device");
+        assert_eq!(caller_class("anonymous"), "anonymous");
+        assert_eq!(caller_class(""), "anonymous");
+        assert_eq!(
+            caller_class("root:0"),
+            "anonymous",
+            "an unknown class is anonymous"
+        );
+    }
 
     #[test]
     fn each_verb_has_its_own_name() {

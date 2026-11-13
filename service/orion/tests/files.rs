@@ -197,6 +197,8 @@ fn start_bridge(lemnosd: &Path, orion: &Path, incoming: &Path) -> Bridge {
         files: vec![("slots".to_owned(), incoming.to_path_buf())],
         links: Vec::new(),
         streams: Vec::new(),
+        lease: Some(lemnos_orion::config::LEASE),
+        stall: lemnos_orion::files::IDLE,
     };
     let (jobs, queue) = mpsc::channel();
     let threads = vec![
@@ -206,7 +208,9 @@ fn start_bridge(lemnosd: &Path, orion: &Path, incoming: &Path) -> Bridge {
         },
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
-            std::thread::spawn(move || calls::run(&socket, &queue, &shared))
+            std::thread::spawn(move || {
+                calls::run(&socket, &queue, &shared, Some(lemnos_orion::config::LEASE))
+            })
         },
         {
             let (config, shared) = (config.clone(), Arc::clone(&shared));

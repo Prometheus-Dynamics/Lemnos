@@ -24,7 +24,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, Handle};
 use lemnos_slot_store::json::Json;
@@ -65,6 +65,8 @@ struct Active {
     job: u64,
     handle: Handle,
     data: u16,
+    /// When the sender last sent a chunk, or the stream began.
+    seen: Instant,
 }
 
 impl std::fmt::Debug for Active {
@@ -120,6 +122,21 @@ impl Streamer {
             && let Ok(client) = self.client()
         {
             let _ = client.cancel_job(active.job);
+        }
+    }
+
+    /// Drops the stream being received when no chunk has come for `idle`: the job it feeds would
+    /// otherwise hold the device for ever. The receiver expires the file at the same time, so the
+    /// sender could not send on either way. Nothing says a sender went; a quiet one is dropped the same.
+    // ORION-R2 (C33): the sender's session end (Orion's Cancel with its reason) would say the stream is
+    // over at once; until then the bound is the one `idle` gives.
+    pub fn expire(&mut self, idle: Duration) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.seen.elapsed() >= idle)
+        {
+            self.drop_active();
         }
     }
 
@@ -197,6 +214,7 @@ impl Streamer {
             job,
             handle,
             data: data_id,
+            seen: Instant::now(),
         })
     }
 
@@ -237,6 +255,7 @@ impl Streamer {
         };
         active.hasher.update(bytes);
         active.got += bytes.len() as u64;
+        active.seen = Instant::now();
         Answer {
             received: active.got,
             state: FileState::Receiving,

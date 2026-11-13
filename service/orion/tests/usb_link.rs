@@ -140,6 +140,8 @@ fn bridge_config(lemnosd_socket: &Path, orion: &Path) -> Config {
         files: Vec::new(),
         links: Vec::new(),
         streams: Vec::new(),
+        lease: Some(lemnos_orion::config::LEASE),
+        stall: lemnos_orion::files::IDLE,
     }
 }
 

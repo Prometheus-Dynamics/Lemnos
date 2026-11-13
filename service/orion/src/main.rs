@@ -49,9 +49,10 @@ fn main() -> ExitCode {
         {
             let socket = config.lemnosd_socket.clone();
             let shared = Arc::clone(&shared);
+            let lease = config.lease;
             std::thread::Builder::new()
                 .name("calls".to_owned())
-                .spawn(move || calls::run(&socket, &queue, &shared))
+                .spawn(move || calls::run(&socket, &queue, &shared, lease))
         },
         {
             let config = config.clone();

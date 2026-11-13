@@ -15,10 +15,6 @@ use lemnos_contract_self_test::{
     Outcome as SelfOutcome, RECORD_BYTES, Record, read_last, read_tests,
 };
 use lemnos_core::Reader;
-use lemnos_core::{
-    CallerId, Config as DriverConfig, JobId, JobState, Lifecycle, Reply, Result,
-    Status as DriverStatus, contract, driver,
-};
 use lemnos_driver_board_self_test::BoardSelfTest;
 use lemnos_driver_system_identity::Identity;
 use lemnos_driver_system_slots::SystemSlots;
@@ -121,6 +117,25 @@ struct Bridge {
 }
 
 fn start_bridge(lemnosd: &Path, orion: &Path, node: Option<&str>) -> Bridge {
+    start_bridge_leased(lemnosd, orion, node, lemnos_orion::config::LEASE)
+}
+
+fn start_bridge_leased(
+    lemnosd: &Path,
+    orion: &Path,
+    node: Option<&str>,
+    lease: Duration,
+) -> Bridge {
+    start_bridge_opt(lemnosd, orion, node, Some(lease))
+}
+
+/// A bridge whose lease is `lease`, or off when it is `None` (`LEMNOS_ORION_LEASE=0`).
+fn start_bridge_opt(
+    lemnosd: &Path,
+    orion: &Path,
+    node: Option<&str>,
+    lease: Option<Duration>,
+) -> Bridge {
     let shared = Arc::new(Shared::new().expect("shared"));
     let config = Config {
         lemnosd_socket: lemnosd.to_path_buf(),
@@ -130,6 +145,8 @@ fn start_bridge(lemnosd: &Path, orion: &Path, node: Option<&str>) -> Bridge {
         files: Vec::new(),
         links: Vec::new(),
         streams: Vec::new(),
+        lease,
+        stall: lemnos_orion::files::IDLE,
     };
     let (jobs, queue) = mpsc::channel();
     let threads = vec![
@@ -139,7 +156,7 @@ fn start_bridge(lemnosd: &Path, orion: &Path, node: Option<&str>) -> Bridge {
         },
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
-            std::thread::spawn(move || calls::run(&socket, &queue, &shared))
+            std::thread::spawn(move || calls::run(&socket, &queue, &shared, lease))
         },
         {
             let shared = Arc::clone(&shared);
@@ -686,6 +703,8 @@ fn the_board_publishes_its_identity_facts_and_what_it_offers() {
     let facts = hello_with(&dashboard, "offers");
     let expected: BTreeMap<String, String> = [
         ("family", "reference"),
+        ("lease.seconds", "60"),
+        ("leases.ended", "0"),
         ("model", "Alpha r2"),
         ("offers", OFFERS),
         ("serial", "0000000000abcdef"),
@@ -716,7 +735,14 @@ fn a_fact_that_cannot_be_read_is_absent() {
     let names: Vec<&str> = facts.keys().map(String::as_str).collect();
     assert_eq!(
         names,
-        ["family", "model", "offers", "version.lemnos"],
+        [
+            "family",
+            "lease.seconds",
+            "leases.ended",
+            "model",
+            "offers",
+            "version.lemnos"
+        ],
         "no serial and no running slot: absent, not guessed"
     );
 }
@@ -986,108 +1012,9 @@ fn image(dir: &Path, id: &str) {
     file.set_len(4096).expect("image size");
 }
 
-/// A device whose driver tracks its callers: `take` remembers the caller that asked, `held` counts
-/// the callers it holds for, `who` says the caller's number, and `hold_until_cancelled` is a long
-/// job that runs until it is cancelled.
-#[contract("tracked", version = 1)]
-pub trait Tracked {
-    #[method(1)]
-    fn take(&mut self) -> Result<()>;
-    #[method(2)]
-    fn held(&mut self) -> Result<u32>;
-    #[method(3)]
-    fn who(&mut self) -> Result<u32>;
-    #[method(4, job)]
-    fn hold_until_cancelled(&mut self) -> Result<JobId>;
-}
-
-#[driver("tracked", provides = [Tracked])]
-pub struct TrackedDevice {
-    calling: CallerId,
-    holders: [Option<CallerId>; 8],
-    job: Option<(JobId, bool)>,
-    next: u64,
-}
-
-impl Lifecycle for TrackedDevice {
-    type Needs = TrackedDeviceNeeds;
-    const TRACKS_CALLERS: bool = true;
-    const JOBS: bool = true;
-
-    fn start(_: TrackedDeviceNeeds, _: &DriverConfig<'_>) -> Result<Self> {
-        Ok(Self {
-            calling: CallerId::LOCAL,
-            holders: [None; 8],
-            job: None,
-            next: 0,
-        })
-    }
-
-    fn caller(&mut self, caller: CallerId) {
-        self.calling = caller;
-    }
-
-    fn caller_gone(&mut self, caller: CallerId) {
-        for holder in &mut self.holders {
-            if *holder == Some(caller) {
-                *holder = None;
-            }
-        }
-    }
-
-    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
-        let _ = result;
-        match self.job {
-            Some((id, cancelled)) if id == job => {
-                if cancelled {
-                    self.job = None;
-                    JobState::Finished(DriverStatus::CANCELLED)
-                } else {
-                    JobState::Running { done: 0, total: 0 }
-                }
-            }
-            _ => JobState::Finished(DriverStatus::NOT_FOUND),
-        }
-    }
-
-    fn job_cancel(&mut self, job: JobId) {
-        if let Some((id, cancelled)) = &mut self.job
-            && *id == job
-        {
-            *cancelled = true;
-        }
-    }
-}
-
-impl Tracked for TrackedDevice {
-    fn take(&mut self) -> Result<()> {
-        if self.holders.contains(&Some(self.calling)) {
-            return Ok(());
-        }
-        if let Some(free) = self.holders.iter_mut().find(|h| h.is_none()) {
-            *free = Some(self.calling);
-        }
-        Ok(())
-    }
-
-    fn held(&mut self) -> Result<u32> {
-        Ok(self.holders.iter().flatten().count() as u32)
-    }
-
-    fn who(&mut self) -> Result<u32> {
-        Ok(self.calling.0 as u32)
-    }
-
-    fn hold_until_cancelled(&mut self) -> Result<JobId> {
-        if self.job.is_some() {
-            return Err(DriverStatus::BUSY);
-        }
-        self.next += 1;
-        let id = JobId(self.next);
-        self.job = Some((id, false));
-        Ok(id)
-    }
-}
+#[path = "support/tracked.rs"]
+mod tracked;
+use tracked::TrackedDevice;
 
 /// lemnosd over a board text, with the given drivers.
 fn start_lemnosd_with(
@@ -1311,6 +1238,17 @@ fn a_fact_and_a_device_coming_and_going_move_an_unrelated_device_not_at_all() {
 /// Orion names every local session by the same caller (`local:<uid>`), so the bridge keeps one
 /// lemnosd connection for them, and the driver sees one caller: what the holds below count.
 fn start_tracked(dir: &Path) -> (Board, Logic, Service, Bridge, Orion) {
+    start_tracked_leased(dir, lemnos_orion::config::LEASE)
+}
+
+fn start_tracked_leased(dir: &Path, lease: Duration) -> (Board, Logic, Service, Bridge, Orion) {
+    start_tracked_opt(dir, Some(lease))
+}
+
+fn start_tracked_opt(
+    dir: &Path,
+    lease: Option<Duration>,
+) -> (Board, Logic, Service, Bridge, Orion) {
     let lemnosd = dir.join("lemnosd.sock");
     let board_text = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
     let board = Board::start_for_node(dir);
@@ -1324,7 +1262,7 @@ fn start_tracked(dir: &Path) -> (Board, Logic, Service, Bridge, Orion) {
             entry::<TrackedDevice>(),
         ],
     );
-    let bridge = start_bridge(&lemnosd, board.socket(), None);
+    let bridge = start_bridge_opt(&lemnosd, board.socket(), None, lease);
     let dashboard = dashboard(board.socket());
     wait_for("the tracked device's resource", || {
         resource(&dashboard, "lemnos.tracked").filter(|found| found.state == ResourceState::Ready)
@@ -1365,6 +1303,11 @@ fn call_describe_answers_the_device_description_as_text() {
             .find(|r| r.word == "method" && r.get("id") == Some(id))
             .unwrap_or_else(|| panic!("method {id}: {text}"))
     };
+    assert_eq!(
+        device.get("lease_seconds"),
+        Some("60"),
+        "the lease a client renews within"
+    );
     assert_eq!(method("1").get("name"), Some("take"));
     assert_eq!(method("4").get("name"), Some("hold_until_cancelled"));
     assert_eq!(
@@ -1382,6 +1325,207 @@ fn call_describe_answers_the_device_description_as_text() {
     assert_eq!(finished.outcome, Outcome::Rejected, "{finished:?}");
     assert!(finished.output.is_empty(), "{finished:?}");
     assert_eq!(finished.detail, "describe takes no arguments");
+}
+
+/// The lease the hold tests use: a second, so a test waits seconds rather than the default minute.
+const TEST_LEASE: Duration = Duration::from_secs(1);
+
+/// A second Orion session of this user: it runs long jobs, and it is the one a test ends.
+fn second_session(board: &Board) -> Orion {
+    wait_for("a second Orion session", || {
+        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
+    })
+}
+
+/// A caller that goes away (its session ends) and whose holds are idle: the holds are released
+/// within its lease. Every local session is one caller, so the dashboard is the caller's lemnosd
+/// connection too; it stays silent so that nothing renews the lease. Mutation: with the lease's
+/// `expire` made a no-op the holds stay (`held` is 1) and this test fails.
+#[test]
+fn a_dead_callers_idle_holds_are_released_within_its_lease() {
+    let dir = dir("lease-dead-idle");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    // The caller's session ends.
+    drop(caller);
+    // Its lease (and one more tick) runs out with nothing sent on the connection.
+    std::thread::sleep(TEST_LEASE * 3);
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "0",
+        "the dead caller's hold outlived its lease"
+    );
+    // The bridge says so in its hello document: the lease, and how many leases have ended.
+    let facts = hello(&dashboard).expect("the hello document");
+    assert_eq!(facts.get("lease.seconds").map(String::as_str), Some("1"));
+    assert_eq!(
+        facts.get("leases.ended").map(String::as_str),
+        Some("1"),
+        "{facts:?}"
+    );
+}
+
+/// What a dropped caller sees on its next request: the request is served on a fresh connection, its
+/// holds are gone, and the reply says nothing of the drop (the outcome is `Succeeded`, the output is
+/// the new state and the detail is empty). The only sign is the hello document's `leases.ended`.
+/// The next reply after a drop is the one the note of a lease's end is to go on (see docs/daemon.md).
+#[test]
+fn a_dropped_callers_next_reply_says_nothing_of_its_dropped_holds() {
+    let dir = dir("lease-dropped-reply");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    drop(caller);
+    std::thread::sleep(TEST_LEASE * 3);
+    let next = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    assert_eq!(next.outcome, Outcome::Succeeded, "{next:?}");
+    assert_eq!(String::from_utf8(next.output).expect("text"), "0");
+    assert_eq!(next.detail, "", "the reply says the holds were released");
+    let facts = hello(&dashboard).expect("the hello document");
+    assert_eq!(facts.get("leases.ended").map(String::as_str), Some("1"));
+}
+
+/// A caller that is alive and renews its lease keeps its holds for as long as it renews them.
+/// `describe` is the renewal with nothing to do. Mutation: a lease that expires at once releases
+/// the hold and this test fails.
+#[test]
+fn an_alive_caller_that_renews_its_lease_keeps_its_holds() {
+    let dir = dir("lease-alive");
+    let (_board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    tracked_call(&dashboard, "take");
+    assert_eq!(tracked_call(&dashboard, "held"), "1");
+    let until = Instant::now() + TEST_LEASE * 3;
+    while Instant::now() < until {
+        std::thread::sleep(TEST_LEASE / 3);
+        tracked_call(&dashboard, "describe");
+    }
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "a caller that renewed its lease lost its hold"
+    );
+}
+
+/// A caller whose session ends while its long job runs: the job is cancelled at once (the Orion
+/// Cancel), and the holds it took are released within its lease, after its last request. Mutation:
+/// with `expire` a no-op the hold stays and this test fails.
+#[test]
+fn a_dead_callers_long_job_ends_and_its_holds_are_released_within_its_lease() {
+    let dir = dir("lease-dead-job");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let _long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    std::thread::sleep(Duration::from_millis(300));
+    drop(_long);
+    drop(caller);
+    std::thread::sleep(TEST_LEASE * 3);
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "0",
+        "the dead caller's hold outlived its lease after its long job was cancelled"
+    );
+}
+
+/// A silent long job keeps its caller alive: a caller with any run in flight is alive, whether or not
+/// the run reports progress, so its other hold stays for three leases while the job runs with the
+/// caller sending nothing. Cancelling the run ends its shield: the caller, still silent, loses its
+/// hold one lease after the cancel. Mutation: with the in-flight shield removed the hold is released at
+/// the lease and the first check fails.
+#[test]
+fn a_silent_long_job_keeps_its_callers_other_hold_until_it_is_cancelled() {
+    let dir = dir("lease-silent-run");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let mut long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    // The caller stays silent for three leases while its silent job runs.
+    std::thread::sleep(TEST_LEASE * 3);
+    let held = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    assert_eq!(
+        String::from_utf8(held.output).expect("text"),
+        "1",
+        "a silent long job lost its caller's hold at the lease"
+    );
+    long.cancel().expect("cancel");
+    let _ = long.finish(WAIT);
+    // The run is over, and the caller is silent: its lease counts from the cancel.
+    std::thread::sleep(TEST_LEASE * 2);
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "0",
+        "the caller's hold outlived its lease after its run was cancelled"
+    );
+}
+
+/// A long job that reports progress renews its caller's lease: the caller, silent otherwise, keeps
+/// its hold for three leases while the job reports. Mutation: with the progress not renewing the
+/// lease the hold is released at the lease and this test fails.
+#[test]
+fn a_long_job_reporting_progress_keeps_its_callers_other_hold() {
+    let dir = dir("lease-progress");
+    let (_board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    tracked_call(&dashboard, "take");
+    assert_eq!(tracked_call(&dashboard, "held"), "1");
+    let mut long = dashboard
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"count_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    // The caller sends nothing for three leases: only the job's progress is news.
+    std::thread::sleep(TEST_LEASE * 3);
+    let held = tracked_call(&dashboard, "held");
+    long.cancel().expect("cancel");
+    let _ = long.finish(WAIT);
+    assert_eq!(
+        held, "1",
+        "a long job reporting progress lost its caller's hold"
+    );
+}
+
+/// `LEMNOS_ORION_LEASE=0` turns the lease off: holds stay however long the caller is silent, the
+/// hello document has neither lease fact, and the describe reply has no `lease_seconds`.
+#[test]
+fn a_lease_of_zero_is_off_and_the_bridge_says_nothing_of_one() {
+    let dir = dir("lease-off");
+    let (_board, _logic, _service, _bridge, dashboard) = start_tracked_opt(&dir, None);
+    tracked_call(&dashboard, "take");
+    std::thread::sleep(TEST_LEASE * 3);
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "a caller with the lease off lost its hold"
+    );
+    let facts = hello(&dashboard).expect("the hello document");
+    assert!(!facts.contains_key("lease.seconds"), "{facts:?}");
+    assert!(!facts.contains_key("leases.ended"), "{facts:?}");
+    let text = tracked_call(&dashboard, "describe");
+    assert!(!text.contains("lease_seconds"), "{text}");
 }
 
 #[test]

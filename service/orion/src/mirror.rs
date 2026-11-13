@@ -144,6 +144,11 @@ pub struct Mirror {
     /// Counts each change of the device set: a device that came or went.
     set_generation: u64,
     set_dirty: bool,
+    /// The caller lease, in whole seconds: published as `hello.lease.seconds`, and given in a
+    /// description. Zero until the publisher sets it.
+    lease_seconds: Option<u64>,
+    /// How many callers' leases have ended (their connections dropped): `hello.leases.ended`.
+    leases_ended: u64,
 }
 
 /// Whether a change of status changes what `describe` says: its state or its reason. Health is
@@ -261,11 +266,40 @@ impl Mirror {
                 .filter(|d| d.spec.status.state == DeviceState::Running)
                 .flat_map(|d| d.spec.tags.iter().map(String::as_str)),
         );
-        let document = hello::document(self.identity.as_deref(), &offers);
+        // With the lease off the bridge says nothing about one: neither fact is in the document.
+        let bridge: Vec<(&str, String)> = self.lease_seconds.map_or_else(Vec::new, |seconds| {
+            vec![
+                ("lease.seconds", seconds.to_string()),
+                ("leases.ended", self.leases_ended.to_string()),
+            ]
+        });
+        let document = hello::document_with(self.identity.as_deref(), &offers, &bridge);
         if document != self.hello {
             self.hello = document;
             self.hello_dirty = true;
         }
+    }
+
+    /// Sets the caller lease, in whole seconds (`None`: off), and says it in the hello document.
+    pub fn set_lease(&mut self, seconds: Option<u64>) {
+        self.lease_seconds = seconds;
+        self.rebuild_hello();
+    }
+
+    /// The caller lease, in whole seconds; `None` when it is off.
+    pub fn lease_seconds(&self) -> Option<u64> {
+        self.lease_seconds
+    }
+
+    /// Counts one caller's lease ending, and says the new count in the hello document.
+    pub fn note_lease_end(&mut self) {
+        self.leases_ended += 1;
+        self.rebuild_hello();
+    }
+
+    /// How many callers' leases have ended.
+    pub fn leases_ended(&self) -> u64 {
+        self.leases_ended
     }
 
     /// A device's state, by lemnosd's index. An unknown index is ignored, and so is a state
@@ -651,15 +685,33 @@ mod tests {
     #[test]
     fn offers_are_the_contracts_of_the_running_devices_and_change_with_them() {
         let mut mirror = Mirror::new();
+        mirror.set_lease(Some(60));
         mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
         let _ = take(&mut mirror);
-        assert_eq!(mirror.snapshot().1, [fact("offers", "imu")]);
+        assert_eq!(
+            mirror.snapshot().1,
+            [
+                fact("offers", "imu"),
+                fact("lease.seconds", "60"),
+                fact("leases.ended", "0")
+            ]
+        );
         mirror.set_status(0, DeviceState::Off, DeviceHealth::Ok, "");
         assert!(take(&mut mirror).hello.is_none());
         mirror.set_status(1, DeviceState::Off, DeviceHealth::Ok, "");
-        assert_eq!(take(&mut mirror).hello, Some(Vec::new()));
+        assert_eq!(
+            take(&mut mirror).hello,
+            Some(vec![fact("lease.seconds", "60"), fact("leases.ended", "0")])
+        );
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Ok, "");
-        assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
+        assert_eq!(
+            take(&mut mirror).hello,
+            Some(vec![
+                fact("offers", "imu"),
+                fact("lease.seconds", "60"),
+                fact("leases.ended", "0")
+            ])
+        );
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "read");
         assert!(take(&mut mirror).hello.is_none());
     }
@@ -667,20 +719,38 @@ mod tests {
     #[test]
     fn the_identity_facts_come_with_offers_and_go_when_they_cannot_be_read() {
         let mut mirror = Mirror::new();
+        mirror.set_lease(Some(60));
         mirror.set_devices(vec![spec(0, "a", &[])], Some(vec![fact("family", "alpha")]));
         let first = take(&mut mirror);
         assert_eq!(
             first.hello,
-            Some(vec![fact("family", "alpha"), fact("offers", "imu")])
+            Some(vec![
+                fact("family", "alpha"),
+                fact("offers", "imu"),
+                fact("lease.seconds", "60"),
+                fact("leases.ended", "0")
+            ])
         );
         mirror.set_identity(Some(vec![fact("family", "alpha")]));
         assert!(take(&mut mirror).hello.is_none());
         mirror.set_identity(Some(vec![fact("family", "beta")]));
         assert_eq!(
             take(&mut mirror).hello,
-            Some(vec![fact("family", "beta"), fact("offers", "imu")])
+            Some(vec![
+                fact("family", "beta"),
+                fact("offers", "imu"),
+                fact("lease.seconds", "60"),
+                fact("leases.ended", "0")
+            ])
         );
         mirror.set_identity(None);
-        assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
+        assert_eq!(
+            take(&mut mirror).hello,
+            Some(vec![
+                fact("offers", "imu"),
+                fact("lease.seconds", "60"),
+                fact("leases.ended", "0")
+            ])
+        );
     }
 }

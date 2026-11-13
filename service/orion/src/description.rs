@@ -22,7 +22,8 @@
 //!
 //! **The records.**
 //!
-//! - `device generation label kind bus address location state reason`: `generation` is the
+//! - `device generation lease_seconds label kind bus address location state reason`: `lease_seconds`
+//!   is the bridge's caller lease, in seconds, when the lease is on (also the hello fact `lease.seconds`); `generation` is the
 //!   device's description generation, the same number as its `lemnos.<device>.description` topic
 //!   (`unknown` when the device has none yet); `address` is `0xNN` or `none`; `state` is the
 //!   device's state word above (`unknown` when none is given).
@@ -48,13 +49,20 @@ use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod};
 pub const VERSION_LINE: &str = "describe 1";
 
 /// The text of a description, its version line first, then its records, with no final newline.
-/// `generation` is the device's description generation, from the same place its topic takes it.
-pub fn render(description: &DeviceDescription, generation: Option<u64>) -> String {
+/// `generation` is the device's description generation, from the same place its topic takes it;
+/// `lease_seconds` is the caller lease the bridge runs (see the hello fact `lease.seconds`).
+pub fn render(
+    description: &DeviceDescription,
+    generation: Option<u64>,
+    lease_seconds: Option<u64>,
+) -> String {
     let mut out = String::from(VERSION_LINE);
     let generation = generation.map_or_else(|| "unknown".to_owned(), |g| g.to_string());
+    // The field is there only when the lease is on, as the hello document's facts are.
+    let lease = lease_seconds.map_or_else(String::new, |s| format!(" lease_seconds={s}"));
     let _ = write!(
         out,
-        "\ndevice generation={generation} label={} kind={} bus={} address={} location={} state={} reason={}",
+        "\ndevice generation={generation}{lease} label={} kind={} bus={} address={} location={} state={} reason={}",
         quote(&description.label),
         quote(&description.kind),
         quote(&description.bus),
@@ -371,7 +379,7 @@ mod tests {
     fn text_round_trips_through_the_reader_whatever_it_holds() {
         for label in HARD {
             for reason in HARD {
-                let text = render(&described(label, reason), Some(7));
+                let text = render(&described(label, reason), Some(7), Some(60));
                 let records = parse(&text).expect("parses");
                 let device = &records[0];
                 assert_eq!(device.word, "device");
@@ -390,7 +398,7 @@ mod tests {
         description.items[0].unit = "°C\\".to_owned();
         description.items[0].group = Some("none".to_owned());
         description.items[0].field = Some("x=1".to_owned());
-        let records = parse(&render(&description, None)).expect("parses");
+        let records = parse(&render(&description, None, Some(60))).expect("parses");
         let item = records.iter().find(|r| r.word == "item").expect("item");
         assert_eq!(item.get("name"), Some("a \"name\""));
         assert_eq!(item.get("unit"), Some("°C\\"));
@@ -407,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_reader_refuses_another_version_and_ignores_keys_it_does_not_know() {
-        let text = render(&described("l", "r"), Some(1));
+        let text = render(&described("l", "r"), Some(1), Some(60));
         assert!(parse(&text.replacen("describe 1", "describe 2", 1)).is_err());
         assert!(parse("").is_err());
         let extended = text.replacen("device ", "device future=\"x\" ", 1);
@@ -418,7 +426,7 @@ mod tests {
 
     #[test]
     fn a_text_value_of_none_is_not_the_absent_option() {
-        let text = render(&described("none", "r"), None);
+        let text = render(&described("none", "r"), None, Some(60));
         let records = parse(&text).expect("parses");
         assert_eq!(records[0].get("generation"), Some("unknown"));
         assert_eq!(records[0].get("label"), Some("none"));
