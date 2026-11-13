@@ -258,6 +258,20 @@ pub fn decide(
 ///
 /// `NOT_SUPPORTED` for another board; `INVALID_ARGUMENT` for anything else out of shape.
 pub fn parse(text: &str, board_id: &str) -> Result<Parsed, (Status, String)> {
+    parse_for(text, board_id, DISK)
+}
+
+/// [`parse`] for a board whose raw image is `format` (the board's own: `disk`, `mtd-ubi` or
+/// `mtd-raw`). A manifest with another format is refused by name, as another board's is.
+///
+/// # Errors
+///
+/// As [`parse`]; `NOT_SUPPORTED` for a format the board does not take.
+pub fn parse_for(
+    text: &str,
+    board_id: &str,
+    expected_format: &str,
+) -> Result<Parsed, (Status, String)> {
     let bad = |why: &str| (Status::INVALID_ARGUMENT, why.to_string());
     let json = Json::parse(text).ok_or_else(|| bad("the manifest is not JSON"))?;
     if json.get("schema").and_then(Json::u64) != Some(1) {
@@ -280,9 +294,10 @@ pub fn parse(text: &str, board_id: &str) -> Result<Parsed, (Status, String)> {
         .get("format")
         .and_then(Json::text)
         .ok_or_else(|| bad("the manifest has no format"))?;
-    if format != DISK {
-        return Err(bad(
-            "the manifest's format is not disk: this board takes a whole disk image",
+    if format != expected_format {
+        return Err((
+            Status::NOT_SUPPORTED,
+            format!("this image is {format}, and this board takes {expected_format}"),
         ));
     }
     let image_size = json

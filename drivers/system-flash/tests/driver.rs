@@ -71,6 +71,19 @@ struct Rig {
     require_signed: bool,
     board: &'static str,
     max_dict_mb: Option<i64>,
+    /// The NAND settings, when the target is a `mtd` partition (a temp file standing in for it).
+    mtd: Option<MtdRig>,
+}
+
+/// The NAND settings of a test target: its geometry, bad blocks and image kind.
+#[derive(Clone)]
+struct MtdRig {
+    image: &'static str,
+    erase: i64,
+    write: i64,
+    bad: Vec<u64>,
+    index: Option<i64>,
+    sysfs: Option<PathBuf>,
 }
 
 impl Rig {
@@ -93,6 +106,7 @@ impl Rig {
             require_signed: false,
             board: BOARD,
             max_dict_mb: None,
+            mtd: None,
         }
     }
 
@@ -139,6 +153,32 @@ impl Rig {
         if let Some(mb) = self.max_dict_mb {
             entries.push(("max_dict_mb", ConfigValue::Int(mb)));
         }
+        let bad_file = self.mtd.as_ref().map(|m| {
+            let path = self.dir.path("bad_blocks");
+            let text: String = m.bad.iter().map(|b| format!("{b}\n")).collect();
+            fs::write(&path, text).unwrap();
+            path.to_str().unwrap().to_string()
+        });
+        let sysfs = self
+            .mtd
+            .as_ref()
+            .and_then(|m| m.sysfs.as_ref())
+            .map(|p| p.to_str().unwrap().to_string());
+        if let Some(m) = self.mtd.as_ref() {
+            entries[1].1 = ConfigValue::Str("mtd");
+            entries.push(("image", ConfigValue::Str(m.image)));
+            entries.push(("erase_size", ConfigValue::Int(m.erase)));
+            entries.push(("write_size", ConfigValue::Int(m.write)));
+            if let Some(bad) = bad_file.as_ref() {
+                entries.push(("bad_blocks", ConfigValue::Str(bad)));
+            }
+            if let Some(index) = m.index {
+                entries.push(("mtd_index", ConfigValue::Int(index)));
+            }
+            if let Some(sysfs) = sysfs.as_ref() {
+                entries.push(("sysfs", ConfigValue::Str(sysfs)));
+            }
+        }
         let cfg = Config::new(&entries).on_board(self.board);
         let needs = lemnos_driver_system_flash::SystemFlashNeeds { indicator };
         <SystemFlash as Lifecycle>::start(needs, &cfg)
@@ -163,7 +203,7 @@ fn manifest_json(board: &str, size: u64, sha: &str, signature: Option<&str>) -> 
     .into_bytes()
 }
 
-/// The vector's key: the test seed (seven bytes of 0x07 repeated four times, i.e. 0x07 x 32).
+/// The vector's key: the test seed (the byte 0x07 repeated 32 times).
 fn vector_key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
 }
@@ -914,5 +954,254 @@ fn a_refused_image_ends_on_failed() {
         states.last().map(String::as_str),
         Some("failed"),
         "{states:?}"
+    );
+}
+
+// ---- Raw NAND (kind = "mtd"): a temp file stands in for the partition, 8 erase blocks of 4 KiB ----
+
+const NAND_ERASE: u64 = 4096;
+const NAND_WRITE: u64 = 512;
+const NAND_BLOCKS: u64 = 8;
+
+fn nand_rig(label: &str, image: &'static str, bad: Vec<u64>) -> Rig {
+    let mut rig = Rig::new(label, NAND_ERASE * NAND_BLOCKS);
+    rig.mtd = Some(MtdRig {
+        image,
+        erase: NAND_ERASE as i64,
+        write: NAND_WRITE as i64,
+        bad,
+        index: Some(0),
+        sysfs: None,
+    });
+    rig
+}
+
+/// A UBI erase block with its header (`ec`, VID at 512, data at 1024, CRC over the first 60 bytes)
+/// and a pattern after it.
+fn ubi_block(ec: u64, fill: u8) -> Vec<u8> {
+    let mut block: Vec<u8> = (0..NAND_ERASE as usize)
+        .map(|i| fill.wrapping_add(i as u8))
+        .collect();
+    block[..4].copy_from_slice(b"UBI#");
+    block[4] = 1;
+    block[8..16].copy_from_slice(&ec.to_be_bytes());
+    block[16..20].copy_from_slice(&512u32.to_be_bytes());
+    block[20..24].copy_from_slice(&1024u32.to_be_bytes());
+    let crc = manifest_crc(&block[..60]);
+    block[60..64].copy_from_slice(&crc.to_be_bytes());
+    block
+}
+
+fn manifest_crc(bytes: &[u8]) -> u32 {
+    lemnos_driver_system_flash::nand::crc32_le(0xFFFF_FFFF, bytes)
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(bytes))
+}
+
+/// A transport manifest with the board's own format string.
+fn nand_manifest(board: &str, format: &str, size: u64, sha: &str) -> Vec<u8> {
+    format!(
+        r#"{{"schema":1,"board":"{board}","format":"{format}","image":{{"size":{size},"sha256":"{sha}"}}}}"#
+    )
+    .into_bytes()
+}
+
+/// Writes and verifies `image` through the job path, the way the bridge does.
+fn nand_flash(driver: &mut SystemFlash, image: &[u8]) -> (Status, Vec<u8>) {
+    driver
+        .write(image.len() as u64, FORMAT_RAW)
+        .map(|job| {
+            let streamed = stream(driver, image, 1000);
+            assert_eq!(streamed, Ok(()));
+            let (status, reply, _) = run_to_end(driver, job);
+            (status, reply)
+        })
+        .expect("the write starts")
+}
+
+#[test]
+fn a_ubi_image_is_written_to_a_nand_target_past_its_bad_block_and_verifies() {
+    let rig = nand_rig("nand-ubi", "ubi", vec![1]);
+    let image: Vec<u8> = [ubi_block(3, 1), ubi_block(4, 2), ubi_block(5, 3)].concat();
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-ubi", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .expect("the manifest is accepted");
+    let text = info(&mut driver);
+    for want in [
+        "\"kind\":\"mtd\"",
+        "\"image\":\"ubi\"",
+        "\"erase_size\":4096",
+        "\"bad_blocks\":1",
+        "\"needed\":3",
+        "\"available\":7",
+    ] {
+        assert!(text.contains(want), "{want} in {text}");
+    }
+    let (status, reply) = nand_flash(&mut driver, &image);
+    assert_eq!(status, Status::OK, "{}", info(&mut driver));
+    assert_eq!(reply, written(image.len() as u64, 1));
+    let file = rig.file_bytes();
+    // Image block 0 is good block 0; image block 1 is good block 2, past the bad block 1.
+    assert_eq!(file[64..4096], image[64..4096]);
+    assert!(
+        file[4096..8192].iter().all(|&b| b == 0),
+        "the bad block is never touched"
+    );
+    assert_eq!(file[8192 + 64..8192 + 4096], image[4096 + 64..8192]);
+    let verify = driver.verify().expect("verify starts");
+    assert_eq!(run_to_end(&mut driver, verify).0, Status::OK);
+    assert!(info(&mut driver).contains("\"state\":\"verified\""));
+}
+
+#[test]
+fn a_raw_image_is_written_to_a_nand_partition_and_verifies() {
+    let rig = nand_rig("nand-raw", "raw", vec![]);
+    let image: Vec<u8> = (0..(2 * NAND_ERASE + 700))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-raw", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .expect("the manifest is accepted");
+    let (status, reply) = nand_flash(&mut driver, &image);
+    assert_eq!(status, Status::OK, "{}", info(&mut driver));
+    assert_eq!(reply, written(image.len() as u64, 1));
+    assert_eq!(rig.file_bytes()[..image.len()], image[..]);
+    let verify = driver.verify().expect("verify starts");
+    assert_eq!(run_to_end(&mut driver, verify).0, Status::OK);
+}
+
+#[test]
+fn a_manifest_for_another_format_is_refused_by_name_on_a_nand_board() {
+    let rig = nand_rig("nand-format", "ubi", vec![]);
+    let mut driver = rig.start();
+    let refused = driver
+        .manifest(&nand_manifest(BOARD, "disk", 4096, SMALL_SHA), &[])
+        .unwrap_err();
+    assert_eq!(refused, Status::NOT_SUPPORTED);
+    assert!(info(&mut driver).contains("this board takes mtd-ubi"));
+}
+
+#[test]
+fn a_ubi_image_built_for_another_page_size_fails_at_its_first_block_and_the_target_is_untouched() {
+    let rig = nand_rig("nand-layout", "ubi", vec![]);
+    let mut other = ubi_block(3, 1);
+    other[16..20].copy_from_slice(&2048u32.to_be_bytes());
+    other[20..24].copy_from_slice(&4096u32.to_be_bytes());
+    let crc = manifest_crc(&other[..60]);
+    other[60..64].copy_from_slice(&crc.to_be_bytes());
+    let image = other;
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-ubi", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .unwrap();
+    let job = driver.write(image.len() as u64, FORMAT_RAW).unwrap();
+    assert_eq!(
+        stream(&mut driver, &image, 1000),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(run_to_end(&mut driver, job).0, Status::INVALID_ARGUMENT);
+    assert!(info(&mut driver).contains("another page or sub-page size"));
+    assert!(
+        rig.file_bytes().iter().all(|&b| b == 0),
+        "refused before any erase"
+    );
+}
+
+#[test]
+fn an_image_too_large_after_the_bad_blocks_is_refused_before_anything_is_written() {
+    let rig = nand_rig("nand-full", "ubi", vec![0, 1, 2, 3, 4, 5]);
+    let image: Vec<u8> = [ubi_block(1, 1), ubi_block(1, 2), ubi_block(1, 3)].concat();
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-ubi", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        driver.write(image.len() as u64, FORMAT_RAW),
+        Err(Status::from_errno(28))
+    );
+    assert!(info(&mut driver).contains("needs 3 good erase blocks and the target has 2"));
+    assert!(rig.file_bytes().iter().all(|&b| b == 0));
+}
+
+#[test]
+fn a_nand_target_holding_a_ubi_volume_of_the_running_root_is_refused() {
+    let mut rig = nand_rig("nand-root", "ubi", vec![]);
+    let sysfs = rig.dir.path("sys");
+    fs::create_dir_all(sysfs.join("class/ubi/ubi0")).unwrap();
+    fs::create_dir_all(sysfs.join("class/ubi/ubi0_0")).unwrap();
+    fs::write(sysfs.join("class/ubi/ubi0/mtd_num"), "0\n").unwrap();
+    fs::write(sysfs.join("class/ubi/ubi0_0/dev"), "254:7\n").unwrap();
+    fs::write(
+        &rig.mountinfo,
+        "1 0 0:1 / / rw - rootfs rootfs rw\n2 1 254:7 / /srv/volume rw - ubifs ubi0_0 rw\n",
+    )
+    .unwrap();
+    rig.mtd.as_mut().unwrap().sysfs = Some(sysfs);
+    let image = ubi_block(3, 1);
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-ubi", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        driver.write(image.len() as u64, FORMAT_RAW),
+        Err(Status::NOT_PERMITTED)
+    );
+    assert!(info(&mut driver).contains("/srv/volume is mounted from it"));
+    assert!(rig.file_bytes().iter().all(|&b| b == 0));
+}
+
+#[test]
+fn the_nand_write_holds_one_erase_block_and_one_page_beyond_what_it_writes() {
+    let rig = nand_rig("nand-alloc", "ubi", vec![]);
+    let image: Vec<u8> = [
+        ubi_block(3, 1),
+        ubi_block(4, 2),
+        ubi_block(5, 3),
+        ubi_block(6, 4),
+    ]
+    .concat();
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    driver
+        .manifest(
+            &nand_manifest(BOARD, "mtd-ubi", image.len() as u64, &sha_hex(&image)),
+            &[],
+        )
+        .unwrap();
+    let (status, peak) = peak_bytes(|| {
+        let job = driver.write(image.len() as u64, FORMAT_RAW).unwrap();
+        stream(&mut driver, &image, 1000).unwrap();
+        run_to_end(&mut driver, job).0
+    });
+    assert_eq!(status, Status::OK);
+    // The sink's buffers (one erase block, one page), the plan's block list and the job's state.
+    assert!(
+        peak <= NAND_ERASE as usize + NAND_WRITE as usize + 16 * 1024,
+        "peak {peak} bytes"
     );
 }
