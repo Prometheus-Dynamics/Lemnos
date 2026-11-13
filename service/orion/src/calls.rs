@@ -17,7 +17,14 @@
 //! `"<done> of <total>"`, and the data `done` and `total` as two little-endian `u64`s. The run
 //! ends as the job does: its result as the output (text when it is UTF-8, hex otherwise),
 //! `Cancelled` when it was cancelled, `Failed` otherwise. Cancelling the run cancels the job.
+//!
+//! Each Orion caller has a lemnosd connection of its own. lemnosd keeps the callers of a driver
+//! apart by connection, so a driver that tracks callers sees each Orion caller as its own. Orion
+//! does not say when a caller goes away; it cancels the runs of a caller that goes away. So when a
+//! caller's last long job is cancelled, its connection is closed, and lemnosd tells the drivers
+//! that caller is gone. The same cancel from a caller that is still there is read the same way.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
@@ -84,6 +91,9 @@ pub struct Job {
     pub device: String,
     pub verb: Verb,
     pub args: String,
+    /// Who asked for the run, as Orion names the caller (`local:<uid>`, `operator:<key>`,
+    /// `peer:<node>`, `device:<name>` or `anonymous`). Empty when Orion did not say.
+    pub caller: String,
 }
 
 /// What the publisher hands the call thread.
@@ -124,12 +134,17 @@ impl Progress {
 }
 
 /// A long job a run started, until it ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Running {
     session: u64,
     call: u64,
     job: u64,
+    /// The caller the run came from: the key of its lemnosd connection.
+    caller: String,
 }
+
+/// The lemnosd connections the calls go on, by caller.
+type Callers = HashMap<String, Client>;
 
 /// How long the call thread waits for a job's news before it looks for new runs again.
 const JOB_WAIT: Duration = Duration::from_millis(50);
@@ -148,10 +163,11 @@ pub struct Done {
 
 /// Runs what the publisher hands over until it stops sending.
 ///
-/// The connection is made when a run comes and none is up, so a call made just after lemnosd
-/// comes back reaches it, rather than waiting out a retry delay from while it was away.
+/// Each caller's connection is made when a run from it comes and none is up, so a call made just
+/// after lemnosd comes back reaches it, rather than waiting out a retry delay from while it was
+/// away.
 pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared) {
-    let mut client: Option<Client> = None;
+    let mut clients: Callers = HashMap::new();
     let mut running: Vec<Running> = Vec::new();
     loop {
         let message = if running.is_empty() {
@@ -167,45 +183,86 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared) {
             }
         };
         match message {
-            Some(Message::Run(job)) => run_one(socket, &mut client, &job, &mut running, shared),
-            Some(Message::Cancel { session, call }) => {
-                let found = running
-                    .iter()
-                    .find(|r| r.session == session && r.call == call);
-                if let (Some(found), Some(client)) = (found, &client) {
-                    // Its end, cancelled or not, comes as the job's news.
-                    let _ = client.cancel_job(found.job);
-                }
+            Some(Message::Run(job)) => {
+                run_one(socket, &mut clients, &job, &mut running, shared);
             }
-            None => follow(client.as_ref(), &mut running, shared),
+            Some(Message::Cancel { session, call }) => {
+                cancel(&mut clients, &mut running, session, call, shared);
+            }
+            None => follow(&mut clients, &mut running, shared),
         }
     }
+}
+
+/// Stops run `call` of `session`. A long job is cancelled on lemnosd; when it was the last run
+/// of its caller, the caller's connection is closed, which tells lemnosd's drivers the caller is
+/// gone. The run ends as cancelled at once: nothing else would answer it.
+fn cancel(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    session: u64,
+    call: u64,
+    shared: &Shared,
+) {
+    let Some(at) = running
+        .iter()
+        .position(|r| r.session == session && r.call == call)
+    else {
+        return;
+    };
+    let caller = running[at].caller.clone();
+    let others = running
+        .iter()
+        .enumerate()
+        .any(|(i, r)| i != at && r.caller == caller);
+    if others {
+        if let Some(client) = clients.get(&caller) {
+            // Its end, cancelled or not, comes as the job's news.
+            let _ = client.cancel_job(running[at].job);
+        }
+        return;
+    }
+    let r = running.remove(at);
+    // Dropping the connection ends the job on lemnosd too.
+    clients.remove(&caller);
+    shared.finished(Done {
+        session: r.session,
+        call: r.call,
+        outcome: Outcome::Cancelled,
+        output: String::new(),
+        detail: "cancelled: the caller went away or stopped the run".to_owned(),
+    });
 }
 
 /// Runs one job: answered now, or followed as a long job.
 fn run_one(
     socket: &Path,
-    client: &mut Option<Client>,
+    clients: &mut Callers,
     job: &Job,
     running: &mut Vec<Running>,
     shared: &Shared,
 ) {
-    if !client.as_ref().is_some_and(Client::is_connected) {
+    let caller = job.caller.as_str();
+    if !clients.get(caller).is_some_and(Client::is_connected) {
         // Jobs on the connection that went are over: lemnosd ended them with it.
-        lost(running, shared);
-        *client = Client::connect(socket, LEMNOSD_CALLS_NAME).ok();
+        lost(caller, running, shared);
+        clients.remove(caller);
+        if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
+            clients.insert(caller.to_owned(), client);
+        }
     }
-    let mut served = match client.as_ref() {
+    let mut served = match clients.get(caller) {
         Some(client) => serve(client, job),
         None => Err(Failure::Failed("lemnosd is not there".to_owned())),
     };
     // A connection that went quiet with lemnosd is found dead only when used: connect
     // again and run the job once more: the call never reached the lemnosd that is there now.
-    if served.is_err() && client.as_ref().is_some_and(|c| !c.is_connected()) {
-        lost(running, shared);
-        *client = Client::connect(socket, LEMNOSD_CALLS_NAME).ok();
-        if let Some(client) = client.as_ref() {
-            served = serve(client, job);
+    if served.is_err() && clients.get(caller).is_some_and(|c| !c.is_connected()) {
+        lost(caller, running, shared);
+        clients.remove(caller);
+        if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
+            served = serve(&client, job);
+            clients.insert(caller.to_owned(), client);
         }
     }
     let (outcome, output, detail) = match served {
@@ -214,6 +271,7 @@ fn run_one(
                 session: job.session,
                 call: job.call,
                 job: started,
+                caller: caller.to_owned(),
             });
             return;
         }
@@ -230,39 +288,52 @@ fn run_one(
     });
 }
 
-/// Takes the news of the long jobs, waiting a little for it.
-fn follow(client: Option<&Client>, running: &mut Vec<Running>, shared: &Shared) {
-    let Some(client) = client else {
-        lost(running, shared);
+/// Takes the news of the long jobs on every caller's connection, waiting a little for it.
+fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
+    if clients.is_empty() {
+        lost_all(running, shared);
         return;
-    };
-    let Some(event) = client.wait_job_event(JOB_WAIT) else {
-        if !client.is_connected() {
-            lost(running, shared);
+    }
+    let wait = JOB_WAIT / u32::try_from(clients.len()).unwrap_or(u32::MAX);
+    let mut news = Vec::new();
+    let mut gone = Vec::new();
+    for (caller, client) in clients.iter() {
+        match client.wait_job_event(wait) {
+            Some(event) => news.push((caller.clone(), event)),
+            None if !client.is_connected() => gone.push(caller.clone()),
+            None => {}
         }
-        return;
-    };
-    match event {
-        JobEvent::Progress { job, done, total } => {
-            if let Some(r) = running.iter().find(|r| r.job == job) {
-                shared.progressed(Progress {
-                    session: r.session,
-                    call: r.call,
-                    done,
-                    total,
-                });
+    }
+    for caller in gone {
+        lost(&caller, running, shared);
+        clients.remove(&caller);
+    }
+    for (caller, event) in news {
+        match event {
+            JobEvent::Progress { job, done, total } => {
+                if let Some(r) = running.iter().find(|r| r.job == job) {
+                    shared.progressed(Progress {
+                        session: r.session,
+                        call: r.call,
+                        done,
+                        total,
+                    });
+                }
             }
-        }
-        JobEvent::Done {
-            job,
-            status,
-            result,
-        } => {
-            let Some(at) = running.iter().position(|r| r.job == job) else {
-                return;
-            };
-            let r = running.remove(at);
-            shared.finished(job_done(&r, status, &result));
+            JobEvent::Done {
+                job,
+                status,
+                result,
+            } => {
+                let Some(at) = running
+                    .iter()
+                    .position(|r| r.job == job && r.caller == caller)
+                else {
+                    continue;
+                };
+                let r = running.remove(at);
+                shared.finished(job_done(&r, status, &result));
+            }
         }
     }
 }
@@ -297,9 +368,15 @@ pub fn result_text(result: &[u8]) -> String {
     }
 }
 
-/// Ends every followed job as failed: lemnosd went, and its jobs with it.
-fn lost(running: &mut Vec<Running>, shared: &Shared) {
+/// Ends the followed jobs of one caller as failed: its lemnosd connection went, and its jobs
+/// with it.
+fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
+    let mut kept = Vec::with_capacity(running.len());
     for r in running.drain(..) {
+        if r.caller != caller {
+            kept.push(r);
+            continue;
+        }
         shared.finished(Done {
             session: r.session,
             call: r.call,
@@ -307,6 +384,15 @@ fn lost(running: &mut Vec<Running>, shared: &Shared) {
             output: String::new(),
             detail: "lemnosd went away; the job ended with it".to_owned(),
         });
+    }
+    *running = kept;
+}
+
+/// Ends every followed job as failed, when there is no connection at all.
+fn lost_all(running: &mut Vec<Running>, shared: &Shared) {
+    let callers: Vec<String> = running.iter().map(|r| r.caller.clone()).collect();
+    for caller in callers {
+        lost(&caller, running, shared);
     }
 }
 

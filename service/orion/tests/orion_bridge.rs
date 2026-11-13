@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use lemnos_core::{
+    CallerId, Config as DriverConfig, JobId, JobState, Lifecycle, Reply, Result,
+    Status as DriverStatus, contract, driver,
+};
 use lemnos_driver_system_identity::Identity;
 use lemnos_driver_system_slots::SystemSlots;
 use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
@@ -22,11 +26,11 @@ use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target};
 use orion::provider::{Found, ResourceState};
-use orion::topics::{FieldId, Status, Subscriber};
+use orion::topics::{FieldId, SampleTime, Status, Subscriber};
 use orion::types::Error as Refusal;
 use orion::{Address, ClientError, Orion};
 use orion_node_app::{Node, NodeSettings};
-use orion_stubs::Board;
+use orion_stubs::{Board, Options as BoardOptions};
 use tokio::sync::oneshot;
 
 const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -558,6 +562,11 @@ impl IdentityFiles {
 
     /// Boots `slot`: the marker names it and its manifest is on the data partition, as the
     /// initramfs leaves them.
+    /// Removes the boot marker: no slot is running now, so its facts go.
+    fn unboot(&self) {
+        let _ = std::fs::remove_file(self.dir.join("data/board/slots/booted"));
+    }
+
     fn boot(&self, slot: &str, product: &str, version: &str) {
         let slots = self.dir.join("data/slots");
         std::fs::create_dir_all(&slots).expect("slots");
@@ -842,4 +851,352 @@ fn image(dir: &Path, id: &str) {
     let file =
         std::fs::File::create(dir.join("data/slots").join(format!("{id}.erofs"))).expect("image");
     file.set_len(4096).expect("image size");
+}
+
+/// A device whose driver tracks its callers: `take` remembers the caller that asked, `held` counts
+/// the callers it holds for, `who` says the caller's number, and `hold_until_cancelled` is a long
+/// job that runs until it is cancelled.
+#[contract("tracked", version = 1)]
+pub trait Tracked {
+    #[method(1)]
+    fn take(&mut self) -> Result<()>;
+    #[method(2)]
+    fn held(&mut self) -> Result<u32>;
+    #[method(3)]
+    fn who(&mut self) -> Result<u32>;
+    #[method(4, job)]
+    fn hold_until_cancelled(&mut self) -> Result<JobId>;
+}
+
+#[driver("tracked", provides = [Tracked])]
+pub struct TrackedDevice {
+    calling: CallerId,
+    holders: [Option<CallerId>; 8],
+    job: Option<(JobId, bool)>,
+    next: u64,
+}
+
+impl Lifecycle for TrackedDevice {
+    type Needs = TrackedDeviceNeeds;
+    const TRACKS_CALLERS: bool = true;
+    const JOBS: bool = true;
+
+    fn start(_: TrackedDeviceNeeds, _: &DriverConfig<'_>) -> Result<Self> {
+        Ok(Self {
+            calling: CallerId::LOCAL,
+            holders: [None; 8],
+            job: None,
+            next: 0,
+        })
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        for holder in &mut self.holders {
+            if *holder == Some(caller) {
+                *holder = None;
+            }
+        }
+    }
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        let _ = result;
+        match self.job {
+            Some((id, cancelled)) if id == job => {
+                if cancelled {
+                    self.job = None;
+                    JobState::Finished(DriverStatus::CANCELLED)
+                } else {
+                    JobState::Running { done: 0, total: 0 }
+                }
+            }
+            _ => JobState::Finished(DriverStatus::NOT_FOUND),
+        }
+    }
+
+    fn job_cancel(&mut self, job: JobId) {
+        if let Some((id, cancelled)) = &mut self.job
+            && *id == job
+        {
+            *cancelled = true;
+        }
+    }
+}
+
+impl Tracked for TrackedDevice {
+    fn take(&mut self) -> Result<()> {
+        if self.holders.contains(&Some(self.calling)) {
+            return Ok(());
+        }
+        if let Some(free) = self.holders.iter_mut().find(|h| h.is_none()) {
+            *free = Some(self.calling);
+        }
+        Ok(())
+    }
+
+    fn held(&mut self) -> Result<u32> {
+        Ok(self.holders.iter().flatten().count() as u32)
+    }
+
+    fn who(&mut self) -> Result<u32> {
+        Ok(self.calling.0 as u32)
+    }
+
+    fn hold_until_cancelled(&mut self) -> Result<JobId> {
+        if self.job.is_some() {
+            return Err(DriverStatus::BUSY);
+        }
+        self.next += 1;
+        let id = JobId(self.next);
+        self.job = Some((id, false));
+        Ok(id)
+    }
+}
+
+/// lemnosd over a board text, with the given drivers.
+fn start_lemnosd_with(
+    socket: &Path,
+    board: &str,
+    drivers: Vec<lemnos_host::DriverEntry>,
+) -> Service {
+    Service::start(LemnosdConfig {
+        socket: socket.to_path_buf(),
+        name: "t".to_string(),
+        board: parse(board).expect("board"),
+        drivers,
+        backend: Box::new(SimBoard::new()),
+        options: HostOptions::default(),
+    })
+    .expect("lemnosd")
+}
+
+/// The newest value of a field, with the time it belongs to.
+fn latest_sample(subscriber: &mut Subscriber, field: u16) -> Option<(Vec<u8>, SampleTime)> {
+    let _ = subscriber.wait(Duration::from_millis(50));
+    subscriber
+        .latest(FieldId(field))
+        .map(|sample| (sample.payload.to_vec(), sample.time))
+}
+
+#[test]
+fn a_fact_that_comes_and_goes_moves_nothing_else() {
+    let dir = dir("fact-moves");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    hello_with(&dashboard, "serial");
+    wait_for("the counter's resource", || {
+        resource(&dashboard, "lemnos.thing")
+    });
+
+    // The counter is an unrelated device: it counts on every read, so a reset would show.
+    let mut count = dashboard
+        .subscribe("lemnos.thing.values")
+        .expect("subscribe");
+    let mut status = dashboard
+        .subscribe("lemnos.thing.status")
+        .expect("subscribe");
+    let before = wait_for("the counter counting", || {
+        latest(&mut count, 0).and_then(|b| float(&b))
+    });
+    wait_for("the counter's status live", || {
+        let _ = status.wait(Duration::from_millis(50));
+        (status.status() == Status::Live).then_some(())
+    });
+
+    // A fact comes, then a fact goes: each while the counter keeps counting.
+    let mut lowest = before;
+    files.boot("os-2", "an-os", "2.0");
+    hello_with(&dashboard, "version.slot");
+    for _ in 0..10 {
+        let _ = status.wait(Duration::from_millis(20));
+        assert_ne!(
+            status.status(),
+            Status::PublisherGone,
+            "a fact moved the counter's topic"
+        );
+        if let Some(value) = latest(&mut count, 0).and_then(|b| float(&b)) {
+            lowest = lowest.min(value);
+        }
+    }
+    files.unboot();
+    wait_for("the running slot's fact gone", || {
+        hello(&dashboard).filter(|facts| !facts.contains_key("version.slot"))
+    });
+    for _ in 0..10 {
+        let _ = status.wait(Duration::from_millis(20));
+        assert_ne!(
+            status.status(),
+            Status::PublisherGone,
+            "a fact going moved the counter's topic"
+        );
+        if let Some(value) = latest(&mut count, 0).and_then(|b| float(&b)) {
+            lowest = lowest.min(value);
+        }
+    }
+    assert!(
+        lowest >= before,
+        "the counter went back: {lowest} < {before}"
+    );
+    let after = wait_for("the counter counting after the changes", || {
+        latest(&mut count, 0)
+            .and_then(|b| float(&b))
+            .filter(|value| *value > before)
+    });
+    assert!(after > before);
+    assert_eq!(status.status(), Status::Live);
+}
+
+#[test]
+fn a_caller_that_goes_away_is_gone_to_the_tracked_driver() {
+    let dir = dir("callers");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board_text = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_with(
+        &lemnosd,
+        &board_text,
+        vec![
+            entry::<FakeAccelerometer>(),
+            entry::<FakeCounter>(),
+            entry::<TrackedDevice>(),
+        ],
+    );
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the tracked device's resource", || {
+        resource(&dashboard, "lemnos.tracked").filter(|found| found.state == ResourceState::Ready)
+    });
+    let call = |args: &str| {
+        let finished = run_once_said(&dashboard, "lemnos.tracked.call", "lemnos.tracked", args);
+        assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+        String::from_utf8(finished.output).expect("text")
+    };
+
+    // The driver sees the Orion caller's own number: not the daemon's local one, and the same on
+    // every run while the caller's connection is up.
+    call("take");
+    let who = call("who");
+    assert_ne!(who, "0", "the caller is not the local caller");
+    assert_eq!(call("who"), who, "one caller, one number");
+    assert_eq!(call("held"), "1", "the driver holds for the caller");
+
+    // The caller starts a long job, then goes away while it runs: Orion cancels its run, and the
+    // driver is told the caller is gone.
+    let caller = wait_for("a second Orion session", || {
+        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
+    });
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    // The bridge takes the run and starts the job on lemnosd; a moment for that to happen.
+    std::thread::sleep(Duration::from_millis(300));
+    drop(long);
+    drop(caller);
+    wait_for("the driver is told the caller is gone", || {
+        (call("held") == "0").then_some(())
+    });
+}
+
+#[test]
+fn values_keep_the_time_the_driver_read_them_on_the_monotonic_clock() {
+    let dir = dir("stamps");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let before = SampleTime::now();
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the counter's resource", || {
+        resource(&dashboard, "lemnos.thing")
+    });
+    let mut count = dashboard
+        .subscribe("lemnos.thing.values")
+        .expect("subscribe");
+    let (_, time) = wait_for("a counter value", || latest_sample(&mut count, 0));
+    // A monotonic time since the start of the test, not the wall clock (which is far larger).
+    assert!(time >= before, "{time:?} is before the start of the test");
+    assert!(
+        time <= SampleTime::now(),
+        "{time:?} is in the future of the monotonic clock: a wall-clock stamp"
+    );
+}
+
+#[test]
+fn an_idle_session_is_kept_while_nothing_changes() {
+    let dir = dir("idle");
+    let lemnosd = dir.join("lemnosd.sock");
+    // The comm core gives a quiet session 400 ms, with a 50 ms heartbeat. The bridge pings, so it
+    // is never quiet for that long, and nothing is said to Orion meanwhile.
+    let board = Board::start_with(
+        &dir,
+        BoardOptions {
+            for_node: true,
+            heartbeat_ms: 50,
+            idle_ms: 400,
+            ..BoardOptions::default()
+        },
+    );
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the imu's resource", || {
+        resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    });
+    // The dashboard's own session must keep pinging too, or the comm core closes it.
+    let until = Instant::now() + Duration::from_millis(1600);
+    while Instant::now() < until {
+        let _ = dashboard.pump(Duration::from_millis(20));
+    }
+    let imu = resource(&dashboard, "lemnos.imu").expect("still published");
+    assert_eq!(imu.state, ResourceState::Ready);
+    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
+}
+
+#[test]
+fn a_comm_core_with_a_short_idle_time_is_connected_to_again() {
+    let dir = dir("short-idle");
+    let lemnosd = dir.join("lemnosd.sock");
+    let options = || BoardOptions {
+        for_node: true,
+        heartbeat_ms: 50,
+        idle_ms: 400,
+        ..BoardOptions::default()
+    };
+    let board = Board::start_with(&dir, options());
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let socket = board.socket().to_path_buf();
+    let _bridge = start_bridge(&lemnosd, &socket, None);
+    {
+        let dashboard = dashboard(&socket);
+        wait_for("the imu's resource", || resource(&dashboard, "lemnos.imu"));
+    }
+    // The comm core goes away: the bridge notices within the idle time and connects again when it
+    // is back.
+    drop(board);
+    let board = Board::start_with(&dir, options());
+    let dashboard = dashboard(board.socket());
+    wait_for("the imu's resource after the comm core came back", || {
+        resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    });
+    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }

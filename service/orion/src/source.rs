@@ -36,7 +36,8 @@ const FACTS_EVERY: Duration = Duration::from_secs(2);
 /// How to turn one subscription's reply into a value for one item.
 #[derive(Debug)]
 struct Route {
-    device: usize,
+    /// lemnosd's index for the device: the mirror finds the device by it.
+    device: u32,
     item: usize,
     shape: OwnedShape,
     field: Option<String>,
@@ -191,7 +192,8 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
             &reply[..value.len],
         ) {
             Ok(reading) => {
-                shared.with(|mirror| mirror.set_reading(route.device, route.item, reading));
+                let stamp = value.stamp_ns;
+                shared.with(|mirror| mirror.set_reading(route.device, route.item, reading, stamp));
                 shared.changed();
             }
             Err(error) => {
@@ -231,7 +233,6 @@ fn discover(
     let mut undescribed = Vec::new();
     let mut identity = None;
     for entry in client.list()? {
-        let position = specs.len();
         let mut items = Vec::new();
         let mut controls = Vec::new();
         match describe(client, entry.index) {
@@ -257,7 +258,7 @@ fn discover(
                             routes.insert(
                                 subscription,
                                 Route {
-                                    device: position,
+                                    device: entry.index,
                                     item: items.len(),
                                     shape: method.returns.clone(),
                                     field: item.field.clone(),
