@@ -409,6 +409,49 @@ impl Stream<'_> {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
+    /// The part of the held frame in `buffer` that is in plane `plane`, on a
+    /// stream whose buffers are in planes ([`info`](Self::info)'s `planes`).
+    pub fn plane(&self, buffer: u32, plane: u32) -> Result<&[u8], Status> {
+        let (mut data, mut len): (*const u8, usize) = (core::ptr::null(), 0);
+        // SAFETY: `data` and `len` are valid for a write during the call.
+        checked(unsafe {
+            ffi::lemnos_stream_plane(
+                self.client.handle,
+                self.handle,
+                buffer,
+                plane,
+                &mut data,
+                &mut len,
+            )
+        })?;
+        if len == 0 || data.is_null() {
+            return Ok(&[]);
+        }
+        // SAFETY: the surface points `data` at `len` bytes of the held frame's
+        // plane, mapped for as long as the stream is open; the frame stays
+        // held while `self` is borrowed, as for `next_frame`.
+        Ok(unsafe { core::slice::from_raw_parts(data, len) })
+    }
+
+    /// A descriptor of the dma-buf behind plane `plane` of the buffer.
+    pub fn plane_handle(&self, buffer: u32, plane: u32) -> Result<OwnedFd, Status> {
+        let mut fd = -1;
+        // SAFETY: `fd` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_plane_handle(
+                self.client.handle,
+                self.handle,
+                buffer,
+                plane,
+                &mut fd,
+                MessageSink::NONE,
+            )
+        })?;
+        // SAFETY: on success the surface gives a new descriptor that only the
+        // caller owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
     /// Gives the stream back, saying whether the service took it.
     pub fn close(self) -> Result<(), Status> {
         let status = ffi::lemnos_stream_close(self.client.handle, self.handle, MessageSink::NONE);

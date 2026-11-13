@@ -16,21 +16,24 @@ use lemnos_host::Host;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::mmap::Mapping;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout};
 
-/// The pool as the host addresses it, over one mapping per buffer.
+/// The pool as the host addresses it, over one mapping per plane of each buffer.
 struct Mapped {
     buffers: Vec<Mapping>,
     stride: usize,
-    bytes: usize,
+    planes: Planes,
 }
 
 impl Mapped {
+    /// The mapping and place that `len` bytes at pool offset `offset` are, when they lie in
+    /// one plane.
     fn at(&self, offset: usize, len: usize) -> Option<(&Mapping, usize)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let map = self.buffers.get(offset / self.stride)?;
-        fits.then_some((map, inner))
+        let (plane, inner, room) = self.planes.locate(offset % self.stride)?;
+        let index = offset / self.stride * self.planes.count() as usize + plane as usize;
+        let map = self.buffers.get(index)?;
+        (len <= room).then_some((map, inner))
     }
 }
 
@@ -54,31 +57,14 @@ impl BufferMemory for Mapped {
     }
 }
 
-/// A stream allocator that makes each buffer its own sealed memfd, mapped for the host and
-/// lent as its handle: what a stream of dma-bufs looks like to a driver.
+/// A stream allocator that makes each buffer, or each plane of each buffer, its own sealed
+/// memfd, mapped for the host and lent as its handle: what a stream of dma-bufs looks like to
+/// a driver.
 pub struct PerBuffer;
 
 impl StreamAllocator for PerBuffer {
     fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut handles = Vec::new();
-        let mut buffers = Vec::new();
-        for _ in 0..layout.buffers {
-            let fd: OwnedFd =
-                sealed_memfd(c"codec-jobs-test", layout.stride()).map_err(|_| Status::IO)?;
-            let bytes = layout.buffer_bytes as usize;
-            buffers.push(Mapping::new(fd.as_fd(), bytes, 0, true).map_err(|_| Status::IO)?);
-            handles.push(fd);
-        }
-        Ok(Backing {
-            buffers: Arc::new(Mapped {
-                buffers,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
-        })
+        self.allocate_planes(name, layout, "", &Planes::one(layout.buffer_bytes))
     }
 
     fn allocate_handles(
@@ -88,6 +74,42 @@ impl StreamAllocator for PerBuffer {
         _heap: &str,
     ) -> Result<Backing, Status> {
         self.allocate(name, layout)
+    }
+
+    fn allocate_planes(
+        &self,
+        name: &str,
+        layout: &Layout,
+        _heap: &str,
+        planes: &Planes,
+    ) -> Result<Backing, Status> {
+        let plain = HeapAllocator.allocate(name, layout)?;
+        let mut handles = Vec::new();
+        let mut buffers = Vec::new();
+        for _ in 0..layout.buffers {
+            for length in planes.lengths() {
+                // A buffer of one plane keeps the whole stride, as a heap rounds up.
+                let made = if planes.count() == 1 {
+                    layout.stride()
+                } else {
+                    u64::from(*length)
+                };
+                let fd: OwnedFd = sealed_memfd(c"codec-jobs-test", made).map_err(|_| Status::IO)?;
+                buffers.push(
+                    Mapping::new(fd.as_fd(), *length as usize, 0, true).map_err(|_| Status::IO)?,
+                );
+                handles.push(fd);
+            }
+        }
+        Ok(Backing {
+            buffers: Arc::new(Mapped {
+                buffers,
+                stride: layout.stride() as usize,
+                planes: *planes,
+            }),
+            handles: Some(handles.into()),
+            ..plain
+        })
     }
 }
 

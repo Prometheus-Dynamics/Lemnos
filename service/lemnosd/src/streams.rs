@@ -1,7 +1,8 @@
 //! What a frame stream is backed by on Linux: sealed memory the client can map but can't resize,
 //! and an eventfd. A stream the board file declares as dma-bufs gets one dma-buf per buffer from
 //! a dma-heap in place of the one memfd for all of them, so a driver can hand a buffer to
-//! hardware; the ring and the doorbell are the same.
+//! hardware, or one per plane of each buffer when the board file gives the buffers planes; the
+//! ring and the doorbell are the same.
 
 use std::ffi::CString;
 use std::fs::File;
@@ -16,8 +17,8 @@ use lemnos_host::stream::{Backing, BufferMemory, Doorbell, StreamAllocator};
 use lemnos_linux_sys::dma_buf::{self, SYNC_END, SYNC_READ, SYNC_START, SYNC_WRITE, sealed_memfd};
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::{dma_heap, eventfd};
-use lemnos_wire::MAX_HANDLE_BUFFERS;
 use lemnos_wire::ring::{Layout, WordMemory};
+use lemnos_wire::{Planes, handle_descriptors};
 
 /// Where the buffers of a stream of dma-bufs come from.
 pub trait BufferSource: Send + Sync {
@@ -111,34 +112,57 @@ fn memory(name: &str, suffix: &str, len: u64) -> Result<(OwnedFd, Mapping), Stat
     Ok((fd, mapping))
 }
 
-/// The buffers of a stream of dma-bufs, each mapped on its own. The host addresses them as one
-/// pool, a buffer every `stride` bytes, which is turned back into a buffer and a place in it.
+/// The buffers of a stream of dma-bufs, each plane of each mapped on its own. The host
+/// addresses them as one pool, a buffer every `stride` bytes and a buffer's planes end to end,
+/// which is turned back into planes and places in them.
 struct HandleBuffers {
+    /// One per plane of each buffer, buffer 0's planes first, as `handles`.
     maps: Vec<Mapping>,
     handles: Arc<[OwnedFd]>,
     stride: usize,
-    /// How much of each buffer is the stream's: the layout's `buffer_bytes`.
-    bytes: usize,
+    planes: Planes,
     /// Whether the buffers are real dma-bufs, whose CPU access is bracketed for the kernel.
     /// Stand-ins in tests have no such call.
     sync: bool,
 }
 
 impl HandleBuffers {
-    /// The buffer and the place in it that `len` bytes at `offset` of the pool are, when they
-    /// lie within one buffer's own bytes.
-    fn at(&self, offset: usize, len: usize) -> Option<(usize, usize)> {
+    /// Calls `each` with every plane `len` bytes at `offset` of the pool cover, the place in
+    /// that plane and how many of the bytes it holds, in order. `false`, and `each` never
+    /// called, unless all of them lie within one buffer's planes.
+    fn span(&self, offset: usize, len: usize, mut each: impl FnMut(usize, usize, usize)) -> bool {
+        let buffer = offset / self.stride;
         let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        fits.then_some((offset / self.stride, inner))
+        let inside = inner
+            .checked_add(len)
+            .is_some_and(|end| end <= self.planes.lengths().iter().map(|l| *l as usize).sum());
+        if !inside || buffer.saturating_add(1) * self.planes.count() as usize > self.maps.len() {
+            return false;
+        }
+        let (mut at, mut left, mut done) = (inner, len, 0);
+        while left > 0 {
+            let Some((plane, place, room)) = self.planes.locate(at) else {
+                return done == len;
+            };
+            let take = left.min(room);
+            each(
+                buffer * self.planes.count() as usize + plane as usize,
+                place,
+                take,
+            );
+            at += take;
+            left -= take;
+            done += take;
+        }
+        true
     }
 
     /// Tells the kernel the CPU is starting or ending an access (`DMA_BUF_IOCTL_SYNC`), so a
     /// device whose memory isn't cache-coherent sees what was written and the CPU sees what the
     /// device wrote. A failure changes nothing about where the bytes go, so it isn't one here.
-    fn bracket(&self, buffer: usize, flags: u64) {
+    fn bracket(&self, index: usize, flags: u64) {
         if self.sync
-            && let Some(handle) = self.handles.get(buffer)
+            && let Some(handle) = self.handles.get(index)
         {
             let _ = dma_buf::sync(handle.as_fd(), flags);
         }
@@ -147,33 +171,41 @@ impl HandleBuffers {
 
 impl BufferMemory for HandleBuffers {
     fn write(&self, offset: usize, data: &[u8]) -> bool {
-        let Some((buffer, inner)) = self.at(offset, data.len()) else {
-            return false;
-        };
-        let Some(map) = self.maps.get(buffer) else {
-            return false;
-        };
-        self.bracket(buffer, SYNC_START | SYNC_WRITE);
-        let written = map.write_bytes(inner, data).is_some();
-        self.bracket(buffer, SYNC_END | SYNC_WRITE);
-        written
+        let mut from = 0;
+        let mut written = true;
+        let fits = self.span(offset, data.len(), |index, place, take| {
+            let part = data.get(from..from + take).unwrap_or(&[]);
+            from += take;
+            self.bracket(index, SYNC_START | SYNC_WRITE);
+            written &= self
+                .maps
+                .get(index)
+                .and_then(|map| map.write_bytes(place, part))
+                .is_some();
+            self.bracket(index, SYNC_END | SYNC_WRITE);
+        });
+        fits && written
     }
 
     fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        let Some((buffer, inner)) = self.at(offset, out.len()) else {
-            return false;
-        };
-        let from = self.maps.get(buffer).and_then(|map| {
-            let end = inner.checked_add(out.len())?;
-            map.as_slice().get(inner..end)
+        let mut to = 0;
+        let mut read = true;
+        let fits = self.span(offset, out.len(), |index, place, take| {
+            let source = self
+                .maps
+                .get(index)
+                .and_then(|map| map.as_slice().get(place..place + take));
+            match (source, out.get_mut(to..to + take)) {
+                (Some(source), Some(dest)) => {
+                    self.bracket(index, SYNC_START | SYNC_READ);
+                    dest.copy_from_slice(source);
+                    self.bracket(index, SYNC_END | SYNC_READ);
+                }
+                _ => read = false,
+            }
+            to += take;
         });
-        let Some(from) = from else {
-            return false;
-        };
-        self.bracket(buffer, SYNC_START | SYNC_READ);
-        out.copy_from_slice(from);
-        self.bracket(buffer, SYNC_END | SYNC_READ);
-        true
+        fits && read
     }
 }
 
@@ -228,40 +260,67 @@ impl StreamAllocator for ServiceStreams {
     }
 
     fn allocate_handles(&self, name: &str, layout: &Layout, heap: &str) -> Result<Backing, Status> {
+        self.allocate_planes(name, layout, heap, &Planes::one(layout.buffer_bytes))
+    }
+
+    fn allocate_planes(
+        &self,
+        name: &str,
+        layout: &Layout,
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Backing, Status> {
         // More could not be handed to the consumer in the one message the answer is.
-        if layout.buffers > MAX_HANDLE_BUFFERS {
+        if handle_descriptors(layout.buffers, planes.count()).is_none() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let stride = layout.stride();
-        let handles = self
-            .source
-            .allocate(heap, stride, layout.buffers)
-            .map_err(|error| heap_status(&error))?;
-        if handles.len() != layout.buffers as usize {
-            return Err(Status::IO);
-        }
-        let mapped = usize::try_from(stride).map_err(|_| Status::IO)?;
-        let mut maps = Vec::with_capacity(handles.len());
+        let mut handles = Vec::with_capacity(layout.buffers as usize * planes.count() as usize);
+        let mut maps = Vec::with_capacity(handles.capacity());
         let mut sync = true;
-        for handle in &handles {
-            // A source is taken at its word about nothing: the buffer must really be this long
-            // before it is mapped, or touching the mapping would fault.
-            let long_enough = dma_buf::size(handle.as_fd()).is_ok_and(|size| size >= stride);
-            if !long_enough {
+        // A buffer of one plane keeps the whole stride, as it always had.
+        let lengths: Vec<u64> = if planes.count() == 1 {
+            vec![layout.stride()]
+        } else {
+            planes.lengths().iter().map(|l| u64::from(*l)).collect()
+        };
+        for length in &lengths {
+            let made = self
+                .source
+                .allocate(heap, *length, layout.buffers)
+                .map_err(|error| heap_status(&error))?;
+            if made.len() != layout.buffers as usize {
                 return Err(Status::IO);
             }
-            sync &= dma_buf::is_dma_buf(handle.as_fd()).unwrap_or(false);
-            maps.push(Mapping::new(handle.as_fd(), mapped, 0, true).map_err(|_| Status::IO)?);
+            handles.push(made);
         }
-        let handles: Arc<[OwnedFd]> = handles.into();
+        // Buffer-major: buffer 0's planes, then buffer 1's.
+        let mut ordered = Vec::with_capacity(maps.capacity());
+        let mut per_plane: Vec<std::vec::IntoIter<OwnedFd>> =
+            handles.into_iter().map(Vec::into_iter).collect();
+        for _ in 0..layout.buffers {
+            for (plane, length) in per_plane.iter_mut().zip(&lengths) {
+                let handle = plane.next().ok_or(Status::IO)?;
+                // A source is taken at its word about nothing: the buffer must really be this
+                // long before it is mapped, or touching the mapping would fault.
+                let long_enough = dma_buf::size(handle.as_fd()).is_ok_and(|size| size >= *length);
+                if !long_enough {
+                    return Err(Status::IO);
+                }
+                sync &= dma_buf::is_dma_buf(handle.as_fd()).unwrap_or(false);
+                let mapped = usize::try_from(*length).map_err(|_| Status::IO)?;
+                maps.push(Mapping::new(handle.as_fd(), mapped, 0, true).map_err(|_| Status::IO)?);
+                ordered.push(handle);
+            }
+        }
+        let handles: Arc<[OwnedFd]> = ordered.into();
         let common = common(name, layout)?;
         Ok(Backing {
             ring: common.ring,
             buffers: Arc::new(HandleBuffers {
                 maps,
                 handles: Arc::clone(&handles),
-                stride: mapped,
-                bytes: layout.buffer_bytes as usize,
+                stride: usize::try_from(layout.stride()).map_err(|_| Status::IO)?,
+                planes: *planes,
                 sync,
             }),
             doorbell: common.doorbell,

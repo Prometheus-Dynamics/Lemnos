@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use lemnos_core::Status;
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
-    DeviceDescription, Frame, MAX_QUEUED_BYTES, VERSION, append, decode, decode_description,
-    feature, handle_descriptors, health, package_mode, state,
+    DeviceDescription, Frame, MAX_QUEUED_BYTES, Planes, VERSION, append, decode,
+    decode_description, feature, handle_descriptors, health, package_mode, state,
 };
 
 use crate::connection::{Connection, Taker};
@@ -243,8 +243,11 @@ struct Shared {
 pub(crate) struct StreamAnswer {
     layout: Layout,
     descriptors: u8,
-    /// StreamHandles: a descriptor per buffer. Otherwise StreamReady.
+    /// StreamHandles: a descriptor per buffer, or per plane of each. Otherwise StreamReady.
     handles: bool,
+    /// Each buffer's planes, as StreamHandles gave them; `None` when what it gave is no
+    /// planes of the buffer. One plane for StreamReady.
+    planes: Option<Planes>,
     /// Whether the request said this client takes StreamHandles.
     asked_handles: bool,
 }
@@ -1292,7 +1295,7 @@ impl Session {
                         job_bytes,
                         ..
                     } => (
-                        false,
+                        None,
                         buffers,
                         descriptors,
                         buffer_bytes,
@@ -1307,9 +1310,10 @@ impl Session {
                         frame_slots,
                         job_slots,
                         job_bytes,
+                        plane_bytes,
                         ..
                     } => (
-                        true,
+                        Some(Planes::decode(plane_bytes, buffer_bytes)),
                         buffers,
                         descriptors,
                         buffer_bytes,
@@ -1328,7 +1332,8 @@ impl Session {
                     job_bytes,
                 },
                 descriptors,
-                handles,
+                handles: handles.is_some(),
+                planes: handles.unwrap_or(Some(Planes::one(buffer_bytes))),
                 asked_handles,
             }))
         }))
@@ -1360,20 +1365,28 @@ impl Session {
             layout,
             descriptors,
             handles,
+            planes,
             asked_handles,
         } = answer;
-        // Every number here came off the socket. For a descriptor per buffer, the count must be
-        // the one the buffers give, the buffers no more than one message carries, and the answer
-        // one this client asked for.
-        let consistent =
-            !handles || (asked_handles && handle_descriptors(layout.buffers) == Some(descriptors));
+        // Every number here came off the socket. For a descriptor per buffer or plane, the
+        // planes must add up to the buffer, the count must be the one the buffers and planes
+        // give, no more than one message carries, and the answer one this client asked for.
+        let consistent = match planes {
+            Some(planes) => {
+                !handles
+                    || (asked_handles
+                        && handle_descriptors(layout.buffers, planes.count()) == Some(descriptors))
+            }
+            None => false,
+        };
+        let planes = planes.unwrap_or(Planes::one(layout.buffer_bytes));
         if !consistent || usize::from(descriptors) != fds.len() {
             // `fds` drops, closing whatever did arrive.
             self.lost();
             return Err(Error::Wire(lemnos_wire::WireError::Malformed));
         }
         let built = if handles {
-            FrameStream::with_handles(device, name, layout, fds, writable, platform)
+            FrameStream::with_handles(device, name, layout, planes, fds, writable, platform)
         } else {
             FrameStream::new(device, name, layout, fds, writable, platform)
         };

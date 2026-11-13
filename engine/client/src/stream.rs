@@ -16,8 +16,8 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_wire::handle_descriptors;
 use lemnos_wire::ring::{ByteMemory, Consumer, Layout, RingError, STATE_OPEN, WordMemory};
+use lemnos_wire::{Planes, handle_descriptors};
 
 use crate::error::Error;
 use crate::holds::Hold;
@@ -131,6 +131,8 @@ pub struct FrameStream {
     pool: Pool,
     /// Whether the buffers were mapped to be written too.
     writable: bool,
+    /// Each buffer's planes: one, unless the stream's buffers are a descriptor per plane.
+    planes: Planes,
     doorbell: OwnedFd,
     platform: Arc<dyn StreamPlatform>,
     /// The session's record that this stream is open. Dropping the stream without closing it
@@ -142,7 +144,8 @@ pub struct FrameStream {
 enum Pool {
     /// One mapping, a buffer every `stride` bytes.
     Whole(Box<dyn ByteMemory>),
-    /// A mapping per buffer, each from its first byte, and the buffer's descriptor.
+    /// A mapping per plane of each buffer, buffer 0's planes first, each from its first byte,
+    /// and the plane's descriptor.
     Each(Box<[(Box<dyn ByteMemory>, OwnedFd)]>),
 }
 
@@ -187,6 +190,7 @@ impl FrameStream {
             ring,
             pool: Pool::Whole(pool),
             writable,
+            planes: Planes::one(layout.buffer_bytes),
             doorbell,
             platform,
             hold: None,
@@ -194,21 +198,25 @@ impl FrameStream {
     }
 
     /// Builds the stream from what StreamHandles carried: the ring, the doorbell, then one
-    /// descriptor per buffer. Any failure closes every descriptor. Each buffer's descriptor is
-    /// kept beside its mapping, for [`buffer_handle`](Self::buffer_handle), and closes with the
-    /// stream.
+    /// descriptor per plane of each buffer (a buffer of one plane: per buffer). Any failure
+    /// closes every descriptor. Each plane's descriptor is kept beside its mapping, for
+    /// [`buffer_handle`](Self::buffer_handle) and [`plane_handle`](Self::plane_handle), and
+    /// closes with the stream.
     pub(crate) fn with_handles(
         device: u32,
         name: &str,
         layout: Layout,
+        planes: Planes,
         fds: Vec<OwnedFd>,
         writable: bool,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<Self, Error> {
         let layout = layout.checked().map_err(Error::Stream)?;
         // Checked by the session too. Here it is what makes the split below right.
-        let expected = handle_descriptors(layout.buffers).map(usize::from);
-        if expected != Some(fds.len()) {
+        let expected = handle_descriptors(layout.buffers, planes.count()).map(usize::from);
+        if expected != Some(fds.len())
+            || Planes::new(planes.lengths(), layout.buffer_bytes).is_none()
+        {
             return Err(Error::Stream(RingError::BadHeader));
         }
         let mut fds = fds.into_iter();
@@ -219,11 +227,11 @@ impl FrameStream {
         let ring_memory = platform
             .map_ring(ring_fd.as_fd(), layout.ring_bytes())
             .map_err(failed)?;
-        let buffer_bytes = layout.buffer_bytes as usize;
         let mut buffers = Vec::with_capacity(fds.len());
-        for fd in fds {
+        let lengths = planes.lengths().iter().cycle();
+        for (fd, length) in fds.zip(lengths) {
             let memory = platform
-                .map_buffer(fd.as_fd(), buffer_bytes, writable)
+                .map_buffer(fd.as_fd(), *length as usize, writable)
                 .map_err(|error| match error.kind() {
                     io::ErrorKind::Unsupported => Error::StreamUnsupported,
                     _ => failed(error),
@@ -237,6 +245,7 @@ impl FrameStream {
             ring,
             pool: Pool::Each(buffers.into()),
             writable,
+            planes,
             doorbell,
             platform,
             hold: None,
@@ -254,6 +263,13 @@ impl FrameStream {
         if let Some(hold) = &self.hold {
             hold.release();
         }
+    }
+
+    /// Each buffer's planes: one, unless the stream's buffers are a descriptor per plane.
+    /// [`write`](Self::write) and [`read`](Self::read) address a buffer's planes end to end.
+    #[must_use]
+    pub const fn planes(&self) -> &Planes {
+        &self.planes
     }
 
     /// Whether each buffer is its own mapping, which is how a stream of dma-bufs arrives.
@@ -287,9 +303,11 @@ impl FrameStream {
     /// The next frame, if one has arrived. Never waits and allocates nothing.
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
         let frame = self.ring.pop_frame().map_err(Error::Stream)?;
-        if let Some(memory) = frame.as_ref().and_then(|slot| self.own_memory(slot.buffer)) {
+        if let Some(slot) = frame.as_ref() {
             // The frame is read in place from here until it is given back.
-            memory.begin_read();
+            for memory in self.own_memory(slot.buffer) {
+                memory.begin_read();
+            }
         }
         Ok(frame.map(|slot| HeldFrame {
             buffer: slot.buffer,
@@ -322,8 +340,10 @@ impl FrameStream {
         }
     }
 
-    /// The bytes of a frame this stream handed out. A frame from another stream reads as whatever
-    /// its numbers fall on here, and within this stream's memory.
+    /// The bytes of a frame this stream handed out. On a stream whose buffers are several
+    /// planes this is the first plane's part of the frame: read each with
+    /// [`plane`](Self::plane). A frame from another stream reads as whatever its numbers fall
+    /// on here, and within this stream's memory.
     #[must_use]
     pub fn bytes(&self, frame: &HeldFrame) -> &[u8] {
         match &self.pool {
@@ -335,17 +355,39 @@ impl FrameStream {
                 let end = offset.saturating_add(frame.bytes as usize);
                 pool.bytes().get(offset..end).unwrap_or(&[])
             }
-            Pool::Each(buffers) => buffers
-                .get(frame.buffer as usize)
-                .and_then(|(buffer, _)| buffer.bytes().get(..frame.bytes as usize))
+            Pool::Each(_) => self.plane(frame, 0),
+        }
+    }
+
+    /// The part of a frame in plane `plane` of its buffer: the planes hold the frame's bytes
+    /// end to end, so a plane past the frame's length is empty, and one it ends in is cut
+    /// there. Empty for a plane the buffers don't have. On a stream of one plane this is
+    /// [`bytes`](Self::bytes).
+    #[must_use]
+    pub fn plane(&self, frame: &HeldFrame, plane: u32) -> &[u8] {
+        let (Some(start), Some(length)) = (
+            self.planes.offset(plane),
+            self.planes.lengths().get(plane as usize),
+        ) else {
+            return &[];
+        };
+        let held = (frame.bytes as usize)
+            .saturating_sub(start)
+            .min(*length as usize);
+        match &self.pool {
+            Pool::Whole(_) => self.bytes(frame).get(start..start + held).unwrap_or(&[]),
+            Pool::Each(_) => self
+                .plane_memory(frame.buffer, plane)
+                .and_then(|memory| memory.bytes().get(..held))
                 .unwrap_or(&[]),
         }
     }
 
     /// The descriptor of `buffer`, on a stream whose buffers are a descriptor each (dma-bufs),
     /// for handing the buffer to something else that takes memory that way: a GPU importing a
-    /// frame, an encoder. `None` for a stream of shared memory, whose buffers have no descriptor
-    /// of their own, and for a buffer the stream doesn't have.
+    /// frame, an encoder. On a stream whose buffers are in planes this is plane 0's; see
+    /// [`plane_handle`](Self::plane_handle). `None` for a stream of shared memory, whose buffers
+    /// have no descriptor of their own, and for a buffer the stream doesn't have.
     ///
     /// The descriptor stays the stream's and closes with it; clone it
     /// ([`BorrowedFd::try_clone_to_owned`]) to keep the memory past that. Whatever is handed the
@@ -354,28 +396,55 @@ impl FrameStream {
     /// job that names it.
     #[must_use]
     pub fn buffer_handle(&self, buffer: u32) -> Option<BorrowedFd<'_>> {
+        self.plane_handle(buffer, 0)
+    }
+
+    /// The descriptor of plane `plane` of `buffer`, as [`buffer_handle`](Self::buffer_handle)
+    /// lends plane 0. `None` for a plane the buffers don't have.
+    #[must_use]
+    pub fn plane_handle(&self, buffer: u32, plane: u32) -> Option<BorrowedFd<'_>> {
+        self.plane_entry(buffer, plane).map(|(_, fd)| fd.as_fd())
+    }
+
+    /// The mapping and descriptor of plane `plane` of `buffer`, on a stream whose buffers are a
+    /// descriptor each.
+    fn plane_entry(&self, buffer: u32, plane: u32) -> Option<&(Box<dyn ByteMemory>, OwnedFd)> {
         match &self.pool {
             Pool::Whole(_) => None,
-            Pool::Each(buffers) => buffers.get(buffer as usize).map(|(_, fd)| fd.as_fd()),
+            Pool::Each(maps) => {
+                if plane >= self.planes.count() {
+                    return None;
+                }
+                let index = (buffer as usize)
+                    .checked_mul(self.planes.count() as usize)?
+                    .checked_add(plane as usize)?;
+                maps.get(index)
+            }
         }
     }
 
-    /// The mapping of `buffer` alone, on a stream whose buffers are a descriptor each.
-    fn own_memory(&self, buffer: u32) -> Option<&dyn ByteMemory> {
-        match &self.pool {
-            Pool::Whole(_) => None,
-            Pool::Each(buffers) => buffers.get(buffer as usize).map(|(memory, _)| &**memory),
-        }
+    /// The mapping of plane `plane` of `buffer`, on a stream whose buffers are a descriptor
+    /// each.
+    fn plane_memory(&self, buffer: u32, plane: u32) -> Option<&dyn ByteMemory> {
+        self.plane_entry(buffer, plane).map(|(memory, _)| &**memory)
     }
 
-    /// The memory `len` bytes at `offset` of `buffer` are in, and where in it. Refused for a
-    /// buffer the stream doesn't have and for a range that isn't inside the buffer.
-    fn place(
+    /// The mappings of `buffer`'s planes, on a stream whose buffers are a descriptor each.
+    fn own_memory(&self, buffer: u32) -> impl Iterator<Item = &dyn ByteMemory> {
+        (0..self.planes.count()).filter_map(move |plane| self.plane_memory(buffer, plane))
+    }
+
+    /// Calls `each` with the memory, the place in it and the length of every part of the `len`
+    /// bytes at `offset` of `buffer`, in order: one part, unless they cross from one plane to
+    /// the next. Refused for a buffer the stream doesn't have and for a range that isn't
+    /// inside the buffer, before `each` is called at all.
+    fn parts(
         &self,
         buffer: u32,
         offset: usize,
         len: usize,
-    ) -> Result<(&dyn ByteMemory, usize), Error> {
+        mut each: impl FnMut(&dyn ByteMemory, usize, usize),
+    ) -> Result<(), Error> {
         let layout = self.ring.layout();
         if buffer >= layout.buffers {
             return Err(Error::Stream(RingError::BadBuffer));
@@ -392,13 +461,26 @@ impl FrameStream {
                     .buffer_offset(buffer)
                     .and_then(|at| at.checked_add(offset))
                     .ok_or(Error::Stream(RingError::BadBuffer))?;
-                Ok((&**pool, start))
+                each(&**pool, start, len);
             }
-            Pool::Each(buffers) => buffers
-                .get(buffer as usize)
-                .map(|(memory, _)| (&**memory, offset))
-                .ok_or(Error::Stream(RingError::BadBuffer)),
+            Pool::Each(_) => {
+                let (mut at, mut left) = (offset, len);
+                while left > 0 {
+                    let (plane, place, room) = self
+                        .planes
+                        .locate(at)
+                        .ok_or(Error::Stream(RingError::BadLength))?;
+                    let memory = self
+                        .plane_memory(buffer, plane)
+                        .ok_or(Error::Stream(RingError::BadBuffer))?;
+                    let take = left.min(room);
+                    each(memory, place, take);
+                    at += take;
+                    left -= take;
+                }
+            }
         }
+        Ok(())
     }
 
     /// Whether the stream was taken to be filled ([`Session::open_stream_writable`]), so that
@@ -429,8 +511,15 @@ impl FrameStream {
         if !self.writable {
             return Err(Error::StreamReadOnly);
         }
-        let (memory, start) = self.place(buffer, offset, data.len())?;
-        if memory.write(start, data) {
+        let mut from = 0;
+        let mut written = true;
+        self.parts(buffer, offset, data.len(), |memory, start, take| {
+            written &= data
+                .get(from..from + take)
+                .is_some_and(|part| memory.write(start, part));
+            from += take;
+        })?;
+        if written {
             Ok(())
         } else {
             Err(Error::Stream(RingError::BadLength))
@@ -442,19 +531,30 @@ impl FrameStream {
     /// place with [`bytes`](Self::bytes). Refused as [`write`](Self::write) is for a buffer or
     /// a range the stream doesn't have. Never waits and allocates nothing.
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Error> {
-        let (memory, start) = self.place(buffer, offset, out.len())?;
-        memory.begin_read();
-        let copied = start
-            .checked_add(out.len())
-            .and_then(|end| memory.bytes().get(start..end))
-            .map(|from| out.copy_from_slice(from));
-        memory.end_read();
-        copied.ok_or(Error::Stream(RingError::BadLength))
+        let mut to = 0;
+        let mut copied = true;
+        self.parts(buffer, offset, out.len(), |memory, start, take| {
+            memory.begin_read();
+            let from = start
+                .checked_add(take)
+                .and_then(|end| memory.bytes().get(start..end));
+            match (from, out.get_mut(to..to + take)) {
+                (Some(from), Some(into)) => into.copy_from_slice(from),
+                _ => copied = false,
+            }
+            memory.end_read();
+            to += take;
+        })?;
+        if copied {
+            Ok(())
+        } else {
+            Err(Error::Stream(RingError::BadLength))
+        }
     }
 
     /// Gives a frame's buffer back to the producer. The frame is gone either way.
     pub fn release(&mut self, frame: HeldFrame) -> Result<(), Error> {
-        if let Some(memory) = self.own_memory(frame.buffer) {
+        for memory in self.own_memory(frame.buffer) {
             memory.end_read();
         }
         match self.ring.release(frame.buffer, frame.fence) {

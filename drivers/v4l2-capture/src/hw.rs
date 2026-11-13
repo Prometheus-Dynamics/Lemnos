@@ -2,6 +2,7 @@
 //! device through `lemnos-v4l2`.
 
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 
 use lemnos_core::{Result, Status};
@@ -17,6 +18,9 @@ use lemnos_v4l2::{Error, FourCc};
 /// `V4L2_FIELD_NONE`: progressive frames.
 const FIELD_NONE: u32 = 1;
 
+/// The most memory planes a frame has (`VIDEO_MAX_PLANES`).
+pub const MAX_PLANES: usize = lemnos_v4l2::v4l2::MAX_PLANES;
+
 /// The format the driver asks the node for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wanted {
@@ -28,9 +32,13 @@ pub struct Wanted {
     pub height: u32,
     pub stride: u32,
     pub size: u32,
+    /// A mode of the receiver's own, read by nothing here: the receiver's
+    /// [`Prepare`] call is given it before the format is set. 0 for none.
+    pub mode: u32,
 }
 
-/// What the node answered `VIDIOC_S_FMT` with, for its first plane.
+/// What the node answered `VIDIOC_S_FMT` with: the first plane's numbers, and every memory
+/// plane's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Granted {
     pub fourcc: FourCc,
@@ -38,7 +46,23 @@ pub struct Granted {
     pub height: u32,
     pub stride: u32,
     pub size: u32,
+    /// Memory planes a frame is written in: 1 for a single-planar format.
+    pub planes: usize,
+    /// Each memory plane's size, the first `planes` of them.
+    pub plane_sizes: [u32; MAX_PLANES],
 }
+
+impl Granted {
+    /// Each memory plane's size.
+    #[must_use]
+    pub fn plane_sizes(&self) -> &[u32] {
+        self.plane_sizes.get(..self.planes).unwrap_or(&[])
+    }
+}
+
+/// A receiver's own call on the node, made after the node opens and before the input and the
+/// format are set, with what is wanted: a vendor driver's private memory mode, say.
+pub type Prepare = Box<dyn Fn(BorrowedFd<'_>, &Wanted) -> Result<()> + Send>;
 
 /// A filled buffer taken off the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,15 +95,15 @@ pub trait Hardware: Send {
     /// Asks for `buffers` buffers, queues them all and starts streaming. After `open`.
     fn stream_on(&mut self, buffers: u32) -> Result<()>;
     /// Asks for `slots` slots that take the caller's dma-bufs and starts streaming with
-    /// nothing queued: the node fills what [`queue_handle`](Self::queue_handle) gives it.
-    /// After `open`, in place of `stream_on`. `NOT_SUPPORTED` when the node can't: its frames
-    /// have more than one memory plane, or its queue takes no dma-bufs. Open the node again
-    /// before trying `stream_on`.
+    /// nothing queued: the node fills what [`queue_handles`](Self::queue_handles) gives it.
+    /// After `open`, in place of `stream_on`. `NOT_SUPPORTED` when the node's queue takes no
+    /// dma-bufs. Open the node again before trying `stream_on`.
     fn stream_on_importing(&mut self, slots: u32) -> Result<()>;
-    /// Queues slot `index` on the dma-buf behind `handle`, for the node to fill. The node
-    /// takes its own hold on the memory, so the borrow ends with the call. Refused when the
-    /// dma-buf is smaller than a frame.
-    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()>;
+    /// Queues slot `index` on the dma-bufs behind `planes`, one per memory plane of the
+    /// node's format, for the node to fill. The node takes its own hold on the memory, so the
+    /// borrow ends with the call. Refused for a count of planes other than the format's, and
+    /// when a dma-buf is smaller than its plane.
+    fn queue_handles(&mut self, index: u32, planes: &[BufferHandle<'_>]) -> Result<()>;
     /// Stops streaming, frees the buffers and closes the node. Nothing to stop is not an error.
     fn stop(&mut self) -> Result<()>;
     /// The next filled buffer, if one is ready. Never blocks.
@@ -126,10 +150,10 @@ pub struct LinuxHardware {
     opened: Option<(VideoDevice, BufType)>,
     /// The node's queue, while streaming: mapped, or importing dma-bufs.
     queue: Option<MmapQueue>,
-    /// Bytes of a frame, as the node's format has them: what a dma-buf must hold.
-    frame_bytes: u32,
-    /// Memory planes of the node's format.
-    frame_planes: usize,
+    /// The node's format: each memory plane's size, what the dma-buf for it must hold.
+    granted: Option<Granted>,
+    /// The receiver's own call before the format.
+    prepare: Option<Prepare>,
     /// The buffer `dequeue` returned last, for `payload`.
     current: Option<DequeuedBuffer>,
 }
@@ -142,10 +166,17 @@ impl LinuxHardware {
             found: None,
             opened: None,
             queue: None,
-            frame_bytes: 0,
-            frame_planes: 0,
+            granted: None,
+            prepare: None,
             current: None,
         }
+    }
+
+    /// The node, with `prepare` called on it at each open before the input and format.
+    #[must_use]
+    pub fn with_prepare(mut self, prepare: Prepare) -> Self {
+        self.prepare = Some(prepare);
+        self
     }
 
     /// The media device holding an entity named as configured with a video node behind it, and
@@ -190,22 +221,36 @@ fn status(error: &Error) -> Status {
 }
 
 fn granted(format: &Format) -> Result<Granted> {
-    let (fourcc, width, height, plane) = match format {
-        Format::Single(p) => (
-            p.fourcc,
-            p.width,
-            p.height,
-            PlaneFormat {
-                bytes_per_line: p.bytes_per_line,
-                size_image: p.size_image,
-            },
-        ),
-        Format::Multi(p) => (
-            p.fourcc,
-            p.width,
-            p.height,
-            p.planes.first().copied().ok_or(Status::IO)?,
-        ),
+    let mut plane_sizes = [0; MAX_PLANES];
+    let (fourcc, width, height, plane, planes) = match format {
+        Format::Single(p) => {
+            plane_sizes[0] = p.size_image;
+            (
+                p.fourcc,
+                p.width,
+                p.height,
+                PlaneFormat {
+                    bytes_per_line: p.bytes_per_line,
+                    size_image: p.size_image,
+                },
+                1,
+            )
+        }
+        Format::Multi(p) => {
+            if p.planes.len() > MAX_PLANES {
+                return Err(Status::IO);
+            }
+            for (size, plane) in plane_sizes.iter_mut().zip(&p.planes) {
+                *size = plane.size_image;
+            }
+            (
+                p.fourcc,
+                p.width,
+                p.height,
+                p.planes.first().copied().ok_or(Status::IO)?,
+                p.planes.len(),
+            )
+        }
         Format::Meta(_) => return Err(Status::IO),
     };
     Ok(Granted {
@@ -214,6 +259,8 @@ fn granted(format: &Format) -> Result<Granted> {
         height,
         stride: plane.bytes_per_line,
         size: plane.size_image,
+        planes,
+        plane_sizes,
     })
 }
 
@@ -229,6 +276,9 @@ impl Hardware for LinuxHardware {
         } else {
             return Err(Status::NOT_SUPPORTED);
         };
+        if let Some(prepare) = &self.prepare {
+            prepare(dev.as_fd(), wanted)?;
+        }
         // A kernel driver that sets up its pipeline here needs this before the format.
         if let Some(input) = wanted.input {
             dev.set_input(input).map_err(|e| status(&e))?;
@@ -258,11 +308,7 @@ impl Hardware for LinuxHardware {
         };
         let chosen = dev.set_format(buf_type, &format).map_err(|e| status(&e))?;
         let granted = granted(&chosen)?;
-        self.frame_bytes = granted.size;
-        self.frame_planes = match &chosen {
-            Format::Multi(p) => p.planes.len(),
-            _ => 1,
-        };
+        self.granted = Some(granted);
         self.opened = Some((dev, buf_type));
         Ok(granted)
     }
@@ -280,10 +326,6 @@ impl Hardware for LinuxHardware {
     }
 
     fn stream_on_importing(&mut self, slots: u32) -> Result<()> {
-        // One dma-buf holds one memory plane: a frame in several can't land in a stream buffer.
-        if self.frame_planes != 1 {
-            return Err(Status::NOT_SUPPORTED);
-        }
         let (dev, buf_type) = self.opened.take().ok_or(Status::INVALID_ARGUMENT)?;
         // A queue that takes no dma-bufs refuses the request, and the node is closed with it.
         let queue = MmapQueue::importing(dev, buf_type, slots, "capture")
@@ -293,21 +335,30 @@ impl Hardware for LinuxHardware {
         Ok(())
     }
 
-    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()> {
+    fn queue_handles(&mut self, index: u32, planes: &[BufferHandle<'_>]) -> Result<()> {
         let queue = self.queue.as_ref().ok_or(Status::IO)?;
-        // The node writes a whole frame: the dma-buf's real size must hold one.
-        let size = dma_buf::size(handle.fd()).map_err(|_| Status::IO)?;
-        if size < u64::from(self.frame_bytes) {
+        let granted = self.granted.as_ref().ok_or(Status::IO)?;
+        let (Some(first), true) = (planes.first(), planes.len() == granted.planes) else {
             return Err(Status::INVALID_ARGUMENT);
+        };
+        // The node writes each plane whole: each dma-buf's real size must hold its plane.
+        let mut fds = [first.fd(); MAX_PLANES];
+        for ((fd, plane), need) in fds.iter_mut().zip(planes).zip(granted.plane_sizes()) {
+            let size = dma_buf::size(plane.fd()).map_err(|_| Status::IO)?;
+            if size < u64::from(*need) {
+                return Err(Status::INVALID_ARGUMENT);
+            }
+            *fd = plane.fd();
         }
         queue
-            .queue_dmabuf(index, &[handle.fd()])
+            .queue_dmabuf(index, fds.get(..planes.len()).unwrap_or(&[]))
             .map_err(|e| status(&e))
     }
 
     fn stop(&mut self) -> Result<()> {
         self.current = None;
         self.opened = None;
+        self.granted = None;
         // Found again at the next open, in case the node came back under another number.
         self.found = None;
         match self.queue.take() {
@@ -411,8 +462,11 @@ mod tests {
                 height: 32,
                 stride: 128,
                 size: 4096,
+                planes: 2,
+                plane_sizes: [4096, 1, 0, 0, 0, 0, 0, 0],
             }
         );
+        assert_eq!(granted(&multi).unwrap().plane_sizes(), &[4096, 1]);
         let single = Format::Single(PixFormat {
             width: 8,
             height: 2,
@@ -422,6 +476,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(granted(&single).unwrap().size, 16);
+        assert_eq!(granted(&single).unwrap().plane_sizes(), &[16]);
         let empty = Format::Multi(PixFormatMplane::default());
         assert_eq!(granted(&empty).unwrap_err(), Status::IO);
     }
@@ -431,6 +486,30 @@ mod tests {
         assert!(Settings::new("vin_video0").is_ok());
         assert_eq!(Settings::new("").unwrap_err(), Status::INVALID_ARGUMENT);
         assert_eq!(Settings::new("a\0b").unwrap_err(), Status::INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn a_format_of_more_planes_than_a_buffer_has_is_refused() {
+        let over = Format::Multi(PixFormatMplane {
+            planes: vec![
+                PlaneFormat {
+                    bytes_per_line: 1,
+                    size_image: 1,
+                };
+                MAX_PLANES + 1
+            ],
+            ..Default::default()
+        });
+        assert_eq!(granted(&over).unwrap_err(), Status::IO);
+    }
+
+    #[test]
+    fn handles_are_refused_while_nothing_streams() {
+        let mut hw = LinuxHardware::new(Settings::new("vin_video0").unwrap());
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let handle = BufferHandle::from(file.as_fd());
+        assert_eq!(hw.queue_handles(0, &[handle]).unwrap_err(), Status::IO);
+        assert_eq!(hw.queue_handles(0, &[]).unwrap_err(), Status::IO);
     }
 
     #[test]

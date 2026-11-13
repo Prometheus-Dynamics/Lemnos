@@ -71,5 +71,3 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
       `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),
       and pass descriptors with `shm-fdpass`.
-- [ ] **Capture**: `rkcif` has no 16-bit unpacked layout; multi-plane frames are copied; nothing is
-      captured straight into a stream while no consumer is attached.

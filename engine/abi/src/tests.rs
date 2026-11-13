@@ -392,9 +392,9 @@ mod package {
         assert_eq!(size_of::<PackageItem>(), 56);
         assert_eq!(size_of::<PackageSetting<'static>>(), 56);
         assert_eq!(size_of::<DriverTable>(), 72);
-        assert_eq!(size_of::<HostTable>(), 568);
+        assert_eq!(size_of::<HostTable>(), 592);
         assert_eq!(core::mem::offset_of!(HostTable, device), 32);
-        assert_eq!(core::mem::offset_of!(HostTable, usb_function), 496);
+        assert_eq!(core::mem::offset_of!(HostTable, usb_function), 520);
         // What the tables carry.
         assert_eq!(size_of::<Fd>(), 4);
         assert_eq!(size_of::<PackageTransfer<'static>>(), 40);
@@ -422,7 +422,7 @@ mod package {
             (size_of::<DmaTable>(), 6),
             (size_of::<ClocksTable>(), 4),
             (size_of::<ResetTable>(), 2),
-            (size_of::<StreamTable>(), 10),
+            (size_of::<StreamTable>(), 13),
             (size_of::<UsbDeviceTable>(), 14),
             (size_of::<UsbFunctionTable>(), 9),
         ] {

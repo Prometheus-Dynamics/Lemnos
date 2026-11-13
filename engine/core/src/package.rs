@@ -1207,6 +1207,30 @@ impl StreamEndpoint for Taken {
     fn fault_consumer(&mut self) -> Hal<()> {
         done((self.host.stream.fault_consumer)(self.handle))
     }
+
+    fn planes(&self) -> u32 {
+        let mut count = 1;
+        let status = (self.host.stream.planes)(self.handle, Out::new(&mut count));
+        // A host that can't say lends whole buffers.
+        if status.is_ok() { count.max(1) } else { 1 }
+    }
+
+    fn plane_offset(&self, plane: u32) -> Option<usize> {
+        let mut offset = 0;
+        let status = (self.host.stream.plane_offset)(self.handle, plane, Out::new(&mut offset));
+        status.is_ok().then_some(offset)
+    }
+
+    fn plane_handle(&self, buffer: u32, plane: u32) -> Hal<Option<BufferHandle<'_>>> {
+        let mut fd = Fd::NONE;
+        done((self.host.stream.plane_handle)(
+            self.handle,
+            buffer,
+            plane,
+            Out::new(&mut fd),
+        ))?;
+        lent(self, fd)
+    }
 }
 
 /// The descriptor the host lent for a buffer, borrowed for as long as the stream is.

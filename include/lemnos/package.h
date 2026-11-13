@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0x4391f834b6603755ULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x987634c72e5b0188ULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */
@@ -455,6 +455,13 @@ typedef struct LemnosStreamTable {
     LemnosStatus (*buffer_kind)(LemnosHandle stream, uint32_t *kind);
     /* Ends the attached consumer's stream as faulted. */
     LemnosStatus (*fault_consumer)(LemnosHandle stream);
+    /* count: how many memory planes each buffer is, 1 unless the board file gives more. */
+    LemnosStatus (*planes)(LemnosHandle stream, uint32_t *count);
+    /* offset: where plane starts in a buffer as write and read address it. */
+    LemnosStatus (*plane_offset)(LemnosHandle stream, uint32_t plane, size_t *offset);
+    /* Plane plane of the buffer as a descriptor, lent as buffer_handle lends plane 0. */
+    LemnosStatus (*plane_handle)(LemnosHandle stream, uint32_t buffer, uint32_t plane,
+                                 LemnosFd *fd);
 } LemnosStreamTable;
 
 typedef struct LemnosUsbDeviceTable {

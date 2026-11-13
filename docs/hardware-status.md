@@ -63,6 +63,9 @@ These are stated in the code and can only be settled on a board:
   in `D10.md`.
 - **Whether the vendor capture drivers accept dma-bufs** from outside (`E39.md`). If not, frames
   on those boards are copied once.
+- **Whether the vendor `rkcif` takes its memory-mode request before each format**, so that
+  16-bit words come out as the uAPI's formats say (`H5a.md`). If not, only the compact layout
+  is offered there.
 - **Whether a program on the Rockchip NPU can reach its IOMMU's own registers** (`E32.md`). If it
   can, no driver in user space can confine it.
 - **Register facts the code marks `Unconfirmed`**: the `k230-capture` frame path
@@ -158,6 +161,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E12.md`](../testing/board-runs/E12.md) | `sunxi-vin`: layout, 3000 frames, a stall, recovery |
 | [`E13.md`](../testing/board-runs/E13.md) | `isp600`: request numbers, statistics size, regions, an address refused |
 | [`E39.md`](../testing/board-runs/E39.md) | Capture straight into a stream's dma-bufs, and whether the vendor capture drivers take them at all |
+| [`H5a.md`](../testing/board-runs/H5a.md) | `rkcif`'s 16-bit word layout through the vendor memory-mode request, a frame in planes straight into a stream, capture on standby |
 | [`E11.md`](../testing/board-runs/E11.md) | `k230isp`: the register window, the request numbers, refusals, statistics |
 | [`E30.md`](../testing/board-runs/E30.md) | `k230-capture`: nodes, the link, guard pages, formats, stop and restart |
 | [`H1.md`](../testing/board-runs/H1.md) | `k230isp` and `k230-capture` on the ISP's registers and interrupt through the kernel module (`unconfined=`) |

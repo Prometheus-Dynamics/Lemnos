@@ -25,6 +25,8 @@ pub struct StreamScript {
 
 #[derive(Default)]
 pub struct Control {
+    /// StreamHandles' `plane_bytes`: empty for buffers of one plane.
+    pub plane_bytes: Mutex<Vec<u8>>,
     pub connections: AtomicU32,
     /// 0 means answer with the real version.
     pub version: AtomicU16,
@@ -360,6 +362,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                                 job_bytes,
                             } = script.layout;
                             let descriptors = script.claimed;
+                            let plane_bytes = control.plane_bytes.lock().unwrap().clone();
                             let answer = if control.answer_handles.load(Ordering::SeqCst) {
                                 Frame::StreamHandles {
                                     id,
@@ -369,6 +372,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                                     frame_slots,
                                     job_slots,
                                     job_bytes,
+                                    plane_bytes: &plane_bytes,
                                 }
                             } else {
                                 Frame::StreamReady {

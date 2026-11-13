@@ -52,7 +52,7 @@ closes the connection on a larger length, without reading it.
 | 20 | Refusal | id u32, status i32, text str | to client |
 | 21 | StreamClose | id u32, device u32, name str | to host |
 | 22 | StreamOpenHandles | id u32, device u32, name str | to host |
-| 23 | StreamHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
+| 23 | StreamHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, plane_bytes bytes | to client |
 | 24 | Packages | id u32 | to host |
 | 25 | Package | id u32, path str, driver str, reason str | to client |
 | 26 | PackagesDone | id u32, mode u8, note str | to client |
@@ -132,12 +132,16 @@ client reads the socket with `recvmsg` while a StreamOpen is outstanding, becaus
 discards descriptors. Descriptors passed to the host are closed unread.
 
 StreamHandles carries its descriptors the same way, in one message: the ring, the doorbell, then
-one descriptor per buffer, in buffer order. `descriptors` is `2 + buffers`, and `buffers` is at
-most 128, so at most 130 descriptors arrive. A client that sends StreamOpenHandles gives its
-`recvmsg` room for 130 descriptors: what doesn't fit is lost, and the stream with it. A client
-refuses a StreamHandles whose `buffers` is 0 or over 128, whose `descriptors` isn't `2 + buffers`,
-or that came with a different number of descriptors, and closes the connection, as for any frame
-that can't be trusted.
+one descriptor per plane of each buffer, buffer by buffer and each buffer's planes in order.
+`plane_bytes` is each plane's length as a little-endian u32, at most 8 of them, adding up to
+`buffer_bytes`. It is empty for a buffer of one plane, the usual case. `descriptors` is
+`2 + buffers × planes`, and `buffers × planes` is at most 128, so at most 130 descriptors arrive.
+A client that sends StreamOpenHandles gives its `recvmsg` room for 130 descriptors: what doesn't
+fit is lost, and the stream with it. A client refuses a StreamHandles whose `buffers` is 0, whose
+`plane_bytes` isn't whole lengths, more than 8 of them, a zero length, or a sum other than
+`buffer_bytes`, whose `buffers × planes` is over 128, whose `descriptors` isn't
+`2 + buffers × planes`, or that came with a different number of descriptors, and closes the
+connection, as for any frame that can't be trusted.
 
 ## Streams
 
@@ -491,11 +495,20 @@ client reads that as `link: ""`.
 
 ### stream-handles
 
-`StreamHandles { id: 13, buffers: 4, descriptors: 6, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
+`StreamHandles { id: 13, buffers: 4, descriptors: 6, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, plane_bytes: [] }`
 
 <!-- vector: stream-handles -->
 ```hex
-1b 00 00 00 17 00 0d 00 00 00 04 00 00 00 06 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
+1f 00 00 00 17 00 0d 00 00 00 04 00 00 00 06 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 00 00 00 00
+```
+
+### stream-handles-planes
+
+`StreamHandles { id: 14, buffers: 2, descriptors: 6, buffer_bytes: 256, frame_slots: 2, job_slots: 1, job_bytes: 0, plane_bytes: [192 as u32 LE, 64 as u32 LE] }`
+
+<!-- vector: stream-handles-planes -->
+```hex
+27 00 00 00 17 00 0e 00 00 00 02 00 00 00 06 00 01 00 00 02 00 00 00 01 00 00 00 00 00 00 00 08 00 00 00 c0 00 00 00 40 00 00 00
 ```
 
 ### packages

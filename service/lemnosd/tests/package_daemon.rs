@@ -152,8 +152,21 @@ impl Drop for Packages {
     }
 }
 
+/// A daemon process that is always reaped: a test that fails before stopping it, or a daemon
+/// that never listened, still takes it down, so no daemon outlives the test binary.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
 struct Daemon {
-    child: Child,
+    child: Reaped,
     socket: PathBuf,
 }
 
@@ -174,6 +187,8 @@ impl Daemon {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        // Reaped from here on, even if it never listens.
+        let child = Reaped(child);
         eventually(
             || UnixStream::connect(&socket).ok(),
             "the daemon never listened",
@@ -191,17 +206,18 @@ impl Daemon {
     fn stop(mut self) -> String {
         let sent = Command::new("kill")
             .arg("-TERM")
-            .arg(self.child.id().to_string())
+            .arg(self.child.0.id().to_string())
             .status()
             .unwrap();
         assert!(sent.success());
         let status = eventually(
-            || self.child.try_wait().unwrap(),
+            || self.child.0.try_wait().unwrap(),
             "the daemon ignored the signal",
         );
         assert!(status.success(), "{status}");
         let mut said = String::new();
         self.child
+            .0
             .stderr
             .take()
             .unwrap()

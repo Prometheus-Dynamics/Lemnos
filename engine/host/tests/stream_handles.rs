@@ -1,5 +1,7 @@
 //! Streams whose buffers are dma-bufs: a producer borrows the handle behind a buffer it holds,
-//! for hardware. Unnamed files stand in for the dma-bufs, one per buffer.
+//! for hardware, a buffer of several planes lends one per plane, and a stream on standby has
+//! memory to fill while nobody is attached. Unnamed files stand in for the dma-bufs, one per
+//! buffer or plane.
 
 #![cfg(unix)]
 
@@ -20,6 +22,7 @@ use lemnos_host::stream::{
 use lemnos_host::{Host, Options, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout};
 
 #[global_allocator]
@@ -52,20 +55,21 @@ fn unnamed(len: u64) -> File {
     file
 }
 
-/// The pool as the host addresses it, over one file per buffer.
+/// The pool as the host addresses it, over one file per plane of each buffer.
 struct PerBuffer {
     files: Vec<File>,
     stride: usize,
-    bytes: usize,
+    planes: Planes,
 }
 
 impl PerBuffer {
-    /// The file and the offset in it that pool offset `offset` is, when `len` bytes fit.
+    /// The file and the offset in it that pool offset `offset` is, when `len` bytes fit in one
+    /// plane.
     fn at(&self, offset: usize, len: usize) -> Option<(&File, u64)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let file = self.files.get(offset / self.stride)?;
-        fits.then_some((file, inner as u64))
+        let (plane, inner, room) = self.planes.locate(offset % self.stride)?;
+        let index = offset / self.stride * self.planes.count() as usize + plane as usize;
+        let file = self.files.get(index)?;
+        (len <= room).then_some((file, inner as u64))
     }
 }
 
@@ -91,10 +95,20 @@ impl StreamAllocator for FileStreams {
         HeapAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(&self, name: &str, layout: &Layout, _: &str) -> Result<Backing, Status> {
+    fn allocate_handles(&self, name: &str, layout: &Layout, heap: &str) -> Result<Backing, Status> {
+        self.allocate_planes(name, layout, heap, &Planes::one(layout.buffer_bytes))
+    }
+
+    fn allocate_planes(
+        &self,
+        name: &str,
+        layout: &Layout,
+        _: &str,
+        planes: &Planes,
+    ) -> Result<Backing, Status> {
         let heap = HeapAllocator.allocate(name, layout)?;
         let files: Vec<File> = (0..layout.buffers)
-            .map(|_| unnamed(u64::from(layout.buffer_bytes)))
+            .flat_map(|_| planes.lengths().iter().map(|len| unnamed(u64::from(*len))))
             .collect();
         let handles: Vec<OwnedFd> = files
             .iter()
@@ -106,7 +120,7 @@ impl StreamAllocator for FileStreams {
             buffers: Arc::new(PerBuffer {
                 files,
                 stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
+                planes: *planes,
             }),
             handles: Some(handles.into()),
             ..heap
@@ -541,4 +555,241 @@ fn plain_memory_handed_over_for_a_stream_declared_as_dma_bufs_is_refused() {
         Some(Status::IO)
     );
     assert!(!host.stream_stats(0, "frames").unwrap().attached);
+}
+
+/// The board file's keys for a stream of dma-bufs whose buffers are two planes.
+const PLANES: &str = "memory = \"dma-buf\"\nplanes = [48, 16]\n";
+
+#[test]
+fn a_buffer_of_planes_lends_each_plane_and_write_reaches_them_end_to_end() {
+    let host = start_declared(Arc::new(FileStreams { short: 0 }), PLANES);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    assert_eq!(producer.planes(), 2);
+    assert_eq!(producer.plane_offset(0), Some(0));
+    assert_eq!(producer.plane_offset(1), Some(48));
+    assert_eq!(producer.plane_offset(2), None);
+    let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+    assert_eq!(lease.planes.lengths(), &[48, 16]);
+    let given = lease.handles.as_ref().unwrap();
+    assert_eq!(given.len(), 2 * BUFFERS as usize);
+    let mut consumer = consumer(&lease);
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    // Each plane is its own memory, as long as the board file gives it.
+    let first = hardware(producer.plane_handle(buffer, 0).unwrap().unwrap());
+    let second = hardware(producer.plane_handle(buffer, 1).unwrap().unwrap());
+    assert_eq!(first.metadata().unwrap().len(), 48);
+    assert_eq!(second.metadata().unwrap().len(), 16);
+    let whole = hardware(producer.buffer_handle(buffer).unwrap().unwrap());
+    assert_eq!(whole.metadata().unwrap().len(), 48, "plane 0");
+    assert_eq!(
+        producer.plane_handle(buffer, 2).map(|_| ()),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        producer.plane_handle(buffer + 1, 1).map(|_| ()),
+        Err(ErrorKind::InvalidInput),
+        "a buffer it doesn't hold"
+    );
+    // Hardware writes each plane; `read` finds the second after the first.
+    first.write_all_at(&[1; 4], 0).unwrap();
+    second.write_all_at(&[2; 4], 0).unwrap();
+    let mut out = [0; 4];
+    assert_eq!(producer.read(buffer, 0, &mut out), Ok(true));
+    assert_eq!(out, [1; 4]);
+    assert_eq!(producer.read(buffer, 48, &mut out), Ok(true));
+    assert_eq!(out, [2; 4]);
+    assert_eq!(producer.write(buffer, 60, &[3; 4]), Ok(true));
+    second.read_exact_at(&mut out, 12).unwrap();
+    assert_eq!(out, [3; 4]);
+    // The consumer was given the same planes, buffer by buffer.
+    File::from(given[buffer as usize * 2 + 1].try_clone().unwrap())
+        .read_exact_at(&mut out, 0)
+        .unwrap();
+    assert_eq!(out, [2; 4]);
+    producer.publish(frame(buffer)).unwrap();
+    assert_eq!(consumer.pop_frame().unwrap().unwrap().buffer, buffer);
+    // Lending a plane allocates nothing.
+    let held = producer.next_buffer().unwrap().unwrap();
+    let ((), count) = allocations(|| {
+        for _ in 0..1000 {
+            assert!(producer.plane_handle(held, 1).unwrap().is_some());
+        }
+    });
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn an_allocator_that_makes_only_whole_buffers_refuses_a_stream_of_planes() {
+    let host = start_declared(Arc::new(Declared::default()), PLANES);
+    assert_eq!(
+        host.stream_attach(0, "frames", FIRST).err(),
+        Some(Status::NOT_SUPPORTED)
+    );
+    // A stream of one plane is still asked of it as it always was.
+    let host = start_declared(Arc::new(Declared::default()), DMA_BUF);
+    let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+    assert_eq!(lease.planes, Planes::one(BYTES as u32));
+}
+
+/// The board file's keys for a stream of dma-bufs kept on standby.
+const STANDBY: &str = "memory = \"dma-buf\"\nstandby = true\n";
+
+#[test]
+fn on_standby_hardware_fills_buffers_with_nobody_attached_and_the_next_consumer_gets_the_newest() {
+    let host = start_declared(Arc::new(FileStreams { short: 0 }), STANDBY);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    assert!(
+        !host.stream_stats(0, "frames").unwrap().standby,
+        "made when asked for"
+    );
+    let older = producer.next_buffer().unwrap().unwrap();
+    assert!(host.stream_stats(0, "frames").unwrap().standby);
+    assert_eq!(
+        producer.buffer_current(older),
+        Ok(true),
+        "memory is in place"
+    );
+    let into = hardware(producer.buffer_handle(older).unwrap().unwrap());
+    into.write_all_at(&[1; 4], 0).unwrap();
+    producer.publish(frame(older)).unwrap();
+    let newer = producer.next_buffer().unwrap().unwrap();
+    let into = hardware(producer.buffer_handle(newer).unwrap().unwrap());
+    into.write_all_at(&[2; 4], 0).unwrap();
+    producer
+        .publish(StreamFrame {
+            sequence: 2,
+            ..frame(newer)
+        })
+        .unwrap();
+    // The newest is kept; the one before went back to be filled again.
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert_eq!((stats.kept, stats.dropped, stats.free), (1, 1, BUFFERS - 1));
+    // A buffer still being filled when the consumer comes stays current on its memory.
+    let filling = producer.next_buffer().unwrap().unwrap();
+    let late = hardware(producer.buffer_handle(filling).unwrap().unwrap());
+    let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+    let mut consumer = consumer(&lease);
+    let got = consumer
+        .pop_frame()
+        .unwrap()
+        .expect("the newest frame, at once");
+    assert_eq!((got.buffer, got.sequence), (newer, 2));
+    assert_eq!(seen(&lease, newer), [2; 4]);
+    // The consumer's memory is what hardware wrote: nothing was copied.
+    let mut out = [0; 4];
+    File::from(
+        lease.handles.as_ref().unwrap()[newer as usize]
+            .try_clone()
+            .unwrap(),
+    )
+    .read_exact_at(&mut out, 0)
+    .unwrap();
+    assert_eq!(out, [2; 4]);
+    assert_eq!(producer.buffer_current(filling), Ok(true));
+    late.write_all_at(&[3; 4], 0).unwrap();
+    producer
+        .publish(StreamFrame {
+            sequence: 3,
+            ..frame(filling)
+        })
+        .unwrap();
+    assert_eq!(consumer.pop_frame().unwrap().unwrap().buffer, filling);
+    assert_eq!(seen(&lease, filling), [3; 4]);
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert_eq!((stats.kept, stats.standby, stats.delivered), (0, false, 2));
+}
+
+#[test]
+fn on_standby_the_memory_a_consumer_leaves_goes_with_it_and_fresh_memory_waits() {
+    let host = start_declared(Arc::new(FileStreams { short: 0 }), STANDBY);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let first = host.stream_attach(0, "frames", FIRST).unwrap();
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    let late = hardware(producer.buffer_handle(buffer).unwrap().unwrap());
+    host.stream_detach(0, "frames", FIRST).unwrap();
+    assert_eq!(
+        producer.buffer_current(buffer),
+        Ok(false),
+        "its memory went"
+    );
+    assert!(producer.buffer_handle(buffer).unwrap().is_none());
+    producer.publish(frame(buffer)).unwrap();
+    assert_eq!(host.stream_stats(0, "frames").unwrap().kept, 0, "not kept");
+    // Fresh memory, which the first consumer never had.
+    let fresh = producer.next_buffer().unwrap().unwrap();
+    assert!(host.stream_stats(0, "frames").unwrap().standby);
+    let into = hardware(producer.buffer_handle(fresh).unwrap().unwrap());
+    late.write_all_at(&[0xEE; 4], 0).unwrap();
+    into.write_all_at(&[5; 4], 0).unwrap();
+    producer.publish(frame(fresh)).unwrap();
+    let second = host.stream_attach(0, "frames", SECOND).unwrap();
+    let got = consumer(&second).pop_frame().unwrap().unwrap();
+    assert_eq!(seen(&second, got.buffer), [5; 4]);
+    assert_eq!(
+        seen(&first, buffer),
+        [0xEE; 4],
+        "the late write stayed the first's"
+    );
+    if got.buffer == buffer {
+        unreachable!("the buffer given up went back free and was taken again");
+    }
+    // An empty frame is a buffer given up, and is not kept for anyone.
+    host.stream_detach(0, "frames", SECOND).unwrap();
+    let empty = producer.next_buffer().unwrap().unwrap();
+    producer
+        .publish(StreamFrame {
+            bytes: 0,
+            ..frame(empty)
+        })
+        .unwrap();
+    assert_eq!(host.stream_stats(0, "frames").unwrap().kept, 0);
+}
+
+#[test]
+fn on_standby_plain_memory_takes_writes_with_nobody_attached() {
+    let host = start_declared(Arc::new(HeapAllocator), "standby = true\n");
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    assert_eq!(
+        producer.write(buffer, 0, &[9; 4]),
+        Ok(true),
+        "somewhere to land"
+    );
+    producer.publish(frame(buffer)).unwrap();
+    // The stream beside it is not on standby, and keeps nothing.
+    let mut plain = host.stream_producer(0, "plain").unwrap();
+    let other = plain.next_buffer().unwrap().unwrap();
+    assert_eq!(plain.write(other, 0, &[1]), Ok(false));
+    let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+    let got = consumer(&lease).pop_frame().unwrap().unwrap();
+    assert_eq!(got.buffer, buffer);
+    assert_eq!(seen(&lease, buffer), [9; 4]);
+}
+
+#[test]
+fn on_standby_a_thousand_frames_with_nobody_attached_allocate_nothing() {
+    let host = start_declared(Arc::new(FileStreams { short: 0 }), STANDBY);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let mut cycle = |sequence: u64| {
+        let buffer = producer.next_buffer().unwrap().unwrap();
+        assert!(producer.buffer_handle(buffer).unwrap().is_some());
+        producer
+            .publish(StreamFrame {
+                sequence,
+                ..frame(buffer)
+            })
+            .unwrap();
+    };
+    cycle(0);
+    let ((), count) = allocations(|| {
+        for sequence in 1..1001 {
+            cycle(sequence);
+        }
+    });
+    assert_eq!(count, 0, "allocations in 1000 frames");
+    let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+    assert_eq!(
+        consumer(&lease).pop_frame().unwrap().unwrap().sequence,
+        1000
+    );
 }

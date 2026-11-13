@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 #define LEMNOS_ABI_MAJOR 1
-#define LEMNOS_ABI_MINOR 1
+#define LEMNOS_ABI_MINOR 2
 #define LEMNOS_LAYOUT_HASH 0x87298e01dabc373fULL
 
 #define LEMNOS_VERSION_INIT \
@@ -114,7 +114,7 @@ typedef struct LemnosStreamInfo {
     uint32_t frame_slots;
     uint32_t job_slots;
     uint32_t job_bytes;
-    uint32_t reserved;
+    uint32_t planes; /* memory planes per buffer: 1 unless the board file gives more */
 } LemnosStreamInfo;
 
 typedef struct LemnosFrame {
@@ -195,8 +195,9 @@ LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, Lemnos
 /* Returns 1 with a frame, 0 when timeout_ms passed or the host ended the stream
  * (LEMNOS_STREAM_OPEN then clears). 0 ms takes a frame only if one is there.
  * *data, when data is not NULL, is the frame's frame->len bytes, read in place
- * and valid until the frame is released or the stream closed. Allocates
- * nothing. */
+ * and valid until the frame is released or the stream closed. On a stream whose
+ * buffers are in planes (info.planes above 1) *data is NULL: read each plane
+ * with lemnos_stream_plane. Allocates nothing. */
 LemnosStatus lemnos_stream_next_frame(LemnosHandle client, LemnosHandle stream, uint32_t timeout_ms,
                                       LemnosFrame *frame, const uint8_t **data,
                                       LemnosMessageSink sink);
@@ -221,6 +222,16 @@ LemnosStatus lemnos_stream_post_job(LemnosHandle client, LemnosHandle stream, co
  * lemnos_stream_write and frames. */
 LemnosStatus lemnos_stream_buffer_handle(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
                                          int32_t *fd, LemnosMessageSink sink);
+/* The part of the held frame in buffer that is in plane plane: *data and *len,
+ * read in place and valid as lemnos_stream_next_frame's data. The planes hold the
+ * frame's bytes end to end, so a plane past its end is empty. A buffer not held
+ * or a plane the stream doesn't have is -EINVAL. Allocates nothing. */
+LemnosStatus lemnos_stream_plane(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
+                                 uint32_t plane, const uint8_t **data, size_t *len);
+/* A new descriptor of plane plane of a buffer, as lemnos_stream_buffer_handle
+ * gives plane 0. */
+LemnosStatus lemnos_stream_plane_handle(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
+                                        uint32_t plane, int32_t *fd, LemnosMessageSink sink);
 /* Releases every frame still held and gives the stream back. */
 LemnosStatus lemnos_stream_close(LemnosHandle client, LemnosHandle stream, LemnosMessageSink sink);
 

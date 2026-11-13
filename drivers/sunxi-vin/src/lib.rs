@@ -306,6 +306,7 @@ impl SunxiVin {
             height: layout.height,
             stride: layout.stride,
             size: layout.size,
+            mode: 0,
         };
         self.pump
             .begin(&mut *self.hw, &*self.frames, &wanted, self.options.buffers)

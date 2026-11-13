@@ -161,6 +161,12 @@ consumer attaches. A driver whose hardware takes buffers only by handle refuses 
 in `start` with `NOT_SUPPORTED`, as `drivers/g2d` does. The device then shows as failing to bind,
 which points at the board file, where waiting for a consumer and going unhealthy would not.
 
+A stream of dma-bufs may give each buffer in planes (the board file's `planes`), one dma-buf per
+plane: `planes()` says how many, `plane_offset(plane)` where each starts in the buffer's bytes as
+`write` and `read` address them, and `plane_handle(buffer, plane)` lends one. `buffer_handle` is
+plane 0. A stream on standby (`standby = true`) has memory with no consumer attached, so the
+handles are there to fill then too, and the newest frame published is the next consumer's first.
+
 A driver that takes jobs on a stream holds the buffers its consumer names, and a stream's memory
 is made anew for each consumer. `buffer_current(buffer)` says whether a held buffer was taken
 under the consumer attached now. Ask it of one held buffer at the start of each tick, before
@@ -289,7 +295,7 @@ a small table of functions for its kind. Four things are worth knowing:
   and the rest), so a driver that tells them apart still can.
 - One I2C or SPI transaction carries at most 16 steps, and one isochronous USB transfer at most
   64 packets. More is `InvalidInput` before anything reaches the bus.
-- A stream buffer's handle (`StreamEndpoint::buffer_handle`) crosses as the number of a file
+- A stream buffer's handle (`StreamEndpoint::buffer_handle`, and `plane_handle`) crosses as the number of a file
   descriptor in the service's process, which is the package's process too. It is borrowed until
   the stream's next call, as it is for a built-in driver: duplicate it, or hand it to the kernel,
   to hold the memory longer.

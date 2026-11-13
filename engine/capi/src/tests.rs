@@ -124,7 +124,7 @@ fn a_c_compiler_agrees_on_every_layout() {
         frame_slots,
         job_slots,
         job_bytes,
-        reserved
+        planes
     );
     source += &check!(
         "LemnosFrame",

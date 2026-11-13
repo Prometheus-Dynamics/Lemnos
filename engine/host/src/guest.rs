@@ -488,6 +488,19 @@ impl StreamEndpoint for ReadOnly<StreamHandle> {
         Err(ErrorKind::Unsupported)
     }
 
+    /// Where `write` lands, which a driver filling the stream in software needs.
+    fn planes(&self) -> u32 {
+        self.0.planes()
+    }
+
+    fn plane_offset(&self, plane: u32) -> Option<usize> {
+        self.0.plane_offset(plane)
+    }
+
+    fn plane_handle(&self, _: u32, _: u32) -> Refusable<Option<BufferHandle<'_>>> {
+        Err(ErrorKind::Unsupported)
+    }
+
     fn buffer_current(&self, buffer: u32) -> Refusable<bool> {
         self.0.buffer_current(buffer)
     }

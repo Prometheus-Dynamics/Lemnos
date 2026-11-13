@@ -119,6 +119,7 @@ buffers = 8
 buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
+standby = true                 # capture with nobody attached; a consumer gets the newest frame
 
 [[devices]]
 id = "cam0-isp"
@@ -140,6 +141,18 @@ buffers = 4
 buffer_bytes = 4194304
 memory = "dma-buf"
 heap = "linux,cma"
+
+# A receiver whose node writes each frame in two memory planes: one dma-buf per plane.
+[[devices]]
+id = "cam1-receiver"
+driver = "sunxi-vin"
+config = { capture = "vin_video0" }
+
+[devices.streams.frames]
+buffers = 4
+buffer_bytes = 3110400
+memory = "dma-buf"
+planes = [2073600, 1036800]    # the node's planes, in order: they add up to buffer_bytes
 
 # DMA memory for a block bound to the kernel module: `dma:` and the block's device name.
 [[devices]]

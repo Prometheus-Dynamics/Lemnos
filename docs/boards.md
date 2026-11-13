@@ -57,6 +57,8 @@ In a stream:
 | `job_bytes` | The largest job. 256 when left out, at most 4096 |
 | `memory` | `"shared"` (the default): memory shared with the consumer, filled by the driver in software. `"dma-buf"`: one dma-buf per buffer, so hardware can fill it or read it |
 | `heap` | Only with `memory = "dma-buf"`: the dma-heap the buffers come from, by its name under `/dev/dma_heap`. `"system"` when left out |
+| `planes` | Only with `memory = "dma-buf"`: the lengths of a buffer's memory planes, for hardware that writes one frame into several (a node of the multi-plane V4L2 API). Each plane is its own dma-buf, 1 to 8 of them, and they add up to `buffer_bytes`. `buffers` times the plane count is at most 128. Left out, a buffer is one plane |
+| `standby` | `true`: the stream has memory while no consumer is attached, so hardware keeps filling it and a consumer that attaches is handed the newest frame at once, with nothing copied. `false` (the default): memory is made only for a consumer |
 
 [Frame streams](streams.md) says which to choose.
 
@@ -371,6 +373,7 @@ buffers = 8
 buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
+standby = true                 # capture with nobody attached; a consumer gets the newest frame
 
 [[devices]]
 id = "cam0-isp"
@@ -392,6 +395,18 @@ buffers = 4
 buffer_bytes = 4194304
 memory = "dma-buf"
 heap = "linux,cma"
+
+# A receiver whose node writes each frame in two memory planes: one dma-buf per plane.
+[[devices]]
+id = "cam1-receiver"
+driver = "sunxi-vin"
+config = { capture = "vin_video0" }
+
+[devices.streams.frames]
+buffers = 4
+buffer_bytes = 3110400
+memory = "dma-buf"
+planes = [2073600, 1036800]    # the node's planes, in order: they add up to buffer_bytes
 
 # DMA memory for a block bound to the kernel module: `dma:` and the block's device name.
 [[devices]]

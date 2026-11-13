@@ -572,6 +572,31 @@ impl StreamHost for Held {
         let stream = held!(stream, Stream);
         done(lock(&stream).fault_consumer())
     }
+
+    fn planes(stream: Handle, count: Out<'_, u32>) -> Status {
+        let stream = held!(stream, Stream);
+        count.set(lock(&stream).planes());
+        Status::OK
+    }
+
+    fn plane_offset(stream: Handle, plane: u32, offset: Out<'_, usize>) -> Status {
+        let stream = held!(stream, Stream);
+        match lock(&stream).plane_offset(plane) {
+            Some(at) => {
+                offset.set(at);
+                Status::OK
+            }
+            None => Status::INVALID_ARGUMENT,
+        }
+    }
+
+    fn plane_handle(stream: Handle, buffer: u32, plane: u32, fd: Out<'_, Fd>) -> Status {
+        let stream = held!(stream, Stream);
+        // Lent as `buffer_handle` lends plane 0: until the stream's next call.
+        answer(lock(&stream).plane_handle(buffer, plane), fd, |handle| {
+            handle.map_or(Fd::NONE, |handle| Fd::lend(handle.fd()))
+        })
+    }
 }
 
 impl UsbDeviceHost for Held {

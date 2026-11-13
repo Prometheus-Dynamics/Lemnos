@@ -15,6 +15,7 @@ lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-v4l2 = { path = "../../backends/v4l2" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-driver-v4l2-capture = { path = "../v4l2-capture" }
+lemnos-driver-rkcif-sys = { path = "../rkcif-sys" }
 libc.workspace = true
 
 [dev-dependencies]

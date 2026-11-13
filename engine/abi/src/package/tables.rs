@@ -569,6 +569,13 @@ table! {
         fn buffer_kind(stream: Handle, kind: Out<'_, u32>);
         /// Ends the attached consumer's stream as faulted.
         fn fault_consumer(stream: Handle);
+        /// How many memory planes each buffer is: 1 unless the board file gives more.
+        fn planes(stream: Handle, count: Out<'_, u32>);
+        /// Where `plane` starts in a buffer as `write` and `read` address it.
+        fn plane_offset(stream: Handle, plane: u32, offset: Out<'_, usize>);
+        /// Plane `plane` of the buffer as a descriptor, lent as `buffer_handle` lends plane 0,
+        /// or [`Fd::NONE`] when nothing is behind the buffer now.
+        fn plane_handle(stream: Handle, buffer: u32, plane: u32, fd: Out<'_, Fd>);
     }
 }
 

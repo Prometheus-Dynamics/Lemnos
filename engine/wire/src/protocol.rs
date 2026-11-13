@@ -29,9 +29,14 @@ pub mod feature {
     pub const ALL: u64 = STREAM_HANDLES | PACKAGES;
 }
 
-/// The most buffers a stream may have when each is its own descriptor. Its descriptors, and
-/// the ring's and the doorbell's, travel in one `SCM_RIGHTS` message, which holds 253.
+/// The most buffer descriptors a stream may have when each buffer, or each plane of a buffer,
+/// is its own descriptor. They, and the ring's and the doorbell's, travel in one `SCM_RIGHTS`
+/// message, which holds 253.
 pub const MAX_HANDLE_BUFFERS: u32 = 128;
+/// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
+pub const MAX_PLANES: u32 = 8;
+/// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
+pub const PLANE_LENGTH_BYTES: usize = 4;
 /// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
 pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
 
@@ -210,9 +215,12 @@ frames! {
     /// StreamOpen from a client that can also take StreamHandles for an answer. Sent only to a
     /// host whose Welcome set [`feature::STREAM_HANDLES`].
     22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
-    /// StreamReady for a stream whose buffers are one descriptor each. `descriptors` is 2 plus
-    /// `buffers`, all with this frame over `SCM_RIGHTS`: the ring, the doorbell, then the buffers
-    /// in order. `buffers` is at most [`MAX_HANDLE_BUFFERS`].
+    /// StreamReady for a stream whose buffers are one descriptor each, or one per plane.
+    /// `plane_bytes` is each plane's length, [`PLANE_LENGTH_BYTES`] little-endian bytes each,
+    /// adding up to `buffer_bytes`; empty when a buffer is one plane. `descriptors` is 2 plus
+    /// `buffers` times the planes, all with this frame over `SCM_RIGHTS`: the ring, the
+    /// doorbell, then buffer 0's planes in order, buffer 1's, and so on. At most
+    /// [`MAX_HANDLE_BUFFERS`] buffer descriptors.
     23 StreamHandles {
         id: u32,
         buffers: u32,
@@ -221,6 +229,7 @@ frames! {
         frame_slots: u32,
         job_slots: u32,
         job_bytes: u32,
+        plane_bytes: &'a [u8],
     }
     /// Asks what became of the host's driver packages. Sent only to a host whose Welcome set
     /// [`feature::PACKAGES`]. Answered with one Package for each file, then PackagesDone.
@@ -233,15 +242,146 @@ frames! {
     26 PackagesDone { id: u32, mode: u8, note: &'a str }
 }
 
-/// How many descriptors StreamHandles carries for a stream of `buffers` buffers, or `None` when
-/// that many buffers can't each be a descriptor.
+/// How many descriptors StreamHandles carries for a stream of `buffers` buffers of `planes`
+/// planes each, or `None` when that many can't each be a descriptor.
 #[must_use]
-pub const fn handle_descriptors(buffers: u32) -> Option<u8> {
-    if buffers == 0 || buffers > MAX_HANDLE_BUFFERS {
+pub const fn handle_descriptors(buffers: u32, planes: u32) -> Option<u8> {
+    if buffers == 0 || planes == 0 || planes > MAX_PLANES {
         return None;
     }
-    // At most 130, so it fits.
-    Some((HANDLE_DESCRIPTORS_BEFORE + buffers) as u8)
+    match buffers.checked_mul(planes) {
+        // At most 130, so it fits.
+        Some(total) if total <= MAX_HANDLE_BUFFERS => {
+            Some((HANDLE_DESCRIPTORS_BEFORE + total) as u8)
+        }
+        _ => None,
+    }
+}
+
+/// A buffer's planes, by length: what StreamHandles' `plane_bytes` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Planes {
+    lengths: [u32; MAX_PLANES as usize],
+    count: u32,
+}
+
+impl Planes {
+    /// One plane of `buffer_bytes`.
+    #[must_use]
+    pub const fn one(buffer_bytes: u32) -> Self {
+        let mut lengths = [0; MAX_PLANES as usize];
+        lengths[0] = buffer_bytes;
+        Self { lengths, count: 1 }
+    }
+
+    /// `lengths` as planes of a buffer of `buffer_bytes`: 1 to [`MAX_PLANES`] of them, none
+    /// empty, adding up to the buffer. `None` otherwise.
+    #[must_use]
+    pub fn new(lengths: &[u32], buffer_bytes: u32) -> Option<Self> {
+        let count = u32::try_from(lengths.len()).ok()?;
+        if !(1..=MAX_PLANES).contains(&count) || lengths.contains(&0) {
+            return None;
+        }
+        let sum = lengths
+            .iter()
+            .try_fold(0u32, |sum, length| sum.checked_add(*length))?;
+        if sum != buffer_bytes {
+            return None;
+        }
+        let mut out = [0; MAX_PLANES as usize];
+        out.get_mut(..lengths.len())?.copy_from_slice(lengths);
+        Some(Self {
+            lengths: out,
+            count,
+        })
+    }
+
+    /// Reads `plane_bytes` from StreamHandles, checked as [`new`](Self::new) checks; empty is
+    /// one plane of `buffer_bytes`.
+    #[must_use]
+    pub fn decode(plane_bytes: &[u8], buffer_bytes: u32) -> Option<Self> {
+        if plane_bytes.is_empty() {
+            return (buffer_bytes > 0).then(|| Self::one(buffer_bytes));
+        }
+        if !plane_bytes.len().is_multiple_of(PLANE_LENGTH_BYTES)
+            || plane_bytes.len() > PLANE_LENGTH_BYTES * MAX_PLANES as usize
+        {
+            return None;
+        }
+        let mut lengths = [0; MAX_PLANES as usize];
+        let mut count = 0;
+        for (slot, chunk) in lengths
+            .iter_mut()
+            .zip(plane_bytes.as_chunks::<PLANE_LENGTH_BYTES>().0)
+        {
+            *slot = u32::from_le_bytes(*chunk);
+            count += 1;
+        }
+        Self::new(lengths.get(..count)?, buffer_bytes)
+    }
+
+    /// The bytes StreamHandles carries for these planes: empty for one plane.
+    #[must_use]
+    pub fn encode(&self, out: &mut [u8; PLANE_LENGTH_BYTES * MAX_PLANES as usize]) -> usize {
+        if self.count == 1 {
+            return 0;
+        }
+        for (chunk, length) in out
+            .as_chunks_mut::<PLANE_LENGTH_BYTES>()
+            .0
+            .iter_mut()
+            .zip(self.lengths())
+        {
+            *chunk = length.to_le_bytes();
+        }
+        self.lengths().len() * PLANE_LENGTH_BYTES
+    }
+
+    /// How many planes.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Each plane's length, in order.
+    #[must_use]
+    pub fn lengths(&self) -> &[u32] {
+        self.lengths.get(..self.count as usize).unwrap_or(&[])
+    }
+
+    /// Where plane `plane` starts in the buffer: the planes before it, end to end.
+    #[must_use]
+    pub fn offset(&self, plane: u32) -> Option<usize> {
+        if plane >= self.count {
+            return None;
+        }
+        Some(
+            self.lengths()
+                .iter()
+                .take(plane as usize)
+                .map(|length| *length as usize)
+                .sum(),
+        )
+    }
+
+    /// The plane `len` bytes at `offset` of a buffer begin in, where in it they begin, and how
+    /// many of them it holds; `None` when `offset` is past the buffer.
+    #[must_use]
+    pub fn locate(&self, offset: usize) -> Option<(u32, usize, usize)> {
+        let mut start = 0usize;
+        for (plane, length) in self.lengths().iter().enumerate() {
+            let length = *length as usize;
+            if offset < start + length {
+                return Some((
+                    u32::try_from(plane).ok()?,
+                    offset - start,
+                    start + length - offset,
+                ));
+            }
+            start += length;
+        }
+        None
+    }
 }
 
 /// Writes a frame into `buf` and returns its length.
