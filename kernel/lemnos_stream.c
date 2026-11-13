@@ -128,6 +128,19 @@ struct lem_stream_region {
 };
 
 /*
+ * The consumer's doorbell (shm/ring-doorbell's publisher side): the eventfd it sleeps on,
+ * and its page, mapped read-only. Word 0 of the page is sleeps << 1 | asleep, written by the
+ * consumer only. The module rings the eventfd once per sleep, after a publish that finds the
+ * consumer asleep, and remembers the sleep it rang for, so no sleep is rung twice.
+ */
+struct lem_bell {
+	struct eventfd_ctx *efd;	/* NULL: no bell */
+	struct page *page;		/* the page, kept referenced for the stream's life */
+	u64 *map;			/* vmap of page, read-only; set last, with release */
+	atomic64_t rung;		/* the state the consumer was last rung for */
+};
+
+/*
  * A reader's marks page, pinned for the stream's life: the reader's own memfd,
  * mapped read-only here. Its words are shm/ring-holds' layout (marks.rs): the
  * version, then one mark per buffer, nonzero while the reader holds it.
@@ -191,6 +204,7 @@ struct lem_stream {
 	struct lem_reader reader[LEMNOS_STREAM_MAX_READERS];	/* shm form: the consumers' marks */
 	u32 newest;			/* shm form: the buffer of the newest frame, kept for the frame path */
 	u64 reader_ids;			/* the last registration id given out */
+	struct lem_bell bell;		/* shm form: the consumer's doorbell, LEMNOS_STREAM_IOC_BELL */
 	refcount_t refs;		/* the stream's file, and each reader file that holds the stream */
 };
 
@@ -255,12 +269,34 @@ static void lem_stream_fault_locked(struct lem_stream *s, int err)
 	lem_ring_write_release(s, s->w_state, LEMNOS_RING_STATE_FAULT);
 }
 
+/*
+ * Rings the consumer's bell once for a sleep it has gone to, if it is asleep now.
+ * The full barrier orders the publish (the head store, before the caller's wake) before
+ * the read of the page; the consumer orders its arm before its look (protocol.rs), so
+ * either the consumer sees the frame or this sees it asleep. Never under s->lock.
+ */
+static void lem_stream_ring(struct lem_stream *s)
+{
+	struct lem_bell *b = &s->bell;
+	u64 state;
+
+	if (!smp_load_acquire(&b->map))
+		return;
+	smp_mb();
+	state = READ_ONCE(b->map[0]);
+	smp_rmb();
+	if (!(state & 1) || atomic64_xchg(&b->rung, state) == state)
+		return;
+	eventfd_signal(b->efd);
+}
+
 /* Wakes whoever is waiting. Never under s->lock: the eventfd has its own. */
 static void lem_stream_wake(struct lem_stream *s)
 {
 	wake_up_interruptible(&s->wait);
 	if (s->doorbell)
 		eventfd_signal(s->doorbell);
+	lem_stream_ring(s);
 }
 
 /*
@@ -1639,6 +1675,61 @@ static const struct file_operations lem_reader_fops = {
 	.llseek = noop_llseek,
 };
 
+/*
+ * LEMNOS_STREAM_IOC_BELL: the consumer's doorbell, once per stream. The eventfd and the page
+ * are both pinned here; the page is mapped read-only and never written. Called with s->ctl
+ * held. The eventfd is set before the mapping is published (lem_stream_ring reads the mapping
+ * first, with acquire).
+ */
+static long lem_stream_bell_set(struct lem_stream *s, const struct lemnos_stream_bell *a)
+{
+	struct eventfd_ctx *efd;
+	struct file *file;
+	struct page *page;
+	unsigned long flags;
+	u64 *map;
+	long ret = -EINVAL;
+
+	if (!s->shm)
+		return -EINVAL;
+	if (s->bell.map)
+		return -EBUSY;
+	efd = eventfd_ctx_fdget(a->eventfd);
+	if (IS_ERR(efd))
+		return PTR_ERR(efd);
+	file = fget(a->page);
+	if (!file) {
+		eventfd_ctx_put(efd);
+		return -EBADF;
+	}
+	if (!shmem_file(file) || i_size_read(file_inode(file)) < (loff_t)sizeof(u64))
+		goto put;
+	page = shmem_read_mapping_page(file->f_mapping, 0);
+	if (IS_ERR(page)) {
+		ret = PTR_ERR(page);
+		goto put;
+	}
+	map = vmap(&page, 1, VM_MAP, PAGE_KERNEL_RO);
+	if (!map) {
+		put_page(page);
+		ret = -ENOMEM;
+		goto put;
+	}
+
+	spin_lock_irqsave(&s->lock, flags);
+	s->bell.efd = efd;
+	s->bell.page = page;
+	smp_store_release(&s->bell.map, map);
+	spin_unlock_irqrestore(&s->lock, flags);
+	fput(file);
+	return 0;
+
+put:
+	fput(file);
+	eventfd_ctx_put(efd);
+	return ret;
+}
+
 static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct lem_stream *s = file->private_data;
@@ -1735,6 +1826,17 @@ static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long 
 		mutex_unlock(&s->ctl);
 		if (!ret && copy_to_user(uarg, &a, sizeof(a)))
 			ret = -EFAULT;
+		return ret;
+	}
+
+	if (cmd == LEMNOS_STREAM_IOC_BELL) {
+		struct lemnos_stream_bell a;
+
+		if (copy_from_user(&a, uarg, sizeof(a)))
+			return -EFAULT;
+		mutex_lock(&s->ctl);
+		ret = s->dead ? -ENODEV : s->fault ? s->fault : lem_stream_bell_set(s, &a);
+		mutex_unlock(&s->ctl);
 		return ret;
 	}
 
@@ -1862,6 +1964,12 @@ static void lem_stream_free(struct lem_stream *s)
 	}
 	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++)
 		lem_reader_release(&s->reader[r]);
+	if (s->bell.map)
+		vunmap(s->bell.map);
+	if (s->bell.page)
+		put_page(s->bell.page);
+	if (s->bell.efd)
+		eventfd_ctx_put(s->bell.efd);
 	kvfree(s->own);
 	kvfree(s->queue);
 	kvfree(s->buf);
@@ -1975,6 +2083,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_job) % 8);
 	BUILD_BUG_ON(LEM_SHM_ENTRY_BYTES % 8 || LEM_SHM_SLOT_WORDS != 9);
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_reader) != 24);
+	BUILD_BUG_ON(sizeof(struct lemnos_stream_bell) != 8);
 	BUILD_BUG_ON(LEMNOS_STREAM_MAX_READERS != LEM_POOL_READERS);
 
 	ret = lem_stream_check_layout(c);

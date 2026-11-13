@@ -57,6 +57,17 @@ struct Reader {
 pod!(Reader);
 
 const READER: Ioctl<Reader> = Ioctl::new(iowr::<Reader>(TYPE, 0x87), "LEMNOS_STREAM_IOC_READER");
+
+/// `struct lemnos_stream_bell`: the consumer's doorbell, the eventfd and the page read-only.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Bell {
+    eventfd: i32,
+    page: i32,
+}
+pod!(Bell);
+
+const BELL: Ioctl<Bell> = Ioctl::new(iow::<Bell>(TYPE, 0x89), "LEMNOS_STREAM_IOC_BELL");
 /// `LEMNOS_READER_IOC_UNREGISTER`: `_IO`, no argument.
 const UNREGISTER: u32 = ioc(0, TYPE, 0x88, 0);
 
@@ -177,9 +188,32 @@ pub fn unregister(registration: BorrowedFd<'_>) -> io::Result<()> {
     unsafe { ioctl_ptr::<u8>(registration, UNREGISTER, std::ptr::null_mut()) }.map(|_| ())
 }
 
+/// Gives a stream's module the consumer's doorbell: `eventfd` is the eventfd the consumer sleeps
+/// on, and `page` the doorbell page, read-only (`shm_ring_doorbell::Doorbell::bell_fds`). The
+/// module rings the eventfd after each publish that finds the consumer asleep, once per sleep.
+/// Once per stream: a second call fails with `EBUSY`.
+pub fn set_bell(
+    stream: BorrowedFd<'_>,
+    eventfd: BorrowedFd<'_>,
+    page: BorrowedFd<'_>,
+) -> io::Result<()> {
+    let mut arg = Bell {
+        eventfd: eventfd.as_raw_fd(),
+        page: page.as_raw_fd(),
+    };
+    BELL.call(stream, &mut arg).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Reader;
+    use super::{Bell, Reader};
+
+    /// The C struct is 8 bytes; `kernel/lemnos_stream.c` asserts its size.
+    #[test]
+    fn the_bell_struct_is_the_modules() {
+        assert_eq!(std::mem::size_of::<Bell>(), 8);
+        assert_eq!(std::mem::offset_of!(Bell, page), 4);
+    }
 
     /// The C struct is 24 bytes with the same offsets; `kernel/lemnos_stream.c` asserts its size.
     #[test]

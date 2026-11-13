@@ -365,6 +365,9 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos-shm-holds-check", "/dev/lemnos", BLOCK,
 				    (char *)cma_heap(), "release", NULL }),
 	      "lemnos-shm-holds-check release");
+	check(!run((char *const[]){ "/lemnos-shm-bell-check", "/dev/lemnos", BLOCK,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos-shm-bell-check");
 	check(!run((char *const[]){ "/lemnos_stream_check", "/dev/lemnos", BLOCK, UNBIND,
 				    (char *)cma_heap(), NULL }),
 	      "lemnos_stream_check");

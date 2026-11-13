@@ -392,6 +392,21 @@ struct lemnos_stream_test_source {
  */
 #define LEMNOS_READER_IOC_UNREGISTER   _IO('L', 0x88)
 
+/*
+ * LEMNOS_STREAM_IOC_BELL, on a stream made with LEMNOS_STREAM_CREATE_SHM: the consumer's doorbell
+ * (shm/ring-doorbell's Doorbell::bell_fds: an eventfd it sleeps on, and its page, read-only). The
+ * page's word 0 is sleeps << 1 | asleep, and only the consumer writes it. After each publish the
+ * module reads it, and when the consumer is asleep, signals the eventfd once for that sleep. Once
+ * per stream: -EBUSY after. Both descriptors are the caller's to keep; the module takes its own.
+ * Additive: a stream without a bell is unchanged.
+ */
+struct lemnos_stream_bell {
+	__s32 eventfd;		/* in: an eventfd the consumer waits on */
+	__s32 page;		/* in: the doorbell page, read-only */
+};
+
+#define LEMNOS_STREAM_IOC_BELL         _IOW('L', 0x89, struct lemnos_stream_bell)
+
 #define LEMNOS_BUS_MAX_SEGMENTS 16
 
 /* lemnos_i2c_segment.flags */

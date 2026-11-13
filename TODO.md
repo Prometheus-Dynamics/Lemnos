@@ -109,7 +109,10 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     crates still read the old one until I2b2. I2b1b makes the marks page the returns in that form:
     `LEMNOS_STREAM_IOC_READER` gives the module a reader's marks, and a buffer is reused only when no
     reader holds it. I2b1c cuts off readers over their limits. I2b1d frees a registration when its
-    reader file closes (an exit does too) or on `LEMNOS_READER_IOC_UNREGISTER`. The doorbell comes next (I2b1e).
+    reader file closes (an exit does too) or on `LEMNOS_READER_IOC_UNREGISTER`. I2b1ea gives the module
+    the consumer's doorbell (`LEMNOS_STREAM_IOC_BELL`): it rings the eventfd after each publish that finds
+    the consumer asleep. The driver relay still polls every 1 ms until I2b1eb: it waits on the bell with a
+    bounded fallback, once the engine can wait on a driver's descriptor.
   - I2c: the job ring.
   - I2d: outside readers by ticket. A third process gets a reader slot from the service, and the
     service asks the daemon for a ticket on its own connection. Read and import rights are kept

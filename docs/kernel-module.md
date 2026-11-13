@@ -84,7 +84,18 @@ marks stop holding at that moment, so the next frame that needs the buffer can t
 on that file does the same at once, and a second one fails with `ENOENT`. The table has 64 slots, so a
 reader must not leak its registration. `testing/crates/shm-holds-check` `release` proves the release
 on the pinned kernel: a reader that holds and exits without unregistering has its buffer reused and its
-slot free, 200 arrive-and-leave cycles all register, and the release hook disabled makes it fail. The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
+slot free, 200 arrive-and-leave cycles all register, and the release hook disabled makes it fail.
+
+The consumer's doorbell (`LEMNOS_STREAM_IOC_BELL`, shm form only) is the shm ring's doorbell
+(`shm/ring-doorbell`): the consumer gives the module an eventfd it sleeps on and its doorbell page,
+read-only (`Doorbell::bell_fds`). The page's word 0 is `sleeps << 1 | asleep`, written only by the
+consumer. After each publish the module reads it, and when the consumer is asleep it signals the
+eventfd once for that sleep. A sleeping consumer arms the page, looks for samples, and only then
+sleeps, so a frame published before its wait is still read without a sleep, and a frame published
+during the arm is seen by the look. `testing/crates/shm-bell-check` proves both on the pinned kernel:
+the first wait returns at once with frames published before it, and a consumer that sleeps on the
+bell reads 2000 frames at a 2 ms period, with the bell's median latency below a 1 ms poll's (QEMU
+numbers; the regression check only). The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
 and [`TODO.md`](../TODO.md) lists the port.
 
 ## What it never does

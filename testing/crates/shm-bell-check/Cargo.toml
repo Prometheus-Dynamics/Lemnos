@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-shm-bell-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Guest check in the QEMU harness: the module rings a consumer's doorbell after each publish, and the first wait sees a frame published before it"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+shm-ring = { path = "../../../shm/ring" }
+shm-ring-buffers = { path = "../../../shm/ring-buffers" }
+shm-ring-doorbell = { path = "../../../shm/ring-doorbell" }
