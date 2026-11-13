@@ -603,6 +603,7 @@ mod description {
         );
         description.add(Item::value("on", method).field("x"));
         description.set_address(0x40);
+        description.set_location("/sys/class/hwmon/hwmon2");
         let mut buf = [0; 512];
         let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
         let back = decode_description(&buf[..n]).unwrap();
@@ -613,6 +614,7 @@ mod description {
         );
         assert_eq!((back.state, back.reason.as_str()), (Some(1), "bus error"));
         assert_eq!(back.address, Some(0x40));
+        assert_eq!(back.location, "/sys/class/hwmon/hwmon2");
 
         let m = &back.contracts[0].methods[0];
         assert_eq!(back.contracts[0].tag, "example.thing/1");
@@ -649,6 +651,69 @@ mod description {
             .map(|m| (m.id, m.job))
             .collect();
         assert_eq!(jobs, [(3, false), (5, true)]);
+    }
+
+    /// Takes the unit state off the last item of an encoded description, as a host from before
+    /// the state would have sent it: that item's block shrinks by its two bytes. The last item has
+    /// no step, limits or group, so its block is 7 bytes with the state and 5 without.
+    fn without_last_unit_state(buf: &mut [u8], n: usize) -> usize {
+        let at = n - 4 - 7;
+        assert_eq!(u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()), 7);
+        buf[at..at + 4].copy_from_slice(&5u32.to_le_bytes());
+        n - 2
+    }
+
+    #[test]
+    fn each_unit_state_round_trips_and_an_old_description_decides_by_the_unit() {
+        use lemnos_core::UnitState;
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[CONTRACT],
+        };
+        let method = MethodId {
+            contract: 0,
+            method: 3,
+        };
+        // The three states, each round-tripped.
+        let mut description = Description::new();
+        description.add(Item::value("volts", method).unit(Unit::Volt, 0));
+        description.add(Item::value("count", method).dimensionless());
+        description.add(Item::value("mystery", method));
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
+        let back = decode_description(&buf[..n]).unwrap();
+        let states: Vec<_> = back.items.iter().map(|item| item.unit_state).collect();
+        assert_eq!(
+            states,
+            [
+                UnitState::Known,
+                UnitState::Dimensionless,
+                UnitState::Unknown
+            ]
+        );
+
+        // An old description, without the state: the last item's unit string decides. An empty
+        // unit is unknown; a unit is known.
+        let mut old = Description::new();
+        old.add(Item::value("count", method).dimensionless());
+        old.add(Item::value("volts", method).unit(Unit::Volt, 0));
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &old, &identity(), &mut buf).unwrap();
+        let n = without_last_unit_state(&mut buf, n);
+        let back = decode_description(&buf[..n]).unwrap();
+        assert_eq!(back.items[0].unit_state, UnitState::Dimensionless);
+        assert_eq!(back.items[1].unit_state, UnitState::Known);
+
+        let mut old = Description::new();
+        old.add(Item::value("count", method).unit(Unit::Volt, 0));
+        old.add(Item::value("mystery", method));
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &old, &identity(), &mut buf).unwrap();
+        let n = without_last_unit_state(&mut buf, n);
+        let back = decode_description(&buf[..n]).unwrap();
+        assert_eq!(back.items[1].unit, "");
+        assert_eq!(back.items[1].unit_state, UnitState::Unknown);
     }
 
     /// The identity trailer's length for `description`, measured by encoding it alone.

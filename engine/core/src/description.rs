@@ -43,6 +43,51 @@ impl Unit {
     }
 }
 
+/// Whether an item's unit is known. An empty unit string means two different things, so the
+/// description says which: a count, a ratio or a switch is `Dimensionless`; a value whose unit
+/// the driver did not say is `Unknown`; any other unit is `Known`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum UnitState {
+    /// The item has a unit, its symbol.
+    Known,
+    /// The item has no unit: a count, a ratio, a switch, a text.
+    Dimensionless,
+    /// The driver did not say.
+    #[default]
+    Unknown,
+}
+
+impl UnitState {
+    /// The number this state has on the wire. Fixed.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Known => 0,
+            Self::Dimensionless => 1,
+            Self::Unknown => 2,
+        }
+    }
+
+    /// The state for a wire number, or `None` for one this build does not know.
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Known),
+            1 => Some(Self::Dimensionless),
+            2 => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    /// What an item with no state from its host means: an empty unit is unknown, anything else
+    /// is known. This is how descriptions from before the state decode.
+    pub const fn from_unit(symbol: &str) -> Self {
+        if symbol.is_empty() {
+            Self::Unknown
+        } else {
+            Self::Known
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
     /// Something to read.
@@ -107,6 +152,8 @@ pub struct Item {
     pub kind: ItemKind,
     pub name: &'static str,
     pub unit: Unit,
+    /// Whether `unit` is known, dimensionless or not said (see [`UnitState`]).
+    pub unit_state: UnitState,
     /// The value is `raw * 10^exponent`, in `unit`.
     pub exponent: i8,
     /// The lowest and highest raw values the item can take. `None` when the driver does not know.
@@ -134,6 +181,7 @@ impl Item {
             kind,
             name,
             unit: Unit::One,
+            unit_state: UnitState::Unknown,
             exponent: 0,
             min: None,
             max: None,
@@ -155,13 +203,30 @@ impl Item {
         Self::new(ItemKind::Control, name, method)
     }
 
+    /// An action has no value, so no unit: it is dimensionless.
     pub const fn action(name: &'static str, method: MethodId) -> Self {
-        Self::new(ItemKind::Action, name, method)
+        let mut item = Self::new(ItemKind::Action, name, method);
+        item.unit_state = UnitState::Dimensionless;
+        item
     }
 
+    /// Gives the item its unit and exponent. `Unit::One` is dimensionless; any other unit is known.
     pub const fn unit(mut self, unit: Unit, exponent: i8) -> Self {
         self.unit = unit;
         self.exponent = exponent;
+        self.unit_state = if matches!(unit, Unit::One) {
+            UnitState::Dimensionless
+        } else {
+            UnitState::Known
+        };
+        self
+    }
+
+    /// The item is a count, a ratio, a switch or a text: it has no unit, and says so.
+    pub const fn dimensionless(mut self) -> Self {
+        self.unit = Unit::One;
+        self.exponent = 0;
+        self.unit_state = UnitState::Dimensionless;
         self
     }
 
@@ -218,6 +283,10 @@ impl Item {
 /// The most items one device can describe.
 pub const MAX_ITEMS: usize = 32;
 
+/// The most bytes a device's location text carries (a sysfs path fits). A longer one is cut at a
+/// character boundary.
+pub const MAX_LOCATION: usize = 128;
+
 /// What a device says about itself.
 #[derive(Debug, Clone)]
 pub struct Description {
@@ -225,6 +294,8 @@ pub struct Description {
     len: usize,
     dropped: usize,
     address: Option<u8>,
+    location: [u8; MAX_LOCATION],
+    location_len: u8,
 }
 
 impl Default for Description {
@@ -240,6 +311,8 @@ impl Description {
             len: 0,
             dropped: 0,
             address: None,
+            location: [0; MAX_LOCATION],
+            location_len: 0,
         }
     }
 
@@ -254,6 +327,25 @@ impl Description {
     /// The address the driver named, if any.
     pub const fn address(&self) -> Option<u8> {
         self.address
+    }
+
+    /// Says where the device is, in words, for what a 7-bit address cannot say: a sysfs directory,
+    /// a chip select, a port path, a UART name. The bus is the board's own word, and is not
+    /// repeated here. Text past [`MAX_LOCATION`] bytes is cut at a character boundary.
+    pub fn set_location(&mut self, text: &str) -> &mut Self {
+        let mut end = text.len().min(MAX_LOCATION);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.location = [0; MAX_LOCATION];
+        self.location[..end].copy_from_slice(&text.as_bytes()[..end]);
+        self.location_len = end as u8;
+        self
+    }
+
+    /// The location the driver named, or the empty string.
+    pub fn location(&self) -> &str {
+        core::str::from_utf8(&self.location[..usize::from(self.location_len)]).unwrap_or("")
     }
 
     /// Adds an item. Past [`MAX_ITEMS`] it is counted in

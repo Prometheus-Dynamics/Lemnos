@@ -135,6 +135,9 @@ impl Lifecycle for HwmonFan {
     }
 
     fn describe(&self, out: &mut Description) {
+        if let Some(dir) = self.pwm.parent().and_then(Path::to_str) {
+            out.set_location(dir);
+        }
         let mut rpm = Item::value("rpm", RPM)
             .unit(Unit::RevolutionPerMinute, 0)
             .step(1);

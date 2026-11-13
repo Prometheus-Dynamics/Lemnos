@@ -139,8 +139,12 @@ impl Lifecycle for FakeCounter {
             contract: 0,
             method,
         };
-        out.add(Item::value("count", id(1)).range(0, i64::from(u32::MAX)));
-        out.add(Item::control("target", id(2)));
+        out.add(
+            Item::value("count", id(1))
+                .dimensionless()
+                .range(0, i64::from(u32::MAX)),
+        );
+        out.add(Item::control("target", id(2)).dimensionless());
         out.add(Item::action("crash", id(3)));
     }
 }

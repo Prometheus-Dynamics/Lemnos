@@ -64,12 +64,12 @@ impl Lifecycle for HostClock {
 
     fn describe(&self, out: &mut Description) {
         if self.facts.clock_source {
-            out.add(Item::value("clock_source", FACT));
+            out.add(Item::value("clock_source", FACT).dimensionless());
         }
         if let Some(hctosys) = self.facts.rtc {
-            out.add(Item::value("rtc", FACT));
+            out.add(Item::value("rtc", FACT).dimensionless());
             if hctosys {
-                out.add(Item::value("rtc_hctosys", FACT));
+                out.add(Item::value("rtc_hctosys", FACT).dimensionless());
             }
         }
     }

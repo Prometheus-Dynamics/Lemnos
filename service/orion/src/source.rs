@@ -427,6 +427,7 @@ mod tests {
             kind,
             name: name.to_owned(),
             unit: String::new(),
+            unit_state: lemnos_core::UnitState::Dimensionless,
             exponent: 0,
             min: None,
             max: None,

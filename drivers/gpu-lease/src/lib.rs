@@ -61,7 +61,7 @@ impl Lifecycle for GpuLeaseDevice {
     }
 
     fn describe(&self, out: &mut Description) {
-        out.add(Item::value("state", STATE));
+        out.add(Item::value("state", STATE).dimensionless());
     }
 
     fn caller(&mut self, caller: CallerId) {

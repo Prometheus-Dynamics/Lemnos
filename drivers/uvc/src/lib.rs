@@ -101,13 +101,25 @@ impl Lifecycle for Uvc {
     fn describe(&self, out: &mut Description) {
         out.add(Item::action("start", START));
         out.add(Item::action("stop", STOP));
-        out.add(Item::value("frames", COUNTERS).field("frames"));
-        out.add(Item::value("dropped", COUNTERS).field("dropped"));
-        out.add(Item::value("errors", COUNTERS).field("errors"));
+        out.add(
+            Item::value("frames", COUNTERS)
+                .dimensionless()
+                .field("frames"),
+        );
+        out.add(
+            Item::value("dropped", COUNTERS)
+                .dimensionless()
+                .field("dropped"),
+        );
+        out.add(
+            Item::value("errors", COUNTERS)
+                .dimensionless()
+                .field("errors"),
+        );
         let state = self.session.state();
-        out.add(Item::value(state, COUNTERS));
+        out.add(Item::value(state, COUNTERS).dimensionless());
         if let Some(warning) = self.session.warning().filter(|warning| *warning != state) {
-            out.add(Item::value(warning, COUNTERS));
+            out.add(Item::value(warning, COUNTERS).dimensionless());
         }
     }
 
