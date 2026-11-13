@@ -5,17 +5,19 @@ on:
     branches:
       - next
     # The harness builds module-check, which links every contract and driver it checks, so a
-    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only the
-    # licence files are skipped.
+    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only
+    # Markdown and the licence files are skipped; the QEMU harness reads none of them (M12).
     paths-ignore:
+      - "**/*.md"
       - "LICENSE-*"
   pull_request:
     branches:
       - next
     # The harness builds module-check, which links every contract and driver it checks, so a
-    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only the
-    # licence files are skipped.
+    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only
+    # Markdown and the licence files are skipped; the QEMU harness reads none of them (M12).
     paths-ignore:
+      - "**/*.md"
       - "LICENSE-*"
   workflow_dispatch:
 
