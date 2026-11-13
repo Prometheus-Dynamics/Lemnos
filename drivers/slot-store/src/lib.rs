@@ -7,14 +7,17 @@
 //! - [`ubi`]: slots on raw NAND: images and the record as UBI volumes.
 //! - [`boots`]: the boot history, one line per boot.
 //! - [`json`]: the small JSON reader both use.
+//! - [`twocopy`]: two-copy records, written one sector at a time; [`bootfat`] places their files.
 //!
 //! Plain `std`, so the initramfs program stays small; the `linux` feature adds the UBI ioctls.
 
+pub mod bootfat;
 pub mod boots;
 pub mod json;
 pub mod manifest;
 pub mod records;
 pub mod store;
+pub mod twocopy;
 pub mod ubi;
 
 #[cfg(test)]

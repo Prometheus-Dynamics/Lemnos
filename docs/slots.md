@@ -328,6 +328,31 @@ The script and the UBI calls have run only against fakes. The tests check the vo
 structures and request numbers against `mtd/ubi-user.h`, and the script's text against the
 decision table. `testing/board-runs/I5c.md` is the board run.
 
+## Two-copy records
+
+State that must survive a power cut, and that a boot loader or the initramfs needs, is kept as
+two-copy records (`lemnos_slot_store::twocopy`). A record is a pre-created file on the boot
+partition (or a fixed raw place) of two 512-byte sectors. Each copy carries a magic, a version, a
+kind, a sequence number and a CRC-32 over the sector. A write changes exactly one sector: the copy
+that does not hold the highest valid sequence. A reader takes the valid copy with the higher
+sequence. A cut leaves the old value or the new one, never neither, because the other copy is
+never written by the same update. The format is in the module's documentation; the kinds are
+`TRIAL`, `REASON`, `BOOT_HISTORY` and `SECURITY`.
+
+The record files are never created, grown, renamed or deleted at run time, and nothing mounts the
+boot partition: the placement is found by reading the FAT once, read-only, in our own code
+(`lemnos_slot_store::bootfat`), and a file that is missing, fragmented, or not exactly the size
+the image builder wrote is refused by name before anything is written. A run-time record write
+therefore changes no filesystem structure.
+
+Adding a kind: a new `Kind` constant with the next free number (numbers are never reused), a file
+name in `Kind::file_name`, and an entry in the image build's list of kinds for `precreate`.
+
+One honest limit: on a board whose firmware reads its pointer files (`default.txt`, `trial.txt`),
+promoting a trial to default is a single-sector write with no second copy. Its safety rests on the
+storage device completing or not starting a single-sector write, and it is what the pull-the-plug
+procedure in `testing/board-runs/I5i.md` measures.
+
 ## Booting a slot: `lemnos-slot-init`
 
 `service/slot-init` builds `lemnos-slot-init`, the `/init` of a slot's initramfs. It is a static
