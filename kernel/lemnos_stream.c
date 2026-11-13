@@ -160,6 +160,13 @@ struct lem_stream {
 	struct lem_stream_producer producer;	/* the block feeding this stream, or stop NULL */
 	u32 frame_bytes;		/* what the producer may write per buffer */
 	bool wedged;			/* a block's DMA could not be seen to stop: nothing is unpinned */
+
+	/* Where the control words are: the LEMNOS_RING_* ones, or the shm form's. */
+	bool shm;			/* LEMNOS_STREAM_CREATE_SHM */
+	size_t shm_total;		/* words of the shm ring */
+	size_t shm_slots_at;		/* its slots */
+	size_t page_at;			/* the pool page's first word (shm form) */
+	size_t w_state, w_returns_head, w_returns_tail, w_jobs_head, w_jobs_tail;
 };
 
 static const struct file_operations lem_stream_fops;
@@ -207,7 +214,7 @@ static void lem_stream_fault_locked(struct lem_stream *s, int err)
 	if (s->fault)
 		return;
 	s->fault = err;
-	lem_ring_write_release(s, LEMNOS_RING_STATE, LEMNOS_RING_STATE_FAULT);
+	lem_ring_write_release(s, s->w_state, LEMNOS_RING_STATE_FAULT);
 }
 
 /* Wakes whoever is waiting. Never under s->lock: the eventfd has its own. */
@@ -218,13 +225,95 @@ static void lem_stream_wake(struct lem_stream *s)
 		eventfd_signal(s->doorbell);
 }
 
+/*
+ * The shm form (LEMNOS_STREAM_CREATE_SHM): shm/README.md's ring (layout 1),
+ * one field, one sample per frame, and the pool page of
+ * shm/ring-buffers/src/page.rs after it. Every number here is what the Rust
+ * crates say (testing/crates/shm-ring-check reads what this writes, and its
+ * own tests pin the derived shape): the word numbers, the slot size, the
+ * entry, the stamps, and the pool page's ticket words.
+ */
+#define LEM_SHM_MAGIC		0x31474e49524d4853ull	/* "SHMRING1" */
+#define LEM_SHM_LAYOUT		1ull
+#define LEM_SHM_W_MAGIC		0
+#define LEM_SHM_W_LAYOUT	1
+#define LEM_SHM_W_SHAPE		2
+#define LEM_SHM_W_SIZES		3
+#define LEM_SHM_W_TOTAL		4
+#define LEM_SHM_W_HEAD		8
+#define LEM_SHM_W_END		10
+#define LEM_SHM_LANE_HEAD	16	/* the one field's lane head */
+#define LEM_SHM_INDEX		17	/* frame_slots index words */
+#define LEM_SHM_SLOT_HEADER	4	/* stamp, time, meta, lane sequence */
+#define LEM_SHM_ENTRY_BYTES	40	/* generation, count, buffer, ticket, sequence, identity, bytes, fence */
+#define LEM_SHM_SLOT_WORDS	(LEM_SHM_SLOT_HEADER + LEM_SHM_ENTRY_BYTES / 8)
+#define LEM_POOL_MAGIC		0x314c4f4f504d4853ull	/* "SHMPOOL1" */
+#define LEM_POOL_TICKETS	8	/* one word per buffer, from here */
+#define LEM_POOL_READERS	64	/* shm-ring-buffers' MAX_READERS: cut-off words after the tickets */
+
+static u64 lem_shm_stamp(u64 seq)
+{
+	return (seq + 1) << 1;
+}
+
+static u64 lem_shm_busy(u64 seq)
+{
+	return lem_shm_stamp(seq) | 1;
+}
+
+/*
+ * Publishes frame `sample` (the frame ring's head before it) as the next sample
+ * of the one field. The order is the one the readers rely on: busy stamp,
+ * fence, time, meta, lane sequence, payload, finished stamp, index entry, lane
+ * head, head. Lock held; the ring can't be full: a reader that falls behind
+ * skips ahead, it doesn't hold the writer back.
+ */
+static void lem_shm_publish(struct lem_stream *s, u32 buffer, u32 bytes, u64 sequence,
+			    u64 identity, u32 fence, u64 timestamp_ns)
+{
+	u64 sample = s->frames_head;
+	u64 lane_head = lem_ring_read(s, LEM_SHM_LANE_HEAD);
+	size_t lane_slot = lane_head & (s->frame_slots - 1);
+	size_t at = s->shm_slots_at + lane_slot * LEM_SHM_SLOT_WORDS;
+	u64 ticket = lem_ring_read(s, s->page_at + LEM_POOL_TICKETS + buffer);
+	/* The entry: one buffer, its even ticket, the frame's sequence, identity, bytes and fence. */
+	u64 entry[LEM_SHM_ENTRY_BYTES / 8] = {
+		1ull | 1ull << 32,		/* generation 1, one buffer */
+		buffer | (ticket & 0xffffffffull) << 32,
+		sequence,
+		identity,
+		bytes | (u64)fence << 32,
+	};
+
+	lem_ring_write(s, at, lem_shm_busy(sample));
+	smp_wmb();
+	lem_ring_write(s, at + 1, timestamp_ns);
+	lem_ring_write(s, at + 2, LEM_SHM_ENTRY_BYTES);	/* field 0, flags 0 */
+	lem_ring_write(s, at + 3, lane_head);
+	for (size_t i = 0; i < ARRAY_SIZE(entry); i++)
+		lem_ring_write(s, at + LEM_SHM_SLOT_HEADER + i, entry[i]);
+	lem_ring_write_release(s, at, lem_shm_stamp(sample));
+	lem_ring_write(s, LEM_SHM_INDEX + (sample & (s->frame_slots - 1)), lane_slot << 16);
+	lem_ring_write_release(s, LEM_SHM_LANE_HEAD, lane_head + 1);
+	s->frames_head++;
+	lem_ring_write_release(s, LEM_SHM_W_HEAD, s->frames_head);
+}
+
+/* A buffer the consumer returned: its ticket goes on to the next even value. Lock held. */
+static void lem_shm_ticket_advance(struct lem_stream *s, u32 buffer)
+{
+	size_t at = s->page_at + LEM_POOL_TICKETS + buffer;
+
+	lem_ring_write_release(s, at, lem_ring_read(s, at) + 2);
+}
+
 /* Takes back buffers the consumer returned. Lock held; bounded by the kernel's capacity. */
 static int lem_stream_collect_returns(struct lem_stream *s)
 {
 	u32 slots = s->frame_slots;
 
 	for (u32 n = 0; n < slots; n++) {
-		u64 head = lem_ring_read_acquire(s, LEMNOS_RING_RETURNS_HEAD);
+		u64 head = lem_ring_read_acquire(s, s->w_returns_head);
 		u64 count = head - s->returns_tail;
 		u64 word;
 		u32 buffer, fence;
@@ -245,7 +334,9 @@ static int lem_stream_collect_returns(struct lem_stream *s)
 		b->state = LEM_BUF_FREE;
 		s->returned++;
 		s->returns_tail++;
-		lem_ring_write_release(s, LEMNOS_RING_RETURNS_TAIL, s->returns_tail);
+		if (s->shm)
+			lem_shm_ticket_advance(s, buffer);
+		lem_ring_write_release(s, s->w_returns_tail, s->returns_tail);
 	}
 	return 0;
 }
@@ -381,7 +472,7 @@ static int lem_stream_collect_jobs(struct lem_stream *s)
 	u32 slots = s->job_slots;
 
 	for (u32 n = 0; n < slots; n++) {
-		u64 head = lem_ring_read_acquire(s, LEMNOS_RING_JOBS_HEAD);
+		u64 head = lem_ring_read_acquire(s, s->w_jobs_head);
 		u64 count = head - s->jobs_tail;
 		u64 words[LEM_JOB_WORDS];
 		size_t at;
@@ -415,7 +506,7 @@ static int lem_stream_collect_jobs(struct lem_stream *s)
 		if (ret)
 			return ret;
 		s->jobs_tail++;
-		lem_ring_write_release(s, LEMNOS_RING_JOBS_TAIL, s->jobs_tail);
+		lem_ring_write_release(s, s->w_jobs_tail, s->jobs_tail);
 	}
 	return 0;
 }
@@ -441,6 +532,11 @@ static int lem_stream_push_frame(struct lem_stream *s, u32 buffer, u32 bytes, u6
 	size_t at;
 
 	*pushed = false;
+	if (s->shm) {
+		lem_shm_publish(s, buffer, bytes, sequence, identity, fence, timestamp_ns);
+		*pushed = true;
+		return 0;
+	}
 	if (tail - s->frames_seen > s->frames_head - s->frames_seen ||
 	    s->frames_head - tail > slots)
 		return -ERANGE;
@@ -845,7 +941,7 @@ int lem_stream_job_peek(struct lem_stream *s, void *job, size_t bytes)
 	ret = lem_stream_collect_returns(s);
 	if (ret)
 		goto out;
-	head = lem_ring_read_acquire(s, LEMNOS_RING_JOBS_HEAD);
+	head = lem_ring_read_acquire(s, s->w_jobs_head);
 	count = head - s->jobs_tail;
 	if (!count) {
 		ret = 0;
@@ -922,7 +1018,7 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 	b->state = LEM_BUF_ACTIVE;
 	s->jobs++;
 	s->jobs_tail++;
-	lem_ring_write_release(s, LEMNOS_RING_JOBS_TAIL, s->jobs_tail);
+	lem_ring_write_release(s, s->w_jobs_tail, s->jobs_tail);
 out:
 	spin_unlock_irqrestore(&s->lock, flags);
 	return ret;
@@ -1310,7 +1406,7 @@ static __poll_t lem_stream_poll(struct file *file, poll_table *wait)
 	/* A tail the consumer scribbled on only wakes the consumer. */
 	if (s->dead || s->fault)
 		mask = EPOLLIN | EPOLLRDNORM | EPOLLHUP;
-	else if (s->frames_head != READ_ONCE(s->ring[LEMNOS_RING_FRAMES_TAIL]))
+	else if (!s->shm && s->frames_head != READ_ONCE(s->ring[LEMNOS_RING_FRAMES_TAIL]))
 		mask = EPOLLIN | EPOLLRDNORM;
 	spin_unlock_irqrestore(&s->lock, flags);
 	return mask;
@@ -1351,7 +1447,7 @@ static void lem_stream_shutdown(struct lem_stream *s, u64 state)
 	producer = s->producer;
 	s->producer.stop = NULL;
 	if (!s->fault)
-		lem_ring_write_release(s, LEMNOS_RING_STATE, state);
+		lem_ring_write_release(s, s->w_state, state);
 	spin_unlock_irqrestore(&s->lock, flags);
 
 	cancel_delayed_work_sync(&s->source);
@@ -1443,7 +1539,9 @@ static int lem_stream_check_layout(const struct lemnos_stream_create *c)
 {
 	u64 stride;
 
-	if (c->flags & ~LEMNOS_STREAM_CREATE_BUFFERS)
+	if (c->flags & ~(LEMNOS_STREAM_CREATE_BUFFERS | LEMNOS_STREAM_CREATE_SHM))
+		return -EINVAL;
+	if ((c->flags & LEMNOS_STREAM_CREATE_SHM) && c->frame_slots < 2)
 		return -EINVAL;
 	if (!c->buffers || c->buffers > LEMNOS_STREAM_MAX_BUFFERS)
 		return -EINVAL;
@@ -1469,6 +1567,17 @@ static int lem_stream_check_layout(const struct lemnos_stream_create *c)
 
 static void lem_stream_init_ring(struct lem_stream *s)
 {
+	if (s->shm) {
+		/* The pool page's shape, then its magic, then the ring's header: each magic last. */
+		lem_ring_write(s, s->page_at + 1, 1ull | (u64)s->buffers << 32);
+		lem_ring_write_release(s, s->page_at, LEM_POOL_MAGIC);
+		lem_ring_write(s, LEM_SHM_W_LAYOUT, LEM_SHM_LAYOUT);
+		lem_ring_write(s, LEM_SHM_W_SHAPE, 1ull | (u64)s->frame_slots << 32);
+		lem_ring_write(s, LEM_SHM_W_SIZES, LEM_SHM_ENTRY_BYTES);
+		lem_ring_write(s, LEM_SHM_W_TOTAL, s->shm_total);
+		lem_ring_write_release(s, LEM_SHM_W_MAGIC, LEM_SHM_MAGIC);
+		return;
+	}
 	lem_ring_write(s, LEMNOS_RING_VERSION, LEMNOS_RING_LAYOUT_VERSION);
 	lem_ring_write(s, LEMNOS_RING_BUFFERS, s->buffers);
 	lem_ring_write(s, LEMNOS_RING_BUFFER_BYTES, s->buffer_bytes);
@@ -1492,6 +1601,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 
 	BUILD_BUG_ON(IS_ENABLED(CONFIG_CPU_BIG_ENDIAN));
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_job) % 8);
+	BUILD_BUG_ON(LEM_SHM_ENTRY_BYTES % 8 || LEM_SHM_SLOT_WORDS != 9);
 
 	ret = lem_stream_check_layout(c);
 	if (ret)
@@ -1522,10 +1632,33 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	s->job_slots = c->job_slots;
 	s->job_bytes = c->job_bytes;
 	s->stride = ALIGN((u64)c->buffer_bytes, LEMNOS_STREAM_BUFFER_ALIGN);
-	s->returns_at = LEMNOS_RING_FRAMES + (size_t)s->frame_slots * LEMNOS_STREAM_FRAME_WORDS;
-	s->jobs_at = s->returns_at + s->frame_slots;
+	s->shm = c->flags & LEMNOS_STREAM_CREATE_SHM;
 	s->job_words = 1 + DIV_ROUND_UP(s->job_bytes, 8);
-	ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
+	if (s->shm) {
+		size_t control;
+
+		s->shm_slots_at = LEM_SHM_INDEX + s->frame_slots;
+		s->shm_total = s->shm_slots_at + (size_t)s->frame_slots * LEM_SHM_SLOT_WORDS;
+		s->page_at = s->shm_total;
+		control = s->page_at + LEM_POOL_TICKETS + s->buffers + LEM_POOL_READERS;
+		s->w_state = LEM_SHM_W_END;
+		s->w_returns_head = control;
+		s->w_returns_tail = control + 1;
+		s->w_jobs_head = control + 2;
+		s->w_jobs_tail = control + 3;
+		s->returns_at = control + 4;
+		s->jobs_at = s->returns_at + s->frame_slots;
+		ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
+	} else {
+		s->w_state = LEMNOS_RING_STATE;
+		s->w_returns_head = LEMNOS_RING_RETURNS_HEAD;
+		s->w_returns_tail = LEMNOS_RING_RETURNS_TAIL;
+		s->w_jobs_head = LEMNOS_RING_JOBS_HEAD;
+		s->w_jobs_tail = LEMNOS_RING_JOBS_TAIL;
+		s->returns_at = LEMNOS_RING_FRAMES + (size_t)s->frame_slots * LEMNOS_STREAM_FRAME_WORDS;
+		s->jobs_at = s->returns_at + s->frame_slots;
+		ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
+	}
 	s->ring_bytes = ring_words * sizeof(u64);
 	pool_bytes = (u64)s->buffers * s->stride;
 

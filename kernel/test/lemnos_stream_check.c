@@ -862,8 +862,9 @@ static void test_refusals_at_create(int ctl, uint32_t block, int pool)
 		      "%s: EINVAL", name);                                        \
 	} while (0)
 
-	BAD_LAYOUT(flags, 2, "unknown flags");
-	BAD_LAYOUT(flags, 3, "a known flag with an unknown one");
+	BAD_LAYOUT(flags, 1u << 30, "unknown flags");
+	BAD_LAYOUT(flags, LEMNOS_STREAM_CREATE_BUFFERS | (1u << 30),
+		   "a known flag with an unknown one");
 	BAD_LAYOUT(flags, LEMNOS_STREAM_CREATE_BUFFERS, "own buffers and a pool descriptor");
 	BAD_LAYOUT(buffers, 0, "no buffers");
 	BAD_LAYOUT(buffers, LEMNOS_STREAM_MAX_BUFFERS + 1, "too many buffers");

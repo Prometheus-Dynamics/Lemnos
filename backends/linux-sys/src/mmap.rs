@@ -100,6 +100,22 @@ impl Mapping {
         Some(unsafe { std::slice::from_raw_parts(first, words) })
     }
 
+    /// The mapped words, for loads only, on a mapping of either kind: a read-only one can be read
+    /// this way too. `None` unless the mapping is a whole number of aligned words.
+    pub fn load_words(&self) -> Option<Loads<'_>> {
+        let words = self.len / size_of::<AtomicU64>();
+        let first = self.ptr.as_ptr().cast::<AtomicU64>();
+        if !self.len.is_multiple_of(size_of::<AtomicU64>()) || !first.is_aligned() {
+            return None;
+        }
+        // The slice is wrapped in `Loads`, which gives loads and no stores, so a read-only mapping
+        // is never written through it.
+        // SAFETY: `ptr` maps `len` readable bytes for as long as `&self` lives, holding `words`
+        // whole `AtomicU64`s, aligned as just checked. Every bit pattern is a valid `AtomicU64`.
+        let words = unsafe { std::slice::from_raw_parts(first, words) };
+        Some(Loads { words })
+    }
+
     /// Copies `data` to `offset` in the mapping. `None`, and nothing written, outside the mapping
     /// or when the mapping is read-only.
     pub fn write_bytes(&self, offset: usize, data: &[u8]) -> Option<()> {
@@ -328,5 +344,31 @@ mod tests {
         // Contents stay writable.
         let map = Mapping::new(fd.as_fd(), 8192, 0, true).unwrap();
         assert_eq!(map.write_bytes(0, &[9]), Some(()));
+    }
+}
+
+/// A mapping's words, for loads only (see [`Mapping::load_words`]).
+#[derive(Clone, Copy)]
+pub struct Loads<'a> {
+    words: &'a [AtomicU64],
+}
+
+impl Loads<'_> {
+    /// How many words there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Word `index`, or `None` past the end.
+    #[must_use]
+    pub fn load(&self, index: usize, order: std::sync::atomic::Ordering) -> Option<u64> {
+        self.words.get(index).map(|word| word.load(order))
     }
 }

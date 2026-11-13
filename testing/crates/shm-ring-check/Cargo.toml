@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-shm-ring-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Guest check in the QEMU harness: a kernel-made frame ring (LEMNOS_STREAM_CREATE_SHM) read with the shm crates alone"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+shm-ring = { path = "../../../shm/ring" }
+shm-ring-buffers = { path = "../../../shm/ring-buffers" }
