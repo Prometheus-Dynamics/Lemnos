@@ -10,7 +10,10 @@
 //! The sensor's controls go through a simulated pipeline shared by the sensor and its receiver, so
 //! a frame shows the values in force for it, with the timing rule of `camera.sensor`: a group whose
 //! launch falls in frame `F` shows each control on frame `F + delay`. Frame `k` is the `k`th start
-//! since the receiver started, one interval after the first tick; the first `drop_frames` are
+//! since the receiver started, one frame period after the first tick. A frame's period is its line
+//! time times the frame length (VTS) in force for it, through the same [`Mode::period_ps`] the
+//! contract and the rate proof use, so a frame length that is programmed shows in the frame rate.
+//! Starts are kept in picoseconds and summed, so they do not drift. The first `drop_frames` are
 //! masked at the sensor and never published, but they are starts and count. With `embedded = true`
 //! the sensor reports register embedded data, and the receiver publishes the values in force for
 //! each frame on its `embedded` stream, in the layout `encode_embedded` and `decode_embedded` here
@@ -209,9 +212,15 @@ pub struct Pipeline {
     /// value), in the order they were posted. A frame is -1 before the first.
     queues: [Vec<(i64, u32)>; 3],
     in_force: [u32; 3],
-    /// Time of the first frame start, and the frame period. `None` until the receiver's first tick.
-    frame0_ns: Option<u64>,
-    interval_ns: u64,
+    /// The mode the sensor selected: its line time sets every frame's period. `None` until a mode
+    /// is selected, and then the first mode's.
+    mode: Option<Mode>,
+    /// A fixed frame period in picoseconds, when a free-running board sets one.
+    period_override_ps: Option<u128>,
+    /// Where each frame starts, in picoseconds of the receiver's clock: `starts[k]` is frame `k`'s
+    /// start, and the last entry is the start of the frame not yet emitted. Empty until the first
+    /// tick.
+    starts: Vec<u128>,
     /// The receiver's last tick: the sim's present.
     now_ns: u64,
     /// When set, the receiver's frame count is read as of this time instead of the present. The
@@ -228,21 +237,66 @@ impl Pipeline {
             emitted: 0,
             queues: [Vec::new(), Vec::new(), Vec::new()],
             in_force: INITIAL,
-            frame0_ns: None,
-            interval_ns: 1,
+            mode: None,
+            period_override_ps: None,
+            starts: Vec::new(),
             now_ns: 0,
             read_at: None,
             straddles: 0,
         }
     }
 
-    /// The frame in progress at `at_ns`: frame `k` starts at `frame0 + k * interval`. -1 before the
-    /// first frame starts.
-    fn frame_at(&self, at_ns: u64) -> i64 {
-        match self.frame0_ns {
-            Some(frame0) if at_ns >= frame0 => ((at_ns - frame0) / self.interval_ns) as i64,
-            _ => -1,
+    /// The frame period in picoseconds now: the board's fixed period when it sets one, else the
+    /// selected mode's period at the frame length in force.
+    fn period_ps(&self) -> u128 {
+        if let Some(period) = self.period_override_ps {
+            return period;
         }
+        let mode = self
+            .mode
+            .or_else(|| mode(0, SimConfig::DEFAULT))
+            .unwrap_or_default();
+        mode.period_ps(self.in_force[2]).max(1)
+    }
+
+    /// The start of frame `frame` in picoseconds. A frame not yet emitted starts one period after
+    /// the last emitted, at the period now in force. Needs at least one start.
+    fn start_ps(&self, frame: u64) -> u128 {
+        match self.starts.get(frame as usize) {
+            Some(&start) => start,
+            None => {
+                let last = self.starts.len() - 1;
+                let past = u128::from(frame) - last as u128;
+                self.starts[last] + past * self.period_ps()
+            }
+        }
+    }
+
+    /// The frame in progress at `at_ns`: the last frame whose stamp (its start in whole
+    /// nanoseconds, as the receiver publishes it) is at or before `at_ns`. -1 before the first
+    /// frame starts.
+    fn frame_at(&self, at_ns: u64) -> i64 {
+        let at = u128::from(at_ns);
+        match self.starts.first() {
+            Some(&first) if at >= first / 1000 => {}
+            _ => return -1,
+        }
+        let stamped = |frame: u128| self.start_ps(frame as u64) / 1000;
+        let started = self.starts.partition_point(|&start| start / 1000 <= at);
+        if started < self.starts.len() {
+            return started as i64 - 1;
+        }
+        // Past the known starts: estimate from the period, then settle on the frame whose stamp
+        // is the last one at or before `at_ns` (the estimate can be one frame early or late).
+        let last = self.starts.len() - 1;
+        let mut frame = last as u128 + (at * 1000 - self.starts[last]) / self.period_ps();
+        while frame > last as u128 && stamped(frame) > at {
+            frame -= 1;
+        }
+        while stamped(frame + 1) <= at {
+            frame += 1;
+        }
+        frame as i64
     }
 
     /// Schedules `value` for control `control` to show on frame `target`.
@@ -251,7 +305,8 @@ impl Pipeline {
     }
 
     /// Emits the next frame: applies the values due on it and returns its number with the values
-    /// in force for it.
+    /// in force for it. The frame lasts one period at the frame length in force for it, so the next
+    /// frame starts that much after its start.
     fn emit(&mut self) -> (u64, [u32; 3]) {
         let frame = self.emitted;
         self.emitted += 1;
@@ -265,6 +320,8 @@ impl Pipeline {
                 }
             }
         }
+        let next = self.start_ps(frame) + self.period_ps();
+        self.starts.push(next);
         (frame, self.in_force)
     }
 }
@@ -284,14 +341,16 @@ pub fn calls() -> Vec<String> {
     LOG.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
-/// Modes as (width, height, frames per second). Every mode has the same pixel rate, so frame time
-/// follows from the link alone.
-const MODES: [(u32, u32, u32); 2] = [(320, 40, 120), (640, 40, 60)];
+/// Modes as (width, height, frames per second, line time in picoseconds). The line time is the one
+/// that makes the frame length in force at the start, [`INITIAL`]'s 1000 lines, give the mode's rate:
+/// 1000 lines of 8.333 us is 120 frames a second, and of 16.667 us, 60.
+const MODES: [(u32, u32, u32, u32); 2] = [(320, 40, 120, 8_333_333), (640, 40, 60, 16_666_666)];
 const PIXEL_RATE_HZ: u64 = 1_536_000;
 
 fn mode(index: usize, cfg: SimConfig) -> Option<Mode> {
-    let (width, height, fps) = *MODES.get(index)?;
+    let (width, height, fps, line_time_ps) = *MODES.get(index)?;
     Some(Mode {
+        line_time_ps,
         link: LinkConfig {
             lanes: 2,
             virtual_channel: 0,
@@ -323,15 +382,6 @@ fn mode(index: usize, cfg: SimConfig) -> Option<Mode> {
         frame_length_delay: cfg.delays[2],
         ..Mode::default()
     })
-}
-
-/// Frame time in nanoseconds for a link: its active pixels at its pixel rate.
-fn frame_interval_ns(link: &LinkConfig) -> u64 {
-    let pixels = u128::from(link.width) * u128::from(link.height);
-    let rate = u128::from(link.pixel_rate_hz.max(1));
-    u64::try_from(pixels * 1_000_000_000 / rate)
-        .unwrap_or(u64::MAX)
-        .max(1)
 }
 
 /// What a sensor's read of the receiver's frame count gave.
@@ -407,6 +457,7 @@ impl CameraSensor for SimSensor {
             return Err(Status::NOT_FOUND);
         }
         log("sensor.select_mode");
+        pipeline().mode = mode(usize::from(index), self.config);
         self.selected = Some(index);
         Ok(())
     }
@@ -611,13 +662,6 @@ fn check_limits(controls: &Controls) -> Result<()> {
     Ok(())
 }
 
-/// A frame stream's producer, and what it makes: one frame per interval, while running.
-#[derive(Clone, Copy)]
-struct Run {
-    interval_ns: u64,
-    next_ns: Option<u64>,
-}
-
 #[driver("sim-receiver", provides = [CameraReceiver])]
 pub struct SimReceiver {
     #[needs(free)]
@@ -627,7 +671,8 @@ pub struct SimReceiver {
     embedded: Option<StreamHandle>,
     configured: Option<LinkConfig>,
     layout: Option<FrameLayout>,
-    run: Option<Run>,
+    /// Whether the receiver is started: it makes frames on the host's ticks while it is.
+    running: bool,
     counters: Counters,
 }
 
@@ -641,7 +686,7 @@ impl Lifecycle for SimReceiver {
             embedded: needs.embedded,
             configured: None,
             layout: None,
-            run: None,
+            running: false,
             counters: Counters::default(),
         })
     }
@@ -649,23 +694,31 @@ impl Lifecycle for SimReceiver {
     /// Makes every frame due by `now_ns`, and returns when the next one is due.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         pipeline().now_ns = now_ns;
-        let run = self.run.as_mut()?;
-        let mut next = match run.next_ns {
-            Some(next) => next,
-            None => {
-                // The first frame starts one interval after the first tick.
-                let next = now_ns.saturating_add(run.interval_ns);
-                run.next_ns = Some(next);
-                pipeline().frame0_ns = Some(next);
-                return Some(next);
-            }
-        };
+        if !self.running {
+            return None;
+        }
         let size = self.layout.map_or(0, |layout| layout.size);
         let (masked, embedded_on) = {
-            let p = pipeline();
+            let mut p = pipeline();
+            if p.starts.is_empty() {
+                // The first frame starts one frame period after the first tick.
+                let first = u128::from(now_ns) * 1000 + p.period_ps();
+                p.starts.push(first);
+            }
             (u64::from(p.config.drop_frames), p.config.embedded)
         };
-        while next <= now_ns {
+        loop {
+            // The next frame's start, in whole nanoseconds: the time its stamp carries.
+            let next = {
+                let p = pipeline();
+                match p.starts.get(p.emitted as usize) {
+                    Some(&start) => (start / 1000) as u64,
+                    None => return None,
+                }
+            };
+            if next > now_ns {
+                return Some(next);
+            }
             let (sequence, in_force) = pipeline().emit();
             if sequence >= masked {
                 match self.frames.next_buffer() {
@@ -689,10 +742,7 @@ impl Lifecycle for SimReceiver {
                     publish_embedded(embedded, sequence, in_force, next);
                 }
             }
-            next = next.saturating_add(run.interval_ns);
         }
-        run.next_ns = Some(next);
-        Some(next)
     }
 }
 
@@ -707,7 +757,7 @@ impl CameraReceiver for SimReceiver {
     }
 
     fn configure(&mut self, link: LinkConfig, packing: Packing) -> Result<FrameLayout> {
-        if self.run.is_some() {
+        if self.running {
             return Err(Status::BUSY);
         }
         if link.lanes == 0
@@ -753,29 +803,30 @@ impl CameraReceiver for SimReceiver {
     }
 
     fn start(&mut self) -> Result<()> {
-        let link = self.configured.ok_or(Status::INVALID_ARGUMENT)?;
-        if self.run.is_some() {
+        self.configured.ok_or(Status::INVALID_ARGUMENT)?;
+        if self.running {
             return Err(Status::BUSY);
         }
         log("receiver.start");
         self.counters = Counters::default();
-        let config = pipeline().config;
-        let interval_ns = config.period_ns.unwrap_or_else(|| frame_interval_ns(&link));
-        *pipeline() = Pipeline {
-            config,
-            interval_ns,
-            ..Pipeline::new()
-        };
-        self.run = Some(Run {
-            interval_ns,
-            next_ns: None,
-        });
+        {
+            // A restart begins the frame clock again. The sensor's registers persist, as on the
+            // board: the queued controls and the values in force are kept.
+            let mut p = pipeline();
+            p.emitted = 0;
+            p.starts.clear();
+            p.straddles = 0;
+            p.now_ns = 0;
+            p.read_at = None;
+            p.period_override_ps = p.config.period_ns.map(|ns| u128::from(ns) * 1000);
+        }
+        self.running = true;
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
         log("receiver.stop");
-        self.run = None;
+        self.running = false;
         Ok(())
     }
 
@@ -812,19 +863,19 @@ impl CameraReceiver for SimReceiver {
     /// too: they are counted and their sequence is taken, but nothing is published for them.
     /// `None` while the receiver is not running or before the first frame has started.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
-        if self.run.is_none() {
+        if !self.running {
             return Ok(None);
         }
         let p = pipeline();
         let at = p.read_at.unwrap_or(p.now_ns);
         let frame = p.frame_at(at);
-        let Some(frame0) = p.frame0_ns.filter(|_| frame >= 0) else {
+        if p.starts.is_empty() || frame < 0 {
             return Ok(None);
-        };
+        }
         let frame = frame as u64;
         Ok(Some(FrameStarts {
             count: frame + 1,
-            latest_ns: frame0 + frame * p.interval_ns,
+            latest_ns: (p.start_ps(frame) / 1000) as u64,
         }))
     }
 

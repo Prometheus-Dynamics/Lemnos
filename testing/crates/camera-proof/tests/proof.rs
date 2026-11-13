@@ -2,12 +2,14 @@
 
 mod sim;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lemnos_camera_proof::{Bus, DirSink, Error, Frames, Options, assemble, capture};
+use lemnos_camera_proof::{Bus, DirSink, Error, FrameSink, Frames, Options, assemble, capture};
 use lemnos_contract_camera_receiver::{CameraReceiver, MAX_EMBEDDED_STREAM_NAME};
-use lemnos_contract_camera_sensor::{Controls, FrameValues};
+use lemnos_contract_camera_sensor::{Controls, FrameValues, frame_length_for_fps_milli};
+use lemnos_wire::ring::FrameSlot;
 
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("camera-proof-{}-{name}", std::process::id()))
@@ -483,4 +485,116 @@ fn without_the_straddle_rule_a_straddling_post_is_named_one_frame_early() {
         bad > 100,
         "the same check must fail when the answer skips the straddle rule: {bad} mismatches"
     );
+}
+
+/// Records each frame's sequence and timestamp; the bytes are not kept.
+#[derive(Default)]
+struct Stamps(Vec<(u64, u64)>);
+
+impl FrameSink for Stamps {
+    fn save(&mut self, frame: &FrameSlot, _bytes: &[u8]) -> std::io::Result<()> {
+        self.0.push((frame.sequence, frame.timestamp_ns));
+        Ok(())
+    }
+}
+
+/// One run's rates, in milli-fps: the rate asked for, the rate the frame length the contract
+/// answers computes to, and the rate the frame timestamps measure.
+struct Rates {
+    asked: u32,
+    lines: u32,
+    computed: u32,
+    measured: u64,
+}
+
+/// Asks for `asked_milli` on `mode`, sets the frame length the contract answers with before the
+/// start, takes `frames` frames and measures the rate from their timestamps. Frame 0 is not
+/// counted: the programmed frame length lands two frames after the start, so frame 0's interval
+/// runs at the frame length in force before it.
+fn rates_of(asked_milli: u32, mode: u16, frames: u64) -> Rates {
+    let bus = sim::bus(&sim::board(Some("csi0")));
+    let mut camera = assemble(&bus, &Options { sensor: None, mode }).unwrap();
+    let m = *camera.mode();
+    let (lines, computed) = frame_length_for_fps_milli(
+        m.line_time_ps,
+        m.frame_length_min,
+        m.frame_length_max,
+        asked_milli,
+    )
+    .unwrap();
+    camera
+        .set_controls(Controls {
+            frame_length: Some(lines),
+            ..Controls::default()
+        })
+        .unwrap();
+    camera.start().unwrap();
+    let mut stamps = Stamps::default();
+    let report = capture(&mut camera, frames, &mut stamps).unwrap();
+    camera.stop().unwrap();
+    assert_eq!((report.dropped, report.gaps), (0, 0), "{report:?}");
+    let counted: Vec<u64> = stamps
+        .0
+        .iter()
+        .filter(|(sequence, _)| *sequence >= 1)
+        .map(|&(_, ns)| ns)
+        .collect();
+    let span = u128::from(counted[counted.len() - 1] - counted[0]);
+    let measured = (counted.len() as u128 - 1) * 1_000_000_000_000 / span;
+    Rates {
+        asked: asked_milli,
+        lines,
+        computed,
+        measured: measured as u64,
+    }
+}
+
+/// The measured rate must equal the computed one to 200 parts per million (the rate proof's
+/// tolerance). The run is written to stdout.
+fn assert_measured_is_computed(r: &Rates) {
+    let ppm =
+        u128::from(r.measured.abs_diff(u64::from(r.computed))) * 1_000_000 / u128::from(r.computed);
+    let _ = writeln!(
+        std::io::stdout(),
+        "asked {} milli-fps: frame length {} lines, computed {} milli-fps, measured {} milli-fps, difference {ppm} ppm",
+        r.asked,
+        r.lines,
+        r.computed,
+        r.measured
+    );
+    assert!(
+        ppm <= 200,
+        "asked {}: computed {} measured {} ({ppm} ppm)",
+        r.asked,
+        r.computed,
+        r.measured
+    );
+}
+
+#[test]
+fn the_measured_rate_is_the_computed_rate_at_60_fps() {
+    let _serial = sim::serial();
+    assert_measured_is_computed(&rates_of(60_000, 0, 2000));
+}
+
+#[test]
+fn the_measured_rate_is_the_computed_rate_at_120_fps() {
+    let _serial = sim::serial();
+    assert_measured_is_computed(&rates_of(120_000, 0, 2000));
+}
+
+#[test]
+fn the_measured_rate_is_the_computed_rate_for_an_out_of_range_ask() {
+    // 2000 fps is faster than the shortest frame (100 lines, 1200 fps): the contract answers with
+    // that frame, and the frames must run at the rate it says.
+    let _serial = sim::serial();
+    let r = rates_of(2_000_000, 0, 2000);
+    assert_eq!((r.lines, r.computed), (100, 1_200_000));
+    assert_measured_is_computed(&r);
+}
+
+#[test]
+fn the_measured_rate_is_the_computed_rate_in_the_wide_mode_at_30_fps() {
+    let _serial = sim::serial();
+    assert_measured_is_computed(&rates_of(30_000, 1, 2000));
 }

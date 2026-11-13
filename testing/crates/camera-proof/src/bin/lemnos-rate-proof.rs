@@ -213,8 +213,7 @@ fn run(args: &Args) -> Result<bool, String> {
     stopped.map_err(|e| format!("stop: {e:?}"))?;
 
     let measured = report.fps_milli().ok_or("no frame interval to measure")?;
-    let period_ps = u128::from(mode.line_time_ps) * u128::from(lines);
-    let computed = 1_000_000_000_000_000u128 / period_ps;
+    let computed = 1_000_000_000_000_000u128 / mode.period_ps(lines);
     let error_ppm = u128::from(measured.abs_diff(computed as u64)) * 1_000_000 / computed.max(1);
     out(format_args!(
         "frames {}, dropped {}, gaps {}; rate from timestamps {measured} milli-fps; nominal {computed} milli-fps; difference {error_ppm} ppm (limit {TOLERANCE_PPM})",

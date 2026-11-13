@@ -292,7 +292,9 @@ show on the frame `F + delay` for each control, where `F` is the frame in progre
 launches. Frames are named by sequence (receivers publish identity 0). `ov9782` has no embedded
 data, so a caller checks its posts from the timing rule. The simulated sensor in the camera proof
 has configurable delays, masked frames and embedded data, and its schedule test checks a 1,000-step
-run with unequal delays.
+run with unequal delays. Its frames last one period of the frame length in force (the mode's line time
+times the frame length, `Mode::period_ps`), so a frame length that is programmed shows in the timestamps:
+the rate tests check the measured rate against the computed one at 30, 60, 120 and an out-of-range ask.
 
 Confirming a link. `camera.receiver/1` `source` says which sensor its input is wired to, as the
 kernel names it; `camera.sensor/1` `identity` says what the kernel calls that sensor. The sensor

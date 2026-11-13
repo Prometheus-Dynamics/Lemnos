@@ -484,11 +484,25 @@ pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<Link
     })
 }
 
+/// The frame period, in picoseconds, of a frame `lines` long on a sensor whose line time is
+/// `line_time_ps`: `line_time_ps × lines`. The one period the rate functions, [`Mode::period_ps`],
+/// the rate proof and the simulated sensor's frame clock all take.
+pub fn frame_period_ps(line_time_ps: u32, lines: u32) -> u128 {
+    u128::from(line_time_ps) * u128::from(lines)
+}
+
+impl Mode {
+    /// The frame period in picoseconds of a frame `lines` long in this mode ([`frame_period_ps`]).
+    pub fn period_ps(&self, lines: u32) -> u128 {
+        frame_period_ps(self.line_time_ps, lines)
+    }
+}
+
 /// The frame rate, in thousandths of a frame per second, of a frame `lines` long on a sensor whose
-/// line time is `line_time_ps` picoseconds: `1e15 / (line_time_ps × lines)`, rounded to the nearest.
-/// `None` when either is zero.
+/// line time is `line_time_ps` picoseconds: `1e15 / period`, with the period from
+/// [`frame_period_ps`], rounded to the nearest. `None` when the period is zero.
 pub fn fps_milli_of(line_time_ps: u32, lines: u32) -> Option<u32> {
-    let period = u128::from(line_time_ps) * u128::from(lines);
+    let period = frame_period_ps(line_time_ps, lines);
     if period == 0 {
         return None;
     }
@@ -537,6 +551,18 @@ pub fn frame_length_for_fps_milli(
 #[cfg(test)]
 mod rate_tests {
     use super::*;
+
+    #[test]
+    fn a_mode_period_is_its_line_time_times_the_frame_length() {
+        let mode = Mode {
+            line_time_ps: 8_333_333,
+            ..Mode::default()
+        };
+        assert_eq!(mode.period_ps(1000), 8_333_333_000);
+        assert_eq!(mode.period_ps(1000), frame_period_ps(8_333_333, 1000));
+        // The rate of that period is the rate the rate functions report for the same lines.
+        assert_eq!(fps_milli_of(8_333_333, 1000), Some(120_000));
+    }
 
     #[test]
     fn the_rate_of_a_frame_is_rounded_to_the_nearest_milli_fps() {
