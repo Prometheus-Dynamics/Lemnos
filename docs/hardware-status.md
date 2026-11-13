@@ -48,6 +48,7 @@ F2b) also gave the PIO I2C bus a module route.
 | Check | Result |
 |---|---|
 | [`F2e.md`](../testing/board-runs/F2e.md) | The 9000-frame raw run at 114.802 fps with no gaps or drops, as root and as the `lemnos` user with the three device nodes it needs; the sensor's six modes select; the LED ring's pixel order not decided; a client that stops with an error leaves the sensor started (found, not fixed) |
+| [`F2f1.md`](../testing/board-runs/F2f1.md) | Not run on the board. The receiver and the front end claim their parts, observers read counters while another file drives; the chain run that needs it is the next board session |
 
 ## What has been shown, and how
 

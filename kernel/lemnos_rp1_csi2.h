@@ -2,8 +2,8 @@
 /*
  * The rp1-csi2 receiver: the camera front-end block's D-PHY, its CSI-2 host
  * and one DMA channel, with frames delivered through a frame stream
- * (lemnos.h, "Frame streams"). The node is /dev/lemnos-rp1-csi2-<device>, one
- * opener at a time.
+ * (lemnos.h, "Frame streams"). The node is /dev/lemnos-rp1-csi2-<device>. Several
+ * files may open it; each drives one part of the block by claiming it (see "Parts" below).
  *
  * The sensor is user space's: nothing here talks to it. START takes the link
  * the sensor was set up for and the stream to keep (virtual channel, data
@@ -117,5 +117,28 @@ struct lemnos_rp1_csi2_embedded {
 };
 
 #define LEMNOS_RP1_CSI2_IOC_EMBEDDED	 _IOW('L', 0xc5, struct lemnos_rp1_csi2_embedded)
+
+/*
+ * Parts. The block has two: the receiver (LEMNOS_RP1_CSI2_PART_CSI2: START, STOP,
+ * EMBEDDED, and the frame streams made with STREAM_CREATE) and the front end on
+ * the same block, when it has one (LEMNOS_RP1_CSI2_PART_FE: the front end's
+ * START, STOP, TEST_TRACE and TEST_SCRIBBLE). A file drives a part only after it
+ * has claimed it with LEMNOS_RP1_CSI2_IOC_CLAIM. Each part has one claimant at a
+ * time: a claim of a part another file holds, or one this file already holds, is
+ * EBUSY. Two files can hold different parts. A file's claims end when it is
+ * closed (its receiver stops when the receiver's claim ends, and the front end
+ * stops with it, since the front end is fed by the receiver); a claim the file
+ * never made is refused with EPERM. Observe-only calls need no claim from any
+ * file: INFO, FRAME_STARTS, and the front end's INFO.
+ */
+#define LEMNOS_RP1_CSI2_PART_CSI2	(1u << 0)
+#define LEMNOS_RP1_CSI2_PART_FE		(1u << 1)
+
+struct lemnos_rp1_csi2_claim {
+	__u32 parts;		/* LEMNOS_RP1_CSI2_PART_* bits, one or more; EINVAL for a part the block lacks */
+	__u32 reserved;		/* zero */
+};
+
+#define LEMNOS_RP1_CSI2_IOC_CLAIM	 _IOW('L', 0xc6, struct lemnos_rp1_csi2_claim)
 
 #endif

@@ -96,8 +96,9 @@ Refusals and what they mean are listed in `lemnos.h`.
 `lemnos_rp1_csi2.c` is the camera receiver: the block's D-PHY, CSI-2 host and one DMA channel,
 delivering into a frame stream. It's a second platform driver in this module, `lemnos-rp1-csi2`,
 bound the same way as a block (`driver_override`, and a compatible in `owned`). It has its own node
-for each bound device, `/dev/lemnos-rp1-csi2-<device>`, one opener at a time; interface in
-`lemnos_rp1_csi2.h`. Sensor bring-up is the sensor driver's: nothing here touches a sensor.
+for each bound device, `/dev/lemnos-rp1-csi2-<device>`. Several files may open it; each drives one
+part of the block (the receiver, or the front end on the same block) by claiming it, one claimant per
+part, and observes freely; interface in `lemnos_rp1_csi2.h`. Sensor bring-up is the sensor driver's: nothing here touches a sensor.
 
 `LEMNOS_RP1_CSI2_IOC_START` names the link, the layout and a stream made on this node. There is no
 ioctl carrying an address and no access to the registers. The receiver only arms buffers it gets

@@ -191,6 +191,9 @@ impl LinuxHardware {
 
     fn open(&mut self, plan: &Plan) -> io::Result<Placed> {
         let node = Node::open(format!("/dev/lemnos-rp1-csi2-{}", self.settings.device))?;
+        // The front end's part: its calls drive only what it claims. A claim another file holds
+        // is EBUSY, so a second front end on this block is refused, by the module.
+        node.claim()?;
         let heap = std::fs::File::open(format!("/dev/dma_heap/{}", self.settings.heap))?;
         let stream = node.stream_create(&StreamParams {
             buffers: plan.buffers,

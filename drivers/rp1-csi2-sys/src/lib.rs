@@ -86,6 +86,21 @@ pub struct Embedded {
     pub reserved: [u32; 2],
 }
 
+/// `LEMNOS_RP1_CSI2_PART_CSI2`: the receiver part (START, STOP, EMBEDDED, stream creation).
+pub const PART_CSI2: u32 = 1 << 0;
+/// `LEMNOS_RP1_CSI2_PART_FE`: the front end on the same block.
+pub const PART_FE: u32 = 1 << 1;
+
+/// `struct lemnos_rp1_csi2_claim`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claim {
+    /// `PART_*` bits.
+    pub parts: u32,
+    /// Zero.
+    pub reserved: u32,
+}
+
 /// `struct lemnos_rp1_csi2_start`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -182,6 +197,7 @@ const IOC_START: u32 = iow::<Start>(b'L', 0xc2);
 const IOC_EMBEDDED: u32 = iow::<Embedded>(b'L', 0xc5);
 const IOC_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xc3, 0);
 const IOC_FRAME_STARTS: u32 = ior::<FrameStarts>(b'L', 0xc4);
+const IOC_CLAIM: u32 = iow::<Claim>(b'L', 0xc6);
 const IOC_STREAM_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
 const IOC_STREAM_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 /// `sizeof(struct lemnos_stream_job)`: a job's fixed size.
@@ -215,7 +231,8 @@ pub struct StreamParams {
     pub job_slots: u32,
 }
 
-/// An open receiver node. One opener at a time; closing it stops the receiver.
+/// An open receiver node. Several files may open it; each drives the part it claims, and closing
+/// it ends the claims it holds (closing the receiver's claim stops the receiver).
 #[derive(Debug)]
 pub struct Node {
     file: File,
@@ -304,6 +321,13 @@ impl Node {
     pub fn embedded(&self, embedded: &Embedded) -> io::Result<()> {
         let mut args = *embedded;
         self.ioctl(IOC_EMBEDDED, &raw mut args).map(|_| ())
+    }
+
+    /// Claims `parts` (`PART_*` bits) for this file. A part another file holds, or one this file
+    /// already holds, is `EBUSY`. Needed before a driving call; observing needs no claim.
+    pub fn claim(&self, parts: u32) -> io::Result<()> {
+        let mut args = Claim { parts, reserved: 0 };
+        self.ioctl(IOC_CLAIM, &raw mut args).map(|_| ())
     }
 
     /// Starts receiving into the stream `start.stream_fd` names.

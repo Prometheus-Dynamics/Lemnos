@@ -40,6 +40,15 @@ struct lrc_emb {
 	u16 fe_line;			/* the channel's line count at the last frame end */
 };
 
+/*
+ * One open file of the node: the parts it has claimed (LEMNOS_RP1_CSI2_PART_*). `parts`
+ * is written only by this file's own CLAIM, under l->ctl; the file's own calls read it.
+ */
+struct lrc_file {
+	struct lrc_dev *l;
+	u32 parts;
+};
+
 struct lrc_dev {
 	struct kref ref;		/* the block, each open file, each attached stream */
 	struct device *dev;		/* held until freed */
@@ -49,7 +58,8 @@ struct lrc_dev {
 	u8 polarity[5];			/* clock, then data lanes 0-3 */
 	struct miscdevice misc;
 	char name[64];
-	atomic_t opened;
+	/* The file that claims each part (index: the part's bit, LEMNOS_RP1_CSI2_PART_*); under ctl. */
+	struct lrc_file *owner[2];
 
 	struct rw_semaphore going;	/* stream creation against unbinding */
 	struct mutex ctl;		/* START, STOP, close, unbind */

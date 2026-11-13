@@ -216,6 +216,7 @@ const IOC_STREAM_CREATE: u32 = iowr::<StreamCreate>(b'L', 0xc1);
 const IOC_FE_INFO: u32 = ior::<Info>(b'L', 0xc8);
 const IOC_FE_START: u32 = iow::<Start>(b'L', 0xc9);
 const IOC_FE_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xca, 0);
+const IOC_CLAIM: u32 = iow::<Claim>(b'L', 0xc6);
 const IOC_KICK: u32 = lemnos_linux_sys::ioc(0, b'L', 0x81, 0);
 const IOC_REGISTER: u32 = iowr::<Register>(b'L', 0x82);
 const IOC_UNREGISTER: u32 = iow::<Unregister>(b'L', 0x83);
@@ -252,7 +253,21 @@ pub struct Frame {
     pub fence: u32,
 }
 
-/// The receiver's node, used for the front end. One opener at a time; closing it stops the block.
+/// `LEMNOS_RP1_CSI2_PART_FE`: the front end's part of the receiver's node.
+pub const PART_FE: u32 = 1 << 1;
+
+/// `struct lemnos_rp1_csi2_claim`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claim {
+    /// `PART_*` bits.
+    pub parts: u32,
+    /// Zero.
+    pub reserved: u32,
+}
+
+/// The receiver's node, used for the front end. Several files may open it; the front end drives
+/// its part once it has claimed it, and closing the node ends the claim.
 #[derive(Debug)]
 pub struct Node {
     file: File,
@@ -326,6 +341,15 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(stream)
+    }
+
+    /// Claims the front end's part for this file. A claim another file holds is `EBUSY`.
+    pub fn claim(&self) -> io::Result<()> {
+        let mut args = Claim {
+            parts: PART_FE,
+            reserved: 0,
+        };
+        ioctl(self.file.as_fd(), IOC_CLAIM, (&raw mut args).cast()).map(|_| ())
     }
 
     /// Starts the front end on the stream. The stream must hold its first job; a refusal of that
