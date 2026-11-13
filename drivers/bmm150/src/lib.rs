@@ -95,11 +95,15 @@ impl Lifecycle for Bmm150 {
             ("magnetic_field.y", "y"),
             ("magnetic_field.z", "z"),
         ] {
+            // The chip's full scale: ±1300 µT on x and y, ±2500 µT on z (the datasheet's measurement
+            // range), in tesla as the read gives them.
+            let full = if field == "z" { 2500e-6 } else { 1300e-6 };
             out.add(
                 Item::value(name, READ)
                     .unit(Unit::Tesla, 0)
                     .field(field)
-                    .group("magnetic_field"),
+                    .group("magnetic_field")
+                    .real_range(-full, full),
             );
         }
     }

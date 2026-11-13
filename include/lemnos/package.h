@@ -209,6 +209,10 @@ typedef struct LemnosPackageItem {
 #define LEMNOS_EXTRA_HAS_WARN_LOW 4
 #define LEMNOS_EXTRA_HAS_WARN_HIGH 8
 #define LEMNOS_EXTRA_HAS_GROUP 16
+/* flags: the item's unit state is given; the two below say which (neither: known). Both: unknown. */
+#define LEMNOS_EXTRA_HAS_UNIT_STATE 32
+#define LEMNOS_EXTRA_UNIT_DIMENSIONLESS 64
+#define LEMNOS_EXTRA_UNIT_UNKNOWN 128
 typedef struct LemnosPackageExtra {
     /* LEMNOS_EXTRA_CONTRACT, LEMNOS_EXTRA_METHOD or LEMNOS_EXTRA_ITEM. */
     uint8_t what;

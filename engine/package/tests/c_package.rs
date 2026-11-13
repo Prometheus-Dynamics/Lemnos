@@ -244,14 +244,17 @@ config = { base = 40 }
         kind: ItemKind::Value,
         name: "level",
         unit: Unit::One,
-        // The package's table carries no unit state yet (V1c): the unit string decides.
-        unit_state: lemnos_core::UnitState::Unknown,
+        // The package states it as dimensionless (its extra's unit bit).
+        unit_state: lemnos_core::UnitState::Dimensionless,
         exponent: 0,
         min: Some(0),
         max: Some(100),
         step: Some(5),
         warn_low: Some(10),
         warn_high: Some(90),
+        real_min: None,
+        real_max: None,
+        real_step: None,
         reading: Some(Reading::Range),
         group: Some("grp"),
         method: MethodId {

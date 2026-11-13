@@ -395,7 +395,8 @@ pub struct PackageExtra {
     /// The reading's code ([`EXTRA_HAS_READING`]); for a method, its reading; for an item, its own.
     pub reading: u8,
     /// [`EXTRA_HAS_READING`], [`EXTRA_HAS_STEP`], [`EXTRA_HAS_WARN_LOW`], [`EXTRA_HAS_WARN_HIGH`],
-    /// [`EXTRA_HAS_GROUP`]: which of the fields below are set.
+    /// [`EXTRA_HAS_GROUP`]: which of the fields below are set. [`EXTRA_HAS_UNIT_STATE`] and the two
+    /// unit bits say an item's unit state (a flag byte, so the table keeps its size).
     pub flags: u8,
     /// [`EXTRA_CONTRACT`] and [`EXTRA_METHOD`]: the contract's position in the manifest.
     pub contract: u8,
@@ -422,6 +423,14 @@ pub const EXTRA_HAS_STEP: u8 = 2;
 pub const EXTRA_HAS_WARN_LOW: u8 = 4;
 pub const EXTRA_HAS_WARN_HIGH: u8 = 8;
 pub const EXTRA_HAS_GROUP: u8 = 16;
+/// [`PackageExtra::flags`] for an item: its unit state is given. Without it the unit string decides
+/// (an empty unit is unknown, anything else known), as for a package built before the state.
+pub const EXTRA_HAS_UNIT_STATE: u8 = 32;
+/// With [`EXTRA_HAS_UNIT_STATE`]: the item is dimensionless (a count, a ratio, a switch, a text).
+pub const EXTRA_UNIT_DIMENSIONLESS: u8 = 64;
+/// With [`EXTRA_HAS_UNIT_STATE`]: the driver did not say the unit. With both this and
+/// [`EXTRA_UNIT_DIMENSIONLESS`] set, the state is unknown.
+pub const EXTRA_UNIT_UNKNOWN: u8 = 128;
 
 impl PackageExtra {
     pub const EMPTY: Self = Self {

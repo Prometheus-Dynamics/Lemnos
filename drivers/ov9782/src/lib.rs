@@ -352,13 +352,16 @@ impl Lifecycle for Ov9782 {
         out.add(frame_value);
         out.add(frame_set);
         out.add(
+            // The value is the register code: 0x10 is one times, so a ratio with no unit.
             Item::value("analogue_gain", IN_FORCE)
+                .dimensionless()
                 .field("analogue_gain")
                 .range(i64::from(gain.min), i64::from(gain.max))
                 .step(i64::from(gain.step)),
         );
         out.add(
             Item::control("analogue_gain", SET_ANALOGUE_GAIN)
+                .dimensionless()
                 .range(i64::from(gain.min), i64::from(gain.max))
                 .step(i64::from(gain.step)),
         );

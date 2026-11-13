@@ -110,7 +110,7 @@ impl OwnedContract {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OwnedItem {
     pub kind: ItemKind,
     pub name: String,
@@ -121,6 +121,12 @@ pub struct OwnedItem {
     pub exponent: i8,
     pub min: Option<i64>,
     pub max: Option<i64>,
+    /// The range and the step as real numbers in the unit, for a float value (see
+    /// [`lemnos_core::Item::real_range`]). `None` when the device gave none, or from a host before
+    /// them.
+    pub real_min: Option<f64>,
+    pub real_max: Option<f64>,
+    pub real_step: Option<f64>,
     pub contract: u8,
     pub method: u16,
     pub field: Option<String>,
@@ -137,7 +143,7 @@ pub struct OwnedItem {
 }
 
 /// Everything a tool with no code for a device needs to use it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DeviceDescription {
     /// The device's name for people: its board `label`, or its id when the board names none.
     /// Empty from a host that sends no identity.
@@ -244,7 +250,7 @@ struct DescContractKind<'a> {
 }
 
 /// One item's extra fields, appended after the contract kinds: one per item, in order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Encode, Decode)]
 struct DescItemExtra<'a> {
     reading: u8,
     step: Option<i64>,
@@ -254,6 +260,22 @@ struct DescItemExtra<'a> {
     /// Appended after the fields above: its absence (a host from before it) reads as `None`, and
     /// the unit's state is then decided by the unit string.
     unit_state: Option<u8>,
+    /// Appended after the unit state: the range and step as real numbers in the unit (a host from
+    /// before them reads none, and the integer range stands).
+    real_min: Option<f64>,
+    real_max: Option<f64>,
+    real_step: Option<f64>,
+}
+
+/// The item's extras as a host from before the unit state and the real ranges wrote them: the same
+/// fields, without the appended ones. Only [`Layout::BeforeUnitState`] writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode)]
+struct DescItemExtraBefore<'a> {
+    reading: u8,
+    step: Option<i64>,
+    warn_low: Option<i64>,
+    warn_high: Option<i64>,
+    group: Option<&'a str>,
 }
 
 /// One added field of a method, appended after the trailer.
@@ -452,6 +474,26 @@ pub fn encode_description(
     identity: &Identity<'_>,
     buf: &mut [u8],
 ) -> Result<usize> {
+    encode_as(manifest, description, identity, buf, Layout::Current)
+}
+
+/// Which layout of the item trailer to write. `BeforeUnitState` is what a host from before the
+/// unit state and the real-valued ranges sends: the items' extras end at the group. Only the
+/// tests write it, to check that a current reader still decodes an old description.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Current,
+    BeforeUnitState,
+}
+
+/// [`encode_description`] with the item trailer in the given layout.
+pub(crate) fn encode_as(
+    manifest: &Manifest,
+    description: &Description,
+    identity: &Identity<'_>,
+    buf: &mut [u8],
+    layout: Layout,
+) -> Result<usize> {
     let mut out = Writer::new(buf);
     (manifest.provides.len() as u16).encode(&mut out)?;
     for contract in manifest.provides {
@@ -491,7 +533,7 @@ pub fn encode_description(
             .encode(&mut out)?;
         }
     }
-    encode_trailer(manifest, description, identity, &mut out)?;
+    encode_trailer(manifest, description, identity, &mut out, layout)?;
     // Appended after the trailer: the hash of every added field of every method. A host from before
     // it stops at the trailer.
     let mut added = 0usize;
@@ -527,6 +569,7 @@ pub(crate) fn encode_trailer(
     description: &Description,
     identity: &Identity<'_>,
     out: &mut Writer<'_>,
+    layout: Layout,
 ) -> Result<()> {
     DescIdentity {
         label: identity.label,
@@ -547,13 +590,28 @@ pub(crate) fn encode_trailer(
     }
     (description.items().count() as u16).encode(out)?;
     for item in description.items() {
+        let reading = effective_reading(manifest, item).code();
+        if layout == Layout::BeforeUnitState {
+            DescItemExtraBefore {
+                reading,
+                step: item.step,
+                warn_low: item.warn_low,
+                warn_high: item.warn_high,
+                group: item.group,
+            }
+            .encode(out)?;
+            continue;
+        }
         DescItemExtra {
-            reading: effective_reading(manifest, item).code(),
+            reading,
             step: item.step,
             warn_low: item.warn_low,
             warn_high: item.warn_high,
             group: item.group,
             unit_state: Some(item.unit_state.code()),
+            real_min: item.real_min,
+            real_max: item.real_max,
+            real_step: item.real_step,
         }
         .encode(out)?;
     }
@@ -612,6 +670,9 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             exponent: item.exponent,
             min: item.min,
             max: item.max,
+            real_min: None,
+            real_max: None,
+            real_step: None,
             contract: item.contract,
             method: item.method,
             field: item.field.map(str::to_string),
@@ -666,6 +727,9 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 if let Some(state) = extra.unit_state.and_then(UnitState::from_code) {
                     item.unit_state = state;
                 }
+                item.real_min = extra.real_min;
+                item.real_max = extra.real_max;
+                item.real_step = extra.real_step;
             }
         }
     }

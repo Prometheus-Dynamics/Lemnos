@@ -104,11 +104,14 @@ what a generic panel shows, with no code for the device:
 - `label`, the board's name for the device (its id when the board names none);
 - `kind`, the grouping its contracts give it (`sensor`, `power`, ...), `other` when none;
 - `bus` (empty when none), `address` (`Option<u8>`, the 7-bit I2C address) and `location` (empty when
-  the driver names none: a sysfs directory, a chip select, a port path, a UART name);
+  the driver names none: a sysfs directory, a chip select, a port path, a UART name). When the
+  driver names none, the host gives the board's own words for what the device uses, as `role name`
+  (`line gpio7`, `pixels light`), joined by commas: the host knows them, the driver need not;
 - `state` (`Option<u8>`: 0 running, 1 retrying, 2 off) and `reason`;
 - for each item, `unit_state` (`UnitState`: known, dimensionless or unknown; an empty unit is unknown
   from a host that sends no state), `reading` (`Option<Reading>`), `step`, `warn_low`, `warn_high` and `group`, next to
-  its `unit`, `exponent`, `min` and `max`.
+  its `unit`, `exponent`, `min` and `max`, and `real_min`, `real_max` and `real_step` (`Option<f64>`:
+  a float value's range and step in the unit, when the device gives one).
 
 A value an older host does not describe reads as unknown (`None`, or empty text). `lemnos-ctl show`
 prints exactly these, one panel per device.

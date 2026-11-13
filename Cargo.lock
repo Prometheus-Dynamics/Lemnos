@@ -712,6 +712,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux",
  "lemnos-sim",
+ "lemnos-sim-walk",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -1883,6 +1884,13 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-hal",
+]
+
+[[package]]
+name = "lemnos-sim-walk"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-sim",
 ]
 
 [[package]]

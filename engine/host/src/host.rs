@@ -1997,6 +1997,17 @@ impl Host {
         let mut out = Description::new();
         catch_unwind(AssertUnwindSafe(|| instance.describe(&mut out)))
             .map_err(|_| Status::PANIC)?;
+        // A device whose driver names no location gets the board's own words for what it uses
+        // (`line gpio7`, `accel imu`): the host knows them, the driver need not.
+        if out.location().is_empty() && !slot.spec.uses.is_empty() {
+            let words: Vec<String> = slot
+                .spec
+                .uses
+                .iter()
+                .map(|(role, name)| format!("{role} {name}"))
+                .collect();
+            out.set_location(&words.join(", "));
+        }
         Ok(out)
     }
 

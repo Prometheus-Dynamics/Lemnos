@@ -160,6 +160,15 @@ fn the_package_header_matches_the_crate() {
             EXTRA_HAS_WARN_HIGH.to_string(),
         ),
         ("LEMNOS_EXTRA_HAS_GROUP", EXTRA_HAS_GROUP.to_string()),
+        (
+            "LEMNOS_EXTRA_HAS_UNIT_STATE",
+            EXTRA_HAS_UNIT_STATE.to_string(),
+        ),
+        (
+            "LEMNOS_EXTRA_UNIT_DIMENSIONLESS",
+            EXTRA_UNIT_DIMENSIONLESS.to_string(),
+        ),
+        ("LEMNOS_EXTRA_UNIT_UNKNOWN", EXTRA_UNIT_UNKNOWN.to_string()),
         ("LEMNOS_METHOD_JOB", METHOD_JOB.to_string()),
     ] {
         checks.push((name.to_string(), value));
