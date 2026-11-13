@@ -249,23 +249,18 @@ impl BackEnd {
                 }
             }
         }
-        for (bit, what) in [
-            (
-                bayer_enable::STITCH,
-                "stitch is not supported by this builder yet",
-            ),
-            (
-                bayer_enable::CAC,
-                "CAC is not supported by this builder yet",
-            ),
-        ] {
-            if g.bayer_enables & bit != 0 {
-                return fail(what);
-            }
+        if g.bayer_enables & bayer_enable::STITCH != 0 {
+            return fail("stitch is not supported by this builder yet");
+        }
+        if g.rgb_enables & rgb_enable::HOG != 0 {
+            return fail("HOG output is not sized by this builder yet");
         }
         self.check_tables()?;
         if g.bayer_enables & bayer_enable::LSC != 0 {
             self.finalise_lsc()?;
+        }
+        if g.bayer_enables & bayer_enable::CAC != 0 {
+            self.finalise_cac()?;
         }
         let mut any_output = false;
         for i in 0..BE_NUM_OUTPUTS {
@@ -498,6 +493,42 @@ impl BackEnd {
         Ok(())
     }
 
+    /// libpisp `finalise_cac`: grid steps from the input size when not given, and the grid must
+    /// cover the image. The same arithmetic as [`Self::finalise_lsc`], with the CAC grid.
+    fn finalise_cac(&mut self) -> Result<()> {
+        const P: u32 = BE_CAC_STEP_PRECISION;
+        let full = (BE_CAC_GRID_SIZE as u32) << P;
+        let (w, h) = (
+            u32::from(self.cfg.input_format.width),
+            u32::from(self.cfg.input_format.height),
+        );
+        let cac = &mut self.cfg.cac;
+        if cac.grid_step_x == 0 {
+            let step = full / w.max(1);
+            if step > u32::from(u16::MAX) {
+                return fail("CAC grid step does not fit: the input is too narrow");
+            }
+            cac.grid_step_x = step as u16;
+        }
+        if cac.grid_step_y == 0 {
+            let step = full / h.max(1);
+            if step > u32::from(u16::MAX) {
+                return fail("CAC grid step does not fit: the input is too short");
+            }
+            cac.grid_step_y = step as u16;
+        }
+        let e = self.cac_extra;
+        let reach = |step: u16, size: u32, off: u16| {
+            u64::from(step) * u64::from(size.saturating_add(u32::from(off)).saturating_sub(1))
+        };
+        if reach(cac.grid_step_x, w, e.offset_x) >= u64::from(full)
+            || reach(cac.grid_step_y, h, e.offset_y) >= u64::from(full)
+        {
+            return fail("chromatic aberration grid does not cover the image");
+        }
+        Ok(())
+    }
+
     /// A block the caller enabled with an all-zero table: nothing useful comes of running it,
     /// and this crate has no default to put there.
     fn check_tables(&self) -> Result<()> {
@@ -695,6 +726,11 @@ impl BackEnd {
             let e = self.lsc_extra;
             t.lsc_grid_offset_x = (x + u32::from(e.offset_x)) * u32::from(c.lsc.grid_step_x);
             t.lsc_grid_offset_y = (y + u32::from(e.offset_y)) * u32::from(c.lsc.grid_step_y);
+        }
+        if c.global.bayer_enables & bayer_enable::CAC != 0 {
+            let e = self.cac_extra;
+            t.cac_grid_offset_x = (x + u32::from(e.offset_x)) * u32::from(c.cac.grid_step_x);
+            t.cac_grid_offset_y = (y + u32::from(e.offset_y)) * u32::from(c.cac.grid_step_y);
         }
         (t.input_addr_offset, t.input_addr_offset2) = addr_offset(&c.input_format, x, y);
         t.tdn_input_addr_offset = addr_offset(&c.tdn_input_format, x, y).0;

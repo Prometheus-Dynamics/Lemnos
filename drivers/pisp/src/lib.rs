@@ -18,9 +18,11 @@
 //!
 //! # Tuning
 //!
-//! Gamma curves, resampling filters, sharpening, demosaic settings and colour encodings are the
-//! caller's: the crate carries the mechanics that turn them into hardware tables, not the
-//! values. The README lists the few fixed values that are kept and why.
+//! Gamma curves and the choice of colour encoding, filter or sharpening strength are the
+//! caller's: the crate carries the mechanics that turn them into hardware tables. The hardware's
+//! own defaults (the libpisp colour encodings, the debin, demosaic and false-colour settings, the
+//! resampler and sharpening filters) are in [`be::defaults`], and a block enabled with a default
+//! runs with it. The README lists the few fixed values that are kept and why.
 //!
 //! # `no_std`, no allocator
 //!
