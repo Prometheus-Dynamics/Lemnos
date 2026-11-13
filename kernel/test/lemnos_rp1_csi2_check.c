@@ -68,6 +68,14 @@ struct frame {
 };
 
 static int ctl, hw;
+
+/* CLAIM the receiver part on `fd`: 0, or -errno. */
+static int claim_csi2(int fd)
+{
+	struct lemnos_rp1_csi2_claim c = { .parts = LEMNOS_RP1_CSI2_PART_CSI2 };
+
+	return ioctl(fd, LEMNOS_RP1_CSI2_IOC_CLAIM, &c) ? -errno : 0;
+}
 static uint8_t *pool_cpu;
 
 static uint64_t load(const struct stream *s, size_t at)
@@ -666,16 +674,25 @@ static void test_close_node(const char *node, int pool_fd)
 {
 	struct stream s;
 	struct lemnos_rp1_csi2_start a;
+	struct lemnos_rp1_csi2_info oi;
 	uint64_t ms;
 	int second;
 
+	/* A second file may open the node; it can't drive the receiver while the first claims it. */
 	second = open(node, O_RDWR | O_CLOEXEC);
-	CHECK(second < 0 && errno == EBUSY, "the node has one opener at a time");
+	CHECK(second >= 0, "a second file opens the node");
+	CHECK(claim_csi2(second) == -EBUSY, "the receiver is claimed by the first file (EBUSY)");
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	a = good_start(s.fd);
 	CHECK(!start(&a), "START");
 	fire(TCSI_FS);
 	busy(25);
+	CHECK(!ioctl(second, LEMNOS_RP1_CSI2_IOC_INFO, &oi) && oi.streaming,
+	      "the second file observes the running receiver");
+	CHECK(ioctl(second, LEMNOS_RP1_CSI2_IOC_STOP) == -1 && errno == EPERM,
+	      "the second file cannot stop it (EPERM)");
+	close(second);
+	CHECK(info().streaming, "closing the second file stops nothing");
 	ms = now_ms();
 	close(ctl);
 	ms = now_ms() - ms;
@@ -683,6 +700,7 @@ static void test_close_node(const char *node, int pool_fd)
 	      (unsigned long long)ms);
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	CHECK(ctl >= 0, "the node opens again");
+	CHECK(!claim_csi2(ctl), "the reopened node claims the receiver again");
 	CHECK(!info().streaming, "not streaming after the close");
 	busy(0);
 	CHECK(load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_OPEN, "the stream stays open");
@@ -928,6 +946,7 @@ static int run_wedge(const char *node, const char *dev, const char *heap)
 
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	hw = open("/dev/lemnos-test-csi2", O_RDWR | O_CLOEXEC);
+	CHECK(!claim_csi2(ctl), "the receiver claimed");
 	pool_fd = make_pool(heap);
 	pool2_fd = make_pool(heap);
 	CHECK(ctl >= 0 && hw >= 0 && pool_fd >= 0 && pool2_fd >= 0, "wedge: set up");
@@ -971,6 +990,7 @@ static int run_wedge_own(const char *node, const char *dev, const char *heap)
 
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	hw = open("/dev/lemnos-test-csi2", O_RDWR | O_CLOEXEC);
+	CHECK(!claim_csi2(ctl), "the receiver claimed");
 	o[0] = own_make(heap);
 	o[1] = own_make(heap);
 	fresh = own_make(heap);
@@ -1147,6 +1167,7 @@ int main(int argc, char **argv)
 
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	hw = open("/dev/lemnos-test-csi2", O_RDWR | O_CLOEXEC);
+	CHECK(!claim_csi2(ctl), "the receiver claimed");
 	CHECK(ctl >= 0 && hw >= 0, "opened");
 	pool_fd = make_pool(heap);
 	CHECK(pool_fd >= 0, "pool allocated");

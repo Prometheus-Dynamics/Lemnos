@@ -1297,6 +1297,137 @@ static void test_good_and_addresses(void)
 	stream_close(&s);
 }
 
+
+#define PARTS_BOTH (LEMNOS_RP1_CSI2_PART_CSI2 | LEMNOS_RP1_CSI2_PART_FE)
+
+/* CLAIM on `fd`: 0, or -errno. */
+static int claim_parts(int fd, uint32_t parts)
+{
+	struct lemnos_rp1_csi2_claim c = { .parts = parts };
+
+	return ioctl(fd, LEMNOS_RP1_CSI2_IOC_CLAIM, &c) ? -errno : 0;
+}
+
+/*
+ * Parts, with three files on one block: fa claims the receiver, fb the front end, and obs
+ * claims nothing. Each file drives only what it claimed (the calls go through the global
+ * `ctl`, which the test points at the file in turn), obs observes while fb drives, closing
+ * obs stops nothing, and closing fb releases the front end's part only.
+ */
+static void test_parts(const char *node)
+{
+	struct lemnos_pisp_fe_info i;
+	struct lemnos_pisp_fe_start a;
+	struct lemnos_rp1_csi2_info ri;
+	struct lemnos_rp1_csi2_frame_starts fs;
+	struct lemnos_rp1_csi2_start r;
+	struct lemnos_rp1_csi2_claim none = {0};
+	struct lemnos_stream_job j;
+	struct stream s, s2;
+	int fa, fb, obs, ret;
+
+	close(ctl);
+	fa = open(node, O_RDWR | O_CLOEXEC);
+	fb = open(node, O_RDWR | O_CLOEXEC);
+	obs = open(node, O_RDWR | O_CLOEXEC);
+	CHECK(fa >= 0 && fb >= 0 && obs >= 0, "three files open the node at once (fa %d fb %d obs %d)",
+	      fa, fb, obs);
+	if (fa < 0 || fb < 0 || obs < 0)
+		return;
+
+	CHECK(!claim_parts(fa, LEMNOS_RP1_CSI2_PART_CSI2), "fa claims the receiver");
+	CHECK(!claim_parts(fb, LEMNOS_RP1_CSI2_PART_FE), "fb claims the front end");
+	CHECK(claim_parts(fa, LEMNOS_RP1_CSI2_PART_CSI2) == -EBUSY,
+	      "fa's second claim of the receiver is EBUSY");
+	CHECK(claim_parts(fb, LEMNOS_RP1_CSI2_PART_FE) == -EBUSY,
+	      "fb's second claim of the front end is EBUSY");
+	CHECK(claim_parts(obs, LEMNOS_RP1_CSI2_PART_CSI2) == -EBUSY,
+	      "obs cannot claim the receiver fa holds");
+	CHECK(claim_parts(obs, LEMNOS_RP1_CSI2_PART_FE) == -EBUSY,
+	      "obs cannot claim the front end fb holds");
+	CHECK(claim_parts(obs, PARTS_BOTH) == -EBUSY, "a claim of held parts claims nothing");
+	CHECK(claim_parts(fa, 0) == -EINVAL, "an empty claim is EINVAL");
+	CHECK(claim_parts(fa, 1u << 2) == -EINVAL, "an unknown part is EINVAL");
+
+	/* fb drives the front end through its own stream. */
+	ctl = fb;
+	CHECK(!stream_setup(&s), "fb makes the front end's stream");
+	valid(cfg_slot(0));
+	cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+	j = job_for(0, 0);
+	post(&s, &j);
+	CHECK(!kick(&s), "job");
+	a = good_start(&s);
+	CHECK(!start(&a), "fb starts the front end");
+
+	/* Observing while fb drives: no claim needed. */
+	CHECK(!ioctl(obs, LEMNOS_PISP_FE_IOC_INFO, &i) && i.streaming,
+	      "obs reads the front end's INFO while fb drives it");
+	CHECK(!ioctl(obs, LEMNOS_RP1_CSI2_IOC_INFO, &ri), "obs reads the receiver's INFO");
+	CHECK(!ioctl(obs, LEMNOS_RP1_CSI2_IOC_FRAME_STARTS, &fs), "obs reads the frame-start count");
+
+	/* Driving without the claim is refused. */
+	CHECK(ioctl(obs, LEMNOS_PISP_FE_IOC_STOP) == -1 && errno == EPERM,
+	      "obs cannot stop the front end (EPERM)");
+	CHECK(ioctl(obs, LEMNOS_PISP_FE_IOC_START, &a) == -1 && errno == EPERM,
+	      "obs cannot start the front end (EPERM)");
+	memset(&r, 0, sizeof(r));
+	CHECK(ioctl(obs, LEMNOS_RP1_CSI2_IOC_START, &r) == -1 && errno == EPERM,
+	      "obs cannot start the receiver (EPERM)");
+	CHECK(ioctl(obs, LEMNOS_RP1_CSI2_IOC_STOP) == -1 && errno == EPERM,
+	      "obs cannot stop the receiver (EPERM)");
+	CHECK(ioctl(obs, LEMNOS_RP1_CSI2_IOC_CLAIM, &none) == -1 && errno == EINVAL,
+	      "obs's empty claim is EINVAL, not a claim");
+
+	/* fa drives the receiver: refused while the front end runs (the module's rule). */
+	ctl = fa;
+	CHECK(!stream_setup(&s2), "fa makes the receiver's stream");
+	memset(&r, 0, sizeof(r));
+	r.stream_fd = s2.fd;
+	r.lanes = 2;
+	r.mbps = 800;
+	r.dt = 0x2b;
+	r.width = W;
+	r.height = H;
+	r.stride = STRIDE;
+	r.size = OUT0_BYTES;
+	ret = ioctl(fa, LEMNOS_RP1_CSI2_IOC_START, &r) ? -errno : 0;
+	CHECK(ret == -EBUSY, "fa's receiver START is refused while fb's front end runs (%d)", ret);
+
+	/* obs closing stops nothing. */
+	close(obs);
+	obs = -1;
+	ctl = fb;
+	CHECK(!ioctl(fb, LEMNOS_PISP_FE_IOC_INFO, &i) && i.streaming,
+	      "closing an observer stops nothing");
+
+	/* fb closing releases the front end only: fa keeps the receiver, and the front end is free. */
+	stream_close(&s);
+	close(fb);
+	fb = -1;
+	obs = open(node, O_RDWR | O_CLOEXEC);
+	CHECK(obs >= 0, "obs reopens the node");
+	CHECK(claim_parts(obs, LEMNOS_RP1_CSI2_PART_CSI2) == -EBUSY,
+	      "closing fb leaves fa's receiver claim");
+	CHECK(!claim_parts(obs, LEMNOS_RP1_CSI2_PART_FE), "closing fb frees the front end's claim");
+	CHECK(!ioctl(obs, LEMNOS_PISP_FE_IOC_INFO, &i) && !i.streaming,
+	      "closing fb stopped the front end");
+	ctl = fa;
+	ret = ioctl(fa, LEMNOS_RP1_CSI2_IOC_START, &r) ? -errno : 0;
+	CHECK(!ret, "fa's receiver starts once the front end is stopped (%d)", ret);
+	CHECK(!ioctl(fa, LEMNOS_RP1_CSI2_IOC_STOP), "fa stops the receiver");
+	stream_close(&s2);
+
+	/* fa closing frees the receiver's part for the next claimant. */
+	close(fa);
+	CHECK(!claim_parts(obs, LEMNOS_RP1_CSI2_PART_CSI2), "closing fa frees the receiver's claim");
+
+	/* The global file again, holding both parts, for the tests after this one. */
+	close(obs);
+	ctl = open(node, O_RDWR | O_CLOEXEC);
+	CHECK(ctl >= 0 && !claim_parts(ctl, PARTS_BOTH), "the global file claims both parts again");
+}
+
 /* The receiver and the front end share one channel: never both. */
 static void test_exclusive(void)
 {
@@ -1962,6 +2093,7 @@ static void test_stop_in_flight(const char *node, const char *unbind, const char
 	      (unsigned long long)(now_ms() - t));
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	CHECK(ctl >= 0, "node reopened");
+	CHECK(!claim_parts(ctl, PARTS_BOTH), "reopened node claims both parts");
 	stream_close(&s);
 
 	/* Unbinding with a frame in flight. */
@@ -2004,6 +2136,7 @@ static int open_all(const char *node, const char *heap)
 	out_r.fd = make_buf(heap, 8192);
 	if (ctl < 0 || hw < 0 || pool_fd < 0 || cfg_r.fd < 0 || stats_r.fd < 0 || out_r.fd < 0)
 		return -1;
+	CHECK(!claim_parts(ctl, PARTS_BOTH), "claimed both parts");
 	cfg_r.map = mmap(NULL, CFG_SLOTS * CFG_SIZE + 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
 			 cfg_r.fd, 0);
 	stats_map_bytes = (STATS_SIZE + 4095) & ~4095u;
@@ -2093,6 +2226,7 @@ int main(int argc, char **argv)
 	test_good_and_addresses();
 	test_library_config();
 	test_exclusive();
+	test_parts(node);
 	test_sequence();
 	test_toctou();
 	test_hostile_hw();

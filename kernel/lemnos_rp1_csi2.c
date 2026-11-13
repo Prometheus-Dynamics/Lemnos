@@ -63,6 +63,7 @@
 #include <linux/uaccess.h>
 
 #include "lemnos_internal.h"
+#include "lemnos_pisp_fe.h"
 #include "lemnos_rp1_csi2.h"
 #include "lemnos_rp1_csi2_priv.h"
 
@@ -928,9 +929,47 @@ static long lrc_stream_create(struct lrc_dev *l, void __user *arg)
 	return ret;
 }
 
+/* Whether this file has claimed `part`. Read by the file's own calls only (see struct lrc_file). */
+static bool lrc_holds(const struct lrc_file *lf, u32 part)
+{
+	return READ_ONCE(lf->parts) & part;
+}
+
+/* CLAIM: each named part gets this file as its claimant, or none does (EBUSY). */
+static long lrc_claim(struct lrc_dev *l, struct lrc_file *lf, void __user *arg)
+{
+	struct lemnos_rp1_csi2_claim c;
+	long ret = 0;
+	unsigned int i;
+
+	if (copy_from_user(&c, arg, sizeof(c)))
+		return -EFAULT;
+	if (!c.parts || (c.parts & ~(LEMNOS_RP1_CSI2_PART_CSI2 | LEMNOS_RP1_CSI2_PART_FE)) || c.reserved)
+		return -EINVAL;
+	if ((c.parts & LEMNOS_RP1_CSI2_PART_FE) && !l->fe)
+		return -EINVAL;
+
+	mutex_lock(&l->ctl);
+	if (l->gone) {
+		ret = -ENODEV;
+	} else {
+		for (i = 0; i < ARRAY_SIZE(l->owner); i++)
+			if ((c.parts & BIT(i)) && l->owner[i])
+				ret = -EBUSY;
+		for (i = 0; !ret && i < ARRAY_SIZE(l->owner); i++)
+			if (c.parts & BIT(i)) {
+				l->owner[i] = lf;
+				lf->parts |= BIT(i);
+			}
+	}
+	mutex_unlock(&l->ctl);
+	return ret;
+}
+
 static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct lrc_dev *l = file->private_data;
+	struct lrc_file *lf = file->private_data;
+	struct lrc_dev *l = lf->l;
 	void __user *uarg = (void __user *)arg;
 	long ret;
 
@@ -939,9 +978,15 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return lrc_info(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_FRAME_STARTS:
 		return lrc_frame_starts(l, uarg);
+	case LEMNOS_RP1_CSI2_IOC_CLAIM:
+		return lrc_claim(l, lf, uarg);
 	case LEMNOS_RP1_CSI2_IOC_STREAM_CREATE:
+		if (!lrc_holds(lf, LEMNOS_RP1_CSI2_PART_CSI2 | LEMNOS_RP1_CSI2_PART_FE))
+			return -EPERM;
 		return lrc_stream_create(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_EMBEDDED:
+		if (!lrc_holds(lf, LEMNOS_RP1_CSI2_PART_CSI2))
+			return -EPERM;
 		return lrc_embedded(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_START: {
 		struct lemnos_rp1_csi2_start s;
@@ -949,7 +994,12 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&s, uarg, sizeof(s)))
 			return -EFAULT;
 		mutex_lock(&l->ctl);
-		ret = l->gone ? -ENODEV : lrc_start(l, &s);
+		if (l->gone)
+			ret = -ENODEV;
+		else if (!lrc_holds(lf, LEMNOS_RP1_CSI2_PART_CSI2))
+			ret = -EPERM;
+		else
+			ret = lrc_start(l, &s);
 		mutex_unlock(&l->ctl);
 		return ret;
 	}
@@ -958,40 +1008,59 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		mutex_lock(&l->ctl);
 		if (l->gone)
 			ret = -ENODEV;
+		else if (!lrc_holds(lf, LEMNOS_RP1_CSI2_PART_CSI2))
+			ret = -EPERM;
 		else if (l->stream)
 			lrc_stop_locked(l);
 		mutex_unlock(&l->ctl);
 		return ret;
 	default:
-		return l->fe ? lem_pisp_fe_ioctl(l->fe, cmd, uarg) : -ENOTTY;
+		if (!l->fe)
+			return -ENOTTY;
+		/* The front end's INFO is observe-only; its driving calls need its claim. */
+		if (cmd != LEMNOS_PISP_FE_IOC_INFO && !lrc_holds(lf, LEMNOS_RP1_CSI2_PART_FE))
+			return -EPERM;
+		return lem_pisp_fe_ioctl(l->fe, cmd, uarg);
 	}
 }
 
 static int lrc_open(struct inode *inode, struct file *file)
 {
 	struct lrc_dev *l = container_of(file->private_data, struct lrc_dev, misc);
+	struct lrc_file *lf = kzalloc(sizeof(*lf), GFP_KERNEL);
 
-	if (atomic_xchg(&l->opened, 1))
-		return -EBUSY;
+	if (!lf)
+		return -ENOMEM;
+	lf->l = l;
 	kref_get(&l->ref);
-	file->private_data = l;
+	file->private_data = lf;
 	return 0;
 }
 
 static int lrc_release(struct inode *inode, struct file *file)
 {
-	struct lrc_dev *l = file->private_data;
+	struct lrc_file *lf = file->private_data;
+	struct lrc_dev *l = lf->l;
+	unsigned int i;
 
 	mutex_lock(&l->ctl);
-	if (l->stream)
-		lrc_stop_locked(l);
-	/* The embedded stream is asked for per open, as the frame stream is per START. */
-	l->emb.req_fd = -1;
-	l->emb.req_bytes = 0;
-	if (l->fe)
+	if (lrc_holds(lf, LEMNOS_RP1_CSI2_PART_CSI2)) {
+		if (l->stream)
+			lrc_stop_locked(l);
+		/* The embedded stream is asked for per open, as the frame stream is per START. */
+		l->emb.req_fd = -1;
+		l->emb.req_bytes = 0;
+		/* The front end is fed by the receiver: with the receiver's claim gone it stops too. */
+		if (l->fe)
+			lem_pisp_fe_stop(l->fe);
+	}
+	if (lrc_holds(lf, LEMNOS_RP1_CSI2_PART_FE) && l->fe)
 		lem_pisp_fe_stop(l->fe);
+	for (i = 0; i < ARRAY_SIZE(l->owner); i++)
+		if (l->owner[i] == lf)
+			l->owner[i] = NULL;
 	mutex_unlock(&l->ctl);
-	atomic_set(&l->opened, 0);
+	kfree(lf);
 	kref_put(&l->ref, lrc_free);
 	return 0;
 }

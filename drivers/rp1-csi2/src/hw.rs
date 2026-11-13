@@ -129,6 +129,9 @@ impl Settings {
 pub struct LinuxHardware {
     settings: Settings,
     node: Option<Node>,
+    /// Whether `node` holds the receiver part's claim. Set by the first driving call on an open
+    /// node; a refused claim (another file holds the part) is asked again by the next driving call.
+    claimed: bool,
     /// The module's stream and what it is started with, held until stopped. Dropping the
     /// stream ends it: the module stops the block first and then unpins every buffer.
     running: Option<(Stream, StartParams)>,
@@ -142,6 +145,7 @@ impl LinuxHardware {
         Self {
             settings,
             node: None,
+            claimed: false,
             running: None,
             running_embedded: None,
         }
@@ -164,12 +168,26 @@ impl LinuxHardware {
         self.node.as_ref().ok_or(Status::NO_DEVICE)
     }
 
+    /// The node, with the receiver part claimed for this file: for the calls that drive the
+    /// receiver. Observing calls use `node` and need no claim. A refused claim is `BUSY`.
+    fn driving(&mut self) -> Result<&Node> {
+        if !self.claimed {
+            let claim = self.node()?.claim(sys::PART_CSI2);
+            if let Err(e) = claim {
+                return Err(self.node_error(e));
+            }
+            self.claimed = true;
+        }
+        self.node()
+    }
+
     /// An error from the node. A node whose block was unbound answers `ENODEV` to everything
     /// for good, and a block bound again is a new node at the same path: the old one is
     /// dropped, so the next call opens the new one.
     fn node_error(&mut self, error: io::Error) -> Status {
         if node_is_gone(&error) {
             self.node = None;
+            self.claimed = false;
             self.running = None;
             self.running_embedded = None;
         }
@@ -200,7 +218,7 @@ impl Hardware for LinuxHardware {
 
     fn make(&mut self, params: &StartParams) -> Result<()> {
         let _ = self.stop();
-        let made = self.node()?.stream_create(&StreamParams {
+        let made = self.driving()?.stream_create(&StreamParams {
             buffers: params.buffers,
             buffer_bytes: params.size,
             frame_slots: params.frame_slots,
@@ -208,7 +226,7 @@ impl Hardware for LinuxHardware {
         });
         let stream = made.map_err(|e| self.node_error(e))?;
         let embedded = if params.embedded_buffers > 0 {
-            let made = self.node()?.stream_create(&StreamParams {
+            let made = self.driving()?.stream_create(&StreamParams {
                 buffers: params.embedded_buffers,
                 buffer_bytes: params.embedded_bytes,
                 frame_slots: params.embedded_frame_slots,
@@ -230,14 +248,14 @@ impl Hardware for LinuxHardware {
         let (stream_fd, params) = (stream.raw_fd(), *params);
         if let Some(embedded) = self.running_embedded.as_ref().map(Stream::raw_fd) {
             // Asked for before START: the module's embedded channel is set up with the image's.
-            let asked = self.node()?.embedded(&Embedded {
+            let asked = self.driving()?.embedded(&Embedded {
                 stream_fd: embedded,
                 bytes: params.embedded_bytes,
                 reserved: [0; 2],
             });
             asked.map_err(|e| self.node_error(e))?;
         }
-        let started = self.node()?.start(&Start {
+        let started = self.driving()?.start(&Start {
             stream_fd,
             lanes: params.lanes,
             mbps: params.mbps,
@@ -254,9 +272,10 @@ impl Hardware for LinuxHardware {
     }
 
     fn stop(&mut self) -> Result<()> {
+        // Only this file's claim can stop the block: without it there is nothing of ours to stop.
         let result = match &self.node {
-            Some(node) => node.stop(),
-            None => Ok(()),
+            Some(node) if self.claimed => node.stop(),
+            _ => Ok(()),
         };
         self.running = None;
         self.running_embedded = None;
@@ -265,6 +284,7 @@ impl Hardware for LinuxHardware {
             // Unbinding stopped the block: there's nothing left to stop.
             Err(e) if node_is_gone(&e) => {
                 self.node = None;
+                self.claimed = false;
                 Ok(())
             }
             Err(e) => Err(status(e)),
