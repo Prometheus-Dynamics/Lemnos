@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The K230 non-AI 2D engine: pixel-format conversion between dma-bufs through the SDK kernel's nonai-2d V4L2 mem2mem driver, image.convert/1 jobs from a stream, reopened after a failure. A library: no driver wraps it yet. No vendor library"
+description = "The K230 non-AI 2D engine: pixel-format conversion between dma-bufs through the SDK kernel's nonai-2d V4L2 mem2mem driver, served as image.convert/1 from a job stream of dma-bufs, reopened after a failure. No vendor library"
 
 [lints]
 workspace = true
@@ -25,3 +25,6 @@ lemnos-sim = { path = "../../backends/sim" }
 lemnos-wire = { path = "../../engine/wire" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Nonai2dDriver"

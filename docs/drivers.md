@@ -77,6 +77,8 @@ python3 scripts/generate-builtins.py --check
 | `rga` | `image.scaler/1`, `image.convert/1`, `image.blend/1` | optional `scale`, `convert`, `blend` streams; `soc` | Serves its contract. Nothing is computed in software: an operation the hardware route lacks is `NOT_SUPPORTED` |
 | `g2d` | `image.convert/1` | `jobs` stream of dma-bufs | Serves its contract |
 | `rkvpss` | `image.scaler/1` | `jobs` stream of dma-bufs | Serves its contract |
+| `nonai2d` | `image.convert/1` | `jobs` stream of dma-bufs; optional `device` | Serves its contract. One size, one plane: no scaling, and the 4:2:0 formats only through the library with a dma-buf per plane |
+| `vglite` | `image.scaler/1`, `image.convert/1` | optional `scale`, `convert` streams of dma-bufs, at least one | Serves its contract. Every image is copied through the GPU's own staging memory, since its kernel can't be trusted with a dma-buf in pieces. The area filter only halves. Not `image.blend/1`: its blend is straight alpha only |
 
 ## Codec blocks
 
@@ -106,9 +108,7 @@ A board file cannot name these.
 | `k230-ai2d` | The AI2D block's kernel interface, and checked job logic over a device trait | No hardware path: nothing implements the device trait on Linux, because the block's register map is not in the public sources. It serves no contract |
 | `k230-gsdma` | Job checks, descriptors, and a Linux device on the engine's node in `lemnos.ko` | No contract driver wraps it. Untested on board |
 | `rkaiisp` | The AI-ISP's layouts, parameter checks and ring | Never run on the block. No contract |
-| `rk-jpeg` | The JPEG block's register and address model | Builds no job: the field layout is not public. JPEG jobs go through `rk-mpp` with the caller's registers |
-| `nonai2d` | Format conversion and overlay on the vendor's V4L2 node | Complete as a library. No contract driver wraps it |
-| `vglite` | The GPU's 2D command and stroke logic | No contract driver wraps it |
+| `rk-jpeg` | The JPEG block's register and address model | Builds no job: no public source says how far the block reaches from each address. JPEG jobs go through `rk-mpp` with the caller's registers |
 | `rk-mpp` | The MPP service's checked jobs | Used by `rk-mpp-codec` and `rk-iep` |
 | `codec-jobs` | The job server every `codec.block/1` driver shares | A building block |
 | `v4l2-capture` | A capture node that fills a stream's own buffers | Used by `rkcif` and `sunxi-vin` |
@@ -171,8 +171,8 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `isp.pisp/1` | 1 info, 2 set_front_end_compression, 3 enable_temporal_denoise, 4 reset_temporal_denoise, 5 set_line_event | `pisp-be`, `pisp-fe` |
 | `isp.isp600/1` | 1 info, 2 load_region, 3 statistics_region | `isp600` |
 | `camera.frames/1` | 1 format_count, 2 format, 3 select_format, 4 selected, 5 frame_stream, 6 start, 7 stop, 8 counters | `uvc` |
-| `image.scaler/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga`, `rkvpss` |
-| `image.convert/1` | 1 info, 2 conversion_count, 3 conversion, 4 job_stream, 5 counters | `rga`, `g2d` |
+| `image.scaler/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga`, `rkvpss`, `vglite` |
+| `image.convert/1` | 1 info, 2 conversion_count, 3 conversion, 4 job_stream, 5 counters | `rga`, `g2d`, `nonai2d`, `vglite` |
 | `image.blend/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga` |
 | `codec.block/1` | 1 info, 2 block, 3 job_stream, 4 counters | `rk-mpp`, `rk-iep`, `v4l2-stateless`, `a733-di`, `k230-vpu`, `a733-video` |
 | `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | `rknpu` |

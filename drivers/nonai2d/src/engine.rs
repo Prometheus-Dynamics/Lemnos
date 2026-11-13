@@ -45,6 +45,16 @@ pub trait Engine {
     fn convert(&mut self, src: &Frame<'_>, dst: &Frame<'_>) -> io::Result<()>;
 }
 
+impl<E: Engine + ?Sized> Engine for Box<E> {
+    fn layouts(&self) -> (Layout, Layout) {
+        (**self).layouts()
+    }
+
+    fn convert(&mut self, src: &Frame<'_>, dst: &Frame<'_>) -> io::Result<()> {
+        (**self).convert(src, dst)
+    }
+}
+
 impl<N: Node> Engine for Device<N> {
     fn layouts(&self) -> (Layout, Layout) {
         Device::layouts(self)

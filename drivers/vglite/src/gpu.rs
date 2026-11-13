@@ -375,6 +375,58 @@ impl Vglite {
         )
     }
 
+    fn convert(
+        &mut self,
+        now_ns: u64,
+        src: Image,
+        input: Input<'_>,
+        dst: Image,
+        out: Output<'_>,
+    ) -> Result<Transfer, RunError> {
+        plan::convert(src, dst).map_err(RunError::Refused)?;
+        self.blit(
+            now_ns,
+            (src, input),
+            dst,
+            out,
+            false,
+            IDENTITY,
+            BLEND_NONE,
+            Sampling::Point,
+        )
+    }
+
+    /// `src` into `dst` of the same size in another format (see [`crate::CONVERTIBLE`]): an
+    /// identity blit with the source read in its format and the target written in its own.
+    pub fn convert_bytes(
+        &mut self,
+        now_ns: u64,
+        src: Image,
+        from: &[u8],
+        dst: Image,
+        to: &mut [u8],
+    ) -> Result<Transfer, RunError> {
+        checked(src, from.len())?;
+        checked(dst, to.len())?;
+        self.convert(now_ns, src, Input::Bytes(from), dst, Output::Bytes(to))
+    }
+
+    /// [`Vglite::convert_bytes`] between dma-bufs.
+    pub fn convert_dmabuf(
+        &mut self,
+        now_ns: u64,
+        src: Frame<'_>,
+        dst: Frame<'_>,
+    ) -> Result<Transfer, RunError> {
+        self.convert(
+            now_ns,
+            src.image,
+            Input::Frame(src),
+            dst.image,
+            Output::Frame(dst),
+        )
+    }
+
     fn crop(
         &mut self,
         now_ns: u64,
