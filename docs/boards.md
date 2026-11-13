@@ -585,6 +585,25 @@ first). The `interface`, `alternate` and `endpoint` lines describe the FunctionF
 is listed at most once. `host=MAC device=MAC` gives the board's own addresses. `derive` takes both
 from the board's identity, so every board of a type gets its own pair (see below).
 
+A board file that gives no `interfaces` setting gets the default composition, the one the managed link is
+defined on: the link (FunctionFS, interface 0, class 0xff, interface string `orion-link`), then CDC NCM with
+the addresses derived from the board's identity, then one CDC ACM:
+
+```text
+function ffs
+interface 0xff 0 0 orion-link
+endpoint in bulk
+endpoint out bulk
+function ncm derive ifname=lemnos%d
+function acm
+```
+
+That text is `DEFAULT_INTERFACES` in `drivers/usb-gadget` and `[composition] default` in
+`contracts/usb-link.toml`; a test checks both. A board file that gives `interfaces` deviates from it, and
+must keep the link first: its first `interface` line is the vendor-class (0xff) link, interface 0. A text
+whose first interface is anything else drops the link or moves it off interface 0, and is refused
+(`LinkNotFirst`). A second `function ffs` is refused as a function listed twice.
+
 `ifname=TEMPLATE` (optional, once per NCM line) names the network interface the host side gets. The
 template is one to 15 bytes of printable ASCII with exactly one `%d`, which the kernel replaces with
 the first free number: `lemnos%d` gives `lemnos0`. A fixed name such as `lemnos0`, a template with
@@ -695,7 +714,9 @@ config = { vendor = 0x1209, product = 0x0001, identity = "identity", interfaces 
 ```
 
 - `identity` (optional) names the `system-identity` device. Without it, or with a serial that cannot
-  be read, the gadget has no board serial. A board file that names a device that is not there, or
+  be read, the gadget has no board serial. A gadget that derives its NCM addresses (`function ncm
+  derive`, which the default composition has) and names no `identity` device is refused by
+  `lemnos-ctl validate` by name: the file cannot start its gadget. A board file that names a device that is not there, or
   one that is not a `system-identity` device, is refused: `lemnos-ctl validate` refuses the board, and
   the daemon starts without the gadget, which shows failed with the reason. The board file may not set
   `board_serial` or `board_serial_error` itself: the daemon writes them.

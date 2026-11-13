@@ -27,8 +27,10 @@
 //!
 //! - `vendor`, `product` (integers, default [`LINK_VENDOR`] and [`LINK_PRODUCT`]): the USB vendor
 //!   and product numbers, 0 to 0xffff. See "The link's identity" below.
-//! - `interfaces` (string, required): the interfaces and their endpoints, as [`description`]
-//!   sets out: the text itself, in every build.
+//! - `interfaces` (string, default [`DEFAULT_INTERFACES`] when neither key is given): the interfaces
+//!   and their endpoints, as [`description`] sets out: the text itself, in every build. Given text
+//!   must put the link first (its first interface is the vendor-class link, interface 0), or it is
+//!   refused ([`description::check_link`]).
 //! - `interfaces_file` (string, optional, `std` builds only): a path to a file holding that text,
 //!   read once at bind. A build without a filesystem refuses it by name ([`check`]). Giving both
 //!   `interfaces` and `interfaces_file` is refused by name too.
@@ -116,6 +118,11 @@ pub const COMPOSITE_CLASS: (i64, i64, i64) = (0xef, 0x02, 0x01);
 /// by, with the vendor and product numbers (never by GUID or tty number). It is named in
 /// `contracts/usb-link.toml`, which a test checks against this.
 pub const LINK_INTERFACE_NAME: &str = "orion-link";
+/// The composition of a gadget whose board file gives neither `interfaces` nor `interfaces_file`:
+/// the link (FunctionFS, class 0xff, interface string [`LINK_INTERFACE_NAME`], interface 0), then
+/// CDC NCM with the addresses derived from the board identity, then one CDC ACM. The same text is
+/// `[composition] default` in `contracts/usb-link.toml`, which a test checks against this.
+pub const DEFAULT_INTERFACES: &str = "function ffs\ninterface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive ifname=lemnos%d\nfunction acm\n";
 use lemnos_contract_usb_function::{
     Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, MAX_IFNAME_TEXT, Request,
     State, UsbFunction,
@@ -161,6 +168,8 @@ const IFNAME: MethodId = MethodId {
     contract: 0,
     method: 11,
 };
+/// Refused when a gadget derives its NCM addresses and names no `identity` device.
+pub const NO_IDENTITY_FOR_DERIVE: &str = "is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device";
 /// Health while up, when the gadget has no serial string: the board names no serial source.
 pub const NO_SERIAL: &str = "no USB serial string: the board names no readable serial";
 /// Health while up, when the gadget has no serial string although the board names one that
@@ -724,14 +733,9 @@ fn interfaces_text<'a>(
                 }
                 _ => ConfigError::new("interfaces_file", "cannot be read"),
             }),
-        _ => string(cfg, "interfaces")?
-            .map(alloc_or_str::Text::Borrowed)
-            .ok_or_else(|| {
-                ConfigError::new(
-                    "interfaces",
-                    "is required: give the interfaces text, or interfaces_file",
-                )
-            }),
+        _ => Ok(alloc_or_str::Text::Borrowed(
+            string(cfg, "interfaces")?.unwrap_or(DEFAULT_INTERFACES),
+        )),
     }
 }
 
@@ -742,9 +746,9 @@ fn interfaces_text<'a>(
     match (cfg.get("interfaces"), cfg.get("interfaces_file")) {
         (Some(_), Some(_)) => Err(ConfigError::new("interfaces_file", BOTH_INTERFACES)),
         (None, Some(_)) => Err(ConfigError::new("interfaces_file", NO_FILESYSTEM)),
-        _ => string(cfg, "interfaces")?
-            .map(alloc_or_str::Text::Borrowed)
-            .ok_or_else(|| ConfigError::new("interfaces", "is required: give the interfaces text")),
+        _ => Ok(alloc_or_str::Text::Borrowed(
+            string(cfg, "interfaces")?.unwrap_or(DEFAULT_INTERFACES),
+        )),
     }
 }
 
@@ -785,7 +789,26 @@ pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> 
     let text = interfaces_text(cfg)?;
     description::build(&identity(cfg)?, text.as_str())
         .map(drop)
-        .map_err(|_| ConfigError::new("interfaces", "is not an interfaces description"))
+        .map_err(|_| ConfigError::new("interfaces", "is not an interfaces description"))?;
+    description::check_link(text.as_str()).map_err(|_| {
+        ConfigError::new(
+            "interfaces",
+            "the first interface must be the vendor-class link (class 0xff): the link is interface 0",
+        )
+    })?;
+    // A `function ncm derive` line takes its addresses from the board serial, which only the
+    // identity device gives. A gadget that names no identity device can never set it up, so the
+    // file is refused here rather than at the daemon's start.
+    if cfg.get("identity").is_none()
+        && cfg.get("board_serial").is_none()
+        && matches!(
+            description::functions(text.as_str(), None),
+            Err(description::Fault::NoIdentity(_))
+        )
+    {
+        return Err(ConfigError::new("identity", NO_IDENTITY_FOR_DERIVE));
+    }
+    Ok(())
 }
 
 /// The descriptor set and the functions the settings describe. The setup that makes the

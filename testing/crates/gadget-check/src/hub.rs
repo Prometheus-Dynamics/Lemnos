@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use lemnos_linux_sys::mount;
 use lemnos_linux_sys::usbfs::{ControlSetup, UsbfsFile};
 
-use crate::{CHUNK, EP_IN, EP_OUT, MOUNTS, UDC, find_device};
+use crate::host::find_device;
+use crate::{CHUNK, EP_IN, EP_OUT, MOUNTS, UDC};
 
 /// The root hub: the first bus, its device one.
 const ROOT_HUB: &str = "/sys/bus/usb/devices/usb1";

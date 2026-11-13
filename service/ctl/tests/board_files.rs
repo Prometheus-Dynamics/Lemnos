@@ -35,11 +35,11 @@ struct Row {
     daemon: Daemon,
 }
 
-/// The gadget of an rk board file has no `interfaces` text. Next takes no default composition, so
-/// the daemon refuses the gadget alone (the board runs without it). The text is a product choice,
-/// not a fact the repository holds: the board file is left as it is until one is given.
-const RK_GADGET_NO_INTERFACES: &str =
-    "device \"gadget\": setting \"interfaces\" is required: give the interfaces text";
+/// The gadget of an rk board file names no `identity` device, and its default composition derives
+/// the NCM addresses from the board serial. Validation refuses that (the daemon agrees): the board
+/// runs without the gadget. Naming the identity device is a board choice, left to the board's owner;
+/// the file is not changed here.
+const RK_GADGET_NO_IDENTITY: &str = "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device";
 
 const TABLE: &[Row] = &[
     Row {
@@ -94,23 +94,23 @@ const TABLE: &[Row] = &[
     },
     Row {
         file: "testing/boards/rk3566.toml",
-        validate: Validate::Refused(RK_GADGET_NO_INTERFACES),
+        validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"interfaces\" is required: give the interfaces text; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
         ),
     },
     Row {
         file: "testing/boards/rk3576.toml",
-        validate: Validate::Refused(RK_GADGET_NO_INTERFACES),
+        validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"interfaces\" is required: give the interfaces text; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
         ),
     },
     Row {
         file: "testing/boards/rk3588.toml",
-        validate: Validate::Refused(RK_GADGET_NO_INTERFACES),
+        validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"interfaces\" is required: give the interfaces text; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
         ),
     },
     Row {

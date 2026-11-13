@@ -98,6 +98,9 @@ pub enum Fault {
     /// An `ifname=` on a `function ncm` line that is not a name template (see
     /// [`IfName::new`]); by its number from 1.
     InterfaceName(usize),
+    /// The first `interface` line is not the vendor-class (class 0xff) link. The link is
+    /// interface 0 (see [`check_link`]): a text without it at the front drops it or moves it.
+    LinkNotFirst,
 }
 
 /// A descriptor set, built.
@@ -503,6 +506,18 @@ pub fn functions(interfaces: &str, macs: Option<Macs>) -> Result<Functions, Faul
         len += 1;
     }
     Ok(Functions { items, len })
+}
+
+/// Checks the rule the managed link needs of an `interfaces` text: its first interface, which is
+/// interface 0, is the vendor-class link (class 0xff). FunctionFS, the link's function, is always
+/// first in the composite (see [`functions`]), so this interface is the one it binds to. A text
+/// whose first interface is anything else drops the link from interface 0, which is refused.
+pub fn check_link(text: &str) -> Result<(), Fault> {
+    let layout = Layout::parse(text)?;
+    match layout.interfaces().next() {
+        Some((0, interface)) if interface.class == 0xff => Ok(()),
+        _ => Err(Fault::LinkNotFirst),
+    }
 }
 
 /// The set for `identity` with the interfaces `interfaces` describes.

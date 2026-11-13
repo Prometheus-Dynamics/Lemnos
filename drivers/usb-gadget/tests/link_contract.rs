@@ -3,7 +3,7 @@
 //! a file another team edits cannot silently mean something else.
 
 use lemnos_driver_usb_gadget::{
-    COMPOSITE_CLASS, LINK_INTERFACE_NAME, LINK_PRODUCT, LINK_VENDOR, revision,
+    COMPOSITE_CLASS, DEFAULT_INTERFACES, LINK_INTERFACE_NAME, LINK_PRODUCT, LINK_VENDOR, revision,
 };
 use lemnos_hal::usb_descriptors::ms_os;
 use toml::{Table, Value};
@@ -15,14 +15,15 @@ const FILE: &str = include_str!("../../../contracts/usb-link.toml");
 fn read(text: &str) -> Result<Table, String> {
     let table: Table = text.parse().map_err(|error| format!("not TOML: {error}"))?;
     match table.get("version") {
-        Some(Value::Integer(1)) => {}
-        other => return Err(format!("unknown version {other:?}; this reader knows 1")),
+        Some(Value::Integer(2)) => {}
+        other => return Err(format!("unknown version {other:?}; this reader knows 2")),
     }
     let top = [
         "version",
         "device",
         "link",
         "functions",
+        "composition",
         "os",
         "reservation",
     ];
@@ -53,6 +54,7 @@ fn read(text: &str) -> Result<Table, String> {
             ][..],
         ),
         ("functions", &["ncm", "acm"][..]),
+        ("composition", &["default"][..]),
         ("os", &["vendor_code", "qw_sign"][..]),
         ("reservation", &["managed", "other"][..]),
     ];
@@ -129,6 +131,16 @@ fn the_file_reads_at_version_one() {
 }
 
 #[test]
+fn the_default_composition_is_the_file_text() {
+    let file = read(FILE).unwrap();
+    assert_eq!(
+        text(&file, &["composition", "default"]),
+        DEFAULT_INTERFACES,
+        "the driver's default `interfaces` text is the file's [composition] default"
+    );
+}
+
+#[test]
 fn the_code_agrees_with_the_file() {
     let file = read(FILE).unwrap();
     assert_eq!(int(&file, &["device", "vendor"]), i64::from(LINK_VENDOR));
@@ -201,13 +213,15 @@ fn the_reservations_match_the_revision_policy() {
 
 #[test]
 fn a_reader_refuses_a_version_it_does_not_know() {
-    let two = FILE.replacen("version = 1", "version = 2", 1);
-    assert!(read(&two).unwrap_err().contains("unknown version"));
+    let one = FILE.replacen("version = 2", "version = 1", 1);
+    assert!(read(&one).unwrap_err().contains("unknown version"));
+    let three = FILE.replacen("version = 2", "version = 3", 1);
+    assert!(read(&three).unwrap_err().contains("unknown version"));
 }
 
 #[test]
 fn a_reader_refuses_an_unknown_key_at_any_level() {
-    let top = FILE.replacen("version = 1", "version = 1\nextra = 1", 1);
+    let top = FILE.replacen("version = 2", "version = 2\nextra = 1", 1);
     assert!(
         read(&top)
             .unwrap_err()

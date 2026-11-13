@@ -10,6 +10,7 @@ description = "Board-check in the QEMU harness: the USB gadget's root phase run 
 workspace = true
 
 [dependencies]
+toml = { workspace = true }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-hal = { path = "../../../engine/hal" }

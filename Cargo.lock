@@ -1689,6 +1689,7 @@ dependencies = [
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnosd",
+ "toml",
 ]
 
 [[package]]
