@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use lemnos_client::{Client, DeviceEntry, DeviceState, Error};
 use lemnos_core::ItemKind;
@@ -21,8 +21,6 @@ const WAIT: Duration = Duration::from_millis(200);
 /// Asks for the fastest period the service grants for an item (its cost floor). With
 /// `only_changes`, the service then sends a reply only when its bytes differ from the last.
 const PERIOD_US: u64 = 1;
-/// How often the list is read while a device has no description.
-const LOOK_AGAIN: Duration = Duration::from_secs(1);
 /// The largest reply lemnos-ctl reads. Items reply with a few bytes.
 const REPLY_MAX: usize = 64 * 1024;
 
@@ -80,21 +78,9 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
     shared.changed();
     backoff.reset();
     let mut reply = vec![0; REPLY_MAX];
-    let mut looked = Instant::now();
     while !shared.stopping() {
         if !client.is_connected() {
             return Err(Error::Disconnected);
-        }
-        // While a device has no description, look at the list now and then too, so one that
-        // starts running is read even if its event is missed.
-        if !undescribed.is_empty() && looked.elapsed() >= LOOK_AGAIN {
-            looked = Instant::now();
-            let running = client.list()?.into_iter().any(|entry| {
-                entry.state == DeviceState::Running && undescribed.contains(&entry.index)
-            });
-            if running {
-                return Ok(Ended::Undescribed);
-            }
         }
         while let Some(event) = client.next_event() {
             if event.state == DeviceState::Running && undescribed.contains(&event.device) {
@@ -138,7 +124,7 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
 /// other error on one device or item leaves that item out and logs why, so one bad device does
 /// not hold back the rest.
 /// The indexes of devices that could not be described come back too: lemnosd describes only a
-/// running device, and one that starts running later is read again.
+/// running device, and an event says when one starts running, which is when it is read again.
 #[allow(clippy::type_complexity)]
 fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>, Vec<u32>), Error> {
     let mut specs = Vec::new();

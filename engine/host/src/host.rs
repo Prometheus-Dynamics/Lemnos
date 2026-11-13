@@ -180,6 +180,11 @@ pub struct DeviceInfo {
     /// The device this one is wired to, by the id the board file's `link` names. The host
     /// hands it on as written and never reads it: what the wiring means is the devices'.
     pub link: Option<String>,
+    /// Goes up with every change to this device's state, after the change, so a reader that
+    /// saw an earlier revision knows what it holds is out of date. It never goes back. Health is
+    /// read from the driver on each look and does not move it: a change of health alone is
+    /// reported with the device's next state change.
+    pub revision: u64,
 }
 
 struct Slot {
@@ -191,6 +196,8 @@ struct Slot {
     entry: Option<DriverEntry>,
     instance: Mutex<Option<Box<dyn Instance>>>,
     state: Mutex<DeviceState>,
+    /// Goes up after each change to `state`. See [`DeviceInfo::revision`].
+    revision: AtomicU64,
     /// A call into this device never came back.
     hung: AtomicBool,
     errors: AtomicU32,
@@ -247,6 +254,7 @@ impl Slot {
             spec,
             instance: Mutex::new(None),
             state: Mutex::new(state),
+            revision: AtomicU64::new(0),
             hung: AtomicBool::new(false),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
@@ -402,6 +410,13 @@ fn asks_rebind(instance: &dyn Instance) -> Option<&'static str> {
 }
 
 impl Inner {
+    /// Records that a device's state has just been changed: its revision and the host's count go
+    /// up. Called after the change is written.
+    fn moved(&self, slot: &Slot) {
+        slot.revision.fetch_add(1, Ordering::Release);
+        self.changes.fetch_add(1, Ordering::Release);
+    }
+
     fn slot(&self, index: u32) -> Option<Arc<Slot>> {
         self.slots
             .read()
@@ -537,7 +552,7 @@ impl Inner {
             }
         };
         *state = self.next_state(slot, attempts, reason);
-        self.changes.fetch_add(1, Ordering::Release);
+        self.moved(slot);
     }
 
     /// Lets go of a driver that is not in a call, outside its lock, with a panic in its drop
@@ -923,7 +938,7 @@ impl Inner {
                 if slot.ticks() {
                     self.set_next_tick(&slot, Some(0));
                 }
-                self.changes.fetch_add(1, Ordering::Release);
+                self.moved(&slot);
                 self.bring_users_forward(&slot.spec.id);
             }
             Ok(Err(status)) => {
@@ -946,7 +961,7 @@ impl Inner {
             DeviceState::Running => 0,
         };
         *state = self.next_state(slot, attempts, reason);
-        self.changes.fetch_add(1, Ordering::Release);
+        self.moved(slot);
     }
 
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
@@ -1309,9 +1324,12 @@ impl Host {
     }
 
     fn info(&self, slot: &Slot) -> DeviceInfo {
+        // The revision is read first: the state read after it is never older than the revision.
+        let revision = slot.revision.load(Ordering::Acquire);
         let state = lock(&slot.state).clone();
         DeviceInfo {
             index: slot.index,
+            revision,
             id: slot.spec.id.clone(),
             driver: slot.spec.driver.clone(),
             tags: slot
@@ -1601,7 +1619,7 @@ impl Host {
     pub fn off(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
-        self.inner.changes.fetch_add(1, Ordering::Release);
+        self.inner.moved(&slot);
         if let Ok(mut guard) = slot.instance.try_lock() {
             let dead = guard.take();
             drop(guard);
@@ -1619,7 +1637,7 @@ impl Host {
             next_retry_ns: 0,
             reason: "switched on".to_string(),
         };
-        self.inner.changes.fetch_add(1, Ordering::Release);
+        self.inner.moved(&slot);
         self.inner.bind(slot);
         Ok(())
     }
@@ -1630,6 +1648,7 @@ impl Host {
         let slots = self.inner.all();
         for slot in slots.iter().rev() {
             *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
+            self.inner.moved(slot);
             if let Ok(mut guard) = slot.instance.try_lock() {
                 let dead = guard.take();
                 drop(guard);
