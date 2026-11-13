@@ -1,7 +1,8 @@
 //! The udev fragment: the reference board's golden, and what the board's `[host]` section and its
 //! dma-buf streams do to the dma-heap rules.
 
-use lemnos_devtree::udev::{DAEMON_GROUP, fragment};
+use lemnos_devtree::permissions::DAEMON_GROUP;
+use lemnos_devtree::udev::fragment;
 use lemnos_host::board::{self, BoardFile};
 
 const REFERENCE_BOARD: &str = include_str!("../../../testing/boards/reference.toml");

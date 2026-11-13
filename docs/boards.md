@@ -73,7 +73,7 @@ In `[host]`, every key optional. Each one left out keeps the default:
 | `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go |
 | `retry_first_ms` | 1000 | 1 to the cap | The wait before a device that failed is bound again. It doubles with each failure in a row |
 | `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long a driver must stay up before its wait starts again from the first |
-| `dma_heaps` | `["linux,cma"]` | heap names | The dma-heaps the daemon's own drivers allocate from, by name under `/dev/dma_heap`: each is one file name. Each dma-buf stream's heap is added to them. Gives `lemnos-ctl tree --udev` its rules, and the daemon's start check its nodes. `[]` names none |
+| `dma_heaps` | `["linux,cma"]` | heap names | The dma-heaps the daemon's own drivers allocate from, by name under `/dev/dma_heap`: each is one file name. Each dma-buf stream's heap is added to them. Gives `lemnos-ctl tree --udev` and `--mdev` their lines, and the daemon's start check its nodes. `[]` names none |
 
 The cap can be shorter than 8 s but never longer: that is [the failure rule](concepts.md#the-failure-rule),
 and a longer value is refused. There is no host-wide auto-off: only a device's own
@@ -673,6 +673,19 @@ drop, each of those nodes that exists, and refuses to start when the group canno
 naming it (`/dev/dma_heap/linux,cma: not readable/writable by group lemnos: install the generated udev
 fragment`). The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=` or `DevicePolicy=`,
 so systemd filters no device and the unit names no heap.
+
+`lemnos-ctl tree BOARD --mdev FILE` writes the same permissions for a BusyBox image, as `/etc/mdev.conf`
+lines: one per node, `<regex> root:lemnos 0660`, where the regex is the node's path under `/dev`
+(`^lemnos$`, `^lemnos-.*$`, `^dma_heap/linux,cma$`). Both outputs come from one list of facts in
+`service/devtree/src/permissions.rs`, and the tests parse both back and compare them for every board file
+in the repository (`service/devtree/tests/permissions_agree.rs`). The BusyBox form is the plain one
+`mdev.txt` gives first: a device regex, owner and group, an octal mode, with no `ENV=regex;` prefix.
+Two differences from the udev rules, both stated in the file's header: mdev matches the device name only,
+so the udev `SUBSYSTEM==` condition is not written; and the board's lines go after the packaged kinds in
+`packaging/init/mdev.conf.fragment`, before any catch-all line, because mdev takes the first line that
+matches. The packaged kinds (serial ports, buses, cameras, usbfs, the watchdog) are not generated from the
+board file: they are in `packaging/udev/70-lemnos.rules` and `packaging/init/mdev.conf.fragment`, kept by
+hand in both forms.
 
 ## The self-test of a board
 

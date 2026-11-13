@@ -1,8 +1,10 @@
-# Device nodes lemnosd opens, given to group lemnos (mode 0660). The BusyBox counterpart of
-# packaging/udev/70-lemnos.rules: each line names the same nodes the udev rule names. Append this to
-# /etc/mdev.conf, before any catch-all line. mdev matches the device name (relative to /dev) with a
-# regular expression, so each pattern is anchored. Needs mdev to run on hotplug: the image's rcS
-# runs `mdev -s` at boot and sets /proc/sys/kernel/hotplug to /sbin/mdev.
+# Device nodes lemnosd opens, given to group lemnos (mode 0660), for a BusyBox image: the packaged
+# kinds, the counterpart of packaging/udev/70-lemnos.rules. Append this to /etc/mdev.conf, before any
+# catch-all line. Each line names the nodes its udev rule names, as an anchored regex of the device name.
+# The board's own nodes (the kernel module's, and each dma-heap the board uses) are not here: they are
+# generated from the board file by `lemnos-ctl tree BOARD --mdev FILE`; append that file after this one.
+# mdev matches the device name relative to /dev. Needs mdev to run on hotplug: the image's rcS runs
+# `mdev -s` at boot and sets /proc/sys/kernel/hotplug to /sbin/mdev.
 
 # The kernel module's control node, /dev/lemnos, and the CSI-2 receiver's nodes it makes.
 ^lemnos$                root:lemnos 0660

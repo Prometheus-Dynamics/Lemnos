@@ -18,6 +18,11 @@ board's own device-node rules, for `/usr/lib/udev/rules.d/71-lemnos-board.rules`
 It is not in `files.txt`, because it depends on the board, and it is produced by the tree command, not copied
 from here (see [docs/boards.md](../docs/boards.md#the-daemons-device-permissions)).
 
+The mdev counterpart is generated the same way: `lemnos-ctl tree BOARD --mdev FILE` writes the
+board's own lines, appended to `/etc/mdev.conf` after `init/mdev.conf.fragment` (the packaged kinds,
+which stay in that file). It is not in `files.txt`, for the same reason as the udev file.
+See [docs/boards.md](../docs/boards.md#the-daemons-device-permissions).
+
 The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, the board file
 at `/etc/lemnos/board.toml` (see [docs/boards.md](../docs/boards.md)), and the Orion node's group name
 for `lemnos-orion`. The daemon's unit and script refuse to start without the board file.
@@ -159,7 +164,9 @@ The daemon looks the names up when it starts, so the lines must be in place befo
 on the ids. The OS adds program users to group `lemnos` as usual.
 
 **The device nodes** are given to group `lemnos` by mdev, not udev. Append `init/mdev.conf.fragment` to
-`/etc/mdev.conf`. Each line is the same node as a udev rule: `^lemnos$` is `/dev/lemnos`, `^dma_heap/.*$`
+`/etc/mdev.conf`, then the board's own lines, `lemnos-ctl tree BOARD --mdev FILE` (the same permissions as
+the generated udev rules, from the same list; see [docs/boards.md](../docs/boards.md)).
+Each line of the fragment is the same node as a udev rule: `^lemnos$` is `/dev/lemnos`, `^dma_heap/.*$`
 the dma heaps, `^i2c-[0-9]+$` the I2C buses, `^spidev...$` SPI, `^gpiochip[0-9]+$` GPIO, the `ttyS`,
 `ttyAMA`, `ttyUSB` and `ttyACM` serial ports, `^video[0-9]+$` and `^media[0-9]+$` for cameras,
 `^watchdog[0-9]*$` for the watchdog, and `^bus/usb/.../...$` for usbfs. mdev runs at boot (`mdev -s`) and

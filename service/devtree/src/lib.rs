@@ -7,11 +7,16 @@
 //! gives to Lemnos, each with its reason beside it. [`boot_fragment`] writes what must be true
 //! before the kernel runs. [`check`] compares a live device tree with both.
 //!
+//! The device permissions the daemon needs (the nodes it opens, and their group) are one list of
+//! facts ([`permissions`]), written as udev rules ([`udev`]) and as mdev rules ([`mdev`]).
+//!
 //! Nothing here knows a kind of hardware: that is the map's, as data.
 
 pub mod check;
 pub mod generate;
 pub mod map;
+pub mod mdev;
+pub mod permissions;
 pub mod udev;
 
 pub use check::check;
