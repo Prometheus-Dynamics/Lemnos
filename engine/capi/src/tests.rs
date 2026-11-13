@@ -78,6 +78,32 @@ fn the_export_list_matches_the_functions() {
     assert_eq!(listed(), exported);
 }
 
+/// A scratch directory of one test: unique to the test (the tests of this binary run in
+/// parallel and must not share a path), and removed when the test ends, whatever it did.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("lemnos-capi-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_c_compiler_agrees_on_every_layout() {
     if Command::new("cc").arg("--version").output().is_err() {
@@ -146,9 +172,8 @@ fn a_c_compiler_agrees_on_every_layout() {
         status,
         len
     );
-    let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("check.c");
+    let scratch = Scratch::new("layout");
+    let file = scratch.path().join("check.c");
     std::fs::write(&file, source).unwrap();
     let output = Command::new("cc")
         .args(["-std=c11", "-fsyntax-only", "-I"])
@@ -156,7 +181,6 @@ fn a_c_compiler_agrees_on_every_layout() {
         .arg(&file)
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         output.status.success(),
         "{}",
@@ -189,10 +213,8 @@ fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
             .push_str(core::str::from_utf8(bytes).unwrap());
     }
 
-    let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("svc.sock");
-    let _ = std::fs::remove_file(&path);
+    let scratch = Scratch::new("socket");
+    let path = scratch.path().join("svc.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let served = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
@@ -234,7 +256,6 @@ fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
         crate::ffi::lemnos_client_open(socket.as_ptr(), name.as_ptr(), 2_000, &mut handle, sink)
     };
     served.join().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status, lemnos_abi::Status::VERSION_MISMATCH);
     let text = TEXT.lock().unwrap().clone();
     assert!(text.contains("0xdeadbeef0badf00d"), "{text}");
