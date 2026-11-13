@@ -19,10 +19,14 @@
 //! `Cancelled` when it was cancelled, `Failed` otherwise. Cancelling the run cancels the job.
 //!
 //! Each Orion caller has a lemnosd connection of its own. lemnosd keeps the callers of a driver
-//! apart by connection, so a driver that tracks callers sees each Orion caller as its own. Orion
-//! does not say when a caller goes away; it cancels the runs of a caller that goes away. So when a
-//! caller's last long job is cancelled, its connection is closed, and lemnosd tells the drivers
-//! that caller is gone. The same cancel from a caller that is still there is read the same way.
+//! apart by connection, so a driver that tracks callers sees each Orion caller as its own.
+//!
+//! A cancel stops the run and nothing else: the job is cancelled on lemnosd, and the caller's
+//! connection stays, so the drivers keep what the caller holds. At Orion's pinned revision a cancel
+//! does not say why it was sent. Orion sends the same `Cancel` when the caller stops the run, when
+//! the caller's session ends, when the run's deadline passes and when the node stops, and a caller
+//! that is still there cannot be told from one that is gone. So lemnosd is not told a caller is gone
+//! at all until Orion says why (see the `ORION-R2` note in `cancel`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -194,9 +198,12 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared) {
     }
 }
 
-/// Stops run `call` of `session`. A long job is cancelled on lemnosd; when it was the last run
-/// of its caller, the caller's connection is closed, which tells lemnosd's drivers the caller is
-/// gone. The run ends as cancelled at once: nothing else would answer it.
+/// Stops run `call` of `session`. A long job is cancelled on lemnosd, and the run ends as cancelled
+/// at once: nothing else would answer it. The caller's connection is kept.
+// ORION-R2: Orion's Cancel gains `reason` (0 not said, 1 caller asked, 2 caller's session ended,
+// 3 deadline, 4 node stopping). With reason 2 only, the caller's lemnosd connection is closed here
+// after its job is cancelled (`clients.remove`), which is what tells lemnosd's drivers the caller
+// is gone. Every other reason keeps the connection, as this does now.
 fn cancel(
     clients: &mut Callers,
     running: &mut Vec<Running>,
@@ -210,27 +217,17 @@ fn cancel(
     else {
         return;
     };
-    let caller = running[at].caller.clone();
-    let others = running
-        .iter()
-        .enumerate()
-        .any(|(i, r)| i != at && r.caller == caller);
-    if others {
-        if let Some(client) = clients.get(&caller) {
-            // Its end, cancelled or not, comes as the job's news.
-            let _ = client.cancel_job(running[at].job);
-        }
-        return;
-    }
     let r = running.remove(at);
-    // Dropping the connection ends the job on lemnosd too.
-    clients.remove(&caller);
+    if let Some(client) = clients.get(&r.caller) {
+        // Its end, cancelled or not, comes as the job's news, which finds no run and is dropped.
+        let _ = client.cancel_job(r.job);
+    }
     shared.finished(Done {
         session: r.session,
         call: r.call,
         outcome: Outcome::Cancelled,
         output: String::new(),
-        detail: "cancelled: the caller went away or stopped the run".to_owned(),
+        detail: "cancelled".to_owned(),
     });
 }
 

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -208,6 +208,11 @@ fn run(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished 
 /// A run of an action, asked again while the comm core does not run it yet. After a comm core
 /// restart Orion lists a resource with its actions before it takes the actions back, so until the
 /// bridge has said them all a run is refused as not found. Asked again for at most [`WAIT`].
+// ORION-R2: Orion restores actions before records at R2, so this retry is removed and every caller
+// uses `run`. The bridge no longer waits on Orion's restore order: after a comm core restart it
+// opens a new session that registers each device's actions before its resource, so a resource is
+// never listed without them (`a_comm_core_restart_gets_every_device_and_value_again` checks this
+// with `run`, not this helper).
 fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
     let deadline = Instant::now() + WAIT;
     loop {
@@ -402,20 +407,31 @@ fn a_comm_core_restart_gets_every_device_and_value_again() {
         resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
     });
     // The counter's actions are said after the imu's, one by one: wait until they are there.
-    wait_for(
-        "the counter's resource and its call action after the restart",
-        || {
-            resource(&dashboard, "lemnos.thing").filter(|found| {
-                found.state == ResourceState::Ready
-                    && found.actions.contains(&"lemnos.thing.call".to_owned())
-            })
-        },
-    );
+    // A resource listed Ready is never listed without its call action: the bridge registers the
+    // actions before it publishes the resource, so a run asked as soon as it is listed is answered.
+    // Polled without a pause, so that a listing in the middle of a restore is seen.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(found) =
+            resource(&dashboard, "lemnos.thing").filter(|found| found.state == ResourceState::Ready)
+        {
+            assert!(
+                found.actions.contains(&"lemnos.thing.call".to_owned()),
+                "listed Ready without its call action: {found:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out: the counter's resource after the restart"
+        );
+    }
     let mut values = dashboard.subscribe("lemnos.imu.values").expect("subscribe");
     wait_for("the imu's x after the restart", || {
         (latest(&mut values, 0).and_then(|b| float(&b)) == Some(1.5)).then_some(())
     });
-    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    // No retry: the first run asked after the counter is listed is answered, not refused.
+    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
@@ -1055,14 +1071,135 @@ fn a_fact_that_comes_and_goes_moves_nothing_else() {
     assert_eq!(status.status(), Status::Live);
 }
 
+/// What a second client sees of the counter while the board changes, read as fast as it can.
+#[derive(Debug, Default)]
+struct Seen {
+    /// Reads in which the counter's values topic was not live: withdrawn, or declared again.
+    not_live: u32,
+    /// Reads in which the counter was not listed, or not ready.
+    not_listed: u32,
+    /// Values that went back: a sequence that started again.
+    back: u32,
+    /// Values that changed as read.
+    moved: u32,
+    /// Samples lost to this client for reading too slowly.
+    missed: u64,
+}
+
+/// Reads the counter's topic and resource in a loop, in a thread of its own, until `stop` is set.
+fn watch_counter(orion: PathBuf, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Seen> {
+    std::thread::spawn(move || {
+        let watcher = dashboard(&orion);
+        let mut values = watcher.subscribe("lemnos.thing.values").expect("subscribe");
+        let mut status = watcher.subscribe("lemnos.thing.status").expect("subscribe");
+        let mut seen = Seen::default();
+        let mut last: Option<f64> = None;
+        // Counted from the moment both topics are live: before that there is nothing to lose.
+        while values.status() != Status::Live || status.status() != Status::Live {
+            let _ = values.wait(Duration::from_millis(1));
+            let _ = status.wait(Duration::from_millis(1));
+        }
+        while !stop.load(Ordering::Relaxed) {
+            let _ = status.wait(Duration::from_millis(1));
+            let _ = values.wait(Duration::from_millis(1));
+            if status.status() != Status::Live {
+                seen.not_live += 1;
+            }
+            if values.status() != Status::Live {
+                seen.not_live += 1;
+            }
+            if resource(&watcher, "lemnos.thing")
+                .is_none_or(|found| found.state != ResourceState::Ready)
+            {
+                seen.not_listed += 1;
+            }
+            let now = values
+                .latest(FieldId(0))
+                .and_then(|sample| float(sample.payload));
+            if let Some(value) = now {
+                if last.is_some_and(|before| value < before) {
+                    seen.back += 1;
+                }
+                if last != Some(value) {
+                    seen.moved += 1;
+                }
+                last = Some(value);
+            }
+        }
+        seen.missed = values.missed();
+        seen
+    })
+}
+
 #[test]
-fn a_caller_that_goes_away_is_gone_to_the_tracked_driver() {
-    let dir = dir("callers");
+fn a_fact_and_a_device_coming_and_going_move_an_unrelated_device_not_at_all() {
+    // A second client reads the counter (an unrelated device) the whole time. Each change below
+    // used to withdraw and declare the whole session again, which the counter's topic and resource
+    // show at once. Now only the fact, or the imu, is said: the counter must not move at all.
+    let dir = dir("unrelated");
     let lemnosd = dir.join("lemnosd.sock");
-    let board_text = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
+    let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
-    let _service = start_lemnosd_with(
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    hello_with(&dashboard, "serial");
+    wait_for("the counter's resource, ready", || {
+        resource(&dashboard, "lemnos.thing").filter(|found| found.state == ResourceState::Ready)
+    });
+    let imu = lemnos_client::Client::connect(&lemnosd, "test")
+        .expect("lemnosd")
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|device| device.name == "imu")
+        .expect("the imu")
+        .index;
+    let client = lemnos_client::Client::connect(&lemnosd, "test-power").expect("lemnosd");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let watch = watch_counter(board.socket().to_path_buf(), Arc::clone(&stop));
+    std::thread::sleep(Duration::from_millis(200));
+
+    // A fact comes, the imu goes and comes back, then the fact goes. Each one is given time.
+    files.boot("os-2", "an-os", "2.0");
+    hello_with(&dashboard, "version.slot");
+    std::thread::sleep(Duration::from_millis(200));
+    client.set_power(imu, false).expect("the imu off");
+    std::thread::sleep(Duration::from_millis(200));
+    client.set_power(imu, true).expect("the imu on");
+    std::thread::sleep(Duration::from_millis(200));
+    files.unboot();
+    wait_for("the running slot's fact gone", || {
+        hello(&dashboard).filter(|facts| !facts.contains_key("version.slot"))
+    });
+    std::thread::sleep(Duration::from_millis(200));
+
+    stop.store(true, Ordering::Relaxed);
+    let seen = watch.join().expect("the watcher");
+    assert!(seen.moved > 0, "the counter did not count: {seen:?}");
+    assert_eq!(
+        seen.not_live, 0,
+        "the counter's topic was withdrawn: {seen:?}"
+    );
+    assert_eq!(seen.not_listed, 0, "the counter was not listed: {seen:?}");
+    assert_eq!(
+        seen.back, 0,
+        "the counter's sequence started again: {seen:?}"
+    );
+    assert_eq!(seen.missed, 0, "samples were lost: {seen:?}");
+}
+
+/// The tracked device, with a dashboard session and a second Orion session to run long jobs from.
+/// Orion names every local session by the same caller (`local:<uid>`), so the bridge keeps one
+/// lemnosd connection for them, and the driver sees one caller: what the holds below count.
+fn start_tracked(dir: &Path) -> (Board, Logic, Service, Bridge, Orion) {
+    let lemnosd = dir.join("lemnosd.sock");
+    let board_text = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
+    let board = Board::start_for_node(dir);
+    let logic = Logic::start(dir);
+    let service = start_lemnosd_with(
         &lemnosd,
         &board_text,
         vec![
@@ -1071,27 +1208,75 @@ fn a_caller_that_goes_away_is_gone_to_the_tracked_driver() {
             entry::<TrackedDevice>(),
         ],
     );
-    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let bridge = start_bridge(&lemnosd, board.socket(), None);
     let dashboard = dashboard(board.socket());
     wait_for("the tracked device's resource", || {
         resource(&dashboard, "lemnos.tracked").filter(|found| found.state == ResourceState::Ready)
     });
-    let call = |args: &str| {
-        let finished = run_once_said(&dashboard, "lemnos.tracked.call", "lemnos.tracked", args);
-        assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
-        String::from_utf8(finished.output).expect("text")
-    };
+    (board, logic, service, bridge, dashboard)
+}
 
-    // The driver sees the Orion caller's own number: not the daemon's local one, and the same on
-    // every run while the caller's connection is up.
-    call("take");
-    let who = call("who");
+/// Runs `args` on the tracked device, and its reply as text.
+fn tracked_call(orion: &Orion, args: &str) -> String {
+    let finished = run_once_said(orion, "lemnos.tracked.call", "lemnos.tracked", args);
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    String::from_utf8(finished.output).expect("text")
+}
+
+#[test]
+fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
+    let dir = dir("cancel");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    // Its holds are taken first, so the cancel below has something to lose.
+    tracked_call(&dashboard, "take");
+    assert_eq!(tracked_call(&dashboard, "held"), "1");
+
+    // The caller is still there: it cancels its own long job. Only the run ends: the caller's
+    // driver holds stay, and the driver's own connection is not told the caller is gone.
+    let caller = wait_for("a second Orion session", || {
+        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
+    });
+    let mut long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    std::thread::sleep(Duration::from_millis(300));
+    long.cancel().expect("cancel");
+    let finished = long.finish(WAIT).expect("the cancelled run ends");
+    assert_eq!(finished.outcome, Outcome::Cancelled, "{finished:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "a plain cancel told the driver its caller is gone"
+    );
+}
+
+#[test]
+fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
+    let dir = dir("callers");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    tracked_call(&dashboard, "take");
+    let who = tracked_call(&dashboard, "who");
     assert_ne!(who, "0", "the caller is not the local caller");
-    assert_eq!(call("who"), who, "one caller, one number");
-    assert_eq!(call("held"), "1", "the driver holds for the caller");
+    assert_eq!(
+        tracked_call(&dashboard, "who"),
+        who,
+        "one caller, one number"
+    );
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "the driver holds for the caller"
+    );
 
-    // The caller starts a long job, then goes away while it runs: Orion cancels its run, and the
-    // driver is told the caller is gone.
+    // The caller starts a long job, then goes away while it runs. Orion cancels its run with the
+    // same cancel a caller's explicit cancel is sent with, so the bridge cannot tell them apart.
     let caller = wait_for("a second Orion session", || {
         Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
     });
@@ -1108,9 +1293,36 @@ fn a_caller_that_goes_away_is_gone_to_the_tracked_driver() {
     std::thread::sleep(Duration::from_millis(300));
     drop(long);
     drop(caller);
-    wait_for("the driver is told the caller is gone", || {
-        (call("held") == "0").then_some(())
+    // The run's job is over on the driver: a new long job starts (it is refused while one runs).
+    wait_for("the caller's job is over on the driver", || {
+        let mut run = dashboard
+            .run(&ActionCall {
+                name: "lemnos.tracked.call",
+                target: Target::Resource("lemnos.tracked".parse().expect("name")),
+                args: b"hold_until_cancelled",
+                deadline_ms: 0,
+                detached: false,
+            })
+            .ok()?;
+        match run.finish(Duration::from_millis(200)) {
+            // Refused at once: the driver is still busy with the caller's job.
+            Ok(_) => None,
+            Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                // Started: it is the one that is wanted; cancel it again so the device is free.
+                let _ = run.cancel();
+                Some(())
+            }
+            Err(_) => None,
+        }
     });
+    // ORION-R2: at R2 the bridge reads a session end as `caller_gone` (reason 2), and the driver
+    // drops the caller's holds: `held` is then "0". At this revision the same cancel says no more
+    // than a plain one, so the holds stay.
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "the holds stay until Orion says why a run was cancelled"
+    );
 }
 
 #[test]
