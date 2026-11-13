@@ -143,29 +143,49 @@ pub fn parse_baseline(text: &str) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// The first device that was running in the baseline and fails now, as the reason. A device
-/// that is absent is failed only when it came from the board file: a hotplug device that is
-/// simply not there is not, and neither is one that is Gone (its resource is dead and not
-/// failing) or a new device. A built-in device that is present and not bound counts too.
+/// The first device that was running in the baseline and regressed now, as the reason.
+///
+/// A device from the board file's own list (on a bus that stays put) regresses when it is missing,
+/// not bound, failed or gone. A hot-pluggable device (on a USB port, or made by an `[[each]]`
+/// entry) is not the board's own hardware: when it is missing, not bound or gone it is simply not
+/// there now, and that is not a regression. Only one that is bound and failed is. A device that is
+/// new, or was already failed in the baseline, never counts.
 pub fn regression(baseline: &[(String, bool)], now: &[Dev]) -> Option<String> {
     for (id, builtin) in baseline {
         match now.iter().find(|dev| &dev.id == id) {
+            // A missing device the board itself names is a regression; a hot-pluggable one is
+            // simply not there.
             None if *builtin => {
                 return Some(format!(
                     "built-in device {id} was running in the last good slot and is missing here"
                 ));
             }
             None => {}
+            Some(dev) if !dev.builtin => {
+                if let (true, Hs::Failed(why)) = (dev.bound, &dev.health) {
+                    return Some(format!(
+                        "device {id} was running in the last good slot and is failed here: {why}"
+                    ));
+                }
+            }
             Some(dev) => {
-                if *builtin && !dev.bound {
+                if !dev.bound {
                     return Some(format!(
                         "built-in device {id} was running in the last good slot and didn't bind here"
                     ));
                 }
-                if let Hs::Failed(why) = &dev.health {
-                    return Some(format!(
-                        "device {id} was running in the last good slot and is failed here: {why}"
-                    ));
+                match &dev.health {
+                    Hs::Failed(why) => {
+                        return Some(format!(
+                            "device {id} was running in the last good slot and is failed here: {why}"
+                        ));
+                    }
+                    Hs::Gone(why) => {
+                        return Some(format!(
+                            "device {id} was running in the last good slot and is gone here: {why}"
+                        ));
+                    }
+                    Hs::Ok | Hs::Degraded(_) => {}
                 }
             }
         }
@@ -191,17 +211,39 @@ fn device_unmet(sources: &[Source], now: &[Dev]) -> Option<String> {
     })
 }
 
+/// How long a `socket:` source may stay busy (its listener's backlog full) before it is not good.
+pub const SOCKET_DEADLINE_NS: u64 = 2_000_000_000;
+
+/// What a `socket:` source's check remembers between looks: since when it has been busy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Probe {
+    busy_since: Option<u64>,
+}
+
 /// The first source that isn't good now, as the reason: device health from the board view, file
-/// and socket checks made here. `boot` is when this boot began.
-pub fn source_unmet(sources: &[Source], now: &[Dev], boot: SystemTime) -> Option<String> {
+/// and socket checks made here. `boot` is when this boot began. `probes` holds one entry per
+/// source, kept between looks; `now_ns` is the monotonic clock. A socket that takes no connection
+/// right away is busy, and only that look's answer is not good: it is asked again at the next
+/// look, and it is not good for good once it has been busy for [`SOCKET_DEADLINE_NS`].
+pub fn source_unmet(
+    sources: &[Source],
+    probes: &mut Vec<Probe>,
+    now: &[Dev],
+    boot: SystemTime,
+    now_ns: u64,
+) -> Option<String> {
     if let Some(reason) = device_unmet(sources, now) {
         return Some(reason);
     }
-    sources.iter().find_map(|source| match source {
-        Source::Device(_) => None,
-        Source::File(path) => file_unmet(path, boot),
-        Source::Socket(path) => socket_unmet(path),
-    })
+    probes.resize(sources.len(), Probe::default());
+    sources
+        .iter()
+        .zip(probes.iter_mut())
+        .find_map(|(source, probe)| match source {
+            Source::Device(_) => None,
+            Source::File(path) => file_unmet(path, boot),
+            Source::Socket(path) => socket_unmet(path, probe, now_ns),
+        })
 }
 
 fn file_unmet(path: &Path, boot: SystemTime) -> Option<String> {
@@ -220,13 +262,35 @@ fn file_unmet(path: &Path, boot: SystemTime) -> Option<String> {
     }
 }
 
-fn socket_unmet(path: &Path) -> Option<String> {
-    match std::os::unix::net::UnixStream::connect(path) {
-        Ok(_) => None,
-        Err(error) => Some(format!(
-            "health source socket:{} doesn't accept a connection: {error}",
-            path.display()
-        )),
+/// One look at a socket: a connect that does not wait. See [`source_unmet`].
+fn socket_unmet(path: &Path, probe: &mut Probe, now_ns: u64) -> Option<String> {
+    match lemnos_linux_sys::unix::connect_nonblocking(path) {
+        Ok(lemnos_linux_sys::unix::Connect::Connected) => {
+            probe.busy_since = None;
+            None
+        }
+        Ok(lemnos_linux_sys::unix::Connect::Busy) => {
+            let since = *probe.busy_since.get_or_insert(now_ns);
+            if now_ns.saturating_sub(since) >= SOCKET_DEADLINE_NS {
+                Some(format!(
+                    "health source socket:{} did not accept a connection within {} s (its backlog stays full)",
+                    path.display(),
+                    SOCKET_DEADLINE_NS / 1_000_000_000
+                ))
+            } else {
+                Some(format!(
+                    "health source socket:{} is busy: its backlog is full",
+                    path.display()
+                ))
+            }
+        }
+        Err(error) => {
+            probe.busy_since = None;
+            Some(format!(
+                "health source socket:{} doesn't accept a connection: {error}",
+                path.display()
+            ))
+        }
     }
 }
 
@@ -317,8 +381,9 @@ impl Log {
         self.attempts.push((n, now_utc()));
     }
 
-    /// The `trial` field of `list`, given the attempts the loader holds now.
-    pub fn json(&self, attempts_left: u8) -> String {
+    /// The `trial` field of `list`, given the attempts the loader holds now and whether the
+    /// driver could not write its record of the trial (`record_error`, the reason it gave).
+    pub fn json(&self, attempts_left: u8, record_error: Option<&str>) -> String {
         let mut out = String::from("{\"slot\":");
         quoted(&self.slot, &mut out);
         out.push_str(&format!(
@@ -338,6 +403,11 @@ impl Log {
         optional(&self.last_time, &mut out);
         out.push_str(",\"reason\":");
         optional(&self.reason, &mut out);
+        out.push_str(",\"record_error\":");
+        match record_error {
+            Some(error) => quoted(error, &mut out),
+            None => out.push_str("null"),
+        }
         out.push('}');
         out
     }

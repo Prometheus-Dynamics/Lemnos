@@ -138,6 +138,13 @@ pub trait Provider {
     fn fits(&self, name: &str, found: &str) -> bool {
         name == found
     }
+    /// Whether `bus`, a name a board file gives a device as its `bus`, is a resource that comes
+    /// and goes while the board runs (a USB port, say). A device on such a bus is
+    /// [`Origin::Hotplug`](crate::Origin::Hotplug), so a driver watching the board does not take
+    /// it for hardware the board always has. The default says none does.
+    fn hotplug(&self, _bus: &str) -> bool {
+        false
+    }
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller>;
     /// The device the board's `link` names, if it has the contract `tag`. Only a host that
     /// binds drivers from its own table can name one; the default refuses.

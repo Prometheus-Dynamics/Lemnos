@@ -184,8 +184,17 @@ pub struct Slot<D, L> {
     driver: PhantomData<fn() -> D>,
 }
 
-impl<D, L> Slot<D, L> {
+impl<D: Driver, L> Slot<D, L> {
+    /// A driver that watches the board is handed a view of it before each tick. This host keeps
+    /// no table it could show, so such a driver would run without the view it depends on: it is
+    /// refused when the slot is built (a constant that fails to evaluate), not left to run blind.
+    const NO_BOARD_VIEW: () = assert!(
+        !D::WATCHES_BOARD,
+        "lemnos-host-static cannot run a driver that watches the board (WATCHES_BOARD): it gives no board view. Run that driver on lemnos-host"
+    );
+
     pub const fn new(spec: Spec, cell: L) -> Self {
+        let () = Self::NO_BOARD_VIEW;
         Self {
             spec,
             cell,

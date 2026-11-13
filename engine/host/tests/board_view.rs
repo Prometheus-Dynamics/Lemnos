@@ -3,7 +3,7 @@
 //! `Failed`). Reading it allocates nothing, and a driver that does not watch never gets it.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use lemnos_core::{
@@ -17,6 +17,9 @@ use lemnos_sim::SimBoard;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
+
+/// The tests share the statics below, so they run one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 /// What the watcher saw at its last look, one line per device.
 static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -203,6 +206,7 @@ fn seen() -> Vec<String> {
 
 #[test]
 fn a_watching_driver_sees_every_device_with_origin_bound_and_health() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let board = SimBoard::new();
     board.add_usb_device_as("usb:1-1", CAMERA, &VIDEO);
     let host = start(board, BOARD);
@@ -233,6 +237,7 @@ fn a_watching_driver_sees_every_device_with_origin_bound_and_health() {
 
 #[test]
 fn reading_the_board_allocates_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let board = SimBoard::new();
     board.add_usb_device_as("usb:1-1", CAMERA, &VIDEO);
     let host = start(board, BOARD);
@@ -242,6 +247,7 @@ fn reading_the_board_allocates_nothing() {
 
 #[test]
 fn a_driver_that_does_not_watch_is_never_handed_the_board() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let board = SimBoard::new();
     let host = start(board, BOARD);
     host.tick();
@@ -251,10 +257,31 @@ fn a_driver_that_does_not_watch_is_never_handed_the_board() {
 
 #[test]
 fn a_board_file_list_of_strings_reaches_the_driver_and_other_arrays_are_refused() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let board = SimBoard::new();
     let _host = start(board, BOARD);
     assert_eq!(*LISTED.lock().unwrap(), ["device:s", "file:/run/x"]);
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"w\"\ndriver = \"watch\"\nconfig = { n = [1, 2] }\n";
     assert!(parse(text).is_err(), "a list of numbers is not a setting");
+}
+
+#[test]
+fn a_board_file_device_on_a_bus_that_comes_and_goes_is_hotplug() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    // `u` is named by the board file, but on a USB port: what is plugged in there comes and goes,
+    // so it is not the board's own hardware. `plain` takes no bus, so it binds here either way.
+    let board = SimBoard::new();
+    let text = format!("{BOARD}[[devices]]\nid = \"u\"\ndriver = \"plain\"\nbus = \"usb:1-2\"\n");
+    let host = start(board, &text);
+    host.tick();
+    let lines = seen();
+    assert!(
+        lines.contains(&"u hotplug bound Ok".to_string()),
+        "a device on a USB port is hotplug: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"w builtin bound Ok".to_string()),
+        "the board's own devices stay builtin: {lines:?}"
+    );
 }

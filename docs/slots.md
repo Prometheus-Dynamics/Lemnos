@@ -423,12 +423,20 @@ keeps its attempts until it confirms or runs out.
 **Confirmation.** After a trial boot, the driver confirms on its own once every condition holds:
 
 - the daemon has run for `confirm_uptime_s` (30 s);
-- no device that was running and healthy in the previous good slot is now failed, or missing if it
-  is built into the board file or did not bind. A hotplug device that is simply absent doesn't
-  count, nor does one that is `Gone`. The previous slot's healthy devices are written as
-  `board/slots/<id>.devices` once that slot has run for its uptime, and at each confirm;
+- no device that was running and healthy in the previous good slot now regresses. A device from
+  the board file's own list, on a bus that stays put, regresses when it is missing, did not bind,
+  is failed or is `Gone`. A hotplug device (one an `[[each]]` entry made, or one on a USB port: the
+  board's origin for it is `Hotplug`) is not the board's own hardware: when it is unbound, `Gone`
+  or absent it is simply not there, and only one that is bound and failed blocks. An unplugged
+  USB device's driver is dropped and retries as failed, so its unbound state is what the board
+  sees, and it must not block. The previous slot's healthy devices are written as
+  `board/slots/<id>.devices` once that slot has run for its uptime, and at each confirm, each with
+  its origin (`builtin` or `hotplug`);
 - every `health` source in the board file is good: `device:<id>` is `Ok`, `file:<path>` exists and
-  was written since this boot began, `socket:<path>` accepts a connection;
+  was written since this boot began, `socket:<path>` accepts a connection. A socket is connected
+  without waiting: a listener whose backlog is full answers busy, the look is not good, and the
+  next look tries again. A socket still busy after 2 s is not good for good, and the reason says
+  so. Nothing on a tick waits on another process;
 - the state and the boot record can be written.
 
 Each of these is looked at each second while the trial waits, and the reason it is still waiting
@@ -440,12 +448,23 @@ default), the board restarts plainly. The default comes back, and the trial is r
 back with that reason. With `auto_confirm = false`, nothing confirms or restarts by itself, and
 `confirm` works at any time during the wait.
 
+**When the reason can't be kept.** The restart is the way the default comes back, so it is never
+held for long. The reason is written to the state (the trial's `trial.env`) with the attempts set
+to 0. If the state can't be written, the driver tries again with a capped backoff: at 0, 1, 3, 7,
+15 and 23 s after the deadline (the waits double from 1 s and stop at 8 s), and restarts at the
+last try whatever happened. The reason is also written to `trial-reason` on the boot partition, beside
+the boot record, whenever that can be written, and the next start reads it there when the state
+has no reason. The boot loader never reads that file, so it can't change what boots. `list` shows
+the failure as `trial.record_error`, and it is null once the reason is kept.
+
 **Fallen back.** A trial that is out of attempts is resolved on the first boot of the default: its
 state is `rolled-back`, the slot is marked failed with a reason (the trial slot's own `FAIL_REASON`
 when it has one, else "did not reach a running daemon in N boots"), and `resolved` says so.
 
 **What `list` shows.** Two fields at the end of the object: `trial` is null, or the trial that is
-pending across boots, `{slot, attempts_left, attempts:[{n,time}], last, last_time, reason}`, with
+pending across boots, `{slot, attempts_left, attempts:[{n,time}], last, last_time, reason,
+record_error}`, where `record_error` is null or the text of why the driver's record could not be
+written, with
 `last` one of `power-lost-before-daemon`, `daemon-reached-not-yet-confirmed`, `confirmed` and
 `fell-back` (null before the trial's first boot). `resolved` is null, or the last resolution,
 `{slot, outcome: confirmed|fell-back, by: auto|call, caller, reason, time}`. `caller` is the caller's

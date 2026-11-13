@@ -1813,12 +1813,16 @@ fn a_slot_state_that_cant_be_written_does_not_confirm() {
     let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
     let waiting = board.settle_at(31, &view);
-    // Still read-only at the deadline: the reason says why, and the board restarts.
-    let restarted = board.settle_at(600, &view);
+    // Still read-only at the deadline: the reason is tried again with backoff, and the board
+    // restarts when the tries run out, as the reason can't be written where nothing can be.
+    let mut at = board.settle_at(600, &view);
+    assert_eq!(at, Some(secs(601)));
+    for now in [601, 603, 607, 615, 623] {
+        at = board.settle_at(now, &view);
+    }
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(waiting.is_some(), "waits while the state can't be written");
-    assert_eq!(restarted, None);
-    // The reason can't be written where nothing can be written; the board still restarts.
+    assert_eq!(at, None);
     assert!(board.told.take().contains(&"restart".to_string()));
 }
 
@@ -2039,4 +2043,202 @@ fn a_cancelled_install_shows_failed() {
     board.slots.tick(0);
     let shown = recorder.0.lock().unwrap().clone();
     assert_eq!(shown.last().map(|(s, _)| s.as_str()), Some("failed"));
+}
+
+fn secs(s: u64) -> u64 {
+    s * 1_000_000_000
+}
+
+/// The trial's log can't be written: a directory stands where its file is, so the write fails
+/// and every other state file still reads.
+fn block_log(board: &Board) {
+    let path = board.layout().marker("trial.env");
+    let _ = fs::remove_file(&path);
+    fs::create_dir_all(&path).unwrap();
+}
+
+fn unblock_log(board: &Board) {
+    fs::remove_dir(board.layout().marker("trial.env")).unwrap();
+}
+
+fn failing() -> View {
+    View(vec![(
+        "dev",
+        Origin::BuiltIn,
+        true,
+        Health::Failed("broken"),
+    )])
+}
+
+#[test]
+fn a_deadline_restart_retries_the_reason_with_capped_backoff_before_it_restarts() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = failing();
+    assert!(board.settle_at(31, &view).is_some());
+    block_log(&board);
+    // At the deadline the reason can't be written: the tries come at 0, 1, 3, 7, 15 and 23 s
+    // after it, the waits doubling and capped at 8 s, and the board restarts with the last.
+    assert_eq!(board.settle_at(600, &view), Some(secs(601)));
+    assert_eq!(board.settle_at(601, &view), Some(secs(603)));
+    assert_eq!(board.settle_at(603, &view), Some(secs(607)));
+    assert_eq!(board.settle_at(607, &view), Some(secs(615)));
+    assert_eq!(board.settle_at(615, &view), Some(secs(623)));
+    assert!(
+        !board.told.take().contains(&"restart".to_string()),
+        "no restart while the reason is still being tried"
+    );
+    assert_eq!(board.settle_at(623, &view), None);
+    assert!(board.told.take().contains(&"restart".to_string()));
+    // The default still comes back: the trial's attempts are used up.
+    assert_eq!(board.slots.record.pending().unwrap(), Some(("b".into(), 0)));
+    // `list` says the record could not be written.
+    let list = board.slots.list_json();
+    assert!(
+        list.contains("\"record_error\":\"the trial's record can't be written"),
+        "{list}"
+    );
+    // The reason is kept on the boot partition, where the next boot reads it.
+    assert!(
+        crate::boot::read_reason(&board.layout().boot)
+            .unwrap()
+            .contains("broken")
+    );
+}
+
+#[test]
+fn once_the_reason_can_be_written_the_deadline_restart_goes_and_nothing_is_reported() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = failing();
+    board.settle_at(31, &view);
+    block_log(&board);
+    assert_eq!(board.settle_at(600, &view), Some(secs(601)));
+    assert!(!board.told.take().contains(&"restart".to_string()));
+    unblock_log(&board);
+    assert_eq!(board.settle_at(601, &view), None);
+    assert!(board.told.take().contains(&"restart".to_string()));
+    let reason = Log::load(board.layout())
+        .expect("the reason is written")
+        .reason;
+    assert!(reason.contains("broken"), "{reason}");
+    assert!(board.slots.list_json().contains("\"record_error\":null"));
+}
+
+#[test]
+fn a_reason_the_state_never_held_is_read_from_the_boot_partition_at_the_next_start() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = failing();
+    board.settle_at(31, &view);
+    block_log(&board);
+    for at in [600, 601, 603, 607, 615, 623] {
+        board.settle_at(at, &view);
+    }
+    unblock_log(&board);
+    assert!(board.told.take().contains(&"restart".to_string()));
+    // The next boot is the default's, and the trial's record is judged from what was left.
+    let slot = board.next_boot(2);
+    assert_eq!(slot, "a");
+    let record = resolved(&board);
+    assert_eq!(
+        (record.slot.as_str(), record.outcome.as_str()),
+        ("b", "fell-back")
+    );
+    assert!(record.reason.contains("broken"), "{}", record.reason);
+    assert!(
+        crate::boot::read_reason(&board.layout().boot).is_none(),
+        "the copy is cleared once the trial is resolved"
+    );
+}
+
+#[test]
+fn a_hot_pluggable_device_that_is_unbound_and_failed_is_not_a_regression() {
+    // An unplugged USB device's driver is dropped and retries as failed: it is not there.
+    let mut board = trial_board();
+    board.baseline("a", "cam hotplug\n");
+    board.next_boot(1);
+    let unplugged = View(vec![(
+        "cam",
+        Origin::Hotplug,
+        false,
+        Health::Failed("retrying"),
+    )]);
+    assert_eq!(board.settle_at(31, &unplugged), None);
+    assert_eq!(board.state().default, "b");
+}
+
+#[test]
+fn a_built_in_device_that_is_gone_blocks_the_confirm_and_is_named() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let gone = View(vec![("dev", Origin::BuiltIn, true, Health::Gone("dead"))]);
+    assert!(board.settle_at(31, &gone).is_some());
+    assert_eq!(board.state().trial, "b", "no confirm");
+    assert!(Log::load(board.layout()).unwrap().reason.contains("gone"));
+}
+
+#[test]
+fn a_hot_pluggable_device_failed_while_bound_still_blocks_the_confirm() {
+    let mut board = trial_board();
+    board.baseline("a", "cam hotplug\n");
+    board.next_boot(1);
+    let sick = View(vec![("cam", Origin::Hotplug, true, Health::Failed("sick"))]);
+    assert!(board.settle_at(31, &sick).is_some());
+    assert_eq!(board.state().trial, "b", "no confirm");
+    assert!(Log::load(board.layout()).unwrap().reason.contains("cam"));
+}
+
+/// A socket source whose listener's backlog is full: its check must come back at once, busy,
+/// and only be not good at its deadline. A blocking connect would hang here.
+#[test]
+fn a_socket_whose_backlog_is_full_is_busy_and_never_blocks_a_look() {
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+    use std::time::{Duration, SystemTime};
+
+    use crate::trial::{self, Source};
+
+    let dir = TempDir::new("socket");
+    let path = dir.0.join("health.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    // Nothing accepts, so connections queue until the backlog is full.
+    let mut queued = 0;
+    while let Ok(lemnos_linux_sys::unix::Connect::Connected) =
+        lemnos_linux_sys::unix::connect_nonblocking(&path)
+    {
+        queued += 1;
+        assert!(queued < 100_000, "the backlog never filled");
+    }
+    let sources = vec![Source::Socket(path.clone())];
+    let (tx, rx) = mpsc::channel();
+    let looked = sources.clone();
+    std::thread::spawn(move || {
+        let mut probes = Vec::new();
+        let busy = trial::source_unmet(&looked, &mut probes, &[], SystemTime::now(), 0);
+        tx.send((busy, probes)).unwrap();
+    });
+    let (busy, mut probes) = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a look at a full backlog returned: it did not block");
+    let busy = busy.expect("busy is not good");
+    assert!(busy.contains("busy"), "{busy}");
+    assert_eq!(probes.len(), 1, "one probe per source, kept between looks");
+    // Still busy before the deadline, and not good at it.
+    let at = |secs: u64| secs * 1_000_000_000;
+    let still = trial::source_unmet(&sources, &mut probes, &[], SystemTime::now(), at(1)).unwrap();
+    assert!(still.contains("busy"), "{still}");
+    let late = trial::source_unmet(&sources, &mut probes, &[], SystemTime::now(), at(2)).unwrap();
+    assert!(late.contains("did not accept"), "{late}");
+    // Once the listener takes its connections, the same source is good.
+    listener.set_nonblocking(true).unwrap();
+    while listener.accept().is_ok() {}
+    assert_eq!(
+        trial::source_unmet(&sources, &mut probes, &[], SystemTime::now(), at(3)),
+        None
+    );
 }

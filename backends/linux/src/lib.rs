@@ -260,6 +260,11 @@ impl Provider for LinuxBoard {
         name == found || usb::fits(&self.sys, name, found)
     }
 
+    /// A USB port comes and goes with the device plugged into it.
+    fn hotplug(&self, bus: &str) -> bool {
+        usb::UsbName::parse(bus).is_some()
+    }
+
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
         // Devices are the host's to wire. A board only has hardware.
         Err(Status::NOT_SUPPORTED)

@@ -48,6 +48,23 @@ Report CM5 timings only.
    itself. A `confirm` call during the wait confirms it, and `resolved` says `by: call` with the
    caller.
 
+6. **The state can't be written at the deadline.** Make `board/slots/trial.env` a directory
+   (`mkdir` in place of the file) while `B` is on trial with a failing `health` source. Expect no
+   restart at 600 s, then the retries at 601, 603, 607, 615 and 623 s (about; the console and
+   `list`'s `trial.record_error` show it), and the restart at 623 s. Expect `trial-reason` on
+   `/boot/firmware` to hold the reason, and after the boot into `A`, `resolved` `fell-back` with
+   that reason. Then remove the directory and repeat with it removed before 623 s: the restart
+   must come at the first retry that succeeds, with `record_error` null.
+7. **A socket whose backlog is full.** Give `B`'s `health` a `socket:` path of a listener that
+   never accepts, and fill its backlog (connect until `EAGAIN`, `listen(0)`). Expect the trial to
+   stay pending with the reason `is busy` and no stall in `lemnosd`'s calls (the daemon answers
+   `list` throughout), then at 2 s `did not accept a connection within 2 s`. Accept the queued
+   connections; the next look must find the socket good and the trial confirms.
+8. **A USB device on a board port, unplugged during the trial.** Give the board a device on a
+   `usb:` bus and let the trial confirm with it present. On a second trial, unplug that device
+   before the uptime. Expect the trial to confirm anyway (`resolved` `confirmed`, `by: auto`), since
+   an unbound hotplug device is absent. Plug it back in and check it binds again.
+
 ## Measured: the extra tryboot pass
 
 The `tryboot` form runs the default's firmware, kernel and initramfs once before a trial boots.

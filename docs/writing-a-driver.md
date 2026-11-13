@@ -179,14 +179,18 @@ have changed, so it finds out without waiting for a caller.
 
 A driver that needs to know the rest of the board sets `WATCHES_BOARD` and implements `board(view)`.
 Before each tick the host hands it a `BoardView`: every device the board names, each as a
-`BoardDevice` with its `id`, its `origin` (`Origin::BuiltIn` from the board file's `[[devices]]`, or
-`Origin::Hotplug` for one an `[[each]]` entry made; a device a board file names on a bus is
-`BuiltIn`, whatever the bus), whether it is `bound` (its driver is running),
-and its `health`. A dead device's `Health::Gone` is kept apart from `Health::Failed`. Reading the view
+`BoardDevice` with its `id`, its `origin`, whether it is `bound` (its driver is running), and its
+`health`. A dead device's `Health::Gone` is kept apart from `Health::Failed`. The origin is
+`Origin::BuiltIn` for a device the board file names on a bus that stays put, and `Origin::Hotplug`
+for one that comes and goes: one an `[[each]]` entry made, one on a USB port (the backend says which
+buses come and go, `Provider::hotplug`), or one built on such a device (`uses`). A device from a
+driver package has the origin its board entry gives it. Reading the view
 allocates nothing, and the driver keeps what it needs from it in its own fields: the view is gone
 after the call. A driver built into the host gets this; a driver package gets an empty view, and
 a board-file list of strings (`health = ["device:x"]`) reaches a built-in driver through
-`cfg.list("health")` (other arrays in a device's `config` are refused).
+`cfg.list("health")` (other arrays in a device's `config` are refused). A driver that watches the
+board can't be built into a `lemnos-host-static` table: the table's slot refuses it when it is
+built, because that host gives no view.
 
 ### Long jobs
 

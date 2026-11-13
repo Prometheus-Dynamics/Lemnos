@@ -10,6 +10,7 @@ use std::time::Duration;
 use lemnos_core::{BoardView, CallerId, Result, Status};
 
 use crate::SystemSlots;
+use crate::boot;
 use crate::store::{self, Meta, valid_id};
 use crate::trial::{self, Dev, Log, Resolved};
 
@@ -22,6 +23,23 @@ pub enum By {
 
 /// How often a waiting trial is looked at.
 const LOOK_EVERY: u64 = 1_000_000_000;
+
+/// A deadline restart tries to write its reason this many times, then restarts anyway: the
+/// default has to come back. The first wait is one second, doubling, capped at 8 s, so the tries
+/// come at 0, 1, 3, 7, 15 and 23 s.
+const RESTART_TRIES: u32 = 6;
+const RETRY_FIRST_NS: u64 = 1_000_000_000;
+const RETRY_CAP_NS: u64 = 8_000_000_000;
+
+/// A deadline restart waiting to write its reason: the reason, how many tries have been made,
+/// and when the next is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GiveUp {
+    reason: String,
+    tries: u32,
+    wait_ns: u64,
+    next_ns: u64,
+}
 
 impl SystemSlots {
     /// Starts one boot's accounting for a pending trial, before anything else runs.
@@ -79,6 +97,8 @@ impl SystemSlots {
         }
         let reason = if !log.reason.is_empty() {
             log.reason.clone()
+        } else if let Some(reason) = boot::read_reason(&self.layout.boot) {
+            reason
         } else {
             self.trial_reason(&trial).unwrap_or_else(|| {
                 format!(
@@ -88,6 +108,7 @@ impl SystemSlots {
             })
         };
         log.note("fell-back");
+        boot::clear_reason(&self.layout.boot);
         let _ = self.record.clear_trial();
         self.end_trial_failed(&trial, &reason);
         Log::remove(&self.layout);
@@ -165,6 +186,9 @@ impl SystemSlots {
     /// Called on each tick: judges a waiting trial, records a good boot's baseline, and returns
     /// when to look again (`None` when there is nothing left to look at).
     pub(crate) fn settle(&mut self, now_ns: u64) -> Option<u64> {
+        if self.giving_up.is_some() {
+            return self.finish_give_up(now_ns);
+        }
         let started = *self.started_ns.get_or_insert(now_ns);
         let elapsed = Duration::from_nanos(now_ns.saturating_sub(started));
         let state = self.state();
@@ -186,8 +210,15 @@ impl SystemSlots {
         }
         let baseline = self.baseline(&state.default);
         let mut unmet = if self.looked {
-            trial::regression(&baseline, &self.seen)
-                .or_else(|| trial::source_unmet(&self.sources, &self.seen, self.started_wall))
+            trial::regression(&baseline, &self.seen).or_else(|| {
+                trial::source_unmet(
+                    &self.sources,
+                    &mut self.probes,
+                    &self.seen,
+                    self.started_wall,
+                    now_ns,
+                )
+            })
         } else {
             Some("the board has not been looked at yet".to_string())
         };
@@ -210,8 +241,7 @@ impl SystemSlots {
                 )
             });
             if self.policy.reboot_at_deadline {
-                self.give_up(reason);
-                return None;
+                return self.begin_give_up(reason, now_ns);
             }
         }
         Some(now_ns + LOOK_EVERY)
@@ -245,17 +275,85 @@ impl SystemSlots {
         }
     }
 
-    /// The deadline passed with the trial unconfirmed: the reason is kept, the trial's attempts
-    /// are used up, and the board restarts into the default.
-    fn give_up(&mut self, reason: String) {
-        let mut log = Log::load(&self.layout).unwrap_or_default();
-        log.reason = reason;
+    /// The deadline passed with the trial unconfirmed: the reason is recorded, the trial's attempts
+    /// are used up, and the board restarts into the default. See [`GiveUp`] for the writes.
+    fn begin_give_up(&mut self, reason: String, now_ns: u64) -> Option<u64> {
+        self.giving_up = Some(GiveUp {
+            reason,
+            tries: 0,
+            wait_ns: RETRY_FIRST_NS,
+            next_ns: now_ns,
+        });
+        self.finish_give_up(now_ns)
+    }
+
+    /// One step of a deadline restart: writes the reason once it is due, and restarts when it is
+    /// written or the tries are used up. Returns when to come back, `None` once the restart went.
+    fn finish_give_up(&mut self, now_ns: u64) -> Option<u64> {
+        let (reason, next_ns) = self
+            .giving_up
+            .as_ref()
+            .map(|give_up| (give_up.reason.clone(), give_up.next_ns))?;
+        if now_ns < next_ns {
+            return Some(next_ns);
+        }
+        let written = self.write_give_up(&reason);
+        let give_up = self.giving_up.as_mut()?;
+        give_up.tries += 1;
+        let tries = give_up.tries;
+        match written {
+            Ok(warning) => {
+                self.record_error = warning;
+                self.giving_up = None;
+                self.restart_after_give_up(&reason);
+                None
+            }
+            Err(error) => {
+                self.record_error = Some(error.clone());
+                if tries >= RESTART_TRIES {
+                    // The reason could not be written in time: the default comes back all the
+                    // same, the reason kept in the boot partition if that could be written.
+                    self.giving_up = None;
+                    self.restart_after_give_up(&reason);
+                    return None;
+                }
+                give_up.next_ns = now_ns + give_up.wait_ns;
+                give_up.wait_ns = (give_up.wait_ns * 2).min(RETRY_CAP_NS);
+                Some(give_up.next_ns)
+            }
+        }
+    }
+
+    /// The writes a deadline restart needs: the reason and the attempts used up, in the state
+    /// (as the trial's log), with the reason also on the boot partition. Fails with the reason
+    /// when the state could not hold it, so the caller tries again; a boot partition copy that
+    /// could not be written is returned as a warning instead.
+    fn write_give_up(&mut self, reason: &str) -> std::result::Result<Option<String>, String> {
+        let boot_copy = boot::write_reason(&self.layout.boot, reason);
+        let state = self.state();
+        let mut log = Log::load(&self.layout).unwrap_or_else(|| Log {
+            slot: state.trial.clone(),
+            ..Log::default()
+        });
+        // The boot record first: it is what brings the default back, whatever the state holds.
+        self.record
+            .set_attempts(0)
+            .map_err(|error| format!("the boot record can't be written: {error}"))?;
+        log.reason = reason.to_string();
         log.seen = 0;
-        let _ = log.save(&self.layout);
-        let _ = self.record.set_attempts(0);
+        log.save(&self.layout)
+            .map_err(|error| format!("the trial's record can't be written: {error}"))?;
+        // The state holds the reason; a missing boot partition copy is reported, not retried.
+        Ok(boot_copy
+            .err()
+            .map(|error| format!("the reason is not on the boot partition: {error}")))
+    }
+
+    /// Restarts the board into the default, after the reason has been kept as far as it could be.
+    fn restart_after_give_up(&mut self, reason: &str) {
         if let Err(error) = self.record.restart() {
             let mut log = Log::load(&self.layout).unwrap_or_default();
-            log.reason = format!("{}; the restart failed: {error}", log.reason);
+            log.reason = format!("{reason}; the restart failed: {error}");
             let _ = log.save(&self.layout);
         }
     }
@@ -344,6 +442,7 @@ impl SystemSlots {
         self.save(&state)?;
         if resolved_here {
             Log::remove(&self.layout);
+            boot::clear_reason(&self.layout.boot);
             let _ = Resolved {
                 slot: running.clone(),
                 outcome: "confirmed".into(),

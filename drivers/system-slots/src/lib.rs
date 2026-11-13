@@ -119,6 +119,12 @@ pub struct SystemSlots {
     /// The trial settings, and the health sources the board file names.
     policy: Policy,
     sources: Vec<Source>,
+    /// One per source, kept between looks (a socket's busy time).
+    probes: Vec<trial::Probe>,
+    /// A deadline restart waiting to write its reason (see [`resolve`]).
+    giving_up: Option<resolve::GiveUp>,
+    /// Why the driver's record of the trial could not be written, when it could not.
+    record_error: Option<String>,
     /// This boot's id: a trial's attempt is given back once per boot.
     boot: String,
     /// When the driver first ticked (monotonic) and when the board's boot began (wall clock).
@@ -172,6 +178,9 @@ impl SystemSlots {
             ubi_write: ubi_write.filter(|_| layout_has_ubi),
             policy: Policy::default(),
             sources: Vec::new(),
+            probes: Vec::new(),
+            giving_up: None,
+            record_error: None,
             boot: String::new(),
             started_ns: None,
             started_wall: SystemTime::now(),
@@ -688,14 +697,15 @@ impl SystemSlots {
             Ok(Some((id, left))) if id == state.trial => left,
             _ => 0,
         };
+        let record_error = self.record_error.as_deref();
         match Log::load(&self.layout).filter(|log| log.slot == state.trial) {
-            Some(log) => log.json(left),
+            Some(log) => log.json(left, record_error),
             None => Log {
                 slot: state.trial.clone(),
                 seen: left,
                 ..Log::default()
             }
-            .json(left),
+            .json(left, record_error),
         }
     }
 }
@@ -886,6 +896,7 @@ impl Lifecycle for SystemSlots {
             .iter()
             .map(|text| Source::parse(text).map_err(|_| Status::INVALID_ARGUMENT))
             .collect::<Result<Vec<_>>>()?;
+        slots.probes = vec![trial::Probe::default(); slots.sources.len()];
         slots.boot = read_boot_id();
         slots.indicator = needs.indicator;
         slots.partuuid = cfg
@@ -1043,6 +1054,7 @@ impl Slots for SystemSlots {
         self.evict(&state, id)?;
         boot::stage(&self.layout, id, false).map_err(|_| Status::IO)?;
         self.mark_keep_old(id, keep_old)?;
+        boot::clear_reason(&self.layout.boot);
         self.record
             .set_trial(id, self.policy.attempts)
             .map_err(|_| Status::IO)?;

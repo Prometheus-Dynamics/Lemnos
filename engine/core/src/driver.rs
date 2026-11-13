@@ -73,13 +73,15 @@ impl CallerId {
     pub const LOCAL: Self = Self(0);
 }
 
-/// Who a board device came from: the board file's own list, or a device made for a resource a
-/// `[[each]]` entry found (or one on a bus such a device is).
+/// Where a board device comes from: the board file's own list, or hardware that comes and goes.
+/// A device from a driver package is a board-file device like any other; the board decides
+/// whether it is there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// Named by the board file's `[[devices]]`.
+    /// Named by the board file's `[[devices]]`, on a bus that stays put.
     BuiltIn,
-    /// Made by an `[[each]]` entry, as the resource came and went.
+    /// Made by an `[[each]]` entry for a resource it found, or named on a bus that comes and goes
+    /// (see [`Provider::hotplug`](crate::Provider::hotplug)). Absent is a normal state for it.
     Hotplug,
 }
 
