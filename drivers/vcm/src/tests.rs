@@ -268,3 +268,72 @@ fn describes_the_position() {
     let item = out.find("position").unwrap();
     assert_eq!(item.unit, Unit::One);
 }
+
+#[test]
+fn direction_and_settle_are_unknown_for_every_chip_unless_the_board_says() {
+    for chip in ["dw9714", "dw9807", "dw9817", "ak7375"] {
+        let (mut board, _sim) = board(Layout::Bytes);
+        let mut lens = bind(&mut board, &chip_config(chip)).unwrap();
+        assert_eq!(lens.direction(), Ok(FocusDirection::Unknown), "{chip}");
+        assert_eq!(lens.settle_us(1), Ok(None), "{chip}");
+        assert_eq!(lens.settle_us(1023), Ok(None), "{chip}");
+    }
+}
+
+#[test]
+fn the_board_gives_the_direction_and_one_settle_time_for_every_move() {
+    for (word, expected) in [
+        ("near", FocusDirection::TowardNear),
+        ("Far", FocusDirection::TowardFar),
+        ("unknown", FocusDirection::Unknown),
+    ] {
+        let (mut board, _sim) = board(Layout::Bytes);
+        let mut lens = bind(
+            &mut board,
+            &[
+                ("chip", ConfigValue::Str("dw9807")),
+                ("direction", ConfigValue::Str(word)),
+                ("settle_us", ConfigValue::Int(12_000)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(lens.direction(), Ok(expected), "{word}");
+        assert_eq!(lens.settle_us(0), Ok(Some(12_000)));
+        assert_eq!(lens.settle_us(1023), Ok(Some(12_000)));
+    }
+}
+
+#[test]
+fn a_zero_settle_time_is_a_figure_not_an_unknown() {
+    let (mut board, _sim) = board(Layout::Bytes);
+    let mut lens = bind(
+        &mut board,
+        &[
+            ("chip", ConfigValue::Str("ak7375")),
+            ("settle_us", ConfigValue::Int(0)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(lens.settle_us(5), Ok(Some(0)));
+}
+
+#[test]
+fn a_bad_direction_or_settle_time_is_refused() {
+    let (mut board, _sim) = board(Layout::Bytes);
+    let board = &mut board;
+    let with =
+        |extra: (&'static str, ConfigValue<'static>)| [("chip", ConfigValue::Str("dw9817")), extra];
+    for entry in [
+        ("direction", ConfigValue::Str("sideways")),
+        ("direction", ConfigValue::Int(1)),
+        ("settle_us", ConfigValue::Int(-1)),
+        ("settle_us", ConfigValue::Int(1 << 32)),
+        ("settle_us", ConfigValue::Str("10")),
+    ] {
+        assert_eq!(
+            refused(board, &with(entry)),
+            Some(Status::INVALID_ARGUMENT),
+            "{entry:?}"
+        );
+    }
+}
