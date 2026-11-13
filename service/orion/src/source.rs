@@ -3,15 +3,16 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use lemnos_client::{Client, DeviceEntry, Error};
+use lemnos_client::{Client, DeviceEntry, DeviceState, Error};
 use lemnos_core::ItemKind;
+use lemnos_wire::text::{method_of, shape_name};
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
 use crate::backoff::Backoff;
-use crate::mirror::{DeviceSpec, ItemSpec};
-use crate::values::{self, plain_of};
+use crate::mirror::{ControlSpec, DeviceSpec, ItemSpec, Status};
+use crate::values::{self, Plain, plain_of};
 use crate::{LEMNOSD_NAME, Shared, log};
 
 /// How long one wait for a value lasts. The loop checks for stop and for a lost connection
@@ -20,6 +21,8 @@ const WAIT: Duration = Duration::from_millis(200);
 /// Asks for the fastest period the service grants for an item (its cost floor). With
 /// `only_changes`, the service then sends a reply only when its bytes differ from the last.
 const PERIOD_US: u64 = 1;
+/// How often the list is read while a device has no description.
+const LOOK_AGAIN: Duration = Duration::from_secs(1);
 /// The largest reply lemnos-ctl reads. Items reply with a few bytes.
 const REPLY_MAX: usize = 64 * 1024;
 
@@ -41,8 +44,13 @@ pub fn run(socket: &Path, shared: &Shared) {
     let mut backoff = Backoff::new();
     while !shared.stopping() {
         let client = Client::connecting(socket, LEMNOSD_NAME);
-        if let Err(error) = session(&client, shared, &mut backoff) {
-            log(&format!("lemnosd: {error}; retrying"));
+        match session(&client, shared, &mut backoff) {
+            // A device that could not be described is running now: read every device again
+            // on a fresh connection. The list the mirror holds stays until the new one
+            // replaces it.
+            Ok(Ended::Undescribed) => continue,
+            Ok(Ended::Stopped) => {}
+            Err(error) => log(&format!("lemnosd: {error}; retrying")),
         }
         shared.with(|mirror| {
             if !mirror.is_empty() {
@@ -57,20 +65,43 @@ pub fn run(socket: &Path, shared: &Shared) {
     }
 }
 
+/// How a session ended, when the connection did not.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    Stopped,
+    /// A device that was not described at discovery has started running.
+    Undescribed,
+}
+
 /// One connection's life: discover, then forward values and events until the connection ends.
-fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<(), Error> {
-    let (specs, mut routes) = discover(client)?;
+fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<Ended, Error> {
+    let (specs, mut routes, undescribed) = discover(client)?;
     shared.with(|mirror| mirror.set_devices(specs));
     shared.changed();
     backoff.reset();
     let mut reply = vec![0; REPLY_MAX];
+    let mut looked = Instant::now();
     while !shared.stopping() {
         if !client.is_connected() {
             return Err(Error::Disconnected);
         }
+        // While a device has no description, look at the list now and then too, so one that
+        // starts running is read even if its event is missed.
+        if !undescribed.is_empty() && looked.elapsed() >= LOOK_AGAIN {
+            looked = Instant::now();
+            let running = client.list()?.into_iter().any(|entry| {
+                entry.state == DeviceState::Running && undescribed.contains(&entry.index)
+            });
+            if running {
+                return Ok(Ended::Undescribed);
+            }
+        }
         while let Some(event) = client.next_event() {
+            if event.state == DeviceState::Running && undescribed.contains(&event.device) {
+                return Ok(Ended::Undescribed);
+            }
             shared.with(|mirror| {
-                mirror.set_state(event.device, event.state, event.health, &event.reason);
+                mirror.set_status(event.device, event.state, event.health, &event.reason);
             });
             shared.changed();
         }
@@ -98,7 +129,7 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<()
             }
         }
     }
-    Ok(())
+    Ok(Ended::Stopped)
 }
 
 /// Every device lemnosd has, with the value items that can be published and a route for each.
@@ -106,20 +137,26 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<()
 /// Only a failure to list the devices, or a lost connection, fails the whole discovery. Any
 /// other error on one device or item leaves that item out and logs why, so one bad device does
 /// not hold back the rest.
-fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>), Error> {
+/// The indexes of devices that could not be described come back too: lemnosd describes only a
+/// running device, and one that starts running later is read again.
+#[allow(clippy::type_complexity)]
+fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>, Vec<u32>), Error> {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
+    let mut undescribed = Vec::new();
     for entry in client.list()? {
         let position = specs.len();
         let mut items = Vec::new();
+        let mut controls = Vec::new();
         match client.describe(entry.index) {
             Ok(description) => {
+                controls = controls_of(&description);
                 for item in description
                     .items
                     .iter()
                     .filter(|item| item.kind == ItemKind::Value)
                 {
-                    let Some((tag, method)) = plan(&description, item) else {
+                    let Some((tag, method, plain)) = plan(&description, item) else {
                         log(&format!(
                             "{}: {} has no plain value; not published",
                             entry.name, item.name
@@ -142,6 +179,7 @@ fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>), E
                             items.push(ItemSpec {
                                 name: item.name.clone(),
                                 unit: item.unit.clone(),
+                                plain,
                             });
                         }
                         Err(error) if transient(&error) => return Err(error),
@@ -153,34 +191,65 @@ fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>), E
                 }
             }
             Err(error) if transient(&error) => return Err(error),
-            Err(error) => log(&format!("{}: not described: {error}", entry.name)),
+            Err(error) => {
+                log(&format!("{}: not described: {error}", entry.name));
+                undescribed.push(entry.index);
+            }
         }
         specs.push(DeviceSpec {
             index: entry.index,
             name: entry.name,
             driver: entry.driver,
             tags: entry.tags,
-            state: entry.state,
-            health: entry.health,
-            reason: entry.reason,
+            status: Status {
+                state: entry.state,
+                health: entry.health,
+                reason: entry.reason,
+            },
             items,
+            controls,
         });
     }
-    Ok((specs, routes))
+    Ok((specs, routes, undescribed))
 }
 
-/// The contract tag and method that read a value item, when the item can be published: a
-/// reader takes no arguments, has no out-buffer, and replies with a number or a flag.
+/// The contract tag and method that read a value item, and what it publishes as, when the
+/// item can be published: a reader takes no arguments, has no out-buffer, and replies with a
+/// number or a flag.
 fn plan<'a>(
     description: &'a DeviceDescription,
     item: &OwnedItem,
-) -> Option<(&'a str, &'a OwnedMethod)> {
+) -> Option<(&'a str, &'a OwnedMethod, Plain)> {
     let contract = description.contracts.get(usize::from(item.contract))?;
     let method = contract.methods.iter().find(|m| m.id == item.method)?;
-    let plain = method.params.is_empty()
-        && !method.has_out_buffer
-        && plain_of(&method.returns, item.field.as_deref()).is_some();
-    plain.then_some((contract.tag.as_str(), method))
+    if !method.params.is_empty() || method.has_out_buffer {
+        return None;
+    }
+    let plain = plain_of(&method.returns, item.field.as_deref())?;
+    Some((contract.tag.as_str(), method, plain))
+}
+
+/// The items a caller drives: controls and actions, each with what it takes. An item whose
+/// method the device does not have is left out.
+fn controls_of(description: &DeviceDescription) -> Vec<ControlSpec> {
+    description
+        .items
+        .iter()
+        .filter(|item| item.kind != ItemKind::Value)
+        .filter_map(|item| {
+            let (_, method) = method_of(description, item).ok()?;
+            let takes = method
+                .params
+                .iter()
+                .map(|param| shape_name(&param.shape))
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(ControlSpec {
+                name: item.name.clone(),
+                takes,
+            })
+        })
+        .collect()
 }
 
 fn subscribe(
@@ -269,7 +338,7 @@ mod tests {
         let description = description();
         let planned = |name: &str| {
             let item = description.items.iter().find(|i| i.name == name).unwrap();
-            plan(&description, item).map(|(tag, method)| (tag.to_owned(), method.id))
+            plan(&description, item).map(|(tag, method, _)| (tag.to_owned(), method.id))
         };
         assert_eq!(planned("count"), Some(("example.thing/1".to_owned(), 1)));
         assert_eq!(planned("x"), Some(("example.thing/1".to_owned(), 5)));
@@ -284,6 +353,18 @@ mod tests {
             planned("whole"),
             None,
             "a record with no field has no plain value"
+        );
+    }
+
+    #[test]
+    fn controls_are_listed_with_what_they_take() {
+        let controls = controls_of(&description());
+        assert_eq!(
+            controls,
+            [ControlSpec {
+                name: "target".to_owned(),
+                takes: "u32".to_owned(),
+            }]
         );
     }
 

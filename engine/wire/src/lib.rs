@@ -14,6 +14,8 @@
 #[cfg(feature = "protocol")]
 mod protocol;
 pub mod ring;
+#[cfg(feature = "protocol")]
+pub mod text;
 
 #[cfg(feature = "protocol")]
 pub use protocol::*;

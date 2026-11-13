@@ -1,16 +1,15 @@
 //! `lemnos-ctl`: everything it knows about a device comes from that device's
 //! description, so it works on devices nobody has written tooling for.
 
-mod shape;
-
 use std::io::Write;
 use std::time::Duration;
 
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::ItemKind;
+use lemnos_wire::text::{
+    encode_args, find_item, find_method, method_of, render, render_reply, shape_name,
+};
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
-
-use shape::{encode_args, render, shape_name};
 
 pub const USAGE: &str = "\
 lemnos-ctl [--socket PATH] COMMAND
@@ -388,7 +387,7 @@ impl Tool<'_> {
         let args = encode_args(&method.params, values)?;
         let reply = self.invoke(name, &description, contract, method, &args)?;
         if method.returns != OwnedShape::Unit {
-            let value = render(&method.returns, method.has_out_buffer, &reply, &bare_item())?;
+            let value = render_reply(method, &reply)?;
             line(self.out, format_args!("{value}"))?;
         }
         Ok(())
@@ -398,66 +397,4 @@ impl Tool<'_> {
         let device = self.device(name)?;
         self.client.set_power(device.index, on).map_err(text)
     }
-}
-
-fn bare_item() -> OwnedItem {
-    OwnedItem {
-        kind: ItemKind::Value,
-        name: String::new(),
-        unit: String::new(),
-        exponent: 0,
-        min: None,
-        max: None,
-        contract: 0,
-        method: 0,
-        field: None,
-    }
-}
-
-fn find_item<'a>(
-    description: &'a DeviceDescription,
-    wanted: &str,
-) -> Result<&'a OwnedItem, String> {
-    description
-        .items
-        .iter()
-        .find(|i| i.name == wanted)
-        .ok_or_else(|| format!("no item {wanted:?}"))
-}
-
-fn method_of<'a>(
-    description: &'a DeviceDescription,
-    item: &OwnedItem,
-) -> Result<(usize, &'a OwnedMethod), String> {
-    let contract = usize::from(item.contract);
-    description
-        .contracts
-        .get(contract)
-        .and_then(|c| c.methods.iter().find(|m| m.id == item.method))
-        .map(|m| (contract, m))
-        .ok_or_else(|| format!("{} names a method the device doesn't have", item.name))
-}
-
-fn find_method<'a>(
-    description: &'a DeviceDescription,
-    wanted: &str,
-) -> Result<(usize, &'a OwnedMethod), String> {
-    let (tag, name) = wanted
-        .rsplit_once(':')
-        .map_or((None, wanted), |(tag, name)| (Some(tag), name));
-    let mut found = description.contracts.iter().enumerate().flat_map(|(i, c)| {
-        c.methods
-            .iter()
-            .filter(move |m| m.name == name && tag.is_none_or(|t| t == c.tag))
-            .map(move |m| (i, m))
-    });
-    let first = found
-        .next()
-        .ok_or_else(|| format!("no method {wanted:?}"))?;
-    if found.next().is_some() {
-        return Err(format!(
-            "{name:?} is in more than one contract; use TAG:{name}"
-        ));
-    }
-    Ok(first)
 }
