@@ -103,6 +103,25 @@ Neither side trusts the ring. Each value is read once and checked.
   memory.
 - A consumer that closes its connection gives up every stream it held.
 
+## Giving a stream back
+
+A consumer gives a stream back with `close_stream`, or by dropping it. Dropping a stream the
+consumer never closed does the same: its close is queued in the client, and sent with the client's
+next request. Nothing waits for that close. The next open of the same stream on the same client
+sends the close first, so it is never refused for a stream the client already let go.
+
+When the service ends a stream it does the following, however the consumer went:
+
+- the buffers the consumer still held go back to the free pool, and nothing it held is kept;
+- the ring is marked closed, so a consumer that is still reading it sees the stream has ended;
+- until a consumer attaches again, each frame the producer publishes is counted as dropped, and
+  `stream_stats` reports `attached` as false. A driver learns the consumer is gone from those
+  counts and from its own `publish` results, not from a callback.
+
+A second open while a consumer still holds the stream is refused with `BUSY` straight away. An
+open that the service doesn't answer fails with `TimedOut` once the client's deadline passes (five
+seconds by default, `set_timeout` changes it); it never waits without one.
+
 ## In a program
 
 `lemnos-client` opens a stream with `open_stream`, or `open_stream_writable` for one the consumer

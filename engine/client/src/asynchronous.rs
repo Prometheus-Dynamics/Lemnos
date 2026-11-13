@@ -197,6 +197,7 @@ impl AsyncClient {
 
     /// See [`Session::close_stream`].
     pub async fn close_stream(&mut self, stream: FrameStream) -> Result<(), Error> {
+        stream.release_hold();
         self.settle().await?;
         let (id, pick) = self.session.op_close_stream(&stream)?;
         self.wait(id, pick).await

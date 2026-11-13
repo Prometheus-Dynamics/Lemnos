@@ -219,6 +219,27 @@ fn the_rust_wrapper_works_through_the_surface() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A stream the wrapper's handle drops without a close is closed by that drop, so the next open of
+/// the same stream on the same client succeeds.
+#[test]
+fn a_stream_dropped_without_a_close_is_closed_for_the_next_open() {
+    let streams = stream_service();
+    let producing = Producing::start(&streams);
+    let client = Client::connect(
+        streams.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    drop(client.open_stream(0, "frames", false).unwrap());
+    let again = client
+        .open_stream(0, "frames", false)
+        .expect("the dropped stream was closed");
+    assert!(again.info().is_ok());
+    drop(again);
+    producing.stop();
+}
+
 #[test]
 fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
     let streams = stream_service();

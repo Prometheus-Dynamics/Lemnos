@@ -16,6 +16,7 @@ mod asynchronous;
 mod client;
 mod connection;
 mod error;
+mod holds;
 mod session;
 mod stream;
 mod values;

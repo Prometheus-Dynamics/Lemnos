@@ -77,7 +77,9 @@ What a client can do:
   [protocol](wire.md) says.
 - **`subscribe`, `next_value`**: the daemon reads a method at a period and sends each value.
 - **`set_power`**: off and on.
-- **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md).
+- **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). `close_stream`
+  gives it back; dropping it does the same, with the close sent on the client's next request. Closing
+  the client gives up every stream it holds.
 - **`packages`**: what became of the daemon's driver packages.
 - **`next_event`**: a device changed state or health.
 
@@ -108,7 +110,7 @@ function, struct and code is there with its rule.
 | `lemnos_set_power` | Off and on |
 | `lemnos_item_count`, `lemnos_item_info`, `lemnos_item_text` | What a device says about itself |
 | `lemnos_package_list`, `lemnos_package_info`, `lemnos_package_text` | What became of the daemon's driver packages |
-| `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only or `LEMNOS_STREAM_WRITABLE`, and give it back |
+| `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only or `LEMNOS_STREAM_WRITABLE`, and give it back. Waits for the service's answer, up to the client's timeout. `lemnos_client_close` gives up every stream still open |
 | `lemnos_stream_next_frame`, `lemnos_stream_release` | Take the next frame, read in place, and give its buffer back |
 | `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |
 | `lemnos_stream_buffer_handle` | A new descriptor of a buffer's own dma-buf, to hand to a GPU or an encoder |
@@ -118,7 +120,8 @@ where the call says so. Output structs start with their own size. Text comes bac
 callback or into a buffer the caller gives. A panic inside the library comes back as a status and
 never unwinds into C.
 
-A stream works as it does in the Rust client. `lemnos_stream_next_frame` gives the frame's bytes
+A stream works as it does in the Rust client. The Rust wrapper's stream is closed when it is dropped; a C program closes its stream with `lemnos_stream_close`, or gives every stream up with
+`lemnos_client_close`. `lemnos_stream_next_frame` gives the frame's bytes
 in place, valid until the frame is released, and allocates nothing. On a stream of dma-bufs
 (`LEMNOS_STREAM_BUFFER_HANDLES` in its info) each buffer has its own descriptor, and
 `lemnos_stream_buffer_handle` gives the caller a new one to close when done. A stream of shared

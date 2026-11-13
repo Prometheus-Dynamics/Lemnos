@@ -13,6 +13,7 @@ use lemnos_wire::{
 
 use crate::connection::{Connection, Taker};
 use crate::error::Error;
+use crate::holds::{Hold, Holds};
 use crate::stream::{FrameStream, StreamPlatform};
 use crate::values::ValueQueue;
 
@@ -228,8 +229,11 @@ struct Shared {
     host: String,
     /// What the service said it can do, in its Welcome.
     features: u64,
-    /// A request whose answer nobody waits for: giving back a stream that couldn't be set up.
-    unheard: Option<u32>,
+    /// Requests whose answers nobody waits for: giving back a stream that couldn't be set up, and
+    /// closing a stream that was dropped.
+    unheard: Vec<u32>,
+    /// The streams this session holds, and the closes owed for dropped ones.
+    holds: Arc<Holds>,
     rejected: Option<Error>,
     close: bool,
 }
@@ -281,8 +285,8 @@ impl Shared {
     /// on to whoever is waiting.
     fn route(&mut self, frame: Frame<'_>, tx: &mut Vec<u8>) -> bool {
         match frame {
-            Frame::Reply { id, .. } | Frame::Refusal { id, .. } if self.unheard == Some(id) => {
-                self.unheard = None;
+            Frame::Reply { id, .. } | Frame::Refusal { id, .. } if self.unheard.contains(&id) => {
+                self.unheard.retain(|&unheard| unheard != id);
                 false
             }
             Frame::Welcome {
@@ -474,7 +478,8 @@ impl Session {
                 events: VecDeque::new(),
                 host: String::new(),
                 features: 0,
-                unheard: None,
+                unheard: Vec::new(),
+                holds: Arc::new(Holds::default()),
                 rejected: None,
                 close: false,
             },
@@ -531,7 +536,7 @@ impl Session {
         self.connection = None;
         self.shared.ready = false;
         self.shared.features = 0;
-        self.shared.unheard = None;
+        self.shared.unheard.clear();
         self.shared.close = false;
         self.generation += 1;
         for sub in &mut self.shared.subs {
@@ -628,6 +633,7 @@ impl Session {
     ) -> usize {
         self.try_connect();
         self.retry_subscriptions();
+        self.send_closing();
         let Some(connection) = self.connection.as_mut() else {
             if let Some(wait) = wait {
                 let pause = wait
@@ -716,10 +722,37 @@ impl Session {
         }
     }
 
+    /// Sends the closes owed for streams dropped since the last write, on this connection. Nothing
+    /// waits for them: their answers are absorbed when they come. A close owed for a connection
+    /// that has since ended is dropped, since the service released that stream when it ended.
+    fn send_closing(&mut self) {
+        if !self.shared.ready {
+            return;
+        }
+        for close in self.shared.holds.take_closing() {
+            if close.generation != self.generation {
+                continue;
+            }
+            let id = self.shared.id();
+            let frame = Frame::StreamClose {
+                id,
+                device: close.device,
+                name: &close.name,
+            };
+            let Some(connection) = self.connection.as_mut() else {
+                return;
+            };
+            if append(&frame, &mut connection.tx).is_ok() {
+                self.shared.unheard.push(id);
+            }
+        }
+    }
+
     fn queue(&mut self, frame: &Frame<'_>) -> Result<(), Error> {
         if !self.shared.ready {
             return Err(Error::Disconnected);
         }
+        self.send_closing();
         let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
         if connection.unsent() > MAX_QUEUED_BYTES {
             return Err(Error::Full);
@@ -1347,7 +1380,10 @@ impl Session {
         if built.is_err() {
             self.give_back(device, name);
         }
-        built
+        built.map(|stream| {
+            let token = self.shared.holds.register(self.generation, device, name);
+            stream.with_hold(Hold::new(Arc::clone(&self.shared.holds), token))
+        })
     }
 
     /// Gives back a stream the service handed over and this side couldn't set up, so it isn't
@@ -1355,7 +1391,7 @@ impl Session {
     fn give_back(&mut self, device: u32, name: &str) {
         let id = self.shared.id();
         if self.queue(&Frame::StreamClose { id, device, name }).is_ok() {
-            self.shared.unheard = Some(id);
+            self.shared.unheard.push(id);
             if let Some(connection) = self.connection.as_mut() {
                 let _ = connection.flush();
             }
@@ -1376,8 +1412,11 @@ impl Session {
     }
 
     /// Gives a stream back. The host can then give it to someone else. Dropping a [`FrameStream`]
-    /// without this holds it until the connection ends.
+    /// without this does the same: its close is sent with this session's next write, and nothing
+    /// waits for it.
     pub fn close_stream(&mut self, stream: FrameStream) -> Result<(), Error> {
+        // Released first: the close is sent below, and no second one is owed when this drops.
+        stream.release_hold();
         self.settle()?;
         let (id, pick) = self.op_close_stream(&stream)?;
         self.wait(id, pick)
