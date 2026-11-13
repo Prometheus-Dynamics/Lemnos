@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 
-use lemnos_contract_camera_receiver::Counters;
+use lemnos_contract_camera_receiver::{Counters, FrameStarts};
 use lemnos_core::{Result, Status};
 use lemnos_driver_rp1_csi2_sys::{self as sys, Node, Start, Stream, StreamParams, UNPACK16};
 
@@ -64,6 +64,9 @@ pub trait Hardware: Send {
     fn check(&mut self) -> Result<()>;
     /// The module's counters since the last start.
     fn counters(&mut self) -> Result<Counters>;
+    /// The frame-start count since the last start, or `None` while nothing is streaming (not
+    /// started, or stopped): unknown, and not a count of zero.
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
 }
 
 /// Where the block is.
@@ -273,6 +276,23 @@ impl Hardware for LinuxHardware {
             errors: info.errors,
         })
     }
+
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        let read = self.node()?.frame_starts();
+        let fs = match read {
+            Ok(fs) => fs,
+            // A module without the ioctl can't count its frame starts: that is the receiver's
+            // fact, not a failed read.
+            Err(e) if e.raw_os_error() == Some(libc_errno::ENOTTY) => {
+                return Err(Status::NOT_SUPPORTED);
+            }
+            Err(e) => return Err(self.node_error(e)),
+        };
+        Ok((fs.valid != 0).then_some(FrameStarts {
+            count: fs.frames,
+            latest_ns: fs.latest_ns,
+        }))
+    }
 }
 
 /// The errnos the module answers a buffer's memory with (`kernel/lemnos.h`).
@@ -281,6 +301,7 @@ mod libc_errno {
     pub const EBUSY: i32 = 16;
     pub const ENODEV: i32 = 19;
     pub const EINVAL: i32 = 22;
+    pub const ENOTTY: i32 = 25;
 }
 
 #[cfg(test)]

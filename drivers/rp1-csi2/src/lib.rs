@@ -49,6 +49,15 @@
 //! restart: `start` opens the node, makes the module's stream, gives it the buffers the driver
 //! holds, and starts the block from nothing.
 //!
+//! Frame starts. `frame_starts` reads the kernel's count of the block's frame starts since `start`,
+//! with the time of the latest one (CLOCK_MONOTONIC). A start is counted when the block raises its
+//! interrupt for it, whether or not a buffer was armed (then the frame is dropped), so a published
+//! frame's sequence is the count at its start, less one, as the frame stream numbers it. A block
+//! with no buffer address raises no interrupt, and such a start is in no count (measured on the
+//! board: `testing/board-runs/D5.md`): the count is the sensor's starts only while every start
+//! shows. The count is unknown (`None`) before `start` and after `stop`. A recovery restart is a new
+//! start: the count begins again at zero, so a read lower than the one before means a restart.
+//!
 //! Failures. While streaming, every millisecond the driver moves finished frames and returned
 //! buffers, and every second it reads the module's state. A stream that has ended or faulted, or
 //! a receiver that has stopped, starts recovery: the next ticks stop what's left, make a new
@@ -440,13 +449,18 @@ impl CameraReceiver for Rp1Csi2 {
         Ok(0)
     }
 
-    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
-    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
-    /// Not counted yet: the frame-start count is not wired in this driver.
+    /// The frame starts the block has counted since `start`, as the kernel's count: `None` before
+    /// `start` and after `stop`, where nothing is counted and nothing is zero. Counted in the
+    /// kernel (`LEMNOS_RP1_CSI2_IOC_FRAME_STARTS`), so a read is the block's own count.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
-        Err(Status::NOT_SUPPORTED)
+        if self.state == State::Stopped {
+            return Ok(None);
+        }
+        self.hw.frame_starts()
     }
 
+    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
+    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }

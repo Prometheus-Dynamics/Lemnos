@@ -105,6 +105,20 @@ static struct lemnos_rp1_csi2_info info(void)
 	return i;
 }
 
+static struct lemnos_rp1_csi2_frame_starts frame_starts(void)
+{
+	struct lemnos_rp1_csi2_frame_starts fs;
+
+	memset(&fs, 0xff, sizeof(fs));
+	CHECK(!ioctl(ctl, LEMNOS_RP1_CSI2_IOC_FRAME_STARTS, &fs), "FRAME_STARTS");
+	return fs;
+}
+
+static uint64_t mono_ns(const struct timespec *t)
+{
+	return (uint64_t)t->tv_sec * 1000000000u + (uint64_t)t->tv_nsec;
+}
+
 static struct tcsi_regs peek(void)
 {
 	struct tcsi_regs r;
@@ -400,6 +414,48 @@ static void test_frames(int pool_fd)
 }
 
 /*
+ * The frame-start count: not valid before START and after STOP; since START it
+ * counts the starts, and the latest one's time is CLOCK_MONOTONIC at its own
+ * start. A published frame's sequence is the count at its start, less one.
+ */
+static void test_frame_starts(int pool_fd)
+{
+	struct stream s;
+	struct frame f;
+	struct lemnos_rp1_csi2_start a;
+	struct lemnos_rp1_csi2_frame_starts fs;
+	struct timespec t0, t1;
+
+	CHECK(!stream_open(&s, pool_fd), "stream made");
+	fs = frame_starts();
+	CHECK(!fs.valid && fs.frames == 0 && fs.latest_ns == 0,
+	      "before START the count is not valid (valid %u)", fs.valid);
+	a = good_start(s.fd);
+	CHECK(!start(&a), "START");
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == 0 && fs.latest_ns == 0,
+	      "after START the count is valid and empty (valid %u frames %llu)", fs.valid,
+	      (unsigned long long)fs.frames);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	fire(TCSI_FS);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == 1, "one start counted (frames %llu)",
+	      (unsigned long long)fs.frames);
+	CHECK(fs.latest_ns >= mono_ns(&t0) && fs.latest_ns <= mono_ns(&t1),
+	      "its time is between the CLOCK_MONOTONIC reads around it (%llu)",
+	      (unsigned long long)fs.latest_ns);
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f) && f.sequence == fs.frames - 1,
+	      "the frame's sequence is the count less one (sequence %llu)",
+	      (unsigned long long)f.sequence);
+	CHECK(!stop(), "STOP");
+	fs = frame_starts();
+	CHECK(!fs.valid, "after STOP the count is not valid");
+	stream_close(&s);
+}
+
+/*
  * A frame cut short: its frame start and end came, but the channel wrote one
  * line of it (seen on the board when a start catches a frame mid-way). It is
  * a frame gone wrong, not published; the next whole frame is.
@@ -485,6 +541,9 @@ static void test_jobs(int pool_fd)
 	struct lemnos_rp1_csi2_start a;
 	struct lemnos_stream_job job = { .identity = 0xabc, .buffer = 2, .count = 0 };
 	struct lemnos_rp1_csi2_info i;
+	struct lemnos_rp1_csi2_frame_starts fs;
+	struct timespec t0, t1;
+	uint64_t bad;
 
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	post(&s, &job);
@@ -500,10 +559,18 @@ static void test_jobs(int pool_fd)
 	      (unsigned long long)f.identity);
 
 	/* The stream is job-driven now: no job, no buffer armed for this start. */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	fire(TCSI_FS);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
 	i = info();
 	CHECK(i.dropped == 1, "a frame start with no job is dropped (%llu)",
 	      (unsigned long long)i.dropped);
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == i.frames, "the count names the dropped start (%llu)",
+	      (unsigned long long)fs.frames);
+	CHECK(fs.latest_ns >= mono_ns(&t0) && fs.latest_ns <= mono_ns(&t1),
+	      "the latest start is the dropped one, at its own time (%llu)",
+	      (unsigned long long)fs.latest_ns);
 
 	/* A job whose frame goes wrong comes back with 0 bytes, identity intact. */
 	give_back(&s, f.buffer, f.fence);
@@ -511,10 +578,14 @@ static void test_jobs(int pool_fd)
 	post(&s, &job);
 	fire(TCSI_FE_ACK);	/* that frame end (no buffer) lets the job be armed */
 	fire(TCSI_FS);
+	bad = frame_starts().frames;	/* the frame on buffer 3 started at this count */
 	fire(TCSI_FS);		/* a second start: the frame on buffer 3 went wrong */
 	CHECK(pop_frame(&s, &f) && f.buffer == 3 && f.bytes == 0 && f.identity == 0xdef,
 	      "a bad frame on a job comes back with 0 bytes (buffer %u bytes %u identity %llx)",
 	      f.buffer, f.bytes, (unsigned long long)f.identity);
+	CHECK(f.sequence == bad - 1,
+	      "and its sequence is its own start's, one below the count (%llu, count %llu)",
+	      (unsigned long long)f.sequence, (unsigned long long)bad);
 
 	stream_close(&s);
 }
@@ -971,6 +1042,7 @@ int main(int argc, char **argv)
 	CHECK(!stream_open(&s, pool_fd), "a stream can be made and dropped untouched");
 	stream_close(&s);
 	test_frames(pool_fd);
+	test_frame_starts(pool_fd);
 	test_short_frame(pool_fd);
 	test_hostile_hw(pool_fd);
 	test_jobs(pool_fd);

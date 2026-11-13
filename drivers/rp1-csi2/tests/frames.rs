@@ -16,7 +16,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex};
 
-use lemnos_contract_camera_receiver::{CameraReceiver, Counters, LinkConfig, Packing};
+use lemnos_contract_camera_receiver::{CameraReceiver, Counters, FrameStarts, LinkConfig, Packing};
 use lemnos_core::{CallerId, Health, Lifecycle, Result, Status, StreamHandle};
 use lemnos_driver_rp1_csi2::relay::Set;
 use lemnos_driver_rp1_csi2::{Finished, Hardware, Rp1Csi2, StartParams};
@@ -168,9 +168,16 @@ struct Block {
     going: bool,
     frame_bytes: u32,
     cursor: usize,
-    sequence: u64,
-    /// The frame being written: its buffer and the address the block was armed with.
-    writing: Option<(u32, u64)>,
+    /// Frame starts counted since the block was started, as the kernel counts them: a start
+    /// is counted when the block has an address to show it, armed or not. The latest one's time
+    /// is the count times 1000 ns (the stand-in's clock).
+    starts: u64,
+    /// Whether the block has had a buffer's address since it was started: until then it raises
+    /// no frame start the kernel can count (measured on the board, `testing/board-runs/D5.md`).
+    addressed: bool,
+    /// The frame being written: its buffer, the address the block was armed with, and its
+    /// sequence, which is its own start's count less one.
+    writing: Option<(u32, u64, u64)>,
     finished: VecDeque<Finished>,
     /// Memory given, counting swaps.
     given: u32,
@@ -185,28 +192,41 @@ struct Block {
 impl Block {
     /// A frame starts: the block is armed with the next free buffer that has memory.
     fn begin_frame(&mut self) -> bool {
-        if !self.going || self.writing.is_some() {
+        if !self.going {
             return false;
         }
         let count = self.buffers.len();
-        for step in 0..count {
-            let index = (self.cursor + step) % count;
-            let buffer = &mut self.buffers[index];
-            if let (Where::Free, Some(memory)) = (buffer.at, &buffer.memory) {
-                buffer.at = Where::Block;
-                self.writing = Some((index as u32, memory.addr));
-                self.cursor = (index + 1) % count;
-                return true;
-            }
+        let free = (0..count)
+            .map(|step| (self.cursor + step) % count)
+            .find(|&index| {
+                let buffer = &self.buffers[index];
+                matches!((buffer.at, &buffer.memory), (Where::Free, Some(_)))
+            });
+        // With no address yet, the block raises no frame start: nothing is counted.
+        if free.is_none() && !self.addressed {
+            return false;
         }
-        false
+        // Otherwise every start is counted, a dropped one and one during a frame included.
+        let sequence = self.starts;
+        self.starts += 1;
+        if self.writing.is_some() {
+            return false;
+        }
+        let Some(index) = free else {
+            return false;
+        };
+        let buffer = &mut self.buffers[index];
+        buffer.at = Where::Block;
+        let addr = buffer.memory.as_ref().map_or(0, |m| m.addr);
+        self.writing = Some((index as u32, addr, sequence));
+        self.cursor = (index + 1) % count;
+        self.addressed = true;
+        true
     }
 
     /// The frame ends: the block has written it at the address it was armed with.
     fn end_frame(&mut self) -> Option<u32> {
-        let (index, addr) = self.writing.take()?;
-        let sequence = self.sequence;
-        self.sequence += 1;
+        let (index, addr, sequence) = self.writing.take()?;
         let data = image(sequence);
         let wrote = self
             .buffers
@@ -286,8 +306,22 @@ impl Hardware for Hw {
     }
 
     fn go(&mut self) -> Result<()> {
-        self.with(|b| b.going = true);
+        // START: the count begins again.
+        self.with(|b| {
+            b.going = true;
+            b.starts = 0;
+            b.addressed = b.buffers.iter().any(|buffer| buffer.memory.is_some());
+        });
         Ok(())
+    }
+
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Ok(self.with(|b| {
+            b.going.then_some(FrameStarts {
+                count: b.starts,
+                latest_ns: if b.starts == 0 { 0 } else { b.starts * 1000 },
+            })
+        }))
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -469,10 +503,15 @@ fn a_buffer_the_consumer_holds_is_not_filled_again() {
         assert_eq!(frame.sequence, sequence);
         held.push(frame);
     }
-    // The consumer has all four: the block has nowhere to write.
+    // The consumer has all four: the block has nowhere to write, and that start is dropped.
     assert_eq!(hw.with(Block::frame), None);
     now = receiver.tick(now).unwrap();
     assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert_eq!(
+        receiver.frame_starts().unwrap().map(|fs| fs.count),
+        Some(5),
+        "the dropped start is counted"
+    );
     for frame in &held {
         assert!(
             frames.read(frame.buffer) == image(frame.sequence),
@@ -486,8 +525,9 @@ fn a_buffer_the_consumer_holds_is_not_filled_again() {
     assert_eq!(hw.with(Block::frame), Some(back.buffer));
     receiver.tick(now).unwrap();
     let frame = frames.ring.pop_frame().unwrap().expect("a frame");
-    assert_eq!((frame.buffer, frame.sequence), (back.buffer, 4));
-    assert!(frames.read(frame.buffer) == image(4));
+    // Five starts so far, the dropped one among them: this frame's start is the sixth.
+    assert_eq!((frame.buffer, frame.sequence), (back.buffer, 5));
+    assert!(frames.read(frame.buffer) == image(5));
     assert_eq!(hw.with(|b| (b.stray, b.bad_returns)), (0, 0));
 }
 

@@ -272,9 +272,12 @@ static void lrc_set_buffer(struct lrc_dev *l, const struct lem_stream_slot *slot
  * channel stops, on the high-priority queue so a busy CPU delays it least. A
  * stream's own error is not retried: the stream is over.
  *
- * The frames that start while nothing is armed are never seen here: no frame
- * start, no sequence number, no drop counted. The stock driver is the same.
- * Only the time between the frame starts on either side shows them.
+ * A frame start is counted when the channel raises its interrupt for it
+ * (lrc_isr, lrc_sof), whether or not a buffer is armed for it: with none armed
+ * it is a drop. A channel with no buffer address raises no interrupt, so a start
+ * then is in no count and has no sequence number; the board showed that
+ * (testing/board-runs/D5.md, "Nothing armed, nothing seen"), and the stock driver
+ * is the same. The count is therefore the starts the channel showed.
  */
 static void lrc_arm(struct lrc_dev *l)
 {
@@ -307,15 +310,16 @@ static void lrc_retry(struct work_struct *work)
 static void lrc_sof(struct lrc_dev *l, u64 now)
 {
 	if (l->cur.valid) {		/* a start before the last frame's end */
-		lem_stream_complete(l->stream, &l->cur.slot, 0, l->frames, l->fs_ns);
+		/* The cut frame's start was counted at l->frames: its sequence is one below. */
+		lem_stream_complete(l->stream, &l->cur.slot, 0, l->frames - 1, l->fs_ns);
 		l->errors++;
 		l->cur.valid = false;
 	}
 	l->cur = l->next;
 	l->next.valid = false;
-	if (l->cur.valid)
-		l->fs_ns = now;
-	else
+	/* The latest start, armed or not: LEMNOS_RP1_CSI2_IOC_FRAME_STARTS names it. */
+	l->fs_ns = now;
+	if (!l->cur.valid)
 		l->dropped++;
 	l->frames++;
 	l->fs_int = true;
@@ -558,6 +562,7 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	l->stream = stream;
 	l->cur.valid = l->next.valid = false;
 	l->frames = l->written = l->dropped = l->errors = 0;
+	l->fs_ns = 0;
 	l->fs_int = l->fe_int = false;
 	l->fe_line = 0;		/* the line count is cleared below */
 	spin_unlock_irqrestore(&l->lock, flags);
@@ -656,6 +661,28 @@ static long lrc_info(struct lrc_dev *l, void __user *arg)
 	return copy_to_user(arg, &info, sizeof(info)) ? -EFAULT : 0;
 }
 
+/*
+ * The frame-start count since START and the latest start's time, read together
+ * under the frame path's lock. `valid` is zero when the receiver isn't streaming:
+ * then the count isn't one since START and must not be read as zero.
+ */
+static long lrc_frame_starts(struct lrc_dev *l, void __user *arg)
+{
+	struct lemnos_rp1_csi2_frame_starts fs = {};
+	unsigned long flags;
+
+	mutex_lock(&l->ctl);
+	spin_lock_irqsave(&l->lock, flags);
+	fs.valid = l->streaming;
+	if (fs.valid) {
+		fs.frames = l->frames;
+		fs.latest_ns = l->fs_ns;
+	}
+	spin_unlock_irqrestore(&l->lock, flags);
+	mutex_unlock(&l->ctl);
+	return copy_to_user(arg, &fs, sizeof(fs)) ? -EFAULT : 0;
+}
+
 /* Runs lem_stream_create without l->ctl: see the locking note above. */
 static long lrc_stream_create(struct lrc_dev *l, void __user *arg)
 {
@@ -682,6 +709,8 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case LEMNOS_RP1_CSI2_IOC_INFO:
 		return lrc_info(l, uarg);
+	case LEMNOS_RP1_CSI2_IOC_FRAME_STARTS:
+		return lrc_frame_starts(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_STREAM_CREATE:
 		return lrc_stream_create(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_START: {
