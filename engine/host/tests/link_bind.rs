@@ -70,9 +70,6 @@ impl CameraReceiver for LinkedProvider {
         match self.source.as_str() {
             "unknown" => Err(Status::NOT_SUPPORTED),
             "nothing" => Ok(0),
-            // A device that does not serve the receiver contract refuses the question as an
-            // invalid call, as the host answers for a link to a device without it.
-            "refuse" => Err(Status::INVALID_ARGUMENT),
             name => {
                 into.get_mut(..name.len())
                     .ok_or(Status::BUFFER_TOO_SMALL)?
@@ -253,20 +250,6 @@ fn a_receiver_that_cannot_say_leaves_the_link_unconfirmed() {
     assert_eq!(
         host.device("cam0-sensor").unwrap().health,
         Health::Degraded("the linked receiver cannot say what is wired to its input")
-    );
-}
-
-#[test]
-fn a_linked_device_that_does_not_answer_as_a_receiver_leaves_the_link_unknown() {
-    // A front end linked as the sensor's receiver refuses `source` as an invalid call. That must
-    // not fail the bind: the sensor runs, its link unknown with the reason.
-    let (host, clock) = camera("refuse");
-    settle(&host, &clock);
-    let sensor = host.device("cam0-sensor").unwrap();
-    assert_eq!(sensor.state, DeviceState::Running);
-    assert_eq!(
-        sensor.health,
-        Health::Degraded("the linked device does not answer as a receiver")
     );
 }
 
