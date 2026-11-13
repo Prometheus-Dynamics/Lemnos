@@ -158,7 +158,7 @@ fn frames_arrive_in_order_with_contents_and_identities_over_many_cycles() {
         assert!(produce(&mut source, &mut producer), "frame {sequence}");
         let frame = consumer.pop_frame().unwrap().unwrap();
         assert_eq!(frame.sequence, sequence);
-        assert_eq!(frame.identity, SimFrameSource::identity(sequence));
+        assert_eq!(frame.identity, 0);
         assert_eq!(frame.timestamp_ns, sequence * 1000);
         assert_eq!(frame.bytes as usize, FRAME_BYTES);
         assert!(consumer.read(frame.buffer, 0, &mut read));

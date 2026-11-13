@@ -136,6 +136,10 @@ typedef struct LemnosStreamRegion {
     uint64_t tail_bytes;     /* slack past the payload for an importer: 0 today */
 } LemnosStreamRegion;
 
+/* sequence is the frame counter: the producer's frames from its start, numbered 0, 1, 2, ... The
+ * consumer numbers and checks frames by it. identity is what the producer names the frame by: the job
+ * identity a block's job carried back, or 0 for a producer that takes no job (a camera receiver, on
+ * hardware and in the simulator). Lemnos does not read identity; do not use it as a frame number. */
 typedef struct LemnosFrame {
     uint32_t struct_size;
     uint32_t buffer;
