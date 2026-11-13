@@ -99,7 +99,7 @@ buffer_bytes = 1048576         # the size of each
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:fe980000.usb" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "interface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\n" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "function ffs\ninterface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\nfunction ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\nfunction acm\n" }
 
 [devices.streams.data]
 buffers = 8

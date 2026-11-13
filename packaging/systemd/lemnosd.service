@@ -52,6 +52,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# The gadget's UDC attribute, written by the daemon after the drop (service/lemnosd/src/gadget.rs).
+# Missing on a board without a gadget: the dash makes that fine. Not verified on a board yet.
+ReadWritePaths=-/sys/kernel/config/usb_gadget
 # Not PrivateDevices=: the device nodes are the daemon's whole job. Not PrivateNetwork=: the
 # kernel's uevent socket is the host network namespace's.
 ProtectKernelTunables=yes

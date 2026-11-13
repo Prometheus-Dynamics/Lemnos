@@ -30,7 +30,7 @@
 //! The set has the configuration at full speed and at high speed, one language (US English,
 //! 0x0409) and USB 2.0 as its version. Class descriptors have no line here.
 
-use lemnos_hal::usb_descriptors::UsbDescriptors;
+use lemnos_hal::usb_descriptors::{GadgetFunction, UsbDescriptors};
 
 /// The most bytes a built descriptor set may come to.
 pub const MAX_SET: usize = 1024;
@@ -42,6 +42,8 @@ pub const MAX_ISO_BYTES: u16 = 1023;
 pub const MAX_ISO_INTERVAL_MS: u16 = 4096;
 /// The most endpoints: a device has 15 endpoint numbers besides 0.
 pub const MAX_ENDPOINTS: usize = 15;
+/// The most functions a gadget's configuration has: FunctionFS, NCM and ACM, one each.
+pub const MAX_FUNCTIONS: usize = 3;
 /// The most bytes of UTF-8 a name may have, so its descriptor fits one length byte whatever it
 /// holds.
 pub const MAX_NAME: usize = 63;
@@ -83,6 +85,9 @@ pub enum Fault {
     Power,
     /// The set is over [`MAX_SET`] bytes.
     TooLong,
+    /// A `function` line that is not `ffs`, `ncm host=MAC device=MAC` or `acm`, that lists a
+    /// function twice, or that makes more than [`MAX_FUNCTIONS`]; by its number from 1.
+    Function(usize),
 }
 
 /// A descriptor set, built.
@@ -167,6 +172,37 @@ struct Layout<'a> {
     interface_count: usize,
     endpoints: [Option<Endpoint>; MAX_ENDPOINTS],
     endpoint_count: usize,
+    functions: [Option<GadgetFunction>; MAX_FUNCTIONS],
+    function_count: usize,
+}
+
+/// The functions of a gadget's configuration, in the order its `function` lines list them.
+/// Without a `function ffs` line the FunctionFS function comes first, as the one every gadget
+/// has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Functions {
+    items: [GadgetFunction; MAX_FUNCTIONS],
+    len: usize,
+}
+
+impl Functions {
+    pub fn as_slice(&self) -> &[GadgetFunction] {
+        &self.items[..self.len]
+    }
+}
+
+/// A MAC address from `aa:bb:cc:dd:ee:ff`, unicast (the low bit of the first octet clear).
+fn mac(word: &str) -> Option<[u8; 6]> {
+    let mut octets = [0u8; 6];
+    let mut parts = word.split(':');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.len() != 2 {
+            return None;
+        }
+        *octet = u8::from_str_radix(part, 16).ok()?;
+    }
+    (parts.next().is_none() && octets[0] & 1 == 0).then_some(octets)
 }
 
 fn number(word: Option<&str>) -> Option<u32> {
@@ -192,6 +228,8 @@ impl<'a> Layout<'a> {
             interface_count: 0,
             endpoints: [None; MAX_ENDPOINTS],
             endpoint_count: 0,
+            functions: [None; MAX_FUNCTIONS],
+            function_count: 0,
         };
         for (at, line) in text.lines().enumerate() {
             let line_number = at + 1;
@@ -202,6 +240,7 @@ impl<'a> Layout<'a> {
                 "interface" => layout.interface(rest.trim(), line_number)?,
                 "alternate" => layout.alternate(rest.trim(), line_number)?,
                 "endpoint" => layout.endpoint(rest, line_number)?,
+                "function" => layout.function(rest.trim(), line_number)?,
                 _ => return Err(Fault::Line(line_number)),
             }
         }
@@ -317,6 +356,54 @@ impl<'a> Layout<'a> {
         Ok(())
     }
 
+    fn function(&mut self, rest: &str, line: usize) -> Result<(), Fault> {
+        let bad = Fault::Function(line);
+        let (kind, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let mut words = args.split_whitespace();
+        let function = match kind {
+            "ffs" => GadgetFunction::Ffs,
+            "acm" => GadgetFunction::Acm,
+            "ncm" => {
+                // `host=MAC device=MAC`, in either order, each once.
+                let (mut host, mut device) = (None, None);
+                for word in words.by_ref() {
+                    match word.split_once('=') {
+                        Some(("host", value)) if host.is_none() => host = mac(value),
+                        Some(("device", value)) if device.is_none() => device = mac(value),
+                        _ => return Err(bad),
+                    }
+                }
+                let (host, device) = (host.ok_or(bad)?, device.ok_or(bad)?);
+                if host == device {
+                    return Err(bad);
+                }
+                return self.push(GadgetFunction::Ncm { host, device }, line);
+            }
+            _ => return Err(bad),
+        };
+        if words.next().is_some() {
+            return Err(bad);
+        }
+        self.push(function, line)
+    }
+
+    fn push(&mut self, function: GadgetFunction, line: usize) -> Result<(), Fault> {
+        let bad = Fault::Function(line);
+        let kind = |f: &GadgetFunction| core::mem::discriminant(f);
+        let listed = self.functions().any(|f| kind(&f) == kind(&function));
+        if listed {
+            return Err(bad);
+        }
+        let slot = self.functions.get_mut(self.function_count).ok_or(bad)?;
+        *slot = Some(function);
+        self.function_count += 1;
+        Ok(())
+    }
+
+    fn functions(&self) -> impl Iterator<Item = GadgetFunction> + '_ {
+        self.functions.iter().flatten().copied()
+    }
+
     fn interfaces(&self) -> impl Iterator<Item = (usize, Interface<'a>)> + '_ {
         self.interfaces.iter().flatten().copied().enumerate()
     }
@@ -326,6 +413,24 @@ impl<'a> Layout<'a> {
 /// 2^(n-1) microframes of 125 us, so 1 ms is 4 and each doubling adds one.
 fn high_speed_interval(ms: u8) -> u8 {
     4 + ms.ilog2() as u8
+}
+
+/// The functions `interfaces` lists, in order. FunctionFS is first unless a `function ffs` line
+/// places it.
+pub fn functions(interfaces: &str) -> Result<Functions, Fault> {
+    let layout = Layout::parse(interfaces)?;
+    let mut items = [GadgetFunction::Ffs; MAX_FUNCTIONS];
+    let mut len = 0;
+    let listed: [Option<GadgetFunction>; MAX_FUNCTIONS] = layout.functions;
+    if !layout.functions().any(|f| f == GadgetFunction::Ffs) {
+        items[0] = GadgetFunction::Ffs;
+        len = 1;
+    }
+    for function in listed.iter().flatten() {
+        items[len] = *function;
+        len += 1;
+    }
+    Ok(Functions { items, len })
 }
 
 /// The set for `identity` with the interfaces `interfaces` describes.

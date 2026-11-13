@@ -361,7 +361,7 @@ buffer_bytes = 1048576         # the size of each
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:fe980000.usb" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "interface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\n" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "function ffs\ninterface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\nfunction ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\nfunction acm\n" }
 
 [devices.streams.data]
 buffers = 8
@@ -449,6 +449,16 @@ config = { frame_bytes = 1048576 }
 buffers = 4
 buffer_bytes = 1048576
 ```
+
+The gadget's `interfaces` text lists its functions in configfs link order, one per line: `function ffs`
+(the FunctionFS link the daemon serves; the default, first, when no line names it), `function ncm
+host=MAC device=MAC` (a CDC network function; both MACs unicast and different), and `function acm`
+(a serial console, `ttyGS0` for the first). The `interface`, `alternate` and `endpoint` lines
+describe the FunctionFS function. Each kind is listed at most once. The MACs are the board's own.
+Deriving them from the board serial is not in yet (see `TODO.md`).
+
+The gadget's configfs tree and FunctionFS mount are made by the daemon in its root phase, before it
+drops to user `lemnos` (see `packaging/README.md`). The daemon then binds the gadget and serves ep0.
 
 The simulated board accepts it. Devices whose buses it does not have are listed as retrying:
 

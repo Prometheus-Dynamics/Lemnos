@@ -41,6 +41,10 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
+- [ ] **Gadget MAC derivation** (R1): `function ncm derive`, a NCM address stable from the board
+      serial, is not in the board format yet. It waits for the identity library (P1) to be on `next`,
+      and is then a call into it. Until then the NCM addresses are the board file's own `host=` and
+      `device=` values.
 - [ ] **Two libraries with no contract driver**, rechecked against the public sources on
       2026-11-11:
   - `drivers/k230-ai2d`: the block's job registers are in no public source. The SDK kernel's

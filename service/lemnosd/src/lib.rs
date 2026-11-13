@@ -10,6 +10,7 @@ pub mod builtin;
 mod clock;
 mod conn;
 mod events;
+pub mod gadget;
 mod notify;
 pub mod packages;
 pub mod privilege;

@@ -1,54 +1,61 @@
-//! This board as a USB device ([`UsbFunction`]) on Linux: a gadget made in configfs with one
-//! FunctionFS function, by the name a board file uses: `udc:NAME`, where `NAME` is the USB
-//! device controller as `/sys/class/udc` lists it (`udc:fe980000.usb`). The controller is
-//! always named. With several on a board nothing here picks one.
+//! This board as a USB device ([`UsbFunction`]) on Linux: one gadget in configfs, made by the
+//! privileged setup ([`prepare`]) and attached by the daemon ([`FunctionFsGadget`]).
 //!
-//! Untested on board.
+//! Untested on board: the checks are `testing/board-runs/R1.md`.
 //!
-//! # What the board's image sets up
+//! # Who does what
 //!
-//! configfs makes a FunctionFS instance when its function directory is made, and the instance
-//! can only be mounted after that. Neither is done here: mounting is the image's business. For
-//! the controller `NAME`, before the daemon starts:
+//! configfs and mounts need root, and the daemon runs as the `lemnos` user. So the two halves
+//! split at the gadget's configuration:
 //!
-//! ```text
-//! mkdir -p /sys/kernel/config/usb_gadget/lemnos-NAME/functions/ffs.NAME
-//! mkdir -p /dev/usb-ffs/NAME
-//! mount -t functionfs NAME /dev/usb-ffs/NAME
-//! ```
+//! - [`prepare`], run as root in the daemon's root phase (`lemnosd`, before it drops to the
+//!   `lemnos` user; see `service/lemnosd/src/gadget.rs`), makes the
+//!   gadget `lemnos-NAME` in configfs: its identity and strings, configuration `c.1`, and the
+//!   functions in the order the board file lists them. The FunctionFS function `ffs.NAME` is
+//!   mounted at `/dev/usb-ffs/NAME` with the daemon's uid and gid. The CDC network function
+//!   `ncm.usb0` and the serial function `acm.GS0` (the console, `ttyGS0` for the first one)
+//!   are configfs only. Last, it gives the daemon the `UDC` attribute: owned by its uid and gid,
+//!   mode 0600. Nothing is bound.
+//! - [`FunctionFsGadget::enable`], in the daemon, takes ep0 and writes the FunctionFS
+//!   descriptors and strings to it, opens the endpoint files, and then writes the controller's
+//!   name to `UDC`. The daemon never makes or removes a configfs directory.
 //!
-//! (with `libcomposite` and `usb_f_fs` loaded and configfs mounted at `/sys/kernel/config`).
-//! When the function directory or the mount is missing, [`UsbFunction::enable`] fails with
-//! `NotFound` and changes nothing.
+//! The order is fixed by FunctionFS: a FunctionFS function does not bind until its descriptors
+//! are written to ep0, so the gadget binds only at the last step, after them.
 //!
-//! # What `enable` does
+//! # What [`prepare`] writes
 //!
-//! Inside `usb_gadget/lemnos-NAME`, from the descriptor set
-//! ([`lemnos_hal::usb_descriptors`]) it is given:
+//! Inside `usb_gadget/lemnos-NAME`, from the descriptor set ([`lemnos_hal::usb_descriptors`]):
 //!
-//! 1. Removes what an earlier run left: the controller binding, every configuration and every
-//!    strings directory. The gadget is this code's own, by its name.
+//! 1. Unbinds the controller, then removes what an earlier setup left: every configuration,
+//!    its links and strings, the gadget's strings, the function directories and the mount.
 //! 2. Writes the device descriptor's fields to `idVendor`, `idProduct`, `bcdDevice`, `bcdUSB`,
 //!    `bDeviceClass`, `bDeviceSubClass`, `bDeviceProtocol` and `bMaxPacketSize0`, and the
 //!    highest speed the set has a configuration for to `max_speed` where the kernel has that
 //!    attribute (5.12 on).
-//! 3. Makes `strings/0xLANG` and writes `manufacturer`, `product` and `serialnumber`, for the
-//!    strings the device descriptor names.
+//! 3. Makes `strings/0xLANG` and writes `manufacturer`, `product` and `serialnumber`.
 //! 4. Makes `configs/c.N` (`N` is `bConfigurationValue`), writes `MaxPower` (in mA) and
-//!    `bmAttributes`, and the configuration's name to `configs/c.N/strings/0xLANG/configuration`
-//!    if it has one.
-//! 5. Links `functions/ffs.NAME` into the configuration.
-//! 6. Opens `ep0` in the mount and writes the FunctionFS descriptors (the interface, endpoint
+//!    `bmAttributes`, and the configuration's name.
+//! 5. Walks the board file's functions in order: `ffs` makes `functions/ffs.NAME` and mounts
+//!    FunctionFS on it with `uid=`, `gid=`, `rmode=0500` and `fmode=0600`; `ncm` makes
+//!    `functions/ncm.usb0` with `host_addr` and `dev_addr`; `acm` makes `functions/acm.GS0`.
+//! 6. Links each function into `configs/c.N`, in the same order.
+//! 7. Gives `UDC` to the owner, mode 0600.
+//!
+//! # What the daemon does in [`FunctionFsGadget::enable`]
+//!
+//! 1. Checks the controller, the function directory and `ep0` are there (`NotFound` and
+//!    nothing touched otherwise).
+//! 2. Writes `UDC` as empty, in case an earlier run left the gadget bound.
+//! 3. Opens `ep0` in the mount and writes the FunctionFS descriptors (the interface, endpoint
 //!    and class descriptors of each speed) and strings (the whole string table, so a string
 //!    index means the same as in the set).
-//! 7. Opens the endpoint files, which FunctionFS names by the addresses in the descriptors.
-//! 8. Writes the controller's name to `UDC`, which connects.
+//! 4. Opens the endpoint files, which FunctionFS names by the addresses in the descriptors.
+//! 5. Writes the controller's name to `UDC`, which connects.
 //!
 //! A failure at any step undoes the steps before it. [`UsbFunction::disable`] and dropping the
-//! function undo all of it, in the order configfs needs: unbind, close the files, unlink the
-//! function, remove the configuration's strings, the configuration, the gadget's strings. The
-//! gadget directory and its function directory stay: they are the image's, and the mount needs
-//! them.
+//! function unbind the controller and close the files. Nothing is taken apart: the gadget is
+//! the setup's, and the next setup replaces it.
 //!
 //! # What Linux decides
 //!
@@ -90,11 +97,14 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent, iso_interval_bytes};
-use lemnos_hal::usb_descriptors::{self, CONFIGURATION_LEN, INTERFACE, UsbDescriptors};
+use lemnos_hal::usb_descriptors::{
+    self, CONFIGURATION_LEN, GadgetFunction, INTERFACE, UsbDescriptors,
+};
 use lemnos_hal::{ErrorKind, UsbFunction};
 use lemnos_linux_sys::aio;
 use lemnos_linux_sys::functionfs::{self, Endpoint, Ep0, Event, Setup};
@@ -328,15 +338,66 @@ fn directories(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The owner the setup gives the FunctionFS mount and the gadget's `UDC` attribute: the
+/// daemon's user and group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// The mounts the setup makes. The system's are [`SystemMounts`]; a test records them.
+pub trait Mounts {
+    /// Mounts FunctionFS at `target` with `options`, as `f_fs.c` parses them.
+    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()>;
+    /// Unmounts `target`. Nothing mounted there is an error.
+    fn unmount(&mut self, target: &Path) -> io::Result<()>;
+}
+
+/// The system's mounts: `mount(2)` and `umount2(2)`, as root.
+pub struct SystemMounts;
+
+impl Mounts for SystemMounts {
+    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()> {
+        lemnos_linux_sys::mount::functionfs(target, options)
+    }
+
+    fn unmount(&mut self, target: &Path) -> io::Result<()> {
+        lemnos_linux_sys::mount::unmount(target)
+    }
+}
+
+/// The function directories the setup makes, by the name configfs gives each.
+const NCM_DIR: &str = "ncm.usb0";
+const ACM_DIR: &str = "acm.GS0";
+
+fn invalid(kind: ErrorKind) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("{kind:?}"))
+}
+
+fn mac_text(mac: &[u8; 6]) -> String {
+    let octets: Vec<String> = mac.iter().map(|octet| format!("{octet:02x}")).collect();
+    octets.join(":")
+}
+
 impl Paths {
     fn function(&self) -> PathBuf {
         self.gadget.join("functions").join(self.function_name())
     }
 
-    /// Whether the controller and what the image sets up are all there: the function
-    /// directory in the gadget, and `ep0` in the mount.
-    fn ready(&self) -> bool {
-        self.udc.exists() && self.function().is_dir() && self.mount.join("ep0").exists()
+    /// Whether the controller and what the setup made are all there: the FunctionFS function,
+    /// linked into configuration `configuration`, and `ep0` in the mount. A link only the setup
+    /// makes is what says the setup ran.
+    fn ready(&self, configuration: &str) -> bool {
+        let link = self
+            .gadget
+            .join("configs")
+            .join(configuration)
+            .join(self.function_name());
+        self.udc.exists()
+            && self.function().is_dir()
+            && fs::symlink_metadata(link).is_ok()
+            && self.mount.join("ep0").exists()
     }
 
     /// Takes the gadget off its controller. The attribute exists in configfs; it is not made
@@ -351,15 +412,8 @@ impl Paths {
         }
     }
 
-    /// Unbinds and removes everything `build` makes, whether this run made it or an earlier
-    /// one left it.
-    fn clear(&self) {
-        self.unbind();
-        self.dismantle();
-    }
-
-    /// Removes every configuration and strings directory of the gadget. Never fails: what
-    /// isn't there is already gone.
+    /// Removes every configuration and strings directory of the gadget, and the links in them.
+    /// Never fails: what isn't there is already gone. Setup only.
     fn dismantle(&self) {
         for configuration in directories(&self.gadget.join("configs")) {
             // The functions linked in, then the strings, then the configuration.
@@ -383,41 +437,134 @@ impl Paths {
         }
     }
 
-    /// Steps 2 to 8 of the module docs. On an error the caller clears. A piece that went
-    /// missing since `ready` looked is `ENOENT` from the step that needs it.
-    fn build(&self, plan: &Plan) -> io::Result<FfsWire> {
-        let function = self.function();
-        for (file, value) in &plan.identity {
-            attribute(&self.gadget, file, value)?;
+    /// Removes the function directories the setup makes. Setup only, after the configurations
+    /// are gone and the FunctionFS mount is unmounted.
+    fn remove_functions(&self) {
+        for name in [self.function_name().as_str(), NCM_DIR, ACM_DIR] {
+            remove_dir(&self.gadget.join("functions").join(name));
         }
-        // Kernels before 5.12 have no `max_speed`; they run at what the controller offers.
-        if let Ok(mut speed) = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(self.gadget.join("max_speed"))
-        {
-            speed.write_all(format!("{}\n", plan.max_speed).as_bytes())?;
+    }
+}
+
+/// Where the setup finds the system's parts: configfs (`/sys/kernel/config`), the directory of
+/// FunctionFS mount points (`/dev/usb-ffs`) and the controllers (`/sys/class/udc`).
+#[derive(Debug, Clone, Copy)]
+pub struct Roots<'a> {
+    pub configfs: &'a Path,
+    pub mounts: &'a Path,
+    pub udc_class: &'a Path,
+}
+
+/// What the privileged setup does, in the order of the module docs. Runs as root, once before
+/// the daemon, from the same settings the daemon's driver reads: `descriptors` is the set
+/// [`lemnos_hal::usb_descriptors`] checks, and `functions` the board file's functions in order.
+/// `udc_name` is the `NAME` of `udc:NAME`.
+///
+/// Nothing is bound. A failure leaves whatever it made, and the next setup removes it.
+pub fn prepare(
+    roots: &Roots<'_>,
+    udc_name: &str,
+    owner: Owner,
+    descriptors: &[u8],
+    functions: &[GadgetFunction],
+    system: &mut dyn Mounts,
+) -> io::Result<()> {
+    let Roots {
+        configfs,
+        mounts,
+        udc_class,
+    } = *roots;
+    let need = format!("{PREFIX}{udc_name}");
+    let name = controller(&need).ok_or_else(|| invalid(ErrorKind::InvalidInput))?;
+    let paths = Paths {
+        gadget: configfs.join("usb_gadget").join(format!("lemnos-{name}")),
+        mount: mounts.join(name),
+        udc: udc_class.join(name),
+        name: name.to_string(),
+    };
+    let plan = Plan::of(&UsbDescriptors::parse(descriptors).map_err(invalid)?).map_err(invalid)?;
+    if !paths.udc.exists() {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
+    }
+    paths.unbind();
+    paths.dismantle();
+    // `unmount` of a point that isn't mounted fails, which is the state a fresh image is in.
+    let _ = system.unmount(&paths.mount);
+    paths.remove_functions();
+
+    fs::create_dir_all(&paths.gadget)?;
+    for (file, value) in &plan.identity {
+        attribute(&paths.gadget, file, value)?;
+    }
+    // Kernels before 5.12 have no `max_speed`; they run at what the controller offers.
+    if let Ok(mut speed) = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(paths.gadget.join("max_speed"))
+    {
+        speed.write_all(format!("{}\n", plan.max_speed).as_bytes())?;
+    }
+    if let Some(language) = &plan.language
+        && !plan.strings.is_empty()
+    {
+        let strings = paths.gadget.join("strings").join(language);
+        fs::create_dir_all(&strings)?;
+        for (file, value) in &plan.strings {
+            attribute(&strings, file, value)?;
         }
-        if let Some(language) = &plan.language
-            && !plan.strings.is_empty()
-        {
-            let strings = self.gadget.join("strings").join(language);
-            fs::create_dir_all(&strings)?;
-            for (file, value) in &plan.strings {
-                attribute(&strings, file, value)?;
+    }
+    let configuration = paths.gadget.join("configs").join(&plan.configuration);
+    fs::create_dir_all(&configuration)?;
+    attribute(&configuration, "MaxPower", &plan.max_power)?;
+    attribute(&configuration, "bmAttributes", &plan.attributes)?;
+    if let (Some(language), Some(name)) = (&plan.language, &plan.configuration_name) {
+        let strings = configuration.join("strings").join(language);
+        fs::create_dir_all(&strings)?;
+        attribute(&strings, "configuration", name)?;
+    }
+
+    // The functions, each made in configfs, FunctionFS last of the three for its mount.
+    let functions_dir = paths.gadget.join("functions");
+    let mut links = Vec::with_capacity(functions.len());
+    for function in functions {
+        match function {
+            GadgetFunction::Ffs => {
+                let dir = paths.function();
+                fs::create_dir(&dir)?;
+                fs::create_dir_all(&paths.mount)?;
+                let options = format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
+                system.functionfs(&paths.mount, &options)?;
+                links.push(paths.function_name());
+            }
+            GadgetFunction::Ncm { host, device } => {
+                let dir = functions_dir.join(NCM_DIR);
+                fs::create_dir(&dir)?;
+                attribute(&dir, "host_addr", &mac_text(host))?;
+                attribute(&dir, "dev_addr", &mac_text(device))?;
+                links.push(NCM_DIR.to_string());
+            }
+            GadgetFunction::Acm => {
+                fs::create_dir(functions_dir.join(ACM_DIR))?;
+                links.push(ACM_DIR.to_string());
             }
         }
-        let configuration = self.gadget.join("configs").join(&plan.configuration);
-        fs::create_dir_all(&configuration)?;
-        attribute(&configuration, "MaxPower", &plan.max_power)?;
-        attribute(&configuration, "bmAttributes", &plan.attributes)?;
-        if let (Some(language), Some(name)) = (&plan.language, &plan.configuration_name) {
-            let strings = configuration.join("strings").join(language);
-            fs::create_dir_all(&strings)?;
-            attribute(&strings, "configuration", name)?;
-        }
-        std::os::unix::fs::symlink(&function, configuration.join(self.function_name()))?;
+    }
+    for name in &links {
+        std::os::unix::fs::symlink(functions_dir.join(name), configuration.join(name))?;
+    }
 
+    // The daemon writes the controller's name here, and nothing else in the gadget.
+    let udc = paths.gadget.join("UDC");
+    std::os::unix::fs::chown(&udc, Some(owner.uid), Some(owner.gid))?;
+    fs::set_permissions(&udc, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+impl Paths {
+    /// Steps 3 to 5 of the daemon's [`FunctionFsGadget::enable`]: ep0, the endpoint files and
+    /// the bind. On an error the caller unbinds. A piece that went missing since `ready`
+    /// looked is `ENOENT` from the step that needs it.
+    fn attach(&self, plan: &Plan) -> io::Result<FfsWire> {
         let ep0 = Ep0::open(&self.mount.join("ep0"))?;
         ep0.describe(&plan.descriptors, &plan.function_strings)?;
         let mut endpoints = Vec::with_capacity(plan.endpoints.len());
@@ -742,17 +889,17 @@ impl UsbFunction for FunctionFsGadget {
         }
         let plan = Plan::of(&UsbDescriptors::parse(descriptors)?)?;
         // Checked before anything is written, so a board that is not set up stays as it is.
-        if !self.paths.ready() {
+        if !self.paths.ready(&plan.configuration) {
             return Err(ErrorKind::NotFound);
         }
-        self.paths.clear();
-        match self.paths.build(&plan) {
+        self.paths.unbind();
+        match self.paths.attach(&plan) {
             Ok(wire) => {
                 self.session = Some(Session::new(wire, plan.endpoints));
                 Ok(())
             }
             Err(error) => {
-                self.paths.clear();
+                self.paths.unbind();
                 Err(setup_kind(&error))
             }
         }
@@ -760,10 +907,9 @@ impl UsbFunction for FunctionFsGadget {
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
         if self.session.is_some() {
-            // Unbind first, then close the files, then take the gadget apart.
+            // Unbind first, then close the files. The gadget stays as the setup made it.
             self.paths.unbind();
             self.session = None;
-            self.paths.dismantle();
         }
         Ok(())
     }

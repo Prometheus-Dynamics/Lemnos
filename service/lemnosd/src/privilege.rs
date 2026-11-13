@@ -53,10 +53,16 @@ pub struct Step {
 
 /// The privileged start's steps, in order. The first is built in: the socket's directory, owned by
 /// the daemon's user, so the socket is made in it after the drop.
-pub const STEPS: &[Step] = &[Step {
-    name: "runtime directory",
-    run: runtime_directory,
-}];
+pub const STEPS: &[Step] = &[
+    Step {
+        name: "runtime directory",
+        run: runtime_directory,
+    },
+    Step {
+        name: "usb gadget",
+        run: crate::gadget::privileged_step,
+    },
+];
 
 /// Builds the request from `--user` and `--group`, or their environment variables. A group needs a
 /// user.
