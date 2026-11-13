@@ -107,14 +107,24 @@ function, struct and code is there with its rule.
 | `lemnos_subscribe`, `lemnos_unsubscribe`, `lemnos_next_value` | Values at a period |
 | `lemnos_set_power` | Off and on |
 | `lemnos_item_count`, `lemnos_item_info`, `lemnos_item_text` | What a device says about itself |
+| `lemnos_package_list`, `lemnos_package_info`, `lemnos_package_text` | What became of the daemon's driver packages |
+| `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only or `LEMNOS_STREAM_WRITABLE`, and give it back |
+| `lemnos_stream_next_frame`, `lemnos_stream_release` | Take the next frame, read in place, and give its buffer back |
+| `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |
+| `lemnos_stream_buffer_handle` | A new descriptor of a buffer's own dma-buf, to hand to a GPU or an encoder |
 
 Every call returns a status: 0 for success, a negative number for an error, and a positive count
 where the call says so. Output structs start with their own size. Text comes back through a
 callback or into a buffer the caller gives. A panic inside the library comes back as a status and
 never unwinds into C.
 
-The C API has no frame streams and no package list. A C program that needs a stream speaks the
-socket protocol for it.
+A stream works as it does in the Rust client. `lemnos_stream_next_frame` gives the frame's bytes
+in place, valid until the frame is released, and allocates nothing. On a stream of dma-bufs
+(`LEMNOS_STREAM_BUFFER_HANDLES` in its info) each buffer has its own descriptor, and
+`lemnos_stream_buffer_handle` gives the caller a new one to close when done. A stream of shared
+memory has none and answers `-EOPNOTSUPP`. Calls on one stream wait for each other, never for the
+client's other calls, so one thread can wait for frames while another calls methods. The C tests
+(`engine/capi/tests/c/`) run each of these against the daemon on the simulated board.
 
 Install the headers, both libraries and their `pkg-config` files under a prefix:
 

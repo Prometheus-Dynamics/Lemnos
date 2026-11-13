@@ -5,7 +5,10 @@
 #[cfg(not(feature = "shared"))]
 pub(crate) use crate::surface::{
     lemnos_call, lemnos_check_version, lemnos_client_close, lemnos_client_open,
-    lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_subscribe,
+    lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_package_info,
+    lemnos_package_list, lemnos_package_text, lemnos_stream_buffer_handle, lemnos_stream_close,
+    lemnos_stream_info, lemnos_stream_next_frame, lemnos_stream_open, lemnos_stream_post_job,
+    lemnos_stream_read, lemnos_stream_release, lemnos_stream_write, lemnos_subscribe,
 };
 
 #[cfg(feature = "shared")]
@@ -17,7 +20,7 @@ mod shared {
 
     use lemnos_abi::{AbiVersion, Handle, MessageSink, Status};
 
-    use crate::surface::{Subscription, Value};
+    use crate::surface::{Frame, PackageInfo, StreamInfo, Subscription, Value};
 
     // The declarations of include/lemnos.h.
     #[link(name = "liblemnos_capi.so.1", kind = "dylib", modifiers = "+verbatim")]
@@ -73,6 +76,88 @@ mod shared {
             value: *mut Value,
             into: *mut u8,
             capacity: usize,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_package_list(
+            client: Handle,
+            mode: *mut u32,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_package_info(
+            client: Handle,
+            package: u32,
+            info: *mut PackageInfo,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_package_text(
+            client: Handle,
+            package: u32,
+            field: u32,
+            out: *mut c_char,
+            capacity: usize,
+            len: *mut usize,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_open(
+            client: Handle,
+            device: u32,
+            name: *const c_char,
+            flags: u32,
+            stream: *mut Handle,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_info(
+            client: Handle,
+            stream: Handle,
+            info: *mut StreamInfo,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_next_frame(
+            client: Handle,
+            stream: Handle,
+            timeout_ms: u32,
+            frame: *mut Frame,
+            data: *mut *const u8,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) safe fn lemnos_stream_release(
+            client: Handle,
+            stream: Handle,
+            buffer: u32,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_read(
+            client: Handle,
+            stream: Handle,
+            buffer: u32,
+            offset: usize,
+            out: *mut u8,
+            len: usize,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_write(
+            client: Handle,
+            stream: Handle,
+            buffer: u32,
+            offset: usize,
+            data: *const u8,
+            len: usize,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_post_job(
+            client: Handle,
+            stream: Handle,
+            job: *const u8,
+            len: usize,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_buffer_handle(
+            client: Handle,
+            stream: Handle,
+            buffer: u32,
+            fd: *mut i32,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) safe fn lemnos_stream_close(
+            client: Handle,
+            stream: Handle,
             sink: MessageSink,
         ) -> Status;
     }

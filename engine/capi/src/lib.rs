@@ -14,7 +14,7 @@ mod single;
 pub mod surface;
 mod wrapper;
 
-pub use wrapper::{Client, Value};
+pub use wrapper::{Client, Stream, StreamFrame, Value};
 
 #[cfg(test)]
 mod tests;

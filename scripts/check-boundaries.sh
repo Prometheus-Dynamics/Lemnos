@@ -52,9 +52,13 @@ check_tree() (
     failed=1
   }
 
-  # The engine never imports what it hosts.
+  # The engine never imports what it hosts. One exception: the C library is a
+  # client program for C callers, and a client program brings the operating
+  # system's half of a frame stream, backends/linux-stream (docs/streams.md).
   while read -r crate; do
-    if runtime_deps "$crate/Cargo.toml" | grep -Eq 'path *= *"[^"]*(contracts|drivers|backends|service)/'; then
+    if runtime_deps "$crate/Cargo.toml" |
+      if [[ $crate == engine/capi ]]; then grep -v 'path *= *"\.\./\.\./backends/linux-stream"'; else cat; fi |
+      grep -Eq 'path *= *"[^"]*(contracts|drivers|backends|service)/'; then
       fail "$crate depends on contracts, drivers, backends or service"
     fi
   done < <(crates_in engine)

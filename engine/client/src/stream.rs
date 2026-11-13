@@ -136,8 +136,8 @@ pub struct FrameStream {
 enum Pool {
     /// One mapping, a buffer every `stride` bytes.
     Whole(Box<dyn ByteMemory>),
-    /// A mapping per buffer, each from its first byte.
-    Each(Box<[Box<dyn ByteMemory>]>),
+    /// A mapping per buffer, each from its first byte, and the buffer's descriptor.
+    Each(Box<[(Box<dyn ByteMemory>, OwnedFd)]>),
 }
 
 impl Debug for Pool {
@@ -187,9 +187,9 @@ impl FrameStream {
     }
 
     /// Builds the stream from what StreamHandles carried: the ring, the doorbell, then one
-    /// descriptor per buffer. Any failure closes every descriptor. The buffers' descriptors
-    /// close once they are mapped; the mappings keep the memory, and whatever hold on it the
-    /// platform needs to tell the kernel about its accesses.
+    /// descriptor per buffer. Any failure closes every descriptor. Each buffer's descriptor is
+    /// kept beside its mapping, for [`buffer_handle`](Self::buffer_handle), and closes with the
+    /// stream.
     pub(crate) fn with_handles(
         device: u32,
         name: &str,
@@ -215,14 +215,13 @@ impl FrameStream {
         let buffer_bytes = layout.buffer_bytes as usize;
         let mut buffers = Vec::with_capacity(fds.len());
         for fd in fds {
-            buffers.push(
-                platform
-                    .map_buffer(fd.as_fd(), buffer_bytes, writable)
-                    .map_err(|error| match error.kind() {
-                        io::ErrorKind::Unsupported => Error::StreamUnsupported,
-                        _ => failed(error),
-                    })?,
-            );
+            let memory = platform
+                .map_buffer(fd.as_fd(), buffer_bytes, writable)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::Unsupported => Error::StreamUnsupported,
+                    _ => failed(error),
+                })?;
+            buffers.push((memory, fd));
         }
         let ring = Consumer::attach(ring_memory, layout).map_err(Error::Stream)?;
         Ok(Self {
@@ -317,8 +316,26 @@ impl FrameStream {
             }
             Pool::Each(buffers) => buffers
                 .get(frame.buffer as usize)
-                .and_then(|buffer| buffer.bytes().get(..frame.bytes as usize))
+                .and_then(|(buffer, _)| buffer.bytes().get(..frame.bytes as usize))
                 .unwrap_or(&[]),
+        }
+    }
+
+    /// The descriptor of `buffer`, on a stream whose buffers are a descriptor each (dma-bufs),
+    /// for handing the buffer to something else that takes memory that way: a GPU importing a
+    /// frame, an encoder. `None` for a stream of shared memory, whose buffers have no descriptor
+    /// of their own, and for a buffer the stream doesn't have.
+    ///
+    /// The descriptor stays the stream's and closes with it; clone it
+    /// ([`BorrowedFd::try_clone_to_owned`]) to keep the memory past that. Whatever is handed the
+    /// buffer is under the same rule as a write: a frame is the consumer's from when it is taken
+    /// until it is released, and a buffer the consumer fills is its own only until it posts the
+    /// job that names it.
+    #[must_use]
+    pub fn buffer_handle(&self, buffer: u32) -> Option<BorrowedFd<'_>> {
+        match &self.pool {
+            Pool::Whole(_) => None,
+            Pool::Each(buffers) => buffers.get(buffer as usize).map(|(_, fd)| fd.as_fd()),
         }
     }
 
@@ -326,7 +343,7 @@ impl FrameStream {
     fn own_memory(&self, buffer: u32) -> Option<&dyn ByteMemory> {
         match &self.pool {
             Pool::Whole(_) => None,
-            Pool::Each(buffers) => buffers.get(buffer as usize).map(|memory| &**memory),
+            Pool::Each(buffers) => buffers.get(buffer as usize).map(|(memory, _)| &**memory),
         }
     }
 
@@ -358,7 +375,7 @@ impl FrameStream {
             }
             Pool::Each(buffers) => buffers
                 .get(buffer as usize)
-                .map(|memory| (&**memory, offset))
+                .map(|(memory, _)| (&**memory, offset))
                 .ok_or(Error::Stream(RingError::BadBuffer)),
         }
     }

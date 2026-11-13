@@ -67,6 +67,8 @@ fn build_library(name: &str) -> PathBuf {
         "../client/src",
         "../wire/src",
         "../core/src",
+        "../../backends/linux-stream/src",
+        "../../backends/linux-sys/src",
     ] {
         println!("cargo:rerun-if-changed={}", manifest.join(src).display());
     }

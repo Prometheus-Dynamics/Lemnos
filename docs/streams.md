@@ -124,7 +124,9 @@ while let Some(frame) = stream.next_frame(Duration::from_secs(1))? {
 ```
 
 `post_job` posts a job, `write` fills a buffer of a writable stream, `read` reads one back, and
-`try_next` takes a frame without waiting.
+`try_next` takes a frame without waiting. On a stream of dma-bufs, `buffer_handle` gives a buffer's
+own descriptor, for handing the frame to something else that takes memory that way. The
+[C API](client.md#the-c-api) has the same calls.
 
 The daemon's tests run every case on this page against drivers made for the purpose: frames, jobs,
 a consumer that fills buffers, dma-bufs, and each fault.

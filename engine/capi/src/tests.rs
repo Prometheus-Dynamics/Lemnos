@@ -1,11 +1,18 @@
 use core::mem::{offset_of, size_of};
 use std::process::Command;
 
-use crate::surface::{DeviceInfo, ItemInfo, LAYOUT, Subscription, VERSION, Value};
+use crate::surface::{
+    DeviceInfo, Frame, ItemInfo, LAYOUT, PackageInfo, STREAM_BUFFER_HANDLES, STREAM_OPEN,
+    STREAM_WRITABLE, StreamInfo, Subscription, VERSION, Value,
+};
 
 const HEADER: &str = include_str!("../../../include/lemnos.h");
 const EXPORTS: &str = include_str!("../lemnos.exports");
-const SURFACE: &str = include_str!("surface.rs");
+/// The surface's functions, in the order they are declared.
+const SURFACE: [&str; 2] = [
+    include_str!("surface.rs"),
+    include_str!("surface/streams.rs"),
+];
 
 fn define(name: &str) -> &'static str {
     HEADER
@@ -13,6 +20,16 @@ fn define(name: &str) -> &'static str {
         .find_map(|l| l.strip_prefix(&format!("#define {name} ")))
         .unwrap_or_else(|| panic!("{name} in lemnos.h"))
         .trim()
+}
+
+#[test]
+fn the_flag_defines_match() {
+    assert_eq!(define("LEMNOS_STREAM_WRITABLE"), "(1u << 0)");
+    assert_eq!(STREAM_WRITABLE, 1 << 0);
+    assert_eq!(define("LEMNOS_STREAM_BUFFER_HANDLES"), "(1u << 1)");
+    assert_eq!(STREAM_BUFFER_HANDLES, 1 << 1);
+    assert_eq!(define("LEMNOS_STREAM_OPEN"), "(1u << 2)");
+    assert_eq!(STREAM_OPEN, 1 << 2);
 }
 
 #[test]
@@ -53,7 +70,8 @@ fn the_export_list_matches_the_header() {
 #[test]
 fn the_export_list_matches_the_functions() {
     let exported: Vec<&str> = SURFACE
-        .lines()
+        .iter()
+        .flat_map(|file| file.lines())
         .filter_map(|l| l.split("extern \"C\" fn ").nth(1))
         .filter_map(|l| l.split('(').next())
         .collect();
@@ -95,6 +113,28 @@ fn a_c_compiler_agrees_on_every_layout() {
         has_range,
         min,
         max
+    );
+    source += &check!("LemnosPackageInfo", PackageInfo, loaded);
+    source += &check!(
+        "LemnosStreamInfo",
+        StreamInfo,
+        flags,
+        buffers,
+        buffer_bytes,
+        frame_slots,
+        job_slots,
+        job_bytes,
+        reserved
+    );
+    source += &check!(
+        "LemnosFrame",
+        Frame,
+        buffer,
+        len,
+        reserved,
+        sequence,
+        identity,
+        timestamp_ns
     );
     let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

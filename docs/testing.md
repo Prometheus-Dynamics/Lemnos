@@ -63,7 +63,9 @@ LEMNOS_TEST_DMA_HEAP=/dev/dma_heap/system cargo test -p lemnosd --test stream_dm
 
 `scripts/check-boundaries.sh` fails when:
 
-- a crate in `engine/` depends on `contracts/`, `drivers/`, `backends/` or `service/`;
+- a crate in `engine/` depends on `contracts/`, `drivers/`, `backends/` or `service/` (except the C
+  library on `backends/linux-stream`, the operating system's half of a frame stream, which a client
+  program brings);
 - a type, module or file in `engine/` or `service/` is named after a kind of hardware;
 - `unsafe` appears outside `engine/abi`, `engine/capi`, `engine/measure`, `backends/linux-sys` and
   `drivers/*-sys`, or a crate drops the workspace lints that forbid it;
