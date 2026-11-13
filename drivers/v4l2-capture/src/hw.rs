@@ -264,6 +264,40 @@ fn granted(format: &Format) -> Result<Granted> {
     })
 }
 
+/// The two calls `LinuxHardware::open` makes on the node. [`VideoDevice`] is the real one; the
+/// call-order test gives a recorder instead, so the order is pinned without a device.
+pub(crate) trait CaptureNode {
+    /// `VIDIOC_S_INPUT`.
+    fn set_input(&self, index: u32) -> lemnos_v4l2::Result<()>;
+    /// `VIDIOC_S_FMT`: returns what the node chose.
+    fn set_format(&self, buf_type: BufType, format: &Format) -> lemnos_v4l2::Result<Format>;
+}
+
+impl CaptureNode for VideoDevice {
+    fn set_input(&self, index: u32) -> lemnos_v4l2::Result<()> {
+        VideoDevice::set_input(self, index)
+    }
+
+    fn set_format(&self, buf_type: BufType, format: &Format) -> lemnos_v4l2::Result<Format> {
+        VideoDevice::set_format(self, buf_type, format)
+    }
+}
+
+/// The node setup after the receiver's own [`Prepare`] call: the input first, when the receiver
+/// names one, then the format. A kernel driver may set up its pipeline in `VIDIOC_S_INPUT`, and the
+/// format is only valid on that pipeline. If the input is refused, the format is not set.
+pub(crate) fn select_and_negotiate(
+    node: &dyn CaptureNode,
+    wanted: &Wanted,
+    buf_type: BufType,
+    format: &Format,
+) -> Result<Format> {
+    if let Some(input) = wanted.input {
+        node.set_input(input).map_err(|e| status(&e))?;
+    }
+    node.set_format(buf_type, format).map_err(|e| status(&e))
+}
+
 impl Hardware for LinuxHardware {
     fn open(&mut self, wanted: &Wanted) -> Result<Granted> {
         let video = self.find()?.video.clone();
@@ -278,10 +312,6 @@ impl Hardware for LinuxHardware {
         };
         if let Some(prepare) = &self.prepare {
             prepare(dev.as_fd(), wanted)?;
-        }
-        // A kernel driver that sets up its pipeline here needs this before the format.
-        if let Some(input) = wanted.input {
-            dev.set_input(input).map_err(|e| status(&e))?;
         }
         let format = if buf_type.is_multiplanar() {
             Format::Multi(PixFormatMplane {
@@ -306,7 +336,7 @@ impl Hardware for LinuxHardware {
                 ..Default::default()
             })
         };
-        let chosen = dev.set_format(buf_type, &format).map_err(|e| status(&e))?;
+        let chosen = select_and_negotiate(&dev, wanted, buf_type, &format)?;
         let granted = granted(&chosen)?;
         self.granted = Some(granted);
         self.opened = Some((dev, buf_type));
@@ -415,7 +445,76 @@ impl Hardware for LinuxHardware {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    /// Records the calls in order; `refuse_input` makes `VIDIOC_S_INPUT` fail.
+    #[derive(Default)]
+    struct Recorder {
+        calls: RefCell<Vec<String>>,
+        refuse_input: bool,
+    }
+
+    impl CaptureNode for Recorder {
+        fn set_input(&self, index: u32) -> lemnos_v4l2::Result<()> {
+            self.calls.borrow_mut().push(format!("input {index}"));
+            if self.refuse_input {
+                return Err(Error::Ioctl {
+                    name: "VIDIOC_S_INPUT",
+                    errno: 22,
+                });
+            }
+            Ok(())
+        }
+
+        fn set_format(&self, _: BufType, _: &Format) -> lemnos_v4l2::Result<Format> {
+            self.calls.borrow_mut().push("format".to_string());
+            Ok(Format::Single(PixFormat::default()))
+        }
+    }
+
+    fn wanted(input: Option<u32>) -> Wanted {
+        Wanted {
+            input,
+            fourcc: FourCc::new(b"NV12"),
+            width: 64,
+            height: 32,
+            stride: 64,
+            size: 3072,
+            mode: 0,
+        }
+    }
+
+    #[test]
+    fn the_input_is_selected_before_the_format_is_set() {
+        let node = Recorder::default();
+        let format = Format::Single(PixFormat::default());
+        select_and_negotiate(&node, &wanted(Some(2)), BufType::VideoCapture, &format).unwrap();
+        // The order the sunxi-vin pipeline needs: S_INPUT, then S_FMT.
+        assert_eq!(*node.calls.borrow(), ["input 2", "format"]);
+    }
+
+    #[test]
+    fn no_input_named_means_no_input_call() {
+        let node = Recorder::default();
+        let format = Format::Single(PixFormat::default());
+        select_and_negotiate(&node, &wanted(None), BufType::VideoCapture, &format).unwrap();
+        assert_eq!(*node.calls.borrow(), ["format"]);
+    }
+
+    #[test]
+    fn a_refused_input_stops_before_the_format() {
+        let node = Recorder {
+            refuse_input: true,
+            ..Recorder::default()
+        };
+        let format = Format::Single(PixFormat::default());
+        let err = select_and_negotiate(&node, &wanted(Some(7)), BufType::VideoCapture, &format);
+        assert!(err.is_err());
+        // The format is never set on a pipeline the input did not select.
+        assert_eq!(*node.calls.borrow(), ["input 7"]);
+    }
 
     #[test]
     fn a_kernel_error_becomes_the_status_a_caller_can_act_on() {

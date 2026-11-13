@@ -175,6 +175,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E8.md`](../testing/board-runs/E8.md) | `rkcif`: graph names, routing, frames, recovery |
 | [`E9.md`](../testing/board-runs/E9.md) | `rkisp`: graph, sizes, parameters taken, statistics, both paths |
 | [`E12.md`](../testing/board-runs/E12.md) | `sunxi-vin`: layout, 3000 frames, a stall, recovery |
+| [`U2c.md`](../testing/board-runs/U2c.md) | Not run yet: `sunxi-vin` selects its input before the format, and the input's name and kind via `VIDIOC_ENUMINPUT` |
 | [`E13.md`](../testing/board-runs/E13.md) | `isp600`: request numbers, statistics size, regions, an address refused |
 | [`U3.md`](../testing/board-runs/U3.md) | `isp600` tuning encodings: channel black level and bit depths, module enables, temporal denoise record, the extent words refused |
 | [`E39.md`](../testing/board-runs/E39.md) | Capture straight into a stream's dma-bufs, and whether the vendor capture drivers take them at all |
