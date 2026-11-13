@@ -452,8 +452,9 @@ impl Fixture {
     /// alternate `data[1]` on it. 4: detaches its kernel driver. 5: resets the device.
     /// 6: control in, with the setup in `data[..6]`. 7: control out, the same, sending
     /// `data[6..]`, answers how many went (8). 8: bulk in from endpoint `data[0]`. 9: bulk out
-    /// of `data[1..]` to it (8). 10: interrupt in from it. 11: three isochronous packets of 8
-    /// bytes from it: the 24 bytes, then received and intact for each.
+    /// of `data[1..]` to it (8). 10: interrupt in from it. 11: starts a stream of two
+    /// transfers of three 8-byte isochronous packets from it, takes one transfer and stops:
+    /// the 24 bytes, then received and intact for each.
     fn usb(&mut self, step: u8, data: &[u8], into: &mut [u8]) -> Result<usize> {
         let usb = self.usb.as_mut().ok_or_else(missing)?;
         match step {
@@ -491,14 +492,12 @@ impl Fixture {
             }
             10 => usb.interrupt_in(byte(data, 0)?, into, WAIT).map_err(failed),
             11 => {
-                let mut packets = [IsoPacket {
-                    capacity: 8,
-                    received: 0,
-                    ok: false,
-                }; 3];
+                let mut packets = [IsoPacket::default(); 3];
                 let (bytes, results) = room(into, 30)?.split_at_mut(24);
-                usb.iso_in(byte(data, 0)?, bytes, &mut packets, WAIT)
-                    .map_err(failed)?;
+                usb.iso_in_start(byte(data, 0)?, 2, 3, 8).map_err(failed)?;
+                let taken = usb.iso_in_next(bytes, &mut packets, WAIT);
+                usb.iso_in_stop().map_err(failed)?;
+                taken.map_err(failed)?;
                 for (result, packet) in results.chunks_mut(2).zip(packets) {
                     result[0] = packet.received as u8;
                     result[1] = u8::from(packet.ok);

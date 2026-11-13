@@ -8,26 +8,38 @@
 //!
 //! - `interface <class> <subclass> <protocol> [name...]`: the next interface, numbered from 0
 //!   in file order. The rest of the line, if any, is its name, which the host can read.
+//! - `alternate [name...]`: another setting of the interface above, numbered from 1, with its
+//!   class, subclass and protocol. The endpoints after it are the setting's. The host picks a
+//!   setting with `SET_INTERFACE`; setting 0, the `interface` line's own, is in force until
+//!   it does. An isochronous endpoint goes in a setting other than 0, so a host that has not
+//!   asked for it reserves no bandwidth for it.
 //! - `endpoint <in|out> bulk`: a bulk endpoint of the interface above, with the packet size of
 //!   each speed (64 at full speed, 512 at high speed).
 //! - `endpoint <in|out> interrupt <max-packet> <interval-ms>`: an interrupt endpoint, with a
 //!   packet of 1 to 64 bytes polled every 1 to 255 ms (rounded down to a power of two at high
 //!   speed, where intervals are powers of two).
+//! - `endpoint <in|out> isochronous <bytes> <interval-ms>`: an isochronous endpoint moving up
+//!   to 1 to 1023 bytes every `interval-ms`, a power of two from 1 to 4096 ms, at either speed.
+//!   Its synchronisation type is asynchronous. Each send is one interval's bytes, and a
+//!   receive needs room for them.
 //!
-//! Endpoints are numbered from 1 in file order, whatever their direction, so there are at most
-//! 15. What the classes, subclasses and protocols mean, and what the endpoints carry, is the
+//! Endpoints are numbered from 1 in file order, whatever their direction and setting, so there
+//! are at most 15, and no address is in two settings. What the classes, subclasses and protocols mean, and what the endpoints carry, is the
 //! business of whoever talks over them: nothing here looks.
 //!
 //! The set has the configuration at full speed and at high speed, one language (US English,
-//! 0x0409) and USB 2.0 as its version. Isochronous endpoints, alternate settings and class
-//! descriptors have no line here.
+//! 0x0409) and USB 2.0 as its version. Class descriptors have no line here.
 
 use lemnos_hal::usb_descriptors::UsbDescriptors;
 
 /// The most bytes a built descriptor set may come to.
 pub const MAX_SET: usize = 1024;
-/// The most interfaces a description may have.
+/// The most interface settings a description may have, alternate settings included.
 pub const MAX_INTERFACES: usize = 8;
+/// The most bytes an isochronous endpoint moves in an interval: a full-speed packet's most.
+pub const MAX_ISO_BYTES: u16 = 1023;
+/// The longest interval of an isochronous endpoint, in ms: `bInterval` 16 at high speed.
+pub const MAX_ISO_INTERVAL_MS: u16 = 4096;
 /// The most endpoints: a device has 15 endpoint numbers besides 0.
 pub const MAX_ENDPOINTS: usize = 15;
 /// The most bytes of UTF-8 a name may have, so its descriptor fits one length byte whatever it
@@ -59,7 +71,7 @@ pub struct Identity<'a> {
 pub enum Fault {
     /// A line that is not one of the forms above, by its number from 1.
     Line(usize),
-    /// An `endpoint` line before any `interface` line, by its number.
+    /// An `endpoint` or `alternate` line before any `interface` line, by its number.
     NoInterface(usize),
     /// No `interface` line at all.
     Empty,
@@ -118,7 +130,15 @@ impl Writer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transfer {
     Bulk,
-    Interrupt { max_packet: u8, interval_ms: u8 },
+    Interrupt {
+        max_packet: u8,
+        interval_ms: u8,
+    },
+    /// `interval_log2` is the interval in ms as a power of two.
+    Isochronous {
+        bytes: u16,
+        interval_log2: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +149,9 @@ struct Endpoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Interface<'a> {
+    /// The interface's number, and the setting's.
+    number: u8,
+    alternate: u8,
     class: u8,
     subclass: u8,
     protocol: u8,
@@ -177,6 +200,7 @@ impl<'a> Layout<'a> {
             match key {
                 "" => {}
                 "interface" => layout.interface(rest.trim(), line_number)?,
+                "alternate" => layout.alternate(rest.trim(), line_number)?,
                 "endpoint" => layout.endpoint(rest, line_number)?,
                 _ => return Err(Fault::Line(line_number)),
             }
@@ -201,18 +225,43 @@ impl<'a> Layout<'a> {
         if name.is_some_and(|name| !name_fits(name)) {
             return Err(Fault::Name);
         }
-        let slot = self
-            .interfaces
-            .get_mut(self.interface_count)
-            .ok_or(Fault::TooManyInterfaces)?;
-        *slot = Some(Interface {
+        let number = self.interfaces().filter(|(_, i)| i.alternate == 0).count();
+        self.add(Interface {
+            // At most `MAX_INTERFACES`, which fits.
+            number: number as u8,
+            alternate: 0,
             class: numbers[0],
             subclass: numbers[1],
             protocol: numbers[2],
             name,
             first: self.endpoint_count,
             endpoints: 0,
-        });
+        })
+    }
+
+    fn alternate(&mut self, rest: &'a str, line: usize) -> Result<(), Fault> {
+        let name = (!rest.is_empty()).then_some(rest);
+        if name.is_some_and(|name| !name_fits(name)) {
+            return Err(Fault::Name);
+        }
+        let above = self.interface_count.checked_sub(1);
+        let above = above.and_then(|at| self.interfaces[at]);
+        let above = above.ok_or(Fault::NoInterface(line))?;
+        self.add(Interface {
+            alternate: above.alternate + 1,
+            name,
+            first: self.endpoint_count,
+            endpoints: 0,
+            ..above
+        })
+    }
+
+    fn add(&mut self, interface: Interface<'a>) -> Result<(), Fault> {
+        let slot = self
+            .interfaces
+            .get_mut(self.interface_count)
+            .ok_or(Fault::TooManyInterfaces)?;
+        *slot = Some(interface);
         self.interface_count += 1;
         Ok(())
     }
@@ -233,6 +282,17 @@ impl<'a> Layout<'a> {
                 Transfer::Interrupt {
                     max_packet: max_packet.ok_or(bad)?,
                     interval_ms: interval_ms.ok_or(bad)?,
+                }
+            }
+            Some("isochronous") => {
+                let bytes =
+                    number(words.next()).filter(|n| (1..=u32::from(MAX_ISO_BYTES)).contains(n));
+                let interval = number(words.next())
+                    .filter(|n| n.is_power_of_two() && *n <= u32::from(MAX_ISO_INTERVAL_MS));
+                Transfer::Isochronous {
+                    // Both checked to fit above.
+                    bytes: bytes.ok_or(bad)? as u16,
+                    interval_log2: interval.ok_or(bad)?.ilog2() as u8,
                 }
             }
             _ => return Err(bad),
@@ -332,27 +392,21 @@ pub fn build(identity: &Identity<'_>, interfaces: &str) -> Result<Set, Fault> {
 
     for high_speed in [false, true] {
         let start = out.len;
+        let interfaces = layout
+            .interfaces()
+            .filter(|(_, i)| i.alternate == 0)
+            .count();
         // Bit 7 is always set; bit 6 says the device has its own supply.
         let attributes = 0x80 | (u8::from(identity.self_powered) << 6);
         // `bMaxPower` counts 2 mA, rounded up. At most 250.
         let max_power = identity.max_power_ma.div_ceil(2) as u8;
-        out.put(&[
-            9,
-            2,
-            0,
-            0,
-            layout.interface_count as u8,
-            1,
-            0,
-            attributes,
-            max_power,
-        ]);
+        out.put(&[9, 2, 0, 0, interfaces as u8, 1, 0, attributes, max_power]);
         for (at, interface) in layout.interfaces() {
             out.put(&[
                 9,
                 4,
-                at as u8,
-                0,
+                interface.number,
+                interface.alternate,
                 interface.endpoints as u8,
                 interface.class,
                 interface.subclass,
@@ -374,6 +428,15 @@ pub fn build(identity: &Identity<'_>, interfaces: &str) -> Result<Set, Fault> {
                             interval_ms
                         };
                         (3, u16::from(max_packet), interval)
+                    }
+                    // Asynchronous: bits 2 and 3 are 1. `bInterval` is 2^(n-1) frames at full
+                    // speed and 2^(n-1) microframes of 125 us at high speed.
+                    Transfer::Isochronous {
+                        bytes,
+                        interval_log2,
+                    } => {
+                        let interval = interval_log2 + if high_speed { 4 } else { 1 };
+                        (0x05, bytes, interval)
                     }
                 };
                 let [low, high] = max_packet.to_le_bytes();

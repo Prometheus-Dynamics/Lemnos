@@ -329,12 +329,22 @@ fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
     let mut gadget = tree.gadget();
     assert_eq!(gadget.enable(&[1, 2, 3]), Err(ErrorKind::InvalidInput));
 
-    // A second alternate setting.
+    // A fourth alternate setting: FunctionFS takes three.
     let mut body = function(64);
-    body.extend_from_slice(&[9, 4, 0, 1, 0, 0xff, 0, 0, 0]);
+    for alternate in 1..=3 {
+        body.extend_from_slice(&[9, 4, 0, alternate, 0, 0xff, 0, 0, 0]);
+    }
     let alternates = [&DEVICE[..], &configuration(&body), &table()].concat();
     assert!(UsbDescriptors::parse(&alternates).is_ok());
     assert_eq!(gadget.enable(&alternates), Err(ErrorKind::Unsupported));
+
+    // An endpoint address in two settings.
+    let mut body = function(64);
+    body.extend_from_slice(&[9, 4, 0, 1, 1, 0xff, 0, 0, 0]);
+    body.extend_from_slice(&[7, 5, 0x81, 1, 0, 1, 1]);
+    let twice = [&DEVICE[..], &configuration(&body), &table()].concat();
+    assert!(UsbDescriptors::parse(&twice).is_ok());
+    assert_eq!(gadget.enable(&twice), Err(ErrorKind::Unsupported));
 
     // No interface at all.
     let mut empty = configuration(&[]);
@@ -354,6 +364,101 @@ fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
     assert!(tree.is_bare());
     assert!(!tree.gadget_dir().join("idVendor").exists());
     assert_eq!(fs::read(tree.mount().join("ep0")).unwrap(), b"");
+}
+
+/// The function with a second setting of its interface that adds an isochronous IN endpoint
+/// of `full` bytes a frame at full speed and `high` (`wMaxPacketSize`, transactions in bits 11
+/// and 12) at high speed.
+fn streaming(full: u16, high: u16) -> Vec<u8> {
+    let mut speeds = Vec::new();
+    for (bulk, iso, interval) in [(64u16, full, 1u8), (512, high, 1)] {
+        let mut body = function(bulk);
+        body.extend_from_slice(&[9, 4, 0, 1, 3, 0xff, 0, 0, 0]);
+        // FunctionFS takes an address in one setting only, so the second has its own.
+        let [low, hi] = bulk.to_le_bytes();
+        body.extend_from_slice(&[7, 5, 0x84, 2, low, hi, 0]);
+        body.extend_from_slice(&[7, 5, 0x05, 2, low, hi, 0]);
+        let [low, hi] = iso.to_le_bytes();
+        body.extend_from_slice(&[7, 5, 0x83, 0x05, low, hi, interval]);
+        speeds.push(configuration(&body));
+    }
+    [&DEVICE[..], &speeds[0], &speeds[1], &table()].concat()
+}
+
+#[test]
+fn alternate_settings_and_isochronous_endpoints_are_carried() {
+    let tree = Tree::new();
+    for file in ["ep83", "ep84", "ep05"] {
+        fs::write(tree.mount().join(file), "").unwrap();
+    }
+    let mut gadget = tree.gadget();
+    // 1023 bytes a frame at full speed, three transactions of 1024 a microframe at high speed.
+    gadget.enable(&streaming(1023, 1024 | 2 << 11)).unwrap();
+    let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
+    assert!(
+        ep0.windows(7)
+            .any(|d| d == [7, 5, 0x83, 0x05, 0x00, 0x14, 1]),
+        "the high-speed descriptor goes to FunctionFS as it was"
+    );
+    tree.event(ENABLE);
+    assert_eq!(gadget.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+
+    // A write is at most one interval, at the larger speed's size.
+    let interval = vec![7u8; 3072];
+    assert_eq!(gadget.write(0x83, &interval, WAIT), Ok(3072));
+    assert_eq!(fs::read(tree.mount().join("ep83")).unwrap(), interval);
+    assert_eq!(
+        gadget.write(0x83, &[0; 3073], WAIT),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(gadget.set_halt(0x83, true), Err(ErrorKind::Unsupported));
+    // The second setting's bulk endpoints are endpoints like any other.
+    assert_eq!(gadget.write(0x84, &[1, 2], WAIT), Ok(2));
+
+    // The host picks a setting: FunctionFS says ENABLE again, and nothing of before is kept.
+    tree.event(ENABLE);
+    assert_eq!(gadget.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+    // Writes go on past more than the transfers there are, and allocate nothing.
+    let (written, count) = allocations(|| {
+        (0..ISO_TRANSFERS * 3)
+            .map(|_| gadget.write(0x83, &[1; 16], WAIT))
+            .all(|written| written == Ok(16))
+    });
+    assert_eq!((written, count), (true, 0));
+}
+
+#[test]
+fn an_isochronous_out_endpoint_reads_one_interval_at_a_time() {
+    let tree = Tree::new();
+    let mut set = streaming(64, 64);
+    // Make the isochronous endpoint an OUT one, at both speeds.
+    let at: Vec<usize> = set
+        .windows(4)
+        .enumerate()
+        .filter(|(_, d)| *d == [7, 5, 0x83, 0x05])
+        .map(|(at, _)| at + 2)
+        .collect();
+    assert_eq!(at.len(), 2);
+    for at in at {
+        set[at] = 0x03;
+    }
+    for file in ["ep03", "ep84", "ep05"] {
+        fs::write(tree.mount().join(file), "").unwrap();
+    }
+    let mut gadget = tree.gadget();
+    gadget.enable(&set).unwrap();
+    tree.event(ENABLE);
+    gadget.next_event().unwrap();
+    fs::write(tree.mount().join("ep03"), [5u8; 64]).unwrap();
+    let mut short = [0u8; 63];
+    assert_eq!(
+        gadget.read(3, &mut short, WAIT),
+        Err(ErrorKind::InvalidInput),
+        "a read has room for a whole interval"
+    );
+    let mut data = [0u8; 64];
+    assert_eq!(gadget.read(3, &mut data, WAIT), Ok(64));
+    assert_eq!(data, [5; 64]);
 }
 
 #[test]
@@ -651,11 +756,17 @@ fn request(request_type: u8, length: u16) -> Setup {
     }
 }
 
-/// A session over a bulk IN endpoint, a bulk OUT endpoint and an isochronous IN endpoint.
+/// A session over a bulk IN endpoint, a bulk OUT endpoint, an isochronous IN endpoint of
+/// 16 bytes an interval and an isochronous OUT one of 8.
 fn session() -> Session<FakeWire> {
     Session::new(
         FakeWire::default(),
-        vec![(0x81, false), (0x02, false), (0x83, true)],
+        vec![
+            (0x81, None),
+            (0x02, None),
+            (0x83, Some(16)),
+            (0x04, Some(8)),
+        ],
     )
 }
 
@@ -889,6 +1000,34 @@ fn a_halt_goes_to_the_named_endpoint_and_an_isochronous_one_has_none() {
     session.wire.fail = Some(libc::EAGAIN);
     assert_eq!(session.set_halt(0x81, true), Err(ErrorKind::Unavailable));
     assert_eq!(session.wire.did.len(), 4);
+}
+
+#[test]
+fn an_isochronous_transfer_is_one_interval() {
+    let mut session = configured();
+    assert_eq!(session.write(0x83, &[1; 16], WAIT), Ok(16));
+    assert_eq!(session.write(0x83, &[], WAIT), Ok(0));
+    assert_eq!(
+        session.write(0x83, &[1; 17], WAIT),
+        Err(ErrorKind::InvalidInput)
+    );
+    let mut data = [0u8; 8];
+    assert_eq!(session.read(0x04, &mut data, WAIT), Ok(8));
+    assert_eq!(
+        session.read(0x04, &mut data[..7], WAIT),
+        Err(ErrorKind::InvalidInput)
+    );
+    // A bulk endpoint takes any length; what one transfer carries is the wire's to say.
+    assert_eq!(session.write(0x81, &[1; 17], WAIT), Ok(17));
+    assert_eq!(
+        session.wire.did,
+        [
+            Did::Write(2, vec![1; 16]),
+            Did::Write(2, vec![]),
+            Did::Read(3),
+            Did::Write(0, vec![1; 17]),
+        ]
+    );
 }
 
 #[test]

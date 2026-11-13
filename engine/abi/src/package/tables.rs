@@ -616,14 +616,25 @@ table! {
             timeout_ns: u64,
             len: Out<'_, usize>,
         );
-        /// Fills at most [`MAX_ISO_PACKETS`] packets from one isochronous transfer into `data`.
-        fn iso_in(
+        /// Starts an isochronous stream from the IN `endpoint`: `transfers` transfers of
+        /// `packets` packets, at most [`MAX_ISO_PACKETS`], of `packet_bytes` each, kept queued.
+        fn iso_in_start(
             device: Handle,
             endpoint: u8,
+            transfers: u8,
+            packets: u16,
+            packet_bytes: u32,
+        );
+        /// Takes the stream's oldest done transfer into `data`, packet `i` at `i *
+        /// packet_bytes`, and queues it again.
+        fn iso_in_next(
+            device: Handle,
             data: SliceMut<'_, u8>,
             packets: SliceMut<'_, PackageIsoPacket>,
             timeout_ns: u64,
         );
+        /// Ends the stream.
+        fn iso_in_stop(device: Handle);
     }
 }
 

@@ -441,15 +441,76 @@ pub trait UsbDevice {
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, Self::Error>;
-    /// Fills `packets` from one isochronous transfer into `data`, packed
-    /// back to back at each packet's capacity.
-    fn iso_in(
+    /// Starts an isochronous stream from the IN `endpoint`: `transfers` transfers of `packets`
+    /// packets each, every packet room for `packet_bytes`, are queued with the host controller
+    /// now, and each one [`iso_in_next`](Self::iso_in_next) hands over is queued again at once.
+    /// So the controller always has transfers queued, and no service interval goes by between
+    /// two of them with nothing to take the device's packet, however long the caller takes
+    /// between calls, up to `transfers - 1` transfers' time.
+    ///
+    /// `InvalidInput` for `transfers` of 0 or over [`MAX_ISO_TRANSFERS`], `packets` of 0 or
+    /// over [`MAX_ISO_PACKETS`], or `packet_bytes` of 0 or over [`MAX_ISO_PACKET_BYTES`]. `Busy`
+    /// while a stream is started: stop it first. Nothing is queued after an error. The memory
+    /// the stream needs is taken here; nothing after this allocates.
+    fn iso_in_start(
         &mut self,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), Self::Error>;
+    /// Takes the oldest transfer of the stream once it is done, waiting at most `timeout`, and
+    /// queues it again. Packet `i` lands at `i * packet_bytes` in `data` and is described by
+    /// `packets[i]`: its `capacity` is `packet_bytes`, its `received` how many bytes came, and
+    /// `ok` whether they came intact. A packet that came short leaves the rest of its room as
+    /// it was.
+    ///
+    /// `packets` holds exactly the stream's `packets`, and `data` at least `packets *
+    /// packet_bytes` bytes, or this is `InvalidInput` and the stream is left as it is; so is a
+    /// call with no stream started. `Timeout` when nothing was done in time: the stream goes
+    /// on, and nothing is lost but what the device sent while every transfer was done and not
+    /// yet taken. `Unavailable` when the device has gone, for good as for any call. Any other
+    /// error says the transfer failed as a whole; it is queued again all the same, and the
+    /// next call goes on with the one after it. Allocates nothing.
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         timeout: Duration,
     ) -> Result<(), Self::Error>;
+    /// Takes every transfer of the stream back from the controller, and waits until it has
+    /// let go of them. `Ok`, doing nothing, with no stream started. Dropping the device does
+    /// this too. Allocates nothing.
+    fn iso_in_stop(&mut self) -> Result<(), Self::Error>;
+}
+
+/// The most transfers an isochronous stream keeps queued ([`UsbDevice::iso_in_start`]).
+pub const MAX_ISO_TRANSFERS: u8 = 16;
+/// The most packets in one isochronous transfer.
+pub const MAX_ISO_PACKETS: u16 = 64;
+/// The most bytes one isochronous packet carries: three transactions of 1024 bytes in one
+/// high-speed microframe.
+pub const MAX_ISO_PACKET_BYTES: u32 = 3 * 1024;
+
+/// The bytes an isochronous endpoint moves in one service interval, from its `wMaxPacketSize`:
+/// the packet size in bits 0 to 10 times the transactions per microframe, one more than bits
+/// 11 and 12 say (at high speed; always one at full speed, where those bits are 0).
+#[must_use]
+pub const fn iso_interval_bytes(max_packet: u16) -> u32 {
+    let size = (max_packet & 0x7ff) as u32;
+    let transactions = ((max_packet >> 11) & 3) as u32 + 1;
+    size * transactions
+}
+
+/// Whether an isochronous stream's shape is one [`UsbDevice::iso_in_start`] takes.
+#[must_use]
+pub const fn iso_shape_ok(transfers: u8, packets: u16, packet_bytes: u32) -> bool {
+    transfers != 0
+        && transfers <= MAX_ISO_TRANSFERS
+        && packets != 0
+        && packets <= MAX_ISO_PACKETS
+        && packet_bytes != 0
+        && packet_bytes <= MAX_ISO_PACKET_BYTES
 }
 
 /// What happened on the wire to this board acting as a USB device.
@@ -521,6 +582,35 @@ pub enum UsbFunctionEvent {
 /// interface numbers and string indexes than the descriptors carry. The function always uses
 /// the ones it gave: in `read`, `write` and `set_halt`, and in the `index` of a request sent to
 /// one of its interfaces or endpoints.
+///
+/// # Isochronous endpoints and alternate settings
+///
+/// An isochronous endpoint moves one service interval's bytes at a time, with no handshake
+/// and no retry. On one:
+///
+/// - Each [`write`](Self::write) is what goes out in one service interval: at most the
+///   endpoint's bytes per interval ([`iso_interval_bytes`] of its descriptor at the speed in
+///   force; the larger of the two speeds' when the backend can't tell which), else
+///   `InvalidInput` and nothing is taken. The backend keeps several writes queued with the
+///   controller, so one is there at each interval while the function prepares the next: a
+///   write returns as soon as its bytes are queued, and `Timeout` only when every place in
+///   the queue is still taken. Bytes the host did not ask for in time are dropped, and a
+///   write that failed is not reported: the next interval carries the next write.
+/// - Each [`read`](Self::read) is what came in one service interval, oldest first. `data`
+///   must hold the endpoint's bytes per interval, else `InvalidInput`. The backend keeps
+///   several reads queued, so what the host sends between two calls is kept while there is
+///   room.
+/// - [`set_halt`](Self::set_halt) is `Unsupported`.
+///
+/// Interfaces may have alternate settings, and the host picks one with `SET_INTERFACE`. An
+/// isochronous endpoint goes in a setting other than 0, so the default setting reserves no
+/// bandwidth. A backend either answers `SET_INTERFACE` and `GET_INTERFACE` itself, and may then
+/// report [`Configured`](UsbFunctionEvent::Configured) again when the setting changes, or hands
+/// them to the function as [`Setup`](UsbFunctionEvent::Setup) events like any other request.
+/// Either way a function that needs to know when to start streaming can learn it from its own
+/// class requests. A backend may limit how many settings an
+/// interface has, or take an endpoint in only one setting of the configuration, and refuses a
+/// set beyond that in `enable` with `Unsupported`.
 ///
 /// Nothing here allocates once `enable` has returned.
 pub trait UsbFunction {

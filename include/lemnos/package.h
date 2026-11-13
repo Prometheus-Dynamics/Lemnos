@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0xc3b57d581148d928ULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x171f8780472f4930ULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */
@@ -475,9 +475,14 @@ typedef struct LemnosUsbDeviceTable {
                              uint64_t timeout_ns, size_t *len);
     LemnosStatus (*interrupt_in)(LemnosHandle device, uint8_t endpoint, LemnosSliceMut data,
                                  uint64_t timeout_ns, size_t *len);
-    /* packets: LemnosPackageIsoPacket, at most LEMNOS_MAX_ISO_PACKETS. */
-    LemnosStatus (*iso_in)(LemnosHandle device, uint8_t endpoint, LemnosSliceMut data,
-                           LemnosSliceMut packets, uint64_t timeout_ns);
+    /* A stream of `transfers` transfers of `packets` packets (at most LEMNOS_MAX_ISO_PACKETS)
+     * of `packet_bytes` each, kept queued. */
+    LemnosStatus (*iso_in_start)(LemnosHandle device, uint8_t endpoint, uint8_t transfers,
+                                 uint16_t packets, uint32_t packet_bytes);
+    /* The oldest done transfer; packets: LemnosPackageIsoPacket, packet i at i * packet_bytes. */
+    LemnosStatus (*iso_in_next)(LemnosHandle device, LemnosSliceMut data, LemnosSliceMut packets,
+                                uint64_t timeout_ns);
+    LemnosStatus (*iso_in_stop)(LemnosHandle device);
 } LemnosUsbDeviceTable;
 
 typedef struct LemnosUsbFunctionTable {

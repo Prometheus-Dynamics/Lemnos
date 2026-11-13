@@ -34,7 +34,7 @@ use lemnos_abi::package::{
 use lemnos_abi::{Handle, guard};
 use lemnos_hal::blocks::{
     BufferHandle, BufferKind, ControlSetup, DmaBuffer, InterruptEvent, IsoPacket, StreamFrame,
-    UsbFunctionEvent,
+    UsbFunctionEvent, iso_shape_ok,
 };
 use lemnos_hal::i2c::{self, I2c as HalI2c, Operation};
 use lemnos_hal::raw::{
@@ -1333,33 +1333,55 @@ impl UsbDevice for Taken {
         length(status, len, room)
     }
 
-    fn iso_in(
+    /// A shape out of range never crosses.
+    fn iso_in_start(
         &mut self,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Hal<()> {
+        if !iso_shape_ok(transfers, packets, packet_bytes) {
+            return Err(ErrorKind::InvalidInput);
+        }
+        done((self.host.usb_device.iso_in_start)(
+            self.handle,
+            endpoint,
+            transfers,
+            packets,
+            packet_bytes,
+        ))
+    }
+
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         timeout: Duration,
     ) -> Hal<()> {
-        if packets.len() > MAX_ISO_PACKETS {
+        if packets.is_empty() || packets.len() > MAX_ISO_PACKETS {
             return Err(ErrorKind::InvalidInput);
         }
         let mut carried = [PackageIsoPacket::default(); MAX_ISO_PACKETS];
-        for (carried, packet) in carried.iter_mut().zip(packets.iter()) {
-            carried.capacity = packet.capacity;
-        }
-        done((self.host.usb_device.iso_in)(
+        done((self.host.usb_device.iso_in_next)(
             self.handle,
-            endpoint,
             SliceMut::new(data),
             SliceMut::new(&mut carried[..packets.len()]),
             timeout_out(timeout),
         ))?;
+        // Packet `i` starts at `i * capacity`, so no packet had more room than `data` shared
+        // out evenly, whatever the host says.
+        let room = u32::try_from(data.len() / packets.len()).unwrap_or(u32::MAX);
         for (packet, carried) in packets.iter_mut().zip(carried.iter()) {
-            // A packet never carried more than it had room for.
+            packet.capacity = carried.capacity.min(room);
             packet.received = carried.received.min(packet.capacity);
             packet.ok = carried.ok != 0;
         }
         Ok(())
+    }
+
+    fn iso_in_stop(&mut self) -> Hal<()> {
+        done((self.host.usb_device.iso_in_stop)(self.handle))
     }
 }
 
@@ -1651,6 +1673,8 @@ mod tests {
         UsbDeviceHost, UsbFunctionHost, host_table,
     };
 
+    use lemnos_hal::blocks::{MAX_ISO_PACKET_BYTES, MAX_ISO_TRANSFERS};
+
     use super::*;
 
     /// A host that answers with lengths and counts larger than the room it was given, and
@@ -1700,14 +1724,19 @@ mod tests {
             Status::OK
         }
 
-        fn iso_in(
+        fn iso_in_start(_: Handle, _: u8, _: u8, _: u16, _: u32) -> Status {
+            REACHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Status::OK
+        }
+
+        fn iso_in_next(
             _device: Handle,
-            _endpoint: u8,
             _data: SliceMut<'_, u8>,
             mut packets: SliceMut<'_, PackageIsoPacket>,
             _timeout_ns: u64,
         ) -> Status {
             for packet in packets.as_mut_slice() {
+                packet.capacity = u32::MAX;
                 packet.received = u32::MAX;
                 packet.ok = 7;
             }
@@ -1765,16 +1794,15 @@ mod tests {
         assert_eq!(HalUart::write(&mut resource, &[1, 2, 3]), Ok(3));
         assert_eq!(resource.next_job(&mut room), Ok(Some(4)));
         assert_eq!(resource.bulk_in(0x81, &mut room, Duration::ZERO), Ok(4));
-        let mut packets = [IsoPacket {
-            capacity: 8,
-            received: 0,
-            ok: false,
-        }; 2];
+        let mut packets = [IsoPacket::default(); 2];
         let mut data = [0u8; 16];
         resource
-            .iso_in(0x81, &mut data, &mut packets, Duration::ZERO)
+            .iso_in_next(&mut data, &mut packets, Duration::ZERO)
             .unwrap();
-        assert_eq!((packets[1].received, packets[1].ok), (8, true));
+        assert_eq!(
+            (packets[1].capacity, packets[1].received, packets[1].ok),
+            (8, 8, true)
+        );
     }
 
     #[test]
@@ -1801,9 +1829,24 @@ mod tests {
         );
         let mut packets = [IsoPacket::default(); MAX_ISO_PACKETS + 1];
         assert_eq!(
-            resource.iso_in(0x81, &mut [], &mut packets, Duration::ZERO),
+            resource.iso_in_next(&mut [], &mut packets, Duration::ZERO),
             Err(ErrorKind::InvalidInput)
         );
+        let before = reached();
+        for (transfers, packets, bytes) in [
+            (0, 1, 1),
+            (MAX_ISO_TRANSFERS + 1, 1, 1),
+            (1, MAX_ISO_PACKETS as u16 + 1, 1),
+            (1, 1, MAX_ISO_PACKET_BYTES + 1),
+        ] {
+            assert_eq!(
+                resource.iso_in_start(0x81, transfers, packets, bytes),
+                Err(ErrorKind::InvalidInput)
+            );
+        }
+        assert_eq!(reached(), before);
+        resource.iso_in_start(0x81, 4, 32, 944).unwrap();
+        assert_eq!(reached(), before + 1);
     }
 
     #[test]

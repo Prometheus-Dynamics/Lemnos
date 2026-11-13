@@ -17,13 +17,19 @@
 //! [`lemnos_hal::usb_descriptors`], checked there. The device descriptor, the full-speed
 //! configuration and the strings are served to the host as they stand. The port runs at full
 //! speed, so a high-speed configuration in the set is kept and not used.
+//!
+//! An endpoint named in several alternate settings is configured once, as the first names it.
+//! `SET_INTERFACE` and `GET_INTERFACE` come to the function as requests like any other, for
+//! it to accept, answer or refuse. An isochronous endpoint's `read` and `write` are one
+//! frame each, checked against the largest packet any setting gives it; how many frames a
+//! port keeps queued with its peripheral is the port's to say.
 
 use core::time::Duration;
 
 use lemnos_core::HostClock;
 use lemnos_hal::blocks::{
     ControlSetup, IsoPacket, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent,
-    UsbHost,
+    UsbHost, iso_interval_bytes, iso_shape_ok,
 };
 use lemnos_hal::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 use lemnos_hal::{ErrorKind, HalError};
@@ -258,6 +264,19 @@ impl<P: FunctionPort, const N: usize> Function<P, N> {
         }
         Ok(enabled)
     }
+
+    /// The bytes a frame of the isochronous `endpoint` carries, the most any setting gives
+    /// it; `None` for any other endpoint.
+    fn iso_bytes(&self, enabled: Enabled, endpoint: u8) -> Option<usize> {
+        if enabled.isochronous & endpoint_bit(endpoint) == 0 {
+            return None;
+        }
+        let set = UsbDescriptors::parse(&self.descriptors[..enabled.len]).ok()?;
+        usb_descriptors::endpoints(set.full_speed())
+            .filter(|e| e.address == endpoint)
+            .map(|e| iso_interval_bytes(e.max_packet) as usize)
+            .max()
+    }
 }
 
 impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
@@ -380,7 +399,14 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, ErrorKind> {
-        self.usable(endpoint, Some(false))?;
+        let enabled = self.usable(endpoint, Some(false))?;
+        // An isochronous read is one frame, and has room for all of it.
+        if self
+            .iso_bytes(enabled, endpoint)
+            .is_some_and(|bytes| data.len() < bytes)
+        {
+            return Err(ErrorKind::InvalidInput);
+        }
         let until = deadline(self.clock, timeout);
         loop {
             if let Some(n) = self.port.read(endpoint, data).map_err(port_error)? {
@@ -393,7 +419,14 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
     }
 
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration) -> Result<usize, ErrorKind> {
-        self.usable(endpoint, Some(true))?;
+        let enabled = self.usable(endpoint, Some(true))?;
+        // An isochronous write is one frame, and is never cut.
+        if self
+            .iso_bytes(enabled, endpoint)
+            .is_some_and(|bytes| data.len() > bytes)
+        {
+            return Err(ErrorKind::InvalidInput);
+        }
         let until = deadline(self.clock, timeout);
         loop {
             if let Some(n) = self.port.write(endpoint, data).map_err(port_error)? {
@@ -453,15 +486,26 @@ pub trait HostPort: Clone {
         data: &[u8],
         timeout: Duration,
     ) -> Result<usize, Self::Error>;
-    /// An isochronous transfer, packed as [`UsbDevice::iso_in`] says.
-    fn iso_in(
+    /// Starts an isochronous stream from `device`, as [`UsbDevice::iso_in_start`] says. The
+    /// shape is one [`iso_shape_ok`] takes.
+    fn iso_in_start(
         &mut self,
         device: UsbDeviceId,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), Self::Error>;
+    /// The stream's next transfer, as [`UsbDevice::iso_in_next`] says.
+    fn iso_in_next(
+        &mut self,
+        device: UsbDeviceId,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         timeout: Duration,
     ) -> Result<(), Self::Error>;
+    /// Ends the stream, as [`UsbDevice::iso_in_stop`] says.
+    fn iso_in_stop(&mut self, device: UsbDeviceId) -> Result<(), Self::Error>;
 }
 
 /// The board's USB host over port `P`.
@@ -630,15 +674,34 @@ impl<P: HostPort> UsbDevice for HostDevice<P> {
             .map_err(port_error)
     }
 
-    fn iso_in(
+    /// A shape out of range never reaches the port.
+    fn iso_in_start(
         &mut self,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), ErrorKind> {
+        if !iso_shape_ok(transfers, packets, packet_bytes) {
+            return Err(ErrorKind::InvalidInput);
+        }
+        self.port
+            .iso_in_start(self.id, endpoint, transfers, packets, packet_bytes)
+            .map_err(port_error)
+    }
+
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         timeout: Duration,
     ) -> Result<(), ErrorKind> {
         self.port
-            .iso_in(self.id, endpoint, data, packets, timeout)
+            .iso_in_next(self.id, data, packets, timeout)
             .map_err(port_error)
+    }
+
+    fn iso_in_stop(&mut self) -> Result<(), ErrorKind> {
+        self.port.iso_in_stop(self.id).map_err(port_error)
     }
 }

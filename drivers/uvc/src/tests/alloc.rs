@@ -21,6 +21,8 @@ struct Replay {
     descriptors: Vec<u8>,
     packets: Vec<Vec<u8>>,
     cursor: usize,
+    /// Room for each packet, as the stream was started with.
+    packet_bytes: usize,
 }
 
 impl UsbDevice for Replay {
@@ -75,21 +77,28 @@ impl UsbDevice for Replay {
     fn interrupt_in(&mut self, _: u8, _: &mut [u8], _: Duration) -> Result<usize, ErrorKind> {
         Err(ErrorKind::Unsupported)
     }
-    fn iso_in(
+    fn iso_in_start(&mut self, _: u8, _: u8, _: u16, packet_bytes: u32) -> Result<(), ErrorKind> {
+        self.packet_bytes = packet_bytes as usize;
+        Ok(())
+    }
+    fn iso_in_next(
         &mut self,
-        _: u8,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         _: Duration,
     ) -> Result<(), ErrorKind> {
-        let capacity = packets[0].capacity as usize;
+        let capacity = self.packet_bytes;
         for (index, packet) in packets.iter_mut().enumerate() {
             let source = &self.packets[self.cursor];
             self.cursor = (self.cursor + 1) % self.packets.len();
             data[index * capacity..index * capacity + source.len()].copy_from_slice(source);
+            packet.capacity = capacity as u32;
             packet.received = source.len() as u32;
             packet.ok = true;
         }
+        Ok(())
+    }
+    fn iso_in_stop(&mut self) -> Result<(), ErrorKind> {
         Ok(())
     }
 }
@@ -166,6 +175,7 @@ fn a_thousand_transfers_allocate_nothing() {
         descriptors: webcam().bytes,
         packets,
         cursor: 0,
+        packet_bytes: 0,
     };
     let stream = Endless {
         published: &PUBLISHED,

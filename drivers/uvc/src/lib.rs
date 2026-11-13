@@ -8,7 +8,10 @@
 //!   counted.
 //!
 //! The device needs `usb`, the camera, and `frames`, the stream. Binding touches no USB device.
-//! All the work is in [`Lifecycle::tick`], at most one USB transfer per tick.
+//! All the work is in [`Lifecycle::tick`], at most one USB transfer per tick. While streaming,
+//! [`TRANSFERS`](session::TRANSFERS) isochronous transfers stay queued with the host controller,
+//! and each tick takes the oldest done one, so the camera's packets always find a transfer
+//! waiting, however long a tick takes, up to three transfers' time.
 //!
 //! The host's own video driver is taken off the control and streaming interfaces before they are
 //! claimed, on every attempt, since a reset or replug can bind it again. Each whole frame is

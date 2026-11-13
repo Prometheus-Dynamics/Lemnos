@@ -260,6 +260,8 @@ impl UsbDevice for HeldUsb {
         bulk_in(endpoint: u8, data: &mut [u8], timeout: Duration) -> usize;
         bulk_out(endpoint: u8, data: &[u8], timeout: Duration) -> usize;
         interrupt_in(endpoint: u8, data: &mut [u8], timeout: Duration) -> usize;
-        iso_in(endpoint: u8, data: &mut [u8], packets: &mut [IsoPacket], timeout: Duration) -> ();
+        iso_in_start(endpoint: u8, transfers: u8, packets: u16, packet_bytes: u32) -> ();
+        iso_in_next(data: &mut [u8], packets: &mut [IsoPacket], timeout: Duration) -> ();
+        iso_in_stop() -> ();
     }
 }

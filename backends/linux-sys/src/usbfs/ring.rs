@@ -333,6 +333,15 @@ impl UrbRing {
         self.slots.in_flight()
     }
 
+    /// Whether URB `slot` is submitted and not yet reaped. `false` for a slot past the ring.
+    #[must_use]
+    pub fn is_in_flight(&self, slot: usize) -> bool {
+        self.slots
+            .slots
+            .get(slot)
+            .is_some_and(|entry| entry.in_flight)
+    }
+
     /// Submits URB `slot` to IN `endpoint`, one packet of each length in `lengths`. A URB in
     /// flight is refused with `ResourceBusy`.
     pub fn submit(&mut self, slot: usize, endpoint: u8, lengths: &[u32]) -> io::Result<()> {

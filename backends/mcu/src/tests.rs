@@ -751,6 +751,13 @@ fn a_function_halts_only_endpoints_its_descriptors_name() {
     function.next_event().unwrap();
     assert_eq!(function.set_halt(0x81, true), Err(ErrorKind::Unsupported));
     assert!(function.port().halts.is_empty());
+    // Its writes are one frame each, at most the packet size: 64 here.
+    assert_eq!(function.write(0x81, &[1; 64], SHORT), Ok(64));
+    assert_eq!(
+        function.write(0x81, &[1; 65], SHORT),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(function.port().written.len(), 1);
 }
 
 #[test]
@@ -796,6 +803,8 @@ struct HostLog {
     resets: Vec<UsbDeviceId>,
     /// What the next reset answers, if not `Ok`.
     reset_error: Option<ErrorKind>,
+    /// The isochronous stream started: endpoint, transfers, packets and packet bytes.
+    iso: Option<(u8, u8, u16, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -896,18 +905,37 @@ impl HostPort for HostDouble {
         Ok(data.len())
     }
 
-    fn iso_in(
+    fn iso_in_start(
         &mut self,
         _device: UsbDeviceId,
-        _endpoint: u8,
+        endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), ErrorKind> {
+        self.0.lock().unwrap().iso = Some((endpoint, transfers, packets, packet_bytes));
+        Ok(())
+    }
+
+    fn iso_in_next(
+        &mut self,
+        _device: UsbDeviceId,
         _data: &mut [u8],
         packets: &mut [IsoPacket],
         _timeout: Duration,
     ) -> Result<(), ErrorKind> {
+        let Some((_, _, _, bytes)) = self.0.lock().unwrap().iso else {
+            return Err(ErrorKind::InvalidInput);
+        };
         for packet in packets {
-            packet.received = packet.capacity;
+            packet.received = bytes;
             packet.ok = true;
         }
+        Ok(())
+    }
+
+    fn iso_in_stop(&mut self, _device: UsbDeviceId) -> Result<(), ErrorKind> {
+        self.0.lock().unwrap().iso = None;
         Ok(())
     }
 }
@@ -983,18 +1011,24 @@ fn a_host_device_carries_each_kind_of_transfer() {
     device
         .interrupt_in(0x83, &mut data[..8], Duration::from_millis(5))
         .unwrap();
-    let mut packets = [IsoPacket {
-        capacity: 8,
-        ..IsoPacket::default()
-    }; 2];
+    let mut packets = [IsoPacket::default(); 2];
+    assert_eq!(
+        device.iso_in_start(0x84, 0, 2, 8),
+        Err(ErrorKind::InvalidInput),
+        "a shape out of range never reaches the port"
+    );
+    device.iso_in_start(0x84, 3, 2, 8).unwrap();
+    assert_eq!(log.0.lock().unwrap().iso, Some((0x84, 3, 2, 8)));
     device
-        .iso_in(0x84, &mut data, &mut packets, Duration::from_millis(5))
+        .iso_in_next(&mut data, &mut packets, Duration::from_millis(5))
         .unwrap();
     assert!(
         packets
             .iter()
             .all(|packet| packet.ok && packet.received == 8)
     );
+    device.iso_in_stop().unwrap();
+    assert_eq!(log.0.lock().unwrap().iso, None);
     assert_eq!(
         log.0.lock().unwrap().transfers,
         [

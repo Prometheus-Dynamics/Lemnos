@@ -440,13 +440,20 @@ impl UsbDevice for MockUsb {
         Err(ErrorKind::Unsupported)
     }
 
-    fn iso_in(
+    fn iso_in_start(&mut self, _: u8, _: u8, _: u16, _: u32) -> Result<(), ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
+
+    fn iso_in_next(
         &mut self,
-        _: u8,
         _: &mut [u8],
         _: &mut [IsoPacket],
         _: Duration,
     ) -> Result<(), ErrorKind> {
         Err(ErrorKind::Unsupported)
+    }
+
+    fn iso_in_stop(&mut self) -> Result<(), ErrorKind> {
+        Ok(())
     }
 }

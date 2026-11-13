@@ -82,6 +82,55 @@ fn a_description_becomes_the_set_byte_for_byte() {
 }
 
 #[test]
+fn alternate_settings_and_isochronous_endpoints_become_the_set_byte_for_byte() {
+    let text = "
+interface 0x0e 1 0 control
+alternate
+interface 0x0e 2 0
+alternate frames
+endpoint in isochronous 1023 1
+endpoint out isochronous 0x40 8
+interface 0xff 0 0
+";
+    let identity = Identity {
+        manufacturer: None,
+        serial: None,
+        ..IDENTITY
+    };
+    let set = build(&identity, text).unwrap();
+    #[rustfmt::skip]
+    let speed = |interval_in: u8, interval_out: u8| -> Vec<u8> {
+        [
+            // Three interfaces, five settings.
+            &[9, 2, 68, 0, 3, 1, 0, 0xc0, 50][..],
+            &[9, 4, 0, 0, 0, 0x0e, 1, 0, 1],
+            &[9, 4, 0, 1, 0, 0x0e, 1, 0, 0],
+            &[9, 4, 1, 0, 0, 0x0e, 2, 0, 0],
+            &[9, 4, 1, 1, 2, 0x0e, 2, 0, 2],
+            &[7, 5, 0x81, 0x05, 0xff, 0x03, interval_in],
+            &[7, 5, 0x02, 0x05, 0x40, 0, interval_out],
+            &[9, 4, 2, 0, 0, 0xff, 0, 0, 0],
+        ]
+        .concat()
+    };
+    // 1 ms is `bInterval` 1 at full speed and 4 at high speed; 8 ms is 4 and 7.
+    let expected: Vec<u8> = [
+        &set.bytes()[..18],
+        &speed(1, 4),
+        &speed(4, 7),
+        &[4, 3, 0x09, 0x04],
+        &[
+            16, 3, b'c', 0, b'o', 0, b'n', 0, b't', 0, b'r', 0, b'o', 0, b'l', 0,
+        ],
+        &[14, 3, b'f', 0, b'r', 0, b'a', 0, b'm', 0, b'e', 0, b's', 0],
+    ]
+    .concat();
+    assert_eq!(set.bytes(), expected);
+    let parsed = UsbDescriptors::parse(set.bytes()).unwrap();
+    assert_eq!(parsed.configuration().interfaces, 3);
+}
+
+#[test]
 fn a_description_without_names_has_no_string_table() {
     let identity = Identity {
         manufacturer: None,
@@ -128,6 +177,7 @@ fn a_description_that_does_not_add_up_is_refused_with_the_reason() {
     assert_eq!(fault(""), Some(Fault::Empty));
     assert_eq!(fault("# nothing\n\n"), Some(Fault::Empty));
     assert_eq!(fault("endpoint in bulk"), Some(Fault::NoInterface(1)));
+    assert_eq!(fault("\nalternate"), Some(Fault::NoInterface(2)));
     let lines = [
         "interface",
         "interface 0xff 0",
@@ -145,6 +195,12 @@ fn a_description_that_does_not_add_up_is_refused_with_the_reason() {
         "interface 0xff 0 0\nendpoint in interrupt 8 0",
         "interface 0xff 0 0\nendpoint in interrupt 8 256",
         "interface 0xff 0 0\nendpoint in interrupt 8 1 1",
+        "interface 0xff 0 0\nendpoint in isochronous 0 1",
+        "interface 0xff 0 0\nendpoint in isochronous 1024 1",
+        "interface 0xff 0 0\nendpoint in isochronous 64 0",
+        "interface 0xff 0 0\nendpoint in isochronous 64 3",
+        "interface 0xff 0 0\nendpoint in isochronous 64 8192",
+        "interface 0xff 0 0\nendpoint in isochronous 64 1 1",
         "interface 0xff 0 0\ninterfaces 1 2 3",
     ];
     for text in lines {
