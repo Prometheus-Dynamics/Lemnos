@@ -136,7 +136,11 @@ struct lem_reader {
 	struct page **pages;
 	unsigned int npages;
 	u64 *marks;			/* vmap of pages, read-only; NULL: no reader in this slot */
-	u32 max_held;			/* what the reader may hold at once; enforced by the cut-off */
+	u32 max_held;			/* what the reader may hold at once; 0 for no limit */
+	u64 max_hold_ns;		/* how long one hold may last; 0 for no limit */
+	bool cut_off;			/* over a limit: its marks hold nothing, and the pool page says so */
+	u64 uncounted_since;		/* when its marks last could not be counted at one instant; 0 if they can */
+	u64 *seen;			/* per buffer: the use it was first seen marked in (+1), and when */
 };
 
 struct lem_stream {
@@ -269,6 +273,8 @@ static void lem_stream_wake(struct lem_stream *s)
 #define LEM_POOL_TICKETS	8	/* one word per buffer, from here */
 #define LEM_POOL_READERS	64	/* shm-ring-buffers' MAX_READERS: cut-off words after the tickets */
 #define LEM_MARKS_AT		1	/* a marks page's first mark: word 0 is its version (marks.rs) */
+/* How long a reader's marks may stay uncountable when it has no hold time of its own (table.rs). */
+#define LEM_UNCOUNTED_NS	(10ull * NSEC_PER_SEC)
 
 static u64 lem_shm_stamp(u64 seq)
 {
@@ -324,10 +330,84 @@ static bool lem_stream_held(const struct lem_stream *s, u32 buffer)
 	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++) {
 		const u64 *marks = s->reader[r].marks;
 
-		if (marks && READ_ONCE(marks[LEM_MARKS_AT + buffer]))
+		if (marks && !s->reader[r].cut_off && READ_ONCE(marks[LEM_MARKS_AT + buffer]))
 			return true;
 	}
 	return false;
+}
+
+/*
+ * How many buffers a reader's marks hold, counted at one instant (table.rs's
+ * count): the version must be even and the same before and after. -1 if it
+ * kept changing, so there was no such instant. Memory reads only.
+ */
+static int lem_marks_count(const u64 *marks, u32 buffers)
+{
+	for (int t = 0; t < 3; t++) {
+		u64 before = READ_ONCE(marks[0]);
+		int n = 0;
+
+		if (before & 1)
+			continue;
+		smp_rmb();
+		for (u32 b = 0; b < buffers; b++)
+			n += READ_ONCE(marks[LEM_MARKS_AT + b]) != 0;
+		smp_rmb();
+		if (READ_ONCE(marks[0]) == before)
+			return n;
+	}
+	return -1;
+}
+
+/*
+ * Applies every reader's limits at `now` (table.rs's enforce). A reader over
+ * its hold count, or holding one buffer on one use for longer than its hold
+ * time, is cut off; so is one whose marks could not be counted for longer than
+ * its hold time (or LEM_UNCOUNTED_NS without one). A cut-off reader's marks
+ * hold nothing from then on, and its pool-page word says so. Lock held. Runs
+ * before the buffers are taken back, so a limit is seen before the reuse.
+ */
+static void lem_stream_enforce(struct lem_stream *s, u64 now)
+{
+	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++) {
+		struct lem_reader *rd = &s->reader[r];
+		u64 allowed = rd->max_hold_ns ? rd->max_hold_ns : LEM_UNCOUNTED_NS;
+		bool over = false, stuck = false;
+		int held;
+
+		if (!rd->marks || rd->cut_off)
+			continue;
+		held = lem_marks_count(rd->marks, s->buffers);
+		if (held >= 0) {
+			rd->uncounted_since = 0;
+			over = rd->max_held && (u32)held > rd->max_held;
+		} else {
+			if (!rd->uncounted_since)
+				rd->uncounted_since = now;
+			stuck = now - rd->uncounted_since > allowed;
+		}
+		for (u32 b = 0; b < s->buffers; b++) {
+			u64 *seen = &rd->seen[2 * b];
+			u64 use;
+
+			if (!READ_ONCE(rd->marks[LEM_MARKS_AT + b])) {
+				seen[0] = 0;
+				continue;
+			}
+			use = lem_ring_read(s, s->page_at + LEM_POOL_TICKETS + b) >> 1;
+			if (seen[0] == use + 1) {
+				if (rd->max_hold_ns && now - seen[1] > rd->max_hold_ns)
+					stuck = true;
+			} else {
+				seen[0] = use + 1;
+				seen[1] = now;
+			}
+		}
+		if (over || stuck) {
+			rd->cut_off = true;
+			lem_ring_write_release(s, s->page_at + LEM_POOL_TICKETS + s->buffers + r, 1);
+		}
+	}
 }
 
 /*
@@ -488,8 +568,10 @@ static int lem_stream_accept(struct lem_stream *s, const struct lemnos_stream_jo
 	if (in->buffer >= s->buffers)
 		return -EINVAL;
 	/* A consumer that let go of the buffer's marks gets it back to post a job on it. */
-	if (s->shm)
+	if (s->shm) {
+		lem_stream_enforce(s, ktime_get_ns());
 		lem_stream_reclaim(s, in->buffer);
+	}
 	b = &s->buf[in->buffer];
 	if (b->state == LEM_BUF_ABSENT)
 		return -EFAULT;
@@ -638,6 +720,7 @@ static bool lem_stream_take(struct lem_stream *s, struct lem_job *job)
 	}
 	/* Shm: take back one no reader holds, but never the newest frame's, so a reader always has one. */
 	if (s->shm) {
+		lem_stream_enforce(s, ktime_get_ns());
 		for (u32 i = 0; i < s->buffers; i++) {
 			u32 b = (s->cursor + i) % s->buffers;
 
@@ -1057,8 +1140,10 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 		ret = -EINVAL;
 		goto out;
 	}
-	if (s->shm)
+	if (s->shm) {
+		lem_stream_enforce(s, ktime_get_ns());
 		lem_stream_reclaim(s, buffer);
+	}
 	for (u32 i = 0; i < count; i++) {
 		ret = lem_stream_resolve(s, buffer, range[i].addr, range[i].len, &slot->job.range[i]);
 		if (ret)
@@ -1369,6 +1454,7 @@ static void lem_reader_release(struct lem_reader *r)
 	for (unsigned int i = 0; i < r->npages; i++)
 		put_page(r->pages[i]);
 	kfree(r->pages);
+	kvfree(r->seen);
 	memset(r, 0, sizeof(*r));
 }
 
@@ -1389,7 +1475,7 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	u32 slot;
 	long ret = -EINVAL;
 
-	if (!s->shm || a->reserved || a->max_hold_ns)
+	if (!s->shm || a->reserved)
 		return -EINVAL;
 	for (slot = 0; slot < LEMNOS_STREAM_MAX_READERS; slot++)
 		if (!s->reader[slot].marks)
@@ -1427,6 +1513,12 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 		goto unpin;
 	}
 	r.max_held = a->max_held;
+	r.max_hold_ns = a->max_hold_ns;
+	r.seen = kvcalloc(2 * (size_t)s->buffers, sizeof(*r.seen), GFP_KERNEL);
+	if (!r.seen) {
+		ret = -ENOMEM;
+		goto unpin;
+	}
 
 	spin_lock_irqsave(&s->lock, flags);
 	s->reader[slot] = r;

@@ -339,8 +339,10 @@ struct lemnos_stream_buffer {
  * LEMNOS_STREAM_IOC_READER, on a stream made with LEMNOS_STREAM_CREATE_SHM: gives
  * the module a reader's marks page (shm/ring-holds/src/marks.rs). The module
  * pins the page and reads it read-only; it never writes it. A buffer is held
- * while any reader marks it, and the module reuses it only when none does. The
- * page must be a sealed memfd (F_SEAL_SHRINK and F_SEAL_GROW) of at least
+ * while any reader marks it, and the module reuses it only when none does. A reader
+ * over max_held, or holding a buffer longer than max_hold_ns, is cut off: its marks stop
+ * holding, and its word after the tickets on the pool page is set (page::is_cut_off).
+ * The page must be a sealed memfd (F_SEAL_SHRINK and F_SEAL_GROW) of at least
  * 8 * (1 + 2 * buffers) bytes. The reader table is fixed at LEMNOS_STREAM_MAX_READERS
  * for the stream's life; a reader's page is released when the stream is.
  */
@@ -351,7 +353,7 @@ struct lemnos_stream_reader {
 	__u32 slot;		/* out: the reader slot the module gave it, 0 to 63 */
 	__u32 max_held;		/* in: buffers it may hold at once; 0 for no limit */
 	__u32 reserved;		/* in: zero */
-	__u64 max_hold_ns;	/* in: how long one hold may last; zero until the cut-off lands */
+	__u64 max_hold_ns;	/* in: how long one hold may last, ns; 0 for no limit */
 };
 
 struct lemnos_stream_status {

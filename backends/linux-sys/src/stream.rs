@@ -43,7 +43,7 @@ struct TestSource {
 }
 pod!(TestSource);
 
-/// `struct lemnos_stream_reader`: the marks page in, the slot out.
+/// `struct lemnos_stream_reader`: the marks page and its limits in, the slot out.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Reader {
@@ -133,14 +133,20 @@ pub fn test_source(stream: BorrowedFd<'_>, period_us: u32, frames: u32) -> io::R
 /// Gives a stream's module a reader's marks page: a sealed memfd in the layout of
 /// `shm_ring_holds::Marks` (its read-only descriptor, `Marks::page_fd`). The module holds every
 /// buffer the page marks, and returns the reader's slot, which the reader reports with
-/// `Marks::set_slot`. `max_held` is what the reader may hold at once, zero for no limit.
-pub fn add_reader(stream: BorrowedFd<'_>, marks: BorrowedFd<'_>, max_held: u32) -> io::Result<u32> {
+/// `Marks::set_slot`. `max_held` is what the reader may hold at once, and `max_hold_ns` how long
+/// one hold may last; zero for no limit. A reader over either is cut off by the module.
+pub fn add_reader(
+    stream: BorrowedFd<'_>,
+    marks: BorrowedFd<'_>,
+    max_held: u32,
+    max_hold_ns: u64,
+) -> io::Result<u32> {
     let mut arg = Reader {
         fd: marks.as_raw_fd(),
         slot: 0,
         max_held,
         reserved: 0,
-        max_hold_ns: 0,
+        max_hold_ns,
     };
     READER.call(stream, &mut arg)?;
     Ok(arg.slot)
