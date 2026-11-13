@@ -4,14 +4,12 @@
 //! the way they would reach any caller. Frames come off the host's real ring. Time moves only when
 //! [`Bus::wait`] moves it, to the next tick a device asked for.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_core::{Bound, Caller, CallerId, Contract, LOCAL_ARGS, MethodId, Result, Status};
 use lemnos_host::Host;
-use lemnos_host::stream::Lease;
 use lemnos_sim::SimClock;
-use lemnos_wire::ring::{Consumer, FrameSlot, WordMemory};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout};
 
 use crate::{Bus, Device, Error, Frames};
 
@@ -61,7 +59,7 @@ struct HostFrames<'a> {
     host: &'a Host,
     device: u32,
     stream: String,
-    lease: Lease,
+    layout: Layout,
     consumer: Consumer,
 }
 
@@ -75,7 +73,7 @@ impl Drop for HostFrames<'_> {
 
 impl Frames for HostFrames<'_> {
     fn buffer_bytes(&self) -> usize {
-        self.lease.layout.buffer_bytes as usize
+        self.layout.buffer_bytes as usize
     }
 
     fn pop(&mut self) -> std::result::Result<Option<FrameSlot>, Error> {
@@ -83,12 +81,10 @@ impl Frames for HostFrames<'_> {
     }
 
     fn read(&mut self, frame: &FrameSlot, out: &mut [u8]) -> std::result::Result<(), Error> {
-        let offset = self
-            .lease
-            .layout
-            .buffer_offset(frame.buffer)
-            .ok_or(Error::BadBuffer)?;
-        if self.lease.buffers.read(offset, out) {
+        if frame.buffer >= self.layout.buffers {
+            return Err(Error::BadBuffer);
+        }
+        if self.consumer.read(frame.buffer, 0, out) {
             Ok(())
         } else {
             Err(Error::ReadFailed)
@@ -96,10 +92,11 @@ impl Frames for HostFrames<'_> {
     }
 
     fn release(&mut self, frame: FrameSlot) -> std::result::Result<(), Error> {
-        match self.consumer.release(frame.buffer, frame.fence) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(Error::ReturnQueueFull),
-            Err(e) => Err(Error::Ring(e)),
+        // The consumer holds no frame on this buffer: it was released already, or never taken.
+        if self.consumer.release(frame.buffer) {
+            Ok(())
+        } else {
+            Err(Error::BadBuffer)
         }
     }
 }
@@ -174,13 +171,13 @@ impl Bus for HostBus {
                 stream: stream.to_string(),
                 status,
             })?;
-        let ring: Arc<dyn WordMemory> = Arc::clone(&lease.ring);
-        let consumer = Consumer::attach(ring, lease.layout).map_err(Error::Ring)?;
+        let layout = lease.layout;
+        let consumer = lease.consumer().map_err(Error::Ring)?;
         Ok(Box::new(HostFrames {
             host: &self.host,
             device: device.index,
             stream: stream.to_string(),
-            lease,
+            layout,
             consumer,
         }))
     }

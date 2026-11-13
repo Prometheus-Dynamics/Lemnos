@@ -16,9 +16,16 @@ workspace = true
 default = ["protocol"]
 # The socket protocol: frames, calls, values, descriptions.
 protocol = ["dep:lemnos-core"]
+# The in-process producer that tests of a stream use (`testing::Harness`).
+testing = []
 
 [dependencies]
 lemnos-core = { path = "../core", features = ["std"], optional = true }
+# The stream's shared memory is the shm family's (docs/ring.md).
+shm-ring = { path = "../../shm/ring" }
+shm-ring-buffers = { path = "../../shm/ring-buffers" }
+shm-ring-holds = { path = "../../shm/ring-holds" }
+shm-ring-doorbell = { path = "../../shm/ring-doorbell" }
 
 [dev-dependencies]
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
@@ -27,3 +34,9 @@ lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 [[test]]
 name = "alloc"
 required-features = ["protocol"]
+
+# Publish to hold through the shared memory, for the record in docs/streams.md.
+[[example]]
+name = "stream_hold"
+required-features = ["testing"]
+

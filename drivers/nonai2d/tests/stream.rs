@@ -26,13 +26,14 @@ use lemnos_driver_nonai2d::{Converter, Engine, Frame, Layout as FrameLayout, Non
 use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Access, Buffers, DmaSync, Lease, MemfdAllocator, StreamAllocator};
 use lemnos_host::{Host, Options, entry};
 use lemnos_linux_sys::dma_buf::{self, SYNC_END, SYNC_READ, SYNC_START, SYNC_WRITE, sealed_memfd};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
 
 #[global_allocator]
@@ -46,101 +47,83 @@ const ODD_BYTES: u32 = 5000;
 const ARGB: u32 = u32::from_le_bytes(*b"AR24");
 const XRGB: u32 = u32::from_le_bytes(*b"XR24");
 
-/// The pool as the host addresses it, over one mapping per buffer.
-struct Mapped {
-    buffers: Vec<Mapping>,
-    /// The dma-bufs, when they are real: CPU access to one is bracketed for the kernel.
-    synced: Vec<OwnedFd>,
-    stride: usize,
-    bytes: usize,
-}
+/// Brackets the producer's CPU access to each dma-buf with the kernel, as a CPU must for memory a
+/// device shares. Indexed by pool index, which is the buffer with one plane.
+struct Bracket(Vec<OwnedFd>);
 
-impl Mapped {
-    /// The buffer and the offset in it that pool offset `offset` is, when `len` bytes fit.
-    fn at(&self, offset: usize, len: usize) -> Option<(usize, usize)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        fits.then_some((offset / self.stride, inner))
-    }
-
-    fn sync(&self, buffer: usize, flags: u64) -> bool {
-        self.synced
-            .get(buffer)
-            .is_none_or(|fd| dma_buf::sync(fd.as_fd(), flags).is_ok())
-    }
-}
-
-impl BufferMemory for Mapped {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        let Some((buffer, inner)) = self.at(offset, data.len()) else {
-            return false;
+impl Bracket {
+    fn sync(&self, index: usize, phase: u64, access: Access) {
+        let rw = match access {
+            Access::Read => SYNC_READ,
+            Access::Write => SYNC_WRITE,
         };
-        let Some(map) = self.buffers.get(buffer) else {
-            return false;
-        };
-        self.sync(buffer, SYNC_START | SYNC_WRITE)
-            && map.write_bytes(inner, data).is_some()
-            && self.sync(buffer, SYNC_END | SYNC_WRITE)
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        let Some((buffer, inner)) = self.at(offset, out.len()) else {
-            return false;
-        };
-        let from = self
-            .buffers
-            .get(buffer)
-            .and_then(|map| map.as_slice().get(inner..inner + out.len()));
-        let Some(from) = from else {
-            return false;
-        };
-        if !self.sync(buffer, SYNC_START | SYNC_READ) {
-            return false;
+        if let Some(fd) = self.0.get(index) {
+            let _ = dma_buf::sync(fd.as_fd(), phase | rw);
         }
-        out.copy_from_slice(from);
-        self.sync(buffer, SYNC_END | SYNC_READ)
     }
 }
 
-/// Makes each buffer of a stream its own descriptor, mapped for `write` and `read` and handed
-/// out as the buffer's handle. From `heap` they are dma-bufs; without one, sealed memfds a page
+impl DmaSync for Bracket {
+    fn begin(&self, index: usize, access: Access) {
+        self.sync(index, SYNC_START, access);
+    }
+
+    fn end(&self, index: usize, access: Access) {
+        self.sync(index, SYNC_END, access);
+    }
+}
+
+/// Makes each buffer of a stream its own descriptor, as the buffers of a heap are. From `heap`
+/// they are dma-bufs, bracketed for the producer's CPU access; without one, sealed memfds a page
 /// multiple long, as a heap rounds.
 struct PerBuffer {
     heap: Option<File>,
 }
 
 impl StreamAllocator for PerBuffer {
-    fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
-        HeapAllocator.allocate(name, layout)
+    fn allocate(&self, name: &str, layout: &Layout) -> Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(&self, name: &str, layout: &Layout, _: &str) -> Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut handles = Vec::new();
-        let mut buffers = Vec::new();
-        let mut synced = Vec::new();
+    fn allocate_planes(
+        &self,
+        name: &str,
+        layout: &Layout,
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Buffers, Status> {
+        let _ = (name, heap);
+        let mut fds = Vec::new();
         for _ in 0..layout.buffers {
-            let fd: OwnedFd = match &self.heap {
-                Some(heap) => dma_heap::allocate(heap.as_fd(), u64::from(layout.buffer_bytes)),
-                None => sealed_memfd(c"nonai2d-stream-test", layout.stride()),
+            for length in planes.lengths() {
+                // A buffer of one plane keeps the whole stride, as a heap rounds up.
+                let made = if planes.count() == 1 {
+                    u64::from(layout.buffer_bytes)
+                } else {
+                    u64::from(*length)
+                };
+                let fd: OwnedFd = match &self.heap {
+                    Some(heap) => dma_heap::allocate(heap.as_fd(), made),
+                    None => sealed_memfd(c"g2d-stream-test", layout.stride()),
+                }
+                .map_err(|_| Status::IO)?;
+                fds.push(fd);
             }
-            .map_err(|_| Status::IO)?;
-            let bytes = layout.buffer_bytes as usize;
-            buffers.push(Mapping::new(fd.as_fd(), bytes, 0, true).map_err(|_| Status::IO)?);
-            if self.heap.is_some() {
-                synced.push(fd.try_clone().map_err(|_| Status::IO)?);
-            }
-            handles.push(fd);
         }
-        Ok(Backing {
-            buffers: Arc::new(Mapped {
-                buffers,
-                synced,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
+        let sync: Option<Arc<dyn DmaSync>> = match self.heap {
+            Some(_) => {
+                let copies = fds
+                    .iter()
+                    .map(|fd| fd.try_clone().map_err(|_| Status::IO))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(Arc::new(Bracket(copies)))
+            }
+            None => None,
+        };
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync,
         })
     }
 }
@@ -220,11 +203,11 @@ fn post(consumer: &mut Consumer, job: &ConvertJob) {
     let mut writer = Writer::new(&mut bytes);
     job.encode(&mut writer).unwrap();
     let used = writer.len();
-    assert!(consumer.push_job(&bytes[..used]).unwrap());
+    assert!(consumer.jobs().post(&bytes[..used]).unwrap());
 }
 
-fn consumer(lease: &Lease) -> Consumer {
-    Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap()
+fn consumer(lease: Lease) -> Consumer {
+    lease.consumer_writable().unwrap()
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
@@ -236,15 +219,14 @@ fn jobs_on_the_ring_run_on_the_streams_dma_bufs_and_complete_on_the_ring() {
     let host = start();
     let mut producer = host.stream_producer(0, "jobs").unwrap();
     let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     // What a driver is given.
     let stream: &mut dyn StreamEndpoint<Error = ErrorKind> = &mut producer;
     let runs = Rc::new(Cell::new(0));
     let mut converter = converter(&runs);
     assert_eq!(converter.serve(stream, 0), Ok(0), "holds the free buffers");
     // The consumer fills buffer 0 and asks for it converted into buffer 1.
-    let offset = lease.layout.buffer_offset(0).unwrap();
-    assert!(lease.buffers.write(offset, &[0x11; 64]));
+    assert!(consumer.write(0, 0, &[0x11; 64]));
     post(&mut consumer, &job(0xF00D, 0, 1, 32, 32));
     assert_eq!(converter.serve(stream, 9), Ok(1));
     assert_eq!(runs.get(), 1);
@@ -268,8 +250,8 @@ fn jobs_on_the_ring_run_on_the_streams_dma_bufs_and_complete_on_the_ring() {
     assert_eq!(converter.last_failure(), Some(Failure::Buffers));
     assert_eq!(completion(&mut consumer).bytes, 0);
     // Returned, it can be an input.
-    assert!(consumer.release(done.buffer, done.fence).unwrap());
-    assert!(consumer.release(failed.buffer, failed.fence).unwrap());
+    assert!(consumer.release(done.buffer));
+    assert!(consumer.release(failed.buffer));
     post(&mut consumer, &job(4, 1, 2, 32, 32));
     assert_eq!(converter.serve(stream, 12), Ok(1));
     assert_eq!(runs.get(), 2);
@@ -303,7 +285,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
     let host = start();
     let mut producer = host.stream_producer(0, "jobs").unwrap();
     let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let consumer = Rc::new(RefCell::new(consumer(&lease)));
+    let consumer = Rc::new(RefCell::new(consumer(lease)));
     let runs = Rc::new(Cell::new(0));
     // While the engine runs the second job, the consumer takes the first one's completion,
     // gives its buffer back and posts a third job writing into that buffer.
@@ -316,7 +298,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
             let mut consumer = consumer.borrow_mut();
             let done = completion(&mut consumer);
             assert_eq!((done.buffer, done.identity, done.bytes), (1, 1, BYTES));
-            assert!(consumer.release(done.buffer, done.fence).unwrap());
+            assert!(consumer.release(done.buffer));
             post(&mut consumer, &job(3, 0, 1, 32, 32));
         }))
     };
@@ -353,11 +335,11 @@ fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consum
     let host = start();
     let mut producer = host.stream_producer(0, "jobs").unwrap();
     let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let runs = Rc::new(Cell::new(0));
     let mut converter = converter(&runs);
     assert_eq!(converter.serve(&mut producer, 0), Ok(0));
-    assert!(consumer.push_job(&[1, 2, 3]).unwrap());
+    assert!(consumer.jobs().post(&[1, 2, 3]).unwrap());
     post(&mut consumer, &job(1, 0, 1, 32, 32));
     assert_eq!(converter.serve(&mut producer, 1), Ok(1));
     // The consumer sees the fault, and the job it posted behind the bad bytes ran nowhere.
@@ -369,7 +351,7 @@ fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consum
     assert_eq!((stats.producer_held, stats.consumer_held), (0, 0));
     // The driver carries on: the next consumer's job runs.
     let next = host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut fresh = self::consumer(&next);
+    let mut fresh = self::consumer(next);
     post(&mut fresh, &job(2, 0, 1, 32, 32));
     assert_eq!(converter.serve(&mut producer, 2), Ok(1));
     assert_eq!(runs.get(), 1);
@@ -389,7 +371,8 @@ fn a_new_consumers_first_job_runs_on_its_own_memory() {
     host.stream_detach(0, "jobs", CallerId(1)).unwrap();
     // Everything the driver holds is from the first consumer's time.
     let second = host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut consumer = consumer(&second);
+    let given_handles = second.handles.clone().unwrap();
+    let mut consumer = consumer(second);
     post(&mut consumer, &job(7, 2, 3, 32, 32));
     assert_eq!(converter.serve(&mut producer, 1), Ok(1));
     assert_eq!(runs.get(), 1);
@@ -400,7 +383,7 @@ fn a_new_consumers_first_job_runs_on_its_own_memory() {
     // The two buffers given up reached no one, and the handles lent are the second's.
     assert_eq!(host.stream_stats(0, "jobs").unwrap().dropped, 2);
     let lent = producer.buffer_handle(2).unwrap().unwrap();
-    let given = &second.handles.as_ref().unwrap()[2];
+    let given = &given_handles[2];
     let same = |fd| lemnos_linux_sys::dma_buf::identity(fd).unwrap();
     assert_eq!(same(lent.fd()), same(given.as_fd()));
     assert_ne!(
@@ -414,7 +397,7 @@ fn a_thousand_jobs_through_the_stream_allocate_nothing() {
     let host = start();
     let mut producer = host.stream_producer(0, "jobs").unwrap();
     let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let runs = Rc::new(Cell::new(0));
     let mut converter = converter(&runs);
     let mut cycle = |n: u64| {
@@ -423,7 +406,7 @@ fn a_thousand_jobs_through_the_stream_allocate_nothing() {
         assert_eq!(converter.serve(&mut producer, n), Ok(1));
         let done = completion(&mut consumer);
         assert_eq!((done.buffer, done.identity, done.bytes), (output, n, BYTES));
-        assert!(consumer.release(done.buffer, done.fence).unwrap());
+        assert!(consumer.release(done.buffer));
     };
     for n in 0..10 {
         cycle(n);
@@ -442,7 +425,7 @@ fn a_thousand_jobs_through_the_stream_allocate_nothing() {
 fn a_frame_past_the_streams_buffer_but_inside_its_dma_buf(host: &Host) {
     let mut producer = host.stream_producer(0, "odd").unwrap();
     let lease = host.stream_attach(0, "odd", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let runs = Rc::new(Cell::new(0));
     let mut converter = converter(&runs);
     assert_eq!(converter.serve(&mut producer, 0), Ok(0));
@@ -457,7 +440,7 @@ fn a_frame_past_the_streams_buffer_but_inside_its_dma_buf(host: &Host) {
     assert_eq!(converter.serve(&mut producer, 0), Ok(1));
     let done = completion(&mut consumer);
     assert_eq!((done.identity, done.bytes), (1, 4992));
-    assert!(consumer.release(done.buffer, done.fence).unwrap());
+    assert!(consumer.release(done.buffer));
     // 32 by 40 is 5120: past the stream's buffer, inside the dma-buf.
     post(&mut consumer, &job(2, 0, 1, 32, 40));
     assert_eq!(converter.serve(&mut producer, 0), Ok(1));
@@ -465,7 +448,7 @@ fn a_frame_past_the_streams_buffer_but_inside_its_dma_buf(host: &Host) {
     assert_eq!(converter.last_failure(), Some(Failure::Completion));
     let done = completion(&mut consumer);
     assert_eq!((done.identity, done.bytes), (2, 0));
-    assert!(consumer.release(done.buffer, done.fence).unwrap());
+    assert!(consumer.release(done.buffer));
     // 32 by 65 is 8320: past the dma-buf, and the engine never sees it.
     post(&mut consumer, &job(3, 0, 1, 32, 65));
     assert_eq!(converter.serve(&mut producer, 0), Ok(1));

@@ -17,7 +17,6 @@ use lemnos_driver_usb_gadget::UsbGadget;
 use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent};
 use lemnos_hal::mock::{ControlAnswer, MockUsbFunction};
 use lemnos_host::board::parse;
-use lemnos_host::stream::Lease;
 use lemnos_host::{Host, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, FrameSlot, STATE_FAULT};
@@ -113,19 +112,18 @@ impl Rig {
 
 /// A consumer of the data stream, as a client of the service is one.
 struct Serving {
-    lease: Lease,
     ring: Consumer,
 }
 
 impl Serving {
     fn attach(rig: &Rig, caller: u64) -> Self {
-        let lease = rig.host.stream_attach(0, "data", CallerId(caller)).unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
-    }
-
-    fn at(&self, buffer: u32, offset: usize) -> usize {
-        self.lease.layout.buffer_offset(buffer).unwrap() + offset
+        let ring = rig
+            .host
+            .stream_attach(0, "data", CallerId(caller))
+            .unwrap()
+            .consumer_writable()
+            .unwrap();
+        Self { ring }
     }
 
     fn post(&mut self, job: Job) {
@@ -133,7 +131,7 @@ impl Serving {
         let mut writer = Writer::new(&mut bytes);
         job.encode(&mut writer).unwrap();
         let used = writer.len();
-        assert!(self.ring.push_job(&bytes[..used]).unwrap());
+        assert!(self.ring.jobs().post(&bytes[..used]).unwrap());
     }
 
     fn want_event(&mut self, identity: u64, buffer: u32) {
@@ -157,7 +155,7 @@ impl Serving {
     }
 
     fn send(&mut self, identity: u64, buffer: u32, data: &[u8]) {
-        assert!(self.lease.buffers.write(self.at(buffer, DATA_OFFSET), data));
+        assert!(self.ring.write(buffer, DATA_OFFSET, data));
         self.post(Job {
             identity,
             kind: JobKind::Send,
@@ -172,19 +170,11 @@ impl Serving {
     fn completion(&mut self) -> Option<(FrameSlot, Completion, Vec<u8>)> {
         let frame = self.ring.pop_frame().unwrap()?;
         let mut record = [0u8; COMPLETION_BYTES];
-        assert!(
-            self.lease
-                .buffers
-                .read(self.at(frame.buffer, 0), &mut record)
-        );
+        assert!(self.ring.read(frame.buffer, 0, &mut record));
         let record = Completion::decode(&mut Reader::new(&record)).unwrap();
         let mut data = vec![0u8; (frame.bytes as usize).saturating_sub(DATA_OFFSET)];
-        assert!(
-            self.lease
-                .buffers
-                .read(self.at(frame.buffer, DATA_OFFSET), &mut data)
-        );
-        assert!(self.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(self.ring.read(frame.buffer, DATA_OFFSET, &mut data));
+        assert!(self.ring.release(frame.buffer));
         Some((frame, record, data))
     }
 

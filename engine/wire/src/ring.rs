@@ -1,164 +1,136 @@
-//! The ring a frame stream shares between its producer and its one consumer. `docs/wire.md` is its
-//! specification.
+//! The shared memory of a frame stream, as the shm family lays it out (`docs/ring.md`). A stream is
+//! four shm objects and two small pages, and this module says which is which and how each is sized:
 //!
-//! The memory is shared with a peer that isn't trusted, so everything here is atomics over a slice
-//! of `u64` words: reading a word the peer is writing is well defined, and a word is read once,
-//! then checked. Every index and length read from the shared words is checked against the
-//! capacities each side already holds, never against a value stored in the memory. Nothing here
-//! panics, indexes out of bounds or loops on what a peer wrote; a malformed peer is an error, and
-//! the side that saw it never looks at the ring again.
+//! | Object | Shm type | Written by | Read by |
+//! | --- | --- | --- | --- |
+//! | frames | `shm_ring::Ring`, one field, a frame's metadata as its payload | host | consumer |
+//! | pool | `shm_ring_buffers::Pool`, the buffers, one descriptor per plane of each buffer | host (and consumer, for a stream it fills) | consumer |
+//! | holds | a page of `shm_ring_holds::Marks`, one per consumer | consumer | host |
+//! | doorbell | `shm_ring_doorbell::Doorbell`: an eventfd and a page | consumer (page), host (eventfd) | consumer |
+//! | jobs | a second `shm_ring::Ring`, one field, a job's bytes as payload | consumer | host |
+//! | job acks | one word: how many jobs the host has collected | host | consumer |
 //!
-//! Three queues live in the words, one writer each: frames (producer to consumer), returned
-//! buffers and jobs (consumer to producer). Heads and tails count up forever and wrap only
-//! at 2^64; the slot is the count modulo a power-of-two capacity.
+//! The host makes every object and hands the consumer the descriptors in the order of [`fds`]. A
+//! consumer that only has the shm crates and these descriptors can read the frames: see
+//! `docs/streams.md#reading-with-the-shm-crates-alone`.
+//!
+//! A frame's buffers are named by pool index: buffer `b`'s plane `p` is pool buffer `b × planes + p`,
+//! so a frame of several planes is an entry naming several pool buffers. Nothing here reads what a
+//! frame or job carries: the contract says what the bytes mean.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::os::fd::OwnedFd;
 
-/// Shared memory as 64-bit atomics. Implemented outside this crate over a mapping, and over the
-/// heap for in-process use.
-pub trait WordMemory: Send + Sync {
-    fn words(&self) -> &[AtomicU64];
-}
-
-/// The frame buffers, as the consumer reads them and, on a stream it fills, writes them.
-pub trait ByteMemory: Send + Sync {
-    fn bytes(&self) -> &[u8];
-
-    /// Copies `data` to `offset`. `false`, and nothing written, when the range isn't inside the
-    /// memory or the memory was mapped to be read only, which is what this default is.
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        let _ = (offset, data);
-        false
-    }
-
-    /// The consumer starts reading this memory in place, and goes on until
-    /// [`end_read`](Self::end_read). Memory a device also uses (a dma-buf) tells the kernel, so
-    /// the processor sees what the device wrote. Nothing for any other memory, which is this
-    /// default.
-    fn begin_read(&self) {}
-
-    /// The consumer has finished the reading it began with [`begin_read`](Self::begin_read).
-    fn end_read(&self) {}
-}
-
-impl WordMemory for Box<[AtomicU64]> {
-    fn words(&self) -> &[AtomicU64] {
-        self
-    }
-}
+use shm_ring::{
+    FieldId, Flags, Mem, MemMut, ReadMap, RingError as ShmError, SampleTime, Spec, WriteMap,
+};
+use shm_ring_buffers::{BufferDesc, BufferIndex};
 
 constants! {
-    /// `b"LMNSRING"`, stored in the first word.
-    pub const MAGIC: u64 = u64::from_le_bytes(*b"LMNSRING");
-    /// The ring's layout version, stored in the second word.
-    pub const LAYOUT_VERSION: u64 = 1;
-    /// The most buffers one stream has.
-    pub const MAX_BUFFERS: u32 = 4096;
-    /// The largest buffer.
-    pub const MAX_BUFFER_BYTES: u32 = 1 << 28;
-    /// The most buffer memory one stream maps.
-    pub const MAX_POOL_BYTES: u64 = 1 << 34;
-    /// The most jobs waiting at once.
-    pub const MAX_JOB_SLOTS: u32 = 64;
-    /// The largest job.
-    pub const MAX_JOB_BYTES: u32 = 4096;
-    /// Buffers start on multiples of this inside the buffer descriptor.
-    pub const BUFFER_ALIGN: u64 = 4096;
-    /// Words in one frame slot.
-    pub const FRAME_WORDS: usize = 5;
-    /// The stream is running.
-    pub const STATE_OPEN: u64 = 0;
-    /// The stream ended normally.
-    pub const STATE_CLOSED: u64 = 1;
-    /// The stream ended because the consumer broke the rules.
-    pub const STATE_FAULT: u64 = 2;
+/// The most buffers one stream has: what one pool and one set of holds can name.
+pub const MAX_BUFFERS: u32 = shm_ring_buffers::MAX_BUFFERS;
+/// The largest buffer.
+pub const MAX_BUFFER_BYTES: u32 = 1 << 28;
+/// The most buffer memory one stream maps.
+pub const MAX_POOL_BYTES: u64 = 1 << 34;
+/// The most jobs waiting at once.
+pub const MAX_JOB_SLOTS: u32 = 64;
+/// The largest job.
+pub const MAX_JOB_BYTES: u32 = 4096;
+/// Buffers start on multiples of this inside a shared pool.
+pub const BUFFER_ALIGN: u64 = 4096;
+/// Bytes of a frame's metadata: sequence, identity and length.
+pub const FRAME_BYTES: usize = 20;
+/// Pool buffers one frame may name: one per plane, at most `VIDEO_MAX_PLANES` (8).
+pub const MAX_PLANES: usize = shm_ring_buffers::MAX_PER_FRAME;
+
+/// The stream's end codes, stored in the frame ring's end word. Zero while the stream runs.
+/// The host ends a stream the consumer may still be reading.
+pub const STATE_OPEN: u32 = 0;
+/// The stream ended normally.
+pub const STATE_CLOSED: u32 = 1;
+/// The stream ended because the consumer broke the rules.
+pub const STATE_FAULT: u32 = 2;
 }
-/// Where things are, in words from the start of the ring.
-pub mod offsets {
+
+/// Where each descriptor of a stream is in the order the host passes them: the frame ring, the
+/// pool page, the job ring, the job acks, the doorbell's eventfd, its page, the holds page, and then
+/// the pool's buffers, one descriptor per plane of each buffer (shared memory is one descriptor).
+pub mod fds {
     constants! {
-        pub const MAGIC: usize = 0;
-        pub const VERSION: usize = 1;
-        pub const BUFFERS: usize = 2;
-        pub const BUFFER_BYTES: usize = 3;
-        pub const FRAME_SLOTS: usize = 4;
-        pub const JOB_SLOTS: usize = 5;
-        pub const JOB_BYTES: usize = 6;
-        /// [`super::STATE_OPEN`], [`super::STATE_CLOSED`] or [`super::STATE_FAULT`]. Host writes.
-        pub const STATE: usize = 8;
-        /// Frames published. Producer writes.
-        pub const FRAMES_HEAD: usize = 16;
-        /// Frames taken. Consumer writes.
-        pub const FRAMES_TAIL: usize = 24;
-        /// Buffers returned. Consumer writes.
-        pub const RETURNS_HEAD: usize = 32;
-        /// Returned buffers collected. Producer writes.
-        pub const RETURNS_TAIL: usize = 40;
-        /// Jobs posted. Consumer writes.
-        pub const JOBS_HEAD: usize = 48;
-        /// Jobs collected. Producer writes.
-        pub const JOBS_TAIL: usize = 56;
-        /// The frame slots start here.
-        pub const FRAMES: usize = 64;
+    pub const RING: usize = 0;
+    pub const POOL_PAGE: usize = 1;
+    pub const JOB_RING: usize = 2;
+    pub const JOB_ACKS: usize = 3;
+    pub const BELL: usize = 4;
+    pub const BELL_PAGE: usize = 5;
+    pub const MARKS: usize = 6;
+    /// The first buffer descriptor.
+    pub const BUFFERS: usize = 7;
+    /// How many descriptors come before the buffers'.
+    pub const BEFORE: usize = BUFFERS;
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The error for a ring that doesn't hold what the layout says, a job that doesn't fit, or a
+/// shm operation that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RingError {
     /// The layout is outside the limits.
     BadLayout,
-    /// The memory is smaller than the layout needs.
-    TooSmall,
-    /// The memory wasn't set up by this version of the producer.
-    BadHeader,
-    /// A shared head or tail is impossible.
-    BadIndex,
-    /// A buffer number is outside the pool.
-    BadBuffer,
-    /// A length is too large.
-    BadLength,
-    /// A buffer is already held by the consumer.
-    BufferInUse,
-    /// The buffer isn't held by this consumer.
-    NotHeld,
-    /// The job doesn't fit where it was asked to go. Nothing was consumed.
+    /// A job is larger than the layout allows.
     JobTooLarge,
-    /// This side already saw a malformed peer.
+    /// The peer broke the rules: it skipped jobs it had no right to lose, or sent a frame or a
+    /// buffer that can't be right.
     Broken,
+    /// A buffer number outside the stream.
+    BadBuffer,
+    /// A length or range outside a buffer.
+    BadLength,
+    /// The shared memory isn't the one the layout describes; the shm crate's message.
+    Shm(String),
 }
 
 impl core::fmt::Display for RingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::BadLayout => "the stream layout is out of range",
-            Self::TooSmall => "the shared memory is too small",
-            Self::BadHeader => "the ring header doesn't match",
-            Self::BadIndex => "an impossible ring index",
-            Self::BadBuffer => "a buffer number outside the pool",
-            Self::BadLength => "a length out of range",
-            Self::BufferInUse => "a buffer already held",
-            Self::NotHeld => "a buffer not held",
-            Self::JobTooLarge => "a job too large for its destination",
-            Self::Broken => "the stream's peer is malformed",
-        })
+        match self {
+            Self::BadLayout => f.write_str("the stream layout is out of range"),
+            Self::JobTooLarge => f.write_str("a job too large for its destination"),
+            Self::Broken => f.write_str("the stream's peer is malformed"),
+            Self::BadBuffer => f.write_str("a buffer number outside the stream"),
+            Self::BadLength => f.write_str("a length out of range"),
+            Self::Shm(error) => write!(f, "shared memory: {error}"),
+        }
     }
 }
 
 impl std::error::Error for RingError {}
 
-/// What a stream's ring and buffers look like. Both sides hold their own copy and never trust the
-/// shared words for it.
+impl From<std::io::Error> for RingError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Shm(error.to_string())
+    }
+}
+
+impl From<ShmError> for RingError {
+    fn from(error: ShmError) -> Self {
+        Self::Shm(error.to_string())
+    }
+}
+
+/// What a stream's rings and buffers look like. Both sides hold their own copy: the host made it,
+/// and the consumer was given it with the descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     pub buffers: u32,
     pub buffer_bytes: u32,
+    /// The frame ring's history: at least `buffers`, a power of two.
     pub frame_slots: u32,
     pub job_slots: u32,
     pub job_bytes: u32,
 }
 
 impl Layout {
-    /// A layout with enough slots that a queue can only fill if its reader stops.
+    /// A layout with enough frame slots that a frame can only be lost when its reader stops.
     pub fn new(
         buffers: u32,
         buffer_bytes: u32,
@@ -168,8 +140,8 @@ impl Layout {
         Self {
             buffers,
             buffer_bytes,
-            frame_slots: buffers.checked_next_power_of_two().unwrap_or(0).max(1),
-            job_slots: job_slots.checked_next_power_of_two().unwrap_or(0).max(1),
+            frame_slots: buffers.checked_next_power_of_two().unwrap_or(0).max(2),
+            job_slots: job_slots.checked_next_power_of_two().unwrap_or(0).max(2),
             job_bytes,
         }
         .checked()
@@ -183,9 +155,11 @@ impl Layout {
             || self.buffer_bytes > MAX_BUFFER_BYTES
             || !self.frame_slots.is_power_of_two()
             || self.frame_slots < self.buffers
-            || self.frame_slots > 2 * MAX_BUFFERS
+            || self.frame_slots < 2
             || !self.job_slots.is_power_of_two()
+            || self.job_slots < 2
             || self.job_slots > MAX_JOB_SLOTS
+            || self.job_bytes == 0
             || self.job_bytes > MAX_JOB_BYTES
             || self.pool_bytes() > MAX_POOL_BYTES;
         if bad {
@@ -195,284 +169,254 @@ impl Layout {
         }
     }
 
-    const fn job_words(&self) -> usize {
-        1 + (self.job_bytes as usize).div_ceil(8)
-    }
-
-    const fn returns_at(&self) -> usize {
-        offsets::FRAMES + self.frame_slots as usize * FRAME_WORDS
-    }
-
-    const fn jobs_at(&self) -> usize {
-        self.returns_at() + self.frame_slots as usize
-    }
-
-    /// Words the ring occupies.
-    pub const fn ring_words(&self) -> usize {
-        self.jobs_at() + self.job_slots as usize * self.job_words()
-    }
-
-    /// Bytes the ring occupies.
-    pub const fn ring_bytes(&self) -> usize {
-        self.ring_words() * 8
-    }
-
-    /// Distance between buffers in the buffer descriptor.
+    /// Distance between buffers in a shared pool.
+    #[must_use]
     pub const fn stride(&self) -> u64 {
         (self.buffer_bytes as u64).next_multiple_of(BUFFER_ALIGN)
     }
 
-    /// Bytes the buffer descriptor holds.
+    /// Bytes a shared pool holds.
+    #[must_use]
     pub const fn pool_bytes(&self) -> u64 {
         self.buffers as u64 * self.stride()
     }
 
-    /// Where `buffer` starts, or `None` outside the pool.
-    pub fn buffer_offset(&self, buffer: u32) -> Option<usize> {
-        if buffer >= self.buffers {
-            return None;
+    /// The shape of the frame ring: one field, whose payloads are buffer entries naming up to
+    /// [`MAX_PLANES`] pool buffers and carrying a frame's metadata.
+    #[must_use]
+    pub const fn frame_spec(&self) -> Spec {
+        Spec {
+            fields: 1,
+            history: self.frame_slots,
+            max_payload: shm_ring_buffers::entry::len(MAX_PLANES, FRAME_BYTES) as u32,
+            expiry_ms: 0,
         }
-        usize::try_from(u64::from(buffer) * self.stride()).ok()
+    }
+
+    /// The shape of the job ring: one field, a job as its payload.
+    #[must_use]
+    pub const fn job_spec(&self) -> Spec {
+        Spec {
+            fields: 1,
+            history: self.job_slots,
+            max_payload: self.job_bytes,
+            expiry_ms: 0,
+        }
+    }
+
+    /// The pool buffers' descriptions, in pool order, for the consumer to attach with. `planes` is
+    /// each plane's length, empty for one plane of a whole stride. A shared pool (`shared`) is one
+    /// descriptor with every buffer at its stride; otherwise each plane of each buffer is its own
+    /// descriptor, and pool buffer `b × planes + p` is buffer `b`'s plane `p` (see [`pool_index`]).
+    #[must_use]
+    pub fn pool_descs(&self, shared: bool, planes: &[u32]) -> Vec<BufferDesc> {
+        let count = planes.len().max(1);
+        let mut out = Vec::with_capacity(self.buffers as usize * count);
+        for buffer in 0..self.buffers {
+            for plane in 0..count {
+                out.push(if shared {
+                    BufferDesc {
+                        descriptor: 0,
+                        offset: u64::from(buffer) * self.stride(),
+                        size: u64::from(self.buffer_bytes),
+                    }
+                } else {
+                    BufferDesc {
+                        descriptor: pool_index(buffer, plane as u32, count as u32) as u8,
+                        offset: 0,
+                        size: match planes.get(plane) {
+                            Some(length) => u64::from(*length),
+                            None => self.stride(),
+                        },
+                    }
+                });
+            }
+        }
+        out
     }
 }
 
-/// One published frame, as a ring slot holds it.
+/// The index in the pool of plane `plane` of buffer `buffer`, for a stream of `planes` planes.
+#[must_use]
+pub const fn pool_index(buffer: u32, plane: u32, planes: u32) -> u32 {
+    buffer * planes + plane
+}
+
+/// One frame a consumer took with [`Consumer::pop_frame`]: its buffer, and its metadata. The
+/// buffer is held until [`Consumer::release`] gives it back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameSlot {
+    /// The buffer, as the producer numbers it (a plane's pool buffers are its buffer's).
     pub buffer: u32,
+    /// The frame's length, across its planes.
     pub bytes: u32,
     pub sequence: u64,
     /// Means something only to the producer and the consumer.
     pub identity: u64,
-    /// `CLOCK_MONOTONIC` nanoseconds on Linux. Carried, never read.
+    /// `CLOCK_MONOTONIC` nanoseconds.
     pub timestamp_ns: u64,
-    /// What the consumer hands back with the buffer.
-    pub fence: u32,
 }
 
-fn load(words: &[AtomicU64], at: usize, order: Ordering) -> Result<u64, RingError> {
-    words
-        .get(at)
-        .map(|word| word.load(order))
-        .ok_or(RingError::TooSmall)
+/// One frame's metadata, as the frame ring's payload carries it. The frame's buffers are the
+/// entry's, not this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameInfo {
+    /// Counts from the producer's start, one per frame.
+    pub sequence: u64,
+    /// Means something only to the producer and the consumer.
+    pub identity: u64,
+    /// The frame's length, across its planes.
+    pub bytes: u32,
 }
 
-fn store(words: &[AtomicU64], at: usize, value: u64, order: Ordering) -> Result<(), RingError> {
-    words
-        .get(at)
-        .map(|word| word.store(value, order))
-        .ok_or(RingError::TooSmall)
-}
-
-/// How many entries a reader may take, from the writer's head, or an error if that's impossible.
-fn available(head: u64, tail: u64, slots: u32) -> Result<u64, RingError> {
-    let count = head.wrapping_sub(tail);
-    if count > u64::from(slots) {
-        return Err(RingError::BadIndex);
+impl FrameInfo {
+    #[must_use]
+    pub fn encode(self) -> [u8; FRAME_BYTES] {
+        let mut out = [0_u8; FRAME_BYTES];
+        out[0..8].copy_from_slice(&self.sequence.to_le_bytes());
+        out[8..16].copy_from_slice(&self.identity.to_le_bytes());
+        out[16..20].copy_from_slice(&self.bytes.to_le_bytes());
+        out
     }
-    Ok(count)
-}
 
-/// A writer's view of the reader's tail: it must lie between the last one seen and `head`, or the
-/// reader is lying.
-fn checked_tail(tail: u64, seen: u64, head: u64, slots: u32) -> Result<u64, RingError> {
-    if tail.wrapping_sub(seen) > head.wrapping_sub(seen)
-        || head.wrapping_sub(tail) > u64::from(slots)
-    {
-        return Err(RingError::BadIndex);
+    /// The metadata in `bytes`, or `None` if it is not exactly one frame's.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; FRAME_BYTES] = bytes.try_into().ok()?;
+        Some(Self {
+            sequence: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            identity: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            bytes: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+        })
     }
-    Ok(tail)
 }
 
-const fn slot_of(count: u64, slots: u32) -> usize {
-    (count & (slots as u64 - 1)) as usize
+/// The page that says how many jobs the host has collected: one word, written by the host.
+pub const JOB_ACK_BYTES: usize = 8;
+
+/// The consumer's end of the job ring: posts a job, or says the ring is full. Never waits.
+pub struct JobPoster {
+    ring: shm_ring::Writer<WriteMap>,
+    acks: ReadMap,
+    job_bytes: u32,
+    slots: u32,
 }
 
-/// The producer's end. Holds its own counters and capacities and writes the header once.
-pub struct Producer {
-    memory: Arc<dyn WordMemory>,
-    layout: Layout,
-    frames_head: u64,
-    frames_seen: u64,
-    returns_tail: u64,
-    jobs_tail: u64,
-    broken: bool,
-}
-
-impl core::fmt::Debug for Producer {
+impl core::fmt::Debug for JobPoster {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Producer")
-            .field("layout", &self.layout)
+        f.debug_struct("JobPoster")
+            .field("slots", &self.slots)
+            .field("job_bytes", &self.job_bytes)
             .finish_non_exhaustive()
     }
 }
 
-impl Producer {
-    /// Sets up fresh, zeroed memory.
-    pub fn new(memory: Arc<dyn WordMemory>, layout: Layout) -> Result<Self, RingError> {
-        let layout = layout.checked()?;
-        let words = memory.words();
-        if words.len() < layout.ring_words() {
-            return Err(RingError::TooSmall);
+impl JobPoster {
+    /// Takes the write end of the job ring and the job-ack page, read-only.
+    pub fn new(ring: OwnedFd, acks: OwnedFd, layout: &Layout) -> Result<Self, RingError> {
+        let ring = shm_ring::Writer::attach(ring)?;
+        let acks = ReadMap::new(acks)?;
+        if ring.geometry().history() != layout.job_slots || acks.words() < 1 {
+            return Err(RingError::BadLayout);
         }
-        for (at, value) in [
-            (offsets::VERSION, LAYOUT_VERSION),
-            (offsets::BUFFERS, u64::from(layout.buffers)),
-            (offsets::BUFFER_BYTES, u64::from(layout.buffer_bytes)),
-            (offsets::FRAME_SLOTS, u64::from(layout.frame_slots)),
-            (offsets::JOB_SLOTS, u64::from(layout.job_slots)),
-            (offsets::JOB_BYTES, u64::from(layout.job_bytes)),
-            (offsets::STATE, STATE_OPEN),
-        ] {
-            store(words, at, value, Ordering::Relaxed)?;
-        }
-        store(words, offsets::MAGIC, MAGIC, Ordering::Release)?;
         Ok(Self {
-            memory,
-            layout,
-            frames_head: 0,
-            frames_seen: 0,
-            returns_tail: 0,
-            jobs_tail: 0,
-            broken: false,
+            ring,
+            acks,
+            job_bytes: layout.job_bytes,
+            slots: layout.job_slots,
         })
     }
 
-    pub const fn layout(&self) -> &Layout {
-        &self.layout
-    }
-
-    fn guard(&self) -> Result<(), RingError> {
-        if self.broken {
-            return Err(RingError::Broken);
+    /// Posts `job`. `false`, and nothing posted, when `job_slots` jobs are waiting, because the
+    /// host has not collected them yet. A job longer than the layout allows is an error.
+    pub fn post(&mut self, job: &[u8]) -> Result<bool, RingError> {
+        if job.len() > self.job_bytes as usize {
+            return Err(RingError::JobTooLarge);
         }
-        Ok(())
-    }
-
-    /// Keeps what the error says, and refuses from then on.
-    fn fail<T>(&mut self, error: RingError) -> Result<T, RingError> {
-        self.broken = true;
-        Err(error)
-    }
-
-    /// Publishes a frame. `false` means the ring is full and nothing was written.
-    pub fn push_frame(&mut self, frame: FrameSlot) -> Result<bool, RingError> {
-        self.guard()?;
-        let slots = self.layout.frame_slots;
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        let tail = load(words, offsets::FRAMES_TAIL, Ordering::Acquire);
-        let tail =
-            tail.and_then(|tail| checked_tail(tail, self.frames_seen, self.frames_head, slots));
-        let tail = match tail {
-            Ok(tail) => tail,
-            Err(error) => return self.fail(error),
-        };
-        self.frames_seen = tail;
-        if self.frames_head.wrapping_sub(tail) == u64::from(slots) {
+        let collected = self.acks.load(0, std::sync::atomic::Ordering::Acquire);
+        let waiting = self.ring.published().saturating_sub(collected);
+        if waiting >= u64::from(self.slots) {
             return Ok(false);
         }
-        let at = offsets::FRAMES + slot_of(self.frames_head, slots) * FRAME_WORDS;
-        let pair = u64::from(frame.buffer) | (u64::from(frame.bytes) << 32);
-        for (offset, value) in [
-            pair,
-            frame.sequence,
-            frame.identity,
-            frame.timestamp_ns,
-            u64::from(frame.fence),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            store(words, at + offset, value, Ordering::Relaxed)?;
-        }
-        self.frames_head = self.frames_head.wrapping_add(1);
-        store(
-            words,
-            offsets::FRAMES_HEAD,
-            self.frames_head,
-            Ordering::Release,
-        )?;
+        self.ring
+            .publish(FieldId(0), SampleTime::ZERO, Flags::NONE, job)
+            .map_err(|_| RingError::BadLayout)?;
         Ok(true)
-    }
-
-    /// The next returned buffer and its fence, or `None`. The caller checks them against the pool.
-    pub fn pop_return(&mut self) -> Result<Option<(u32, u32)>, RingError> {
-        self.guard()?;
-        let slots = self.layout.frame_slots;
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        let head = load(words, offsets::RETURNS_HEAD, Ordering::Acquire)?;
-        match available(head, self.returns_tail, slots) {
-            Ok(0) => return Ok(None),
-            Ok(_) => {}
-            Err(error) => return self.fail(error),
-        }
-        let at = self.layout.returns_at() + slot_of(self.returns_tail, slots);
-        let word = load(words, at, Ordering::Relaxed)?;
-        self.returns_tail = self.returns_tail.wrapping_add(1);
-        store(
-            words,
-            offsets::RETURNS_TAIL,
-            self.returns_tail,
-            Ordering::Release,
-        )?;
-        Ok(Some((word as u32, (word >> 32) as u32)))
-    }
-
-    /// Copies the next job into `out` and returns its length. A job too large for `out` stays and
-    /// is [`RingError::JobTooLarge`]: that's the caller's error, not the peer's.
-    pub fn pop_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, RingError> {
-        self.guard()?;
-        let slots = self.layout.job_slots;
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        let head = load(words, offsets::JOBS_HEAD, Ordering::Acquire)?;
-        match available(head, self.jobs_tail, slots) {
-            Ok(0) => return Ok(None),
-            Ok(_) => {}
-            Err(error) => return self.fail(error),
-        }
-        let at = self.layout.jobs_at() + slot_of(self.jobs_tail, slots) * self.layout.job_words();
-        let len = load(words, at, Ordering::Relaxed)?;
-        if len > u64::from(self.layout.job_bytes) {
-            return self.fail(RingError::BadLength);
-        }
-        let len = len as usize;
-        let into = out.get_mut(..len).ok_or(RingError::JobTooLarge)?;
-        for (index, chunk) in into.chunks_mut(8).enumerate() {
-            let word = load(words, at + 1 + index, Ordering::Relaxed)?;
-            let bytes = word.to_le_bytes();
-            let part = bytes.get(..chunk.len()).ok_or(RingError::BadLength)?;
-            chunk.copy_from_slice(part);
-        }
-        self.jobs_tail = self.jobs_tail.wrapping_add(1);
-        store(words, offsets::JOBS_TAIL, self.jobs_tail, Ordering::Release)?;
-        Ok(Some(len))
-    }
-
-    /// Tells the consumer the stream has ended.
-    pub fn close(&self, state: u64) {
-        let _ = store(
-            self.memory.words(),
-            offsets::STATE,
-            state,
-            Ordering::Release,
-        );
     }
 }
 
-/// The consumer's end.
+/// The host's end of the job ring: takes each job in order and tells the consumer how many it
+/// has collected.
+pub struct JobCollector {
+    reader: shm_ring::Reader<ReadMap>,
+    acks: WriteMap,
+    collected: u64,
+    job_bytes: u32,
+}
+
+impl core::fmt::Debug for JobCollector {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JobCollector")
+            .field("collected", &self.collected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl JobCollector {
+    /// Takes the read end of the job ring and the job-ack page, writable.
+    pub fn new(ring: OwnedFd, acks: OwnedFd, layout: &Layout) -> Result<Self, RingError> {
+        let reader = shm_ring::Reader::attach(ring)?;
+        let acks = WriteMap::new(acks)?;
+        if reader.geometry().history() != layout.job_slots || acks.words() < 1 {
+            return Err(RingError::BadLayout);
+        }
+        Ok(Self {
+            reader,
+            acks,
+            collected: 0,
+            job_bytes: layout.job_bytes,
+        })
+    }
+
+    /// The next job in `out`, its length; `None` if there is none. A job the reader lost (the
+    /// consumer posted more than the ring holds) is [`RingError::Broken`]: the consumer broke the
+    /// rules, and nothing it posted after the lost job can be trusted in order.
+    pub fn next(&mut self, out: &mut [u8]) -> Result<Option<usize>, RingError> {
+        match self.reader.next() {
+            shm_ring::Next::Empty => Ok(None),
+            shm_ring::Next::Skipped(_) => Err(RingError::Broken),
+            shm_ring::Next::Sample(sample) => {
+                let len = sample.payload.len();
+                if len > self.job_bytes as usize || len > out.len() {
+                    return Err(RingError::JobTooLarge);
+                }
+                out[..len].copy_from_slice(sample.payload);
+                self.collected += 1;
+                use std::sync::atomic::Ordering;
+                self.acks.store(0, self.collected, Ordering::Release);
+                Ok(Some(len))
+            }
+        }
+    }
+}
+
+/// The consumer's end of a stream, assembled from the descriptors the host passed in the order of
+/// [`fds`]. Every mapping is checked by the shm crates when it is made; nothing here reads a value
+/// from the shared memory that the layout doesn't already give.
+///
+/// A consumer reads frames with [`frames`](Self::frames), returns buffers by dropping their held
+/// frames, posts jobs with [`jobs`](Self::jobs), and waits with [`doorbell`](Self::doorbell).
 pub struct Consumer {
-    memory: Arc<dyn WordMemory>,
     layout: Layout,
-    frames_tail: u64,
-    returns_head: u64,
-    returns_seen: u64,
-    jobs_head: u64,
-    jobs_seen: u64,
-    held: Vec<bool>,
-    broken: bool,
+    frames: shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>>,
+    /// The frames [`pop_frame`](Self::pop_frame) took and nobody has released, by buffer.
+    held: Vec<Option<shm_ring_buffers::Held<shm_ring_holds::Marks<WriteMap>>>>,
+    /// How many planes each buffer has: one, or each plane's pool buffer.
+    planes: u32,
+    /// The buffers a consumer that fills them maps writable, apart from the reader's own view.
+    fills: Option<shm_ring_buffers::PoolView>,
+    jobs: JobPoster,
+    bell: shm_ring_doorbell::Doorbell,
 }
 
 impl core::fmt::Debug for Consumer {
@@ -484,452 +428,217 @@ impl core::fmt::Debug for Consumer {
 }
 
 impl Consumer {
-    /// Attaches to a ring the producer has set up, refusing one that doesn't match `layout`.
-    pub fn attach(memory: Arc<dyn WordMemory>, layout: Layout) -> Result<Self, RingError> {
+    /// Attaches to a stream from its descriptors, in the order of [`fds`] followed by the pool's
+    /// buffers. `planes` are each plane's length (empty for one plane of a whole stride), and
+    /// `shared` says the pool is one descriptor. `writable` maps the buffers writable too, for a
+    /// stream the consumer fills.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError`] if the descriptors are the wrong number or can't be mapped as the layout
+    /// says, or the rings aren't the ones the layout describes.
+    pub fn attach(
+        descriptors: Vec<OwnedFd>,
+        layout: Layout,
+        planes: &[u32],
+        shared: bool,
+        writable: bool,
+    ) -> Result<Self, RingError> {
         let layout = layout.checked()?;
-        let words = memory.words();
-        if words.len() < layout.ring_words() {
-            return Err(RingError::TooSmall);
+        let descs = layout.pool_descs(shared, planes);
+        let pool_fds = if shared { 1 } else { descs.len() };
+        if descriptors.len() != fds::BUFFERS + pool_fds {
+            return Err(RingError::BadLayout);
         }
-        let header = [
-            (offsets::MAGIC, MAGIC),
-            (offsets::VERSION, LAYOUT_VERSION),
-            (offsets::BUFFERS, u64::from(layout.buffers)),
-            (offsets::BUFFER_BYTES, u64::from(layout.buffer_bytes)),
-            (offsets::FRAME_SLOTS, u64::from(layout.frame_slots)),
-            (offsets::JOB_SLOTS, u64::from(layout.job_slots)),
-            (offsets::JOB_BYTES, u64::from(layout.job_bytes)),
-        ];
-        for (at, expected) in header {
-            if load(words, at, Ordering::Acquire)? != expected {
-                return Err(RingError::BadHeader);
-            }
+        let mut descriptors = descriptors.into_iter();
+        let mut next = || descriptors.next().ok_or(RingError::BadLayout);
+        let ring = next()?;
+        let pool_page = next()?;
+        let job_ring = next()?;
+        let job_acks = next()?;
+        let bell_fd = next()?;
+        let bell_page = next()?;
+        let marks = next()?;
+        let buffer_fds: Vec<OwnedFd> = descriptors.collect();
+
+        // The ring is new for this attachment, so the consumer reads from its first sample: a
+        // frame the host published on standby before this consumer could map the ring is still
+        // there.
+        let reader = shm_ring::Reader::attach_from_start(ring)?;
+        if reader.geometry().history() != layout.frame_slots {
+            return Err(RingError::BadLayout);
         }
+        let (fills, view) = if writable {
+            let fills = shm_ring_buffers::PoolView::attach_writable(
+                clone_owned(&pool_page)?,
+                clone_all(&buffer_fds)?,
+                &descs,
+            )?;
+            let view = shm_ring_buffers::PoolView::attach_writable(pool_page, buffer_fds, &descs)?;
+            (Some(fills), view)
+        } else {
+            (
+                None,
+                shm_ring_buffers::PoolView::attach(pool_page, buffer_fds, &descs)?,
+            )
+        };
+        let marks = shm_ring_holds::Marks::over(
+            WriteMap::new(marks)?,
+            layout.buffers * planes.len().max(1) as u32,
+            0,
+            0,
+        );
+        let frames = shm_ring_buffers::BufferReader::new(reader, FieldId(0), view, marks);
+        let jobs = JobPoster::new(job_ring, job_acks, &layout)?;
+        let bell = shm_ring_doorbell::Doorbell::attach(bell_fd, bell_page)?;
         Ok(Self {
-            memory,
+            held: (0..layout.buffers).map(|_| None).collect(),
+            planes: planes.len().max(1) as u32,
             layout,
-            frames_tail: 0,
-            returns_head: 0,
-            returns_seen: 0,
-            jobs_head: 0,
-            jobs_seen: 0,
-            held: vec![false; layout.buffers as usize],
-            broken: false,
+            frames,
+            fills,
+            jobs,
+            bell,
         })
     }
 
+    /// The layout the stream was attached with.
+    #[must_use]
     pub const fn layout(&self) -> &Layout {
         &self.layout
     }
 
-    /// The ring's state: [`STATE_OPEN`] while running. An unknown value reads as a fault.
-    pub fn state(&self) -> u64 {
-        match load(self.memory.words(), offsets::STATE, Ordering::Acquire) {
-            Ok(state @ (STATE_OPEN | STATE_CLOSED)) => state,
-            _ => STATE_FAULT,
-        }
-    }
-
-    fn guard(&self) -> Result<(), RingError> {
-        if self.broken {
-            return Err(RingError::Broken);
-        }
-        Ok(())
-    }
-
-    fn fail<T>(&mut self, error: RingError) -> Result<T, RingError> {
-        self.broken = true;
-        Err(error)
-    }
-
-    /// The next frame, or `None`. The buffer counts as held from here until [`Self::release`].
+    /// Takes the next frame and holds its buffer until [`release`](Self::release) gives it back.
+    /// `Ok(None)` when no frame is waiting. Frames the ring lost before the consumer got to them
+    /// are skipped, as [`shm_ring_buffers::BufferReader::next`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError::Broken`] if the frame's metadata or buffers can't be right, or the topic
+    /// ended.
     pub fn pop_frame(&mut self) -> Result<Option<FrameSlot>, RingError> {
-        self.guard()?;
-        let slots = self.layout.frame_slots;
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        let head = load(words, offsets::FRAMES_HEAD, Ordering::Acquire)?;
-        match available(head, self.frames_tail, slots) {
-            Ok(0) => return Ok(None),
-            Ok(_) => {}
-            Err(error) => return self.fail(error),
-        }
-        let at = offsets::FRAMES + slot_of(self.frames_tail, slots) * FRAME_WORDS;
-        let pair = load(words, at, Ordering::Relaxed)?;
-        let frame = FrameSlot {
-            buffer: pair as u32,
-            bytes: (pair >> 32) as u32,
-            sequence: load(words, at + 1, Ordering::Relaxed)?,
-            identity: load(words, at + 2, Ordering::Relaxed)?,
-            timestamp_ns: load(words, at + 3, Ordering::Relaxed)?,
-            fence: load(words, at + 4, Ordering::Relaxed)? as u32,
+        let planes = self.planes;
+        let buffer_bytes = self.layout.buffer_bytes;
+        let taken = match self.frames.next() {
+            shm_ring_buffers::NextBatch::Batch(batch) => {
+                let info = FrameInfo::decode(batch.meta).ok_or(RingError::Broken)?;
+                let first = batch.held.buffer(0).ok_or(RingError::Broken)?;
+                let buffer = first.0 / planes;
+                if info.bytes > buffer_bytes * planes {
+                    return Err(RingError::Broken);
+                }
+                let slot = FrameSlot {
+                    buffer,
+                    bytes: info.bytes,
+                    sequence: info.sequence,
+                    identity: info.identity,
+                    timestamp_ns: batch.time.as_nanos(),
+                };
+                let held = batch.held;
+                if let Some(place) = self.held.get_mut(buffer as usize) {
+                    *place = Some(held);
+                }
+                Some(slot)
+            }
+            shm_ring_buffers::NextBatch::Empty
+            | shm_ring_buffers::NextBatch::Skipped(_)
+            | shm_ring_buffers::NextBatch::Limited => None,
+            shm_ring_buffers::NextBatch::PoolChanged { .. }
+            | shm_ring_buffers::NextBatch::CutOff => return Err(RingError::Broken),
         };
-        if frame.bytes > self.layout.buffer_bytes {
-            return self.fail(RingError::BadLength);
-        }
-        let Some(held) = self.held.get_mut(frame.buffer as usize) else {
-            return self.fail(RingError::BadBuffer);
-        };
-        if *held {
-            return self.fail(RingError::BufferInUse);
-        }
-        *held = true;
-        self.frames_tail = self.frames_tail.wrapping_add(1);
-        store(
-            words,
-            offsets::FRAMES_TAIL,
-            self.frames_tail,
-            Ordering::Release,
-        )?;
-        Ok(Some(frame))
+        Ok(taken)
     }
 
-    /// Gives a buffer back. `false` means the return queue is full and nothing changed: that
-    /// happens only while the producer has stopped collecting.
-    pub fn release(&mut self, buffer: u32, fence: u32) -> Result<bool, RingError> {
-        self.guard()?;
-        let slots = self.layout.frame_slots;
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        if !self.held.get(buffer as usize).copied().unwrap_or(false) {
-            return Err(RingError::NotHeld);
-        }
-        let tail = load(words, offsets::RETURNS_TAIL, Ordering::Acquire);
-        let tail =
-            tail.and_then(|tail| checked_tail(tail, self.returns_seen, self.returns_head, slots));
-        let tail = match tail {
-            Ok(tail) => tail,
-            Err(error) => return self.fail(error),
+    /// Copies `data` into whole buffer `buffer` at `offset`, on a stream attached writable, for a
+    /// buffer the consumer fills. `false` if the stream isn't writable, or the range isn't in the
+    /// buffer. A stream of one plane per buffer; see [`crate::ring`] for planes.
+    pub fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> bool {
+        let Some(fills) = self.fills.as_mut() else {
+            return false;
         };
-        self.returns_seen = tail;
-        if self.returns_head.wrapping_sub(tail) == u64::from(slots) {
-            return Ok(false);
-        }
-        let at = self.layout.returns_at() + slot_of(self.returns_head, slots);
-        let word = u64::from(buffer) | (u64::from(fence) << 32);
-        store(words, at, word, Ordering::Relaxed)?;
-        self.returns_head = self.returns_head.wrapping_add(1);
-        store(
-            words,
-            offsets::RETURNS_HEAD,
-            self.returns_head,
-            Ordering::Release,
-        )?;
-        if let Some(held) = self.held.get_mut(buffer as usize) {
-            *held = false;
-        }
-        Ok(true)
+        fills
+            .bytes_mut(BufferIndex(buffer))
+            .and_then(|bytes| bytes.get_mut(offset..offset.checked_add(data.len())?))
+            .map(|dst| dst.copy_from_slice(data))
+            .is_some()
     }
 
-    /// Posts a job for the producer. `false` means the job queue is full.
-    pub fn push_job(&mut self, job: &[u8]) -> Result<bool, RingError> {
-        self.guard()?;
-        let slots = self.layout.job_slots;
-        if job.len() > self.layout.job_bytes as usize {
-            return Err(RingError::BadLength);
-        }
-        let memory = Arc::clone(&self.memory);
-        let words = memory.words();
-        let tail = load(words, offsets::JOBS_TAIL, Ordering::Acquire);
-        let tail = tail.and_then(|tail| checked_tail(tail, self.jobs_seen, self.jobs_head, slots));
-        let tail = match tail {
-            Ok(tail) => tail,
-            Err(error) => return self.fail(error),
-        };
-        self.jobs_seen = tail;
-        if self.jobs_head.wrapping_sub(tail) == u64::from(slots) {
-            return Ok(false);
-        }
-        let at = self.layout.jobs_at() + slot_of(self.jobs_head, slots) * self.layout.job_words();
-        store(words, at, job.len() as u64, Ordering::Relaxed)?;
-        for (index, chunk) in job.chunks(8).enumerate() {
-            let mut bytes = [0u8; 8];
-            let to = bytes.get_mut(..chunk.len()).ok_or(RingError::BadLength)?;
-            to.copy_from_slice(chunk);
-            store(
-                words,
-                at + 1 + index,
-                u64::from_le_bytes(bytes),
-                Ordering::Relaxed,
-            )?;
-        }
-        self.jobs_head = self.jobs_head.wrapping_add(1);
-        store(words, offsets::JOBS_HEAD, self.jobs_head, Ordering::Release)?;
-        Ok(true)
+    /// Copies from whole buffer `buffer` at `offset` into `out`, for a buffer that isn't a frame.
+    /// `false` if the range isn't in the buffer. A stream of one plane per buffer.
+    #[must_use]
+    pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> bool {
+        self.frames
+            .pool()
+            .bytes(BufferIndex(buffer))
+            .and_then(|bytes| bytes.get(offset..offset.checked_add(out.len())?))
+            .map(|src| out.copy_from_slice(src))
+            .is_some()
+    }
+
+    /// Gives back a buffer whose frame [`pop_frame`](Self::pop_frame) took. `false` if this
+    /// consumer doesn't hold it.
+    pub fn release(&mut self, buffer: u32) -> bool {
+        self.held
+            .get_mut(buffer as usize)
+            .and_then(Option::take)
+            .is_some()
+    }
+
+    /// The buffer reader of the frame ring. Its held frames give their buffers back when dropped.
+    #[must_use]
+    pub const fn frames(
+        &self,
+    ) -> &shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>> {
+        &self.frames
+    }
+
+    /// The buffer reader of the frame ring, to read frames from.
+    pub fn frames_mut(
+        &mut self,
+    ) -> &mut shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>> {
+        &mut self.frames
+    }
+
+    /// The writable view of the pool, for a stream the consumer fills; `None` otherwise.
+    pub fn fills(&mut self) -> Option<&mut shm_ring_buffers::PoolView> {
+        self.fills.as_mut()
+    }
+
+    /// Sleeps until a frame may be ready, the stream ends, or `timeout` passes. `Ok(false)` only
+    /// for the timeout: a frame may still be there after `true`, and a caller reads again.
+    ///
+    /// # Errors
+    ///
+    /// If the poll on the doorbell fails.
+    pub fn wait(&mut self, timeout: std::time::Duration) -> std::io::Result<bool> {
+        let frames = &self.frames;
+        let woke = self
+            .bell
+            .wait(Some(timeout), || frames.pending() > 0 || frames.end() != 0)?;
+        Ok(!matches!(woke, shm_ring_doorbell::Wake::TimedOut))
+    }
+
+    /// Posts jobs. See [`JobPoster::post`].
+    pub fn jobs(&mut self) -> &mut JobPoster {
+        &mut self.jobs
+    }
+
+    /// The doorbell the host rings after each frame, for a consumer that sleeps until one comes.
+    pub fn doorbell(&mut self) -> &mut shm_ring_doorbell::Doorbell {
+        &mut self.bell
+    }
+
+    /// Why the stream ended, as its end word says: [`STATE_OPEN`] while it runs.
+    #[must_use]
+    pub fn state(&self) -> u32 {
+        self.frames.end()
     }
 }
 
-/// Zeroed words on the heap: a ring within one process.
-#[must_use]
-pub fn heap_words(words: usize) -> Arc<dyn WordMemory> {
-    let memory: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
-    Arc::new(memory)
+fn clone_owned(fd: &OwnedFd) -> Result<OwnedFd, RingError> {
+    Ok(fd.try_clone().map_err(ShmError::from)?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn layout() -> Layout {
-        Layout::new(4, 256, 2, 16).unwrap()
-    }
-
-    fn frame(buffer: u32, sequence: u64) -> FrameSlot {
-        FrameSlot {
-            buffer,
-            bytes: 16,
-            sequence,
-            identity: sequence + 100,
-            timestamp_ns: sequence * 10,
-            fence: 1,
-        }
-    }
-
-    fn pair() -> (Arc<dyn WordMemory>, Producer, Consumer) {
-        let layout = layout();
-        let memory = heap_words(layout.ring_words());
-        let producer = Producer::new(Arc::clone(&memory), layout).unwrap();
-        let consumer = Consumer::attach(Arc::clone(&memory), layout).unwrap();
-        (memory, producer, consumer)
-    }
-
-    fn set(memory: &dyn WordMemory, at: usize, value: u64) {
-        memory.words()[at].store(value, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn frames_arrive_in_order_with_their_fields() {
-        let (_, mut producer, mut consumer) = pair();
-        for i in 0..4 {
-            assert!(producer.push_frame(frame(i, u64::from(i))).unwrap());
-        }
-        for i in 0..4 {
-            assert_eq!(
-                consumer.pop_frame().unwrap(),
-                Some(frame(i, u64::from(i))),
-                "frame {i}"
-            );
-        }
-        assert_eq!(consumer.pop_frame().unwrap(), None);
-    }
-
-    #[test]
-    fn the_rings_wrap_and_stay_correct_over_many_cycles() {
-        let (_, mut producer, mut consumer) = pair();
-        for sequence in 0..10_000u64 {
-            let buffer = (sequence % 4) as u32;
-            assert!(producer.push_frame(frame(buffer, sequence)).unwrap());
-            let got = consumer.pop_frame().unwrap().unwrap();
-            assert_eq!(got, frame(buffer, sequence));
-            assert!(consumer.release(buffer, 7).unwrap());
-            assert_eq!(producer.pop_return().unwrap(), Some((buffer, 7)));
-        }
-    }
-
-    #[test]
-    fn a_full_frame_ring_reports_full_and_changes_nothing() {
-        let (_, mut producer, mut consumer) = pair();
-        for i in 0..4 {
-            assert!(producer.push_frame(frame(i, u64::from(i))).unwrap());
-        }
-        assert!(!producer.push_frame(frame(0, 9)).unwrap());
-        assert_eq!(consumer.pop_frame().unwrap(), Some(frame(0, 0)));
-    }
-
-    #[test]
-    fn jobs_round_trip_with_their_bytes_and_a_short_destination_keeps_them() {
-        let (_, mut producer, mut consumer) = pair();
-        assert!(consumer.push_job(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap());
-        assert!(consumer.push_job(&[]).unwrap());
-        assert!(!consumer.push_job(&[1]).unwrap(), "two slots");
-        let mut small = [0u8; 2];
-        assert_eq!(producer.pop_job(&mut small), Err(RingError::JobTooLarge));
-        let mut out = [0u8; 16];
-        assert_eq!(producer.pop_job(&mut out).unwrap(), Some(9));
-        assert_eq!(&out[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        assert_eq!(producer.pop_job(&mut out).unwrap(), Some(0));
-        assert_eq!(producer.pop_job(&mut out).unwrap(), None);
-    }
-
-    #[test]
-    fn an_impossible_frame_head_is_an_error_and_sticks() {
-        let (memory, _producer, mut consumer) = pair();
-        set(memory.as_ref(), offsets::FRAMES_HEAD, u64::MAX);
-        assert_eq!(consumer.pop_frame(), Err(RingError::BadIndex));
-        set(memory.as_ref(), offsets::FRAMES_HEAD, 0);
-        assert_eq!(consumer.pop_frame(), Err(RingError::Broken));
-    }
-
-    #[test]
-    fn a_frame_head_just_past_the_capacity_is_refused() {
-        let (memory, _producer, mut consumer) = pair();
-        set(memory.as_ref(), offsets::FRAMES_HEAD, 5);
-        assert_eq!(consumer.pop_frame(), Err(RingError::BadIndex));
-    }
-
-    #[test]
-    fn a_frame_naming_a_buffer_outside_the_pool_is_refused() {
-        let (memory, _producer, mut consumer) = pair();
-        set(memory.as_ref(), offsets::FRAMES, 4);
-        set(memory.as_ref(), offsets::FRAMES_HEAD, 1);
-        assert_eq!(consumer.pop_frame(), Err(RingError::BadBuffer));
-    }
-
-    #[test]
-    fn a_frame_longer_than_a_buffer_is_refused() {
-        let (memory, _producer, mut consumer) = pair();
-        set(memory.as_ref(), offsets::FRAMES, 257 << 32);
-        set(memory.as_ref(), offsets::FRAMES_HEAD, 1);
-        assert_eq!(consumer.pop_frame(), Err(RingError::BadLength));
-    }
-
-    #[test]
-    fn a_frame_on_a_buffer_the_consumer_holds_is_refused() {
-        let (_, mut producer, mut consumer) = pair();
-        assert!(producer.push_frame(frame(1, 1)).unwrap());
-        assert!(producer.push_frame(frame(1, 2)).unwrap());
-        assert!(consumer.pop_frame().unwrap().is_some());
-        assert_eq!(consumer.pop_frame(), Err(RingError::BufferInUse));
-    }
-
-    #[test]
-    fn a_buffer_cant_be_released_twice_or_unheld() {
-        let (_, mut producer, mut consumer) = pair();
-        assert_eq!(consumer.release(0, 1), Err(RingError::NotHeld));
-        assert_eq!(consumer.release(99, 1), Err(RingError::NotHeld));
-        producer.push_frame(frame(0, 1)).unwrap();
-        consumer.pop_frame().unwrap();
-        assert!(consumer.release(0, 1).unwrap());
-        assert_eq!(consumer.release(0, 1), Err(RingError::NotHeld));
-    }
-
-    #[test]
-    fn a_producer_refuses_an_impossible_frames_tail() {
-        let (memory, mut producer, _consumer) = pair();
-        producer.push_frame(frame(0, 0)).unwrap();
-        // Beyond the head.
-        set(memory.as_ref(), offsets::FRAMES_TAIL, 9);
-        assert_eq!(producer.push_frame(frame(0, 1)), Err(RingError::BadIndex));
-    }
-
-    #[test]
-    fn a_tail_going_backwards_is_refused() {
-        let (memory, mut producer, mut consumer) = pair();
-        for i in 0..3 {
-            producer.push_frame(frame(i, 0)).unwrap();
-            consumer.pop_frame().unwrap();
-        }
-        producer.push_frame(frame(3, 0)).unwrap();
-        set(memory.as_ref(), offsets::FRAMES_TAIL, 0);
-        assert_eq!(producer.push_frame(frame(0, 1)), Err(RingError::BadIndex));
-    }
-
-    #[test]
-    fn an_impossible_returns_head_is_refused() {
-        let (memory, mut producer, _consumer) = pair();
-        set(memory.as_ref(), offsets::RETURNS_HEAD, 1 << 40);
-        assert_eq!(producer.pop_return(), Err(RingError::BadIndex));
-        assert_eq!(producer.pop_return(), Err(RingError::Broken));
-    }
-
-    #[test]
-    fn a_job_length_past_the_slot_is_refused_and_a_negative_one_too() {
-        let layout = layout();
-        let (memory, mut producer, _consumer) = pair();
-        set(memory.as_ref(), layout.jobs_at(), 17);
-        set(memory.as_ref(), offsets::JOBS_HEAD, 1);
-        let mut out = [0u8; 64];
-        assert_eq!(producer.pop_job(&mut out), Err(RingError::BadLength));
-        let (memory, mut producer, _consumer) = pair();
-        set(memory.as_ref(), layout.jobs_at(), u64::MAX);
-        set(memory.as_ref(), offsets::JOBS_HEAD, 1);
-        assert_eq!(producer.pop_job(&mut out), Err(RingError::BadLength));
-    }
-
-    #[test]
-    fn a_consumer_refuses_a_header_that_doesnt_match() {
-        let layout = layout();
-        let memory = heap_words(layout.ring_words());
-        let _producer = Producer::new(Arc::clone(&memory), layout).unwrap();
-        set(memory.as_ref(), offsets::BUFFERS, 1000);
-        assert_eq!(
-            Consumer::attach(Arc::clone(&memory), layout).unwrap_err(),
-            RingError::BadHeader
-        );
-        let blank = heap_words(layout.ring_words());
-        assert_eq!(
-            Consumer::attach(blank, layout).unwrap_err(),
-            RingError::BadHeader
-        );
-    }
-
-    #[test]
-    fn memory_smaller_than_the_layout_is_refused_on_both_sides() {
-        let layout = layout();
-        let short = heap_words(layout.ring_words() - 1);
-        assert_eq!(
-            Producer::new(Arc::clone(&short), layout).unwrap_err(),
-            RingError::TooSmall
-        );
-        assert_eq!(
-            Consumer::attach(short, layout).unwrap_err(),
-            RingError::TooSmall
-        );
-    }
-
-    #[test]
-    fn layouts_out_of_range_are_refused() {
-        let good = layout();
-        assert!(Layout::new(0, 1, 1, 0).is_err());
-        assert!(Layout::new(MAX_BUFFERS + 1, 1, 1, 0).is_err());
-        assert!(Layout::new(1, 0, 1, 0).is_err());
-        assert!(Layout::new(1, MAX_BUFFER_BYTES + 1, 1, 0).is_err());
-        assert!(Layout::new(1, 1, 1, MAX_JOB_BYTES + 1).is_err());
-        assert!(Layout::new(MAX_BUFFERS, MAX_BUFFER_BYTES, 1, 0).is_err());
-        for bad in [
-            Layout {
-                frame_slots: 3,
-                ..good
-            },
-            Layout {
-                frame_slots: 2,
-                ..good
-            },
-            Layout {
-                job_slots: 0,
-                ..good
-            },
-            Layout {
-                job_slots: 128,
-                ..good
-            },
-            Layout {
-                frame_slots: 1 << 30,
-                ..good
-            },
-        ] {
-            assert_eq!(bad.checked(), Err(RingError::BadLayout), "{bad:?}");
-        }
-        assert_eq!(good.checked(), Ok(good));
-    }
-
-    #[test]
-    fn buffers_sit_at_multiples_of_the_stride() {
-        let layout = Layout::new(3, 5000, 1, 0).unwrap();
-        assert_eq!(layout.stride(), 8192);
-        assert_eq!(layout.buffer_offset(0), Some(0));
-        assert_eq!(layout.buffer_offset(2), Some(16384));
-        assert_eq!(layout.buffer_offset(3), None);
-        assert_eq!(layout.pool_bytes(), 3 * 8192);
-    }
-
-    #[test]
-    fn the_state_word_reads_as_a_fault_when_unknown() {
-        let (memory, producer, consumer) = pair();
-        assert_eq!(consumer.state(), STATE_OPEN);
-        producer.close(STATE_CLOSED);
-        assert_eq!(consumer.state(), STATE_CLOSED);
-        set(memory.as_ref(), offsets::STATE, 99);
-        assert_eq!(consumer.state(), STATE_FAULT);
-    }
+fn clone_all(fds: &[OwnedFd]) -> Result<Vec<OwnedFd>, RingError> {
+    fds.iter().map(clone_owned).collect()
 }

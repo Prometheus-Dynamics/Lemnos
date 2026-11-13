@@ -12,7 +12,6 @@ use lemnos_core::{
     CallerId, Decode, Driver, Encode, Health, MethodId, Reader, Result, Status, Writer,
 };
 use lemnos_host::board::parse;
-use lemnos_host::stream::Lease;
 use lemnos_host::{Binder, DeviceState, DriverEntry, Host, Instance, Options, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::{SimBoard, SimClock};
@@ -165,38 +164,41 @@ fn enc<T: Encode + ?Sized>(value: &T) -> Vec<u8> {
     buffer[..used].to_vec()
 }
 
-fn write(lease: &Lease, buffer: u32, data: &[u8]) {
-    let at = lease.layout.buffer_offset(buffer).unwrap();
-    assert!(lease.buffers.write(at, data));
+/// Copies `data` into buffer `buffer` of the stream, which the consumer fills.
+fn write(consumer: &mut Consumer, buffer: u32, data: &[u8]) {
+    assert!(consumer.write(buffer, 0, data));
 }
 
-fn read(lease: &Lease, buffer: u32, len: usize) -> Vec<u8> {
-    let at = lease.layout.buffer_offset(buffer).unwrap();
+fn read(consumer: &Consumer, buffer: u32, len: usize) -> Vec<u8> {
     let mut out = vec![0; len];
-    assert!(lease.buffers.read(at, &mut out));
+    assert!(consumer.read(buffer, 0, &mut out));
     out
 }
 
 fn post(consumer: &mut Consumer, run: RunJob) {
-    assert!(consumer.push_job(&enc(&run)).unwrap());
+    assert!(consumer.jobs().post(&enc(&run)).unwrap());
 }
 
 /// The next completion's identity and status; its buffer goes back.
-fn completion(consumer: &mut Consumer, lease: &Lease) -> (u64, RunStatus) {
+fn completion(consumer: &mut Consumer) -> (u64, RunStatus) {
     let frame = consumer.pop_frame().unwrap().expect("a completion");
     assert_eq!(frame.bytes, RESULT_BYTES as u32);
-    let status = RunResult::decode(&mut Reader::new(&read(lease, frame.buffer, RESULT_BYTES)))
-        .unwrap()
-        .status;
-    assert!(consumer.release(frame.buffer, frame.fence).unwrap());
+    let status = RunResult::decode(&mut Reader::new(&read(
+        consumer,
+        frame.buffer,
+        RESULT_BYTES,
+    )))
+    .unwrap()
+    .status;
+    assert!(consumer.release(frame.buffer));
     (frame.identity, status)
 }
 
 /// Loads the played copy program from buffer 0 as `caller`, with slot 0 on buffer 1 and slot 1
 /// on buffer 2, four bytes each.
-fn load_copy(rig: &Rig, lease: &Lease, caller: CallerId) -> u32 {
+fn load_copy(rig: &Rig, consumer: &mut Consumer, caller: CallerId) -> u32 {
     let bytes = Framed::copy(4).bytes();
-    write(lease, 0, &bytes);
+    write(consumer, 0, &bytes);
     let program = rig.load(caller, 0, bytes.len() as u32).unwrap();
     rig.attach(caller, program, 0, 1, 4).unwrap();
     rig.attach(caller, program, 1, 2, 4).unwrap();
@@ -219,15 +221,19 @@ fn a_board_file_binds_it_and_a_caller_runs_a_program_through_the_host() {
     let name = rig.call(ME, 2, &32u32.to_le_bytes()).unwrap();
     assert!(name.ends_with(b"jobs"), "{name:?}");
 
-    let lease = rig.host.stream_attach(0, "jobs", ME).unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-    let program = load_copy(&rig, &lease, ME);
+    let mut consumer = rig
+        .host
+        .stream_attach(0, "jobs", ME)
+        .unwrap()
+        .consumer_writable()
+        .unwrap();
+    let program = load_copy(&rig, &mut consumer, ME);
     assert_eq!(program, 1);
-    write(&lease, 1, &[10, 20, 30, 40]);
+    write(&mut consumer, 1, &[10, 20, 30, 40]);
     post(&mut consumer, job(0xabc, program, 3));
     rig.after(Duration::from_nanos(POLL_NS));
-    assert_eq!(completion(&mut consumer, &lease), (0xabc, RunStatus::Done));
-    assert_eq!(read(&lease, 2, 4), [11, 21, 31, 41]);
+    assert_eq!(completion(&mut consumer), (0xabc, RunStatus::Done));
+    assert_eq!(read(&consumer, 2, 4), [11, 21, 31, 41]);
     assert_eq!(rig.counters(), Counters { jobs: 1, errors: 0 });
     // The run named the program's domain, and could reach its body and two slots, no more.
     let seen = kernel.lock().unwrap().seen.clone();
@@ -240,10 +246,7 @@ fn a_board_file_binds_it_and_a_caller_runs_a_program_through_the_host() {
     // A run naming no program is refused on its completion; nothing reaches the block.
     post(&mut consumer, job(0xdef, 9, 3));
     rig.after(Duration::from_nanos(POLL_NS));
-    assert_eq!(
-        completion(&mut consumer, &lease),
-        (0xdef, RunStatus::Refused)
-    );
+    assert_eq!(completion(&mut consumer), (0xdef, RunStatus::Refused));
     assert_eq!(kernel.lock().unwrap().submits, 1);
 }
 
@@ -252,8 +255,13 @@ fn a_program_is_its_callers_and_goes_when_its_caller_goes() {
     let kernel = Kernel::new(true);
     let rig = Rig::played(&kernel);
     rig.host.tick();
-    let lease = rig.host.stream_attach(0, "jobs", ME).unwrap();
-    let program = load_copy(&rig, &lease, ME);
+    let mut consumer = rig
+        .host
+        .stream_attach(0, "jobs", ME)
+        .unwrap()
+        .consumer_writable()
+        .unwrap();
+    let program = load_copy(&rig, &mut consumer, ME);
     assert_eq!(handles_in(&kernel, 1).len(), 3);
     // Another caller can't change it.
     assert_eq!(rig.unload(OTHER, program), Err(Status::NOT_FOUND));
@@ -321,13 +329,17 @@ fn a_node_that_goes_away_is_opened_again_and_its_programs_are_gone() {
     let kernel = Kernel::new(true);
     let rig = Rig::played(&kernel);
     rig.host.tick();
-    let lease = rig.host.stream_attach(0, "jobs", ME).unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-    let program = load_copy(&rig, &lease, ME);
+    let mut consumer = rig
+        .host
+        .stream_attach(0, "jobs", ME)
+        .unwrap()
+        .consumer_writable()
+        .unwrap();
+    let program = load_copy(&rig, &mut consumer, ME);
     kernel.lock().unwrap().gone = true;
     post(&mut consumer, job(1, program, 3));
     rig.after(Duration::from_nanos(POLL_NS));
-    assert_eq!(completion(&mut consumer, &lease), (1, RunStatus::Failed));
+    assert_eq!(completion(&mut consumer), (1, RunStatus::Failed));
     assert_eq!(
         rig.health(),
         Health::Degraded("the node went away: opening it again")
@@ -337,11 +349,11 @@ fn a_node_that_goes_away_is_opened_again_and_its_programs_are_gone() {
     rig.after(Duration::from_secs(8));
     assert_eq!(rig.health(), Health::Ok);
     assert_eq!(rig.unload(ME, program), Err(Status::NOT_FOUND));
-    let again = load_copy(&rig, &lease, ME);
-    write(&lease, 1, &[1, 2, 3, 4]);
+    let again = load_copy(&rig, &mut consumer, ME);
+    write(&mut consumer, 1, &[1, 2, 3, 4]);
     post(&mut consumer, job(2, again, 3));
     rig.after(Duration::from_nanos(POLL_NS));
-    assert_eq!(completion(&mut consumer, &lease), (2, RunStatus::Done));
+    assert_eq!(completion(&mut consumer), (2, RunStatus::Done));
 }
 
 #[test]
@@ -381,10 +393,14 @@ fn ticks_with_a_claim_held_allocate_nothing() {
     let mut driver = Rknpu::with_opener(RknpuNeeds { jobs }, opener(&kernel)).unwrap();
     assert_eq!(Driver::tick(&mut driver, 0), Some(POLL_NS));
     assert!(driver.claim().is_some() && driver.closed().is_none());
-    let lease = rig.host.stream_attach(0, "jobs", ME).unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    let mut consumer = rig
+        .host
+        .stream_attach(0, "jobs", ME)
+        .unwrap()
+        .consumer_writable()
+        .unwrap();
     let bytes = Framed::copy(4).bytes();
-    write(&lease, 0, &bytes);
+    write(&mut consumer, 0, &bytes);
     Driver::caller(&mut driver, ME);
     let program = lemnos_contract_npu::Npu::load(&mut driver, 0, bytes.len() as u32).unwrap();
     lemnos_contract_npu::Npu::attach(&mut driver, program, 0, 1, 4).unwrap();
@@ -397,11 +413,11 @@ fn ticks_with_a_claim_held_allocate_nothing() {
         let mut writer = Writer::new(&mut encoded);
         job(n, program, 3).encode(&mut writer).unwrap();
         let used = writer.len();
-        assert!(consumer.push_job(&encoded[..used]).unwrap());
+        assert!(consumer.jobs().post(&encoded[..used]).unwrap());
         let (_, allocated) = allocations(|| Driver::tick(&mut driver, now));
         now += POLL_NS;
         let frame = consumer.pop_frame().unwrap().expect("a completion");
-        assert!(consumer.release(frame.buffer, frame.fence).unwrap());
+        assert!(consumer.release(frame.buffer));
         if n >= 10 {
             count += allocated;
         }

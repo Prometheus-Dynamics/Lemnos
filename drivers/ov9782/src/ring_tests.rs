@@ -23,7 +23,8 @@ use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
 use lemnos_hal::mock::MockI2c;
 use lemnos_hal::register::AddressWidth;
-use lemnos_wire::ring::{Consumer, Layout, Producer, heap_words};
+use lemnos_wire::ring::{Consumer, Layout};
+use lemnos_wire::testing::Harness;
 
 extern crate alloc;
 extern crate std;
@@ -107,7 +108,7 @@ impl HalI2c for Bus {
 
 /// The consumer's side of the ring is `Consumer`. The driver's side is this: the host's own
 /// endpoint is a thin wrapper over the same `Producer`, and the host tests cover that.
-struct RingEnd(Producer);
+struct RingEnd(Harness);
 
 impl StreamEndpoint for RingEnd {
     type Error = ErrorKind;
@@ -261,9 +262,7 @@ impl Rig {
             fail_at: Arc::new(AtomicI64::new(0)),
         };
         let layout = Layout::new(1, 64, 8, 64).unwrap();
-        let memory = heap_words(layout.ring_words());
-        let producer = Producer::new(memory.clone(), layout).unwrap();
-        let jobs = Consumer::attach(memory, layout).unwrap();
+        let (producer, jobs) = Harness::new(layout, true, false).unwrap();
         let no_config: &[(&str, ConfigValue<'_>)] = &[];
         let mut sensor = <Ov9782 as Lifecycle>::start(
             Ov9782Needs {
@@ -332,7 +331,7 @@ impl Rig {
         .encode(&mut out)
         .unwrap();
         let len = out.len();
-        assert!(self.jobs.push_job(&buf[..len]).unwrap());
+        assert!(self.jobs.jobs().post(&buf[..len]).unwrap());
     }
 
     fn launched(&self) -> (Vec<Launch>, usize) {

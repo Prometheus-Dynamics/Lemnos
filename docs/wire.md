@@ -47,12 +47,12 @@ closes the connection on a larger length, without reading it.
 | 15 | Value | subscription u64, stamp_ns u64, bytes | to client |
 | 16 | SetPower | id u32, device u32, on bool | to host |
 | 17 | StreamOpen | id u32, device u32, name str | to host |
-| 18 | StreamReady | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
+| 18 | StreamRings | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
 | 19 | Event | device u32, state u8, health u8, reason str | to client |
 | 20 | Refusal | id u32, status i32, text str | to client |
 | 21 | StreamClose | id u32, device u32, name str | to host |
 | 22 | StreamOpenHandles | id u32, device u32, name str | to host |
-| 23 | StreamHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, plane_bytes bytes | to client |
+| 23 | StreamRingHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, plane_bytes bytes | to client |
 | 24 | Packages | id u32 | to host |
 | 25 | Package | id u32, path str, driver str, reason str | to client |
 | 26 | PackagesDone | id u32, mode u8, note str | to client |
@@ -82,10 +82,11 @@ closes the connection on a kind it doesn't know (rule 3).
 
 | Bit | Value | The host |
 |---|---|---|
-| 0 | 1 | takes StreamOpenHandles, and may answer it with StreamHandles |
+| 0 | 1 | takes StreamOpenHandles, and may answer it with StreamRingHandles |
 | 1 | 2 | takes Packages |
 | 2 | 4 | takes CallJob and JobCancel |
 | 4 | 16 | takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints |
+| 4 | 8 | frame streams are the shm rings of [`docs/ring.md`](ring.md), with the descriptors of this page's stream answers |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -143,13 +144,15 @@ so cannot move its hash: a frame kind marked `added` in the table, and a field w
 (a trailing value, one a peer from before it does not send). A structure whose field is appended
 therefore keeps its hash. The values this build computes are:
 
-`core hash: 0xa2b3f48271c1f428`
+`core hash: 0x9c2eeb86d3c5c928`
 
-`stream-handles part hash: 0x0f65b93219892e68`
+`stream-handles part hash: 0x8b54fb4c60535d2b`
 
 `packages part hash: 0xb3db2c33449c615d`
 
 `jobs part hash: 0xe8ed57f23fc18516`
+
+`shared-rings part hash: 0x756927694c521908`
 
 The hashes do not include the Lemnos version string. Two builds with the same core interoperate
 whatever their Lemnos versions. What a client sees when the cores differ: the connection is refused
@@ -236,46 +239,65 @@ A client sends Packages only to a host that set bit 1 of `features` (rule 10).
 
 ## Descriptors
 
-StreamReady says how many file descriptors arrive with it, as `SCM_RIGHTS` on the same `sendmsg`
-that carries the frame's first byte. Three, in order: the ring, the doorbell, the buffers. A
-client reads the socket with `recvmsg` while a StreamOpen is outstanding, because a plain read
-discards descriptors. Descriptors passed to the host are closed unread.
+**Declared break (descriptor layout).** The answers StreamRings and StreamRingHandles carry the
+stream's shared-memory descriptors in the order of [`lemnos_wire::ring::fds`] (seven before the
+buffers). The earlier answers, which carried three (or two plus buffers) with the older ring, are
+gone: a host and a client built from different revisions cannot share a stream. What is additive:
+the feature bit `SHARED_RINGS` (8), which is part 4 (`shared-rings`, whose hash folds the descriptor layout of [`ring::fds`](../engine/wire/src/ring.rs)): a client refuses to open a stream from a host that does not set it, and the new end code in the ring header. What is not: the
+meaning of the descriptors of the answer kinds, which is why those kinds were renamed (the layout
+hash moves with the names, so a mismatch is refused at the handshake rather than misread).
 
-StreamHandles carries its descriptors the same way, in one message: the ring, the doorbell, then
-one descriptor per plane of each buffer, buffer by buffer and each buffer's planes in order.
-`plane_bytes` is each plane's length as a little-endian u32, at most 8 of them, adding up to
-`buffer_bytes`. It is empty for a buffer of one plane, the usual case. `descriptors` is
-`2 + buffers × planes`, and `buffers × planes` is at most 128, so at most 130 descriptors arrive.
-A client that sends StreamOpenHandles gives its `recvmsg` room for 130 descriptors: what doesn't
-fit is lost, and the stream with it. A client refuses a StreamHandles whose `buffers` is 0, whose
-`plane_bytes` isn't whole lengths, more than 8 of them, a zero length, or a sum other than
-`buffer_bytes`, whose `buffers × planes` is over 128, whose `descriptors` isn't
-`2 + buffers × planes`, or that came with a different number of descriptors, and closes the
-connection, as for any frame that can't be trusted.
+StreamRings says how many file descriptors arrive with it, as `SCM_RIGHTS` on the same `sendmsg`
+that carries the frame's first byte: the seven of the stream's rings and pages, in the order
+[`lemnos_wire::ring::fds`](../engine/wire/src/ring.rs) gives (the frame ring, the pool page, the job
+ring, the job acks, the doorbell's eventfd and page, and the holds page), then the pool's buffers.
+For a shared stream the buffers are one descriptor, so `descriptors` is 8. A client reads the
+socket with `recvmsg` while a StreamOpen is outstanding, because a plain read discards
+descriptors. Descriptors passed to the host are closed unread.
+
+StreamRingHandles carries its descriptors the same way, in one message: the seven, then one descriptor
+per plane of each buffer, buffer by buffer and each buffer's planes in order. `plane_bytes` is each
+plane's length as a little-endian u32, at most 8 of them, adding up to `buffer_bytes`. It is empty
+for a buffer of one plane, the usual case. `descriptors` is `7 + buffers × planes`, and
+`buffers × planes` is at most 128, so at most 135 descriptors arrive. A client that sends
+StreamOpenHandles gives its `recvmsg` room for 135 descriptors: what doesn't fit is lost, and the
+stream with it. A client refuses a StreamRingHandles whose `buffers` is 0, whose `plane_bytes` isn't
+whole lengths, more than 8 of them, a zero length, or a sum other than `buffer_bytes`, whose
+`buffers × planes` is over 128, whose `descriptors` isn't `7 + buffers × planes`, or that came
+with a different number of descriptors, and closes the connection, as for any frame that can't be
+trusted.
 
 ## Streams
 
 StreamOpen takes one stream of one device for this connection. `name` is the stream's name under
 that device in the board file (`[devices.streams.<name>]`). A stream has one consumer: a second
 StreamOpen gets Refusal with `BUSY`; an unknown device or name gets `NOT_FOUND`. StreamClose gives
-it up; a connection closing gives up every stream it held. After StreamReady nothing about a frame
+it up; a connection closing gives up every stream it held. After StreamRings nothing about a frame
 crosses the socket.
 
 | Descriptor | What it is |
 |---|---|
-| ring | a shared mapping of `ring_bytes`, read and written by both sides |
-| doorbell | an eventfd. The host adds 1 after each frame. Waiting on it is optional |
-| buffers | `buffers` buffers, one every `stride` bytes from offset 0. Map it read-only, or writable for a stream the consumer fills (below) |
+| frame ring | a sealed memfd holding a `shm-ring` ring of one field. Map it read-only, with `Reader::attach_from_start` |
+| pool page | a sealed page of `shm-ring-buffers`: the buffers' tickets and the reader cut-offs. Read-only |
+| job ring | a `shm-ring` ring the consumer writes, one field, a job per sample. Write end |
+| job acks | one word the host writes: how many jobs it has collected. Read-only |
+| doorbell eventfd | rung by the host after each frame. Waiting on it is optional |
+| doorbell page | the consumer's own `shm-ring-doorbell` page, writable |
+| holds page | the consumer's own `shm-ring-holds` page of marks, writable |
+| buffers | the pool's buffers, one descriptor for shared memory, one per plane of each buffer for dma-bufs. Map read-only, or writable for a stream the consumer fills (below) |
+
+The frame ring, the pool and the holds are the [shm family's](ring.md) layout, word for word; the
+protocol does not restate it. Its end word says whether the stream closed (1) or faulted (2).
 
 ### Streams whose buffers are dma-bufs
 
 A board file can say a stream's buffers are dma-bufs (`memory = "dma-buf"`), one per buffer, so
-that a driver can hand a buffer to hardware. Such a stream can't be answered with StreamReady,
+that a driver can hand a buffer to hardware. Such a stream can't be answered with StreamRings,
 which carries one descriptor for all the buffers.
 
 - A client that can take one descriptor per buffer sends StreamOpenHandles in place of StreamOpen,
   and only to a host that set bit 0 of `features`. It means the same as StreamOpen, and the answer
-  is StreamReady for a stream of shared memory and StreamHandles for a stream of dma-bufs.
+  is StreamRings for a stream of shared memory and StreamRingHandles for a stream of dma-bufs.
 - StreamOpen for a stream of dma-bufs gets Refusal with `NOT_SUPPORTED` (-95), and the stream is
   left untaken. This is what a client from before this addition sees.
 - StreamOpenHandles to a host from before this addition is an unknown kind and closes the
@@ -332,55 +354,31 @@ access by the processor (`DMA_BUF_IOCTL_SYNC`): start and end of a write around 
 start and end of a read from when a frame is taken to when it is returned. The host does the same
 around its own accesses.
 
-`stride` is `buffer_bytes` rounded up to a multiple of 4096. The ring is 64-bit words, little-endian
-on every platform this is built for:
+`stride` is `buffer_bytes` rounded up to a multiple of 4096: a shared pool holds buffer `b` at
+`b × stride`. A frame is an entry naming the pool buffers it occupies (one per plane), with a
+20-byte metadata payload: sequence, identity and length, little-endian. Its time is the frame's
+`CLOCK_MONOTONIC` time. A job is one sample of the job ring, whose bytes are the job.
 
-| Word | Name | Written by |
-|---|---|---|
-| 0 | magic `LMNSRING` | host, once |
-| 1 | layout version, 1 | host, once |
-| 2 | buffers | host, once |
-| 3 | buffer_bytes | host, once |
-| 4 | frame_slots | host, once |
-| 5 | job_slots | host, once |
-| 6 | job_bytes | host, once |
-| 8 | state: 0 open, 1 closed, 2 faulted | host |
-| 16 | frames head | host |
-| 24 | frames tail | consumer |
-| 32 | returns head | consumer |
-| 40 | returns tail | host |
-| 48 | jobs head | consumer |
-| 56 | jobs tail | host |
-| 64 | frame slots, 5 words each, `frame_slots` of them | host |
-| after | return slots, 1 word each, `frame_slots` of them | consumer |
-| after | job slots, `1 + ceil(job_bytes / 8)` words each, `job_slots` of them | consumer |
-
-`ring_bytes` is 8 times the words above, and a client checks the descriptor is exactly that long
-before mapping it. Every head and tail counts up without wrapping; a slot is the count modulo the
-queue's capacity, which is a power of two. A writer writes the slot, then stores the head with
-release ordering. A reader loads the head with acquire ordering, then the slot.
-
-A frame slot's words are: buffer in the low 32 bits with the length in the high 32, sequence,
-identity, timestamp in `CLOCK_MONOTONIC` ns (on Linux; see [Frames](streams.md#frames)), fence.
-Identity is the producer's and is never read. A return slot is
-the buffer in the low 32 bits and the frame's fence in the high 32. A job slot is its length, then
-its bytes, little-endian, the last word zero-padded.
+The job acks word is the number of jobs the host has collected. The consumer posts a job only
+while fewer than `job_slots` are waiting, which it knows from that word, so the job ring can't
+overrun: a job posted beyond that is refused, not sent.
 
 ### What each side checks
 
-The peer is not trusted. Every value below is read once from the shared memory and checked against
-limits that side already holds.
+The peer is not trusted. Everything the host reads from the consumer is read through the shm
+crates, which check every index, length and stamp against the shape they read once, and never
+trust a word twice.
 
-- A head more than the queue's capacity ahead of its tail is an error. A tail behind the last one
-  seen or ahead of its head is an error. An unknown state word reads as faulted.
-- A frame's buffer must be below `buffers`, its length at most `buffer_bytes`, and its buffer must
-  not already be held.
-- A returned buffer must be below `buffers`, published and not yet returned, with the fence of
-  its frame. A job must be at most `job_bytes`.
+- A frame's entry must name pool buffers the consumer's pool has, and its metadata must be exactly
+  the 20 bytes. A frame's length must be at most the stream's frame size.
+- The host reads the consumer's holds at one instant and cuts off a consumer whose marks are stuck
+  past the hold time. A cut-off consumer's stream faults.
+- A job is one sample of the job ring. A job the reader lost because the consumer published past
+  the ring's capacity is an error: the consumer broke the rules.
 
-A consumer that breaks these loses the stream: the host marks it faulted (state 2) and rings the
-doorbell. Nothing else is affected: not the connection, not other streams. A fresh StreamOpen starts
-over on new memory.
+A consumer that breaks these loses the stream: the host sets its end word to faulted (2) and rings
+the doorbell. Nothing else is affected: not the connection, not other streams. A fresh StreamOpen
+starts over on new memory.
 
 The ring carries a job's bytes without reading them, so whether they are a job is for the driver to
 say. A driver whose contract calls bytes that are no job a broken consumer ends the stream the same
@@ -530,20 +528,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the three part hashes }`
+`Hello { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the four part hashes }`
 
 <!-- vector: hello -->
 ```hex
-51 00 00 00 01 00 28 f4 c1 71 82 f4 b3 a2 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 18 00 00 00 68 2e 89 19 32 b9 65 0f 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8
+59 00 00 00 01 00 28 c9 c5 d3 86 eb 2e 9c 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
 ```
 
 ### welcome
 
-`Welcome { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the three part hashes }`
+`Welcome { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the four part hashes }`
 
 <!-- vector: welcome -->
 ```hex
-55 00 00 00 02 00 28 f4 c1 71 82 f4 b3 a2 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 18 00 00 00 68 2e 89 19 32 b9 65 0f 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8
+5d 00 00 00 02 00 28 c9 c5 d3 86 eb 2e 9c 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
 ```
 
 ### list
@@ -686,11 +684,11 @@ client reads that as `link: ""`.
 
 ### stream-ready
 
-`StreamReady { id: 11, buffers: 4, descriptors: 3, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
+`StreamRings { id: 11, buffers: 4, descriptors: 8, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
 
-<!-- vector: stream-ready -->
+<!-- vector: stream-rings -->
 ```hex
-1b 00 00 00 12 00 0b 00 00 00 04 00 00 00 03 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
+1b 00 00 00 12 00 0b 00 00 00 04 00 00 00 08 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
 ```
 
 ### stream-close
@@ -713,20 +711,20 @@ client reads that as `link: ""`.
 
 ### stream-handles
 
-`StreamHandles { id: 13, buffers: 4, descriptors: 6, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, plane_bytes: [] }`
+`StreamRingHandles { id: 13, buffers: 4, descriptors: 11, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8, plane_bytes: [] }`
 
-<!-- vector: stream-handles -->
+<!-- vector: stream-ring-handles -->
 ```hex
-1f 00 00 00 17 00 0d 00 00 00 04 00 00 00 06 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 00 00 00 00
+1f 00 00 00 17 00 0d 00 00 00 04 00 00 00 0b 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00 00 00 00 00
 ```
 
 ### stream-handles-planes
 
-`StreamHandles { id: 14, buffers: 2, descriptors: 6, buffer_bytes: 256, frame_slots: 2, job_slots: 1, job_bytes: 0, plane_bytes: [192 as u32 LE, 64 as u32 LE] }`
+`StreamRingHandles { id: 14, buffers: 2, descriptors: 11, buffer_bytes: 256, frame_slots: 2, job_slots: 1, job_bytes: 0, plane_bytes: [192 as u32 LE, 64 as u32 LE] }`
 
-<!-- vector: stream-handles-planes -->
+<!-- vector: stream-ring-handles-planes -->
 ```hex
-27 00 00 00 17 00 0e 00 00 00 02 00 00 00 06 00 01 00 00 02 00 00 00 01 00 00 00 00 00 00 00 08 00 00 00 c0 00 00 00 40 00 00 00
+27 00 00 00 17 00 0e 00 00 00 02 00 00 00 0b 00 01 00 00 02 00 00 00 01 00 00 00 00 00 00 00 08 00 00 00 c0 00 00 00 40 00 00 00
 ```
 
 ### packages

@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex};
 
@@ -23,10 +23,11 @@ use lemnos_contract_isp_pisp::LAYOUT_FRONT_END;
 use lemnos_core::{CallerId, Encode, Health, Lifecycle, Result, Status, StreamHandle, Writer};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
 use lemnos_host::{Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_sim::SimBoard;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout};
 
 use super::{Link, Options, PispFe, PispFeNeeds};
@@ -60,62 +61,30 @@ fn image(identity: u64) -> Vec<u8> {
 
 // ---- The stream's memory, as the daemon makes it: one descriptor per buffer.
 
-struct PerBuffer {
-    files: Vec<File>,
-    stride: usize,
-    bytes: usize,
-}
-
-impl PerBuffer {
-    fn at(&self, offset: usize, len: usize) -> Option<(&File, u64)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let file = self.files.get(offset / self.stride)?;
-        fits.then_some((file, inner as u64))
-    }
-}
-
-impl BufferMemory for PerBuffer {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        self.at(offset, data.len())
-            .is_some_and(|(file, at)| file.write_all_at(data, at).is_ok())
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        self.at(offset, out.len())
-            .is_some_and(|(file, at)| file.read_exact_at(out, at).is_ok())
-    }
-}
-
+/// Each buffer of a stream its own sealed memfd, lent as its handle. The plain allocator makes
+/// shared memory, as a stream without dma-bufs gets.
 struct Handles;
 
 impl StreamAllocator for Handles {
-    fn allocate(&self, name: &str, layout: &Layout) -> core::result::Result<Backing, Status> {
-        HeapAllocator.allocate(name, layout)
+    fn allocate(&self, name: &str, layout: &Layout) -> core::result::Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(
+    fn allocate_planes(
         &self,
-        name: &str,
+        _name: &str,
         layout: &Layout,
         _heap: &str,
-    ) -> core::result::Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut files = Vec::new();
-        let mut handles = Vec::new();
+        _planes: &Planes,
+    ) -> core::result::Result<Buffers, Status> {
+        let mut fds = Vec::new();
         for _ in 0..layout.buffers {
-            let fd = sealed_memfd(c"fe-frames", layout.stride()).map_err(|_| Status::IO)?;
-            handles.push(fd.try_clone().map_err(|_| Status::IO)?);
-            files.push(File::from(fd));
+            fds.push(sealed_memfd(c"fe-frames", layout.stride()).map_err(|_| Status::IO)?);
         }
-        Ok(Backing {
-            buffers: Arc::new(PerBuffer {
-                files,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync: None,
         })
     }
 }
@@ -409,21 +378,21 @@ fn driver(host: &Host, hw: &Hw) -> PispFe {
 
 /// The consumer's end of a stream, as a client holds it.
 struct Client {
-    lease: Lease,
+    handles: Option<Arc<[OwnedFd]>>,
     ring: Consumer,
 }
 
 impl Client {
     fn attach(host: &Host, name: &str) -> Self {
         let lease = host.stream_attach(0, name, CALLER).unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
+        let handles = lease.handles.clone();
+        let ring = lease.consumer_writable().unwrap();
+        Self { handles, ring }
     }
 
     /// Writes the configuration into config buffer 0 and posts a job naming it.
     fn post(&mut self, identity: u64, output0: u32) {
-        let at = self.lease.layout.buffer_offset(0).unwrap();
-        assert!(self.lease.buffers.write(at, &config()));
+        assert!(self.ring.write(0, 0, &config()));
         let job = IspJob {
             identity,
             layout: LAYOUT_FRONT_END,
@@ -435,12 +404,12 @@ impl Client {
         let mut w = Writer::new(&mut buf);
         job.encode(&mut w).unwrap();
         let n = w.len();
-        assert!(self.ring.push_job(&buf[..n]).unwrap());
+        assert!(self.ring.jobs().post(&buf[..n]).unwrap());
     }
 
     /// The descriptor the consumer was handed for `buffer`, as a file of its own.
     fn file(&self, buffer: u32) -> File {
-        let handles = self.lease.handles.as_ref().expect("a stream of dma-bufs");
+        let handles = self.handles.as_ref().expect("a stream of dma-bufs");
         File::from(
             handles[buffer as usize]
                 .as_fd()
@@ -499,7 +468,7 @@ fn the_consumer_reads_what_the_block_wrote_for_its_job() {
             &seen[..8],
             &expected[..8]
         );
-        assert!(frames.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(frames.ring.release(frame.buffer));
         now = fe.tick(now).unwrap();
     }
     assert_eq!(hw.with(|b| (b.stray, b.refused, b.bad_returns)), (0, 0, 0));
@@ -533,7 +502,7 @@ fn a_job_on_a_buffer_the_consumer_holds_or_a_job_has_is_dropped() {
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 2);
     assert!(frames.read(1) == image(1), "untouched");
     // Given back, it can be a job's again.
-    assert!(frames.ring.release(frame.buffer, frame.fence).unwrap());
+    assert!(frames.ring.release(frame.buffer));
     jobs.post(4, 1);
     now = fe.tick(now).unwrap();
     assert_eq!(hw.with(Block::run), Some(1));
@@ -594,7 +563,7 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
             "frame {identity}: the second consumer's buffer {output} doesn't hold what the block \
              wrote"
         );
-        assert!(second.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(second.ring.release(frame.buffer));
         now = fe.tick(now).unwrap();
     }
     let after: Vec<Vec<u8>> = old.iter().map(read).collect();

@@ -6,7 +6,6 @@
 #![cfg(target_os = "linux")]
 
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,12 +17,12 @@ use lemnos_driver_rkvpss::jobs::Failure;
 use lemnos_driver_rkvpss::{Channel, Device, Job, Rkvpss, RkvpssNeeds, State};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Buffers, Lease, MemfdAllocator, StreamAllocator};
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
-use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
 
 #[global_allocator]
@@ -37,74 +36,40 @@ const EAGAIN: i32 = 11;
 /// What a 64 by 48 NV12 output takes.
 const OUT_BYTES: u32 = 64 * 48 * 3 / 2;
 
-struct Mapped {
-    buffers: Vec<Mapping>,
-    stride: usize,
-    bytes: usize,
-}
-
-impl Mapped {
-    fn at(&self, offset: usize, len: usize) -> Option<(&Mapping, usize)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let map = self.buffers.get(offset / self.stride)?;
-        fits.then_some((map, inner))
-    }
-}
-
-impl BufferMemory for Mapped {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        self.at(offset, data.len())
-            .is_some_and(|(map, inner)| map.write_bytes(inner, data).is_some())
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        let Some((map, inner)) = self.at(offset, out.len()) else {
-            return false;
-        };
-        match map.as_slice().get(inner..inner + out.len()) {
-            Some(from) => {
-                out.copy_from_slice(from);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-/// Each buffer of a stream its own sealed memfd, mapped for the host and lent as its handle.
+/// Each buffer of a stream its own sealed memfd, lent as its handle: what a stream of dma-bufs
+/// looks like to a driver.
 struct PerBuffer;
 
 impl StreamAllocator for PerBuffer {
-    fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut handles = Vec::new();
-        let mut buffers = Vec::new();
-        for _ in 0..layout.buffers {
-            let fd: OwnedFd =
-                sealed_memfd(c"rkvpss-driver-test", layout.stride()).map_err(|_| Status::IO)?;
-            let bytes = layout.buffer_bytes as usize;
-            buffers.push(Mapping::new(fd.as_fd(), bytes, 0, true).map_err(|_| Status::IO)?);
-            handles.push(fd);
-        }
-        Ok(Backing {
-            buffers: Arc::new(Mapped {
-                buffers,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
-        })
+    fn allocate(&self, name: &str, layout: &Layout) -> Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(
+    fn allocate_planes(
         &self,
         name: &str,
         layout: &Layout,
-        _heap: &str,
-    ) -> Result<Backing, Status> {
-        self.allocate(name, layout)
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Buffers, Status> {
+        let _ = (name, heap);
+        let mut fds = Vec::new();
+        for _ in 0..layout.buffers {
+            for length in planes.lengths() {
+                // A buffer of one plane keeps the whole stride, as a heap rounds up.
+                let made = if planes.count() == 1 {
+                    layout.stride()
+                } else {
+                    u64::from(*length)
+                };
+                fds.push(sealed_memfd(c"rkvpss-driver-test", made).map_err(|_| Status::IO)?);
+            }
+        }
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync: None,
+        })
     }
 }
 
@@ -196,11 +161,11 @@ fn post(consumer: &mut Consumer, job: &ScaleJob) {
     let mut writer = Writer::new(&mut bytes);
     job.encode(&mut writer).unwrap();
     let used = writer.len();
-    assert!(consumer.push_job(&bytes[..used]).unwrap());
+    assert!(consumer.jobs().post(&bytes[..used]).unwrap());
 }
 
-fn consumer(lease: &Lease) -> Consumer {
-    Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap()
+fn consumer(lease: Lease) -> Consumer {
+    lease.consumer().unwrap()
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
@@ -229,7 +194,7 @@ fn a_board_file_binds_it_and_the_host_reaches_its_contract_and_its_jobs() {
     assert_eq!(rig.call(3, &6u16.to_le_bytes()), Err(Status::NOT_FOUND));
     // No node at the configured path: the job fails, and the driver keeps trying.
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     rig.after(Duration::from_millis(1));
     post(&mut consumer, &job(0xCAFE, 0, 1));
     rig.after(Duration::from_millis(1));
@@ -256,10 +221,10 @@ fn a_board_file_without_a_channel_is_refused() {
 
 #[test]
 fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes() {
-    // `HeapAllocator` makes plain shared memory, with no handles.
+    // `MemfdAllocator` makes plain shared memory, with no handles.
     let rig = Rig::start(
         &board("rkvpss", "channel = 0", false),
-        Arc::new(HeapAllocator),
+        Arc::new(MemfdAllocator),
     );
     rig.host.tick();
     let DeviceState::Backoff { reason, .. } = rig.host.device("v").unwrap().state else {
@@ -382,7 +347,7 @@ fn jobs_run_on_the_handles_of_their_buffers_and_complete_on_the_ring() {
     let log = log(16);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer1 = consumer(&lease);
+    let mut consumer1 = consumer(lease);
     assert_eq!(driver.tick(0), Some(POLL_NS));
     post(&mut consumer1, &job(1, 0, 1));
     driver.tick(MS);
@@ -399,7 +364,7 @@ fn jobs_run_on_the_handles_of_their_buffers_and_complete_on_the_ring() {
     // the kernel lets go of the old consumer's dma-bufs.
     rig.host.stream_detach(0, "jobs", CallerId(1)).unwrap();
     let second = rig.host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut consumer2 = consumer(&second);
+    let mut consumer2 = consumer(second);
     post(&mut consumer2, &job(2, 2, 3));
     driver.tick(2 * MS);
     let done = completion(&mut consumer2);
@@ -415,7 +380,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
     let mut driver = driver_on(&rig.host, &log);
     assert_eq!(driver.tick(0), Some(POLL_NS));
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let shared = Arc::new(Mutex::new(consumer(&lease)));
+    let shared = Arc::new(Mutex::new(consumer(lease)));
     // While the block runs the second job, the consumer takes the first one's completion,
     // gives its buffer back and posts a third job writing into that buffer.
     let hook = {
@@ -427,7 +392,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
             let mut consumer = shared.lock().unwrap();
             let done = completion(&mut consumer);
             assert_eq!((done.buffer, done.identity, done.bytes), (1, 1, OUT_BYTES));
-            assert!(consumer.release(done.buffer, done.fence).unwrap());
+            assert!(consumer.release(done.buffer));
             post(&mut consumer, &job(3, 0, 1));
         }
     };
@@ -461,9 +426,9 @@ fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consum
     let log = log(16);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut broken = consumer(&lease);
+    let mut broken = consumer(lease);
     driver.tick(0);
-    assert!(broken.push_job(&[1, 2, 3]).unwrap());
+    assert!(broken.jobs().post(&[1, 2, 3]).unwrap());
     post(&mut broken, &job(1, 0, 1));
     driver.tick(MS);
     // The consumer sees the fault, and the job it posted behind the bad bytes ran nowhere.
@@ -480,7 +445,7 @@ fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consum
     );
     // The next consumer's job runs, and the kernel lets go of the old one's dma-bufs.
     let next = rig.host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut fresh = consumer(&next);
+    let mut fresh = consumer(next);
     post(&mut fresh, &job(2, 2, 3));
     driver.tick(2 * MS);
     let done = completion(&mut fresh);
@@ -495,7 +460,7 @@ fn one(job: &ScaleJob) -> (FrameSlot, Option<Failure>, usize) {
     let log = log(4);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     driver.tick(0);
     post(&mut consumer, job);
     driver.tick(MS);
@@ -566,7 +531,7 @@ fn what_the_channel_or_the_block_cant_do_never_reaches_it() {
         let log = log(4);
         let mut driver = driver_on(&rig.host, &log);
         let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-        let mut consumer = consumer(&lease);
+        let mut consumer = consumer(lease);
         driver.tick(0);
         post(&mut consumer, &twice);
         driver.tick(MS);
@@ -585,7 +550,7 @@ fn a_frame_that_times_out_holds_its_output_back_until_the_block_finishes_another
     let log = log(16);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     driver.tick(0);
     // The block doesn't finish in time: the kernel gives up, the block may still be writing.
     log.run_errno.store(EAGAIN, Ordering::Relaxed);
@@ -621,7 +586,7 @@ fn a_frame_that_times_out_holds_its_output_back_until_the_block_finishes_another
     assert!(!driver.server().held_back(1));
     assert_eq!(driver.health(), Health::Ok);
     // And jobs run again.
-    consumer.release(done.buffer, done.fence).unwrap();
+    assert!(consumer.release(done.buffer));
     post(&mut consumer, &job(0xD3, 0, 1));
     driver.tick(MS + 751 * MS);
     assert_eq!(completion(&mut consumer).bytes, OUT_BYTES);
@@ -633,7 +598,7 @@ fn a_later_job_finishing_also_ends_the_hold() {
     let log = log(16);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     driver.tick(0);
     log.run_errno.store(EAGAIN, Ordering::Relaxed);
     log.run_failures.store(1, Ordering::Relaxed);
@@ -659,16 +624,16 @@ fn a_consumer_that_goes_while_an_output_is_held_back_leaves_the_hold_in_place() 
     let log = log(16);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer1 = consumer(&lease);
+    let mut consumer1 = consumer(lease);
     driver.tick(0);
     log.run_errno.store(EAGAIN, Ordering::Relaxed);
     log.run_failures.store(1, Ordering::Relaxed);
     post(&mut consumer1, &job(1, 0, 1));
     driver.tick(0);
     rig.host.stream_detach(0, "jobs", CallerId(1)).unwrap();
-    drop(lease);
+    drop(consumer1);
     let second = rig.host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut consumer2 = consumer(&second);
+    let mut consumer2 = consumer(second);
     // The node is still backing off: the new consumer's job fails, but its buffers are taken
     // anew, the held-back one with them. The hold on the old memory stays, and the kernel's
     // attachments aren't released while it does.
@@ -693,7 +658,7 @@ fn a_node_that_wont_open_is_tried_again_doubling_to_8_s_and_holds_nothing_back()
     log.open_failures.store(u32::MAX, Ordering::Relaxed);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let mut now = 0;
     for (n, want_ms) in [250, 500, 1000, 2000, 4000, 8000, 8000, 8000]
         .into_iter()
@@ -703,7 +668,7 @@ fn a_node_that_wont_open_is_tried_again_doubling_to_8_s_and_holds_nothing_back()
         driver.tick(now);
         let done = completion(&mut consumer);
         assert_eq!((done.identity, done.bytes), (n as u64, 0));
-        consumer.release(done.buffer, done.fence).unwrap();
+        assert!(consumer.release(done.buffer));
         let State::BackingOff { retry_at_ns, .. } = driver.server().scaler().state() else {
             panic!("backing off");
         };
@@ -724,7 +689,7 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
     let log = log(1100);
     let mut driver = driver_on(&rig.host, &log);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let mut cycle = |n: u64| {
         let output = 1 + (n % 3) as u32;
         post(&mut consumer, &job(n, 0, output));
@@ -734,7 +699,7 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
             (done.buffer, done.identity, done.bytes),
             (output, n, OUT_BYTES)
         );
-        assert!(consumer.release(done.buffer, done.fence).unwrap());
+        assert!(consumer.release(done.buffer));
     };
     for n in 0..10 {
         cycle(n);

@@ -67,6 +67,13 @@ a process holds and files each event under its own. Supplies, thermal watches an
 in the module and tested in QEMU; the driver interface has no supply or thermal resource, so the
 backend hands those two to no driver.
 
+## The module's own streams
+
+A stream the module makes (`LEMNOS_STREAM_*`) has its own ring, in the layout `kernel/lemnos.h`
+gives (`LEMNOS_RING_*`), which is not yet the shm ring a consumer reads. The driver that runs the
+block reads it, with its fences and job ranges. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module)
+says how it fits, and [`TODO.md`](../TODO.md) lists the port.
+
 ## What it never does
 
 - It has no match table. It binds nothing unless told to, device by device.

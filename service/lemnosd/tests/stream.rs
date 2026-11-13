@@ -8,7 +8,6 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,7 +19,7 @@ use lemnos_host::stream::ProducerEndpoint;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::scm::recv_with_fds;
 use lemnos_sim::SimFrameSource;
-use lemnos_wire::ring::{Layout, STATE_FAULT, WordMemory, offsets};
+use lemnos_wire::ring::{Consumer, JobPoster, Layout, STATE_FAULT, fds as desc};
 use lemnos_wire::{Frame, VERSION, append, decode};
 
 const FRAME_BYTES: usize = 4096;
@@ -89,13 +88,24 @@ fn frames_cross_from_a_producer_thread_with_contents_order_and_identity_intact()
         producing
     });
 
+    // The producer runs ahead of this consumer, and with four buffers it replaces the oldest frame
+    // the consumer hasn't taken. So the frames that arrive are an increasing subset of the
+    // sequence, each one whole, and the newest is never the one replaced.
     let mut expected = vec![0u8; FRAME_BYTES];
-    for sequence in 0..FRAMES {
+    let mut last = None;
+    let mut seen = 0u64;
+    while last != Some(FRAMES - 1) {
         let frame = stream
             .next_frame(Duration::from_secs(5))
             .unwrap()
-            .unwrap_or_else(|| panic!("frame {sequence} never came"));
-        assert_eq!(frame.sequence(), sequence);
+            .unwrap_or_else(|| panic!("no frame after {last:?} came"));
+        let sequence = frame.sequence();
+        assert!(
+            last.is_none_or(|l| sequence > l),
+            "{last:?} then {sequence}"
+        );
+        last = Some(sequence);
+        seen += 1;
         assert_eq!(frame.identity(), SimFrameSource::identity(sequence));
         assert_eq!(frame.timestamp_ns(), sequence * 1000);
         assert_eq!(frame.len(), FRAME_BYTES);
@@ -103,14 +113,13 @@ fn frames_cross_from_a_producer_thread_with_contents_order_and_identity_intact()
         assert_eq!(stream.bytes(&frame), &expected[..], "frame {sequence}");
         stream.release(frame).unwrap();
     }
+    assert!(seen > 0 && seen <= FRAMES);
     assert!(stream.try_next().unwrap().is_none());
 
     let mut producing = producer_thread.join().unwrap();
     producing.next_buffer().unwrap();
     let stats = host(&running).stream_stats(DEVICE, NAME).unwrap();
     assert_eq!(stats.published, FRAMES);
-    assert_eq!(stats.delivered, FRAMES);
-    assert_eq!(stats.dropped, 0);
     assert_eq!(stats.faults, 0);
     assert_eq!(stats.consumer_held, 0);
     assert_eq!(stats.free + stats.producer_held, 4);
@@ -177,13 +186,14 @@ fn a_client_disconnecting_tears_the_stream_down_and_frees_its_buffers() {
     for _ in 0..3 {
         assert!(produce(&mut source, &mut producing));
     }
+    // Three frames were published, but the consumer has taken one: that is the one it holds.
     let _kept = stream.next_frame(Duration::from_secs(5)).unwrap().unwrap();
     assert_eq!(
         host(&running)
             .stream_stats(DEVICE, NAME)
             .unwrap()
             .consumer_held,
-        3
+        1
     );
 
     drop(session);
@@ -311,7 +321,7 @@ impl RawClient {
             name: NAME,
         });
         let layout = self.next(|frame| match frame {
-            Frame::StreamReady {
+            Frame::StreamRings {
                 buffers,
                 buffer_bytes,
                 frame_slots,
@@ -320,7 +330,8 @@ impl RawClient {
                 descriptors,
                 ..
             } => {
-                assert_eq!(descriptors, 3);
+                // A shared stream: the seven base descriptors and the pool's one.
+                assert_eq!(descriptors, 8);
                 Some(Layout {
                     buffers,
                     buffer_bytes,
@@ -331,7 +342,7 @@ impl RawClient {
             }
             _ => None,
         });
-        assert_eq!(self.fds.len(), 3, "three descriptors came with it");
+        assert_eq!(self.fds.len(), 8, "eight descriptors came with it");
         (layout, std::mem::take(&mut self.fds))
     }
 
@@ -345,17 +356,13 @@ impl RawClient {
 fn descriptors_are_sealed_so_a_client_cant_resize_them() {
     let running = service();
     let mut raw = RawClient::connect(&running.socket);
-    let (layout, mut fds) = raw.open_stream();
-    let buffers = fds.remove(2);
-    let bell = fds.remove(1);
-    let ring = fds.remove(0);
-    let ring = std::fs::File::from(ring);
-    let pool = std::fs::File::from(buffers);
+    let (layout, fds) = raw.open_stream();
+    let ring = std::fs::File::from(fds[desc::RING].try_clone().unwrap());
+    let pool = std::fs::File::from(fds[desc::BUFFERS].try_clone().unwrap());
     assert!(ring.set_len(0).is_err());
     assert!(pool.set_len(0).is_err());
-    assert_eq!(ring.metadata().unwrap().len(), layout.ring_bytes() as u64);
     assert_eq!(pool.metadata().unwrap().len(), layout.pool_bytes());
-    drop(bell);
+    drop(fds);
     assert!(raw.still_answers());
 }
 
@@ -364,28 +371,40 @@ fn a_client_that_corrupts_the_ring_loses_only_that_stream() {
     let running = service();
     let mut raw = RawClient::connect(&running.socket);
     let (layout, fds) = raw.open_stream();
-    let mapped = LinuxStreams
-        .map_ring(fds[0].as_fd(), layout.ring_bytes())
-        .unwrap();
+    // The consumer's own end, to read the state the host ends the stream with.
+    let clones: Vec<_> = fds.iter().map(|fd| fd.try_clone().unwrap()).collect();
+    let consumer = Consumer::attach(clones, layout, &[], true, false).unwrap();
     let mut other = RawClient::connect(&running.socket);
     other.send(&Frame::StreamOpen {
         id: 4,
         device: DEVICE,
         name: "other",
     });
-    other.next(|frame| matches!(frame, Frame::StreamReady { .. }).then_some(()));
+    other.next(|frame| matches!(frame, Frame::StreamRings { .. }).then_some(()));
     let mut producing = producer(&running);
 
-    mapped.words()[offsets::RETURNS_HEAD].store(u64::MAX, Ordering::SeqCst);
-    let _ = producing.next_buffer().unwrap();
+    // A consumer that posts more jobs than the ring holds, without waiting for the host to collect
+    // any: a job the host's reader loses. The consumer's own `post` refuses that, so this posts
+    // through a poster whose acks say everything is collected.
+    // Sealed against resizing, as the host's own is; its one word says everything is collected.
+    let acks = lemnos_linux_sys::dma_buf::sealed_memfd(c"acks", 8).unwrap();
+    std::io::Write::write_all(
+        &mut std::fs::File::from(acks.try_clone().unwrap()),
+        &u64::MAX.to_le_bytes(),
+    )
+    .unwrap();
+    let mut poster =
+        JobPoster::new(fds[desc::JOB_RING].try_clone().unwrap(), acks, &layout).unwrap();
+    for at in 0..128u8 {
+        assert!(poster.post(&[at]).unwrap());
+    }
+    let mut out = [0u8; 4];
+    assert_eq!(producing.next_job(&mut out), Ok(None));
 
     let stats = host(&running).stream_stats(DEVICE, NAME).unwrap();
     assert_eq!(stats.faults, 1);
     assert!(!stats.attached);
-    assert_eq!(
-        mapped.words()[offsets::STATE].load(Ordering::SeqCst),
-        STATE_FAULT
-    );
+    assert_eq!(consumer.state(), STATE_FAULT);
     assert!(
         host(&running)
             .stream_stats(DEVICE, "other")

@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex};
 
@@ -36,11 +36,12 @@ use lemnos_driver_pisp::uapi::{
 use lemnos_driver_pisp::{FeLink, FeOptions, PispFe, PispFeNeeds};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
 use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
 
 #[global_allocator]
@@ -97,62 +98,30 @@ fn key_of(cfg: &FeConfig) -> u8 {
 
 // ---- The streams' memory, as the daemon makes it: one descriptor per buffer.
 
-struct PerBuffer {
-    files: Vec<File>,
-    stride: usize,
-    bytes: usize,
-}
-
-impl PerBuffer {
-    fn at(&self, offset: usize, len: usize) -> Option<(&File, u64)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let file = self.files.get(offset / self.stride)?;
-        fits.then_some((file, inner as u64))
-    }
-}
-
-impl BufferMemory for PerBuffer {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        self.at(offset, data.len())
-            .is_some_and(|(file, at)| file.write_all_at(data, at).is_ok())
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        self.at(offset, out.len())
-            .is_some_and(|(file, at)| file.read_exact_at(out, at).is_ok())
-    }
-}
-
+/// Each buffer of a stream its own sealed memfd, lent as its handle. The plain allocator makes
+/// shared memory, as a stream without dma-bufs gets.
 struct Handles;
 
 impl StreamAllocator for Handles {
-    fn allocate(&self, name: &str, layout: &Layout) -> core::result::Result<Backing, Status> {
-        HeapAllocator.allocate(name, layout)
+    fn allocate(&self, name: &str, layout: &Layout) -> core::result::Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(
+    fn allocate_planes(
         &self,
-        name: &str,
+        _name: &str,
         layout: &Layout,
         _heap: &str,
-    ) -> core::result::Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut files = Vec::new();
-        let mut handles = Vec::new();
+        _planes: &Planes,
+    ) -> core::result::Result<Buffers, Status> {
+        let mut fds = Vec::new();
         for _ in 0..layout.buffers {
-            let fd = sealed_memfd(c"fe-buffer", layout.stride()).map_err(|_| Status::IO)?;
-            handles.push(fd.try_clone().map_err(|_| Status::IO)?);
-            files.push(File::from(fd));
+            fds.push(sealed_memfd(c"fe-buffer", layout.stride()).map_err(|_| Status::IO)?);
         }
-        Ok(Backing {
-            buffers: Arc::new(PerBuffer {
-                files,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync: None,
         })
     }
 }
@@ -564,26 +533,26 @@ fn driver(host: &Host, hw: &Hw) -> PispFe {
 
 /// The client's end of a stream.
 struct Client {
-    lease: Lease,
+    handles: Option<Arc<[OwnedFd]>>,
     ring: Consumer,
 }
 
 impl Client {
     fn attach(host: &Host, name: &str) -> Self {
         let lease = host.stream_attach(0, name, CALLER).unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
+        let handles = lease.handles.clone();
+        let ring = lease.consumer_writable().unwrap();
+        Self { handles, ring }
     }
 
     /// Writes `data` at the start of `buffer`, through the memory the client was given.
-    fn fill(&self, buffer: u32, data: &[u8]) {
-        let at = self.lease.layout.buffer_offset(buffer).unwrap();
-        assert!(self.lease.buffers.write(at, data));
+    fn fill(&mut self, buffer: u32, data: &[u8]) {
+        assert!(self.ring.write(buffer, 0, data));
     }
 
     /// What the descriptor the client was handed for `buffer` holds.
     fn read(&self, buffer: u32, bytes: usize) -> Vec<u8> {
-        let handles = self.lease.handles.as_ref().expect("a stream of dma-bufs");
+        let handles = self.handles.as_ref().expect("a stream of dma-bufs");
         let fd: BorrowedFd<'_> = handles[buffer as usize].as_fd();
         let file = File::from(fd.try_clone_to_owned().unwrap());
         let mut out = vec![0; bytes];
@@ -622,7 +591,7 @@ impl App {
         let mut w = Writer::new(&mut buf);
         job.encode(&mut w).unwrap();
         let n = w.len();
-        assert!(self.config.ring.push_job(&buf[..n]).unwrap());
+        assert!(self.config.ring.jobs().post(&buf[..n]).unwrap());
     }
 }
 
@@ -662,7 +631,7 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
             app.output0.read(frame.buffer, want.len()) == want,
             "job {identity:#x}: output 0 isn't what the block made of config {config}"
         );
-        assert!(app.output0.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(app.output0.ring.release(frame.buffer));
 
         let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
         assert_eq!(
@@ -675,7 +644,7 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
             app.stats.read(stats.buffer, want.len()) == want,
             "job {identity:#x}: the statistics aren't what the block made"
         );
-        assert!(app.stats.ring.release(stats.buffer, stats.fence).unwrap());
+        assert!(app.stats.ring.release(stats.buffer));
 
         let second = app.output1.ring.pop_frame().unwrap();
         if with1 {
@@ -689,12 +658,7 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
                 app.output1.read(second.buffer, want.len()) == want,
                 "job {identity:#x}: output 1 isn't what the block made"
             );
-            assert!(
-                app.output1
-                    .ring
-                    .release(second.buffer, second.fence)
-                    .unwrap()
-            );
+            assert!(app.output1.ring.release(second.buffer));
         } else {
             assert!(second.is_none(), "output 1 was off");
         }
@@ -796,7 +760,7 @@ fn a_job_naming_a_statistics_buffer_the_driver_does_not_hold_is_dropped() {
     assert_eq!(hw.with(|b| b.keys.clone()), [1]);
 
     // Given back, it can be a job's again.
-    assert!(app.stats.ring.release(stats.buffer, stats.fence).unwrap());
+    assert!(app.stats.ring.release(stats.buffer));
     app.post(3, 0, 2, NO_BUFFER);
     two_ticks(&mut fe, now);
     let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
@@ -842,7 +806,7 @@ fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_s
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
     app.config.fill(0, &config_for(1, true, false));
-    assert!(app.config.ring.push_job(&[1, 2, 3]).unwrap());
+    assert!(app.config.ring.jobs().post(&[1, 2, 3]).unwrap());
     app.post(1, 0, 0, NO_BUFFER);
     let now = two_ticks(&mut fe, 1);
     // The client that posted them sees its config stream faulted, and the job it posted behind
@@ -919,7 +883,7 @@ fn jobs_in_steady_state_allocate_nothing() {
         for client in [&mut app.output0, &mut app.stats, &mut app.output1] {
             let frame = client.ring.pop_frame().unwrap().expect("a frame");
             assert_eq!(frame.identity, identity);
-            assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+            assert!(client.ring.release(frame.buffer));
         }
     }
     assert_eq!(allocated, 0, "taking, running and publishing jobs");
@@ -1010,7 +974,7 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
             app.output1.read(frame.buffer, OUTPUT_BYTES as usize)
                 == expected(1, 0x11, 1, OUTPUT_BYTES as usize)
         );
-        assert!(app.output1.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(app.output1.ring.release(frame.buffer));
         app.post(3, 0, 2, 0);
     });
     let now = fe.tick(now).unwrap();

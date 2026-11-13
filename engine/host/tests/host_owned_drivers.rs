@@ -20,7 +20,6 @@ use lemnos_hal::blocks::{BufferKind, StreamFrame};
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, DriverEntry, Host, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
-use lemnos_wire::ring::Consumer;
 
 const HEADER: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
 
@@ -330,12 +329,13 @@ fn read_u32(host: &Host, method: u16) -> u32 {
 fn a_consumers_jobs_never_reach_a_host_owned_devices_driver_and_its_frames_still_come() {
     for (owner, expected) in [("owner = \"host\"", 0), ("", 2)] {
         let (host, clock) = job_reader(owner);
-        let lease = host
+        let mut consumer = host
             .stream_attach(0, "frames", lemnos_core::CallerId(5))
+            .unwrap()
+            .consumer()
             .unwrap();
-        let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        assert!(consumer.push_job(b"change it").unwrap());
-        assert!(consumer.push_job(b"and again").unwrap());
+        assert!(consumer.jobs().post(b"change it").unwrap());
+        assert!(consumer.jobs().post(b"and again").unwrap());
         run(&host, &clock, 2);
         assert_eq!(read_u32(&host, 1), expected, "{owner:?}");
         assert!(consumer.pop_frame().unwrap().is_some(), "{owner:?}");

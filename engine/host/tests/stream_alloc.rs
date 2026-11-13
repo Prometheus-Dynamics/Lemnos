@@ -8,7 +8,6 @@ use lemnos_host::board::parse;
 use lemnos_host::{Host, Options, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimFrameSource};
-use lemnos_wire::ring::Consumer;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -30,8 +29,11 @@ fn a_thousand_frames_through_the_host_allocate_nothing() {
     .unwrap();
     let mut producer = host.stream_producer(0, "frames").unwrap();
     let writer = producer.writer();
-    let lease = host.stream_attach(0, "frames", CallerId(3)).unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    let mut consumer = host
+        .stream_attach(0, "frames", CallerId(3))
+        .unwrap()
+        .consumer()
+        .unwrap();
     let mut source = SimFrameSource::new(64);
     let mut frame = |sequence: u64| {
         let mut write = |buffer, bytes: &[u8]| writer.write(buffer, 0, bytes);
@@ -39,7 +41,7 @@ fn a_thousand_frames_through_the_host_allocate_nothing() {
         let got = consumer.pop_frame().unwrap().unwrap();
         assert_eq!(got.sequence, sequence);
         assert_eq!(got.identity, SimFrameSource::identity(sequence));
-        assert!(consumer.release(got.buffer, got.fence).unwrap());
+        assert!(consumer.release(got.buffer));
     };
     for sequence in 0..10 {
         frame(sequence);

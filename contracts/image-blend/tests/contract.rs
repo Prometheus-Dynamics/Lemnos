@@ -6,7 +6,8 @@ use lemnos_core::{
     Shape, Status, Writer,
 };
 use lemnos_measure::test_alloc::{Counting, allocations};
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout, Producer, STATE_FAULT, heap_words};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
+use lemnos_wire::testing::Harness;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -225,48 +226,35 @@ fn a_caller_finds_the_formats_and_the_stream() {
 const BUFFERS: u32 = 4;
 const BUFFER_BYTES: usize = 256;
 
-/// The block's end: reads a job, writes its output, publishes the completion.
-struct Block {
-    ring: Producer,
-    sequence: u64,
-    counters: Counters,
-}
-
-impl Block {
+/// The block's end, played by the harness: reads a job, writes its output, publishes the completion.
+impl Rig {
     /// Takes at most one job. Returns `false` when none is waiting.
-    fn run_one(&mut self, pool: &mut [Vec<u8>]) -> bool {
-        // Collect the buffers the consumer has released, so its return queue never fills.
-        while self.ring.pop_return().unwrap().is_some() {}
+    fn run_one(&mut self) -> bool {
+        // Collect the buffers the consumer has released, so they can be published again.
+        self.host.reclaim();
         let mut bytes = [0u8; JOB_BYTES];
-        let Some(len) = self.ring.pop_job(&mut bytes).unwrap() else {
+        let Some(len) = self.host.pop_job(&mut bytes).unwrap() else {
             return false;
         };
         let job = match BlendJob::decode(&mut Reader::new(&bytes[..len])) {
             Ok(job) => job,
             Err(_) => {
-                self.ring.close(STATE_FAULT);
+                self.host.end(STATE_FAULT);
                 return false;
             }
         };
-        let written = blend(pool, &job).unwrap_or_else(|| {
+        let written = blend(&self.consumer, &mut self.host, &job).unwrap_or_else(|| {
             self.counters.errors += 1;
             0
         });
         if written != 0 {
             self.counters.jobs += 1;
         }
-        let sent = self
-            .ring
-            .push_frame(FrameSlot {
-                buffer: job.output.buffer,
-                bytes: written,
-                sequence: self.sequence,
-                identity: job.identity,
-                timestamp_ns: 0,
-                fence: 0,
-            })
-            .unwrap();
-        assert!(sent, "the completion ring is full");
+        assert!(
+            self.host
+                .publish(job.output.buffer, written, self.sequence, job.identity, 0),
+            "the completion was not published"
+        );
         self.sequence += 1;
         true
     }
@@ -277,8 +265,9 @@ fn over(s: u8, d: u8, a: u8) -> u8 {
     (u32::from(s) + u32::from(d) * (255 - u32::from(a)) / 255).min(255) as u8
 }
 
-/// Composites the job. `None` when the job is refused.
-fn blend(pool: &mut [Vec<u8>], job: &BlendJob) -> Option<u32> {
+/// Composites the job. `None` when the job is refused. The inputs are read through the consumer's
+/// view of the shared buffers, and the output is written by the host.
+fn blend(consumer: &Consumer, host: &mut Harness, job: &BlendJob) -> Option<u32> {
     let (f, b, o) = (job.foreground, job.background, job.output);
     let same = [f, b, o]
         .iter()
@@ -300,9 +289,13 @@ fn blend(pool: &mut [Vec<u8>], job: &BlendJob) -> Option<u32> {
     {
         return None;
     }
-    let [fg, bg, out] = pool
-        .get_disjoint_mut([fb as usize, bb as usize, ob as usize])
-        .ok()?;
+    let n = (o.stride * o.height) as usize;
+    let mut fg = [0u8; BUFFER_BYTES];
+    let mut bg = [0u8; BUFFER_BYTES];
+    let mut out = [0u8; BUFFER_BYTES];
+    if !consumer.read(fb, 0, &mut fg[..n]) || !consumer.read(bb, 0, &mut bg[..n]) {
+        return None;
+    }
     for y in 0..o.height as usize {
         for x in 0..o.width as usize {
             let at = y * o.stride as usize + x * PIXEL;
@@ -316,27 +309,26 @@ fn blend(pool: &mut [Vec<u8>], job: &BlendJob) -> Option<u32> {
             out[at..at + 4].copy_from_slice(&px);
         }
     }
-    Some(o.stride * o.height)
+    host.write(ob, 0, &out[..n]).then_some(o.stride * o.height)
 }
 
+/// The host's end (the harness) and the consumer's end, over one stream.
 struct Rig {
-    block: Block,
+    host: Harness,
     consumer: Consumer,
-    pool: Vec<Vec<u8>>,
+    sequence: u64,
+    counters: Counters,
 }
 
 impl Rig {
     fn new() -> Self {
         let layout = Layout::new(BUFFERS, BUFFER_BYTES as u32, 4, JOB_BYTES as u32).unwrap();
-        let memory = heap_words(layout.ring_words());
+        let (host, consumer) = Harness::new(layout, true, true).unwrap();
         Self {
-            block: Block {
-                ring: Producer::new(memory.clone(), layout).unwrap(),
-                sequence: 0,
-                counters: Counters::default(),
-            },
-            consumer: Consumer::attach(memory, layout).unwrap(),
-            pool: vec![vec![0; BUFFER_BYTES]; BUFFERS as usize],
+            host,
+            consumer,
+            sequence: 0,
+            counters: Counters::default(),
         }
     }
 
@@ -348,24 +340,24 @@ impl Rig {
             job.encode(&mut writer).unwrap();
             writer.len()
         };
-        assert!(self.consumer.push_job(&bytes[..used]).unwrap());
-        assert!(self.block.run_one(&mut self.pool));
+        assert!(self.consumer.jobs().post(&bytes[..used]).unwrap());
+        assert!(self.run_one());
         self.consumer.pop_frame().unwrap().expect("a completion")
     }
 
     /// Writes pixels into the start of one buffer, the consumer's side of an image.
     fn put(&mut self, buffer: usize, pixels: &[[u8; 4]]) {
         for (at, px) in pixels.iter().enumerate() {
-            self.pool[buffer][at * PIXEL..at * PIXEL + PIXEL].copy_from_slice(px);
+            assert!(self.consumer.write(buffer as u32, at * PIXEL, px));
         }
     }
 
     fn pixels(&self, buffer: usize, count: usize) -> Vec<[u8; 4]> {
         (0..count)
             .map(|at| {
-                self.pool[buffer][at * PIXEL..at * PIXEL + PIXEL]
-                    .try_into()
-                    .unwrap()
+                let mut px = [0u8; 4];
+                assert!(self.consumer.read(buffer as u32, at * PIXEL, &mut px));
+                px
             })
             .collect()
     }
@@ -391,8 +383,8 @@ fn a_simulated_source_over_weighs_the_foreground_by_its_alpha() {
     assert_eq!(done.identity, 0xbeef);
     assert_eq!(done.bytes, 8);
     assert_eq!(rig.pixels(2, 2), [[199, 99, 99, 255], [200, 200, 200, 255]]);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
-    assert_eq!(rig.block.counters, Counters { jobs: 1, errors: 0 });
+    assert!(rig.consumer.release(done.buffer));
+    assert_eq!(rig.counters, Counters { jobs: 1, errors: 0 });
 }
 
 #[test]
@@ -426,7 +418,7 @@ fn a_refused_job_still_completes_as_failed() {
     let done = rig.blend(&job);
     assert_eq!(done.identity, 0xbeef);
     assert_eq!(done.bytes, 0);
-    assert_eq!(rig.block.counters, Counters { jobs: 0, errors: 1 });
+    assert_eq!(rig.counters, Counters { jobs: 0, errors: 1 });
 }
 
 #[test]
@@ -445,14 +437,14 @@ fn jobs_in_a_row_reuse_the_buffers_without_allocating() {
     let job = two_by_one(BlendOp::SrcOver);
     // Warm up: the first job sets up whatever the thread needs, and its output is released.
     let done = rig.blend(&job);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+    assert!(rig.consumer.release(done.buffer));
     let ((), count) = allocations(|| {
         for identity in 1..1001 {
             let done = rig.blend(&BlendJob { identity, ..job });
             assert_eq!(done.identity, identity);
-            assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+            assert!(rig.consumer.release(done.buffer));
         }
     });
     assert_eq!(count, 0, "allocations in 1000 jobs");
-    assert_eq!(rig.block.counters.jobs, 1001);
+    assert_eq!(rig.counters.jobs, 1001);
 }

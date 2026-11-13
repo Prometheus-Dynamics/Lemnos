@@ -17,7 +17,7 @@ use lemnos_core::{
 use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
-    HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
+    Lease, MemfdAllocator, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
 };
 use crate::{Options, guest};
 
@@ -1834,7 +1834,7 @@ impl Host {
             backend,
             clock,
             options,
-            Arc::new(HeapAllocator),
+            Arc::new(MemfdAllocator),
         )
     }
 

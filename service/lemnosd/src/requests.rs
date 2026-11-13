@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
+use lemnos_wire::ring::fds;
 use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
     PLANE_LENGTH_BYTES, REPLY_OVERHEAD, Tail, VERSION, WireError, decode, encode_description,
@@ -469,7 +470,7 @@ impl Client {
             let planes = lease.planes.count();
             let descriptors = handle_descriptors(layout.buffers, planes).filter(|_| {
                 takes_handles
-                    && lease.descriptors.len() == 2
+                    && lease.descriptors.len() == fds::BEFORE + handles.len()
                     && handles.len() == layout.buffers as usize * planes as usize
             });
             let mut plane_bytes = [0; PLANE_LENGTH_BYTES * MAX_PLANES as usize];
@@ -478,10 +479,10 @@ impl Client {
                 let _ = self.core.host.stream_detach(device, name, self.conn.id);
                 return self.refuse(id, Status::IO, "the stream's descriptors can't be sent");
             };
-            // The ring and the doorbell close here if this connection has already gone, and
-            // this hold on the buffers goes with them.
-            self.conn.answer_with_handles(
-                &Frame::StreamHandles {
+            // The descriptors close here if this connection has already gone, and the host's
+            // hold on the buffers goes with them.
+            self.conn.answer_with_descriptors(
+                &Frame::StreamRingHandles {
                     id,
                     buffers: layout.buffers,
                     descriptors,
@@ -492,7 +493,6 @@ impl Client {
                     plane_bytes: plane_bytes.get(..plane_len).unwrap_or(&[]),
                 },
                 lease.descriptors,
-                Some(handles),
             );
             return true;
         }
@@ -503,7 +503,7 @@ impl Client {
         // The descriptors close here if this connection has already gone. It stays attached
         // until `release` runs, which it will.
         self.conn.answer_with_descriptors(
-            &Frame::StreamReady {
+            &Frame::StreamRings {
                 id,
                 buffers: layout.buffers,
                 descriptors,

@@ -21,7 +21,7 @@ use lemnos_driver_rk_mpp::codec::NOT_THERE;
 use lemnos_driver_rk_mpp::played::{Kernel, iova};
 use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, Message, Session};
 use lemnos_host::board::parse;
-use lemnos_host::stream::HeapAllocator;
+use lemnos_host::stream::MemfdAllocator;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::{SimBoard, SimClock};
@@ -109,7 +109,7 @@ impl Rig {
         let allocator: Arc<dyn lemnos_host::stream::StreamAllocator> = if dma_buf {
             Arc::new(PerBuffer)
         } else {
-            Arc::new(HeapAllocator)
+            Arc::new(MemfdAllocator)
         };
         let host = Host::start_with_streams(
             &board,

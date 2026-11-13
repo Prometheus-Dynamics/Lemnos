@@ -14,11 +14,19 @@ pub(crate) const VERSION_WORD: usize = 0;
 /// The word of buffer 0's mark. Buffer `b`'s is `b` words after it.
 pub(crate) const MARKS_AT: usize = 1;
 
+/// The word of buffer `buffer`'s taken stamp in a page for `buffers` buffers: after every mark. It
+/// holds one more than the ring sequence of the last frame the reader took from that buffer, and
+/// zero before any.
+pub(crate) fn taken_at(buffers: u32, buffer: usize) -> usize {
+    MARKS_AT + buffers as usize + buffer
+}
+
 /// A reader's page of marks for one pool: the version, then one word per buffer, nonzero while
-/// the reader holds that buffer. Only this reader writes it.
+/// the reader holds that buffer, then one taken stamp per buffer. Only this reader writes it.
 #[derive(Debug)]
 pub struct Marks<M: MemMut = WriteMap> {
     page: M,
+    buffers: u32,
     slot: AtomicU32,
     max_held: u32,
     /// How many holds this reader has on each buffer, and in all. A buffer's word in the page
@@ -43,11 +51,31 @@ impl Marks<WriteMap> {
     ///
     /// If the page can't be made.
     pub fn create(buffers: u32, slot: u32, max_held: u32) -> Result<Self, RingError> {
+        let page = WriteMap::new(sealed_memfd(Self::page_bytes(buffers)?)?)?;
+        Ok(Self::over(page, buffers, slot, max_held))
+    }
+
+    /// The size of a marks page for a pool of `buffers` buffers, in bytes: what
+    /// [`create`](Self::create) makes, and what a reader that makes its own page must make too.
+    ///
+    /// # Errors
+    ///
+    /// If `buffers` is zero or more than a pool may hold.
+    pub fn page_bytes(buffers: u32) -> Result<usize, RingError> {
         if buffers == 0 || buffers > MAX_BUFFERS {
             return Err(RingError::Spec("a pool holds 1 to 1024 buffers"));
         }
-        let page = WriteMap::new(sealed_memfd((MARKS_AT + buffers as usize) * 8)?)?;
-        Ok(Self::over(page, buffers, slot, max_held))
+        Ok((MARKS_AT + 2 * buffers as usize) * 8)
+    }
+
+    /// The page, writable, for the reader to keep (the reader's own mapping of it is
+    /// [`over`](Self::over)). The publisher gets [`page_fd`](Self::page_fd) instead.
+    ///
+    /// # Errors
+    ///
+    /// If the descriptor can't be duplicated.
+    pub fn writable_fd(&self) -> Result<OwnedFd, RingError> {
+        Ok(self.page.fd().try_clone_to_owned()?)
     }
 
     /// The page, read-only, to send to the publisher.
@@ -61,11 +89,12 @@ impl Marks<WriteMap> {
 }
 
 impl<M: MemMut> Marks<M> {
-    /// Marks kept in `page`, which must be zeroed and hold one word more than `buffers`.
+    /// Marks kept in `page`, which must be zeroed and hold the version and two words per buffer.
     pub fn over(page: M, buffers: u32, slot: u32, max_held: u32) -> Self {
-        let buffers = (buffers as usize).min(page.words().saturating_sub(MARKS_AT));
+        let buffers = (buffers as usize).min(page.words().saturating_sub(MARKS_AT) / 2);
         Self {
             page,
+            buffers: buffers as u32,
             slot: AtomicU32::new(slot),
             max_held,
             counts: Mutex::new(Counts {
@@ -146,6 +175,16 @@ impl<M: MemMut> Marker for Marks<M> {
 
     fn slot(&self) -> Option<u32> {
         Some(self.slot.load(Ordering::Relaxed))
+    }
+
+    fn taken(&self, buffer: BufferIndex, seq: u64) {
+        if buffer.0 < self.buffers {
+            self.page.store(
+                taken_at(self.buffers, buffer.0 as usize),
+                seq.saturating_add(1),
+                Ordering::SeqCst,
+            );
+        }
     }
 }
 

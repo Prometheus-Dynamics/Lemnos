@@ -396,11 +396,15 @@ fn free_run(config: &str, steps: u64) -> FreeRun {
         .map(|frame| frame.expect("every posted control has a landing"));
         posts.push((values, landed));
     }
-    // Let every value land and its frame be published.
-    bus.advance(Duration::from_millis(200));
-    drain_embedded(&mut *embedded, &mut shown);
-    while let Some(frame) = frames.pop().unwrap() {
-        frames.release(frame).unwrap();
+    // Let every value land and its frame be published. The consumer keeps up while it waits, as it
+    // does between posts: read every 10 ms, a frame or two at a time, so no frame is replaced
+    // unread.
+    for _ in 0..20 {
+        bus.advance(Duration::from_millis(10));
+        drain_embedded(&mut *embedded, &mut shown);
+        while let Some(frame) = frames.pop().unwrap() {
+            frames.release(frame).unwrap();
+        }
     }
     let counted = (
         camera.frame_starts().unwrap().map(|starts| starts.count),

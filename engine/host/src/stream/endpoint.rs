@@ -1,4 +1,9 @@
 //! The producer's end of a stream, and the state both ends share under one lock.
+//!
+//! The memory of one attachment ([`Memory`]) is the shm family's: a frame ring and a job ring the
+//! host owns, and a buffer pool it publishes into. The consumer's end ([`Lease`]) is the descriptors
+//! of those, plus a hold page and a doorbell the host makes for it. What the consumer gives back is
+//! read from its hold marks, never from the shared memory's words.
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -7,19 +12,39 @@ use lemnos_core::{CallerId, Status};
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_wire::Planes;
-use lemnos_wire::ring::{FrameSlot, Layout, Producer, RingError, STATE_CLOSED, STATE_FAULT};
+use lemnos_wire::ring::{
+    FrameInfo, JOB_ACK_BYTES, JobCollector, Layout, RingError, STATE_CLOSED, STATE_FAULT, fds,
+};
+use shm_ring::{FieldId, ReadMap, Ring, SampleTime, WriteMap, read_only, sealed_memfd};
+use shm_ring_buffers::{BufferIndex, BufferWriter as Publisher, Holders, MAX_PER_FRAME, Pool};
+use shm_ring_doorbell::{Bell, Doorbell};
+use shm_ring_holds::{HoldTable, Limits, Marks};
 
 use super::pool::{BufferPool, BufferState};
-use super::{Backing, BufferMemory, Doorbell, Lease, StreamAllocator, StreamStats};
+use super::{Access, Buffers, DmaSync, Lease, StreamAllocator, StreamStats};
 use crate::board::{StreamMemory, StreamSpec};
 
-struct Attached {
-    caller: CallerId,
-    ring: Producer,
-    buffers: Arc<dyn BufferMemory>,
-    doorbell: Arc<dyn Doorbell>,
+/// What one attachment's memory is: the publisher over the frame ring and the pool, the job ring
+/// and its acks, and the dma-bufs when the buffers are dma-bufs. Made once and, on standby, kept
+/// until a consumer attaches.
+struct Memory {
+    publisher: Publisher<WriteMap>,
+    ring: Ring,
+    jobs: Ring,
+    /// The job-ack page: one word, how many jobs the host has collected. Writable here.
+    acks: OwnedFd,
     /// One dma-buf per plane of each buffer, when the buffers are dma-bufs.
     handles: Option<Arc<[OwnedFd]>>,
+    sync: Option<Arc<dyn DmaSync>>,
+}
+
+/// A consumer's attachment: the memory it reads from, and what the host reads back from it.
+struct Attached {
+    caller: CallerId,
+    memory: Memory,
+    holds: HoldTable<ReadMap>,
+    jobs: JobCollector,
+    bell: Bell,
 }
 
 /// Counts that aren't buffer states.
@@ -48,7 +73,7 @@ pub(crate) struct StreamCore {
     pool: BufferPool,
     attached: Option<Attached>,
     /// On standby with no consumer attached: the memory the next one gets.
-    waiting: Option<Backing>,
+    waiting: Option<Memory>,
     /// The newest frame published onto `waiting`, for the next consumer.
     kept: Option<StreamFrame>,
     /// Making standby memory failed since a consumer last left: it is made at the next
@@ -61,15 +86,25 @@ pub(crate) struct StreamCore {
     /// from standby, or standby memory made), so a buffer granted before is known to be on
     /// memory it no longer has.
     epoch: u64,
+    /// Publish order of each buffer's newest frame, so the oldest unheld one is taken back first.
+    published_at: Box<[u64]>,
+    /// Frames published so far on this stream.
+    published_count: u64,
     counters: Counters,
 }
 
-fn lock(core: &Mutex<StreamCore>) -> std::sync::MutexGuard<'_, StreamCore> {
+pub(super) fn lock(core: &Mutex<StreamCore>) -> std::sync::MutexGuard<'_, StreamCore> {
     core.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The memory in place: its buffers, and their dma-bufs when it has them.
-type InPlace<'a> = (&'a Arc<dyn BufferMemory>, Option<&'a Arc<[OwnedFd]>>);
+fn io_status(_error: impl std::fmt::Debug) -> Status {
+    Status::IO
+}
+
+/// A shared-memory error, as the status a stream's attachment is refused with.
+fn ring_status(_error: impl std::fmt::Debug) -> Status {
+    Status::IO
+}
 
 impl StreamCore {
     pub(crate) fn new(spec: &StreamSpec, name: &str, allocator: Arc<dyn StreamAllocator>) -> Self {
@@ -93,6 +128,8 @@ impl StreamCore {
             closed: false,
             claimed: false,
             epoch: 0,
+            published_at: vec![0; layout.buffers as usize].into_boxed_slice(),
+            published_count: 0,
             counters: Counters::default(),
         }
     }
@@ -105,9 +142,17 @@ impl StreamCore {
         self.attached.is_some()
     }
 
-    /// Memory for one consumer, as the board file declares it, checked against the layout.
-    fn make(&self) -> Result<Backing, Status> {
-        let backing = match self.memory {
+    /// The pool buffers of this stream: one per plane of each buffer.
+    fn pool_buffers(&self) -> u32 {
+        self.layout.buffers * self.planes.count()
+    }
+
+    /// Memory for one consumer, as the board file declares it: the buffers from the allocator and
+    /// the rings the host makes over them.
+    fn make(&self) -> Result<Memory, Status> {
+        let shared = self.memory == StreamMemory::Shared;
+        let planes = self.planes.count();
+        let Buffers { fds, dma, sync } = match self.memory {
             StreamMemory::Shared => self.allocator.allocate(&self.name, &self.layout)?,
             StreamMemory::DmaBuf => self.allocator.allocate_planes(
                 &self.name,
@@ -116,24 +161,43 @@ impl StreamCore {
                 &self.planes,
             )?,
         };
-        let expected = self.layout.buffers as usize * self.planes.count() as usize;
-        if backing
-            .handles
-            .as_ref()
-            .is_some_and(|handles| handles.len() != expected)
-        {
+        // What the board file declared is what a driver was written against, and what its end of
+        // the stream told it when it bound.
+        let expected = if shared {
+            1
+        } else {
+            self.pool_buffers() as usize
+        };
+        if fds.len() != expected || dma == shared {
             return Err(Status::IO);
         }
-        // What the board file declared is what a driver was written against, and what its end
-        // of the stream told it when it bound.
-        if self.memory == StreamMemory::DmaBuf && backing.handles.is_none() {
-            return Err(Status::IO);
-        }
-        Ok(Backing {
-            handles: backing
-                .handles
-                .filter(|_| self.memory == StreamMemory::DmaBuf),
-            ..backing
+        let lengths: Vec<u32> = if shared || planes == 1 {
+            Vec::new()
+        } else {
+            self.planes.lengths().to_vec()
+        };
+        let descs = self.layout.pool_descs(shared, &lengths);
+        let handles = if dma {
+            let copies = fds
+                .iter()
+                .map(|fd| fd.try_clone().map_err(io_status))
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(Arc::from(copies))
+        } else {
+            None
+        };
+        let pool = Pool::mapped(1, fds, descs).map_err(|_| Status::IO)?;
+        let ring = Ring::create(&self.layout.frame_spec()).map_err(ring_status)?;
+        let jobs = Ring::create(&self.layout.job_spec()).map_err(ring_status)?;
+        let acks = sealed_memfd(JOB_ACK_BYTES).map_err(io_status)?;
+        let writer = ring.writer().map_err(ring_status)?;
+        Ok(Memory {
+            publisher: Publisher::new(writer, FieldId(0), pool),
+            ring,
+            jobs,
+            acks,
+            handles,
+            sync: if dma { sync } else { None },
         })
     }
 
@@ -148,62 +212,64 @@ impl StreamCore {
             return;
         }
         match self.make() {
-            Ok(backing) => {
-                self.waiting = Some(backing);
+            Ok(memory) => {
+                self.waiting = Some(memory);
                 self.epoch += 1;
             }
             Err(_) => self.standby_failed = true,
         }
     }
 
-    /// The buffers and their dma-bufs of the memory in place now: the consumer's, or what
-    /// waits on standby for the next.
-    fn in_place(&self) -> Option<InPlace<'_>> {
+    /// The memory in place now: the consumer's, or what waits on standby for the next.
+    fn in_place(&self) -> Option<&Memory> {
         match (&self.attached, &self.waiting) {
-            (Some(attached), _) => Some((&attached.buffers, attached.handles.as_ref())),
-            (None, Some(waiting)) => Some((&waiting.buffers, waiting.handles.as_ref())),
+            (Some(attached), _) => Some(&attached.memory),
+            (None, Some(waiting)) => Some(waiting),
             (None, None) => None,
         }
     }
 
-    /// Takes the consumer's end for `caller`: the memory waiting on standby, with the frame
-    /// kept on it at once, or memory made now.
+    fn in_place_mut(&mut self) -> Option<&mut Memory> {
+        match (&mut self.attached, &mut self.waiting) {
+            (Some(attached), _) => Some(&mut attached.memory),
+            (None, Some(waiting)) => Some(waiting),
+            (None, None) => None,
+        }
+    }
+
+    /// Takes the consumer's end for `caller`: the memory waiting on standby, with the frame kept
+    /// on it at once, or memory made now.
     pub(crate) fn attach(&mut self, caller: CallerId) -> Result<Lease, Status> {
         if self.attached.is_some() {
             return Err(Status::BUSY);
         }
-        let (backing, adopted) = match self.waiting.take() {
-            Some(backing) => (backing, true),
+        let (memory, adopted) = match self.waiting.take() {
+            Some(memory) => (memory, true),
             None => (self.make()?, false),
         };
-        let Backing {
-            ring,
-            buffers,
-            doorbell,
-            descriptors,
-            handles,
-        } = backing;
-        let producer = match Producer::new(Arc::clone(&ring), self.layout) {
-            Ok(producer) => producer,
-            Err(_) => {
+        let parts = match self.consumer_parts(&memory) {
+            Ok(parts) => parts,
+            Err(status) => {
                 // The memory is gone either way; the producer's buffers were on it.
                 if adopted {
                     self.drop_kept();
                     self.epoch += 1;
                 }
-                return Err(Status::IO);
+                return Err(status);
             }
         };
+        let (descriptors, holds, jobs, bell) = parts;
         if !adopted {
             self.epoch += 1;
         }
+        let handles = memory.handles.clone();
         self.counters.attachments += 1;
         self.attached = Some(Attached {
             caller,
-            ring: producer,
-            buffers: Arc::clone(&buffers),
-            doorbell: Arc::clone(&doorbell),
-            handles: handles.clone(),
+            memory,
+            holds,
+            jobs,
+            bell,
         });
         if let Some(frame) = self.kept.take() {
             self.deliver(frame);
@@ -211,21 +277,67 @@ impl StreamCore {
         Ok(Lease {
             layout: self.layout,
             descriptors,
-            ring,
-            buffers,
-            doorbell,
             handles,
             planes: self.planes,
+            shared: self.memory == StreamMemory::Shared,
         })
     }
 
-    /// Ends the attachment with `state`, taking back everything the consumer had.
-    pub(crate) fn detach(&mut self, state: u64) {
+    /// The consumer's descriptors and the host's ends that go with them: the hold marks, the job
+    /// collector and the doorbell.
+    fn consumer_parts(
+        &self,
+        memory: &Memory,
+    ) -> Result<(Vec<OwnedFd>, HoldTable<ReadMap>, JobCollector, Bell), Status> {
+        let buffers = self.pool_buffers();
+        let marks = sealed_memfd(Marks::<WriteMap>::page_bytes(buffers).map_err(ring_status)?)
+            .map_err(io_status)?;
+        let mut holds = HoldTable::new(buffers);
+        holds
+            .add(
+                0,
+                read_only(marks.as_fd()).map_err(io_status)?,
+                Limits::default(),
+            )
+            .map_err(ring_status)?;
+        let jobs = JobCollector::new(
+            memory.jobs.read_fd().map_err(ring_status)?,
+            memory.acks.try_clone().map_err(io_status)?,
+            &self.layout,
+        )
+        .map_err(ring_status)?;
+        let doorbell = Doorbell::create().map_err(|_| Status::IO)?;
+        let (bell_eventfd, bell_page) = doorbell.subscriber_fds().map_err(|_| Status::IO)?;
+        let (host_eventfd, host_page) = doorbell.bell_fds().map_err(|_| Status::IO)?;
+        let bell = Bell::attach(host_eventfd, host_page).map_err(|_| Status::IO)?;
+
+        let pool_fds: Vec<OwnedFd> = memory
+            .publisher
+            .pool()
+            .descriptors()
+            .map(|fd| fd.try_clone_to_owned().map_err(io_status))
+            .collect::<Result<_, _>>()?;
+        let mut descriptors = Vec::with_capacity(fds::BUFFERS + pool_fds.len());
+        descriptors.push(memory.ring.read_fd().map_err(ring_status)?);
+        descriptors.push(memory.publisher.pool().page_fd().map_err(ring_status)?);
+        descriptors.push(memory.jobs.write_fd().map_err(ring_status)?);
+        descriptors.push(read_only(memory.acks.as_fd()).map_err(io_status)?);
+        descriptors.push(bell_eventfd);
+        descriptors.push(bell_page);
+        descriptors.push(marks);
+        descriptors.extend(pool_fds);
+        Ok((descriptors, holds, jobs, bell))
+    }
+
+    /// Ends the attachment with `state`, taking back everything the consumer had. Its memory goes
+    /// with it: the ring records the end, which a consumer still reading it sees.
+    pub(crate) fn detach(&mut self, state: u32) {
         let Some(attached) = self.attached.take() else {
             return;
         };
-        attached.ring.close(state);
-        attached.doorbell.ring();
+        attached.memory.ring.set_end(state);
+        let mut bell = attached.bell;
+        bell.ring();
         self.epoch += 1;
         self.pool.reclaim_published();
         // Fresh memory for the next consumer, if on standby, when the producer next asks.
@@ -233,7 +345,7 @@ impl StreamCore {
     }
 
     /// The host is going: ends the attachment and lets go of any memory on standby.
-    pub(crate) fn close(&mut self, state: u64) {
+    pub(crate) fn close(&mut self, state: u32) {
         self.closed = true;
         self.detach(state);
         if self.waiting.take().is_some() {
@@ -267,30 +379,89 @@ impl StreamCore {
         self.detach(STATE_FAULT);
     }
 
-    /// Collects returned buffers. Bounded by the ring's capacity, so a peer that keeps writing
-    /// can't hold this up.
-    fn collect_returns(&mut self) {
-        for _ in 0..self.layout.frame_slots {
-            let Some(attached) = self.attached.as_mut() else {
-                return;
-            };
-            match attached.ring.pop_return() {
-                Ok(None) => return,
-                Ok(Some((buffer, fence))) => {
-                    if self.pool.release(buffer, fence).is_err() {
-                        return self.fault();
-                    }
-                    self.counters.returned += 1;
-                }
-                Err(_) => return self.fault(),
-            }
+    /// The next buffer for the producer: a free one, or, when there is none, the frame the
+    /// publisher takes back. That is the oldest frame no consumer holds, never the newest, so a
+    /// consumer that is behind loses old frames and nothing it holds. A consumer whose marks are
+    /// stuck, or that the publisher cut off, is ended as a fault.
+    fn next_buffer(&mut self) -> Option<u32> {
+        self.stand_by();
+        if let Some(buffer) = self.pool.take(self.epoch) {
+            return Some(buffer);
         }
+        self.take_back()
     }
 
-    fn next_buffer(&mut self) -> Option<u32> {
-        self.collect_returns();
-        self.stand_by();
-        self.pool.take(self.epoch)
+    fn take_back(&mut self) -> Option<u32> {
+        let now = SampleTime::now().as_nanos();
+        let planes = self.planes.count();
+        let buffers = self.layout.buffers;
+        let epoch = self.epoch;
+        let attached = self.attached.as_mut()?;
+        attached
+            .holds
+            .enforce(now, attached.memory.publisher.pool().page());
+        if attached.holds.is_cut_off(0) {
+            self.fault();
+            return None;
+        }
+        let attached = self.attached.as_mut()?;
+        // Only published frames can be taken back, and never a buffer the producer already holds.
+        // A frame the consumer has read goes back at any time: nothing is lost. A frame it has not
+        // read is replaced only when the producer holds no buffer of its own to fill, and never
+        // while it is the newest, so a consumer still behind finds a frame. Oldest first; a frame
+        // whose planes don't all come back is skipped.
+        let newest = (0..buffers)
+            .filter(|b| matches!(self.pool.state(*b), Some(BufferState::Consumer { .. })))
+            .map(|b| self.published_at[b as usize])
+            .max()
+            .unwrap_or(0);
+        let holding =
+            (0..buffers).any(|b| matches!(self.pool.state(b), Some(BufferState::Producer { .. })));
+        let mut after = 0_u64;
+        loop {
+            let mut oldest: Option<(u64, u32)> = None;
+            for buffer in 0..buffers {
+                if !matches!(self.pool.state(buffer), Some(BufferState::Consumer { .. })) {
+                    continue;
+                }
+                let at = self.published_at[buffer as usize];
+                if at <= after {
+                    continue;
+                }
+                let taken = attached
+                    .memory
+                    .publisher
+                    .taken(BufferIndex(buffer * planes), &attached.holds);
+                if !taken && (at == newest || holding) {
+                    continue;
+                }
+                if oldest.is_none_or(|(seen, _)| at < seen) {
+                    oldest = Some((at, buffer));
+                }
+            }
+            let (at, buffer) = oldest?;
+            // Whether the consumer took the frame before it is replaced: only a frame it never
+            // took is lost. Asked before the planes are reclaimed, while the frame is still there.
+            let taken = attached
+                .memory
+                .publisher
+                .taken(BufferIndex(buffer * planes), &attached.holds);
+            let mut free = true;
+            for plane in 0..planes {
+                let index = BufferIndex(buffer * planes + plane);
+                free &= attached.memory.publisher.reclaim(index, &attached.holds);
+            }
+            if free {
+                self.pool.grant(buffer, epoch);
+                self.counters.returned += 1;
+                if !taken {
+                    // The consumer never read this frame: it is dropped.
+                    self.counters.dropped += 1;
+                }
+                return Some(buffer);
+            }
+            after = at;
+        }
     }
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {
@@ -319,31 +490,44 @@ impl StreamCore {
         Ok(())
     }
 
-    /// Puts a frame the consumer attached now is due on its ring.
+    /// Puts a frame the consumer attached now is due on its ring: the frame's buffer's planes, and
+    /// its metadata.
     fn deliver(&mut self, frame: StreamFrame) {
         let fence = self.pool.publish(frame.buffer);
+        self.published_count += 1;
+        self.published_at[frame.buffer as usize] = self.published_count;
+        let planes = self.planes.count();
+        let mut names = [BufferIndex(0); MAX_PER_FRAME];
+        for plane in 0..planes {
+            names[plane as usize] = BufferIndex(frame.buffer * planes + plane);
+        }
+        let meta = FrameInfo {
+            sequence: frame.sequence,
+            identity: frame.identity,
+            bytes: frame.bytes,
+        }
+        .encode();
+        let time = SampleTime::from_nanos(frame.timestamp_ns);
         let Some(attached) = self.attached.as_mut() else {
             self.pool.drop_held(frame.buffer);
             return;
         };
-        let pushed = attached.ring.push_frame(FrameSlot {
-            buffer: frame.buffer,
-            bytes: frame.bytes,
-            sequence: frame.sequence,
-            identity: frame.identity,
-            timestamp_ns: frame.timestamp_ns,
-            fence,
-        });
-        match pushed {
-            Ok(true) => {
-                attached.doorbell.ring();
+        let published = attached
+            .memory
+            .publisher
+            .publish(&names[..planes as usize], time, &meta);
+        match published {
+            Ok(_) => {
+                attached.bell.ring();
                 self.counters.delivered += 1;
             }
-            Ok(false) => {
+            Err(_) => {
+                // Not free on the ring: the frame never reached anyone, so its buffer is the
+                // producer's to drop.
+                let _ = self.pool.release(frame.buffer, fence);
                 self.pool.drop_held(frame.buffer);
                 self.counters.dropped += 1;
             }
-            Err(_) => self.fault(),
         }
     }
 
@@ -351,7 +535,8 @@ impl StreamCore {
         let Some(attached) = self.attached.as_mut() else {
             return Ok(None);
         };
-        match attached.ring.pop_job(out) {
+        let taken = attached.jobs.next(out);
+        match taken {
             Ok(job) => Ok(job),
             Err(RingError::JobTooLarge) => Err(ErrorKind::InvalidInput),
             Err(_) => {
@@ -361,48 +546,69 @@ impl StreamCore {
         }
     }
 
-    fn write(&self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, ErrorKind> {
+    /// Whether `buffer` is one the producer holds (not published, not kept).
+    fn holds_buffer(&self, buffer: u32) -> Result<(), ErrorKind> {
         match self.pool.state(buffer) {
-            Some(BufferState::Producer { .. }) => {}
-            _ => return Err(ErrorKind::InvalidInput),
+            Some(BufferState::Producer { .. }) => Ok(()),
+            _ => Err(ErrorKind::InvalidInput),
         }
+    }
+
+    fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, ErrorKind> {
+        self.holds_buffer(buffer)?;
         let in_buffer = offset
             .checked_add(data.len())
             .is_some_and(|end| end <= self.layout.buffer_bytes as usize);
         if !in_buffer {
             return Err(ErrorKind::InvalidInput);
         }
-        let Some((buffers, _)) = self.in_place() else {
+        let planes = self.planes;
+        let Some(memory) = self.in_place_mut() else {
             return Ok(false);
         };
-        let start = self
-            .layout
-            .buffer_offset(buffer)
-            .and_then(|at| at.checked_add(offset))
-            .ok_or(ErrorKind::InvalidInput)?;
-        Ok(buffers.write(start, data))
+        Ok(span(
+            &planes,
+            buffer,
+            offset,
+            data.len(),
+            |index, place, from, take| {
+                write_plane(
+                    memory_mut_parts(memory),
+                    index,
+                    place,
+                    &data[from..from + take],
+                )
+            },
+        ))
     }
 
-    fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
-        match self.pool.state(buffer) {
-            Some(BufferState::Producer { .. }) => {}
-            _ => return Err(ErrorKind::InvalidInput),
-        }
+    fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
+        self.holds_buffer(buffer)?;
         let in_buffer = offset
             .checked_add(out.len())
             .is_some_and(|end| end <= self.layout.buffer_bytes as usize);
         if !in_buffer {
             return Err(ErrorKind::InvalidInput);
         }
-        let Some((buffers, _)) = self.in_place() else {
+        let planes = self.planes;
+        let Some(memory) = self.in_place_mut() else {
             return Ok(false);
         };
-        let start = self
-            .layout
-            .buffer_offset(buffer)
-            .and_then(|at| at.checked_add(offset))
-            .ok_or(ErrorKind::InvalidInput)?;
-        Ok(buffers.read(start, out))
+        let len = out.len();
+        Ok(span(
+            &planes,
+            buffer,
+            offset,
+            len,
+            |index, place, from, take| {
+                read_plane(
+                    memory_mut_parts(memory),
+                    index,
+                    place,
+                    &mut out[from..from + take],
+                )
+            },
+        ))
     }
 
     /// Whether `buffer`, which the producer holds, was taken on the memory in place now.
@@ -420,17 +626,30 @@ impl StreamCore {
         let Some(BufferState::Producer { epoch }) = self.pool.state(buffer) else {
             return Err(ErrorKind::InvalidInput);
         };
-        let Some((_, handles)) = self.in_place() else {
+        let Some(memory) = self.in_place() else {
             return Ok(None);
         };
-        if handles.is_none() {
+        if memory.handles.is_none() {
             return Err(ErrorKind::Unsupported);
         }
         Ok((epoch == self.epoch).then_some(epoch))
     }
 
     pub(crate) fn stats(&self) -> StreamStats {
-        let (free, producer_held, consumer_held, kept) = self.pool.counts();
+        let (mut free, producer_held, mut consumer_held, kept) = self.pool.counts();
+        // A published buffer the consumer has let go of, which nothing has reclaimed yet, is free
+        // for the producer to take: only a buffer a hold mark names is the consumer's.
+        if let Some(attached) = self.attached.as_ref() {
+            let planes = self.planes.count();
+            for buffer in 0..self.layout.buffers {
+                if matches!(self.pool.state(buffer), Some(BufferState::Consumer { .. }))
+                    && !attached.holds.held(BufferIndex(buffer * planes))
+                {
+                    consumer_held = consumer_held.saturating_sub(1);
+                    free += 1;
+                }
+            }
+        }
         StreamStats {
             attached: self.is_attached(),
             claimed: self.claimed,
@@ -447,6 +666,79 @@ impl StreamCore {
             standby: self.waiting.is_some(),
         }
     }
+}
+
+/// The parts of a memory a plane access needs, split so the publisher and the dma-buf brackets
+/// are borrowed at once.
+struct Parts<'a> {
+    publisher: &'a mut Publisher<WriteMap>,
+    sync: Option<&'a Arc<dyn DmaSync>>,
+}
+
+fn memory_mut_parts(memory: &mut Memory) -> Parts<'_> {
+    Parts {
+        publisher: &mut memory.publisher,
+        sync: memory.sync.as_ref(),
+    }
+}
+
+/// Calls `each` for every plane `take` bytes at buffer offset `offset` lands in: the plane's pool
+/// index, the place in that plane, where in `data` the bytes start, and how many. `false` if the
+/// range doesn't lie in the buffer, or a plane refuses.
+fn span(
+    planes: &Planes,
+    buffer: u32,
+    offset: usize,
+    len: usize,
+    mut each: impl FnMut(usize, usize, usize, usize) -> bool,
+) -> bool {
+    let count = planes.count();
+    let (mut at, mut left, mut from) = (offset, len, 0);
+    let mut ok = true;
+    while left > 0 {
+        let Some((plane, place, room)) = planes.locate(at) else {
+            return false;
+        };
+        let take = left.min(room);
+        let index = buffer as usize * count as usize + plane as usize;
+        ok &= each(index, place, from, take);
+        at += take;
+        left -= take;
+        from += take;
+    }
+    ok
+}
+
+fn write_plane(parts: Parts<'_>, index: usize, place: usize, data: &[u8]) -> bool {
+    if let Some(sync) = parts.sync {
+        sync.begin(index, Access::Write);
+    }
+    let written = parts
+        .publisher
+        .buffer_mut(BufferIndex(index as u32))
+        .and_then(|bytes| bytes.get_mut(place..place.checked_add(data.len())?))
+        .map(|dst| dst.copy_from_slice(data))
+        .is_some();
+    if let Some(sync) = parts.sync {
+        sync.end(index, Access::Write);
+    }
+    written
+}
+
+fn read_plane(parts: Parts<'_>, index: usize, place: usize, out: &mut [u8]) -> bool {
+    if let Some(sync) = parts.sync {
+        sync.begin(index, Access::Read);
+    }
+    let read = parts
+        .publisher
+        .buffer_mut(BufferIndex(index as u32))
+        .and_then(|bytes| bytes.get(place..place.checked_add(out.len())?))
+        .map(|src| out.copy_from_slice(src))
+        .is_some();
+    if let Some(sync) = parts.sync {
+        sync.end(index, Access::Read);
+    }
+    read
 }
 
 /// The producer's end of a stream, given to a driver through `StreamHandle` and usable as a
@@ -540,7 +832,7 @@ impl StreamEndpoint for ProducerEndpoint {
         let buffer = core.next_buffer();
         if buffer.is_some() && self.lent_epoch != core.epoch {
             // Cloning shares the descriptors, and allocates nothing.
-            self.lent = core.in_place().and_then(|(_, handles)| handles.cloned());
+            self.lent = core.in_place().and_then(|memory| memory.handles.clone());
             self.lent_epoch = core.epoch;
         }
         Ok(buffer)

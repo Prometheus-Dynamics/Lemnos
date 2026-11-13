@@ -3,7 +3,7 @@
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::Ordering;
 
-use crate::layout::{Geometry, Spec, W_SUBSCRIBERS, format};
+use crate::layout::{Geometry, Spec, W_END, W_SUBSCRIBERS, format};
 use crate::{Mem, MemMut, Reader, RingError, WriteMap, Writer, map};
 
 /// A ring and the right to hand out its ends. The owner (the broker that hands out ends) holds one per topic.
@@ -100,6 +100,19 @@ impl Ring {
     #[must_use]
     pub fn subscribers(&self) -> u32 {
         self.map.load(W_SUBSCRIBERS, Ordering::Relaxed) as u32
+    }
+
+    /// Records that the topic has ended, with `code` (nonzero) for why. Readers see it through
+    /// [`Reader::end`](crate::Reader::end). Nothing else changes: samples already published stay
+    /// readable, and the publisher may still publish after this, which its owner should not allow.
+    pub fn set_end(&self, code: u32) {
+        self.map.store(W_END, u64::from(code), Ordering::Release);
+    }
+
+    /// The end code the owner recorded, 0 while the topic runs.
+    #[must_use]
+    pub fn end(&self) -> u32 {
+        self.map.load(W_END, Ordering::Acquire) as u32
     }
 }
 

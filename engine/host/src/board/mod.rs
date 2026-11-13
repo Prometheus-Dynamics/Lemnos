@@ -34,7 +34,7 @@ pub enum BoardError {
         "device {0:?} stream {1:?}: {2} buffers, and a stream of dma-bufs has at most \
          {MAX_HANDLE_BUFFERS}"
     )]
-    StreamHandles(String, String, u32),
+    StreamRingHandles(String, String, u32),
     #[error("device {0:?} stream {1:?}: heap {2:?} is not the name of a heap")]
     StreamHeap(String, String, String),
     #[error("device {0:?} stream {1:?}: `heap` is only for `memory = \"dma-buf\"`")]
@@ -249,7 +249,7 @@ impl StreamSpec {
             (StreamMemory::Shared, Some(_)) => Err(BoardError::StreamHeapUnused(device, name)),
             (StreamMemory::DmaBuf, heap) => {
                 if self.buffers > MAX_HANDLE_BUFFERS {
-                    return Err(BoardError::StreamHandles(device, name, self.buffers));
+                    return Err(BoardError::StreamRingHandles(device, name, self.buffers));
                 }
                 match heap {
                     Some(heap) if !is_heap_name(heap) => {
@@ -821,7 +821,7 @@ mod tests {
         assert!(board(MAX_HANDLE_BUFFERS, dma).is_ok());
         assert_eq!(
             board(MAX_HANDLE_BUFFERS + 1, dma),
-            Err(BoardError::StreamHandles(
+            Err(BoardError::StreamRingHandles(
                 "a".to_string(),
                 "out".to_string(),
                 MAX_HANDLE_BUFFERS + 1

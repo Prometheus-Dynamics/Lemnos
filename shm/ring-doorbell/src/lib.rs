@@ -82,6 +82,20 @@ impl Doorbell {
         Bell::attach(eventfd, page)
     }
 
+    /// The two descriptors a subscriber's doorbell is made of, for a subscriber in another
+    /// process: the eventfd, and the page writable. [`Doorbell::attach`] takes them. Whoever is
+    /// given the writable page can write it, so it is the subscriber's and nobody else's.
+    ///
+    /// # Errors
+    ///
+    /// If the descriptors can't be duplicated.
+    pub fn subscriber_fds(&self) -> Result<(OwnedFd, OwnedFd), RingError> {
+        Ok((
+            self.eventfd.try_clone()?,
+            self.page.fd().try_clone_to_owned()?,
+        ))
+    }
+
     /// The two descriptors to pass to a publisher: the eventfd, and the page, read-only.
     ///
     /// # Errors

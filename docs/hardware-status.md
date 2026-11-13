@@ -208,6 +208,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`A24.md`](../testing/board-runs/A24.md) | Heaps found by name, descriptor counts, refusals, hardware-written bytes at the consumer |
 | [`A31.md`](../testing/board-runs/A31.md) | A million jobs with a buffer given back and named again in the same round |
 | [`I1.md`](../testing/board-runs/I1.md) | The shared-memory ring (`shm/`) built here: publish to a held frame against the 10.5 µs measured before the move, and its tests on the board's weaker memory order |
+| [`I2.md`](../testing/board-runs/I2.md) | Frame streams on the shm rings: the camera path through `lemnosd`, consumer-filled streams for the ISP, and the kernel module's own ring still on its old layout (I2b). Not yet run on the board |
 
 ## Image blocks
 

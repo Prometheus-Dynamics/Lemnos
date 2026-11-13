@@ -1,26 +1,38 @@
 //! Taking a frame stream: the descriptors arrive once, and after that frames come off the shared
-//! ring with no socket involved.
+//! rings with no socket involved.
+//!
+//! The rings, the buffer pool, the holds and the doorbell are the shm family's: the client maps
+//! them with the shm crates, which need no `unsafe` here. What only the operating system can do is
+//! the rest: receiving the descriptors, and telling the kernel around each CPU access to a dma-buf.
+//! So those are the [`StreamPlatform`] trait, and the program brings the implementation: on Linux,
+//! `lemnos-linux-stream`.
 //!
 //! A consumer reads frames, and on a stream its contract has it fill it also writes buffers: a
 //! job's input image, a configuration. Such a stream is taken writable
 //! ([`Session::open_stream_writable`](crate::Session::open_stream_writable)); every other is
-//! mapped read-only, so a frame can't be scribbled on by mistake.
-//!
-//! Passing descriptors and mapping memory need `unsafe`, which this crate doesn't allow. So the
-//! few things a stream needs from the operating system are the [`StreamPlatform`] trait, and the
-//! program brings the implementation: on Linux, `lemnos-linux-stream`.
+//! mapped read-only for its frames, so a frame can't be scribbled on by mistake.
 
 use std::fmt::Debug;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_wire::ring::{ByteMemory, Consumer, Layout, RingError, STATE_OPEN, WordMemory};
-use lemnos_wire::{Planes, handle_descriptors};
+use lemnos_wire::Planes;
+use lemnos_wire::ring::{Consumer, FrameInfo, Layout, RingError, STATE_OPEN};
+use shm_ring::WriteMap;
+use shm_ring_buffers::{BufferIndex, Held, NextBatch};
+use shm_ring_holds::Marks;
 
 use crate::error::Error;
 use crate::holds::Hold;
+
+/// The one kind of access a platform brackets for the kernel on a dma-buf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    Write,
+}
 
 /// How a stream reaches the operating system.
 pub trait StreamPlatform: Debug + Send + Sync {
@@ -34,65 +46,39 @@ pub trait StreamPlatform: Debug + Send + Sync {
         fds: &mut Vec<OwnedFd>,
     ) -> io::Result<usize>;
 
-    /// Maps `bytes` of `fd` shared and writable. Fails unless `fd` is exactly `bytes` long, since
-    /// a mapping past the end would fault when touched.
-    fn map_ring(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Arc<dyn WordMemory>>;
-
-    /// Maps `bytes` of `fd` shared, with the same check of its length: read-only, or writable
-    /// too when `writable` is set, which a consumer asks for on a stream it fills. The memory's
-    /// [`ByteMemory::write`] works only on a writable mapping.
-    fn map_buffers(
-        &self,
-        fd: BorrowedFd<'_>,
-        bytes: usize,
-        writable: bool,
-    ) -> io::Result<Box<dyn ByteMemory>>;
-
-    /// Maps the first `bytes` of `fd` shared, read-only or writable as
-    /// [`map_buffers`](Self::map_buffers) does: one buffer of a stream whose buffers are a
-    /// descriptor each (dma-bufs). Fails unless `fd` is at least `bytes` long and can never
-    /// get shorter, since a mapping past the end would fault when touched. It may be longer: a
-    /// dma-heap rounds up.
-    ///
-    /// A device shares this memory. The mapping tells the kernel around each access by the
-    /// processor (`DMA_BUF_IOCTL_SYNC` on Linux): inside [`ByteMemory::write`], and between
-    /// [`ByteMemory::begin_read`] and [`ByteMemory::end_read`].
-    ///
-    /// A platform without this can't take such a stream, and opening one fails with nothing
-    /// mapped. That is what this default does.
-    fn map_buffer(
-        &self,
-        fd: BorrowedFd<'_>,
-        bytes: usize,
-        writable: bool,
-    ) -> io::Result<Box<dyn ByteMemory>> {
-        let _ = (fd, bytes, writable);
-        Err(io::ErrorKind::Unsupported.into())
+    /// Tells the kernel the CPU is starting (`begin`) or has finished an access of `access` to the
+    /// dma-buf `fd`, so a device whose memory isn't cache-coherent sees what was written and the
+    /// CPU sees what the device wrote. Called only for the buffers of a stream of dma-bufs, around
+    /// each access: a frame is bracketed from when it is taken until it is released, and a write or
+    /// read is bracketed around its copy. Nothing is done by default, which is right for memory a
+    /// device doesn't share.
+    fn dma_sync(&self, fd: BorrowedFd<'_>, access: Access, begin: bool) -> io::Result<()> {
+        let _ = (fd, access, begin);
+        Ok(())
     }
-
-    /// Waits for `fd` to be signalled, then clears it. `false` means `timeout` passed first.
-    fn wait_doorbell(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool>;
 }
 
-/// One frame taken from a stream, held until it's given back with [`FrameStream::release`].
-/// Only [`FrameStream`] can make one, and it can't be cloned, so a frame is given back once.
-#[derive(Debug, PartialEq, Eq)]
+/// One frame taken from a stream, held until it's given back with [`FrameStream::release`]. Only
+/// [`FrameStream`] can make one, and it can't be cloned, so a frame is given back once.
+#[derive(Debug)]
 pub struct HeldFrame {
     buffer: u32,
     bytes: u32,
     sequence: u64,
     identity: u64,
     timestamp_ns: u64,
-    fence: u32,
+    /// The buffers of the frame, held while this lives: their marks go when it is dropped.
+    _held: Held<Marks<WriteMap>>,
 }
 
 impl HeldFrame {
+    /// The buffer the frame is in, as the producer numbers it.
     #[must_use]
     pub const fn buffer(&self) -> u32 {
         self.buffer
     }
 
-    /// Bytes this frame's buffer holds.
+    /// The frame's length, across its planes.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.bytes as usize
@@ -108,14 +94,12 @@ impl HeldFrame {
         self.sequence
     }
 
-    /// Means something only to whoever made the frame. Lemnos never reads it.
     #[must_use]
     pub const fn identity(&self) -> u64 {
         self.identity
     }
 
-    /// When the frame was made: nanoseconds on `CLOCK_MONOTONIC` on Linux, the clock of
-    /// `clock_gettime(CLOCK_MONOTONIC)`. 0 when the producer had no time for it.
+    /// `CLOCK_MONOTONIC` nanoseconds, or 0 when the producer had no time for the frame.
     #[must_use]
     pub const fn timestamp_ns(&self) -> u64 {
         self.timestamp_ns
@@ -127,126 +111,52 @@ impl HeldFrame {
 pub struct FrameStream {
     device: u32,
     name: String,
-    ring: Consumer,
-    pool: Pool,
+    consumer: Consumer,
+    /// Whether the buffers are dma-bufs, each its own descriptor, around which each access is
+    /// bracketed for the kernel.
+    dma: bool,
     /// Whether the buffers were mapped to be written too.
     writable: bool,
     /// Each buffer's planes: one, unless the stream's buffers are a descriptor per plane.
     planes: Planes,
-    doorbell: OwnedFd,
     platform: Arc<dyn StreamPlatform>,
     /// The session's record that this stream is open. Dropping the stream without closing it
     /// queues the close.
     hold: Option<Hold>,
 }
 
-/// The buffer memory. Debug-printable so a stream can derive it.
-enum Pool {
-    /// One mapping, a buffer every `stride` bytes.
-    Whole(Box<dyn ByteMemory>),
-    /// A mapping per plane of each buffer, buffer 0's planes first, each from its first byte,
-    /// and the plane's descriptor.
-    Each(Box<[(Box<dyn ByteMemory>, OwnedFd)]>),
-}
-
-impl Debug for Pool {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("<buffers>")
-    }
-}
-
-/// The ring, the doorbell and the buffers.
-pub(crate) const DESCRIPTORS: usize = 3;
 /// The most descriptors one answer brings: a stream with a descriptor per buffer, at its limit.
 pub(crate) const MAX_DESCRIPTORS: usize =
     (lemnos_wire::HANDLE_DESCRIPTORS_BEFORE + lemnos_wire::MAX_HANDLE_BUFFERS) as usize;
 
 impl FrameStream {
-    /// Builds the stream from what StreamReady carried. Any failure closes every descriptor.
+    /// Builds the stream from what the answer carried: the descriptors in the order of
+    /// [`lemnos_wire::ring::fds`] and then the pool's buffers, the layout, and each buffer's
+    /// planes. `shared` says the pool is one descriptor; otherwise each plane of each buffer is its
+    /// own dma-buf. Any failure closes every descriptor.
     pub(crate) fn new(
         device: u32,
         name: &str,
-        layout: Layout,
+        (layout, planes): (Layout, Planes),
+        shared: bool,
         fds: Vec<OwnedFd>,
         writable: bool,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<Self, Error> {
-        let layout = layout.checked().map_err(Error::Stream)?;
-        let pool_bytes =
-            usize::try_from(layout.pool_bytes()).map_err(|_| Error::Stream(RingError::TooSmall))?;
-        let [ring_fd, doorbell, buffers_fd] = <[OwnedFd; DESCRIPTORS]>::try_from(fds)
-            .map_err(|_| Error::Stream(RingError::BadHeader))?;
-        let failed = |_: io::Error| Error::Stream(RingError::TooSmall);
-        let ring_memory = platform
-            .map_ring(ring_fd.as_fd(), layout.ring_bytes())
-            .map_err(failed)?;
-        let pool = platform
-            .map_buffers(buffers_fd.as_fd(), pool_bytes, writable)
-            .map_err(failed)?;
-        let ring = Consumer::attach(ring_memory, layout).map_err(Error::Stream)?;
-        Ok(Self {
-            device,
-            name: name.to_string(),
-            ring,
-            pool: Pool::Whole(pool),
-            writable,
-            planes: Planes::one(layout.buffer_bytes),
-            doorbell,
-            platform,
-            hold: None,
-        })
-    }
-
-    /// Builds the stream from what StreamHandles carried: the ring, the doorbell, then one
-    /// descriptor per plane of each buffer (a buffer of one plane: per buffer). Any failure
-    /// closes every descriptor. Each plane's descriptor is kept beside its mapping, for
-    /// [`buffer_handle`](Self::buffer_handle) and [`plane_handle`](Self::plane_handle), and
-    /// closes with the stream.
-    pub(crate) fn with_handles(
-        device: u32,
-        name: &str,
-        layout: Layout,
-        planes: Planes,
-        fds: Vec<OwnedFd>,
-        writable: bool,
-        platform: Arc<dyn StreamPlatform>,
-    ) -> Result<Self, Error> {
-        let layout = layout.checked().map_err(Error::Stream)?;
-        // Checked by the session too. Here it is what makes the split below right.
-        let expected = handle_descriptors(layout.buffers, planes.count()).map(usize::from);
-        if expected != Some(fds.len())
-            || Planes::new(planes.lengths(), layout.buffer_bytes).is_none()
-        {
-            return Err(Error::Stream(RingError::BadHeader));
-        }
-        let mut fds = fds.into_iter();
-        let (Some(ring_fd), Some(doorbell)) = (fds.next(), fds.next()) else {
-            return Err(Error::Stream(RingError::BadHeader));
+        let lengths: &[u32] = if planes.count() == 1 {
+            &[]
+        } else {
+            planes.lengths()
         };
-        let failed = |_: io::Error| Error::Stream(RingError::TooSmall);
-        let ring_memory = platform
-            .map_ring(ring_fd.as_fd(), layout.ring_bytes())
-            .map_err(failed)?;
-        let mut buffers = Vec::with_capacity(fds.len());
-        let lengths = planes.lengths().iter().cycle();
-        for (fd, length) in fds.zip(lengths) {
-            let memory = platform
-                .map_buffer(fd.as_fd(), *length as usize, writable)
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::Unsupported => Error::StreamUnsupported,
-                    _ => failed(error),
-                })?;
-            buffers.push((memory, fd));
-        }
-        let ring = Consumer::attach(ring_memory, layout).map_err(Error::Stream)?;
+        let consumer =
+            Consumer::attach(fds, layout, lengths, shared, writable).map_err(Error::Stream)?;
         Ok(Self {
             device,
             name: name.to_string(),
-            ring,
-            pool: Pool::Each(buffers.into()),
+            consumer,
+            dma: !shared,
             writable,
             planes,
-            doorbell,
             platform,
             hold: None,
         })
@@ -272,16 +182,28 @@ impl FrameStream {
         &self.planes
     }
 
-    /// Whether each buffer is its own mapping, which is how a stream of dma-bufs arrives.
-    /// Frames read the same either way.
+    /// Whether each buffer is a dma-buf of its own (a stream of dma-bufs). Frames read the same
+    /// either way.
     #[must_use]
     pub const fn has_buffer_handles(&self) -> bool {
-        matches!(self.pool, Pool::Each(_))
+        self.dma
     }
 
     #[must_use]
     pub const fn device(&self) -> u32 {
         self.device
+    }
+
+    /// The length of each buffer, as the stream was opened with.
+    #[must_use]
+    pub const fn buffer_len(&self) -> usize {
+        self.consumer.layout().buffer_bytes as usize
+    }
+
+    /// How many buffers the stream has.
+    #[must_use]
+    pub const fn buffer_count(&self) -> u32 {
+        self.consumer.layout().buffers
     }
 
     #[must_use]
@@ -291,46 +213,72 @@ impl FrameStream {
 
     #[must_use]
     pub const fn layout(&self) -> &Layout {
-        self.ring.layout()
-    }
-
-    /// Bytes in each buffer of the stream: the most a frame in one can hold, so a frame's
-    /// [`HeldFrame::len`] is at most this. A consumer checks a receiver's frame size against it
-    /// before it reads frames.
-    #[must_use]
-    pub const fn buffer_len(&self) -> usize {
-        self.ring.layout().buffer_bytes as usize
-    }
-
-    /// Buffers in the stream, which is how many frames can be held at once.
-    #[must_use]
-    pub const fn buffer_count(&self) -> u32 {
-        self.ring.layout().buffers
+        self.consumer.layout()
     }
 
     /// Whether the host has ended this stream.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        self.ring.state() == STATE_OPEN
+        self.consumer.state() == STATE_OPEN
+    }
+
+    /// The pool index of plane `plane` of `buffer`.
+    fn index(&self, buffer: u32, plane: u32) -> Option<u32> {
+        buffer
+            .checked_mul(self.planes.count())?
+            .checked_add(plane)
+            .filter(|_| plane < self.planes.count())
+    }
+
+    /// Brackets the access of every plane of `index`'s buffer for the kernel, on a stream of
+    /// dma-bufs. A failure changes nothing about where the bytes are, so it isn't one here.
+    fn sync_plane(&self, index: u32, access: Access, begin: bool) {
+        if !self.dma {
+            return;
+        }
+        if let Some((fd, _)) = self.consumer.frames().pool().descriptor(BufferIndex(index)) {
+            let _ = self.platform.dma_sync(fd, access, begin);
+        }
     }
 
     /// The next frame, if one has arrived. Never waits and allocates nothing.
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
-        let frame = self.ring.pop_frame().map_err(Error::Stream)?;
-        if let Some(slot) = frame.as_ref() {
+        let planes = self.planes.count();
+        let buffer_bytes = self.layout().buffer_bytes as usize;
+        let taken = match self.consumer.frames_mut().next() {
+            NextBatch::Batch(batch) => {
+                let info = FrameInfo::decode(batch.meta).ok_or(Error::Stream(RingError::Broken))?;
+                let first = batch
+                    .held
+                    .buffer(0)
+                    .ok_or(Error::Stream(RingError::Broken))?;
+                let buffer = first.0 / planes;
+                let timestamp_ns = batch.time.as_nanos();
+                let held = batch.held;
+                if info.bytes as usize > buffer_bytes {
+                    return Err(Error::Stream(RingError::Broken));
+                }
+                Some(HeldFrame {
+                    buffer,
+                    bytes: info.bytes,
+                    sequence: info.sequence,
+                    identity: info.identity,
+                    timestamp_ns,
+                    _held: held,
+                })
+            }
+            NextBatch::Empty | NextBatch::Skipped(_) | NextBatch::Limited => None,
+            NextBatch::PoolChanged { .. } | NextBatch::CutOff => {
+                return Err(Error::Stream(RingError::Broken));
+            }
+        };
+        if let Some(frame) = taken.as_ref() {
             // The frame is read in place from here until it is given back.
-            for memory in self.own_memory(slot.buffer) {
-                memory.begin_read();
+            for plane in 0..planes {
+                self.sync_plane(frame.buffer * planes + plane, Access::Read, true);
             }
         }
-        Ok(frame.map(|slot| HeldFrame {
-            buffer: slot.buffer,
-            bytes: slot.bytes,
-            sequence: slot.sequence,
-            identity: slot.identity,
-            timestamp_ns: slot.timestamp_ns,
-            fence: slot.fence,
-        }))
+        Ok(taken)
     }
 
     /// The next frame, or `None` after `timeout` passes or the host ends the stream.
@@ -347,9 +295,8 @@ impl FrameStream {
             if left.is_zero() {
                 return Ok(None);
             }
-            match self.platform.wait_doorbell(self.doorbell.as_fd(), left) {
-                Ok(_) => {}
-                Err(_) => return Ok(None),
+            if self.consumer.wait(left).is_err() {
+                return Ok(None);
             }
         }
     }
@@ -360,17 +307,7 @@ impl FrameStream {
     /// on here, and within this stream's memory.
     #[must_use]
     pub fn bytes(&self, frame: &HeldFrame) -> &[u8] {
-        match &self.pool {
-            Pool::Whole(pool) => {
-                let layout = self.ring.layout();
-                let Some(offset) = layout.buffer_offset(frame.buffer) else {
-                    return &[];
-                };
-                let end = offset.saturating_add(frame.bytes as usize);
-                pool.bytes().get(offset..end).unwrap_or(&[])
-            }
-            Pool::Each(_) => self.plane(frame, 0),
-        }
+        self.plane(frame, 0)
     }
 
     /// The part of a frame in plane `plane` of its buffer: the planes hold the frame's bytes
@@ -388,13 +325,15 @@ impl FrameStream {
         let held = (frame.bytes as usize)
             .saturating_sub(start)
             .min(*length as usize);
-        match &self.pool {
-            Pool::Whole(_) => self.bytes(frame).get(start..start + held).unwrap_or(&[]),
-            Pool::Each(_) => self
-                .plane_memory(frame.buffer, plane)
-                .and_then(|memory| memory.bytes().get(..held))
-                .unwrap_or(&[]),
-        }
+        let Some(index) = self.index(frame.buffer, plane) else {
+            return &[];
+        };
+        self.consumer
+            .frames()
+            .pool()
+            .bytes(BufferIndex(index))
+            .and_then(|bytes| bytes.get(..held))
+            .unwrap_or(&[])
     }
 
     /// The descriptor of `buffer`, on a stream whose buffers are a descriptor each (dma-bufs),
@@ -414,87 +353,19 @@ impl FrameStream {
     }
 
     /// The descriptor of plane `plane` of `buffer`, as [`buffer_handle`](Self::buffer_handle)
-    /// lends plane 0. `None` for a plane the buffers don't have.
+    /// lends plane 0. `None` for a plane the buffers don't have, and for a stream of shared
+    /// memory.
     #[must_use]
     pub fn plane_handle(&self, buffer: u32, plane: u32) -> Option<BorrowedFd<'_>> {
-        self.plane_entry(buffer, plane).map(|(_, fd)| fd.as_fd())
-    }
-
-    /// The mapping and descriptor of plane `plane` of `buffer`, on a stream whose buffers are a
-    /// descriptor each.
-    fn plane_entry(&self, buffer: u32, plane: u32) -> Option<&(Box<dyn ByteMemory>, OwnedFd)> {
-        match &self.pool {
-            Pool::Whole(_) => None,
-            Pool::Each(maps) => {
-                if plane >= self.planes.count() {
-                    return None;
-                }
-                let index = (buffer as usize)
-                    .checked_mul(self.planes.count() as usize)?
-                    .checked_add(plane as usize)?;
-                maps.get(index)
-            }
+        if !self.dma {
+            return None;
         }
-    }
-
-    /// The mapping of plane `plane` of `buffer`, on a stream whose buffers are a descriptor
-    /// each.
-    fn plane_memory(&self, buffer: u32, plane: u32) -> Option<&dyn ByteMemory> {
-        self.plane_entry(buffer, plane).map(|(memory, _)| &**memory)
-    }
-
-    /// The mappings of `buffer`'s planes, on a stream whose buffers are a descriptor each.
-    fn own_memory(&self, buffer: u32) -> impl Iterator<Item = &dyn ByteMemory> {
-        (0..self.planes.count()).filter_map(move |plane| self.plane_memory(buffer, plane))
-    }
-
-    /// Calls `each` with the memory, the place in it and the length of every part of the `len`
-    /// bytes at `offset` of `buffer`, in order: one part, unless they cross from one plane to
-    /// the next. Refused for a buffer the stream doesn't have and for a range that isn't
-    /// inside the buffer, before `each` is called at all.
-    fn parts(
-        &self,
-        buffer: u32,
-        offset: usize,
-        len: usize,
-        mut each: impl FnMut(&dyn ByteMemory, usize, usize),
-    ) -> Result<(), Error> {
-        let layout = self.ring.layout();
-        if buffer >= layout.buffers {
-            return Err(Error::Stream(RingError::BadBuffer));
-        }
-        let inside = offset
-            .checked_add(len)
-            .is_some_and(|end| end <= layout.buffer_bytes as usize);
-        if !inside {
-            return Err(Error::Stream(RingError::BadLength));
-        }
-        match &self.pool {
-            Pool::Whole(pool) => {
-                let start = layout
-                    .buffer_offset(buffer)
-                    .and_then(|at| at.checked_add(offset))
-                    .ok_or(Error::Stream(RingError::BadBuffer))?;
-                each(&**pool, start, len);
-            }
-            Pool::Each(_) => {
-                let (mut at, mut left) = (offset, len);
-                while left > 0 {
-                    let (plane, place, room) = self
-                        .planes
-                        .locate(at)
-                        .ok_or(Error::Stream(RingError::BadLength))?;
-                    let memory = self
-                        .plane_memory(buffer, plane)
-                        .ok_or(Error::Stream(RingError::BadBuffer))?;
-                    let take = left.min(room);
-                    each(memory, place, take);
-                    at += take;
-                    left -= take;
-                }
-            }
-        }
-        Ok(())
+        let index = self.index(buffer, plane)?;
+        self.consumer
+            .frames()
+            .pool()
+            .descriptor(BufferIndex(index))
+            .map(|(fd, _)| fd)
     }
 
     /// Whether the stream was taken to be filled ([`Session::open_stream_writable`]), so that
@@ -504,6 +375,22 @@ impl FrameStream {
     #[must_use]
     pub const fn is_writable(&self) -> bool {
         self.writable
+    }
+
+    /// Refuses a buffer the stream doesn't have, and a range that isn't inside the buffer.
+    fn check(&self, buffer: u32, offset: usize, len: usize) -> Result<(), Error> {
+        let layout = self.layout();
+        if buffer >= layout.buffers {
+            return Err(Error::Stream(RingError::BadBuffer));
+        }
+        let inside = offset
+            .checked_add(len)
+            .is_some_and(|end| end <= layout.buffer_bytes as usize);
+        if inside {
+            Ok(())
+        } else {
+            Err(Error::Stream(RingError::BadLength))
+        }
     }
 
     /// Copies `data` into `buffer` at `offset`: a job's input image, a configuration, a
@@ -525,14 +412,33 @@ impl FrameStream {
         if !self.writable {
             return Err(Error::StreamReadOnly);
         }
-        let mut from = 0;
+        self.check(buffer, offset, data.len())?;
+        let (mut at, mut left, mut from) = (offset, data.len(), 0);
         let mut written = true;
-        self.parts(buffer, offset, data.len(), |memory, start, take| {
-            written &= data
-                .get(from..from + take)
-                .is_some_and(|part| memory.write(start, part));
+        while left > 0 {
+            let (plane, place, room) = self
+                .planes
+                .locate(at)
+                .ok_or(Error::Stream(RingError::BadLength))?;
+            let take = left.min(room);
+            let index = self
+                .index(buffer, plane)
+                .ok_or(Error::Stream(RingError::BadBuffer))?;
+            let part = data.get(from..from + take);
+            self.sync_plane(index, Access::Write, true);
+            written &= match (part, self.consumer.fills()) {
+                (Some(part), Some(fills)) => fills
+                    .bytes_mut(BufferIndex(index))
+                    .and_then(|bytes| bytes.get_mut(place..place + take))
+                    .map(|dst| dst.copy_from_slice(part))
+                    .is_some(),
+                _ => false,
+            };
+            self.sync_plane(index, Access::Write, false);
+            at += take;
+            left -= take;
             from += take;
-        })?;
+        }
         if written {
             Ok(())
         } else {
@@ -545,20 +451,34 @@ impl FrameStream {
     /// place with [`bytes`](Self::bytes). Refused as [`write`](Self::write) is for a buffer or
     /// a range the stream doesn't have. Never waits and allocates nothing.
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Error> {
-        let mut to = 0;
+        self.check(buffer, offset, out.len())?;
+        let (mut at, mut left, mut to) = (offset, out.len(), 0);
         let mut copied = true;
-        self.parts(buffer, offset, out.len(), |memory, start, take| {
-            memory.begin_read();
-            let from = start
-                .checked_add(take)
-                .and_then(|end| memory.bytes().get(start..end));
-            match (from, out.get_mut(to..to + take)) {
-                (Some(from), Some(into)) => into.copy_from_slice(from),
+        while left > 0 {
+            let (plane, place, room) = self
+                .planes
+                .locate(at)
+                .ok_or(Error::Stream(RingError::BadLength))?;
+            let take = left.min(room);
+            let index = self
+                .index(buffer, plane)
+                .ok_or(Error::Stream(RingError::BadBuffer))?;
+            self.sync_plane(index, Access::Read, true);
+            let source = self
+                .consumer
+                .frames()
+                .pool()
+                .bytes(BufferIndex(index))
+                .and_then(|bytes| bytes.get(place..place + take));
+            match (source, out.get_mut(to..to + take)) {
+                (Some(source), Some(into)) => into.copy_from_slice(source),
                 _ => copied = false,
             }
-            memory.end_read();
+            self.sync_plane(index, Access::Read, false);
+            at += take;
+            left -= take;
             to += take;
-        })?;
+        }
         if copied {
             Ok(())
         } else {
@@ -566,20 +486,19 @@ impl FrameStream {
         }
     }
 
-    /// Gives a frame's buffer back to the producer. The frame is gone either way.
+    /// Gives a frame's buffer back to the producer. The frame is gone either way: its marks are
+    /// taken off when it is dropped, and a dma-buf is bracketed for the kernel first.
     pub fn release(&mut self, frame: HeldFrame) -> Result<(), Error> {
-        for memory in self.own_memory(frame.buffer) {
-            memory.end_read();
+        let planes = self.planes.count();
+        for plane in 0..planes {
+            self.sync_plane(frame.buffer * planes + plane, Access::Read, false);
         }
-        match self.ring.release(frame.buffer, frame.fence) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(Error::Stream(RingError::BadIndex)),
-            Err(error) => Err(Error::Stream(error)),
-        }
+        drop(frame);
+        Ok(())
     }
 
     /// Posts a job for the producer. `false` means too many are waiting.
     pub fn post_job(&mut self, job: &[u8]) -> Result<bool, Error> {
-        self.ring.push_job(job).map_err(Error::Stream)
+        self.consumer.jobs().post(job).map_err(Error::Stream)
     }
 }

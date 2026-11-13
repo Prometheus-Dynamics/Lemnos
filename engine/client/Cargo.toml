@@ -18,6 +18,10 @@ tokio = ["dep:tokio"]
 [dependencies]
 lemnos-core = { path = "../core", features = ["std"] }
 lemnos-wire = { path = "../wire" }
+shm-ring = { path = "../../shm/ring" }
+shm-ring-buffers = { path = "../../shm/ring-buffers" }
+shm-ring-holds = { path = "../../shm/ring-holds" }
+shm-ring-doorbell = { path = "../../shm/ring-doorbell" }
 tokio = { workspace = true, optional = true, features = ["net", "time"] }
 
 [dev-dependencies]
