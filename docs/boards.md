@@ -74,6 +74,12 @@ The cap can be shorter than 8 s but never longer: that is [the failure rule](con
 and a longer value is refused. There is no host-wide auto-off: only a device's own
 `auto_off_after` turns a device off.
 
+## `[board]` identity
+
+The `[board]` table also names the board's identity: `name` and `revision` are the `model` fact, and
+`[board.serial]` says where the serial comes from. The table and the four source kinds are in
+[Identity facts](identity.md#board-file-syntax).
+
 ## `bus` and `uses`
 
 A driver names what it needs: `bus`, `line`, `accel`, `frames`. The host fills each need in this

@@ -15,6 +15,7 @@ workspace = true
 lemnos-core = { path = "../core", features = ["std"] }
 lemnos-hal = { path = "../hal", features = ["std"] }
 lemnos-wire = { path = "../wire" }
+lemnos-identity = { path = "../identity" }
 serde = { workspace = true, features = ["derive", "std"] }
 toml.workspace = true
 thiserror = { workspace = true, features = ["std"] }
