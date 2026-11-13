@@ -48,9 +48,11 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_fe_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check --target "$target")
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check --target "$target")
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-stream-compose-check" "$root/"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.

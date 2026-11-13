@@ -327,6 +327,21 @@ int main(void)
 	check(!forget_override(BLOCK) && !forget_override(CSI2), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded after the receiver checks");
 
+	/*
+	 * The frame path end to end: the receiver's frames through the module's stream, the
+	 * rp1-csi2 driver, the host's endpoint and the shm ring, read by a client through lemnosd.
+	 */
+	check(!load("/lemnos.ko", OWNED_CSI2), "module loaded for the composition check");
+	check(!bind_block(BLOCK), "test block bound for the composition check");
+	check(!bind_csi2(), "receiver bound for the composition check");
+	check(!run((char *const[]){ "/lemnos-stream-compose-check", "/lemnosd", CSI2,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos-stream-compose-check");
+	check(!put(CSI2_UNBIND, CSI2), "receiver unbound after the composition check");
+	check(!put(UNBIND, BLOCK), "test block unbound after the composition check");
+	check(!forget_override(BLOCK) && !forget_override(CSI2), "composition overrides cleared");
+	check(!unload("lemnos"), "module unloaded after the composition check");
+
 	check(!load("/lemnos.ko", OWNED_CSI2), "module loaded for the stuck-DMA check");
 	check(!bind_csi2(), "receiver bound again");
 	check(!run((char *const[]){ "/lemnos_rp1_csi2_check", "wedge", CSI2, CSI2_UNBIND,

@@ -1864,6 +1864,16 @@ name = "lemnos-soc"
 version = "2.0.1-dev"
 
 [[package]]
+name = "lemnos-stream-compose-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-contract-camera-receiver",
+ "lemnos-linux-stream",
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-usb"
 version = "2.0.1-dev"
 dependencies = [
