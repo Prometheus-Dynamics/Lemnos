@@ -41,6 +41,10 @@ pub trait Instance: Send {
     fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
         Err(Status::NOT_SUPPORTED)
     }
+    /// See [`Driver::endpoints_ended`].
+    fn endpoints_ended(&mut self) -> bool {
+        false
+    }
     /// See [`Driver::job`]. Asked only of a driver whose entry says it runs jobs.
     fn job(&mut self, _job: JobId, _result: &mut Reply<'_>) -> JobState {
         JobState::Finished(Status::NOT_SUPPORTED)
@@ -88,6 +92,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn release_endpoints(&mut self, caller: CallerId) -> Result<()> {
         Driver::release_endpoints(self, caller)
+    }
+
+    fn endpoints_ended(&mut self) -> bool {
+        Driver::endpoints_ended(self)
     }
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
@@ -286,6 +294,18 @@ struct Slot {
     made: Option<(usize, String)>,
     /// Long jobs of this device's driver that are still open.
     open_jobs: AtomicU32,
+    /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
+    end: Mutex<Option<EndHold>>,
+}
+
+/// The END descriptor of a hold: a pipe whose write end the host keeps for the hold. Each copy
+/// of the read end a caller gets is readable (EOF, a hang-up) once the write end is dropped,
+/// which is how the host tells the holder the hold is over for good.
+struct EndHold {
+    caller: CallerId,
+    read: OwnedFd,
+    /// Kept open, and never written to: dropping it is what ends the hold for the holder.
+    _write: OwnedFd,
 }
 
 const NO_TICK: u64 = u64::MAX;
@@ -361,6 +381,7 @@ impl Slot {
             state: Mutex::new(state),
             revision: AtomicU64::new(0),
             hung: AtomicBool::new(false),
+            end: Mutex::new(None),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
             link_refusal: Mutex::new(None),
@@ -380,6 +401,41 @@ impl Slot {
 
     fn ticks(&self) -> bool {
         self.entry.is_some_and(|entry| entry.ticks)
+    }
+
+    /// A copy of the END descriptor for `caller`'s hold, made on the first ask and shared after.
+    /// `BUSY` while another caller's hold has one.
+    fn end_for(&self, caller: CallerId) -> Result<OwnedFd> {
+        let mut held = lock(&self.end);
+        if let Some(hold) = held.as_ref() {
+            if hold.caller != caller {
+                return Err(Status::BUSY);
+            }
+            return hold.read.try_clone().map_err(|_| Status::IO);
+        }
+        let (read, write) = std::io::pipe().map_err(|_| Status::IO)?;
+        let read = OwnedFd::from(read);
+        let copy = read.try_clone().map_err(|_| Status::IO)?;
+        *held = Some(EndHold {
+            caller,
+            read,
+            _write: OwnedFd::from(write),
+        });
+        Ok(copy)
+    }
+
+    /// Ends the hold END belongs to, if `caller` has one: the write end goes, so every copy of
+    /// END reads EOF.
+    fn end_close_for(&self, caller: CallerId) {
+        let mut held = lock(&self.end);
+        if held.as_ref().is_some_and(|hold| hold.caller == caller) {
+            *held = None;
+        }
+    }
+
+    /// Ends whatever hold has an END descriptor, whoever has it.
+    fn end_close(&self) {
+        *lock(&self.end) = None;
     }
 
     fn tracks_callers(&self) -> bool {
@@ -1368,6 +1424,7 @@ impl Inner {
         };
         let dead = old.take();
         drop(old);
+        slot.end_close();
         drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
         slot.hung.store(false, Ordering::Release);
 
@@ -1462,7 +1519,11 @@ impl Inner {
         if slot.entry.is_some_and(|entry| entry.watches) {
             instance.board(&BoardRead { inner: self });
         }
-        instance.tick(now_ns)
+        let next = instance.tick(now_ns);
+        if instance.endpoints_ended() {
+            slot.end_close();
+        }
+        next
     }
 
     /// Whether a device comes and goes: an `[[each]]` entry made it, or it sits on a bus the
@@ -2042,12 +2103,34 @@ impl Host {
             .on_lane_answer(slot, caller, move |instance| instance.endpoints(caller))
     }
 
+    /// [`Host::usb_endpoints`] with a third descriptor, END, as `[OUT, IN, END]`. END is the read
+    /// end of a pipe whose write end the host keeps for the hold, and it reads EOF (or hangs up)
+    /// once the hold is over for good: when `caller` releases the endpoints or goes, when the
+    /// device is switched off, reloaded or shut down, and when its driver says its endpoints have
+    /// ended ([`Driver::endpoints_ended`], asked after each tick). A host going away or a bus
+    /// reset is not that: the pair stays the same. The same caller asking again gets the same
+    /// END.
+    pub fn usb_endpoints_end(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 3]> {
+        let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
+        let [out, input] =
+            self.inner
+                .on_lane_answer(Arc::clone(&slot), caller, move |instance| {
+                    instance.endpoints(caller)
+                })?;
+        let end = slot.end_for(caller)?;
+        Ok([out, input, end])
+    }
+
     /// Gives up the endpoints `caller` holds on a device. `NOT_FOUND` if it holds none.
     pub fn usb_endpoints_release(&self, caller: CallerId, device: u32) -> Result<()> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.inner.on_lane_answer(slot, caller, move |instance| {
-            instance.release_endpoints(caller)
-        })
+        let done = self
+            .inner
+            .on_lane_answer(Arc::clone(&slot), caller, move |instance| {
+                instance.release_endpoints(caller)
+            });
+        slot.end_close_for(caller);
+        done
     }
 
     /// Starts a long job for `caller`: runs `method`, which its contract marks as starting one,
@@ -2118,6 +2201,7 @@ impl Host {
         let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {
             index += 1;
+            slot.end_close_for(caller);
             let started = slot.open_jobs.load(Ordering::Acquire) > 0
                 && self
                     .inner
@@ -2362,6 +2446,7 @@ impl Host {
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
         self.inner.moved(&slot);
         self.inner.end_jobs(&slot, Status::INTERRUPTED);
+        slot.end_close();
         if let Ok(mut guard) = slot.instance.try_lock() {
             let dead = guard.take();
             drop(guard);
@@ -2392,6 +2477,7 @@ impl Host {
             *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
             self.inner.moved(slot);
             self.inner.end_jobs(slot, Status::INTERRUPTED);
+            slot.end_close();
             if let Ok(mut guard) = slot.instance.try_lock() {
                 let dead = guard.take();
                 drop(guard);

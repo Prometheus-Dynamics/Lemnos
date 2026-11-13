@@ -631,7 +631,8 @@ fn a_client_whose_part_differs_is_refused_by_name_and_the_rest_works() {
         assert_eq!(core, lemnos_wire::CORE_HASH);
         assert_eq!(
             features,
-            lemnos_wire::feature::EVERY & !lemnos_wire::feature::PACKAGES
+            (lemnos_wire::feature::EVERY | lemnos_wire::ENDPOINTS_END)
+                & !lemnos_wire::feature::PACKAGES
         );
     });
 }

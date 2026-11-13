@@ -180,6 +180,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`R1d.md`](../testing/board-runs/R1d.md) | The gadget's unit capability in its drop-in, and three hardening candidates to try on a board |
 | [`R1e.md`](../testing/board-runs/R1e.md) | The NCM interface's name (`ifname=`): the kernel takes it from 5.12 on, the setup refuses older kernels by name, and the read-back is reported as `ifname` |
 | [`H4b.md`](../testing/board-runs/H4b.md) | Isochronous streams both ways: `uvc` with several transfers queued, and a gadget's isochronous endpoints in an alternate setting |
+| [`R1f.md`](../testing/board-runs/R1f.md) | What a holder of the lent gadget pair sees on a real controller: the errno of a read in flight at each host or daemon event, and whether the same descriptors work again |
 
 ## Cameras
 

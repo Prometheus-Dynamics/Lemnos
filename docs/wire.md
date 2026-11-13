@@ -404,11 +404,22 @@ EndpointsOpen is sent only to a host that set bit 4 (value 16) of `features` (ru
 frames are `added` to the core: they are left out of the core hash, and a host without them refuses
 the kind alone with `UnknownKind`.
 
+EndpointsOpenEnd is the same request for a client that wants the END descriptor too. It is sent only
+to a host that set `ENDPOINTS_END` (value 64) in `features`: a host without that bit is never
+sent it, and a client that wants it refuses by name, `NOT_SUPPORTED`, without sending anything. The
+answer is EndpointsEnd, with three descriptors over `SCM_RIGHTS`: OUT, IN, then END. END is the read
+end of a pipe whose write end the host keeps for this hold. The host closes that write end when the
+hold is over for good, so END reads EOF or hangs up: on EndpointsClose, when the connection goes, when
+the device is taken off or reloaded, and when the driver says its endpoints have ended. A holder
+that sees END readable closes all three and asks again; `Endpoints` (kind 33) is unchanged and gets
+no END.
+
 EndpointsOpen takes the pair for this connection. The answer is Endpoints, with two descriptors over
 `SCM_RIGHTS` in one message: the OUT endpoint's first, then the IN endpoint's. A client reads them
 with `recvmsg`, as for StreamHandles, and closes the connection on an Endpoints that came with other
-than two descriptors. Each descriptor blocks, as the function's own files do. The host keeps its own
-copies, which it never reads while the pair is held.
+than two descriptors. The descriptors are the function's endpoint files, opened `O_NONBLOCK`: a
+read, write or AIO submit made while the function is down gets `EAGAIN`, not a wait (see What a
+holder sees). The host keeps its own copies, which it never reads while the pair is held.
 
 | Refusal | Why |
 |---|---|
@@ -425,16 +436,52 @@ connection holds none. A connection that closes gives it up (rule 6). While a co
 pair, the host serves no bytes on it itself: the data stream of `usb.function/1` waits, and the
 control requests on endpoint 0 are still answered by the host, as they are without a client.
 
-The pair outlives a host disconnect, a suspend and a bus reset: nothing is handed over again. A
-transfer under way when the host goes away fails with `ESHUTDOWN`. While the host is away a read or
-write waits, or fails with `EAGAIN` on a descriptor set `O_NONBLOCK`. The `O_NONBLOCK` flag belongs to
-the open file, so it is shared by every copy of the descriptor, the host's included. The bus itself is
-reported through the function's `state` method (see The bus state below).
+The pair outlives a host disconnect, a suspend, a bus reset and a configuration change made by the
+host: the same descriptors work again once the host is back, and nothing is handed over again. While
+the function is down, reads, writes and AIO submits get `EAGAIN`, and a transfer in flight when it
+went down fails with `ESHUTDOWN` once. A holder keeps its descriptors and retries.
 
-When the function itself is taken down (its controller lets go, or the host restarts the gadget),
-the pair is dead for good. The host ends the hold at that point. The kernel does not reset the
-function while a descriptor of it is open, so the host cannot bring the gadget up again until the
-client has closed its copies: it retries with its usual backoff until then. A client that sees the
+The hold ends for good only when the host ends it, and END (below) says so. The daemon ends it when
+the holder releases the pair or goes, when the device is switched off, reloaded or shut down, and
+when its driver says its endpoints have ended. After that the descriptors are dead, and a holder
+closes all three and asks again.
+
+### What a holder sees
+
+Measured on the QEMU harness (`testing/crates/gadget-check`, the holder checks) with the pinned
+7.3.3 kernel. Rows: (a) a blocking read in flight, (b) a queued AIO read, (c) a write after the
+event, (d) a new read afterwards. Each cell is the code the holder gets. ESHUTDOWN is returned once;
+every later call while the function is down gets EAGAIN.
+
+| Case | (a) read in flight | (b) AIO in flight | (c) write | (d) new read | What the holder does |
+|---|---|---|---|---|---|
+| 1 host disconnect (port off) | ESHUTDOWN | ESHUTDOWN | EAGAIN | EAGAIN | keeps the descriptors; the same ones work after on and bulk |
+| 2a suspend, resume | keeps waiting, no code | not measured | not measured | waits, then takes the host's bytes | nothing: the same descriptors |
+| 2b bus reset | ESHUTDOWN | not measured | not measured | waits for the host to configure, then works | keeps them; the host reconfigures |
+| 3 configuration 0, then 1 | ESHUTDOWN | new AIO EAGAIN | EAGAIN | EAGAIN | keeps them; they work again after configuration 1 |
+| 4 UDC unbound and rebound (daemon keeps ep0) | ESHUTDOWN | ESHUTDOWN | EAGAIN, not ENODEV | EAGAIN, not ENODEV | keeps them; they work again after rebind |
+| 5 daemon disables, closes and unmounts | not measured as sync | ESHUTDOWN | EAGAIN | EAGAIN; descriptors live | keeps its copies: umount and remount are EBUSY until it closes them |
+| halted OUT endpoint (host SET_FEATURE halt) | keeps waiting, no code | not measured | not measured | takes the bytes once the host clears the halt | nothing |
+| 6 daemon dies with the pair held | not run | not run | not run | not run | not run: needs the daemon as its own process |
+| pending control request (ep0) | not run | not run | not run | not run | not run: the pair is a different endpoint |
+
+Two things can mislead. `ENODEV` never reaches a holder that keeps a file open: the function stays
+enabled while any copy is open, so the code alone cannot tell case 1 (host away) from case 4 (gadget
+unbound). Only END, and the function's `state` method, tell them apart. A write in the wrong
+direction gets `EBADMSG` and halts the endpoint.
+
+### The END descriptor
+
+END is the third descriptor of `EndpointsEnd` (above). The host writes nothing to it. It reads EOF,
+or hangs up, once the host ends the hold for good: a release, the holder going away, the device
+switched off or reloaded, or the driver's endpoints ended. A holder that sees END readable closes all
+three descriptors and asks again. A holder that sees only `ESHUTDOWN` or `EAGAIN` keeps its
+descriptors and retries: the function is down for now.
+
+A holder that keeps its copies blocks a remount of the function's mount (EBUSY), so the daemon's
+setup of a gadget that a previous holder still has open cannot remount until that holder closes them.
+END is how the holder learns that it must.
+
 function's `up` false closes its copies, and asks for the pair again once `up` is true.
 
 ### The bus state
@@ -865,6 +912,24 @@ client reads that as `link: ""`.
 <!-- vector: endpoints-close -->
 ```hex
 0a 00 00 00 22 00 12 00 00 00 03 00 00 00
+```
+
+### endpoints-open-end
+
+`EndpointsOpenEnd { id: 17, device: 3 }`
+
+<!-- vector: endpoints-open-end -->
+```hex
+0a 00 00 00 28 00 11 00 00 00 03 00 00 00
+```
+
+### endpoints-end
+
+`EndpointsEnd { id: 17 }`, with three descriptors: OUT, IN, then END.
+
+<!-- vector: endpoints-end -->
+```hex
+06 00 00 00 29 00 11 00 00 00
 ```
 
 ### refusal

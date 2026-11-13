@@ -285,3 +285,41 @@ fn a_link_the_comm_core_does_not_have_is_refused_and_the_pair_is_given_back() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
+    let dir = dir("reconnect");
+    let (out_device, out_host) = UnixStream::pair().expect("pair");
+    let (in_device, in_host) = UnixStream::pair().expect("pair");
+    let function =
+        MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
+    let lemnosd = dir.join("lemnosd.sock");
+    let _service = start_lemnosd(&lemnosd, &function);
+    let orion = dir.join("orion.sock");
+    let _comm = start_comm(&orion, &["usb0"]);
+    let hold = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+
+    let mut host = Host::new(out_host, in_host);
+    host.send(&Hello {
+        name: "sensor",
+        roles: Roles::DEVICE,
+        max_frame: 512,
+        revision: 1,
+    });
+    assert_eq!(host.next().0, kind::WELCOME);
+
+    // The host goes away: the gadget comes down, and the bridge gives the hold up.
+    function.release();
+    assert_eq!(hold.recv_timeout(WAIT).expect("the hold ends"), Ok(()));
+
+    // The gadget reconnects: the bridge takes the pair again and offers it once more.
+    let again = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+    for round in 0..5u64 {
+        host.send(&Ping { now_ms: round });
+        let (kind_seen, payload) = host.next();
+        assert_eq!(kind_seen, kind::PONG, "frames flow after the reconnect");
+        assert_eq!(Pong::decode(&payload).expect("pong").now_ms, round);
+    }
+    assert!(again.try_recv().is_err(), "the second hold stands");
+    let _ = std::fs::remove_dir_all(&dir);
+}

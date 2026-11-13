@@ -52,6 +52,10 @@ pub const MAX_QUEUED_BYTES: usize = 4 << 20;
 /// `MAX_FRAME - REPLY_OVERHEAD`. Not one of the layout's constants: it is a limit each side
 /// checks for itself.
 pub const REPLY_OVERHEAD: usize = 32;
+/// The feature bit of the END descriptor (kinds 40 and 41, in the endpoints part). It is not a part,
+/// so it has no hash of its own and is not in the `feature` module: a host sets it in Welcome
+/// beside [`feature::EVERY`], and a host without it refuses the request by name.
+pub const ENDPOINTS_END: u64 = 64;
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -482,6 +486,15 @@ frames! {
         added 33 Endpoints { id: u32 }
         /// Gives up the endpoints this connection holds. Answered with an empty Reply.
         added 34 EndpointsClose { id: u32, device: u32 }
+        /// Borrows the bulk pair and the END descriptor for this connection. Sent only to a host
+        /// whose Welcome set [`ENDPOINTS_END`]: a host without that bit refuses it by name and is
+        /// never sent it. Answered with EndpointsEnd, or Refusal. Kind 32 is unchanged: it still
+        /// gets two descriptors.
+        added 40 EndpointsOpenEnd { id: u32, device: u32 }
+        /// The bulk pair and END: three descriptors with this frame over `SCM_RIGHTS`, in the order
+        /// OUT, IN, END. END is the read end of a pipe the host writes to no more: it is readable
+        /// (EOF or a hang-up) once the hold is over for good. Only the connection that asked holds them.
+        added 41 EndpointsEnd { id: u32 }
     }
 }
 

@@ -468,6 +468,29 @@ fn a_function_that_cannot_be_enabled_is_retried_at_1_2_4_8_8_seconds_for_ever() 
 }
 
 #[test]
+fn an_endpoint_file_busy_at_enable_is_retried_with_its_reason_and_comes_up_when_it_frees() {
+    // ep0 busy: an outside process still has the function's file open. Named as in use, retried
+    // with the usual backoff, never given up, and up at the first try after it frees.
+    let mut rig = Rig::new();
+    rig.host.refuse_enable(Some(ErrorKind::Busy));
+    let mut waits = Vec::new();
+    for _ in 0..12 {
+        waits.push(rig.step() / SECOND);
+        assert_eq!(rig.health(), Health::Failed(IN_USE));
+    }
+    assert_eq!(waits[..5], [1, 2, 4, 8, 8]);
+    assert!(
+        waits[5..].iter().all(|wait| *wait == 8),
+        "never longer, never off"
+    );
+
+    rig.host.refuse_enable(None);
+    assert_eq!(rig.step(), POLL_NS);
+    assert_eq!(rig.health(), Health::Ok);
+    assert_eq!(rig.host.enables(), 1);
+}
+
+#[test]
 fn each_way_an_enable_fails_has_its_reason() {
     let reasons = [
         (ErrorKind::NotFound, NOT_THERE),

@@ -169,6 +169,7 @@ impl Client {
             } => self.call_job(id, device, contract, method, args),
             Frame::JobCancel { id, job } => self.cancel_job(id, job),
             Frame::EndpointsOpen { id, device } => self.endpoints_open(id, device),
+            Frame::EndpointsOpenEnd { id, device } => self.endpoints_open_end(id, device),
             Frame::EndpointsClose { id, device } => self.endpoints_close(id, device),
             // Only the service sends the rest.
             _ => false,
@@ -195,7 +196,14 @@ impl Client {
             parts: Tail(&PART_BYTES[..]),
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
-            features: feature::EVERY & !theirs.refused,
+            // END belongs to the endpoints part: a client that refuses that part gets neither bit.
+            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END)
+                & !theirs.refused
+                & if theirs.refused & feature::ENDPOINTS != 0 {
+                    !lemnos_wire::ENDPOINTS_END
+                } else {
+                    !0
+                },
             host: &self.core.name,
         });
         true
@@ -538,6 +546,19 @@ impl Client {
             Ok([out, input]) => {
                 self.conn
                     .answer_with_descriptors(&Frame::Endpoints { id }, vec![out, input]);
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't open the endpoints"),
+        }
+    }
+
+    /// Lends this connection the bulk pair and the END descriptor of a device's function. As
+    /// [`Self::endpoints_open`], and the hold's END goes when the hold is over for good.
+    fn endpoints_open_end(&self, id: u32, device: u32) -> Keep {
+        match self.core.host.usb_endpoints_end(self.conn.id, device) {
+            Ok([out, input, end]) => {
+                self.conn
+                    .answer_with_descriptors(&Frame::EndpointsEnd { id }, vec![out, input, end]);
                 true
             }
             Err(status) => self.refuse(id, status, "can't open the endpoints"),

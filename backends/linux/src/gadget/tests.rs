@@ -259,14 +259,10 @@ fn setup_writes_the_identity_the_configuration_and_the_function_and_leaves_udc_u
         fs::read_link(tree.gadget_dir().join("configs/c.1/ffs.udc0")).unwrap(),
         tree.gadget_dir().join("functions/ffs.udc0")
     );
-    assert_eq!(
-        recorder.mounts,
-        [(
-            "udc0".to_string(),
-            tree.mount(),
-            format!("uid={},gid={},rmode=0500,fmode=0600", own().uid, own().gid)
-        )],
-        "FunctionFS is mounted once, from its instance name, for the daemon's owner"
+    // The fixture's mount is already there, with its ep0: it is reused, not mounted again.
+    assert!(
+        recorder.mounts.is_empty(),
+        "a mount already there is reused"
     );
 }
 
@@ -492,10 +488,9 @@ fn what_an_earlier_setup_left_is_removed_before_the_gadget_is_made() {
         "a function left by an earlier run"
     );
     assert_eq!(tree.attribute("UDC"), "\n", "unbound before it was remade");
-    assert_eq!(
-        recorder.unmounts,
-        [tree.mount()],
-        "the old mount is taken down first"
+    assert!(
+        recorder.unmounts.is_empty(),
+        "a mount with ep0 in it is never unmounted"
     );
 }
 
@@ -1294,4 +1289,39 @@ fn a_kernel_that_takes_no_interface_name_refuses_the_board_by_name() {
     // Any other failure is what it was.
     let other = ifname_refused(io::Error::from_raw_os_error(libc::ENOSPC));
     assert_eq!(other.raw_os_error(), Some(libc::ENOSPC));
+}
+
+#[test]
+fn a_functionfs_mount_already_there_is_reused_and_never_unmounted_or_remounted() {
+    let tree = Tree::new();
+    // The mount a holder or an earlier daemon left: ep0 is in it.
+    let mount = tree.mounts_root.join(UDC);
+    fs::create_dir_all(&mount).unwrap();
+    fs::write(mount.join("ep0"), b"").unwrap();
+
+    let recorder = setup(&tree);
+
+    assert!(
+        recorder.mounts.is_empty(),
+        "no new mount: {:?}",
+        recorder.mounts
+    );
+    assert!(
+        recorder.unmounts.is_empty(),
+        "no unmount: {:?}",
+        recorder.unmounts
+    );
+    // The configuration is still linked to the function, which is kept.
+    let config = tree.config_root.join("usb_gadget");
+    assert!(config.exists());
+}
+
+#[test]
+fn a_functionfs_mount_that_is_not_there_is_mounted_as_before() {
+    let tree = Tree::new();
+    // The fixture's mount has ep0 in it: without ep0 the mount is not there.
+    fs::remove_file(tree.mount().join("ep0")).unwrap();
+    let recorder = setup(&tree);
+    assert_eq!(recorder.mounts.len(), 1);
+    assert_eq!(recorder.unmounts.len(), 1);
 }
