@@ -38,6 +38,15 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       (`testing/board-runs/E32.md`), it needs a kernel path too.
 - [ ] **Rockchip AI-ISP** (`drivers/rkaiisp`): the layouts and checks exist; running the block is
       left out until its kernel driver's unchecked fields are bounded on a board.
+- [ ] **A733 video engine encoder** (`drivers/a733-video`, K1c): the encoder's register layouts
+      and builder are not written. Checked 2026-11-13, no open-source source with the encoder's
+      register facts: `mashiqi/A733-Cedarc` (MIT for its own code) wraps a vendor library, and its
+      `vendor/` headers say "All rights reserved" with no redistribution grant; `aodzip/cedar`
+      (GPL-2.0) is the H3/sun8i-v3 generation; `hanetzer/H6-CedarC` (LGPL-2.1+) is H6;
+      `aodzip/libcedarc`, `linux-sunxi/cedarx-libs` and `leviathanch/sunxi-cedarx-blobs` have no
+      licence file, and the last is binary blobs (not read). Licence question for the user: may the
+      `vendor/` material of `mashiqi/A733-Cedarc`, or the unlicensed repositories, be used for the
+      register facts? Until a licensed source is found, the encoder stays out.
 
 ## Unfinished in the code
 
