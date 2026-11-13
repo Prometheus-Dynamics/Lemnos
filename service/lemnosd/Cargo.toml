@@ -27,6 +27,7 @@ lemnos-sim = { path = "../../backends/sim" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = true }
+toml.workspace = true
 # generated: begin drivers
 lemnos-driver-a733-di = { path = "../../drivers/a733-di" }
 lemnos-driver-a733-video = { path = "../../drivers/a733-video" }

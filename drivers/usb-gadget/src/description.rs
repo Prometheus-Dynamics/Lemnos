@@ -30,6 +30,7 @@
 //! The set has the configuration at full speed and at high speed, one language (US English,
 //! 0x0409) and USB 2.0 as its version. Class descriptors have no line here.
 
+use crate::derive::Macs;
 use lemnos_hal::usb_descriptors::{GadgetFunction, UsbDescriptors};
 
 /// The most bytes a built descriptor set may come to.
@@ -85,9 +86,12 @@ pub enum Fault {
     Power,
     /// The set is over [`MAX_SET`] bytes.
     TooLong,
-    /// A `function` line that is not `ffs`, `ncm host=MAC device=MAC` or `acm`, that lists a
-    /// function twice, or that makes more than [`MAX_FUNCTIONS`]; by its number from 1.
+    /// A `function` line that is not `ffs`, `ncm host=MAC device=MAC`, `ncm derive` or `acm`, that
+    /// lists a function twice, or that makes more than [`MAX_FUNCTIONS`]; by its number from 1.
     Function(usize),
+    /// A `function ncm derive` line with no board identity to derive the addresses from (see
+    /// [`crate::derive`]); by its number from 1.
+    NoIdentity(usize),
 }
 
 /// A descriptor set, built.
@@ -166,19 +170,39 @@ struct Interface<'a> {
     endpoints: usize,
 }
 
+/// A function as its line lists it. `derive` takes its addresses from the board identity, which
+/// [`functions`] is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listed {
+    Fixed(GadgetFunction),
+    Derive { line: usize },
+}
+
+impl Listed {
+    /// Which function it is, for the rule that each is listed once: an NCM with either address
+    /// form counts as the NCM.
+    fn kind(&self) -> u8 {
+        match self {
+            Self::Fixed(GadgetFunction::Ffs) => 0,
+            Self::Fixed(GadgetFunction::Acm) => 1,
+            Self::Fixed(GadgetFunction::Ncm { .. }) | Self::Derive { .. } => 2,
+        }
+    }
+}
+
 /// The lines of an `interfaces` text, read.
 struct Layout<'a> {
     interfaces: [Option<Interface<'a>>; MAX_INTERFACES],
     interface_count: usize,
     endpoints: [Option<Endpoint>; MAX_ENDPOINTS],
     endpoint_count: usize,
-    functions: [Option<GadgetFunction>; MAX_FUNCTIONS],
+    functions: [Option<Listed>; MAX_FUNCTIONS],
     function_count: usize,
 }
 
 /// The functions of a gadget's configuration, in the order its `function` lines list them.
 /// Without a `function ffs` line the FunctionFS function comes first, as the one every gadget
-/// has.
+/// has. Every NCM address is concrete: a `derive` line has its addresses from the identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Functions {
     items: [GadgetFunction; MAX_FUNCTIONS],
@@ -364,6 +388,10 @@ impl<'a> Layout<'a> {
             "ffs" => GadgetFunction::Ffs,
             "acm" => GadgetFunction::Acm,
             "ncm" => {
+                // `derive` alone: the addresses come from the board identity.
+                if args.trim() == "derive" {
+                    return self.push(Listed::Derive { line }, line);
+                }
                 // `host=MAC device=MAC`, in either order, each once.
                 let (mut host, mut device) = (None, None);
                 for word in words.by_ref() {
@@ -377,20 +405,19 @@ impl<'a> Layout<'a> {
                 if host == device {
                     return Err(bad);
                 }
-                return self.push(GadgetFunction::Ncm { host, device }, line);
+                return self.push(Listed::Fixed(GadgetFunction::Ncm { host, device }), line);
             }
             _ => return Err(bad),
         };
         if words.next().is_some() {
             return Err(bad);
         }
-        self.push(function, line)
+        self.push(Listed::Fixed(function), line)
     }
 
-    fn push(&mut self, function: GadgetFunction, line: usize) -> Result<(), Fault> {
+    fn push(&mut self, function: Listed, line: usize) -> Result<(), Fault> {
         let bad = Fault::Function(line);
-        let kind = |f: &GadgetFunction| core::mem::discriminant(f);
-        let listed = self.functions().any(|f| kind(&f) == kind(&function));
+        let listed = self.listed().any(|f| f.kind() == function.kind());
         if listed {
             return Err(bad);
         }
@@ -400,7 +427,7 @@ impl<'a> Layout<'a> {
         Ok(())
     }
 
-    fn functions(&self) -> impl Iterator<Item = GadgetFunction> + '_ {
+    fn listed(&self) -> impl Iterator<Item = Listed> + '_ {
         self.functions.iter().flatten().copied()
     }
 
@@ -416,18 +443,30 @@ fn high_speed_interval(ms: u8) -> u8 {
 }
 
 /// The functions `interfaces` lists, in order. FunctionFS is first unless a `function ffs` line
-/// places it.
-pub fn functions(interfaces: &str) -> Result<Functions, Fault> {
+/// places it. `macs` are the addresses a `function ncm derive` line takes, from
+/// [`crate::derive::macs`]; without them such a line is a [`Fault::NoIdentity`].
+pub fn functions(interfaces: &str, macs: Option<Macs>) -> Result<Functions, Fault> {
     let layout = Layout::parse(interfaces)?;
     let mut items = [GadgetFunction::Ffs; MAX_FUNCTIONS];
     let mut len = 0;
-    let listed: [Option<GadgetFunction>; MAX_FUNCTIONS] = layout.functions;
-    if !layout.functions().any(|f| f == GadgetFunction::Ffs) {
+    if !layout
+        .listed()
+        .any(|f| f == Listed::Fixed(GadgetFunction::Ffs))
+    {
         items[0] = GadgetFunction::Ffs;
         len = 1;
     }
-    for function in listed.iter().flatten() {
-        items[len] = *function;
+    for function in layout.functions.iter().flatten() {
+        items[len] = match *function {
+            Listed::Fixed(function) => function,
+            Listed::Derive { line } => {
+                let macs = macs.ok_or(Fault::NoIdentity(line))?;
+                GadgetFunction::Ncm {
+                    host: macs.host,
+                    device: macs.device,
+                }
+            }
+        };
         len += 1;
     }
     Ok(Functions { items, len })

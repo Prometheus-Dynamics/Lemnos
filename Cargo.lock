@@ -1430,6 +1430,7 @@ dependencies = [
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-wire",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1824,6 +1825,7 @@ dependencies = [
  "lemnos-package",
  "lemnos-sim",
  "lemnos-wire",
+ "toml",
 ]
 
 [[package]]

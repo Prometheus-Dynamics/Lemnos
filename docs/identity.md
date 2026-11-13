@@ -66,6 +66,12 @@ revision = "r2"
 | `name`, `revision` | The `model` fact |
 | `data` | The data partition for the slot facts. Default `/data` |
 
+A USB gadget takes the board's serial from this device: its `identity` setting names the device
+(see [the gadget section of `boards.md`](boards.md#identity-derived-addresses-and-the-usb-serial)).
+The daemon reads the serial once, when it starts, through the same settings as this driver, and
+gives the result to the gadget's setup and driver as `board_serial`. The serial is read by this
+device's source only. A gadget does not carry a second copy of these settings.
+
 One source per board file: the device names exactly one `serial` kind. A source that cannot be read
 fails the bind and is retried. A value that does not fit the format leaves `serial` absent and the
 device `Degraded`.
@@ -91,5 +97,6 @@ with its URL and commit, not from memory.
 ## Who checks what
 
 The serial reaches the stack only through the daemon: lemnosd is the one process that serves
-`system.identity/1`, and the bridge publishes what it serves. Recovery and flasher images run the
+`system.identity/1`, and the bridge publishes what it serves. The USB gadget's derived addresses
+come from the same serial, read by the daemon in its start (`resolve` in `service/lemnosd`). Recovery and flasher images run the
 daemon too, so they report the same serial as a normal boot.

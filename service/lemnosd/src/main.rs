@@ -19,6 +19,7 @@ use lemnos_linux::hotplug::BoardHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
+use lemnosd::gadget;
 use lemnosd::packages::{PackageConfig, add_packages};
 use lemnosd::privilege;
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
@@ -137,10 +138,14 @@ fn main() -> ExitCode {
         Ok(text) => text,
         Err(error) => return complain(&format!("{board}: {error}")),
     };
-    let board_file = match parse(&text) {
+    let mut board_file = match parse(&text) {
         Ok(board_file) => board_file,
         Err(error) => return complain(&format!("{board}: {error}")),
     };
+    // Each gadget's board serial is read once, here, so the root phase and the daemon agree on it.
+    if let Err(error) = gadget::resolve(&mut board_file) {
+        return complain(&format!("{board}: {error}"));
+    }
     if check {
         return ExitCode::SUCCESS;
     }

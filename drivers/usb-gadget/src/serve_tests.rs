@@ -73,6 +73,7 @@ fn bind_on(
     let mut entries = std::vec![
         ("vendor", ConfigValue::Int(0x1209)),
         ("product", ConfigValue::Int(1)),
+        ("serial", ConfigValue::Str("S0")),
     ];
     // The test's own interfaces, if it gives them, in place of the usual ones.
     if !extra.iter().any(|(key, _)| *key == "interfaces") {

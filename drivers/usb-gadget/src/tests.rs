@@ -15,6 +15,8 @@ use lemnos_measure::test_alloc::{Counting, allocations};
 
 use super::*;
 use crate::description::{MAX_ENDPOINTS, MAX_INTERFACES, MAX_NAME, build};
+use crate::{NO_SERIAL, NO_SERIAL_READ};
+use lemnos_hal::usb_descriptors::GadgetFunction;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -303,8 +305,17 @@ fn settings() -> Vec<(&'static str, ConfigValue<'static>)> {
         ("vendor", ConfigValue::Int(0x1209)),
         ("product", ConfigValue::Int(1)),
         ("manufacturer", ConfigValue::Str("Maker")),
+        ("serial", ConfigValue::Str("S0")),
         ("interfaces", ConfigValue::Str(INTERFACES)),
     ]
+}
+
+/// The base settings with no serial at all: the gadget is up, and its health says so.
+fn settings_without_serial() -> Vec<(&'static str, ConfigValue<'static>)> {
+    settings()
+        .into_iter()
+        .filter(|(k, _)| *k != "serial")
+        .collect()
 }
 
 fn bind(function: &MockUsbFunction, entries: &[(&str, ConfigValue<'_>)]) -> Result<UsbGadget> {
@@ -636,7 +647,7 @@ fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
 
     let ncm = "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\n";
     let interfaces = "interface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\n";
-    let listed = |text: &str| functions(text).map(|f| f.as_slice().to_vec());
+    let listed = |text: &str| functions(text, None).map(|f| f.as_slice().to_vec());
 
     // No `function` line: FunctionFS alone, as before.
     assert_eq!(listed(interfaces), Ok(std::vec![Ffs]));
@@ -679,7 +690,7 @@ fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
 fn a_function_line_that_is_not_one_of_the_three_is_refused_by_its_line() {
     use crate::description::functions;
     let interfaces = "interface 0xff 0 0\nendpoint in bulk\nendpoint out bulk\n";
-    let fault = |line: &str| functions(&std::format!("{line}\n{interfaces}")).err();
+    let fault = |line: &str| functions(&std::format!("{line}\n{interfaces}"), None).err();
     let good_ncm = "ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02";
     assert_eq!(fault("function"), Some(Fault::Function(1)));
     assert_eq!(fault("function rndis"), Some(Fault::Function(1)));
@@ -726,7 +737,129 @@ fn a_function_line_that_is_not_one_of_the_three_is_refused_by_its_line() {
         "one NCM"
     );
     assert_eq!(
-        functions(&std::format!("function {good_ncm}\n{interfaces}")).map(|f| f.as_slice().len()),
+        functions(&std::format!("function {good_ncm}\n{interfaces}"), None)
+            .map(|f| f.as_slice().len()),
         Ok(2)
     );
+}
+
+/// Binds on the board `board`, with the given settings.
+fn bind_on(
+    function: &MockUsbFunction,
+    entries: &[(&str, ConfigValue<'_>)],
+    board: &str,
+) -> Result<UsbGadget> {
+    let mut board_handle = Board(Some(function.clone()));
+    let mut resources = Resources::new(&mut board_handle, None);
+    UsbGadget::bind(&mut resources, &Config::new(entries).on_board(board))
+}
+
+/// UTF-16LE, as a string descriptor holds it.
+fn utf16(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn the_serial_string_is_the_explicit_one_or_else_the_board_serial() {
+    let board = "0123456789abcdef";
+    let with = |extra: &[(&'static str, ConfigValue<'static>)]| {
+        let mut entries: Vec<(&str, ConfigValue<'_>)> = settings_without_serial();
+        entries.extend_from_slice(extra);
+        settings_of(&entries, "alpha")
+    };
+    // No serial given: the board's serial is the string.
+    let (set, _) = with(&[("board_serial", ConfigValue::Str(board))]).unwrap();
+    assert!(contains(set.bytes(), &utf16(board)));
+    // An explicit serial overrides it.
+    let (set, _) = with(&[
+        ("board_serial", ConfigValue::Str(board)),
+        ("serial", ConfigValue::Str("S1")),
+    ])
+    .unwrap();
+    assert!(contains(set.bytes(), &utf16("S1")));
+    assert!(!contains(set.bytes(), &utf16(board)));
+    // Neither: no serial string, and health says so once the gadget is up.
+    let (set, _) = with(&[]).unwrap();
+    assert!(!contains(set.bytes(), &utf16(board)));
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &settings_without_serial(), "alpha")
+        .map_err(|_| ())
+        .unwrap();
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL));
+    // The explicit serial is in the set and health is `Ok`.
+    let mut entries: Vec<(&str, ConfigValue<'_>)> = settings_without_serial();
+    entries.push(("serial", ConfigValue::Str("S1")));
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &entries, "alpha")
+        .map_err(|_| ())
+        .unwrap();
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Ok);
+    // A board serial that could not be read says so in its own words.
+    let mut entries: Vec<(&str, ConfigValue<'_>)> = settings_without_serial();
+    entries.push(("board_serial_error", ConfigValue::Str("no serial source")));
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &entries, "alpha")
+        .map_err(|_| ())
+        .unwrap();
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL_READ));
+}
+
+/// The settings for the board `board`, through the same function the daemon's root phase uses.
+fn settings_of(
+    entries: &[(&str, ConfigValue<'_>)],
+    board: &str,
+) -> Result<(Set, crate::description::Functions)> {
+    crate::settings(&Config::new(entries).on_board(board))
+}
+
+#[test]
+fn derive_takes_the_addresses_from_the_board_identity_and_fails_without_one() {
+    use crate::derive::macs;
+    let interfaces = std::format!("function ncm derive\n{INTERFACES}");
+    let mut entries: Vec<(&str, ConfigValue<'_>)> = settings();
+    entries.retain(|(key, _)| *key != "interfaces");
+    entries.push(("interfaces", ConfigValue::Str(&interfaces)));
+
+    // With the board's identity: the NCM function carries the derived pair.
+    let mut with_serial = entries.clone();
+    with_serial.push(("board_serial", ConfigValue::Str("00000001")));
+    let (_, functions) = settings_of(&with_serial, "alpha").unwrap();
+    let pair = macs("alpha", "00000001").unwrap();
+    assert!(functions.as_slice().contains(&GadgetFunction::Ncm {
+        host: pair.host,
+        device: pair.device,
+    }));
+    assert_ne!(pair.host, pair.device);
+
+    // Without a serial, a serial outside the format, or no board id: the setting is refused.
+    assert_eq!(
+        settings_of(&entries, "alpha").map(|_| ()).unwrap_err(),
+        Status::INVALID_ARGUMENT
+    );
+    let mut bad = entries.clone();
+    bad.push(("board_serial", ConfigValue::Str("0000001G")));
+    assert_eq!(
+        settings_of(&bad, "alpha").map(|_| ()).unwrap_err(),
+        Status::INVALID_ARGUMENT
+    );
+    assert_eq!(
+        settings_of(&with_serial, "").map(|_| ()).unwrap_err(),
+        Status::INVALID_ARGUMENT
+    );
+    // And the bind refuses it, so nothing is enabled.
+    let function = MockUsbFunction::new();
+    assert_eq!(
+        bind_on(&function, &entries, "alpha")
+            .map(|_| ())
+            .unwrap_err(),
+        Status::INVALID_ARGUMENT
+    );
+    assert_eq!(function.enables(), 0);
 }
