@@ -20,7 +20,9 @@
 //! - **Extents.** `offset + extent` is checked against the dma-buf's size, in `u64` with overflow
 //!   refused. The extent is the bytes the block may reach from that address. It is the caller's
 //!   figure here: the registers that fix it (sizes, strides, formats, stream lengths) are not
-//!   named in the vendor kernel's source, which is why no job path is built on this yet.
+//!   named in the vendor kernel's source. The decoder builds no job on that account. The encoder's
+//!   job (`lemnos-driver-rkjpege`, see [`crate::encoder`]) checks its planes against the encoded
+//!   picture, which its header fields give.
 //! - **The encoder's link table** (register 9) is refused: in link mode the block fetches register
 //!   lists from memory, which would let a buffer's contents program addresses.
 //! - **Register reads** ([`read_window`]) stay inside the variant's register file: the vendor

@@ -1181,6 +1181,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-driver-rk-mpp",
  "lemnos-driver-rk-mpp-sys",
+ "lemnos-driver-rkjpege",
  "lemnos-linux-sys",
  "lemnos-measure",
  "libc",
@@ -1275,6 +1276,15 @@ dependencies = [
 [[package]]
 name = "lemnos-driver-rkisp-sys"
 version = "2.0.1-dev"
+
+[[package]]
+name = "lemnos-driver-rkjpege"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-rk-mpp",
+ "lemnos-linux-sys",
+ "lemnos-measure",
+]
 
 [[package]]
 name = "lemnos-driver-rknpu"

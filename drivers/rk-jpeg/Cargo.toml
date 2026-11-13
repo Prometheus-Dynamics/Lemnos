@@ -15,6 +15,8 @@ lemnos-linux-sys = { path = "../../backends/linux-sys" }
 libc.workspace = true
 lemnos-driver-rk-mpp = { path = "../rk-mpp" }
 lemnos-driver-rk-mpp-sys = { path = "../rk-mpp-sys" }
+lemnos-driver-rkjpege = { path = "../rkjpege" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

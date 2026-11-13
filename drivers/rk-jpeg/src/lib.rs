@@ -19,19 +19,13 @@
 //! the buffers behind the address registers, and the shared service layer places and checks
 //! every address. That is the block rule: what a picture is coded with is the caller's.
 //!
-//! **This crate still builds no job of its own.** To build one it would have to know what the
-//! registers mean: how far the block reads and writes from each address is fixed by fields
-//! (sizes, strides, formats, stream and bitstream lengths) that the vendor kernel's driver
-//! source does not name. It names the address registers, the start and status bits and the
-//! picture-size fields, which is what [`regs`], [`Addresses`] and [`status`] hold for a
-//! caller that builds register files. Rockchip's user-space MPP (`rockchip-linux/mpp` at
-//! `9b56348`, Apache-2.0) does name every field (`hal_jpegd_rkv_reg.h`,
-//! `hal_jpegd_vpu730_reg.h`, `hal_jpege_vpu720_reg.h`), but not how far the block reads and
-//! writes from each address: where the decoder's chroma plane lies and how large it is per
-//! output format, the units of the table lengths, the encoder's ECS length buffer. Those are
-//! what a job's check needs, and they are not guessed here (`TODO.md` lists them).
+//! The encoder's job is built by `lemnos-driver-rkjpege`, re-exported as [`encoder`]: its
+//! register file is the VPU720 class's 79 words, pinned to the vendor header by gcc and clang, and
+//! its builder checks the picture's planes against the buffers the caller holds. The decoder builds
+//! no job of its own: no public source says how far its block reaches from each address (the
+//! decoder's chroma plane, the table units), which a job's check needs. `TODO.md` lists them.
 //!
-//! # On a device
+//! //! # On a device
 //!
 //! The session runs on the shared service layer: [`open`] opens the service node through
 //! `lemnos-driver-rk-mpp-sys`, whose session implements this crate's [`Device`] (bind to the
@@ -48,11 +42,14 @@
 
 pub mod address;
 mod device;
+pub mod encoder;
 pub mod mpp;
 pub mod regs;
 mod session;
 pub mod status;
 
+#[cfg(test)]
+mod encoder_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
