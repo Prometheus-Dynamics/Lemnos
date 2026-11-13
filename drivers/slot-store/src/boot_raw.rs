@@ -16,6 +16,8 @@ use std::io;
 pub const TRIAL_FILE: &[u8; 11] = b"TRIAL   REC";
 /// The FAT directory name of the reason record's file.
 pub const REASON_FILE: &[u8; 11] = b"REASON  REC";
+/// The FAT directory name of the episodes record's file.
+pub const EPISODES_FILE: &[u8; 11] = b"EPISODESREC";
 /// The size of each record file: two sectors, one per copy.
 pub const RECORD_BYTES: u64 = 1024;
 
@@ -24,6 +26,7 @@ pub const RECORD_BYTES: u64 = 1024;
 pub struct Records {
     trial: Pair,
     reason: Pair,
+    episodes: Pair,
 }
 
 /// A pending trial: the slot and the attempts left.
@@ -40,15 +43,57 @@ impl Records {
     pub fn place<D: ReadAt>(dev: &mut D) -> Result<Self, Refusal> {
         let trial = bootfat::locate(dev, TRIAL_FILE, RECORD_BYTES)?;
         let reason = bootfat::locate(dev, REASON_FILE, RECORD_BYTES)?;
+        let episodes = bootfat::locate(dev, EPISODES_FILE, RECORD_BYTES)?;
         Ok(Self {
             trial: Pair::at(trial.first_lba),
             reason: Pair::at(reason.first_lba),
+            episodes: Pair::at(episodes.first_lba),
         })
     }
 
-    /// The first sector of each record's copy A, for tests and the image builder's report.
+    /// The first sector of each record's copy A: trial, then reason, for tests and the image
+    /// builder's report. The episodes record's is [`Records::episodes_lba`].
     pub fn lbas(&self) -> (u64, u64) {
         (self.trial.lba(), self.reason.lba())
+    }
+
+    /// The first sector of the episodes record's copy A.
+    pub fn episodes_lba(&self) -> u64 {
+        self.episodes.lba()
+    }
+
+    /// The episodes recorded against a slot: `(slot, episodes)`, `None` when none is kept.
+    pub fn episodes<D: Sectors>(&self, dev: &mut D) -> Result<Option<(String, u8)>, Error> {
+        let Some(cur) = self.episodes.read(dev, Kind::EPISODES)? else {
+            return Ok(None);
+        };
+        Ok(decode_episodes(&cur.payload))
+    }
+
+    /// Records `episodes` against `slot`, in one sector write. Zero is written as an empty payload.
+    pub fn set_episodes<D: Sectors>(
+        &self,
+        dev: &mut D,
+        slot: &str,
+        episodes: u8,
+    ) -> Result<(), Error> {
+        if !crate::store::valid_id(slot) {
+            return Err(invalid("episodes slot id is not valid"));
+        }
+        let payload = if episodes == 0 {
+            String::new()
+        } else {
+            format!("{slot} {episodes}")
+        };
+        self.episodes
+            .write(dev, Kind::EPISODES, payload.as_bytes())?;
+        Ok(())
+    }
+
+    /// Clears the episodes record (a boot-good on the slot).
+    pub fn clear_episodes<D: Sectors>(&self, dev: &mut D) -> Result<(), Error> {
+        self.episodes.write(dev, Kind::EPISODES, b"")?;
+        Ok(())
     }
 
     /// The pending trial, `None` when the record is absent, empty or holds no trial.
@@ -114,6 +159,14 @@ pub fn decode_trial(payload: &[u8]) -> Option<Trial> {
         slot: slot.to_string(),
         attempts,
     })
+}
+
+/// An episodes payload: `None` for an empty or malformed one.
+pub fn decode_episodes(payload: &[u8]) -> Option<(String, u8)> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let (slot, n) = text.split_once(' ')?;
+    let n: u8 = n.parse().ok()?;
+    (n > 0 && crate::store::valid_id(slot)).then(|| (slot.to_string(), n))
 }
 
 fn invalid(why: &'static str) -> Error {

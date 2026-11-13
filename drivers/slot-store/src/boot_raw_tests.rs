@@ -65,12 +65,25 @@ fn partition() -> (Vec<u8>, Records) {
                 size: 1024,
                 chain: vec![5, 6],
             },
+            Entry {
+                name: EPISODES_FILE,
+                size: 1024,
+                chain: vec![7, 8],
+            },
         ],
     );
     let records = Records::place(&mut vol).unwrap();
     let (trial_lba, reason_lba) = records.lbas();
-    let made = precreate(&[(Kind::TRIAL, b"os-1 3"), (Kind::REASON, b"")]).unwrap();
-    for ((_, bytes), lba) in made.iter().zip([trial_lba, reason_lba]) {
+    let made = precreate(&[
+        (Kind::TRIAL, b"os-1 3"),
+        (Kind::REASON, b""),
+        (Kind::EPISODES, b""),
+    ])
+    .unwrap();
+    for ((_, bytes), lba) in made
+        .iter()
+        .zip([trial_lba, reason_lba, records.episodes_lba()])
+    {
         let at = lba as usize * SECTOR;
         vol.0[at..at + bytes.len()].copy_from_slice(bytes);
     }
@@ -286,4 +299,57 @@ fn updates_survive_a_cut_at_each_step_and_recover() {
             }
         }
     }
+}
+
+#[test]
+fn an_episodes_record_round_trips_and_a_cut_leaves_old_or_new() {
+    let (image, records) = partition();
+    let mut dev = Cut::new(image.clone());
+    assert_eq!(records.episodes(&mut dev).unwrap(), None);
+    records.set_episodes(&mut dev, "os-1", 1).unwrap();
+    assert_eq!(
+        records.episodes(&mut dev).unwrap(),
+        Some(("os-1".into(), 1))
+    );
+    records.set_episodes(&mut dev, "os-1", 2).unwrap();
+    assert_eq!(
+        records.episodes(&mut dev).unwrap(),
+        Some(("os-1".into(), 2))
+    );
+    records.clear_episodes(&mut dev).unwrap();
+    assert_eq!(records.episodes(&mut dev).unwrap(), None);
+
+    // A cut at every point of the update: old (1 episode) or new (2), never neither.
+    let old = Some(("os-1".to_string(), 1u8));
+    let new = Some(("os-1".to_string(), 2u8));
+    let mut base = Cut::new(image.clone());
+    records.set_episodes(&mut base, "os-1", 1).unwrap();
+    let start = base.image.clone();
+    let mut run = Cut::new(start.clone());
+    records.set_episodes(&mut run, "os-1", 2).unwrap();
+    for n in 0..=run.writes {
+        for tear in [0, 1, 255, 511, SECTOR] {
+            let mut dev = Cut::new(start.clone());
+            dev.cut = Some((n, tear));
+            let _ = records.set_episodes(&mut dev, "os-1", 2);
+            let mut after = Cut::new(dev.image.clone());
+            let got = records.episodes(&mut after).unwrap();
+            assert!(got == old || got == new, "cut {n} tear {tear}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn an_episodes_count_of_zero_or_a_bad_slot_is_refused() {
+    let (image, records) = partition();
+    let mut dev = Cut::new(image);
+    assert!(records.set_episodes(&mut dev, "bad id", 1).is_err());
+    assert_eq!(dev.writes, 0);
+    assert_eq!(
+        decode_episodes(b"os-1 0"),
+        None,
+        "zero is no episode record"
+    );
+    assert_eq!(decode_episodes(b"os-1 300"), None, "past one byte");
+    assert_eq!(decode_episodes(b"os-1 2"), Some(("os-1".into(), 2)));
 }

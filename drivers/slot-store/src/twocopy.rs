@@ -54,6 +54,8 @@ impl Kind {
     pub const BOOT_HISTORY: Kind = Kind(3);
     /// The board's security switch and its generation (S2).
     pub const SECURITY: Kind = Kind(4);
+    /// The episodes a slot has had against it: `"<slot> <episodes>"` (the count-based fallback).
+    pub const EPISODES: Kind = Kind(5);
 
     /// The pre-created file's FAT directory name for this kind (eleven bytes: 8.3, space padded,
     /// upper case). `None` for a kind this build does not know.
@@ -63,6 +65,22 @@ impl Kind {
             Kind::REASON => Some(b"REASON  REC"),
             Kind::BOOT_HISTORY => Some(b"BOOTHISTREC"),
             Kind::SECURITY => Some(b"SECURE  REC"),
+            Kind::EPISODES => Some(b"EPISODESREC"),
+            _ => None,
+        }
+    }
+
+    /// The record file's name as the generator and the image builder see it on the boot partition:
+    /// lower case, 8.3 with a dot, no space. The FAT directory entry is [`Kind::file_name`], which is
+    /// this name with its base and extension space padded and upper cased (see the tests). The
+    /// locator reads the directory entry, so it never needs this form. `None` as for `file_name`.
+    pub fn visible_name(self) -> Option<&'static str> {
+        match self {
+            Kind::TRIAL => Some("trial.rec"),
+            Kind::REASON => Some("reason.rec"),
+            Kind::BOOT_HISTORY => Some("boothist.rec"),
+            Kind::SECURITY => Some("secure.rec"),
+            Kind::EPISODES => Some("episodes.rec"),
             _ => None,
         }
     }

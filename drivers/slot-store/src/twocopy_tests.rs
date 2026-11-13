@@ -350,3 +350,46 @@ fn a_file_device_writes_and_reads_its_sectors() {
     assert_eq!(sector_of(&raw, 2)[0..4], *b"LMRC");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The FAT directory name (eleven bytes, space padded, upper case) of an 8.3 name with a dot.
+fn fat_name_of(visible: &str) -> [u8; 11] {
+    let (base, ext) = visible.split_once('.').expect("an 8.3 name with a dot");
+    assert!(base.len() <= 8 && ext.len() <= 3, "{visible} is 8.3");
+    let mut out = [b' '; 11];
+    for (i, b) in base.bytes().enumerate() {
+        out[i] = b.to_ascii_uppercase();
+    }
+    for (i, b) in ext.bytes().enumerate() {
+        out[8 + i] = b.to_ascii_uppercase();
+    }
+    out
+}
+
+#[test]
+fn every_record_has_an_ordinary_visible_name_that_its_directory_entry_is_named_by() {
+    for kind in [
+        Kind::TRIAL,
+        Kind::REASON,
+        Kind::BOOT_HISTORY,
+        Kind::SECURITY,
+        Kind::EPISODES,
+    ] {
+        let visible = kind
+            .visible_name()
+            .expect("every known kind has a visible name");
+        assert!(
+            !visible.contains(' ') && visible.is_ascii(),
+            "{visible} has a space or is not ASCII"
+        );
+        let fat = kind.file_name().expect("every known kind has a FAT name");
+        assert_eq!(
+            &fat_name_of(visible),
+            fat,
+            "{visible} must name the directory entry {}",
+            String::from_utf8_lossy(fat)
+        );
+    }
+    assert_eq!(Kind(200).visible_name(), None);
+    // The FAT names precreate writes are the same ones: the trial record is `TRIAL   REC`.
+    assert_eq!(&fat_name_of("trial.rec"), b"TRIAL   REC");
+}
