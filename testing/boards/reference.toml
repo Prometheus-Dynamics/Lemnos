@@ -1,6 +1,7 @@
 # The reference board: a compute module on its IO board, with one addressable LED ring on RP1
-# GPIO13, a camera sensor on the SoC's own I2C bus, and the fan header's PWM. Its overlay is made
-# from this file by `lemnos-ctl tree`.
+# GPIO13, a camera sensor on the SoC's own I2C bus, a camera power switch on RP1 GPIO34, a fan on
+# the fan header's PWM channel, and the camera receiver owned by the kernel module. Its overlay,
+# boot fragment and module configuration are made from this file by `lemnos-ctl tree`.
 format = "lemnos.board"
 schema_version = 1
 
@@ -23,8 +24,16 @@ controller = "i2c10"
 controller = "pwm1"
 pins = "gpio45"
 
+# The camera receiver is driven by the kernel module, so the module owns its node and the stock
+# receiver driver is kept off it.
 [[hardware]]
 controller = "csi0"
+module = "owned"
+
+# The PiSP back end: the module drives it, as the `pisp_be` role.
+[[hardware]]
+controller = "pisp-be"
+module = "pisp_be"
 
 [[hardware]]
 controller = "pio"
@@ -32,13 +41,14 @@ controller = "pio"
 [[hardware]]
 controller = "watchdog"
 
-# A line the board gives to Lemnos: the camera regulator's line is held by a base node that the
-# overlay disables. The fan header's line is held at its full-speed level from power-on.
+# The lines the board gives to Lemnos, by their stable names. The camera regulator's line is held
+# by a base node, which the overlay disables; the power switch below drives it. The fan header's
+# line is at its full-speed level from power-on, until the fan's driver takes the PWM.
 [[lines]]
-line = "rp1:34"
+line = "gpio:pinctrl-rp1:34"
 
 [[lines]]
-line = "rp1:45"
+line = "gpio:pinctrl-rp1:45"
 boot = "high"
 reason = "the fan header's line: at full speed from power-on, until Lemnos's fan driver takes it"
 
@@ -58,3 +68,15 @@ config = { accel_rate = 200, gyro_rate = 200, fifo = false }
 id = "sensor"
 driver = "ov9782"
 bus = "i2c-10"
+
+[[devices]]
+id = "cam0-power"
+driver = "gpio-power-switch"
+uses = { line = "gpio:pinctrl-rp1:34" }
+config = { default_on = true }
+
+[[devices]]
+id = "fan"
+driver = "pwm-channel-fan"
+uses = { pwm = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1" }
+config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }

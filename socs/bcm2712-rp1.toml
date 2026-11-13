@@ -5,6 +5,16 @@
 # labels, so each node is named by its path. A pin set also has its label, which an overlay refers to:
 # the base tree keeps the labels in its symbols. The paths of the RP1 nodes are the `rp1` ones.
 soc = "bcm2712-rp1"
+needs_nothing = ["orientation", "fan-control"]
+
+# The GPIO chips a `gpio:LABEL:LINE` name may name. The label is the chip's own, as the kernel
+# reports it: the RP1 GPIO chip's label is a constant of its driver (`pinctrl-rp1`, drivers/pinctrl/
+# pinctrl-rp1.c in raspberrypi/linux rpi-7.2.y, `MODULE_NAME`), not something the tree sets.
+[chips.rp1]
+label = "pinctrl-rp1"
+reason = "the RP1 GPIO chip, on the IO board's RP1"
+
+# Drivers whose devices need no hardware from this SoC: they are composed of other devices.
 
 # The I2C buses. The kernel numbers an I2C adapter by its alias `i2cN`, so the board's `i2c-N`
 # comes out of that alias.
@@ -63,7 +73,7 @@ reason = "the SoC's own I2C controller, the camera sensor's bus (the board's i2c
 [controllers.pwm1]
 kind = "pwm"
 path = "/axi/pcie@1000120000/rp1/pwm@9c000"
-reason = "a PWM channel on RP1; the fan's pulse output"
+reason = "a PWM channel on RP1; the fan's pulse output (a `pwm:NODE:CHANNEL` name's NODE is this path)"
 [controllers.pwm1.pins.gpio45]
 label = "rp1_pwm1_gpio45"
 path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_pwm1_gpio45"
@@ -77,11 +87,15 @@ path = "/axi/pcie@1000120000/rp1/pio@178000"
 reason = "the RP1 PIO block, which the module's state machines and the PIO I2C bus run on"
 
 # The CSI-2 receiver with no sensor node: the sensor is Lemnos's, and the receiver is the module's.
+# Its compatible (`raspberrypi,rp1-cfe`, the `csi@110000` node in rp1.dtsi of rpi-7.2.y) is what the
+# module's `owned=` takes; the stock receiver module is blacklisted for it.
 [controllers.csi0]
 kind = "csi"
 path = "/axi/pcie@1000120000/rp1/csi@110000"
 sysfs = "1f00110000.csi"
 stock_driver = "rp1-cfe"
+compatible = "raspberrypi,rp1-cfe"
+stock_modules = ["rp1-cfe"]
 reason = "the camera receiver; the module drives it, and the stock receiver driver must not bind"
 
 # The SoC's USB controller in peripheral mode, for a gadget (`udc:` names).
@@ -89,6 +103,20 @@ reason = "the camera receiver; the module drives it, and the stock receiver driv
 kind = "usb-peripheral"
 path = "/axi/usb@480000"
 reason = "the SoC's USB controller in peripheral mode, for a USB gadget"
+
+# The PiSP back end, the ISP's processing block. Its node is enabled, and the kernel module drives
+# it: the module owns it as the `pisp_be` role (`raspberrypi,pispbe`, pisp_be.c, `pispbe`), and
+# the stock driver is kept off it. The node is `pisp_be@880000` under the bus, at 0x10 0x00880000
+# (bcm2712-ds.dtsi of rpi-7.2.y, line ~379, which is what the sysfs name `1000880000.pisp_be` is).
+[controllers.pisp-be]
+kind = "block"
+path = "/axi/pisp_be@880000"
+sysfs = "1000880000.pisp_be"
+stock_driver = "pispbe"
+compatible = "raspberrypi,pispbe"
+module_roles = ["pisp_be"]
+stock_modules = ["pispbe"]
+reason = "the PiSP back end, the ISP's processing block; the module drives it"
 
 # The hardware watchdog. Enabled on a managed board: a board file with this entry has it.
 [controllers.watchdog]
@@ -98,6 +126,6 @@ reason = "the hardware watchdog, on for a managed board"
 
 # What the base tree does with the lines the board may give to Lemnos. A line the board lists
 # that a base node holds is disabled in the overlay: the node is the one that drives the line.
-[bases.module-io.lines."rp1:34"]
+[bases.module-io.lines."gpio:pinctrl-rp1:34"]
 holders = ["/cam0_reg"]
 reason = "the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it"

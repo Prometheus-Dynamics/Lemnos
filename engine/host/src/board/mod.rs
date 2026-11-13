@@ -325,6 +325,19 @@ pub struct HardwareSpec {
     /// The pin set in the map that wires the controller, when it has more than one.
     #[serde(default)]
     pub pins: Option<String>,
+    /// The kernel module's role for this node, when the module drives it rather than a stock
+    /// driver: `"owned"` for a node the module owns, or the role a driver needs of it (such as
+    /// `"pisp_be"`). Only the device tree generator reads it, to write the module's options.
+    #[serde(default)]
+    pub module: Option<String>,
+    /// Whether the module may map the node's registers though no IOMMU confines its DMA. Needs
+    /// `module`. Only the generator reads it.
+    #[serde(default)]
+    pub unconfined: bool,
+    /// Whether an IOMMU really confines the node's DMA, so the module may map its registers.
+    /// Needs `module`. Only the generator reads it.
+    #[serde(default)]
+    pub confined: bool,
 }
 
 /// A GPIO line the board gives to Lemnos, and the state the line is in before the kernel runs.

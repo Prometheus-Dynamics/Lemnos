@@ -22,6 +22,7 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 # For `tree` and the live check of `validate`: the overlay generator and the SoC map.
 lemnos-devtree = { path = "../devtree" }
+lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
 
 [dev-dependencies]

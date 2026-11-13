@@ -16,7 +16,31 @@ pub struct SocMap {
     /// The base trees a board may be built on, by name.
     #[serde(default)]
     pub bases: BTreeMap<String, Base>,
+    /// The GPIO chips a `gpio:LABEL:LINE` name may name, by a short key. The label is the chip's
+    /// own, as the kernel reports it.
+    #[serde(default)]
+    pub chips: BTreeMap<String, Chip>,
+    /// Drivers whose devices need nothing from the SoC: a device of one of these with no
+    /// hardware name is accepted, and produces nothing. Any other device with no hardware name is
+    /// refused, since its needs would produce nothing in any output.
+    #[serde(default)]
+    pub needs_nothing: Vec<String>,
 }
+
+/// A GPIO chip: the label `gpio:LABEL:LINE` names it by.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chip {
+    /// The label the kernel gives the chip (`GPIO_GET_CHIPINFO`'s label).
+    pub label: String,
+    /// What the chip is, for a message that names it.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// The kernel module's options a node may be given, besides `owned`, which every module-owned
+/// node has. Each is a comma-separated list of `vendor,name` pairs in the module's own parameter.
+pub const MODULE_ROLES: &[&str] = &["pisp_be", "gsdma", "a733_ve", "k230_isp", "vip9000"];
 
 /// What a controller is. Each kind is enabled the same way (its node's status) with what its
 /// board entry needs on top.
@@ -39,6 +63,9 @@ pub enum Kind {
     UsbPeripheral,
     /// The hardware watchdog.
     Watchdog,
+    /// A block the kernel module drives, enabled with no pin set and no bus of its own: its
+    /// board entry makes the module's option for it, and nothing else.
+    Block,
 }
 
 impl Kind {
@@ -53,6 +80,7 @@ impl Kind {
             Self::Csi => "csi",
             Self::UsbPeripheral => "usb-peripheral",
             Self::Watchdog => "watchdog",
+            Self::Block => "block",
         }
     }
 
@@ -82,6 +110,17 @@ pub struct Controller {
     /// The pin sets the controller can be wired through, by name.
     #[serde(default)]
     pub pins: BTreeMap<String, PinSet>,
+    /// The node's compatible string, `vendor,name`: what the kernel module's `owned=` parameter
+    /// takes to claim it. Needed for a controller a board gives to the module.
+    #[serde(default)]
+    pub compatible: Option<String>,
+    /// The module roles this node may be given besides `owned`, from [`MODULE_ROLES`].
+    #[serde(default)]
+    pub module_roles: Vec<String>,
+    /// Stock kernel modules that bind this node when they load. The generator writes a
+    /// `blacklist` for each one a board gives to the module, so it is not loaded for the node.
+    #[serde(default)]
+    pub stock_modules: Vec<String>,
     /// Why the generated overlay enables this node. Written beside it.
     pub reason: String,
 }
@@ -118,9 +157,40 @@ impl SocMap {
     /// alias matches its kind's form, and no two pin sets of one controller share a GPIO.
     pub fn parse(text: &str) -> Result<Self, String> {
         let map: Self = toml::from_str(text).map_err(|e| format!("soc map: {e}"))?;
+        for (key, chip) in &map.chips {
+            if chip.label.is_empty() || chip.label.contains([':', '/', ',', ' ']) {
+                return Err(format!(
+                    "chip {key:?}: label {:?} is not a chip label",
+                    chip.label
+                ));
+            }
+        }
         for (name, controller) in &map.controllers {
             if !controller.path.starts_with('/') {
                 return Err(format!("controller {name:?}: its path must be absolute"));
+            }
+            if let Some(compatible) = &controller.compatible {
+                let pair = compatible.split(',').collect::<Vec<_>>();
+                let valid = pair.len() == 2
+                    && pair.iter().all(|part| {
+                        !part.is_empty()
+                            && part.bytes().all(|b| {
+                                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+')
+                            })
+                    });
+                if !valid {
+                    return Err(format!(
+                        "controller {name:?}: compatible {compatible:?} is not vendor,name"
+                    ));
+                }
+            }
+            for role in &controller.module_roles {
+                if !MODULE_ROLES.contains(&role.as_str()) {
+                    return Err(format!(
+                        "controller {name:?}: module role {role:?} is not one of {}",
+                        MODULE_ROLES.join(", ")
+                    ));
+                }
             }
             if let (Some(alias), Kind::I2c | Kind::Spi) = (&controller.alias, controller.kind) {
                 let prefix = if controller.kind == Kind::I2c {
@@ -156,6 +226,23 @@ impl SocMap {
             }
         }
         Ok(map)
+    }
+
+    /// The GPIO chip labelled `label`, if the map has one.
+    pub fn chip_labelled(&self, label: &str) -> Option<&Chip> {
+        self.chips.values().find(|chip| chip.label == label)
+    }
+
+    /// The labels of the map's GPIO chips, for a message that lists what the map has.
+    pub fn chip_labels(&self) -> String {
+        if self.chips.is_empty() {
+            return "no GPIO chips".into();
+        }
+        self.chips
+            .values()
+            .map(|chip| chip.label.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The controllers' names, for a message that lists what the map has.

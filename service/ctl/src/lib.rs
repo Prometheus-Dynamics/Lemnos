@@ -27,9 +27,10 @@ lemnos-ctl [--socket PATH] COMMAND
   validate [--socs DIR] [--no-live] BOARD
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
-  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE]
+  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--modprobe FILE]
                                  write the device-tree overlay for a board (stdout by default),
-                                 and its firmware boot fragment, with no daemon";
+                                 its firmware boot fragment, and the kernel module's modprobe
+                                 configuration, with no daemon";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -83,15 +84,25 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         return Err(USAGE.to_string());
     };
     if command == "validate" {
-        return match tail {
-            [board] => validate(board, None, true, out),
-            [flag, dir, board] if flag == "--socs" => validate(board, Some(dir), true, out),
-            [flag, board] if flag == "--no-live" => validate(board, None, false, out),
-            [flag, dir, nolive, board] if flag == "--socs" && nolive == "--no-live" => {
-                validate(board, Some(dir), false, out)
+        // `--socs DIR` and `--no-live` in either order, then the board file.
+        let mut socs = None;
+        let mut live = true;
+        let mut board = None;
+        let mut i = 0;
+        while i < tail.len() {
+            match tail[i].as_str() {
+                "--socs" if socs.is_none() => {
+                    socs = Some(tail.get(i + 1).ok_or_else(|| USAGE.to_string())?.as_str());
+                    i += 1;
+                }
+                "--no-live" => live = false,
+                flag if board.is_none() && !flag.starts_with('-') => board = Some(flag),
+                _ => return Err(USAGE.to_string()),
             }
-            _ => Err(USAGE.to_string()),
-        };
+            i += 1;
+        }
+        let board = board.ok_or_else(|| USAGE.to_string())?;
+        return validate(board, socs, live, out);
     }
     if command == "tree" {
         return tree(tail, out);
@@ -136,6 +147,24 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
             ));
         }
     }
+    for device in &board.devices {
+        for name in device
+            .bus
+            .iter()
+            .chain(device.uses.values())
+            .filter(|name| unstable_name(name))
+        {
+            line(
+                out,
+                format_args!(
+                    "warning: device {:?} uses {name:?}: the kernel renumbers gpio and pwm chips, so \
+                     this name can point at another chip after a reboot; use gpio:LABEL:LINE or \
+                     pwm:NODE:CHANNEL",
+                    device.id
+                ),
+            )?;
+        }
+    }
     let problems = match (&board.board.soc, live) {
         (Some(_), true) => live_problems(&board, socs)?,
         _ => Vec::new(),
@@ -153,18 +182,28 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     Ok(())
 }
 
+/// A name of a GPIO or PWM chip by its number, which the kernel may renumber.
+fn unstable_name(name: &str) -> bool {
+    name.starts_with("gpiochip") || name.starts_with("pwmchip")
+}
+
 /// The problems the live device tree and platform devices have against the board's hardware.
 fn live_problems(
     board: &lemnos_host::board::BoardFile,
     socs: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let map = load_map(board, socs)?;
+    let chips: Vec<(String, u32)> = lemnos_linux::gpio_chips(std::path::Path::new("/dev"))
+        .into_iter()
+        .map(|chip| (chip.label, chip.lines))
+        .collect();
     Ok(lemnos_devtree::check(
         board,
         &map,
         &lemnos_devtree::check::Live {
             tree: std::path::Path::new("/proc/device-tree"),
             sys: std::path::Path::new("/sys/bus/platform/devices"),
+            gpio_chips: &chips,
         },
     ))
 }
@@ -188,6 +227,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut map_file = None;
     let mut overlay_out = None;
     let mut boot_out = None;
+    let mut modprobe_out = None;
     let mut board_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -197,6 +237,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--map", Some(file)) => map_file = Some(file),
             ("-o", Some(file)) => overlay_out = Some(file),
             ("--boot", Some(file)) => boot_out = Some(file),
+            ("--modprobe", Some(file)) => modprobe_out = Some(file),
             (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
                 board_path = Some(flag.to_string());
                 i += 1;
@@ -225,6 +266,9 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if let Some(file) = boot_out {
         std::fs::write(&file, &generated.boot).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = modprobe_out {
+        std::fs::write(&file, &generated.modprobe).map_err(|e| format!("{file}: {e}"))?;
     }
     Ok(())
 }

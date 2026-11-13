@@ -1,5 +1,11 @@
 # A test SoC with one controller of every kind, so every resource kind is generated and checked.
 soc = "test-soc"
+needs_nothing = ["composed"]
+
+[chips.g]
+label = "gpio-test"
+reason = "the test GPIO chip"
+
 
 [controllers.i2c0]
 kind = "i2c"
@@ -46,6 +52,9 @@ kind = "csi"
 path = "/bus/csi@6000"
 sysfs = "6000.csi"
 stock_driver = "stock-csi"
+compatible = "test,csi"
+module_roles = ["pisp_be"]
+stock_modules = ["stock-csi"]
 reason = "a camera receiver"
 
 [controllers.usb]
@@ -58,6 +67,6 @@ kind = "watchdog"
 path = "/bus/wdt@8000"
 reason = "the hardware watchdog"
 
-[bases.b.lines."gpio:9"]
+[bases.b.lines."gpio:gpio-test:9"]
 holders = ["/bus/regulator"]
 reason = "a regulator on the line"

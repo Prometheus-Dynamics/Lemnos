@@ -654,6 +654,7 @@ dependencies = [
  "lemnos-devtree",
  "lemnos-fake-devices",
  "lemnos-host",
+ "lemnos-linux",
  "lemnos-sim",
  "lemnos-wire",
  "lemnosd",

@@ -16,6 +16,8 @@ pub struct Live<'a> {
     pub tree: &'a Path,
     /// The platform devices, as `/sys/bus/platform/devices` shows them.
     pub sys: &'a Path,
+    /// The GPIO chips on the machine, as `(label, line count)`: the kernel's own chip information.
+    pub gpio_chips: &'a [(String, u32)],
 }
 
 /// Every problem with the live system against the board, one message each. Empty when it matches.
@@ -42,14 +44,16 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
         if status_of(&node) == "disabled" {
             problems.push(format!("{label}: node disabled: {}", controller.path));
         }
-        if let Some(name) = &controller.sysfs
+        // A node the board gives to the module must not be bound by the stock driver the map names.
+        if let Some(role) = &hardware.module
+            && let Some(name) = &controller.sysfs
             && let Some(stock) = &controller.stock_driver
             && let Some(bound) = bound_driver(live.sys, name)
             && bound == *stock
         {
             problems.push(format!(
-                "{label}: stock driver {stock} is bound to {name}; the module must own the node \
-                 (set driver_override, or unbind {stock})"
+                "{label}: stock driver {stock} is bound to {name}, and the board gives that node to \
+                 the module ({role}); the module must own it (set driver_override, or unbind {stock})"
             ));
         }
         if let Some(pins) = &hardware.pins
@@ -66,6 +70,70 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
                 &phandles,
                 live.tree,
             ));
+        }
+    }
+    // A stable GPIO name: a chip with its label must be on the machine, with the line in range.
+    let mut lines: Vec<(&str, &str)> = board
+        .lines
+        .iter()
+        .map(|l| (l.line.as_str(), "[[lines]]"))
+        .collect();
+    for device in &board.devices {
+        for name in device.bus.iter().chain(device.uses.values()) {
+            lines.push((name.as_str(), device.id.as_str()));
+        }
+    }
+    for (name, owner) in lines {
+        let Some(rest) = name.strip_prefix("gpio:") else {
+            continue;
+        };
+        let Some((label, line)) = rest.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(line) = line.parse::<u32>() else {
+            continue;
+        };
+        match live.gpio_chips.iter().find(|(found, _)| found == label) {
+            None => problems.push(format!(
+                "{owner}: {name}: no GPIO chip labelled {label:?} on this machine (the chips are: {})",
+                if live.gpio_chips.is_empty() {
+                    "none".to_string()
+                } else {
+                    live.gpio_chips
+                        .iter()
+                        .map(|(l, _)| l.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )),
+            Some((_, count)) if line >= *count => problems.push(format!(
+                "{owner}: {name}: line {line} is past the {count} lines of the chip labelled {label:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    // A PWM name is a node of the live tree: it must be there and enabled, as the overlay makes it.
+    for device in &board.devices {
+        for name in device.bus.iter().chain(device.uses.values()) {
+            let Some(node) = name
+                .strip_prefix("pwm:")
+                .and_then(|rest| rest.rsplit_once(':'))
+                .map(|(node, _)| node)
+            else {
+                continue;
+            };
+            let dir = live.tree.join(node.trim_start_matches('/'));
+            if !dir.is_dir() {
+                problems.push(format!(
+                    "device {:?}: {name}: node absent: {node} (the overlay should enable it)",
+                    device.id
+                ));
+            } else if status_of(&dir) == "disabled" {
+                problems.push(format!(
+                    "device {:?}: {name}: node disabled: {node}",
+                    device.id
+                ));
+            }
         }
     }
     problems

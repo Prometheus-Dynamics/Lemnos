@@ -34,7 +34,7 @@
 			aliases { i2c10 = "/soc@107c000000/i2c@7d005600"; };
 		};
 	};
-	// pwm: a PWM channel on RP1; the fan's pulse output on GPIO45
+	// pwm: a PWM channel on RP1; the fan's pulse output (a `pwm:NODE:CHANNEL` name's NODE is this path) on GPIO45
 	fragment@4 {
 		target-path = "/axi/pcie@1000120000/rp1/pwm@9c000";
 		__overlay__ {
@@ -50,22 +50,29 @@
 			status = "okay";
 		};
 	};
-	// pio: the RP1 PIO block, which the module's state machines and the PIO I2C bus run on
+	// block: the PiSP back end, the ISP's processing block; the module drives it
 	fragment@6 {
+		target-path = "/axi/pisp_be@880000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	// pio: the RP1 PIO block, which the module's state machines and the PIO I2C bus run on
+	fragment@7 {
 		target-path = "/axi/pcie@1000120000/rp1/pio@178000";
 		__overlay__ {
 			status = "okay";
 		};
 	};
 	// watchdog: the hardware watchdog, on for a managed board
-	fragment@7 {
+	fragment@8 {
 		target-path = "/soc@107c000000/watchdog@7d200000";
 		__overlay__ {
 			status = "okay";
 		};
 	};
-	// disabled: base "module-io" /cam0_reg: the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it; the board gives rp1:34 to Lemnos
-	fragment@8 {
+	// disabled: base "module-io" /cam0_reg: the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it; the board gives gpio:pinctrl-rp1:34 to Lemnos
+	fragment@9 {
 		target-path = "/cam0_reg";
 		__overlay__ {
 			status = "disabled";
