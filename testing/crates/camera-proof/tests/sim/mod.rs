@@ -670,6 +670,14 @@ impl CameraIsp for SimIsp {
         Err(Status::NOT_FOUND)
     }
 
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn output_layout(&mut self, _output: u8) -> Result<Option<OutputLayout>> {
+        Err(Status::NOT_FOUND)
+    }
+
     fn config_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Err(Status::NOT_SUPPORTED)
     }

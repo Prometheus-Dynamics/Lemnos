@@ -213,6 +213,8 @@ struct Lent {
 struct InFlight {
     input: Lent,
     outputs: [Option<Lent>; BE_NUM_OUTPUTS],
+    /// The config buffer the job named.
+    config: u32,
 }
 
 /// Which stream an image is on.
@@ -236,6 +238,12 @@ pub struct PispBe {
     hw: Box<dyn Hardware>,
     options: Options,
     raw: Option<IspInput>,
+    /// The layout of a raw frame, from `set_input`: the stride and bytes the configuration must name.
+    raw_layout: Option<OutputLayout>,
+    /// Each output's layout, from `set_output`; `None` while it is off.
+    output_layouts: [Option<OutputLayout>; BE_NUM_OUTPUTS],
+    /// Config buffers a job accepted here still names; busy until that job completes.
+    config_busy: [bool; MAX_BUFFERS],
     output_bytes: [Option<u32>; BE_NUM_OUTPUTS],
     tdn_compressed: Option<bool>,
     /// Bytes of each temporal denoise average, while it's on.
@@ -370,6 +378,9 @@ impl PispBe {
             hw,
             options,
             raw: None,
+            raw_layout: None,
+            output_layouts: [None; BE_NUM_OUTPUTS],
+            config_busy: [false; MAX_BUFFERS],
             output_bytes: [None; BE_NUM_OUTPUTS],
             tdn_compressed: None,
             tdn_bytes: None,
@@ -426,6 +437,7 @@ impl PispBe {
         self.hw.stop();
         self.jobs = [None; MAX_JOBS];
         self.inputs.busy = [false; MAX_BUFFERS];
+        self.config_busy = [false; MAX_BUFFERS];
         for o in &mut self.outputs {
             o.busy = [false; MAX_BUFFERS];
         }
@@ -545,6 +557,7 @@ impl PispBe {
         // The block is done with them: the module has released the job's hold.
         self.hw.unregister(job.input.region)?;
         Buffers::set(&mut self.inputs.busy, job.input.buffer, false);
+        Buffers::set(&mut self.config_busy, job.config, false);
         for lent in job.outputs.iter().flatten() {
             self.hw.unregister(lent.region)?;
         }
@@ -590,6 +603,7 @@ impl PispBe {
         let named = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
         if job.layout != LAYOUT_BACK_END
             || !self.configs.free(job.config_buffer)
+            || self.config_busy.get(job.config_buffer as usize) != Some(&false)
             || !self.inputs.free(job.input_buffer)
             || (BE_NUM_OUTPUTS..MAX_OUTPUTS).any(|i| named(i) != NO_BUFFER)
         {
@@ -620,6 +634,16 @@ impl PispBe {
             return Ok(false);
         }
         let c = &self.parsed.config;
+        // The configuration must describe the frame set_input described: its size and stride.
+        let frame_ok = self.raw.is_some_and(|r| {
+            u32::from(c.input_format.width) == r.width
+                && u32::from(c.input_format.height) == r.height
+        }) && self
+            .raw_layout
+            .is_some_and(|l| u32::try_from(c.input_format.stride).ok() == Some(l.stride));
+        if !frame_ok {
+            return Ok(false);
+        }
         let bayer = c.global.bayer_enables;
         let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
         let writes_average = bayer & bayer_enable::TDN_OUTPUT != 0;
@@ -655,6 +679,7 @@ impl PispBe {
         let mut flight = InFlight {
             input: input.1,
             outputs: [None; BE_NUM_OUTPUTS],
+            config: job.config_buffer,
         };
         for (o, bytes) in output_bytes.into_iter().enumerate() {
             let buffer = named(o);
@@ -691,6 +716,7 @@ impl PispBe {
             Err(e) => return Err(e),
         }
         Buffers::set(&mut self.inputs.busy, flight.input.buffer, true);
+        Buffers::set(&mut self.config_busy, flight.config, true);
         for (o, lent) in flight.outputs.iter().enumerate() {
             if let (Some(lent), Some(buffers)) = (lent, self.outputs.get_mut(o)) {
                 Buffers::set(&mut buffers.busy, lent.buffer, true);
@@ -851,9 +877,13 @@ impl CameraIsp for PispBe {
             ..Default::default()
         };
         compute_stride_align(&mut image, INPUT_ALIGN);
-        be_job::image_bytes(&image)
+        let bytes = be_job::image_bytes(&image)
             .filter(|&b| b <= MAX_IMAGE_BYTES)
             .ok_or(Status::INVALID_ARGUMENT)?;
+        self.raw_layout = Some(OutputLayout {
+            stride: u32::try_from(image.stride).map_err(|_| Status::INVALID_ARGUMENT)?,
+            size: u32::try_from(bytes).map_err(|_| Status::INVALID_ARGUMENT)?,
+        });
         self.raw = Some(input);
         Ok(())
     }
@@ -876,11 +906,31 @@ impl CameraIsp for PispBe {
             .ok_or(Status::INVALID_ARGUMENT)?;
         let size = u32::try_from(bytes).map_err(|_| Status::INVALID_ARGUMENT)?;
         let stride = u32::try_from(format.stride).map_err(|_| Status::INVALID_ARGUMENT)?;
+        let layout = OutputLayout { stride, size };
         *self
             .output_bytes
             .get_mut(usize::from(output))
             .ok_or(Status::NOT_FOUND)? = Some(size);
-        Ok(OutputLayout { stride, size })
+        *self
+            .output_layouts
+            .get_mut(usize::from(output))
+            .ok_or(Status::NOT_FOUND)? = Some(layout);
+        Ok(layout)
+    }
+
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        Ok(self.raw_layout)
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        if usize::from(output) >= self.output_count() {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(self
+            .output_layouts
+            .get(usize::from(output))
+            .copied()
+            .flatten())
     }
 
     fn clear_output(&mut self, output: u8) -> Result<()> {
@@ -890,6 +940,10 @@ impl CameraIsp for PispBe {
         self.stopped()?;
         *self
             .output_bytes
+            .get_mut(usize::from(output))
+            .ok_or(Status::NOT_FOUND)? = None;
+        *self
+            .output_layouts
             .get_mut(usize::from(output))
             .ok_or(Status::NOT_FOUND)? = None;
         Ok(())

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
     BayerOrder, CameraIsp, Counters, IspInput, IspJob, IspOutput, MAX_STREAM_NAME, NO_BUFFER,
+    OutputLayout,
 };
 use lemnos_core::{Encode, Health, Lifecycle, Result, Status, StreamHandle, Writer};
 use lemnos_hal::ErrorKind;
@@ -1169,6 +1170,121 @@ fn counters_start_again_at_each_start() {
 }
 
 // ---- Allocation.
+
+#[test]
+fn layouts_are_the_ones_set_output_answered_and_none_when_unset() {
+    let streams = Streams::new();
+    let (mut d, _k) = driver(&streams);
+    // Nothing set: no output layout, and the input has none to give.
+    assert_eq!(d.output_layout(0).unwrap(), None);
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    // One output here: output 1 is past the last one.
+    assert_eq!(d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+    d.set_input(input()).unwrap();
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    let answered = d.set_output(0, nv12()).unwrap();
+    // The stand-in kernel lays NV12 out at WIDTH bytes a line, IMAGE bytes an image.
+    assert_eq!(
+        answered,
+        OutputLayout {
+            stride: WIDTH,
+            size: IMAGE as u32
+        }
+    );
+    assert_eq!(d.output_layout(0).unwrap(), Some(answered));
+    // The caller's padding is in the stream buffer, so in the layout's size.
+    let padded = d
+        .set_output(
+            0,
+            IspOutput {
+                pad_bytes: 16,
+                ..nv12()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        padded,
+        OutputLayout {
+            stride: WIDTH,
+            size: IMAGE as u32 + 16
+        }
+    );
+    assert_eq!(d.output_layout(0).unwrap(), Some(padded));
+    d.clear_output(0).unwrap();
+    assert_eq!(d.output_layout(0).unwrap(), None);
+    assert_eq!(d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+}
+
+#[test]
+fn the_self_path_has_a_layout_only_when_its_stream_is_there() {
+    let streams = Streams::new().with_output1();
+    let (mut d, _k) = driver(&streams);
+    assert_eq!(d.output_layout(1).unwrap(), None);
+    assert_eq!(d.output_layout(2).unwrap_err(), Status::NOT_FOUND);
+    let answered = d.set_output(1, nv12()).unwrap();
+    assert_eq!(d.output_layout(1).unwrap(), Some(answered));
+    assert_eq!(d.output_layout(0).unwrap(), None);
+}
+
+#[test]
+fn a_job_naming_a_config_buffer_still_in_flight_is_dropped_and_the_earlier_job_runs() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    let first = pattern(3, PARAMS);
+    streams.config.fill(2, &first);
+    post(&streams.config, &job(1, 2, NO_BUFFER));
+    d.tick(1);
+    assert_eq!(k.queued_params(), vec![(0, 10921)]);
+    // The consumer rewrites config buffer 2 while job 1 is in flight, and names it again.
+    streams.config.fill(2, &pattern(4, PARAMS));
+    post(&streams.config, &job(2, 2, NO_BUFFER));
+    d.tick(2);
+    assert_eq!(d.counters().unwrap().dropped, 1);
+    assert_eq!(
+        k.queued_params(),
+        vec![(0, 10921)],
+        "job 2 never reached the kernel"
+    );
+    // Job 1 completes as if nothing happened: its copy is what the kernel got.
+    k.apply(0, 5);
+    k.finish(Queue::Statistics, 0, 5, &pattern(9, 1000));
+    d.tick(3);
+    assert_eq!(k.params_seen(0), first);
+    assert_eq!(
+        d.counters().unwrap(),
+        Counters {
+            jobs: 1,
+            dropped: 1,
+            errors: 0
+        }
+    );
+    let s = streams.statistics.take_frame().unwrap();
+    assert_eq!(s.identity, 1);
+    assert!(streams.statistics.take_frame().is_none());
+}
+
+#[test]
+fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    streams.config.fill(2, &pattern(1, PARAMS));
+    post(&streams.config, &job(1, 2, NO_BUFFER));
+    d.tick(1);
+    k.apply(0, 5);
+    k.finish(Queue::Statistics, 0, 5, &pattern(9, 1000));
+    d.tick(2);
+    assert_eq!(d.counters().unwrap().jobs, 1);
+    // Free again: the consumer writes it and names it in a new job.
+    let second = pattern(7, PARAMS);
+    streams.config.fill(2, &second);
+    post(&streams.config, &job(2, 2, NO_BUFFER));
+    d.tick(3);
+    assert_eq!(d.counters().unwrap().dropped, 0);
+    assert_eq!(k.queued_params().len(), 2);
+    assert_eq!(k.params_seen(0), second);
+}
 
 /// One job through the driver: taken on one tick, its frame finished for the next, its results
 /// handed back by the consumer.

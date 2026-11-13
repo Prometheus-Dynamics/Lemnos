@@ -26,8 +26,9 @@
 //!
 //! 1. [`job::check`]: the layout is the generation's, the config buffer is on the config
 //!    stream, each output buffer is on a stream of an output that is on. Then: the config
-//!    buffer is one this driver holds, each output buffer is one it holds and no waiting job
-//!    named, a kernel parameter buffer is free, and fewer than [`MAX_PENDING`] jobs wait.
+//!    buffer is one this driver holds and no waiting job names it, each output buffer is one it
+//!    holds and no waiting job named, a kernel parameter buffer is free, and fewer than
+//!    [`MAX_PENDING`] jobs wait.
 //! 2. The parameters are read from the config buffer into the driver's copy, exactly the
 //!    generation's size; [`job::copy_params`] puts that copy into the kernel's parameter
 //!    buffer, which is queued.
@@ -39,9 +40,17 @@
 //!    whose frame has passed, or that the kernel flagged, is not delivered and the job counts
 //!    as an error.
 //!
+//! Config buffers follow the contract's configuration-buffer rules (`camera-isp`, its
+//! "Configuration buffers" section): the driver reads a config buffer once, when it takes the
+//! job, and checks and programs only that copy. A config buffer is busy from the job's take to
+//! the job's completion (a frame, a drop or an error), and a job naming a busy one is refused
+//! and counted as dropped without touching the earlier job. A busy buffer is never handed back
+//! to the consumer, not even when the config stream's consumer faults.
+//!
 //! A job that fails step 1 or 2 is counted as dropped. Bytes on the config stream's job queue
 //! that are no job are counted as dropped too and, as the contract says of a broken consumer,
-//! fault that consumer's config stream; the config buffers held under it are given up. Nothing
+//! fault that consumer's config stream; the config buffers held under it that no job names are
+//! given up. Nothing
 //! on the way allocates.
 //!
 //! # Settings
@@ -251,6 +260,8 @@ struct Pending {
     identity: u64,
     /// When it was taken, to find the oldest.
     order: u64,
+    /// The config buffer its parameters were read from: busy until the job completes.
+    config: u32,
     /// The kernel parameter buffer carrying its parameters.
     slot: u32,
     /// The frame the kernel applied them to, once the parameter buffer is back.
@@ -304,10 +315,24 @@ struct Agreed {
     stream_bytes: u32,
 }
 
+impl Agreed {
+    /// The layout `set_output` answers and `output_layout` gives: the kernel's stride, and the
+    /// stream buffer's bytes (the image and the caller's padding).
+    fn layout(&self) -> OutputLayout {
+        OutputLayout {
+            stride: self.image.stride,
+            size: self.stream_bytes,
+        }
+    }
+}
+
 /// The stream buffers this driver holds, one bit per buffer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Held {
     config: u64,
+    /// Config buffers a job named and has not completed: the driver holds them, and no job may
+    /// name one of them until its job completes.
+    config_busy: u64,
     statistics: u64,
     outputs: [u64; OUTPUTS as usize],
 }
@@ -503,8 +528,9 @@ impl Rkisp {
     /// Ends every waiting job as an error: its frame will not come.
     fn abandon(&mut self) {
         for slot in &mut self.pending {
-            if slot.take().is_some() {
+            if let Some(p) = slot.take() {
                 self.counters.errors = self.counters.errors.saturating_add(1);
+                self.held.config_busy = with(self.held.config_busy, p.config, false);
             }
         }
     }
@@ -736,6 +762,7 @@ impl Rkisp {
                 &mut self.counters.jobs
             };
             *counter = counter.saturating_add(1);
+            self.held.config_busy = with(self.held.config_busy, p.config, false);
             *slot = None;
         }
     }
@@ -779,11 +806,13 @@ impl Rkisp {
     }
 
     /// Faults the config stream's consumer. The config buffers held were taken under it and
-    /// have nothing behind them now: each is given up, to be taken again under the next one.
+    /// have nothing behind them now: each one no job names is given up, to be taken again under
+    /// the next one. A busy one stays held until its job completes.
     fn fault_config(&mut self) -> Result<()> {
         self.config.fault_consumer().map_err(|_| Status::IO)?;
         for buffer in 0..MAX_STREAM_BUFFERS {
-            if !has(self.held.config, buffer) {
+            // A buffer a job still names stays with the driver until that job completes.
+            if !has(self.held.config, buffer) || has(self.held.config_busy, buffer) {
                 continue;
             }
             // Nothing is behind it, so this reaches no one.
@@ -810,7 +839,9 @@ impl Rkisp {
         let Some(checked) = job::check(job, limits) else {
             return Ok(false);
         };
-        if !has(self.held.config, checked.config_buffer) {
+        if !has(self.held.config, checked.config_buffer)
+            || has(self.held.config_busy, checked.config_buffer)
+        {
             return Ok(false);
         }
         for (o, buffer) in checked.outputs.iter().enumerate() {
@@ -844,11 +875,13 @@ impl Rkisp {
         let n = u32::try_from(n).map_err(|_| Status::IO)?;
         self.hw.queue_params(slot, n)?;
         self.params_free = with(self.params_free, slot, false);
+        self.held.config_busy = with(self.held.config_busy, checked.config_buffer, true);
         self.taken = self.taken.wrapping_add(1);
         if let Some(entry) = self.pending.get_mut(free) {
             *entry = Some(Pending {
                 identity: checked.identity,
                 order: self.taken,
+                config: checked.config_buffer,
                 slot,
                 sequence: None,
                 statistics: true,
@@ -943,14 +976,12 @@ impl CameraIsp for Rkisp {
             .size
             .checked_add(image.pad_bytes)
             .ok_or(Status::INVALID_ARGUMENT)?;
-        *self.outputs.get_mut(o).ok_or(Status::NOT_FOUND)? = Some(Agreed {
+        let agreed = Agreed {
             image: got,
             stream_bytes,
-        });
-        Ok(OutputLayout {
-            stride: got.stride,
-            size: stream_bytes,
-        })
+        };
+        *self.outputs.get_mut(o).ok_or(Status::NOT_FOUND)? = Some(agreed);
+        Ok(agreed.layout())
     }
 
     fn clear_output(&mut self, output: u8) -> Result<()> {
@@ -982,6 +1013,21 @@ impl CameraIsp for Rkisp {
             return Err(Status::NOT_FOUND);
         }
         name(OUTPUT_STREAMS.get(o).ok_or(Status::NOT_FOUND)?, into)
+    }
+
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        // The raw frame never passes through a buffer this driver holds: the receiver feeds the
+        // ISP inside the kernel, and the driver programs no stride for it (only the raw format,
+        // in `begin`). There is no layout to report, so it is refused like `input_stream`.
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        let o = usize::from(output);
+        if o >= self.output_count() {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(self.outputs.get(o).copied().flatten().map(|a| a.layout()))
     }
 
     fn start(&mut self) -> Result<()> {

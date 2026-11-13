@@ -43,6 +43,22 @@
 //! dropped. A frame that
 //! wrapped in its buffer (a plane reached its size) is published empty and counted as an error.
 //!
+//! # Configuration buffers
+//!
+//! This driver follows the contract's configuration buffer rules, 2 to 5 (the `# Configuration
+//! buffers` section of the `camera.isp/1` contract). A job's configuration buffer is read once,
+//! when the job is taken off the ring, into the driver's copy, and only the copy is checked and
+//! written. A job is busy from its take until its image is published (at the next job's frame
+//! end). While one is busy, a job naming its configuration buffer is refused: it is counted as
+//! dropped, nothing is published for it, and the job in flight is not disturbed.
+//!
+//! # Layouts
+//!
+//! `input_layout` is `NOT_SUPPORTED`: the frame comes from the receiver, as `input_stream` says.
+//! `output_layout` is the layout `set_output` answered, `stride` the width and `size` the planes
+//! plus `pad_bytes`, from `set_output` until `clear_output`; `None` before that, `NOT_FOUND` past
+//! the one output.
+//!
 //! # Settings
 //!
 //! - `block` (string, required): the ISP's platform device name, as the module lists it.
@@ -245,11 +261,14 @@ enum State {
     Recovering { attempt: u32, due: Option<u64> },
 }
 
-/// A frame job: whose, and the output buffer its image goes into.
+/// A frame job: whose, the output buffer its image goes into, and the config buffer its
+/// configuration was read from. Both buffers stay busy until the job completes (its image is
+/// published).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Frame {
     identity: u64,
     buffer: u32,
+    config: u32,
 }
 
 /// An output buffer's dma-buf as imported: the module's index and the memory's identity.
@@ -265,6 +284,8 @@ struct Output {
     image: IspOutput,
     luma: u32,
     chroma: u32,
+    /// What `set_output` answered, and what `output_layout` gives until the output is cleared.
+    layout: OutputLayout,
 }
 
 /// The ISP through `lemnos.ko`, frames into the caller's dma-bufs, as `camera.isp/1`.
@@ -685,14 +706,19 @@ impl K230IspFrames {
             return Ok(false);
         };
         let buffer = job.outputs[0];
-        let busy = |frame: Option<Frame>| frame.is_some_and(|f| f.buffer == buffer);
+        let config = job.config_buffer;
+        // A job still in flight (started, or the path writing its image) holds both its buffers.
+        let busy_output = |frame: Option<Frame>| frame.is_some_and(|f| f.buffer == buffer);
+        let busy_config = |frame: Option<Frame>| frame.is_some_and(|f| f.config == config);
         if job.layout != LAYOUT_WRITES
             || job.config_buffer >= self.config_buffers
             || !has(self.held_config, job.config_buffer)
             || job.input_buffer != NO_BUFFER
             || job.outputs[1..].iter().any(|&b| b != NO_BUFFER)
             || !has(self.held_output, buffer)
-            || busy(self.writing)
+            || busy_output(self.writing)
+            || busy_config(self.started)
+            || busy_config(self.writing)
         {
             return Ok(false);
         }
@@ -772,6 +798,7 @@ impl K230IspFrames {
         self.started = Some(Frame {
             identity: job.identity,
             buffer,
+            config: job.config_buffer,
         });
         Ok(true)
     }
@@ -863,15 +890,17 @@ impl CameraIsp for K230IspFrames {
         let stream_bytes = (luma + chroma)
             .checked_add(image.pad_bytes)
             .ok_or(Status::INVALID_ARGUMENT)?;
+        let layout = OutputLayout {
+            stride: image.width,
+            size: stream_bytes,
+        };
         self.output = Some(Output {
             image,
             luma,
             chroma,
+            layout,
         });
-        Ok(OutputLayout {
-            stride: image.width,
-            size: stream_bytes,
-        })
+        Ok(layout)
     }
 
     fn clear_output(&mut self, output: u8) -> Result<()> {
@@ -881,6 +910,19 @@ impl CameraIsp for K230IspFrames {
         self.stopped()?;
         self.output = None;
         Ok(())
+    }
+
+    /// `NOT_SUPPORTED`: the frame comes from the receiver, not from a buffer this driver's
+    /// consumer writes.
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        if output != 0 {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(self.output.map(|o| o.layout))
     }
 
     fn config_stream(&mut self, into: &mut [u8]) -> Result<usize> {

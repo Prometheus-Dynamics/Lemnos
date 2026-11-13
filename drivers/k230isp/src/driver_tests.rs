@@ -640,6 +640,75 @@ fn with_no_statistics_buffer_free_the_job_is_an_error() {
     assert_eq!((c.jobs, c.errors), (1, 1));
 }
 
+#[test]
+fn layouts_are_refused_because_this_driver_has_no_input_and_no_outputs() {
+    let (mut d, _b) = driver(&Streams::new());
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    assert_eq!(d.output_layout(0).unwrap_err(), Status::NOT_FOUND);
+    assert_eq!(d.output_layout(3).unwrap_err(), Status::NOT_FOUND);
+    d.start().unwrap();
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    assert_eq!(d.output_layout(0).unwrap_err(), Status::NOT_FOUND);
+}
+
+#[test]
+fn a_job_naming_a_config_buffer_the_block_holds_waits_on_the_ring() {
+    let streams = Streams::new();
+    let (mut d, b) = running(&streams);
+    streams.config.fill(0, &list(&[(AE_V_SIZE, 2)]));
+    post(&streams.config, &job(1, 0));
+    // Posted while job 1 holds buffer 0: the consumer writes nothing to it.
+    post(&streams.config, &job(2, 0));
+    d.tick(STRIDE);
+    assert_eq!(b.writes(), [(AE_V_SIZE, 2), (ISP_CTRL, CTRL_GEN_CFG_UPD)]);
+    d.tick(STRIDE * 2);
+    d.tick(STRIDE * 3);
+    // Job 2 is still on the ring: not taken, not dropped.
+    assert_eq!(b.writes().len(), 2);
+    assert_eq!(d.counters().unwrap().dropped, 0);
+    b.frame_out(1);
+    b.frame_out(2);
+    d.tick(STRIDE * 4);
+    assert_eq!(streams.statistics.take_frame().unwrap().identity, 1);
+    // Job 2 went once job 1 was done, reading buffer 0 as it was.
+    assert_eq!(
+        b.writes(),
+        [
+            (AE_V_SIZE, 2),
+            (ISP_CTRL, CTRL_GEN_CFG_UPD),
+            (AE_V_SIZE, 2),
+            (ISP_CTRL, CTRL_GEN_CFG_UPD)
+        ]
+    );
+    assert_eq!(d.counters().unwrap().dropped, 0);
+}
+
+#[test]
+fn a_config_buffer_rewritten_after_its_job_completes_is_read_by_the_next_job() {
+    let streams = Streams::new();
+    let (mut d, b) = running(&streams);
+    streams.config.fill(0, &list(&[(AE_V_SIZE, 2)]));
+    post(&streams.config, &job(1, 0));
+    d.tick(STRIDE);
+    b.frame_out(1);
+    b.frame_out(2);
+    d.tick(STRIDE * 2);
+    assert_eq!(streams.statistics.take_frame().unwrap().identity, 1);
+    // Job 1 is complete: the consumer may write buffer 0 again and name it.
+    streams.config.fill(0, &list(&[(AE_V_SIZE, 9)]));
+    post(&streams.config, &job(2, 0));
+    d.tick(STRIDE * 3);
+    assert_eq!(
+        b.writes(),
+        [
+            (AE_V_SIZE, 2),
+            (ISP_CTRL, CTRL_GEN_CFG_UPD),
+            (AE_V_SIZE, 9),
+            (ISP_CTRL, CTRL_GEN_CFG_UPD)
+        ]
+    );
+}
+
 // ---- Failures.
 
 #[test]

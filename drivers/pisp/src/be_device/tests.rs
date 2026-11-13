@@ -291,10 +291,14 @@ fn setup(streams: &Streams) -> (PispBe, Hw) {
 }
 
 fn job(identity: u64, input: u32, output: u32) -> IspJob {
+    job_on(identity, 1, input, output)
+}
+
+fn job_on(identity: u64, config: u32, input: u32, output: u32) -> IspJob {
     IspJob {
         identity,
         layout: LAYOUT_BACK_END,
-        config_buffer: 1,
+        config_buffer: config,
         input_buffer: input,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
     }
@@ -521,11 +525,14 @@ fn streams_whose_buffers_have_no_handles_are_refused_at_start() {
 fn a_job_needs_a_free_pool_buffer_and_room_on_the_ring() {
     let streams = Streams::new();
     let (mut be, hw) = setup_with(&streams, Options::new(2, 4).unwrap());
-    streams.configure(&config());
+    // Each job names its own configuration buffer, so the ring is what limits them.
+    for buffer in 1..=3 {
+        streams.config.fill(buffer, &bytes_of(&config()));
+    }
     CameraIsp::start(&mut be).unwrap();
-    streams.post(&job(1, 0, 0));
-    streams.post(&job(2, 1, 1));
-    streams.post(&job(3, 2, 2));
+    streams.post(&job_on(1, 1, 0, 0));
+    streams.post(&job_on(2, 2, 1, 1));
+    streams.post(&job_on(3, 3, 2, 2));
     run_once(&mut be, 1);
     let posted = hw.posted();
     assert_eq!(posted.iter().map(|k| k.buffer).collect::<Vec<_>>(), [0, 1]);
@@ -908,4 +915,80 @@ fn the_steady_state_allocates_nothing() {
         }
     });
     assert_eq!(allocated, 0, "a tick with nothing to do");
+}
+
+#[test]
+fn the_layouts_are_what_set_input_and_set_output_programmed() {
+    let streams = Streams::new();
+    let (mut be, _hw) = setup(&streams);
+    let raw = CameraIsp::input_layout(&mut be)
+        .unwrap()
+        .expect("set by set_input");
+    assert_eq!((raw.stride, u64::from(raw.size)), (2560, INPUT_BYTES));
+    let out = CameraIsp::output_layout(&mut be, 0)
+        .unwrap()
+        .expect("set by set_output");
+    assert_eq!((out.stride, u64::from(out.size)), (1280, OUTPUT_BYTES));
+    // This device has output 0 only, so output 1 is past the last one.
+    assert_eq!(
+        CameraIsp::output_layout(&mut be, 1).err(),
+        Some(Status::NOT_FOUND)
+    );
+    CameraIsp::clear_output(&mut be, 0).unwrap();
+    assert_eq!(
+        CameraIsp::output_layout(&mut be, 0).unwrap(),
+        None,
+        "cleared"
+    );
+}
+
+#[test]
+fn a_job_naming_a_config_buffer_an_accepted_job_holds_is_dropped_until_that_job_completes() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job(1, 2, 3));
+    streams.post(&job(2, 0, 1));
+    run_once(&mut be, 1);
+    run_once(&mut be, 2);
+    assert_eq!(
+        hw.with(|m| m.posted.len()),
+        1,
+        "the second names the buffer the first holds"
+    );
+    assert_eq!(dropped(&mut be), 1);
+    hw.finish(0, 1, 4096);
+    run_once(&mut be, 3);
+    streams.post(&job(3, 0, 1));
+    run_once(&mut be, 4);
+    assert_eq!(
+        hw.with(|m| m.posted.len()),
+        2,
+        "the buffer is free once its job completed"
+    );
+    assert_eq!(dropped(&mut be), 1);
+}
+
+#[test]
+fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    let mut first = config();
+    first.config.wbg.gain_r = 0x1111;
+    streams.configure(&first);
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job(1, 2, 3));
+    run_once(&mut be, 1);
+    hw.finish(0, 1, 4096);
+    run_once(&mut be, 2);
+    let mut second = config();
+    second.config.wbg.gain_r = 0x2222;
+    streams.configure(&second);
+    streams.post(&job(2, 0, 1));
+    run_once(&mut be, 3);
+    let posted = hw.with(|m| m.posted.clone());
+    assert_eq!(posted.len(), 2);
+    assert_eq!(&posted[0].1[..], &bytes_of(&first)[..]);
+    assert_eq!(&posted[1].1[..], &bytes_of(&second)[..]);
 }

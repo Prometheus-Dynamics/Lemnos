@@ -5,11 +5,12 @@ use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
-    BayerOrder, CameraIsp, Counters, IspInput, IspJob, IspOutput, NO_BUFFER,
+    BayerOrder, CameraIsp, Counters, IspInput, IspJob, IspOutput, NO_BUFFER, OutputLayout,
 };
 use lemnos_contract_isp_pisp::{IspPisp, LAYOUT_FRONT_END};
 use lemnos_core::{Encode, Health, Lifecycle, Result, Status, StreamHandle, Writer};
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
+use lemnos_hal::blocks::StreamEndpoint;
 use lemnos_hal::mock::MockStream;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
@@ -282,15 +283,15 @@ impl Rig {
 }
 
 /// Every stream: four config buffers, four statistics buffers, `frames` (four output 0 buffers
-/// with handles unless given), and output 1 when `output1`.
-fn rig_with(frames: Option<MockStream>, output1: bool) -> Rig {
+/// with handles unless given), and output 1 when `output1`. Nothing is set: no input, no output.
+fn unset_rig(frames: Option<MockStream>, output1: bool) -> Rig {
     let hw = Hw::default();
     let hold = |s: &MockStream| -> StreamHandle { lemnos_core::Held::boxed(Box::new(s.clone())) };
     let config = MockStream::with_bytes(4, CONFIG_BYTES);
     let stats = handles(4, STATS_BYTES as u64);
     let frames = frames.unwrap_or_else(|| handles(4, 4096));
     let out1 = handles(4, u64::from(FRAME));
-    let mut fe = PispFe::with_hardware(
+    let fe = PispFe::with_hardware(
         Box::new(hw.clone()),
         PispFeNeeds {
             config: hold(&config),
@@ -300,21 +301,6 @@ fn rig_with(frames: Option<MockStream>, output1: bool) -> Rig {
         },
         options(),
     );
-    CameraIsp::set_input(
-        &mut fe,
-        IspInput {
-            width: 640,
-            height: 480,
-            bit_depth: 12,
-            bayer: BayerOrder::default(),
-        },
-    )
-    .unwrap();
-    let layout = CameraIsp::set_output(&mut fe, 2, image()).unwrap();
-    assert_eq!((layout.stride, layout.size), (STRIDE, FRAME));
-    if output1 {
-        CameraIsp::set_output(&mut fe, 3, image()).unwrap();
-    }
     Rig {
         fe,
         hw,
@@ -323,6 +309,27 @@ fn rig_with(frames: Option<MockStream>, output1: bool) -> Rig {
         frames,
         out1,
     }
+}
+
+/// [`unset_rig`] with the input and every output set, as a client leaves it before `start`.
+fn rig_with(frames: Option<MockStream>, output1: bool) -> Rig {
+    let mut r = unset_rig(frames, output1);
+    CameraIsp::set_input(
+        &mut r.fe,
+        IspInput {
+            width: 640,
+            height: 480,
+            bit_depth: 12,
+            bayer: BayerOrder::default(),
+        },
+    )
+    .unwrap();
+    let layout = CameraIsp::set_output(&mut r.fe, 2, image()).unwrap();
+    assert_eq!((layout.stride, layout.size), (STRIDE, FRAME));
+    if output1 {
+        CameraIsp::set_output(&mut r.fe, 3, image()).unwrap();
+    }
+    r
 }
 
 fn rig() -> Rig {
@@ -827,6 +834,142 @@ fn a_second_job_on_a_buffer_a_job_already_has_is_dropped() {
     assert_eq!(r.hw.with(|m| m.posted.len()), 1);
     assert_eq!(r.hw.with(|m| m.posted[0].identity), 1);
     assert_eq!(r.fe.counters.dropped, 1);
+}
+
+#[test]
+fn a_job_naming_a_config_buffer_an_accepted_job_still_holds_is_dropped() {
+    let mut r = rig();
+    r.fill(0, &config(0));
+    CameraIsp::start(&mut r.fe).unwrap();
+    r.post(&job(1, 0, 2, NO_BUFFER));
+    r.post(&job(2, 0, 3, NO_BUFFER));
+    r.fe.tick(1);
+    assert_eq!(
+        r.hw.with(|m| m.posted.len()),
+        1,
+        "the second job names config 0, which the first still holds"
+    );
+    assert_eq!(r.hw.with(|m| m.posted[0].identity), 1);
+    assert_eq!(r.fe.counters.dropped, 1);
+    assert!(
+        r.frames.take_frame().is_none(),
+        "nothing is published for the drop"
+    );
+    assert_eq!(
+        &r.hw.with(|m| m.configs[2].to_vec())[..],
+        &bytes_of(&config(0))[..],
+        "the earlier job's slot is not disturbed"
+    );
+
+    // Once the first job completes, config 0 is the consumer's again: the next job uses what it
+    // was rewritten to.
+    r.hw.with(|m| m.finished.push(done(2, 1)));
+    r.fe.tick(2);
+    assert_eq!(r.fe.counters.jobs, 1);
+    let rewritten = config(en::AWB_STATS);
+    r.fill(0, &rewritten);
+    r.post(&job(3, 0, 3, NO_BUFFER));
+    r.fe.tick(3);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 2);
+    assert_eq!(r.hw.with(|m| m.posted[1].identity), 3);
+    assert_eq!(
+        &r.hw.with(|m| m.configs[3].to_vec())[..],
+        &bytes_of(&rewritten)[..],
+        "the job runs with the configuration written after the first completed"
+    );
+}
+
+#[test]
+fn a_config_buffer_a_job_holds_when_its_consumer_faults_is_given_up_when_the_job_completes() {
+    let mut r = rig();
+    r.fill(0, &config(0));
+    CameraIsp::start(&mut r.fe).unwrap();
+    r.post(&job(1, 0, 2, NO_BUFFER));
+    r.fe.tick(1);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 1);
+    // A job that is no job: the consumer is faulted while job 1 holds config 0.
+    r.config.post_job(&[0xff; 3]);
+    r.fe.tick(2);
+    assert_eq!(r.config.faults(), 1);
+    assert_eq!(
+        r.config.buffer_current(0),
+        Ok(false),
+        "still held by the job, so not given up yet"
+    );
+    r.hw.with(|m| m.finished.push(done(2, 1)));
+    r.fe.tick(3);
+    assert_eq!(
+        r.config.buffer_current(0),
+        Ok(true),
+        "given up when the job completed: taken again under the next consumer"
+    );
+}
+
+#[test]
+fn an_output_layout_is_the_one_set_output_answered_until_cleared() {
+    let mut r = rig_with(None, true);
+    assert_eq!(
+        CameraIsp::output_layout(&mut r.fe, 2),
+        Ok(Some(OutputLayout {
+            stride: STRIDE,
+            size: FRAME,
+        }))
+    );
+    let layout = CameraIsp::set_output(&mut r.fe, 3, image()).unwrap();
+    assert_eq!(CameraIsp::output_layout(&mut r.fe, 3), Ok(Some(layout)));
+    CameraIsp::clear_output(&mut r.fe, 3).unwrap();
+    assert_eq!(CameraIsp::output_layout(&mut r.fe, 3), Ok(None));
+    assert_eq!(
+        CameraIsp::output_layout(&mut r.fe, 2),
+        Ok(Some(OutputLayout {
+            stride: STRIDE,
+            size: FRAME,
+        })),
+        "clearing output 1 leaves output 0 as it was"
+    );
+    assert_eq!(
+        CameraIsp::output_layout(&mut r.fe, 4),
+        Err(Status::NOT_FOUND)
+    );
+}
+
+#[test]
+fn output_layouts_are_none_before_set_and_not_found_past_the_last_output() {
+    let mut r = unset_rig(None, true);
+    assert_eq!(CameraIsp::output_layout(&mut r.fe, 2), Ok(None));
+    assert_eq!(CameraIsp::output_layout(&mut r.fe, 3), Ok(None));
+    assert_eq!(
+        CameraIsp::output_layout(&mut r.fe, 4),
+        Err(Status::NOT_FOUND)
+    );
+
+    let mut bare = unset_rig(None, false);
+    assert_eq!(
+        CameraIsp::output_layout(&mut bare.fe, 3),
+        Err(Status::NOT_FOUND),
+        "output 1 without its stream is past the last output"
+    );
+}
+
+#[test]
+fn the_input_layout_is_none_before_set_input_and_not_supported_after() {
+    let mut r = unset_rig(None, false);
+    assert_eq!(CameraIsp::input_layout(&mut r.fe), Ok(None));
+    CameraIsp::set_input(
+        &mut r.fe,
+        IspInput {
+            width: 640,
+            height: 480,
+            bit_depth: 12,
+            bayer: BayerOrder::default(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        CameraIsp::input_layout(&mut r.fe),
+        Err(Status::NOT_SUPPORTED),
+        "frames come from the receiver, and the driver programs no stride for them"
+    );
 }
 
 #[test]
