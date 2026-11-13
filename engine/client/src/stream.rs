@@ -165,6 +165,10 @@ pub struct FrameStream {
     planes: Planes,
     /// Each pool index's descriptor facts, probed at open.
     slots: Box<[Slot]>,
+    /// The producer's working set, as the answer gave it.
+    working: u32,
+    /// Whether the frames are job results (`StreamKind::JobDriven`), as the answer gave it.
+    job_driven: bool,
     platform: Arc<dyn StreamPlatform>,
     /// The session's record that this stream is open. Dropping the stream without closing it
     /// queues the close.
@@ -237,7 +241,7 @@ impl FrameStream {
     pub(crate) fn new(
         device: u32,
         name: &str,
-        (layout, planes): (Layout, Planes),
+        (layout, planes, working, job_driven): (Layout, Planes, u32, bool),
         shared: bool,
         fds: Vec<OwnedFd>,
         writable: bool,
@@ -259,6 +263,8 @@ impl FrameStream {
             device,
             name: name.to_string(),
             consumer,
+            working,
+            job_driven,
             dma: !shared,
             writable,
             planes,
@@ -310,6 +316,30 @@ impl FrameStream {
     #[must_use]
     pub const fn buffer_count(&self) -> u32 {
         self.consumer.layout().buffers
+    }
+
+    /// The producer's working set: how many buffers it holds in its own hands when it asks for
+    /// its next one, as the board file declares it (`docs/streams.md`, "The margin").
+    #[must_use]
+    pub const fn working(&self) -> u32 {
+        self.working
+    }
+
+    /// Whether the stream's frames are the results of jobs this consumer posted. A job-driven
+    /// stream never replaces an unread frame: the margin does not apply (`docs/streams.md`,
+    /// "The guarantee").
+    #[must_use]
+    pub const fn job_driven(&self) -> bool {
+        self.job_driven
+    }
+
+    /// How many frames this reader may fall behind before it loses one: `buffers - 1 - working`
+    /// (`docs/streams.md`, "The margin"). 0 when the stream has no such room.
+    #[must_use]
+    pub const fn margin(&self) -> u32 {
+        self.buffer_count()
+            .saturating_sub(1)
+            .saturating_sub(self.working)
     }
 
     #[must_use]

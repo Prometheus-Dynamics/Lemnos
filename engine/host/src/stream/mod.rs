@@ -41,7 +41,7 @@ use endpoint::StreamCore;
 pub use endpoint::{BufferWriter, ProducerEndpoint};
 
 use crate::board::DeviceSpec;
-pub use crate::board::StreamMemory;
+pub use crate::board::{StreamKind, StreamMemory};
 
 /// Which way the producer touches a buffer's memory, for a dma-buf that needs the kernel told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +129,9 @@ pub struct StreamStats {
     pub returned: u64,
     /// Consumers cut off for breaking the rules.
     pub faults: u64,
+    /// Asks for a buffer that found none on a job-driven stream: the job did not start. Always 0
+    /// on a free-running stream, whose frames are replaced instead (`dropped`).
+    pub refused: u64,
     /// Buffers in each state, always summing to the pool.
     pub free: u32,
     pub producer_held: u32,
@@ -143,6 +146,10 @@ pub struct StreamStats {
 /// [`lemnos_wire::ring::fds`] followed by the pool's buffers, and what they describe.
 pub struct Lease {
     pub layout: Layout,
+    /// The producer's working set, from the board file (see `StreamSpec::working`).
+    pub working: u32,
+    /// Who makes the frames, from the board file (see `StreamSpec::kind`).
+    pub kind: StreamKind,
     pub descriptors: Vec<OwnedFd>,
     /// The buffers as dma-bufs, when they are: see [`ProducerEndpoint::buffer_handle`].
     pub handles: Option<Arc<[OwnedFd]>>,

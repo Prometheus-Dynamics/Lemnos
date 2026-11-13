@@ -199,6 +199,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 frame_slots: 4,
                 job_slots: 2,
                 job_bytes: 8,
+                working: Tail(1),
+                kind: Tail(0),
             },
         ),
         (
@@ -228,6 +230,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 job_slots: 2,
                 job_bytes: 8,
                 plane_bytes: &[],
+                working: Tail(1),
+                kind: Tail(0),
             },
         ),
         (
@@ -241,6 +245,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 job_slots: 1,
                 job_bytes: 0,
                 plane_bytes: &[0xc0, 0, 0, 0, 0x40, 0, 0, 0],
+                working: Tail(0),
+                kind: Tail(0),
             },
         ),
         (

@@ -22,7 +22,7 @@ use shm_ring_holds::{HoldTable, Limits, Marks};
 
 use super::pool::{BufferPool, BufferState};
 use super::{Access, Buffers, DmaSync, Lease, StreamAllocator, StreamStats};
-use crate::board::{StreamMemory, StreamSpec};
+use crate::board::{StreamKind, StreamMemory, StreamSpec};
 
 /// What one attachment's memory is: the publisher over the frame ring and the pool, the job ring
 /// and its acks, and the dma-bufs when the buffers are dma-bufs. Made once and, on standby, kept
@@ -56,10 +56,16 @@ struct Counters {
     dropped: u64,
     returned: u64,
     faults: u64,
+    /// Asks for a buffer that found none, on a job-driven stream: the job did not start.
+    refused: u64,
 }
 
 pub(crate) struct StreamCore {
     layout: Layout,
+    /// The producer's working set the board file declares (`StreamSpec::working`).
+    working: u32,
+    /// Who makes the frames (`StreamSpec::kind`), which decides what the producer may take back.
+    kind: StreamKind,
     /// What the board file says the buffers are, and the heap dma-bufs come from.
     memory: StreamMemory,
     heap: Box<str>,
@@ -119,6 +125,8 @@ impl StreamCore {
         Self {
             pool: BufferPool::new(layout.buffers),
             layout,
+            working: spec.working,
+            kind: spec.kind,
             memory: spec.memory,
             heap: spec.heap_name().into(),
             planes,
@@ -283,6 +291,8 @@ impl StreamCore {
         }
         Ok(Lease {
             layout: self.layout,
+            working: self.working,
+            kind: self.kind,
             descriptors,
             handles,
             planes: self.planes,
@@ -395,7 +405,12 @@ impl StreamCore {
         if let Some(buffer) = self.pool.take(self.epoch) {
             return Some(buffer);
         }
-        self.take_back()
+        let buffer = self.take_back();
+        if buffer.is_none() && self.kind == StreamKind::JobDriven {
+            // No free buffer for the next job: it does not start, and the refusal is counted.
+            self.counters.refused += 1;
+        }
+        buffer
     }
 
     fn take_back(&mut self) -> Option<u32> {
@@ -414,16 +429,18 @@ impl StreamCore {
         let attached = self.attached.as_mut()?;
         // Only published frames can be taken back, and never a buffer the producer already holds.
         // A frame the consumer has read goes back at any time: nothing is lost. A frame it has not
-        // read is replaced only when the producer holds no buffer of its own to fill, and never
-        // while it is the newest, so a consumer still behind finds a frame. Oldest first; a frame
-        // whose planes don't all come back is skipped.
+        // read is replaced only when the producer has no free buffer (this is only reached then),
+        // and only on a free-running stream, whose frames arrive whether or not anyone reads them:
+        // there the oldest unread frame goes, never the newest, and the replacement is counted in
+        // `dropped`. On a job-driven stream an unread frame is a result the consumer posted a job
+        // for, so it is never replaced; the job that needs its buffer does not start. Oldest first;
+        // a frame whose planes don't all come back is skipped. The producer's own buffers do not
+        // matter: a producer that keeps a queue in its device must be able to refill it.
         let newest = (0..buffers)
             .filter(|b| matches!(self.pool.state(*b), Some(BufferState::Consumer { .. })))
             .map(|b| self.published_at[b as usize])
             .max()
             .unwrap_or(0);
-        let holding =
-            (0..buffers).any(|b| matches!(self.pool.state(b), Some(BufferState::Producer { .. })));
         let mut after = 0_u64;
         loop {
             let mut oldest: Option<(u64, u32)> = None;
@@ -439,7 +456,7 @@ impl StreamCore {
                     .memory
                     .publisher
                     .taken(BufferIndex(buffer * planes), &attached.holds);
-                if !taken && (at == newest || holding) {
+                if !taken && (at == newest || self.kind == StreamKind::JobDriven) {
                     continue;
                 }
                 if oldest.is_none_or(|(seen, _)| at < seen) {
@@ -666,6 +683,7 @@ impl StreamCore {
             dropped: self.counters.dropped,
             returned: self.counters.returned,
             faults: self.counters.faults,
+            refused: self.counters.refused,
             free,
             producer_held,
             consumer_held,

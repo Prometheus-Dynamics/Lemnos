@@ -113,11 +113,87 @@ reader gets it from the batch's `time`, and `lemnos-client` from the frame.
 The consumer reads the buffer, then releases it (dropping the frame it took). A buffer the
 consumer holds is not written by anyone else.
 
-**The replacement rule.** A buffer the consumer has read and let go goes back to the driver as
+**The kind of stream.** Who makes the frames is declared by the board author with `kind` in
+`[devices.streams.NAME]`, and the reclaim rule below is a function of it:
+
+- `kind = "free-running"` (the default): the frames arrive whether or not anyone reads them (a
+  camera, a receiver, a front end's statistics). The rule for these is the replacement rule and
+  the margin below.
+- `kind = "job"`: each frame is the result of a job the consumer posted (a memory-to-memory
+  device's output, an encoder, a scaler, the config and input of a job-driven block). See
+  "Job-driven streams" below.
+
+**The replacement rule, for a free-running stream.** A buffer the consumer has read and let go goes back to the driver as
 soon as the driver asks for one: nothing is lost. A frame the consumer has not read yet stays in
-its buffer while the driver holds a buffer of its own to fill; only when the driver holds none is
-the oldest such frame taken back, and the consumer sees it skipped. The newest frame is never
-taken back while unread. A consumer that holds every buffer stops the driver without a fault.
+its buffer for as long as the driver has a free buffer to fill. Only when the driver asks and none
+is free is the oldest unread frame taken back, and the consumer sees it skipped. What the driver
+holds of its own does not change this: a driver with a queue of buffers in its device is refilled
+from the oldest unread frame like any other. The newest frame is never taken back while unread,
+and a frame the consumer has read and not yet released is never taken back at all. A consumer
+that holds every buffer stops the driver without a fault.
+
+Whether a frame has been read is kept by the consumer's taken stamp on the ring, not by its holds:
+a frame the consumer has read and let go counts as taken, and one it has not read counts as
+unread, whatever the consumer holds of other buffers. Nothing else makes an unread frame
+reclaimable.
+
+**Job-driven streams.** On a `kind = "job"` stream an unread frame is never replaced, whatever the
+driver's working set. Each frame is a result the consumer posted a job for, so replacing it loses
+the consumer's work. The pressure goes the other way: a job whose output has no free buffer is not
+started. The driver's ask finds none and the refusal is counted in `refused` (the stream's stats).
+The block's own contract counters are not changed by this rule. A read result is taken back as usual, so a
+consumer that keeps up is refused nothing, and no result is ever silently lost.
+
+**The guarantee, per kind.**
+
+- Free-running: a reader at most N frames behind loses none, with **N = B − 1 − W − granted holds**
+  (below). Past N the oldest unread frame is replaced, counted in `dropped`, and the newest is never
+  replaced.
+- Job-driven: **no result is ever replaced.** Every posted job that gets a buffer publishes its
+  result, which stays until the consumer reads it; a job that finds no free buffer is refused and
+  counted in `refused`.
+
+**The margin.** A reader that falls behind by up to a number of frames loses none of them. Call
+the buffers in the pool `B` and the producer's working set `W`: the number of buffers the producer
+holds in its own hands at the moment it asks for its next one. Then a reader N frames behind
+loses nothing, where
+
+> **N = B − 1 − W**
+
+Why: when the producer asks, every buffer is either free, held by the producer (`W`), or holds an
+unread or read-and-held frame. With `n` unread frames a free buffer exists while `W + n ≤ B − 1`.
+A read frame is taken back at no cost, so only unread frames bound the margin. Past N, the
+producer's ask takes back the oldest unread frame, which the consumer sees skipped and `dropped`
+counts; the newest frame is never taken. A producer that is never refused a buffer loses no frame.
+
+What `W` is, for each kind of producer:
+
+- A driver that publishes each frame before it asks for the next buffer (a USB camera's tick, a
+  codec filling one buffer at a time): `W = 0`, so `N = B − 1`.
+- A driver that asks for its next buffer while it still holds the one it is filling: `W = 1`,
+  so `N = B − 2`.
+- A device with `K` buffers queued in its hardware, refilled as each frame completes: V4L2 capture
+  (a node that takes the stream's dma-bufs, or whose buffers are mapped), the kernel module's
+  blocks, and a memory-to-memory device with `K` queued. The device holds `K − 1` at the ask, so
+  `W = K − 1` and `N = B − K`.
+
+The board author sets `B` as `buffers` and `W` as `working` in `[devices.streams.NAME]` (the
+driver's `W` for its kind; `working = 0` when left out, which is right for the first kind above
+only). `working` must be less than `buffers`. A consumer reads them, and the stream's `kind`, from
+the open answer: `FrameStream::buffer_count()`, `FrameStream::working()`, `FrameStream::margin()`
+(which is N, for a free-running stream) and `FrameStream::job_driven()`. The host's stats carry
+`refused`, the count of asks a job-driven stream could not answer.
+A consumer that reads the shared memory with the shm crates alone is not told `W`, and must take it
+from the board file.
+
+What a reader that is late by at most N sees is every frame in order, each with the bytes the
+producer wrote into it: nothing is refilled under a frame it has not released. A reader that is
+later than N sees the newest frames only, in order, and each frame it misses is counted in
+`dropped` (a read frame's buffer is never counted, and is never replaced).
+
+Each frame a stream's consumer must hold while it works (the frames it has taken and not released,
+and any hold granted against the pool to an outside reader) is one buffer out of the same count, so
+the margin falls by one per held buffer: N = B − 1 − W − held.
 
 A consumer that must not lose frames holds each frame it takes until it has finished with it, and
 releases it then. While it holds them the driver has nothing to take back, and its publishes are

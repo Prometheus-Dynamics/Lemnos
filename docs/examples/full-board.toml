@@ -178,16 +178,19 @@ driver = "pisp-be"
 config = { device = "1000880000.pisp_be" }
 
 [devices.streams.config]
+kind = "job"
 buffers = 4
 buffer_bytes = 8192
 
 [devices.streams.input]
+kind = "job"
 buffers = 4
 buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
+kind = "job"
 buffers = 4
 buffer_bytes = 4194304
 memory = "dma-buf"

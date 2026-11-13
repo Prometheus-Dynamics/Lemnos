@@ -54,6 +54,8 @@ In a stream:
 | Key | Meaning |
 |---|---|
 | `buffers` | How many buffers. At most 4096, or 128 with `memory = "dma-buf"` |
+| `working` | The producer's working set: the buffers it holds in its own hands when it asks for its next one (a device's queue, `K - 1` for a queue of `K`). Left out, 0. Less than `buffers`. The reader's margin is `buffers - 1 - working` frames: [`streams.md`](streams.md) |
+| `kind` | Who makes the frames: `"free-running"` (the default: the frames arrive whether or not anyone reads them, and the oldest unread one is replaced past the margin), or `"job"` (each frame is the result of a job the consumer posted: an unread result is never replaced, and a job with no free buffer is refused and counted in `refused`). [`streams.md`](streams.md) |
 | `buffer_bytes` | The size of each. At most 256 MiB, and 16 GiB for the whole stream |
 | `job_slots` | How many jobs a consumer can have waiting. 4 when left out, at most 64, rounded up to a power of two |
 | `job_bytes` | The largest job. 256 when left out, at most 4096 |
@@ -486,16 +488,19 @@ driver = "pisp-be"
 config = { device = "1000880000.pisp_be" }
 
 [devices.streams.config]
+kind = "job"
 buffers = 4
 buffer_bytes = 8192
 
 [devices.streams.input]
+kind = "job"
 buffers = 4
 buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
+kind = "job"
 buffers = 4
 buffer_bytes = 4194304
 memory = "dma-buf"

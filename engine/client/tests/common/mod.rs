@@ -403,6 +403,8 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                                     job_slots,
                                     job_bytes,
                                     plane_bytes: &plane_bytes,
+                                    working: lemnos_wire::Tail(1),
+                                    kind: lemnos_wire::Tail(0),
                                 }
                             } else {
                                 Frame::StreamRings {
@@ -413,6 +415,8 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                                     frame_slots,
                                     job_slots,
                                     job_bytes,
+                                    working: lemnos_wire::Tail(1),
+                                    kind: lemnos_wire::Tail(0),
                                 }
                             };
                             append(&answer, &mut ready).unwrap();

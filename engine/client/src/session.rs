@@ -293,6 +293,10 @@ pub(crate) struct StreamAnswer {
     planes: Option<Planes>,
     /// Whether the request said this client takes StreamRingHandles.
     asked_handles: bool,
+    /// The producer's working set (`StreamRings::working`).
+    working: u32,
+    /// Whether the producer's frames are job results (`StreamRings::kind` is 1).
+    job_driven: bool,
 }
 
 impl Shared {
@@ -1709,45 +1713,62 @@ impl Session {
             fds: Vec::new(),
         });
         Ok((id, move |frame: Frame<'_>| {
-            let (handles, buffers, descriptors, buffer_bytes, frame_slots, job_slots, job_bytes) =
-                match frame {
-                    Frame::StreamRings {
-                        buffers,
-                        descriptors,
-                        buffer_bytes,
-                        frame_slots,
-                        job_slots,
-                        job_bytes,
-                        ..
-                    } => (
-                        None,
-                        buffers,
-                        descriptors,
-                        buffer_bytes,
-                        frame_slots,
-                        job_slots,
-                        job_bytes,
-                    ),
-                    Frame::StreamRingHandles {
-                        buffers,
-                        descriptors,
-                        buffer_bytes,
-                        frame_slots,
-                        job_slots,
-                        job_bytes,
-                        plane_bytes,
-                        ..
-                    } => (
-                        Some(Planes::decode(plane_bytes, buffer_bytes)),
-                        buffers,
-                        descriptors,
-                        buffer_bytes,
-                        frame_slots,
-                        job_slots,
-                        job_bytes,
-                    ),
-                    _ => return None,
-                };
+            let (
+                handles,
+                buffers,
+                descriptors,
+                buffer_bytes,
+                frame_slots,
+                job_slots,
+                job_bytes,
+                working,
+                job_driven,
+            ) = match frame {
+                Frame::StreamRings {
+                    buffers,
+                    descriptors,
+                    buffer_bytes,
+                    frame_slots,
+                    job_slots,
+                    job_bytes,
+                    working: Tail(working),
+                    kind: Tail(kind),
+                    ..
+                } => (
+                    None,
+                    buffers,
+                    descriptors,
+                    buffer_bytes,
+                    frame_slots,
+                    job_slots,
+                    job_bytes,
+                    working,
+                    kind == 1,
+                ),
+                Frame::StreamRingHandles {
+                    buffers,
+                    descriptors,
+                    buffer_bytes,
+                    frame_slots,
+                    job_slots,
+                    job_bytes,
+                    plane_bytes,
+                    working: Tail(working),
+                    kind: Tail(kind),
+                    ..
+                } => (
+                    Some(Planes::decode(plane_bytes, buffer_bytes)),
+                    buffers,
+                    descriptors,
+                    buffer_bytes,
+                    frame_slots,
+                    job_slots,
+                    job_bytes,
+                    working,
+                    kind == 1,
+                ),
+                _ => return None,
+            };
             Some(Ok(StreamAnswer {
                 layout: Layout {
                     buffers,
@@ -1760,6 +1781,8 @@ impl Session {
                 handles: handles.is_some(),
                 planes: handles.unwrap_or(Some(Planes::one(buffer_bytes))),
                 asked_handles,
+                working,
+                job_driven,
             }))
         }))
     }
@@ -1792,6 +1815,8 @@ impl Session {
             handles,
             planes,
             asked_handles,
+            working,
+            job_driven,
         } = answer;
         // Every number here came off the socket. For a descriptor per buffer or plane, the
         // planes must add up to the buffer, the count must be the one the buffers and planes
@@ -1813,7 +1838,7 @@ impl Session {
         let built = FrameStream::new(
             device,
             name,
-            (layout, planes),
+            (layout, planes, working, job_driven),
             !handles,
             fds,
             writable,

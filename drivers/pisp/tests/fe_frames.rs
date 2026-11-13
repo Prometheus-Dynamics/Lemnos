@@ -134,8 +134,8 @@ fn host() -> Host {
          [devices.streams.config]\nbuffers = {CONFIGS}\nbuffer_bytes = {CONFIG_BYTES}\n\
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.statistics]\nbuffers = {CONFIGS}\nbuffer_bytes = {STATS_BYTES}\n{dma}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{dma}\n\
-         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{dma}\n"
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{dma}\n\
+         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{dma}\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
@@ -902,8 +902,8 @@ fn bound(statistics: &str, output0: &str, output1: &str) -> Host {
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.statistics]\nbuffers = {CONFIGS}\nbuffer_bytes = {STATS_BYTES}\n\
          {statistics}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output0}\n\
-         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output1}\n"
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{output0}\n\
+         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{output1}\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();

@@ -41,6 +41,7 @@ link = "cam0-be"
 config = { device = "1f00110000.csi", lanes = 2, mbps = 800, data_type = 0x2b, job_slots = 8 }
 
 [devices.streams.config]
+kind = "job"
 buffers = 8
 buffer_bytes = 632
 job_slots = 8
@@ -53,12 +54,14 @@ memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
+kind = "job"
 buffers = 4
 buffer_bytes = 2052096
 memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output1]
+kind = "job"
 buffers = 4
 buffer_bytes = 516096
 memory = "dma-buf"
@@ -70,18 +73,21 @@ driver = "pisp-be"
 config = { device = "1000880000.pisp_be" }
 
 [devices.streams.config]
+kind = "job"
 buffers = 2
 buffer_bytes = 16720
 job_slots = 8
 job_bytes = 128
 
 [devices.streams.input]
+kind = "job"
 buffers = 2
 buffer_bytes = 2048000
 memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
+kind = "job"
 buffers = 4
 buffer_bytes = 1600000
 memory = "dma-buf"

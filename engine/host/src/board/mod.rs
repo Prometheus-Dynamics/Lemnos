@@ -161,6 +161,26 @@ pub enum StreamMemory {
     DmaBuf,
 }
 
+/// Who makes a stream's frames, which decides what the producer may take back.
+///
+/// A free-running stream's frames arrive whether or not anyone reads them (a camera, a receiver, a
+/// front end's statistics). Beyond the late-reader guarantee the oldest unread frame is replaced,
+/// never the newest, and each replacement is counted in `dropped`.
+///
+/// A job-driven stream's frames are the results of jobs the consumer posted (a memory-to-memory
+/// device's outputs, an encoder, a scaler). An unread result is never replaced: a producer with no
+/// free buffer does not start the next job, and that is counted in `refused`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum StreamKind {
+    /// The frames arrive on their own. The default.
+    #[default]
+    #[serde(rename = "free-running")]
+    FreeRunning,
+    /// Each frame is the result of a job the consumer posted.
+    #[serde(rename = "job")]
+    JobDriven,
+}
+
 /// The heap a stream of dma-bufs comes from when its board file names none.
 pub const DEFAULT_HEAP: &str = "system";
 
@@ -193,6 +213,15 @@ pub struct StreamSpec {
     /// copied. The memory is still made anew after each consumer leaves.
     #[serde(default)]
     pub standby: bool,
+    /// The producer's working set: how many buffers it holds in its own hands when it asks for
+    /// its next one (a device's queue of buffers, not the one it is filling). A reader's margin
+    /// is `buffers - 1 - working` frames (`docs/streams.md`, "The margin"). Less than `buffers`.
+    #[serde(default)]
+    pub working: u32,
+    /// Who makes the frames: `"free-running"` when left out, or `"job"` for the results of jobs
+    /// the consumer posted. It decides what the producer may take back (see [`StreamKind`]).
+    #[serde(default)]
+    pub kind: StreamKind,
 }
 
 const fn default_job_slots() -> u32 {
@@ -679,7 +708,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
 
 fn check_streams(id: &str, streams: &BTreeMap<String, StreamSpec>) -> Result<(), BoardError> {
     for (name, stream) in streams {
-        if stream.checked_layout().is_none() {
+        if stream.checked_layout().is_none() || stream.working >= stream.buffers {
             return Err(BoardError::Stream(id.to_string(), name.clone()));
         }
         stream.check_memory(id, name)?;
