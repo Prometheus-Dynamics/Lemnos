@@ -495,23 +495,90 @@ it as a package, do what `engine/package/tests` does: build the `cdylib`, load i
 every kind of resource from a package against the simulated board, and `tests/merged_driver.rs`
 runs one driver both ways.
 
-## What moves a contract's hash
+## Compatibility: what must match, and what need not
 
-Every `#[contract]` has an encoding hash, `Contract::HASH`, computed at compile time from the
-contract's tag, its method numbers and names, and each method's parameter and result shapes. A
-device says its contracts' hashes in its description, and a typed client refuses a device whose
-hash differs from its own (see [`client.md`](client.md#versions-at-connect)). The hash is generated,
-so you never update it by hand, but you should know what changes it:
+> **Status:** these are the rules the code is being brought to. Nothing enforces them yet: the
+> current build still checks one whole-wire hash and one hash per contract, and refuses on any change.
+> The core hash, base shapes, additions levels, `#[breaking]` and the package guarantee land in T1c to
+> T1f, in that order. Until T1f lands, a package or client built from another revision is refused.
 
-- adding, renaming or renumbering a method, or changing whether it fills a buffer or starts a job;
-- a parameter or result type whose shape changes. For an `Encode` derive, that is a field added,
-  removed, renamed or retyped, in any struct the method takes or returns, however deeply nested.
+Nothing unreleased is versioned. Compatibility is structural: each unit of the interface has its own
+hash, and a client, a driver package or the daemon need agree only on the units they actually use.
+A minor Lemnos change does not rebuild every driver and client.
 
-A change in either means a client built from the old contract is refused, not misread. Bump the
-contract's `version` when the change is one an old client must not be used for, as the contract
-macro's `version` says; the hash is the check that a client was built against the same encoding.
+The units, and what each hash covers:
 
-Nothing else moves it: doc comments, method bodies, and the driver's own state don't.
+- **The core**: the handshake, framing, the call and reply envelopes, the event envelope, stream and
+  job framing. One hash, kept small. A connection refused on it says `core protocol differs`, with
+  both hashes.
+- **Each contract**: its tag, and for each method its number, name, parameter and result shapes,
+  and whether it fills a buffer or starts a job. Checked once, when a client binds that contract. A
+  change to one contract never affects a client of another.
+- **Each ABI table** of a driver package: its layout, checked when the package is loaded.
+- **Each optional part** of the wire (stream handles, packages, jobs), negotiated by the feature
+  bits, with its own hash where its layout can change.
+
+Every unit also has a **base shape** (what both sides must agree on) and an **additions level**: the
+number of methods and fields appended to the base. The base shape hash must be equal. Of two
+additions levels, the lower one is what both sides use.
+
+### Additive and breaking changes
+
+A change is **additive** when an old reader still reads everything it needs correctly, given the
+rules below. It is **breaking** when it changes what an existing field or method means. An author
+marks a breaking change with `#[breaking]` on the field or method. A breaking change moves the base
+shape, so the old and new sides are refused at bind, and the refusal names the unit.
+
+Additive changes, by construction:
+
+- a method appended at the end of a contract (a new number, after every existing one);
+- a field appended at the end of a struct, when the field's absence leaves the meaning of the other
+  fields unchanged (an absent `Option` is `None`, an absent flag is `false`);
+- a new frame kind, a new feature bit, a function pointer appended to an ABI table.
+
+How the encodings tolerate them:
+
+- Structs carry their length. A reader skips trailing fields it does not know. A reader expecting
+  more fields than it received fills in the declared defaults.
+- A call to a method the device's driver does not provide answers `NOT_SUPPORTED`, and the refusal
+  names the method.
+- An unknown frame kind is refused on its own, not at connect.
+- An ABI table carries its size. A loader ignores entries past what it knows, and treats an entry a
+  package lacks as absent.
+
+Structural compatibility is not semantic compatibility. Appending a field can still change what the
+existing fields mean. For example, a `gain law` added beside gain codes makes an old reader misread
+the codes. Mark such an addition `#[breaking]`.
+
+### Classifying a change
+
+When you add a method or field, classify it in the PR:
+
+- **Additive**: a method at the end, or a field whose absence means the same as before.
+- **Breaking** (`#[breaking]`): anything whose old meaning changes without the new field. The gain law
+  above is one.
+
+### Examples from this branch
+
+| Change | Class | Reason |
+|---|---|---|
+| `camera.sensor` `GainRange.law` | breaking | without it, gain codes have one meaning (linear); an old reader would misread a reciprocal or decibel sensor's codes |
+| `camera.sensor` `SensorInfo.embedded_data` | additive | absent means `None`, which is what a sensor from before it did |
+| `camera.receiver` methods 9 to 11 (`embedded_stream`, `source`, `layout`) | additive | appended methods; an old driver answers `NOT_SUPPORTED` |
+| `camera.sensor` method 12 (`identity`) | additive | appended method |
+| `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |
+| `raw-bus` methods 6 and 7 (`uart_write`, `uart_read`) | additive | appended methods |
+| `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |
+| `MethodInfo.job` set on an existing method | breaking | a client that calls it as a call would now get `NOT_SUPPORTED` |
+| `system.identity/1` (new contract) | additive | a new contract is only bound by a client that asks for it |
+
+### Hashes and versions
+
+Each unit's hash is computed at compile time from its declarations, and nothing writes one by hand.
+Nothing is versioned while unreleased: a contract's `version` stays 1. A change that is additive
+leaves the base shape hash unchanged; a breaking change moves it.
+
+Doc comments, method bodies and the driver's own state don't move any hash.
 
 ## Checklist
 
