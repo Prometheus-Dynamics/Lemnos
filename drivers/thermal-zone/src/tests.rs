@@ -140,3 +140,31 @@ fn describes_one_temperature_value() {
     assert_eq!(out.items().count(), 1);
     assert_eq!(out.find("temperature").unwrap().unit, Unit::DegreeCelsius);
 }
+
+#[test]
+fn the_board_gives_the_zones_range_and_warning_limits() {
+    let tree = Tree::new("limits");
+    let path = tree.path();
+    let entries = [
+        ("path", ConfigValue::Str(&path)),
+        ("min_c", ConfigValue::Int(-20)),
+        ("max_c", ConfigValue::Int(100)),
+        ("warn_below_c", ConfigValue::Int(-10)),
+        ("warn_above_c", ConfigValue::Int(85)),
+    ];
+    let dev = ThermalZone::start(ThermalZoneNeeds {}, &Config::new(&entries)).unwrap();
+    let mut out = Description::default();
+    dev.describe(&mut out);
+    let item = out.find("temperature").unwrap();
+    assert_eq!(
+        (item.min, item.max, item.warn_low, item.warn_high),
+        (Some(-20), Some(100), Some(-10), Some(85))
+    );
+    // A range the other way round is refused at bind.
+    let backwards = [
+        ("path", ConfigValue::Str(&path)),
+        ("min_c", ConfigValue::Int(50)),
+        ("max_c", ConfigValue::Int(10)),
+    ];
+    assert!(ThermalZone::start(ThermalZoneNeeds {}, &Config::new(&backwards)).is_err());
+}

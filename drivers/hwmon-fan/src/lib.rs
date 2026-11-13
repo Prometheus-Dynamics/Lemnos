@@ -38,6 +38,26 @@ use std::path::{Path, PathBuf};
 
 /// The largest raw `pwm1` value.
 pub const PWM_MAX: u32 = 255;
+
+/// The board's limits on the fan's speed, in rpm: the fastest the fan turns (`max_rpm`), and the
+/// speed below which it has stalled (`warn_below_rpm`). Unset means unknown.
+#[derive(Debug, Clone, Copy, Default)]
+struct RpmLimits {
+    max: Option<i64>,
+    warn_below: Option<i64>,
+}
+
+fn rpm_limits(cfg: &Config<'_>) -> Result<RpmLimits> {
+    let optional = |key: &str| match cfg.get(key) {
+        None => Ok(None),
+        Some(lemnos_core::ConfigValue::Int(value)) if value >= 0 => Ok(Some(value)),
+        Some(_) => Err(Status::INVALID_ARGUMENT),
+    };
+    Ok(RpmLimits {
+        max: optional("max_rpm")?,
+        warn_below: optional("warn_below_rpm")?,
+    })
+}
 /// `pwm1_enable` for manual control, the only mode in which `pwm1` sets the duty.
 const MODE_MANUAL: i32 = 1;
 /// The largest duty, per mille.
@@ -83,6 +103,8 @@ pub struct HwmonFan {
     failing: bool,
     /// The operating system owns this fan: nothing is ever opened for writing.
     reads_only: bool,
+    /// The board's limits on the speed (`max_rpm`, `warn_below_rpm`).
+    rpm_limits: RpmLimits,
 }
 
 impl Lifecycle for HwmonFan {
@@ -108,11 +130,21 @@ impl Lifecycle for HwmonFan {
         };
         let mut driver = Self::new(&fan);
         driver.reads_only = cfg.host_owned();
+        driver.rpm_limits = rpm_limits(cfg)?;
         Ok(driver)
     }
 
     fn describe(&self, out: &mut Description) {
-        out.add(Item::value("rpm", RPM).unit(Unit::RevolutionPerMinute, 0));
+        let mut rpm = Item::value("rpm", RPM)
+            .unit(Unit::RevolutionPerMinute, 0)
+            .step(1);
+        if let Some(max) = self.rpm_limits.max {
+            rpm = rpm.range(0, max);
+        }
+        if let Some(low) = self.rpm_limits.warn_below {
+            rpm = rpm.warn_below(low);
+        }
+        out.add(rpm);
         // Duty is per mille: a range of 0 to MAX_DUTY, one step is one per mille.
         out.add(
             Item::value("duty", DUTY)
@@ -147,6 +179,7 @@ impl HwmonFan {
             manual: false,
             failing: false,
             reads_only: false,
+            rpm_limits: RpmLimits::default(),
         }
     }
 

@@ -505,3 +505,38 @@ fn a_host_owned_ina260_reads_as_it_stands() {
     close(reading.power_w, 12.0);
     assert_eq!(words(&sim), before);
 }
+
+#[test]
+fn the_board_gives_the_rails_warning_limits_in_nano_units() {
+    let (mut board, _sim) = board_with_bus();
+    let driver = bind(
+        &mut board,
+        &[
+            ("chip", ConfigValue::Str("ina226")),
+            ("shunt_ohms", ConfigValue::Float(0.01)),
+            ("max_current_a", ConfigValue::Float(2.0)),
+            ("bus_warn_below_v", ConfigValue::Float(10.8)),
+            ("bus_warn_above_v", ConfigValue::Float(13.5)),
+            ("current_warn_above_a", ConfigValue::Float(1.5)),
+        ],
+    )
+    .unwrap();
+    let mut out = Description::new();
+    Driver::describe(&driver, &mut out);
+    let bus = out.find("bus_voltage").unwrap();
+    assert_eq!(
+        (bus.warn_low, bus.warn_high),
+        (Some(10_800_000_000), Some(13_500_000_000))
+    );
+    let current = out.find("current").unwrap();
+    assert_eq!(
+        (current.warn_low, current.warn_high),
+        (None, Some(1_500_000_000))
+    );
+    // Without them, no limit.
+    let (mut board, _sim) = board_with_bus();
+    let bare = bind(&mut board, &INA226).unwrap();
+    let mut out = Description::new();
+    Driver::describe(&bare, &mut out);
+    assert_eq!(out.find("bus_voltage").unwrap().warn_high, None);
+}

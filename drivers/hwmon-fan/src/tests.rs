@@ -220,3 +220,34 @@ fn a_release_with_nothing_taken_writes_nothing() {
     assert_eq!(read(tree.root(), &format!("{CHIP}/pwm1")), "100");
     assert_eq!(read(tree.root(), &format!("{CHIP}/pwm1_enable")), "5");
 }
+
+#[test]
+fn the_board_gives_the_speed_range_and_the_stall_limit() {
+    let tree = Tree::new("rpm-limits");
+    let fan = bind(
+        tree.root(),
+        &[
+            ("name", ConfigValue::Str("pwmfan")),
+            ("max_rpm", ConfigValue::Int(3000)),
+            ("warn_below_rpm", ConfigValue::Int(200)),
+        ],
+    )
+    .unwrap();
+    let mut out = Description::new();
+    Driver::describe(&fan, &mut out);
+    let rpm = out.find("rpm").unwrap();
+    assert_eq!(
+        (rpm.min, rpm.max, rpm.step, rpm.warn_low, rpm.warn_high),
+        (Some(0), Some(3000), Some(1), Some(200), None)
+    );
+    // Without the board's figures the speed has none, and a bad one is refused at bind.
+    let bare = pwm_fan(tree.root());
+    let mut out = Description::new();
+    Driver::describe(&bare, &mut out);
+    let rpm = out.find("rpm").unwrap();
+    assert_eq!((rpm.min, rpm.max, rpm.warn_low), (None, None, None));
+    assert!(matches!(
+        bind(tree.root(), &[("max_rpm", ConfigValue::Int(-1))]),
+        Err(Status::INVALID_ARGUMENT)
+    ));
+}

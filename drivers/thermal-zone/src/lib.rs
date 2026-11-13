@@ -39,6 +39,17 @@ pub struct ThermalZone {
     /// `<path>/temp`, formatted once at start.
     temp: PathBuf,
     faulted: bool,
+    limits: Limits,
+}
+
+/// The board's limits on a zone's reading, in whole degrees. Each is set only when the board file
+/// says so: an unset limit is unknown, never a default.
+#[derive(Debug, Clone, Copy, Default)]
+struct Limits {
+    min: Option<i64>,
+    max: Option<i64>,
+    warn_below: Option<i64>,
+    warn_above: Option<i64>,
 }
 
 impl Lifecycle for ThermalZone {
@@ -48,14 +59,34 @@ impl Lifecycle for ThermalZone {
 
     fn start(_needs: ThermalZoneNeeds, cfg: &Config<'_>) -> Result<Self> {
         let dir = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
+        let limits = Limits {
+            min: cfg.int("min_c"),
+            max: cfg.int("max_c"),
+            warn_below: cfg.int("warn_below_c"),
+            warn_above: cfg.int("warn_above_c"),
+        };
+        if matches!((limits.min, limits.max), (Some(min), Some(max)) if min > max) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         Ok(Self {
             temp: Path::new(dir).join("temp"),
             faulted: false,
+            limits,
         })
     }
 
     fn describe(&self, out: &mut Description) {
-        out.add(Item::value("temperature", READ).unit(Unit::DegreeCelsius, 0));
+        let mut temperature = Item::value("temperature", READ).unit(Unit::DegreeCelsius, 0);
+        if let (Some(min), Some(max)) = (self.limits.min, self.limits.max) {
+            temperature = temperature.range(min, max);
+        }
+        if let Some(low) = self.limits.warn_below {
+            temperature = temperature.warn_below(low);
+        }
+        if let Some(high) = self.limits.warn_above {
+            temperature = temperature.warn_above(high);
+        }
+        out.add(temperature);
     }
 
     fn health(&self) -> Health {

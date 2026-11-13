@@ -137,3 +137,21 @@ fn sequence_numbers_are_checked_across_the_wrap() {
     tach.edge(rising(0, 5 * MS));
     assert_eq!(tach.rpm(5 * MS), 6000);
 }
+
+#[test]
+fn the_board_gives_the_speed_range_and_the_stall_limit_to_the_shape() {
+    use lemnos_core::{Config, ConfigValue};
+    let entries = [
+        ("max_rpm", ConfigValue::Int(3000)),
+        ("warn_below_rpm", ConfigValue::Int(200)),
+    ];
+    let shape = super::shape(&Config::new(&entries)).unwrap();
+    assert_eq!(
+        (shape.max_rpm, shape.warn_below_rpm),
+        (Some(3000), Some(200))
+    );
+    let bare = super::shape(&Config::new(&[])).unwrap();
+    assert_eq!((bare.max_rpm, bare.warn_below_rpm), (None, None));
+    let negative = [("max_rpm", ConfigValue::Int(-5))];
+    assert!(super::shape(&Config::new(&negative)).is_err());
+}
