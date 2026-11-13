@@ -87,8 +87,8 @@ use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
-    Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle,
-    driver,
+    CallerId, Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status,
+    StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -168,6 +168,10 @@ pub struct Rp1Csi2 {
     packing: Packing,
     layout: Option<FrameLayout>,
     state: State,
+    /// The caller of the call in progress, told by the host (`Lifecycle::caller`).
+    caller: Option<CallerId>,
+    /// The caller whose START started the receiver: its going away stops it (`caller_gone`).
+    owner: Option<CallerId>,
 }
 
 /// The smallest ring holding `buffers` frames, a power of two.
@@ -223,6 +227,19 @@ fn handles_only(frames: &relay::Frames) -> Result<()> {
 impl Lifecycle for Rp1Csi2 {
     type Needs = Rp1Csi2Needs;
     const TICKS: bool = true;
+    // The host says who is calling, so a caller that goes away can stop the receiver it started.
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.caller = Some(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.owner == Some(caller) {
+            self.owner = None;
+            let _ = CameraReceiver::stop(self);
+        }
+    }
 
     fn start(needs: Rp1Csi2Needs, cfg: &Config<'_>) -> Result<Self> {
         let settings = hw::Settings::new(cfg.str("device"))?;
@@ -337,6 +354,8 @@ impl Rp1Csi2 {
             packing: Packing::Packed,
             layout: None,
             state: State::Stopped,
+            caller: None,
+            owner: None,
         }
     }
 
@@ -528,6 +547,8 @@ impl CameraReceiver for Rp1Csi2 {
         if self.state != State::Stopped {
             return Err(Status::BUSY);
         }
+        // Whoever starts the receiver owns it until it stops, even if the start then fails.
+        self.owner = self.caller;
         self.begin()?;
         self.state = State::Streaming { next_check: None };
         Ok(())
@@ -535,6 +556,7 @@ impl CameraReceiver for Rp1Csi2 {
 
     fn stop(&mut self) -> Result<()> {
         // Stop means stop, whatever the driver was doing. Recovery is over either way.
+        self.owner = None;
         self.state = State::Stopped;
         self.hw.stop()
     }

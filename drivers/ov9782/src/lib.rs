@@ -99,8 +99,8 @@ use lemnos_contract_camera_sensor::{
     Mode, SensorInfo, check_link, landing_of, launch_frame,
 };
 use lemnos_core::{
-    Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle, MethodId, Reader,
-    Result, Status, StreamHandle, Unit, driver,
+    CallerId, Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle,
+    MethodId, Reader, Result, Status, StreamHandle, Unit, driver,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
@@ -283,6 +283,11 @@ pub struct Ov9782 {
     last: Option<(FrameValues, Outcome)>,
     /// Set once the chip-ID read has answered. Until then a start goes through `PowerUp`.
     powered: bool,
+    /// The caller of the call in progress, told by the host (`Lifecycle::caller`).
+    caller: Option<CallerId>,
+    /// The caller whose START started the sensor. Its going away (`Lifecycle::caller_gone`)
+    /// stops the sensor: nothing else owns a stream the client left running.
+    owner: Option<CallerId>,
 }
 
 impl Lifecycle for Ov9782 {
@@ -290,6 +295,21 @@ impl Lifecycle for Ov9782 {
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
     const TICKS: bool = true;
+    // The host says who is calling, so a caller that goes away can stop the sensor it started.
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.caller = Some(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.owner == Some(caller) {
+            self.owner = None;
+            // A bus error on the standby write is reported by `stop`'s own path; the sensor then
+            // stays as the bus left it (see the PR's notes on a failed standby).
+            let _ = CameraSensor::stop(self);
+        }
+    }
 
     fn start(needs: Ov9782Needs, cfg: &Config<'_>) -> Result<Self> {
         let mut needs = needs;
@@ -309,6 +329,8 @@ impl Lifecycle for Ov9782 {
             applied: None,
             last: None,
             powered: false,
+            caller: None,
+            owner: None,
         })
     }
 
@@ -816,6 +838,10 @@ impl CameraSensor for Ov9782 {
         if self.selected.is_none() {
             return Err(Status::INVALID_ARGUMENT);
         }
+        if self.state == State::Stopped {
+            // Whoever starts the sensor owns it until it stops, even if this start then fails.
+            self.owner = self.caller;
+        }
         if matches!(self.state, State::Streaming | State::PowerUp { .. }) {
             return Ok(());
         }
@@ -832,6 +858,7 @@ impl CameraSensor for Ov9782 {
     }
 
     fn stop(&mut self) -> Result<()> {
+        self.owner = None;
         if self.state == State::Stopped {
             return Ok(());
         }

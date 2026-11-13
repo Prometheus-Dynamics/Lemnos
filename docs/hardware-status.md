@@ -52,6 +52,8 @@ F2b) also gave the PIO I2C bus a module route.
 | [`Q2i.md`](../testing/board-runs/Q2i.md) | Untested on board. The daemon's device permissions from the generated udev fragment (`lemnos-ctl tree --udev`): the module's nodes and the board's dma-heaps given to group `lemnos`, the start check that names a node it cannot open, and the steps to run on the board |
 | [`F2g1.md`](../testing/board-runs/F2g1.md) | The chain proof's checks (not checked is a failure; timestamps; rate; the latch beside the chain) and the isp proof's 640x400 luma readout: not run, untested on board |
 | [`F2e1.md`](../testing/board-runs/F2e1.md) | Not run yet: a receiver unbound mid-stream stops the OV9782 (host tests only: the watch and the check in `select_mode`, two tests fail with the check off); five unbind and rebind cycles on the board are the check |
+| [`F2f2.md`](../testing/board-runs/F2f2.md) | Not run on the board. A client that goes away while its sensor streams stops the sensor (host check only) |
+| [`L1-chain.md`](../testing/board-runs/L1-chain.md) | Not run. The steps of the camera chain run (sensor, receiver, front end, back end, 600+ frames, recovery), for the next board session |
 
 ## What has been shown, and how
 

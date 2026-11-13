@@ -107,8 +107,8 @@ use lemnos_contract_isp_pisp::{
     IspPisp, LAYOUT_FRONT_END, LAYOUT_STATISTICS, OUTPUT_FRONT_END_0, OUTPUT_FRONT_END_1, PispInfo,
 };
 use lemnos_core::{
-    Config, Decode, Description, Dev, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    CallerId, Config, Decode, Description, Dev, Health, Item, Lifecycle, MethodId, Reader, Result,
+    Status, StreamHandle, driver,
 };
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
@@ -296,6 +296,10 @@ pub struct PispFe {
     outputs: [Option<Output>; FE_NUM_OUTPUTS],
     compressed: [bool; FE_NUM_OUTPUTS],
     state: State,
+    /// The caller of the call in progress, told by the host (`Lifecycle::caller`).
+    caller: Option<CallerId>,
+    /// The caller whose START started the front end: its going away stops it (`caller_gone`).
+    owner: Option<CallerId>,
     placed: Placed,
     /// Whether the block has been started on this stream: the first job does that.
     started: bool,
@@ -328,6 +332,20 @@ fn handles_only(stream: &StreamHandle) -> Result<()> {
 }
 
 impl Lifecycle for PispFe {
+    // The host says who is calling, so a caller that goes away can stop the front end it started.
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.caller = Some(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.owner == Some(caller) {
+            self.owner = None;
+            let _ = CameraIsp::stop(self);
+        }
+    }
+
     type Needs = PispFeNeeds;
     const TICKS: bool = true;
 
@@ -447,6 +465,8 @@ impl PispFe {
             outputs: [None; FE_NUM_OUTPUTS],
             compressed: [false; FE_NUM_OUTPUTS],
             state: State::Stopped,
+            caller: None,
+            owner: None,
             placed: Placed::default(),
             started: false,
             counters: Counters::default(),
@@ -1109,6 +1129,8 @@ impl CameraIsp for PispFe {
             return Err(Status::INVALID_ARGUMENT);
         }
         self.stopped()?;
+        // Whoever starts the front end owns it until it stops, even if the start then fails.
+        self.owner = self.caller;
         self.counters = Counters::default();
         self.begin()?;
         self.state = State::Running { next_check: None };
@@ -1117,6 +1139,7 @@ impl CameraIsp for PispFe {
 
     fn stop(&mut self) -> Result<()> {
         // Stop means stop, whatever the driver was doing. Recovery is over either way.
+        self.owner = None;
         self.state = State::Stopped;
         self.stop_block();
         Ok(())
