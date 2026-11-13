@@ -32,6 +32,7 @@ pub mod erased;
 mod error;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+pub mod pio;
 pub mod power;
 pub mod raw;
 pub mod register;

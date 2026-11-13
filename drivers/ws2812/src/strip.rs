@@ -53,6 +53,14 @@ pub enum Wire {
 }
 
 impl Wire {
+    /// Bits per LED on the wire, the count a PIO machine shifts out of each word.
+    pub const fn bits(self) -> u8 {
+        match self {
+            Self::Rgb => 24,
+            Self::Rgbw => 32,
+        }
+    }
+
     /// Data bytes per LED on the wire.
     pub const fn bytes(self) -> usize {
         match self {
@@ -194,6 +202,35 @@ pub fn encode_spi(
             if let Some(slot) = out.get_mut(at + i * 3..at + i * 3 + 3) {
                 slot.copy_from_slice(&encode_spi_byte(*byte));
             }
+        }
+    }
+    len
+}
+
+/// Words [`encode_pio`] writes: one per LED, then one padding word of zero bits.
+pub const fn pio_words(config: &StripConfig) -> usize {
+    config.count as usize + 1
+}
+
+/// Encodes `pixels` (logical order; LEDs past the end are off, extras are ignored) as the words a
+/// PIO machine shifts out, into `out`, which must hold [`pio_words`] words. Each word is left
+/// justified: green, red, blue and white (the white byte only on RGBW) in bits 31 to 0, first
+/// byte most significant. The machine takes [`Wire::bits`] bits of each word. The last word is
+/// zero: its bits end with the line low, so the line stays low through the reset. Returns the
+/// words written.
+pub fn encode_pio(
+    config: &StripConfig,
+    pixels: impl Iterator<Item = Rgbw>,
+    out: &mut [u32],
+) -> usize {
+    let len = pio_words(config).min(out.len());
+    out[..len].fill(0);
+    for (index, pixel) in pixels.take(config.count as usize).enumerate() {
+        let p = config.output(pixel);
+        let at = config.physical(index as u16) as usize;
+        if let Some(slot) = out.get_mut(at) {
+            *slot =
+                u32::from(p.g) << 24 | u32::from(p.r) << 16 | u32::from(p.b) << 8 | u32::from(p.w);
         }
     }
     len

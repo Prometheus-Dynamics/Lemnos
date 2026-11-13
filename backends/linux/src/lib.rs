@@ -16,6 +16,7 @@ pub mod hotplug;
 mod i2c;
 mod module;
 mod pio_i2c;
+mod pio_out;
 mod pwm;
 mod spi;
 mod uart;
@@ -27,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{
-    ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, LocalCaller, Provider, Pwm, RawSpiBus,
-    RegistersHandle, ResetHandle, Result, Spi, Status, Tag, Uart, UsbDeviceHandle,
+    ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, LocalCaller, Pio, Provider, Pwm,
+    RawSpiBus, RegistersHandle, ResetHandle, Result, Spi, Status, Tag, Uart, UsbDeviceHandle,
     UsbFunctionHandle, status_of,
 };
 use lemnos_hal::ErrorKind;
@@ -213,6 +214,7 @@ fn exists(path: Option<PathBuf>) -> bool {
 impl Provider for LinuxBoard {
     fn provided(&self, need: &str) -> bool {
         pio_i2c::provided(&self.dev, need)
+            || pio_out::provided(&self.dev, need)
             || exists(self.node(need, I2C))
             || exists(self.node(need, SPI))
             || exists(self.node(need, TTY))
@@ -272,6 +274,14 @@ impl Provider for LinuxBoard {
             return Ok(lemnos_core::Held::boxed(Box::new(device)));
         }
         Ok(lemnos_core::Held::boxed(Box::new(self.open_spi(need)?)))
+    }
+
+    fn pio(&mut self, need: &str) -> Result<Pio> {
+        Ok(lemnos_core::Held::boxed(Box::new(pio_out::open(
+            &self.dev,
+            need,
+            self.module.as_ref(),
+        )?)))
     }
 
     fn line(&mut self, need: &str) -> Result<Line> {

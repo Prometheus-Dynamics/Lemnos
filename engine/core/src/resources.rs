@@ -1,4 +1,5 @@
 use lemnos_hal::i2c::{self, I2c as HalI2c, Operation};
+use lemnos_hal::pio::PioMachine;
 use lemnos_hal::raw::{RawLine, RawPwm, RawSpi};
 use lemnos_hal::spi::{self, SpiDevice};
 use lemnos_hal::{
@@ -25,6 +26,7 @@ pub enum BusKind {
     Clocks,
     Reset,
     Stream,
+    Pio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +88,8 @@ pub type DmaHandle = Held<dyn DmaBuffers<Error = ErrorKind> + Send>;
 pub type ClocksHandle = Held<dyn Clocks<Error = ErrorKind> + Send>;
 pub type ResetHandle = Held<dyn Reset<Error = ErrorKind> + Send>;
 pub type StreamHandle = Held<dyn StreamEndpoint<Error = ErrorKind> + Send>;
+/// A PIO state machine on one GPIO line (see [`lemnos_hal::pio`]).
+pub type Pio = Held<dyn PioMachine + Send>;
 
 /// What a backend tells the host when hardware comes or goes, by the names a board file uses.
 /// The host never learns what the hardware is: it looks for devices whose board entry has the
@@ -182,6 +186,9 @@ pub trait Provider {
     fn stream(&mut self, _need: &str) -> Result<StreamHandle> {
         Err(Status::NOT_SUPPORTED)
     }
+    fn pio(&mut self, _need: &str) -> Result<Pio> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Everything a driver can ask for while it binds.
@@ -269,6 +276,7 @@ resources! {
     ClocksHandle => Clocks, clocks;
     ResetHandle => Reset, reset;
     StreamHandle => Stream, stream;
+    Pio => Pio, pio;
 }
 
 impl<C: Contract + ?Sized> Resource for Dev<C> {

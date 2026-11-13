@@ -10,7 +10,7 @@
 //! a board shows it has the block.
 
 mod bus;
-mod device;
+pub(crate) mod device;
 mod program;
 mod protocol;
 mod selector;

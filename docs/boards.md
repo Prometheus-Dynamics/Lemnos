@@ -120,6 +120,7 @@ On Linux (`lemnosd` with no `--sim`):
 |---|---|
 | `i2c-N` | The I2C adapter `/dev/i2c-N`. Every device on a bus opens it; the kernel serialises them |
 | `pio-i2c:sda=N,scl=N` | An I2C bus made from two GPIO lines by the RP1 PIO block. `,hz=N` sets the clock |
+| `pio-out:gpio=N` | One state machine of the RP1 PIO block driving GPIO N, running the program its driver gives (a `ws2812` strip takes this as its `bus`) |
 | `spidevB.C` | The SPI device `/dev/spidevB.C` |
 | `gpiochipN:LINE` | One line of a GPIO chip |
 | `pwmchipN:CHANNEL` | One channel of a PWM chip |
@@ -330,6 +331,14 @@ config = { default_on = true }
 id = "ring-pixels"
 driver = "ws2812"
 bus = "spidev0.0"
+config = { count = 16, wire = "rgb", brightness = 255 }
+
+# The same strip on the RP1 PIO block: a `pio-out` name instead of an SPI device. Needs the PIO
+# block's node (and the kernel module, or the stock node).
+[[devices]]
+id = "ring-pixels-pio"
+driver = "ws2812"
+bus = "pio-out:gpio=13"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
 # `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
