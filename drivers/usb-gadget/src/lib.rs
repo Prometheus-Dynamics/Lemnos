@@ -244,8 +244,9 @@ impl UsbGadget {
         self.ifname = None;
         self.suspended = false;
         self.serve.request_deadline_ns = None;
-        // The endpoints a holder has went with the session: its files are dead for good.
-        self.holder = None;
+        // The holder keeps the endpoints through a let-go: the function keeps ep0 open for them
+        // (`UsbFunction::disable`), and the same descriptors work again once it is bound. Only the
+        // holder's release, its going, or the device's switching off ends the hold.
         if core::mem::take(&mut self.configured) {
             self.serve.note(serve::plain(EventKind::Deconfigured));
         }

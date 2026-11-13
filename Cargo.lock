@@ -1681,9 +1681,9 @@ dependencies = [
 name = "lemnos-gadget-check"
 version = "2.0.1-dev"
 dependencies = [
- "lemnos-hal",
- "lemnos-host",
- "lemnos-linux",
+ "lemnos-client",
+ "lemnos-core",
+ "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnosd",
 ]

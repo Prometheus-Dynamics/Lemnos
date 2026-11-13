@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Board-check in the QEMU harness: the USB gadget's root phase, its FunctionFS link bound on the dummy controller, and a host loop over its bulk pair"
+description = "Board-check in the QEMU harness: the USB gadget's root phase run by lemnosd as its own process, its FunctionFS link on the dummy controller, and the bulk pair held through the daemon with END"
 
 [lints]
 workspace = true
 
 [dependencies]
 lemnosd = { path = "../../../service/lemnosd" }
-lemnos-host = { path = "../../../engine/host" }
-lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
-lemnos-linux = { path = "../../../backends/linux" }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-core = { path = "../../../engine/core" }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }

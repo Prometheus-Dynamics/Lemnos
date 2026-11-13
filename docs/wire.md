@@ -449,21 +449,27 @@ closes all three and asks again.
 ### What a holder sees
 
 Measured on the QEMU harness (`testing/crates/gadget-check`, the holder checks) with the pinned
-7.3.3 kernel. Rows: (a) a blocking read in flight, (b) a queued AIO read, (c) a write after the
-event, (d) a new read afterwards. Each cell is the code the holder gets. ESHUTDOWN is returned once;
-every later call while the function is down gets EAGAIN.
+7.3.3 kernel, with the holder a client of lemnosd (`usb_endpoints_end`) and the daemon its own
+process. Rows: (a) a blocking read in flight, (b) a queued AIO read, (c) a write after the event, (d)
+a new read afterwards. Each cell is the code the holder gets. ESHUTDOWN is returned once; every later
+call while the function is down gets EAGAIN.
 
 | Case | (a) read in flight | (b) AIO in flight | (c) write | (d) new read | What the holder does |
 |---|---|---|---|---|---|
-| 1 host disconnect (port off) | ESHUTDOWN | ESHUTDOWN | EAGAIN | EAGAIN | keeps the descriptors; the same ones work after on and bulk |
-| 2a suspend, resume | keeps waiting, no code | not measured | not measured | waits, then takes the host's bytes | nothing: the same descriptors |
-| 2b bus reset | ESHUTDOWN | not measured | not measured | waits for the host to configure, then works | keeps them; the host reconfigures |
-| 3 configuration 0, then 1 | ESHUTDOWN | new AIO EAGAIN | EAGAIN | EAGAIN | keeps them; they work again after configuration 1 |
-| 4 UDC unbound and rebound (daemon keeps ep0) | ESHUTDOWN | ESHUTDOWN | EAGAIN, not ENODEV | EAGAIN, not ENODEV | keeps them; they work again after rebind |
-| 5 daemon disables, closes and unmounts | not measured as sync | ESHUTDOWN | EAGAIN | EAGAIN; descriptors live | keeps its copies: umount and remount are EBUSY until it closes them |
+| 1 host disconnect (port off) | ESHUTDOWN | ESHUTDOWN | EAGAIN | EAGAIN | keeps the descriptors; the same ones work after on and bulk; END stays open |
+| 2a suspend, resume | keeps waiting, no code | not measured | not measured | waits, then takes the host's bytes | nothing: the same descriptors; END stays open |
+| 2b bus reset | ESHUTDOWN | not measured | not measured | waits for the host to configure, then works | keeps them; the host reconfigures; END stays open |
+| 3 configuration 0, then 1 | ESHUTDOWN | new AIO EAGAIN | EAGAIN | EAGAIN | keeps them; they work again after configuration 1; END stays open |
+| 4 UDC unbound; the daemon binds it again | ESHUTDOWN | ESHUTDOWN | EAGAIN, not ENODEV | EAGAIN, not ENODEV | keeps them; the daemon keeps ep0 open and binds again, and the same descriptors work; END stays open |
+| 5 daemon switches the device off (client `set_power`) | not measured as sync | ESHUTDOWN | EAGAIN | EAGAIN; descriptors live | keeps its copies: umount and remount are EBUSY until it closes them; END hangs up |
 | halted OUT endpoint (host SET_FEATURE halt) | keeps waiting, no code | not measured | not measured | takes the bytes once the host clears the halt | nothing |
-| 6 daemon dies with the pair held | not run | not run | not run | not run | not run: needs the daemon as its own process |
-| pending control request (ep0) | not run | not run | not run | not run | not run: the pair is a different endpoint |
+| pending control request on ep0 (no data stream: the daemon stalls it at once) | keeps waiting, no code (the request is not on the pair) | not measured | not measured | not measured | the host sees the stall (EPIPE); the pair sees nothing |
+| 6 the daemon's process dies with the pair held | keeps waiting, no code; then takes the host's bytes and writes them back | not measured | waits (write), not measured as an errno | waits, then takes the host's bytes | keeps its copies. END hangs up at once. A new daemon does not bind the gadget while the copies are open; once the holder closes them, it lends the pair and END again |
+
+Notes on case 6: the endpoints stay enabled while the holder's copies are open, so the host still sees
+the device and the reads and writes wait for it rather than failing. The new daemon's enable reads ep0
+again, and the kernel refuses the descriptors while the endpoint files are open (EBADFD, the daemon
+reports `could not be enabled: retrying`). END is the only signal that the old daemon is gone.
 
 Two things can mislead. `ENODEV` never reaches a holder that keeps a file open: the function stays
 enabled while any copy is open, so the code alone cannot tell case 1 (host away) from case 4 (gadget
@@ -480,9 +486,10 @@ descriptors and retries: the function is down for now.
 
 A holder that keeps its copies blocks a remount of the function's mount (EBUSY), so the daemon's
 setup of a gadget that a previous holder still has open cannot remount until that holder closes them.
-END is how the holder learns that it must.
-
-function's `up` false closes its copies, and asks for the pair again once `up` is true.
+END is how the holder learns that it must. A new daemon's enable does not reattach ep0 while those
+copies are open: the kernel refuses the descriptors, and the daemon retries (with its backoff) until
+the holder closes them. A controller that lets go of the gadget does not end the hold: the daemon
+keeps ep0 open and binds the gadget again, and the holder's copies carry on (case 4 above).
 
 ### The bus state
 

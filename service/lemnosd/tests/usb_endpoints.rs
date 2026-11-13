@@ -236,15 +236,28 @@ fn the_hold_ends_when_the_gadget_goes_down_and_a_new_hand_off_comes_once_it_is_u
     until(&mut watch, |state| state[0]);
     take_pair(&mut one, device).unwrap();
 
-    // The controller lets go: the gadget comes down, and the hold with it.
+    // The controller lets go: the gadget comes down. The hold stays with its holder, whose copies
+    // are still open, so another connection is refused while the gadget is down and after it is up
+    // again.
     host.function.release();
     until(&mut watch, |state| !state[0]);
-    let status = refused(one.usb_endpoints_release(device).err().unwrap());
-    assert_eq!(status, Status::NOT_FOUND);
-
-    // Once the gadget is enabled again, another connection gets a fresh pair.
-    until(&mut watch, |state| state[0]);
     let mut two = connect(&running.socket, "two");
+    let status = refused(
+        two.usb_endpoints(device, std::sync::Arc::new(LinuxStreams))
+            .err()
+            .unwrap(),
+    );
+    assert_eq!(status, Status::BUSY);
+    until(&mut watch, |state| state[0]);
+    let status = refused(
+        two.usb_endpoints(device, std::sync::Arc::new(LinuxStreams))
+            .err()
+            .unwrap(),
+    );
+    assert_eq!(status, Status::BUSY);
+
+    // The holder gives the pair up; then another connection gets a fresh pair.
+    one.usb_endpoints_release(device).unwrap();
     let (mut out, _input) = take_pair(&mut two, device).unwrap();
     host.to_device.write_all(b"back").unwrap();
     assert_eq!(read_exact(&mut out, 4), b"back");

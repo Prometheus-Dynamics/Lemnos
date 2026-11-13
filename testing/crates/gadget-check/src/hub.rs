@@ -12,6 +12,8 @@
 //! - `reset`: the device's bus reset (`USBDEVFS_RESET`), which the gadget sees as a reset.
 //! - `cfg N`: SET_CONFIGURATION N to the device; `cfg 0` leaves the function disabled.
 //! - `halt` / `unhalt`: the host halts the bulk OUT endpoint, or clears the halt.
+//! - `ctl`: a vendor request to interface 0, device to host, which nothing on the daemon's side serves:
+//!   the device stalls it, and the host sees `EPIPE`.
 //! - `bulk`: claims interface 0 and moves one chunk out of the bulk OUT endpoint and back on the
 //!   IN endpoint, checking the bytes; retried until the device is configured again.
 //! - `mount`: mounts the gadget's FunctionFS instance on its mount point.
@@ -101,6 +103,7 @@ fn command(line: &str) -> io::Result<()> {
         }
         Some("halt") => endpoint_feature(SET_FEATURE, EP_OUT),
         Some("unhalt") => endpoint_feature(CLEAR_FEATURE, EP_OUT),
+        Some("ctl") => request_interface(),
         Some("bulk") => bulk(),
         Some("mount") => mount::functionfs(UDC, &target(), ""),
         Some("umount") => mount::unmount(&target()),
@@ -166,6 +169,21 @@ fn root_hub() -> io::Result<PathBuf> {
 /// The gadget's usbfs node as the host sees it now.
 fn device() -> io::Result<PathBuf> {
     find_device(Duration::from_secs(10)).ok_or_else(|| io::Error::from_raw_os_error(ENODEV))
+}
+
+/// A vendor request to interface 0, device to host: stalled by the device (`EPIPE` here) when no
+/// consumer on the daemon's side answers it.
+fn request_interface() -> io::Result<()> {
+    let setup = ControlSetup {
+        request_type: 0xc1,
+        request: 0x42,
+        value: 0,
+        index: 0,
+    };
+    let mut buf = [0u8; 8];
+    UsbfsFile::open(&device()?)?
+        .control_in(setup, &mut buf, TIMEOUT_MS)
+        .map(drop)
 }
 
 /// One chunk out of the bulk OUT endpoint and back on the IN endpoint, checked, retried for

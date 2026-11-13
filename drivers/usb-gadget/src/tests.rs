@@ -972,20 +972,22 @@ fn only_the_holder_can_give_the_endpoints_up() {
 
 #[cfg(unix)]
 #[test]
-fn the_hold_ends_when_the_controller_lets_go_of_the_gadget() {
+fn the_hold_survives_a_let_go_until_its_holder_gives_it_up() {
     let mut rig = lending_rig();
     rig.step();
     assert_eq!(lent(&mut rig, 1), Ok(()));
     rig.host.release();
     rig.step();
     assert_eq!(rig.health(), Health::Failed(LET_GO));
+    // Down for now: nobody is lent the endpoints, the holder keeps its hold, and a stranger is
+    // refused as before.
+    assert_eq!(lent(&mut rig, 2), Err(Status::BUSY));
+    // Enabled again: the holder gives the hold up, and then a new hold is possible for anyone.
+    rig.step();
     assert_eq!(
         Driver::release_endpoints(&mut rig.driver, CallerId(1)),
-        Err(Status::NOT_FOUND),
-        "the hold went with the gadget"
+        Ok(())
     );
-    // Enabled again: a new hold is possible, for anyone.
-    rig.step();
     assert_eq!(lent(&mut rig, 2), Ok(()));
 }
 

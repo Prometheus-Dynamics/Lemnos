@@ -1,38 +1,40 @@
 //! The USB gadget, end to end, in the QEMU harness (`testing/qemu`).
 //!
 //! `lemnos-gadget-check` runs as root in the guest, with configfs, FunctionFS and the dummy
-//! controller (`dummy_hcd`) the kernel provides:
+//! controller (`dummy_hcd`) the kernel provides. The daemon is its own process:
 //!
-//! 1. The daemon's own setup: the board file is read and its gadget's serial resolved
-//!    (`lemnosd::gadget::resolve`, from the kernel command line), then the root phase makes the
-//!    configfs tree (`lemnosd::gadget::privileged_start`).
-//! 2. The tree holds the derived NCM addresses and the board serial as the USB serial.
-//! 3. The gadget is enabled on `dummy_udc.0` the way the daemon enables it
-//!    (`lemnos_linux::FunctionFsGadget`), and waits for the host to configure it. The NCM
-//!    function's interface is named from the board's `ifname=lemnos%d` template, and the name the
-//!    kernel gave it is read back and checked against `lemnos0` in the guest.
-//! 4. The host side, a child process, finds the device in sysfs and reads its descriptors over
-//!    usbfs: a vendor-class interface, a CDC NCM pair and a CDC ACM pair.
-//! 5. The host claims the vendor interface and sends bytes out of the bulk OUT endpoint; the
-//!    gadget reads them and sends them back on the bulk IN endpoint; the host compares.
+//! 1. This check starts `lemnosd` on the board file below, as root, with `--user 999`. The daemon's
+//!    own privileged start makes the gadget's configfs tree and drops to uid 999; its gadget driver
+//!    then enables the function on `dummy_udc.0`. The check reads the daemon's process status
+//!    (`/proc/PID/status`) for the drop, and runs a `probe` child as the daemon's user to see the
+//!    FunctionFS mount refused.
+//! 2. The tree holds the derived NCM addresses and the board serial as the USB serial. The NCM
+//!    interface has the name the board's template gives, and the kernel's name is read back.
+//! 3. The host side, a child process, finds the device in sysfs and reads its descriptors over
+//!    usbfs: a vendor-class interface, a CDC NCM pair and a CDC ACM pair. It claims the vendor
+//!    interface and sends bytes out of the bulk OUT endpoint.
+//! 4. A holder takes the bulk pair and END from the daemon through `lemnos-client`, and echoes the
+//!    bytes from OUT to IN until the host has its bytes back.
+//! 5. The holder checks (`holder.rs`) run on that hold: the host and bus events through the hub,
+//!    the gadget's unbind, the daemon's process killed and started again (case 6), and the device
+//!    switched off through the client (case 5). END is asserted in each case.
 //!
-//! Prints one `ok` or `FAIL` line per check and exits non-zero if any failed. `host` as the
-//! first argument runs the host side alone (the child of step 4 and 5).
+//! Prints one `ok` or `FAIL` line per check and exits non-zero if any failed. `host`, `hub` and
+//! `probe` are the roles of the child processes this program starts.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
-use lemnos_hal::UsbFunction;
-use lemnos_hal::blocks::UsbFunctionEvent;
-use lemnos_linux::FunctionFsGadget;
 use lemnos_linux_sys::usbfs::UsbfsFile;
-use lemnosd::gadget::{resolve, settings_for};
-use lemnosd::privilege::{self, KEEP, Request};
+use lemnosd::privilege::KEEP;
 
+mod daemon;
 mod holder;
 mod hub;
+use daemon::{DAEMON_ID, Lemnosd};
 use hub::Hub;
 
 /// The board the check runs: the gadget derives its addresses from the identity device, whose
@@ -56,32 +58,30 @@ uses = { function = "udc:dummy_udc.0" }
 config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 gadget-check\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive ifname=lemnos%d\nfunction acm\n" }
 "#;
 
+/// Where the board file is written, and the daemon's socket beside it (the daemon makes its
+/// socket's directory in its privileged start).
+const BOARD_PATH: &str = "/run/lemnos-check/board.toml";
+const SOCKET: &str = "/run/lemnos-check/lemnosd.sock";
+
 /// The serial the command line gives, and the addresses it derives for board `lemnos-qemu`.
 /// Computed with `hashlib` from the rule in `docs/boards.md`, not with this code.
 const SERIAL: &str = "0123456789abcdef";
 const HOST_MAC: &str = "e6:41:0a:6e:54:dc";
 const DEVICE_MAC: &str = "e6:41:0a:6e:54:dd";
 
-const CONFIGFS: &str = "/sys/kernel/config";
 const MOUNTS: &str = "/dev/usb-ffs";
-const UDC_CLASS: &str = "/sys/class/udc";
-const UDC: &str = "dummy_udc.0";
-const GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/lemnos-dummy_udc.0";
-/// The user and group the daemon runs as in the check: numbers, so no account database is needed.
-const DAEMON_ID: &str = "999";
-/// The socket's directory is made in the root phase, owned by the daemon's user.
-const SOCKET: &str = "/run/lemnos-check/lemnosd.sock";
+pub const UDC: &str = "dummy_udc.0";
+pub const GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/lemnos-dummy_udc.0";
 /// `CAP_SYS_ADMIN`, the capability the FunctionFS mount needs and the drop must remove.
 const CAP_SYS_ADMIN: u32 = 21;
 
 /// Bulk endpoints: the gadget's IN endpoint is the first `endpoint in` (address 0x81), its OUT
 /// endpoint the second (0x02), numbered from 1 in the order the board file lists them.
-const EP_IN: u8 = 0x81;
-const EP_OUT: u8 = 0x02;
+pub const EP_IN: u8 = 0x81;
+pub const EP_OUT: u8 = 0x02;
 /// The bytes moved, in packets of the high-speed bulk size.
-const CHUNK: usize = 512;
+pub const CHUNK: usize = 512;
 const ROUNDS: usize = 8;
-const TIMEOUT: Duration = Duration::from_secs(10);
 /// The interfaces the host must see, in order: the vendor-class FunctionFS link, then the CDC NCM
 /// control and data interfaces, then the CDC ACM control and data interfaces. Class, subclass.
 const INTERFACES: [(u8, u8); 5] = [
@@ -102,16 +102,26 @@ macro_rules! say {
 fn main() -> ExitCode {
     // The first argument decides which role this process plays; the children are this program.
     let role = std::env::args().nth(1);
-    if role.as_deref() == Some("hub") {
-        hub::run();
-        return ExitCode::SUCCESS;
-    }
-    if role.as_deref() == Some("host") {
-        return if host_side() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+    match role.as_deref() {
+        Some("hub") => {
+            hub::run();
+            return ExitCode::SUCCESS;
+        }
+        Some("host") => {
+            return if host_side() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        Some("probe") => {
+            return if probe() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        _ => {}
     }
     let mut failures = 0;
     let mut check = |ok: bool, what: &str| {
@@ -120,20 +130,16 @@ fn main() -> ExitCode {
         ok
     };
 
-    // The board file, with the gadget's serial read once, as the daemon does before its start.
-    let mut board = match lemnos_host::board::parse(BOARD) {
-        Ok(board) => board,
-        Err(error) => {
-            say!("FAIL the board file parses: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if !check(resolve(&mut board).is_ok(), "the board serial is resolved") {
+    if let Err(error) =
+        fs::create_dir_all("/run/lemnos-check").and_then(|()| fs::write(BOARD_PATH, BOARD))
+    {
+        say!("FAIL the board file is written: {error}");
         return ExitCode::FAILURE;
     }
 
-    // The host is a separate process, as a host is. It starts before the daemon's privileged start
-    // and runs as root, which the check's host side needs for usbfs.
+    // The host is a separate process, as a host is. It starts before the daemon and runs as root,
+    // which the check's host side needs for usbfs. The root child for the holder checks is started
+    // here too, and keeps its root.
     let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/lemnos-gadget-check"));
     let mut host = match Command::new(&me).arg("host").spawn() {
         Ok(child) => child,
@@ -142,9 +148,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
-    // The root child for the holder checks: port controls, resets, configurations and mounts. It
-    // is started here, before the daemon drops to its user, and keeps its root.
     let mut hub = match Hub::start(&me) {
         Ok(hub) => hub,
         Err(error) => {
@@ -153,23 +156,27 @@ fn main() -> ExitCode {
         }
     };
 
-    // 1. The daemon's own privileged start: the root phase, then the drop to the daemon's user,
-    // keeping KEEP, and the verification after the drop. This is what lemnosd runs.
-    let request = Request {
-        user: DAEMON_ID.to_string(),
-        group: Some(DAEMON_ID.to_string()),
+    // 1. The daemon, as its own process: its privileged start, the drop, and the gadget's enable.
+    let mut daemon = match Lemnosd::start(
+        &me.with_file_name("lemnosd"),
+        Path::new(BOARD_PATH),
+        Path::new(SOCKET),
+    ) {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            say!("FAIL the daemon starts on the board file: {error}");
+            return ExitCode::FAILURE;
+        }
     };
-    if let Err(reason) = privilege::start(&request, &board, Path::new(SOCKET)) {
-        say!("FAIL the daemon's privileged start: {reason}");
-        list("/sys/class/udc");
-        list("/sys/kernel/config/usb_gadget/lemnos-dummy_udc.0/functions");
-        list("/dev/usb-ffs/dummy_udc.0");
+    check(
+        true,
+        "the daemon's privileged start ran and it listens on its socket",
+    );
+    let Some(pid) = daemon.pid() else {
+        say!("FAIL the daemon's process id is not known");
         return ExitCode::FAILURE;
-    }
-    check(true, "the root phase ran and the daemon dropped to uid 999");
-
-    // 1b. What the drop left. The status file is the kernel's own account of the sets.
-    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    };
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     let sets = capability_sets(&status);
     let uid = status
         .lines()
@@ -179,11 +186,11 @@ fn main() -> ExitCode {
         .to_string();
     check(
         uid == DAEMON_ID,
-        "the process runs as uid 999 after the drop",
+        "the daemon's process runs as uid 999 after the drop",
     );
     check(
         sets.len() == 5,
-        "/proc/self/status lists the five capability sets",
+        "the daemon's /proc status lists the five capability sets",
     );
     for (name, mask) in &sets {
         check(
@@ -200,16 +207,18 @@ fn main() -> ExitCode {
         bounding & !keep == 0,
         "CapBnd keeps only the capabilities the daemon keeps",
     );
-    // A driver in the same process reaches mount(2), but without the capability it is refused.
-    let refused = lemnos_linux_sys::mount::functionfs(UDC, &Path::new(MOUNTS).join(UDC), "")
-        .err()
-        .map(|error| error.kind());
+    let refused = Command::new(&me)
+        .arg("probe")
+        .uid(999)
+        .gid(999)
+        .status()
+        .is_ok_and(|status| status.success());
     check(
-        refused == Some(std::io::ErrorKind::PermissionDenied),
-        "a FunctionFS mount is refused after the drop (EPERM)",
+        refused,
+        "a FunctionFS mount is refused to the daemon's user (EPERM)",
     );
 
-    // 2. What the tree holds.
+    // 2. What the tree holds, and what the daemon enabled.
     let read = |path: &str| {
         fs::read_to_string(path)
             .map(|s| s.trim_end_matches(['\n', '\0']).to_string())
@@ -232,51 +241,12 @@ fn main() -> ExitCode {
         read(&format!("{GADGET_DIR}/functions/ncm.usb0/dev_addr")) == DEVICE_MAC,
         "the NCM device address is derived from the board identity",
     );
-
-    // 3. The daemon's enable, on the dummy controller.
-    let Some((set, functions)) = board
-        .devices
-        .iter()
-        .find(|d| d.id == "gadget")
-        .map(|device| settings_for(&board.board.id, device))
-        .and_then(Result::ok)
-    else {
-        say!("FAIL the gadget's settings are read back");
-        return ExitCode::FAILURE;
-    };
     check(
-        functions.as_slice().len() == 3,
-        "three functions: ffs, ncm, acm",
+        daemon::wait_until(Duration::from_secs(20), daemon::enabled),
+        "the daemon enables the gadget on the dummy controller",
     );
-    let mut gadget = match FunctionFsGadget::new(
-        Path::new(CONFIGFS),
-        Path::new(MOUNTS),
-        Path::new(UDC_CLASS),
-        UDC,
-    ) {
-        Some(gadget) => gadget,
-        None => {
-            say!("FAIL {UDC} is not a controller name");
-            return ExitCode::FAILURE;
-        }
-    };
-    if !check(
-        gadget.enable(set.bytes()).is_ok(),
-        "the gadget is enabled on the dummy controller",
-    ) {
-        return ExitCode::FAILURE;
-    }
-
-    // The NCM interface has the name the board's template gives, and the kernel's choice is
-    // read back: the first free `lemnos<N>` on a fresh guest is `lemnos0`.
-    let mut name = [0u8; 16];
-    let named = gadget
-        .interface_name(&mut name)
-        .ok()
-        .flatten()
-        .map(|len| String::from_utf8_lossy(&name[..len]).into_owned());
     check(
-        named.as_deref() == Some("lemnos0"),
+        read(&format!("{GADGET_DIR}/functions/ncm.usb0/ifname")) == "lemnos0",
         "the NCM interface is named by the board's template, and the name is read back",
     );
     check(
@@ -284,10 +254,20 @@ fn main() -> ExitCode {
         "the guest has a network interface lemnos0",
     );
 
-    // 4 and 5. The host runs beside us, and we serve the bulk pair until it is done.
-    let configured = wait_configured(&mut gadget);
-    check(configured, "the host configured the gadget");
-    let moved = configured && serve(&mut gadget);
+    // 3 and 4. The holder takes the pair and END through the daemon's socket, and echoes the host's
+    // bytes; the host side checks them.
+    let hold = match holder::Hold::take(&daemon) {
+        Ok(hold) => hold,
+        Err(error) => {
+            say!("FAIL the holder takes the bulk pair and END from the daemon: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    check(
+        true,
+        "the holder takes the bulk pair and END from the daemon, through the client",
+    );
+    let moved = (0..ROUNDS).all(|_| holder::echo_round(&hold));
     check(
         moved,
         "bytes sent to the gadget came back on the IN endpoint",
@@ -297,10 +277,9 @@ fn main() -> ExitCode {
         host_ok,
         "the host side saw the interfaces and got its bytes back",
     );
-    // 6. The holder checks: a process holding the bulk pair sees each event, and the gadget is
-    // torn down by the last case.
-    holder::run(&mut gadget, &mut hub, &mut check);
-    let _ = gadget.disable();
+
+    // 5. The holder checks, on the same hold, through the daemon's events.
+    holder::run(&mut daemon, &mut hub, hold, &mut check);
     if failures == 0 {
         ExitCode::SUCCESS
     } else {
@@ -308,8 +287,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Reads events until the host chooses the configuration, or the wait runs out.
-/// The five capability sets of `/proc/self/status`, as masks: inheritable, permitted, effective,
+/// The five capability sets of `/proc/PID/status`, as masks: inheritable, permitted, effective,
 /// bounding and ambient, in that order.
 fn capability_sets(status: &str) -> Vec<(&'static str, u64)> {
     const NAMES: [&str; 5] = ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"];
@@ -325,43 +303,11 @@ fn capability_sets(status: &str) -> Vec<(&'static str, u64)> {
         .collect()
 }
 
-fn wait_configured(gadget: &mut FunctionFsGadget) -> bool {
-    let until = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < until {
-        match gadget.next_event() {
-            Ok(Some(UsbFunctionEvent::Configured)) => return true,
-            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => return false,
-        }
-    }
-    false
-}
-
-/// Moves each round's chunk from the OUT endpoint to the IN endpoint, and says whether every
-/// chunk moved in full. The host checks the bytes themselves.
-fn serve(gadget: &mut FunctionFsGadget) -> bool {
-    let mut buffer = [0u8; CHUNK];
-    for _ in 0..ROUNDS {
-        let got = match gadget.read(EP_OUT, &mut buffer, TIMEOUT) {
-            Ok(n) => n,
-            Err(error) => {
-                say!("FAIL the gadget reads the OUT endpoint: {error:?}");
-                return false;
-            }
-        };
-        if got != CHUNK {
-            say!("FAIL the gadget read {got} bytes from OUT, not {CHUNK}");
-            return false;
-        }
-        match gadget.write(EP_IN, &buffer[..got], TIMEOUT) {
-            Ok(n) if n == got => {}
-            other => {
-                say!("FAIL the gadget writes the IN endpoint: {other:?}");
-                return false;
-            }
-        }
-    }
-    true
+/// The FunctionFS mount, tried as the daemon's user: refused (EPERM), as the drop must refuse it.
+fn probe() -> bool {
+    lemnos_linux_sys::mount::functionfs(UDC, &Path::new(MOUNTS).join(UDC), "")
+        .err()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 /// The host's side: find the device, check its interfaces, and loop the bulk pair.
@@ -467,17 +413,4 @@ fn interfaces(bytes: &[u8]) -> Vec<(u8, u8)> {
         at += len;
     }
     out
-}
-
-/// The names in a directory, for a failure's diagnostics.
-fn list(dir: &str) {
-    let names: Vec<String> = fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_else(|error| vec![error.to_string()]);
-    say!("     {dir}: {names:?}");
 }

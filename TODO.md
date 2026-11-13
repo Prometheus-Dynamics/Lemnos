@@ -137,9 +137,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## USB gadget
 
-- [ ] **What an endpoint holder sees on teardown** (R1f): open; the gadget's bulk endpoints are
-      lent to one client (R1b), and the teardown case is not yet settled.
-
 ## Camera and sensors
 
 - [ ] **Embedded data lines from the receivers** (J4b3, PR #225, open): embedded data lines, the

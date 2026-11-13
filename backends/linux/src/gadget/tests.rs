@@ -365,6 +365,33 @@ fn enable_before_setup_is_not_found_and_touches_nothing() {
 }
 
 #[test]
+fn a_controller_that_let_go_keeps_ep0_for_the_bind_again() {
+    let tree = Tree::new();
+    setup(&tree);
+    let mut gadget = tree.gadget();
+    gadget.enable(&set()).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    // The controller let go: the kernel unbound the function, and the session saw the unbind.
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    assert!(
+        gadget.endpoint_handles().is_err(),
+        "nothing is lent while down"
+    );
+    assert_eq!(gadget.disable(), Ok(()));
+    assert!(gadget.session.is_some(), "ep0 stays open across the let-go");
+    assert_eq!(tree.attribute("UDC"), "\n");
+    assert_eq!(
+        gadget.enable(&set()),
+        Ok(()),
+        "bound again with the attribute"
+    );
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert!(!gadget.session.as_ref().unwrap().released);
+    assert!(gadget.endpoint_handles().is_ok());
+}
+
+#[test]
 fn disable_and_drop_unbind_and_leave_the_setup_as_it_made_it() {
     let tree = Tree::new();
     setup(&tree);

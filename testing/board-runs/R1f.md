@@ -40,6 +40,7 @@ What a real controller may show differently from `dummy_hcd`:
 - **A host that stays configured while the daemon is down (6).** Not run in QEMU at all: the check
   does not kill the daemon. On a board, kill the daemon's own PID (started by the check, never by name)
   with the pair held and the host still configured, and check the holder's reads still complete.
+  QEMU measured this on dummy_hcd (see docs/wire.md, "What a holder sees").
 
 Nothing here is `pkill`, `killall` or a pattern kill: stop only the PIDs the check started, and record
 each one in a pid file on the board when starting it.
@@ -55,7 +56,15 @@ never unmounts or remounts under it; on the board, start the daemon with a holde
 check that setup does not fail with EBUSY and that the holder's descriptors keep working until the
 holder releases them.
 
-Not run in QEMU in this change: END through the harness. The holder checks call the gadget directly,
-not through lemnosd's hold, so the END is covered by the lemnosd tests (`service/lemnosd/tests/usb_endpoints.rs`)
-and the bridge test, not by the QEMU cases. Case 6 (daemon dies with the pair held) still needs the
-daemon as its own process.
+Run in QEMU (R1g, the holder checks through lemnosd, `dummy_hcd`, the daemon its own process): END was
+read in each case of the table. It stays open through the host's disconnect, suspend, reset and
+configuration change (cases 1, 2a, 2b, 3), and through the gadget's unbind (case 4). It hangs up when the
+daemon's client switches the device off (case 5) and when the daemon's process is killed (case 6). A new
+daemon on the same mount does not bind the gadget while the holder keeps its copies, and lends the pair and
+END again once the holder closes them. Negative runs: with the write end of END kept open on a switch-off,
+case 5 fails on END; with END hung up while the gadget is down, case 4 fails on END. Still for the board:
+the errno of each row on a real controller, and the daemon's new-enable refusal (EBADFD on the descriptors)
+on a real controller's FunctionFS.
+
+Case 6 on the board: kill the daemon's own PID (started by the check, never by name) with the pair held
+and the host still configured, and check the holder's reads still complete after the host moves bytes.

@@ -962,6 +962,11 @@ impl UsbFunction for FunctionFsGadget {
     /// holder dups by taking a borrow of them. Nothing is opened here.
     fn endpoint_handles(&self) -> Result<[BufferHandle<'_>; 2], ErrorKind> {
         let session = self.session.as_ref().ok_or(ErrorKind::Unavailable)?;
+        // Kept open for the holder's copies after the controller let go: nothing is lent while
+        // the gadget is down.
+        if session.released {
+            return Err(ErrorKind::Unavailable);
+        }
         let [out, input] = session.lend.ok_or(ErrorKind::Unsupported)?;
         Ok([
             BufferHandle::from(session.wire.endpoints[out].as_fd()),
@@ -997,13 +1002,25 @@ impl UsbFunction for FunctionFsGadget {
     }
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
-        if self.session.is_some() {
-            return Err(ErrorKind::Busy);
-        }
+        let released = match self.session.as_ref() {
+            Some(session) if session.released => true,
+            Some(_) => return Err(ErrorKind::Busy),
+            None => false,
+        };
         let plan = Plan::of(&UsbDescriptors::parse(descriptors)?)?;
         // Checked before anything is written, so a board that is not set up stays as it is.
         if !self.paths.ready(&plan.configuration) {
             return Err(ErrorKind::NotFound);
+        }
+        if released {
+            // The controller let go and the session kept ep0 open (see `disable`). The descriptors
+            // are still the kernel's, and a fresh ep0 could not describe them again while a holder
+            // keeps the endpoints open, so only the attribute is written.
+            attribute(&self.paths.gadget, "UDC", &self.paths.name).map_err(|e| setup_kind(&e))?;
+            if let Some(session) = self.session.as_mut() {
+                session.released = false;
+            }
+            return Ok(());
         }
         self.paths.unbind();
         match self.paths.attach(&plan) {
@@ -1021,12 +1038,19 @@ impl UsbFunction for FunctionFsGadget {
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
-        if self.session.is_some() {
-            // Unbind first, then close the files. The gadget stays as the setup made it.
-            self.paths.unbind();
-            self.session = None;
+        match self.session.as_ref() {
+            // The controller let go already, so there is nothing to unbind. The session keeps ep0
+            // and the endpoints open: a holder's copies stay valid, and `enable` binds again on the
+            // same ep0. Dropping the gadget closes them.
+            Some(session) if session.released => Ok(()),
+            Some(_) => {
+                // Unbind first, then close the files. The gadget stays as the setup made it.
+                self.paths.unbind();
+                self.session = None;
+                Ok(())
+            }
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
