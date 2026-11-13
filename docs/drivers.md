@@ -93,7 +93,7 @@ python3 scripts/generate-builtins.py --check
 | `v4l2-stateless` (crate `m2m-decode`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. One media request per job, with the caller's controls as bytes |
 | `a733-di` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract |
 | `k230-vpu` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. Some of the node's private requests are refused |
-| `a733-video` | `codec.block/1` | `jobs` stream | Refuses to run. It answers register reads only. Every encode or decode job and every register write is refused, because an address written into a register cannot be bounded from user space on this block |
+| `a733-video` | `codec.block/1` | `jobs` stream | With `route = "module"`, encode jobs as register writes and dma-bufs, which `lemnos.ko` checks and runs: it writes every address register itself and refuses a range that doesn't cover what the job's own geometry makes the engine reach. On the vendor route (the default) register reads only, because an address written into a register cannot be bounded from user space. A decode job is refused: the module allows the H.264 encoder's registers only |
 
 ## Neural accelerators
 

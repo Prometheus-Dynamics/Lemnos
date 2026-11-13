@@ -3,3 +3,4 @@
 obj-m += lemnos_test_block.o
 ccflags-y += -I$(src)
 obj-m += lemnos_test_bus.o
+obj-m += lemnos_test_regjob.o

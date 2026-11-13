@@ -197,6 +197,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E18.md`](../testing/board-runs/E18.md) | The JPEG block: hardware ID, the register file, offsets |
 | [`E38.md`](../testing/board-runs/E38.md) | `a733-di` output and field order; JPEG through `rk-mpp` |
 | [`E19.md`](../testing/board-runs/E19.md) | `a733-video`: the register window, the claim, a second claimant |
+| [`H8a.md`](../testing/board-runs/H8a.md) | `a733-video` through `lemnos.ko`: the encoder's register map, an encode, tight extents, refusals, a timeout reset |
 | [`E20.md`](../testing/board-runs/E20.md) | `a733-di`: every mode, reads past the rows, recovery |
 | [`E21.md`](../testing/board-runs/E21.md) | `k230-vpu`: layouts, JPEG encode and decode, guards, sessions |
 | [`E41.md`](../testing/board-runs/E41.md) | `k230-vpu` through its job stream: out-of-order completions, a source change |

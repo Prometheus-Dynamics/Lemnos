@@ -36,6 +36,8 @@ as soon as the module loads.
 | `gsdma` | Compatibles driven as the graphics DMA engine (`lemnos_gsdma.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_gsdma_fake_regs` | Test only. The graphics DMA engine's register window is ordinary memory, for the fake engine in QEMU. |
 | `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
+| `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`lemnos_regjob_a733.c`). Must also be in `owned`. Empty by default. |
+| `test_rj_fake_regs` | Test only. A register-job block's window is ordinary memory, for the fake blocks in QEMU. |
 
 ## Claims
 
@@ -212,6 +214,51 @@ a row. If it doesn't within a bounded time, nothing is released, every pin stays
 GPL-2.0-only. Register offsets and the start, submit, interrupt and stop sequences are ported from
 the stock `rp1_cfe` driver's `pisp-fe.c` and `cfe.c`, Copyright (C) 2021-2024 Raspberry Pi Ltd.; the
 notice is kept in the file header. The driver is `drivers/pisp/` (`PispFe`, the `device` feature).
+
+## Register jobs
+
+Some blocks are programmed by writing registers, and some of those registers take bus addresses or
+decide how far past one the block reaches. A block listed in a register-job parameter (`a733_ve`)
+is driven that way by the module (`lemnos_regjob.c`), with a profile per block that says which
+registers a caller may write, which take addresses, and what a job's geometry makes the block
+reach. Its registers can't be mapped, its interrupt isn't forwarded and its power isn't the
+caller's (`LEMNOS_IOC_POWER` gets `ENOTTY`).
+
+`LEMNOS_IOC_REGJOB_OPEN` opens a session on the block, one at a time (`EBUSY` for a second), as a
+file. On it (`lemnos_regjob.h`):
+
+- `LEMNOS_IOC_REGJOB_IMPORT` attaches and maps a dma-buf for the block and answers its index and
+  bus address. A buffer whose mapping isn't one contiguous range of bus addresses is refused
+  (`EINVAL`). At most 64 per session (`ENOSPC`).
+- `LEMNOS_IOC_REGJOB_RUN` runs one job and waits for it: up to 1024 plain writes, written in order,
+  up to 16 addresses, each a register, an imported buffer, an offset and a length, a start value,
+  a timeout of 1 ms to 10 s, and up to 64 registers read back. The module copies the job once,
+  checks all of it before writing anything, writes the plain values, writes every address
+  register itself (the buffer's bus address plus the offset) and the registers the profile derives
+  from a buffer (an end address, a size), enables the interrupt and writes the start value.
+- `LEMNOS_IOC_REGJOB_RELEASE` lets a buffer go, refused with `EBUSY` while the block may use it.
+- `LEMNOS_IOC_REGJOB_INFO` answers the profile, the window and the counters.
+
+A job is refused with nothing written: `EPERM` for a write to a register the profile doesn't let a
+caller write, a bit it doesn't let one set, or any write to an address register or a register the
+module derives; `EINVAL` for a register outside the window or off its boundary, an address
+register named twice or left out, a geometry register missing or written twice, a geometry the
+profile doesn't size, an unaligned address or one past what the register can hold, a length of
+0, or counts or a timeout out of range;
+`ENOENT` for a buffer the session doesn't hold; `EFAULT` for a range outside its buffer, an offset
+and length that overflow, or a range shorter than what the job's geometry makes the block reach.
+Nothing is clamped.
+
+A job that doesn't finish in its time is answered `ETIMEDOUT` after the module pulses the block's
+reset line and puts its registers back to rest; the session goes on. A block with no reset line
+that times out is wedged: its buffers are held until a reboot, `lemnos.ko` can't be unloaded, and
+later jobs get `EIO`. An unbind stops the block, ends the session's jobs with `ENODEV`, and keeps
+the buffers pinned until the session closes.
+
+The A733 profile's register facts come from the vendor kernel (window, top register, reset bits,
+interrupt registers) and from the mainline Cedrus register list and a public reverse-engineered
+H.264 encoder (the encoder's address and geometry registers); `lemnos_regjob_a733.c` names each
+source. No code of theirs is copied.
 
 ## Buses
 

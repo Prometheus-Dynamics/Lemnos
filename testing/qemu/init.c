@@ -24,6 +24,7 @@
 #define PISP "lemnos-test-pisp"
 #define GSDMA "lemnos-test-gsdma"
 #define OWNED_GSDMA OWNED ",lemnos,test-gsdma gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"
+#define VE "lemnos-test-ve"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block,lemnos,test-spi"
@@ -393,6 +394,18 @@ int main(void)
 	check(!put(UNBIND, PISP), "PiSP block unbound");
 	check(!forget_override(PISP), "PiSP override cleared");
 	check(!unload("lemnos"), "module unloaded with the back end idle");
+
+	/* Register jobs on a fake video engine. The check unbinds it at its end. */
+	check(!load("/lemnos_test_regjob.ko", ""), "fake register-job blocks loaded");
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-ve a733_ve=lemnos,test-ve test_rj_fake_regs=1"),
+	      "module loaded with register jobs");
+	check(!bind_block(VE), "fake video engine bound");
+	check(!run((char *const[]){ "/lemnos_regjob_check", "/dev/lemnos", VE, UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_regjob_check");
+	check(!forget_override(VE), "fake video engine override cleared");
+	check(!unload("lemnos"), "module unloaded after the register jobs");
+	check(!unload("lemnos_test_regjob"), "fake register-job blocks unloaded");
 
 	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be,lemnos,test-gsdma pisp_be=lemnos,test-pisp-be "
 				  "test_pb_fake_regs=1 gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"),
