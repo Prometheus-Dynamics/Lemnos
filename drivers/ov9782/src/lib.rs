@@ -10,6 +10,14 @@
 //! line are the board's. Binding does not touch the bus. Nothing is kept across a restart: each
 //! `start` writes the whole configuration from the sensor's reset defaults upward.
 //!
+//! Power-up. The first `start` after the driver is created does not touch the bus. It answers at
+//! once, in `PowerUp`, and the first chip-ID read is made by the first tick at least
+//! [`POWER_UP_NS`] later. The datasheet's power-up timing puts the first SCCB transaction at least
+//! 1 ms after the supplies are up (t2), at least 5 ms after the reset line rises (t3), and after
+//! 8192 XVCLK cycles (about 0.34 ms at 24 MHz). The board's power switch is started before the
+//! sensor, so the delay runs from the sensor's own start, which comes after the supplies rise. A
+//! chip that still does not answer then is recovered with the backoff below, as any bus fault is.
+//!
 //! Modes are one table (`chip::MODES`): 1280x800, 1280x720 and a 2x2-binned 640x400, each at RAW10
 //! and RAW8. A mode's array crop is reported as `Mode::crop`; the contract has no way to change a
 //! crop at runtime, so a different crop is a different row of that table.
@@ -126,6 +134,11 @@ const SET_FRAME_LENGTH: MethodId = MethodId {
     method: 18,
 };
 
+/// The time between a sensor's `start` and its first chip-ID read. The datasheet's power-up
+/// timing: at least 1 ms from the supplies to the reset line (t2), at least 5 ms from the reset
+/// line to system ready (t3), and 8192 XVCLK cycles before the first SCCB transaction. 10 ms covers
+/// those with the board's own rise times.
+pub const POWER_UP_NS: u64 = 10_000_000;
 /// First delay between recovery attempts.
 const BACKOFF_FIRST_NS: u64 = 250_000_000;
 /// Longest delay between recovery attempts.
@@ -154,6 +167,11 @@ const fn backoff_ns(attempt: u32) -> u64 {
 enum State {
     /// Not streaming.
     Stopped,
+    /// Started on a chip never read: the first chip-ID read is due at `due`, which a tick sets
+    /// [`POWER_UP_NS`] after the start. Nothing has been written to the bus.
+    PowerUp {
+        due: Option<u64>,
+    },
     Streaming,
     /// A write failed while streaming: ticks are reprogramming and restarting the sensor.
     Recovering {
@@ -259,6 +277,8 @@ pub struct Ov9782 {
     applied: Option<FrameValues>,
     /// The last post accepted, with where it landed.
     last: Option<(FrameValues, Outcome)>,
+    /// Set once the chip-ID read has answered. Until then a start goes through `PowerUp`.
+    powered: bool,
 }
 
 impl Lifecycle for Ov9782 {
@@ -284,6 +304,7 @@ impl Lifecycle for Ov9782 {
             test_pattern: 0,
             applied: None,
             last: None,
+            powered: false,
         })
     }
 
@@ -353,6 +374,7 @@ impl Lifecycle for Ov9782 {
             (State::Recovering { .. }, _) => {
                 Health::Degraded("bus error while streaming: restarting the sensor")
             }
+            (State::PowerUp { .. }, _) => Health::Degraded("powering up"),
             (_, LinkCheck::Unknown(reason)) => Health::Degraded(reason),
             _ => Health::Ok,
         }
@@ -364,6 +386,37 @@ impl Lifecycle for Ov9782 {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         match self.state {
             State::Stopped => None,
+            State::PowerUp { due } => {
+                let next = match due {
+                    None => {
+                        let at = now_ns.saturating_add(POWER_UP_NS);
+                        self.state = State::PowerUp { due: Some(at) };
+                        Some(at)
+                    }
+                    Some(at) if now_ns < at => Some(at),
+                    Some(_) => match self.program() {
+                        Ok(()) => {
+                            self.state = State::Streaming;
+                            None
+                        }
+                        // The first attempt failed: recovery takes over, from the bottom of its
+                        // backoff.
+                        Err(_) => {
+                            self.state = State::Recovering {
+                                attempt: 0,
+                                due: None,
+                            };
+                            self.recover(now_ns, 0, None)
+                        }
+                    },
+                };
+                if self.values.is_some() && matches!(self.state, State::Streaming) {
+                    let poll = now_ns.saturating_add(VALUES_POLL_NS);
+                    Some(next.map_or(poll, |at| at.min(poll)))
+                } else {
+                    next
+                }
+            }
             State::Streaming => {
                 self.take_values();
                 self.values
@@ -549,7 +602,7 @@ impl Ov9782 {
 
     /// Whether a method may write to the sensor now.
     fn check_not_recovering(&self) -> Result<()> {
-        if matches!(self.state, State::Recovering { .. }) {
+        if matches!(self.state, State::Recovering { .. } | State::PowerUp { .. }) {
             Err(Status::BUSY)
         } else {
             Ok(())
@@ -634,6 +687,7 @@ impl Ov9782 {
         if !CHIP_IDS.contains(&id) {
             return Err(Status::NO_DEVICE);
         }
+        self.powered = true;
 
         self.reg(MODE_SELECT, STANDBY)?;
         self.reg(
@@ -718,11 +772,16 @@ impl CameraSensor for Ov9782 {
         if self.selected.is_none() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        self.check_not_recovering()?;
-        if self.state == State::Streaming {
+        if matches!(self.state, State::Streaming | State::PowerUp { .. }) {
             return Ok(());
         }
+        self.check_not_recovering()?;
         self.discard_values();
+        if !self.powered {
+            // The first start: the chip gets its power-up time before it is read (`POWER_UP_NS`).
+            self.state = State::PowerUp { due: None };
+            return Ok(());
+        }
         self.program()?;
         self.state = State::Streaming;
         Ok(())
@@ -730,6 +789,11 @@ impl CameraSensor for Ov9782 {
 
     fn stop(&mut self) -> Result<()> {
         if self.state == State::Stopped {
+            return Ok(());
+        }
+        if matches!(self.state, State::PowerUp { .. }) {
+            // Nothing was written: the chip was never read.
+            self.state = State::Stopped;
             return Ok(());
         }
         self.reg(MODE_SELECT, STANDBY)?;

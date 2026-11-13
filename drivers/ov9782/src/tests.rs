@@ -34,6 +34,10 @@ struct Bus {
     fail_at: Arc<AtomicI64>,
     /// Fail every transaction.
     down: Arc<std::sync::atomic::AtomicBool>,
+    /// The time the simulated chip is in SCCB, against `answers_from`: every transaction before
+    /// that time is refused (the chip is still powering up).
+    clock: Arc<std::sync::atomic::AtomicU64>,
+    answers_from: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ErrorType for Bus {
@@ -46,7 +50,9 @@ impl HalI2c for Bus {
         address: u8,
         operations: &mut [Operation<'_>],
     ) -> core::result::Result<(), ErrorKind> {
-        if self.down.load(Ordering::SeqCst) {
+        if self.down.load(Ordering::SeqCst)
+            || self.clock.load(Ordering::SeqCst) < self.answers_from.load(Ordering::SeqCst)
+        {
             return Err(ErrorKind::Nack);
         }
         let left = self.fail_at.load(Ordering::SeqCst);
@@ -67,7 +73,21 @@ fn bus_with_id(id: u16) -> Bus {
             .with_registers(ADDR, CHIP_ID, &id.to_be_bytes()),
         fail_at: Arc::new(AtomicI64::new(0)),
         down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        clock: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        answers_from: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }
+}
+
+/// Starts a sensor and runs its power-up: the start itself touches nothing, the first tick is the
+/// power-up time, and the next tick reads the chip and starts it.
+pub(crate) fn start_up(s: &mut Ov9782) {
+    s.start().unwrap();
+    if matches!(s.state, State::PowerUp { .. }) {
+        assert_eq!(Lifecycle::tick(s, 0), Some(POWER_UP_NS));
+        // A values ring makes the streaming tick return its poll; the state is what matters here.
+        Lifecycle::tick(s, POWER_UP_NS);
+    }
+    assert_eq!(s.state, State::Streaming);
 }
 
 fn sensor_on(bus: &Bus, entries: &[(&str, ConfigValue<'_>)]) -> Ov9782 {
@@ -185,7 +205,7 @@ fn start_prefix(mipi: u8) -> Vec<(u16, u8)> {
 fn full_start_sequence_1280x800_raw10_gated_clock() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
 
     let mut expected = start_prefix(0x20);
     expected.extend_from_slice(&[
@@ -246,7 +266,7 @@ fn full_start_sequence_640x400_binned_raw8_continuous_clock() {
     let bus = bus_with_id(0x9782);
     let mut s = sensor_on(&bus, &[("continuous_clock", ConfigValue::Bool(true))]);
     s.select_mode(5).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
 
     let mut expected = start_prefix(0x00);
     expected.extend_from_slice(&[
@@ -305,7 +325,7 @@ fn full_start_sequence_640x400_binned_raw8_continuous_clock() {
 fn full_start_sequence_1280x720_raw8_keeps_flip_bits_clear() {
     let (mut s, bus) = sensor();
     s.select_mode(3).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     let w = writes(&bus);
     // Array crop: rows 0..=735, window offset (8, 8), output 1280x720.
     let tail = [
@@ -350,7 +370,7 @@ fn every_raw8_mode_programs_pll_0x60_and_every_raw10_mode_0x50() {
     for (index, entry) in MODES.iter().enumerate() {
         let (mut s, bus) = sensor();
         s.select_mode(index as u16).unwrap();
-        s.start().unwrap();
+        start_up(&mut s);
         let w = writes(&bus);
         let pll = w.iter().find(|(r, _)| *r == 0x030d).unwrap().1;
         let expected = match entry.depth.bit_depth {
@@ -367,7 +387,15 @@ fn start_refuses_a_wrong_chip_and_writes_nothing() {
     let bus = bus_with_id(0x1234);
     let mut s = sensor_on(&bus, &[]);
     s.select_mode(0).unwrap();
-    assert_eq!(s.start(), Err(Status::NO_DEVICE));
+    // The start answers; the chip is read at the first tick after the power-up time.
+    assert_eq!(s.start(), Ok(()));
+    assert_eq!(writes(&bus), vec![]);
+    assert_eq!(Lifecycle::tick(&mut s, 0), Some(POWER_UP_NS));
+    assert_eq!(
+        Lifecycle::tick(&mut s, POWER_UP_NS),
+        Some(POWER_UP_NS + 250_000_000)
+    );
+    assert!(matches!(s.state, State::Recovering { .. }));
     assert_eq!(writes(&bus), vec![]);
 }
 
@@ -377,7 +405,8 @@ fn start_accepts_both_chip_ids() {
         let bus = bus_with_id(id);
         let mut s = sensor_on(&bus, &[]);
         s.select_mode(0).unwrap();
-        assert_eq!(s.start(), Ok(()), "id {id:#x}");
+        start_up(&mut s);
+        assert_eq!(s.state, State::Streaming, "id {id:#x}");
     }
 }
 
@@ -417,7 +446,7 @@ fn no_table_or_sequence_ever_writes_otp_program() {
         .unwrap();
         s.set_flips(true, true).unwrap();
         s.set_test_pattern(7).unwrap();
-        s.start().unwrap();
+        start_up(&mut s);
         s.post_values(FrameValues {
             identity: 1,
             controls: Controls {
@@ -546,7 +575,7 @@ fn continuous_clock_changes_line_length_and_link() {
 fn group_hold_brackets_a_full_post_with_vertical_blanking_launch() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     assert_eq!(s.applied(), Ok(None));
     clear(&bus);
 
@@ -582,7 +611,7 @@ fn group_hold_brackets_a_full_post_with_vertical_blanking_launch() {
 fn group_hold_writes_only_the_controls_given() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     clear(&bus);
     s.post_values(FrameValues {
         identity: 7,
@@ -609,7 +638,7 @@ fn group_hold_writes_only_the_controls_given() {
 fn post_values_failure_closes_the_group_and_does_not_launch() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     clear(&bus);
     // Transactions in post_values: hold start, exposure bytes..., so the second fails.
     bus.fail_at.store(2, Ordering::SeqCst);
@@ -638,7 +667,7 @@ fn post_values_failure_closes_the_group_and_does_not_launch() {
 fn recovery_retries_with_backoff_capped_at_8s_never_gives_up_and_clears_on_success() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     bus.down.store(true, Ordering::SeqCst);
 
     assert_eq!(
@@ -704,7 +733,7 @@ fn recovery_retries_with_backoff_capped_at_8s_never_gives_up_and_clears_on_succe
 fn stop_during_recovery_is_reported_and_leaves_recovery_to_retry() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     bus.down.store(true, Ordering::SeqCst);
     let _ = s.set_test_pattern(1);
     assert_eq!(s.stop(), Err(Status::IO));
@@ -868,7 +897,7 @@ fn limits_are_refused_before_any_write() {
         Err(Status::INVALID_ARGUMENT)
     );
     // Validation on post_values too.
-    s.start().unwrap();
+    start_up(&mut s);
     clear(&bus);
     assert_eq!(
         s.post_values(FrameValues {
@@ -937,7 +966,7 @@ fn select_mode_rules() {
     s.select_mode(2).unwrap();
     assert_eq!(s.selected(), Ok(Some(2)));
     assert_eq!(writes(&bus), vec![], "select_mode alone touches nothing");
-    s.start().unwrap();
+    start_up(&mut s);
     assert_eq!(s.select_mode(0), Err(Status::BUSY));
     assert_eq!(s.start(), Ok(()));
     clear(&bus);
@@ -958,7 +987,7 @@ fn set_flips_sets_the_flip_bits_over_the_mode_base_values() {
     assert_eq!(writes(&bus), vec![]);
 
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     let w = writes(&bus);
     assert!(w.contains(&(0x3820, 0x44)));
     assert!(w.contains(&(0x3821, 0x04)));
@@ -1008,7 +1037,7 @@ fn test_pattern_codes_program_register_0x5e00() {
     s.set_test_pattern(1).unwrap();
     s.select_mode(0).unwrap();
     clear(&bus);
-    s.start().unwrap();
+    start_up(&mut s);
     assert!(writes(&bus).contains(&(0x5e00, 0x80)));
 }
 
@@ -1017,7 +1046,7 @@ fn first_frame_masking_is_programmed_before_streaming_starts() {
     let (mut s, bus) = sensor();
     s.select_mode(0).unwrap();
     assert_eq!(s.mode(0).unwrap().drop_frames, 0);
-    s.start().unwrap();
+    start_up(&mut s);
     let w = writes(&bus);
     let mask = w.iter().position(|r| *r == (0x4242, 0x01)).unwrap();
     let run = w.iter().position(|r| *r == (0x0100, 0x01)).unwrap();
@@ -1188,7 +1217,7 @@ fn streaming_sensor(receiver: Option<Dev<dyn CameraReceiver>>) -> (Ov9782, Bus) 
     )
     .unwrap();
     s.select_mode(0).unwrap();
-    s.start().unwrap();
+    start_up(&mut s);
     clear(&bus);
     (s, bus)
 }
@@ -1452,4 +1481,59 @@ fn a_setter_while_stopped_is_refused_and_writes_nothing() {
         "nothing written: {:?}",
         writes(&bus)
     );
+}
+
+/// Power-up timing: the chip answers SCCB from `T` after power (here 6 ms, the datasheet's t2 and
+/// t3 at their minimums). The start is at power, and the first attempt, `POWER_UP_NS` later, must
+/// read the chip and start it. A driver that reads the chip at its start, before `T`, refuses.
+#[test]
+fn the_first_attempt_after_power_up_succeeds_when_the_chip_answers_within_the_settle() {
+    let power = 1_000_000_000u64;
+    let bus = bus_with_id(0x9782);
+    bus.answers_from.store(power + 6_000_000, Ordering::SeqCst);
+    let mut s = sensor_on(&bus, &[]);
+    s.select_mode(0).unwrap();
+    bus.clock.store(power, Ordering::SeqCst);
+
+    assert_eq!(s.start(), Ok(()));
+    assert!(
+        bus.mock.transfers().is_empty(),
+        "the start does not read the chip"
+    );
+    assert_eq!(Lifecycle::tick(&mut s, power), Some(power + POWER_UP_NS));
+
+    bus.clock.store(power + POWER_UP_NS, Ordering::SeqCst);
+    assert_eq!(Lifecycle::tick(&mut s, power + POWER_UP_NS), None);
+    assert_eq!(
+        s.state,
+        State::Streaming,
+        "the first attempt started the sensor"
+    );
+    assert_eq!(writes(&bus).first(), Some(&(0x0100, 0x00)));
+}
+
+/// A chip that still does not answer at the first attempt is recovered with the backoff, as any
+/// bus fault is, and starts when it answers. The failure rule is unchanged: no giving up.
+#[test]
+fn a_chip_that_answers_after_the_first_attempt_is_retried_from_the_bottom_of_the_backoff() {
+    let power = 1_000_000_000u64;
+    let bus = bus_with_id(0x9782);
+    bus.answers_from.store(power + 50_000_000, Ordering::SeqCst);
+    let mut s = sensor_on(&bus, &[]);
+    s.select_mode(0).unwrap();
+    bus.clock.store(power, Ordering::SeqCst);
+    assert_eq!(s.start(), Ok(()));
+
+    assert_eq!(Lifecycle::tick(&mut s, power), Some(power + POWER_UP_NS));
+    bus.clock.store(power + POWER_UP_NS, Ordering::SeqCst);
+    let first_retry = power + POWER_UP_NS + 250_000_000;
+    assert_eq!(
+        Lifecycle::tick(&mut s, power + POWER_UP_NS),
+        Some(first_retry)
+    );
+    assert!(matches!(s.state, State::Recovering { .. }));
+
+    bus.clock.store(first_retry, Ordering::SeqCst);
+    assert_eq!(Lifecycle::tick(&mut s, first_retry), None);
+    assert_eq!(s.state, State::Streaming);
 }

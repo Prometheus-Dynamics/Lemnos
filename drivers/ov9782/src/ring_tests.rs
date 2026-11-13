@@ -274,7 +274,7 @@ impl Rig {
         )
         .unwrap();
         sensor.select_mode(0).unwrap();
-        sensor.start().unwrap();
+        crate::tests::start_up(&mut sensor);
         let frame0 = log
             .lock()
             .unwrap()
@@ -556,7 +556,7 @@ fn a_job_posted_before_a_start_is_dropped_by_it() {
     rig.run_to(rig.at(5, 0));
     rig.sensor.stop().unwrap();
     rig.post(rig.at(5, 2 * MS), 1, SHORT);
-    rig.sensor.start().unwrap();
+    crate::tests::start_up(&mut rig.sensor);
     rig.next = Lifecycle::tick(&mut rig.sensor, rig.clock.load(Ordering::SeqCst));
     rig.run_to(rig.at(9, 0));
     assert_eq!(rig.launched().0.len(), 0);

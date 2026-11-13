@@ -183,6 +183,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | Check | What a board has to show |
 |---|---|
 | [`D8.md`](../testing/board-runs/D8.md) | `ov9782`: bring-up, mode timing, exposure limits, flips, recovery |
+| [`F2g2.md`](../testing/board-runs/F2g2.md) | `ov9782`: the first chip-ID read waits 10 ms after the start (the datasheet's power-up time); the first start succeeds on the board or the board says why not |
 | [`D10.md`](../testing/board-runs/D10.md) | `ov9782`: which frame a posted exposure lands on |
 | [`J4b.md`](../testing/board-runs/J4b.md) | `ov9782`: which frame a posted exposure lands on, through the receiver's frame-start count (`post_values_at`); every real receiver answers `NOT_SUPPORTED` in this PR |
 | [`V1b2.md`](../testing/board-runs/V1b2.md) | `ov9782`: the exposure, analogue gain and frame length items (ranges, steps, unit `line` for the first and last); a set through an item lands on the frame `post_values_at` gives, on the reference board |
