@@ -48,8 +48,9 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_fe_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check --target "$target")
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check --target "$target")
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.
@@ -77,7 +78,7 @@ log="$work/console.log"
 status=0
 timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
   -kernel "$KERNEL" -initrd "$work/initramfs" \
-  -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000" | tee "$log" || status=$?
+  -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000 lemnos.serial=0123456789abcdef" | tee "$log" || status=$?
 
 # Only what happened after the guest started the checks counts.
 after="$(sed -n '/lemnos-qemu: start/,$p' "$log")"

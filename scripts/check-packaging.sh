@@ -5,9 +5,21 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# The units' security exposure, from `systemd-analyze security --offline=true`, must stay at or
-# below this, as Orion's node unit does (packaging/README.md).
+# The units' security exposure, from `systemd-analyze security --offline=true`. A unit stays at or
+# below max_exposure (the baseline, as Orion's node unit does), in tenths of a point. The one
+# exception is a board's optional fragment (packaging/systemd/lemnosd.service.d/gadget.conf), checked
+# with the base unit it extends: it may add exactly the items in `additions`, each at the score
+# systemd-analyze gives it. An addition the unit no longer has fails the check, so the list cannot
+# outlive what it names, and any other exposure fails it.
 max_exposure=2.5
+max_tenths=25
+# name as systemd-analyze prints it | score in tenths | reason
+additions=(
+  "CapabilityBoundingSet=~CAP_SYS_ADMIN|3|the root phase's FunctionFS mount: mount(2) of functionfs needs CAP_SYS_ADMIN. The daemon drops it with the rest after the root phase"
+  "SystemCallFilter=~@mount|2|the root phase's FunctionFS mount and its unmount. Without CAP_SYS_ADMIN they fail with EPERM"
+)
+fragment=packaging/systemd/lemnosd.service.d/gadget.conf
+combined=lemnosd-gadget.service
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/lemnos-packaging.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -49,18 +61,64 @@ if [[ "$systemd_major" -ge 254 ]]; then
     echo "$verified" >&2
     exit 1
   }
-  (cd "$work" && systemd-analyze security --offline=true ./*.service) | awk -v max="$max_exposure" '
-    /Overall exposure level/ {
-      seen++
-      name = $6; score = $7
-      sub(/:$/, "", name)
-      if (score + 0 > max + 0) { printf "packaging: %s exposure %s is above %s\n", name, score, max; bad = 1 }
-      else printf "    %s exposure %s\n", name, score
-    }
-    END {
-      if (seen == 0) { print "packaging: no exposure levels read"; exit 1 }
-      exit bad
-    }'
+  # The base unit with the gadget fragment inserted after its [Service] line: the unit a gadget
+  # board runs. Checked as one unit, against the additions.
+  [[ -f "$fragment" ]] || { echo "packaging: $fragment is missing"; exit 1; }
+  awk -v frag="$fragment" '
+    { print }
+    /^\[Service\]/ { while ((getline line < frag) > 0) if (line !~ /^\[Service\]/ && line !~ /^#/) print line }
+  ' "$work/lemnosd.service" >"$work/$combined"
+  sed -i '/^$/d' "$work/$combined"
+  verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service 2>&1)" || {
+    echo "$verified" >&2
+    exit 1
+  }
+  # Every unit's rows and overall score, one unit at a time.
+  bad=0
+  for unit in "$work"/*.service; do
+    name="$(basename "$unit")"
+    out="$(systemd-analyze security --offline=true "$unit" 2>&1)"
+    score="$(awk '/Overall exposure level/ { print $7 }' <<<"$out")"
+    [[ -n "$score" ]] || { echo "packaging: no exposure level read for $name"; exit 1; }
+    rows="$(awk '/^✗/ { print $2 "|" $NF }' <<<"$out")"
+    limit=$max_tenths
+    if [[ "$name" == "$combined" ]]; then
+      for entry in "${additions[@]}"; do
+        item="${entry%%|*}"
+        rest="${entry#*|}"
+        listed="${rest%%|*}"
+        found="$(grep -F "$item|" <<<"$rows" | head -1 | cut -d'|' -f2 || true)"
+        if [[ -z "$found" ]]; then
+          echo "packaging: $item is listed as an addition but $name no longer has it: remove it from additions"
+          bad=1
+          continue
+        fi
+        got="$(awk -v s="$found" 'BEGIN { printf "%d", s * 10 + 0.5 }')"
+        if [[ "$got" != "$listed" ]]; then
+          echo "packaging: $item scores $found in $name; the list says $listed tenths"
+          bad=1
+        fi
+        limit=$((limit + listed))
+      done
+    else
+      while IFS='|' read -r item found; do
+        for entry in "${additions[@]}"; do
+          if [[ "${entry%%|*}" == "$item" ]]; then
+            echo "packaging: $item is an addition, so it belongs in $fragment, not in $name"
+            bad=1
+          fi
+        done
+      done <<<"$rows"
+    fi
+    got="$(awk -v s="$score" 'BEGIN { printf "%d", s * 10 + 0.5 }')"
+    if [[ "$got" -gt "$limit" ]]; then
+      echo "packaging: $name exposure $score is above $(awk -v l="$limit" 'BEGIN { printf "%.1f", l / 10 }') (the baseline plus its listed additions)"
+      bad=1
+    else
+      echo "    $name exposure $score (limit $(awk -v l="$limit" 'BEGIN { printf "%.1f", l / 10 }'))"
+    fi
+  done
+  if [[ "$bad" -ne 0 ]]; then exit 1; fi
 elif command -v systemd-analyze >/dev/null; then
   echo "==> units: skipped, systemd $systemd_major is older than 254 (RestartSteps=)"
 else

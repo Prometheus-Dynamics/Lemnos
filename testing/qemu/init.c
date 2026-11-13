@@ -479,6 +479,13 @@ int main(void)
 	check(!put(UNBIND, VIP), "wedged VIP9000 unbound");
 	/* The stand-in PIO driver stays: the wedged module above depends on it. */
 
+	/* The USB gadget end to end: the daemon's root phase, FunctionFS on dummy_hcd, and a host. */
+	mkdir("/sys/kernel/config", 0755);
+	if (mount("configfs", "/sys/kernel/config", "configfs", 0, NULL) && errno != EBUSY)
+		check(0, "configfs mounted");
+	mkdir("/dev/usb-ffs", 0755);
+	check(!run((char *const[]){ "/lemnos-gadget-check", NULL }), "lemnos_gadget_check");
+
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
 	sync();
 	reboot(RB_POWER_OFF);

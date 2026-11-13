@@ -45,16 +45,16 @@ RestartSec=1s
 
 # Kept with the daemon: only the one capability, for the module's register mapping.
 # The root phase needs these five; the daemon drops every other one from its own bounding set after
-# the drop, so this list is only what starts it. CAP_SYS_RAWIO is the one it keeps.
+# the drop, so this list is only what starts it. CAP_SYS_RAWIO is the one it keeps. A gadget board's
+# fragment adds CAP_SYS_ADMIN for the FunctionFS mount, which the drop also removes.
 CapabilityBoundingSet=CAP_CHOWN CAP_SETGID CAP_SETUID CAP_SETPCAP CAP_SYS_RAWIO
 NoNewPrivileges=yes
 
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-# The gadget's UDC attribute, written by the daemon after the drop (service/lemnosd/src/gadget.rs).
-# Missing on a board without a gadget: the dash makes that fine. Not verified on a board yet.
-ReadWritePaths=-/sys/kernel/config/usb_gadget
+# A board with a USB gadget takes the optional fragment packaging/systemd/lemnosd.service.d/gadget.conf
+# as a drop-in: the capability and the mount calls its FunctionFS mount needs, and the configfs path.
 # Not PrivateDevices=: the device nodes are the daemon's whole job. Not PrivateNetwork=: the
 # kernel's uevent socket is the host network namespace's.
 ProtectKernelTunables=yes
@@ -73,7 +73,8 @@ SystemCallArchitectures=native
 # AF_UNIX: the socket. AF_NETLINK: the kernel's uevent socket for hotplug. Nothing else.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 # The root phase's calls on top of @system-service: the id changes (@setuid), the owner of the
-# runtime directory (@chown), and prctl for the capability and no_new_privs settings.
+# runtime directory (@chown), and prctl for the capability and no_new_privs settings. A gadget board's
+# fragment adds the FunctionFS mount and its unmount.
 SystemCallFilter=@system-service @setuid @chown prctl
 SystemCallErrorNumber=EPERM
 

@@ -24,7 +24,7 @@ const UDC: &str = "fe980000.usb";
 struct FakeMounts;
 
 impl Mounts for FakeMounts {
-    fn functionfs(&mut self, target: &Path, _options: &str) -> io::Result<()> {
+    fn functionfs(&mut self, _source: &str, target: &Path, _options: &str) -> io::Result<()> {
         for file in ["ep0", "ep81", "ep02"] {
             fs::write(target.join(file), "")?;
         }
@@ -111,7 +111,7 @@ impl Tree {
     }
 
     fn mount_functionfs(&self) {
-        FakeMounts.functionfs(&self.mount(), "").unwrap();
+        FakeMounts.functionfs("udc0", &self.mount(), "").unwrap();
     }
 
     fn attribute(&self, file: &str) -> String {

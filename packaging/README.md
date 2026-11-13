@@ -57,8 +57,29 @@ that names the step. The USB gadget's configfs and FunctionFS setup is the secon
 (`service/lemnosd/src/gadget.rs`): it makes each gadget's configfs tree and mounts its FunctionFS with
 the daemon's uid and gid, and chowns each `UDC` attribute to it. The daemon then writes `UDC` and ep0
 after the drop. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
-`ReadWritePaths=-/sys/kernel/config/usb_gadget` in the unit keeps `UDC` writable under the sandbox; that
-is not verified on a board yet (`testing/board-runs/R1.md`).
+The gadget's three unit settings are in an optional drop-in, `packaging/systemd/lemnosd.service.d/gadget.conf`,
+not in the base unit. Install it as `/etc/systemd/system/lemnosd.service.d/gadget.conf` on a board whose
+board file has a `usb-gadget` device, and only then. Its settings: `CAP_SYS_ADMIN` in
+`CapabilityBoundingSet` (the FunctionFS mount and its unmount need it; the daemon drops it with the rest
+after the root phase, `backends/linux-sys/src/privilege.rs` `drop_to`), `mount umount2` in
+`SystemCallFilter` (not in `@system-service`), and `ReadWritePaths=-/sys/kernel/config/usb_gadget`, which
+keeps the tree writable under `ProtectKernelTunables`. The QEMU check (`testing/crates/gadget-check`)
+runs the daemon's privileged start and reads the capability sets after it. The sandbox itself has not run
+on a board (`testing/board-runs/R1d.md`).
+
+**The exposure limit.** `scripts/check-packaging.sh` reads each unit's score from `systemd-analyze security`.
+The base units stay at 2.5 with nothing added. The gadget fragment is checked on top of the base unit, and
+may add exactly the items in the script's `additions` list, each at the score it has:
+
+| Addition | Score | Why |
+|---|---|---|
+| `CapabilityBoundingSet=~CAP_SYS_ADMIN` | 0.3 | the root phase's FunctionFS mount needs it; dropped after the root phase |
+| `SystemCallFilter=~@mount` | 0.2 | the mount and its unmount; without the capability they fail with `EPERM` |
+
+The check fails if the fragment's combined score is above 2.5 plus the listed scores, if a listed addition is
+not in the unit (remove it from the list), if a listed score is not what the unit gives, or if a base unit
+has an addition. Other exposure is not allowed. Candidate hardenings that are not in the unit are in
+`testing/board-runs/R1d.md`.
 
 The bridge uses the same drop, from its environment: `LEMNOS_ORION_USER`, `LEMNOS_ORION_GROUP` and
 `LEMNOS_ORION_GROUPS` (`service/orion/src/privilege.rs`). It keeps no capability.

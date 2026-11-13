@@ -177,6 +177,10 @@ impl Queue {
     /// holds, the rest staying for the next call. A read that brought nothing (a zero-length
     /// packet) returns 0.
     ///
+    /// The read asks `fd` for as many bytes as `data` holds, at most the capacity. It must ask
+    /// for that much and no more: a FunctionFS endpoint completes a read only when it is full or
+    /// a short packet arrives, so a larger read waits for packets the host never sends.
+    ///
     /// A read that failed is reported once, with its error, and the next call begins another.
     /// `fd` must be the same file for as long as a read is under way or has bytes left.
     pub fn read(
@@ -185,6 +189,9 @@ impl Queue {
         data: &mut [u8],
         timeout: Duration,
     ) -> io::Result<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
         loop {
             match self.flight {
                 Flight::Read { at, end } => {
@@ -199,7 +206,8 @@ impl Queue {
                 }
                 Flight::Writing => return Err(io::ErrorKind::InvalidInput.into()),
                 Flight::Idle => {
-                    self.submit(fd, PREAD, self.buffer.len())?;
+                    let asked = data.len().min(self.buffer.len());
+                    self.submit(fd, PREAD, asked)?;
                     self.flight = Flight::Reading;
                 }
                 Flight::Reading => {
@@ -895,6 +903,21 @@ mod tests {
     }
 
     #[test]
+    fn a_read_asks_for_what_the_caller_holds_and_no_more() {
+        // A pipe gives what it holds at once, so bytes left in it show how much a read asked for.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let mut queue = Queue::new(64 * 1024).unwrap();
+        writer.write_all(&[1u8; 100]).unwrap();
+        let mut data = [0u8; 16];
+        assert_eq!(queue.read(reader.as_fd(), &mut data, WAIT).unwrap(), 16);
+        // 84 bytes are in the pipe; a read that asked for 200 gets those and the 50 written now.
+        writer.write_all(&[2u8; 50]).unwrap();
+        let mut more = [0u8; 200];
+        assert_eq!(queue.read(reader.as_fd(), &mut more, WAIT).unwrap(), 134);
+        assert!(more[..84].iter().all(|&b| b == 1) && more[84..134].iter().all(|&b| b == 2));
+    }
+
+    #[test]
     fn a_destroyed_context_refuses_transfers() {
         let mut aio = Context::new().unwrap();
         aio.destroy();
@@ -956,22 +979,21 @@ mod tests {
     }
 
     #[test]
-    fn a_queue_hands_out_what_a_read_brought_in_as_many_calls_as_it_takes() {
+    fn a_queue_hands_out_what_each_read_brings_in_as_many_calls_as_it_takes() {
+        // Each read asks for what its caller holds, so bytes the caller leaves stay in the pipe
+        // and the next read gets them, in order.
         let (reader, mut writer) = std::io::pipe().unwrap();
         let mut queue = Queue::new(8).unwrap();
         writer.write_all(b"abcde").unwrap();
         let mut data = [0u8; 2];
         assert_eq!(queue.read(reader.as_fd(), &mut data, WAIT).unwrap(), 2);
         assert_eq!(&data, b"ab");
-        // What is left of that read comes before anything newer.
+        let mut rest = [0u8; 8];
+        assert_eq!(queue.read(reader.as_fd(), &mut rest, WAIT).unwrap(), 3);
+        assert_eq!(&rest[..3], b"cde");
         writer.write_all(b"XY").unwrap();
         assert_eq!(queue.read(reader.as_fd(), &mut data, WAIT).unwrap(), 2);
-        assert_eq!(&data, b"cd");
-        let mut rest = [0u8; 8];
-        assert_eq!(queue.read(reader.as_fd(), &mut rest, WAIT).unwrap(), 1);
-        assert_eq!(rest[0], b'e');
-        assert_eq!(queue.read(reader.as_fd(), &mut rest, WAIT).unwrap(), 2);
-        assert_eq!(&rest[..2], b"XY");
+        assert_eq!(&data, b"XY");
     }
 
     #[test]
@@ -997,7 +1019,9 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_an_idle_queue_forgets_what_was_read_and_not_taken() {
+    fn cancelling_an_idle_queue_leaves_what_it_did_not_take_in_the_file() {
+        // A read takes only what its caller asked for, so nothing is left in the queue to forget:
+        // the bytes not taken are still in the pipe after a cancel.
         let (reader, mut writer) = std::io::pipe().unwrap();
         let mut queue = Queue::new(8).unwrap();
         writer.write_all(b"old").unwrap();
@@ -1005,8 +1029,8 @@ mod tests {
         queue.cancel();
         writer.write_all(b"new").unwrap();
         let mut data = [0u8; 8];
-        assert_eq!(queue.read(reader.as_fd(), &mut data, WAIT).unwrap(), 3);
-        assert_eq!(&data[..3], b"new");
+        assert_eq!(queue.read(reader.as_fd(), &mut data, WAIT).unwrap(), 5);
+        assert_eq!(&data[..5], b"ldnew");
     }
 
     // No file a test can open here completes later than `io_submit` returns, so a transfer
