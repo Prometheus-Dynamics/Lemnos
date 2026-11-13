@@ -107,6 +107,7 @@ scripts/gate.sh
 | [The daemon and lemnos-ctl](docs/daemon.md) | Every flag and every subcommand |
 | [The client library and the C API](docs/client.md) | Using devices from a program |
 | [Frame streams](docs/streams.md) | Shared memory and dma-bufs, jobs, faults |
+| [The shared-memory ring](docs/ring.md) | The standalone `shm-*` crates every layer shares |
 | [The kernel module](docs/kernel-module.md) | What it gives, building, loading, claims |
 | [Writing a driver](docs/writing-a-driver.md) | The three forms: built in, description file, package |
 | [The microcontroller host](docs/mcu.md) | The same drivers with no allocator and no threads |

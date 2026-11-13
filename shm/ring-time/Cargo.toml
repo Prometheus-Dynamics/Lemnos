@@ -1,0 +1,19 @@
+[package]
+name = "shm-ring-time"
+description = "The value of an shm-ring field at or before a sample time: hit, lagged or missing, with a bounded wait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+shm-ring = { path = "../ring" }
+shm-ring-doorbell = { path = "../ring-doorbell" }
+
+[dev-dependencies]
+shm-measure = { path = "../measure" }
+
+[lints]
+workspace = true

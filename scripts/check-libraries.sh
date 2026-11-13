@@ -14,6 +14,9 @@ libraries=(
   lemnos-driver-isp600 lemnos-driver-isp600-sys
   lemnos-linux-hotplug
   lemnos-wire lemnos-linux-stream
+  # The shared-memory ring family (docs/ring.md): standalone, so no Lemnos crate at all.
+  shm-sample-time shm-ring shm-ring-latest shm-ring-time shm-ring-doorbell shm-ring-buffers
+  shm-ring-holds shm-fdpass
 )
 
 # The daemon, the host, the driver model and its macros, the contracts, the client and the
@@ -23,7 +26,9 @@ forbidden='^(lemnosd|lemnos-ctl|lemnos-orion|lemnos-host|lemnos-host-static|lemn
 for crate in "${libraries[@]}"; do
   tree=$(cargo tree -q -e normal -p "$crate" --no-default-features --prefix none --format '{p}' |
     awk '{print $1}' | sort -u)
-  pulled=$(grep -E "$forbidden" <<<"$tree" || true)
+  pattern=$forbidden
+  [[ $crate == shm-* ]] && pattern='^lemnos'
+  pulled=$(grep -E "$pattern" <<<"$tree" || true)
   if [ -n "$pulled" ]; then
     echo "$crate with no default features pulls in:" $pulled >&2
     exit 1

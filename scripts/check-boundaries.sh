@@ -37,6 +37,9 @@ runtime_deps() {
 may_use_unsafe() {
   case "$1" in
     engine/abi | engine/capi | engine/measure | backends/linux-sys | drivers/*-sys) return 0 ;;
+    # The shm family: shared mappings, eventfds, descriptor passing, the clock.
+    shm/sample-time | shm/ring | shm/ring-buffers | shm/ring-holds | shm/ring-doorbell) return 0 ;;
+    shm/fdpass | shm/measure) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -73,9 +76,24 @@ check_tree() (
     )
   done
 
+  # The shm family stands alone: no crate in it depends on anything outside shm/, dev and
+  # build dependencies included, so another project can take it at a locked revision.
+  local dep
+  while read -r crate; do
+    while read -r dep; do
+      case "$(realpath -m "$crate/$dep")" in
+        "$PWD"/shm/*) ;;
+        *) fail "$crate depends on a path outside shm/: $dep" ;;
+      esac
+    done < <(grep -oP 'path *= *"\K[^"]+' "$crate/Cargo.toml" || true)
+    if grep -Eq '^ *lemnos' "$crate/Cargo.toml"; then
+      fail "$crate depends on a lemnos crate"
+    fi
+  done < <(crates_in shm)
+
   # unsafe lives in the named crates only, and the lint that enforces it stays on.
   local folder
-  for folder in engine backends service contracts drivers testing/crates; do
+  for folder in engine backends service contracts drivers testing/crates shm; do
     while read -r crate; do
       may_use_unsafe "$crate" && continue
       manifest="$crate/Cargo.toml"

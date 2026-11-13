@@ -1,0 +1,23 @@
+# cargo-fuzz targets for the shm crates. Its own workspace: built only by `cargo fuzz`, on nightly.
+[package]
+name = "shm-ring-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shm-ring-model = { path = ".." }
+
+[workspace]
+
+[[bin]]
+name = "ring"
+path = "fuzz_targets/ring.rs"
+test = false
+doc = false
+bench = false

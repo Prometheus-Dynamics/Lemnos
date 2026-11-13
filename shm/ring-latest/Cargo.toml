@@ -1,0 +1,18 @@
+[package]
+name = "shm-ring-latest"
+description = "The newest value of each field of an shm-ring, in constant time, with the ring's expiry."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+shm-ring = { path = "../ring" }
+
+[dev-dependencies]
+shm-measure = { path = "../measure" }
+
+[lints]
+workspace = true

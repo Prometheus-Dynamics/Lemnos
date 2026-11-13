@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 86 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 87 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -164,6 +164,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`A23.md`](../testing/board-runs/A23.md) | A block taking a dma-buf from the board's heap, and the consumer reading what it wrote |
 | [`A24.md`](../testing/board-runs/A24.md) | Heaps found by name, descriptor counts, refusals, hardware-written bytes at the consumer |
 | [`A31.md`](../testing/board-runs/A31.md) | A million jobs with a buffer given back and named again in the same round |
+| [`I1.md`](../testing/board-runs/I1.md) | The shared-memory ring (`shm/`) built here: publish to a held frame against the 10.5 µs measured before the move, and its tests on the board's weaker memory order |
 
 ## Image blocks
 

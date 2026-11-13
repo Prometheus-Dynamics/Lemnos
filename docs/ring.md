@@ -1,0 +1,46 @@
+# The shared-memory ring
+
+Lemnos hosts one shared-memory ring for the whole stack, as a family of standalone crates under
+[`shm/`](../shm). They are the bottom layer: they depend on nothing in Lemnos (only `libc`, and
+`serde` as an option), and Lemnos's own crates will use them exactly as an outside project does.
+Other projects depend on them at a locked revision of this repository.
+
+| Crate | What it is |
+| --- | --- |
+| `shm-sample-time` | `SampleTime`: nanoseconds of `CLOCK_MONOTONIC`, and `SampleTime::now()`. `no_std` |
+| `shm-ring` | One writer, many readers in a sealed memfd. A publish is memory writes only |
+| `shm-ring-latest` | The newest value of each field, and whether it has expired |
+| `shm-ring-time` | The value of a field at or before a sample time, and a bounded wait for it |
+| `shm-ring-doorbell` | An eventfd per reader, rung only when that reader is asleep |
+| `shm-ring-buffers` | Buffer topics: a pool of shared buffers handed over once, entries naming them |
+| `shm-ring-holds` | Hold marks and their limits: a buffer a reader holds is never reused |
+| `shm-fdpass` | Descriptors over a Unix socket, each set tied to one message |
+
+`shm-measure`, `shm-ring-model` and `shm-ring-bench` are their tests' support, the `loom`
+models and the bench; they are not published.
+
+## What it promises
+
+- A publish makes no system call and allocates nothing. Waking a sleeping reader is one `write`.
+- A reader maps the ring read-only, checks everything it reads and cannot disturb the writer or
+  another reader. A hostile writer can only spoil its own ring.
+- The header carries a magic and a layout number. A reader refuses a ring whose layout it does
+  not read, so two processes built at different revisions fail cleanly instead of misreading.
+- Lemnos's rules hold here too: `unsafe` only in the modules that need it (mappings, eventfds,
+  descriptor passing, the clock), one operation per block with a `SAFETY` comment, and
+  `scripts/check-boundaries.sh` refuses any dependency from `shm/` on the rest of the repository.
+
+[`shm/README.md`](../shm/README.md) is the reference: every word of the layout, the publish and
+read orders, why a reader never sees a torn sample, doorbells, buffer topics and hold marks.
+
+## Where Lemnos stands
+
+Lemnos's frame streams ([Frame streams](streams.md)) still use their own ring. Moving them onto
+`shm-ring` and `shm-ring-buffers` is the next step and is listed in [`TODO.md`](../TODO.md).
+
+## Measured
+
+On the reference board, 10.5 µs median from publish to the reader holding a frame at 120 Hz with
+hold marks, no system call by the publisher while the reader is awake, no allocation.
+[`testing/board-runs/I1.md`](../testing/board-runs/I1.md) has the figures, where they come from, and
+the check that repeats them on this repository's build.

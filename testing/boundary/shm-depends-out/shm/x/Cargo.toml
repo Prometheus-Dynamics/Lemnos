@@ -1,0 +1,8 @@
+[package]
+name = "x"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+c = { path = "../../engine/core" }

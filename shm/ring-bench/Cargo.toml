@@ -1,0 +1,21 @@
+[package]
+name = "shm-ring-bench"
+description = "What shm-ring costs: value publishes with an awake and a sleeping reader, and a frame topic with hold marks."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+shm-measure = { path = "../measure" }
+shm-ring = { path = "../ring" }
+shm-ring-buffers = { path = "../ring-buffers" }
+shm-ring-doorbell = { path = "../ring-doorbell" }
+shm-ring-holds = { path = "../ring-holds" }
+shm-ring-time = { path = "../ring-time" }
+
+[lints]
+workspace = true

@@ -1,0 +1,104 @@
+//! The allocation gate and the no-system-call proof, checked against themselves.
+
+use std::hint::black_box;
+
+use shm_measure::CountingAlloc;
+use shm_measure::harness::{assert_steady_no_allocs, installed, measure, steady_allocs};
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc::system();
+
+#[test]
+fn it_knows_it_is_installed() {
+    assert!(installed());
+}
+
+#[test]
+fn a_path_that_allocates_nothing_passes() {
+    let mut total = 0_u64;
+    assert_steady_no_allocs("adding", 4, 1000, || total = black_box(total + 1));
+    assert_eq!(total, 1004);
+}
+
+#[test]
+#[should_panic(expected = "leaky path: 10 allocations")]
+fn a_deliberate_allocation_is_caught() {
+    assert_steady_no_allocs("leaky path", 4, 10, || drop(black_box(vec![1_u8; 32])));
+}
+
+#[test]
+fn warm_up_is_not_counted() {
+    let mut cache: Option<Vec<u8>> = None;
+    assert_steady_no_allocs("lazy", 1, 100, || {
+        black_box(cache.get_or_insert_with(|| vec![0; 64]));
+    });
+}
+
+#[test]
+fn counts_and_bytes_are_exact() {
+    let (_, count) = measure(|| drop(black_box(Vec::<u8>::with_capacity(100))));
+    assert_eq!((count.allocs, count.deallocs, count.bytes), (1, 1, 100));
+    let steady = steady_allocs(0, 3, || drop(black_box(Box::new(1_u32))));
+    assert_eq!((steady.allocs, steady.bytes), (3, 12));
+}
+
+#[test]
+fn other_threads_do_not_count() {
+    let (_, count) = measure(|| {
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..100 {
+                    drop(black_box(vec![0_u8; 8]));
+                }
+            });
+        });
+    });
+    assert!(count.allocs < 100, "{count:?}");
+}
+
+#[cfg(target_os = "linux")]
+mod sched {
+    use std::hint::black_box;
+
+    use shm_measure::sched::{
+        SystemCalls, pin_current_thread, thread_cpu_ns, without_system_calls,
+    };
+
+    #[test]
+    fn a_body_that_only_computes_makes_no_system_call() {
+        let outcome = without_system_calls(|| black_box((0..10_000_u64).sum::<u64>()) > 0);
+        assert_eq!(outcome, SystemCalls::None);
+    }
+
+    #[test]
+    fn a_system_call_is_caught() {
+        let outcome = without_system_calls(|| {
+            std::thread::current().id() == std::thread::current().id() && {
+                std::thread::yield_now();
+                true
+            }
+        });
+        assert_eq!(outcome, SystemCalls::Made);
+    }
+
+    #[test]
+    fn a_body_that_says_no_is_a_failure_not_a_pass() {
+        assert_eq!(
+            without_system_calls(|| black_box(false)),
+            SystemCalls::Failed
+        );
+    }
+
+    #[test]
+    fn a_thread_can_be_pinned_and_its_cpu_time_goes_up() {
+        // Whatever CPU this thread is allowed on, it can be pinned to one of them.
+        assert!((0..256).any(pin_current_thread));
+        assert!(!pin_current_thread(usize::MAX));
+        let before = thread_cpu_ns();
+        let mut total = 0_u64;
+        while thread_cpu_ns() - before < 2_000_000 {
+            total = black_box(total.wrapping_add(1));
+        }
+        assert!(total > 0);
+    }
+}
