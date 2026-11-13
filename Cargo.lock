@@ -1069,6 +1069,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-pwm-channel-fan"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-fan",
+ "lemnos-core",
+ "lemnos-hal",
+ "lemnos-host",
+ "lemnos-measure",
+ "lemnos-sim",
+]
+
+[[package]]
 name = "lemnos-driver-raw-bus"
 version = "2.0.1-dev"
 dependencies = [
@@ -1742,6 +1754,7 @@ dependencies = [
  "lemnos-driver-orientation",
  "lemnos-driver-ov9782",
  "lemnos-driver-pisp",
+ "lemnos-driver-pwm-channel-fan",
  "lemnos-driver-raw-bus",
  "lemnos-driver-rga",
  "lemnos-driver-rk-iep",

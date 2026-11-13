@@ -335,6 +335,14 @@ driver = "hwmon-fan"
 owner = "host"
 config = { name = "pwmfan" }
 
+# A fan on a PWM channel, driven directly: no kernel fan driver in between. `tach` is optional.
+# The duty is 0 to 1000; `min_duty` is the lowest duty the fan turns at.
+[[devices]]
+id = "channel-fan"
+driver = "pwm-channel-fan"
+uses = { pwm = "pwmchip0:1", tach = "gpiochip0:20" }
+config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500, pulses_per_rev = 2 }
+
 # A USB device by the port it is plugged into, or by vendor and product (`usb:1a2b:3c4d`).
 # `[devices.streams.NAME]` gives the device a frame stream of shared memory.
 [[devices]]

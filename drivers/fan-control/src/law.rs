@@ -4,7 +4,7 @@
 //!
 //! Ported from dev's `lemnos_device::fan_control`. Three things differ: time is nanoseconds from
 //! `tick` (the law works in milliseconds internally, as dev does); a timed hold can override the
-//! curves; and a failed fan write hands the fan back and waits, doubling each time, capped at 8 s.
+//! curves; and a failed fan write releases the fan and waits, doubling each time, capped at 8 s.
 
 use lemnos_contract_fan_control::{MAX_POINTS, Point, Settings, State};
 use lemnos_core::{Health, Result, Status};
@@ -290,7 +290,7 @@ impl Control {
         self.urgent = true;
     }
 
-    /// Turns the controller on or off. Off stops the steps and hands the fan back; on starts
+    /// Turns the controller on or off. Off stops the steps and releases the fan; on starts
     /// the steps again from a stopped fan.
     pub fn set_enabled(&mut self, enabled: bool) {
         if enabled == self.enabled {

@@ -99,7 +99,7 @@ pub trait FanControl {
     /// Ends a hold early.
     #[method(7)]
     fn release_hold(&mut self) -> Result<()>;
-    /// `false` hands the fan back and stops the controller.
+    /// `false` stops the controller and releases its fan, which goes to its safe state (full duty).
     #[method(8)]
     fn set_enabled(&mut self, enabled: bool) -> Result<()>;
 }

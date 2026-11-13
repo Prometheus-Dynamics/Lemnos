@@ -15,7 +15,7 @@ pub trait Fan {
     /// Revolutions per minute, for a fan with a tachometer.
     #[method(3)]
     fn rpm(&mut self) -> Result<Option<u32>>;
-    /// Hands the fan back to whoever controlled it before.
+    /// Puts the fan in its safe state, full duty. Nothing hands the fan to another controller.
     #[method(4)]
     fn release(&mut self) -> Result<()>;
 }

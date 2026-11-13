@@ -39,6 +39,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_ov9782::Ov9782>(),
         entry::<lemnos_driver_pisp::PispBe>(),
         entry::<lemnos_driver_pisp::PispFe>(),
+        entry::<lemnos_driver_pwm_channel_fan::PwmChannelFan>(),
         entry::<lemnos_driver_raw_bus::RawBus>(),
         entry::<lemnos_driver_rga::Rga>(),
         entry::<lemnos_driver_rk_iep::RkIep>(),
