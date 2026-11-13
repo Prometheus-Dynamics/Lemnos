@@ -4,23 +4,19 @@ on:
   push:
     branches:
       - next
-    paths:
-      - "kernel/**"
-      - "testing/qemu/**"
-      - "backends/linux/**"
-      - "backends/linux-sys/**"
-      - "testing/crates/module-check/**"
-      - ".github/workflows/next-kernel.yml"
+    # The harness builds module-check, which links every contract and driver it checks, so a
+    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only the
+    # licence files are skipped.
+    paths-ignore:
+      - "LICENSE-*"
   pull_request:
     branches:
       - next
-    paths:
-      - "kernel/**"
-      - "testing/qemu/**"
-      - "backends/linux/**"
-      - "backends/linux-sys/**"
-      - "testing/crates/module-check/**"
-      - ".github/workflows/next-kernel.yml"
+    # The harness builds module-check, which links every contract and driver it checks, so a
+    # change anywhere in the workspace can break it (M10: a contract's wire change did). Only the
+    # licence files are skipped.
+    paths-ignore:
+      - "LICENSE-*"
   workflow_dispatch:
 
 concurrency:
