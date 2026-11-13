@@ -12,6 +12,7 @@ mod conn;
 mod events;
 mod notify;
 pub mod packages;
+pub mod privilege;
 mod readers;
 mod requests;
 mod serve;

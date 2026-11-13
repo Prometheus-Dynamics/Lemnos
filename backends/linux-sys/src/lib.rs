@@ -25,6 +25,7 @@ pub mod module;
 pub mod netlink;
 pub mod poll;
 pub mod pool;
+pub mod privilege;
 pub mod process;
 pub mod rp1_pio;
 pub mod scm;

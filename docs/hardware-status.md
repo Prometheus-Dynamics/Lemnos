@@ -236,6 +236,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 |---|---|
 | [`E27.md`](../testing/board-runs/E27.md) | Driver packages on a board: load, call, crash, signature, every kind of resource |
 | [`E28.md`](../testing/board-runs/E28.md) | The microcontroller host on a microcontroller: boot, a bus outage, USB, flash and RAM |
+| [`L3.md`](../testing/board-runs/L3.md) | The root phase on a board image: lemnosd and `lemnos-orion` start as root, drop to `lemnos`, keep `CAP_SYS_RAWIO`, and their device groups, socket and restart time |
 | [`B20.md`](../testing/board-runs/B20.md) | `lemnos-orion` against a node on a board: every device a resource, with its topics and actions |
 | [`B22.md`](../testing/board-runs/B22.md) | The bench's reference set, measured for real |
 | [`A17.md`](../testing/board-runs/A17.md) | The hardware performance counters on the reference board's cores |

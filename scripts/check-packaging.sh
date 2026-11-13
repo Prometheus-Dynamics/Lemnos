@@ -67,6 +67,24 @@ else
   echo "==> units: skipped, systemd-analyze is not installed"
 fi
 
+# The root phase: lemnosd and the bridge start as root and drop themselves (`--user`, LEMNOS_ORION_USER),
+# so no unit may give them a user or an ambient capability. The daemon's unit must pass its drop.
+echo "==> root phase"
+for unit in packaging/systemd/*.service; do
+  if grep -Eq '^(User|Group|AmbientCapabilities)=' "$unit"; then
+    echo "packaging: $unit gives a user or an ambient capability; the daemon drops itself" >&2
+    exit 1
+  fi
+done
+grep -q -- '--user lemnos --group lemnos' packaging/systemd/lemnosd.service || {
+  echo "packaging: lemnosd.service does not pass --user lemnos --group lemnos" >&2
+  exit 1
+}
+grep -q 'lemnos-orion.env' packaging/systemd/lemnos-orion.service || {
+  echo "packaging: lemnos-orion.service does not read /etc/lemnos/lemnos-orion.env" >&2
+  exit 1
+}
+
 # The hardware watchdog belongs to lemnosd alone, and a restart delay is constant: no unit may set
 # a systemd watchdog, or a restart delay that grows (packaging/README.md, "The hardware watchdog").
 echo "==> watchdog and restart"
@@ -77,19 +95,25 @@ for unit in packaging/systemd/*.service; do
   fi
 done
 
-# The BusyBox init script: parsed, never run. sh is always here; busybox and shellcheck are optional.
-echo "==> init script"
-sh -n packaging/init/S50lemnosd
-if command -v busybox >/dev/null; then
-  busybox sh -n packaging/init/S50lemnosd
-else
-  echo "    busybox sh -n: skipped, busybox is not installed"
-fi
-if command -v shellcheck >/dev/null; then
-  shellcheck --shell=sh packaging/init/S50lemnosd
-else
-  echo "    shellcheck: skipped, shellcheck is not installed"
-fi
+# The BusyBox init scripts: parsed, never run. sh is always here; busybox and shellcheck are optional.
+echo "==> init scripts"
+for script in packaging/init/S5*; do
+  sh -n "$script"
+  if command -v busybox >/dev/null; then
+    busybox sh -n "$script"
+  else
+    echo "    busybox sh -n $script: skipped, busybox is not installed"
+  fi
+  if command -v shellcheck >/dev/null; then
+    shellcheck --shell=sh "$script"
+  else
+    echo "    shellcheck $script: skipped, shellcheck is not installed"
+  fi
+done
+# The settings files are sourced by the scripts, so they must parse as shell too.
+for env in packaging/systemd/*.env.example; do
+  sh -n "$env"
+done
 
 # The mdev fragment: every rule is an anchored pattern, owner:group and a four-digit mode.
 echo "==> mdev fragment"

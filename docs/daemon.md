@@ -9,6 +9,7 @@ It has no code for any device: everything it shows comes from the device's own d
 ```text
 lemnosd [--sim] [--board PATH] [--socket PATH] [--check]
         [--packages DIR] [--package-keys FILE] [--package-mode signed|open]
+        [--user USER] [--group GROUP]
 ```
 
 | Flag | Environment | Default | Meaning |
@@ -20,6 +21,8 @@ lemnosd [--sim] [--board PATH] [--socket PATH] [--check]
 | `--packages DIR` | `LEMNOSD_PACKAGES` | none | Load driver packages from this directory |
 | `--package-keys FILE` | `LEMNOSD_PACKAGE_KEYS` | none | The public keys packages must be signed with |
 | `--package-mode` | `LEMNOSD_PACKAGE_MODE` | `signed` | `signed`, or `open` to run any package |
+| `--user USER` | `LEMNOSD_USER` | none | Start as root, run the privileged start, then drop to this user (a name or a number). See [the root phase](#the-root-phase) |
+| `--group GROUP` | `LEMNOSD_GROUP` | the user's own | The group to drop to, with `--user` (a name or a number) |
 
 A flag wins over its environment variable. Packages are described in
 [Writing a driver](writing-a-driver.md#the-package-form).
@@ -68,11 +71,24 @@ For a board, add `--target aarch64-unknown-linux-musl` (after `rustup target add
 statically linked `lemnosd` cannot load driver packages and says so; build for a glibc target to
 use them.
 
+## The root phase
+
+Started as root with `--user` (or `LEMNOSD_USER`), lemnosd runs its privileged start, then drops to that
+user and group, keeps only `CAP_SYS_RAWIO`, and verifies the result before it listens. A failed step, a
+failed drop, or a state after the drop that is not the one asked for stops it, with the reason on its
+error output. Started without root, it runs as it is and says which capabilities it lacks. The
+privileged start is the list `STEPS` in `service/lemnosd/src/privilege.rs`: each step runs as root, with
+the board file and the socket and ids the daemon will run as, and a step added there (the USB gadget's
+configfs setup is planned as the first) runs before the drop. No unit or script gives the daemon a user, or a
+file capability. The steps and the drop are described in
+[`packaging/README.md`](../packaging/README.md#one-privilege-path).
+
 ## Running under systemd
 
-`packaging/systemd/lemnosd.service` runs the daemon as the `lemnos` user, not root, with the device
-nodes given to group `lemnos` by `packaging/udev/70-lemnos.rules`. Its one capability is
-`CAP_SYS_RAWIO`, for register mapping through `/dev/lemnos`. The unit starts only when the OS has
+`packaging/systemd/lemnosd.service` starts the daemon as root and runs it with `--user lemnos --group
+lemnos`, so it drops to `lemnos` itself. The device nodes are given to group `lemnos` by
+`packaging/udev/70-lemnos.rules`. Its one kept capability is `CAP_SYS_RAWIO`, for register mapping
+through `/dev/lemnos`. The unit starts only when the OS has
 supplied the board file at `/etc/lemnos/board.toml`. The OS installs the unit files and supplies the
 `lemnosd` binary and the board file. The unit restarts the daemon after a constant 1 s and sets no
 `WatchdogSec=`: the hardware watchdog escalates, as it does without systemd. [`packaging/README.md`](../packaging/README.md) has the install
@@ -81,10 +97,10 @@ configfs, which only root may do, so a board that uses them needs a drop-in that
 
 ## Running under BusyBox init
 
-On a board without systemd, `packaging/init/S50lemnosd` runs the daemon as the `lemnos` user, with
-the same socket and device-node groups as the unit, through `start`, `status`, `restart` and `stop`. A
-crash restarts it after a constant 1 s. `stop` is for shutdown, and sends TERM, then KILL after 10 s.
-The capability is a file capability on `/usr/bin/lemnosd`. The hardware watchdog is the escalation on
+On a board without systemd, `packaging/init/S50lemnosd` starts the same root phase through `start`,
+`status`, `restart` and `stop`: its supervisor runs `lemnosd --user lemnos --group lemnos`. A crash
+restarts it after a constant 1 s. `stop` is for shutdown, and sends TERM, then KILL after 10 s. There is
+no file capability and no `setcap`. The hardware watchdog is the escalation on
 both init systems: the daemon feeds it, and the OS must not give it to systemd. [`packaging/README.md`](../packaging/README.md)
 has the user's passwd and group lines, the mdev rules, and what the unit gives that the script does not.
 
