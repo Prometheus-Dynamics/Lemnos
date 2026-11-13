@@ -139,6 +139,40 @@ static int frames(LemnosHandle client) {
     if (status != LEMNOS_OK) return fail("close frames", status);
     status = lemnos_stream_info(client, stream, &info);
     if (status != LEMNOS_E_STALE_HANDLE) return fail("closed stream", status);
+
+    /* The same stream taken unmapped: its frames and their lengths, and no bytes. */
+    status = lemnos_stream_open(client, 0, "frames",
+                                LEMNOS_STREAM_OPEN_UNMAPPED | LEMNOS_STREAM_WRITABLE, &stream, sink);
+    if (status != -EINVAL) return fail("unmapped and writable together", status);
+    status = lemnos_stream_open(client, 0, "frames", LEMNOS_STREAM_OPEN_UNMAPPED, &stream, sink);
+    if (status != LEMNOS_OK) return fail("open frames unmapped", status);
+    status = lemnos_stream_info(client, stream, &info);
+    if (status != LEMNOS_OK) return fail("unmapped info", status);
+    if (!(info.flags & LEMNOS_STREAM_UNMAPPED) || (info.flags & LEMNOS_STREAM_WRITABLE))
+        return fail("unmapped flags", -1);
+    LemnosFrame held = {sizeof held, 0, 0, 0, 0, 0, 0};
+    const uint8_t *none = NULL;
+    status = lemnos_stream_next_frame(client, stream, 5000, &held, &none, sink);
+    if (status != 1) return fail("unmapped next frame", status);
+    if (none != NULL || held.len != FRAME_BYTES) return fail("unmapped frame has no data", -1);
+    size_t plane_len = 0;
+    status = lemnos_stream_plane_len(client, stream, held.buffer, 0, &plane_len);
+    if (status != LEMNOS_OK || plane_len != FRAME_BYTES) return fail("plane len", status);
+    status = lemnos_stream_plane_len(client, stream, held.buffer, 1, &plane_len);
+    if (status != -EINVAL) return fail("plane len of a plane there isn't", status);
+    const uint8_t *plane = NULL;
+    size_t plane_bytes = 1;
+    status = lemnos_stream_plane(client, stream, held.buffer, 0, &plane, &plane_bytes);
+    if (status != LEMNOS_OK || plane_bytes != 0) return fail("unmapped plane is empty", status);
+    uint8_t copy_out[4];
+    status = lemnos_stream_read(client, stream, held.buffer, 0, copy_out, sizeof copy_out, sink);
+    if (status != -EOPNOTSUPP) return fail("read on an unmapped stream", status);
+    status = lemnos_stream_release(client, stream, held.buffer, sink);
+    if (status != LEMNOS_OK) return fail("release unmapped", status);
+    status = lemnos_stream_close(client, stream, sink);
+    if (status != LEMNOS_OK) return fail("close unmapped", status);
+    printf("unmapped plane_len=%u data=%d read=%d\n", (unsigned)FRAME_BYTES, none == NULL,
+           -EOPNOTSUPP);
     return 0;
 }
 

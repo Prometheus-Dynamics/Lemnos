@@ -9,6 +9,7 @@
 #![cfg(target_os = "linux")]
 
 pub mod aio;
+pub mod descriptor;
 pub mod dma_buf;
 pub mod dma_heap;
 pub mod eventfd;

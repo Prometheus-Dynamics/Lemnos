@@ -349,7 +349,7 @@ seconds by default, `set_timeout` changes it); it never waits without one.
 ## In a program
 
 `lemnos-client` opens a stream with `open_stream`, or `open_stream_writable` for one the consumer
-fills. Both take a `StreamPlatform`, which does what only the operating system can: receive the
+fills, or `open_stream_unmapped` for one whose buffers this process never maps ([below](#unmapped-streams)). All three take a `StreamPlatform`, which does what only the operating system can: receive the
 descriptors, and tell the kernel around each access to a dma-buf. On Linux that is `LinuxStreams`
 from `lemnos-linux-stream` (`backends/linux-stream`). The rings and the buffers are mapped by the
 shm crates, so the client has no `unsafe` of its own. A program with no client reads the stream
@@ -410,7 +410,8 @@ board's per-stream `tail_bytes` key for dma-bufs, in I2d), and `writable`. `pool
 read-only descriptor of the pool page, and `generation()` the pool's generation.
 
 `writable` is what the descriptor allows: whether a writable mapping of it succeeds, probed when the
-stream opens. The consumer maps the buffers writable only when it took the stream with
+stream opens. On a stream taken with `open_stream_unmapped` nothing is mapped, so it is read from the
+descriptor instead, as [Unmapped streams](#unmapped-streams) says. The consumer maps the buffers writable only when it took the stream with
 `open_stream_writable`, and that open fails with `StreamBuffersReadOnly` ("this stream's buffers
 are read-only") when any buffer's descriptor allows only read-only mappings, so the mismatch shows
 at the open and not at the first write. A stream taken with `open_stream` maps read-only even where
@@ -452,6 +453,58 @@ a consumer that fills buffers, dma-bufs, and each fault.
 ```sh slow
 cargo test -q -p lemnosd --test stream --test stream_fill --test stream_dma
 ```
+
+## Unmapped streams
+
+`open_stream_unmapped` (C: `lemnos_stream_open` with `LEMNOS_STREAM_OPEN_UNMAPPED`) takes a stream
+whose buffers this process never maps. It is for a frame that goes straight to something else that
+maps it: a consumer takes each buffer's descriptor (`region`, `buffer_handle`, `plane_handle`) and
+hands it to a GPU, an encoder or a second process of its own, so the bytes are never touched here.
+
+What works on it is everything but the bytes:
+
+- The rings, the holds, the pool page and the doorbell are mapped, since they are the protocol:
+  frames arrive, `try_next` and `next_frame` return them, and `release` gives them back.
+- A held frame's `buffer()`, `len()`, `sequence()`, `identity()` and `timestamp_ns()`, and
+  `plane_len(&frame, plane)`: the bytes the frame holds in each plane, by the arithmetic `plane()`
+  uses. `plane_len` equals `plane().len()` on a mapped stream, and it is what a consumer that hands
+  the frame on needs to know how much of each plane to hand.
+- `region`, `buffer_handle`, `plane_handle`, `pool_page` and `generation`, as on any stream.
+- Posting jobs, for a stream whose contract has them.
+
+What does not:
+
+- `bytes` and `plane` are empty. The frame has no bytes in this process.
+- `read` and `write` are refused with `Error::StreamUnmapped`, which the C surface reports as
+  `-EOPNOTSUPP`. Nothing is copied.
+- No CPU access is made, so a stream of dma-bufs is never bracketed with `StreamPlatform::dma_sync`:
+  the consumer's device does its own cache maintenance.
+- `is_mapped()` is `false`; the C info flag `LEMNOS_STREAM_UNMAPPED` is set.
+
+**How the open maps nothing.** The shm pool view a frame reader holds maps the descriptors it is
+given, so an unmapped stream's view maps stand-ins instead: sealed memfds of the same reach as the
+pool's buffers, which nothing writes and nothing reads. The real descriptors are kept and handed out
+by `region` and `buffer_handle`. The shm crates are unchanged, and the stand-ins are an implementation
+detail: a pool view of an unmapped stream is never asked for a byte, which is what
+`FrameStream::is_mapped()` guards.
+
+**How `writable` is decided.** Without a mapping, `Region.writable` is read from the descriptor:
+
+- the access mode (`F_GETFL`): a descriptor opened read-only gives `false`;
+- the seals of a memfd (`F_GET_SEALS`): `F_SEAL_WRITE` or `F_SEAL_FUTURE_WRITE` give `false`. A
+  dma-buf has no seals, so its access mode decides alone.
+
+The probe a mapped stream makes (a writable mapping, then unmapped) answers the same question for
+these cases: a read-only descriptor and a sealed memfd. What the descriptor check cannot see is
+everything a mapping is decided by when it is made: the address-space and memory limits, a security
+module's policy on shared writable mappings, and a dma-buf exporter that refuses CPU mappings. The
+probe sees those and the check does not, so `writable: true` from an unmapped stream is a claim
+about the descriptor only, and does not promise that a later mapping will succeed. A consumer that
+needs that promise maps the region itself and handles the error.
+
+**Telling a second process.** The regions, the pool page and the generation are all a second process
+needs (see [Lifetimes](#lifetimes-and-a-second-process)). It maps them itself, as `PoolView::attach`
+does; the unmapped stream maps nothing of the buffers for its own part.
 
 ## Reading with the shm crates alone
 

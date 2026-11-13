@@ -15,6 +15,7 @@ use crate::session::{
     DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Subscription, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
+use lemnos_wire::ring::Mapping;
 
 /// [`Session`] for a tokio program. It waits on the socket's readiness and
 /// otherwise runs the same core.
@@ -216,7 +217,19 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, false, platform).await
+        self.open_stream_as(device, name, Mapping::ReadOnly, platform)
+            .await
+    }
+
+    /// See [`Session::open_stream_unmapped`].
+    pub async fn open_stream_unmapped(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::Unmapped, platform)
+            .await
     }
 
     /// See [`Session::open_stream_writable`].
@@ -226,21 +239,22 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, true, platform).await
+        self.open_stream_as(device, name, Mapping::Writable, platform)
+            .await
     }
 
     async fn open_stream_as(
         &mut self,
         device: u32,
         name: &str,
-        writable: bool,
+        mapping: Mapping,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         self.settle().await?;
         let (id, pick) = self.session.op_open_stream(device, name, &platform)?;
         let ready = self.wait(id, pick).await;
         self.session
-            .finish_open_stream(ready, device, name, writable, platform)
+            .finish_open_stream(ready, device, name, mapping, platform)
     }
 
     /// See [`Session::close_stream`].

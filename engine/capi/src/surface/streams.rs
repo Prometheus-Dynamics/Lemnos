@@ -20,10 +20,16 @@ use super::{checked, count, entry, fail, out_bytes, text, with_entry};
 /// `lemnos_stream_open` flag, and `LemnosStreamInfo` flag: the buffers can be
 /// written.
 pub const STREAM_WRITABLE: u32 = 1 << 0;
+/// `lemnos_stream_open` flag: map none of the buffers (see
+/// `FrameStream::open_stream_unmapped`). Not with `STREAM_WRITABLE`.
+pub const STREAM_OPEN_UNMAPPED: u32 = 1 << 1;
 /// `LemnosStreamInfo` flag: each buffer is a dma-buf of its own.
 pub const STREAM_BUFFER_HANDLES: u32 = 1 << 1;
 /// `LemnosStreamInfo` flag: the host has not ended the stream.
 pub const STREAM_OPEN: u32 = 1 << 2;
+/// `LemnosStreamInfo` flag: the buffers' memory is not mapped by this stream, so
+/// its frames have no bytes here.
+pub const STREAM_UNMAPPED: u32 = 1 << 3;
 /// `LemnosStreamRegion` flag: the descriptor allows a writable mapping.
 pub const REGION_WRITABLE: u32 = 1 << 0;
 /// `LemnosStreamRegion` flag: the descriptor is a dma-buf of its own (else a memfd of the pool).
@@ -135,7 +141,8 @@ pub unsafe extern "C" fn lemnos_stream_open(
     sink: MessageSink,
 ) -> Status {
     guard(|| {
-        if stream.is_null() || flags & !STREAM_WRITABLE != 0 {
+        let known = STREAM_WRITABLE | STREAM_OPEN_UNMAPPED;
+        if stream.is_null() || flags & !known != 0 || flags & known == known {
             return Status::INVALID_ARGUMENT;
         }
         // SAFETY: NUL-terminated by the contract, read only in this call.
@@ -152,6 +159,8 @@ pub unsafe extern "C" fn lemnos_stream_open(
             };
             let taken = if flags & STREAM_WRITABLE != 0 {
                 entry.session.open_stream_writable(index, name, platform)
+            } else if flags & STREAM_OPEN_UNMAPPED != 0 {
+                entry.session.open_stream_unmapped(index, name, platform)
             } else {
                 entry.session.open_stream(index, name, platform)
             };
@@ -207,6 +216,7 @@ pub unsafe extern "C" fn lemnos_stream_info(
                 (s.stream.is_writable(), STREAM_WRITABLE),
                 (s.stream.has_buffer_handles(), STREAM_BUFFER_HANDLES),
                 (s.stream.is_open(), STREAM_OPEN),
+                (!s.stream.is_mapped(), STREAM_UNMAPPED),
             ]
             .iter()
             .filter(|(on, _)| *on)
@@ -249,7 +259,8 @@ pub unsafe extern "C" fn lemnos_stream_next_frame(
             if !data.is_null() {
                 // A frame in planes is not one piece of memory: `lemnos_stream_plane` reads
                 // each, and `data` says so with NULL rather than point at less than `len`.
-                let bytes = if s.stream.planes().count() > 1 {
+                // An unmapped stream has no bytes here, so it is NULL too.
+                let bytes = if s.stream.planes().count() > 1 || !s.stream.is_mapped() {
                     core::ptr::null()
                 } else {
                     s.stream.bytes(&got).as_ptr()
@@ -440,6 +451,39 @@ pub unsafe extern "C" fn lemnos_stream_plane(
             unsafe { data.write(bytes.as_ptr()) };
             // SAFETY: not null, and valid for a write by the contract.
             unsafe { len.write(bytes.len()) };
+            Status::OK
+        })
+    })
+}
+
+/// The bytes of plane `plane` of the held frame in `buffer`, as `lemnos_stream_plane`
+/// gives them, but only the length: `len` is set to what `lemnos_stream_plane` would
+/// return, with no mapping of the buffers. Works on an unmapped stream. The same
+/// errors as `lemnos_stream_plane`.
+///
+/// # Safety
+/// `len` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_plane_len(
+    client: Handle,
+    stream: Handle,
+    buffer: u32,
+    plane: u32,
+    len: *mut usize,
+) -> Status {
+    guard(|| {
+        if len.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            if plane >= s.stream.planes().count() {
+                return Status::INVALID_ARGUMENT;
+            }
+            let Some(Some(frame)) = s.held.get(buffer as usize) else {
+                return Status::INVALID_ARGUMENT;
+            };
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { len.write(s.stream.plane_len(frame, plane)) };
             Status::OK
         })
     })

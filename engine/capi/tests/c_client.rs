@@ -90,6 +90,7 @@ const STREAM: &[&str] = &[
     "frames 6 in place, by copy and by handle",
     "region of buffer ",
     "refused write=-13 past=-22 none=-22",
+    "unmapped plane_len=5000 data=1 read=-95",
     "jobs 6 written, posted and made",
     "plain handle status=-95",
     "taken again after a close holding a frame",
@@ -273,6 +274,22 @@ fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
     // The skip count goes through the C export; the reader may have been overrun, so only the call is checked.
     stream.skipped().unwrap();
     stream.close().unwrap();
+
+    // Unmapped: the frame has no bytes here, its length is still there, and a copy is refused.
+    let mut unmapped = client.open_stream_unmapped(0, "frames").unwrap();
+    let buffer = {
+        let frame = unmapped
+            .next_frame(Duration::from_secs(5))
+            .unwrap()
+            .expect("a frame");
+        assert!(frame.bytes.is_empty());
+        assert_eq!(unmapped.plane_len(frame.buffer, 0).unwrap(), 5000);
+        frame.buffer
+    };
+    let mut copy = [0; 8];
+    assert!(unmapped.read(buffer, 0, &mut copy).is_err());
+    unmapped.release(buffer).unwrap();
+    unmapped.close().unwrap();
 
     let mut input = client.open_stream(0, "input", true).unwrap();
     let image: Vec<u8> = (0..=255).collect();

@@ -52,6 +52,12 @@ impl LinuxStreams {
         Ok(events & POLLIN != 0)
     }
 
+    /// Whether a writable shared mapping of `fd` can succeed, from the descriptor alone (see
+    /// `lemnos_linux_sys::descriptor::may_map_writable`). `false` if the kernel can't say.
+    pub fn writable_descriptor(&self, fd: BorrowedFd<'_>) -> bool {
+        lemnos_linux_sys::descriptor::may_map_writable(fd).unwrap_or(false)
+    }
+
     /// Starts (`begin`) or ends an access of `access` to the dma-buf `fd`.
     pub fn dma_sync(&self, fd: BorrowedFd<'_>, access: Access, begin: bool) -> io::Result<()> {
         let direction = match access {
@@ -76,6 +82,10 @@ impl lemnos_client::StreamPlatform for LinuxStreams {
 
     fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
         LinuxStreams::wait_readable(self, fd, timeout)
+    }
+
+    fn writable_descriptor(&self, fd: BorrowedFd<'_>) -> bool {
+        LinuxStreams::writable_descriptor(self, fd)
     }
 
     fn dma_sync(

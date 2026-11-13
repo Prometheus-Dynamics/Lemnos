@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_wire::Planes;
-use lemnos_wire::ring::{Consumer, FrameInfo, Layout, RingError, STATE_OPEN};
+use lemnos_wire::ring::{Consumer, FrameInfo, Layout, Mapping, RingError, STATE_OPEN};
 use shm_ring::WriteMap;
 use shm_ring_buffers::{BufferIndex, Held, NextBatch};
 use shm_ring_holds::Marks;
@@ -59,8 +59,11 @@ pub struct Region<'a> {
     /// Slack past the payload that a device importing the buffer must be given. Always 0 today:
     /// it will come from the board's per-stream `tail_bytes` key, dma-bufs only (I2d).
     pub tail_bytes: u64,
-    /// Whether `fd` allows a writable mapping, as probed at open. The stream maps it writable only
-    /// when it was taken with [`Session::open_stream_writable`](crate::Session::open_stream_writable).
+    /// Whether `fd` allows a writable mapping. On a mapped stream this is probed at open; on a
+    /// stream taken with [`Session::open_stream_unmapped`](crate::Session::open_stream_unmapped)
+    /// it is read from the descriptor's access mode and seals, with no mapping (see
+    /// `docs/streams.md` for what that can and can't tell). The stream maps it writable only when
+    /// it was taken with [`Session::open_stream_writable`](crate::Session::open_stream_writable).
     pub writable: bool,
 }
 
@@ -89,6 +92,14 @@ pub trait StreamPlatform: Debug + Send + Sync {
         buf: &mut [u8],
         fds: &mut Vec<OwnedFd>,
     ) -> io::Result<usize>;
+
+    /// Whether `fd` allows a writable shared mapping, decided from the descriptor alone, without
+    /// mapping it. Used only for an unmapped stream's `Region::writable`. The default says
+    /// `false`, which is the safe answer where the platform can't tell.
+    fn writable_descriptor(&self, fd: BorrowedFd<'_>) -> bool {
+        let _ = fd;
+        false
+    }
 
     /// Tells the kernel the CPU is starting (`begin`) or has finished an access of `access` to the
     /// dma-buf `fd`, so a device whose memory isn't cache-coherent sees what was written and the
@@ -194,6 +205,7 @@ fn probe(
     layout: Layout,
     lengths: &[u32],
     shared: bool,
+    writable_of: &dyn Fn(BorrowedFd<'_>) -> bool,
 ) -> Result<Box<[Slot]>, Error> {
     let descs = layout.pool_descs(shared, lengths);
     let mut seen: [Option<Slot>; 256] = [None; 256];
@@ -206,7 +218,7 @@ fn probe(
                     .get(lemnos_wire::ring::fds::BUFFERS + usize::from(desc.descriptor))
                     .ok_or(Error::Stream(RingError::BadLayout))?;
                 let slot = Slot {
-                    writable: writable_fd(fd.as_fd()),
+                    writable: writable_of(fd.as_fd()),
                     // A shared pool's buffers sit a stride apart; a dma-buf's memory is its size.
                     allocated: if shared {
                         layout.stride()
@@ -223,8 +235,8 @@ fn probe(
     Ok(out.into_boxed_slice())
 }
 
-/// Whether `fd` allows a writable shared mapping: the one thing a writer does with it. The probe
-/// maps and unmaps it, so nothing is kept.
+/// Whether `fd` allows a writable shared mapping, by mapping it writable and unmapping it again:
+/// the probe a mapped stream makes, so nothing is kept.
 fn writable_fd(fd: BorrowedFd<'_>) -> bool {
     fd.try_clone_to_owned()
         .ok()
@@ -245,13 +257,16 @@ impl FrameStream {
     /// [`lemnos_wire::ring::fds`] and then the pool's buffers, the layout, and each buffer's
     /// planes. `shared` says the pool is one descriptor; otherwise each plane of each buffer is its
     /// own dma-buf. Any failure closes every descriptor.
+    ///
+    /// On an unmapped stream nothing of the buffers is mapped, so `writable` is read from each
+    /// descriptor by the platform, and the consumer is attached with [`Mapping::Unmapped`].
     pub(crate) fn new(
         device: u32,
         name: &str,
         (layout, planes, working, job_driven): (Layout, Planes, u32, bool),
         shared: bool,
         fds: Vec<OwnedFd>,
-        writable: bool,
+        mapping: Mapping,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<Self, Error> {
         let lengths: &[u32] = if planes.count() == 1 {
@@ -260,12 +275,21 @@ impl FrameStream {
             planes.lengths()
         };
         let layout = layout.checked().map_err(Error::Stream)?;
-        let slots = probe(&fds, layout, lengths, shared)?;
+        let slots = match mapping {
+            Mapping::Unmapped => {
+                let by_platform = |fd: BorrowedFd<'_>| platform.writable_descriptor(fd);
+                probe(&fds, layout, lengths, shared, &by_platform)?
+            }
+            Mapping::ReadOnly | Mapping::Writable => {
+                probe(&fds, layout, lengths, shared, &writable_fd)?
+            }
+        };
+        let writable = mapping == Mapping::Writable;
         if writable && slots.iter().any(|slot| !slot.writable) {
             return Err(Error::StreamBuffersReadOnly);
         }
         let consumer =
-            Consumer::attach(fds, layout, lengths, shared, writable).map_err(Error::Stream)?;
+            Consumer::attach_with(fds, layout, lengths, shared, mapping).map_err(Error::Stream)?;
         Ok(Self {
             device,
             name: name.to_string(),
@@ -292,6 +316,16 @@ impl FrameStream {
         if let Some(hold) = &self.hold {
             hold.release();
         }
+    }
+
+    /// Whether the buffers' memory is mapped in this process. A stream taken with
+    /// [`Session::open_stream_unmapped`](crate::Session::open_stream_unmapped) isn't: its frames
+    /// have no bytes here ([`bytes`](Self::bytes) and [`plane`](Self::plane) are empty), and
+    /// [`read`](Self::read) and [`write`](Self::write) are refused. Its frames, lengths and
+    /// [`plane_len`](Self::plane_len) are all there, and so are its regions.
+    #[must_use]
+    pub const fn is_mapped(&self) -> bool {
+        self.consumer.mapped()
     }
 
     /// Each buffer's planes: one, unless the stream's buffers are a descriptor per plane.
@@ -374,12 +408,13 @@ impl FrameStream {
     }
 
     /// Brackets the access of every plane of `index`'s buffer for the kernel, on a stream of
-    /// dma-bufs. A failure changes nothing about where the bytes are, so it isn't one here.
+    /// dma-bufs. A failure changes nothing about where the bytes are, so it isn't one here. An
+    /// unmapped stream makes no CPU access, so it is never bracketed.
     fn sync_plane(&self, index: u32, access: Access, begin: bool) {
-        if !self.dma {
+        if !self.dma || !self.consumer.mapped() {
             return;
         }
-        if let Some((fd, _)) = self.consumer.frames().pool().descriptor(BufferIndex(index)) {
+        if let Some((fd, _)) = self.consumer.descriptor(BufferIndex(index)) {
             let _ = self.platform.dma_sync(fd, access, begin);
         }
     }
@@ -493,30 +528,26 @@ impl FrameStream {
     /// The bytes of a frame this stream handed out. On a stream whose buffers are several
     /// planes this is the first plane's part of the frame: read each with
     /// [`plane`](Self::plane). A frame from another stream reads as whatever its numbers fall
-    /// on here, and within this stream's memory.
+    /// on here, and within this stream's memory. Empty on an unmapped stream.
     #[must_use]
     pub fn bytes(&self, frame: &HeldFrame) -> &[u8] {
         self.plane(frame, 0)
     }
 
-    /// The part of a frame in plane `plane` of its buffer: the planes hold the frame's bytes
-    /// end to end, so a plane past the frame's length is empty, and one it ends in is cut
-    /// there. Empty for a plane the buffers don't have. On a stream of one plane this is
+    /// The bytes of the held frame that are in plane `plane` of its buffer. The planes hold the
+    /// frame's bytes end to end, so a plane past the frame's length is empty, and one it ends in
+    /// is cut there. Empty for a plane the buffers don't have, and on an unmapped stream
+    /// ([`is_mapped`](Self::is_mapped)). On a stream of one plane this is
     /// [`bytes`](Self::bytes).
     #[must_use]
     pub fn plane(&self, frame: &HeldFrame, plane: u32) -> &[u8] {
-        let (Some(start), Some(length)) = (
-            self.planes.offset(plane),
-            self.planes.lengths().get(plane as usize),
-        ) else {
+        if !self.consumer.mapped() {
             return &[];
-        };
-        let held = (frame.bytes as usize)
-            .saturating_sub(start)
-            .min(*length as usize);
+        }
         let Some(index) = self.index(frame.buffer, plane) else {
             return &[];
         };
+        let held = self.plane_len(frame, plane);
         self.consumer
             .frames()
             .pool()
@@ -525,17 +556,36 @@ impl FrameStream {
             .unwrap_or(&[])
     }
 
+    /// The bytes of the held frame that are in plane `plane` of its buffer: the length
+    /// [`plane`](Self::plane) returns, without touching any mapping, so it works on a stream
+    /// taken with [`Session::open_stream_unmapped`](crate::Session::open_stream_unmapped). 0 for
+    /// a plane past the frame's end, and for a plane the stream doesn't have.
+    #[must_use]
+    pub fn plane_len(&self, frame: &HeldFrame, plane: u32) -> usize {
+        if plane >= self.planes.count() {
+            return 0;
+        }
+        let (Some(start), Some(length)) = (
+            self.planes.offset(plane),
+            self.planes.lengths().get(plane as usize),
+        ) else {
+            return 0;
+        };
+        let held = (frame.bytes as usize).saturating_sub(start);
+        if held < *length as usize {
+            held
+        } else {
+            *length as usize
+        }
+    }
+
     /// The memory of each buffer and plane: the descriptor, where it starts, and what it allows.
     /// `None` for a buffer or plane the stream doesn't have. Lives as long as the stream; see
     /// [`Region`] for the rules that apply to a copy of the descriptor.
     #[must_use]
     pub fn region(&self, buffer: u32, plane: u32) -> Option<Region<'_>> {
         let index = self.index(buffer, plane)?;
-        let (fd, desc) = self
-            .consumer
-            .frames()
-            .pool()
-            .descriptor(BufferIndex(index))?;
+        let (fd, desc) = self.consumer.descriptor(BufferIndex(index))?;
         let slot = self.slots.get(index as usize)?;
         let payload = *self.planes.lengths().get(plane as usize)?;
         Some(Region {
@@ -639,6 +689,9 @@ impl FrameStream {
     ///
     /// [`Session::open_stream_writable`]: crate::Session::open_stream_writable
     pub fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<(), Error> {
+        if !self.consumer.mapped() {
+            return Err(Error::StreamUnmapped);
+        }
         if !self.writable {
             return Err(Error::StreamReadOnly);
         }
@@ -681,6 +734,9 @@ impl FrameStream {
     /// place with [`bytes`](Self::bytes). Refused as [`write`](Self::write) is for a buffer or
     /// a range the stream doesn't have. Never waits and allocates nothing.
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Error> {
+        if !self.consumer.mapped() {
+            return Err(Error::StreamUnmapped);
+        }
         self.check(buffer, offset, out.len())?;
         let (mut at, mut left, mut to) = (offset, out.len(), 0);
         let mut copied = true;

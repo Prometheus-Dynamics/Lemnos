@@ -11,6 +11,7 @@ use common::{FakeHost, StreamHost, StreamScript};
 use lemnos_client::{Access, Error, FrameStream, MemoryKind, Session, StreamPlatform};
 use lemnos_core::Status;
 use lemnos_linux_stream::LinuxStreams;
+use lemnos_linux_sys::descriptor::{SEAL_FUTURE_WRITE, add_seals, sealable_memfd};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGUSR1, catch_without_restart, interrupt_this_thread_after};
@@ -624,6 +625,10 @@ impl StreamPlatform for Telling {
         LinuxStreams.wait_readable(fd, timeout)
     }
 
+    fn writable_descriptor(&self, fd: BorrowedFd<'_>) -> bool {
+        LinuxStreams.writable_descriptor(fd)
+    }
+
     fn dma_sync(&self, fd: BorrowedFd<'_>, access: Access, begin: bool) -> std::io::Result<()> {
         self.calls
             .lock()
@@ -1157,4 +1162,244 @@ fn a_failed_doorbell_wait_is_an_error_and_a_frame_already_there_is_still_returne
         .unwrap()
         .expect("a frame already in the ring comes back without waiting");
     assert_eq!(frame.sequence(), 0);
+}
+
+/// The number of lines of `/proc/self/maps` that map the memory with inode `ino`. A memfd's
+/// mappings all carry its inode, so this counts the mappings of one piece of memory.
+fn mappings_of(ino: u64) -> usize {
+    std::fs::read_to_string("/proc/self/maps")
+        .unwrap()
+        .lines()
+        .filter(|line| line.split_whitespace().nth(4) == Some(ino.to_string().as_str()))
+        .count()
+}
+
+fn inode(fd: BorrowedFd<'_>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::File::from(fd.try_clone_to_owned().unwrap())
+        .metadata()
+        .unwrap()
+        .ino()
+}
+
+#[test]
+fn plane_len_is_the_length_plane_gives_for_every_plane_of_a_mapped_stream() {
+    let (layout, mut host, fds) = good_planes(2);
+    let (fake, mut session) = handles_host(layout, claimed_for(2, 2), fds);
+    *fake.control.plane_bytes.lock().unwrap() = two_planes();
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    for (buffer, bytes, lens) in [
+        (0, 192, [128, 64, 0]),
+        (1, 130, [128, 2, 0]),
+        (0, 100, [100, 0, 0]),
+    ] {
+        let sequence = u64::from(bytes);
+        assert!(host.write(buffer * 2, 0, &[9; 128]));
+        assert!(host.write(buffer * 2 + 1, 0, &[9; 64]));
+        assert!(host.push(buffer, bytes, sequence, 0, 0));
+        let frame = stream.try_next().unwrap().unwrap();
+        for plane in 0..3 {
+            assert_eq!(
+                stream.plane_len(&frame, plane),
+                stream.plane(&frame, plane).len(),
+                "plane {plane} of a {bytes}-byte frame"
+            );
+            assert_eq!(stream.plane_len(&frame, plane), lens[plane as usize]);
+        }
+        stream.release(frame).unwrap();
+        assert!(host.reclaim(buffer));
+    }
+}
+
+#[test]
+fn plane_len_of_a_single_plane_stream_matches_bytes_and_is_zero_past_the_end() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    assert!(host.write(1, 0, &[5, 6, 7]));
+    assert!(host.push(1, 3, 1, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(stream.plane_len(&frame, 0), 3);
+    assert_eq!(stream.plane_len(&frame, 0), stream.bytes(&frame).len());
+    assert_eq!(stream.plane_len(&frame, 1), 0, "no second plane");
+    stream.release(frame).unwrap();
+}
+
+#[test]
+fn an_unmapped_stream_takes_frames_and_gives_their_fields_lengths_and_regions_but_no_bytes() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert!(!stream.is_mapped() && !stream.is_writable());
+    assert_eq!(stream.layout(), &layout());
+    assert_eq!((stream.buffer_len(), stream.buffer_count()), (128, 2));
+    assert!(host.write(1, 0, &[5, 6, 7]));
+    assert!(host.push(1, 3, 11, 12, 13));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(
+        (frame.buffer(), frame.len()),
+        (1, 3),
+        "the frame's fields are there"
+    );
+    assert_eq!(
+        (frame.sequence(), frame.identity(), frame.timestamp_ns()),
+        (11, 12, 13)
+    );
+    assert!(
+        stream.bytes(&frame).is_empty(),
+        "no bytes on an unmapped stream"
+    );
+    assert!(stream.plane(&frame, 0).is_empty());
+    assert_eq!(stream.plane_len(&frame, 0), 3, "the length is there");
+    assert_eq!(stream.plane_len(&frame, 1), 0);
+    let mut out = [0u8; 3];
+    assert_eq!(stream.read(1, 0, &mut out), Err(Error::StreamUnmapped));
+    assert_eq!(stream.write(1, 0, &[1]), Err(Error::StreamUnmapped));
+    assert_eq!(Status::from(Error::StreamUnmapped), Status::NOT_SUPPORTED);
+    let region = stream.region(1, 0).unwrap();
+    assert_eq!(region.kind, MemoryKind::SharedMemory);
+    assert_eq!((region.index, region.payload_bytes), (1, 128));
+    assert!(
+        region.writable,
+        "the pool's memfd is read-write, as the host made it"
+    );
+    assert!(stream.pool_page().is_ok());
+    stream.release(frame).unwrap();
+    assert!(host.reclaim(1), "a released frame's buffer comes back");
+    assert!(stream.is_open());
+}
+
+#[test]
+fn a_second_view_built_from_an_unmapped_streams_regions_reads_the_producers_bytes() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert!(host.write(0, 0, &[1; 128]));
+    assert!(host.write(1, 0, &[2; 128]));
+    let view = second_view(&stream);
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(0)).unwrap(),
+        [1; 128]
+    );
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(1)).unwrap(),
+        [2; 128]
+    );
+    assert!(host.push(1, 128, 1, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert!(stream.bytes(&frame).is_empty());
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(1)).unwrap(),
+        [2; 128],
+        "the frame's bytes are read through the second view"
+    );
+    stream.release(frame).unwrap();
+}
+
+#[test]
+fn an_unmapped_stream_of_planes_is_told_nothing_for_its_planes_and_its_regions_are_dma_bufs() {
+    let (layout, mut host, fds) = good_planes(2);
+    let (fake, mut session) = handles_host(layout, claimed_for(2, 2), fds);
+    *fake.control.plane_bytes.lock().unwrap() = two_planes();
+    let telling = Arc::new(Telling::default());
+    let mut stream = session
+        .open_stream_unmapped(7, "s", Arc::clone(&telling) as _)
+        .unwrap();
+    assert!(!stream.is_mapped());
+    assert!(host.push(1, 192, 1, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(stream.plane_len(&frame, 0), 128);
+    assert_eq!(stream.plane_len(&frame, 1), 64);
+    assert!(stream.plane(&frame, 0).is_empty() && stream.plane(&frame, 1).is_empty());
+    stream.release(frame).unwrap();
+    assert!(
+        telling.take().is_empty(),
+        "no CPU access is made, so none is bracketed"
+    );
+    let region = stream.region(1, 1).unwrap();
+    assert_eq!(region.kind, MemoryKind::DmaBuf);
+    assert_eq!((region.index, region.payload_bytes), (3, 64));
+    assert!(
+        region.writable,
+        "a read-write dma-buf allows a writable mapping"
+    );
+    assert!(stream.plane_handle(0, 0).is_some());
+}
+
+#[test]
+fn an_unmapped_stream_of_planes_has_a_second_view_of_each_plane() {
+    let (layout, mut host, fds) = good_planes(2);
+    let (fake, mut session) = handles_host(layout, claimed_for(2, 2), fds);
+    *fake.control.plane_bytes.lock().unwrap() = two_planes();
+    let stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert!(host.write(2, 0, &[1; 128]));
+    assert!(host.write(3, 0, &[2; 64]));
+    let view = second_view(&stream);
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(2)).unwrap(),
+        [1; 128]
+    );
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(3)).unwrap(),
+        [2; 64]
+    );
+}
+
+#[test]
+fn an_unmapped_open_maps_no_buffer_memory_and_a_mapped_one_of_the_same_memory_does() {
+    // The host maps its own pool when it makes it, so the count starts above zero; what the
+    // consumer adds is what is counted.
+    let (mut host, fds) = good();
+    let pool = inode(fds[fds::BUFFERS].as_fd());
+    let before = mappings_of(pool);
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert_eq!(
+        mappings_of(pool),
+        before,
+        "taking an unmapped stream mapped none of the buffers"
+    );
+    assert!(host.write(1, 0, &[4]));
+    assert!(host.push(1, 1, 1, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(
+        mappings_of(pool),
+        before,
+        "a frame maps none of them either"
+    );
+    stream.release(frame).unwrap();
+
+    // The same memory taken mapped does add a mapping, so the count above can tell.
+    let (_host, fds) = good();
+    let pool = inode(fds[fds::BUFFERS].as_fd());
+    let before = mappings_of(pool);
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let _mapped = session.open_stream(7, "s", platform()).unwrap();
+    assert!(
+        mappings_of(pool) > before,
+        "a mapped stream maps the buffers"
+    );
+}
+
+#[test]
+fn an_unmapped_streams_writable_comes_from_the_descriptor_and_its_seals_not_a_mapping() {
+    // A read-only descriptor: the stream still opens, and says so for the region.
+    let (_host, mut fds) = good();
+    for fd in fds.iter_mut().skip(fds::BUFFERS) {
+        let read = read_only(fd.as_fd()).unwrap();
+        *fd = read;
+    }
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert!(!stream.region(0, 0).unwrap().writable);
+
+    // A pool sealed against future writable mappings, not yet mapped by anyone: the same answer.
+    // (The descriptor stands in for the pool here; an unmapped open never maps it.)
+    let (_host, mut fds) = good();
+    let sealed = sealable_memfd(c"sealed", 4096).unwrap();
+    add_seals(sealed.as_fd(), SEAL_FUTURE_WRITE).unwrap();
+    fds[fds::BUFFERS] = sealed;
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
+    assert!(!stream.region(0, 0).unwrap().writable);
 }

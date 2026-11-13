@@ -84,7 +84,7 @@ What a client can do:
   open when the connection is lost ends as `INTERRUPTED`.
 - **`usb_endpoints`, `usb_endpoints_release`**: a USB function's two bulk endpoints (`usb.function/1`), lent to this connection as `out` and `input` descriptors that the caller reads and writes itself. One connection holds them at a time; another gets `BUSY`. The caller passes the stream platform that takes descriptors off the socket (`lemnos-linux-stream`'s `LinuxStreams` on Linux), as for a stream. See [the wire's Endpoints section](wire.md#endpoints).
 - **`usb_endpoints_end`**: the same, with a third descriptor, `end`, which reads EOF once the hold is over for good (the release, the holder going, the device switched off or reloaded, or the driver's endpoints ended). A service without the `ENDPOINTS_END` feature refuses it by name, `NOT_SUPPORTED`, and is never sent the request.
-- **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). The stream says its buffer length (`buffer_len`) and count (`buffer_count`).
+- **`open_stream`, `open_stream_writable`, `open_stream_unmapped`**: a device's [frame stream](streams.md). The stream says its buffer length (`buffer_len`) and count (`buffer_count`). `open_stream_unmapped` maps none of the buffers: frames, lengths (`plane_len`) and regions work, the bytes are not in this process ([Unmapped streams](streams.md#unmapped-streams)).
   `close_stream`
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing
   the client gives up every stream it holds.
@@ -209,11 +209,11 @@ function, struct and code is there with its rule.
 | `lemnos_set_power` | Off and on |
 | `lemnos_item_count`, `lemnos_item_info`, `lemnos_item_text` | What a device says about itself |
 | `lemnos_package_list`, `lemnos_package_info`, `lemnos_package_text` | What became of the daemon's driver packages |
-| `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only or `LEMNOS_STREAM_WRITABLE`, and give it back. Waits for the service's answer, up to the client's timeout. `lemnos_client_close` gives up every stream still open |
+| `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only, `LEMNOS_STREAM_WRITABLE`, or `LEMNOS_STREAM_OPEN_UNMAPPED` (none of its buffers mapped), and give it back. Waits for the service's answer, up to the client's timeout. `lemnos_client_close` gives up every stream still open |
 | `lemnos_stream_next_frame`, `lemnos_stream_release` | Take the next frame, read in place, and give its buffer back |
 | `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |
 | `lemnos_stream_buffer_handle` | A new descriptor of a buffer's own dma-buf, to hand to a GPU or an encoder |
-| `lemnos_stream_plane`, `lemnos_stream_plane_handle` | On a stream whose buffers are in planes: a held frame's part in one plane, read in place, and a new descriptor of one plane's dma-buf |
+| `lemnos_stream_plane`, `lemnos_stream_plane_len`, `lemnos_stream_plane_handle` | On a stream whose buffers are in planes: a held frame's part in one plane, read in place; its length alone, which works on an unmapped stream; and a new descriptor of one plane's dma-buf |
 | `lemnos_stream_region` | Where one plane of a buffer is: a new descriptor of its memory (a pool's memfd or a dma-buf), its offset, payload and allocated sizes, and whether the descriptor allows writes. Valid for the stream's life; see [Where a buffer's memory is](streams.md#where-a-buffers-memory-is) |
 | `lemnos_stream_pool_page`, `lemnos_stream_generation` | A read-only descriptor of the pool page, for a second reader, and the pool's generation (a new one whenever the host makes a new pool) |
 | `lemnos_stream_skipped` | How many frames the stream's reader was too late for, in total: lost frames are passed over by `lemnos_stream_next_frame`, which still returns the frame behind them. See [Waiting on the doorbell](streams.md#waiting-on-the-doorbell) |
@@ -232,7 +232,8 @@ memory has none and answers `-EOPNOTSUPP`. When the buffers are in planes (`plan
 above 1, from the board file's `planes`), each plane is a dma-buf of its own: a frame has no one
 place in memory, so `lemnos_stream_next_frame` gives its data as `NULL`, `lemnos_stream_plane`
 gives each plane's part, `lemnos_stream_plane_handle` each plane's descriptor, and
-`lemnos_stream_read` and `lemnos_stream_write` address the planes end to end. Calls on one stream wait for each other, never for the
+`lemnos_stream_read` and `lemnos_stream_write` address the planes end to end. On a stream opened with
+`LEMNOS_STREAM_OPEN_UNMAPPED` (its info flags `LEMNOS_STREAM_UNMAPPED`) `*data` is `NULL`, `lemnos_stream_plane` gives a length of 0, and `lemnos_stream_read` and `lemnos_stream_write` answer `-EOPNOTSUPP`; `lemnos_stream_plane_len` and the regions still work. Calls on one stream wait for each other, never for the
 client's other calls, so one thread can wait for frames while another calls methods. The C tests
 (`engine/capi/tests/c/`) run each of these against the daemon on the simulated board.
 

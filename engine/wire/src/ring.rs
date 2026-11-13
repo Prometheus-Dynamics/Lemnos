@@ -18,7 +18,7 @@
 //! so a frame of several planes is an entry naming several pool buffers. Nothing here reads what a
 //! frame or job carries: the contract says what the bytes mean.
 
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use shm_ring::{
     FieldId, Flags, Mem, MemMut, ReadMap, RingError as ShmError, SampleTime, Spec, WriteMap,
@@ -411,6 +411,12 @@ pub struct Consumer {
     /// The pool page as the host passed it (read-only), kept so it can be handed on to another
     /// reader. The pool's own view has a mapping of it, not the descriptor.
     pool_page: OwnedFd,
+    /// Whether the buffers' memory is mapped here. An unmapped consumer's pool view maps stand-in
+    /// memory of the same shape instead (see [`Mapping::Unmapped`]), so its bytes are never read.
+    mapped: bool,
+    /// The buffers' descriptors, as the host passed them, kept by an unmapped consumer so that it
+    /// can hand them on. A mapped consumer's view owns them, and this is empty.
+    pool_fds: Vec<OwnedFd>,
     frames: shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>>,
     /// The frames [`pop_frame`](Self::pop_frame) took and nobody has released, by buffer.
     held: Vec<Option<shm_ring_buffers::Held<shm_ring_holds::Marks<WriteMap>>>>,
@@ -430,6 +436,21 @@ impl core::fmt::Debug for Consumer {
     }
 }
 
+/// How a consumer maps a stream's buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mapping {
+    /// Read-only: frames are read in place.
+    ReadOnly,
+    /// Writable as well, for a stream the consumer fills.
+    Writable,
+    /// Not at all. The buffers' memory is never mapped by this consumer: its descriptors are kept
+    /// and handed on as they are. The rings, the holds, the pool page and the doorbell are mapped
+    /// as the protocol needs them. The pool view the frame reader holds maps stand-in memory of
+    /// the same shape, a sealed memfd as large as each descriptor's buffers, which nothing writes
+    /// or reads; [`Consumer::read`] and [`Consumer::mapped`] keep it from being read.
+    Unmapped,
+}
+
 impl Consumer {
     /// Attaches to a stream from its descriptors, in the order of [`fds`] followed by the pool's
     /// buffers. `planes` are each plane's length (empty for one plane of a whole stride), and
@@ -446,6 +467,26 @@ impl Consumer {
         planes: &[u32],
         shared: bool,
         writable: bool,
+    ) -> Result<Self, RingError> {
+        let mapping = if writable {
+            Mapping::Writable
+        } else {
+            Mapping::ReadOnly
+        };
+        Self::attach_with(descriptors, layout, planes, shared, mapping)
+    }
+
+    /// As [`attach`](Self::attach), with how the buffers are mapped: see [`Mapping`].
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`](Self::attach).
+    pub fn attach_with(
+        descriptors: Vec<OwnedFd>,
+        layout: Layout,
+        planes: &[u32],
+        shared: bool,
+        mapping: Mapping,
     ) -> Result<Self, RingError> {
         let layout = layout.checked()?;
         let descs = layout.pool_descs(shared, planes);
@@ -472,20 +513,40 @@ impl Consumer {
             return Err(RingError::BadLayout);
         }
         let kept = clone_owned(&pool_page)?;
-        let (fills, view) = if writable {
-            let fills = shm_ring_buffers::PoolView::attach_writable(
-                clone_owned(&pool_page)?,
-                clone_all(&buffer_fds)?,
-                &descs,
-            )?;
-            let view = shm_ring_buffers::PoolView::attach_writable(pool_page, buffer_fds, &descs)?;
-            (Some(fills), view)
-        } else {
-            (
+        let (fills, view, kept_fds) = match mapping {
+            Mapping::Writable => {
+                let fills = shm_ring_buffers::PoolView::attach_writable(
+                    clone_owned(&pool_page)?,
+                    clone_all(&buffer_fds)?,
+                    &descs,
+                )?;
+                let view =
+                    shm_ring_buffers::PoolView::attach_writable(pool_page, buffer_fds, &descs)?;
+                (Some(fills), view, Vec::new())
+            }
+            Mapping::ReadOnly => (
                 None,
                 shm_ring_buffers::PoolView::attach(pool_page, buffer_fds, &descs)?,
-            )
+                Vec::new(),
+            ),
+            Mapping::Unmapped => {
+                // The view needs descriptors it can map, and each must be as large as the buffers
+                // reach into it. One sealed memfd of the largest reach serves for every one.
+                let reach = descs
+                    .iter()
+                    .map(|desc| desc.offset.checked_add(desc.size))
+                    .try_fold(0_u64, |most, end| end.map(|end| most.max(end)))
+                    .and_then(|most| usize::try_from(most).ok())
+                    .ok_or(RingError::BadLayout)?;
+                let stand_in = shm_ring::sealed_memfd(reach)?;
+                let stand_ins = (0..pool_fds)
+                    .map(|_| clone_owned(&stand_in))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let view = shm_ring_buffers::PoolView::attach(pool_page, stand_ins, &descs)?;
+                (None, view, buffer_fds)
+            }
         };
+        let mapped = mapping != Mapping::Unmapped;
         let marks = shm_ring_holds::Marks::over(
             WriteMap::new(marks)?,
             layout.buffers * planes.len().max(1) as u32,
@@ -497,6 +558,8 @@ impl Consumer {
         let bell = shm_ring_doorbell::Doorbell::attach(bell_fd, bell_page)?;
         Ok(Self {
             pool_page: kept,
+            mapped,
+            pool_fds: kept_fds,
             held: (0..layout.buffers).map(|_| None).collect(),
             planes: planes.len().max(1) as u32,
             layout,
@@ -568,10 +631,36 @@ impl Consumer {
             .is_some()
     }
 
+    /// Whether this consumer maps the buffers' memory. An unmapped one ([`Mapping::Unmapped`])
+    /// reads and writes nothing through [`read`](Self::read) and [`write`](Self::write), and its
+    /// frames' bytes are not its to read.
+    #[must_use]
+    pub const fn mapped(&self) -> bool {
+        self.mapped
+    }
+
+    /// The descriptor of the pool's buffer `buffer`, and where the buffer is in it. For an
+    /// unmapped consumer this is the descriptor the host passed, not the stand-in its view maps.
+    #[must_use]
+    pub fn descriptor(&self, buffer: BufferIndex) -> Option<(BorrowedFd<'_>, BufferDesc)> {
+        if self.mapped {
+            return self.frames.pool().descriptor(buffer);
+        }
+        let (_, desc) = self.frames.pool().descriptor(buffer)?;
+        Some((
+            self.pool_fds.get(usize::from(desc.descriptor))?.as_fd(),
+            desc,
+        ))
+    }
+
     /// Copies from whole buffer `buffer` at `offset` into `out`, for a buffer that isn't a frame.
-    /// `false` if the range isn't in the buffer. A stream of one plane per buffer.
+    /// `false` if the range isn't in the buffer, or this consumer doesn't map the buffers. A
+    /// stream of one plane per buffer.
     #[must_use]
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> bool {
+        if !self.mapped {
+            return false;
+        }
         self.frames
             .pool()
             .bytes(BufferIndex(buffer))

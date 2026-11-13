@@ -160,12 +160,22 @@ impl Client {
         name: &str,
         writable: bool,
     ) -> Result<Stream<'_>, Status> {
-        let name = c_string(name)?;
         let flags = if writable {
             surface::STREAM_WRITABLE
         } else {
             0
         };
+        self.open_stream_with(device, name, flags)
+    }
+
+    /// Takes a device's stream with none of its buffers mapped (see
+    /// `lemnos_stream_open` and `LEMNOS_STREAM_OPEN_UNMAPPED`).
+    pub fn open_stream_unmapped(&self, device: u32, name: &str) -> Result<Stream<'_>, Status> {
+        self.open_stream_with(device, name, surface::STREAM_OPEN_UNMAPPED)
+    }
+
+    fn open_stream_with(&self, device: u32, name: &str, flags: u32) -> Result<Stream<'_>, Status> {
+        let name = c_string(name)?;
         let mut handle = Handle::NULL;
         // SAFETY: the string is NUL-terminated and outlives the call, and
         // `handle` is valid for a write.
@@ -496,6 +506,17 @@ impl Stream<'_> {
         // plane, mapped for as long as the stream is open; the frame stays
         // held while `self` is borrowed, as for `next_frame`.
         Ok(unsafe { core::slice::from_raw_parts(data, len) })
+    }
+
+    /// The length of plane `plane` of the held frame in `buffer`, without the
+    /// bytes: works on a stream opened unmapped (see `lemnos_stream_plane_len`).
+    pub fn plane_len(&self, buffer: u32, plane: u32) -> Result<usize, Status> {
+        let mut len = 0;
+        // SAFETY: `len` is valid for a write during the call.
+        checked(unsafe {
+            ffi::lemnos_stream_plane_len(self.client.handle, self.handle, buffer, plane, &mut len)
+        })?;
+        Ok(len)
     }
 
     /// A descriptor of the dma-buf behind plane `plane` of the buffer.

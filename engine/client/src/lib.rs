@@ -6,7 +6,9 @@
 //! A device's frame stream is taken with [`Session::open_stream`], which needs a
 //! [`StreamPlatform`] for what only the operating system can do. A stream whose buffers the
 //! consumer fills (a job's input image, a configuration) is taken with
-//! [`Session::open_stream_writable`] and filled with [`FrameStream::write`].
+//! [`Session::open_stream_writable`] and filled with [`FrameStream::write`]. A consumer that hands
+//! the buffers to a device that maps them itself takes them with [`Session::open_stream_unmapped`],
+//! which maps none of them here.
 //! A long job (a method its contract marks as one) is started with [`Session::start_job`],
 //! and its progress and end come from [`Session::next_job_event`] or [`Session::wait_job`].
 //! The `tokio` feature adds `AsyncClient`. All three share one connection

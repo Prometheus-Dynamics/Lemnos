@@ -32,6 +32,7 @@ lemnos_stream_write
 lemnos_stream_post_job
 lemnos_stream_buffer_handle
 lemnos_stream_plane
+lemnos_stream_plane_len
 lemnos_stream_plane_handle
 lemnos_stream_region
 lemnos_stream_pool_page

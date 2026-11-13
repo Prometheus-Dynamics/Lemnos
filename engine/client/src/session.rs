@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_core::{Contract, Status, Tail};
-use lemnos_wire::ring::Layout;
+use lemnos_wire::ring::{Layout, Mapping};
 use lemnos_wire::{
     CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BITS,
     PART_BYTES, PART_HASHES, PART_NAMES, Parts, Planes, VERSION, WireError, append, check_parts,
@@ -1700,7 +1700,26 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, false, platform)
+        self.open_stream_as(device, name, Mapping::ReadOnly, platform)
+    }
+
+    /// Takes a stream as [`open_stream`](Self::open_stream) takes one, but maps none of its
+    /// buffers. The rings, the holds, the pool page and the doorbell are still mapped, so frames
+    /// arrive as they do anywhere else, and their [`HeldFrame`](crate::HeldFrame) fields, lengths
+    /// ([`FrameStream::plane_len`]) and [`FrameStream::region`]s are all there. What is not there
+    /// is the bytes: [`FrameStream::bytes`] and [`FrameStream::plane`] are empty, and
+    /// [`FrameStream::read`] and [`FrameStream::write`] are refused with
+    /// [`Error::StreamUnmapped`]. For a consumer that hands the buffers to something else that
+    /// maps them (a GPU, an encoder), or a second process of its own, so that this process never
+    /// maps the buffer memory. `Region::writable` is read from each descriptor's access mode and
+    /// seals, not probed by mapping (see `docs/streams.md`).
+    pub fn open_stream_unmapped(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::Unmapped, platform)
     }
 
     /// Takes a stream this consumer fills as well as reads, as [`open_stream`](Self::open_stream)
@@ -1727,20 +1746,20 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, true, platform)
+        self.open_stream_as(device, name, Mapping::Writable, platform)
     }
 
     fn open_stream_as(
         &mut self,
         device: u32,
         name: &str,
-        writable: bool,
+        mapping: Mapping,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         self.settle()?;
         let (id, pick) = self.op_open_stream(device, name, &platform)?;
         let ready = self.wait(id, pick);
-        self.finish_open_stream(ready, device, name, writable, platform)
+        self.finish_open_stream(ready, device, name, mapping, platform)
     }
 
     /// Asks for a stream and starts reading the socket so its descriptors are kept.
@@ -1854,7 +1873,7 @@ impl Session {
         ready: Result<StreamAnswer, Error>,
         device: u32,
         name: &str,
-        writable: bool,
+        mapping: Mapping,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         let taker = self.connection.as_mut().and_then(|c| c.taker.take());
@@ -1901,7 +1920,7 @@ impl Session {
             (layout, planes, working, job_driven),
             !handles,
             fds,
-            writable,
+            mapping,
             platform,
         );
         if built.is_err() {

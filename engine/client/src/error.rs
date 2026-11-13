@@ -82,6 +82,10 @@ pub enum Error {
     /// but a buffer's descriptor allows only read-only mappings (the host gave it read-only, or a
     /// seal forbids writes). Nothing was taken: the stream is given back.
     StreamBuffersReadOnly,
+    /// A stream taken with [`Session::open_stream_unmapped`](crate::Session::open_stream_unmapped)
+    /// maps none of its buffers, so its bytes can't be read or written through the stream: use
+    /// the buffers' regions and descriptors instead. Nothing was read or written.
+    StreamUnmapped,
 }
 
 impl core::fmt::Display for Error {
@@ -150,6 +154,9 @@ impl core::fmt::Display for Error {
             Self::Full => f.write_str("too many requests waiting"),
             Self::Stream(error) => write!(f, "the frame stream: {error}"),
             Self::StreamWait(kind) => write!(f, "waiting for a frame failed: {kind}"),
+            Self::StreamUnmapped => {
+                f.write_str("this stream maps none of its buffers: read them through their regions")
+            }
             Self::StreamUnsupported => {
                 f.write_str("the frame stream's buffers are dma-bufs, which can't be mapped here")
             }
@@ -189,7 +196,7 @@ impl From<Error> for Status {
             Error::TooSmall => Status::BUFFER_TOO_SMALL,
             Error::Full => Status::BUSY,
             Error::Stream(_) | Error::StreamWait(_) => Status::IO,
-            Error::StreamUnsupported => Status::NOT_SUPPORTED,
+            Error::StreamUnsupported | Error::StreamUnmapped => Status::NOT_SUPPORTED,
             Error::StreamReadOnly | Error::StreamBuffersReadOnly => Status::ACCESS,
         }
     }

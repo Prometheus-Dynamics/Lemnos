@@ -64,10 +64,13 @@ extern "C" {
 #define LEMNOS_PACKAGE_REASON 2
 #define LEMNOS_PACKAGE_NOTE 3
 
-/* lemnos_stream_open flags, and LemnosStreamInfo flags. */
+/* lemnos_stream_open flags, and LemnosStreamInfo flags. LEMNOS_STREAM_OPEN_UNMAPPED
+ * is an open flag only, and not with LEMNOS_STREAM_WRITABLE. */
 #define LEMNOS_STREAM_WRITABLE (1u << 0)
+#define LEMNOS_STREAM_OPEN_UNMAPPED (1u << 1)
 #define LEMNOS_STREAM_BUFFER_HANDLES (1u << 1)
 #define LEMNOS_STREAM_OPEN (1u << 2)
+#define LEMNOS_STREAM_UNMAPPED (1u << 3)
 /* LemnosStreamRegion flags. */
 #define LEMNOS_REGION_WRITABLE (1u << 0)
 #define LEMNOS_REGION_DMA_BUF (1u << 1)
@@ -240,7 +243,14 @@ LemnosStatus lemnos_package_text(LemnosHandle client, uint32_t package, uint32_t
 
 /* Takes the named stream of a device, by its place in the list. With
  * LEMNOS_STREAM_WRITABLE the buffers are mapped to be written too, for a stream
- * the consumer fills (its contract says which). */
+ * the consumer fills (its contract says which). With LEMNOS_STREAM_OPEN_UNMAPPED
+ * none of the buffers is mapped by this process: frames, their lengths
+ * (lemnos_stream_plane_len), regions, pool page and generation all work, but
+ * *data of lemnos_stream_next_frame is NULL, lemnos_stream_plane gives len 0,
+ * and lemnos_stream_read and lemnos_stream_write fail with -EOPNOTSUPP. The
+ * writable flag of a region is then read from the descriptor's access mode and
+ * seals, not by mapping it (docs/streams.md). Any other combination of flags is
+ * -EINVAL. */
 LemnosStatus lemnos_stream_open(LemnosHandle client, uint32_t device, const char *name,
                                 uint32_t flags, LemnosHandle *stream, LemnosMessageSink sink);
 LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, LemnosStreamInfo *info);
@@ -248,8 +258,8 @@ LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, Lemnos
  * (LEMNOS_STREAM_OPEN then clears). 0 ms takes a frame only if one is there.
  * *data, when data is not NULL, is the frame's frame->len bytes, read in place
  * and valid until the frame is released or the stream closed. On a stream whose
- * buffers are in planes (info.planes above 1) *data is NULL: read each plane
- * with lemnos_stream_plane. Allocates nothing. */
+ * buffers are in planes (info.planes above 1), or an unmapped one, *data is NULL:
+ * read each plane with lemnos_stream_plane. Allocates nothing. */
 LemnosStatus lemnos_stream_next_frame(LemnosHandle client, LemnosHandle stream, uint32_t timeout_ms,
                                       LemnosFrame *frame, const uint8_t **data,
                                       LemnosMessageSink sink);
@@ -280,6 +290,12 @@ LemnosStatus lemnos_stream_buffer_handle(LemnosHandle client, LemnosHandle strea
  * or a plane the stream doesn't have is -EINVAL. Allocates nothing. */
 LemnosStatus lemnos_stream_plane(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
                                  uint32_t plane, const uint8_t **data, size_t *len);
+/* The length of plane plane of the held frame in buffer: what lemnos_stream_plane
+ * would give as *len, with no mapping of the buffers, so it works on an unmapped
+ * stream. Same errors: -EINVAL for a buffer not held or a plane the stream doesn't
+ * have. */
+LemnosStatus lemnos_stream_plane_len(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
+                                     uint32_t plane, size_t *len);
 /* A new descriptor of plane plane of a buffer, as lemnos_stream_buffer_handle
  * gives plane 0. */
 LemnosStatus lemnos_stream_plane_handle(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
