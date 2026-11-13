@@ -453,6 +453,7 @@ fn a_timed_out_transfer_restarts_the_stream_after_a_backoff() {
     rig.usb.state().iso_errors.push_back(ErrorKind::Timeout);
     rig.tick();
     assert_eq!(Lifecycle::health(&rig.uvc), Health::Failed(session::SILENT));
+    assert_eq!(rig.usb.state().stream, None, "a failure ends the stream");
     rig.advance(BACKOFF_FIRST_NS);
     rig.settle();
     assert_eq!(rig.uvc.session.state(), STREAMING);
@@ -460,6 +461,9 @@ fn a_timed_out_transfer_restarts_the_stream_after_a_backoff() {
         rig.usb.state().alternates.last(),
         Some(&(STREAM_INTERFACE, 2))
     );
+    let usb = rig.usb.state();
+    assert_eq!((usb.starts, usb.stops), (2, 1));
+    assert!(usb.stream.is_some());
 }
 
 #[test]

@@ -2,6 +2,11 @@
 //!
 //! Finding the device out, taking its video interfaces from the host's own driver and claiming
 //! them, probe and commit, the alternate setting and each isochronous transfer all happen here.
+//! Once the alternate setting is on, the device's isochronous stream is started with
+//! [`TRANSFERS`] transfers queued with the host controller, and each tick takes the oldest done
+//! one, which is queued again at once. So the controller always has a transfer waiting for the
+//! camera's packets while a tick works through the last one, and no frame is lost between two
+//! ticks. The stream is stopped before the setting goes back to 0, and on any failure.
 //! Nothing here keeps anything across a restart of the driver. Any failure backs off, capped at
 //! 8 s, and starts again from the last step that still holds. It never gives up and never switches
 //! itself off.
@@ -29,6 +34,9 @@ pub type Stream = dyn StreamEndpoint<Error = ErrorKind> + Send;
 
 /// Isochronous packets per transfer: 4 ms at high speed.
 pub const PACKETS: usize = 32;
+/// Isochronous transfers kept queued with the host controller: up to 12 ms at high speed may
+/// pass between two ticks before the camera's packets find no room.
+pub const TRANSFERS: u8 = 4;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 const ISO_TIMEOUT: Duration = Duration::from_millis(100);
@@ -161,6 +169,8 @@ pub struct Session {
     block: [u8; CONTROL_MAX],
     block_len: usize,
     alt: Option<Alt>,
+    /// The isochronous stream is started.
+    streaming: bool,
     packet_bytes: Vec<u8>,
     packets: [IsoPacket; PACKETS],
     assembler: Assembler,
@@ -186,6 +196,7 @@ impl Session {
             block: [0; CONTROL_MAX],
             block_len: CONTROL_MIN,
             alt: None,
+            streaming: false,
             packet_bytes: Vec::new(),
             packets: [IsoPacket::default(); PACKETS],
             assembler: Assembler::new(capacity),
@@ -288,6 +299,7 @@ impl Session {
                 next
             }
             Err(fault) => {
+                self.end_stream(usb);
                 self.next_ns = self.back_off(fault, now_ns);
                 Some(self.next_ns)
             }
@@ -516,6 +528,9 @@ impl Session {
         usb.set_alternate(self.interface(), alt.alternate)
             .map_err(usb_fault)?;
         self.alternate_set = true;
+        usb.iso_in_start(alt.endpoint, TRANSFERS, PACKETS as u16, alt.bytes)
+            .map_err(usb_fault)?;
+        self.streaming = true;
         self.assembler
             .reset(mode.expected_bytes.map(|bytes| bytes as usize));
         self.phase = Phase::Stream;
@@ -533,16 +548,11 @@ impl Session {
         }
         let alt = self.alt.ok_or(BAD_PROBE)?;
         let capacity = alt.bytes as usize;
-        self.packets.fill(IsoPacket {
-            capacity: alt.bytes,
-            received: 0,
-            ok: false,
-        });
         let data = self
             .packet_bytes
             .get_mut(..capacity * PACKETS)
             .ok_or(TRANSFER_FAILED)?;
-        usb.iso_in(alt.endpoint, data, &mut self.packets, ISO_TIMEOUT)
+        usb.iso_in_next(data, &mut self.packets, ISO_TIMEOUT)
             .map_err(usb_fault)?;
 
         let Self {
@@ -572,7 +582,16 @@ impl Session {
         Ok(now_ns)
     }
 
+    /// Takes the stream's transfers back from the controller. A failure is the device's going,
+    /// which the next step finds out.
+    fn end_stream(&mut self, usb: &mut Usb) {
+        if core::mem::take(&mut self.streaming) {
+            let _ = usb.iso_in_stop();
+        }
+    }
+
     fn halt(&mut self, usb: &mut Usb) -> Result<(), &'static str> {
+        self.end_stream(usb);
         if self.alternate_set {
             usb.set_alternate(self.interface(), 0).map_err(usb_fault)?;
             self.alternate_set = false;

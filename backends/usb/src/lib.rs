@@ -4,9 +4,10 @@
 //! `/dev/bus/usb`. Both roots can be set, so tests run on fixture directories.
 //!
 //! [`UsbfsDevice`] carries control, bulk and interrupt transfers on the kernel's synchronous
-//! ioctls and isochronous transfers on a ring of URBs. Nothing here keeps a device from being
-//! retried: every failure goes back to the caller, and a URB the kernel holds on to past a
-//! timeout makes the next isochronous call return `Busy` until it comes back.
+//! ioctls and an isochronous stream on a ring of URBs, every one of them submitted from the
+//! start and submitted again as soon as it is handed over, so the kernel always has the next
+//! frames' URBs. Nothing here keeps a device from being retried: every failure goes back to the
+//! caller.
 //!
 //! [`UsbHost`]: lemnos_hal::UsbHost
 //! [`UsbDevice`]: lemnos_hal::UsbDevice

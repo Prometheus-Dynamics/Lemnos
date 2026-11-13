@@ -76,8 +76,15 @@ pub struct DeviceState {
     pub iso: VecDeque<Vec<Packet>>,
     pub iso_errors: VecDeque<ErrorKind>,
     pub iso_calls: u32,
-    /// The endpoint and packet capacity of the last transfer.
+    /// The endpoint and packet capacity of the last stream started.
     pub last_iso: Option<(u8, u32)>,
+    /// The stream started and not stopped: endpoint, transfers, packets and packet bytes.
+    pub stream: Option<(u8, u8, u16, u32)>,
+    /// Streams started, and streams stopped.
+    pub starts: u32,
+    pub stops: u32,
+    /// Alternate settings chosen while a stream was started.
+    pub alternates_mid_stream: u32,
     /// Interfaces the host's own driver holds: a claim finds them `Busy`.
     pub kernel_drivers: Vec<u8>,
     /// Every `detach_kernel_driver`, by interface, in order.
@@ -185,6 +192,9 @@ impl UsbDevice for MockUsb {
         if let Some(error) = device.alternate_errors.pop_front() {
             return Err(error);
         }
+        if device.stream.is_some() {
+            device.alternates_mid_stream += 1;
+        }
         device.alternates.push((interface, alternate));
         Ok(())
     }
@@ -257,30 +267,56 @@ impl UsbDevice for MockUsb {
         Err(ErrorKind::Unsupported)
     }
 
-    fn iso_in(
+    fn iso_in_start(
         &mut self,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), ErrorKind> {
+        let mut device = self.present()?;
+        if device.stream.is_some() {
+            return Err(ErrorKind::Busy);
+        }
+        assert!(
+            lemnos_hal::blocks::iso_shape_ok(transfers, packets, packet_bytes),
+            "a stream no backend takes"
+        );
+        device.stream = Some((endpoint, transfers, packets, packet_bytes));
+        device.starts += 1;
+        device.last_iso = Some((endpoint, packet_bytes));
+        Ok(())
+    }
+
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         _timeout: Duration,
     ) -> Result<(), ErrorKind> {
         let mut device = self.present()?;
+        let Some((_, _, count, bytes)) = device.stream else {
+            return Err(ErrorKind::InvalidInput);
+        };
+        let capacity = bytes as usize;
+        if packets.len() != usize::from(count) || data.len() < capacity * packets.len() {
+            return Err(ErrorKind::InvalidInput);
+        }
         device.iso_calls += 1;
-        device.last_iso = Some((endpoint, packets[0].capacity));
         if let Some(error) = device.iso_errors.pop_front() {
             return Err(error);
         }
         let transfer = device.iso.pop_front().unwrap_or_default();
         assert!(transfer.len() <= packets.len(), "a test queued too many");
-        let mut offset = 0usize;
         for (index, packet) in packets.iter_mut().enumerate() {
-            let capacity = packet.capacity as usize;
+            packet.capacity = bytes;
             match transfer.get(index) {
                 Some(queued) => {
                     assert!(
                         queued.data.len() <= capacity,
                         "a packet the bus can't carry"
                     );
+                    let offset = index * capacity;
                     data[offset..offset + queued.data.len()].copy_from_slice(&queued.data);
                     packet.received = queued.claimed.unwrap_or(queued.data.len() as u32);
                     packet.ok = queued.ok;
@@ -290,7 +326,15 @@ impl UsbDevice for MockUsb {
                     packet.ok = true;
                 }
             }
-            offset += capacity;
+        }
+        Ok(())
+    }
+
+    /// Always `Ok`: a device that has gone took its stream with it, as usbfs does.
+    fn iso_in_stop(&mut self) -> Result<(), ErrorKind> {
+        let mut device = self.state();
+        if device.stream.take().is_some() {
+            device.stops += 1;
         }
         Ok(())
     }

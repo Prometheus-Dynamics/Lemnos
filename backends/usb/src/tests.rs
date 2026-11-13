@@ -649,7 +649,6 @@ fn a_reset_that_re_enumerates_is_unavailable_and_so_is_every_call_after_it() {
     assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
 
     let mut data = [0u8; 12];
-    let mut packets = iso_packets([4, 5, 3]);
     assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
     assert_eq!(device.config_descriptor(0, &mut data), gone);
     assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unavailable));
@@ -661,7 +660,7 @@ fn a_reset_that_re_enumerates_is_unavailable_and_so_is_every_call_after_it() {
     assert_eq!(device.bulk_out(0x01, &data, TIMEOUT), gone);
     assert_eq!(device.interrupt_in(0x82, &mut data, TIMEOUT), gone);
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
+        device.iso_in_start(0x81, 3, 3, 5),
         Err(ErrorKind::Unavailable)
     );
 }
@@ -743,84 +742,119 @@ fn a_timeout_is_never_the_kernels_forever() {
     }
 }
 
-/// `capacity`s and the crafted reports for an iso transfer of 12 bytes in 3 packets.
-fn iso_packets(capacities: [u32; 3]) -> [IsoPacket; 3] {
-    capacities.map(|capacity| IsoPacket {
-        capacity,
-        received: 99,
-        ok: true,
-    })
+/// The stream every isochronous test starts: three transfers of three packets of 5 bytes.
+const TRANSFERS: u8 = 3;
+const PACKETS: u16 = 3;
+const PACKET_BYTES: u32 = 5;
+
+fn started() -> (UsbfsDevice, FakeUsbfs) {
+    let (mut device, fake) = device();
+    device
+        .iso_in_start(0x81, TRANSFERS, PACKETS, PACKET_BYTES)
+        .unwrap();
+    (device, fake)
 }
 
+/// What the caller's packet records hold before a transfer: none of it should survive.
+fn iso_packets() -> [IsoPacket; 3] {
+    [IsoPacket {
+        capacity: 99,
+        received: 99,
+        ok: true,
+    }; 3]
+}
+
+/// A completion of 2, 5 and 3 bytes, each packet's at its place in the 15-byte buffer.
 fn good_urb() -> CraftedUrb {
     CraftedUrb {
         packets: vec![(0, 2), (0, 5), (0, 3)],
-        payload: (0..12).collect(),
+        payload: (0..15).collect(),
         ..CraftedUrb::default()
     }
 }
 
-#[test]
-fn an_isochronous_transfer_lands_back_to_back_by_capacity() {
-    let (mut device, fake) = device();
-    fake.queue_urb(CraftedUrb {
-        packets: vec![(0, 2), (-libc::EPROTO, 5), (0, 3)],
-        payload: (0..12).collect(),
-        ..CraftedUrb::default()
-    });
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0xeeu8; 16];
-    device
-        .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
-        .unwrap();
-
-    // Packet 1 starts at the first packet's capacity, not at the bytes that arrived.
-    assert_eq!(data[..2], [0, 1]);
-    assert_eq!(data[2..4], [0xee, 0xee], "the gap is left alone");
-    assert_eq!(data[4..9], [4, 5, 6, 7, 8]);
-    assert_eq!(data[9..12], [9, 10, 11]);
-    assert_eq!(data[12..], [0xee; 4], "nothing past the capacities");
-    assert_eq!(
-        packets,
-        [
-            IsoPacket {
-                capacity: 4,
-                received: 2,
-                ok: true
-            },
-            IsoPacket {
-                capacity: 5,
-                received: 5,
-                ok: false
-            },
-            IsoPacket {
-                capacity: 3,
-                received: 3,
-                ok: true
-            },
-        ]
-    );
-    let submits: Vec<_> = fake
-        .calls()
+/// Each submit's URB, endpoint, buffer length and packet lengths, in order.
+fn submits(fake: &FakeUsbfs) -> Vec<(usize, u8, i32, Vec<u32>)> {
+    fake.calls()
         .into_iter()
         .filter_map(|call| match call {
             Call::Submit {
+                urb,
                 endpoint,
                 buffer_length,
                 lengths,
                 ..
-            } => Some((endpoint, buffer_length, lengths)),
+            } => Some((urb, endpoint, buffer_length, lengths)),
             _ => None,
         })
-        .collect();
-    assert_eq!(submits, vec![(0x81, 12, vec![4, 5, 3])]);
+        .collect()
+}
+
+#[test]
+fn a_stream_queues_every_transfer_at_once_and_each_again_as_it_is_taken() {
+    let (mut device, fake) = started();
+    let queued = submits(&fake);
+    assert_eq!(queued.len(), 3);
+    for (_, endpoint, length, lengths) in &queued {
+        assert_eq!(
+            (*endpoint, *length, lengths.as_slice()),
+            (0x81, 15, &[5, 5, 5][..])
+        );
+    }
+    assert_ne!(queued[0].0, queued[1].0, "three URBs of their own");
+    assert_eq!(fake.in_flight(), 3);
+
+    fake.queue_urb(CraftedUrb {
+        packets: vec![(0, 2), (-libc::EPROTO, 5), (0, 3)],
+        ..good_urb()
+    });
+    let mut packets = iso_packets();
+    let mut data = [0xeeu8; 18];
+    device
+        .iso_in_next(&mut data, &mut packets, TIMEOUT)
+        .unwrap();
+    // Each packet at its place: a short one leaves the rest of its room alone.
+    assert_eq!(data[..2], [0, 1]);
+    assert_eq!(data[2..5], [0xee; 3]);
+    assert_eq!(data[5..10], [5, 6, 7, 8, 9]);
+    assert_eq!(data[10..13], [10, 11, 12]);
+    assert_eq!(data[13..], [0xee; 5], "nothing past the transfer");
+    let record = |received, ok| IsoPacket {
+        capacity: PACKET_BYTES,
+        received,
+        ok,
+    };
+    assert_eq!(
+        packets,
+        [record(2, true), record(5, false), record(3, true)]
+    );
+
+    // The one handed over went straight back, so three are queued again.
+    assert_eq!(fake.in_flight(), 3);
+    let queued = submits(&fake);
+    assert_eq!(queued.len(), 4);
+    assert_eq!(queued[3].0, queued[0].0, "the oldest, again");
+
+    // The others come in their turn.
+    fake.set_steady_urb(good_urb());
+    for _ in 0..5 {
+        device
+            .iso_in_next(&mut data, &mut packets, TIMEOUT)
+            .unwrap();
+        assert_eq!(fake.in_flight(), 3);
+    }
+    let order: Vec<usize> = submits(&fake).iter().map(|s| s.0).collect();
+    assert_eq!(
+        order[3..],
+        [order[0], order[1], order[2], order[0], order[1], order[2]]
+    );
 }
 
 #[test]
 fn crafted_lengths_past_a_buffer_are_failures_not_panics() {
     let bad = [
         CraftedUrb {
-            actual_length: Some(13),
+            actual_length: Some(16),
             ..good_urb()
         },
         CraftedUrb {
@@ -832,7 +866,7 @@ fn crafted_lengths_past_a_buffer_are_failures_not_panics() {
             ..good_urb()
         },
         CraftedUrb {
-            packets: vec![(0, 5), (0, 5), (0, 3)],
+            packets: vec![(0, 6), (0, 5), (0, 3)],
             ..good_urb()
         },
         CraftedUrb {
@@ -857,25 +891,26 @@ fn crafted_lengths_past_a_buffer_are_failures_not_panics() {
         },
     ];
     for crafted in bad {
-        let (mut device, fake) = device();
+        let (mut device, fake) = started();
         fake.queue_urb(crafted.clone());
-        let mut packets = iso_packets([4, 5, 3]);
-        let mut data = [0xeeu8; 12];
+        let mut packets = iso_packets();
+        let mut data = [0xeeu8; 15];
         assert_eq!(
-            device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
+            device.iso_in_next(&mut data, &mut packets, TIMEOUT),
             Err(ErrorKind::Failed),
             "{crafted:?}"
         );
-        assert_eq!(data, [0xee; 12], "nothing delivered: {crafted:?}");
+        assert_eq!(data, [0xee; 15], "nothing delivered: {crafted:?}");
         assert!(
             packets.iter().all(|p| p.received == 0 && !p.ok),
             "{crafted:?}"
         );
 
-        // The URB came back, so the next transfer runs as normal.
+        // The URB came back and went out again, so the stream runs on.
+        assert_eq!(fake.in_flight(), 3, "{crafted:?}");
         fake.queue_urb(good_urb());
         device
-            .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
+            .iso_in_next(&mut data, &mut packets, TIMEOUT)
             .unwrap();
         assert_eq!(packets[1].received, 5, "{crafted:?}");
     }
@@ -883,33 +918,30 @@ fn crafted_lengths_past_a_buffer_are_failures_not_panics() {
 
 #[test]
 fn a_foreign_urb_is_a_failure() {
-    let (mut device, fake) = device();
+    let (mut device, fake) = started();
     fake.queue_urb(CraftedUrb {
         foreign: Some(0x10),
         ..good_urb()
     });
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
+        device.iso_in_next(&mut data, &mut packets, TIMEOUT),
         Err(ErrorKind::Failed)
     );
-    assert_eq!(fake.in_flight(), 1, "the real URB is still held");
+    assert_eq!(fake.in_flight(), 3, "the real URBs are still held");
 }
 
 #[test]
 fn a_status_of_i32_min_does_not_overflow() {
-    let (mut device, fake) = device();
+    let (mut device, fake) = started();
     fake.queue_urb(CraftedUrb {
         status: i32::MIN,
         ..good_urb()
     });
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
-    assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
-        Ok(())
-    );
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
+    assert_eq!(device.iso_in_next(&mut data, &mut packets, TIMEOUT), Ok(()));
 }
 
 #[test]
@@ -923,181 +955,155 @@ fn urb_status_decides_whether_the_whole_urb_failed() {
         (0, Ok(())),
     ];
     for (status, expected) in table {
-        let (mut device, fake) = device();
+        let (mut device, fake) = started();
         fake.queue_urb(CraftedUrb {
             status,
             ..good_urb()
         });
-        let mut packets = iso_packets([4, 5, 3]);
-        let mut data = [0u8; 12];
+        let mut packets = iso_packets();
+        let mut data = [0u8; 15];
         assert_eq!(
-            device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
+            device.iso_in_next(&mut data, &mut packets, TIMEOUT),
             expected,
             "status {status}"
         );
+        if expected.is_err() {
+            assert!(packets.iter().all(|p| p.received == 0 && !p.ok));
+        }
     }
 }
 
 #[test]
 fn bad_isochronous_requests_never_reach_the_kernel() {
     let (mut device, fake) = device();
-    let cases: Vec<(Vec<IsoPacket>, usize, u8)> = vec![
-        (vec![], 8, 0x81),
-        (vec![IsoPacket::default(); 129], 8, 0x81),
-        (iso_packets([4, 5, 3]).to_vec(), 11, 0x81),
-        (iso_packets([0, 0, 0]).to_vec(), 8, 0x81),
-        (iso_packets([u32::MAX, 1, 0]).to_vec(), 8, 0x81),
-        (iso_packets([4, 5, 3]).to_vec(), 12, 0x01),
-        (iso_packets([4, 5, 3]).to_vec(), 12, 0x80),
+    let shapes = [
+        (0x81, 0, 3, 5),
+        (0x81, 17, 3, 5),
+        (0x81, 3, 0, 5),
+        (0x81, 3, 65, 5),
+        (0x81, 3, 3, 0),
+        (0x81, 3, 3, 3073),
+        (0x01, 3, 3, 5),
     ];
-    for (mut packets, len, endpoint) in cases {
-        let mut data = vec![0u8; len];
+    for (endpoint, transfers, packets, bytes) in shapes {
         assert_eq!(
-            device.iso_in(endpoint, &mut data, &mut packets, TIMEOUT),
+            device.iso_in_start(endpoint, transfers, packets, bytes),
             Err(ErrorKind::InvalidInput),
-            "{packets:?}"
+            "{endpoint:#x} {transfers} {packets} {bytes}"
         );
     }
-    assert!(
-        fake.calls()
-            .iter()
-            .all(|call| !matches!(call, Call::Submit { .. })),
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
+    assert_eq!(
+        device.iso_in_next(&mut data, &mut packets, TIMEOUT),
+        Err(ErrorKind::InvalidInput),
+        "no stream"
     );
+    assert!(submits(&fake).is_empty());
+
+    device.iso_in_start(0x81, 3, 3, 5).unwrap();
+    assert_eq!(device.iso_in_start(0x81, 3, 3, 5), Err(ErrorKind::Busy));
+    fake.set_steady_urb(good_urb());
+    assert_eq!(
+        device.iso_in_next(&mut data[..14], &mut packets, TIMEOUT),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        device.iso_in_next(&mut data, &mut packets[..2], TIMEOUT),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(submits(&fake).len(), 3, "and the stream as it was");
+    assert_eq!(fake.in_flight(), 3);
 }
 
 #[test]
-fn an_isochronous_transfer_with_no_completion_times_out_and_cancels() {
-    let (mut device, fake) = device();
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0xeeu8; 12];
+fn a_transfer_not_done_in_time_is_a_timeout_and_the_stream_goes_on() {
+    let (mut device, fake) = started();
+    let mut packets = iso_packets();
+    let mut data = [0xeeu8; 15];
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, Duration::from_millis(5)),
+        device.iso_in_next(&mut data, &mut packets, Duration::from_millis(5)),
         Err(ErrorKind::Timeout)
     );
-    assert_eq!(fake.in_flight(), 0, "the discard brought it back");
-    assert_eq!(data, [0xee; 12]);
+    assert_eq!(fake.in_flight(), 3, "nothing taken back");
+    assert_eq!(data, [0xee; 15]);
     assert!(
-        fake.calls()
+        !fake
+            .calls()
             .iter()
             .any(|call| matches!(call, Call::Discard(_)))
     );
-
     fake.queue_urb(good_urb());
     device
-        .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
+        .iso_in_next(&mut data, &mut packets, TIMEOUT)
         .unwrap();
     assert_eq!(packets[1].received, 5);
 }
 
 #[test]
-fn a_urb_the_kernel_keeps_is_busy_until_it_returns_and_never_stuck_for_good() {
-    let (mut device, fake) = device();
-    fake.set_stuck(true);
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0xeeu8; 12];
+fn stopping_takes_every_transfer_back_and_a_stream_can_start_again() {
+    let (mut device, fake) = started();
+    device.iso_in_stop().unwrap();
+    assert_eq!(fake.in_flight(), 0);
+    let discards = fake
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, Call::Discard(_)))
+        .count();
+    assert_eq!(discards, 3);
+    device.iso_in_stop().unwrap();
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, Duration::from_millis(1)),
-        Err(ErrorKind::Timeout)
+        device.iso_in_next(&mut data, &mut packets, TIMEOUT),
+        Err(ErrorKind::InvalidInput)
     );
-    assert_eq!(fake.in_flight(), 1);
-    for _ in 0..3 {
-        assert_eq!(
-            device.iso_in(0x81, &mut data, &mut packets, Duration::from_millis(1)),
-            Err(ErrorKind::Busy)
-        );
-    }
-    // Once the kernel lets go, the next call's cancel reaps it and the transfer runs.
-    fake.set_stuck(false);
-    fake.set_steady_urb(good_urb());
-    device
-        .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
-        .unwrap();
-    assert_eq!(packets[0].received, 2);
+    device.iso_in_start(0x82, 2, 3, 5).unwrap();
+    assert_eq!(fake.in_flight(), 2);
+    // Dropping the device takes the stream back too.
+    drop(device);
+    assert_eq!(fake.in_flight(), 0);
 }
 
 #[test]
-fn a_device_that_leaves_mid_transfer_is_unavailable() {
-    let (mut device, fake) = device();
+fn a_device_that_leaves_mid_stream_is_unavailable() {
+    let (mut device, fake) = started();
     fake.set_gone(true);
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, Duration::from_secs(30)),
+        device.iso_in_next(&mut data, &mut packets, Duration::from_secs(30)),
         Err(ErrorKind::Unavailable),
         "ENODEV from the reap"
     );
 }
 
-/// The URB can't be reaped once the device has left, and the next call says the device left
-/// rather than that something is busy.
-#[test]
-fn after_a_device_leaves_the_next_call_is_unavailable_too() {
-    let (mut device, fake) = device();
-    fake.set_stuck(true);
-    fake.set_gone(true);
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
-    assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
-        Err(ErrorKind::Unavailable)
-    );
-    assert_eq!(fake.in_flight(), 1);
-    assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
-        Err(ErrorKind::Unavailable)
-    );
-}
-
 #[test]
 fn a_timeout_of_any_size_does_not_panic() {
-    let (mut device, fake) = device();
+    let (mut device, fake) = started();
     fake.set_steady_urb(good_urb());
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
     for timeout in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
         device
-            .iso_in(0x81, &mut data, &mut packets, timeout)
+            .iso_in_next(&mut data, &mut packets, timeout)
             .unwrap();
     }
 }
 
 #[test]
 fn a_timeout_waits_about_that_long() {
-    let (mut device, _fake) = device();
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = [0u8; 12];
+    let (mut device, _fake) = started();
+    let mut packets = iso_packets();
+    let mut data = [0u8; 15];
     let start = Instant::now();
     assert_eq!(
-        device.iso_in(0x81, &mut data, &mut packets, Duration::from_millis(30)),
+        device.iso_in_next(&mut data, &mut packets, Duration::from_millis(30)),
         Err(ErrorKind::Timeout)
     );
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_millis(30), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-}
-
-#[test]
-fn the_ring_is_kept_while_transfers_fit_and_grows_when_they_do_not() {
-    let (mut device, fake) = device();
-    let buffer_of = |fake: &FakeUsbfs, index: usize| match &fake.calls()[index] {
-        Call::Submit { urb, .. } => *urb,
-        other => panic!("{other:?}"),
-    };
-    fake.set_steady_urb(good_urb());
-    let mut packets = iso_packets([4, 5, 3]);
-    let mut data = vec![0u8; 64];
-    device
-        .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
-        .unwrap();
-    device
-        .iso_in(0x82, &mut data, &mut packets, TIMEOUT)
-        .unwrap();
-    assert_eq!(buffer_of(&fake, 0), buffer_of(&fake, 1), "the same URB");
-
-    // A larger transfer makes a larger ring.
-    let mut large = iso_packets([20, 20, 20]);
-    device.iso_in(0x81, &mut data, &mut large, TIMEOUT).unwrap();
-    assert_eq!(large[0].received, 2);
 }
 
 #[test]
@@ -1110,22 +1116,24 @@ fn a_steady_stream_of_every_transfer_allocates_nothing() {
     fake.set_steady_urb(good_urb());
     fake.stop_recording();
 
-    let mut data = [0u8; 12];
-    let mut packets = iso_packets([4, 5, 3]);
-    // The first isochronous call makes the ring; the steady state starts after it.
+    let mut data = [0u8; 15];
+    let mut packets = iso_packets();
+    // Starting the stream makes the ring; the steady state starts after it.
     device
-        .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
+        .iso_in_start(0x81, TRANSFERS, PACKETS, PACKET_BYTES)
         .unwrap();
 
     let mut moved = 0;
     let start = ALLOCATIONS.with(Cell::get);
     for _ in 0..1000 {
-        moved += device.control_in(VENDOR_IN, &mut data, TIMEOUT).unwrap();
-        moved += device.bulk_in(0x81, &mut data, TIMEOUT).unwrap();
-        moved += device.interrupt_in(0x82, &mut data, TIMEOUT).unwrap();
-        moved += device.bulk_out(0x01, &data, TIMEOUT).unwrap();
+        moved += device
+            .control_in(VENDOR_IN, &mut data[..12], TIMEOUT)
+            .unwrap();
+        moved += device.bulk_in(0x81, &mut data[..12], TIMEOUT).unwrap();
+        moved += device.interrupt_in(0x82, &mut data[..12], TIMEOUT).unwrap();
+        moved += device.bulk_out(0x01, &data[..12], TIMEOUT).unwrap();
         device
-            .iso_in(0x81, &mut data, &mut packets, TIMEOUT)
+            .iso_in_next(&mut data, &mut packets, TIMEOUT)
             .unwrap();
         moved += packets.iter().map(|p| p.received as usize).sum::<usize>();
     }

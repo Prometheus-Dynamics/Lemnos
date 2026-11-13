@@ -737,6 +737,12 @@ struct UsbDeviceState {
     alternates: BTreeMap<u8, u8>,
     in_data: VecDeque<Vec<u8>>,
     iso: VecDeque<Vec<u8>>,
+    /// The isochronous stream started: endpoint, transfers, packets, packet bytes.
+    iso_stream: Option<(u8, u8, u16, u32)>,
+    /// Transfers handed over by `iso_in_next`.
+    iso_taken: u64,
+    /// Errors the next `iso_in_next` calls return, in order, instead of a transfer.
+    iso_errors: VecDeque<ErrorKind>,
     written: Vec<(u8, Vec<u8>)>,
     controls: Vec<ControlSetup>,
     /// Interfaces a kernel driver holds.
@@ -773,6 +779,22 @@ impl MockUsbDevice {
     /// Queues one packet for the next isochronous transfers.
     pub fn queue_iso(&self, packet: &[u8]) {
         with(&self.state, |s| s.iso.push_back(packet.to_vec()));
+    }
+
+    /// The isochronous stream started, as `(endpoint, transfers, packets, packet_bytes)`.
+    pub fn iso_stream(&self) -> Option<(u8, u8, u16, u32)> {
+        with(&self.state, |s| s.iso_stream)
+    }
+
+    /// How many transfers `iso_in_next` has handed over.
+    pub fn iso_taken(&self) -> u64 {
+        with(&self.state, |s| s.iso_taken)
+    }
+
+    /// The next `iso_in_next` fails with `error` and hands nothing over. Queued errors go in
+    /// order.
+    pub fn fail_next_iso(&self, error: ErrorKind) {
+        with(&self.state, |s| s.iso_errors.push_back(error));
     }
 
     pub fn written(&self) -> Vec<(u8, Vec<u8>)> {
@@ -975,23 +997,49 @@ impl UsbDevice for MockUsbDevice {
         self.pop_in(data)
     }
 
-    fn iso_in(
+    fn iso_in_start(
         &mut self,
-        _endpoint: u8,
+        endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Result<(), ErrorKind> {
+        self.present()?;
+        if !crate::blocks::iso_shape_ok(transfers, packets, packet_bytes) {
+            return Err(ErrorKind::InvalidInput);
+        }
+        with(&self.state, |s| {
+            if s.iso_stream.is_some() {
+                return Err(ErrorKind::Busy);
+            }
+            s.iso_stream = Some((endpoint, transfers, packets, packet_bytes));
+            Ok(())
+        })
+    }
+
+    /// Each transfer takes as many queued packets as it has; a packet with nothing queued
+    /// for it comes empty and not intact.
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         _timeout: Duration,
     ) -> Result<(), ErrorKind> {
         self.present()?;
         with(&self.state, |s| {
-            let mut offset = 0;
-            for packet in packets {
-                let capacity = packet.capacity as usize;
-                let end = offset + capacity;
-                let slot = data.get_mut(offset..end).ok_or(ErrorKind::InvalidInput)?;
+            let (_, _, count, bytes) = s.iso_stream.ok_or(ErrorKind::InvalidInput)?;
+            let room = usize::from(count) * bytes as usize;
+            if packets.len() != usize::from(count) || data.len() < room {
+                return Err(ErrorKind::InvalidInput);
+            }
+            if let Some(error) = s.iso_errors.pop_front() {
+                return Err(error);
+            }
+            for (packet, slot) in packets.iter_mut().zip(data.chunks_mut(bytes as usize)) {
+                packet.capacity = bytes;
                 match s.iso.pop_front() {
-                    Some(bytes) => {
-                        packet.received = copy(&bytes, slot) as u32;
+                    Some(sent) => {
+                        packet.received = copy(&sent, slot) as u32;
                         packet.ok = true;
                     }
                     None => {
@@ -999,10 +1047,15 @@ impl UsbDevice for MockUsbDevice {
                         packet.ok = false;
                     }
                 }
-                offset = end;
             }
+            s.iso_taken += 1;
             Ok(())
         })
+    }
+
+    fn iso_in_stop(&mut self) -> Result<(), ErrorKind> {
+        with(&self.state, |s| s.iso_stream = None);
+        Ok(())
     }
 }
 
@@ -1082,6 +1135,17 @@ impl UsbFunctionState {
     fn named(&self, endpoint: u8) -> Option<UsbEndpoint> {
         let set = UsbDescriptors::parse(self.descriptors.as_deref()?).ok()?;
         usb_descriptors::endpoints(set.full_speed()).find(|e| e.address == endpoint)
+    }
+
+    /// The bytes per service interval of an isochronous `endpoint`: the larger of its two
+    /// speeds'. `None` for any other endpoint.
+    fn iso_bytes(&self, endpoint: u8) -> Option<u32> {
+        let set = UsbDescriptors::parse(self.descriptors.as_deref()?).ok()?;
+        usb_descriptors::endpoints(set.full_speed())
+            .chain(usb_descriptors::endpoints(set.high_speed().unwrap_or(&[])))
+            .filter(|e| e.address == endpoint && e.attributes & 3 == 1)
+            .map(|e| crate::blocks::iso_interval_bytes(e.max_packet))
+            .max()
     }
 
     /// The endpoint, if the function is in a state to use it.
@@ -1312,6 +1376,11 @@ impl UsbFunction for MockUsbFunction {
             if s.usable(endpoint)?.address & 0x80 != 0 {
                 return Err(ErrorKind::InvalidInput);
             }
+            if s.iso_bytes(endpoint)
+                .is_some_and(|bytes| data.len() < bytes as usize)
+            {
+                return Err(ErrorKind::InvalidInput);
+            }
             let at = s.from_host.iter().position(|(e, _)| *e == endpoint);
             let (_, next) = at
                 .and_then(|at| s.from_host.remove(at))
@@ -1323,6 +1392,11 @@ impl UsbFunction for MockUsbFunction {
     fn write(&mut self, endpoint: u8, data: &[u8], _timeout: Duration) -> Result<usize, ErrorKind> {
         with(&self.state, |s| {
             if s.usable(endpoint)?.address & 0x80 == 0 {
+                return Err(ErrorKind::InvalidInput);
+            }
+            if s.iso_bytes(endpoint)
+                .is_some_and(|bytes| data.len() > bytes as usize)
+            {
                 return Err(ErrorKind::InvalidInput);
             }
             if s.busy.contains(&endpoint) {
@@ -1738,14 +1812,41 @@ mod tests {
 
         probe.queue_iso(&[7, 7]);
         let mut iso = [0; 4];
-        let mut packets = [IsoPacket {
-            capacity: 2,
-            ..IsoPacket::default()
-        }; 2];
-        device.iso_in(4, &mut iso, &mut packets, WAIT).unwrap();
+        let mut packets = [IsoPacket::default(); 2];
+        assert_eq!(
+            device.iso_in_next(&mut iso, &mut packets, WAIT),
+            Err(ErrorKind::InvalidInput),
+            "no stream started"
+        );
+        assert_eq!(
+            device.iso_in_start(4, 0, 2, 2),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            device.iso_in_start(4, 4, 65, 2),
+            Err(ErrorKind::InvalidInput)
+        );
+        device.iso_in_start(4, 4, 2, 2).unwrap();
+        assert_eq!(device.iso_in_start(4, 4, 2, 2), Err(ErrorKind::Busy));
+        assert_eq!(probe.iso_stream(), Some((4, 4, 2, 2)));
+        assert_eq!(
+            device.iso_in_next(&mut iso[..3], &mut packets, WAIT),
+            Err(ErrorKind::InvalidInput)
+        );
+        device.iso_in_next(&mut iso, &mut packets, WAIT).unwrap();
         assert_eq!((packets[0].received, packets[0].ok), (2, true));
         assert_eq!((packets[1].received, packets[1].ok), (0, false));
+        assert_eq!(packets[1].capacity, 2);
         assert_eq!(iso, [7, 7, 0, 0]);
+        probe.fail_next_iso(ErrorKind::Failed);
+        assert_eq!(
+            device.iso_in_next(&mut iso, &mut packets, WAIT),
+            Err(ErrorKind::Failed)
+        );
+        assert_eq!(probe.iso_taken(), 1);
+        device.iso_in_stop().unwrap();
+        assert_eq!(probe.iso_stream(), None);
+        device.iso_in_stop().unwrap();
     }
 
     #[test]
@@ -1819,8 +1920,9 @@ mod tests {
         assert_eq!(device.bulk_in(1, &mut data, WAIT), gone);
         assert_eq!(device.bulk_out(1, &[1], WAIT), gone);
         assert_eq!(device.interrupt_in(1, &mut data, WAIT), gone);
+        assert_eq!(device.iso_in_start(1, 2, 1, 4), Err(ErrorKind::Unavailable));
         assert_eq!(
-            device.iso_in(1, &mut data, &mut packets, WAIT),
+            device.iso_in_next(&mut data, &mut packets, WAIT),
             Err(ErrorKind::Unavailable)
         );
         assert_eq!(probe.resets(), 2);

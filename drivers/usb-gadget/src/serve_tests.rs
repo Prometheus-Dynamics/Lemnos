@@ -73,8 +73,11 @@ fn bind_on(
     let mut entries = std::vec![
         ("vendor", ConfigValue::Int(0x1209)),
         ("product", ConfigValue::Int(1)),
-        ("interfaces", ConfigValue::Str(INTERFACES)),
     ];
+    // The test's own interfaces, if it gives them, in place of the usual ones.
+    if !extra.iter().any(|(key, _)| *key == "interfaces") {
+        entries.push(("interfaces", ConfigValue::Str(INTERFACES)));
+    }
     entries.extend_from_slice(extra);
     let mut board = Board {
         function: Some(function),
@@ -638,6 +641,31 @@ fn a_send_waits_for_its_endpoint_and_holds_only_that_endpoint() {
         rig.host.host_received()[1..],
         [(IN, b"first".to_vec()), (IN, b"second".to_vec())]
     );
+}
+
+#[test]
+fn an_isochronous_job_is_one_interval_and_a_longer_one_is_refused() {
+    const STREAMING: &str = "
+interface 0xff 0 0
+alternate
+endpoint in isochronous 16 1
+endpoint out isochronous 8 1
+";
+    let mut rig = Rig::with(BYTES, &[("interfaces", ConfigValue::Str(STREAMING))]);
+    rig.host.event(UsbFunctionEvent::Configured);
+    rig.tick();
+    let (iso_in, iso_out) = (0x81, 0x02);
+    rig.send(1, iso_in, 0, &[1; 16]);
+    rig.send(2, iso_in, 1, &[2; 17]);
+    rig.receive(3, iso_out, 2, 7);
+    rig.receive(4, iso_out, 3, 8);
+    rig.host.host_sends(iso_out, &[3; 8]);
+    rig.tick();
+    assert_eq!(rig.done(1), b"");
+    assert_eq!(rig.failed(2), JobStatus::Refused, "more than an interval");
+    assert_eq!(rig.failed(3), JobStatus::Refused, "no room for an interval");
+    assert_eq!(rig.done(4), [3; 8]);
+    assert_eq!(rig.host.host_received(), [(iso_in, std::vec![1; 16])]);
 }
 
 #[test]

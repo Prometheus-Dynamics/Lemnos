@@ -71,8 +71,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     with the caller's registers.
 - [ ] **The description form covers one contract**, `magnetometer/1`.
 - [ ] **No built-in driver takes a UART.**
-- [ ] **USB**: the gadget has no isochronous endpoints, and `uvc` reads one isochronous transfer
-      at a time.
 - [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the
       C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
       `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),

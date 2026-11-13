@@ -31,6 +31,16 @@
 //! the endpoint to be free of the one before it, so a host that stops asking holds that
 //! endpoint's sends, and only those.
 //!
+//! On an isochronous endpoint a job is one service interval: a send's `length` is at most
+//! the bytes the endpoint moves in an interval (its `wMaxPacketSize` at the speed in force,
+//! times its transactions per microframe at high speed), and a receive's `length` is at least
+//! that; any other completes as [`JobStatus::Refused`]. The block keeps several sends queued
+//! with the controller, so a send completes once queued: bytes the host did not ask for in
+//! time are dropped, and nobody is told. An isochronous endpoint has no halt. Its interface
+//! has it in an alternate setting the host picks; the bus answers `SET_INTERFACE` or delivers
+//! it as a request, as the board's controller does, and may report
+//! [`EventKind::Configured`] again when the setting changes.
+//!
 //! Completion is a frame on the same stream. Its buffer is the job's and its `identity` is
 //! the job's. The block writes a [`Completion`] to the start of the buffer first, which says
 //! whether the job was done and its count. The frame's length is [`DATA_OFFSET`] plus the

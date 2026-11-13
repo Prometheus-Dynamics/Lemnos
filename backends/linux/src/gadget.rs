@@ -57,8 +57,13 @@
 //!   own, as [`UsbFunction`] says.
 //! - The gadget framework answers the standard requests, and FunctionFS refuses descriptor
 //!   types it does not know, which `enable` reports as `InvalidInput`.
-//! - Alternate settings other than 0, a configuration with no interface, and a manufacturer,
-//!   product, serial or configuration string over 125 bytes of UTF-8 are `Unsupported`.
+//! - FunctionFS takes alternate settings 0 to [`MAX_ALTERNATE`] of an interface, and one
+//!   endpoint address in one setting only: a set with more settings, or an address in two, is
+//!   `Unsupported`. It answers `SET_INTERFACE` itself and enables every endpoint of the
+//!   function whichever setting the host picks; each pick is reported as
+//!   [`Configured`](UsbFunctionEvent::Configured) again (FunctionFS says `ENABLE` again).
+//! - A configuration with no interface, and a manufacturer, product, serial or configuration
+//!   string over 125 bytes of UTF-8, are `Unsupported`.
 //! - The data stage of a control request can't be abandoned once begun: `control_in` and
 //!   `control_out` wait for the host, whatever their timeout.
 //! - Each endpoint has one transfer with the kernel at a time, on [`TRANSFER_BYTES`] of memory
@@ -71,6 +76,16 @@
 //!     the write before it. How that write ended is reported by the next `write`.
 //!   - When the host configures the function again, what was under way or read and not yet
 //!     taken under the configuration before is dropped.
+//! - An isochronous endpoint has [`ISO_TRANSFERS`] transfers with the kernel instead, each of
+//!   one service interval's bytes (the larger of the two speeds' [`iso_interval_bytes`]), on
+//!   memory of their own, as [`UsbFunction`] says of isochronous endpoints:
+//!   - `write` takes at most an interval's bytes, else `InvalidInput`, into a free transfer
+//!     and hands it to the kernel; `Timeout` when all are with the kernel. How a write ended
+//!     is never reported: FunctionFS gives each its own request, and the controller sends it
+//!     at the next interval the host asks.
+//!   - `read` needs room for an interval's bytes, else `InvalidInput`. Every transfer waits
+//!     with the kernel as a read, and each call takes the oldest that is done and gives it
+//!     back at once, so the host's packets find a request while the caller works.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -78,7 +93,7 @@ use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent};
+use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent, iso_interval_bytes};
 use lemnos_hal::usb_descriptors::{self, CONFIGURATION_LEN, INTERFACE, UsbDescriptors};
 use lemnos_hal::{ErrorKind, UsbFunction};
 use lemnos_linux_sys::aio;
@@ -92,6 +107,10 @@ pub(crate) const PREFIX: &str = "udc:";
 const MAX_FUNCTION_NAME: usize = 39;
 /// The longest string configfs takes, less the newline written after it.
 const MAX_STRING: usize = 125;
+/// The highest alternate setting FunctionFS takes (`MAX_ALT_SETTINGS` in `f_fs.c`).
+pub const MAX_ALTERNATE: u8 = 2;
+/// Transfers an isochronous endpoint keeps with the kernel.
+pub const ISO_TRANSFERS: usize = 8;
 
 /// The controller a board file's name means, if the name is one of ours and can be a
 /// directory name: no separator, no leading dot, nothing but what a kernel device name has.
@@ -169,21 +188,43 @@ struct Plan {
     configuration_name: Option<String>,
     descriptors: Vec<u8>,
     function_strings: Vec<u8>,
-    /// Each endpoint's address and whether it is isochronous.
-    endpoints: Vec<(u8, bool)>,
+    /// Each endpoint's address, and for an isochronous one its bytes per interval.
+    endpoints: Vec<(u8, Option<u32>)>,
 }
 
 impl Plan {
     fn of(set: &UsbDescriptors<'_>) -> Result<Self, ErrorKind> {
         let full = &set.full_speed()[CONFIGURATION_LEN..];
         let high = set.high_speed().map(|high| &high[CONFIGURATION_LEN..]);
-        let alternates = usb_descriptors::descriptors(full)
-            .chain(usb_descriptors::descriptors(high.unwrap_or(&[])))
-            .any(|d| d[1] == INTERFACE && d[3] != 0);
+        let alternates =
+            usb_descriptors::descriptors(full).any(|d| d[1] == INTERFACE && d[3] > MAX_ALTERNATE);
+        // The same shape at both speeds, so one speed tells whether an address comes twice.
+        let mut seen = 0u32;
+        let twice = usb_descriptors::endpoints(set.full_speed()).any(|e| {
+            let bit = 1u32 << (u32::from(e.address & 0x0f) + u32::from(e.address >> 7) * 16);
+            let again = seen & bit != 0;
+            seen |= bit;
+            again
+        });
         let configuration = set.configuration();
-        if alternates || configuration.interfaces == 0 {
+        if alternates || twice || configuration.interfaces == 0 {
             return Err(ErrorKind::Unsupported);
         }
+        // An isochronous endpoint's bytes per interval, the larger of the two speeds'.
+        let high_endpoints = set.high_speed().map(usb_descriptors::endpoints);
+        let mut high_endpoints = high_endpoints.into_iter().flatten();
+        let endpoints = usb_descriptors::endpoints(set.full_speed())
+            .map(|e| {
+                let high = high_endpoints
+                    .next()
+                    .map_or(0, |h| iso_interval_bytes(h.max_packet));
+                let iso = e.attributes & 3 == 1;
+                (
+                    e.address,
+                    iso.then(|| iso_interval_bytes(e.max_packet).max(high)),
+                )
+            })
+            .collect();
 
         let text = |index: u8| -> Result<Option<String>, ErrorKind> {
             let Some(units) = set.text(index) else {
@@ -252,9 +293,7 @@ impl Plan {
             descriptors: functionfs::descriptors_blob(flags, Some(full), high).map_err(invalid)?,
             function_strings: functionfs::strings_blob(language.unwrap_or(0), &table)
                 .map_err(invalid)?,
-            endpoints: usb_descriptors::endpoints(set.full_speed())
-                .map(|e| (e.address, e.attributes & 3 == 1))
-                .collect(),
+            endpoints,
         })
     }
 }
@@ -387,8 +426,13 @@ impl Paths {
             endpoints.push(Endpoint::open(&file)?);
         }
         let mut queues = Vec::with_capacity(endpoints.len());
-        for _ in &endpoints {
-            queues.push(aio::Queue::new(TRANSFER_BYTES)?);
+        for (_, iso) in &plan.endpoints {
+            queues.push(match iso {
+                Some(bytes) => {
+                    Transfers::Ring(Box::new(aio::Ring::new(ISO_TRANSFERS, *bytes as usize)?))
+                }
+                None => Transfers::One(aio::Queue::new(TRANSFER_BYTES)?),
+            });
         }
         attribute(&self.gadget, "UDC", &self.name)?;
         Ok(FfsWire {
@@ -420,11 +464,19 @@ trait Wire {
 /// size, so a longer transfer is cut only between packets.
 pub const TRANSFER_BYTES: usize = 64 * 1024;
 
+/// One endpoint's transfers with the kernel.
+enum Transfers {
+    /// One at a time, for bulk and interrupt endpoints.
+    One(aio::Queue),
+    /// [`ISO_TRANSFERS`] at once, for an isochronous endpoint.
+    Ring(Box<aio::Ring>),
+}
+
 struct FfsWire {
     ep0: Ep0,
     endpoints: Vec<Endpoint>,
     /// Each endpoint's transfers, in the endpoints' order.
-    queues: Vec<aio::Queue>,
+    queues: Vec<Transfers>,
 }
 
 impl Wire for FfsWire {
@@ -453,16 +505,27 @@ impl Wire for FfsWire {
     }
 
     fn read(&mut self, endpoint: usize, data: &mut [u8], timeout: Duration) -> io::Result<usize> {
-        self.queues[endpoint].read(self.endpoints[endpoint].as_fd(), data, timeout)
+        let fd = self.endpoints[endpoint].as_fd();
+        match &mut self.queues[endpoint] {
+            Transfers::One(queue) => queue.read(fd, data, timeout),
+            Transfers::Ring(ring) => ring.read(fd, data, timeout),
+        }
     }
 
     fn write(&mut self, endpoint: usize, data: &[u8], timeout: Duration) -> io::Result<usize> {
-        self.queues[endpoint].write(self.endpoints[endpoint].as_fd(), data, timeout)
+        let fd = self.endpoints[endpoint].as_fd();
+        match &mut self.queues[endpoint] {
+            Transfers::One(queue) => queue.write(fd, data, timeout),
+            Transfers::Ring(ring) => ring.write(fd, data, timeout),
+        }
     }
 
     fn forget(&mut self) {
         for queue in &mut self.queues {
-            queue.cancel();
+            match queue {
+                Transfers::One(queue) => queue.cancel(),
+                Transfers::Ring(ring) => ring.cancel(),
+            }
         }
     }
 }
@@ -471,8 +534,9 @@ impl Wire for FfsWire {
 /// and goings, over the files.
 struct Session<W> {
     wire: W,
-    /// Each endpoint's address and whether it is isochronous, in the wire's order.
-    endpoints: Vec<(u8, bool)>,
+    /// Each endpoint's address, and for an isochronous one its bytes per interval, in the
+    /// wire's order.
+    endpoints: Vec<(u8, Option<u32>)>,
     configured: bool,
     /// The gadget was unbound from its controller.
     released: bool,
@@ -480,7 +544,7 @@ struct Session<W> {
 }
 
 impl<W: Wire> Session<W> {
-    fn new(wire: W, endpoints: Vec<(u8, bool)>) -> Self {
+    fn new(wire: W, endpoints: Vec<(u8, Option<u32>)>) -> Self {
         Self {
             wire,
             endpoints,
@@ -490,9 +554,14 @@ impl<W: Wire> Session<W> {
         }
     }
 
-    /// The place and kind of `endpoint`, if the descriptors name it, in the direction asked
-    /// for if one is, and the host has configured the function.
-    fn usable(&self, endpoint: u8, to_host: Option<bool>) -> Result<(usize, bool), ErrorKind> {
+    /// The place of `endpoint` and, for an isochronous one, its bytes per interval, if the
+    /// descriptors name it, in the direction asked for if one is, and the host has configured
+    /// the function.
+    fn usable(
+        &self,
+        endpoint: u8,
+        to_host: Option<bool>,
+    ) -> Result<(usize, Option<u32>), ErrorKind> {
         let at = self.endpoints.iter().position(|(a, _)| *a == endpoint);
         let at = at.ok_or(ErrorKind::InvalidInput)?;
         if to_host.is_some_and(|to_host| to_host != (endpoint & 0x80 != 0)) {
@@ -589,7 +658,7 @@ impl<W: Wire> Session<W> {
 
     fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), ErrorKind> {
         let (at, isochronous) = self.usable(endpoint, None)?;
-        if isochronous {
+        if isochronous.is_some() {
             return Err(ErrorKind::Unsupported);
         }
         let done = if halted {
@@ -606,12 +675,20 @@ impl<W: Wire> Session<W> {
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, ErrorKind> {
-        let (at, _) = self.usable(endpoint, Some(false))?;
+        let (at, interval) = self.usable(endpoint, Some(false))?;
+        // An isochronous read is one interval, and must have room for all of it.
+        if interval.is_some_and(|bytes| data.len() < bytes as usize) {
+            return Err(ErrorKind::InvalidInput);
+        }
         self.wire.read(at, data, timeout).map_err(|e| wire_kind(&e))
     }
 
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration) -> Result<usize, ErrorKind> {
-        let (at, _) = self.usable(endpoint, Some(true))?;
+        let (at, interval) = self.usable(endpoint, Some(true))?;
+        // An isochronous write is one interval, and is never cut.
+        if interval.is_some_and(|bytes| data.len() > bytes as usize) {
+            return Err(ErrorKind::InvalidInput);
+        }
         self.wire
             .write(at, data, timeout)
             .map_err(|e| wire_kind(&e))

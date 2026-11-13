@@ -7,12 +7,14 @@
 //! from `<linux/aio_abi.h>`; what cancelling and destroying do is from `fs/aio.c`. No kernel
 //! code is copied.
 //!
-//! Two forms. A [`Context`] runs a transfer on the caller's buffer and returns only when the
+//! Three forms. A [`Context`] runs a transfer on the caller's buffer and returns only when the
 //! kernel has finished with it. A [`Queue`] owns the buffer, so a transfer can stay under way
 //! after the call that began it has returned: a read that timed out is still there to finish,
-//! and a write is the kernel's to send while the caller goes on.
+//! and a write is the kernel's to send while the caller goes on. A [`Ring`] keeps several
+//! transfers of its own memory with the kernel at once, for an isochronous endpoint, where
+//! a transfer must be waiting at every service interval.
 //!
-//! One transfer runs at a time, and [`Context::read`] and [`Context::write`] return only once
+//! In a context or a queue one transfer runs at a time, and [`Context::read`] and [`Context::write`] return only once
 //! the kernel has finished with the caller's buffer: on a timeout the transfer is cancelled and
 //! its completion waited for, without a limit, before the call returns. A kernel that never
 //! completes a cancelled transfer would hold the call for ever; the context is destroyed
@@ -340,11 +342,327 @@ impl Drop for Queue {
 
 /// A new context with room for one transfer.
 fn new_context() -> io::Result<libc::c_ulong> {
+    context_for(1)
+}
+
+/// A new context with room for `transfers` at once.
+fn context_for(transfers: usize) -> io::Result<libc::c_ulong> {
     let mut id: libc::c_ulong = 0;
+    let transfers = libc::c_long::try_from(transfers).map_err(|_| io::ErrorKind::InvalidInput)?;
     // SAFETY: `io_setup` writes one `aio_context_t` through the pointer, which is to a live
     // one that is 0 as the call requires.
-    check(unsafe { libc::syscall(libc::SYS_io_setup, ONE, &raw mut id) })?;
+    check(unsafe { libc::syscall(libc::SYS_io_setup, transfers, &raw mut id) })?;
     Ok(id)
+}
+
+/// The most transfers a [`Ring`] keeps with the kernel.
+pub const MAX_RING: usize = 16;
+
+/// Where one of a [`Ring`]'s transfers is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Not with the kernel, and nothing in it to hand out.
+    Idle,
+    /// With the kernel, stamped so its completion can be told.
+    Busy(u64),
+    /// Back from the kernel, stamped as it was, with the kernel's result: bytes moved or a
+    /// negative errno.
+    Done(u64, i64),
+}
+
+/// Several transfers with one file at once, each on memory of its own the ring owns, so the
+/// kernel always has the next ready while the caller works on the last. A ring goes one way:
+/// it reads or it writes, as its first call says.
+///
+/// - [`write`](Self::write) copies the caller's bytes into a free transfer and hands it to
+///   the kernel, waiting at most its timeout for one to be free. It never waits for the write
+///   itself, and how a write ended is not reported: a stream of writes goes on past one that
+///   failed.
+/// - [`read`](Self::read) keeps every transfer with the kernel as a read, and hands out the
+///   oldest once it is done, handing that transfer back to the kernel at once.
+///
+/// The kernel has a transfer's memory only between its submission and its completion, and
+/// nothing here reads or writes it in between; each transfer's memory is its own allocation,
+/// so touching one never touches another. Dropping the ring, [`cancel`](Self::cancel) and
+/// every failure the ring can't account for destroy the context, which waits until the
+/// kernel has let go of all of them. Nothing allocates after [`new`](Self::new), but a
+/// context destroyed is made again by the next transfer.
+#[derive(Debug)]
+pub struct Ring {
+    /// `aio_context_t`, or 0 when there is none.
+    id: libc::c_ulong,
+    /// Each transfer's memory.
+    buffers: Box<[Box<[u8]>]>,
+    /// Each transfer's block. Boxed apart from the ring so a block's address stays put.
+    blocks: Box<[Iocb]>,
+    slots: [Slot; MAX_RING],
+    /// The stamp of the next transfer: stamps count up, so the oldest has the lowest.
+    next: u64,
+    /// Whether the ring reads, once its first call has said.
+    reading: Option<bool>,
+}
+
+impl Ring {
+    /// A ring of `transfers` transfers, 1 to [`MAX_RING`], of at most `bytes` each.
+    pub fn new(transfers: usize, bytes: usize) -> io::Result<Self> {
+        if !(1..=MAX_RING).contains(&transfers) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(Self {
+            id: context_for(transfers)?,
+            buffers: (0..transfers)
+                .map(|_| vec![0; bytes].into_boxed_slice())
+                .collect(),
+            blocks: vec![Iocb::default(); transfers].into_boxed_slice(),
+            slots: [Slot::Idle; MAX_RING],
+            next: 0,
+            reading: None,
+        })
+    }
+
+    /// The most bytes one transfer carries.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.buffers.first().map_or(0, |buffer| buffer.len())
+    }
+
+    /// How many transfers the ring has.
+    #[must_use]
+    pub fn transfers(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// How many transfers are with the kernel.
+    #[must_use]
+    pub fn under_way(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| matches!(slot, Slot::Busy(_)))
+            .count()
+    }
+
+    /// Hands `data` to the kernel to write to `fd`, in a free transfer, waiting at most
+    /// `timeout` for one to be free: [`io::ErrorKind::TimedOut`] when none is, and nothing is
+    /// taken. `data` must fit one transfer, else [`io::ErrorKind::InvalidInput`]. Returns
+    /// `data.len()`. `fd` must be the same file for as long as a write is under way.
+    pub fn write(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        data: &[u8],
+        timeout: Duration,
+    ) -> io::Result<usize> {
+        self.going(false)?;
+        if data.len() > self.capacity() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if self.under_way() != 0 {
+            self.harvest(Some(Duration::ZERO), 0)?;
+        }
+        let at = match self.free() {
+            Some(at) => at,
+            None => {
+                self.harvest(Some(timeout), 1)?;
+                self.free().ok_or(io::ErrorKind::TimedOut)?
+            }
+        };
+        self.buffers[at][..data.len()].copy_from_slice(data);
+        self.submit(at, fd, PWRITE, data.len())?;
+        Ok(data.len())
+    }
+
+    /// Takes the oldest read from `fd` into `data`, waiting at most `timeout` for it to be
+    /// done: [`io::ErrorKind::TimedOut`] when it is not, and every read stays under way.
+    /// Returns how many bytes it brought, at most `data.len()`; bytes past that are lost, so
+    /// `data` should hold a whole transfer. A read that failed is reported with its error.
+    /// Either way the transfer goes back to the kernel as a read before this returns, and so
+    /// does every transfer not with it. `fd` must be the same file for as long as a read is
+    /// under way.
+    pub fn read(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> io::Result<usize> {
+        self.going(true)?;
+        self.prime(fd)?;
+        let deadline = std::time::Instant::now() + timeout;
+        let at = loop {
+            let oldest = self.oldest().ok_or(io::ErrorKind::TimedOut)?;
+            if matches!(self.slots[oldest], Slot::Done(..)) {
+                break oldest;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if self.harvest(Some(left), 1)? == 0 {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+        };
+        let Slot::Done(_, result) = self.slots[at] else {
+            unreachable!("the loop above stops at a done transfer");
+        };
+        let taken = match usize::try_from(result) {
+            Ok(n) if n <= self.capacity() => {
+                let n = n.min(data.len());
+                data[..n].copy_from_slice(&self.buffers[at][..n]);
+                Ok(n)
+            }
+            Ok(_) => Err(io::ErrorKind::InvalidData.into()),
+            Err(_) => Err(io::Error::from_raw_os_error(
+                i32::try_from(result.unsigned_abs()).unwrap_or(libc::EIO),
+            )),
+        };
+        self.slots[at] = Slot::Idle;
+        // Back to the kernel at once. One that can't go now goes with the next call.
+        let _ = self.submit(at, fd, PREAD, self.capacity());
+        taken
+    }
+
+    /// Gives up every transfer, waiting until the kernel has let go of all of them, and
+    /// forgets reads not handed out. The ring is idle afterwards, and may go either way again.
+    pub fn cancel(&mut self) {
+        self.renew();
+        self.reading = None;
+    }
+
+    /// Fails with [`io::ErrorKind::InvalidInput`] if the ring already goes the other way.
+    fn going(&mut self, reading: bool) -> io::Result<()> {
+        match self.reading {
+            Some(going) if going != reading => Err(io::ErrorKind::InvalidInput.into()),
+            _ => {
+                self.reading = Some(reading);
+                Ok(())
+            }
+        }
+    }
+
+    fn free(&self) -> Option<usize> {
+        (0..self.transfers()).find(|&at| self.slots[at] == Slot::Idle)
+    }
+
+    /// The transfer submitted longest ago that is not handed out yet.
+    fn oldest(&self) -> Option<usize> {
+        (0..self.transfers())
+            .filter_map(|at| match self.slots[at] {
+                Slot::Busy(stamp) | Slot::Done(stamp, _) => Some((stamp, at)),
+                Slot::Idle => None,
+            })
+            .min()
+            .map(|(_, at)| at)
+    }
+
+    /// Hands every idle transfer to the kernel as a read. An error is reported once no
+    /// transfer at all is with the kernel or done; otherwise the reads there are go on.
+    fn prime(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
+        let capacity = self.capacity();
+        for at in 0..self.transfers() {
+            if self.slots[at] == Slot::Idle
+                && let Err(error) = self.submit(at, fd, PREAD, capacity)
+            {
+                if self.oldest().is_none() {
+                    return Err(error);
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands the kernel transfer `at` of the first `len` bytes of its memory.
+    fn submit(&mut self, at: usize, fd: BorrowedFd<'_>, opcode: u16, len: usize) -> io::Result<()> {
+        if self.id == 0 {
+            self.id = context_for(self.transfers())?;
+        }
+        self.next = self.next.wrapping_add(1);
+        self.blocks[at] = Iocb {
+            data: self.next,
+            opcode,
+            fildes: fd.as_raw_fd() as u32,
+            buf: self.buffers[at].as_mut_ptr() as u64,
+            nbytes: len as u64,
+            ..Iocb::default()
+        };
+        let mut list = [&raw mut self.blocks[at]];
+        // SAFETY: `list` holds one pointer to a live block of the ring, matching the count 1.
+        // The memory it names is transfer `at`'s own, `len` is within it, and it is neither
+        // read, written nor freed until the completion has been reaped: the slot says
+        // `Busy` from here until `harvest` has seen it end, or `renew` has destroyed the
+        // context, which waits for it.
+        let submitted =
+            unsafe { libc::syscall(libc::SYS_io_submit, self.id, ONE, list.as_mut_ptr()) };
+        if check(submitted)? != 1 {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        self.slots[at] = Slot::Busy(self.next);
+        Ok(())
+    }
+
+    /// Takes the completions there are, waiting at most `timeout` (for ever when `None`) for
+    /// at least `least` of them. A write's completion frees its transfer; a read's leaves it
+    /// done, to be handed out. Returns how many came. A completion the ring did not ask for,
+    /// or a failure to wait, destroys the context.
+    fn harvest(&mut self, timeout: Option<Duration>, least: usize) -> io::Result<usize> {
+        if self.id == 0 {
+            return Ok(0);
+        }
+        let mut events = [IoEvent::default(); MAX_RING];
+        let mut wait = timeout.map(timespec);
+        let wait = wait
+            .as_mut()
+            .map_or(std::ptr::null_mut(), |wait| &raw mut *wait);
+        let got = loop {
+            // SAFETY: `events` is `MAX_RING` live `io_event`s, matching the maximum, and
+            // `wait` is null or points to the live `timespec` above.
+            let got = unsafe {
+                libc::syscall(
+                    libc::SYS_io_getevents,
+                    self.id,
+                    least as libc::c_long,
+                    MAX_RING as libc::c_long,
+                    events.as_mut_ptr(),
+                    wait,
+                )
+            };
+            match check(got) {
+                Ok(got) => break got as usize,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    self.renew();
+                    return Err(error);
+                }
+            }
+        };
+        let reading = self.reading == Some(true);
+        for event in &events[..got] {
+            let at = (0..self.transfers()).find(|&at| self.slots[at] == Slot::Busy(event.data));
+            let Some(at) = at else {
+                self.renew();
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            };
+            self.slots[at] = if reading {
+                Slot::Done(event.data, event.res)
+            } else {
+                Slot::Idle
+            };
+        }
+        Ok(got)
+    }
+
+    /// Destroys the context, which cancels every transfer and waits until the kernel has let
+    /// go of their memory. The next transfer makes a new context.
+    fn renew(&mut self) {
+        if self.id != 0 {
+            // SAFETY: `id` is a context from `io_setup` that has not been destroyed.
+            unsafe { libc::syscall(libc::SYS_io_destroy, self.id) };
+            self.id = 0;
+        }
+        self.slots = [Slot::Idle; MAX_RING];
+    }
+}
+
+impl Drop for Ring {
+    /// Waits for the kernel to let go of every transfer's memory before it is freed.
+    fn drop(&mut self) {
+        self.renew();
+    }
 }
 
 /// An AIO context that runs one transfer at a time.
@@ -693,4 +1011,122 @@ mod tests {
 
     // No file a test can open here completes later than `io_submit` returns, so a transfer
     // still under way when its call returns, and cancelling one, are for a board run.
+
+    #[test]
+    fn a_ring_writes_each_transfer_from_its_own_memory_in_order() {
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let mut ring = Ring::new(3, 4).unwrap();
+        assert_eq!((ring.transfers(), ring.capacity()), (3, 4));
+        for chunk in [&b"ab"[..], b"cdef", b"g"] {
+            assert_eq!(
+                ring.write(writer.as_fd(), chunk, WAIT).unwrap(),
+                chunk.len()
+            );
+        }
+        // A transfer's worth at most, and nothing is taken of more.
+        let error = ring.write(writer.as_fd(), b"hijkl", WAIT).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // Every transfer comes back free, so a ring of three takes a fourth and more.
+        for _ in 0..6 {
+            ring.write(writer.as_fd(), b"z", WAIT).unwrap();
+        }
+        drop(writer);
+        let mut all = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut all).unwrap();
+        assert_eq!(all, b"abcdefgzzzzzz");
+        // A ring goes one way.
+        let (other, _) = std::io::pipe().unwrap();
+        let error = ring.read(other.as_fd(), &mut [0u8; 4], WAIT).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_write_that_failed_is_not_reported_and_the_ring_goes_on() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut ring = Ring::new(2, 4).unwrap();
+        // Twice the transfers there are: each failed write freed its transfer for the next.
+        for _ in 0..4 {
+            assert_eq!(ring.write(writer.as_fd(), b"x", WAIT).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn a_ring_keeps_every_transfer_reading_and_hands_out_the_oldest_first() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        // An empty pipe that doesn't block answers "try again" in place.
+        nonblocking(reader.as_fd());
+        writer.write_all(b"abcdef").unwrap();
+        let mut ring = Ring::new(3, 2).unwrap();
+        let mut data = [0u8; 2];
+        // The first call hands all three to the kernel: each takes its two bytes in turn.
+        for expected in [b"ab", b"cd", b"ef"] {
+            assert_eq!(ring.read(reader.as_fd(), &mut data, WAIT).unwrap(), 2);
+            assert_eq!(&data, expected);
+        }
+        // Each went back to the kernel as it was taken, and found the pipe empty.
+        for _ in 0..3 {
+            let error = ring.read(reader.as_fd(), &mut data, WAIT).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EAGAIN));
+        }
+        writer.write_all(b"gh").unwrap();
+        // All three went back before the bytes came, so they come in the fourth read, which
+        // the first of them began as it was handed out.
+        for _ in 0..3 {
+            let error = ring.read(reader.as_fd(), &mut data, WAIT).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EAGAIN));
+        }
+        assert_eq!(ring.read(reader.as_fd(), &mut data, WAIT).unwrap(), 2);
+        assert_eq!(&data, b"gh");
+        // A ring goes one way.
+        let error = ring.write(writer.as_fd(), b"x", WAIT).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_short_room_takes_what_fits_and_cancelling_forgets_what_was_read() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        nonblocking(reader.as_fd());
+        writer.write_all(b"oldest").unwrap();
+        let mut ring = Ring::new(2, 8).unwrap();
+        let mut small = [0u8; 3];
+        assert_eq!(ring.read(reader.as_fd(), &mut small, WAIT).unwrap(), 3);
+        assert_eq!(&small, b"old");
+        writer.write_all(b"new").unwrap();
+        ring.cancel();
+        assert_eq!(ring.under_way(), 0);
+        let mut data = [0u8; 8];
+        assert_eq!(ring.read(reader.as_fd(), &mut data, WAIT).unwrap(), 3);
+        assert_eq!(&data[..3], b"new");
+        // Cancelled, it may go the other way.
+        ring.cancel();
+        ring.write(writer.as_fd(), b"w", WAIT).unwrap();
+    }
+
+    #[test]
+    fn a_ring_of_no_transfers_or_too_many_is_refused() {
+        for transfers in [0, MAX_RING + 1] {
+            let error = Ring::new(transfers, 4).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn a_ring_allocates_nothing_once_made() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        nonblocking(reader.as_fd());
+        let mut writes = Ring::new(4, 8).unwrap();
+        let mut reads = Ring::new(4, 8).unwrap();
+        let mut data = [0u8; 8];
+        writes.write(writer.as_fd(), b"warm", WAIT).unwrap();
+        let _ = reads.read(reader.as_fd(), &mut data, WAIT);
+        let ((), allocated) = crate::test_alloc::allocations(|| {
+            for _ in 0..100 {
+                writes.write(writer.as_fd(), b"abcd", WAIT).unwrap();
+                let _ = reads.read(reader.as_fd(), &mut data, WAIT);
+            }
+        });
+        assert_eq!(allocated, 0);
+        drop(writer);
+    }
 }

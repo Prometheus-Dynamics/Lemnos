@@ -373,12 +373,58 @@ fn hostile_packets_never_panic_and_never_overrun() {
 }
 
 #[test]
-fn the_packets_are_read_where_the_capacity_put_them() {
-    let mut rig = Rig::streaming(4096, MODE_VGA_30);
-    assert_eq!(rig.usb.state().last_iso, None);
+fn the_stream_starts_with_the_alternate_settings_packets_several_transfers_deep() {
+    let mut rig = Rig::webcam(4096);
+    rig.settle();
+    rig.uvc.select_format(MODE_VGA_30).unwrap();
+    rig.uvc.start().unwrap();
+    assert_eq!(rig.usb.state().stream, None);
+    rig.settle_streaming();
+    // 900 asked for, so alternate 2's 944-byte packets, started once the setting is on.
+    assert_eq!(
+        rig.usb.state().stream,
+        Some((0x81, session::TRANSFERS, session::PACKETS as u16, 944))
+    );
+    assert_eq!(rig.usb.state().alternates_mid_stream, 0);
     rig.feed(vec![payload(EOF, b"")]);
-    // 900 asked for, so alternate 2's 944-byte packets.
     assert_eq!(rig.usb.state().last_iso, Some((0x81, 944)));
+}
+
+#[test]
+fn the_stream_is_started_once_and_each_tick_takes_the_next_transfer() {
+    let mut rig = Rig::streaming(4096, MODE_MJPEG);
+    rig.feed(vec![payload(EOF, b"")]);
+    let mut frames = 0;
+    for n in 0u8..12 {
+        let fid = if n % 2 == 0 { FID } else { 0 };
+        rig.feed(vec![payload(fid, &[n, n]), payload(fid | EOF, &[n])]);
+        frames += rig.frames().len();
+    }
+    let usb = rig.usb.state();
+    assert_eq!(
+        (usb.starts, usb.stops),
+        (1, 0),
+        "no transfer is left unqueued between ticks"
+    );
+    assert_eq!(usb.iso_calls, 13);
+    drop(usb);
+    assert_eq!(frames, 12);
+}
+
+#[test]
+fn stopping_ends_the_stream_before_the_setting_goes_back_to_0() {
+    let mut rig = Rig::streaming(4096, MODE_MJPEG);
+    rig.feed(vec![payload(EOF, b"")]);
+    rig.uvc.stop().unwrap();
+    rig.settle();
+    let usb = rig.usb.state();
+    assert_eq!((usb.starts, usb.stops), (1, 1));
+    assert_eq!(usb.stream, None);
+    assert_eq!(
+        usb.alternates.last().map(|&(_, alternate)| alternate),
+        Some(0)
+    );
+    assert_eq!(usb.alternates_mid_stream, 0);
 }
 
 #[test]

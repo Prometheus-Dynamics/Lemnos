@@ -385,14 +385,28 @@ impl UsbDevice for ReadOnly<UsbDeviceHandle> {
         self.0.interrupt_in(endpoint, data, timeout)
     }
 
-    fn iso_in(
+    fn iso_in_start(
         &mut self,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Refusable<()> {
+        self.0
+            .iso_in_start(endpoint, transfers, packets, packet_bytes)
+    }
+
+    fn iso_in_next(
+        &mut self,
         data: &mut [u8],
         packets: &mut [IsoPacket],
         timeout: Duration,
     ) -> Refusable<()> {
-        self.0.iso_in(endpoint, data, packets, timeout)
+        self.0.iso_in_next(data, packets, timeout)
+    }
+
+    fn iso_in_stop(&mut self) -> Refusable<()> {
+        self.0.iso_in_stop()
     }
 }
 

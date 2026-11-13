@@ -697,37 +697,47 @@ impl UsbDeviceHost for Held {
         )
     }
 
-    fn iso_in(
+    fn iso_in_start(
         device: Handle,
         endpoint: u8,
+        transfers: u8,
+        packets: u16,
+        packet_bytes: u32,
+    ) -> Status {
+        let device = held!(device, UsbDevice);
+        if usize::from(packets) > MAX_ISO_PACKETS {
+            return Status::INVALID_ARGUMENT;
+        }
+        done(lock(&device).iso_in_start(endpoint, transfers, packets, packet_bytes))
+    }
+
+    fn iso_in_next(
+        device: Handle,
         data: SliceMut<'_, u8>,
         mut packets: SliceMut<'_, PackageIsoPacket>,
         timeout_ns: u64,
     ) -> Status {
         let device = held!(device, UsbDevice);
         let (data, carried) = (data.into_slice(), packets.as_mut_slice());
-        if carried.len() > MAX_ISO_PACKETS {
+        if carried.is_empty() || carried.len() > MAX_ISO_PACKETS {
             return Status::INVALID_ARGUMENT;
         }
-        // The packets lie back to back in `data`: together they must fit in it.
-        let wanted = carried
-            .iter()
-            .try_fold(0u64, |sum, packet| sum.checked_add(packet.capacity.into()));
-        if wanted.is_none_or(|wanted| wanted > data.len() as u64) {
-            return Status::INVALID_ARGUMENT;
-        }
+        // Packet `i` starts at `i * capacity`: none had more room than `data` shared out evenly.
+        let room = u32::try_from(data.len() / carried.len()).unwrap_or(u32::MAX);
         let mut row = [IsoPacket::default(); MAX_ISO_PACKETS];
-        for (packet, carried) in row.iter_mut().zip(carried.iter()) {
-            packet.capacity = carried.capacity;
-        }
         let count = carried.len();
-        let result =
-            lock(&device).iso_in(endpoint, data, &mut row[..count], timeout_in(timeout_ns));
+        let result = lock(&device).iso_in_next(data, &mut row[..count], timeout_in(timeout_ns));
         for (carried, packet) in carried.iter_mut().zip(row.iter()) {
+            carried.capacity = packet.capacity.min(room);
             carried.received = packet.received.min(carried.capacity);
             carried.ok = u32::from(packet.ok);
         }
         done(result)
+    }
+
+    fn iso_in_stop(device: Handle) -> Status {
+        let device = held!(device, UsbDevice);
+        done(lock(&device).iso_in_stop())
     }
 }
 
@@ -1113,18 +1123,33 @@ mod tests {
         assert_eq!((HOST.pwm.configure)(pwm, config), Status::INVALID_ARGUMENT);
         assert!(pwm_probe.history().is_empty());
 
-        // Isochronous packets that together do not fit in the data, or are too many.
-        usb_probe.queue_iso(&[1; 8]);
+        // Isochronous: a stream too wide for the boundary, a transfer with no stream, packets
+        // that don't fit in the data, or too many.
         let mut data = [0u8; 12];
-        let mut packets = [PackageIsoPacket {
-            capacity: 8,
-            received: 0,
-            ok: 0,
-        }; 2];
+        let mut packets = [PackageIsoPacket::default(); 2];
         assert_eq!(
-            (HOST.usb_device.iso_in)(
+            (HOST.usb_device.iso_in_start)(usb, 0x81, 2, MAX_ISO_PACKETS as u16 + 1, 8),
+            Status::INVALID_ARGUMENT
+        );
+        assert_eq!(usb_probe.iso_stream(), None);
+        assert_eq!(
+            (HOST.usb_device.iso_in_next)(
                 usb,
-                0x81,
+                SliceMut::new(&mut data),
+                SliceMut::new(&mut packets),
+                0
+            ),
+            Status::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            (HOST.usb_device.iso_in_start)(usb, 0x81, 2, 2, 8),
+            Status::OK
+        );
+        assert_eq!(usb_probe.iso_stream(), Some((0x81, 2, 2, 8)));
+        usb_probe.queue_iso(&[1; 8]);
+        assert_eq!(
+            (HOST.usb_device.iso_in_next)(
+                usb,
                 SliceMut::new(&mut data),
                 SliceMut::new(&mut packets),
                 0
@@ -1134,9 +1159,8 @@ mod tests {
         assert_eq!(data, [0; 12]);
         let mut many = [PackageIsoPacket::default(); MAX_ISO_PACKETS + 1];
         assert_eq!(
-            (HOST.usb_device.iso_in)(
+            (HOST.usb_device.iso_in_next)(
                 usb,
-                0x81,
                 SliceMut::new(&mut data),
                 SliceMut::new(&mut many),
                 0
@@ -1144,17 +1168,22 @@ mod tests {
             Status::INVALID_ARGUMENT
         );
         // One that fits is carried, and what it says it received is within its capacity.
+        let mut data = [0u8; 16];
         assert_eq!(
-            (HOST.usb_device.iso_in)(
+            (HOST.usb_device.iso_in_next)(
                 usb,
-                0x81,
                 SliceMut::new(&mut data),
-                SliceMut::new(&mut packets[..1]),
+                SliceMut::new(&mut packets),
                 0
             ),
             Status::OK
         );
-        assert_eq!((packets[0].received, packets[0].ok), (8, 1));
+        assert_eq!(
+            (packets[0].capacity, packets[0].received, packets[0].ok),
+            (8, 8, 1)
+        );
+        assert_eq!((HOST.usb_device.iso_in_stop)(usb), Status::OK);
+        assert_eq!(usb_probe.iso_stream(), None);
 
         for handle in [bus, spi, raw, line, pwm, usb] {
             assert_eq!((HOST.release)(handle), Status::OK);

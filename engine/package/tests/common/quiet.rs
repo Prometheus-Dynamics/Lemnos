@@ -345,18 +345,23 @@ impl UsbDevice for Quiet {
         Ok(fill(&mut data[..1]))
     }
 
-    fn iso_in(
-        &mut self,
-        _endpoint: u8,
-        data: &mut [u8],
-        packets: &mut [IsoPacket],
-        _: Duration,
-    ) -> Hal<()> {
+    fn iso_in_start(&mut self, _: u8, _: u8, _: u16, _: u32) -> Hal<()> {
+        Ok(())
+    }
+
+    /// Every packet full, at the room `data` shares out to it.
+    fn iso_in_next(&mut self, data: &mut [u8], packets: &mut [IsoPacket], _: Duration) -> Hal<()> {
         fill(data);
+        let room = (data.len() / packets.len().max(1)) as u32;
         for packet in packets {
-            packet.received = packet.capacity;
+            packet.capacity = room;
+            packet.received = room;
             packet.ok = true;
         }
+        Ok(())
+    }
+
+    fn iso_in_stop(&mut self) -> Hal<()> {
         Ok(())
     }
 }
