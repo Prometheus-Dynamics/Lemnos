@@ -20,7 +20,7 @@ use lemnos_v4l2::FourCc;
 
 use crate::driver::backoff_ns;
 use crate::hw::{Frame, Granted, Hardware, Statistics, Wanted};
-use crate::layout::{self, ADDRESS_WORDS, LOAD_BYTES, STATISTICS_BYTES};
+use crate::layout::{self, ADDRESS_WORDS, EXTENT_WORDS, LOAD_BYTES, STATISTICS_BYTES};
 use crate::{DEFAULT_SETTLE, Isp600, Isp600Needs, Options};
 
 /// 64x32 NV12: lines of 64 bytes, chroma after luma.
@@ -337,12 +337,12 @@ fn job(identity: u64, config_buffer: u32, output0: u32) -> IspJob {
     }
 }
 
-/// A load image with every byte set but the address words.
+/// A load image with every byte set but the address and extent words.
 fn image(seed: u8) -> Vec<u8> {
     let mut image: Vec<u8> = (0..LOAD_BYTES)
         .map(|i| (i as u8).wrapping_mul(13).wrapping_add(seed) | 1)
         .collect();
-    for &w in &ADDRESS_WORDS {
+    for &w in ADDRESS_WORDS.iter().chain(&EXTENT_WORDS) {
         image[w..w + 4].fill(0);
     }
     image

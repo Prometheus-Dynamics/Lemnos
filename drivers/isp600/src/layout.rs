@@ -30,6 +30,13 @@
 //! of them other than zero: an image never names memory, whatever the kernel does with those
 //! words. The kernel also writes the input and valid sizes into each image itself.
 //!
+//! The words that set how far the block reads or writes ([`EXTENT_WORDS`]) are the input, valid
+//! size and valid start, and the lossless group (`D3D_LBC_CFG0` to `CFG5`), whose stride and bit
+//! budgets the kernel derives from the frame's width and bit depth. A caller's image names no
+//! extent either, so [`check_load`] refuses any of them other than zero as well. Whether the
+//! kernel fills these words in each image, or the block takes them from the kernel's own register
+//! writes, is not stated by the source: `testing/board-runs/U3.md` checks it on the block.
+//!
 //! # Source
 //!
 //! Interface facts only, no code copied, from `radxa/allwinner-bsp` on GitHub, branch
@@ -315,6 +322,24 @@ pub const ADDRESS_WORDS: [usize; 3 * VIRTUAL_ISPS + 4] = {
     words
 };
 
+/// The register image's words that set how far the block reads or writes: the input and valid
+/// sizes and start, and the lossless (`D3D_LBC`) group whose stride and bit budgets the kernel
+/// derives from the frame's width and bit depth, and which size the temporal denoise buffers it
+/// allocated. Offsets from the image's start, each the first of four bytes. None of them is the
+/// caller's to set: [`check_load`] refuses an image with any of them other than zero.
+pub const EXTENT_WORDS: [usize; 3 + 6] = {
+    let mut words = [0; 3 + 6];
+    words[0] = LOAD_REGISTERS_OFFSET + reg::INPUT_SIZE;
+    words[1] = LOAD_REGISTERS_OFFSET + reg::VALID_SIZE;
+    words[2] = LOAD_REGISTERS_OFFSET + reg::VALID_START;
+    let mut i = 0;
+    while i < 6 {
+        words[3 + i] = LOAD_REGISTERS_OFFSET + reg::D3D_LBC_CFG0 + 4 * i;
+        i += 1;
+    }
+    words
+};
+
 /// Why [`check_load`] refused an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -322,6 +347,8 @@ pub enum Refusal {
     Length,
     /// An address word, at this offset, is not zero.
     Address(usize),
+    /// An extent word, at this offset, is not zero.
+    Extent(usize),
 }
 
 /// A load image that passed [`check_load`]. The only way to one, so nothing else reaches the
@@ -338,13 +365,19 @@ impl<'a> Checked<'a> {
 }
 
 /// `image`, if it may go to the kernel: exactly [`LOAD_BYTES`] long, and zero in every one of
-/// [`ADDRESS_WORDS`]. Reads only those words, allocates nothing.
+/// [`ADDRESS_WORDS`] and [`EXTENT_WORDS`]. Reads only those words, allocates nothing.
 pub fn check_load(image: &[u8]) -> Result<Checked<'_>, Refusal> {
     let image: &[u8; LOAD_BYTES] = image.try_into().map_err(|_| Refusal::Length)?;
     for &word in &ADDRESS_WORDS {
         let bytes = image.get(word..word + 4).ok_or(Refusal::Address(word))?;
         if bytes.iter().any(|&b| b != 0) {
             return Err(Refusal::Address(word));
+        }
+    }
+    for &word in &EXTENT_WORDS {
+        let bytes = image.get(word..word + 4).ok_or(Refusal::Extent(word))?;
+        if bytes.iter().any(|&b| b != 0) {
+            return Err(Refusal::Extent(word));
         }
     }
     Ok(Checked(image))
@@ -377,13 +410,20 @@ const _: () = {
     assert!(
         STATISTICS_REGIONS[13].bytes + STATISTICS_REGIONS[14].bytes == SAVE_LOAD_STATISTICS_BYTES
     );
-    // Every address word and window lies in the register image.
+    // Every address and extent word, and window, lies in the register image.
     let mut i = 0;
     while i < ADDRESS_WORDS.len() {
         assert!(ADDRESS_WORDS[i] + 4 <= REGISTERS.bytes);
         assert!(ADDRESS_WORDS[i].is_multiple_of(4));
         i += 1;
     }
+    let mut i = 0;
+    while i < EXTENT_WORDS.len() {
+        assert!(EXTENT_WORDS[i] + 4 <= REGISTERS.bytes);
+        assert!(EXTENT_WORDS[i].is_multiple_of(4));
+        i += 1;
+    }
+    assert!(reg::D3D_LBC_CFG5 == reg::D3D_LBC_CFG0 + 20);
     assert!(HISTOGRAM_WINDOW.end() <= REGISTERS.bytes);
     // The control blocks end before the loaded registers start.
     assert!(AHB_OFFSET + VIRTUAL_ISPS * AHB_STRIDE <= LOAD_REGISTERS_OFFSET);
