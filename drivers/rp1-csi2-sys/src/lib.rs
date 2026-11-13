@@ -31,6 +31,10 @@ pub const INFO_WEDGED: u32 = 1;
 pub const UNPACK16: u32 = 1;
 /// `LEMNOS_RING_STATE_OPEN`: the frame stream is running.
 pub const STATE_OPEN: u32 = 0;
+/// `LEMNOS_RP1_CSI2_EMBEDDED_DT`: the CSI-2 data type of embedded data (0x12).
+pub const EMBEDDED_DT: u32 = 0x12;
+/// `LEMNOS_RP1_CSI2_EMBEDDED_MAX`: the longest embedded line the channel takes, in bytes.
+pub const EMBEDDED_MAX: u32 = 65_520;
 /// `LEMNOS_STREAM_MAX_OWN_BUFFERS`: the most buffers a stream of dma-bufs may have.
 pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
@@ -68,6 +72,18 @@ pub struct Info {
     pub dropped: u64,
     /// Frames the block flagged as bad.
     pub errors: u64,
+}
+
+/// `struct lemnos_rp1_csi2_embedded`: the embedded stream for the next START.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Embedded {
+    /// A stream made on this node, or -1 for none.
+    pub stream_fd: i32,
+    /// The embedded line's length: a multiple of 16 from 16 to [`EMBEDDED_MAX`]; 0 with -1.
+    pub bytes: u32,
+    /// Zero.
+    pub reserved: [u32; 2],
 }
 
 /// `struct lemnos_rp1_csi2_start`.
@@ -163,6 +179,7 @@ pub struct FrameStarts {
 const IOC_INFO: u32 = ior::<Info>(b'L', 0xc0);
 const IOC_STREAM_CREATE: u32 = iowr::<StreamCreate>(b'L', 0xc1);
 const IOC_START: u32 = iow::<Start>(b'L', 0xc2);
+const IOC_EMBEDDED: u32 = iow::<Embedded>(b'L', 0xc5);
 const IOC_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xc3, 0);
 const IOC_FRAME_STARTS: u32 = ior::<FrameStarts>(b'L', 0xc4);
 const IOC_STREAM_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
@@ -280,6 +297,13 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(stream)
+    }
+
+    /// Asks for the embedded stream `embedded.stream_fd` names, for the next START. Only while
+    /// not streaming. `stream_fd` -1 asks for none.
+    pub fn embedded(&self, embedded: &Embedded) -> io::Result<()> {
+        let mut args = *embedded;
+        self.ioctl(IOC_EMBEDDED, &raw mut args).map(|_| ())
     }
 
     /// Starts receiving into the stream `start.stream_fd` names.
@@ -424,6 +448,9 @@ mod tests {
         assert_eq!(offset_of!(Info, frames), 24);
         assert_eq!(offset_of!(Info, errors), 48);
         assert_eq!(size_of::<Start>(), 48);
+        assert_eq!(size_of::<Embedded>(), 16);
+        assert_eq!(offset_of!(Embedded, bytes), 4);
+        assert_eq!(offset_of!(Embedded, reserved), 8);
         assert_eq!(offset_of!(Start, flags), 36);
         assert_eq!(size_of::<StreamCreate>(), 56);
         assert_eq!(offset_of!(StreamCreate, fd), 36);
@@ -437,6 +464,7 @@ mod tests {
         assert_eq!(IOC_INFO, 0x8038_4cc0);
         assert_eq!(IOC_STREAM_CREATE, 0xc038_4cc1);
         assert_eq!(IOC_START, 0x4030_4cc2);
+        assert_eq!(IOC_EMBEDDED, 0x4010_4cc5);
         assert_eq!(IOC_STOP, 0x0000_4cc3);
         assert_eq!(IOC_STREAM_STATUS, 0x8028_4c84);
         assert_eq!(JOB_BYTES, 80);

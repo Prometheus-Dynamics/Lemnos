@@ -1004,6 +1004,124 @@ static int run_wedge_own(const char *node, const char *dev, const char *heap)
 	return failures ? 1 : 0;
 }
 
+/*
+ * The embedded data stream: asked for before START, it is written by the
+ * block's second channel on the image's virtual channel with data type 0x12.
+ * Its buffers come from a pool of their own: the frame stream's pool would
+ * alias them.
+ */
+#define EMB_BYTES 256u
+
+static struct tcsi_regs peek_emb(void)
+{
+	struct tcsi_regs r;
+
+	memset(&r, 0xff, sizeof(r));
+	ioctl(hw, TCSI_IOC_PEEK_EMB, &r);
+	return r;
+}
+
+static int ask_embedded(int fd, uint32_t bytes, uint32_t reserved0)
+{
+	struct lemnos_rp1_csi2_embedded e = { .stream_fd = fd, .bytes = bytes };
+
+	e.reserved[0] = reserved0;
+	return ioctl(ctl, LEMNOS_RP1_CSI2_IOC_EMBEDDED, &e) ? -errno : 0;
+}
+
+static void test_embedded(int pool_fd, const char *heap)
+{
+	struct stream main_a, main_b, emb;
+	struct frame f;
+	struct lemnos_rp1_csi2_start a;
+	struct tcsi_regs r;
+	int epool;
+	uint8_t *ecpu;
+	uint32_t i;
+
+	epool = make_pool(heap);
+	CHECK(epool >= 0, "embedded: a pool of its own allocated");
+	ecpu = mmap(NULL, BUFFERS * STRIDE_POOL, PROT_READ | PROT_WRITE, MAP_SHARED, epool, 0);
+	CHECK(ecpu != MAP_FAILED, "embedded: its pool mapped");
+	memset(ecpu, 0, BUFFERS * STRIDE_POOL);
+
+	/* Refused: a length the channel can't take, no stream with a length, a reserved word. */
+	CHECK(ask_embedded(-1, 0, 0) == 0, "embedded: asking for none is allowed");
+	CHECK(ask_embedded(-1, 16, 0) == -EINVAL, "embedded: a length with no stream is refused");
+	CHECK(!stream_open(&emb, epool), "embedded: a stream made for the request");
+	CHECK(ask_embedded(emb.fd, 24, 0) == -EINVAL, "embedded: a length not a multiple of 16");
+	CHECK(ask_embedded(emb.fd, 0, 0) == -EINVAL, "embedded: a zero length");
+	CHECK(ask_embedded(emb.fd, LEMNOS_RP1_CSI2_EMBEDDED_MAX + 16, 0) == -EINVAL,
+	      "embedded: a length over the channel's limit");
+	CHECK(ask_embedded(emb.fd, EMB_BYTES, 1) == -EINVAL, "embedded: a reserved word is refused");
+
+	/* Not asked for: the second channel stays off, and nothing reaches the stream. */
+	CHECK(!stream_open(&main_a, pool_fd), "a frame stream for the run with none asked for");
+	a = good_start(main_a.fd);
+	CHECK(!start(&a), "START with no embedded stream asked for");
+	r = peek_emb();
+	CHECK(r.ctrl == 0, "no embedded channel without a request (ctrl %x)", r.ctrl);
+	CHECK(ask_embedded(emb.fd, EMB_BYTES, 0) == -EBUSY, "embedded: a request is refused while streaming");
+	fire(TCSI_EMB_FS);
+	fire(TCSI_EMB_FE_ACK);
+	fire(TCSI_FE_ACK);
+	CHECK(!pop_frame(&emb, &f), "no embedded frame when none is asked for");
+	CHECK(!stop(), "STOP");
+	stream_close(&main_a);
+
+	/* Asked for: one buffer per frame, carrying that frame's sequence. */
+	CHECK(!stream_open(&main_b, pool_fd), "a frame stream for the embedded run");
+	CHECK(ask_embedded(emb.fd, EMB_BYTES, 0) == 0, "embedded: the request is accepted");
+	a = good_start(main_b.fd);
+	CHECK(!start(&a), "START with the embedded stream");
+	r = peek_emb();
+	CHECK((r.ctrl & 1) && (r.ctrl >> 7 & 63) == LEMNOS_RP1_CSI2_EMBEDDED_DT,
+	      "embedded channel on data type 0x12 (ctrl %x)", r.ctrl);
+	CHECK((r.ctrl >> 5 & 3) == (uint32_t)a.vc, "embedded channel on the image's virtual channel");
+	CHECK(r.frame_size == (1u << 16 | EMB_BYTES), "embedded frame size %x", r.frame_size);
+	CHECK((((uint64_t)r.addr1 << 36) | ((uint64_t)r.addr0 << 4)) == buffer_addr(&emb, 0),
+	      "embedded buffer 0 armed");
+
+	/* Frame 0: a line, written and ended within the frame. */
+	fire(TCSI_FS | TCSI_EMB_FS);
+	fire(TCSI_EMB_FE_ACK);
+	fire(TCSI_FE_ACK);
+	/* Frame 1: no embedded line; its buffer goes out empty when frame 2 starts. */
+	fire(TCSI_FS);
+	fire(TCSI_FE_ACK);
+	/* Frame 2: a line again. */
+	fire(TCSI_FS | TCSI_EMB_FS);
+	fire(TCSI_EMB_FE_ACK);
+	fire(TCSI_FE_ACK);
+
+	/* Frame 1 had no line: nothing is published for it, and the gap in sequence shows it. */
+	CHECK(pop_frame(&emb, &f) && f.sequence == 0 && f.bytes == EMB_BYTES && f.buffer == 0,
+	      "embedded frame 0: buffer %u bytes %u sequence %llu", f.buffer, f.bytes,
+	      (unsigned long long)f.sequence);
+	CHECK(pop_frame(&emb, &f) && f.sequence == 2 && f.bytes == EMB_BYTES && f.buffer == 1,
+	      "embedded frame 2 (frame 1 has none): buffer %u bytes %u sequence %llu", f.buffer,
+	      f.bytes, (unsigned long long)f.sequence);
+	CHECK(!pop_frame(&emb, &f), "no embedded frame for the frame with no line");
+
+	/* Each line's bytes are the block's: one pattern over the whole line, not zero. */
+	for (i = 1; i < EMB_BYTES; i++)
+		if (ecpu[i] != ecpu[0])
+			break;
+	CHECK(ecpu[0] != 0 && i == EMB_BYTES, "frame 0's line is in its buffer (byte %u)", ecpu[0]);
+	for (i = 1; i < EMB_BYTES; i++)
+		if (ecpu[STRIDE_POOL + i] != ecpu[STRIDE_POOL])
+			break;
+	CHECK(ecpu[STRIDE_POOL] != 0 && i == EMB_BYTES, "frame 2's line is in buffer 1 (byte %u)",
+	      ecpu[STRIDE_POOL]);
+	CHECK(info().frames == 3 && info().written == 3, "image frames counted with the line");
+	CHECK(!stop(), "STOP after the embedded run");
+	CHECK(!info().streaming, "not streaming after STOP");
+	stream_close(&main_b);
+	stream_close(&emb);
+	munmap(ecpu, BUFFERS * STRIDE_POOL);
+	close(epool);
+}
+
 int main(int argc, char **argv)
 {
 	const char *dev, *heap, *unbind, *block;
@@ -1047,6 +1165,7 @@ int main(int argc, char **argv)
 	test_hostile_hw(pool_fd);
 	test_jobs(pool_fd);
 	test_own_buffers(heap, dev);
+	test_embedded(pool_fd, heap);
 	test_stop_waits(pool_fd);
 	test_close_node(node, pool_fd);
 	test_unbind(node, unbind, dev, pool_fd);

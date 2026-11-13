@@ -22,7 +22,7 @@ use lemnos_core::Result;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 
-use crate::hw::{Finished, Hardware};
+use crate::hw::{Channel, Finished, Hardware};
 
 /// The most buffers a stream may have (`LEMNOS_STREAM_MAX_OWN_BUFFERS`).
 pub const MAX_BUFFERS: usize = 64;
@@ -62,10 +62,12 @@ pub struct Relay {
     no_handles: bool,
     /// Frames the block finished that reached no one.
     lost: u64,
+    /// The stream this relay serves: the image's or the embedded data's.
+    channel: Channel,
 }
 
 impl Relay {
-    pub const fn new() -> Self {
+    pub const fn new(channel: Channel) -> Self {
         Self {
             slots: [Slot {
                 held: false,
@@ -76,6 +78,7 @@ impl Relay {
             count: 0,
             no_handles: false,
             lost: 0,
+            channel,
         }
     }
 
@@ -146,7 +149,7 @@ impl Relay {
             return Ok(());
         }
         let set = match frames.buffer_handle(buffer) {
-            Ok(Some(handle)) => hw.set_buffer(buffer, handle.fd())?,
+            Ok(Some(handle)) => hw.set_buffer(self.channel, buffer, handle.fd())?,
             Ok(None) => {
                 self.give_up(buffer, frames);
                 return Ok(());
@@ -170,7 +173,7 @@ impl Relay {
                 };
                 slot.matched = true;
                 if let Some(fence) = slot.fence.take() {
-                    hw.give_back(buffer, fence)?;
+                    hw.give_back(self.channel, buffer, fence)?;
                 }
             }
             Set::Busy => {}
@@ -255,7 +258,7 @@ impl Relay {
                 slot.fence = None;
             }
             self.lost = self.lost.saturating_add(1);
-            hw.give_back(done.buffer, done.fence)?;
+            hw.give_back(self.channel, done.buffer, done.fence)?;
             return Ok(false);
         }
         self.lost = self.lost.saturating_add(1);
@@ -271,6 +274,6 @@ impl Relay {
 
 impl Default for Relay {
     fn default() -> Self {
-        Self::new()
+        Self::new(Channel::Image)
     }
 }

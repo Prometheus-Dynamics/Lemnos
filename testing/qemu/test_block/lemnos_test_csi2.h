@@ -22,12 +22,24 @@ struct tcsi_regs {
 
 #define TCSI_FS		0x1u
 #define TCSI_FE_ACK	0x100u
+/* The embedded data channel (channel 1): its start and end, in the same status word. */
+#define TCSI_EMB_FS	0x2u
+#define TCSI_EMB_FE_ACK	0x200u
 
 /* FIRE: sets the status word the handler will read, and raises the interrupt. */
 #define TCSI_IOC_FIRE	_IOW('T', 1, __u32)
 #define TCSI_IOC_PEEK	_IOR('T', 2, struct tcsi_regs)
 /* After FORCE, the channel's line counter moves for this many ms. ~0: never stops. */
 #define TCSI_IOC_BUSY	_IOW('T', 3, __u32)
+
+/* The embedded channel's registers, read as the image channel's (TCSI_IOC_PEEK). */
+#define TCSI_IOC_PEEK_EMB	_IOR('T', 11, struct tcsi_regs)
+/*
+ * How many embedded lines the next embedded frame end adds to the channel's
+ * line count (one, as a meta node's frame is one line, when not set). 0: the
+ * frame had no embedded line, and its buffer is not written.
+ */
+#define TCSI_IOC_EMB_LINES	_IOW('T', 10, __u32)
 
 #define TFE_EOF		0x1u
 #define TFE_SOF		0x2u

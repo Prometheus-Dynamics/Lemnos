@@ -401,13 +401,21 @@ impl CameraReceiver for SunxiVin {
         Ok(name.len())
     }
 
-    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
-    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
-    /// Not counted yet: the frame-start count is not wired in this driver.
+    /// Not answered. Read in full from the vendor kernel (radxa/allwinner-bsp, cubie-aiot-v1.4.6:
+    /// `drivers/vin/vin-video/vin_video.c`, `vin-csi/sunxi_csi.c`, `vin-csi/parser_reg.c` and
+    /// `vin-isp/sunxi_isp.c`), no per-frame start reaches user space. `vin_video.c` raises no
+    /// `V4L2_EVENT_FRAME_SYNC`. The only frame-sync event is the ISP subdevice's
+    /// `sunxi_isp_frame_sync_isr`, a parameter-load sync: it fires on the first two frames, when a
+    /// load flag is set, and on every tenth lost event, not on each frame. The CSI code reads the
+    /// parser's frame end only to close it; no frame start is passed up.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
         Err(Status::NOT_SUPPORTED)
     }
 
+    /// Nothing. Read in full from the vendor kernel (`vin-csi` and `vin-isp` as above): no
+    /// embedded-data line, metadata node or second CSI-2 data type is routed to any output. The
+    /// video node is the only capture node, and the only `embed` in those files is the CCIR656
+    /// comment in `parser_reg.h`. Answers 0.
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }

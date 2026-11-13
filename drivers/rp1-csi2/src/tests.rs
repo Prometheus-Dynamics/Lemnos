@@ -11,9 +11,10 @@ use lemnos_hal::mock::MockStream;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 
-use crate::hw::{Finished, Hardware, StartParams};
+use crate::hw::{Channel, Finished, Hardware, StartParams};
 use crate::relay::Set;
 use crate::{Rp1Csi2, backoff_ns};
+use lemnos_driver_rp1_csi2_sys as sys;
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -39,6 +40,12 @@ struct Mock {
     /// Whether the block is receiving, and the frame starts it has counted since it went.
     receiving: bool,
     starts: FrameStarts,
+    /// The embedded stream's, the same way: its buffers given memory, what the module says to
+    /// one, its finished lines, and what was given back.
+    emb_set: Vec<u32>,
+    emb_answer: Option<(u32, Set)>,
+    emb_finished: Vec<Finished>,
+    emb_given_back: Vec<(u32, u32)>,
 }
 
 impl Mock {
@@ -72,6 +79,7 @@ impl Hardware for Hw {
             None => {
                 m.made.push(*params);
                 m.set.clear();
+                m.emb_set.clear();
                 Ok(())
             }
         })
@@ -87,28 +95,46 @@ impl Hardware for Hw {
         Ok(())
     }
 
-    fn set_buffer(&mut self, buffer: u32, _memory: BorrowedFd<'_>) -> Result<Set> {
-        Ok(self.with(|m| match m.answer {
-            Some((b, answer)) if b == buffer => answer,
-            _ => {
-                m.set.push(buffer);
-                Set::Done
+    fn set_buffer(
+        &mut self,
+        channel: Channel,
+        buffer: u32,
+        _memory: BorrowedFd<'_>,
+    ) -> Result<Set> {
+        Ok(self.with(|m| {
+            let (answer, set) = match channel {
+                Channel::Image => (m.answer, &mut m.set),
+                Channel::Embedded => (m.emb_answer, &mut m.emb_set),
+            };
+            match answer {
+                Some((b, answer)) if b == buffer => answer,
+                _ => {
+                    set.push(buffer);
+                    Set::Done
+                }
             }
         }))
     }
 
-    fn next_frame(&mut self) -> Result<Option<Finished>> {
+    fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>> {
         Ok(self.with(|m| {
-            if m.finished.is_empty() {
+            let finished = match channel {
+                Channel::Image => &mut m.finished,
+                Channel::Embedded => &mut m.emb_finished,
+            };
+            if finished.is_empty() {
                 None
             } else {
-                Some(m.finished.remove(0))
+                Some(finished.remove(0))
             }
         }))
     }
 
-    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()> {
-        self.with(|m| m.given_back.push((buffer, fence)));
+    fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
+        self.with(|m| match channel {
+            Channel::Image => m.given_back.push((buffer, fence)),
+            Channel::Embedded => m.emb_given_back.push((buffer, fence)),
+        });
         Ok(())
     }
 
@@ -299,6 +325,9 @@ fn start_requires_configure_and_passes_the_link_exactly() {
             unpack16: false,
             buffers: 8,
             frame_slots: 8,
+            embedded_buffers: 0,
+            embedded_frame_slots: 0,
+            embedded_bytes: 0,
         }]
     );
     assert_eq!(hw.with(|m| m.stopped), 1, "starts from nothing");
@@ -737,4 +766,89 @@ fn layout_is_what_configure_set_and_nothing_before() {
     assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
     let set = d.configure(raw10(), Packing::Packed).unwrap();
     assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}
+
+/// The embedded data stream: four buffers of its own, a line of 256 bytes each.
+fn embedded_on(frames: &MockStream, embedded: &MockStream, bytes: u32) -> (Rp1Csi2, Hw) {
+    let (driver, hw) = driver_on(frames);
+    let embedded: StreamHandle = lemnos_core::Held::boxed(Box::new(embedded.clone()));
+    (driver.with_embedded(embedded, bytes), hw)
+}
+
+#[test]
+fn the_embedded_stream_is_named_only_when_the_board_declares_one() {
+    let (mut plain, _) = driver();
+    let mut name = [0u8; 16];
+    assert_eq!(plain.embedded_stream(&mut name), Ok(0));
+
+    let (mut d, _) = embedded_on(&stream(8), &stream(4), 256);
+    let n = d.embedded_stream(&mut name).unwrap();
+    assert_eq!(&name[..n], b"embedded");
+    assert_eq!(
+        d.embedded_stream(&mut name[..3]),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+}
+
+#[test]
+fn start_makes_the_embedded_stream_and_gives_its_buffers_memory() {
+    let frames = stream(8);
+    let embedded = stream(4);
+    let (mut d, hw) = embedded_on(&frames, &embedded, 256);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    assert_eq!(
+        hw.with(|m| {
+            let p = m.made[0];
+            (p.embedded_buffers, p.embedded_frame_slots, p.embedded_bytes)
+        }),
+        (4, 4, 256),
+        "the module makes the embedded stream with the board's buffers and the line's bytes"
+    );
+    assert_eq!(
+        hw.with(|m| m.emb_set.clone()),
+        [0, 1, 2, 3],
+        "every embedded buffer has its memory before the block starts"
+    );
+}
+
+#[test]
+fn an_embedded_line_is_published_on_its_own_stream_with_its_frames_sequence() {
+    let frames = stream(8);
+    let embedded = stream(4);
+    let (mut d, hw) = embedded_on(&frames, &embedded, 256);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    hw.with(|m| {
+        m.emb_finished.push(Finished {
+            buffer: 1,
+            bytes: 256,
+            sequence: 5,
+            timestamp_ns: 2000,
+            fence: 9,
+        });
+    });
+    d.tick(0).unwrap();
+    let got = embedded
+        .take_frame()
+        .expect("the line is on the embedded stream");
+    assert_eq!((got.buffer, got.bytes, got.sequence), (1, 256, 5));
+    assert!(
+        frames.take_frame().is_none(),
+        "the image stream got nothing"
+    );
+    assert!(embedded.take_frame().is_none());
+}
+
+#[test]
+fn an_embedded_line_is_refused_without_a_length_the_channel_takes() {
+    for bytes in [0, 24, sys::EMBEDDED_MAX + 16] {
+        let (mut d, _) = embedded_on(&stream(8), &stream(4), bytes);
+        d.configure(raw10(), Packing::Packed).unwrap();
+        assert_eq!(
+            d.start().unwrap_err(),
+            Status::INVALID_ARGUMENT,
+            "bytes {bytes}"
+        );
+    }
 }

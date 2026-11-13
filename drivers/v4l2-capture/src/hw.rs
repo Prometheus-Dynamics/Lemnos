@@ -10,8 +10,8 @@ use lemnos_hal::blocks::BufferHandle;
 use lemnos_linux_sys::dma_buf;
 use lemnos_v4l2::media::{self, InterfaceType, MediaDevice, Topology};
 use lemnos_v4l2::v4l2::{
-    BufType, BufferFlags, CapabilityFlags, DequeuedBuffer, Format, MmapQueue, PixFormat,
-    PixFormatMplane, PlaneFormat, VideoDevice,
+    BufType, BufferFlags, CapabilityFlags, DequeuedBuffer, Format, MetaFormat, MmapQueue,
+    PixFormat, PixFormatMplane, PlaneFormat, VideoDevice,
 };
 use lemnos_v4l2::{Error, FourCc};
 
@@ -145,6 +145,9 @@ struct Found {
 /// failed call rather than a failed bind, and a call can succeed once it is.
 pub struct LinuxHardware {
     settings: Settings,
+    /// A metadata node (`V4L2_BUF_TYPE_META_CAPTURE`): its format is a data format and a buffer
+    /// size, and a frame is a line of that size, not an image.
+    metadata: bool,
     found: Option<Found>,
     /// The node and its format, between `open` and `stream_on`.
     opened: Option<(VideoDevice, BufType)>,
@@ -163,12 +166,24 @@ impl LinuxHardware {
     pub fn new(settings: Settings) -> Self {
         Self {
             settings,
+            metadata: false,
             found: None,
             opened: None,
             queue: None,
             granted: None,
             prepare: None,
             current: None,
+        }
+    }
+
+    /// The node as a metadata node: the same calls, on `V4L2_BUF_TYPE_META_CAPTURE`, with the
+    /// wanted fourcc as the data format and the wanted size as the buffer size. Lines of
+    /// embedded data come off it (see [`crate::embedded`]).
+    #[must_use]
+    pub fn metadata(settings: Settings) -> Self {
+        Self {
+            metadata: true,
+            ..Self::new(settings)
         }
     }
 
@@ -251,7 +266,20 @@ fn granted(format: &Format) -> Result<Granted> {
                 p.planes.len(),
             )
         }
-        Format::Meta(_) => return Err(Status::IO),
+        Format::Meta(m) => {
+            // A line, not an image: its size is the one memory plane, and it has no stride.
+            plane_sizes[0] = m.buffer_size;
+            (
+                m.fourcc,
+                0,
+                0,
+                PlaneFormat {
+                    bytes_per_line: 0,
+                    size_image: m.buffer_size,
+                },
+                1,
+            )
+        }
     };
     Ok(Granted {
         fourcc,
@@ -303,7 +331,12 @@ impl Hardware for LinuxHardware {
         let video = self.find()?.video.clone();
         let dev = VideoDevice::open(&video).map_err(|e| status(&e))?;
         let caps = dev.capabilities().device_caps;
-        let buf_type = if caps.contains(CapabilityFlags::VIDEO_CAPTURE_MPLANE) {
+        let buf_type = if self.metadata {
+            if !caps.contains(CapabilityFlags::META_CAPTURE) {
+                return Err(Status::NOT_SUPPORTED);
+            }
+            BufType::MetaCapture
+        } else if caps.contains(CapabilityFlags::VIDEO_CAPTURE_MPLANE) {
             BufType::VideoCaptureMplane
         } else if caps.contains(CapabilityFlags::VIDEO_CAPTURE) {
             BufType::VideoCapture
@@ -313,7 +346,15 @@ impl Hardware for LinuxHardware {
         if let Some(prepare) = &self.prepare {
             prepare(dev.as_fd(), wanted)?;
         }
-        let format = if buf_type.is_multiplanar() {
+        let format = if buf_type.is_meta() {
+            Format::Meta(MetaFormat {
+                fourcc: wanted.fourcc,
+                buffer_size: wanted.size,
+                width: 0,
+                height: 0,
+                bytes_per_line: 0,
+            })
+        } else if buf_type.is_multiplanar() {
             Format::Multi(PixFormatMplane {
                 width: wanted.width,
                 height: wanted.height,

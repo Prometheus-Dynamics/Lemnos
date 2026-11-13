@@ -15,3 +15,6 @@ lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
 lemnos-v4l2 = { path = "../../backends/v4l2" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }

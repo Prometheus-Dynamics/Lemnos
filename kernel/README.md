@@ -107,6 +107,13 @@ end address checked against the buffer with overflow-safe arithmetic, the frame'
 size checked against the buffer at `START`, and the buffer held as the block's until the frame
 completes or the channel is stopped.
 
+Embedded data (`LEMNOS_RP1_CSI2_IOC_EMBEDDED`, after the stream is made and before `START`): the
+block's second DMA channel takes CSI-2 data type 0x12 on the image's virtual channel, as the stock
+driver's meta node does (`cfe.c`, `csi2.c`), into a stream of its own. Each embedded line is one
+buffer, published with the sequence of the frame it came with; a frame with no line publishes
+nothing, so the sequence skips it. Nothing is written into a buffer that has been given away: the
+channel's address is the next buffer's or zero. Off unless asked for. Untested on the board.
+
 The channel makes no frame start while it has no address, and doesn't count the frame either: a
 frame that starts with nothing armed is never seen, by this module or by the stock driver. Arming
 happens at start and at each frame start and end; when it finds no buffer free (no consumer yet, or

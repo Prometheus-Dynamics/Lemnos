@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use lemnos_contract_camera_receiver::{Counters, FrameStarts};
 use lemnos_core::{Result, Status};
-use lemnos_driver_rp1_csi2_sys::{self as sys, Node, Start, Stream, StreamParams, UNPACK16};
+use lemnos_driver_rp1_csi2_sys::{
+    self as sys, Embedded, Node, Start, Stream, StreamParams, UNPACK16,
+};
 
 use crate::relay::Set;
 
@@ -24,6 +26,21 @@ pub struct StartParams {
     pub unpack16: bool,
     pub buffers: u32,
     pub frame_slots: u32,
+    /// The embedded stream's buffers: 0 when there is none.
+    pub embedded_buffers: u32,
+    /// Its frame slots, a power of two.
+    pub embedded_frame_slots: u32,
+    /// Bytes per embedded line.
+    pub embedded_bytes: u32,
+}
+
+/// Which of the block's two streams a call is about: the image's, or the embedded data's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// The image frames (CSI-2 data type from the link).
+    Image,
+    /// The embedded data (CSI-2 data type 0x12 on the image's virtual channel).
+    Embedded,
 }
 
 /// A frame the block finished.
@@ -53,13 +70,14 @@ pub trait Hardware: Send {
     /// Stops receiving and ends the module's stream; the kernel waits for the DMA, and then
     /// lets go of every buffer's memory (or of none, if the DMA couldn't be seen to stop).
     fn stop(&mut self) -> Result<()>;
-    /// Gives `buffer` its memory, or swaps it: the module pins `memory` and, from then on,
-    /// that is where the block writes the buffer's frames. An error means the stream is over.
-    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set>;
-    /// The next frame the block finished.
-    fn next_frame(&mut self) -> Result<Option<Finished>>;
-    /// Gives a finished frame's buffer back to the block.
-    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()>;
+    /// Gives `buffer` of `channel`'s stream its memory, or swaps it: the module pins `memory`
+    /// and, from then on, that is where the block writes the buffer's frames. An error means
+    /// the stream is over.
+    fn set_buffer(&mut self, channel: Channel, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set>;
+    /// The next frame of `channel`'s stream the block finished.
+    fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>>;
+    /// Gives a finished frame's buffer of `channel`'s stream back to the block.
+    fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()>;
     /// Whether the stream is still running.
     fn check(&mut self) -> Result<()>;
     /// The module's counters since the last start.
@@ -114,6 +132,8 @@ pub struct LinuxHardware {
     /// The module's stream and what it is started with, held until stopped. Dropping the
     /// stream ends it: the module stops the block first and then unpins every buffer.
     running: Option<(Stream, StartParams)>,
+    /// The embedded data's module stream, when the board asks for it, held as `running` is.
+    running_embedded: Option<Stream>,
 }
 
 impl LinuxHardware {
@@ -123,7 +143,17 @@ impl LinuxHardware {
             settings,
             node: None,
             running: None,
+            running_embedded: None,
         }
+    }
+
+    /// The module's stream of `channel`, while it runs.
+    fn stream_mut(&mut self, channel: Channel) -> Result<&mut Stream> {
+        let stream = match channel {
+            Channel::Image => self.running.as_mut().map(|(stream, _)| stream),
+            Channel::Embedded => self.running_embedded.as_mut(),
+        };
+        stream.ok_or(Status::NO_DEVICE)
     }
 
     fn node(&mut self) -> Result<&Node> {
@@ -141,6 +171,7 @@ impl LinuxHardware {
         if node_is_gone(&error) {
             self.node = None;
             self.running = None;
+            self.running_embedded = None;
         }
         status(error)
     }
@@ -176,7 +207,19 @@ impl Hardware for LinuxHardware {
             job_slots: 8,
         });
         let stream = made.map_err(|e| self.node_error(e))?;
+        let embedded = if params.embedded_buffers > 0 {
+            let made = self.node()?.stream_create(&StreamParams {
+                buffers: params.embedded_buffers,
+                buffer_bytes: params.embedded_bytes,
+                frame_slots: params.embedded_frame_slots,
+                job_slots: 8,
+            });
+            Some(made.map_err(|e| self.node_error(e))?)
+        } else {
+            None
+        };
         self.running = Some((stream, *params));
+        self.running_embedded = embedded;
         Ok(())
     }
 
@@ -185,6 +228,15 @@ impl Hardware for LinuxHardware {
             return Err(Status::NO_DEVICE);
         };
         let (stream_fd, params) = (stream.raw_fd(), *params);
+        if let Some(embedded) = self.running_embedded.as_ref().map(Stream::raw_fd) {
+            // Asked for before START: the module's embedded channel is set up with the image's.
+            let asked = self.node()?.embedded(&Embedded {
+                stream_fd: embedded,
+                bytes: params.embedded_bytes,
+                reserved: [0; 2],
+            });
+            asked.map_err(|e| self.node_error(e))?;
+        }
         let started = self.node()?.start(&Start {
             stream_fd,
             lanes: params.lanes,
@@ -207,6 +259,7 @@ impl Hardware for LinuxHardware {
             None => Ok(()),
         };
         self.running = None;
+        self.running_embedded = None;
         match result {
             Ok(()) => Ok(()),
             // Unbinding stopped the block: there's nothing left to stop.
@@ -233,10 +286,8 @@ impl Hardware for LinuxHardware {
         Ok(())
     }
 
-    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
-        let Some((stream, _)) = &self.running else {
-            return Err(Status::NO_DEVICE);
-        };
+    fn set_buffer(&mut self, channel: Channel, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
+        let stream = self.stream_mut(channel)?;
         match stream.set_buffer(buffer, memory) {
             Ok(_) => Ok(Set::Done),
             Err(e) => match e.raw_os_error() {
@@ -248,10 +299,8 @@ impl Hardware for LinuxHardware {
         }
     }
 
-    fn next_frame(&mut self) -> Result<Option<Finished>> {
-        let Some((stream, _)) = &mut self.running else {
-            return Err(Status::NO_DEVICE);
-        };
+    fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>> {
+        let stream = self.stream_mut(channel)?;
         Ok(stream.next_frame().map_err(status)?.map(|f| Finished {
             buffer: f.buffer,
             bytes: f.bytes,
@@ -261,10 +310,8 @@ impl Hardware for LinuxHardware {
         }))
     }
 
-    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()> {
-        let Some((stream, _)) = &mut self.running else {
-            return Err(Status::NO_DEVICE);
-        };
+    fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
+        let stream = self.stream_mut(channel)?;
         stream.return_buffer(buffer, fence).map_err(status)
     }
 

@@ -137,12 +137,22 @@ receiver's start.
 ### Embedded data
 
 A sensor may carry the register values in force for each frame (`camera.sensor/1`,
-`SensorInfo::embedded_data`). A receiver whose sensor does publishes them on a second stream,
-named by `embedded_stream` (`camera.receiver/1`): one buffer per frame, with that frame's sequence
-number, in the sensor's own layout, which the sensor's library crate decodes. A receiver that
-captures none answers an empty name. In the tree, no receiver captures embedded lines yet
-(`rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture`), and no sensor on a board carries them, so the
-path is exercised only by the simulated camera. See [Hardware status](hardware-status.md).
+`SensorInfo::embedded_data`). A receiver whose sensor does publishes them on a second stream, named
+by `embedded_stream` (`camera.receiver/1`): one buffer per line, carrying the sequence of the frame
+it came with, in the sensor's own layout, which the sensor's library crate decodes. A frame with no
+embedded line publishes nothing, so the sequence numbers skip it. A receiver that captures none
+answers an empty name.
+
+On the `rp1-csi2` receiver the board asks for it with a stream named `embedded` on the device, and
+`config.embedded_bytes`, the length of a line (`docs/boards.md`). The kernel module takes the line
+on the block's second DMA channel, data type 0x12 on the image's virtual channel, and the stream
+gets one buffer per line. Untested on a board.
+
+`rkcif` takes the lines from a stock metadata node instead, when the board names one
+(`config.embedded`, with `embedded_format` and `embedded_bytes`): each line is copied onto the
+`embedded` stream with the node's sequence. The vendor kernel exposes no such node, so there the
+path stays off; a kernel that does expose one serves it. `sunxi-vin` captures none. No sensor on a
+board in the tree carries embedded data, so on hardware the path is unproven.
 
 ## Buffer length
 

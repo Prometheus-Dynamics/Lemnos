@@ -98,4 +98,24 @@ struct lemnos_rp1_csi2_frame_starts {
 #define LEMNOS_RP1_CSI2_IOC_STOP	 _IO('L', 0xc3)
 #define LEMNOS_RP1_CSI2_IOC_FRAME_STARTS _IOR('L', 0xc4, struct lemnos_rp1_csi2_frame_starts)
 
+/*
+ * The embedded data stream: CSI-2 data type 0x12 on the image's virtual
+ * channel, written by its own DMA channel, one buffer per frame. It is asked
+ * for before START and takes effect at START. stream_fd -1 asks for none (the
+ * default); a stream_fd names a stream made on this node, and bytes is the
+ * embedded line's length, a multiple of 16 from 16 to 65520. Each frame's
+ * buffer carries that frame's sequence and the line's bytes, or no bytes
+ * when the frame had no embedded line or the line was cut short.
+ */
+#define LEMNOS_RP1_CSI2_EMBEDDED_DT	0x12
+#define LEMNOS_RP1_CSI2_EMBEDDED_MAX	65520u
+
+struct lemnos_rp1_csi2_embedded {
+	__s32 stream_fd;	/* a stream made on this node, or -1 for none */
+	__u32 bytes;		/* the embedded line's length; 0 with -1 */
+	__u32 reserved[2];	/* zero */
+};
+
+#define LEMNOS_RP1_CSI2_IOC_EMBEDDED	 _IOW('L', 0xc5, struct lemnos_rp1_csi2_embedded)
+
 #endif
