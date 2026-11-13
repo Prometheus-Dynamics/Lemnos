@@ -1,0 +1,10 @@
+# A made-up three-axis gyroscope for the simulated bus.
+
+identity 0x00 0x0f                      # chip ID
+init 0x7e 0xb6                          # soft reset
+wait 30                                 # ms the reset takes
+init 0x0f 0x00                          # range: 2000 °/s
+
+axis x 0x02 16 little signed 0.00106526  # rad/s per count
+axis y 0x04 16 little signed 0.00106526
+axis z 0x06 16 little signed 0.00106526

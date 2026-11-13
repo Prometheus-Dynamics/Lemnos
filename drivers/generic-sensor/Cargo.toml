@@ -17,6 +17,10 @@ std = []
 lemnos-core = { path = "../../engine/core" }
 lemnos-hal = { path = "../../engine/hal" }
 lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
+lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }
+lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
+lemnos-contract-temperature = { path = "../../contracts/temperature" }
+lemnos-contract-power-monitor = { path = "../../contracts/power-monitor" }
 
 [dev-dependencies]
 lemnos-sim = { path = "../../backends/sim" }
@@ -24,4 +28,10 @@ lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-driver-bmm150 = { path = "../bmm150" }
 
 [package.metadata.lemnos]
-driver = "GenericSensor"
+driver = [
+    "GenericMagnetometer",
+    "GenericAccelerometer",
+    "GenericGyroscope",
+    "GenericTemperature",
+    "GenericPowerMonitor",
+]

@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 90 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 91 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -101,6 +101,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B11.md`](../testing/board-runs/B11.md) | `ina2xx`: volts, amps and watts against a meter |
 | [`B12.md`](../testing/board-runs/B12.md) | `hwmon-fan`: take-over, release, hand-back on stop, the gap after a kill |
 | [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone`: reads against the kernel's value, a missing zone |
+| [`H3a.md`](../testing/board-runs/H3a.md) | The description form: a power monitor described by a file beside `ina2xx` on the same chip, identity refusal, an outage; a temperature or inertial chip from a file |
 | [`B14.md`](../testing/board-runs/B14.md) | `fan-control`: curve, slew, hold, a failed sensor, restart |
 | [`B15.md`](../testing/board-runs/B15.md) | `gpio-power-switch`: two USB port power lines |
 | [`B16.md`](../testing/board-runs/B16.md) | `ws2812`: bit timing, colour order, reset between frames |

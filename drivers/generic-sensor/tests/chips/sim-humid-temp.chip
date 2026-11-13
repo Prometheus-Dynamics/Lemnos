@@ -1,0 +1,4 @@
+# A made-up sensor whose temperature is an unsigned count with an offset:
+# T = count * 0.01 - 40 °C, in two little-endian bytes.
+
+value temperature 0x05 16 little unsigned 0.01 offset -40

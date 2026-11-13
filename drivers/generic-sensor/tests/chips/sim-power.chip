@@ -1,0 +1,12 @@
+# A made-up power monitor for the simulated bus: 16-bit big-endian values at
+# byte registers, laid out as a shunt monitor's are. The calibration register
+# sets the current and power counts for a 0.01 ohm shunt and 1 mA per count.
+
+identity 0xfe 0x22                      # die ID
+init 0x00 0x4127 16 big                 # configuration: averaging and continuous
+init 0x0a 0x0200 16 big                 # calibration
+
+value shunt_v 0x02 16 big signed 0.0000025      # V per count
+value bus_v 0x04 16 big unsigned 0.00125        # V per count
+value power_w 0x06 16 big unsigned 0.025        # W per count
+value current_a 0x08 16 big signed 0.001        # A per count

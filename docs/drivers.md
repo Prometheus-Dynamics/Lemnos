@@ -27,7 +27,11 @@ python3 scripts/generate-builtins.py --check
 |---|---|---|---|
 | `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C | Serves its contract. Batches only with `fifo = true` |
 | `bmm150` | `magnetometer/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
-| `generic-sensor` | `magnetometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. This is the [description form](writing-a-driver.md#the-description-form); a magnetometer is the only kind it covers |
+| `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
+| `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
+| `generic-gyroscope` | `gyroscope/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
+| `generic-temperature` | `temperature/1` | `bus`: I2C; `description`: a chip file | Serves its contract |
+| `generic-power-monitor` | `power-monitor/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The chip's own registers give all four values |
 | `ina2xx` | `power-monitor/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
 | `vcm` | `lens/1` | `bus`: I2C; `chip` | Serves its contract. The position is unknown until the first move |
 | `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
@@ -167,12 +171,12 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 
 | Tag | Methods | Served by |
 |---|---|---|
-| `accelerometer/1` | 1 read, 2 read_batch | `bmi088` |
-| `gyroscope/1` | 1 read, 2 read_batch | `bmi088` |
-| `magnetometer/1` | 1 read | `bmm150`, `generic-sensor` |
+| `accelerometer/1` | 1 read, 2 read_batch | `bmi088`, `generic-accelerometer` |
+| `gyroscope/1` | 1 read, 2 read_batch | `bmi088`, `generic-gyroscope` |
+| `magnetometer/1` | 1 read | `bmm150`, `generic-magnetometer` |
 | `orientation/1` | 1 read | `orientation` |
-| `temperature/1` | 1 read | `thermal-zone` |
-| `power-monitor/1` | 1 read | `ina2xx` |
+| `temperature/1` | 1 read | `thermal-zone`, `generic-temperature` |
+| `power-monitor/1` | 1 read | `ina2xx`, `generic-power-monitor` |
 | `power-switch/1` | 1 set, 2 is_on, 3 fault | `gpio-power-switch` |
 | `fan/1` | 1 set_duty, 2 duty, 3 rpm, 4 release | `hwmon-fan` |
 | `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
