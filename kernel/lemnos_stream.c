@@ -141,6 +141,7 @@ struct lem_reader {
 	bool cut_off;			/* over a limit: its marks hold nothing, and the pool page says so */
 	u64 uncounted_since;		/* when its marks last could not be counted at one instant; 0 if they can */
 	u64 *seen;			/* per buffer: the use it was first seen marked in (+1), and when */
+	u64 id;				/* the registration's id; 0 when the slot is free */
 };
 
 struct lem_stream {
@@ -189,9 +190,24 @@ struct lem_stream {
 	size_t w_state, w_returns_head, w_returns_tail, w_jobs_head, w_jobs_tail;
 	struct lem_reader reader[LEMNOS_STREAM_MAX_READERS];	/* shm form: the consumers' marks */
 	u32 newest;			/* shm form: the buffer of the newest frame, kept for the frame path */
+	u64 reader_ids;			/* the last registration id given out */
+	refcount_t refs;		/* the stream's file, and each reader file that holds the stream */
+};
+
+/*
+ * What a reader's file holds: the registration it made. Closing the file (an
+ * exit closes it too) or LEMNOS_READER_IOC_UNREGISTER frees the slot, if the
+ * slot still carries this registration. The file holds a reference on the stream.
+ */
+struct lem_reader_handle {
+	struct lem_stream *s;
+	u32 slot;
+	u64 id;
 };
 
 static const struct file_operations lem_stream_fops;
+static const struct file_operations lem_reader_fops;
+static void lem_stream_put(struct lem_stream *s);
 static int lem_region_vmap(struct lem_stream_region *r);
 
 static LIST_HEAD(lem_streams);
@@ -1460,22 +1476,25 @@ static void lem_reader_release(struct lem_reader *r)
 
 /*
  * LEMNOS_STREAM_IOC_READER: pins a reader's marks page and gives the reader a
- * slot. The page must be a shmem file, sealed against shrinking and growing,
- * and big enough for the buffers. Its pages are mapped read-only and never
- * written. Called with s->ctl held, which orders the table's changes; the new
- * entry is published under s->lock, where the frame path reads it.
+ * slot, and a file (a.reader_fd) that holds the registration. The page must be
+ * a shmem file, sealed against shrinking and growing, and big enough for the
+ * buffers. Its pages are mapped read-only and never written. The slot is
+ * published under s->lock, where the frame path reads it. Called with s->ctl
+ * held, which orders the table's changes.
  */
 static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_reader *a)
 {
 	size_t bytes = (LEM_MARKS_AT + 2 * (size_t)s->buffers) * sizeof(u64);
 	const unsigned int want = F_SEAL_SHRINK | F_SEAL_GROW;
 	struct lem_reader r = {};
-	struct file *file;
+	struct lem_reader_handle *h;
+	struct file *marks, *file;
 	unsigned long flags;
 	u32 slot;
+	int fd;
 	long ret = -EINVAL;
 
-	if (!s->shm || a->reserved)
+	if (!s->shm)
 		return -EINVAL;
 	for (slot = 0; slot < LEMNOS_STREAM_MAX_READERS; slot++)
 		if (!s->reader[slot].marks)
@@ -1483,12 +1502,12 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	if (slot == LEMNOS_STREAM_MAX_READERS)
 		return -ENOSPC;
 
-	file = fget(a->fd);
-	if (!file)
+	marks = fget(a->fd);
+	if (!marks)
 		return -EBADF;
-	if (!shmem_file(file) ||
-	    (READ_ONCE(SHMEM_I(file_inode(file))->seals) & want) != want ||
-	    i_size_read(file_inode(file)) < (loff_t)bytes)
+	if (!shmem_file(marks) ||
+	    (READ_ONCE(SHMEM_I(file_inode(marks))->seals) & want) != want ||
+	    i_size_read(file_inode(marks)) < (loff_t)bytes)
 		goto put;
 
 	r.npages = DIV_ROUND_UP(bytes, PAGE_SIZE);
@@ -1498,7 +1517,7 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 		goto put;
 	}
 	for (unsigned int i = 0; i < r.npages; i++) {
-		struct page *page = shmem_read_mapping_page(file->f_mapping, i);
+		struct page *page = shmem_read_mapping_page(marks->f_mapping, i);
 
 		if (IS_ERR(page)) {
 			ret = PTR_ERR(page);
@@ -1520,19 +1539,105 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 		goto unpin;
 	}
 
+	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	if (!h) {
+		ret = -ENOMEM;
+		goto unpin;
+	}
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		ret = fd;
+		goto free_handle;
+	}
+	file = anon_inode_getfile("[lemnos-reader]", &lem_reader_fops, h, O_RDWR);
+	if (IS_ERR(file)) {
+		ret = PTR_ERR(file);
+		goto put_fd;
+	}
+
+	/* A new slot's cut-off word says nothing about the reader it is given to. */
+	lem_ring_write_release(s, s->page_at + LEM_POOL_TICKETS + s->buffers + slot, 0);
+	h->s = s;
+	h->slot = slot;
+	refcount_inc(&s->refs);
 	spin_lock_irqsave(&s->lock, flags);
+	r.id = ++s->reader_ids;
+	h->id = r.id;
 	s->reader[slot] = r;
 	spin_unlock_irqrestore(&s->lock, flags);
+
 	a->slot = slot;
-	fput(file);
+	a->reader_fd = fd;
+	fd_install(fd, file);
+	fput(marks);
 	return 0;
 
+put_fd:
+	put_unused_fd(fd);
+free_handle:
+	kfree(h);
 unpin:
 	lem_reader_release(&r);
 put:
-	fput(file);
+	fput(marks);
 	return ret;
 }
+
+/*
+ * Frees a reader's slot if its handle still holds the registration: its marks
+ * stop holding at once, and the slot can be given out again. Takes s->ctl, so
+ * the caller must not hold it.
+ */
+static bool lem_reader_drop(struct lem_reader_handle *h)
+{
+	struct lem_stream *s = h->s;
+	struct lem_reader r = {};
+	unsigned long flags;
+	bool found = false;
+
+	mutex_lock(&s->ctl);
+	spin_lock_irqsave(&s->lock, flags);
+	if (h->id && s->reader[h->slot].id == h->id) {
+		r = s->reader[h->slot];
+		memset(&s->reader[h->slot], 0, sizeof(s->reader[h->slot]));
+		found = true;
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	mutex_unlock(&s->ctl);
+	if (found)
+		lem_reader_release(&r);
+	h->id = 0;
+	return found;
+}
+
+static int lem_reader_file_release(struct inode *inode, struct file *file)
+{
+	struct lem_reader_handle *h = file->private_data;
+	struct lem_stream *s = h->s;
+
+	lem_reader_drop(h);
+	kfree(h);
+	lem_stream_put(s);
+	return 0;
+}
+
+/* LEMNOS_READER_IOC_UNREGISTER: the explicit form of closing the file. */
+static long lem_reader_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct lem_reader_handle *h = file->private_data;
+
+	if (cmd != LEMNOS_READER_IOC_UNREGISTER)
+		return -ENOTTY;
+	return lem_reader_drop(h) ? 0 : -ENOENT;
+}
+
+static const struct file_operations lem_reader_fops = {
+	.owner = THIS_MODULE,
+	.release = lem_reader_file_release,
+	.unlocked_ioctl = lem_reader_file_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
+	.llseek = noop_llseek,
+};
 
 static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -1767,6 +1872,12 @@ static void lem_stream_free(struct lem_stream *s)
 	kfree(s);
 }
 
+static void lem_stream_put(struct lem_stream *s)
+{
+	if (refcount_dec_and_test(&s->refs))
+		lem_stream_free(s);
+}
+
 static int lem_stream_release(struct inode *inode, struct file *file)
 {
 	struct lem_stream *s = file->private_data;
@@ -1776,7 +1887,7 @@ static int lem_stream_release(struct inode *inode, struct file *file)
 	lem_stream_count--;
 	mutex_unlock(&lem_streams_lock);
 	lem_stream_shutdown(s, LEMNOS_RING_STATE_CLOSED);
-	lem_stream_free(s);
+	lem_stream_put(s);
 	return 0;
 }
 
@@ -1882,6 +1993,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 		ret = -ENOMEM;
 		goto drop_count;
 	}
+	refcount_set(&s->refs, 1);
 	s->dev = get_device(dev);
 	mutex_init(&s->ctl);
 	spin_lock_init(&s->lock);

@@ -78,7 +78,13 @@ reads it with the shm crates alone (`testing/crates/shm-ring-check` does, in the
 this form a buffer is not returned through a words queue: a consumer gives the module its marks page
 (`shm-ring-holds`) with `LEMNOS_STREAM_IOC_READER`, and the module pins that page read-only. A buffer
 goes back to the frame path only when no reader marks it, and the module checks that when it needs the
-buffer, so a held buffer is never reused. The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
+buffer, so a held buffer is never reused. `LEMNOS_STREAM_IOC_READER` also returns `reader_fd`, a file that
+holds the registration: when it closes (a reader that exits closes it), the reader's slot is freed and its
+marks stop holding at that moment, so the next frame that needs the buffer can take it. `LEMNOS_READER_IOC_UNREGISTER`
+on that file does the same at once, and a second one fails with `ENOENT`. The table has 64 slots, so a
+reader must not leak its registration. `testing/crates/shm-holds-check` `release` proves the release
+on the pinned kernel: a reader that holds and exits without unregistering has its buffer reused and its
+slot free, 200 arrive-and-leave cycles all register, and the release hook disabled makes it fail. The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
 and [`TODO.md`](../TODO.md) lists the port.
 
 ## What it never does

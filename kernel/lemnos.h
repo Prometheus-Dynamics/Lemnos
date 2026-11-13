@@ -343,8 +343,10 @@ struct lemnos_stream_buffer {
  * over max_held, or holding a buffer longer than max_hold_ns, is cut off: its marks stop
  * holding, and its word after the tickets on the pool page is set (page::is_cut_off).
  * The page must be a sealed memfd (F_SEAL_SHRINK and F_SEAL_GROW) of at least
- * 8 * (1 + 2 * buffers) bytes. The reader table is fixed at LEMNOS_STREAM_MAX_READERS
- * for the stream's life; a reader's page is released when the stream is.
+ * 8 * (1 + 2 * buffers) bytes. The reader table has LEMNOS_STREAM_MAX_READERS slots. A
+ * registration lasts while its reader_fd is open: closing that file (an exit does too) or
+ * LEMNOS_READER_IOC_UNREGISTER frees the slot, its marks hold nothing from then on, and the page is
+ * unpinned. The stream's end frees whatever is left.
  */
 #define LEMNOS_STREAM_MAX_READERS	64u
 
@@ -352,7 +354,7 @@ struct lemnos_stream_reader {
 	__s32 fd;		/* in: the marks page, a memfd */
 	__u32 slot;		/* out: the reader slot the module gave it, 0 to 63 */
 	__u32 max_held;		/* in: buffers it may hold at once; 0 for no limit */
-	__u32 reserved;		/* in: zero */
+	__s32 reader_fd;	/* out: a file that holds the registration; see LEMNOS_READER_IOC_UNREGISTER */
 	__u64 max_hold_ns;	/* in: how long one hold may last, ns; 0 for no limit */
 };
 
@@ -381,6 +383,14 @@ struct lemnos_stream_test_source {
 #define LEMNOS_STREAM_IOC_TEST_SOURCE  _IOW('L', 0x85, struct lemnos_stream_test_source)
 #define LEMNOS_STREAM_IOC_BUFFER       _IOWR('L', 0x86, struct lemnos_stream_buffer)
 #define LEMNOS_STREAM_IOC_READER       _IOWR('L', 0x87, struct lemnos_stream_reader)
+
+/*
+ * LEMNOS_READER_IOC_UNREGISTER, on the reader_fd that LEMNOS_STREAM_IOC_READER returned: frees the
+ * reader's slot now (its marks stop holding; the next frame that needs a buffer can take it). The
+ * registration is also freed when that file is closed, by the caller or by its exit. Returns
+ * -ENOENT once the registration is gone.
+ */
+#define LEMNOS_READER_IOC_UNREGISTER   _IO('L', 0x88)
 
 #define LEMNOS_BUS_MAX_SEGMENTS 16
 
