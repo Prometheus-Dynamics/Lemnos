@@ -28,6 +28,7 @@ lemnos-wire = { path = "../../engine/wire" }
 lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
+lemnos-driver-named-files = { path = "../../drivers/named-files" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }
 lemnos-contract-camera-frames = { path = "../../contracts/camera-frames" }
