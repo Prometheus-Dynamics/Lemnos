@@ -32,11 +32,16 @@ python3 scripts/generate-builtins.py --check
 | `generic-gyroscope` | `gyroscope/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
 | `generic-temperature` | `temperature/1` | `bus`: I2C; `description`: a chip file | Serves its contract |
 | `generic-power-monitor` | `power-monitor/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The chip's own registers give all four values |
+| `modbus-magnetometer` | `magnetometer/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. The description form for a [Modbus RTU device](writing-a-driver.md#a-chip-on-modbus), as are the four below: each read is a request and its checked reply |
+| `modbus-accelerometer` | `accelerometer/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. `read` only |
+| `modbus-gyroscope` | `gyroscope/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. `read` only |
+| `modbus-temperature` | `temperature/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
+| `modbus-power-monitor` | `power-monitor/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
 | `ina2xx` | `power-monitor/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
 | `vcm` | `lens/1` | `bus`: I2C; `chip`; optional `direction`, `settle_us` | Serves its contract. The position is unknown until the first move. Direction and settle time are unknown unless the board gives them |
 | `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
-| `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm` | Serves its contract. Closed by default: writes and each bus are allowed only by `config` |
+| `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm`, `uart` | Serves its contract. Closed by default: writes and each bus are allowed only by `config`. A UART's frame is set at bind; reading it needs no `writes` |
 | `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and refusal, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`) |
 
 ## Devices with no bus of their own
@@ -173,19 +178,19 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 
 | Tag | Methods | Served by |
 |---|---|---|
-| `accelerometer/1` | 1 read, 2 read_batch | `bmi088`, `generic-accelerometer` |
-| `gyroscope/1` | 1 read, 2 read_batch | `bmi088`, `generic-gyroscope` |
-| `magnetometer/1` | 1 read | `bmm150`, `generic-magnetometer` |
+| `accelerometer/1` | 1 read, 2 read_batch | `bmi088`, `generic-accelerometer`, `modbus-accelerometer` |
+| `gyroscope/1` | 1 read, 2 read_batch | `bmi088`, `generic-gyroscope`, `modbus-gyroscope` |
+| `magnetometer/1` | 1 read | `bmm150`, `generic-magnetometer`, `modbus-magnetometer` |
 | `orientation/1` | 1 read | `orientation` |
-| `temperature/1` | 1 read | `thermal-zone`, `generic-temperature` |
-| `power-monitor/1` | 1 read | `ina2xx`, `generic-power-monitor` |
+| `temperature/1` | 1 read | `thermal-zone`, `generic-temperature`, `modbus-temperature` |
+| `power-monitor/1` | 1 read | `ina2xx`, `generic-power-monitor`, `modbus-power-monitor` |
 | `power-switch/1` | 1 set, 2 is_on, 3 fault | `gpio-power-switch` |
 | `fan/1` | 1 set_duty, 2 duty, 3 rpm, 4 release | `hwmon-fan` |
 | `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
 | `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
 | `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |
 | `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
-| `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set | `raw-bus` |
+| `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
 | `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern | `ov9782` |
 | `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |

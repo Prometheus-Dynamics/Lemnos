@@ -1,0 +1,9 @@
+# A made-up Modbus RTU temperature probe for the simulated port. Its input
+# register 0 holds a device code, input register 1 the temperature in tenths
+# of a degree, and holding register 0x0200 starts it measuring.
+
+modbus input
+identity 0x0000 0x5a01                  # device code
+init 0x0200 0x0001                      # start measuring
+
+value temperature 0x0001 16 big signed 0.1

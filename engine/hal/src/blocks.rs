@@ -132,11 +132,54 @@ pub fn pulse_resets<R: Reset + ?Sized>(reset: &mut R) -> Result<u32, R::Error> {
     Ok(lines)
 }
 
-/// A serial port.
+/// A serial port's parity bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Parity {
+    /// No parity bit.
+    #[default]
+    None,
+    /// The parity bit makes the count of ones even.
+    Even,
+    /// The parity bit makes the count of ones odd.
+    Odd,
+}
+
+/// A serial port's stop bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StopBits {
+    /// One stop bit.
+    #[default]
+    One,
+    /// Two stop bits.
+    Two,
+}
+
+/// How a serial port frames its bytes: always 8 data bits, at `baud`, with a parity bit or none,
+/// and one or two stop bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UartFormat {
+    pub baud: u32,
+    pub parity: Parity,
+    pub stop_bits: StopBits,
+}
+
+impl UartFormat {
+    /// 8N1 at `baud`, the frame a port opens with.
+    pub const fn new(baud: u32) -> Self {
+        Self {
+            baud,
+            parity: Parity::None,
+            stop_bits: StopBits::One,
+        }
+    }
+}
+
+/// A serial port. It opens as 8N1 at a rate the backend chooses, until the driver configures it.
 pub trait Uart {
     type Error: HalError;
 
-    fn set_baud(&mut self, baud: u32) -> Result<(), Self::Error>;
+    /// Sets the rate and the frame. A rate or frame the port can't do is `InvalidInput`.
+    fn configure(&mut self, format: UartFormat) -> Result<(), Self::Error>;
     fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
     /// Returns what arrived, which is 0 bytes when the timeout passed first.
     fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, Self::Error>;

@@ -4,6 +4,9 @@
 //! Lines are `key words...`. `#` starts a comment, blank lines are skipped, and a number is decimal
 //! or `0x` hex. The lines are:
 //!
+//! - `modbus <holding|input>`: the chip is a Modbus RTU device on a UART, and its registers are
+//!   that table's 16-bit registers. Optional, and it comes before every other line. Without it the
+//!   chip's registers are 8-bit addresses on I2C.
 //! - `identity <register> <value>`: the identity register and the value it must read. Optional.
 //! - `init <register> <value> [<bits> <little|big>]`: a register write, one byte unless `bits` (8,
 //!   16, 24 or 32) and a byte order say wider. Writes run in file order when the chip starts.
@@ -19,7 +22,13 @@
 //! four, in the byte order given. A signed number is two's complement in its `bits`. Its value in
 //! the contract's unit is `count * scale + offset` (offset default 0).
 //!
-//! Registers are 8-bit. At most [`MAX_STEPS`] init and wait lines are allowed.
+//! On Modbus a register holds 16 bits, high byte first, so a channel reads one register, or two
+//! when `bits + shift` passes 16. Then `big` means the register at the lower address holds the
+//! high half, and `little` the low half. An `init` writes one register (function 6): its value is
+//! up to 16 bits, and the width, if given, is `16 big`. `identity` reads one register.
+//!
+//! Registers are 8-bit on I2C and 16-bit on Modbus. At most [`MAX_STEPS`] init and wait lines are
+//! allowed.
 
 use lemnos_hal::register::Endian;
 
@@ -28,6 +37,16 @@ pub const MAX_STEPS: usize = 32;
 
 /// The most channels a contract reads.
 pub const MAX_CHANNELS: usize = 4;
+
+/// How the chip's registers are reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// 8-bit register addresses on I2C.
+    I2c,
+    /// A Modbus RTU device's holding registers (function 3), or its input registers (function 4)
+    /// with `input`.
+    Modbus { input: bool },
+}
 
 /// Which contract a description is read for. Each names the channels the file must give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +88,7 @@ impl Kind {
 pub enum Step {
     /// Write `bytes` bytes of `value` in `endian` order, starting at `register`.
     Write {
-        register: u8,
+        register: u16,
         value: u32,
         bytes: u8,
         endian: Endian,
@@ -81,8 +100,8 @@ pub enum Step {
 /// Where one channel is, and how to turn its counts into the contract's unit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Channel {
-    pub register: u8,
-    /// Bytes read: 1 to 4.
+    pub register: u16,
+    /// Bytes read: 1 to 4. On Modbus, 2 or 4: one register or two.
     pub bytes: u8,
     /// Width of the number: 1 to 32.
     pub bits: u8,
@@ -138,7 +157,8 @@ pub struct ParseError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Chip {
     kind: Kind,
-    identity: Option<(u8, u8)>,
+    transport: Transport,
+    identity: Option<(u16, u16)>,
     steps: [Step; MAX_STEPS],
     len: usize,
     channels: [Channel; MAX_CHANNELS],
@@ -150,22 +170,30 @@ impl Chip {
     pub fn parse(text: &str, kind: Kind) -> Result<Self, ParseError> {
         let mut chip = Self {
             kind,
+            transport: Transport::I2c,
             identity: None,
             steps: [Step::Wait { millis: 0 }; MAX_STEPS],
             len: 0,
             channels: [Channel::ZERO; MAX_CHANNELS],
         };
         let mut seen = [false; MAX_CHANNELS];
+        let mut first = true;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("");
             let mut words = line.split_whitespace();
             let Some(key) = words.next() else {
                 continue;
             };
-            line_into(&mut chip, &mut seen, key, &mut words).map_err(|reason| ParseError {
+            let result = if key == "modbus" {
+                transport_into(&mut chip, first, &mut words)
+            } else {
+                line_into(&mut chip, &mut seen, key, &mut words)
+            };
+            result.map_err(|reason| ParseError {
                 line: index + 1,
                 reason,
             })?;
+            first = false;
         }
         if seen[..kind.channels().len()].iter().any(|&given| !given) {
             return Err(ParseError {
@@ -184,8 +212,13 @@ impl Chip {
         self.kind
     }
 
+    /// How the chip's registers are reached.
+    pub fn transport(&self) -> Transport {
+        self.transport
+    }
+
     /// The identity register and the value it must read, if the description checks one.
-    pub fn identity(&self) -> Option<(u8, u8)> {
+    pub fn identity(&self) -> Option<(u16, u16)> {
         self.identity
     }
 
@@ -209,6 +242,27 @@ impl Chip {
     }
 }
 
+/// The `modbus` line.
+fn transport_into<'a>(
+    chip: &mut Chip,
+    first: bool,
+    words: &mut impl Iterator<Item = &'a str>,
+) -> Result<(), &'static str> {
+    if !first {
+        return Err("modbus comes before every other line");
+    }
+    let input = match words.next() {
+        Some("holding") => false,
+        Some("input") => true,
+        _ => return Err("modbus is holding or input"),
+    };
+    if words.next().is_some() {
+        return Err("extra text at the end of the line");
+    }
+    chip.transport = Transport::Modbus { input };
+    Ok(())
+}
+
 fn line_into<'a>(
     chip: &mut Chip,
     seen: &mut [bool; MAX_CHANNELS],
@@ -220,14 +274,14 @@ fn line_into<'a>(
             if chip.identity.is_some() {
                 return Err("identity given twice");
             }
-            let register = byte(words.next())?;
-            chip.identity = Some((register, byte(words.next())?));
+            let register = register(words.next(), chip.transport)?;
+            chip.identity = Some((register, value(words.next(), chip.transport)?));
         }
         "init" => {
-            let register = byte(words.next())?;
+            let register = register(words.next(), chip.transport)?;
             let value = number(words.next())?;
-            let (bytes, endian) = match words.next() {
-                None => (1, Endian::Big),
+            let width = match words.next() {
+                None => None,
                 Some(bits) => {
                     let bytes = match number(Some(bits))? {
                         8 => 1,
@@ -236,7 +290,19 @@ fn line_into<'a>(
                         32 => 4,
                         _ => return Err("an init's bits is 8, 16, 24 or 32"),
                     };
-                    (bytes, endian_of(words.next())?)
+                    Some((bytes, endian_of(words.next())?))
+                }
+            };
+            let (bytes, endian) = match chip.transport {
+                Transport::I2c => width.unwrap_or((1, Endian::Big)),
+                Transport::Modbus { .. } => {
+                    if value > 0xffff {
+                        return Err("a modbus register or value is above 65535");
+                    }
+                    match width {
+                        None | Some((2, Endian::Big)) => (2, Endian::Big),
+                        Some(_) => return Err("a modbus init writes one 16-bit register"),
+                    }
                 }
             };
             if bytes < 4 && value >> (8 * u32::from(bytes)) != 0 {
@@ -276,13 +342,18 @@ fn line_into<'a>(
                     _ => "value given twice",
                 });
             }
-            chip.channels[slot] = channel(words)?;
+            chip.channels[slot] = channel(words, chip.transport)?;
             seen[slot] = true;
             // `channel` takes the options to the end of the line.
             return Ok(());
         }
         _ => return Err("unknown line"),
     }
+    finish(words)
+}
+
+/// Nothing may follow a line's last word.
+fn finish<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<(), &'static str> {
     if words.next().is_some() {
         return Err("extra text at the end of the line");
     }
@@ -290,8 +361,11 @@ fn line_into<'a>(
 }
 
 /// The rest of an `axis` or `value` line: where the number is, and its scale.
-fn channel<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Channel, &'static str> {
-    let register = byte(words.next())?;
+fn channel<'a>(
+    words: &mut impl Iterator<Item = &'a str>,
+    transport: Transport,
+) -> Result<Channel, &'static str> {
+    let register = register(words.next(), transport)?;
     let bits = number(words.next())?;
     if !(1..=32).contains(&bits) {
         return Err("bits is 1 to 32");
@@ -318,9 +392,13 @@ fn channel<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Channel, &'s
     let Some(span) = span else {
         return Err("bits and shift together are more than 32");
     };
+    let bytes = match transport {
+        Transport::I2c => span.div_ceil(8),
+        Transport::Modbus { .. } => 2 * span.div_ceil(16),
+    };
     Ok(Channel {
         register,
-        bytes: span.div_ceil(8) as u8,
+        bytes: bytes as u8,
         bits: bits as u8,
         shift: shift as u8,
         endian,
@@ -357,4 +435,19 @@ fn number(word: Option<&str>) -> Result<u32, &'static str> {
 
 fn byte(word: Option<&str>) -> Result<u8, &'static str> {
     u8::try_from(number(word)?).map_err(|_| "a register or value is above 255")
+}
+
+/// A register: a byte on I2C, 16 bits on Modbus.
+fn register(word: Option<&str>, transport: Transport) -> Result<u16, &'static str> {
+    match transport {
+        Transport::I2c => byte(word).map(u16::from),
+        Transport::Modbus { .. } => {
+            u16::try_from(number(word)?).map_err(|_| "a modbus register or value is above 65535")
+        }
+    }
+}
+
+/// A register's value: as wide as one register.
+fn value(word: Option<&str>, transport: Transport) -> Result<u16, &'static str> {
+    register(word, transport)
 }

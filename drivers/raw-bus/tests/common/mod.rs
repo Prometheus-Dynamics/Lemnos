@@ -10,7 +10,7 @@ use lemnos_core::{
     Result,
 };
 use lemnos_driver_raw_bus::RawBus;
-use lemnos_sim::mock::{MockLine, MockPwm};
+use lemnos_sim::mock::{MockLine, MockPwm, MockUart};
 use lemnos_sim::{Layout, SimBoard, SimI2c, SimSpi};
 
 /// The driver's one local caller: argument bytes in a `LOCAL_ARGS` buffer, as a driver-to-driver
@@ -55,8 +55,8 @@ pub fn bind(board: &mut SimBoard, entries: &[(&str, ConfigValue<'_>)]) -> Result
     RawBus::bind(&mut resources, &Config::new(entries))
 }
 
-/// A board with one of each resource, named as the driver's needs name them: `i2c`, `spi`, `line`
-/// and `pwm`. The I2C bus has chips at 0x17, 0x18, 0x19, 0x40, 0x50 (registers from 0x10), 0x68 and
+/// A board with one of each resource, named as the driver's needs name them: `i2c`, `spi`, `line`,
+/// `pwm` and `uart`. The I2C bus has chips at 0x17, 0x18, 0x19, 0x40, 0x50 (registers from 0x10), 0x68 and
 /// 0x7f.
 pub struct Wiring {
     pub board: SimBoard,
@@ -64,6 +64,7 @@ pub struct Wiring {
     pub spi: SimSpi,
     pub line: MockLine,
     pub pwm: MockPwm,
+    pub uart: MockUart,
 }
 
 pub fn wired() -> Wiring {
@@ -76,12 +77,14 @@ pub fn wired() -> Wiring {
     let spi = board.add_spi("spi");
     let line = board.add_line("line");
     let pwm = board.add_pwm("pwm");
+    let uart = board.add_uart("uart");
     Wiring {
         board,
         i2c,
         spi,
         line,
         pwm,
+        uart,
     }
 }
 
@@ -89,7 +92,7 @@ pub fn wired() -> Wiring {
 /// `BUSY`, and a call the policy refuses still returns the policy's own answer. So a refused call
 /// that returns its refusal, while the bus is down, never reached the bus.
 pub fn all_buses_down(wiring: &Wiring) {
-    for name in ["i2c", "spi", "line", "pwm"] {
+    for name in ["i2c", "spi", "line", "pwm", "uart"] {
         if let Some(faults) = wiring.board.faults(name) {
             faults.outage(Duration::ZERO, None, ErrorKind::Busy);
         }

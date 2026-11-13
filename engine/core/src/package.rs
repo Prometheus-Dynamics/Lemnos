@@ -43,8 +43,8 @@ use lemnos_hal::raw::{
 };
 use lemnos_hal::spi::{self, SpiDevice};
 use lemnos_hal::{
-    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart as HalUart, UsbDevice,
-    UsbFunction,
+    Clocks, DmaBuffers, Interrupt, Parity as UartParity, Registers, Reset, StopBits,
+    StreamEndpoint, Uart as HalUart, UartFormat, UsbDevice, UsbFunction,
 };
 
 use crate::{
@@ -237,6 +237,34 @@ pub fn pwm_config_in(config: PackagePwmConfig) -> Option<PwmConfig> {
         duty_ns: config.duty_ns,
         polarity: *[Polarity::Normal, Polarity::Inversed].get(config.polarity as usize)?,
         enabled: config.enabled != 0,
+    })
+}
+
+/// A serial frame as it crosses the package boundary: `(parity, stop_bits)`, parity 0 none, 1 even,
+/// 2 odd, and stop bits 1 or 2. The rate crosses as it is.
+pub fn uart_format_out(format: UartFormat) -> (u8, u8) {
+    let parity = match format.parity {
+        UartParity::None => 0,
+        UartParity::Even => 1,
+        UartParity::Odd => 2,
+    };
+    let stop_bits = match format.stop_bits {
+        StopBits::One => 1,
+        StopBits::Two => 2,
+    };
+    (parity, stop_bits)
+}
+
+/// `None` for a parity or a stop-bit count this build does not know.
+pub fn uart_format_in(baud: u32, parity: u8, stop_bits: u8) -> Option<UartFormat> {
+    Some(UartFormat {
+        baud,
+        parity: *[UartParity::None, UartParity::Even, UartParity::Odd].get(usize::from(parity))?,
+        stop_bits: match stop_bits {
+            1 => StopBits::One,
+            2 => StopBits::Two,
+            _ => return None,
+        },
     })
 }
 
@@ -943,8 +971,14 @@ impl RawPwm for Taken {
 impl HalUart for Taken {
     type Error = ErrorKind;
 
-    fn set_baud(&mut self, baud: u32) -> Hal<()> {
-        done((self.host.uart.set_baud)(self.handle, baud))
+    fn configure(&mut self, format: UartFormat) -> Hal<()> {
+        let (parity, stop_bits) = uart_format_out(format);
+        done((self.host.uart.configure)(
+            self.handle,
+            format.baud,
+            parity,
+            stop_bits,
+        ))
     }
 
     fn write(&mut self, data: &[u8]) -> Hal<usize> {

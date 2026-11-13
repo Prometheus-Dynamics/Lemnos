@@ -19,7 +19,8 @@ the driver.
 Five contracts can be served from a description: `magnetometer/1`, `accelerometer/1`,
 `gyroscope/1`, `temperature/1` and `power-monitor/1`, by the drivers `generic-magnetometer`,
 `generic-accelerometer`, `generic-gyroscope`, `generic-temperature` and `generic-power-monitor`
-in `drivers/generic-sensor`. Each contract's value names are fixed in code. The file gives only
+in `drivers/generic-sensor`, for a chip on I2C, and their `modbus-*` twins for a Modbus RTU device
+on a UART. Each contract's value names are fixed in code. The file gives only
 the chip's facts.
 
 A whole file, from `drivers/generic-sensor/tests/chips/sim-mag.chip`:
@@ -74,7 +75,7 @@ are read as `bits` and `shift` fill, at most four. A signed number is two's comp
 A, W).
 
 Numbers are decimal or `0x` hex, `#` starts a comment, and there are at most 32 `init` and `wait`
-lines. Registers are 8-bit addresses. An accelerometer's or gyroscope's batches need the chip's
+lines. Registers are 8-bit addresses on I2C (Modbus below). An accelerometer's or gyroscope's batches need the chip's
 FIFO, which a description does not cover, so `read_batch` answers `NOT_SUPPORTED`.
 
 The chip's I2C address is wiring, so it goes in the board file. The description goes in the same
@@ -89,12 +90,51 @@ bus = "<the bus the board names>"
 config = { address = 0x2c, description = "/etc/lemnos/chips/sim-mag.chip" }
 ```
 
+### A chip on Modbus
+
+A sensor on a serial line that speaks Modbus RTU, as many RS-485 probes and meters do, is described
+the same way. Its file starts with `modbus holding` or `modbus input`, the register table its values
+are in. Registers are then the device's 16-bit registers: a channel of up to 16 bits reads one, a
+wider one two, with `big` when the lower register holds the high half and `little` when it holds
+the low half. An `init` writes one register; `identity` reads one. From
+`drivers/generic-sensor/tests/chips/sim-modbus-temp.chip`:
+
+```text
+modbus input
+identity 0x0000 0x5a01                  # device code
+init 0x0200 0x0001                      # start measuring
+
+value temperature 0x0001 16 big signed 0.1
+```
+
+Each `generic-*` driver has a twin for this, `modbus-magnetometer` to `modbus-power-monitor`, whose
+one need is the UART, and `address` is the device's unit id (1 to 247). The
+port's frame is wiring too, so it is set in the board file: `baud` (default 9600), `parity`
+(`"none"`, `"even"` or `"odd"`, default `"even"`, Modbus's own default), `stop_bits` (1 or 2) and
+`response_ms` (how long a reply may take, 1 to 500, default 100):
+
+```toml
+[[devices]]
+id = "probe"
+driver = "modbus-temperature"
+bus = "<the port the board names>"
+config = { address = 7, baud = 19200, parity = "none", description = "/etc/lemnos/chips/probe.chip" }
+```
+
+Each read is a request and its reply, checked for the unit, the function, the length and the CRC.
+No reply is `TIMED_OUT`, a garbled one `IO`, and a Modbus exception (a register the device does
+not have) `NOT_SUPPORTED`; the next read sets the frame and runs the start-up again. Reading a
+Modbus device means sending requests, so one cannot be host-owned.
+
+### Binding
+
 Binding parses the file once into fixed arrays. A file with a bad line, or one written for another
 contract, is refused at bind with `INVALID_ARGUMENT`; the parser's error names the line, and the
 tests in `src/tests.rs` and `src/kinds.rs` check each refusal.
 
 To prove a new file, put it under `tests/chips/` and bind it on the simulated bus the way
-`src/kinds.rs` does. Then break one register in the file and check that the test fails before you
+`src/kinds.rs` does, or on the simulated port with an answering device as `src/modbus_tests.rs`
+does. Then break one register in the file and check that the test fails before you
 restore it.
 
 ```sh slow

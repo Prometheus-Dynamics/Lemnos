@@ -7,8 +7,8 @@ use std::time::Duration;
 use lemnos_core::ErrorKind;
 use lemnos_hal::blocks::{
     BufferHandle, BufferKind, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt,
-    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice,
-    UsbFunction, UsbFunctionEvent,
+    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UartFormat,
+    UsbDevice, UsbFunction, UsbFunctionEvent,
 };
 use lemnos_hal::i2c::{self, I2c, Operation};
 use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
@@ -199,7 +199,7 @@ impl<T: RawPwm> RawPwm for Faulty<T> {
 impl<T: Uart<Error = ErrorKind>> Uart for Faulty<T> {
     type Error = ErrorKind;
     forward! {
-        set_baud(baud: u32) -> ();
+        configure(format: UartFormat) -> ();
         write(data: &[u8]) -> usize;
         read(out: &mut [u8], timeout: Duration) -> usize;
     }

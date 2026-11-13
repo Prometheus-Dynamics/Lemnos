@@ -14,6 +14,8 @@ fn the_tag_and_numbers_are_stable() {
             ("line_get", 3),
             ("line_set", 4),
             ("pwm_set", 5),
+            ("uart_write", 6),
+            ("uart_read", 7),
         ]
     );
 }
@@ -32,4 +34,11 @@ fn the_shapes_carry_bytes_in_the_call_and_fill_a_reply_buffer() {
     assert!(spi.has_out_buffer);
     assert_eq!(info.methods[2].returns, Shape::Bool);
     assert_eq!(info.methods[4].params[0].shape, Shape::U64);
+    let uart_write = info.methods[5];
+    assert_eq!(uart_write.params[0].shape, Shape::Bytes);
+    assert_eq!(uart_write.returns, Shape::U32);
+    let uart_read = info.methods[6];
+    assert_eq!(uart_read.params[0].shape, Shape::U32);
+    assert_eq!(uart_read.params[1].name, "timeout_ms");
+    assert!(uart_read.has_out_buffer);
 }

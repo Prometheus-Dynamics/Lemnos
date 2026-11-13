@@ -18,8 +18,8 @@ use lemnos_hal::blocks::{
 use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
 use lemnos_hal::spi::{self, Operation, SpiDevice};
 use lemnos_hal::{
-    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart as HalUart, UsbDevice,
-    UsbFunction,
+    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart as HalUart, UartFormat,
+    UsbDevice, UsbFunction,
 };
 use lemnos_sim::SimBoard;
 
@@ -136,7 +136,7 @@ impl RawPwm for Quiet {
 impl HalUart for Quiet {
     type Error = ErrorKind;
 
-    fn set_baud(&mut self, _baud: u32) -> Hal<()> {
+    fn configure(&mut self, _format: UartFormat) -> Hal<()> {
         Ok(())
     }
 

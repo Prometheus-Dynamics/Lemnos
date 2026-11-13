@@ -1,5 +1,5 @@
-//! The `raw-bus/1` contract: raw access to the I2C bus, SPI device, GPIO line and PWM channel a device
-//! is wired to. A device has at most one of each, and each method works on the ones it has. Nothing
+//! The `raw-bus/1` contract: raw access to the I2C bus, SPI device, GPIO line, PWM channel and
+//! UART a device is wired to. A device has at most one of each, and each method works on the ones it has. Nothing
 //! here is a message of its own: a caller asks for a transfer the way it asks for any other method,
 //! and each transfer carries its bytes in the call, so one call is one bus transaction.
 //!
@@ -51,4 +51,18 @@ pub trait RawBus {
     /// Sets the PWM channel's period, duty (both in nanoseconds) and enable.
     #[method(5)]
     fn pwm_set(&mut self, period_ns: u64, duty_ns: u64, enabled: bool) -> Result<()>;
+    /// Sends `data` on the UART and returns how many bytes went: fewer than all when the port's
+    /// transmit buffer stays full. An empty `data` is `INVALID_ARGUMENT`.
+    #[method(6)]
+    fn uart_write(&mut self, data: &[u8]) -> Result<u32>;
+    /// Up to `max_len` bytes that arrived on the UART, waiting at most `timeout_ms` for the first
+    /// (0 does not wait, and more than [`UART_MAX_WAIT_MS`] is `INVALID_ARGUMENT`). The bytes go
+    /// into `into`, which must hold `max_len`, and the number is returned: 0 when nothing came.
+    /// A `max_len` of 0 is `INVALID_ARGUMENT`.
+    #[method(7)]
+    fn uart_read(&mut self, max_len: u32, timeout_ms: u32, #[out] into: &mut [u8])
+    -> Result<usize>;
 }
+
+/// The longest `uart_read` waits, in milliseconds: half the host's call deadline.
+pub const UART_MAX_WAIT_MS: u32 = 1000;

@@ -64,7 +64,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     (`reg021_adr_ecs_len`) and of the chroma source planes per format. Read from MPP's own
     buffer sizes these would be guesses at the hardware, so JPEG still runs through `rk-mpp`
     with the caller's registers.
-- [ ] **No built-in driver takes a UART.**
 - [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the
       C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
       `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),

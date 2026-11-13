@@ -389,7 +389,8 @@ typedef struct LemnosPwmTable {
 } LemnosPwmTable;
 
 typedef struct LemnosUartTable {
-    LemnosStatus (*set_baud)(LemnosHandle uart, uint32_t baud);
+    /* parity: 0 none, 1 even, 2 odd. stop_bits: 1 or 2. */
+    LemnosStatus (*configure)(LemnosHandle uart, uint32_t baud, uint8_t parity, uint8_t stop_bits);
     LemnosStatus (*write)(LemnosHandle uart, LemnosSlice data, size_t *len);
     LemnosStatus (*read)(LemnosHandle uart, LemnosSliceMut out, uint64_t timeout_ns, size_t *len);
 } LemnosUartTable;

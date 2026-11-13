@@ -218,12 +218,12 @@ impl Fixture {
         }
     }
 
-    /// 0: sets the baud rate (4). 1: sends `data`, answers how many went (8). 2: what arrived.
+    /// 0: sets the baud rate, 8N1 (4). 1: sends `data`, answers how many went (8). 2: what arrived.
     fn uart(&mut self, step: u8, data: &[u8], into: &mut [u8]) -> Result<usize> {
         let uart = self.uart.as_mut().ok_or_else(missing)?;
         match step {
             0 => {
-                uart.set_baud(u32_at(data, 0)?).map_err(failed)?;
+                uart.configure(UartFormat::new(u32_at(data, 0)?)).map_err(failed)?;
                 Ok(0)
             }
             1 => {

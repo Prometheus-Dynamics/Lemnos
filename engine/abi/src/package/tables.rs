@@ -476,7 +476,9 @@ table! {
 table! {
     /// A serial port.
     UartTable served by UartHost {
-        fn set_baud(uart: Handle, baud: u32);
+        /// `parity`: 0 none, 1 even, 2 odd. `stop_bits`: 1 or 2. Anything else is
+        /// `INVALID_ARGUMENT`.
+        fn configure(uart: Handle, baud: u32, parity: u8, stop_bits: u8);
         fn write(uart: Handle, data: Slice<'_, u8>, len: Out<'_, usize>);
         /// What arrived within `timeout_ns`: 0 bytes when nothing did.
         fn read(uart: Handle, out: SliceMut<'_, u8>, timeout_ns: u64, len: Out<'_, usize>);

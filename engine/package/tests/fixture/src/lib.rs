@@ -14,7 +14,9 @@ use lemnos_core::{
     Item, Lifecycle, Line, MethodId, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Result, Spi,
     Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, contract, driver, status_of,
 };
-use lemnos_hal::blocks::{BufferKind, ControlSetup, IsoPacket, StreamFrame, UsbFunctionEvent};
+use lemnos_hal::blocks::{
+    BufferKind, ControlSetup, IsoPacket, StreamFrame, UartFormat, UsbFunctionEvent,
+};
 use lemnos_hal::i2c::I2c as _;
 use lemnos_hal::raw::{
     Bias, EdgeDetect, LineConfig, Polarity, PwmConfig, SpiConfig, SpiMode, SpiSegment,

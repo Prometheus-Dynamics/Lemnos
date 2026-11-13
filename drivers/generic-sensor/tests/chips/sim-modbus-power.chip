@@ -1,0 +1,9 @@
+# A made-up Modbus RTU power meter for the simulated port. Its 32-bit values
+# span two holding registers, the low half first.
+
+modbus holding
+
+value bus_v 0x0010 16 big unsigned 0.1               # V per count
+value shunt_v 0x0011 16 big signed 0.000001          # V per count
+value current_a 0x0012 32 little signed 0.001        # A per count
+value power_w 0x0014 32 little unsigned 0.1          # W per count
