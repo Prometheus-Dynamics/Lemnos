@@ -1147,3 +1147,33 @@ fn carrying_bytes_both_ways_allocates_nothing() {
     assert!(counters.jobs >= warm.jobs + 1000, "{counters:?}");
     assert_eq!(counters.errors, 0);
 }
+
+/// A request whose data comes from the host, taken into a buffer too small for it: refused as
+/// `BUFFER_TOO_SMALL` before the function is asked, so nothing is accepted, the request stays
+/// pending, and a buffer that holds it takes it whole.
+#[test]
+fn a_control_out_that_cannot_hold_the_request_is_refused_before_anything_is_taken() {
+    let mut rig = Rig::configured();
+    rig.consumer.return_buffer(0);
+    rig.want_event(1, 0);
+    rig.tick();
+    assert_eq!(rig.event(1).kind, EventKind::Configured);
+    rig.consumer.return_buffer(0);
+    rig.want_event(3, 0);
+    rig.host.request(request(0x40), 8, b"12345678");
+    rig.tick();
+    assert_eq!(rig.event(3).request.length, 8);
+
+    let mut small = [0u8; 4];
+    assert_eq!(
+        UsbFunction::control_out(&mut rig.driver, &mut small),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+    assert!(rig.host.answers().is_empty(), "the request was accepted");
+    assert!(UsbFunction::state(&mut rig.driver).unwrap().request_pending);
+
+    let mut taken = [0u8; 8];
+    assert_eq!(UsbFunction::control_out(&mut rig.driver, &mut taken), Ok(8));
+    assert_eq!(&taken, b"12345678");
+    assert_eq!(rig.host.answers(), [(request(0x40), ControlAnswer::Out)]);
+}

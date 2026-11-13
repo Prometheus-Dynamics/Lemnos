@@ -875,6 +875,110 @@ fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
     assert!(big.detail.contains("61440"), "{big:?}");
 }
 
+/// The slot ids in a `list_page` reply, in order.
+fn page_ids(json: &str) -> Vec<String> {
+    json.split("\"id\":\"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The text of a string field of a reply, or of a bare word field such as `more`.
+fn page_field<'a>(json: &'a str, key: &str) -> &'a str {
+    let start = json
+        .find(&format!("\"{key}\":"))
+        .unwrap_or_else(|| panic!("no {key} in {json}"))
+        + key.len()
+        + 3;
+    let rest = &json[start..];
+    match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next().unwrap_or_default(),
+        None => rest.split([',', '}']).next().unwrap_or_default(),
+    }
+}
+
+#[test]
+fn the_slot_list_is_walked_page_by_page_through_the_bridge_with_nothing_lost_or_repeated() {
+    let dir = dir("paged");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
+    files.boot("os-2", "an-os", "2.0");
+    image(&files.dir, "os-2");
+    std::fs::create_dir_all(dir.join("boot/slots")).expect("boot slots");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &outbuf_board(&files));
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the slots resource", || {
+        resource(&dashboard, "lemnos.slots")
+    });
+
+    // 600 more slots: about 210 KB of list, so `list` is refused and the pages carry it.
+    let mut expected: Vec<String> = vec!["os-2".to_string()];
+    for i in 0..600 {
+        let id = format!("bulk-{i:03}");
+        std::fs::write(
+            files.dir.join("data/slots").join(format!("{id}.json")),
+            manifest(&id, "bulk", "1.0"),
+        )
+        .expect("manifest");
+        image(&files.dir, &id);
+        expected.push(id);
+    }
+    let whole = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    assert_ne!(whole.outcome, Outcome::Succeeded, "{whole:?}");
+
+    // Page by page, the cursor the last page named. After the first page a slot is installed:
+    // its install number is larger than every other slot's, as a real install's is.
+    let mut seen: Vec<String> = Vec::new();
+    let mut after = "-".to_string();
+    let mut pages = 0;
+    loop {
+        let reply = run_once_said(
+            &dashboard,
+            "lemnos.slots.call",
+            "lemnos.slots",
+            &format!("list_page {after}"),
+        );
+        assert_eq!(reply.outcome, Outcome::Succeeded, "{reply:?}");
+        assert!(reply.output.len() <= 61440, "{} bytes", reply.output.len());
+        let json = String::from_utf8(reply.output).expect("text");
+        pages += 1;
+        seen.extend(page_ids(&json));
+        if pages == 1 {
+            let id = "late";
+            std::fs::write(
+                files.dir.join("data/slots").join(format!("{id}.json")),
+                manifest(id, "late", "1.0"),
+            )
+            .expect("manifest");
+            image(&files.dir, id);
+            let meta = files
+                .dir
+                .join("data/board/slots")
+                .join(format!("{id}.meta"));
+            std::fs::write(meta, "SEQ='100000'\nINSTALLED='2026-11-13T00:00:00Z'\n").expect("meta");
+        }
+        if page_field(&json, "more") != "true" {
+            break;
+        }
+        after = page_field(&json, "next").to_string();
+        assert_ne!(after, "", "{json}");
+        assert!(pages < 100, "the walk does not end");
+    }
+    assert!(pages >= 3, "{pages} pages");
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), seen.len(), "a slot came on two pages");
+    expected.sort();
+    assert_eq!(
+        sorted, expected,
+        "every slot that was there at the start, once, and no later one"
+    );
+}
+
 /// The image file of slot `id` under `dir`, 4096 bytes as its manifest says.
 fn image(dir: &Path, id: &str) {
     let file =

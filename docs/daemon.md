@@ -266,11 +266,12 @@ each out-buffer method's largest reply, from its contract's own bounds:
 | `gpu-lease/1` | `last_hang` | 128 bytes (`DETAIL_MAX`) | whole |
 | `system-identity/1` | `serial`, `family`, `model` | 256 bytes (`MAX_TEXT`) | whole |
 | `system-identity/1` | `facts` | 2048 bytes (`MAX_FACTS_TEXT`) | whole |
-| `system-slots/1` | `list` | unbounded: 1 slot is about 350 bytes, so about 170 fit | refused by name over about 170 slots; paged form in M8b |
 | `self-test/1` | `tests` | a device: 1 + 8 tests of 249 bytes, 1993 bytes; a board: 1 + 129 entries, 32122 bytes | whole |
 | `self-test/1` | `last` | a device: 1 + 8 results of 454 bytes, 3633 bytes; a board: 1 + 129 entries, 58567 bytes | whole, under 61440 |
+| `system-slots/1` | `list` | unbounded: 1 slot is about 350 bytes, so about 170 fit | refused by name over about 170 slots; use `list_page` |
+| `system-slots/1` | `list_page` | one page: the whole slots that fit the size, about 170 in 60 KiB | whole: the page is at most the size given, and the walk continues from the page's `next` (see `docs/slots.md`) |
 | `raw-bus/1` | `i2c_transfer`, `spi_transfer` (`read_len`), `uart_read` (`max_len`) | the caller's length, up to 4 GiB | a length above 61440 is refused before the transfer; ask for less and repeat |
-| `usb-function/1` | `control_out` | the pending request's `length`, up to 65535 | not checkable up front (no length argument): the bridge refuses a reply too large for its buffer, and the device must refuse before it accepts the request (not yet verified in the USB driver) |
+| `usb-function/1` | `control_out` | the pending request's `length`, up to 65535 | not checkable up front (no length argument). The USB driver refuses a buffer smaller than the pending request's `length` with `BUFFER_TOO_SMALL` before it asks the device, so nothing is transferred and the request stays pending; the bridge names the refusal. Tested on the mock (`drivers/usb-gadget/src/serve_tests.rs`) |
 | `usb-function/1` | `data_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
 
 A length the caller gives (`read_len`, `max_len`) is checked before the call is made, so a bus

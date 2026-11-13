@@ -174,6 +174,9 @@ pub struct UsbGadget {
     /// How many consumers had gone when the request that waits was reported: one more since
     /// means whoever was told of it is no longer there.
     request_gone: u32,
+    /// The length of the pending request when its data comes from the host, else `None`: the
+    /// bytes `control_out` must be able to hold.
+    request_out: Option<u16>,
     /// The caller holding the bulk endpoints, if one does: see [`Lifecycle::endpoints`].
     holder: Option<CallerId>,
     serve: Serve,
@@ -332,6 +335,7 @@ impl UsbGadget {
                         self.serve.request_deadline_ns =
                             Some(now_ns.saturating_add(self.control_timeout_ns));
                         self.request_gone = self.serve.gone;
+                        self.request_out = (setup.request_type & 0x80 == 0).then_some(length);
                     } else {
                         // Nobody here answers requests. A host that already let it go is no
                         // fault.
@@ -421,6 +425,16 @@ impl UsbFunction for UsbGadget {
     }
 
     fn control_out(&mut self, into: &mut [u8]) -> Result<usize> {
+        // The data stage is taken whole or not at all: a buffer that cannot hold the pending
+        // request's data is refused before the function is asked, so nothing is transferred
+        // and the request stays pending.
+        if self.serve.request_deadline_ns.is_some()
+            && self
+                .request_out
+                .is_some_and(|length| into.len() < usize::from(length))
+        {
+            return Err(Status::BUFFER_TOO_SMALL);
+        }
         let came = self.function.control_out(into, CONTROL_STAGE);
         self.answered(came)
     }
@@ -536,6 +550,7 @@ impl Lifecycle for UsbGadget {
             suspended: false,
             control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
             request_gone: 0,
+            request_out: None,
             serve,
             holder: None,
             next_ns: 0,

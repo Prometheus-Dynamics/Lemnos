@@ -29,6 +29,11 @@
 //! ```
 //!
 //! An empty id is `""`.
+//!
+//! `list_page` writes the same object with `slots` holding one page, then `"more":<bool>` and
+//! `"next":"<seq>:<id>"` (`""` when no page follows) before `trial` and `resolved`. Pages run
+//! over the slots' install numbers, newest first, ties by id, so a slot installed between two
+//! pages is never in a later one and none is repeated.
 
 #![no_std]
 
@@ -92,4 +97,11 @@ pub trait Slots {
     /// when it doesn't fit.
     #[method(12)]
     fn boots(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// One page of `list`, for a board whose slots don't fit one reply. `after` is `-` for the
+    /// first page, and then the `next` of the page before (`<seq>:<id>`). The page is the slots
+    /// that come after the cursor, newest first, as many as fit the buffer; `more` says whether
+    /// another page follows, and `next` is the cursor for it. Returns the length, as `list` does.
+    /// `INVALID_ARGUMENT` for a cursor that is not one; `BUFFER_TOO_SMALL` when a slot does not fit.
+    #[method(13)]
+    fn list_page(&mut self, after: &str, #[out] into: &mut [u8]) -> Result<usize>;
 }
