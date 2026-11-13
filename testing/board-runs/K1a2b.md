@@ -12,7 +12,7 @@ Github HDD. Module loads and unbinds are allowed; report each.
 ## Checks
 
 1. **Identity.** Read `reg0000` (VERSION, word 0) through the service once the claim is bound.
-   Pass: `H264_ENC` (bit 8) is 1 and `RKVENC_VER` (bits 24 to 31) is `0x50`. Any other value: stop.
+   Pass: `CAP` (bit 8) is 1 and `IP_ID` (bits 24 to 31) is `0x50`. Any other value: stop.
 2. **Status read-back.** Submit one job with only `TQ8_CKG` set (word 22, BASE class) and no
    address. Pass: the completion returns without a fault and the status class (words 4096 to 4275)
    reads back.
