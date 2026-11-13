@@ -13,6 +13,17 @@ step() {
   echo "    $label: $((SECONDS - start)) s"
 }
 
+# Cargo.lock is tracked. A dependency change that did not update it fails here, before any
+# other cargo command could rewrite it: --locked refuses to change the lock.
+lockfile() {
+  if ! cargo metadata --locked --format-version 1 >/dev/null; then
+    echo "Cargo.lock is out of date with the manifests. Run: cargo metadata --format-version 1 >/dev/null" >&2
+    echo "then commit Cargo.lock with the change (docs/building.md, \"The lock file\")." >&2
+    return 1
+  fi
+}
+step lockfile lockfile
+
 step format cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets -- -D warnings
 step tests cargo test --workspace

@@ -19,15 +19,16 @@ scripts/gate.sh
 
 What it runs, in order:
 
-1. `cargo fmt --all --check`.
-2. `cargo clippy --workspace --all-targets -- -D warnings`.
-3. `cargo test --workspace`.
-4. `cargo check` of the `no_std` crates for three targets: a Cortex-M, a RISC-V microcontroller and
+1. `cargo metadata --locked`: `Cargo.lock` matches the manifests (docs/building.md, "The lock file").
+2. `cargo fmt --all --check`.
+3. `cargo clippy --workspace --all-targets -- -D warnings`.
+4. `cargo test --workspace`.
+5. `cargo check` of the `no_std` crates for three targets: a Cortex-M, a RISC-V microcontroller and
    32-bit ARM Linux.
-5. A few feature combinations: the measurement counters, the client on tokio, the C API as a shared
+6. A few feature combinations: the measurement counters, the client on tokio, the C API as a shared
    library.
-6. `scripts/check-boundaries.sh`: the layering rules.
-7. `scripts/check-docs.py`: the commands and links in these documents, the driver list and the
+7. `scripts/check-boundaries.sh`: the layering rules.
+8. `scripts/check-docs.py`: the commands and links in these documents, the driver list and the
    board-run list.
 
 The last two also run on their own:
