@@ -26,10 +26,8 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use lemnos_hal::usb_descriptors::ms_os;
-use lemnos_linux_sys::usbfs::{ControlSetup, UsbfsFile};
 use lemnosd::privilege::KEEP;
 
 mod daemon;
@@ -56,7 +54,7 @@ config = { serial = "cmdline", serial_key = "lemnos.serial" }
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:dummy_udc.0" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 gadget-check\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive ifname=lemnos%d\nfunction acm\n" }
+config = { manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity" }
 "#;
 
 /// Where the board file is written, and the daemon's socket beside it (the daemon makes its
@@ -83,22 +81,15 @@ pub const EP_OUT: u8 = 0x02;
 /// The bytes moved, in packets of the high-speed bulk size.
 pub const CHUNK: usize = 512;
 const ROUNDS: usize = 8;
-/// The interfaces the host must see, in order: the vendor-class FunctionFS link, then the CDC NCM
-/// control and data interfaces, then the CDC ACM control and data interfaces. Class, subclass.
-const INTERFACES: [(u8, u8); 5] = [
-    (0xff, 0x00),
-    (0x02, 0x0d),
-    (0x0a, 0x00),
-    (0x02, 0x02),
-    (0x0a, 0x00),
-];
-
 /// A line on standard output, which the harness reads.
 macro_rules! say {
     ($($arg:tt)*) => {
         { let _ = std::io::Write::write_fmt(&mut std::io::stdout(), format_args!("{}\n", format_args!($($arg)*))); }
     };
 }
+
+mod contract;
+mod host;
 
 fn main() -> ExitCode {
     // The first argument decides which role this process plays; the children are this program.
@@ -109,7 +100,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("host") => {
-            return if host_side() {
+            return if host::host_side() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -309,238 +300,4 @@ fn probe() -> bool {
     lemnos_linux_sys::mount::functionfs(UDC, &Path::new(MOUNTS).join(UDC), "")
         .err()
         .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
-}
-
-/// The host's side: find the device, check its interfaces, and loop the bulk pair.
-fn host_side() -> bool {
-    let Some(path) = find_device(Duration::from_secs(60)) else {
-        say!("FAIL the host sees the gadget (1209:0001) on the bus");
-        return false;
-    };
-    let usb = match UsbfsFile::open(&path) {
-        Ok(usb) => usb,
-        Err(error) => {
-            say!("FAIL open {}: {error}", path.display());
-            return false;
-        }
-    };
-    let mut descriptors = [0u8; 4096];
-    let n = usb.read_descriptors(0, &mut descriptors).unwrap_or(0);
-    let seen = interfaces(&descriptors[..n]);
-    let mut ok = seen == INTERFACES;
-    ok &= os_descriptors(&usb, &descriptors[..n]);
-    say!(
-        "{} the host sees {:02x?} (want {:02x?})",
-        if ok { "ok  " } else { "FAIL" },
-        seen,
-        INTERFACES
-    );
-    if let Err(error) = usb.claim_interface(0) {
-        say!("FAIL claim the vendor interface: {error}");
-        return false;
-    }
-    let mut pattern = [0u8; CHUNK];
-    let mut back = [0u8; CHUNK];
-    for round in 0..ROUNDS {
-        for (i, byte) in pattern.iter_mut().enumerate() {
-            *byte = (round * 31 + i) as u8;
-        }
-        let sent = usb.bulk_out(EP_OUT, &pattern, 10_000);
-        let got = usb.bulk_in(EP_IN, &mut back, 10_000);
-        if sent.as_ref().ok() != Some(&CHUNK)
-            || got.as_ref().ok() != Some(&CHUNK)
-            || back != pattern
-        {
-            say!("FAIL round {round}: sent {sent:?}, received {got:?}");
-            ok = false;
-            break;
-        }
-    }
-    if ok {
-        say!("ok   {ROUNDS} rounds of {CHUNK} bytes went out and came back");
-    }
-    ok
-}
-
-/// The Microsoft OS 1.0 descriptors, requested the way Windows requests them and read back byte
-/// for byte: string 0xEE; the extended compatible IDs (`wIndex` 4, to the device, as the kernel
-/// answers them); and the link's extended properties (`wIndex` 5, to its interface 0). The
-/// expected bytes are what the host reads, names and data as UTF-16 with a NUL.
-fn os_descriptors(usb: &UsbfsFile, descriptors: &[u8]) -> bool {
-    let wide = |text: &str, nul: bool| -> Vec<u8> {
-        let mut units: Vec<u16> = text.encode_utf16().collect();
-        if nul {
-            units.push(0);
-        }
-        units.iter().flat_map(|unit| unit.to_le_bytes()).collect()
-    };
-    let mut ok = true;
-
-    let mut want = vec![0x12, 0x03];
-    want.extend(wide(ms_os::QW_SIGN, false));
-    want.extend([ms_os::VENDOR_CODE, 0]);
-    ok &= request(
-        usb,
-        "string 0xEE",
-        ControlSetup {
-            request_type: 0x80,
-            request: 6,
-            value: 0x03ee,
-            index: 0,
-        },
-        &want,
-    );
-
-    // The link (interface 0) and the NCM control interface, the two the kernel lists.
-    let mut entries = vec![(0u8, ms_os::LINK_COMPATIBLE_ID)];
-    if let Some(number) = ncm_interface(descriptors) {
-        entries.push((number, ms_os::NCM_COMPATIBLE_ID));
-    } else {
-        say!("FAIL the NCM control interface is not in the descriptors");
-        ok = false;
-    }
-    let mut want = Vec::new();
-    want.extend(((16 + 24 * entries.len()) as u32).to_le_bytes());
-    want.extend([0x00, 0x01]);
-    want.extend(4u16.to_le_bytes());
-    want.push(entries.len() as u8);
-    want.extend([0; 7]);
-    for (first, id) in &entries {
-        want.extend([*first, 1]);
-        want.extend(id);
-        want.extend([0; 8 + 6]);
-    }
-    ok &= request(
-        usb,
-        "extended compatible IDs",
-        ControlSetup {
-            request_type: 0xc0,
-            request: ms_os::VENDOR_CODE,
-            value: 0,
-            index: 4,
-        },
-        &want,
-    );
-
-    let name = wide(ms_os::LINK_GUID_PROPERTY, true);
-    let data = wide(ms_os::LINK_GUID, true);
-    let size = 14 + name.len() + data.len();
-    let mut want = Vec::new();
-    want.extend(((10 + size) as u32).to_le_bytes());
-    want.extend([0x00, 0x01]);
-    want.extend(5u16.to_le_bytes());
-    want.extend(1u16.to_le_bytes());
-    want.extend((size as u32).to_le_bytes());
-    want.extend(1u32.to_le_bytes());
-    want.extend((name.len() as u16).to_le_bytes());
-    want.extend(&name);
-    want.extend((data.len() as u32).to_le_bytes());
-    want.extend(&data);
-    ok &= request(
-        usb,
-        "extended properties of interface 0",
-        ControlSetup {
-            request_type: 0xc1,
-            request: ms_os::VENDOR_CODE,
-            value: 0,
-            index: 5,
-        },
-        &want,
-    );
-    ok
-}
-
-/// One control read, which must return `want` exactly.
-fn request(usb: &UsbfsFile, what: &str, setup: ControlSetup, want: &[u8]) -> bool {
-    let mut got = vec![0u8; want.len() + 8];
-    match usb.control_in(setup, &mut got, 5000) {
-        Ok(n) if got[..n] == *want => {
-            say!("ok   {what}: {n} bytes as the host reads them");
-            true
-        }
-        Ok(n) => {
-            say!("FAIL {what}: got {:02x?}, want {:02x?}", &got[..n], want);
-            false
-        }
-        Err(error) => {
-            say!("FAIL {what}: {error}");
-            false
-        }
-    }
-}
-
-/// The number of the CDC NCM control interface (class 0x02, subclass 0x0d) in the descriptors.
-fn ncm_interface(bytes: &[u8]) -> Option<u8> {
-    let mut at = 0;
-    while at + 2 <= bytes.len() {
-        let len = usize::from(bytes[at]);
-        if len < 2 || at + len > bytes.len() {
-            break;
-        }
-        let is_ncm = bytes[at + 1] == 4
-            && len >= 9
-            && bytes[at + 3] == 0
-            && bytes[at + 5] == 0x02
-            && bytes[at + 6] == 0x0d;
-        if is_ncm {
-            return Some(bytes[at + 2]);
-        }
-        at += len;
-    }
-    None
-}
-
-/// The bus path of the device with the gadget's vendor and product, when it is listed.
-fn find_device(within: Duration) -> Option<PathBuf> {
-    let until = Instant::now() + within;
-    loop {
-        if let Some(path) = scan() {
-            return Some(path);
-        }
-        if Instant::now() >= until {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn scan() -> Option<PathBuf> {
-    for entry in fs::read_dir("/sys/bus/usb/devices").ok()?.flatten() {
-        let dir = entry.path();
-        let text = |name: &str| {
-            fs::read_to_string(dir.join(name))
-                .ok()
-                .map(|s| s.trim().to_string())
-        };
-        if text("idVendor").as_deref() != Some("1209")
-            || text("idProduct").as_deref() != Some("0001")
-        {
-            continue;
-        }
-        let bus: u32 = text("busnum")?.parse().ok()?;
-        let dev: u32 = text("devnum")?.parse().ok()?;
-        let path = PathBuf::from(format!("/dev/bus/usb/{bus:03}/{dev:03}"));
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// The (class, subclass) of each interface setting 0 in the descriptors, in order.
-fn interfaces(bytes: &[u8]) -> Vec<(u8, u8)> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while at + 2 <= bytes.len() {
-        let len = usize::from(bytes[at]);
-        if len < 2 || at + len > bytes.len() {
-            break;
-        }
-        // Interface descriptor: type 4, alternate setting at 3, class at 5, subclass at 6.
-        if bytes[at + 1] == 4 && len >= 9 && bytes[at + 3] == 0 {
-            out.push((bytes[at + 5], bytes[at + 6]));
-        }
-        at += len;
-    }
-    out
 }

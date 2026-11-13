@@ -91,10 +91,41 @@ Pass and fail, per function:
 - NCM: PASS if a network service appears and gets an address with no driver install. FAIL otherwise.
 - ACM: PASS if `/dev/cu.usbmodem*` appears. FAIL otherwise.
 
-## Linux side, checked in QEMU
+## Linux side, checked in QEMU (run locally, positive and two negatives)
 
-The harness's host reads string 0xEE, the extended compatible IDs (`wIndex` 4, to the device) and the
-extended properties (`wIndex` 5, to interface 0, with `bmRequestType` 0xC1) byte for byte. Their
-expected bytes are the ones Windows should read. Any mismatch fails the check.
+The harness's host (`testing/crates/gadget-check/src/host.rs`) reads the device the way Windows
+requests it and compares every byte with what `contracts/usb-link.toml` says, not with the driver's
+constants (the driver and the check share no identity value):
 
-Untested on board. The results below are the next board run's to fill in.
+- the device descriptor: vendor, product, `bcdDevice`, class, against the file;
+- the interface list: every interface, with its number, alternate setting, class, subclass and
+  protocol, printed in full;
+- the link is interface 0 on the bus, and no interface association covers it;
+- the link's interface string, read as a string descriptor, against the file (`orion-link`);
+- string 0xEE; the extended compatible IDs (`wIndex` 4, to the device), whose first function section
+  names the link's interface; the extended property `DeviceInterfaceGUID` (`wIndex` 5, `wValue` the
+  link's interface, `bmRequestType` 0xC1), name, REG_SZ and UTF-16LE value against the file.
+
+Pinned kernel (modules-on), the harness run from this branch, one run each. The gadget's board has no
+`interfaces` key, so the default composition is what the host checks.
+
+- Positive: `lemnos-qemu: passed (0 failed)`. Host lines: the device descriptor (vendor 0x1d6b,
+  product 0x0104, `bcdDevice` 0x0200, class 0xef/0x02/0x01) as the file says; the interface list of six
+  settings (interface 0 class 0xff, interfaces 1 to 4 the CDC pair, interface 2 alternate 1 the NCM
+  endpoints); the link is interface 0 with no association covering it; the interface string
+  `orion-link`; string 0xEE 18 bytes; extended compatible IDs 64 bytes, the first section naming
+  interface 0; extended property `DeviceInterfaceGUID` 142 bytes; 8 rounds of 512 bytes looped back.
+- Negative 1, OS descriptors off (`os_descriptors/use` 1 to 0 in `backends/linux/src/gadget.rs`):
+  `FAIL string 0xEE` (Broken pipe), `FAIL extended compatible IDs` (timed out), `FAIL extended properties
+  of interface 0` (Broken pipe), and the compatible-ID section check FAILs as the host got no bytes;
+  `lemnos-qemu: FAILED (1 failed)`. The interface list passes in this run.
+- Negative 2, one byte of the driver's GUID (`LINK_GUID` in `engine/hal/src/usb_descriptors.rs`,
+  `CF13388F` to `CF13388E`): `FAIL extended properties of interface 0: got [8e, 00, ...]`, the
+  properties check, and `lemnos-qemu: FAILED (1 failed)`.
+- Negative 3, one byte of the contract file alone (`[link] guid` in `contracts/usb-link.toml`): the
+  same `FAIL extended properties of interface 0`, `lemnos-qemu: FAILED (1 failed)`.
+
+Each change was made by `sed`, the file was restored from a copy and compared with `cmp` (byte-identical),
+and the file was touched so that cargo rebuilds what depends on it.
+
+Untested on board. The results on Windows and macOS are the next board run's to fill in.

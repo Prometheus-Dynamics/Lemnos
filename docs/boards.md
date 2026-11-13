@@ -585,6 +585,25 @@ first). The `interface`, `alternate` and `endpoint` lines describe the FunctionF
 is listed at most once. `host=MAC device=MAC` gives the board's own addresses. `derive` takes both
 from the board's identity, so every board of a type gets its own pair (see below).
 
+A board file that gives no `interfaces` setting gets the default composition, the one the managed link is
+defined on: the link (FunctionFS, interface 0, class 0xff, interface string `orion-link`), then CDC NCM with
+the addresses derived from the board's identity, then one CDC ACM:
+
+```text
+function ffs
+interface 0xff 0 0 orion-link
+endpoint in bulk
+endpoint out bulk
+function ncm derive ifname=lemnos%d
+function acm
+```
+
+That text is `DEFAULT_INTERFACES` in `drivers/usb-gadget` and `[composition] default` in
+`contracts/usb-link.toml`; a test checks both. A board file that gives `interfaces` deviates from it, and
+must keep the link first: its first `interface` line is the vendor-class (0xff) link, interface 0. A text
+whose first interface is anything else drops the link or moves it off interface 0, and is refused
+(`LinkNotFirst`). A second `function ffs` is refused as a function listed twice.
+
 `ifname=TEMPLATE` (optional, once per NCM line) names the network interface the host side gets. The
 template is one to 15 bytes of printable ASCII with exactly one `%d`, which the kernel replaces with
 the first free number: `lemnos%d` gives `lemnos0`. A fixed name such as `lemnos0`, a template with

@@ -371,8 +371,7 @@ fn binding_checks_the_settings_and_touches_no_function() {
         }
         entries
     };
-    let refused: [(&str, Option<ConfigValue<'static>>); 12] = [
-        ("interfaces", None),
+    let refused: [(&str, Option<ConfigValue<'static>>); 11] = [
         ("vendor", Some(ConfigValue::Int(0x10000))),
         ("vendor", Some(ConfigValue::Int(-1))),
         ("vendor", Some(ConfigValue::Str("0x1209"))),
@@ -1241,4 +1240,67 @@ fn identity_for_layout() -> Identity<'static> {
         max_power_ma: 100,
         self_powered: false,
     }
+}
+
+#[test]
+fn an_absent_interfaces_setting_is_the_default_composition() {
+    use crate::DEFAULT_INTERFACES;
+    // Absent: the default. Given as the default's text: the same set, byte for byte, and the same
+    // functions in the same order (the golden the configfs plan is generated from).
+    let mut absent = settings();
+    absent.retain(|(key, _)| *key != "interfaces");
+    absent.push(("board_serial", ConfigValue::Str("00000001")));
+    let mut explicit = settings();
+    explicit.retain(|(key, _)| *key != "interfaces");
+    explicit.push(("interfaces", ConfigValue::Str(DEFAULT_INTERFACES)));
+    explicit.push(("board_serial", ConfigValue::Str("00000001")));
+    let (set_absent, functions_absent) = settings_of(&absent, "alpha").unwrap();
+    let (set_explicit, functions_explicit) = settings_of(&explicit, "alpha").unwrap();
+    assert_eq!(
+        set_absent.bytes(),
+        set_explicit.bytes(),
+        "the descriptor blob"
+    );
+    assert_eq!(
+        functions_absent.as_slice(),
+        functions_explicit.as_slice(),
+        "the functions, in configuration order"
+    );
+    // The default is the link, CDC NCM with the derived pair, then one CDC ACM.
+    let functions = functions_absent.as_slice();
+    assert_eq!(functions.len(), 3);
+    assert_eq!(functions[0], GadgetFunction::Ffs);
+    assert!(matches!(functions[1], GadgetFunction::Ncm { .. }));
+    assert_eq!(functions[2], GadgetFunction::Acm);
+}
+
+#[test]
+fn a_text_that_drops_or_moves_the_link_is_refused_by_name() {
+    use crate::DEFAULT_INTERFACES;
+    use crate::description::{Fault, check_link, functions};
+    // The link at the front: accepted.
+    assert!(check_link(DEFAULT_INTERFACES).is_ok());
+    // Dropped: the first interface is CDC, not the link.
+    let dropped = "interface 0x02 0x0d 0 ncm\nendpoint in bulk\nendpoint out bulk\nfunction acm\n";
+    assert!(matches!(check_link(dropped), Err(Fault::LinkNotFirst)));
+    // Moved: a CDC interface first, the link second, so the link is not interface 0.
+    let moved = "interface 0x02 0x02 1 acm\ninterface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\n";
+    assert!(matches!(check_link(moved), Err(Fault::LinkNotFirst)));
+    // Both refused by the settings too, as INVALID_ARGUMENT.
+    for text in [dropped, moved] {
+        let mut entries = settings();
+        entries.retain(|(key, _)| *key != "interfaces");
+        entries.push(("interfaces", ConfigValue::Str(text)));
+        entries.push(("board_serial", ConfigValue::Str("00000001")));
+        assert_eq!(
+            settings_of(&entries, "alpha").map(|_| ()).unwrap_err(),
+            Status::INVALID_ARGUMENT
+        );
+    }
+    // Duplicated: a second `function ffs` is refused by name (its line), not taken as the same one.
+    let duplicated = "function ffs\nfunction ffs\ninterface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\n";
+    assert!(matches!(
+        functions(duplicated, None),
+        Err(Fault::Function(2))
+    ));
 }

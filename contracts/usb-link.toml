@@ -4,7 +4,11 @@
 # constants and this file disagree, and by other teams' tests and device data instead of copying
 # the numbers. A reader refuses a version it does not know and any key it does not know.
 # Changing an identity value here means changing the constant it matches; the tests say which.
-version = 1
+#
+# Versions: 1 is the identity as published with the link's descriptors (R1h, #307). 2 adds the
+# `[composition]` table (the default `interfaces` text). A reader knows the versions it was built for
+# and refuses any other. Any key added later is a new version, never a key added to an old one.
+version = 2
 
 [device]
 vendor = 0x1d6b          # PLACEHOLDER until the user settles a product id; see docs/boards.md
@@ -29,6 +33,19 @@ compatible_id = "WINNCM"         # NCM control interface; not in Microsoft's lis
 
 [functions.acm]
 compatible_id = ""               # none: in-box usbser needs no OS descriptor
+
+# The composition a board gets when its `interfaces` setting is absent. The driver's default is this
+# text exactly (a test in drivers/usb-gadget checks it). A board that gives `interfaces` deviates
+# from it, and a text whose first interface is not the vendor-class link is refused.
+[composition]
+default = """
+function ffs
+interface 0xff 0 0 orion-link
+endpoint in bulk
+endpoint out bulk
+function ncm derive ifname=lemnos%d
+function acm
+"""
 
 [os]
 vendor_code = 0x51               # bMS_VendorCode for the Microsoft OS 1.0 requests
