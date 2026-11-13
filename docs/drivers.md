@@ -90,7 +90,7 @@ python3 scripts/generate-builtins.py --check
 |---|---|---|---|
 | `rk-mpp` (crate `rk-mpp-codec`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. The caller writes the register set; the driver checks every descriptor, offset and length. JPEG blocks included |
 | `rk-iep` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract |
-| `v4l2-stateless` (crate `m2m-decode`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. One media request per job, with the caller's controls as bytes |
+| `v4l2-stateless` (crate `m2m-decode`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. One media request per job, with the caller's controls as bytes. H.264 (`S264`) and HEVC (`S265`) take the same job shape. Slots: 0 is the bitstream, 1 and up the picture's planes; a reference is named by its stamp in the controls, not by a slot, and a stamp is a whole number of microseconds (see the crate's `stateless` module, "References") |
 | `a733-di` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract |
 | `k230-vpu` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. Some of the node's private requests are refused |
 | `a733-video` | `codec.block/1` | `jobs` stream | With `route = "module"`, encode jobs as register writes and dma-bufs, which `lemnos.ko` checks and runs: it writes every address register itself and refuses a range that doesn't cover what the job's own geometry makes the engine reach. On the vendor route (the default) register reads only, because an address written into a register cannot be bounded from user space. A decode job is refused: the module allows the H.264 encoder's registers only |

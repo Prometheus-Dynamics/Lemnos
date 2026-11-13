@@ -34,9 +34,11 @@
 //!   the registers wanted back, one control of a stateless decoder. The bytes are the
 //!   caller's and are passed on as they are.
 //!
-//! [`CodecBlock::block`] names the block (`rk-mpp:vdpu2`, `v4l2-stateless`), and the block's
-//! driver documents its slots and tags under that name. A caller that doesn't know the name
-//! has no work to give it.
+//! What a slot is, is the block's, and the block's driver documents its slots and tags under
+//! the name [`CodecBlock::block`] gives (`rk-mpp:vdpu2`, `v4l2-stateless`). A block that names
+//! a reference picture by a value in its items, rather than by a slot, says so there too: a
+//! stateless decoder's reference is a timestamp in its controls, and is not a slot of the
+//! contract. A caller that doesn't know the name has no work to give it.
 //!
 //! The work is read once, into the driver's own memory, when the job is taken: changing the
 //! buffer afterwards changes nothing.

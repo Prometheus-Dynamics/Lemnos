@@ -3,7 +3,10 @@
 //! bitstream is parsed here and no codec is named: which controls a codec takes and what goes
 //! in them is the caller's.
 //!
-//! The block's name is `v4l2-stateless`. Its work is:
+//! The block's name is `v4l2-stateless`. It serves any stateless codec the kernel has a V4L2
+//! driver for: H.264 (`S264`, [`lemnos_linux_sys::v4l2::h264`]) and HEVC (`S265`,
+//! [`lemnos_linux_sys::v4l2::hevc`]) take the same job shape, and the coded format is the
+//! caller's to name. Its work is:
 //!
 //! - **Item [`TAG_SETUP`]**, exactly one, [`SETUP_BYTES`] long, five `u32`s: the coded pixel
 //!   format (the source queue's fourcc), the picture's width and height, the picture pixel
@@ -11,23 +14,40 @@
 //!   first job's setup and opened again when a job's differs, which forgets every picture
 //!   decoded before.
 //! - **Item [`TAG_STAMP`]**, at most one, 8 bytes: a `u64` of nanoseconds the job's picture is
-//!   known by. A later job's controls name a reference picture by the stamp of the job that
-//!   decoded it, which is how the kernel finds it. 0 when left out.
+//!   known by. It must be a whole number of microseconds (see [`TAG_STAMP`]). A later job's
+//!   controls name a reference picture by the stamp of the job that decoded it, which is how
+//!   the kernel finds it. 0 when left out.
 //! - **Any item whose tag is a control id** ([`FIRST_CONTROL`] and up): one control of the
 //!   request, at most [`MAX_CONTROLS`]. Four bytes are an integer control's value; any other
 //!   length is a compound control's payload. The bytes are the caller's and go to the kernel
 //!   as they are, by a pointer to the driver's own copy with that copy's length: the kernel
 //!   checks a payload against the control's own size, and the bytes hold no pointer it
 //!   follows.
-//! - **Reference slot [`SLOT_SOURCE`]**, exactly one: the bitstream, `length` bytes at
-//!   `offset` of a stream buffer (`offset` must be 0 on a device whose source queue is
-//!   single-planar, which has nowhere to say it).
-//! - **Reference slots [`SLOT_PICTURE`] and up**, one for each memory plane of the picture
-//!   format, in order: the buffers the picture is decoded into, each from its first byte
-//!   (`offset` and `length` 0).
+//! - **Slot [`SLOT_SOURCE`]**, exactly one: the bitstream, `length` bytes at `offset` of a
+//!   stream buffer (`offset` must be 0 on a device whose source queue is single-planar, which
+//!   has nowhere to say it).
+//! - **Slots [`SLOT_PICTURE`] and up**, one for each memory plane of the picture format, in
+//!   order: the buffers the picture is decoded into, each from its first byte (`offset` and
+//!   `length` 0).
 //!
-//! Anything else is refused: another tag, a slot not listed, a slot twice, an item of the
-//! wrong size.
+//! Anything else is refused: another tag, a slot not listed (a reference is not one of them,
+//! see below), a slot twice, an item of the wrong size.
+//!
+//! # References
+//!
+//! A reference picture is not a slot. A decoder names one inside its controls, by the
+//! timestamp of the capture buffer that holds it (H.264's `reference_ts`, HEVC's DPB entry
+//! `timestamp`), and the kernel finds that buffer among its own. The job that decoded the
+//! picture stamped it with [`TAG_STAMP`], so the stamp is the reference. Nothing a reference
+//! names is an address this block reaches, so the block gives no buffer for it and checks
+//! none: a stamp no capture buffer carries is for the device to fail, as it does any other
+//! bad control.
+//!
+//! The picture a reference names is a capture buffer the block holds, the stream buffer the
+//! consumer gave as that job's picture. The consumer keeps that buffer as it is for as long as
+//! a later job names its stamp. A reference numbered as a slot, `2 + DPB index` for instance,
+//! is refused on a one-plane picture and names the second plane of a two-plane one, so it is
+//! not a convention of this block.
 //!
 //! The job's read-back is the bytes written to each picture plane, a little-endian `u32`
 //! each. A picture the device flags as in error fails the job.
@@ -79,6 +99,11 @@ pub const NAME: &str = "v4l2-stateless";
 /// The item that says what the session is set up for.
 pub const TAG_SETUP: u32 = 1;
 /// The item that says what the job's picture is known by.
+///
+/// The stamp is nanoseconds, and must be a whole number of microseconds (a multiple of 1000).
+/// The kernel keeps a buffer's timestamp as a `timeval`, in microseconds, and a reference names
+/// it by that value: a stamp finer than a microsecond could never be found, so the job is
+/// refused rather than rounded.
 pub const TAG_STAMP: u32 = 2;
 /// The lowest tag that is a control id (`V4L2_CTRL_CLASS_USER`).
 pub const FIRST_CONTROL: u32 = 0x0098_0000;
@@ -314,6 +339,10 @@ impl<N: Node, F: FnMut() -> io::Result<N>> StatelessBlock<N, F> {
         let Some(setup) = setup else {
             return Start::Refused;
         };
+        // A stamp the kernel keeps: a whole number of microseconds, its timestamp being a timeval.
+        if stamp.is_some_and(|ns| ns % 1_000 != 0) {
+            return Start::Refused;
+        }
         // The references: one source, and the picture's planes in order.
         let mut source = None;
         let mut picture = [None; MAX_PLANES];
