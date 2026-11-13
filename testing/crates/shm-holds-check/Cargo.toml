@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-shm-holds-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Guest check in the QEMU harness: a reader's hold marks keep the module from reusing a buffer, read with the shm crates"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+shm-ring = { path = "../../../shm/ring" }
+shm-ring-buffers = { path = "../../../shm/ring-buffers" }
+shm-ring-holds = { path = "../../../shm/ring-holds" }

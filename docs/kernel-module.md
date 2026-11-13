@@ -74,9 +74,11 @@ layout (`LEMNOS_RING_*`), which the four sys crates read; the driver that runs t
 with its fences and job ranges. With `LEMNOS_STREAM_CREATE_SHM` the frame ring is the shared-memory
 ring of [`shm/README.md`](../shm/README.md) instead: one field, one sample per frame, each sample's
 entry naming its buffer and ticket, and the pool page after the ring. A reader maps it read-only and
-reads it with the shm crates alone (`testing/crates/shm-ring-check` does, in the QEMU harness). The
-returns and jobs words still follow the old layout in this form; the consumer's returns move to the
-shm holds next. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
+reads it with the shm crates alone (`testing/crates/shm-ring-check` does, in the QEMU harness). In
+this form a buffer is not returned through a words queue: a consumer gives the module its marks page
+(`shm-ring-holds`) with `LEMNOS_STREAM_IOC_READER`, and the module pins that page read-only. A buffer
+goes back to the frame path only when no reader marks it, and the module checks that when it needs the
+buffer, so a held buffer is never reused. The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
 and [`TODO.md`](../TODO.md) lists the port.
 
 ## What it never does
