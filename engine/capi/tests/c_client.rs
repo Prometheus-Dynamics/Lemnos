@@ -1,39 +1,16 @@
-//! A C program on the surface, linked against the static library and against
-//! the shared one, run against the real service.
+//! C programs on the surface, linked against the static library and against
+//! the shared one, run against the real service on the simulated board.
 
+mod common;
+
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use common::{Producing, package_service, service, stream_service};
 use lemnos_capi::Client;
-use lemnos_fake_devices::FakeCounter;
-use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
-use lemnos_sim::SimBoard;
-use lemnosd::{Config, Service};
-
-fn service() -> (Service, PathBuf, PathBuf) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-capi-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let socket = dir.join("sock");
-    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"c\"\n\
-        [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n";
-    let service = Service::start(Config {
-        socket: socket.clone(),
-        name: "c".to_string(),
-        board: parse(text).unwrap(),
-        drivers: vec![entry::<FakeCounter>()],
-        backend: Box::new(SimBoard::new()),
-        options: Options::default(),
-    })
-    .unwrap();
-    (service, socket, dir)
-}
+use lemnos_linux_sys::dma_buf;
 
 fn deps_dir() -> PathBuf {
     std::env::current_exe()
@@ -60,12 +37,12 @@ fn have_cc() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-fn build(out: &Path, link: &[&str]) {
+fn build(out: &Path, source: &str, link: &[&str]) {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let output = Command::new("cc")
         .args(["-std=c11", "-Wall", "-Werror", "-I"])
         .arg(format!("{manifest}/../../include"))
-        .arg(format!("{manifest}/tests/c/client.c"))
+        .arg(format!("{manifest}/tests/c/{source}"))
         .arg("-o")
         .arg(out)
         .args(link)
@@ -78,9 +55,9 @@ fn build(out: &Path, link: &[&str]) {
     );
 }
 
-fn run_and_check(program: &Path, socket: &Path, env: &[(&str, &Path)]) {
+fn run(program: &Path, args: &[&Path], env: &[(&str, &Path)], expected: &[&str]) {
     let mut command = Command::new(program);
-    command.arg(socket);
+    command.args(args);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -92,65 +69,133 @@ fn run_and_check(program: &Path, socket: &Path, env: &[(&str, &Path)]) {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    for expected in [
-        "devices=1",
-        "first=thing state=0",
-        "got=1",
-        "streamed 3",
-        "item=count method=1 of example.counter/1",
-        "off status=",
-        "closed",
-    ] {
+    for expected in expected {
         assert!(stdout.contains(expected), "{expected:?} in {stdout}");
     }
 }
 
-#[cfg(not(feature = "shared"))]
-#[test]
-fn a_c_program_runs_on_the_static_library() {
-    let deps = deps_dir();
-    let lib = deps.join("liblemnos_capi.a");
-    if !have_cc() {
-        return;
-    }
-    assert!(lib.exists(), "cargo builds {} for the tests", lib.display());
-    let program = deps.join(format!("lemnos-capi-c-static-{}", std::process::id()));
-    build(
-        &program,
-        &[lib.to_str().unwrap(), "-lpthread", "-ldl", "-lm"],
-    );
+const CLIENT: &[&str] = &[
+    "devices=1",
+    "first=thing state=0",
+    "got=1",
+    "streamed 3",
+    "item=count method=1 of example.counter/1",
+    "off status=",
+    "closed",
+];
+
+const STREAM: &[&str] = &[
+    "frames buffers=4 bytes=5000 handles=1 writable=0 open=1",
+    "frames 6 in place, by copy and by handle",
+    "refused write=-13 past=-22 none=-22",
+    "jobs 6 written, posted and made",
+    "plain handle status=-95",
+    "taken again after a close holding a frame",
+    "packages=2 mode=1 note=one key file line was not a key",
+    "package pkgs/fan.lpkg loaded=1 driver=fan reason=\n",
+    "package pkgs/odd.lpkg loaded=0 driver= reason=not signed by a trusted key\n",
+    "done",
+];
+
+fn run_client(program: &Path, env: &[(&str, &Path)]) {
     let (service, socket, dir) = service();
-    run_and_check(&program, &socket, &[]);
+    run(program, &[&socket], env, CLIENT);
     service.stop();
-    let _ = std::fs::remove_file(&program);
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[test]
-fn a_c_program_runs_on_the_shared_library() {
+fn run_stream(program: &Path, env: &[(&str, &Path)]) {
+    let streams = stream_service();
+    let packages = package_service();
+    let producing = Producing::start(&streams);
+    run(program, &[&streams.socket, &packages.socket], env, STREAM);
+    producing.stop();
+}
+
+fn static_link(deps: &Path) -> Vec<String> {
+    let lib = deps.join("liblemnos_capi.a");
+    assert!(lib.exists(), "cargo builds {} for the tests", lib.display());
+    [lib.to_str().unwrap(), "-lpthread", "-ldl", "-lm"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn shared_link(lib: &Path) -> Vec<String> {
+    assert!(lib.exists(), "cargo builds {} for the tests", lib.display());
+    vec![
+        "-L".to_string(),
+        lib.parent().unwrap().to_str().unwrap().to_string(),
+        format!("-l:{}", lib.file_name().unwrap().to_str().unwrap()),
+        "-lm".to_string(),
+    ]
+}
+
+/// Builds `source` against the static library and runs it with `run_it`.
+#[cfg(not(feature = "shared"))]
+fn on_static(source: &str, run_it: fn(&Path, &[(&str, &Path)])) {
+    let deps = deps_dir();
+    if !have_cc() {
+        return;
+    }
+    let link = static_link(&deps);
+    let link: Vec<&str> = link.iter().map(String::as_str).collect();
+    let program = deps.join(format!(
+        "lemnos-capi-c-static-{source}-{}",
+        std::process::id()
+    ));
+    build(&program, source, &link);
+    run_it(&program, &[]);
+    let _ = std::fs::remove_file(&program);
+}
+
+/// Builds `source` against the shared library and runs it with `run_it`, the
+/// loader finding the library by its SONAME.
+fn on_shared(source: &str, run_it: fn(&Path, &[(&str, &Path)])) {
     let deps = deps_dir();
     if !have_cc() {
         return;
     }
     let lib = shared_library();
-    assert!(lib.exists(), "cargo builds {} for the tests", lib.display());
-    let program = deps.join(format!("lemnos-capi-c-shared-{}", std::process::id()));
-    build(
-        &program,
-        &[
-            "-L",
-            lib.parent().unwrap().to_str().unwrap(),
-            &format!("-l:{}", lib.file_name().unwrap().to_str().unwrap()),
-            "-lm",
-        ],
-    );
-    let (service, socket, dir) = service();
-    // The loader looks for the library by its SONAME.
-    std::os::unix::fs::symlink(&lib, dir.join("liblemnos_capi.so.1")).unwrap();
-    run_and_check(&program, &socket, &[("LD_LIBRARY_PATH", &dir)]);
-    service.stop();
+    let link = shared_link(&lib);
+    let link: Vec<&str> = link.iter().map(String::as_str).collect();
+    let program = deps.join(format!(
+        "lemnos-capi-c-shared-{source}-{}",
+        std::process::id()
+    ));
+    build(&program, source, &link);
+    let dir = deps.join(format!(
+        "lemnos-capi-soname-{source}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let soname = dir.join("liblemnos_capi.so.1");
+    let _ = std::fs::remove_file(&soname);
+    std::os::unix::fs::symlink(&lib, &soname).unwrap();
+    run_it(&program, &[("LD_LIBRARY_PATH", &dir)]);
     let _ = std::fs::remove_file(&program);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(not(feature = "shared"))]
+#[test]
+fn a_c_program_runs_on_the_static_library() {
+    on_static("client.c", run_client);
+}
+
+#[test]
+fn a_c_program_runs_on_the_shared_library() {
+    on_shared("client.c", run_client);
+}
+
+#[cfg(not(feature = "shared"))]
+#[test]
+fn a_c_program_takes_streams_and_the_package_list_on_the_static_library() {
+    on_static("stream.c", run_stream);
+}
+
+#[test]
+fn a_c_program_takes_streams_and_the_package_list_on_the_shared_library() {
+    on_shared("stream.c", run_stream);
 }
 
 #[test]
@@ -172,4 +217,65 @@ fn the_rust_wrapper_works_through_the_surface() {
     drop(client);
     service.stop();
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
+    let streams = stream_service();
+    let producing = Producing::start(&streams);
+    let client = Client::connect(
+        streams.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mut stream = client.open_stream(0, "frames", false).unwrap();
+    let info = stream.info().unwrap();
+    assert_eq!((info.buffers, info.buffer_bytes), (4, 5000));
+    for _ in 0..6 {
+        let frame = stream
+            .next_frame(Duration::from_secs(5))
+            .unwrap()
+            .expect("a frame");
+        let buffer = frame.buffer;
+        assert!(common::frame_is_right(frame.bytes, frame.sequence));
+        let handle = stream.buffer_handle(buffer).unwrap();
+        let theirs = producing.identity(buffer);
+        assert_eq!(dma_buf::identity(handle.as_fd()).unwrap(), theirs);
+        let mut copy = [0; 8];
+        stream.read(buffer, 0, &mut copy).unwrap();
+        assert_eq!(copy[..], frame.bytes[..8]);
+        stream.release(buffer).unwrap();
+    }
+    stream.close().unwrap();
+
+    let mut input = client.open_stream(0, "input", true).unwrap();
+    let image: Vec<u8> = (0..=255).collect();
+    input.write(1, 0, &image).unwrap();
+    assert!(input.post_job(&1u32.to_le_bytes()).unwrap());
+    let frame = input
+        .next_frame(Duration::from_secs(5))
+        .unwrap()
+        .expect("the job's frame");
+    assert_eq!(frame.buffer, 1);
+    assert!(
+        frame
+            .bytes
+            .iter()
+            .zip(&image)
+            .all(|(made, was)| *made == !was)
+    );
+    input.release(1).unwrap();
+    drop(input);
+    producing.stop();
+
+    let packages = package_service();
+    let client = Client::connect(
+        packages.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let list = client.packages().unwrap();
+    assert_eq!(list, common::package_list());
 }

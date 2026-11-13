@@ -16,3 +16,15 @@ lemnos_set_power
 lemnos_item_count
 lemnos_item_info
 lemnos_item_text
+lemnos_package_list
+lemnos_package_info
+lemnos_package_text
+lemnos_stream_open
+lemnos_stream_info
+lemnos_stream_next_frame
+lemnos_stream_release
+lemnos_stream_read
+lemnos_stream_write
+lemnos_stream_post_job
+lemnos_stream_buffer_handle
+lemnos_stream_close

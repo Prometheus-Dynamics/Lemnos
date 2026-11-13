@@ -1,4 +1,8 @@
-//! `include/lemnos.h`, implemented.
+//! `include/lemnos.h`, implemented. Frame streams are in [`streams`].
+
+mod streams;
+
+pub use streams::*;
 
 use core::ffi::{CStr, c_char};
 use core::mem::{align_of, offset_of, size_of};
@@ -8,7 +12,8 @@ use std::time::Duration;
 
 use lemnos_abi::{AbiVersion, Handle, MessageSink, Slab, Status, guard, layout_hash, write_text};
 use lemnos_client::{
-    self as client, DeviceDescription, DeviceEntry, DeviceHealth, DeviceState, Error, Session,
+    self as client, DeviceDescription, DeviceEntry, DeviceHealth, DeviceState, Error, PackageList,
+    PackageMode, Session,
 };
 use lemnos_core::ItemKind;
 
@@ -52,6 +57,13 @@ pub struct ItemInfo {
     pub max: i64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PackageInfo {
+    pub struct_size: u32,
+    pub loaded: u32,
+}
+
 pub const LAYOUT: u64 = layout_hash(&[
     lemnos_abi::LAYOUT_HASH,
     size_of::<DeviceInfo>() as u64,
@@ -66,24 +78,37 @@ pub const LAYOUT: u64 = layout_hash(&[
     size_of::<ItemInfo>() as u64,
     align_of::<ItemInfo>() as u64,
     offset_of!(ItemInfo, max) as u64,
+    size_of::<PackageInfo>() as u64,
+    align_of::<PackageInfo>() as u64,
+    offset_of!(PackageInfo, loaded) as u64,
+    size_of::<StreamInfo>() as u64,
+    align_of::<StreamInfo>() as u64,
+    offset_of!(StreamInfo, reserved) as u64,
+    size_of::<Frame>() as u64,
+    align_of::<Frame>() as u64,
+    offset_of!(Frame, timestamp_ns) as u64,
 ]);
 
 /// `LEMNOS_LAYOUT_HASH` in `include/lemnos.h`. The layouts it hashes hold no
 /// pointers, so it is the same on every target.
-const HEADER_LAYOUT_HASH: u64 = 0x10174a7e6b2602e2;
+const HEADER_LAYOUT_HASH: u64 = 0xb28f148893bc3412;
 const _: () = assert!(
     LAYOUT == HEADER_LAYOUT_HASH,
     "update LEMNOS_LAYOUT_HASH in lemnos.h"
 );
 
-/// This surface's version: 1.0.
-pub const VERSION: AbiVersion = AbiVersion::new(1, 0, LAYOUT);
+/// This surface's version: 1.1.
+pub const VERSION: AbiVersion = AbiVersion::new(1, 1, LAYOUT);
 
 struct Entry {
     session: Session,
     devices: Vec<DeviceEntry>,
     opened: Vec<client::Handle>,
     descriptions: HashMap<u32, DeviceDescription>,
+    /// The list `lemnos_package_list` last fetched.
+    packages: Option<PackageList>,
+    /// The frame streams this client took.
+    streams: Slab<StreamSlot>,
 }
 
 /// The lock is held only to find an entry. Each entry has its own, so waiting
@@ -94,9 +119,13 @@ fn clients() -> MutexGuard<'static, Slab<Arc<Mutex<Entry>>>> {
     CLIENTS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn entry(client: Handle) -> Result<Arc<Mutex<Entry>>, Status> {
+    clients().get(client).map(Arc::clone)
+}
+
 fn with_entry(client: Handle, f: impl FnOnce(&mut Entry) -> Status) -> Status {
-    let entry = match clients().get(client) {
-        Ok(entry) => Arc::clone(entry),
+    let entry = match entry(client) {
+        Ok(entry) => entry,
         Err(status) => return status,
     };
     let mut entry = entry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -230,6 +259,8 @@ pub unsafe extern "C" fn lemnos_client_open(
             devices,
             opened: Vec::new(),
             descriptions: HashMap::new(),
+            packages: None,
+            streams: Slab::new(),
         }));
         match clients().insert(entry) {
             Ok(handle) => {
@@ -627,6 +658,99 @@ pub unsafe extern "C" fn lemnos_item_text(
                 // SAFETY: passed on from this function's contract.
                 unsafe { give_text(value, out, capacity, len) }
             })
+        })
+    })
+}
+
+/// # Safety
+/// `mode` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_package_list(
+    client: Handle,
+    mode: *mut u32,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        with_entry(client, |entry| match entry.session.packages() {
+            Ok(list) => {
+                if !mode.is_null() {
+                    let value = match list.mode {
+                        PackageMode::Off => 0,
+                        PackageMode::Signed => 1,
+                        PackageMode::Open => 2,
+                    };
+                    // SAFETY: not null, and valid for a write by the contract.
+                    unsafe { mode.write(value) };
+                }
+                let n = list.packages.len();
+                entry.packages = Some(list);
+                count(n)
+            }
+            Err(error) => fail(error, sink),
+        })
+    })
+}
+
+/// # Safety
+/// `info` is null or valid for its declared `struct_size`.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_package_info(
+    client: Handle,
+    package: u32,
+    info: *mut PackageInfo,
+) -> Status {
+    guard(|| {
+        // SAFETY: passed on from this function's contract.
+        let info = match unsafe { checked(info) } {
+            Ok(info) => info,
+            Err(status) => return status,
+        };
+        with_entry(client, |entry| {
+            let Some(found) = entry
+                .packages
+                .as_ref()
+                .and_then(|list| list.packages.get(package as usize))
+            else {
+                return Status::NOT_FOUND;
+            };
+            info.loaded = u32::from(found.driver.is_some());
+            Status::OK
+        })
+    })
+}
+
+/// # Safety
+/// `out` is null or valid for `capacity` bytes; `len` is null or valid for a
+/// write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_package_text(
+    client: Handle,
+    package: u32,
+    field: u32,
+    out: *mut c_char,
+    capacity: usize,
+    len: *mut usize,
+) -> Status {
+    guard(|| {
+        with_entry(client, |entry| {
+            let Some(list) = entry.packages.as_ref() else {
+                return Status::NOT_FOUND;
+            };
+            let value = if field == 3 {
+                list.note.as_str()
+            } else {
+                let Some(found) = list.packages.get(package as usize) else {
+                    return Status::NOT_FOUND;
+                };
+                match field {
+                    0 => found.path.as_str(),
+                    1 => found.driver.as_deref().unwrap_or(""),
+                    2 => found.reason.as_str(),
+                    _ => return Status::INVALID_ARGUMENT,
+                }
+            };
+            // SAFETY: passed on from this function's contract.
+            unsafe { give_text(value, out, capacity, len) }
         })
     })
 }

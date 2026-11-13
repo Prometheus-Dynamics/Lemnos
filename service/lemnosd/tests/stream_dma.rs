@@ -571,3 +571,32 @@ fn the_same_on_dma_bufs_from_a_real_heap_when_one_is_named() {
     a_frame_crosses(&mut producing, &mut stream, 7);
     eprintln!("ran on dma-bufs from {}", path.to_string_lossy());
 }
+
+#[test]
+fn the_consumer_holds_each_buffers_own_handle_and_it_is_the_memory_the_producer_fills() {
+    let (running, _source) = service();
+    let (mut session, mut stream) = open(&running);
+    let mut producing = producer(&running);
+    for _ in 0..BUFFERS {
+        let buffer = producing.next_buffer().unwrap().unwrap();
+        let (fd, map) = hardware(&producing, buffer);
+        let ours = stream.buffer_handle(buffer).expect("a handle per buffer");
+        assert_eq!(
+            dma_buf::identity(ours).unwrap(),
+            dma_buf::identity(fd.as_fd()).unwrap(),
+            "buffer {buffer}"
+        );
+        // What lands through the handle the producer lent is what the consumer's own handle
+        // reaches, mapped apart from the stream's mapping.
+        map.write_bytes(7, &[buffer as u8 + 1]).unwrap();
+        let theirs = Mapping::new(ours, BYTES, 0, false).unwrap();
+        assert_eq!(theirs.as_slice()[7], buffer as u8 + 1);
+        producing.publish(frame(buffer, u64::from(buffer))).unwrap();
+        let got = stream.next_frame(Duration::from_secs(5)).unwrap().unwrap();
+        stream.release(got).unwrap();
+    }
+    assert!(stream.buffer_handle(BUFFERS).is_none(), "no such buffer");
+    let plain = session.open_stream(DEVICE, SHARED, platform()).unwrap();
+    assert!(!plain.has_buffer_handles());
+    assert!(plain.buffer_handle(0).is_none(), "shared memory has none");
+}

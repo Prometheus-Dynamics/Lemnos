@@ -38,9 +38,17 @@ shared = []
 lemnos-abi = { path = "../abi", features = ["std"] }
 lemnos-client = { path = "../client" }
 lemnos-core = { path = "../core", features = ["std"] }
+lemnos-wire = { path = "../wire" }
+
+# Frame streams: receiving their descriptors and mapping them.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-stream = { path = "../../backends/linux-stream" }
 
 [dev-dependencies]
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-hal = { path = "../hal", features = ["std"] }
 lemnos-host = { path = "../host" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 lemnos-sim = { path = "../../backends/sim" }
 lemnosd = { path = "../../service/lemnosd" }

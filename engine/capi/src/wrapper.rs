@@ -1,10 +1,13 @@
 //! A Rust client that goes through the C surface, so a program can share one
 //! installed library instead of compiling the client in.
 
+use core::ffi::c_char;
 use std::ffi::CString;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::time::Duration;
 
 use lemnos_abi::{Handle, MessageSink, Status};
+use lemnos_client::{PackageEntry, PackageList, PackageMode};
 
 use crate::ffi;
 use crate::surface;
@@ -35,6 +38,42 @@ const fn checked(status: Status) -> Result<u32, Status> {
     }
 }
 
+/// Text from one of the surface's text calls, `get(out, capacity, len)`, at
+/// whatever length it is.
+fn text_of(
+    mut get: impl FnMut(*mut c_char, usize, &mut usize) -> Status,
+) -> Result<String, Status> {
+    let mut bytes = vec![0u8; 256];
+    loop {
+        let mut len = 0;
+        let status = get(bytes.as_mut_ptr().cast(), bytes.len(), &mut len);
+        if status == Status::BUFFER_TOO_SMALL && len >= bytes.len() {
+            bytes.resize(len + 1, 0);
+            continue;
+        }
+        checked(status)?;
+        bytes.truncate(len);
+        return String::from_utf8(bytes).map_err(|_| Status::IO);
+    }
+}
+
+/// One frame from a stream, read in place until it is released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamFrame<'a> {
+    pub buffer: u32,
+    pub sequence: u64,
+    pub identity: u64,
+    pub timestamp_ns: u64,
+    pub bytes: &'a [u8],
+}
+
+/// A device's frame stream, through the C surface. Closed when dropped.
+#[derive(Debug)]
+pub struct Stream<'c> {
+    client: &'c Client,
+    handle: Handle,
+}
+
 impl Client {
     pub fn connect(socket: &str, name: &str, timeout: Duration) -> Result<Self, Status> {
         let version = surface::VERSION;
@@ -63,20 +102,87 @@ impl Client {
     }
 
     pub fn device_name(&self, device: u32) -> Result<String, Status> {
-        let mut bytes = [0u8; 256];
-        let mut len = 0;
-        // SAFETY: the buffer is valid for its length and `len` for a write.
+        text_of(|out, capacity, len| {
+            // SAFETY: `out` is valid for `capacity` bytes and `len` for a write.
+            unsafe { ffi::lemnos_device_text(self.handle, device, 0, out, capacity, len) }
+        })
+    }
+
+    /// What became of the service's driver packages.
+    pub fn packages(&self) -> Result<PackageList, Status> {
+        let mut mode = 0;
+        // SAFETY: `mode` is valid for a write.
+        let count = checked(unsafe {
+            ffi::lemnos_package_list(self.handle, &mut mode, MessageSink::NONE)
+        })?;
+        let mode = match mode {
+            0 => PackageMode::Off,
+            1 => PackageMode::Signed,
+            2 => PackageMode::Open,
+            _ => return Err(Status::IO),
+        };
+        let field = |package, field| {
+            text_of(|out, capacity, len| {
+                // SAFETY: `out` is valid for `capacity` bytes and `len` for a write.
+                unsafe { ffi::lemnos_package_text(self.handle, package, field, out, capacity, len) }
+            })
+        };
+        let mut packages = Vec::with_capacity(count as usize);
+        for package in 0..count {
+            let mut info = surface::PackageInfo {
+                struct_size: size_of::<surface::PackageInfo>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `info` is valid for its declared size during the call.
+            checked(unsafe { ffi::lemnos_package_info(self.handle, package, &mut info) })?;
+            packages.push(PackageEntry {
+                path: field(package, 0)?,
+                driver: if info.loaded != 0 {
+                    Some(field(package, 1)?)
+                } else {
+                    None
+                },
+                reason: field(package, 2)?,
+            });
+        }
+        Ok(PackageList {
+            mode,
+            note: field(0, 3)?,
+            packages,
+        })
+    }
+
+    /// Takes a device's stream, by its place in the list; `writable` for one
+    /// the consumer fills.
+    pub fn open_stream(
+        &self,
+        device: u32,
+        name: &str,
+        writable: bool,
+    ) -> Result<Stream<'_>, Status> {
+        let name = c_string(name)?;
+        let flags = if writable {
+            surface::STREAM_WRITABLE
+        } else {
+            0
+        };
+        let mut handle = Handle::NULL;
+        // SAFETY: the string is NUL-terminated and outlives the call, and
+        // `handle` is valid for a write.
         checked(unsafe {
-            ffi::lemnos_device_text(
+            ffi::lemnos_stream_open(
                 self.handle,
                 device,
-                0,
-                bytes.as_mut_ptr().cast(),
-                bytes.len(),
-                &mut len,
+                name.as_ptr(),
+                flags,
+                &mut handle,
+                MessageSink::NONE,
             )
         })?;
-        String::from_utf8(bytes[..len].to_vec()).map_err(|_| Status::IO)
+        Ok(Stream {
+            client: self,
+            handle,
+        })
     }
 
     /// Opens a contract, returning the number the other calls take.
@@ -170,5 +276,149 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = ffi::lemnos_client_close(self.handle);
+    }
+}
+
+impl Stream<'_> {
+    pub fn info(&self) -> Result<surface::StreamInfo, Status> {
+        let mut info = surface::StreamInfo {
+            struct_size: size_of::<surface::StreamInfo>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is valid for its declared size during the call.
+        checked(unsafe { ffi::lemnos_stream_info(self.client.handle, self.handle, &mut info) })?;
+        Ok(info)
+    }
+
+    /// The next frame, or `None` after `timeout` or once the host ended the
+    /// stream. Allocates nothing. Its bytes borrow the stream, so every frame
+    /// taken is dropped before [`release`](Self::release) or a write.
+    pub fn next_frame(&self, timeout: Duration) -> Result<Option<StreamFrame<'_>>, Status> {
+        let mut frame = surface::Frame {
+            struct_size: size_of::<surface::Frame>() as u32,
+            ..Default::default()
+        };
+        let mut data: *const u8 = core::ptr::null();
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        // SAFETY: `frame` is valid for its declared size and `data` for a
+        // write during the call.
+        let got = checked(unsafe {
+            ffi::lemnos_stream_next_frame(
+                self.client.handle,
+                self.handle,
+                timeout_ms,
+                &mut frame,
+                &mut data,
+                MessageSink::NONE,
+            )
+        })?;
+        if got != 1 {
+            return Ok(None);
+        }
+        let bytes = if frame.len == 0 || data.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: the surface points `data` at the frame's `len` bytes in
+            // the stream's mapping, which stays until the frame is released
+            // or the stream closed. Both need `self` mutably or by value, so
+            // neither happens while this borrow lives.
+            unsafe { core::slice::from_raw_parts(data, frame.len as usize) }
+        };
+        Ok(Some(StreamFrame {
+            buffer: frame.buffer,
+            sequence: frame.sequence,
+            identity: frame.identity,
+            timestamp_ns: frame.timestamp_ns,
+            bytes,
+        }))
+    }
+
+    /// Gives a frame's buffer back, by its number.
+    pub fn release(&mut self, buffer: u32) -> Result<(), Status> {
+        checked(ffi::lemnos_stream_release(
+            self.client.handle,
+            self.handle,
+            buffer,
+            MessageSink::NONE,
+        ))
+        .map(drop)
+    }
+
+    pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Status> {
+        // SAFETY: `out` is valid for its length during the call.
+        checked(unsafe {
+            ffi::lemnos_stream_read(
+                self.client.handle,
+                self.handle,
+                buffer,
+                offset,
+                out.as_mut_ptr(),
+                out.len(),
+                MessageSink::NONE,
+            )
+        })
+        .map(drop)
+    }
+
+    pub fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<(), Status> {
+        // SAFETY: `data` is valid for its length during the call.
+        checked(unsafe {
+            ffi::lemnos_stream_write(
+                self.client.handle,
+                self.handle,
+                buffer,
+                offset,
+                data.as_ptr(),
+                data.len(),
+                MessageSink::NONE,
+            )
+        })
+        .map(drop)
+    }
+
+    /// `false` when too many jobs are waiting.
+    pub fn post_job(&mut self, job: &[u8]) -> Result<bool, Status> {
+        // SAFETY: `job` is valid for its length during the call.
+        checked(unsafe {
+            ffi::lemnos_stream_post_job(
+                self.client.handle,
+                self.handle,
+                job.as_ptr(),
+                job.len(),
+                MessageSink::NONE,
+            )
+        })
+        .map(|posted| posted == 1)
+    }
+
+    /// A descriptor of the buffer's own dma-buf.
+    pub fn buffer_handle(&self, buffer: u32) -> Result<OwnedFd, Status> {
+        let mut fd = -1;
+        // SAFETY: `fd` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_buffer_handle(
+                self.client.handle,
+                self.handle,
+                buffer,
+                &mut fd,
+                MessageSink::NONE,
+            )
+        })?;
+        // SAFETY: on success the surface gives a new descriptor that only the
+        // caller owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Gives the stream back, saying whether the service took it.
+    pub fn close(self) -> Result<(), Status> {
+        let status = ffi::lemnos_stream_close(self.client.handle, self.handle, MessageSink::NONE);
+        core::mem::forget(self);
+        checked(status).map(drop)
+    }
+}
+
+impl Drop for Stream<'_> {
+    fn drop(&mut self) {
+        let _ = ffi::lemnos_stream_close(self.client.handle, self.handle, MessageSink::NONE);
     }
 }
