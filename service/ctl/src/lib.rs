@@ -28,9 +28,11 @@ lemnos-ctl [--socket PATH] COMMAND
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--modprobe FILE]
+                                 [--cmdline FILE]
                                  write the device-tree overlay for a board (stdout by default),
                                  its firmware boot fragment, and the kernel module's modprobe
-                                 configuration, with no daemon";
+                                 configuration, and for a module built into the kernel the same
+                                 parameters as kernel command-line words, with no daemon";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -229,6 +231,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut overlay_out = None;
     let mut boot_out = None;
     let mut modprobe_out = None;
+    let mut cmdline_out = None;
     let mut board_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -239,6 +242,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("-o", Some(file)) => overlay_out = Some(file),
             ("--boot", Some(file)) => boot_out = Some(file),
             ("--modprobe", Some(file)) => modprobe_out = Some(file),
+            ("--cmdline", Some(file)) => cmdline_out = Some(file),
             (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
                 board_path = Some(flag.to_string());
                 i += 1;
@@ -271,7 +275,30 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     if let Some(file) = modprobe_out {
         std::fs::write(&file, &generated.modprobe).map_err(|e| format!("{file}: {e}"))?;
     }
+    if let Some(file) = cmdline_out {
+        let line = kernel_cmdline(&generated.modprobe);
+        std::fs::write(&file, line).map_err(|e| format!("{file}: {e}"))?;
+    }
     Ok(())
+}
+
+/// The kernel module's parameters as kernel command-line words, for a module built into the
+/// kernel (`lemnos.owned=...`), one line. It is read from the `options lemnos` line of the modprobe
+/// fragment, so the two carry the same values by construction. A `blacklist` has no command-line
+/// form: a built-in driver is not stopped by one (the fragment says so).
+fn kernel_cmdline(modprobe: &str) -> String {
+    let words: Vec<String> = modprobe
+        .lines()
+        .find_map(|line| line.strip_prefix("options lemnos "))
+        .map(|rest| {
+            rest.split_whitespace()
+                .map(|option| format!("lemnos.{option}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut line = words.join(" ");
+    line.push('\n');
+    line
 }
 
 fn validate_settings(

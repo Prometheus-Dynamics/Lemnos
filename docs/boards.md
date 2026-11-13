@@ -584,3 +584,12 @@ wait
   device is `owner = "host"`.
 - `testing/bench/board.toml`: the reference board's bench, used by the measurements in
   [Testing](testing.md).
+
+## The kernel module's configuration
+
+`lemnos-ctl tree BOARD` writes the module's configuration in two forms, from the same data.
+`--modprobe FILE` is a modprobe.d fragment (`options lemnos`, and a `blacklist` for each stock
+driver the module takes over) for a loadable `lemnos.ko`. `--cmdline FILE` is the same parameters
+as one line of `lemnos.<name>=<value>` words, for a module built into the kernel, which takes
+them from the kernel command line and has no modprobe. The `blacklist` has no command-line form.
+See [kernel-config.md](kernel-config.md#parameters-from-the-command-line) for the length limit.

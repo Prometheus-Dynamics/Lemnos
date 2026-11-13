@@ -49,6 +49,8 @@ step packaging scripts/check-packaging.sh
 # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
 # Also checks that docs/building.md lists each of them.
 step shipped scripts/check-shipped.sh
+# The module's CONFIG_ symbols are all in docs/kernel-config.md, and the QEMU harness enables the required ones.
+step kernel-config scripts/check-kernel-config.py
 # Every command in the documents runs against the simulated board, and every link leads somewhere.
 step documents scripts/check-docs.py
 

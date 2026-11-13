@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# For a kernel tree. Put this directory in as drivers/misc/lemnos/, then add
+#   source "drivers/misc/lemnos/Kconfig"
+# to drivers/misc/Kconfig and
+#   obj-$(CONFIG_LEMNOS) += lemnos/
+# to drivers/misc/Makefile. docs/kernel-config.md has the full list of symbols.
+
+config LEMNOS
+	tristate "Lemnos hardware engine kernel module"
+	depends on PM && OF && HAS_DMA && COMMON_CLK && DMA_SHARED_BUFFER
+	depends on I2C && SPI_MASTER && GPIOLIB && PWM && REGULATOR && THERMAL && RESET_CONTROLLER
+	depends on !CPU_BIG_ENDIAN
+	help
+	  The kernel side of the Lemnos engine: claims on I2C, SPI, GPIO and PWM, DMA buffers,
+	  register and interrupt access for a block in user space, clocks, supplies and resets,
+	  frame streams, and the blocks the module drives itself. Loaded or built in only when a
+	  board needs it: without it the daemon uses the kernel's stock interfaces.
+
+	  If you say M here, the module is lemnos.ko. Say Y to build it into the kernel, which an
+	  image without loadable modules needs; then CONFIG_RP1_PIO must be Y too if the RP1 PIO
+	  part is wanted.
