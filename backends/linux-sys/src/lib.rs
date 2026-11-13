@@ -28,6 +28,7 @@ pub mod poll;
 pub mod pool;
 pub mod privilege;
 pub mod process;
+pub mod rootfs;
 pub mod rp1_pio;
 pub mod scm;
 pub mod serial;

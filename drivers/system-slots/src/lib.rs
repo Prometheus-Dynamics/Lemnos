@@ -49,9 +49,7 @@
 
 pub mod boot;
 mod install;
-pub mod json;
-pub mod manifest;
-pub mod store;
+pub use lemnos_slot_store::{json, manifest, store};
 pub mod tar;
 pub mod uboot;
 

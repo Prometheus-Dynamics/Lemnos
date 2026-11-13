@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-slot-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The board's slot files: the layout, state, per-slot records and the schema 3 manifest, shared by the system-slots driver and lemnos-slot-init"
+
+[lints]
+workspace = true
+
+# Plain std, no other dependency: lemnos-slot-init links it into a static initramfs program.
+[dependencies]

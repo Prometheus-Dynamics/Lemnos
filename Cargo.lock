@@ -1391,8 +1391,8 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-system-identity",
  "lemnos-core",
- "lemnos-driver-system-slots",
  "lemnos-identity",
+ "lemnos-slot-store",
 ]
 
 [[package]]
@@ -1406,6 +1406,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-sim",
+ "lemnos-slot-store",
  "libc",
  "sha2 0.10.9",
 ]
@@ -1715,6 +1716,18 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
 ]
+
+[[package]]
+name = "lemnos-slot-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "lemnos-slot-store",
+]
+
+[[package]]
+name = "lemnos-slot-store"
+version = "2.0.1-dev"
 
 [[package]]
 name = "lemnos-soc"

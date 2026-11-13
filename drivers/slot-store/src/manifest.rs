@@ -14,7 +14,8 @@
 //! - `image.size`: `rootfs.erofs`'s size in bytes, its hash tree included.
 //! - `image.sha256`: `rootfs.erofs`'s SHA-256, 64 lowercase hex digits.
 //! - `verity.root_hash`: 64 lowercase hex digits.
-//! - `verity.salt`: lowercase hex, an even number of digits up to 512; `""` for no salt.
+//! - `verity.salt`: exactly 64 lowercase hex digits (32 bytes). The builder makes a random one
+//!   for every image. An empty, missing or other-length salt is refused.
 //! - `verity.data_blocks`: how many 4096-byte blocks of data the hash tree covers.
 //! - `verity.hash_offset`: the byte offset in `rootfs.erofs` where the hash tree starts.
 //! - `boot.files`: each boot file's path under `boot/` to its SHA-256.
@@ -23,6 +24,13 @@
 //! data and hash blocks, no verity superblock. The hash tree is appended to the data:
 //! `hash_offset` is `data_blocks * 4096`, and `image.size` is `hash_offset` plus the tree's size
 //! ([`tree_bytes`]). A manifest whose values don't fit these is refused.
+//!
+//! The tree's shape is what `veritysetup format --no-superblock` writes and what the kernel's
+//! dm-verity reads: 128 SHA-256 digests to a 4096-byte block; the levels are `ceil(n / 128)`,
+//! repeated while the count being hashed is more than 1, so a single data block has no tree at
+//! all and the root hash is that block's own hash. In the hash area the levels are stored top
+//! level first, down to the level over the data, which is the order the kernel computes for
+//! each level's start from the table's hash start block (`hash_offset / 4096`).
 
 use crate::json::Json;
 
@@ -46,17 +54,13 @@ impl Verity {
     /// The device-mapper table line for the image on `device` (a loop device's `major:minor` or
     /// path), data and tree both on it.
     pub fn table(&self, device: &str) -> String {
-        let salt = if self.salt.is_empty() {
-            "-"
-        } else {
-            &self.salt
-        };
         format!(
-            "0 {} verity 1 {device} {device} {BLOCK} {BLOCK} {} {} sha256 {} {salt}",
+            "0 {} verity 1 {device} {device} {BLOCK} {BLOCK} {} {} sha256 {} {}",
             self.data_blocks * (BLOCK / 512),
             self.data_blocks,
             self.hash_offset / BLOCK,
             self.root_hash,
+            self.salt,
         )
     }
 }
@@ -78,16 +82,15 @@ pub struct Manifest {
     pub boot_files: Vec<(String, String)>,
 }
 
-/// The size of the hash tree over `data_blocks` blocks: every level, down to one block.
+/// The size of the hash tree over `data_blocks` blocks: a level of `ceil(n / 128)` blocks while
+/// the count being hashed is more than 1. One data block has no tree.
 pub fn tree_bytes(data_blocks: u64) -> u64 {
-    let (mut level, mut blocks) = (data_blocks, 0u64);
-    loop {
-        level = level.div_ceil(PER_BLOCK);
-        blocks += level;
-        if level <= 1 {
-            return blocks * BLOCK;
-        }
+    let (mut count, mut blocks) = (data_blocks, 0u64);
+    while count > 1 {
+        count = count.div_ceil(PER_BLOCK);
+        blocks += count;
     }
+    blocks * BLOCK
 }
 
 /// Lowercase hex of exactly `len` digits.
@@ -168,8 +171,8 @@ impl Manifest {
             return Err("slot.json's verity.root_hash isn't 64 hex digits".into());
         }
         let salt = text_of("verity.salt")?;
-        if salt.len() % 2 != 0 || salt.len() > 512 || !is_hex(&salt, salt.len()) {
-            return Err("slot.json's verity.salt isn't hex of up to 256 bytes".into());
+        if !is_hex(&salt, 64) {
+            return Err("slot.json's verity.salt isn't 64 hex digits".into());
         }
         let data_blocks = number("verity.data_blocks")?;
         let hash_offset = number("verity.hash_offset")?;
@@ -238,10 +241,24 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_is_every_level_down_to_one_block() {
-        assert_eq!(tree_bytes(1), BLOCK);
-        assert_eq!(tree_bytes(128), BLOCK);
-        assert_eq!(tree_bytes(129), 3 * BLOCK);
+    fn the_tree_is_what_veritysetup_writes() {
+        // `veritysetup format --no-superblock --data-block-size=4096 --hash-block-size=4096
+        // --hash=sha256 --salt=<64 hex> --data-blocks=N` (2.8.7): the hash file's length.
+        for (data_blocks, hash_file) in [
+            (1, 0),
+            (2, 4096),
+            (128, 4096),
+            (129, 12288),
+            (16_384, 528_384),
+            (16_385, 540_672),
+            (38_400, 1_245_184),
+        ] {
+            assert_eq!(
+                tree_bytes(data_blocks),
+                hash_file,
+                "{data_blocks} data blocks"
+            );
+        }
         // 1 GiB: 262144 blocks, 2048 + 16 + 1 hash blocks.
         assert_eq!(tree_bytes(262_144), 2065 * BLOCK);
     }
@@ -263,11 +280,6 @@ mod tests {
             m.verity.table("7:0"),
             format!("0 2400 verity 1 7:0 7:0 4096 4096 300 300 sha256 {HASH} {HASH}")
         );
-        let unsalted = Verity {
-            salt: String::new(),
-            ..m.verity
-        };
-        assert!(unsalted.table("7:0").ends_with(" -"));
     }
 
     #[test]
@@ -310,7 +322,20 @@ mod tests {
         let salt = good.replace(&format!("\"salt\":\"{HASH}\""), "\"salt\":\"abc\"");
         assert!(Manifest::parse(&salt).unwrap_err().contains("salt"));
         let unsalted = good.replace(&format!("\"salt\":\"{HASH}\""), "\"salt\":\"\"");
-        assert!(Manifest::parse(&unsalted).is_ok());
+        assert!(Manifest::parse(&unsalted).unwrap_err().contains("salt"));
+        let short = good.replace(
+            &format!("\"salt\":\"{HASH}\""),
+            &format!("\"salt\":\"{}\"", &HASH[..32]),
+        );
+        assert!(Manifest::parse(&short).unwrap_err().contains("salt"));
+        let missing = good.replace(&format!("\"salt\":\"{HASH}\","), "");
+        assert!(Manifest::parse(&missing).unwrap_err().contains("salt"));
+        let one = manifest("", 1);
+        assert_eq!(
+            Manifest::parse(&one).unwrap().image_size,
+            BLOCK,
+            "one block, no tree"
+        );
         let zero = manifest("", 0);
         assert!(Manifest::parse(&zero).is_err());
     }

@@ -133,7 +133,7 @@ impl Bundle {
         format!(
             "{{\"schema\":3,\"id\":\"{}\",\"product\":\"an-os\",\"version\":\"1.0\",\"variant\":\"v\",\
              \"board\":\"{}\",\"kernel\":\"6.12\",\"display_name\":\"An OS\",\
-             \"verity\":{{\"root_hash\":\"{ROOT_HASH}\",\"salt\":\"\",\"data_blocks\":{},\"hash_offset\":{}}},\
+             \"verity\":{{\"root_hash\":\"{ROOT_HASH}\",\"salt\":\"{ROOT_HASH}\",\"data_blocks\":{},\"hash_offset\":{}}},\
              \"image\":{{\"size\":{},\"sha256\":\"{}\"}},\"boot\":{{\"files\":{{{}}}}}}}",
             self.id,
             self.board,
@@ -1254,4 +1254,107 @@ fn a_slot_on_disk_for_another_board_is_listed_but_never_booted() {
         "{}",
         board.state().error
     );
+}
+
+/// The hash tree as `veritysetup format --no-superblock` writes it and dm-verity reads it,
+/// built here only to check the conventions the driver and `lemnos-slot-init` rely on: its size
+/// ([`crate::manifest::tree_bytes`]), its levels stored top level first from the table's hash
+/// start, and the root hash. Returns the hash area and the root.
+fn verity_tree(data: &[u8], salt: &[u8]) -> (Vec<u8>, String) {
+    let digest = |block: &[u8]| -> Vec<u8> {
+        let mut h = Sha256::new();
+        h.update(salt);
+        h.update(block);
+        h.finalize().to_vec()
+    };
+    let mut hashes: Vec<Vec<u8>> = data.chunks(BLOCK as usize).map(digest).collect();
+    let mut levels: Vec<Vec<u8>> = Vec::new();
+    while hashes.len() > 1 {
+        let mut level = Vec::new();
+        for group in hashes.chunks(128) {
+            let mut block = group.concat();
+            block.resize(BLOCK as usize, 0);
+            level.push(block);
+        }
+        hashes = level.iter().map(|b| digest(b)).collect();
+        levels.push(level.concat());
+    }
+    levels.reverse();
+    (levels.concat(), hex(&hashes[0]))
+}
+
+#[test]
+fn the_verity_conventions_match_veritysetup() {
+    // veritysetup 2.8.7, `format --no-superblock --data-block-size=4096 --hash-block-size=4096
+    // --hash=sha256 --salt=000102…1f --data-blocks=N` over N blocks, block i filled with the byte
+    // i mod 251: N, the hash file's length, and the root hash it printed.
+    let salt: Vec<u8> = (0..32).collect();
+    for (blocks, tree, root) in [
+        (
+            1u64,
+            0u64,
+            "4ce3ecf32c133bf6321901b6092219474b6ac91a19d0304621d629e6bb9987dc",
+        ),
+        (
+            2,
+            4096,
+            "bd780675f50010ed023fd1f07e98f029a6aaf25a8f6ee33ec94b4b4e847e4b2e",
+        ),
+        (
+            128,
+            4096,
+            "acb37719c99f3ac554ecbbccb8910616915a08e5a67bd3b9778694c60e673da4",
+        ),
+        (
+            129,
+            12_288,
+            "6093a2333523050b628581510028976d3d3e9c62458642a83727e6df641397a4",
+        ),
+        (
+            16_384,
+            528_384,
+            "234a6801a6840c2defdf3a7c08060cf9874f5773c6360f4172b08ae891a611d5",
+        ),
+        (
+            16_385,
+            540_672,
+            "f1acccee31dcae56f612342ed838ba4c1f375de2d0341ae0cddecd0b28ff8732",
+        ),
+        (
+            38_400,
+            1_245_184,
+            "a73f8f9623fc3e3298871b6ef9de8ae4ba8867f23f5d8a92b87d97b0b5ddfa18",
+        ),
+    ] {
+        let data: Vec<u8> = (0..blocks)
+            .flat_map(|i| std::iter::repeat_n((i % 251) as u8, BLOCK as usize))
+            .collect();
+        let (area, got) = verity_tree(&data, &salt);
+        assert_eq!(
+            crate::manifest::tree_bytes(blocks),
+            tree,
+            "{blocks} blocks: tree size"
+        );
+        assert_eq!(area.len() as u64, tree, "{blocks} blocks: built tree");
+        assert_eq!(got, root, "{blocks} blocks: root hash");
+        // The image is the data and the tree after it; the table starts the hash area there,
+        // and its first block is the top level, which hashes to the root.
+        let manifest = crate::manifest::Verity {
+            root_hash: root.into(),
+            salt: hex(&salt),
+            data_blocks: blocks,
+            hash_offset: blocks * BLOCK,
+        };
+        let table = manifest.table("7:0");
+        assert!(
+            table.contains(&format!(" {blocks} {blocks} sha256 {root} ")),
+            "{table}"
+        );
+        if tree > 0 {
+            let mut h = Sha256::new();
+            h.update(&salt);
+            h.update(&area[..BLOCK as usize]);
+            assert_eq!(hex(&h.finalize()), root, "{blocks} blocks: top level first");
+        }
+    }
 }

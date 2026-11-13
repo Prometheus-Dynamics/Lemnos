@@ -17,57 +17,10 @@ use std::path::{Path, PathBuf};
 use crate::boot::{BootRecord, Restarter};
 use crate::store::{Layout, replace, sync_dir, valid_id};
 
-/// The record's file on the boot partition.
-pub const RECORD_FILE: &str = "boot-record.env";
-/// The record's keys, as the script imports them.
-pub const KEYS: [&str; 3] = ["default", "trial", "trial_armed"];
+pub use lemnos_slot_store::records::uboot::{KEYS, RECORD_FILE, Record};
+
 /// Where a slot's loader configuration is, under its boot directory.
 pub const EXTLINUX: &str = "extlinux/extlinux.conf";
-
-/// The record's three values.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Record {
-    pub default: String,
-    pub trial: String,
-    pub armed: bool,
-}
-
-impl Record {
-    /// Reads the text form. Unknown lines and `#` comments are skipped, as `env import -t`
-    /// skips what it isn't asked for; a value that isn't a slot id reads as none.
-    pub fn parse(text: &str) -> Self {
-        let mut record = Self::default();
-        for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let id = || {
-                if valid_id(value) {
-                    value.to_string()
-                } else {
-                    String::new()
-                }
-            };
-            match key {
-                "default" => record.default = id(),
-                "trial" => record.trial = id(),
-                "trial_armed" => record.armed = value == "1",
-                _ => {}
-            }
-        }
-        record
-    }
-
-    /// The text form: one `name=value` line per key, in [`KEYS`] order, nothing else.
-    pub fn text(&self) -> String {
-        format!(
-            "default={}\ntrial={}\ntrial_armed={}\n",
-            self.default,
-            self.trial,
-            u8::from(self.armed)
-        )
-    }
-}
 
 /// One step of the loader script, in the order it takes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
