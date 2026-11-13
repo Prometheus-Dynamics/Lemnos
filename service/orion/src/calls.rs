@@ -196,8 +196,16 @@ pub struct Done {
 pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: Option<Duration>) {
     let mut clients: Callers = HashMap::new();
     let mut running: Vec<Running> = Vec::new();
+    let mut ended: Vec<CallerKey> = Vec::new();
     loop {
-        expire(&mut clients, &mut running, lease, Instant::now(), shared);
+        expire(
+            &mut clients,
+            &mut running,
+            &mut ended,
+            lease,
+            Instant::now(),
+            shared,
+        );
         let message = if !running.is_empty() {
             match messages.try_recv() {
                 Ok(message) => Some(message),
@@ -218,12 +226,19 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
         };
         match message {
             Some(Message::Run(job)) => {
-                run_one(socket, &mut clients, &job, &mut running, shared);
+                run_one(socket, &mut clients, &job, &mut running, &mut ended, shared);
             }
             Some(Message::Cancel { session, call }) => {
-                cancel(&mut clients, &mut running, session, call, shared);
+                cancel(
+                    &mut clients,
+                    &mut running,
+                    &mut ended,
+                    session,
+                    call,
+                    shared,
+                );
             }
-            None if !running.is_empty() => follow(&mut clients, &mut running, shared),
+            None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}
         }
     }
@@ -259,8 +274,8 @@ pub fn caller_class(caller: &str) -> &'static str {
 ///   does not say which session sent a chunk, so an accepted chunk renews every caller's lease.
 ///
 /// The bridge's own housekeeping (its publishing, its hello document, its ticks) renews nothing, and
-/// neither does a topic published to a caller. A caller with a run in flight is not dropped for silence
-/// (see the rule below), and the run's own progress renews it.
+/// neither does a topic published to a caller. A caller with a silent run in progress is not renewed
+/// by it: its run is silent too and its lease runs out like any caller's.
 ///
 /// A holder keeps its holds by renewing them: `<resource>.call describe` is the renewal with nothing
 /// else to do.
@@ -270,6 +285,7 @@ pub fn caller_class(caller: &str) -> &'static str {
 fn expire(
     clients: &mut Callers,
     running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
     lease: Option<Duration>,
     now: Instant,
     shared: &Shared,
@@ -278,7 +294,7 @@ fn expire(
         return;
     };
     let transferred = shared.last_transfer();
-    let ended: Vec<CallerKey> = clients
+    let gone: Vec<CallerKey> = clients
         .iter()
         .filter(|(caller, held)| {
             // ORION-R2 (C33): a caller with any run in flight is alive, whether or not the run reports
@@ -294,22 +310,62 @@ fn expire(
         })
         .map(|(caller, _)| caller.clone())
         .collect();
-    for caller in ended {
+    for caller in gone {
         ended_with(
             &caller,
             running,
             shared,
             "its lease ran out; the job ended with its connection",
         );
-        release(clients, &caller, "its lease ran out", shared);
+        release(clients, ended, &caller, "its lease ran out", shared);
+    }
+}
+
+/// The most callers whose lease ended and who have had no reply since. The oldest is forgotten
+/// first, so a caller that comes back much later sees no note.
+pub const ENDED_MAX: usize = 64;
+
+/// The note a caller's first reply after its lease ended carries, at the start of its `detail`. A
+/// client matches the prefix `lease-ended:`; the rest of the detail is free text.
+pub const LEASE_ENDED_NOTE: &str = "lease-ended: holds released";
+
+/// Remembers that `caller`'s lease ended, so its next reply carries [`LEASE_ENDED_NOTE`].
+fn remember(ended: &mut Vec<CallerKey>, caller: &str) {
+    if ended.iter().any(|c| c == caller) {
+        return;
+    }
+    if ended.len() == ENDED_MAX {
+        ended.remove(0);
+    }
+    ended.push(caller.to_owned());
+}
+
+/// `detail` with the note in front when `caller`'s lease ended and it has had no reply since; the
+/// note is given once.
+fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> String {
+    let Some(at) = ended.iter().position(|c| c == caller) else {
+        return detail;
+    };
+    ended.remove(at);
+    if detail.is_empty() {
+        LEASE_ENDED_NOTE.to_owned()
+    } else {
+        format!("{LEASE_ENDED_NOTE}; {detail}")
     }
 }
 
 // ORION-R2 (C33): the one trigger that releases a caller's holds. Dropping the connection closes it
 // on lemnosd, which calls `caller_gone` on the drivers. At R2 the trigger is CALLER_GONE for the
 // session token; the drop, the log and the count below stay.
-fn release(clients: &mut Callers, caller: &str, why: &str, shared: &Shared) {
+fn release(
+    clients: &mut Callers,
+    ended: &mut Vec<CallerKey>,
+    caller: &str,
+    why: &str,
+    shared: &Shared,
+) {
     if clients.remove(caller).is_some() {
+        remember(ended, caller);
         log(&format!(
             "caller of class {} dropped: {why}; its connection to lemnosd closed, and lemnosd released what it held (1 connection)",
             caller_class(caller)
@@ -328,6 +384,7 @@ fn release(clients: &mut Callers, caller: &str, why: &str, shared: &Shared) {
 fn cancel(
     clients: &mut Callers,
     running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
     session: u64,
     call: u64,
     shared: &Shared,
@@ -344,12 +401,13 @@ fn cancel(
         let _ = lemnosd.client.cancel_job(r.job);
         lemnosd.seen = Instant::now();
     }
+    let detail = noted(ended, &r.caller, "cancelled".to_owned());
     shared.finished(Done {
         session: r.session,
         call: r.call,
         outcome: Outcome::Cancelled,
         output: String::new(),
-        detail: "cancelled".to_owned(),
+        detail,
     });
 }
 
@@ -366,6 +424,7 @@ fn run_one(
     clients: &mut Callers,
     job: &Job,
     running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
     shared: &Shared,
 ) {
     let caller = job.caller.as_str();
@@ -410,6 +469,7 @@ fn run_one(
         Err(Failure::Refused(why)) => (Outcome::Rejected, String::new(), why),
         Err(Failure::Failed(why)) => (Outcome::Failed, String::new(), why),
     };
+    let detail = noted(ended, caller, detail);
     shared.finished(Done {
         session: job.session,
         call: job.call,
@@ -420,7 +480,12 @@ fn run_one(
 }
 
 /// Takes the news of the long jobs on every caller's connection, waiting a little for it.
-fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
+fn follow(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
+    shared: &Shared,
+) {
     if clients.is_empty() {
         lost_all(running, shared);
         return;
@@ -470,7 +535,9 @@ fn follow(clients: &mut Callers, running: &mut Vec<Running>, shared: &Shared) {
                 if let Some(lemnosd) = clients.get_mut(&caller) {
                     lemnosd.seen = Instant::now();
                 }
-                shared.finished(job_done(&r, status, &result));
+                let mut done = job_done(&r, status, &result);
+                done.detail = noted(ended, &r.caller, done.detail);
+                shared.finished(done);
             }
         }
     }
