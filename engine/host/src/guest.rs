@@ -40,14 +40,16 @@ use core::time::Duration;
 
 use lemnos_core::{
     ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, Pwm, RawSpiBus, RegistersHandle,
-    ResetHandle, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    ResetHandle, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 use lemnos_hal::blocks::{
     BufferHandle, BufferKind, ControlSetup, DmaBuffer, InterruptEvent, IsoPacket, StreamFrame,
     UartFormat, UsbFunctionEvent,
 };
 use lemnos_hal::i2c::{self, I2c as HalI2c};
-use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
+use lemnos_hal::raw::{
+    Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, RawWatchdog, SpiSegment,
+};
 use lemnos_hal::register::AddressWidth;
 use lemnos_hal::spi::{self, SpiDevice};
 use lemnos_hal::{
@@ -108,6 +110,11 @@ pub(crate) fn line(line: Line) -> Line {
 
 pub(crate) fn pwm(pwm: Pwm) -> Pwm {
     lemnos_core::Held::boxed(Box::new(ReadOnly(pwm)))
+}
+
+/// A watchdog of a host-owned device: its timeout is read, and never set or fed.
+pub(crate) fn watchdog(watchdog: Watchdog) -> Watchdog {
+    lemnos_core::Held::boxed(Box::new(ReadOnly(watchdog)))
 }
 
 pub(crate) fn uart(uart: Uart) -> Uart {
@@ -212,6 +219,32 @@ impl RawPwm for ReadOnly<Pwm> {
 
     fn config(&mut self) -> Refusable<PwmConfig> {
         self.0.config()
+    }
+}
+
+impl RawWatchdog for ReadOnly<Watchdog> {
+    fn feed(&mut self) -> Refusable<()> {
+        Err(REFUSED)
+    }
+
+    fn set_timeout(&mut self, _: u32) -> Refusable<u32> {
+        Err(REFUSED)
+    }
+
+    fn timeout(&mut self) -> Refusable<u32> {
+        self.0.timeout()
+    }
+
+    fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
+        self.0.timeout_range()
+    }
+
+    fn has_attribute(&mut self, name: &str) -> bool {
+        self.0.has_attribute(name)
+    }
+
+    fn time_left(&mut self) -> Option<u32> {
+        self.0.time_left()
     }
 }
 

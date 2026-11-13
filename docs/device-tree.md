@@ -26,9 +26,13 @@ lemnos-ctl validate --no-live --socs socs testing/boards/reference.toml
   configuration is what keeps the stock driver off it. A blacklist stops the module loading; a
   driver built into the kernel is not stopped, and the start check reports it.
 
-Every device in the board file must be traceable to one of those outputs. A device whose needs
-produce nothing (no node enabled, no line freed, no module option) is refused, unless its driver is
-listed in the map's `needs_nothing`.
+Every device in the board file must be traceable to one of those outputs, or be a device whose
+driver needs no hardware. What a driver needs is in its own manifest: the tool reads the manifests of
+the built-in drivers (the list `lemnosd` runs), so no list is kept by hand. A device that names the
+hardware its driver needs (in `bus` or `uses`) makes a node enabled, a line freed or a module option.
+A device whose driver declares no hardware need (the system identity, a driver built from other
+devices) makes nothing, by definition, and is accepted with no name. A device whose driver does
+need hardware, and names none, is refused, and the refusal names the need.
 
 `validate` checks the board file as `lemnosd` does. With a `soc`, it also checks the live
 device tree (`/proc/device-tree`) and the platform devices (`/sys/bus/platform/devices`) against
@@ -80,15 +84,18 @@ reason = "the fan header's line: at full speed from power-on, until Lemnos's fan
 | SPI bus | `spidevB.C` | The SPI device | The alias `spiB` |
 | GPIO line | `gpio:LABEL:LINE` | A line of the GPIO chip whose label is `LABEL`. The map's `[chips]` table gives the labels | At bind: the chip with that label, found from its character device. Stable across boots |
 | PWM channel | `pwm:NODE:CHANNEL` | A channel of the PWM chip whose device-tree node is `NODE`, the node's path as the live tree shows it | At bind: the chip whose device's `of_node` is that path. Stable across boots |
+| Watchdog | `watchdog:NODE` | The hardware watchdog whose device-tree node is `NODE`. Named in a device's `uses` (as `watchdog = "watchdog:NODE"`), since the watchdog is the driver's optional need | At bind: the `/dev/watchdogN` whose class device's `of_node` is that path. Stable across boots |
 
 Example: `bus = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1"` for channel 1 of the fan's PWM, and
 `uses = { line = "gpio:pinctrl-rp1:34" }` for line 34 of the RP1 GPIO chip labelled `pinctrl-rp1`.
 | PIO bus | `pio-i2c:...`, `pio-out:gpio=N` | A state machine of the PIO block | The PIO block is in the board's hardware |
 | USB gadget | `udc:NAME` | This board as a USB device, through the port the board names | The map's `usb-peripheral` controller, whose `sysfs` is `NAME` |
 
-The numbered forms `gpiochipN:LINE` and `pwmchipN:CHANNEL` still work on a board that has no tree
-generated. The kernel numbers a chip as it probes, so they can point at another chip after a
-reboot: the generator refuses them, and `lemnos-ctl validate` warns about them.
+The numbered forms `gpiochipN:LINE`, `pwmchipN:CHANNEL` and `watchdogN` still work on a board that has
+no tree generated. The kernel numbers a device as it probes, so they can point at another device after
+a reboot: the generator refuses them, and `lemnos-ctl validate` warns about them. A hw-watchdog device
+may also name its node by the `device` setting (`device = "watchdog0"`); the generator cannot see a
+setting, so such a device is accepted and enables no node.
 
 ### Rules the generator enforces
 
@@ -106,7 +113,10 @@ Each rule has a refusal that names the entry:
   device's GPIO line must have a `[[lines]]` entry, and that entry must free something: a base node
   holding the line, or a boot state.
 - Every name a device uses must be one of the forms above. Any other name is refused.
-- A device that makes nothing is refused, unless its driver is in the map's `needs_nothing`.
+- A device names the hardware its driver needs. A device whose driver declares a hardware need (a bus,
+  a line, a PWM channel, a watchdog, the PIO block, a USB controller) and names none is refused, naming
+  the need. A device whose driver declares none is accepted with no name.
+- A `watchdog:` name must be a watchdog node of the map, and its controller a `[[hardware]]` entry.
 - A `usb-peripheral` entry (a USB port in device mode) is refused unless a device names it with a
   `udc:` name. Its name is `udc:` and the map's `sysfs`, so a name that is not the controller's UDC
   is refused. Its `role` is `"peripheral"` when it is given, the only role the generator makes.
@@ -220,8 +230,7 @@ base tree's source (for example `raspberrypi,rp1-cfe`). `module_roles` are the m
 can take besides `owned`: `pisp_be`, `gsdma`, `a733_ve`, `k230_isp`, `vip9000`.
 
 GPIO chips are in `[chips.KEY]`: `label` is the chip's label as the kernel reports it (for the RP1
-GPIO chip, `pinctrl-rp1`, a constant in `drivers/pinctrl/pinctrl-rp1.c`). `needs_nothing` lists
-the drivers whose devices are composed of other devices and need no hardware.
+GPIO chip, `pinctrl-rp1`, a constant in `drivers/pinctrl/pinctrl-rp1.c`). The drivers' needs are not in the map: the tool reads them from the built-in drivers' manifests.
 
 The parser refuses a map whose paths are not absolute, whose alias is not `i2cN` or `spiN` for an
 I2C or SPI controller, or whose pin sets share a GPIO.

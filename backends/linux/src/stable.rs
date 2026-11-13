@@ -1,15 +1,17 @@
-//! The stable names of GPIO lines and PWM channels: `gpio:<label>:LINE` and `pwm:<node>:CHANNEL`.
+//! The stable names of GPIO lines, PWM channels and watchdogs: `gpio:<label>:LINE`,
+//! `pwm:<node>:CHANNEL` and `watchdog:<node>`.
 //!
-//! The kernel numbers a GPIO or PWM chip as it probes, so `gpiochipN` and `pwmchipN` can change
-//! from one boot to the next. A stable name identifies the chip instead, and it is resolved when
-//! the device binds:
+//! The kernel numbers a GPIO, PWM or watchdog device as it probes, so `gpiochipN`, `pwmchipN` and
+//! `watchdogN` can change from one boot to the next. A stable name identifies the device instead,
+//! and it is resolved when the device binds:
 //!
 //! - a GPIO chip by its label, which the kernel reports in the chip's own information
 //!   (`GPIO_GET_CHIPINFO_IOCTL`). A Raspberry Pi RP1's chip is `pinctrl-rp1`, a constant in
 //!   the driver's source (`drivers/pinctrl/pinctrl-rp1.c`, `MODULE_NAME`);
 //! - a PWM chip by its device-tree node: the chip's platform device's `of_node` link, which the
 //!   kernel gives as the node's path in the live tree (`/sys/firmware/devicetree/base`). A PWM
-//!   chip has no label of its own.
+//!   chip has no label of its own;
+//! - a watchdog by its device-tree node, the same way: `class/watchdog/watchdogN/device/of_node`.
 //!
 //! The numbered forms still work, for a board that has no generated tree; the tree generator
 //! refuses them.
@@ -23,10 +25,15 @@ pub(crate) enum Stable<'a> {
     Gpio { label: &'a str, line: u32 },
     /// A PWM channel: the chip's device-tree node path and the channel.
     Pwm { node: &'a str, channel: u32 },
+    /// A watchdog: the device-tree node path of the device.
+    Watchdog { node: &'a str },
 }
 
 /// Splits a `gpio:` or `pwm:` name. Anything else, and a name with no channel number, is `None`.
 pub(crate) fn parse(need: &str) -> Option<Stable<'_>> {
+    if let Some(node) = need.strip_prefix("watchdog:") {
+        return node_path(node).then_some(Stable::Watchdog { node });
+    }
     if let Some(rest) = need.strip_prefix("gpio:") {
         let (label, line) = rest.rsplit_once(':')?;
         if label.is_empty() || label.contains('/') {
@@ -39,13 +46,18 @@ pub(crate) fn parse(need: &str) -> Option<Stable<'_>> {
     }
     let rest = need.strip_prefix("pwm:")?;
     let (node, channel) = rest.rsplit_once(':')?;
-    if !node.starts_with('/') || node.contains("..") {
+    if !node_path(node) {
         return None;
     }
     Some(Stable::Pwm {
         node,
         channel: channel.parse().ok()?,
     })
+}
+
+/// Whether `node` is a node path of the live tree: absolute, with no `..` in it.
+fn node_path(node: &str) -> bool {
+    node.starts_with('/') && !node.contains("..")
 }
 
 /// The number of the GPIO chip whose label is `label`, among `(number, label)` pairs.
@@ -139,6 +151,33 @@ fn chip_label(path: &Path) -> Option<String> {
     String::from_utf8(info.label[..end].to_vec()).ok()
 }
 
+/// The watchdog device node (`dev/watchdogN`) whose device-tree node is `node`, found under `sys`
+/// (`class/watchdog/watchdogN/device/of_node`, as the kernel links it). `None` when no watchdog
+/// has that node, or the name is not one of the kernel's `watchdogN`.
+pub(crate) fn watchdog_dev(dev: &Path, sys: &Path, node: &str) -> Option<PathBuf> {
+    let live = sys.join("firmware/devicetree/base");
+    for entry in std::fs::read_dir(sys.join("class/watchdog"))
+        .ok()?
+        .flatten()
+    {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("watchdog") || name[8..].parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(of_node) = std::fs::canonicalize(entry.path().join("device/of_node")) else {
+            continue;
+        };
+        let Ok(below) = of_node.strip_prefix(&live) else {
+            continue;
+        };
+        if below.to_str() == Some(node.trim_start_matches('/')) {
+            return Some(dev.join(name));
+        }
+    }
+    None
+}
+
 /// The PWM chip directory (`class/pwm/pwmchipN`) whose device-tree node is `node`, found under
 /// `sys`. Each chip's `device/of_node` link is resolved and its path taken below the live tree.
 pub(crate) fn pwm_chip_dir(sys: &Path, node: &str) -> Option<PathBuf> {
@@ -222,5 +261,45 @@ mod tests {
             None
         );
         std::fs::remove_dir_all(&sys).unwrap();
+    }
+
+    #[test]
+    fn a_watchdog_name_is_split_and_found_by_its_device_tree_node() {
+        assert_eq!(
+            parse("watchdog:/soc@107c000000/watchdog@7d200000"),
+            Some(Stable::Watchdog {
+                node: "/soc@107c000000/watchdog@7d200000"
+            })
+        );
+        assert_eq!(parse("watchdog:soc/watchdog"), None);
+        assert_eq!(parse("watchdog:/soc/../x"), None);
+        assert_eq!(parse("watchdog0"), None);
+
+        let dir = std::env::temp_dir().join(format!("lemnos-watchdog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dev = dir.join("dev");
+        let sys = dir.join("sys");
+        std::fs::create_dir_all(&dev).unwrap();
+        let node = sys.join("firmware/devicetree/base/soc@107c000000/watchdog@7d200000");
+        std::fs::create_dir_all(&node).unwrap();
+        let device = sys.join("devices/platform/107d200000.watchdog");
+        std::fs::create_dir_all(&device).unwrap();
+        std::os::unix::fs::symlink(&node, device.join("of_node")).unwrap();
+        std::fs::create_dir_all(sys.join("class/watchdog/watchdog0")).unwrap();
+        std::os::unix::fs::symlink(&device, sys.join("class/watchdog/watchdog0/device")).unwrap();
+        // Found: the node of watchdog0 is its device node under dev.
+        assert_eq!(
+            watchdog_dev(&dev, &sys, "/soc@107c000000/watchdog@7d200000"),
+            Some(dev.join("watchdog0"))
+        );
+        // Missed: no watchdog has that node.
+        assert_eq!(
+            watchdog_dev(&dev, &sys, "/soc@107c000000/watchdog@7d300000"),
+            None
+        );
+        // A non-numbered class entry is not a watchdog.
+        std::fs::create_dir_all(sys.join("class/watchdog/other")).unwrap();
+        assert_eq!(watchdog_dev(&dev, &sys, "/soc@107c000000/other"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

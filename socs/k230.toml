@@ -18,7 +18,6 @@
 soc = "k230"
 form = "fragment"
 
-needs_nothing = ["orientation", "fan-control"]
 
 [controllers.i2c0]
 kind = "i2c"

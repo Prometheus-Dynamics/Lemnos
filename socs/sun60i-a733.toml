@@ -15,7 +15,6 @@ soc = "sun60i-a733"
 # The base the board's loader hands the kernel is a full device tree (extlinux `fdt`), not an overlay.
 form = "fragment"
 
-needs_nothing = ["orientation", "fan-control"]
 
 [controllers.i2c0]
 kind = "i2c"

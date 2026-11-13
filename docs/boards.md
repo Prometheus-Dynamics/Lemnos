@@ -141,6 +141,8 @@ On Linux (`lemnosd` with no `--sim`):
 | `spidevB.C` | The SPI device `/dev/spidevB.C` |
 | `gpiochipN:LINE` | One line of a GPIO chip |
 | `pwmchipN:CHANNEL` | One channel of a PWM chip |
+| `watchdog:NODE` | The hardware watchdog whose device-tree node is `NODE`, named in a device's `uses` as `watchdog = "watchdog:NODE"`. The stable form; the generator enables the node |
+| `watchdogN` | The hardware watchdog `/dev/watchdogN`, by its number. The number can change on reboot |
 | `ttyNAME` | A serial port, such as `ttyAMA0`. No built-in driver takes one yet; a package can |
 | `usb:BUS-PORT` | The USB device plugged into a port, such as `usb:1-1.4` |
 | `usb:VVVV:PPPP` | The USB device with this vendor and product, in hex. Refused when more than one fits |

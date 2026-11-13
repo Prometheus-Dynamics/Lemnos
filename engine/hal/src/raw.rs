@@ -213,6 +213,25 @@ pub trait RawPwm {
     fn config(&mut self) -> Result<PwmConfig, ErrorKind>;
 }
 
+/// A claimed hardware watchdog: its feed and its timeout. The device resets the board when the
+/// timeout runs out without a feed. A feed is one write that is not the magic close character;
+/// nothing here ever writes that character, so the watchdog cannot be disarmed through this trait.
+pub trait RawWatchdog {
+    /// Feeds the watchdog once.
+    fn feed(&mut self) -> Result<(), ErrorKind>;
+    /// Asks for `seconds` and returns the timeout the device applied.
+    fn set_timeout(&mut self, seconds: u32) -> Result<u32, ErrorKind>;
+    /// The timeout the device has now.
+    fn timeout(&mut self) -> Result<u32, ErrorKind>;
+    /// The shortest and longest timeout the device takes, when it says.
+    fn timeout_range(&mut self) -> (Option<u32>, Option<u32>);
+    /// Whether the device has the attribute `name` (`identity`, `timeleft`, ...), as the kernel
+    /// lists it.
+    fn has_attribute(&mut self, name: &str) -> bool;
+    /// The seconds the device has before it resets, when it says.
+    fn time_left(&mut self) -> Option<u32>;
+}
+
 /// SPI clock polarity and phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SpiMode {

@@ -20,7 +20,6 @@ soc = "rk3566"
 form = "overlay"
 
 # The GPIO chips a `gpio:LABEL:LINE` name may name.
-needs_nothing = ["orientation", "fan-control"]
 
 [chips.gpio0]
 label = "gpio0"

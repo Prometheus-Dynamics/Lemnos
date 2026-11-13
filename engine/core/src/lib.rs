@@ -50,7 +50,7 @@ pub use lemnos_macros::{Decode, Encode, contract, driver};
 pub use resources::{
     BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, Home, I2c, InterruptHandle, Line,
     Lock, Need, NeedKind, Pio, Provider, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource,
-    Resources, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    Resources, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 pub use tag::Tag;
 

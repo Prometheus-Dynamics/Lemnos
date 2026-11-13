@@ -12,10 +12,18 @@ const REFERENCE_BOARD: &str = include_str!("../../../testing/boards/reference.to
 const ALL_KINDS_MAP: &str = include_str!("fixtures/all-kinds.toml");
 const ALL_KINDS_BOARD: &str = include_str!("fixtures/all-kinds-board.toml");
 
+/// The manifests of the built-in drivers: what each driver declares it needs.
+fn manifests() -> Vec<lemnos_core::Manifest> {
+    lemnosd::builtin::drivers()
+        .iter()
+        .map(|entry| *entry.manifest())
+        .collect()
+}
+
 fn generated(board_text: &str, map_text: &str) -> Result<lemnos_devtree::Output, String> {
     let board = board::parse(board_text).map_err(|e| e.to_string())?;
     let map = SocMap::parse(map_text)?;
-    generate(&board, &map)
+    generate(&board, &map, &manifests())
 }
 
 fn golden(name: &str) -> String {
@@ -68,11 +76,22 @@ fn no_fan_node_and_no_cooling_binding_is_generated() {
 }
 
 #[test]
-fn a_gadget_is_absent_without_a_usb_hardware_entry() {
+fn a_gadget_needs_its_udc_hardware_entry() {
+    // The gadget names its controller as `udc:`; with no entry for it, the name is refused.
+    let board = REFERENCE_BOARD.replace(
+        "[[hardware]]\nname = \"udc:1000480000.usb\"\ncontroller = \"usb\"\n",
+        "",
+    );
+    let message = generated(&board, REFERENCE_MAP).unwrap_err();
+    assert!(message.contains("udc:1000480000.usb"), "{message}");
+    assert!(message.contains("no [[hardware]] entry names"), "{message}");
+}
+
+#[test]
+fn a_watchdog_device_needs_the_watchdog_hardware_entry() {
     let board = REFERENCE_BOARD.replace("[[hardware]]\ncontroller = \"watchdog\"\n", "");
-    let out = generated(&board, REFERENCE_MAP).unwrap();
-    assert!(!out.overlay.contains("usb@480000"));
-    assert!(!out.overlay.contains("watchdog"));
+    let message = generated(&board, REFERENCE_MAP).unwrap_err();
+    assert!(message.contains("needs the watchdog"), "{message}");
 }
 
 fn refused(board_text: &str) -> String {
@@ -283,18 +302,39 @@ fn a_stock_driver_bound_where_the_module_must_own_the_node_is_named() {
 // The three outputs of the reference board are complete: every device is traceable to something
 // the outputs make, and what each one makes is in them.
 
-/// The board's devices, each with what its needs must produce in the outputs.
-const REFERENCE_DEVICES: &[(&str, &str)] = &[
-    // The ring's PIO block: the node enabled, with its reason.
-    ("ring", "pio: the RP1 PIO block"),
-    // The IMU and the sensor: their buses' nodes enabled and aliased.
-    ("imu", "alias i2c1, the name \"i2c-1\""),
-    ("sensor", "alias i2c10, the name \"i2c-10\""),
-    // The camera power switch: the regulator's node disabled, its line freed, and the module
-    // owns the receiver it powers.
-    ("cam0-power", "disabled: base \"module-io\" /cam0_reg"),
+/// The board's devices, each with what its needs must produce in the outputs. `None` is a device
+/// whose driver needs no hardware: it makes nothing, by definition, and it must still be accepted.
+const REFERENCE_DEVICES: &[(&str, Option<&str>)] = &[
+    // The system devices: their drivers declare no hardware need.
+    ("identity", None),
+    ("slots", None),
+    ("reboot", None),
+    // The watchdog: its node enabled, and the hardware entry it is named by.
+    ("watchdog", Some("the hardware watchdog")),
+    // The USB gadget: the controller in peripheral mode.
+    (
+        "gadget",
+        Some("the SoC's USB controller in peripheral mode"),
+    ),
+    // The LED strip and the IMU and magnetometer: the PIO block, enabled once for all of them.
+    ("ring", Some("the RP1 PIO block")),
+    ("imu", Some("the RP1 PIO block")),
+    ("mag", Some("the RP1 PIO block")),
+    // The power monitor and the camera sensor: their buses' nodes enabled and aliased.
+    ("power", Some("alias i2c1, the name \"i2c-1\"")),
+    ("cam0-sensor", Some("alias i2c10, the name \"i2c-10\"")),
+    // The camera power switch: the regulator's node disabled, its line freed.
+    ("cam0-power", Some("disabled: base \"module-io\" /cam0_reg")),
+    // The camera receiver: the kernel module owns its node. The front end shares that node.
+    ("cam0-receiver", Some("the camera receiver")),
+    ("cam0-fe", None),
+    // The PiSP back end: the module drives its block.
+    ("cam0-isp", Some("the PiSP back end")),
     // The fan: the PWM block with the pin set of its channel.
-    ("fan", "pwm: a PWM channel on RP1"),
+    ("fan", Some("pwm: a PWM channel on RP1")),
+    // The temperature zone and the fan control built on the fan: neither needs hardware of the board.
+    ("cpu-thermal", None),
+    ("fan-control", None),
 ];
 
 #[test]
@@ -302,17 +342,18 @@ fn every_device_of_the_reference_board_is_traceable_to_an_output() {
     let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
     let board = board::parse(REFERENCE_BOARD).unwrap();
     for device in &board.devices {
-        let wanted = REFERENCE_DEVICES
+        let (_, wanted) = REFERENCE_DEVICES
             .iter()
             .find(|(id, _)| *id == device.id)
             .unwrap_or_else(|| panic!("device {:?} has no expected output", device.id));
-        let found = out.overlay.contains(wanted.1)
-            || out.boot.contains(wanted.1)
-            || out.modprobe.contains(wanted.1);
+        let Some(wanted) = wanted else { continue };
+        let found = out.overlay.contains(wanted)
+            || out.boot.contains(wanted)
+            || out.modprobe.contains(wanted);
         assert!(
             found,
             "device {:?}: {:?} is in no output",
-            device.id, wanted.1
+            device.id, wanted
         );
     }
 }
@@ -353,13 +394,37 @@ fn a_device_that_makes_nothing_is_refused() {
 }
 
 #[test]
-fn a_device_with_no_hardware_name_is_refused_unless_its_driver_needs_nothing() {
-    let board = format!("{ALL_KINDS_BOARD}\n[[devices]]\nid = \"lonely\"\ndriver = \"lonely\"\n");
-    assert!(refused(&board).contains("has no hardware name"));
+fn a_device_with_no_hardware_name_is_refused_when_its_driver_needs_hardware() {
+    // The ring's driver needs a bus; a device that names none has nothing to enable.
+    let board = format!("{ALL_KINDS_BOARD}\n[[devices]]\nid = \"lonely\"\ndriver = \"ws2812\"\n");
+    let message = refused(&board);
+    assert!(message.contains("\"lonely\""), "{message}");
+    assert!(message.contains("needs spi"), "{message}");
+}
+
+#[test]
+fn a_device_whose_driver_needs_no_hardware_is_accepted_with_no_list() {
+    // The system identity driver declares no hardware need: it produces nothing, by definition.
+    let board =
+        format!("{ALL_KINDS_BOARD}\n[[devices]]\nid = \"who\"\ndriver = \"system-identity\"\n");
+    let out = generated(&board, ALL_KINDS_MAP).unwrap();
+    assert_eq!(
+        out.overlay,
+        generated(ALL_KINDS_BOARD, ALL_KINDS_MAP).unwrap().overlay
+    );
+    // Its driver's devices on other devices need no hardware either.
     let composed = format!(
-        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"group\"\ndriver = \"composed\"\nuses = {{ imu = \"imu\" }}\n"
+        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"group\"\ndriver = \"orientation\"\nuses = {{ accel = \"imu\" }}\n"
     );
     assert!(generated(&composed, ALL_KINDS_MAP).is_ok());
+}
+
+#[test]
+fn a_driver_the_tool_does_not_know_is_refused_when_it_names_nothing() {
+    let board =
+        format!("{ALL_KINDS_BOARD}\n[[devices]]\nid = \"lonely\"\ndriver = \"not-a-driver\"\n");
+    let message = refused(&board);
+    assert!(message.contains("does not know"), "{message}");
 }
 
 #[test]
@@ -873,6 +938,89 @@ fn a_port_with_no_udc_is_named() {
         problems
             .iter()
             .any(|p| p.contains("no UDC \"fcc00000.usb\"")),
+        "{problems:?}"
+    );
+}
+
+// The hardware watchdog's stable name, `watchdog:<node>`: resolved through the map's node, which the
+// board's hardware entry enables. The numbered `watchdogN` is refused, as the numbered chips are.
+
+/// The fixture board with a watchdog device that names the watchdog by `name`.
+fn with_watchdog(name: &str) -> String {
+    format!(
+        "{ALL_KINDS_BOARD}\n[[devices]]\nid = \"dog\"\ndriver = \"hw-watchdog\"\nkeepalive = true\nuses = {{ watchdog = \"{name}\" }}\nconfig = {{ timeout_s = 15 }}\n"
+    )
+}
+
+#[test]
+fn a_watchdog_name_resolves_through_the_node_and_enables_it() {
+    let out = generated(&with_watchdog("watchdog:/bus/wdt@8000"), ALL_KINDS_MAP).unwrap();
+    assert!(
+        out.overlay.contains("target-path = \"/bus/wdt@8000\""),
+        "{}",
+        out.overlay
+    );
+    assert!(
+        out.overlay.contains("the hardware watchdog"),
+        "{}",
+        out.overlay
+    );
+}
+
+#[test]
+fn a_watchdog_name_the_map_has_no_node_for_is_refused() {
+    let message = refused(&with_watchdog("watchdog:/bus/nope@1"));
+    assert!(
+        message.contains("the map has no watchdog at /bus/nope@1"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_watchdog_name_needs_its_hardware_entry() {
+    let board = ALL_KINDS_BOARD.replace("[[hardware]]\ncontroller = \"wdt\"\n", "");
+    let board = format!(
+        "{board}\n[[devices]]\nid = \"dog\"\ndriver = \"hw-watchdog\"\nuses = {{ watchdog = \"watchdog:/bus/wdt@8000\" }}\n"
+    );
+    let message = refused(&board);
+    assert!(message.contains("needs the watchdog"), "{message}");
+}
+
+#[test]
+fn a_numbered_watchdog_is_refused_with_the_stable_form() {
+    let message = refused(&with_watchdog("watchdog0"));
+    assert!(message.contains("watchdog0"), "{message}");
+    assert!(message.contains("watchdog:NODE"), "{message}");
+}
+
+#[test]
+fn a_watchdog_name_is_found_or_missed_by_the_start_check() {
+    let board = with_watchdog("watchdog:/bus/wdt@8000");
+    let dir = fixture_dir("watchdog");
+    let tree = dir.join("tree");
+    // Absent: the start check names the node.
+    let problems = run_check(&dir, &board, ALL_KINDS_MAP);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p
+                .contains("device \"dog\": watchdog:/bus/wdt@8000: node absent: /bus/wdt@8000")),
+        "{problems:?}"
+    );
+    // Present and enabled: no problem for the name.
+    node(&tree, "/bus/wdt@8000", None, Some("okay"), None);
+    let problems = run_check(&dir, &board, ALL_KINDS_MAP);
+    assert!(
+        !problems.iter().any(|p| p.contains("watchdog:")),
+        "{problems:?}"
+    );
+    // Disabled: named.
+    node(&tree, "/bus/wdt@8000", None, Some("disabled"), None);
+    let problems = run_check(&dir, &board, ALL_KINDS_MAP);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("watchdog:/bus/wdt@8000: node disabled: /bus/wdt@8000")),
         "{problems:?}"
     );
 }

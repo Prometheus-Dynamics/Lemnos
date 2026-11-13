@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use lemnos_core::{BusKind, Manifest, NeedKind};
 use lemnos_host::board::{BoardFile, LineSpec};
 
 use crate::map::{Controller, Form, Kind, PinSet, SocMap};
@@ -36,9 +37,11 @@ struct Chosen<'a> {
     options: Vec<&'a str>,
 }
 
-/// Makes the overlay and the boot fragment for `board`, using `map`. Refuses what the map cannot
-/// provide, with the entry that asks for it.
-pub fn generate(board: &BoardFile, map: &SocMap) -> Result<Output, String> {
+/// Makes the overlay and the boot fragment for `board`, using `map`. `drivers` are the manifests of
+/// the drivers the tool knows (the built-in list, each driver's own declared needs): a device whose
+/// driver declares no hardware need makes nothing by definition, and one whose driver does must name
+/// it. Refuses what the map cannot provide, with the entry that asks for it.
+pub fn generate(board: &BoardFile, map: &SocMap, drivers: &[Manifest]) -> Result<Output, String> {
     let soc = board
         .board
         .soc
@@ -61,7 +64,7 @@ pub fn generate(board: &BoardFile, map: &SocMap) -> Result<Output, String> {
     };
     let chosen = choose(board, map)?;
     check_lines(board, map)?;
-    check_devices(board, map, &chosen, base.map(|(_, b)| b))?;
+    check_devices(board, map, &chosen, base.map(|(_, b)| b), drivers)?;
     let overlay = overlay(board, &chosen, base, &board.lines, map.form)?;
     let boot = boot(board, map)?;
     let modprobe = modprobe(board, &chosen);
@@ -335,14 +338,15 @@ fn gpio_line<'a>(name: &'a str, map: &SocMap) -> Result<(&'a str, u16), String> 
     Ok((label, number))
 }
 
-/// Every name a device uses is one the generator makes something of, and every device makes
-/// something: a node enabled, a line freed, or a module option. A device that makes nothing is
-/// refused, unless its driver needs nothing from the SoC (the map's `needs_nothing`).
+/// Every name a device uses is one the generator makes something of. A device names the hardware
+/// its driver needs: a device that makes nothing is accepted only when its driver declares no hardware
+/// need (its needs are other devices, or none), which is read from the driver's manifest.
 fn check_devices(
     board: &BoardFile,
     map: &SocMap,
     chosen: &[Chosen<'_>],
     base: Option<&crate::map::Base>,
+    drivers: &[Manifest],
 ) -> Result<(), String> {
     let ids: BTreeSet<&str> = board.devices.iter().map(|d| d.id.as_str()).collect();
     let named: BTreeSet<&str> = chosen.iter().map(|c| c.name).collect();
@@ -361,11 +365,15 @@ fn check_devices(
             if ids.contains(name) {
                 continue;
             }
-            if name.starts_with("gpiochip") || name.starts_with("pwmchip") {
+            if name.starts_with("gpiochip")
+                || name.starts_with("pwmchip")
+                || is_numbered_watchdog(name)
+            {
                 return Err(format!(
-                    "device {:?} uses {name:?}: the kernel numbers gpio and pwm chips as it probes \
-                     them, and no device-tree alias sets the number, so this generator cannot make \
-                     it come out as written; name the chip stably: gpio:LABEL:LINE or pwm:NODE:CHANNEL",
+                    "device {:?} uses {name:?}: the kernel numbers gpio, pwm and watchdog devices as it \
+                     probes them, and no device-tree alias sets the number, so this generator cannot make \
+                     it come out as written; name the device stably: gpio:LABEL:LINE, pwm:NODE:CHANNEL or \
+                     watchdog:NODE",
                     device.id
                 ));
             }
@@ -414,6 +422,26 @@ fn check_devices(
                     ));
                 }
                 makes += 1;
+            } else if let Some(node) = name.strip_prefix("watchdog:") {
+                let key = map
+                    .controllers
+                    .iter()
+                    .find(|(_, c)| c.kind == Kind::Watchdog && c.path == node)
+                    .map(|(k, _)| k.as_str())
+                    .ok_or_else(|| {
+                        format!(
+                            "device {:?} uses {name:?}: the map has no watchdog at {node}",
+                            device.id
+                        )
+                    })?;
+                if !chosen.iter().any(|c| c.key == key) {
+                    return Err(format!(
+                        "device {:?} uses {name:?}, which needs the watchdog: add a [[hardware]] entry \
+                         for controller {key:?}",
+                        device.id
+                    ));
+                }
+                makes += 1;
             } else if name.starts_with("pio-i2c:") || name.starts_with("pio-out:") {
                 if !has_pio {
                     return Err(format!(
@@ -443,12 +471,8 @@ fn check_devices(
                 ));
             }
         }
-        if makes == 0 && !map.needs_nothing.iter().any(|d| d == &device.driver) {
-            return Err(format!(
-                "device {:?} (driver {:?}) has no hardware name, so its needs produce nothing in any \
-                 output; name its hardware, or list the driver in the map's `needs_nothing`",
-                device.id, device.driver
-            ));
+        if makes == 0 {
+            check_hardware_needs(device, drivers)?;
         }
     }
     // A port in device mode is made only for the gadget that names it: the board file never puts
@@ -481,6 +505,50 @@ fn asks(need: &crate::map::Need, options: &[&str]) -> bool {
         None => true,
         Some(option) => options.contains(&option),
     }
+}
+
+/// A device that names no hardware is accepted only when its driver declares no hardware need: a
+/// driver whose needs are other devices, or none, produces nothing in any output by definition.
+/// A driver the tool does not know cannot be checked, so it is refused.
+fn check_hardware_needs(
+    device: &lemnos_host::board::DeviceSpec,
+    drivers: &[Manifest],
+) -> Result<(), String> {
+    let Some(manifest) = drivers.iter().find(|m| m.name == device.driver) else {
+        return Err(format!(
+            "device {:?} (driver {:?}) names no hardware, and the tool does not know that driver's \
+             needs, so it cannot tell that they produce nothing; name its hardware in `bus` or `uses`",
+            device.id, device.driver
+        ));
+    };
+    let hardware: Vec<&str> = manifest
+        .needs
+        .iter()
+        .filter(|need| !need.optional && is_hardware(need.kind))
+        .map(|need| need.name)
+        .collect();
+    if hardware.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "device {:?} (driver {:?}) needs {} and names no hardware for it; name the hardware in `bus` \
+         or `uses`",
+        device.id,
+        device.driver,
+        hardware.join(", ")
+    ))
+}
+
+/// Whether a need is hardware a board file names: every bus kind but a stream, which the host
+/// makes from the device's own `streams`.
+fn is_hardware(kind: NeedKind) -> bool {
+    !matches!(kind, NeedKind::Bus(BusKind::Stream) | NeedKind::Device(_))
+}
+
+/// A watchdog by its number, `watchdogN`: the number is the kernel's, as it probes.
+fn is_numbered_watchdog(name: &str) -> bool {
+    name.strip_prefix("watchdog")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The overlay: one fragment per enabled node and per disabled holder, each with its reason.

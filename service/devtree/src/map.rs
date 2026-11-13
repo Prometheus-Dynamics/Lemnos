@@ -25,11 +25,6 @@ pub struct SocMap {
     /// own, as the kernel reports it.
     #[serde(default)]
     pub chips: BTreeMap<String, Chip>,
-    /// Drivers whose devices need nothing from the SoC: a device of one of these with no
-    /// hardware name is accepted, and produces nothing. Any other device with no hardware name is
-    /// refused, since its needs would produce nothing in any output.
-    #[serde(default)]
-    pub needs_nothing: Vec<String>,
 }
 
 /// What the overlay output is: the form a loader applies, which the map says.

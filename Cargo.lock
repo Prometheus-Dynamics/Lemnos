@@ -664,7 +664,9 @@ dependencies = [
 name = "lemnos-devtree"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-core",
  "lemnos-host",
+ "lemnosd",
  "serde",
  "toml",
 ]
@@ -851,6 +853,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-driver-hw-watchdog-sys",
+ "lemnos-hal",
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
@@ -1620,6 +1623,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-driver-bmm150",
+ "lemnos-driver-hw-watchdog-sys",
  "lemnos-hal",
  "lemnos-host",
  "lemnos-linux-hotplug",

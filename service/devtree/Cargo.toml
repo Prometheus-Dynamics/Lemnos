@@ -12,6 +12,12 @@ description = "Makes a device-tree overlay from a Lemnos board file and a SoC ma
 workspace = true
 
 [dependencies]
+lemnos-core = { path = "../../engine/core" }
 lemnos-host = { path = "../../engine/host" }
 serde = { workspace = true, features = ["derive", "std"] }
 toml.workspace = true
+
+[dev-dependencies]
+# The built-in drivers' manifests, for the tests of the generator against the real drivers. The
+# daemon depends on this crate, so this is a dev-dependency only.
+lemnosd = { path = "../lemnosd" }

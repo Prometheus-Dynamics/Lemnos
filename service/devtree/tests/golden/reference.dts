@@ -20,18 +20,20 @@
 			aliases { i2c1 = "/axi/pcie@1000120000/rp1/i2c@74000"; };
 		};
 	};
-	// i2c: the SoC's own I2C controller, the camera sensor's bus (the board's i2c-10) (alias i2c10, the name "i2c-10")
+	// i2c: an I2C bus on RP1 (designware): the camera and display connector's bus, the board's i2c-10 (alias i2c10, the name "i2c-10") on GPIO38, GPIO39
 	fragment@2 {
-		target-path = "/soc@107c000000/i2c@7d005600";
+		target-path = "/axi/pcie@1000120000/rp1/i2c@88000";
 		__overlay__ {
 			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&rp1_i2c6_38_39>;
 		};
 	};
 	// the runtime name comes out of alias i2c10
 	fragment@3 {
 		target-path = "/";
 		__overlay__ {
-			aliases { i2c10 = "/soc@107c000000/i2c@7d005600"; };
+			aliases { i2c10 = "/axi/pcie@1000120000/rp1/i2c@88000"; };
 		};
 	};
 	// pwm: a PWM channel on RP1; the fan's pulse output (a `pwm:NODE:CHANNEL` name's NODE is this path) on GPIO45
@@ -64,15 +66,23 @@
 			status = "okay";
 		};
 	};
-	// watchdog: the hardware watchdog, on for a managed board
+	// usb-peripheral: the SoC's USB controller in peripheral mode, for a USB gadget
 	fragment@8 {
+		target-path = "/axi/usb@480000";
+		__overlay__ {
+			status = "okay";
+			dr_mode = "peripheral";
+		};
+	};
+	// watchdog: the hardware watchdog, on for a managed board
+	fragment@9 {
 		target-path = "/soc@107c000000/watchdog@7d200000";
 		__overlay__ {
 			status = "okay";
 		};
 	};
 	// disabled: base "module-io" /cam0_reg: the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it; the board gives gpio:pinctrl-rp1:34 to Lemnos
-	fragment@9 {
+	fragment@10 {
 		target-path = "/cam0_reg";
 		__overlay__ {
 			status = "disabled";

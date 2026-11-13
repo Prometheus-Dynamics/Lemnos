@@ -59,11 +59,11 @@ impl Fake {
     }
 }
 
-impl Node for Fake {
-    fn feed(&mut self) -> io::Result<()> {
+impl RawWatchdog for Fake {
+    fn feed(&mut self) -> std::result::Result<(), ErrorKind> {
         self.with(|d| {
             if d.feed_fails_from.is_some_and(|from| d.now >= from) {
-                return Err(io::Error::other("the device refused the feed"));
+                return Err(ErrorKind::Failed);
             }
             if d.record {
                 d.written.push(FEED);
@@ -73,32 +73,40 @@ impl Node for Fake {
         })
     }
 
-    fn set_timeout(&mut self, seconds: u32) -> io::Result<u32> {
+    fn set_timeout(&mut self, seconds: u32) -> std::result::Result<u32, ErrorKind> {
         self.with(|d| {
             if d.record {
                 d.sets.push((d.now, seconds));
             }
             if d.set_failures > 0 {
                 d.set_failures -= 1;
-                return Err(io::Error::other("the device refused the timeout"));
+                return Err(ErrorKind::Failed);
             }
             d.timeout = seconds.min(d.clamp);
             Ok(d.timeout)
         })
     }
 
-    fn timeout(&mut self) -> io::Result<u32> {
+    fn timeout(&mut self) -> std::result::Result<u32, ErrorKind> {
         Ok(self.with(|d| d.timeout))
+    }
+
+    fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
+        (None, None)
+    }
+
+    fn has_attribute(&mut self, _name: &str) -> bool {
+        false
+    }
+
+    fn time_left(&mut self) -> Option<u32> {
+        None
     }
 }
 
 /// A driver over `fake` asking for `wanted_s`, with no sysfs tree.
 fn driver(fake: &Fake, wanted_s: u32) -> HwWatchdog {
-    HwWatchdog::new(
-        Box::new(fake.clone()),
-        PathBuf::from("/nonexistent/sys"),
-        wanted_s,
-    )
+    HwWatchdog::new(Held::boxed(Box::new(fake.clone())), wanted_s)
 }
 
 /// Ticks at `at` (ns), with the fake's clock at the same time.

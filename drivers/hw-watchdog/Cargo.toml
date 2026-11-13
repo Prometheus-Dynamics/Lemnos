@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
 lemnos-driver-hw-watchdog-sys = { path = "../hw-watchdog-sys" }
 
 [dev-dependencies]

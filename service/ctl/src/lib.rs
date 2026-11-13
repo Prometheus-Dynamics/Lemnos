@@ -157,9 +157,9 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
             line(
                 out,
                 format_args!(
-                    "warning: device {:?} uses {name:?}: the kernel renumbers gpio and pwm chips, so \
-                     this name can point at another chip after a reboot; use gpio:LABEL:LINE or \
-                     pwm:NODE:CHANNEL",
+                    "warning: device {:?} uses {name:?}: the kernel renumbers gpio, pwm and watchdog \
+                     devices, so this name can point at another device after a reboot; use \
+                     gpio:LABEL:LINE, pwm:NODE:CHANNEL or watchdog:NODE",
                     device.id
                 ),
             )?;
@@ -182,9 +182,22 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     Ok(())
 }
 
-/// A name of a GPIO or PWM chip by its number, which the kernel may renumber.
+/// A name of a GPIO chip, PWM chip or watchdog by its number, which the kernel may renumber.
 fn unstable_name(name: &str) -> bool {
-    name.starts_with("gpiochip") || name.starts_with("pwmchip")
+    name.starts_with("gpiochip")
+        || name.starts_with("pwmchip")
+        || name
+            .strip_prefix("watchdog")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The kernel drivers the tool knows, by their manifests: the built-in list `lemnosd` runs, so
+/// what a driver needs is what the driver declares, never a list kept here.
+fn driver_manifests() -> Vec<lemnos_core::Manifest> {
+    lemnosd::builtin::drivers()
+        .iter()
+        .map(|entry| *entry.manifest())
+        .collect()
 }
 
 /// The problems the live device tree and platform devices have against the board's hardware.
@@ -258,7 +271,8 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         }
         None => load_map(&board, socs.as_deref())?,
     };
-    let generated = lemnos_devtree::generate(&board, &map).map_err(|e| format!("{path}: {e}"))?;
+    let generated = lemnos_devtree::generate(&board, &map, &driver_manifests())
+        .map_err(|e| format!("{path}: {e}"))?;
     match overlay_out {
         Some(file) => {
             std::fs::write(&file, &generated.overlay).map_err(|e| format!("{file}: {e}"))?

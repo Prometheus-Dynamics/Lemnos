@@ -3,7 +3,23 @@
 //! daemon dies or wedges, the feeding stops and the hardware resets the board.
 //!
 //! The board names it as the daemon's keep-alive, so the host ticks it only while the daemon's
-//! liveness is good (see `keepalive` in the board file, and `docs/daemon.md`):
+//! liveness is good (see `keepalive` in the board file, and `docs/daemon.md`). It names the watchdog
+//! either by its device-tree node, the stable form, or by its number:
+//!
+//! ```toml
+//! [[devices]]
+//! id = "watchdog"
+//! driver = "hw-watchdog"
+//! keepalive = true
+//! uses = { watchdog = "watchdog:/soc@107c000000/watchdog@7d200000" }
+//! config = { timeout_s = 15 }
+//! ```
+//!
+//! The watchdog is the driver's optional need, `watchdog`, so the board names it in `uses`: a `bus`
+//! does not stand in for it. The name is resolved by the backend when the device binds
+//! (`watchdog:<node>`, or `watchdogN` as it is), and the host hands the driver the open node.
+//!
+//! Without a `watchdog` name, the node is the `device` setting's, opened from `dev_root`:
 //!
 //! ```toml
 //! [[devices]]
@@ -15,8 +31,9 @@
 //!
 //! Settings come from the device's `config`:
 //!
-//! - `device` (string, required): the node's name under `dev_root`, such as `"watchdog0"`. A name
-//!   with a `/` in it, or an empty one, is `INVALID_ARGUMENT`.
+//! - `device` (string): the node's name under `dev_root`, such as `"watchdog0"`, used when the
+//!   device names no `watchdog`. Required then. A name with a `/` in it, or an empty one, is
+//!   `INVALID_ARGUMENT`. The numbered name can change on reboot; `lemnos-ctl validate` warns about it.
 //! - `timeout_s` (integer, default 15): the timeout to set, in seconds. It is clamped to the
 //!   device's `min_timeout` and `max_timeout` in sysfs when those exist, and the timeout the device
 //!   applies is read back. A failure to set it is retried.
@@ -58,9 +75,11 @@
 mod tests;
 
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, Item, Lifecycle, MethodId, Result, Status, Unit,
-    driver,
+    Config, ConfigValue, Description, Health, Held, Item, Lifecycle, MethodId, Result, Status,
+    Unit, Watchdog, driver,
 };
+use lemnos_hal::ErrorKind;
+use lemnos_hal::raw::RawWatchdog;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -108,45 +127,78 @@ const TIMEOUT_NOT_SET: &str = "timeout not set: retried with backoff";
 const TIMEOUT_DIFFERS: &str = "timeout differs from the one asked for";
 const TIMEOUT_UNKNOWN: &str = "timeout unknown: fed every 1 s";
 
-/// The device node, as the driver uses it. The real one is a file and the watchdog's requests;
-/// tests use a fake.
-pub trait Node: Send {
-    /// Writes [`FEED`] to the node. Must write exactly one byte.
-    fn feed(&mut self) -> io::Result<()>;
-    /// Asks for `seconds` and returns the timeout the device applied.
-    fn set_timeout(&mut self, seconds: u32) -> io::Result<u32>;
-    /// The timeout the device has now.
-    fn timeout(&mut self) -> io::Result<u32>;
+/// The node the `device` setting names: `dev_root/<device>`, opened for writing, with its sysfs
+/// attributes under `sys_root`. The numbered form of the board's watchdog, kept for a board
+/// file that names it by `device`.
+fn open_device(cfg: &Config<'_>) -> Result<Watchdog> {
+    let name = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    let dev_root = cfg.str("dev_root").unwrap_or(DEFAULT_DEV_ROOT);
+    let sys_root = cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT);
+    // Write-only, no create, no truncate: this opens the device and nothing else.
+    let file = OpenOptions::new()
+        .write(true)
+        .open(Path::new(dev_root).join(name))
+        .map_err(|e| io_status(&e))?;
+    let sys_dir = Path::new(sys_root).join("class/watchdog").join(name);
+    Ok(Held::boxed(Box::new(OpenNode { file, sys_dir })))
 }
 
-/// The node a driver opened: a file, and the watchdog requests on its descriptor.
+/// The node a driver opened from the `device` setting: a file, its watchdog requests on its
+/// descriptor, and its sysfs attributes beside it.
 struct OpenNode {
     file: File,
+    sys_dir: PathBuf,
 }
 
-impl Node for OpenNode {
-    fn feed(&mut self) -> io::Result<()> {
-        match self.file.write(&[FEED])? {
-            1 => Ok(()),
-            _ => Err(io::Error::from(io::ErrorKind::WriteZero)),
+impl OpenNode {
+    fn seconds(path: &Path) -> Option<u32> {
+        read_seconds(path).and_then(|s| u32::try_from(s).ok())
+    }
+}
+
+impl RawWatchdog for OpenNode {
+    fn feed(&mut self) -> std::result::Result<(), ErrorKind> {
+        match self.file.write(&[FEED]) {
+            Ok(1) => Ok(()),
+            _ => Err(ErrorKind::Failed),
         }
     }
 
-    fn set_timeout(&mut self, seconds: u32) -> io::Result<u32> {
+    fn set_timeout(&mut self, seconds: u32) -> std::result::Result<u32, ErrorKind> {
         lemnos_driver_hw_watchdog_sys::set_timeout(self.file.as_fd(), seconds)
+            .map_err(|_| ErrorKind::Failed)
     }
 
-    fn timeout(&mut self) -> io::Result<u32> {
-        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd())
+    fn timeout(&mut self) -> std::result::Result<u32, ErrorKind> {
+        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd()).map_err(|_| ErrorKind::Failed)
+    }
+
+    fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
+        (
+            Self::seconds(&self.sys_dir.join("min_timeout")),
+            Self::seconds(&self.sys_dir.join("max_timeout")),
+        )
+    }
+
+    fn has_attribute(&mut self, name: &str) -> bool {
+        self.sys_dir.join(name).exists()
+    }
+
+    fn time_left(&mut self) -> Option<u32> {
+        Self::seconds(&self.sys_dir.join("timeleft"))
     }
 }
 
 #[driver("hw-watchdog", provides = [])]
 pub struct HwWatchdog {
-    /// The node. Feeding writes [`FEED`] to it and nothing else.
-    node: Box<dyn Node>,
-    /// `<sys_root>/class/watchdog/<device>`.
-    sys_dir: PathBuf,
+    /// The node: the board's watchdog, named in `uses` (`watchdog:<node>`, or the numbered
+    /// `watchdogN`), or the one the `device` setting names. Always set once the driver is
+    /// started. Feeding writes [`FEED`] to it and nothing else.
+    #[needs(optional)]
+    watchdog: Option<Watchdog>,
     /// Which of [`ATTRIBUTES`] existed at bind.
     present: [bool; ATTRIBUTES.len()],
     /// The timeout to set, after clamping to the device's range.
@@ -172,32 +224,19 @@ impl Lifecycle for HwWatchdog {
 
     const TICKS: bool = true;
 
-    fn start(_needs: HwWatchdogNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let name = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
-        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        let dev_root = cfg.str("dev_root").unwrap_or(DEFAULT_DEV_ROOT);
-        let sys_root = cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT);
+    fn start(needs: HwWatchdogNeeds, cfg: &Config<'_>) -> Result<Self> {
         let requested = match cfg.get("timeout_s") {
             None => DEFAULT_TIMEOUT_S,
             Some(ConfigValue::Int(s)) if (1..=i64::from(u32::MAX)).contains(&s) => s as u32,
             Some(_) => return Err(Status::INVALID_ARGUMENT),
         };
-
-        // Write-only, no create, no truncate: this opens the device and nothing else.
-        let file = OpenOptions::new()
-            .write(true)
-            .open(Path::new(dev_root).join(name))
-            .map_err(|e| io_status(&e))?;
-
-        let sys_dir = Path::new(sys_root).join("class/watchdog").join(name);
-        let wanted_s = clamp(
-            requested,
-            read_seconds(&sys_dir.join("min_timeout")),
-            read_seconds(&sys_dir.join("max_timeout")),
-        );
-        Ok(Self::new(Box::new(OpenNode { file }), sys_dir, wanted_s))
+        let mut node = match needs.watchdog {
+            Some(node) => node,
+            None => open_device(cfg)?,
+        };
+        let (min, max) = node.timeout_range();
+        let wanted_s = clamp(requested, min.map(u64::from), max.map(u64::from));
+        Ok(Self::new(node, wanted_s))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -240,15 +279,19 @@ impl Lifecycle for HwWatchdog {
 }
 
 impl HwWatchdog {
-    /// A driver over `node`, whose attributes are under `sys_dir`, asking for `wanted_s`.
-    fn new(node: Box<dyn Node>, sys_dir: PathBuf, wanted_s: u32) -> Self {
+    /// The node the driver feeds and asks. A driver with none is refused.
+    fn node(&mut self) -> std::result::Result<&mut Watchdog, ErrorKind> {
+        self.watchdog.as_mut().ok_or(ErrorKind::Failed)
+    }
+
+    /// A driver over `node`, asking for `wanted_s`.
+    fn new(mut node: Watchdog, wanted_s: u32) -> Self {
         let mut present = [false; ATTRIBUTES.len()];
         for (slot, (attr, _)) in present.iter_mut().zip(ATTRIBUTES) {
-            *slot = sys_dir.join(attr).exists();
+            *slot = node.has_attribute(attr);
         }
         Self {
-            node,
-            sys_dir,
+            watchdog: Some(node),
             present,
             wanted_s,
             unset: true,
@@ -264,10 +307,11 @@ impl HwWatchdog {
     /// Asks the device for the wanted timeout and reads back what it applied. A failure is
     /// retried after a backoff.
     fn request_timeout(&mut self, now_ns: u64) {
-        let result = self
-            .node
-            .set_timeout(self.wanted_s)
-            .and_then(|_| self.node.timeout());
+        let wanted = self.wanted_s;
+        let result = match self.node() {
+            Ok(node) => node.set_timeout(wanted).and_then(|_| node.timeout()),
+            Err(error) => Err(error),
+        };
         match result {
             Ok(applied) => {
                 self.applied_s = Some(applied);
@@ -286,7 +330,8 @@ impl HwWatchdog {
 
     /// Writes the feed and schedules the next one.
     fn feed(&mut self, now_ns: u64) {
-        match self.node.feed() {
+        let fed = self.node().and_then(|node| node.feed());
+        match fed {
             Ok(()) => {
                 self.feed_attempts = 0;
                 self.due_ns = now_ns.saturating_add(self.interval_ns());
@@ -310,11 +355,14 @@ impl HwWatchdog {
     }
 
     /// The wait before retrying after a failed feed: the backoff, held to half the time left.
-    fn retry_ns(&self, now_ns: u64) -> u64 {
+    fn retry_ns(&mut self, now_ns: u64) -> u64 {
         let backoff = backoff_ns(self.feed_attempts);
         let left = [
             self.deadline_ns.map(|d| d.saturating_sub(now_ns)),
-            read_seconds(&self.sys_dir.join("timeleft")).map(to_ns),
+            self.watchdog
+                .as_mut()
+                .and_then(|node| node.time_left())
+                .map(|seconds| to_ns(u64::from(seconds))),
         ]
         .into_iter()
         .flatten()

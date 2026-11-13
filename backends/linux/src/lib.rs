@@ -22,6 +22,7 @@ mod spi;
 mod stable;
 mod uart;
 mod usb;
+mod watchdog;
 
 use std::collections::BTreeSet;
 use std::io;
@@ -186,6 +187,15 @@ impl LinuxBoard {
         valid.then(|| (self.sys.join("class/pwm").join(chip), channel))
     }
 
+    /// The watchdog node a name means: `watchdog:<node>` by its device-tree node, or the numbered
+    /// `watchdogN` as it is. Resolved now, not kept: the kernel may renumber.
+    fn watchdog_path(&self, need: &str) -> Option<PathBuf> {
+        if let Some(stable::Stable::Watchdog { node }) = stable::parse(need) {
+            return stable::watchdog_dev(&self.dev, &self.sys, node);
+        }
+        self.node(need, WATCHDOG)
+    }
+
     /// Where the kernel lists the USB device controllers.
     fn udc_class(&self) -> PathBuf {
         self.sys.join("class/udc")
@@ -204,6 +214,7 @@ const SPI: &str = "spidev";
 const GPIO: &str = "gpiochip";
 const PWM: &str = "pwmchip";
 const TTY: &str = "tty";
+const WATCHDOG: &str = "watchdog";
 
 fn split(need: &str) -> Option<(&str, u32)> {
     let (name, number) = need.split_once(':')?;
@@ -232,6 +243,7 @@ impl Provider for LinuxBoard {
             || exists(self.node(need, TTY))
             || exists(self.line_node(need).map(|(path, _)| path))
             || exists(self.pwm_node(need).map(|(path, _)| path))
+            || exists(self.watchdog_path(need))
             || self.module_i2c(need).is_some()
             || self.module_spi(need).is_some()
             || usb::UsbName::parse(need).is_some_and(|name| usb::locate(&self.sys, name).is_ok())
@@ -314,6 +326,16 @@ impl Provider for LinuxBoard {
         let claim = self.claim(need)?;
         let pwm = SysfsPwm::open(&chip, channel).map_err(|e| open_status(&e))?;
         Ok(lemnos_core::Held::boxed(Box::new(pwm.holding(claim))))
+    }
+
+    fn watchdog(&mut self, need: &str) -> Result<lemnos_core::Watchdog> {
+        let path = self.watchdog_path(need).ok_or(Status::NOT_FOUND)?;
+        let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+        let sys_dir = self.sys.join("class/watchdog").join(name);
+        let claim = self.claim(need)?;
+        let watchdog =
+            watchdog::LinuxWatchdog::open(&path, sys_dir, claim).map_err(|e| open_status(&e))?;
+        Ok(lemnos_core::Held::boxed(Box::new(watchdog)))
     }
 
     fn uart(&mut self, need: &str) -> Result<Uart> {

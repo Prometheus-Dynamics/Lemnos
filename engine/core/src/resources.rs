@@ -1,6 +1,6 @@
 use lemnos_hal::i2c::{self, I2c as HalI2c, Operation};
 use lemnos_hal::pio::PioMachine;
-use lemnos_hal::raw::{RawLine, RawPwm, RawSpi};
+use lemnos_hal::raw::{RawLine, RawPwm, RawSpi, RawWatchdog};
 use lemnos_hal::spi::{self, SpiDevice};
 use lemnos_hal::{
     Clocks, DmaBuffers, ErrorKind, Interrupt, Registers, Reset, StreamEndpoint, Uart as UartTrait,
@@ -27,6 +27,7 @@ pub enum BusKind {
     Reset,
     Stream,
     Pio,
+    Watchdog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,7 @@ impl SpiDevice for Spi {
 pub type RawSpiBus = Held<dyn RawSpi + Send>;
 pub type Line = Held<dyn RawLine + Send>;
 pub type Pwm = Held<dyn RawPwm + Send>;
+pub type Watchdog = Held<dyn RawWatchdog + Send>;
 pub type Uart = Held<dyn UartTrait<Error = ErrorKind> + Send>;
 pub type UsbDeviceHandle = Held<dyn UsbDevice<Error = ErrorKind> + Send>;
 pub type UsbFunctionHandle = Held<dyn UsbFunction<Error = ErrorKind> + Send>;
@@ -189,6 +191,9 @@ pub trait Provider {
     fn pio(&mut self, _need: &str) -> Result<Pio> {
         Err(Status::NOT_SUPPORTED)
     }
+    fn watchdog(&mut self, _need: &str) -> Result<Watchdog> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Everything a driver can ask for while it binds.
@@ -277,6 +282,7 @@ resources! {
     ResetHandle => Reset, reset;
     StreamHandle => Stream, stream;
     Pio => Pio, pio;
+    Watchdog => Watchdog, watchdog;
 }
 
 impl<C: Contract + ?Sized> Resource for Dev<C> {
