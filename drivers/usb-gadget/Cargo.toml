@@ -13,8 +13,8 @@ default = ["alloc"]
 # The memory for one endpoint transfer is taken from the allocator, 64 KiB of it, and only
 # when the board gives the device a data stream. Without this it is 1 KiB inside the driver.
 alloc = ["lemnos-core/alloc"]
-# The `interfaces` setting is a path to a file holding the text, read at bind, instead of the
-# text itself.
+# The `interfaces_file` setting is a path to a file holding the text, read at bind. Without this
+# feature it is refused by name; `interfaces` is the text in every build.
 std = ["alloc"]
 
 [dependencies]

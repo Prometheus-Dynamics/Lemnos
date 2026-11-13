@@ -29,7 +29,7 @@ step clippy cargo clippy --workspace --all-targets -- -D warnings
 step tests cargo test --workspace
 
 # What must still build without std, on the targets a microcontroller host uses.
-no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget shm-sample-time)
+no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
 for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-linux-gnueabihf; do
   for crate in "${no_std_crates[@]}"; do
     step "$crate on $target" cargo check -q -p "$crate" --no-default-features --target "$target"
@@ -37,6 +37,12 @@ for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-l
 done
 
 step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
+# A setting's meaning never depends on a feature: the same board text runs the same tests with and
+# without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).
+step "generic sensor, no std" cargo test -q -p lemnos-driver-generic-sensor
+step "generic sensor, std" cargo test -q -p lemnos-driver-generic-sensor --features std
+step "usb gadget, no std" cargo test -q -p lemnos-driver-usb-gadget
+step "usb gadget, std" cargo test -q -p lemnos-driver-usb-gadget --features std
 step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
 step "client on tokio" cargo test -q -p lemnos-client --features tokio
 step "C surface, shared form" cargo test -q -p lemnos-capi --features shared

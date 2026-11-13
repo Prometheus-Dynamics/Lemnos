@@ -169,6 +169,9 @@ pub fn settings_for(board: &str, device: &DeviceSpec) -> Result<(Set, Functions)
     let id = &device.id;
     let entries = config_entries(device).map_err(|reason| format!("{id}: {reason}"))?;
     let config = Config::new(&entries).on_board(board);
+    if let Some(reason) = lemnos_driver_usb_gadget::refusal(&config) {
+        return Err(format!("{id}: {reason}"));
+    }
     lemnos_driver_usb_gadget::settings(&config).map_err(|status| {
         match device
             .config

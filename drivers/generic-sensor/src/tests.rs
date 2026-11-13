@@ -17,11 +17,8 @@ const ADDRESS: u8 = 0x2c;
 /// The file's text, as the driver gets it without `std`.
 const TEXT: &str = include_str!("../tests/chips/sim-mag.chip");
 
-/// The `description` setting: the text itself, or with `std` its path.
-#[cfg(not(feature = "std"))]
+/// The `description` setting: the text itself, in every build.
 const DESCRIPTION: &str = TEXT;
-#[cfg(feature = "std")]
-const DESCRIPTION: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chips/sim-mag.chip");
 
 fn bus() -> (SimBoard, SimI2c) {
     let board = SimBoard::new();
@@ -93,7 +90,10 @@ fn close(actual: f32, expected: f32) {
 /// the wait; the next read finishes start-up and measures.
 fn start(mag: &mut GenericMagnetometer) -> Vector3 {
     assert_eq!(mag.read(), Err(Status::AGAIN));
-    let at = mag.sensor.now_ns + 2_000_000;
+    let Sensor::Live(live) = &mag.sensor else {
+        panic!("the settings named no chip");
+    };
+    let at = live.now_ns + 2_000_000;
     assert_eq!(Driver::tick(mag, at), None);
     mag.read().unwrap()
 }
@@ -198,8 +198,6 @@ fn bus_fault_restarts_the_chip_on_the_next_read_and_is_never_given_up() {
     assert_eq!(Driver::health(&mag), Health::Ok);
 }
 
-// Text that is not a path: without `std` the setting is the text itself.
-#[cfg(not(feature = "std"))]
 #[test]
 fn a_description_that_does_not_parse_is_refused_at_bind() {
     let (mut board, _sim) = bus();
@@ -407,15 +405,101 @@ fn numbers_are_decimal_or_hex_and_axes_decode_their_width() {
     assert_eq!(signed24.channels()[0].units(0xff_ff_fe), -2.0);
 }
 
+/// Binds with the given settings, the `description_file` one among them.
+fn bind_file(board: &mut SimBoard, path: &str) -> Result<GenericMagnetometer> {
+    bind_with(
+        board,
+        &[
+            ("address", ConfigValue::Int(i64::from(ADDRESS))),
+            ("description_file", ConfigValue::Str(path)),
+        ],
+    )
+}
+
+/// The same text, the same meaning, in every build: its items, and a read of the chip's
+/// registers. This runs with and without `std`; the assertions do not change.
+#[test]
+fn the_same_description_text_means_the_same_in_every_build() {
+    let (mut board, sim) = bus();
+    chip(&sim, 0x48);
+    set_field(&sim, 500, -250, -70_000);
+    let mut mag = bind(&mut board, i64::from(ADDRESS), TEXT).unwrap();
+    start(&mut mag);
+    let value = mag.read().unwrap();
+    close(value.x, 500e-6);
+    close(value.y, -250e-6);
+    close(value.z, -70_000e-6);
+    let mut out = Description::new();
+    Driver::describe(&mag, &mut out);
+    assert_eq!(out.items().count(), 3);
+    assert_eq!(out.find("magnetic_field.x").unwrap().field, Some("x"));
+}
+
+/// `description_file` is a path, so a build without a filesystem refuses it by name: the driver
+/// binds, its health names the setting, and it never reads the path as text or touches the bus.
+#[cfg(not(feature = "std"))]
+#[test]
+fn description_file_is_refused_by_name_without_a_filesystem() {
+    let (mut board, sim) = bus();
+    chip(&sim, 0x48);
+    let path = "/etc/lemnos/chips/sim-mag.chip";
+    let mut mag = bind_file(&mut board, path).unwrap();
+    assert_eq!(
+        Driver::health(&mag),
+        Health::Failed("description_file needs a build with a filesystem")
+    );
+    assert_eq!(mag.read().err(), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(sim.byte(ADDRESS, 0x00), Some(0x48), "the chip is untouched");
+}
+
+/// With a filesystem, `description_file` reads the file once at bind, and the chip is the same
+/// chip the text describes.
+#[cfg(feature = "std")]
+#[test]
+fn description_file_reads_the_same_chip_as_its_text() {
+    let (mut board, sim) = bus();
+    chip(&sim, 0x48);
+    set_field(&sim, 500, -250, -70_000);
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chips/sim-mag.chip");
+    let mut from_file = bind_file(&mut board, path).unwrap();
+    start(&mut from_file);
+    let mut from_text = bind(&mut board, i64::from(ADDRESS), TEXT).unwrap();
+    start(&mut from_text);
+    assert_eq!(from_file.read().unwrap(), from_text.read().unwrap());
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn a_missing_description_file_is_not_found() {
     let (mut board, _sim) = bus();
     let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chips/none.chip");
     assert_eq!(
-        bind(&mut board, i64::from(ADDRESS), missing).err(),
+        bind_file(&mut board, missing).err(),
         Some(Status::NOT_FOUND)
     );
+}
+
+/// Both keys name the chip twice, so both are refused by name, in every build.
+#[test]
+fn both_description_keys_are_refused_by_name() {
+    let (mut board, _sim) = bus();
+    let mut mag = bind_with(
+        &mut board,
+        &[
+            ("address", ConfigValue::Int(i64::from(ADDRESS))),
+            ("description", ConfigValue::Str(TEXT)),
+            (
+                "description_file",
+                ConfigValue::Str("/etc/lemnos/chips/x.chip"),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        Driver::health(&mag),
+        Health::Failed("give description or description_file, not both")
+    );
+    assert_eq!(mag.read().err(), Some(Status::INVALID_ARGUMENT));
 }
 
 #[test]

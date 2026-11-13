@@ -560,7 +560,8 @@ section](wire.md#endpoints) for the hand-off, its refusals and what a reconnect 
 means for a holder. `LEMNOS_ORION_LINKS=gadget=serial` on the Orion bridge offers the pair to the comm core as
 the link `serial`.
 
-The gadget's `interfaces` text lists its functions in configfs link order, one per line: `function ffs`
+The gadget's `interfaces` text (`interfaces_file`, a path to a file holding it, is read only by a build with a
+filesystem; giving both is refused by name) lists its functions in configfs link order, one per line: `function ffs`
 (the FunctionFS link the daemon serves; the default, first, when no line names it), `function ncm
 host=MAC device=MAC [ifname=TEMPLATE]` or `function ncm derive [ifname=TEMPLATE]` (a CDC network
 function; both MACs unicast and different), and `function acm` (a serial console, `ttyGS0` for the

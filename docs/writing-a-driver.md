@@ -79,15 +79,17 @@ lines. Registers are 8-bit addresses on I2C (Modbus below). An accelerometer's o
 FIFO, which a description does not cover, so `read_batch` answers `NOT_SUPPORTED`.
 
 The chip's I2C address is wiring, so it goes in the board file. The description goes in the same
-entry as one `description` setting. Without `std` it is the text itself; with `std` it is a path to
-the file, read once at bind:
+entry as one `description` setting: the text itself, in every build. A build with a filesystem (`std`)
+also takes `description_file`, a path to the file, read once at bind; the two keys are never both
+given, and a build without `std` refuses `description_file` by name. The key's meaning never depends on
+the build: `description` is text everywhere and `description_file` is a path everywhere it works:
 
 ```toml
 [[devices]]
 id = "mag1"
 driver = "generic-magnetometer"
 bus = "<the bus the board names>"
-config = { address = 0x2c, description = "/etc/lemnos/chips/sim-mag.chip" }
+config = { address = 0x2c, description_file = "/etc/lemnos/chips/sim-mag.chip" }
 ```
 
 ### A chip on Modbus
@@ -118,7 +120,7 @@ port's frame is wiring too, so it is set in the board file: `baud` (default 9600
 id = "probe"
 driver = "modbus-temperature"
 bus = "<the port the board names>"
-config = { address = 7, baud = 19200, parity = "none", description = "/etc/lemnos/chips/probe.chip" }
+config = { address = 7, baud = 19200, parity = "none", description_file = "/etc/lemnos/chips/probe.chip" }
 ```
 
 Each read is a request and its reply, checked for the unit, the function, the length and the CRC.

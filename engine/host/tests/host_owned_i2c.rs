@@ -127,7 +127,7 @@ id = "described"
 driver = "generic-magnetometer"
 bus = "i2c"
 {owner}
-config = {{ address = {DESCRIBED}, description = "{SIM_MAG}" }}
+config = {{ address = {DESCRIBED}, description_file = "{SIM_MAG}" }}
 "#
     );
     let (host, clock) = host_on(

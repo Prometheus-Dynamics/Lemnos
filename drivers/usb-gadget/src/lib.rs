@@ -27,7 +27,10 @@
 //!
 //! - `vendor`, `product` (integers, required): the USB vendor and product numbers, 0 to 0xffff.
 //! - `interfaces` (string, required): the interfaces and their endpoints, as [`description`]
-//!   sets out. With the `std` feature, a path to a file holding that text, read once at bind.
+//!   sets out: the text itself, in every build.
+//! - `interfaces_file` (string, optional, `std` builds only): a path to a file holding that text,
+//!   read once at bind. A build without a filesystem refuses it by name ([`refusal`]). Giving both
+//!   `interfaces` and `interfaces_file` is refused by name too.
 //! - `release` (integer, default 0x0100): the device's release number (`bcdDevice`).
 //! - `class`, `subclass`, `protocol` (integers, default 0): the device's class triple. 0 leaves
 //!   the class to each interface.
@@ -608,6 +611,20 @@ fn string<'a>(cfg: &Config<'a>, key: &str) -> Result<Option<&'a str>> {
     }
 }
 
+/// The reason the interface settings are refused by name, in this build: both `interfaces` and
+/// `interfaces_file` given, or `interfaces_file` in a build without a filesystem. `None` when they
+/// are not refused. The daemon checks a board file's settings with this before it binds, so the
+/// reason is named there; the driver's own bind refuses with `INVALID_ARGUMENT`.
+pub fn refusal(cfg: &Config<'_>) -> Option<&'static str> {
+    match (cfg.get("interfaces"), cfg.get("interfaces_file")) {
+        (Some(_), Some(_)) => Some("give interfaces or interfaces_file, not both"),
+        (None, Some(_)) if !cfg!(feature = "std") => {
+            Some("interfaces_file needs a build with a filesystem")
+        }
+        _ => None,
+    }
+}
+
 /// The descriptor set and the functions the settings describe. The setup that makes the
 /// gadget's configfs tree reads the same settings through this, so the two agree.
 pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
@@ -629,11 +646,21 @@ pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
         max_power_ma: integer(cfg, "max_power_ma", 500, Some(100))? as u16,
         self_powered,
     };
+    if refusal(cfg).is_some() {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    #[cfg(feature = "std")]
+    let file = match cfg.str("interfaces_file") {
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|_| Status::INVALID_ARGUMENT)?),
+        None => None,
+    };
+    #[cfg(feature = "std")]
+    let interfaces = match &file {
+        Some(text) => text.as_str(),
+        None => string(cfg, "interfaces")?.ok_or(Status::INVALID_ARGUMENT)?,
+    };
+    #[cfg(not(feature = "std"))]
     let interfaces = string(cfg, "interfaces")?.ok_or(Status::INVALID_ARGUMENT)?;
-    #[cfg(feature = "std")]
-    let text = std::fs::read_to_string(interfaces).map_err(|_| Status::INVALID_ARGUMENT)?;
-    #[cfg(feature = "std")]
-    let interfaces = text.as_str();
     let set =
         description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
     // The addresses come from the board's serial fact, and only when there is one in the format.

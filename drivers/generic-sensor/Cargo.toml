@@ -9,8 +9,8 @@ publish = false
 workspace = true
 
 [features]
-# The `description` setting is a path to the description file, read at bind,
-# instead of the text itself.
+# The `description_file` setting is a path to the description file, read at bind. Without this
+# feature the setting is refused by name; `description` is the text in every build.
 std = []
 
 [dependencies]

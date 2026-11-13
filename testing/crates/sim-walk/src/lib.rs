@@ -1,9 +1,9 @@
 //! The simulated board every built-in driver the simulator can host is walked on.
 //!
-//! [`walk`] builds one board: the buses and chips the devices use, the chip descriptions the
-//! description drivers read (written under the given root from `drivers/generic-sensor`'s test
-//! chips), and the fake sysfs trees the sysfs drivers read, all under that root. It returns the
-//! board, the device entries in board-file form, and the root. `lemnos-ctl`'s show walk and any
+//! [`walk`] builds one board: the buses and chips the devices use, the generic sensors' chips (each
+//! described by its text, from `drivers/generic-sensor`'s test chips, so the walk is the same in
+//! every build), and the fake sysfs trees the sysfs drivers read, all under the given root. It returns
+//! the board, the device entries in board-file form, and the root. `lemnos-ctl`'s show walk and any
 //! other walk over the built-in drivers use it, so a driver is simulated in one place.
 //!
 //! [`SIMULATED`] lists the built-in drivers that have a device in [`walk`]'s board. [`NOT_SIMULATED`]
@@ -31,6 +31,11 @@ pub const SIMULATED: &[&str] = &[
     "ina2xx",
     "orientation",
     "pwm-channel-fan",
+    "generic-accelerometer",
+    "generic-gyroscope",
+    "generic-magnetometer",
+    "generic-temperature",
+    "generic-power-monitor",
     "thermal-zone",
     "hwmon-fan",
     "ws2812",
@@ -159,26 +164,6 @@ pub const NOT_WALKED: &[(&str, &str)] = &[
         "the `lemnos/` names are snapshots of the image's own paths (data, boot, sys_block, module): the walk has no fake of them yet",
     ),
     (
-        "generic-accelerometer",
-        "a description's `description` setting is a file path under the `std` feature and the text otherwise, and a build that unifies features turns it on: the walk cannot pick one form for every build (see the report)",
-    ),
-    (
-        "generic-gyroscope",
-        "a description's `description` setting is a file path under the `std` feature and the text otherwise: the walk cannot pick one form for every build",
-    ),
-    (
-        "generic-magnetometer",
-        "a description's `description` setting is a file path under the `std` feature and the text otherwise: the walk cannot pick one form for every build",
-    ),
-    (
-        "generic-temperature",
-        "a description's `description` setting is a file path under the `std` feature and the text otherwise: the walk cannot pick one form for every build",
-    ),
-    (
-        "generic-power-monitor",
-        "a description's `description` setting is a file path under the `std` feature and the text otherwise: the walk cannot pick one form for every build",
-    ),
-    (
         "coral-loader",
         "the USB accelerator's firmware protocol is not faked yet",
     ),
@@ -226,6 +211,32 @@ pub const NOT_WALKED: &[(&str, &str)] = &[
         "its chip (identity register and the vendor's measurement registers) is not faked yet; the generic description tests already drive a BMM150 on the simulated bus",
     ),
 ];
+
+/// The generic sensors' chip descriptions: the test chips of `drivers/generic-sensor`.
+const ACCEL_CHIP: &str =
+    include_str!("../../../../drivers/generic-sensor/tests/chips/sim-accel.chip");
+const GYRO_CHIP: &str =
+    include_str!("../../../../drivers/generic-sensor/tests/chips/sim-gyro.chip");
+const MAG_CHIP: &str = include_str!("../../../../drivers/generic-sensor/tests/chips/sim-mag.chip");
+const TEMP_CHIP: &str =
+    include_str!("../../../../drivers/generic-sensor/tests/chips/sim-temp.chip");
+const POWER_CHIP: &str =
+    include_str!("../../../../drivers/generic-sensor/tests/chips/sim-power.chip");
+
+/// A text as a TOML basic string, so a multi-line description fits on one line of an inline table.
+fn toml_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
 
 /// Builds the walk's board under `root`. Writes the chip descriptions and the fake sysfs trees
 /// there; nothing outside `root` is touched, and nothing real is opened.
@@ -282,6 +293,18 @@ pub fn walk(root: &Path) -> io::Result<Walk> {
     board_i2c.attach(0x68, Layout::Bytes);
     board_i2c.set_bytes(0x68, 0x00, &[0x0f]);
 
+    // The generic sensors' chips, each at its own address, with the identity its description reads.
+    // Each address is one the walk's other chips do not use.
+    board_i2c.attach(0x1d, Layout::Bytes);
+    board_i2c.set_bytes(0x1d, 0x0f, &[0x33]);
+    board_i2c.attach(0x6a, Layout::Bytes);
+    board_i2c.set_bytes(0x6a, 0x00, &[0x0f]);
+    board_i2c.attach(0x2c, Layout::Bytes);
+    board_i2c.set_bytes(0x2c, 0x00, &[0x48]);
+    board_i2c.attach(0x48, Layout::Bytes);
+    board_i2c.attach(0x44, Layout::Bytes);
+    board_i2c.set_bytes(0x44, 0xfe, &[0x22]);
+
     // The PWM channel and the pixel strip the fan and light drivers use.
     board.add_pwm("pwm-fan");
     board.add_spi("spidev0.0");
@@ -301,12 +324,22 @@ config = {{ device = \"watchdog0\", sys_root = \"{}\", dev_root = \"{}\", keepal
 [[devices]]\nid = \"light\"\ndriver = \"ws2812\"\nbus = \"spidev0.0\"\nconfig = {{ count = 8 }}\n\
 [[devices]]\nid = \"status\"\ndriver = \"status-light\"\nuses = {{ pixels = \"light\" }}\nconfig = {{ count = 8 }}\n\
 [[devices]]\nid = \"indicator\"\ndriver = \"indicator\"\nuses = {{ pixels = \"light\" }}\n\
-[[devices]]\nid = \"fan-control\"\ndriver = \"fan-control\"\nuses = {{ fan = \"pwm-fan\", t0 = \"zone\" }}\n",
+[[devices]]\nid = \"fan-control\"\ndriver = \"fan-control\"\nuses = {{ fan = \"pwm-fan\", t0 = \"zone\" }}\n\
+[[devices]]\nid = \"accel\"\ndriver = \"generic-accelerometer\"\nbus = \"i2c-1\"\nconfig = {{ address = 0x1d, description = {} }}\n\
+[[devices]]\nid = \"gyro\"\ndriver = \"generic-gyroscope\"\nbus = \"i2c-1\"\nconfig = {{ address = 0x6a, description = {} }}\n\
+[[devices]]\nid = \"mag\"\ndriver = \"generic-magnetometer\"\nbus = \"i2c-1\"\nconfig = {{ address = 0x2c, description = {} }}\n\
+[[devices]]\nid = \"temp\"\ndriver = \"generic-temperature\"\nbus = \"i2c-1\"\nconfig = {{ address = 0x48, description = {} }}\n\
+[[devices]]\nid = \"power-generic\"\ndriver = \"generic-power-monitor\"\nbus = \"i2c-1\"\nconfig = {{ address = 0x44, description = {} }}\n",
         sys.display(),
         sys.display(),
         dev.display(),
         zone.display(),
         sys.display(),
+        toml_string(ACCEL_CHIP),
+        toml_string(GYRO_CHIP),
+        toml_string(MAG_CHIP),
+        toml_string(TEMP_CHIP),
+        toml_string(POWER_CHIP),
     );
     Ok(Walk {
         board,
