@@ -46,7 +46,8 @@ and board runs.
   output that proves the change into the pull request.
 - Never push tags. Never force-push `next` or `dev`.
 - Workspace members are globs: add a crate by creating its directory under the right folder.
-  Inherit shared dependencies with `workspace = true`. `Cargo.lock` is ignored.
+  Inherit shared dependencies with `workspace = true`. `Cargo.lock` is tracked: a change to a manifest
+  updates it in the same change, and the gate fails until it does (docs/building.md).
 - After adding a driver, run `python3 scripts/generate-builtins.py` so the daemon lists it.
 - Nothing is frozen. A shared interface (`engine/abi`, `engine/hal`, `engine/core`,
   `engine/macros`, `engine/wire`, the kernel interface, the board format) may change when the work
