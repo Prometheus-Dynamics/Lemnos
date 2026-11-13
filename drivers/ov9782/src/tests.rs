@@ -1537,3 +1537,50 @@ fn a_chip_that_answers_after_the_first_attempt_is_retried_from_the_bottom_of_the
     assert_eq!(Lifecycle::tick(&mut s, first_retry), None);
     assert_eq!(s.state, State::Streaming);
 }
+
+#[test]
+fn a_streaming_sensor_stops_when_its_receiver_goes_away() {
+    // The receiver is unbound mid-stream: its frame count answers NO_DEVICE. The watch puts the
+    // sensor to standby and frees it, so a new mode can be selected and started.
+    let receiver = counting_receiver(vec![Err(Status::NO_DEVICE)]);
+    let (mut s, bus) = streaming_sensor(Some(receiver));
+    assert_eq!(Lifecycle::tick(&mut s, 0), None);
+    assert_eq!(writes(&bus), vec![(MODE_SELECT, STANDBY)]);
+    s.select_mode(0).unwrap();
+    s.start().unwrap();
+    assert!(writes(&bus).contains(&(MODE_SELECT, STREAMING)));
+}
+
+#[test]
+fn a_stale_receiver_handle_frees_the_sensor_before_the_watch_runs() {
+    // The receiver was unbound and bound again between two watches: the old handle is stale. A
+    // select_mode that comes first still finds the stream over.
+    let receiver = counting_receiver(vec![Err(Status::STALE_HANDLE)]);
+    let (mut s, bus) = streaming_sensor(Some(receiver));
+    s.select_mode(0).unwrap();
+    assert_eq!(writes(&bus), vec![(MODE_SELECT, STANDBY)]);
+}
+
+#[test]
+fn a_receiver_that_is_still_there_keeps_the_sensor_busy() {
+    // A receiver that answers with some other failure is still there: the stream is not over.
+    let receiver = counting_receiver(vec![Err(Status::BUSY)]);
+    let (mut s, bus) = streaming_sensor(Some(receiver));
+    assert_eq!(Lifecycle::tick(&mut s, 0), Some(RECEIVER_WATCH_NS));
+    assert!(matches!(s.select_mode(0), Err(Status::BUSY)));
+    assert!(writes(&bus).is_empty());
+}
+
+#[test]
+fn a_streaming_sensor_with_a_link_watches_its_receiver_each_interval() {
+    let receiver = counting_receiver(vec![Ok(None), Ok(None)]);
+    let (mut s, _bus) = streaming_sensor(Some(receiver));
+    assert_eq!(
+        Lifecycle::tick(&mut s, 1_000),
+        Some(1_000 + RECEIVER_WATCH_NS)
+    );
+    assert_eq!(
+        Lifecycle::tick(&mut s, 1_000 + RECEIVER_WATCH_NS),
+        Some(1_000 + 2 * RECEIVER_WATCH_NS)
+    );
+}
