@@ -18,7 +18,7 @@ pub type BoxedBlock = Box<dyn Block + Send>;
 /// The codec block as `codec.block/1`.
 #[driver("k230-vpu", provides = [CodecBlock])]
 pub struct K230Vpu {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     block: BoxedBlock,
     server: Server,

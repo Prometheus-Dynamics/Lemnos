@@ -88,10 +88,10 @@ struct Served {
 #[driver("vglite", provides = [ImageScaler, ImageConvert])]
 pub struct VgliteDriver {
     /// `image.scaler/1` jobs.
-    #[needs(optional)]
+    #[needs(optional, job)]
     scale: Option<StreamHandle>,
     /// `image.convert/1` jobs.
-    #[needs(optional)]
+    #[needs(optional, job)]
     convert: Option<StreamHandle>,
     gpu: BoxedGpu,
     lanes: [Served; 2],

@@ -57,7 +57,7 @@ pub const STREAM_FAILED: &str = "the job stream failed: trying it again";
 /// One block of the codec service as `codec.block/1`.
 #[driver("rk-mpp", provides = [CodecBlock])]
 pub struct RkMpp {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     block: MppBlock<BoxedDevice>,
     server: Server,

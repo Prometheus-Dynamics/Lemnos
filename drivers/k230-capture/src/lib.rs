@@ -260,7 +260,7 @@ enum Delivery {
 /// The ISP8000 frame path as a camera receiver.
 #[driver("k230-capture", provides = [CameraReceiver])]
 pub struct K230Capture {
-    #[needs]
+    #[needs(free)]
     frames: StreamHandle,
     /// The host's DMA memory, on the vendor's way. Moved into the hardware at bind, so the
     /// memory has one owner; what is left here is `None`. Declared here so the host provides it.

@@ -122,15 +122,66 @@ reader gets it from the batch's `time`, and `lemnos-client` from the frame.
 The consumer reads the buffer, then releases it (dropping the frame it took). A buffer the
 consumer holds is not written by anyone else.
 
-**The kind of stream.** Who makes the frames is declared by the board author with `kind` in
-`[devices.streams.NAME]`, and the reclaim rule below is a function of it:
+**The kind of stream.** Who makes the frames is declared by the driver that serves the stream, in
+its need: `#[needs(free)]` for a free-running stream, `#[needs(job)]` for a job-driven one, and
+`#[needs(optional, job)]` (or `optional, free`) for an optional one. A stream need without a kind
+does not compile, and the host takes the kind from the driver. A board file does not state it: a
+`kind` key in `[devices.streams.NAME]` is refused by name, whatever its value, and the message names
+the stream and the driver.
 
-- `kind = "free-running"` (the default): the frames arrive whether or not anyone reads them (a
-  camera, a receiver, a front end's statistics). The rule for these is the replacement rule and
+- **free-running** (`#[needs(free)]`): the frames arrive whether or not anyone reads them (a
+  camera, a receiver, a USB or UVC frame stream). The rule for these is the replacement rule and
   the margin below.
-- `kind = "job"`: each frame is the result of a job the consumer posted (a memory-to-memory
-  device's output, an encoder, a scaler, the config and input of a job-driven block). See
-  "Job-driven streams" below.
+- **job** (`#[needs(job)]`): each frame is the result of a job the consumer posted, or a job's
+  input (a memory-to-memory device's output, an encoder, a scaler, an ISP's config, statistics and
+  output, a front end's or back end's config, input and output, a USB transfer's result, sensor
+  values). See "Job-driven streams" below.
+
+**The camera's streams.** Every stream of the receiver, the front end, the back end and the sensor
+(`camera-proof`'s reference board, `testing/boards/reference.toml`, states all of them). "Driver
+publishes" means the driver writes and publishes the frames; "consumer writes" means the consumer
+posts into the stream. A required stream without a board table and the device does not bind; an
+optional one left out and the driver runs without it. No stream has a default for `buffers` or
+`buffer_bytes`; a table states both. The defaults that exist are `job_slots` 4, `job_bytes` 256,
+`memory` shared and `heap` system (for dma-bufs only).
+
+| Device (driver) | Stream | Direction | Kind | Required | What it carries |
+|---|---|---|---|---|---|
+| sensor (`ov9782`) | `values` | consumer writes | job | optional | one encoded `FrameValues` per job |
+| receiver (`rp1-csi2`) | `frames` | driver publishes | free-running | optional | each frame, packed raw |
+| receiver (`rp1-csi2`) | `embedded` | driver publishes | free-running | optional | each embedded data line, with its frame (the sensor has none) |
+| front end (`pisp-fe`) | `config` | consumer writes | job | required | one configuration per job |
+| front end (`pisp-fe`) | `statistics` | driver publishes | job | optional | each job's statistics, numbered as its configuration buffer |
+| front end (`pisp-fe`) | `output0` | driver publishes | job | optional | each job's image |
+| front end (`pisp-fe`) | `output1` | driver publishes | job | optional | the half-size image, when the job turns it on |
+| back end (`pisp-be`) | `config` | consumer writes | job | required | one configuration per job |
+| back end (`pisp-be`) | `input` | consumer writes | job | required | the raw frame each job reads |
+| back end (`pisp-be`) | `output0` | driver publishes | job | required | each job's image |
+| back end (`pisp-be`) | `output1` | driver publishes | job | optional | each job's second image, when the job turns it on |
+
+The reference board's sizes are derived in its comments and checked by
+`testing/crates/camera-proof/tests/reference_board.rs`, which recomputes each `buffer_bytes` from the
+drivers' constants and layout rules and the sensor's mode. The table below gives the same sizes for
+each of the sensor's six modes (the front and back end's sizes follow from the mode's window, and do
+not depend on its bit depth, because the ISP takes 16-bit Bayer). Each size's status is one of
+"run on a board" (the raw `frames` path of mode 0 alone: 8 × 1,280,000 bytes, RAW10 1280 wide is
+1600 bytes a line × 800 lines, from an earlier revision and not re-run for this document), "run in
+simulation/QEMU" (none here), or "computed, not run". The configuration and statistics sizes
+(front end 8 × 632 and 8 × 23200, back end 2 × 16720, the sensor's values 2 × 64) do not depend on the
+mode.
+
+| Mode | `frames` (8) | FE `output0` (4) | FE `output1` (4) | BE `input` (2) | BE `output0` (4) | BE `output1` (4) | Status |
+|---|---|---|---|---|---|---|---|
+| 0: 1280×800 RAW10 | 1,280,000 | 2,052,096 | 516,096 | 2,048,000 | 1,536,000 | 384,000 | `frames`: run on a board; the rest computed, not run |
+| 1: 1280×800 RAW8 | 1,024,000 | 2,052,096 | 516,096 | 2,048,000 | 1,536,000 | 384,000 | computed, not run |
+| 2: 1280×720 RAW10 | 1,152,000 | 1,847,296 | 464,896 | 1,843,200 | 1,382,400 | 345,600 | computed, not run |
+| 3: 1280×720 RAW8 | 921,600 | 1,847,296 | 464,896 | 1,843,200 | 1,382,400 | 345,600 | computed, not run |
+| 4: 640×400 RAW10 | 320,000 | 516,096 | 132,096 | 512,000 | 384,000 | 96,000 | computed, not run |
+| 5: 640×400 RAW8 | 256,000 | 516,096 | 132,096 | 512,000 | 384,000 | 96,000 | computed, not run |
+
+The front end's `output0` and `output1` add a 4096-byte pad (the jobs' `pad_bytes`). The back end's
+outputs are NV12 and its input and the front end's outputs are 16-bit Bayer, as the reference board
+states them.
 
 **The replacement rule, for a free-running stream.** A buffer the consumer has read and let go goes back to the driver as
 soon as the driver asks for one: nothing is lost. A frame the consumer has not read yet stays in
@@ -146,7 +197,7 @@ a frame the consumer has read and let go counts as taken, and one it has not rea
 unread, whatever the consumer holds of other buffers. Nothing else makes an unread frame
 reclaimable.
 
-**Job-driven streams.** On a `kind = "job"` stream an unread frame is never replaced, whatever the
+**Job-driven streams.** On a job stream an unread frame is never replaced, whatever the
 driver's working set. Each frame is a result the consumer posted a job for, so replacing it loses
 the consumer's work. The pressure goes the other way: a job whose output has no free buffer is not
 started. The driver's ask finds none and the refusal is counted in `refused` (the stream's stats).

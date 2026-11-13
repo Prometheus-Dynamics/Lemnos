@@ -154,7 +154,7 @@ pub const RECEIVER_WATCH_NS: u64 = 100_000_000;
 const MAX_JOBS_PER_POLL: usize = 64;
 /// Bytes read of one job: an encoded `FrameValues` fits, and this runs on small stacks. A longer
 /// job isn't one; the ring refuses to hand it over and stays stuck on it until the stream restarts.
-const JOB_BYTES: usize = 64;
+pub const JOB_BYTES: usize = 64;
 
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
@@ -262,7 +262,7 @@ pub struct Ov9782 {
     #[needs]
     bus: I2c,
     /// Jobs carrying `FrameValues`, from the consumer. Absent when the board gives no stream.
-    #[needs(optional)]
+    #[needs(optional, job)]
     values: Option<StreamHandle>,
     /// The receiver the board links this sensor to. Asked once, at bind, whether it is wired to
     /// this sensor ([`LinkCheck`]); kept so the link stays in the board's hands.

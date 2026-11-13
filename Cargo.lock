@@ -381,6 +381,7 @@ dependencies = [
  "lemnos-driver-ov9782",
  "lemnos-driver-pisp",
  "lemnos-driver-pisp-sys",
+ "lemnos-driver-rp1-csi2",
  "lemnos-hal",
  "lemnos-host",
  "lemnos-linux",

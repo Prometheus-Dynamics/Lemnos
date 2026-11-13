@@ -67,7 +67,7 @@ pub type Opener = Box<dyn FnMut() -> io::Result<BoxedDevice> + Send>;
 /// The rkvpss offline scaler as `image.scaler/1`.
 #[driver("rkvpss", provides = [ImageScaler])]
 pub struct Rkvpss {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     server: Jobs<BoxedDevice, Opener>,
     /// Stream errors in a row.

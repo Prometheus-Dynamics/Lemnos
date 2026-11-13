@@ -40,6 +40,7 @@ impl Driver for Fake {
             name: "bus",
             kind: NeedKind::Bus(BusKind::I2c),
             optional: false,
+            stream: None,
         }],
         provides: &[INFO],
     };
@@ -237,11 +238,14 @@ mod package {
                 name: "bus",
                 kind: NeedKind::Bus(BusKind::Stream),
                 optional: false,
+                // A package's table does not carry a stream's kind yet: it crosses as none.
+                stream: None,
             },
             Need {
                 name: "other",
                 kind: NeedKind::Device(Tag::new("example.thing/1")),
                 optional: true,
+                stream: None,
             },
         ],
         provides: &[
@@ -590,4 +594,34 @@ fn a_location_is_kept_whole_or_cut_at_a_character_boundary() {
     assert_eq!(out.location(), "a".repeat(127));
     out.set_location("");
     assert_eq!(out.location(), "");
+}
+
+#[test]
+fn a_stream_need_declares_its_kind_and_no_other_need_does() {
+    use crate::{StreamKind, checked_stream};
+    let stream = NeedKind::Bus(BusKind::Stream);
+    assert_eq!(
+        checked_stream(stream, Some(StreamKind::JobDriven)),
+        Some(StreamKind::JobDriven)
+    );
+    assert_eq!(
+        checked_stream(stream, Some(StreamKind::FreeRunning)),
+        Some(StreamKind::FreeRunning)
+    );
+    assert_eq!(checked_stream(NeedKind::Bus(BusKind::I2c), None), None);
+}
+
+#[test]
+#[should_panic(expected = "a stream need declares its kind")]
+fn a_stream_need_without_a_kind_is_refused() {
+    let _ = crate::checked_stream(NeedKind::Bus(BusKind::Stream), None);
+}
+
+#[test]
+#[should_panic(expected = "only a stream need declares a kind")]
+fn a_kind_on_a_need_that_is_not_a_stream_is_refused() {
+    let _ = crate::checked_stream(
+        NeedKind::Bus(BusKind::I2c),
+        Some(crate::StreamKind::FreeRunning),
+    );
 }

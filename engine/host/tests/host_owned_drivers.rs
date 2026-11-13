@@ -245,7 +245,8 @@ pub trait Jobs {
 
 #[driver("jobs", provides = [Jobs])]
 pub struct JobReader {
-    #[needs]
+    /// Publishes one result per job it takes off the ring: a job-driven stream.
+    #[needs(job)]
     frames: StreamHandle,
     jobs: u32,
 }

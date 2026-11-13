@@ -36,12 +36,41 @@ pub enum NeedKind {
     Device(Tag),
 }
 
+/// Who makes the frames of a stream a driver serves. The driver declares it with its need, from
+/// how the driver produces the stream; a board file cannot choose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// The frames arrive whether or not anyone reads them. Past the reader's margin the oldest
+    /// unread frame is replaced, and the newest never is.
+    FreeRunning,
+    /// Each frame is the result of a job the consumer posted. An unread result is never replaced,
+    /// and a job with no buffer to write into is refused and counted.
+    JobDriven,
+}
+
 /// One thing a driver needs, by the name the board file gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Need {
     pub name: &'static str,
     pub kind: NeedKind,
     pub optional: bool,
+    /// The kind a stream need declares. `Some` for exactly the stream needs, see
+    /// [`checked_stream`].
+    pub stream: Option<StreamKind>,
+}
+
+/// The stream kind a need declares, checked when the driver's manifest is built: a stream need
+/// must declare one, and no other need may. A stream whose kind is left out does not compile.
+#[must_use]
+pub const fn checked_stream(kind: NeedKind, declared: Option<StreamKind>) -> Option<StreamKind> {
+    let is_stream = matches!(kind, NeedKind::Bus(BusKind::Stream));
+    match (is_stream, declared) {
+        (true, None) => panic!("a stream need declares its kind: #[needs(job)] or #[needs(free)]"),
+        (false, Some(_)) => {
+            panic!("only a stream need declares a kind (#[needs(job)] or #[needs(free)])")
+        }
+        (_, declared) => declared,
+    }
 }
 
 /// An I2C bus.

@@ -110,7 +110,7 @@ const MAX_JOBS: usize = 32;
 /// A buffer's largest size (`LEMNOS_STREAM_MAX_BUFFER_BYTES`).
 const MAX_IMAGE_BYTES: u64 = 1 << 28;
 /// The input's alignment; the block needs 4, and importers like more.
-const INPUT_ALIGN: u32 = 64;
+pub const INPUT_ALIGN: u32 = 64;
 /// The block's largest image in each direction.
 const MAX_DIMENSION: u32 = 0xffff;
 /// Bytes of an encoded job at most: every field at its widest.
@@ -227,13 +227,13 @@ enum Image {
 /// The PiSP back end.
 #[driver("pisp-be", provides = [CameraIsp, IspPisp])]
 pub struct PispBe {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     input: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output0: StreamHandle,
-    #[needs(optional)]
+    #[needs(optional, job)]
     output1: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     options: Options,

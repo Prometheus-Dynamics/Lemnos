@@ -315,11 +315,11 @@ fn publish(stream: &mut StreamHandle, mask: &mut u64, frame: StreamFrame) -> boo
 /// The ISP600 as `camera.isp/1` and `isp.isp600/1`.
 #[driver("isp600", provides = [CameraIsp, IspIsp600])]
 pub struct Isp600 {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     statistics: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output0: StreamHandle,
     hw: Box<dyn Hardware>,
     options: Options,

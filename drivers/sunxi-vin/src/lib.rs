@@ -191,7 +191,7 @@ fn options(cfg: &Config<'_>) -> Result<Options> {
 /// The sunxi-vin camera receiver.
 #[driver("sunxi-vin", provides = [CameraReceiver])]
 pub struct SunxiVin {
-    #[needs]
+    #[needs(free)]
     frames: StreamHandle,
     hw: Box<dyn Hardware>,
     options: Options,

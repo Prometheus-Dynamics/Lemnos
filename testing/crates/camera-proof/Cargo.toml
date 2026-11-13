@@ -24,6 +24,7 @@ lemnos-contract-isp-pisp = { path = "../../../contracts/isp-pisp" }
 lemnos-driver-pisp = { path = "../../../drivers/pisp", default-features = false, features = ["device"] }
 lemnos-driver-pisp-sys = { path = "../../../drivers/pisp-sys" }
 lemnos-driver-ov9782 = { path = "../../../drivers/ov9782" }
+lemnos-driver-rp1-csi2 = { path = "../../../drivers/rp1-csi2" }
 lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
 lemnos-linux = { path = "../../../backends/linux" }
 

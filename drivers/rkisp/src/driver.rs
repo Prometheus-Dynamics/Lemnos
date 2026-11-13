@@ -389,13 +389,13 @@ fn deliver(
 /// The vendor kernel's ISP as `camera.isp/1`.
 #[driver("rkisp", provides = [CameraIsp])]
 pub struct Rkisp {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     statistics: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output0: StreamHandle,
-    #[needs(optional)]
+    #[needs(optional, job)]
     output1: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     options: Options,

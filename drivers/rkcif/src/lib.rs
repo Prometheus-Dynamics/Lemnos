@@ -156,10 +156,10 @@ enum State {
 #[driver("rkcif", provides = [CameraReceiver])]
 pub struct Rkcif {
     /// Raw frames go out here, when the board gives the stream.
-    #[needs(optional)]
+    #[needs(optional, free)]
     frames: Option<StreamHandle>,
     /// The embedded data goes out here, when the board gives the stream and names a metadata node.
-    #[needs(optional)]
+    #[needs(optional, free)]
     embedded: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     /// The capture node, when the board names it.

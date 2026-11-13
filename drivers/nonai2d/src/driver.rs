@@ -75,7 +75,7 @@ pub type Opener = Box<dyn FnMut(Layout, Layout) -> io::Result<BoxedEngine> + Sen
 /// The non-AI 2D engine as `image.convert/1`.
 #[driver("nonai2d", provides = [ImageConvert])]
 pub struct Nonai2dDriver {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     converter: Converter<BoxedEngine, Opener>,
     /// Stream errors in a row.

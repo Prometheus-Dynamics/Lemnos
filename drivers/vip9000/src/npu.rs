@@ -131,7 +131,7 @@ pub enum Closed {
 /// The VIP9000 as `npu/1`.
 #[driver("vip9000", provides = [Npu])]
 pub struct Vip9000Driver {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     route: Route,
     service: Service<Node>,

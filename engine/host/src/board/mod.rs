@@ -170,19 +170,20 @@ pub enum StreamMemory {
 /// A job-driven stream's frames are the results of jobs the consumer posted (a memory-to-memory
 /// device's outputs, an encoder, a scaler). An unread result is never replaced: a producer with no
 /// free buffer does not start the next job, and that is counted in `refused`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-pub enum StreamKind {
-    /// The frames arrive on their own. The default.
-    #[default]
-    #[serde(rename = "free-running")]
-    FreeRunning,
-    /// Each frame is the result of a job the consumer posted.
-    #[serde(rename = "job")]
-    JobDriven,
-}
+pub use lemnos_core::StreamKind;
 
 /// The heap a stream of dma-bufs comes from when its board file names none.
 pub const DEFAULT_HEAP: &str = "system";
+
+/// A value of any kind under a key the board file must not have: its presence is what is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AnyValue;
+
+impl<'de> Deserialize<'de> for AnyValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| AnyValue)
+    }
+}
 
 /// One frame stream a device offers.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -218,10 +219,47 @@ pub struct StreamSpec {
     /// is `buffers - 1 - working` frames (`docs/streams.md`, "The margin"). Less than `buffers`.
     #[serde(default)]
     pub working: u32,
-    /// Who makes the frames: `"free-running"` when left out, or `"job"` for the results of jobs
-    /// the consumer posted. It decides what the producer may take back (see [`StreamKind`]).
-    #[serde(default)]
-    pub kind: StreamKind,
+    /// Set when the board file has a `kind` key, whatever its value. Such a board is refused
+    /// (`check_streams`): the driver that serves the stream declares its kind, not the board.
+    #[serde(default, rename = "kind")]
+    pub kind_key: Option<AnyValue>,
+    /// Who makes the frames, as the driver that serves the stream declares it. Set when the board
+    /// is resolved against its drivers (`resolve_kinds`); `None` for a stream no driver serves.
+    #[serde(skip)]
+    pub kind: Option<StreamKind>,
+}
+
+/// Sets each stream's kind from the driver that serves it: the kind the driver declares with its
+/// need. A stream whose driver declares no kind (a packaged driver's) is refused by name. A
+/// `kind` key in the board file is refused before this runs (`check_streams`).
+pub(crate) fn resolve_kinds(
+    driver: &str,
+    manifest: Option<&lemnos_core::Manifest>,
+    streams: &mut BTreeMap<String, StreamSpec>,
+) -> Result<(), BoardError> {
+    for (name, stream) in streams.iter_mut() {
+        let need = manifest.and_then(|m| {
+            m.needs.iter().find(|n| {
+                n.name == name
+                    && matches!(
+                        n.kind,
+                        lemnos_core::NeedKind::Bus(lemnos_core::BusKind::Stream)
+                    )
+            })
+        });
+        let Some(need) = need else {
+            // No driver here serves this stream: nothing produces it, so no kind is needed.
+            continue;
+        };
+        let Some(declared) = need.stream else {
+            return Err(BoardError::Host(
+                "streams",
+                format!("stream `{name}` of driver `{driver}` declares no kind in its package"),
+            ));
+        };
+        stream.kind = Some(declared);
+    }
+    Ok(())
 }
 
 const fn default_job_slots() -> u32 {
@@ -675,7 +713,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         }
         device.owned_config()?;
         device.owned_lists()?;
-        check_streams(&device.id, &device.streams)?;
+        check_streams(&device.id, &device.driver, &device.streams)?;
     }
     let mut rules = BTreeSet::new();
     for each in &board.each {
@@ -701,13 +739,26 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         device.id.clone_from(&each.id);
         device.owned_config()?;
         device.owned_lists()?;
-        check_streams(&each.id, &each.streams)?;
+        check_streams(&each.id, &each.driver, &each.streams)?;
     }
     Ok(board)
 }
 
-fn check_streams(id: &str, streams: &BTreeMap<String, StreamSpec>) -> Result<(), BoardError> {
+fn check_streams(
+    id: &str,
+    driver: &str,
+    streams: &BTreeMap<String, StreamSpec>,
+) -> Result<(), BoardError> {
     for (name, stream) in streams {
+        if stream.kind_key.is_some() {
+            return Err(BoardError::Host(
+                "streams",
+                format!(
+                    "stream `{name}` of driver `{driver}` has a `kind` key in the board file; \
+                     the driver declares that stream's kind, so the key is refused: remove it"
+                ),
+            ));
+        }
         if stream.checked_layout().is_none() || stream.working >= stream.buffers {
             return Err(BoardError::Stream(id.to_string(), name.clone()));
         }

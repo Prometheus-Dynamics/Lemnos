@@ -138,14 +138,25 @@ config = { default_on = true }
 
 # The sensor's clock: the product's overlay is `ov9782,cam0,clk-continuous` (config.txt on the board,
 # 2026-11-13), so the continuous clock. The sensor modes the driver offers are 1280x800, 1280x720 and
-# 640x400 (binned), each RAW10 and RAW8. The stream sizes below are this file's own choices and are
-# not stated by the product: unverified.
+# 640x400 (binned), each RAW10 and RAW8. The camera streams below run mode 0 (1280x800 RAW10, the
+# first entry of the driver's mode table), and their formats are this file's own choices (the back
+# end's outputs are NV12, the front end's are BAYER16): the product does not state them here.
+# Each buffer size is derived in its comment, and `pisp_reference_sizes` in
+# `testing/crates/camera-proof/tests/reference_board.rs` recomputes every one from the drivers.
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
 bus = "i2c-10"
 link = "cam0-receiver"
 config = { continuous_clock = true }
+
+# The sensor's values: jobs of one encoded `FrameValues` each, read from the stream's job queue.
+# 2 of 64 bytes: `ov9782::JOB_BYTES`, the bytes a job reads. The sensor has no embedded data
+# (`chip::EMBEDDED_DATA` is None), so the receiver below has no `embedded` stream.
+[devices.streams.values]
+buffers = 2
+buffer_bytes = 64
+job_bytes = 64
 
 # The receiver is the kernel module's: the module owns its node, and this device is its driver's.
 [[devices]]
@@ -154,38 +165,83 @@ driver = "rp1-csi2"
 link = "cam0-fe"
 config = { device = "1f00110000.csi" }
 
+# 8 of 1280000 bytes: RAW10 packed, 1280 wide is 1600 bytes a line (1280 x 10 / 8, already a
+# multiple of 16), and 800 lines make 1280000 (`rp1_csi2::packed_frame_bytes(1280, 800, 10)`).
+[devices.streams.frames]
+buffers = 8
+buffer_bytes = 1280000
+memory = "dma-buf"
+heap = "linux,cma"
+
 [[devices]]
 id = "cam0-fe"
 driver = "pisp-fe"
 link = "cam0-isp"
 config = { device = "1f00110000.csi" }
 
+# 8 of 632 bytes: one front-end configuration (`fe_job::CONFIG_BYTES`, `FeConfig::SIZE`), per job.
 [devices.streams.config]
-kind = "job"
+buffers = 8
+buffer_bytes = 632
+job_slots = 8
+job_bytes = 128
+
+# 8 of 23200 bytes: one statistics block (`fe_job::STATS_BYTES`, `RawStatistics::SIZE`), per job.
+[devices.streams.statistics]
+buffers = 8
+buffer_bytes = 23200
+memory = "dma-buf"
+heap = "linux,cma"
+
+# 4 of 2052096 bytes: BAYER16 at 1280 x 800. Its stride is 2560 (2 bytes a pixel, aligned to 64,
+# `FE_OUTPUT_ALIGN`), so 2560 x 800 = 2048000, plus a 4096-byte pad: the jobs' `pad_bytes`.
+[devices.streams.output0]
 buffers = 4
-buffer_bytes = 8192
+buffer_bytes = 2052096
+memory = "dma-buf"
+heap = "linux,cma"
+
+# 4 of 516096 bytes: BAYER16 at 640 x 400, half the mode. Stride 1280 x 400 = 512000, plus the
+# same 4096-byte pad.
+[devices.streams.output1]
+buffers = 4
+buffer_bytes = 516096
+memory = "dma-buf"
+heap = "linux,cma"
 
 [[devices]]
 id = "cam0-isp"
 driver = "pisp-be"
 config = { device = "1000880000.pisp_be" }
 
+# 2 of 16720 bytes: one back-end configuration per job (`CONFIG_BYTES`, the block's own size).
 [devices.streams.config]
-kind = "job"
-buffers = 4
-buffer_bytes = 8192
+buffers = 2
+buffer_bytes = 16720
+job_slots = 8
+job_bytes = 128
 
+# 2 of 2048000 bytes: the raw frame the job reads, BAYER16 at 1280 x 800 with a 64-aligned stride of
+# 2560 (`BE_INPUT_ALIGN`): 2560 x 800 = 2048000.
 [devices.streams.input]
-kind = "job"
-buffers = 4
-buffer_bytes = 2097152
+buffers = 2
+buffer_bytes = 2048000
 memory = "dma-buf"
 heap = "linux,cma"
 
+# 4 of 1536000 bytes: NV12 at 1280 x 800. Stride 1280 (16-aligned, `BE_OUTPUT_MIN_ALIGN`), luma
+# 1280 x 800 = 1024000, chroma 1280 x 400 = 512000.
 [devices.streams.output0]
-kind = "job"
 buffers = 4
-buffer_bytes = 4194304
+buffer_bytes = 1536000
+memory = "dma-buf"
+heap = "linux,cma"
+
+# 4 of 384000 bytes: NV12 at 640 x 400, half the mode. Luma 640 x 400 = 256000, chroma 640 x 200 =
+# 128000.
+[devices.streams.output1]
+buffers = 4
+buffer_bytes = 384000
 memory = "dma-buf"
 heap = "linux,cma"
 

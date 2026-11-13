@@ -150,14 +150,14 @@ enum State {
 #[driver("rp1-csi2", provides = [CameraReceiver])]
 pub struct Rp1Csi2 {
     /// Where frames go: the board's `frames` stream on this device.
-    #[needs(optional)]
+    #[needs(optional, free)]
     frames: Option<StreamHandle>,
     /// The ISP the board feeds this receiver to (`link` on the receiver): the front end on a
     /// PiSP block. Resolved at bind, where the host checks it serves `camera.isp/1`.
     #[link]
     _isp: Option<Dev<dyn CameraIsp>>,
     /// Where the embedded data goes, when the board declares an `embedded` stream on the device.
-    #[needs(optional)]
+    #[needs(optional, free)]
     embedded: Option<StreamHandle>,
     /// The bytes of each embedded line (`config.embedded_bytes`), with `embedded`.
     embedded_bytes: u32,
@@ -177,6 +177,20 @@ pub struct Rp1Csi2 {
 /// The smallest ring holding `buffers` frames, a power of two.
 const fn frame_slots_for(buffers: u32) -> u32 {
     buffers.next_power_of_two()
+}
+
+/// The bytes one packed frame of `width` x `height` at `bit_depth` takes in the receiver's buffer:
+/// the receiver's own layout, so a board's `buffer_bytes` for `frames` is checked by the same rule.
+/// `None` where the receiver would refuse the frame.
+#[must_use]
+pub fn packed_frame_bytes(width: u32, height: u32, bit_depth: u8) -> Option<u32> {
+    let link = LinkConfig {
+        bit_depth,
+        width,
+        height,
+        ..LinkConfig::default()
+    };
+    layout(&link, Packing::Packed).ok().map(|frame| frame.size)
 }
 
 /// How a frame is laid out, from the link and the packing asked for. Sizes are checked here and,

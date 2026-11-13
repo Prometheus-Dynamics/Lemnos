@@ -77,7 +77,7 @@ const STOP: MethodId = MethodId {
 pub struct Uvc {
     #[needs]
     usb: UsbDeviceHandle,
-    #[needs]
+    #[needs(free)]
     frames: StreamHandle,
     session: Session,
 }

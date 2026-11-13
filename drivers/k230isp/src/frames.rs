@@ -291,11 +291,11 @@ struct Output {
 /// The ISP through `lemnos.ko`, frames into the caller's dma-bufs, as `camera.isp/1`.
 #[driver("k230isp-frames", provides = [CameraIsp])]
 pub struct K230IspFrames {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     statistics: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output0: StreamHandle,
     module: Box<dyn Module>,
     state: State,

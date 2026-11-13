@@ -158,7 +158,7 @@ pub struct UsbGadget {
     #[needs]
     function: UsbFunctionHandle,
     /// `usb.function/1` jobs and their completions.
-    #[needs(optional)]
+    #[needs(optional, job)]
     data: Option<StreamHandle>,
     set: Set,
     /// Whether the function is enabled.

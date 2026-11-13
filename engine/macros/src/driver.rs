@@ -48,6 +48,9 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     let mut need_idents = Vec::new();
     let mut need_types = Vec::new();
+    // The stream kind each need declares, `None` for a need that is not a stream. A stream need
+    // must declare one: `checked_stream` refuses a manifest without it at compile time.
+    let mut need_streams: Vec<TokenStream> = Vec::new();
     // A `#[link]` field takes the device the board's `link` names. It is not a need: the board
     // gives it no name to `uses`, so it is not in the manifest.
     let mut link_idents = Vec::new();
@@ -66,16 +69,43 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             continue;
         };
         let attr = field.attrs.remove(position);
-        let optional = match &attr.meta {
-            syn::Meta::Path(_) => false,
-            _ => {
-                let word: Ident = attr.parse_args()?;
-                if word != "optional" {
-                    return Err(Error::new(word.span(), "expected #[needs(optional)]"));
-                }
-                true
-            }
+        // `#[needs]`, or a comma-separated list of: `optional`; and for a stream, `job` (each
+        // frame is the result of a job the consumer posted) or `free` (the frames arrive on their
+        // own).
+        let words: Vec<Ident> = match &attr.meta {
+            syn::Meta::Path(_) => Vec::new(),
+            _ => attr
+                .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?
+                .into_iter()
+                .collect(),
         };
+        let mut optional = false;
+        let mut stream = None;
+        for word in &words {
+            match word.to_string().as_str() {
+                "optional" => optional = true,
+                "job" | "free" if stream.is_none() => {
+                    stream = Some(if word == "job" {
+                        quote!(::core::option::Option::Some(
+                            ::lemnos_core::StreamKind::JobDriven
+                        ))
+                    } else {
+                        quote!(::core::option::Option::Some(
+                            ::lemnos_core::StreamKind::FreeRunning
+                        ))
+                    });
+                }
+                "job" | "free" => {
+                    return Err(Error::new(word.span(), "one stream kind: job or free"));
+                }
+                _ => {
+                    return Err(Error::new(
+                        word.span(),
+                        "expected #[needs], #[needs(optional)], or a stream's #[needs(job)] or #[needs(free)]",
+                    ));
+                }
+            }
+        }
         if optional != is_option(&field.ty) {
             return Err(Error::new(
                 field.ty.span(),
@@ -84,6 +114,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
         need_idents.push(field.ident.clone());
         need_types.push(field.ty.clone());
+        need_streams.push(stream.unwrap_or_else(|| quote!(::core::option::Option::None)));
     }
 
     let name = input.ident.clone();
@@ -117,6 +148,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                     name: #need_labels,
                     kind: <#need_types as ::lemnos_core::Resource>::KIND,
                     optional: <#need_types as ::lemnos_core::Resource>::OPTIONAL,
+                    stream: ::lemnos_core::checked_stream(
+                        <#need_types as ::lemnos_core::Resource>::KIND,
+                        #need_streams,
+                    ),
                 }),*],
                 provides: &[#(<dyn #provides as ::lemnos_core::Contract>::INFO),*],
             };

@@ -34,7 +34,6 @@ use lemnos_driver_pisp::uapi::{
     BayerOrder as Order, Branch, FeConfig, ImageFormatConfig, Wire, fe_enable as en,
 };
 use lemnos_driver_pisp::{FeLink, FeOptions, PispFe, PispFeNeeds};
-use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
 use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
@@ -43,6 +42,26 @@ use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
+
+/// The driver's entry with its real manifest, so each stream's kind is the one the driver declares.
+/// The device is never bound (this binder refuses), so the test drives the driver itself.
+struct NeverBinds;
+
+impl lemnos_host::Binder for NeverBinds {
+    fn bind(
+        &self,
+        _: &mut lemnos_core::Resources<'_>,
+        _: &lemnos_core::Config<'_>,
+    ) -> lemnos_core::Result<Box<dyn lemnos_host::Instance>> {
+        Err(lemnos_core::Status::NOT_SUPPORTED)
+    }
+}
+
+static NEVER_BINDS: NeverBinds = NeverBinds;
+
+fn declared<D: lemnos_core::Driver>() -> lemnos_host::DriverEntry {
+    lemnos_host::DriverEntry::bound_by(D::MANIFEST, false, false, &NEVER_BINDS)
+}
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -130,18 +149,19 @@ fn host() -> Host {
     let dma = "memory = \"dma-buf\"";
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-         [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
+         [[devices]]\nid = \"isp\"\ndriver = \"pisp-fe\"\n\
+         config = {{ device = \"none\", lanes = 2, mbps = 900, data_type = 43 }}\n\
          [devices.streams.config]\nbuffers = {CONFIGS}\nbuffer_bytes = {CONFIG_BYTES}\n\
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.statistics]\nbuffers = {CONFIGS}\nbuffer_bytes = {STATS_BYTES}\n{dma}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{dma}\n\
-         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{dma}\n"
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{dma}\n\
+         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{dma}\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
     Host::start_with_streams(
         &parse(&text).unwrap(),
-        &[entry::<FakeCounter>()],
+        &[declared::<PispFe>()],
         Box::new(sim),
         Arc::new(clock),
         HostOptions::default(),
@@ -902,8 +922,8 @@ fn bound(statistics: &str, output0: &str, output1: &str) -> Host {
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.statistics]\nbuffers = {CONFIGS}\nbuffer_bytes = {STATS_BYTES}\n\
          {statistics}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{output0}\n\
-         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n{output1}\n"
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output0}\n\
+         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output1}\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
@@ -1026,4 +1046,53 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
     let counters = CameraIsp::counters(&mut fe).unwrap();
     assert_eq!((counters.jobs, counters.dropped), (3, 0));
     assert_eq!(hw.registered(), 0);
+}
+
+#[test]
+fn an_unread_statistics_result_is_never_replaced_by_a_later_job() {
+    // Statistics are a job's result (the driver declares it `job`): two results sit unread in the two
+    // statistics buffers, and a third job that needs one of them must not start.
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
+    let mut fe = driver(&host, &hw);
+    CameraIsp::start(&mut fe).unwrap();
+
+    app.config.fill(0, &config_for(1, true, false));
+    app.post(1, 0, 0, NO_BUFFER);
+    let now = two_ticks(&mut fe, 1);
+    app.config.fill(1, &config_for(2, true, false));
+    app.post(2, 1, 1, NO_BUFFER);
+    let now = two_ticks(&mut fe, now);
+
+    // Nobody reads the statistics: both results stay in their buffers.
+    app.config.fill(0, &config_for(3, true, false));
+    app.post(3, 0, 2, NO_BUFFER);
+    two_ticks(&mut fe, now);
+
+    assert_eq!(
+        hw.with(|b| b.keys.clone()),
+        [1, 2],
+        "job 3 never reached the block"
+    );
+    let first = app
+        .stats
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job 1 statistics");
+    assert_eq!((first.buffer, first.identity), (0, 1));
+    assert!(app.stats.read(0, STATS_BYTES) == expected(2, 1, 1, STATS_BYTES));
+    let second = app
+        .stats
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job 2 statistics");
+    assert_eq!((second.buffer, second.identity), (1, 2));
+    assert!(
+        app.stats.ring.pop_frame().unwrap().is_none(),
+        "no third result"
+    );
+    assert_eq!(hw.with(|b| b.lost), 0);
 }

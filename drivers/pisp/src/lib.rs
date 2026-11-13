@@ -58,8 +58,9 @@ pub mod uapi;
 
 #[cfg(all(feature = "device", target_os = "linux"))]
 pub use be_device::{
-    CONFIG_STREAM as BE_CONFIG_STREAM, INPUT_STREAM as BE_INPUT_STREAM,
-    OUTPUT_STREAMS as BE_OUTPUT_STREAMS, Options as BeOptions, PispBe, PispBeNeeds,
+    CONFIG_STREAM as BE_CONFIG_STREAM, INPUT_ALIGN as BE_INPUT_ALIGN,
+    INPUT_STREAM as BE_INPUT_STREAM, OUTPUT_STREAMS as BE_OUTPUT_STREAMS, Options as BeOptions,
+    PispBe, PispBeNeeds,
 };
 #[cfg(all(feature = "device", target_os = "linux"))]
 pub use fe_device::{
