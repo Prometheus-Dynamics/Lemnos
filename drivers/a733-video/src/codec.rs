@@ -144,12 +144,19 @@ pub type BoxedBlock = Box<dyn Block + Send>;
 ///
 /// Settings, from the device's `config` in the board file:
 ///
-/// - `device` (string, default `/dev/cedar_dev_ve2`): the engine's node.
-/// - `lock` (string, default `encoder`): the kernel lock a job takes, `decoder`, `encoder` or
-///   `jpeg`.
+/// - `route` (string, default `vendor`): `vendor` reaches the engine through the vendor
+///   kernel's node, for register reads only (this module's docs); `module` through `lemnos.ko`,
+///   which runs encode jobs it has checked ([`crate::module`]).
+/// - `device` (string, default `/dev/cedar_dev_ve2`), vendor route: the engine's node.
+/// - `lock` (string, default `encoder`), vendor route: the kernel lock a job takes, `decoder`,
+///   `encoder` or `jpeg`.
+/// - `block` (string, required), module route: the engine's platform device name, as the
+///   module lists it.
+/// - `node` (string, default `/dev/lemnos`), module route: the module's control node.
 ///
-/// The stream `jobs` is required; its buffers can be plain memory, since no job references
-/// one. Nothing is opened at bind.
+/// The stream `jobs` is required. On the vendor route its buffers can be plain memory, since no
+/// job references one; on the module route a job's buffers are the stream's dma-bufs. Nothing is
+/// opened at bind.
 #[driver("a733-video", provides = [CodecBlock])]
 pub struct A733Video {
     #[needs]
@@ -181,6 +188,21 @@ impl Lifecycle for A733Video {
     const TICKS: bool = true;
 
     fn start(needs: A733VideoNeeds, cfg: &Config<'_>) -> Result<Self> {
+        match cfg.str("route") {
+            None | Some("vendor") => {}
+            Some("module") => {
+                let node = PathBuf::from(cfg.str("node").unwrap_or(crate::module::NODE));
+                let Some(name) = cfg.str("block").filter(|name| !name.is_empty()) else {
+                    return Err(Status::INVALID_ARGUMENT);
+                };
+                let name = name.to_owned();
+                let block = crate::module::ModuleBlock::new(move || {
+                    crate::module::ModuleEngine::open(&node, &name)
+                });
+                return Ok(Self::on(needs, Box::new(block)));
+            }
+            Some(_) => return Err(Status::INVALID_ARGUMENT),
+        }
         let path = PathBuf::from(cfg.str("device").unwrap_or(DEVICE));
         if path.as_os_str().is_empty() {
             return Err(Status::INVALID_ARGUMENT);

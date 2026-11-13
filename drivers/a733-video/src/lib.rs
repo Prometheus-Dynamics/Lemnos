@@ -1,6 +1,7 @@
-//! The A733's second video engine (the encoder side) through the vendor kernel's
-//! `/dev/cedar_dev_ve2`. No vendor library: the engine is reached only through the kernel's own
-//! requests, and what it encodes or decodes is the caller's business.
+//! The A733's second video engine (the encoder side), on two routes: encode jobs through
+//! `lemnos.ko`, which checks them and writes every address itself ([`module`]), and register reads
+//! through the vendor kernel's `/dev/cedar_dev_ve2`. No vendor library: what the engine encodes is
+//! the caller's business.
 //!
 //! - [`uapi`]: the requests, lock bits, modes, structures and register-window facts, transcribed
 //!   with their source and pinned by layout tests.
@@ -13,17 +14,17 @@
 //!   250 ms, capped at 8 s, never giving up and never turning itself off.
 //! - [`Device`]: the kernel operations the block runs on, one per request.
 //!
-//! # What is not here, and why
+//! # Register writes go through the kernel module
 //!
-//! **No register writes.** The engine is programmed by writing its registers, and on this block a
-//! register write can make it read or write memory: some registers take bus addresses, and others
-//! (sizes, strides, lengths, the layout of reference and motion buffers) decide how far past an
-//! address it goes. The kernel checks none of it, and the engine sits behind an IOMMU whose
-//! address space other devices' buffers share. A driver could make an address register take only
-//! an address [`Block::address`] derived, but it could not bound the extent behind it without
-//! knowing what every size and stride register means for every codec, which is both the caller's
-//! business under the block rule and not public. So no path that writes a register lands here: one
-//! would let a caller reach memory it does not hold.
+//! The engine is programmed by writing its registers, and on this block a register write can make
+//! it read or write memory: some registers take bus addresses, and others (sizes, strides, lengths)
+//! decide how far past an address it goes. The vendor kernel checks none of it, and the engine
+//! sits behind an IOMMU whose address space other devices' buffers share. So the vendor route
+//! writes no register. Jobs that encode go through `lemnos.ko` instead ([`module`]): the module
+//! takes the job's writes and the caller's dma-bufs, writes every address register itself from a
+//! buffer it holds, refuses every other write to one, and refuses a range shorter than what the
+//! job's own frame size, stride and format make the engine reach. The module's profile allows
+//! the H.264 encoder's registers only, so a decode job is refused there.
 //!
 //! # On a device, and for a caller
 //!
@@ -41,7 +42,8 @@
 //! engine one); `IOCTL_SET_REFCOUNT`, `IOCTL_FLUSH_CACHE_RANGE` and the address-answering
 //! requests other than `IOCTL_MAP_DMA_BUF` are never issued.
 //!
-//! Hardware status: untested on board. The board check is in `testing/board-runs/E19.md`.
+//! Hardware status: untested on board. The board checks are in `testing/board-runs/E19.md` (the
+//! vendor route) and `testing/board-runs/H8a.md` (the module route).
 
 #![forbid(unsafe_code)]
 
@@ -50,6 +52,8 @@ mod block;
 pub mod codec;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub mod module;
 pub mod uapi;
 
 #[cfg(target_os = "linux")]

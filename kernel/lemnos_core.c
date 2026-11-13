@@ -39,6 +39,7 @@
 #include "lemnos_internal.h"
 #include "lemnos_pisp_be.h"
 #include "lemnos_gsdma.h"
+#include "lemnos_regjob_priv.h"
 
 #define LEM_NAME "lemnos"
 #define LEM_MAX_COMPATIBLE 8
@@ -103,6 +104,7 @@ struct lem_block {
 	u32 nirqs;
 	struct lem_pb *pb;		/* the PiSP back end, or NULL */
 	struct lem_gd *gd;		/* the K230 graphics DMA engine, or NULL */
+	struct lem_rj *rj;		/* run through register jobs, or NULL */
 	struct xarray imports;		/* handle -> struct lem_import */
 	atomic_t bufs;			/* DMA buffers not yet freed */
 	struct lem_power *power;
@@ -148,7 +150,7 @@ static bool lem_listed(const char *list, const char *compatible)
 }
 
 /* Whether any of the device's compatibles is in `list`, from any firmware description. */
-static bool lem_device_listed(struct device *dev, const char *list)
+bool lem_device_listed(struct device *dev, const char *list)
 {
 	const char *c[LEM_MAX_COMPATIBLE];
 	int n = device_property_read_string_array(dev, "compatible", c, ARRAY_SIZE(c));
@@ -563,6 +565,7 @@ union lem_args {
 	struct lemnos_stream_create stream;
 	struct lemnos_pisp_be_create pisp_be;
 	struct lemnos_gsdma_create gsdma;
+	struct lemnos_regjob_open regjob;
 	struct lemnos_i2c_transfer i2c;
 	struct lemnos_i2c_smbus smbus;
 	struct lemnos_spi_transfer spi;
@@ -627,9 +630,13 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		if (!l->gd)
 			return -ENOTTY;
 		return lem_gd_create(l->gd, l->dev, &u->gsdma);
+	case LEMNOS_IOC_REGJOB_OPEN:
+		if (!l->rj)
+			return -ENOTTY;
+		return lem_rj_open(l->rj, &u->regjob);
 	case LEMNOS_IOC_POWER:
 		/* A block the module drives keeps its own clocks. */
-		if (l->pb || l->gd)
+		if (l->pb || l->gd || l->rj)
 			return -ENOTTY;
 		return lem_power_request(l->power, &u->power);
 	case LEMNOS_IOC_TEST_IRQ:
@@ -814,6 +821,13 @@ static int lem_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(l->gd), "K230 graphics DMA engine\n");
 		goto ready;
 	}
+	l->rj = lem_rj_probe(pdev);
+	if (IS_ERR(l->rj))
+		return dev_err_probe(dev, PTR_ERR(l->rj), "register jobs\n");
+	if (l->rj) {
+		l->mappable = false;
+		goto ready;
+	}
 	if (test_irq_inject)
 		dev_warn(dev, "test_irq_inject: interrupts can be raised from user space\n");
 
@@ -841,13 +855,15 @@ static int lem_probe(struct platform_device *pdev)
 
 ready:
 	l->power = lem_power_create(dev);
-	if (IS_ERR(l->power))
-		return PTR_ERR(l->power);
+	if (IS_ERR(l->power)) {
+		ret = PTR_ERR(l->power);
+		goto unwind;
+	}
 	ret = xa_alloc_cyclic(&lem_blocks, &l->id, l, XA_LIMIT(1, LEM_MAX_BLOCK), &lem_next_id,
 			      GFP_KERNEL);
 	if (ret < 0) {
 		lem_power_destroy(l->power);
-		return ret;
+		goto unwind;
 	}
 	lem_power_set_block(l->power, l->id);
 	lem_event_post(LEMNOS_EVENT_BLOCK_BOUND, l->id, 0, 0);
@@ -855,6 +871,11 @@ ready:
 		 l->id, l->regions, l->nirqs, fls64(dma_get_mask(dev)),
 		 l->mappable ? "" : "not ", l->unconfined ? " (unconfined)" : "");
 	return 0;
+unwind:
+	/* No session can exist yet: the block was never published. */
+	if (l->rj)
+		lem_rj_remove(l->rj);
+	return ret;
 }
 
 static void lem_remove(struct platform_device *pdev)
@@ -885,6 +906,8 @@ static void lem_remove(struct platform_device *pdev)
 		lem_pb_remove(l->pb);
 	if (l->gd)
 		lem_gd_remove(l->gd);
+	if (l->rj)
+		lem_rj_remove(l->rj);
 	lem_power_destroy(l->power);
 	up_write(&lem_blocks_sem);
 	lem_event_post(LEMNOS_EVENT_BLOCK_UNBOUND, l->id, 0, 0);

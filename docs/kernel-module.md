@@ -27,6 +27,10 @@ Through one node, `/dev/lemnos`, with one opener at a time:
 - **Four blocks driven inside the module**, because their DMA cannot be left to user space: the
   CSI-2 receiver and both halves of the ISP on the BCM2712 with RP1, and the K230's graphics DMA
   engine, which takes bus addresses with no MMU in front of it.
+- **Register jobs** for blocks programmed by writing registers that take bus addresses: the
+  caller gives the values and its dma-bufs, and the module writes every address itself, refuses a
+  range shorter than what the job's own geometry makes the block reach, runs the job and resets
+  the block if it hangs. The A733 video engine's encoder runs this way.
 - **PIO state machines** on the RP1, through a table of allowed operations.
 
 ## What the daemon uses today
@@ -46,9 +50,9 @@ and everything else stays on the stock path:
 | `irq:BLOCK/N` | Only through the module |
 | `clocks:BLOCK/NAME,...`, `resets:BLOCK/NAME,...` | Only through the module |
 
-The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`) and the graphics DMA library
-(`k230-gsdma`) open the module's nodes themselves. `k230isp` and `k230-capture` take `regs:`,
-`irq:`, `clocks:` and `resets:` when the board file names them (see
+The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`), the graphics DMA library
+(`k230-gsdma`) and `a733-video` with `route = "module"` open the module's nodes themselves.
+`k230isp` and `k230-capture` take `regs:`, `irq:`, `clocks:` and `resets:` when the board file names them (see
 [Drivers and contracts](drivers.md#which-drivers-take-a-blocks-own-resources)).
 
 Interrupts reach the backend on the module's one event stream, which it reads for every interrupt
@@ -108,6 +112,7 @@ Other parameters:
 | `unconfined` | Compatibles whose registers can be mapped though no IOMMU confines their DMA. The driver in user space alone then keeps that DMA inside the block's memory, so list only a block whose driver checks every register it writes and points every address register only at memory the module allocated for that block, and whose stock driver already gives user space the same access. The kernel log says so when such a block binds |
 | `pisp_be` | Compatibles driven as the ISP back end. Must also be in `owned` |
 | `gsdma` | Compatibles driven as the graphics DMA engine. Must also be in `owned` |
+| `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs. Must also be in `owned` |
 | `bus_buffer` | The largest I2C or SPI transfer, in bytes each way. 4096 by default |
 
 The parameters whose names start with `test_` are for the QEMU harness. Leave them unset.

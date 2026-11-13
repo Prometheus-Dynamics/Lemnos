@@ -32,8 +32,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 - [ ] **VIP9000 NPU** (`drivers/vip9000`): refuses to load a program. The block has one page table
       for every opener. Needs a kernel path that gives each job its own.
-- [ ] **A733 video engine** (`drivers/a733-video`): register reads only. An address written into a
-      register cannot be bounded from user space. Needs a kernel path that checks or writes them.
 - [ ] **K230 KPU** (`drivers/k230-kpu`): refuses to load a program. No IOMMU and no bus
       protection, so no kernel path of ours closes it without reading the program. Open until the
       chip offers something.

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The second video engine's character device on the vendor kernel: the requests that take a value or one plain structure, each with its argument checked, and a read-only mapping of exactly the register window. The only place the a733-video driver touches unsafe code"
+description = "The second video engine on the vendor kernel's character device (the requests that take a value or one plain structure, and a read-only mapping of exactly the register window) and through lemnos.ko's register jobs (a session, its dma-bufs, jobs the module checks and runs). The only place the a733-video driver touches unsafe code"
 
 # One of the crates allowed `unsafe`, with the same lint table as lemnos-linux-sys: every block
 # carries a `SAFETY` comment and holds one operation.
