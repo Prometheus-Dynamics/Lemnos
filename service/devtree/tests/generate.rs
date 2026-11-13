@@ -338,6 +338,9 @@ const REFERENCE_DEVICES: &[(&str, Option<&str>)] = &[
     // The temperature zone and the fan control built on the fan: neither needs hardware of the board.
     ("cpu-thermal", None),
     ("fan-control", None),
+    // The board's self-test: it serves `self-test/1` for the board's other devices, so its driver
+    // declares no hardware need of its own.
+    ("selftest", None),
 ];
 
 #[test]
