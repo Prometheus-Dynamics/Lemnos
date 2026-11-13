@@ -55,7 +55,7 @@ In a stream:
 |---|---|
 | `buffers` | How many buffers. At most 4096, or 128 with `memory = "dma-buf"` |
 | `working` | The producer's working set: the buffers it holds in its own hands when it asks for its next one (a device's queue, `K - 1` for a queue of `K`). Left out, 0. Less than `buffers`. The reader's margin is `buffers - 1 - working` frames: [`streams.md`](streams.md) |
-| `kind` | Not a board choice. The driver that serves the stream declares who makes its frames (`free-running` or `job`, see [`streams.md`](streams.md)), and the host takes it from there. A `kind` here is accepted only when it agrees with the driver; one that contradicts it refuses the board by name. Left out, the driver's kind is used |
+| `kind` | Not a board choice. The driver that serves the stream declares who makes its frames (`free-running` or `job`, see [`streams.md`](streams.md)), and the host takes it from there. A `kind` here refuses the board by name: the driver declares the kind, so the key is removed. Left out, the driver's kind is used |
 | `buffer_bytes` | The size of each. At most 256 MiB, and 16 GiB for the whole stream |
 | `job_slots` | How many jobs a consumer can have waiting. 4 when left out, at most 64, rounded up to a power of two |
 | `job_bytes` | The largest job. 256 when left out, at most 4096 |

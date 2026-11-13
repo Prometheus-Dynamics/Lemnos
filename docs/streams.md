@@ -117,8 +117,8 @@ consumer holds is not written by anyone else.
 with its need (`#[needs(free)]` or `#[needs(job)]` in the driver's `#[driver]` struct, where a
 stream need without one does not compile). The host takes the kind from there, and the reclaim
 rule below is a function of it. A board file does not choose it: a `kind` key in
-`[devices.streams.NAME]` is accepted only when it agrees with the driver, and one that contradicts
-it refuses the board by name (`stream `statistics` of driver `pisp-fe` is job-driven; the board file says free-running``).
+`[devices.streams.NAME]` refuses the board by name, agreeing or not (the driver declares the kind),
+and a contradiction is named too (`stream `statistics` of driver `pisp-fe` is job-driven; the board file says free-running``).
 
 - **free-running** (`#[needs(free)]`): the frames arrive whether or not anyone reads them (a
   camera, a receiver, a USB or UVC frame stream). The rule for these is the replacement rule and

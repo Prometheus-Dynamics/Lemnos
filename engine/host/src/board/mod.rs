@@ -265,6 +265,15 @@ pub(crate) fn resolve_kinds(
             // No driver here serves this stream: nothing produces it, so no kind is needed.
             continue;
         };
+        // A board file states no kind: the driver declares it (I2e4 refuses the key outright).
+        if stream.declared_kind.is_some() {
+            return Err(BoardError::Host(
+                "streams",
+                format!(
+                    "stream `{name}` of driver `{driver}` states a `kind`; the driver declares the kind, so remove the key"
+                ),
+            ));
+        }
         let Some(declared) = need.stream else {
             return Err(BoardError::Host(
                 "streams",

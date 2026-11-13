@@ -81,39 +81,39 @@ fn start(text: &str, drivers: &[lemnos_host::DriverEntry]) -> std::result::Resul
 
 #[test]
 fn a_board_that_contradicts_the_driver_is_refused_by_name() {
-    let error = start(
-        &board("job-source", Some("free-running")),
-        &[entry::<JobSource>()],
-    )
-    .err()
-    .expect("refused");
-    assert!(
-        error.contains(
-            "stream `frames` of driver `job-source` is job-driven; the board file says free-running"
-        ),
-        "{error}"
-    );
-    let error = start(&board("free-source", Some("job")), &[entry::<FreeSource>()])
-        .err()
-        .expect("refused");
-    assert!(
-        error.contains(
-            "stream `frames` of driver `free-source` is free-running; the board file says job-driven"
-        ),
-        "{error}"
-    );
+    // The key is refused whether it agrees or contradicts: the refusal names the stream and driver.
+    for (driver, key, entry_fn) in [
+        ("job-source", "free-running", entry::<JobSource>()),
+        ("free-source", "job", entry::<FreeSource>()),
+    ] {
+        let error = start(&board(driver, Some(key)), &[entry_fn])
+            .err()
+            .expect("refused");
+        assert!(
+            error.contains(&format!(
+                "stream `frames` of driver `{driver}` states a `kind`"
+            )),
+            "{error}"
+        );
+    }
 }
 
 #[test]
-fn a_board_that_agrees_with_the_driver_is_accepted() {
-    assert!(start(&board("job-source", Some("job")), &[entry::<JobSource>()]).is_ok());
-    assert!(
-        start(
-            &board("free-source", Some("free-running")),
-            &[entry::<FreeSource>()]
-        )
-        .is_ok()
-    );
+fn a_board_that_states_a_kind_is_refused_even_when_it_agrees() {
+    for (driver, key, entry_fn) in [
+        ("job-source", "job", entry::<JobSource>()),
+        ("free-source", "free-running", entry::<FreeSource>()),
+    ] {
+        let error = start(&board(driver, Some(key)), &[entry_fn])
+            .err()
+            .expect("refused");
+        assert!(
+            error.contains(&format!(
+                "stream `frames` of driver `{driver}` states a `kind`"
+            )),
+            "{error}"
+        );
+    }
 }
 
 #[test]
