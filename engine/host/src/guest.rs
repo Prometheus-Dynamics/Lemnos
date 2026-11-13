@@ -413,6 +413,11 @@ impl UsbDevice for ReadOnly<UsbDeviceHandle> {
 impl UsbFunction for ReadOnly<UsbFunctionHandle> {
     type Error = ErrorKind;
 
+    /// Lending the bulk pair would hand a guest the means to write the function.
+    fn endpoint_handles(&self) -> Refusable<[lemnos_hal::blocks::BufferHandle<'_>; 2]> {
+        Err(REFUSED)
+    }
+
     fn enable(&mut self, _: &[u8]) -> Refusable<()> {
         Err(REFUSED)
     }

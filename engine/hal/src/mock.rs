@@ -737,6 +737,8 @@ mod tests {
 
     #[test]
     fn a_streaming_fifo_buffers_frames_on_the_device_clock() {
+        // The stream's clock starts when the bus is made, so no frame can be older than that.
+        let made = std::time::Instant::now();
         let bus = MockI2c::new()
             .with_target(0x18, AddressWidth::Bits8)
             .with_fifo_stream(
@@ -746,22 +748,38 @@ mod tests {
                 core::time::Duration::from_millis(1),
                 &[0x84, 1, 0, 2, 0, 3, 0],
             );
-        // Nothing read yet: the clock still runs, so frames have arrived.
+        // Nothing read yet: the clock still runs, so frames have arrived. A sleep is at least its
+        // time, so at least 21 frames (one at once, then one each millisecond) are due by the read,
+        // and no more than the clock has run since the bus was made. The bounds follow the clock,
+        // not the scheduler: a loaded machine may sleep longer, and then more frames are due.
         std::thread::sleep(core::time::Duration::from_millis(20));
         let mut regs = I2cRegisters::new(bus.clone(), 0x18, AddressWidth::Bits8);
         let mut level = [0u8; 2];
         crate::RegisterBus::read_burst(&mut regs, 0x24, &mut level).unwrap();
+        let read = std::time::Instant::now();
         let waiting = usize::from(u16::from_le_bytes(level));
-        // Seven bytes a frame: about 20 frames in 20 ms at 1 ms a frame.
+        let frames = waiting / 7;
+        let most = (read.duration_since(made).as_millis() as usize) + 1;
+        assert_eq!(waiting % 7, 0, "whole frames only");
         assert!(
-            (105..=175).contains(&waiting),
-            "{waiting} bytes after 20 ms"
+            (21..=most).contains(&frames),
+            "{frames} frames after 20 ms, at most {most} since the bus was made"
         );
-        // The data read takes them, oldest first, and leaves the rest.
+        // The data read takes them, oldest first, and leaves the rest. The rest is what the clock
+        // made since that read, so it is bounded by the time that passed, not by a count.
         let mut taken = alloc::vec![0u8; waiting];
+        let asked = std::time::Instant::now();
         crate::RegisterBus::read_burst(&mut regs, 0x26, &mut taken).unwrap();
         assert!(taken.chunks(7).all(|f| f == [0x84, 1, 0, 2, 0, 3, 0]));
-        assert!(bus.fifo_bytes(0x18) < 10);
+        let rest = bus.fifo_bytes(0x18);
+        let done = std::time::Instant::now();
+        let most_rest = (done.duration_since(asked).as_millis() as usize) + 1;
+        assert_eq!(rest % 7, 0, "whole frames only");
+        assert!(
+            rest / 7 <= most_rest,
+            "{} frames left, at most {most_rest}",
+            rest / 7
+        );
     }
 
     #[test]

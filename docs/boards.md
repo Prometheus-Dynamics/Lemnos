@@ -497,6 +497,14 @@ buffers = 4
 buffer_bytes = 1048576
 ```
 
+The `ffs` function is the vendor interface a program uses, and its two bulk endpoints can be lent to
+one client at a time: the client reads the OUT endpoint and writes the IN endpoint itself, with the
+daemon still owning the gadget, its control endpoint and the bus. A function with other than one
+bulk OUT and one bulk IN endpoint is not lent (`NOT_SUPPORTED`). See [the wire's Endpoints
+section](wire.md#endpoints) for the hand-off, its refusals and what a reconnect or a gadget restart
+means for a holder. `LEMNOS_ORION_LINKS=gadget=serial` on the Orion bridge offers the pair to the comm core as
+the link `serial`.
+
 The gadget's `interfaces` text lists its functions in configfs link order, one per line: `function ffs`
 (the FunctionFS link the daemon serves; the default, first, when no line names it), `function ncm
 host=MAC device=MAC` or `function ncm derive` (a CDC network function; both MACs unicast and

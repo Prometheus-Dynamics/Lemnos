@@ -266,6 +266,49 @@ fn the_contract_says_what_the_device_is_and_how_it_stands() {
     assert!(state.up && state.configured && state.suspended);
 }
 
+/// While a caller holds the bulk pair, the data stream is not served: a job on an endpoint waits,
+/// and the bytes the host sends stay where they are, for the holder. Once the hold is given up,
+/// the same job is served.
+#[cfg(unix)]
+#[test]
+fn the_data_stream_is_not_served_while_a_caller_holds_the_endpoints() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    let (out, _out_host) = UnixStream::pair().unwrap();
+    let (input, _input_host) = UnixStream::pair().unwrap();
+    let host = MockUsbFunction::with_endpoint_files(OwnedFd::from(out), OwnedFd::from(input));
+    let consumer = MockStream::with_bytes(BUFFERS, BYTES);
+    let driver = bind_on(
+        Box::new(host.clone()),
+        Some(Box::new(consumer.clone())),
+        &[],
+    );
+    let mut rig = Rig {
+        driver,
+        host,
+        consumer,
+        now: 0,
+    };
+    rig.tick();
+    rig.host.event(UsbFunctionEvent::Configured);
+    rig.tick();
+
+    let holder = CallerId(9);
+    assert!(Driver::endpoints(&mut rig.driver, holder).is_ok());
+    rig.receive(1, OUT, 0, 64);
+    rig.host.host_sends(OUT, b"held");
+    rig.tick();
+    rig.tick();
+    assert!(
+        rig.completion().is_none(),
+        "nothing is served while the pair is held"
+    );
+
+    Driver::release_endpoints(&mut rig.driver, holder).unwrap();
+    rig.tick();
+    assert_eq!(rig.done(1), b"held");
+}
+
 #[test]
 fn a_device_without_a_data_stream_is_on_the_bus_and_serves_nothing() {
     let host = MockUsbFunction::new();
@@ -911,6 +954,12 @@ struct Quiet {
 
 impl HalFunction for Quiet {
     type Error = ErrorKind;
+
+    fn endpoint_handles(
+        &self,
+    ) -> core::result::Result<[lemnos_hal::blocks::BufferHandle<'_>; 2], ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
 
     fn enable(&mut self, _descriptors: &[u8]) -> core::result::Result<(), ErrorKind> {
         self.enabled = true;

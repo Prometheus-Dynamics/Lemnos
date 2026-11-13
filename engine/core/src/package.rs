@@ -1448,6 +1448,11 @@ impl UsbDevice for Taken {
 impl UsbFunction for Taken {
     type Error = ErrorKind;
 
+    /// A package's function is not lent its descriptors: the bytes stay with its driver.
+    fn endpoint_handles(&self) -> Hal<[BufferHandle<'_>; 2]> {
+        Err(ErrorKind::Unsupported)
+    }
+
     fn enable(&mut self, descriptors: &[u8]) -> Hal<()> {
         done((self.host.usb_function.enable)(
             self.handle,

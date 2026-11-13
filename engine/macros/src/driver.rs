@@ -180,6 +180,20 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::caller_gone(self, __caller)
             }
 
+            fn endpoints(
+                &mut self,
+                __caller: ::lemnos_core::CallerId,
+            ) -> ::lemnos_core::Result<[::lemnos_core::BufferHandle<'_>; 2]> {
+                <Self as ::lemnos_core::Lifecycle>::endpoints(self, __caller)
+            }
+
+            fn release_endpoints(
+                &mut self,
+                __caller: ::lemnos_core::CallerId,
+            ) -> ::lemnos_core::Result<()> {
+                <Self as ::lemnos_core::Lifecycle>::release_endpoints(self, __caller)
+            }
+
             const JOBS: bool = <Self as ::lemnos_core::Lifecycle>::JOBS;
 
             fn job(

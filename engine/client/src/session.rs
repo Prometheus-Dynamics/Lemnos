@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -504,12 +505,23 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::Subscribed { id, .. }
         | Frame::StreamReady { id, .. }
         | Frame::StreamHandles { id, .. }
+        | Frame::Endpoints { id }
         | Frame::Package { id, .. }
         | Frame::PackagesDone { id, .. }
         | Frame::JobStarted { id, .. }
         | Frame::Refusal { id, .. } => Some(id),
         _ => None,
     }
+}
+
+/// A function's bulk endpoints, borrowed from the service: what [`Session::usb_endpoints`] gives.
+/// Each is a descriptor that blocks, as the function's own files do.
+#[derive(Debug)]
+pub struct UsbEndpoints {
+    /// The OUT endpoint: what the host sent to the device is read from it.
+    pub out: OwnedFd,
+    /// The IN endpoint: what the device sends is written to it.
+    pub input: OwnedFd,
 }
 
 /// A connection to the service that one thread owns.
@@ -1338,6 +1350,83 @@ impl Session {
         }
         let (id, pick) = self.op_start_job(handle, method, args)?;
         self.wait(id, pick)
+    }
+
+    /// Borrows the bulk endpoints of device `device`'s function: `[OUT, IN]`, as two descriptors
+    /// the caller reads and writes itself. `platform` takes the descriptors off the socket, as it
+    /// does for a stream. Until [`usb_endpoints_release`](Self::usb_endpoints_release) or the
+    /// connection ends, no other connection can be given them. See `docs/wire.md` (Endpoints).
+    ///
+    /// # Errors
+    ///
+    /// `Refused` with `BUSY` while another connection holds them, `NO_DEVICE` while the function
+    /// is not enabled, `NOT_SUPPORTED` for a service that can't lend them.
+    pub fn usb_endpoints(
+        &mut self,
+        device: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<UsbEndpoints, Error> {
+        self.settle()?;
+        if self.shared.features & feature::ENDPOINTS == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not lend endpoints".to_string(),
+            });
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::EndpointsOpen { id, device })?;
+        let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
+        connection.taker = Some(Taker {
+            platform: Arc::clone(&platform),
+            fds: Vec::new(),
+        });
+        let ready = self.wait(id, |frame| match frame {
+            Frame::Endpoints { .. } => Some(Ok(())),
+            _ => None,
+        });
+        let taker = self.connection.as_mut().and_then(|c| c.taker.take());
+        match ready {
+            Ok(()) => {
+                let mut fds = taker.ok_or(Error::Disconnected)?.fds;
+                // Every descriptor came with the answer, or the connection is out of step.
+                if fds.len() != 2 {
+                    self.lost();
+                    return Err(Error::Wire(lemnos_wire::WireError::Malformed));
+                }
+                let input = fds.pop().ok_or(Error::Disconnected)?;
+                let out = fds.pop().ok_or(Error::Disconnected)?;
+                Ok(UsbEndpoints { out, input })
+            }
+            Err(Error::TimedOut) => {
+                // A late Endpoints would carry descriptors that a plain read loses.
+                self.lost();
+                Err(Error::TimedOut)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Gives up the endpoints this session holds on device `device`. The descriptors the caller
+    /// holds keep working on the function's files only until the function is taken down; close
+    /// them too.
+    ///
+    /// # Errors
+    ///
+    /// `Refused` with `NOT_FOUND` when this session holds none.
+    pub fn usb_endpoints_release(&mut self, device: u32) -> Result<(), Error> {
+        self.settle()?;
+        if self.shared.features & feature::ENDPOINTS == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not lend endpoints".to_string(),
+            });
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::EndpointsClose { id, device })?;
+        self.wait(id, |frame| match frame {
+            Frame::Reply { .. } => Some(Ok(())),
+            _ => None,
+        })
     }
 
     /// Asks the service to stop a job this session started. Its [`JobEvent::Done`] follows.

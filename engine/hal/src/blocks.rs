@@ -784,4 +784,14 @@ pub trait UsbFunction {
     /// are as for [`read`](Self::read).
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration)
     -> Result<usize, Self::Error>;
+    /// Borrows the function's two bulk endpoints as descriptors a process can read and write
+    /// itself: `[OUT, IN]`, the OUT endpoint (the host's writes, read by the device) first. The
+    /// descriptors block, as the controller's files do, and stay good while the function is
+    /// enabled, through the host going away and coming back. Once the function is disabled
+    /// they are dead for good, and a holder must give them up.
+    ///
+    /// `Unavailable` while not enabled, `Unsupported` for a function that doesn't have one bulk
+    /// OUT and one bulk IN endpoint, or whose backend can't lend them. The borrow is one of
+    /// [`BufferHandle`], which is the descriptor form every backend lends. Allocates nothing.
+    fn endpoint_handles(&self) -> Result<[BufferHandle<'_>; 2], Self::Error>;
 }

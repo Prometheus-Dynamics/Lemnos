@@ -101,7 +101,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent, iso_interval_bytes};
+use lemnos_hal::blocks::{BufferHandle, ControlSetup, UsbFunctionEvent, iso_interval_bytes};
 use lemnos_hal::usb_descriptors::{
     self, CONFIGURATION_LEN, GadgetFunction, INTERFACE, UsbDescriptors,
 };
@@ -200,6 +200,9 @@ struct Plan {
     function_strings: Vec<u8>,
     /// Each endpoint's address, and for an isochronous one its bytes per interval.
     endpoints: Vec<(u8, Option<u32>)>,
+    /// The positions in `endpoints` of the bulk OUT and bulk IN endpoints, when the function is
+    /// exactly that pair: the two that [`UsbFunction::endpoint_handles`] lends.
+    lend: Option<[usize; 2]>,
 }
 
 impl Plan {
@@ -223,7 +226,10 @@ impl Plan {
         // An isochronous endpoint's bytes per interval, the larger of the two speeds'.
         let high_endpoints = set.high_speed().map(usb_descriptors::endpoints);
         let mut high_endpoints = high_endpoints.into_iter().flatten();
-        let endpoints = usb_descriptors::endpoints(set.full_speed())
+        let transfers: Vec<u8> = usb_descriptors::endpoints(set.full_speed())
+            .map(|e| e.attributes & 3)
+            .collect();
+        let endpoints: Vec<(u8, Option<u32>)> = usb_descriptors::endpoints(set.full_speed())
             .map(|e| {
                 let high = high_endpoints
                     .next()
@@ -235,6 +241,7 @@ impl Plan {
                 )
             })
             .collect();
+        let lend = bulk_pair(&transfers, &endpoints);
 
         let text = |index: u8| -> Result<Option<String>, ErrorKind> {
             let Some(units) = set.text(index) else {
@@ -304,8 +311,25 @@ impl Plan {
             function_strings: functionfs::strings_blob(language.unwrap_or(0), &table)
                 .map_err(invalid)?,
             endpoints,
+            lend,
         })
     }
+}
+
+/// `[OUT, IN]` positions when the transfer types are exactly one bulk OUT and one bulk IN.
+fn bulk_pair(transfers: &[u8], endpoints: &[(u8, Option<u32>)]) -> Option<[usize; 2]> {
+    const BULK: u8 = 2;
+    let [a, b] = transfers else { return None };
+    if *a != BULK || *b != BULK {
+        return None;
+    }
+    let out = endpoints
+        .iter()
+        .position(|(address, _)| address & 0x80 == 0)?;
+    let input = endpoints
+        .iter()
+        .position(|(address, _)| address & 0x80 != 0)?;
+    Some([out, input])
 }
 
 /// Writes `value` and a newline to the attribute `file` of `dir`.
@@ -684,6 +708,9 @@ struct Session<W> {
     /// Each endpoint's address, and for an isochronous one its bytes per interval, in the
     /// wire's order.
     endpoints: Vec<(u8, Option<u32>)>,
+    /// The positions of the bulk OUT and bulk IN endpoints in `endpoints`, when the function
+    /// is that pair: see [`Plan::lend`]. Set once at enable, `None` otherwise.
+    lend: Option<[usize; 2]>,
     configured: bool,
     /// The gadget was unbound from its controller.
     released: bool,
@@ -695,6 +722,7 @@ impl<W: Wire> Session<W> {
         Self {
             wire,
             endpoints,
+            lend: None,
             configured: false,
             released: false,
             pending: None,
@@ -883,6 +911,17 @@ impl FunctionFsGadget {
 impl UsbFunction for FunctionFsGadget {
     type Error = ErrorKind;
 
+    /// The bulk pair's files, as the session holds them: the daemon's own descriptors, which a
+    /// holder dups by taking a borrow of them. Nothing is opened here.
+    fn endpoint_handles(&self) -> Result<[BufferHandle<'_>; 2], ErrorKind> {
+        let session = self.session.as_ref().ok_or(ErrorKind::Unavailable)?;
+        let [out, input] = session.lend.ok_or(ErrorKind::Unsupported)?;
+        Ok([
+            BufferHandle::from(session.wire.endpoints[out].as_fd()),
+            BufferHandle::from(session.wire.endpoints[input].as_fd()),
+        ])
+    }
+
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         if self.session.is_some() {
             return Err(ErrorKind::Busy);
@@ -895,7 +934,9 @@ impl UsbFunction for FunctionFsGadget {
         self.paths.unbind();
         match self.paths.attach(&plan) {
             Ok(wire) => {
-                self.session = Some(Session::new(wire, plan.endpoints));
+                let mut session = Session::new(wire, plan.endpoints);
+                session.lend = plan.lend;
+                self.session = Some(session);
                 Ok(())
             }
             Err(error) => {

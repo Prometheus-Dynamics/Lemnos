@@ -310,6 +310,10 @@ impl<T: UsbDevice<Error = ErrorKind>> UsbDevice for Faulty<T> {
 
 impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
     type Error = ErrorKind;
+
+    fn endpoint_handles(&self) -> Result<[lemnos_hal::blocks::BufferHandle<'_>; 2], ErrorKind> {
+        self.inner.endpoint_handles()
+    }
     forward! {
         enable(descriptors: &[u8]) -> ();
         disable() -> ();

@@ -863,3 +863,102 @@ fn derive_takes_the_addresses_from_the_board_identity_and_fails_without_one() {
     );
     assert_eq!(function.enables(), 0);
 }
+
+/// A rig whose function lends a socket pair for each endpoint file.
+#[cfg(unix)]
+fn lending_rig() -> Rig {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    let (out, _host_out) = UnixStream::pair().unwrap();
+    let (input, _host_in) = UnixStream::pair().unwrap();
+    let host = MockUsbFunction::with_endpoint_files(OwnedFd::from(out), OwnedFd::from(input));
+    let driver = bind(&host, &settings()).map_err(|_| ()).expect("bind");
+    Rig {
+        driver,
+        host,
+        now: 0,
+    }
+}
+
+#[cfg(unix)]
+fn lent(rig: &mut Rig, caller: u64) -> lemnos_core::Result<()> {
+    Driver::endpoints(&mut rig.driver, CallerId(caller)).map(|_| ())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_endpoints_are_lent_once_the_gadget_is_up_and_not_before() {
+    let mut rig = lending_rig();
+    assert_eq!(lent(&mut rig, 1), Err(Status::NO_DEVICE));
+    rig.step();
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+}
+
+#[cfg(unix)]
+#[test]
+fn one_caller_holds_the_endpoints_and_another_is_refused_busy() {
+    let mut rig = lending_rig();
+    rig.step();
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    assert_eq!(lent(&mut rig, 2), Err(Status::BUSY));
+    // The holder asking again is given them again.
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    assert_eq!(lent(&mut rig, 2), Err(Status::BUSY));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hold_is_freed_when_its_caller_goes() {
+    let mut rig = lending_rig();
+    rig.step();
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    Lifecycle::caller_gone(&mut rig.driver, CallerId(2));
+    assert_eq!(
+        lent(&mut rig, 2),
+        Err(Status::BUSY),
+        "a stranger going frees nothing"
+    );
+    Lifecycle::caller_gone(&mut rig.driver, CallerId(1));
+    assert_eq!(lent(&mut rig, 2), Ok(()));
+}
+
+#[cfg(unix)]
+#[test]
+fn only_the_holder_can_give_the_endpoints_up() {
+    let mut rig = lending_rig();
+    rig.step();
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    assert_eq!(
+        Driver::release_endpoints(&mut rig.driver, CallerId(2)),
+        Err(Status::NOT_FOUND)
+    );
+    assert_eq!(
+        Driver::release_endpoints(&mut rig.driver, CallerId(1)),
+        Ok(())
+    );
+    assert_eq!(
+        Driver::release_endpoints(&mut rig.driver, CallerId(1)),
+        Err(Status::NOT_FOUND),
+        "nothing left to give up"
+    );
+    assert_eq!(lent(&mut rig, 2), Ok(()));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hold_ends_when_the_controller_lets_go_of_the_gadget() {
+    let mut rig = lending_rig();
+    rig.step();
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    rig.host.release();
+    rig.step();
+    assert_eq!(rig.health(), Health::Failed(LET_GO));
+    assert_eq!(
+        Driver::release_endpoints(&mut rig.driver, CallerId(1)),
+        Err(Status::NOT_FOUND),
+        "the hold went with the gadget"
+    );
+    // Enabled again: a new hold is possible, for anyone.
+    rig.step();
+    assert_eq!(lent(&mut rig, 2), Ok(()));
+}

@@ -44,6 +44,7 @@ pub use fixed::to_f32;
 pub use fixed::{NO_VALUE, rescale};
 pub use lemnos_abi::Status;
 pub use lemnos_hal::ErrorKind;
+pub use lemnos_hal::blocks::BufferHandle;
 pub use lemnos_hal::register::AddressWidth;
 pub use lemnos_macros::{Decode, Encode, contract, driver};
 pub use resources::{

@@ -369,6 +369,10 @@ impl UsbDevice for Quiet {
 impl UsbFunction for Quiet {
     type Error = ErrorKind;
 
+    fn endpoint_handles(&self) -> Hal<[lemnos_hal::blocks::BufferHandle<'_>; 2]> {
+        Err(ErrorKind::Unsupported)
+    }
+
     fn enable(&mut self, _descriptors: &[u8]) -> Hal<()> {
         Ok(())
     }

@@ -28,8 +28,8 @@ use core::time::Duration;
 
 use lemnos_core::HostClock;
 use lemnos_hal::blocks::{
-    ControlSetup, IsoPacket, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent,
-    UsbHost, iso_interval_bytes, iso_shape_ok,
+    BufferHandle, ControlSetup, IsoPacket, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction,
+    UsbFunctionEvent, UsbHost, iso_interval_bytes, iso_shape_ok,
 };
 use lemnos_hal::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 use lemnos_hal::{ErrorKind, HalError};
@@ -281,6 +281,11 @@ impl<P: FunctionPort, const N: usize> Function<P, N> {
 
 impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
     type Error = ErrorKind;
+
+    /// The port hands bytes over one transfer at a time: there is no descriptor to lend.
+    fn endpoint_handles(&self) -> Result<[BufferHandle<'_>; 2], ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         if self.enabled.is_some() {

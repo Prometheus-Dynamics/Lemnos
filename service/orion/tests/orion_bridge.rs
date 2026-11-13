@@ -118,6 +118,7 @@ fn start_bridge(lemnosd: &Path, orion: &Path, node: Option<&str>) -> Bridge {
         node_id: node.map(str::to_owned),
         run_as: None,
         files: Vec::new(),
+        links: Vec::new(),
     };
     let (jobs, queue) = mpsc::channel();
     let threads = vec![

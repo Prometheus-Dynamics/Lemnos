@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::os::fd::{AsFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
@@ -31,6 +32,14 @@ pub trait Instance: Send {
     fn board(&mut self, _view: &dyn BoardView) {}
     fn caller(&mut self, caller: CallerId);
     fn caller_gone(&mut self, caller: CallerId);
+    /// See [`Driver::endpoints`]: the descriptors, duplicated for the caller to keep.
+    fn endpoints(&mut self, _caller: CallerId) -> Result<[OwnedFd; 2]> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// See [`Driver::release_endpoints`].
+    fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// See [`Driver::job`]. Asked only of a driver whose entry says it runs jobs.
     fn job(&mut self, _job: JobId, _result: &mut Reply<'_>) -> JobState {
         JobState::Finished(Status::NOT_SUPPORTED)
@@ -66,6 +75,18 @@ impl<D: Driver + Send> Instance for D {
 
     fn caller_gone(&mut self, caller: CallerId) {
         Driver::caller_gone(self, caller);
+    }
+
+    fn endpoints(&mut self, caller: CallerId) -> Result<[OwnedFd; 2]> {
+        let [out, input] = Driver::endpoints(self, caller)?;
+        let dup = |fd: lemnos_core::BufferHandle<'_>| {
+            fd.as_fd().try_clone_to_owned().map_err(|_| Status::IO)
+        };
+        Ok([dup(out)?, dup(input)?])
+    }
+
+    fn release_endpoints(&mut self, caller: CallerId) -> Result<()> {
+        Driver::release_endpoints(self, caller)
     }
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
@@ -1206,6 +1227,55 @@ impl Inner {
         });
     }
 
+    /// Runs `work` on the device's lane for `caller`, with the driver told who is calling when
+    /// it tracks callers, and returns what `work` answered. A call that runs over its deadline
+    /// is `TIMED_OUT`, as a call is. `work` must not block.
+    fn on_lane_answer<T: Send + 'static>(
+        &'static self,
+        slot: Arc<Slot>,
+        caller: CallerId,
+        work: impl FnOnce(&mut dyn Instance) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let lane = self.lane(&slot).map_err(|_| Status::NO_MEMORY)?;
+        let answer: Arc<Mutex<Option<Result<T>>>> = Arc::new(Mutex::new(None));
+        let cell = Arc::clone(&answer);
+        let target = Arc::clone(&slot);
+        let lane_work = Work::Once(Box::new(move |_: &[u8], _: &mut [u8]| {
+            let mut guard = lock(&target.instance);
+            let Some(instance) = guard.as_mut() else {
+                *lock(&cell) = Some(Err(Status::NO_DEVICE));
+                return Ok(0);
+            };
+            let tells = target.tracks_callers();
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                if tells {
+                    instance.caller(caller);
+                }
+                work(instance.as_mut())
+            }));
+            match outcome {
+                Ok(result) => *lock(&cell) = Some(result),
+                Err(_) => {
+                    let dead = guard.take();
+                    drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+                    drop(guard);
+                    self.fault(&target, "the driver panicked");
+                    *lock(&cell) = Some(Err(Status::PANIC));
+                }
+            }
+            Ok(0)
+        }));
+        match lane.run(&[], &mut [], self.options.call_deadline, lane_work) {
+            Ok(_) => lock(&answer).take().unwrap_or(Err(Status::NO_DEVICE)),
+            Err(LaneError::Deadline) => {
+                self.on_deadline(&slot);
+                Err(Status::TIMED_OUT)
+            }
+            Err(LaneError::Busy) => Err(Status::TIMED_OUT),
+            Err(LaneError::Spawn) => Err(Status::NO_MEMORY),
+        }
+    }
+
     fn call(
         &'static self,
         slot: Arc<Slot>,
@@ -1882,6 +1952,27 @@ impl Host {
     ) -> Result<usize> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
         self.inner.call(slot, caller, false, method, args, reply)
+    }
+
+    /// Borrows the two bulk endpoints of a device's function for `caller`, as `[OUT, IN]`
+    /// descriptors duplicated for `caller` to keep: the caller reads and writes them itself, and
+    /// the driver's own traffic on them stops while they are held. One caller holds them at a
+    /// time: another gets `BUSY`. They are held until `caller` gives them up with
+    /// [`Host::usb_endpoints_release`] or goes ([`Host::caller_gone`]). `UNAVAILABLE` while the
+    /// function is not enabled, `NOT_SUPPORTED` for a device whose driver can't lend them, and
+    /// `NOT_FOUND` for no such device.
+    pub fn usb_endpoints(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 2]> {
+        let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.inner
+            .on_lane_answer(slot, caller, move |instance| instance.endpoints(caller))
+    }
+
+    /// Gives up the endpoints `caller` holds on a device. `NOT_FOUND` if it holds none.
+    pub fn usb_endpoints_release(&self, caller: CallerId, device: u32) -> Result<()> {
+        let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.inner.on_lane_answer(slot, caller, move |instance| {
+            instance.release_endpoints(caller)
+        })
     }
 
     /// Starts a long job for `caller`: runs `method`, which its contract marks as starting one,

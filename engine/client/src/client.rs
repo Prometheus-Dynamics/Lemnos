@@ -7,7 +7,8 @@ use lemnos_core::{Bound, Caller, Contract, JobId, Status};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, ValueInfo,
+    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, UsbEndpoints,
+    ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 
@@ -150,6 +151,20 @@ impl Client {
 
     pub fn set_power(&self, device: u32, on: bool) -> Result<(), Error> {
         self.lock().set_power(device, on)
+    }
+
+    /// See [`Session::usb_endpoints`].
+    pub fn usb_endpoints(
+        &self,
+        device: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<UsbEndpoints, Error> {
+        self.lock().usb_endpoints(device, platform)
+    }
+
+    /// See [`Session::usb_endpoints_release`].
+    pub fn usb_endpoints_release(&self, device: u32) -> Result<(), Error> {
+        self.lock().usb_endpoints_release(device)
     }
 
     /// See [`Session::open_stream`].

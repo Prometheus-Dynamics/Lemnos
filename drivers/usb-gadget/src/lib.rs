@@ -86,7 +86,8 @@ use lemnos_contract_usb_function::{
     Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, Request, State, UsbFunction,
 };
 use lemnos_core::{
-    Config, Health, Lifecycle, Result, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
+    BufferHandle, CallerId, Config, Health, Lifecycle, Result, Status, StreamHandle,
+    UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -157,6 +158,8 @@ pub struct UsbGadget {
     /// How many consumers had gone when the request that waits was reported: one more since
     /// means whoever was told of it is no longer there.
     request_gone: u32,
+    /// The caller holding the bulk endpoints, if one does: see [`Lifecycle::endpoints`].
+    holder: Option<CallerId>,
     serve: Serve,
     /// When the next step is due. A tick can come early.
     next_ns: u64,
@@ -207,6 +210,8 @@ impl UsbGadget {
         self.up = false;
         self.suspended = false;
         self.serve.request_deadline_ns = None;
+        // The endpoints a holder has went with the session: its files are dead for good.
+        self.holder = None;
         if core::mem::take(&mut self.configured) {
             self.serve.note(serve::plain(EventKind::Deconfigured));
         }
@@ -236,11 +241,12 @@ impl UsbGadget {
             self.attempts = 0;
         }
         // Whether a consumer has the data stream open. A stream that fails counts as nobody
-        // there for this tick.
+        // there for this tick. Nobody is served while a caller holds the bulk endpoints: the
+        // bytes on them are that caller's, and this driver's reads would race it.
         let serving = match self.data.as_deref_mut() {
             Some(stream) => self.serve.refresh(stream).unwrap_or(false),
             None => false,
-        };
+        } && self.holder.is_none();
         // A request waits for its answer only while the consumer that was told of it is there
         // to give it, and only so long.
         if !serving
@@ -417,6 +423,36 @@ impl Lifecycle for UsbGadget {
     type Needs = UsbGadgetNeeds;
 
     const TICKS: bool = true;
+    /// The holder of the bulk endpoints is told when it goes, so its hold ends with it.
+    const TRACKS_CALLERS: bool = true;
+
+    /// Lends the bulk pair to `caller`, which holds it until it releases it or goes. One holder
+    /// at a time: another caller gets `BUSY`, and the same caller asking again gets fresh
+    /// descriptors for the same hold. Everything comes from the function's endpoint files, which
+    /// the function keeps open while enabled; nothing is opened here.
+    fn endpoints(&mut self, caller: CallerId) -> Result<[BufferHandle<'_>; 2]> {
+        if self.holder.is_some_and(|holder| holder != caller) {
+            return Err(Status::BUSY);
+        }
+        let handles = self.function.endpoint_handles().map_err(status_of)?;
+        self.holder = Some(caller);
+        Ok(handles)
+    }
+
+    /// Gives up the hold `caller` has. `NOT_FOUND` when it holds none.
+    fn release_endpoints(&mut self, caller: CallerId) -> Result<()> {
+        if self.holder != Some(caller) {
+            return Err(Status::NOT_FOUND);
+        }
+        self.holder = None;
+        Ok(())
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.holder == Some(caller) {
+            self.holder = None;
+        }
+    }
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
         let (set, _) = settings(cfg)?;
@@ -455,6 +491,7 @@ impl Lifecycle for UsbGadget {
             control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
             request_gone: 0,
             serve,
+            holder: None,
             next_ns: 0,
             up_since_ns: 0,
             attempts: 0,

@@ -61,6 +61,9 @@ closes the connection on a larger length, without reading it.
 | 29 | JobProgress | job u64, done u64, total u64 | to client |
 | 30 | JobDone | job u64, status i32, bytes | to client |
 | 31 | JobCancel | id u32, job u64 | to host |
+| 32 | EndpointsOpen | id u32, device u32 | to host |
+| 33 | Endpoints | id u32 | to client, with two descriptors |
+| 34 | EndpointsClose | id u32, device u32 | to host |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -82,6 +85,7 @@ closes the connection on a kind it doesn't know (rule 3).
 | 0 | 1 | takes StreamOpenHandles, and may answer it with StreamHandles |
 | 1 | 2 | takes Packages |
 | 2 | 4 | takes CallJob and JobCancel |
+| 4 | 16 | takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -383,6 +387,57 @@ say. A driver whose contract calls bytes that are no job a broken consumer ends 
 way (`StreamEndpoint::fault_consumer`): state 2, the doorbell, and the jobs still queued are gone.
 A job that decodes but can't be run is not that: it completes as failed, or is counted as dropped,
 as its contract says, and the stream stays open.
+
+## Endpoints
+
+A USB function's two bulk endpoints (a board's gadget with a FunctionFS function, see
+the gadget example in [boards](boards.md)) can be handed to one client, which reads and writes them itself. The
+daemon keeps the function, its control endpoint and the bus; the client gets only the bulk pair.
+EndpointsOpen is sent only to a host that set bit 4 (value 16) of `features` (rule 10). The three
+frames are `added` to the core: they are left out of the core hash, and a host without them refuses
+the kind alone with `UnknownKind`.
+
+EndpointsOpen takes the pair for this connection. The answer is Endpoints, with two descriptors over
+`SCM_RIGHTS` in one message: the OUT endpoint's first, then the IN endpoint's. A client reads them
+with `recvmsg`, as for StreamHandles, and closes the connection on an Endpoints that came with other
+than two descriptors. Each descriptor blocks, as the function's own files do. The host keeps its own
+copies, which it never reads while the pair is held.
+
+| Refusal | Why |
+|---|---|
+| `BUSY` | another connection holds the pair |
+| `NO_DEVICE` | the function is not enabled |
+| `NOT_SUPPORTED` | the device's driver can't lend them, or the function isn't one bulk OUT and one bulk IN |
+| `NOT_FOUND` | no such device |
+
+Asking again on the connection that holds the pair gets new descriptors for the same hold. `BUSY`
+is the only answer to another connection while a hold stands.
+
+EndpointsClose gives the pair up and is answered with an empty Reply; `NOT_FOUND` when this
+connection holds none. A connection that closes gives it up (rule 6). While a connection holds the
+pair, the host serves no bytes on it itself: the data stream of `usb.function/1` waits, and the
+control requests on endpoint 0 are still answered by the host, as they are without a client.
+
+The pair outlives a host disconnect, a suspend and a bus reset: nothing is handed over again. A
+transfer under way when the host goes away fails with `ESHUTDOWN`. While the host is away a read or
+write waits, or fails with `EAGAIN` on a descriptor set `O_NONBLOCK`. The `O_NONBLOCK` flag belongs to
+the open file, so it is shared by every copy of the descriptor, the host's included. The bus itself is
+reported through the function's `state` method (see The bus state below).
+
+When the function itself is taken down (its controller lets go, or the host restarts the gadget),
+the pair is dead for good. The host ends the hold at that point. The kernel does not reset the
+function while a descriptor of it is open, so the host cannot bring the gadget up again until the
+client has closed its copies: it retries with its usual backoff until then. A client that sees the
+function's `up` false closes its copies, and asks for the pair again once `up` is true.
+
+### The bus state
+
+The host reports the bus as it sees it on endpoint 0 through the function's `state` method (method
+4 of `usb.function/1`). It returns a record of four bools in order: `up`, `configured` (the host
+chose the configuration), `suspended` and `request_pending`. A client subscribes to it with
+Subscribe, `only_changes` true, and receives a Value whenever one of them changes. That is how a
+client learns of a connect, a disconnect, a suspend and a resume. Health reports the gadget
+itself: `failed`, with its reason, while the function is down.
 
 ## Description
 
@@ -732,6 +787,33 @@ client reads that as `link: ""`.
 <!-- vector: job-cancel -->
 ```hex
 0e 00 00 00 1f 00 10 00 00 00 02 00 00 00 01 00 00 00
+```
+
+### endpoints-open
+
+`EndpointsOpen { id: 17, device: 3 }`
+
+<!-- vector: endpoints-open -->
+```hex
+0a 00 00 00 20 00 11 00 00 00 03 00 00 00
+```
+
+### endpoints
+
+`Endpoints { id: 17 }`, with two descriptors.
+
+<!-- vector: endpoints -->
+```hex
+06 00 00 00 21 00 11 00 00 00
+```
+
+### endpoints-close
+
+`EndpointsClose { id: 18, device: 3 }`
+
+<!-- vector: endpoints-close -->
+```hex
+0a 00 00 00 22 00 12 00 00 00 03 00 00 00
 ```
 
 ### refusal
