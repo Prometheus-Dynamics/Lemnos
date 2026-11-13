@@ -37,7 +37,7 @@ mod writer;
 
 use core::fmt;
 
-pub use pool::{BufferDesc, Pool, PoolView};
+pub use pool::{BufferDesc, BytesError, Pool, PoolView};
 pub use reader::{Batch, BufferReader, Held, NextBatch};
 pub use writer::BufferWriter;
 

@@ -225,12 +225,32 @@ impl Pool {
     }
 }
 
-/// A subscriber's view of a pool: the same buffers, mapped read-only, and the pool page.
+/// Why a view hands out no bytes of a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BytesError {
+    /// The view maps none of the buffers' memory ([`PoolView::attach_unmapped`]).
+    Unmapped,
+    /// The view maps the buffers read-only, and writing was asked for.
+    NotWritable,
+    /// The buffer is not in the pool, or its bytes are not in its descriptor.
+    OutOfPool,
+}
+
+/// What a view holds of the pool's descriptors: each one mapped, or the descriptors themselves when
+/// nothing is mapped.
+#[derive(Debug)]
+enum Views {
+    Mapped(Vec<Mapped>),
+    Unmapped(Vec<OwnedFd>),
+}
+
+/// A subscriber's view of a pool: the same buffers, mapped read-only, and the pool page. Or, from
+/// [`PoolView::attach_unmapped`], the descriptors without any mapping of the buffers.
 #[derive(Debug)]
 pub struct PoolView {
     generation: u32,
     page: ReadMap,
-    maps: Vec<Mapped>,
+    views: Views,
     buffers: Vec<BufferDesc>,
     writable: bool,
 }
@@ -280,23 +300,78 @@ impl PoolView {
         Ok(Self {
             generation,
             page,
-            maps: map_all(fds, buffers, writable)?,
+            views: Views::Mapped(map_all(fds, buffers, writable)?),
             buffers: buffers.to_vec(),
             writable,
         })
+    }
+
+    /// As [`attach`](Self::attach), but no buffer's memory is mapped. Every descriptor is checked as far
+    /// as that allows without a mapping (a memfd must be sealed against shrinking and reach its
+    /// buffers; a dma-buf must be non-empty), and the view keeps the descriptors themselves: the process
+    /// holds exactly the descriptors it was passed, one for each, and no mapping. Byte access on such a
+    /// view is [`BytesError::Unmapped`]; [`descriptor`](Self::descriptor) still hands each buffer's
+    /// descriptor on.
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`](Self::attach), except that nothing is mapped, so a failed mapping is not one.
+    pub fn attach_unmapped(
+        page: OwnedFd,
+        fds: Vec<OwnedFd>,
+        buffers: &[BufferDesc],
+    ) -> Result<Self, RingError> {
+        let page = ReadMap::new(page)?;
+        let (generation, count) = page::read(&page)?;
+        if count as usize != buffers.len() {
+            return Err(RingError::Malformed("the pool page is for another pool"));
+        }
+        for (fd, extent) in fds.iter().zip(extents(fds.len(), buffers)?) {
+            crate::map::check(fd, extent)?;
+        }
+        Ok(Self {
+            generation,
+            page,
+            views: Views::Unmapped(fds),
+            buffers: buffers.to_vec(),
+            writable: false,
+        })
+    }
+
+    /// Whether this view maps the buffers' memory at all. `false` for [`attach_unmapped`](Self::attach_unmapped).
+    #[must_use]
+    pub const fn is_mapped(&self) -> bool {
+        matches!(self.views, Views::Mapped(_))
     }
 
     /// The bytes of `buffer`, to write, if this view was attached writable and the buffer is in
     /// the pool. What the consumer writes is only ever read by the publisher after the job that
     /// names it (see the contract's rule for consumer-filled buffers).
     pub fn bytes_mut(&mut self, buffer: BufferIndex) -> Option<&mut [u8]> {
+        self.write_bytes(buffer).ok()
+    }
+
+    /// The bytes of `buffer` to write, or why there are none: [`BytesError::Unmapped`] for an unmapped
+    /// view, [`BytesError::NotWritable`] for one attached read-only, [`BytesError::OutOfPool`] for a
+    /// buffer that is not in the pool.
+    ///
+    /// # Errors
+    ///
+    /// As above.
+    pub fn write_bytes(&mut self, buffer: BufferIndex) -> Result<&mut [u8], BytesError> {
+        let Views::Mapped(maps) = &mut self.views else {
+            return Err(BytesError::Unmapped);
+        };
         if !self.writable {
-            return None;
+            return Err(BytesError::NotWritable);
         }
-        let desc = *self.buffers.get(buffer.0 as usize)?;
-        self.maps
-            .get_mut(usize::from(desc.descriptor))?
-            .bytes_mut(desc.offset as usize, desc.size as usize)
+        let desc = *self
+            .buffers
+            .get(buffer.0 as usize)
+            .ok_or(BytesError::OutOfPool)?;
+        maps.get_mut(usize::from(desc.descriptor))
+            .and_then(|map| map.bytes_mut(desc.offset as usize, desc.size as usize))
+            .ok_or(BytesError::OutOfPool)
     }
 
     /// The pool's generation.
@@ -322,7 +397,11 @@ impl PoolView {
     #[must_use]
     pub fn descriptor(&self, buffer: BufferIndex) -> Option<(BorrowedFd<'_>, BufferDesc)> {
         let desc = *self.buffers.get(buffer.0 as usize)?;
-        Some((self.maps.get(usize::from(desc.descriptor))?.fd(), desc))
+        let fd = match &self.views {
+            Views::Mapped(maps) => maps.get(usize::from(desc.descriptor))?.fd(),
+            Views::Unmapped(fds) => fds.get(usize::from(desc.descriptor))?.as_fd(),
+        };
+        Some((fd, desc))
     }
 
     pub(crate) const fn page(&self) -> &ReadMap {
@@ -332,9 +411,25 @@ impl PoolView {
     /// The bytes of `buffer`, to read. Only while the frame that names it is held, for a
     /// consumer's read of a frame's bytes; see [`crate::Held`].
     pub fn bytes(&self, buffer: BufferIndex) -> Option<&[u8]> {
-        let desc = self.buffers.get(buffer.0 as usize)?;
-        self.maps
-            .get(usize::from(desc.descriptor))?
-            .bytes(desc.offset as usize, desc.size as usize)
+        self.read_bytes(buffer).ok()
+    }
+
+    /// The bytes of `buffer` to read, or why there are none: [`BytesError::Unmapped`] for an unmapped
+    /// view, [`BytesError::OutOfPool`] for a buffer that is not in the pool.
+    ///
+    /// # Errors
+    ///
+    /// As above.
+    pub fn read_bytes(&self, buffer: BufferIndex) -> Result<&[u8], BytesError> {
+        let Views::Mapped(maps) = &self.views else {
+            return Err(BytesError::Unmapped);
+        };
+        let desc = self
+            .buffers
+            .get(buffer.0 as usize)
+            .ok_or(BytesError::OutOfPool)?;
+        maps.get(usize::from(desc.descriptor))
+            .and_then(|map| map.bytes(desc.offset as usize, desc.size as usize))
+            .ok_or(BytesError::OutOfPool)
     }
 }

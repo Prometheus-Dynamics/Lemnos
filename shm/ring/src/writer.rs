@@ -1,22 +1,26 @@
 //! The one writer of a ring.
 
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
 
+#[cfg(target_os = "linux")]
+use crate::WriteMap;
 use crate::layout::{Geometry, SLOT_HEADER_WORDS, W_HEAD, W_SUBSCRIBERS, busy, stamp};
-use crate::{FieldId, Flags, MemMut, PublishError, RingError, SampleTime, WriteMap};
+use crate::{DefaultWrite, FieldId, Flags, MemMut, PublishError, RingError, SampleTime};
 
 /// The write end of a ring. There must be exactly one per ring: two would corrupt that topic, and
 /// only that topic.
 #[derive(Debug)]
-pub struct Writer<M: MemMut = WriteMap> {
+pub struct Writer<M: MemMut = DefaultWrite> {
     mem: M,
     geometry: Geometry,
     head: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl Writer<WriteMap> {
-    /// Attaches to the ring behind `fd`, the write end handed over by the ring's owner.
+    /// Attaches to the ring behind `fd`, the write end handed over by the ring's owner. Linux only.
     ///
     /// # Errors
     ///

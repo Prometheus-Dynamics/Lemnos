@@ -11,7 +11,8 @@
 //!
 //! [`wait_at_or_before`] waits, a bounded time, while the publisher is still on an earlier
 //! frame, on the reader's doorbell. The waiting is all on the reader's side: the publisher
-//! never waits for anyone.
+//! never waits for anyone. It is Linux only, with the doorbell; [`at_or_before`] builds on every
+//! OS.
 //!
 //! A field's samples are expected in time order, as frames are. The search relies on it. Out
 //! of order, the answer is still a real sample at or before *t*, but maybe not the newest one.
@@ -21,13 +22,13 @@
 //! frame for a reader that is *behind* the publisher, where a one-deep slot could only offer
 //! the publisher's newest value.
 
-#![cfg(target_os = "linux")]
-
-use std::io;
-use std::time::{Duration, Instant};
-
 use shm_ring::{FieldId, Mem, Reader, Sample, SampleTime};
+#[cfg(target_os = "linux")]
 use shm_ring_doorbell::Doorbell;
+#[cfg(target_os = "linux")]
+use std::io;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 /// How many of the newest samples are checked one by one before searching. A reader is nearly
 /// always asking about the newest frame or the one before.
@@ -119,6 +120,7 @@ pub fn at_or_before<M: Mem>(
 
 /// Whether `field`'s publisher has reached `time`: its newest sample is for that frame or a
 /// later one. While it hasn't, a sample for `time` may still be coming.
+#[cfg(target_os = "linux")]
 fn reached<M: Mem>(reader: &Reader<M>, field: FieldId, time: SampleTime) -> bool {
     let head = reader.lane_head(field);
     head > 0
@@ -138,6 +140,7 @@ fn reached<M: Mem>(reader: &Reader<M>, field: FieldId, time: SampleTime) -> bool
 /// # Errors
 ///
 /// If waiting on the doorbell fails.
+#[cfg(target_os = "linux")]
 pub fn wait_at_or_before<'a, M: Mem>(
     reader: &'a mut Reader<M>,
     doorbell: &mut Doorbell,

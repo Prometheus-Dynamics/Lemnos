@@ -19,7 +19,19 @@ so another project can depend on them at a locked revision and get exactly this.
 | `shm-ring-model` | [`ring-model`](ring-model) | The `loom` models and the hostile-ring check; [`fuzz`](ring-model/fuzz) drives it |
 | `shm-ring-bench` | [`ring-bench`](ring-bench) | What the ring costs, on a real machine |
 
-Linux only, little-endian only (every crate but `shm-sample-time` builds to nothing elsewhere).
+Little-endian only. Linux first: every crate builds to nothing off Linux except three, which the
+gate checks for Windows and macOS (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin`), with their Linux-only parts behind `cfg`:
+
+- `shm-sample-time`: `SampleTime::now()` on every platform. Linux and macOS read `CLOCK_MONOTONIC`
+  through `clock_gettime`; Windows reads `QueryPerformanceCounter`. Times from different machines
+  are not comparable.
+- `shm-ring`: portable are the layout, `Mem` and `Heap`, `Reader::over`, `Writer::over` and the
+  sample and topic types. Linux only are `Ring`, `sealed_memfd`, `ReadMap`, `WriteMap`, `read_only`
+  and the `attach` constructors, which take descriptors. A heap ring works everywhere.
+- `shm-ring-time`: `at_or_before` is portable; `wait_at_or_before` waits on a doorbell, so it is
+  Linux only.
+
 The rest of this page pins the ring's layout: layout number 1. A change to anything here needs a
 new layout number.
 

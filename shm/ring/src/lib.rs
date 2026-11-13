@@ -10,19 +10,26 @@
 //! an index that gives readers the order samples were published in across fields. The newest
 //! value of a field, its history and the order of everything all read the same slots.
 //!
-//! The algorithms are safe code over [`Mem`], an array of 64-bit words. [`Ring`] puts that array
-//! in a sealed memfd; `shm-ring-model` puts it under a model checker.
-
-#![cfg(target_os = "linux")]
+//! The algorithms are safe code over [`Mem`], an array of 64-bit words. On Linux, [`Ring`] puts
+//! that array in a sealed memfd; `shm-ring-model` puts it under a model checker. Elsewhere a ring
+//! lives on the heap ([`Heap`]) and is read and written through [`Reader::over`] and
+//! [`Writer::over`].
+//!
+//! Portable (every OS): [`Mem`], [`MemMut`], [`Heap`], the layout ([`Geometry`], [`format`],
+//! [`Spec`]), [`Reader::over`], [`Writer::over`], and the sample types. Linux only: [`Ring`], the
+//! memfd and mapping functions ([`sealed_memfd`], [`ReadMap`], [`WriteMap`], [`read_only`]), and
+//! the `attach` constructors, which take file descriptors.
 
 #[cfg(target_endian = "big")]
 compile_error!("the ring layout is little-endian");
 
 mod layout;
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod map;
 mod mem;
 mod reader;
+#[cfg(target_os = "linux")]
 mod ring;
 #[cfg(test)]
 mod tests;
@@ -32,12 +39,31 @@ use core::fmt;
 use std::io;
 
 pub use layout::{Geometry, MAX_FIELDS, MAX_HISTORY, MAX_PAYLOAD, Spec, format};
+#[cfg(target_os = "linux")]
 pub use map::{ReadMap, WriteMap, read_only, sealed_memfd};
 pub use mem::{Heap, Mem, MemMut};
 pub use reader::{Next, Reader, Sample};
+#[cfg(target_os = "linux")]
 pub use ring::Ring;
 pub use shm_sample_time::SampleTime;
 pub use writer::Writer;
+
+/// What a [`Reader`] reads when no memory is named: its mapping of a ring's memfd on Linux, and
+/// the heap elsewhere, where no mapping exists.
+#[cfg(target_os = "linux")]
+type DefaultRead = ReadMap;
+/// What a [`Reader`] reads when no memory is named: its mapping of a ring's memfd on Linux, and
+/// the heap elsewhere, where no mapping exists.
+#[cfg(not(target_os = "linux"))]
+type DefaultRead = Heap;
+/// What a [`Writer`] writes when no memory is named: its mapping of a ring's memfd on Linux, and
+/// the heap elsewhere, where no mapping exists.
+#[cfg(target_os = "linux")]
+type DefaultWrite = WriteMap;
+/// What a [`Writer`] writes when no memory is named: its mapping of a ring's memfd on Linux, and
+/// the heap elsewhere, where no mapping exists.
+#[cfg(not(target_os = "linux"))]
+type DefaultWrite = Heap;
 
 /// A field of a topic: its position in the declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

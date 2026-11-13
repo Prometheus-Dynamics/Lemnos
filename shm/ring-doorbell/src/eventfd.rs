@@ -2,7 +2,7 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A non-blocking eventfd.
 pub(crate) fn create() -> io::Result<OwnedFd> {
@@ -32,17 +32,24 @@ pub(crate) fn drain(fd: BorrowedFd<'_>) {
 }
 
 /// Blocks until the eventfd is readable or `timeout` passes. `true` if it is readable.
+///
+/// The deadline is taken once, before the first call. A signal that interrupts the poll (`EINTR`)
+/// does not restart the full timeout: the poll goes on for what is left of it, and gives up as
+/// soon as the deadline has passed.
 pub(crate) fn wait(fd: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
     let mut poll = libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
-    // Rounded up, so a short timeout doesn't become a busy loop.
-    let millis = timeout.map_or(-1, |timeout| {
-        libc::c_int::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(libc::c_int::MAX)
-    });
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     loop {
+        // Rounded up, so a short timeout doesn't become a busy loop. Nothing left is zero: a poll
+        // that returns at once with nothing ready.
+        let millis = deadline.map_or(-1, |deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            libc::c_int::try_from(left.as_nanos().div_ceil(1_000_000)).unwrap_or(libc::c_int::MAX)
+        });
         // SAFETY: `poll` is one valid `pollfd`.
         let ready = unsafe { libc::poll(&raw mut poll, 1, millis) };
         if ready >= 0 {

@@ -36,6 +36,16 @@ for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-l
   done
 done
 
+# What must build on the desktop targets: the crates meant to be portable, checked for Windows and
+# macOS. A crate listed here that stops building there fails the gate, and the step names it.
+# Linux-only crates stay off this list.
+portable_crates=(shm-ring shm-ring-time shm-sample-time)
+for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-apple-darwin; do
+  for crate in "${portable_crates[@]}"; do
+    step "$crate on $target" cargo check -q -p "$crate" --target "$target"
+  done
+done
+
 step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
 # A setting's meaning never depends on a feature: the same board text runs the same tests with and
 # without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).

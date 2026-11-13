@@ -1,10 +1,13 @@
 //! A reader of a ring. Everything it reads from the ring is untrusted.
 
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
 
+#[cfg(target_os = "linux")]
+use crate::ReadMap;
 use crate::layout::{Geometry, SLOT_HEADER_WORDS, W_END, W_HEAD, stamp};
-use crate::{FieldId, Flags, Mem, ReadMap, RingError, SampleTime};
+use crate::{DefaultRead, FieldId, Flags, Mem, RingError, SampleTime};
 
 /// How many samples one [`Reader::next`] call steps over looking for one that is still there.
 const PROBES: u32 = 64;
@@ -51,7 +54,7 @@ struct Found {
 /// A read end of a ring. It never writes to the ring and holds its own copy of the shape, so
 /// nothing the writer does can send it out of bounds or keep it in a loop.
 #[derive(Debug)]
-pub struct Reader<M: Mem = ReadMap> {
+pub struct Reader<M: Mem = DefaultRead> {
     mem: M,
     geometry: Geometry,
     cursor: u64,
@@ -59,6 +62,7 @@ pub struct Reader<M: Mem = ReadMap> {
     scratch: Box<[u8]>,
 }
 
+#[cfg(target_os = "linux")]
 impl Reader<ReadMap> {
     /// Attaches to the ring behind `fd`, a read end handed over by the ring's owner. The first
     /// [`Reader::next`] returns the first sample published after this call.

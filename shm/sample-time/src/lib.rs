@@ -5,12 +5,16 @@
 //! and everything computed from it carry the same value, which is what makes "the value at or
 //! before this frame" a lookup.
 //!
-//! Every process on one machine reads the same `CLOCK_MONOTONIC`, so times written by one
-//! process compare directly with times read by another. A time from another machine must be
-//! moved onto this machine's clock first; nothing here does that.
+//! Every process on one machine reads the same clock, so times written by one process compare
+//! directly with times read by another. A time from another machine must be moved onto this
+//! machine's clock first; nothing here does that, and times from different machines are not
+//! comparable.
 //!
-//! No `std` and no allocation. [`SampleTime::now`] exists on Unix targets, where it reads the
-//! clock with `clock_gettime`.
+//! No `std` and no allocation. [`SampleTime::now`] reads the clock on every platform that has
+//! one: `CLOCK_MONOTONIC` on Unix (Linux and macOS, through `clock_gettime`), and
+//! `QueryPerformanceCounter` on Windows. Both clocks are system-wide and never go backwards.
+//! Only Linux's is the one the rest of Lemnos is documented against, and Linux keeps exactly the
+//! same call it always made.
 
 #![no_std]
 
@@ -50,11 +54,10 @@ impl SampleTime {
         self.0.saturating_sub(earlier.0)
     }
 
-    /// The current time: `CLOCK_MONOTONIC` read now.
-    ///
-    /// `clock_gettime` on this clock is served from the vDSO on Linux, so it is normally not a
-    /// system call. If the clock can't be read, which Linux never does for this clock, the
-    /// result is [`SampleTime::ZERO`].
+    /// The current time: the monotonic clock read now, in nanoseconds (see the crate docs). On
+    /// Linux that is `CLOCK_MONOTONIC`, read through `clock_gettime`, which the vDSO serves, so it
+    /// is normally not a system call. If the clock can't be read, which the platforms don't do for
+    /// these clocks, the result is [`SampleTime::ZERO`]. Not comparable across machines.
     #[cfg(unix)]
     #[must_use]
     pub fn now() -> Self {
@@ -72,6 +75,46 @@ impl SampleTime {
         let seconds = u64::try_from(time.tv_sec).unwrap_or(0);
         let nanos = u64::try_from(time.tv_nsec).unwrap_or(0);
         Self(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+    }
+}
+
+/// Windows: `QueryPerformanceCounter`, scaled by `QueryPerformanceFrequency` to nanoseconds. Both
+/// are declared here directly, so the crate needs no Windows dependency; they are the same
+/// functions `std::time::Instant` uses, and the counter is system-wide.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_clock {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn QueryPerformanceCounter(count: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
+    }
+
+    /// The counter now and its frequency, or `None` if the system won't say.
+    pub(super) fn read() -> Option<(i64, i64)> {
+        let mut count = 0_i64;
+        let mut frequency = 0_i64;
+        // SAFETY: `count` is a valid, writable `i64` for the call to fill.
+        let counted = unsafe { QueryPerformanceCounter(&raw mut count) };
+        // SAFETY: `frequency` is a valid, writable `i64` for the call to fill.
+        let framed = unsafe { QueryPerformanceFrequency(&raw mut frequency) };
+        (counted != 0 && framed != 0 && frequency > 0).then_some((count, frequency))
+    }
+}
+
+#[cfg(windows)]
+impl SampleTime {
+    /// The current time, from `QueryPerformanceCounter`. See [`SampleTime::now`].
+    #[must_use]
+    pub fn now() -> Self {
+        let Some((count, frequency)) = windows_clock::read() else {
+            return Self::ZERO;
+        };
+        // The counter is non-negative for this clock. Scaled in 128 bits so that it cannot
+        // overflow before the division.
+        let nanos = u128::from(u64::try_from(count).unwrap_or(0)) * 1_000_000_000
+            / u128::from(frequency.unsigned_abs());
+        Self(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
 }
 
@@ -97,6 +140,19 @@ mod tests {
         assert_eq!(earlier.saturating_since(later), 0);
         assert_eq!(SampleTime::ZERO.as_nanos(), 0);
         assert_eq!(std::format!("{later}"), "12ns");
+    }
+
+    /// `now` never goes backwards, on every platform that has a monotonic clock.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn now_never_goes_backwards() {
+        let mut last = SampleTime::now();
+        for _ in 0..1000 {
+            let next = SampleTime::now();
+            assert!(last <= next, "{last} > {next}");
+            last = next;
+        }
+        assert!(last.as_nanos() > 0, "the clock reads zero");
     }
 
     /// `now` reads `CLOCK_MONOTONIC`: it lands between two readings of that clock taken by

@@ -20,33 +20,41 @@ unsafe impl Send for Mapped {}
 // SAFETY: as above.
 unsafe impl Sync for Mapped {}
 
+/// Whether `fd` may back `len` bytes that a view reads, without mapping it: a regular or
+/// shared-memory file must be sealed against shrinking and reach `len`; a dma-buf, which can't
+/// be resized, is only required to be non-empty. Shared by a mapped view and an unmapped one.
+pub(crate) fn check(fd: &OwnedFd, len: usize) -> Result<(), RingError> {
+    // SAFETY: plain old data; all zeroes is a valid `stat`.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is open and `stat` is a valid place to write one `stat`.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &raw mut stat) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+        // SAFETY: `fd` is open; `F_GET_SEALS` takes no argument.
+        let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
+        if seals < 0 || seals & libc::F_SEAL_SHRINK == 0 {
+            return Err(RingError::Unsealed);
+        }
+        if u64::try_from(stat.st_size).unwrap_or(0) < len as u64 {
+            return Err(RingError::Malformed(
+                "a buffer lies past the end of its descriptor",
+            ));
+        }
+    }
+    if len == 0 {
+        return Err(RingError::Malformed("an empty buffer descriptor"));
+    }
+    Ok(())
+}
+
 impl Mapped {
     /// Maps the first `len` bytes of `fd`, for writing too if `writable`.
     ///
     /// Refuses a descriptor that could shrink under the mapping: a regular or shared-memory
     /// file must be sealed against shrinking. A dma-buf is neither and cannot be resized.
     pub(crate) fn new(fd: OwnedFd, len: usize, writable: bool) -> Result<Self, RingError> {
-        // SAFETY: plain old data; all zeroes is a valid `stat`.
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: `fd` is open and `stat` is a valid place to write one `stat`.
-        if unsafe { libc::fstat(fd.as_raw_fd(), &raw mut stat) } != 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
-            // SAFETY: `fd` is open; `F_GET_SEALS` takes no argument.
-            let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
-            if seals < 0 || seals & libc::F_SEAL_SHRINK == 0 {
-                return Err(RingError::Unsealed);
-            }
-            if u64::try_from(stat.st_size).unwrap_or(0) < len as u64 {
-                return Err(RingError::Malformed(
-                    "a buffer lies past the end of its descriptor",
-                ));
-            }
-        }
-        if len == 0 {
-            return Err(RingError::Malformed("an empty buffer descriptor"));
-        }
+        check(&fd, len)?;
         let protection = if writable {
             libc::PROT_READ | libc::PROT_WRITE
         } else {
