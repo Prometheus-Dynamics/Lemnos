@@ -31,4 +31,6 @@ pub mod set;
 
 mod job;
 
-pub use job::{CodecJob, READ_BACK, RegisterSet, SetError, StreamRef, WRITE_WORDS};
+pub use job::{
+    CodecJob, L2_FIRST, L2_WORDS, READ_BACK, RegisterSet, SetError, StreamRef, WRITE_WORDS,
+};

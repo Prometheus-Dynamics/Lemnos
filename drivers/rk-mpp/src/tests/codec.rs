@@ -2,6 +2,7 @@
 //! memfds standing in for the stream's dma-bufs), on the played kernel.
 
 use std::cell::RefCell;
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 use lemnos_contract_codec_block::work::Builder;
@@ -10,6 +11,7 @@ use lemnos_contract_codec_block::{
 };
 use lemnos_core::{Decode, Encode, Health, Reader, Writer};
 use lemnos_driver_codec_jobs::{Block as _, POLL_NS, Server};
+use lemnos_hal::StreamEndpoint as _;
 use lemnos_hal::mock::MockStream;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 
@@ -185,11 +187,28 @@ fn a_raw_value_in_an_address_register_never_reaches_the_kernel() {
     assert_eq!(status, JobStatus::Done);
     let k = rig.kernel.borrow();
     assert_eq!(k.translated_len, 1);
-    assert_ne!(
-        k.translated[0], 3,
-        "the driver's descriptor, not the caller's number"
+    // The kernel translated the driver's descriptor for buffer 2, the same dma-buf. It is not
+    // compared by number: the driver's descriptor is a duplicate of the stream's fd, which is the
+    // lowest free number, so it can equal the caller's 3 (which is then not a leak: the driver put
+    // its own descriptor there). Identity is the device and inode the descriptor names.
+    let handle = rig
+        .stream
+        .buffer_handle(2)
+        .unwrap()
+        .expect("buffer 2 is held");
+    assert!(
+        same_file(k.translated[0], handle.fd().as_raw_fd()),
+        "the kernel translated something other than buffer 2"
     );
     assert_eq!(back, [iova(k.translated[0])]);
+}
+
+/// Whether two descriptors of this process name the same file (device and inode).
+fn same_file(a: u32, b: i32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let at = |fd: i32| std::fs::metadata(format!("/proc/self/fd/{fd}")).unwrap();
+    let (x, y) = (at(a as i32), at(b));
+    (x.dev(), x.ino()) == (y.dev(), y.ino())
 }
 
 #[test]
@@ -379,4 +398,29 @@ fn running_jobs_allocates_nothing_once_the_block_is_claimed() {
         }
     });
     assert_eq!(allocated, 0);
+}
+
+#[test]
+fn a_job_writes_each_window_as_its_own_item_and_reads_the_second_back() {
+    let mut rig = Rig::new(Block::Rkvenc);
+    let l2: Vec<u32> = (0..4).map(|i| 0x5a00_0000 | i).collect();
+    let (status, back) = rig.run(
+        &[reference(8, 0, 0, 0)],
+        &[
+            (TAG_WRITE, write(0, &regs())),
+            (TAG_WRITE, write(0x4000, &l2)),
+            (TAG_READ, read(0x4000, 4)),
+        ],
+    );
+    assert_eq!(status, JobStatus::Done);
+    assert_eq!(back, l2);
+    // Nine items are one more write than a job may carry, and a read on its own is no job.
+    let mut items: Vec<(u32, Vec<u8>)> = (0..9).map(|i| (TAG_WRITE, write(i, &[1]))).collect();
+    items.push((TAG_READ, read(0, 1)));
+    rig.refused("more writes than runs", &[reference(8, 0, 0, 0)], &items);
+    rig.refused(
+        "a write across the windows",
+        &[reference(8, 0, 0, 0)],
+        &[(TAG_WRITE, write(779, &[1, 2]))],
+    );
 }

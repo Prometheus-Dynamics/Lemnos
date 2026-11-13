@@ -368,6 +368,7 @@ fn a_job_is_issued_from_the_sessions_own_memory() {
         identity: 7,
         first: 0,
         registers: &registers,
+        more: &[],
         addresses: &addresses,
         read: Some(ReadBack { first: 1, count: 3 }),
     };
@@ -443,6 +444,7 @@ fn read_back_outlives_the_callers_inputs() {
             identity,
             first: 0,
             registers: &registers,
+            more: &[],
             addresses: &addresses,
             read: Some(ReadBack {
                 first: 0,
@@ -494,6 +496,7 @@ fn steady_state_submit_and_complete_allocate_nothing() {
         identity: 0,
         first: 0,
         registers: &registers,
+        more: &[],
         addresses: &addresses,
         read: Some(ReadBack {
             first: 100,
@@ -587,6 +590,7 @@ fn mangled_submit(mangle: Mangle) -> (Result<(), SubmitError>, usize) {
         identity: 0,
         first: 0,
         registers: &registers,
+        more: &[],
         addresses: &addresses,
         read: Some(ReadBack { first: 0, count: 2 }),
     };

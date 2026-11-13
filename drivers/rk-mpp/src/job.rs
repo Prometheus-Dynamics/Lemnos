@@ -27,9 +27,12 @@
 //! - **Register reads and writes.** The kernel bounds them by its register array, which can be
 //!   larger than the block (writes past the block's registers reach other memory-mapped
 //!   registers), and when one overruns it shortens it wrongly. Here a write or read is a run of
-//!   whole registers inside the block's register count and reaching its first register.
+//!   whole registers inside one window of the block ([`crate::Window`]) and reaching its first
+//!   register. A job has at most [`MAX_RUNS`] writes, which do not overlap; a second window (the
+//!   first generation's L2) is written raw, so no address may sit in it.
 //! - **Counts.** At most [`MAX_ADDRESSES`] addresses, below the kernel's 80-entry arrays (whose
-//!   region array check is off by one), and four messages per job, below its 16.
+//!   region array check is off by one), and at most `MAX_RUNS + 3` messages per job, below the
+//!   kernel's 16.
 //!
 //! # Parameter jobs
 //!
@@ -59,7 +62,7 @@
 //! only buffers mapped for the block are the claim's own (see [`crate::Claim`]).
 
 #[cfg(feature = "device")]
-use crate::block::{Facts, MAX_REGISTERS, ParamFacts};
+use crate::block::{Facts, MAX_JOB_WORDS, ParamFacts};
 #[cfg(feature = "device")]
 use crate::message::READ_BACK_BYTES;
 #[cfg(feature = "device")]
@@ -95,6 +98,19 @@ pub struct ReadBack {
     pub count: u16,
 }
 
+/// The most runs one job writes: the job's first run and [`Job::more`].
+pub const MAX_RUNS: usize = 8;
+
+/// One run of registers a job writes: `registers` from word `first` on. A run lies inside one
+/// window of the block ([`crate::Window`]), and runs of one job do not overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Run<'a> {
+    /// The first register written.
+    pub first: u16,
+    /// The values written, from `first` on.
+    pub registers: &'a [u32],
+}
+
 /// One task for the block.
 #[derive(Clone, Copy, Debug)]
 pub struct Job<'a> {
@@ -105,9 +121,14 @@ pub struct Job<'a> {
     /// The values written, from `first` on. An [`Address`] register's value is replaced by the
     /// driver.
     pub registers: &'a [u32],
-    /// The registers that hold buffers.
+    /// The further runs written, after the first. Together with the first they hold at most
+    /// [`MAX_RUNS`] runs; a run may sit in another window of the block (a second window is
+    /// written raw, and no address may sit in it).
+    pub more: &'a [Run<'a>],
+    /// The registers that hold buffers. Each lies inside a run and in a window the kernel
+    /// translates.
     pub addresses: &'a [Address],
-    /// The registers read back at completion, if any.
+    /// The registers read back at completion, if any: one run, inside one window.
     pub read: Option<ReadBack>,
 }
 
@@ -139,11 +160,18 @@ pub struct ParamJob<'a> {
 /// Why a job was refused. The device was not touched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobError {
-    /// The write is empty, or runs past the block's registers.
+    /// A write is empty, or is not inside one window of the block.
     WriteOutside,
-    /// The write ends before the block's first register; the kernel would skip it.
+    /// A write ends before the block's first register; the kernel would skip it.
     WriteBeforeFirst,
-    /// The read-back is empty, or runs past the block's registers.
+    /// More than [`MAX_RUNS`] writes.
+    TooManyRuns,
+    /// Two writes name the same register.
+    WriteOverlap {
+        /// The first register of the later write.
+        register: u16,
+    },
+    /// The read-back is empty, or is not inside one window of the block.
     ReadOutside,
     /// The read-back ends before the block's first register; the kernel would skip it.
     ReadBeforeFirst,
@@ -151,8 +179,13 @@ pub enum JobError {
     NoTableAddress,
     /// More than [`MAX_ADDRESSES`] addresses.
     TooManyAddresses,
-    /// An address register is outside the job's write.
+    /// An address register is outside the job's writes.
     AddressOutsideWrite {
+        /// The register.
+        register: u16,
+    },
+    /// An address register sits in a window the kernel does not translate.
+    NotTranslated {
         /// The register.
         register: u16,
     },
@@ -219,7 +252,7 @@ impl std::error::Error for JobError {}
 /// The claim's memory for building a job's messages, made once with the claim.
 #[cfg(feature = "device")]
 pub(crate) struct Staging {
-    pub(crate) registers: [u8; 4 * MAX_REGISTERS],
+    pub(crate) registers: [u8; 4 * MAX_JOB_WORDS],
     pub(crate) table: [u8; 2 * MAX_ADDRESSES],
     pub(crate) offsets: [u8; 8 * MAX_ADDRESSES],
     pub(crate) read_back: [u8; READ_BACK_BYTES],
@@ -229,7 +262,7 @@ pub(crate) struct Staging {
 impl Staging {
     pub(crate) fn new() -> Box<Self> {
         Box::new(Self {
-            registers: [0; 4 * MAX_REGISTERS],
+            registers: [0; 4 * MAX_JOB_WORDS],
             table: [0; 2 * MAX_ADDRESSES],
             offsets: [0; 8 * MAX_ADDRESSES],
             read_back: [0; READ_BACK_BYTES],
@@ -251,8 +284,10 @@ pub(crate) struct Held {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(feature = "device")]
 pub(crate) struct Plan {
-    /// Byte offset of the write in the register file, and its bytes in `Staging::registers`.
-    pub(crate) write: (u32, usize, usize),
+    /// The writes, in order, the first `runs` of them: each one's byte offset in the register
+    /// file, its bytes' place in `Staging::registers`, and its bytes.
+    pub(crate) writes: [(u32, usize, usize); MAX_RUNS],
+    pub(crate) runs: usize,
     /// Bytes of `Staging::table`.
     pub(crate) table: usize,
     /// Bytes of `Staging::offsets`.
@@ -263,18 +298,17 @@ pub(crate) struct Plan {
     pub(crate) buffers: u64,
 }
 
-/// The run `first..first + count` inside `facts`' registers and reaching its first, as bytes.
 #[cfg(feature = "device")]
-fn run(facts: &Facts, first: u16, count: usize) -> Option<Result<(usize, usize), ()>> {
-    let first = usize::from(first);
-    let end = first.checked_add(count)?;
-    if count == 0 || end > usize::from(facts.registers) {
-        return None;
+impl Plan {
+    /// The staged bytes' index of register `word`, when a write holds it.
+    fn staged(&self, word: usize) -> Option<usize> {
+        self.writes[..self.runs]
+            .iter()
+            .find_map(|&(at, from, len)| {
+                let first = at as usize / 4;
+                (word >= first && word < first + len / 4).then(|| from + 4 * (word - first))
+            })
     }
-    if end < usize::from(facts.first) {
-        return Some(Err(()));
-    }
-    Some(Ok((first * 4, count * 4)))
 }
 
 /// Checks `job` against the block and the claim's buffers, and stages its messages' payloads.
@@ -285,39 +319,93 @@ pub(crate) fn plan(
     held: impl Fn(BufferId) -> Option<Held>,
     staging: &mut Staging,
 ) -> Result<Plan, JobError> {
-    let (write_at, write_len) = match run(facts, job.first, job.registers.len()) {
-        None => return Err(JobError::WriteOutside),
-        Some(Err(())) => return Err(JobError::WriteBeforeFirst),
-        Some(Ok(at)) => at,
+    if job.more.len() + 1 > MAX_RUNS {
+        return Err(JobError::TooManyRuns);
+    }
+    let runs: [Run<'_>; MAX_RUNS] = std::array::from_fn(|i| match i {
+        0 => Run {
+            first: job.first,
+            registers: job.registers,
+        },
+        _ => job.more.get(i - 1).copied().unwrap_or(Run {
+            first: 0,
+            registers: &[],
+        }),
+    });
+    let mut plan = Plan {
+        writes: [(0, 0, 0); MAX_RUNS],
+        runs: 1 + job.more.len(),
+        table: 0,
+        offsets: 0,
+        read: None,
+        buffers: 0,
     };
+
+    // Each write: inside one window and reaching the block's first register, named once against
+    // every other write. The staged words are the caller's, carried as they are.
+    let mut from = 0;
+    for (i, run) in runs[..plan.runs].iter().enumerate() {
+        let len = run.registers.len();
+        if len == 0 || facts.window_of(run.first, len).is_none() {
+            return Err(JobError::WriteOutside);
+        }
+        if usize::from(run.first) + len < usize::from(facts.first) {
+            return Err(JobError::WriteBeforeFirst);
+        }
+        for earlier in &runs[..i] {
+            let (a, b) = (
+                usize::from(earlier.first),
+                usize::from(earlier.first) + earlier.registers.len(),
+            );
+            let (c, d) = (usize::from(run.first), usize::from(run.first) + len);
+            if c < b && a < d {
+                return Err(JobError::WriteOverlap {
+                    register: run.first,
+                });
+            }
+        }
+        let bytes = 4 * len;
+        let (words, _) = staging.registers[from..from + bytes].as_chunks_mut::<4>();
+        for (word, value) in words.iter_mut().zip(run.registers) {
+            *word = value.to_ne_bytes();
+        }
+        plan.writes[i] = (4 * u32::from(run.first), from, bytes);
+        from += bytes;
+    }
+
     let read = match job.read {
         None => None,
-        Some(read) => match run(facts, read.first, usize::from(read.count)) {
-            None => return Err(JobError::ReadOutside),
-            Some(Err(())) => return Err(JobError::ReadBeforeFirst),
-            Some(Ok((at, len))) => Some((at, len)),
-        },
+        Some(read) => {
+            let count = usize::from(read.count);
+            if count == 0 || facts.window_of(read.first, count).is_none() {
+                return Err(JobError::ReadOutside);
+            }
+            if usize::from(read.first) + count < usize::from(facts.first) {
+                return Err(JobError::ReadBeforeFirst);
+            }
+            Some((4 * u32::from(read.first), 4 * count))
+        }
     };
     if job.addresses.len() > MAX_ADDRESSES {
         return Err(JobError::TooManyAddresses);
     }
 
-    // The register file as the kernel will hold it: zero, then the write.
-    let file = &mut staging.registers[..4 * usize::from(facts.registers)];
-    file.fill(0);
-    let (words, _) = file[write_at..write_at + write_len].as_chunks_mut::<4>();
-    for (word, value) in words.iter_mut().zip(job.registers) {
-        *word = value.to_ne_bytes();
-    }
-
-    // Each address: a register inside the write, named once, holding a buffer the claim holds at
-    // an offset inside it. The register takes the descriptor with offset bits 0.
-    let written = usize::from(job.first)..usize::from(job.first) + job.registers.len();
+    // Each address: a register inside a write, in a window the kernel translates, named once,
+    // holding a buffer the claim holds at an offset inside it. The register takes the descriptor
+    // with offset bits 0.
     let mut buffers = 0u64;
     for (i, address) in job.addresses.iter().enumerate() {
         let register = address.register;
-        if !written.contains(&usize::from(register)) {
-            return Err(JobError::AddressOutsideWrite { register });
+        let word = usize::from(register);
+        let staged = plan
+            .staged(word)
+            .ok_or(JobError::AddressOutsideWrite { register })?;
+        match facts
+            .window_of(register, 1)
+            .map(|w| facts.windows[w].translated)
+        {
+            Some(true) => {}
+            _ => return Err(JobError::NotTranslated { register }),
         }
         if job.addresses[..i].iter().any(|a| a.register == register) {
             return Err(JobError::DuplicateAddress { register });
@@ -331,17 +419,18 @@ pub(crate) fn plan(
             });
         }
         debug_assert!((1..=FD_MASK).contains(&buffer.fd));
-        let at = 4 * usize::from(register);
-        file[at..at + 4].copy_from_slice(&buffer.fd.to_ne_bytes());
+        staging.registers[staged..staged + 4].copy_from_slice(&buffer.fd.to_ne_bytes());
         buffers |= 1 << buffer.slot;
     }
+    plan.buffers = buffers;
 
     // A register the kernel translates outside the table in this job's mode must be an address,
-    // and stays out of the table.
+    // and stays out of the table. The mode is the job's own value there, 0 when it writes none.
     let mut direct = None;
     if let Some(d) = facts.direct {
-        let at = 4 * usize::from(d.mode_register);
-        let mode = u32::from_ne_bytes([file[at], file[at + 1], file[at + 2], file[at + 3]]);
+        let mode = plan
+            .staged(usize::from(d.mode_register))
+            .map_or(0, |at| word_at(&staging.registers, at));
         if d.applies(mode) {
             if !job.addresses.iter().any(|a| a.register == d.register) {
                 return Err(JobError::DirectNotAddress {
@@ -371,18 +460,10 @@ pub(crate) fn plan(
     if table == 0 {
         return Err(JobError::NoTableAddress);
     }
-
-    Ok(Plan {
-        write: (
-            u32::try_from(write_at).unwrap_or(u32::MAX),
-            write_at,
-            write_len,
-        ),
-        table,
-        offsets,
-        read: read.map(|(at, len)| (u32::try_from(at).unwrap_or(u32::MAX), len)),
-        buffers,
-    })
+    plan.table = table;
+    plan.offsets = offsets;
+    plan.read = read;
+    Ok(plan)
 }
 
 /// The native-endian word at byte `at` of `bytes`.
@@ -471,8 +552,11 @@ pub(crate) fn plan_params(
         }
     }
 
+    let mut writes = [(0, 0, 0); MAX_RUNS];
+    writes[0] = (0, 0, facts.bytes);
     Ok(Plan {
-        write: (0, 0, facts.bytes),
+        writes,
+        runs: 1,
         table: 0,
         offsets,
         read: Some((0, facts.results)),

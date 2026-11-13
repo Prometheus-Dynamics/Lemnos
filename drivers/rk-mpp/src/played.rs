@@ -7,7 +7,9 @@
 use std::io;
 
 use crate::uapi::{self, Command, MAX_MSG_NUM, MAX_REG_TRANS_NUM, flags};
-use crate::{Block, MAX_REGISTERS, Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS};
+use crate::{
+    Block, MAX_JOB_WORDS, MAX_REGISTERS, Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS,
+};
 
 const SLOTS: usize = READ_BACK_SLOTS;
 
@@ -17,7 +19,9 @@ pub fn iova(fd: u32) -> u32 {
 }
 
 pub struct Task {
-    pub regs: [u32; MAX_REGISTERS],
+    /// The block's flat register array: its windows' words, in order ([`crate::Facts::flat`]).
+    pub regs: [u32; MAX_JOB_WORDS],
+    /// The flat index the read starts at, its bytes and its slot.
     pub read: Option<(usize, usize, usize)>,
     /// An IEP2 task: `regs` holds its parameter structure, and its read copies `output`.
     pub iep2: bool,
@@ -84,7 +88,7 @@ impl Kernel {
             translated: [0; 4 * MAX_REG_TRANS_NUM],
             translated_len: 0,
             tasks: std::array::from_fn(|_| Task {
-                regs: [0; MAX_REGISTERS],
+                regs: [0; MAX_JOB_WORDS],
                 read: None,
                 iep2: false,
             }),
@@ -149,7 +153,7 @@ impl Kernel {
             return self.iep2(messages);
         }
 
-        let mut regs = [0u32; MAX_REGISTERS];
+        let mut regs = [0u32; MAX_JOB_WORDS];
         let mut wrote = false;
         let mut offsets = [(0u32, 0u32); MAX_REG_TRANS_NUM];
         let mut offsets_len = 0;
@@ -175,12 +179,17 @@ impl Kernel {
                 }
                 (Command::SetRegWrite, Payload::In(data)) => {
                     let facts = self.block().facts();
-                    // What this crate promises past mpp_check_req: whole registers, inside the
-                    // block, reaching its first.
+                    // What mpp_check_req and this crate promise: whole registers, inside one
+                    // window of the block, reaching its first.
                     assert!(at.is_multiple_of(4) && size.is_multiple_of(4) && size > 0);
-                    assert!(at + size <= 4 * usize::from(facts.registers));
-                    assert!(at + size >= 4 * usize::from(facts.first));
-                    for (r, w) in regs[at / 4..].iter_mut().zip(data.as_chunks::<4>().0) {
+                    let (word, count) = (at / 4, size / 4);
+                    assert!(
+                        facts.window_of(word as u16, count).is_some(),
+                        "a write outside a window"
+                    );
+                    assert!(word + count >= usize::from(facts.first));
+                    let base = facts.flat(word).expect("inside a window");
+                    for (r, w) in regs[base..].iter_mut().zip(data.as_chunks::<4>().0) {
                         *r = u32::from_ne_bytes(*w);
                     }
                     wrote = true;
@@ -196,9 +205,14 @@ impl Kernel {
                 }
                 (Command::SetRegRead, Payload::ReadBack { slot }) => {
                     let facts = self.block().facts();
-                    assert!(at + size <= 4 * usize::from(facts.registers));
+                    assert!(at.is_multiple_of(4) && size.is_multiple_of(4) && size > 0);
+                    assert!(
+                        facts.window_of((at / 4) as u16, size / 4).is_some(),
+                        "a read outside a window"
+                    );
                     assert!(size <= READ_BACK_BYTES && *slot < SLOTS);
-                    read = Some((at, size, *slot));
+                    let base = facts.flat(at / 4).expect("inside a window");
+                    read = Some((base, size, *slot));
                 }
                 (Command::PollHwFinish, Payload::None) => {
                     self.polls += 1;
@@ -208,9 +222,9 @@ impl Kernel {
                         // `iep2_result`: `size` bytes of the output, whatever the size.
                         assert!(size <= IEP2_OUTPUT, "the kernel would read past its output");
                         self.areas[slot][..size].copy_from_slice(&self.output[..size]);
-                    } else if let Some((at, size, slot)) = task.read {
+                    } else if let Some((base, size, slot)) = task.read {
                         let (words, _) = self.areas[slot][..size].as_chunks_mut::<4>();
-                        for (b, r) in words.iter_mut().zip(&task.regs[at / 4..]) {
+                        for (b, r) in words.iter_mut().zip(&task.regs[base..]) {
                             *b = r.to_ne_bytes();
                         }
                     }
@@ -232,31 +246,51 @@ impl Kernel {
 
         // alloc_task: the mode is read before translation, then the session's table, then the
         // direct register, then the offsets.
+        // The kernel translates only the first window's registers (`task->reg`): a table entry or
+        // an offset that names another window would index past it.
         let facts = self.block().facts();
         assert!(self.table_len > 0, "the built-in table would be used");
-        let mode_applies = facts
-            .direct
-            .map(|d| (d, d.applies(regs[usize::from(d.mode_register)])));
+        let translated = |word: usize| {
+            facts
+                .window_of(word as u16, 1)
+                .is_some_and(|w| facts.windows[w].translated)
+        };
+        let mode_applies = facts.direct.map(|d| {
+            let at = facts
+                .flat(usize::from(d.mode_register))
+                .expect("a mode register in a window");
+            (d, d.applies(regs[at]))
+        });
         for i in 0..self.table_len {
             let index = usize::from(self.table[i]);
-            assert!(index < usize::from(facts.registers));
-            let fd = regs[index] & uapi::FD_MASK;
-            let offset = regs[index] >> 10;
+            assert!(
+                translated(index),
+                "a table entry outside a translated window"
+            );
+            let at = facts.flat(index).expect("inside a window");
+            let fd = regs[at] & uapi::FD_MASK;
+            let offset = regs[at] >> 10;
             if fd == 0 {
                 continue;
             }
-            regs[index] = self.take_fd(fd) + offset;
+            regs[at] = self.take_fd(fd) + offset;
         }
         if let Some((d, true)) = mode_applies {
-            let index = usize::from(d.register);
-            let fd = regs[index] & uapi::FD_MASK;
-            let offset = (regs[index] >> 10) << 4;
+            let at = facts
+                .flat(usize::from(d.register))
+                .expect("a direct register in a window");
+            let fd = regs[at] & uapi::FD_MASK;
+            let offset = (regs[at] >> 10) << 4;
             assert!(fd != 0, "the kernel would fail the task");
-            regs[index] = self.take_fd(fd) + offset;
+            regs[at] = self.take_fd(fd) + offset;
         }
         for &(index, offset) in &offsets[..offsets_len] {
-            assert!((index as usize) < usize::from(facts.registers));
-            regs[index as usize] += offset;
+            assert!(
+                translated(index as usize),
+                "an offset outside a translated window"
+            );
+            let at = facts.flat(index as usize).expect("inside a window");
+            regs[at] += offset;
         }
         assert!(self.queued < SLOTS);
         let tail = (self.head + self.queued) % SLOTS;
@@ -331,7 +365,7 @@ impl Kernel {
             let address = self.take_fd(fd).wrapping_add(offset);
             params[at..at + 4].copy_from_slice(&address.to_ne_bytes());
         }
-        let mut regs = [0u32; MAX_REGISTERS];
+        let mut regs = [0u32; MAX_JOB_WORDS];
         for (r, w) in regs.iter_mut().zip(params.as_chunks::<4>().0) {
             *r = u32::from_ne_bytes(*w);
         }
