@@ -135,6 +135,17 @@ pub const LAYOUT: u64 = fold(&[
     ),
     &shape!(PackageInfo, struct_size, loaded),
     &shape!(
+        StreamRegion,
+        struct_size,
+        flags,
+        index,
+        fd,
+        offset,
+        payload_bytes,
+        allocated_bytes,
+        tail_bytes
+    ),
+    &shape!(
         StreamInfo,
         struct_size,
         flags,

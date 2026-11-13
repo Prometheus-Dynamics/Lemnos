@@ -24,6 +24,10 @@ pub const STREAM_WRITABLE: u32 = 1 << 0;
 pub const STREAM_BUFFER_HANDLES: u32 = 1 << 1;
 /// `LemnosStreamInfo` flag: the host has not ended the stream.
 pub const STREAM_OPEN: u32 = 1 << 2;
+/// `LemnosStreamRegion` flag: the descriptor allows a writable mapping.
+pub const REGION_WRITABLE: u32 = 1 << 0;
+/// `LemnosStreamRegion` flag: the descriptor is a dma-buf of its own (else a memfd of the pool).
+pub const REGION_DMA_BUF: u32 = 1 << 1;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -37,6 +41,21 @@ pub struct StreamInfo {
     pub job_bytes: u32,
     /// The memory planes of each buffer: 1 unless the board file gives more.
     pub planes: u32,
+}
+
+/// One plane of one buffer: where its bytes are. `fd` is a new descriptor the caller owns and
+/// closes; the rest is as `lemnos_stream_region` documents.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StreamRegion {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub index: u32,
+    pub fd: i32,
+    pub offset: u64,
+    pub payload_bytes: u64,
+    pub allocated_bytes: u64,
+    pub tail_bytes: u64,
 }
 
 #[repr(C)]
@@ -462,6 +481,114 @@ pub unsafe extern "C" fn lemnos_stream_plane_handle(
                     Status::from_io_error(&error)
                 }
             }
+        })
+    })
+}
+
+/// Where a plane of a buffer is, and what memory it's in. `region` is filled in with `struct_size`
+/// set: `flags` (`REGION_WRITABLE`, `REGION_DMA_BUF`), `index` (the pool index: buffer times planes
+/// plus plane), `fd` (a new descriptor of the memory, which the caller closes), `offset` (where the
+/// plane starts in it), `payload_bytes` (what the contract may use), `allocated_bytes` (what
+/// exists from `offset`), and `tail_bytes` (0 today). A buffer or plane the stream doesn't have is
+/// -EINVAL. See `docs/streams.md` for who may touch the memory and when.
+///
+/// # Safety
+/// `region` is null or valid for its declared `struct_size`.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_region(
+    client: Handle,
+    stream: Handle,
+    buffer: u32,
+    plane: u32,
+    region: *mut StreamRegion,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        // SAFETY: passed on from this function's contract.
+        let region = match unsafe { checked(region) } {
+            Ok(region) => region,
+            Err(status) => return status,
+        };
+        with_stream(client, stream, |s| {
+            let Some(got) = s.stream.region(buffer, plane) else {
+                return Status::INVALID_ARGUMENT;
+            };
+            let fd = match got.fd.try_clone_to_owned() {
+                Ok(fd) => fd,
+                Err(error) => {
+                    sink.write_fmt(format_args!("{error}"));
+                    return Status::from_io_error(&error);
+                }
+            };
+            region.flags = [
+                (got.writable, REGION_WRITABLE),
+                (
+                    got.kind == lemnos_client::MemoryKind::DmaBuf,
+                    REGION_DMA_BUF,
+                ),
+            ]
+            .iter()
+            .filter(|(on, _)| *on)
+            .fold(0, |flags, (_, flag)| flags | flag);
+            region.index = got.index;
+            region.fd = fd.into_raw_fd();
+            region.offset = got.offset;
+            region.payload_bytes = got.payload_bytes;
+            region.allocated_bytes = got.allocated_bytes;
+            region.tail_bytes = got.tail_bytes;
+            Status::OK
+        })
+    })
+}
+
+/// A new descriptor of the pool page, read-only, for a second reader of the pool. Its rules are
+/// `FrameStream::pool_page`'s.
+///
+/// # Safety
+/// `fd` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_pool_page(
+    client: Handle,
+    stream: Handle,
+    fd: *mut i32,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        if fd.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| match s.stream.pool_page() {
+            Ok(page) => {
+                // SAFETY: not null, and valid for a write by the contract.
+                unsafe { fd.write(page.into_raw_fd()) };
+                Status::OK
+            }
+            Err(error) => {
+                sink.write_fmt(format_args!("{error}"));
+                Status::from_io_error(&error)
+            }
+        })
+    })
+}
+
+/// The pool's generation (see `FrameStream::generation`).
+///
+/// # Safety
+/// `generation` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_generation(
+    client: Handle,
+    stream: Handle,
+    generation: *mut u32,
+) -> Status {
+    guard(|| {
+        if generation.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { generation.write(s.stream.generation()) };
+            Status::OK
         })
     })
 }

@@ -409,6 +409,61 @@ impl Stream<'_> {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
+    /// Where plane `plane` of `buffer` is: its descriptor (a new one, owned by
+    /// the caller), offset, sizes, and flags. See `lemnos_stream_region`.
+    pub fn region(
+        &self,
+        buffer: u32,
+        plane: u32,
+    ) -> Result<(surface::StreamRegion, OwnedFd), Status> {
+        let mut region = surface::StreamRegion {
+            struct_size: size_of::<surface::StreamRegion>() as u32,
+            fd: -1,
+            ..Default::default()
+        };
+        // SAFETY: `region` is valid for its declared size, for the call.
+        checked(unsafe {
+            ffi::lemnos_stream_region(
+                self.client.handle,
+                self.handle,
+                buffer,
+                plane,
+                &mut region,
+                MessageSink::NONE,
+            )
+        })?;
+        // SAFETY: on success the surface gives a new descriptor that only the caller owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(region.fd) };
+        region.fd = -1;
+        Ok((region, fd))
+    }
+
+    /// A new read-only descriptor of the pool page (see `lemnos_stream_pool_page`).
+    pub fn pool_page(&self) -> Result<OwnedFd, Status> {
+        let mut fd = -1;
+        // SAFETY: `fd` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_pool_page(
+                self.client.handle,
+                self.handle,
+                &mut fd,
+                MessageSink::NONE,
+            )
+        })?;
+        // SAFETY: on success the surface gives a new descriptor that only the caller owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The pool's generation (see `lemnos_stream_generation`).
+    pub fn generation(&self) -> Result<u32, Status> {
+        let mut generation = 0;
+        // SAFETY: `generation` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_generation(self.client.handle, self.handle, &mut generation)
+        })?;
+        Ok(generation)
+    }
+
     /// The part of the held frame in `buffer` that is in plane `plane`, on a
     /// stream whose buffers are in planes ([`info`](Self::info)'s `planes`).
     pub fn plane(&self, buffer: u32, plane: u32) -> Result<&[u8], Status> {

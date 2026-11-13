@@ -75,6 +75,10 @@ pub enum Error {
     /// A write to a stream that was taken to be read only
     /// ([`Session::open_stream`](crate::Session::open_stream)). Nothing was written.
     StreamReadOnly,
+    /// A stream was asked for writable buffers ([`Session::open_stream_writable`](crate::Session::open_stream_writable))
+    /// but a buffer's descriptor allows only read-only mappings (the host gave it read-only, or a
+    /// seal forbids writes). Nothing was taken: the stream is given back.
+    StreamBuffersReadOnly,
 }
 
 impl core::fmt::Display for Error {
@@ -148,6 +152,9 @@ impl core::fmt::Display for Error {
             Self::StreamReadOnly => {
                 f.write_str("the frame stream was taken to be read, not written")
             }
+            Self::StreamBuffersReadOnly => {
+                f.write_str("this stream's buffers are read-only: it can't be taken writable")
+            }
         }
     }
 }
@@ -179,7 +186,7 @@ impl From<Error> for Status {
             Error::Full => Status::BUSY,
             Error::Stream(_) => Status::IO,
             Error::StreamUnsupported => Status::NOT_SUPPORTED,
-            Error::StreamReadOnly => Status::ACCESS,
+            Error::StreamReadOnly | Error::StreamBuffersReadOnly => Status::ACCESS,
         }
     }
 }

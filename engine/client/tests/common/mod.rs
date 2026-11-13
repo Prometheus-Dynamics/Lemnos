@@ -542,9 +542,11 @@ impl StreamHost {
         let jobs_ring = ShmRing::create(&layout.job_spec()).unwrap();
         let acks = sealed_memfd(JOB_ACK_BYTES).unwrap();
         let publisher = BufferWriter::new(ring.writer().unwrap(), FieldId(0), pool);
+        // Holds are per pool buffer: one per plane of each buffer, as the host makes them.
+        let pool_buffers = layout.buffers * planes.len().max(1) as u32;
         let marks_page =
-            sealed_memfd(Marks::<WriteMap>::page_bytes(layout.buffers).unwrap()).unwrap();
-        let mut holds = HoldTable::new(layout.buffers);
+            sealed_memfd(Marks::<WriteMap>::page_bytes(pool_buffers).unwrap()).unwrap();
+        let mut holds = HoldTable::new(pool_buffers);
         holds
             .add(0, read_only(marks_page.as_fd()).unwrap(), Limits::default())
             .unwrap();

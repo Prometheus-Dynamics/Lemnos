@@ -286,6 +286,56 @@ while let Some(frame) = stream.next_frame(Duration::from_secs(1))? {
 own descriptor, for handing the frame to something else that takes memory that way. The
 [C API](client.md#the-c-api) has the same calls.
 
+## Where a buffer's memory is
+
+`region(buffer, plane)` says where one plane of a buffer is in memory, for a consumer that maps
+the memory itself (a GPU import, an encoder, or a second process of its own). A `Region` gives the
+descriptor (`fd`, borrowed), `kind` (`SharedMemory`: a memfd of the pool; `DmaBuf`: a dma-buf of its
+own), `index` (the pool index, `buffer * planes + plane`, which is the number the ring's frames
+name), `offset` (where the plane starts in `fd`), `payload_bytes` (what the contract may use: the
+buffer's length, or the plane's), `allocated_bytes` (what exists from `offset`: a shared pool's
+stride, up to the next buffer, or a dma-buf's whole size, which a heap may round up), `tail_bytes`
+(slack past the payload that an importer must be given; always 0 today, and it will come from the
+board's per-stream `tail_bytes` key for dma-bufs, in I2d), and `writable`. `pool_page()` gives a
+read-only descriptor of the pool page, and `generation()` the pool's generation.
+
+`writable` is what the descriptor allows: whether a writable mapping of it succeeds, probed when the
+stream opens. The consumer maps the buffers writable only when it took the stream with
+`open_stream_writable`, and that open fails with `StreamBuffersReadOnly` ("this stream's buffers
+are read-only") when any buffer's descriptor allows only read-only mappings, so the mismatch shows
+at the open and not at the first write. A stream taken with `open_stream` maps read-only even where
+the descriptors allow writes. Today the host hands out read-write descriptors for every stream. The
+outside-reader work (I2d) will make a stream whose buffers a block fills read-only from allocation;
+the same probe reports it, with no change to the client.
+
+The stream's answer carries no image layout (width, height, packing, stride). The stream layer
+moves buffers and does not know what a frame is. A frame's layout comes only from the contract: the
+`layout` method on the receiver, or `output_layout` on an ISP. A consumer reads it from the contract
+after it opens the stream, and again after each reopen (a new generation).
+
+A frame's buffers are the same memory `region` describes: the held frame's `buffer()` gives its
+buffer, and `plane(frame, p)` the bytes of plane `p` that the frame holds.
+
+### Lifetimes, and a second process
+
+- The descriptors live as long as the stream. A `Region` borrows the stream, so it can't outlive it.
+- A frame's hold keeps its buffer from being reused: the producer does not reuse a buffer while a
+  held frame of it exists, and the hold ends when the frame is released or dropped.
+- A copy of a descriptor (`try_clone`, or the descriptor of a region handed to another process over
+  `SCM_RIGHTS`) keeps the memory alive after the stream closes, but nothing protects the content from
+  reuse then. Reuse is only prevented while the stream's own hold on a buffer exists.
+- The pool page, the descriptors and the region offsets are enough for a second process to map the
+  buffers (`shm_ring_buffers::PoolView::attach`). That process holds no reader slot: it must read
+  frames it is given only while the first process holds them, and it must not mark the hold table
+  itself. Its protection against reuse is only what the first process's hold gives. Giving another
+  process its own reader slot is I2d.
+- A `generation` changes whenever the host makes a new pool for the stream: a reopen, or any
+  reallocation. A lease that has an older generation is on a pool that is gone. A consumer that gets
+  The frame reader reports a pool change as `RingError::Broken`: the stream is then reopened, and the
+  consumer takes its regions, descriptors and layout again from the new stream. A consumer that
+  holds an old lease's frames keeps them valid until it releases them, but must not use the old
+  regions for new frames.
+
 The daemon's tests run every case on this page against drivers made for the purpose: frames, jobs,
 a consumer that fills buffers, dma-bufs, and each fault.
 

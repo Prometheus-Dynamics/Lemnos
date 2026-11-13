@@ -86,6 +86,10 @@ pub(crate) struct StreamCore {
     /// from standby, or standby memory made), so a buffer granted before is known to be on
     /// memory it no longer has.
     epoch: u64,
+    /// The pool generation the next memory made is stamped with (the pool page's word, which a
+    /// reader gets with its descriptors): up by one for each memory made, so a pool replaced
+    /// by another, on a reopen or a mode change, is recognisably a different pool.
+    generation: u32,
     /// Publish order of each buffer's newest frame, so the oldest unheld one is taken back first.
     published_at: Box<[u64]>,
     /// Frames published so far on this stream.
@@ -128,6 +132,7 @@ impl StreamCore {
             closed: false,
             claimed: false,
             epoch: 0,
+            generation: 0,
             published_at: vec![0; layout.buffers as usize].into_boxed_slice(),
             published_count: 0,
             counters: Counters::default(),
@@ -149,7 +154,7 @@ impl StreamCore {
 
     /// Memory for one consumer, as the board file declares it: the buffers from the allocator and
     /// the rings the host makes over them.
-    fn make(&self) -> Result<Memory, Status> {
+    fn make(&mut self) -> Result<Memory, Status> {
         let shared = self.memory == StreamMemory::Shared;
         let planes = self.planes.count();
         let Buffers { fds, dma, sync } = match self.memory {
@@ -186,7 +191,9 @@ impl StreamCore {
         } else {
             None
         };
-        let pool = Pool::mapped(1, fds, descs).map_err(|_| Status::IO)?;
+        // The pool generation: one more than the last memory made, never 0 (a page of 0 reads as no pool).
+        self.generation = self.generation.wrapping_add(1).max(1);
+        let pool = Pool::mapped(self.generation, fds, descs).map_err(|_| Status::IO)?;
         let ring = Ring::create(&self.layout.frame_spec()).map_err(ring_status)?;
         let jobs = Ring::create(&self.layout.job_spec()).map_err(ring_status)?;
         let acks = sealed_memfd(JOB_ACK_BYTES).map_err(io_status)?;
