@@ -84,7 +84,7 @@ reason = "the fan header's line: at full speed from power-on, until Lemnos's fan
 Example: `bus = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1"` for channel 1 of the fan's PWM, and
 `uses = { line = "gpio:pinctrl-rp1:34" }` for line 34 of the RP1 GPIO chip labelled `pinctrl-rp1`.
 | PIO bus | `pio-i2c:...`, `pio-out:gpio=N` | A state machine of the PIO block | The PIO block is in the board's hardware |
-| USB gadget | `udc:NAME` | This board as a USB device | The map's `usb-peripheral` controller |
+| USB gadget | `udc:NAME` | This board as a USB device, through the port the board names | The map's `usb-peripheral` controller, whose `sysfs` is `NAME` |
 
 The numbered forms `gpiochipN:LINE` and `pwmchipN:CHANNEL` still work on a board that has no tree
 generated. The kernel numbers a chip as it probes, so they can point at another chip after a
@@ -107,6 +107,10 @@ Each rule has a refusal that names the entry:
   holding the line, or a boot state.
 - Every name a device uses must be one of the forms above. Any other name is refused.
 - A device that makes nothing is refused, unless its driver is in the map's `needs_nothing`.
+- A `usb-peripheral` entry (a USB port in device mode) is refused unless a device names it with a
+  `udc:` name. Its name is `udc:` and the map's `sysfs`, so a name that is not the controller's UDC
+  is refused. Its `role` is `"peripheral"` when it is given, the only role the generator makes.
+- An `options` name must be one the map's controller gives in a `needs` entry, and each is named once.
 - A `module` role must be `owned`, or a role the map gives the controller (`pisp_be` for the PiSP
   back end), and the controller must have a `compatible`. `unconfined` and `confined` need `module`, and not both.
 - A `boot` state is `"low"` or `"high"`, and needs a `reason`.
@@ -124,12 +128,36 @@ Every enabled node gets `status = "okay"`. What a kind adds:
 | `pwm` | path, pin sets (one per channel's pin) | pin set | Enables the block and the channel's pin function. No `pwm-fan` node: see below |
 | `pio` | path | nothing else | Enables the PIO block. Its pins are claimed at run time by the driver |
 | `csi` | path, `sysfs`, `stock_driver` | nothing else | Enables the receiver with no sensor node. The module drives it |
-| `usb-peripheral` | path | `dr_mode = "peripheral"` | The controller in peripheral mode, only when the board has a `udc:` entry |
+| `usb-peripheral` | path, `sysfs`, `needs` | `dr_mode = "peripheral"`, and `phys` and `phy-names` for the PHYs the entry takes | The controller in peripheral mode, for a gadget that names it; the PHYs it is linked to, which the base tree links to both the USB 2 and the SuperSpeed PHY |
 | `watchdog` | path | nothing else | Enables the hardware watchdog on a board that lists it |
 | `block` | path | nothing else | Enables a block the kernel module drives (the PiSP back end). Its board entry gives the module option |
 
 A base-tree holder of a line the board lists is disabled:
 `status = "disabled"` on that node, with the map's reason.
+
+### USB device ports
+
+A `usb-peripheral` controller is a port the SoC can run as a device. The board file names the port
+(`controller`, and `name = "udc:NAME"` with `NAME` the map's `sysfs`), and a `usb-gadget` device
+names the same `udc:NAME`. Its nodes are written only for a port a gadget names: no gadget, no
+peripheral node.
+
+- `role = "peripheral"` is the one role the generator makes. It is optional.
+- A `needs` entry in the map names a node the controller needs enabled. With no `option`, it is always
+  enabled with the controller; with an `option`, only when the board's entry names it in `options`.
+  An entry with `phy` (the `phy-names` entry) and `label` (the PHY's label in the base tree) is a PHY
+  the controller is linked to. The overlay writes the controller's `phys` as the list of PHYs the
+  entry takes, so a port without the SuperSpeed option is linked to its USB 2 PHY only.
+- The SoC's base tree links the controller to its SuperSpeed PHY on the RK3588 and RK3576, and that
+  PHY must be enabled for the controller to probe. A USB 2 only board therefore leaves that PHY out of
+  the `phys`, and the generator writes the USB 2 PHY alone.
+- The generator writes no `phy-supply`, no `extcon` and no `maximum-speed`. A `phy-supply` on the OTG
+  port is host-mode VBUS: a board whose dts sets it keeps it, and the overlay does not remove it.
+
+The start check, for each port the board names: the node is enabled, its `dr_mode` is `peripheral`
+(`host mode` and `no dr_mode` are named), each enabled `needs` node is present and enabled (`PHY or
+node disabled`, `is absent`), each PHY the entry takes is in the live `phys` (`PHY link missing`), and,
+for a named port, `/sys/class/udc/<sysfs>` exists (`no UDC`).
 
 ### Fan, safe from boot
 
@@ -203,8 +231,9 @@ I2C or SPI controller, or whose pin sets share a GPIO.
 | Map | Source | Form | Not in the map |
 |---|---|---|---|
 | `socs/bcm2712-rp1.toml` | the base tree the reference board boots, rpi-7.2.y | overlay | its labels are not checked against a base tree on this host |
-| `socs/rk3566.toml` | mainline v6.12, `rk3566.dtsi` / `rk356x.dtsi`, `rk3568-pinctrl.dtsi` | overlay (`fdtoverlays`) | camera receiver and ISP, NPU, video decoder (no mainline node) |
-| `socs/rk3588.toml` | mainline v6.12, `rk3588-base.dtsi`, `rk3588-base-pinctrl.dtsi` | overlay | camera receiver and ISP, NPU, rkvdec (no mainline node) |
+| `socs/rk3566.toml` | mainline v6.12, `rk3566.dtsi` / `rk356x.dtsi`, `rk3568-pinctrl.dtsi` | overlay (`fdtoverlays`) | camera receiver and ISP, NPU, video decoder (no mainline node). USB: port 0 in device mode, USB 2 only |
+| `socs/rk3588.toml` | mainline v6.12, `rk3588-base.dtsi`, `rk3588-base-pinctrl.dtsi` | overlay | camera receiver and ISP, NPU, rkvdec (no mainline node). USB: port 0 in device mode, USB 2 or USB 3 by the board's `usb3` option; RK3588S is the same (`rk3588s.dtsi` adds no USB node) |
+| `socs/rk3576.toml` | mainline v6.14 (USB, the first tag with the RK3576's USB nodes), `rk3576.dtsi`, `rk3576-pinctrl.dtsi`; GPIO bank names from v6.14 `pinctrl-rockchip.c` | overlay | PWM (no PWM controller node through v6.18), camera receiver and ISP, NPU, video decoder |
 | `socs/k230.toml` | `kendryte/k230_sdk` at 7e302f73, `k230.dtsi` (kernel 5.10.4) | fragment (the SDK loads a plain blob) | camera, ISP, GSDMA, KPU (no node in the SDK's SoC description); GPIO chip labels (one node per pin) |
 | `socs/sun60i-a733.toml` | a vendor BSP's A733 kernel patch series | fragment (extlinux `fdt` loads a full blob) | I2C, PWM and SPI pin groups (none in the series) |
 

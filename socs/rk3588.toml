@@ -128,3 +128,35 @@ reason = "the VPU121 video codec on the RK3588 (rockchip,rk3588-vpu121)"
 kind = "block"
 path = "/rga@fdb80000"
 reason = "the RGA 2D block on the RK3588 (rockchip,rk3588-rga)"
+
+# The USB 3 DRD (OTG) controller, port 0, the SoC's device-mode port (rk3588-base.dtsi, usb_host0_xhci,
+# v6.12). Its USB 2 side is the OTG port of USB 2 PHY 0; its SuperSpeed side is USBDP combo PHY 0. The
+# base tree has both PHYs disabled, and links the controller to both. The board says whether the port
+# has its SuperSpeed lanes (`usb3` in its `options`): the map cannot know which lanes a board wires to
+# the port. Without `usb3` the overlay links the controller to USB 2 PHY 0 alone and leaves the USBDP
+# PHY off, which is a port that is USB 2 only; with it, both PHYs are enabled and linked.
+#
+# Not set here, and not set by the generator: `phy-supply` on the OTG port (a host VBUS supply; a
+# device port must not have it), and `mode-switch` and the Type-C properties on USBDP (a board with a
+# Type-C connector adds them). rk3588s.dtsi includes rk3588-base.dtsi and sets
+# no USB node, so the RK3588S has the same controller and PHYs as this map. Untested on board.
+[controllers.usb-otg0]
+kind = "usb-peripheral"
+path = "/usb@fc000000"
+sysfs = "fc000000.usb"
+reason = "the USB 3 DRD (OTG) controller on the RK3588, port 0 (rockchip,rk3588-dwc3); device mode"
+[[controllers.usb-otg0.needs]]
+path = "/syscon@fd5d0000/usb2phy@0"
+reason = "USB 2 PHY 0 (rockchip,rk3588-usb2phy), the USB 2 side of port 0; disabled in the base tree"
+[[controllers.usb-otg0.needs]]
+path = "/syscon@fd5d0000/usb2phy@0/otg-port"
+phy = "usb2-phy"
+label = "u2phy0_otg"
+reason = "the OTG port of USB 2 PHY 0, the one port 0's controller is wired to (its phys)"
+[[controllers.usb-otg0.needs]]
+option = "usb3"
+path = "/phy@fed80000"
+phy = "usb3-phy"
+label = "usbdp_phy0"
+args = [4]
+reason = "USBDP combo PHY 0 (rockchip,rk3588-usbdp-phy), the SuperSpeed side of port 0; the board names usb3 (its phys, PHY_TYPE_USB3)"

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use lemnos_host::board::BoardFile;
 
-use crate::map::{PinSet, SocMap};
+use crate::map::{Controller, Kind, PinSet, SocMap};
 
 /// What the check reads: the live device tree and the platform device directory.
 pub struct Live<'a> {
@@ -18,6 +18,8 @@ pub struct Live<'a> {
     pub sys: &'a Path,
     /// The GPIO chips on the machine, as `(label, line count)`: the kernel's own chip information.
     pub gpio_chips: &'a [(String, u32)],
+    /// The USB device controllers the kernel lists, as `/sys/class/udc` shows them.
+    pub udc: &'a Path,
 }
 
 /// Every problem with the live system against the board, one message each. Empty when it matches.
@@ -43,6 +45,16 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
         }
         if status_of(&node) == "disabled" {
             problems.push(format!("{label}: node disabled: {}", controller.path));
+        }
+        if controller.kind == Kind::UsbPeripheral {
+            problems.extend(usb_port(
+                hardware,
+                &hardware.controller,
+                controller,
+                &node,
+                live,
+                &phandles,
+            ));
         }
         // A node the board gives to the module must not be bound by the stock driver the map names.
         if let Some(role) = &hardware.module
@@ -135,6 +147,90 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
                 ));
             }
         }
+    }
+    problems
+}
+
+/// What a USB device port needs live: its node in peripheral mode, each node it needs enabled, and,
+/// for a named port, the UDC the kernel lists under `/sys/class/udc` for the gadget.
+fn usb_port(
+    hardware: &lemnos_host::board::HardwareSpec,
+    key: &str,
+    controller: &Controller,
+    node: &Path,
+    live: &Live<'_>,
+    phandles: &BTreeMap<u32, String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let linked: Vec<u32> = fs::read(node.join("phys"))
+        .map(|bytes| {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|four| u32::from_be_bytes(*four))
+                .collect()
+        })
+        .unwrap_or_default();
+    let who = format!("USB port {key}");
+    let mode = fs::read_to_string(node.join("dr_mode"))
+        .map(|m| m.trim_end_matches('\0').trim().to_string())
+        .ok();
+    match mode.as_deref() {
+        Some("peripheral") => {}
+        Some(other) => problems.push(format!(
+            "{who}: host mode: {} has dr_mode {other:?}, so the port is not a device; the overlay sets \"peripheral\"",
+            controller.path
+        )),
+        None => problems.push(format!(
+            "{who}: {} has no dr_mode, so the port is not in peripheral mode; the overlay sets it",
+            controller.path
+        )),
+    }
+    for need in &controller.needs {
+        let asked = match need.option.as_deref() {
+            None => true,
+            Some(option) => hardware.options.iter().any(|o| o.as_str() == option),
+        };
+        if !asked {
+            continue;
+        }
+        let dir = live.tree.join(need.path.trim_start_matches('/'));
+        if !dir.is_dir() {
+            problems.push(format!(
+                "{who}: {} is absent, and the port needs it ({})",
+                need.path, need.reason
+            ));
+        } else if status_of(&dir) == "disabled" {
+            problems.push(format!(
+                "{who}: PHY or node disabled: {} is disabled, and the port needs it ({})",
+                need.path, need.reason
+            ));
+        } else if need.phy.is_some() {
+            let reached = phandles
+                .iter()
+                .find(|(_, path)| path.as_str() == need.path)
+                .is_some_and(|(phandle, _)| linked.contains(phandle));
+            if !reached {
+                problems.push(format!(
+                    "{who}: PHY link missing: {} has no phys entry for {} (phy-names {:?}), so the \
+                     port cannot reach that PHY",
+                    controller.path,
+                    need.path,
+                    need.phy.as_deref().unwrap_or_default()
+                ));
+            }
+        }
+    }
+    if let (Some(name), Some(udc)) = (&hardware.name, &controller.sysfs)
+        && name.starts_with("udc:")
+        && !live.udc.join(udc).exists()
+    {
+        problems.push(format!(
+            "{who}: no UDC {udc:?} under {}: the gadget's controller is not in device mode, so the \
+             gadget cannot bind it",
+            live.udc.display()
+        ));
     }
     problems
 }

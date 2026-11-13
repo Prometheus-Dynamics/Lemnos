@@ -28,6 +28,13 @@ pins = "m0"
 [[hardware]]
 controller = "vpu"
 
+# The USB 2 device port (port 0, the OTG port). The gadget below is its only user, so the generator
+# makes the port a device; the map has no SuperSpeed PHY for this controller, so no option.
+[[hardware]]
+name = "udc:fcc00000.usb"
+controller = "usb-otg0"
+role = "peripheral"
+
 # The power switch's line. Boot low: the line holds its level from power-on until the driver takes it.
 [[lines]]
 line = "gpio:gpio1:4"
@@ -53,3 +60,8 @@ uses = { pwm = "pwm:/pwm@fdd70010:1" }
 id = "load"
 driver = "gpio-power-switch"
 uses = { line = "gpio:gpio1:4" }
+
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:fcc00000.usb" }

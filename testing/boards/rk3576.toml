@@ -1,0 +1,44 @@
+# A board file for the RK3576 map (socs/rk3576.toml): two I2C buses, an SPI bus and a USB device port
+# on the first DRD controller, with its SuperSpeed lanes wired. The overlay is applied by the loader.
+# Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rk3576"
+soc = "rk3576"
+
+[[hardware]]
+name = "i2c-1"
+controller = "i2c1"
+pins = "m0"
+
+[[hardware]]
+name = "spidev0.0"
+controller = "spi0"
+
+# The USB device port: DRD controller 0, with its SuperSpeed lanes wired (`usb3`). The gadget below is
+# its only user.
+[[hardware]]
+name = "udc:23000000.usb"
+controller = "usb-drd0"
+role = "peripheral"
+options = ["usb3"]
+
+[[hardware]]
+controller = "watchdog"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-1"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev0.0"
+
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:23000000.usb" }

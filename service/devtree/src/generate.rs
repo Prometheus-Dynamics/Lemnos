@@ -32,6 +32,8 @@ struct Chosen<'a> {
     module: Option<&'a str>,
     unconfined: bool,
     confined: bool,
+    /// The options the board entry names, each one the map gives the controller.
+    options: Vec<&'a str>,
 }
 
 /// Makes the overlay and the boot fragment for `board`, using `map`. Refuses what the map cannot
@@ -128,6 +130,50 @@ fn choose<'a>(board: &'a BoardFile, map: &'a SocMap) -> Result<Vec<Chosen<'a>>, 
                 "[[hardware]] controller {name:?} is both `unconfined` and `confined`"
             ));
         }
+        if let Some(role) = hardware.role.as_deref() {
+            if controller.kind != Kind::UsbPeripheral {
+                return Err(format!(
+                    "[[hardware]] controller {name:?} is {}, and `role` is for a usb-peripheral controller",
+                    controller.kind.name()
+                ));
+            }
+            if role != "peripheral" {
+                return Err(format!(
+                    "[[hardware]] controller {name:?} has role {role:?}; the generator makes only a \
+                     \"peripheral\" port"
+                ));
+            }
+        }
+        let mut options: Vec<&str> = Vec::new();
+        for option in &hardware.options {
+            if !controller
+                .needs
+                .iter()
+                .any(|n| n.option.as_deref() == Some(option.as_str()))
+            {
+                let offered = controller
+                    .needs
+                    .iter()
+                    .filter_map(|n| n.option.as_deref())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                return Err(format!(
+                    "[[hardware]] controller {name:?} has no option {option:?}; it has: {}",
+                    if offered.is_empty() {
+                        "none".to_string()
+                    } else {
+                        offered.join(", ")
+                    }
+                ));
+            }
+            if options.contains(&option.as_str()) {
+                return Err(format!(
+                    "[[hardware]] controller {name:?} names option {option:?} twice"
+                ));
+            }
+            options.push(option.as_str());
+        }
         chosen.push(Chosen {
             name: runtime,
             key: name,
@@ -136,6 +182,7 @@ fn choose<'a>(board: &'a BoardFile, map: &'a SocMap) -> Result<Vec<Chosen<'a>>, 
             module,
             unconfined: hardware.unconfined,
             confined: hardware.confined,
+            options,
         });
     }
     Ok(chosen)
@@ -198,6 +245,15 @@ fn check_hardware_name(
         ));
     }
     match controller.kind {
+        Kind::UsbPeripheral => {
+            let udc = controller.sysfs.as_deref().unwrap_or_default();
+            if runtime != format!("udc:{udc}") {
+                return Err(format!(
+                    "name {runtime:?}: controller {controller_name:?} is the UDC {udc:?}, so a gadget \
+                     names it as \"udc:{udc}\""
+                ));
+            }
+        }
         Kind::I2c => {
             let number = runtime
                 .strip_prefix("i2c-")
@@ -395,7 +451,36 @@ fn check_devices(
             ));
         }
     }
+    // A port in device mode is made only for the gadget that names it: the board file never puts
+    // a port in peripheral mode for nothing.
+    let used: BTreeSet<&str> = board
+        .devices
+        .iter()
+        .filter(|d| !d.disabled)
+        .flat_map(|d| d.bus.iter().chain(d.uses.values()))
+        .map(String::as_str)
+        .collect();
+    for entry in chosen {
+        if entry.controller.kind == Kind::UsbPeripheral
+            && (entry.name.is_empty() || !used.contains(entry.name))
+        {
+            return Err(format!(
+                "[[hardware]] controller {:?} is a USB device port, and no device names it: add a \
+                 usb-gadget device with `uses = {{ function = \"udc:{}\" }}`, or remove the entry",
+                entry.key,
+                entry.controller.sysfs.as_deref().unwrap_or_default()
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Whether a board entry with `options` takes a map's need: always, or when it names the need's option.
+fn asks(need: &crate::map::Need, options: &[&str]) -> bool {
+    match need.option.as_deref() {
+        None => true,
+        Some(option) => options.contains(&option),
+    }
 }
 
 /// The overlay: one fragment per enabled node and per disabled holder, each with its reason.
@@ -439,6 +524,33 @@ fn overlay(
         if controller.kind == Kind::UsbPeripheral {
             body.push("dr_mode = \"peripheral\";".into());
         }
+        // The PHYs the entry takes, in the map's order: the base tree's `phys` is replaced by these, so
+        // a port without an option has only its USB 2 PHY and no SuperSpeed link.
+        let phys: Vec<&crate::map::Need> = controller
+            .needs
+            .iter()
+            .filter(|n| n.phy.is_some() && asks(n, &entry.options))
+            .collect();
+        if !phys.is_empty() {
+            let phandles = phys
+                .iter()
+                .map(|n| {
+                    let mut cells = format!("&{}", n.label.as_deref().unwrap_or_default());
+                    for arg in &n.args {
+                        let _ = write!(cells, " {arg}");
+                    }
+                    format!("<{cells}>")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let names = phys
+                .iter()
+                .map(|n| format!("\"{}\"", n.phy.as_deref().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push(format!("phys = {phandles};"));
+            body.push(format!("phy-names = {names};"));
+        }
         let mut reason = format!("{}: {}", controller.kind.name(), controller.reason);
         if let Some(alias) = &controller.alias {
             let _ = write!(reason, " (alias {alias}");
@@ -476,6 +588,23 @@ fn overlay(
                 &format!("the runtime name comes out of alias {alias}"),
                 std::slice::from_ref(&alias_body),
             );
+        }
+        for need in &controller.needs {
+            if asks(need, &entry.options) {
+                push_fragment(
+                    form,
+                    &mut fragments,
+                    &mut fragment,
+                    &need.path,
+                    &format!(
+                        "needed by {} ({}): {}",
+                        entry.key,
+                        controller.kind.name(),
+                        need.reason
+                    ),
+                    &["status = \"okay\";".into()],
+                );
+            }
         }
     }
     if let Some((name, base)) = base {
