@@ -281,4 +281,31 @@ mod tests {
             ["sha256", "crc32c"]
         );
     }
+
+    /// The options this module names are exactly the file's `boot_check.checked` list
+    /// (`contracts/slot-kernel.toml`, the machine-read source the gate also reads): every piece
+    /// of either route, plus the two storage names `storage_message` gives.
+    #[test]
+    fn the_options_named_here_are_the_files_boot_check_list() {
+        use std::collections::BTreeSet;
+        let file: toml::Table = include_str!("../../../contracts/slot-kernel.toml")
+            .parse()
+            .unwrap();
+        let listed: BTreeSet<String> = file["boot_check"]["checked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        for route in [Route::Stock, Route::Nand] {
+            named.extend(pieces(route).iter().map(|piece| piece.option.to_string()));
+        }
+        let storage = storage_message();
+        for option in ["MMC_BLOCK", "BLK_DEV_NVME"] {
+            assert!(storage.contains(&format!("CONFIG_{option}")), "{storage}");
+            named.insert(option.to_string());
+        }
+        assert_eq!(named, listed);
+    }
 }

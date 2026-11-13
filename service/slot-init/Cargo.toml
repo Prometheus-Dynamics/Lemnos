@@ -22,3 +22,5 @@ lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [dev-dependencies]
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }
+# The test reads the kernel requirements file; a dev-dependency, so the initramfs binary has no toml.
+toml.workspace = true
