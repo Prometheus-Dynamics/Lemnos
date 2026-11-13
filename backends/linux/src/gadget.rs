@@ -38,7 +38,8 @@
 //!    `bmAttributes`, and the configuration's name.
 //! 5. Walks the board file's functions in order: `ffs` makes `functions/ffs.NAME` and mounts
 //!    FunctionFS on it with `uid=`, `gid=`, `rmode=0500` and `fmode=0600`; `ncm` makes
-//!    `functions/ncm.usb0` with `host_addr` and `dev_addr`; `acm` makes `functions/acm.GS0`.
+//!    `functions/ncm.usb0` with `host_addr` and `dev_addr`, and writes its `ifname` when the
+//!    board names one (see [`NCM_IFNAME_REFUSED`]); `acm` makes `functions/acm.GS0`.
 //! 6. Links each function into `configs/c.N`, in the same order.
 //! 7. Gives `UDC` to the owner, mode 0600.
 //!
@@ -69,6 +70,11 @@
 //!   `Unsupported`. It answers `SET_INTERFACE` itself and enables every endpoint of the
 //!   function whichever setting the host picks; each pick is reported as
 //!   [`Configured`](UsbFunctionEvent::Configured) again (FunctionFS says `ENABLE` again).
+//! - The NCM interface's name is the kernel's to choose from the template the board gives
+//!   (`lemnos%d` is `lemnos0`, the first free number). Kernels before 5.12 have no writable
+//!   `ifname`: [`prepare`] refuses such a board with [`NCM_IFNAME_REFUSED`] and makes nothing
+//!   more. Once bound, [`UsbFunction::interface_name`] reads back the name the kernel gave, and
+//!   it is `usb<N>` when the board names none.
 //! - A configuration with no interface, and a manufacturer, product, serial or configuration
 //!   string over 125 bytes of UTF-8, are `Unsupported`.
 //! - The data stage of a control request can't be abandoned once begun: `control_in` and
@@ -393,10 +399,28 @@ impl Mounts for SystemMounts {
 
 /// The function directories the setup makes, by the name configfs gives each.
 const NCM_DIR: &str = "ncm.usb0";
+/// The refusal when a board names an NCM interface and this kernel can't take the name: its
+/// `f_ncm` has no `ifname` attribute (Linux before 3.17), or one that is read-only (3.17 to
+/// 5.11). The name is writable from Linux 5.12 (`u_ether_configfs.h`, `gether_set_ifname`).
+pub const NCM_IFNAME_REFUSED: &str = "this kernel's NCM function can't be given an interface \
+     name: its ifname attribute is missing or read-only (Linux 5.12 or later is needed)";
 const ACM_DIR: &str = "acm.GS0";
 
 fn invalid(kind: ErrorKind) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("{kind:?}"))
+}
+
+/// What a refused write to `ifname` amounts to: the attribute is missing (`ENOENT`, `EPERM`) or
+/// has no store to take the name (`EINVAL`, or `EACCES` for a caller that is not root). The
+/// board's name is checked before it is written (see [`lemnos_hal::usb_descriptors::IfName`]),
+/// so `EINVAL` here is the kernel saying it takes no name, not a bad one.
+fn ifname_refused(error: io::Error) -> io::Error {
+    match error.raw_os_error() {
+        Some(libc::ENOENT | libc::EPERM | libc::EINVAL | libc::EACCES | libc::EROFS) => {
+            io::Error::new(io::ErrorKind::Unsupported, NCM_IFNAME_REFUSED)
+        }
+        _ => error,
+    }
 }
 
 fn mac_text(mac: &[u8; 6]) -> String {
@@ -560,11 +584,19 @@ pub fn prepare(
                 system.functionfs(&paths.name, &paths.mount, &options)?;
                 links.push(paths.function_name());
             }
-            GadgetFunction::Ncm { host, device } => {
+            GadgetFunction::Ncm {
+                host,
+                device,
+                ifname,
+            } => {
                 let dir = functions_dir.join(NCM_DIR);
                 fs::create_dir(&dir)?;
                 attribute(&dir, "host_addr", &mac_text(host))?;
                 attribute(&dir, "dev_addr", &mac_text(device))?;
+                if let Some(name) = ifname {
+                    // Only taken while the function is unbound, which it is here.
+                    attribute(&dir, "ifname", name.as_str()).map_err(ifname_refused)?;
+                }
                 links.push(NCM_DIR.to_string());
             }
             GadgetFunction::Acm => {
@@ -920,6 +952,33 @@ impl UsbFunction for FunctionFsGadget {
             BufferHandle::from(session.wire.endpoints[out].as_fd()),
             BufferHandle::from(session.wire.endpoints[input].as_fd()),
         ])
+    }
+
+    /// The `ifname` configfs reports for the NCM function, once bound: the name the kernel gave
+    /// the interface. `None` while not bound, with no NCM function, or with no name.
+    fn interface_name(&mut self, into: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        if self.session.is_none() {
+            return Ok(None);
+        }
+        let file = self
+            .paths
+            .gadget
+            .join("functions")
+            .join(NCM_DIR)
+            .join("ifname");
+        let text = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(crate::kind_of(&error)),
+        };
+        let name = text.trim_end_matches('\n').as_bytes();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        into.get_mut(..name.len())
+            .ok_or(ErrorKind::InvalidInput)?
+            .copy_from_slice(name);
+        Ok(Some(name.len()))
     }
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {

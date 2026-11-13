@@ -296,3 +296,23 @@ fn a_descriptor_kind_that_belongs_outside_a_configuration_is_refused_inside_one(
         assert!(refused(&join(&[&device, &config])), "type {kind}");
     }
 }
+
+#[test]
+fn an_interface_name_is_one_template_with_one_number_the_kernel_accepts() {
+    // A template with exactly one `%d`, the kernel's own rule.
+    let name = IfName::new("lemnos%d").expect("a template");
+    assert_eq!(name.as_str(), "lemnos%d");
+    assert!(IfName::new("usb%d").is_some());
+    // The longest the kernel's IFNAMSIZ allows: 15 bytes.
+    assert!(IfName::new("abcdefghijklm%d").is_some());
+    assert_eq!(IfName::new("abcdefghijklmn%d"), None, "16 bytes");
+    // A fixed name is refused: the kernel refuses it too.
+    assert_eq!(IfName::new("lemnos0"), None);
+    assert_eq!(IfName::new("%d%d"), None, "two numbers");
+    assert_eq!(IfName::new("%d%%"), None, "a second percent sign");
+    assert_eq!(IfName::new(""), None);
+    assert_eq!(IfName::new("a/%d"), None, "a slash");
+    assert_eq!(IfName::new("a:%d"), None, "a colon");
+    assert_eq!(IfName::new("a %d"), None, "a space");
+    assert_eq!(IfName::new("a\u{e9}%d"), None, "not ASCII");
+}

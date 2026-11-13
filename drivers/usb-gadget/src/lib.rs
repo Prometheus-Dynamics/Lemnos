@@ -83,11 +83,12 @@ use core::time::Duration;
 
 use description::{Fault, Identity, Set};
 use lemnos_contract_usb_function::{
-    Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, Request, State, UsbFunction,
+    Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, MAX_IFNAME_TEXT, Request,
+    State, UsbFunction,
 };
 use lemnos_core::{
-    BufferHandle, CallerId, Config, Health, Lifecycle, Result, Status, StreamHandle,
-    UsbFunctionHandle, driver, status_of,
+    BufferHandle, CallerId, Config, Description, Health, Item, Lifecycle, MethodId, Result, Status,
+    StreamHandle, UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -121,11 +122,23 @@ pub const DENIED: &str = "not allowed to set the gadget up: retrying";
 pub const IN_USE: &str = "something else holds the controller: retrying";
 pub const ENABLE_FAILED: &str = "the gadget could not be enabled: retrying";
 pub const LET_GO: &str = "the controller let go of the gadget: enabling it again";
+/// The description item for the NCM interface's name, read by the `ifname` method.
+const IFNAME: MethodId = MethodId {
+    contract: 0,
+    method: 11,
+};
 /// Health while up, when the gadget has no serial string: the board names no serial source.
 pub const NO_SERIAL: &str = "no USB serial string: the board names no readable serial";
 /// Health while up, when the gadget has no serial string although the board names one that
 /// could not be read.
 pub const NO_SERIAL_READ: &str = "no USB serial string: the board serial could not be read";
+
+/// The name the kernel gave the NCM interface, as the bound gadget reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InterfaceName {
+    bytes: [u8; MAX_IFNAME_TEXT],
+    len: usize,
+}
 
 fn enable_fault(kind: ErrorKind) -> &'static str {
     match kind {
@@ -147,6 +160,9 @@ pub struct UsbGadget {
     set: Set,
     /// Whether the function is enabled.
     up: bool,
+    /// The NCM interface's name, read back once the gadget is bound; `None` while it is down or
+    /// the gadget has no NCM function.
+    ifname: Option<InterfaceName>,
     /// Why the gadget is up but missing something: its health while up.
     note: Option<&'static str>,
     /// Whether the host has the device configured.
@@ -187,10 +203,21 @@ impl UsbGadget {
         self.next_ns
     }
 
+    /// The name the kernel gave the NCM interface, read after the bind. `None` when the function
+    /// has no NCM function or the backend cannot say.
+    fn read_interface_name(&mut self) -> Option<InterfaceName> {
+        let mut bytes = [0u8; MAX_IFNAME_TEXT];
+        match self.function.interface_name(&mut bytes) {
+            Ok(Some(len)) if len <= MAX_IFNAME_TEXT => Some(InterfaceName { bytes, len }),
+            _ => None,
+        }
+    }
+
     fn bring_up(&mut self, now_ns: u64) -> u64 {
         match self.function.enable(self.set.bytes()) {
             Ok(()) => {
                 self.up = true;
+                self.ifname = self.read_interface_name();
                 self.up_since_ns = now_ns;
                 self.next_ns = now_ns.saturating_add(POLL_NS);
                 self.next_ns
@@ -208,6 +235,7 @@ impl UsbGadget {
     /// on it ends.
     fn let_go(&mut self, now_ns: u64) -> u64 {
         self.up = false;
+        self.ifname = None;
         self.suspended = false;
         self.serve.request_deadline_ns = None;
         // The endpoints a holder has went with the session: its files are dead for good.
@@ -341,6 +369,15 @@ impl UsbGadget {
 }
 
 impl UsbFunction for UsbGadget {
+    /// The NCM interface's name, as the kernel gave it. `NOT_FOUND` while there is none.
+    fn ifname(&mut self, into: &mut [u8]) -> Result<usize> {
+        let name = self.ifname.ok_or(Status::NOT_FOUND)?;
+        into.get_mut(..name.len)
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(&name.bytes[..name.len]);
+        Ok(name.len)
+    }
+
     fn info(&mut self) -> Result<FunctionInfo> {
         Ok(FunctionInfo {
             endpoints: self.serve.endpoints().len() as u8,
@@ -426,6 +463,14 @@ impl Lifecycle for UsbGadget {
     /// The holder of the bulk endpoints is told when it goes, so its hold ends with it.
     const TRACKS_CALLERS: bool = true;
 
+    /// The NCM interface's name, once the gadget is bound and the kernel has named it. Absent
+    /// otherwise, and while the gadget is down.
+    fn describe(&self, out: &mut Description) {
+        if self.ifname.is_some() {
+            out.add(Item::value("ifname", IFNAME));
+        }
+    }
+
     /// Lends the bulk pair to `caller`, which holds it until it releases it or goes. One holder
     /// at a time: another caller gets `BUSY`, and the same caller asking again gets fresh
     /// descriptors for the same hold. Everything comes from the function's endpoint files, which
@@ -485,6 +530,7 @@ impl Lifecycle for UsbGadget {
             data: needs.data,
             set,
             up: false,
+            ifname: None,
             note,
             configured: false,
             suspended: false,

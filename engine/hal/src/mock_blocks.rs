@@ -1154,6 +1154,8 @@ struct UsbFunctionState {
     /// The controller let go: `next_event` fails until the function is enabled again.
     released: bool,
     refuse_enable: Option<ErrorKind>,
+    /// The NCM interface's name the function reports once enabled.
+    interface: Option<Vec<u8>>,
     enables: u32,
     events: VecDeque<(UsbFunctionEvent, Vec<u8>)>,
     /// The request being answered, its `wLength`, and the data stage the host sends with it.
@@ -1244,6 +1246,14 @@ impl MockUsbFunction {
         }
     }
 
+    /// The network interface name the function reports once it is enabled, as the kernel gives
+    /// it; `None` for a function with no NCM function.
+    pub fn set_interface_name(&self, name: Option<&str>) {
+        with(&self.state, |s| {
+            s.interface = name.map(|name| name.as_bytes().to_vec())
+        });
+    }
+
     /// The descriptors the function is enabled with.
     pub fn descriptors(&self) -> Option<Vec<u8>> {
         with(&self.state, |s| s.descriptors.clone())
@@ -1316,6 +1326,18 @@ impl MockUsbFunction {
 
 impl UsbFunction for MockUsbFunction {
     type Error = ErrorKind;
+
+    fn interface_name(&mut self, into: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        with(&self.state, |s| {
+            let Some(name) = s.interface.as_deref().filter(|_| s.descriptors.is_some()) else {
+                return Ok(None);
+            };
+            into.get_mut(..name.len())
+                .ok_or(ErrorKind::InvalidInput)?
+                .copy_from_slice(name);
+            Ok(Some(name.len()))
+        })
+    }
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         with(&self.state, |s| {

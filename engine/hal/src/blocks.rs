@@ -711,6 +711,17 @@ pub trait UsbFunction {
     /// Disconnects from the host and forgets the descriptors. `Ok` on a function that is
     /// already disabled. A pending control request and every halt go with it.
     fn disable(&mut self) -> Result<(), Self::Error>;
+    /// The network interface the host side of the function's NCM network function got, written
+    /// into `into` as text, once [`enable`](Self::enable) has bound the gadget: its length, or
+    /// `None` when the function has no NCM function or the backend cannot say. Read after the
+    /// bind, because the kernel names the interface then. `into` holds
+    /// [`MAX_IFNAME`](crate::usb_descriptors::MAX_IFNAME) bytes. Never waits.
+    ///
+    /// The default says nothing, so a function that has no network interface needs no change.
+    fn interface_name(&mut self, into: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+        let _ = into;
+        Ok(None)
+    }
     /// What happened since the last call, oldest first, or `None`. Never waits.
     ///
     /// A control request still pending when this is called is stalled by it: a function that

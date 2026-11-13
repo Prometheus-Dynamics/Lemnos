@@ -131,8 +131,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## USB gadget
 
-- [ ] **NCM interface name** (R1e): open; R1a to R1d have merged (the NCM and ACM functions, the
-      per-board addresses, the gadget end to end in QEMU).
 - [ ] **What an endpoint holder sees on teardown** (R1f): open; the gadget's bulk endpoints are
       lent to one client (R1b), and the teardown case is not yet settled.
 

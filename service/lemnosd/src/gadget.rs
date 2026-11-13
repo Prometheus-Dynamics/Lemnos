@@ -282,7 +282,8 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
             ncm_of(&functions),
             Some(GadgetFunction::Ncm {
                 host: pair.host,
-                device: pair.device
+                device: pair.device,
+                ifname: None,
             })
         );
         let _ = std::fs::remove_file(path);

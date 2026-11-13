@@ -317,6 +317,7 @@ impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
     forward! {
         enable(descriptors: &[u8]) -> ();
         disable() -> ();
+        interface_name(into: &mut [u8]) -> Option<usize>;
         next_event() -> Option<UsbFunctionEvent>;
         control_in(data: &[u8], timeout: Duration) -> usize;
         control_out(data: &mut [u8], timeout: Duration) -> usize;

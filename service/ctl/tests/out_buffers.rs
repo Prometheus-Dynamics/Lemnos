@@ -115,7 +115,7 @@ fn every_out_buffer_method_of_every_contract_is_callable_through_the_text_path()
 }
 
 /// The out-buffer methods in `contracts/` (`has_out_buffer`), counted when the test was written.
-const OUT_METHODS: usize = 31;
+const OUT_METHODS: usize = 32;
 
 fn check(method: &OwnedMethod) {
     let mut words = Vec::new();

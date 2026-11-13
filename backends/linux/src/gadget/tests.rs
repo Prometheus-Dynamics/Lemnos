@@ -214,6 +214,7 @@ fn ncm() -> GadgetFunction {
     GadgetFunction::Ncm {
         host: [0x02, 0, 0, 0, 0, 0x01],
         device: [0x02, 0, 0, 0, 0, 0x02],
+        ifname: None,
     }
 }
 
@@ -1234,4 +1235,63 @@ fn setup_failures_say_what_was_wrong() {
     assert_eq!(kind(libc::EOVERFLOW), ErrorKind::InvalidInput);
     assert_eq!(kind(libc::EACCES), ErrorKind::PermissionDenied);
     assert_eq!(kind(libc::ENODEV), ErrorKind::Unavailable);
+}
+
+/// The NCM function with the name `template`, as a board's `ifname=` gives it.
+fn named_ncm(template: &str) -> GadgetFunction {
+    use lemnos_hal::usb_descriptors::IfName;
+    GadgetFunction::Ncm {
+        host: [0x02, 0, 0, 0, 0, 0x01],
+        device: [0x02, 0, 0, 0, 0, 0x02],
+        ifname: IfName::new(template),
+    }
+}
+
+#[test]
+fn setup_writes_the_board_template_to_the_ncm_ifname_and_writes_none_without_one() {
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs, named_ncm("lemnos%d")]).unwrap();
+    assert_eq!(tree.attribute("functions/ncm.usb0/ifname"), "lemnos%d\n");
+
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs, ncm()]).unwrap();
+    assert!(!tree.gadget_dir().join("functions/ncm.usb0/ifname").exists());
+}
+
+#[test]
+fn the_interface_name_is_read_back_once_bound_and_not_before() {
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs, named_ncm("lemnos%d")]).unwrap();
+    let mut gadget = tree.gadget();
+    let mut buffer = [0u8; 16];
+    assert_eq!(gadget.interface_name(&mut buffer), Ok(None), "not bound");
+
+    // The kernel names the interface when the gadget binds; the stand-in tree says so itself.
+    fs::write(
+        tree.gadget_dir().join("functions/ncm.usb0/ifname"),
+        "lemnos0\n",
+    )
+    .unwrap();
+    gadget.enable(&set()).unwrap();
+    assert_eq!(gadget.interface_name(&mut buffer), Ok(Some(7)));
+    assert_eq!(&buffer[..7], b"lemnos0");
+    assert_eq!(
+        gadget.interface_name(&mut [0u8; 3]),
+        Err(ErrorKind::InvalidInput),
+        "a buffer too small for the name"
+    );
+    gadget.disable().unwrap();
+    assert_eq!(gadget.interface_name(&mut buffer), Ok(None), "down again");
+}
+
+#[test]
+fn a_kernel_that_takes_no_interface_name_refuses_the_board_by_name() {
+    for code in [libc::ENOENT, libc::EPERM, libc::EINVAL, libc::EACCES] {
+        let refused = ifname_refused(io::Error::from_raw_os_error(code));
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported, "errno {code}");
+        assert!(refused.to_string().contains("5.12"), "{refused}");
+    }
+    // Any other failure is what it was.
+    let other = ifname_refused(io::Error::from_raw_os_error(libc::ENOSPC));
+    assert_eq!(other.raw_os_error(), Some(libc::ENOSPC));
 }

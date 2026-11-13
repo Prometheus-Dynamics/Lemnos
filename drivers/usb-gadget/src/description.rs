@@ -31,7 +31,7 @@
 //! 0x0409) and USB 2.0 as its version. Class descriptors have no line here.
 
 use crate::derive::Macs;
-use lemnos_hal::usb_descriptors::{GadgetFunction, UsbDescriptors};
+use lemnos_hal::usb_descriptors::{GadgetFunction, IfName, UsbDescriptors};
 
 /// The most bytes a built descriptor set may come to.
 pub const MAX_SET: usize = 1024;
@@ -92,6 +92,9 @@ pub enum Fault {
     /// A `function ncm derive` line with no board identity to derive the addresses from (see
     /// [`crate::derive`]); by its number from 1.
     NoIdentity(usize),
+    /// An `ifname=` on a `function ncm` line that is not a name template (see
+    /// [`IfName::new`]); by its number from 1.
+    InterfaceName(usize),
 }
 
 /// A descriptor set, built.
@@ -175,7 +178,7 @@ struct Interface<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Listed {
     Fixed(GadgetFunction),
-    Derive { line: usize },
+    Derive { line: usize, ifname: Option<IfName> },
 }
 
 impl Listed {
@@ -388,24 +391,42 @@ impl<'a> Layout<'a> {
             "ffs" => GadgetFunction::Ffs,
             "acm" => GadgetFunction::Acm,
             "ncm" => {
-                // `derive` alone: the addresses come from the board identity.
-                if args.trim() == "derive" {
-                    return self.push(Listed::Derive { line }, line);
-                }
-                // `host=MAC device=MAC`, in either order, each once.
-                let (mut host, mut device) = (None, None);
+                // `derive`, or `host=MAC device=MAC`, in either order, each once, and an
+                // optional `ifname=TEMPLATE` (once) in any place.
+                let (mut derive, mut host, mut device, mut ifname) = (false, None, None, None);
                 for word in words.by_ref() {
                     match word.split_once('=') {
-                        Some(("host", value)) if host.is_none() => host = mac(value),
-                        Some(("device", value)) if device.is_none() => device = mac(value),
+                        None if word == "derive" && !derive => derive = true,
+                        Some(("host", value)) if host.is_none() => {
+                            host = Some(mac(value).ok_or(bad)?)
+                        }
+                        Some(("device", value)) if device.is_none() => {
+                            device = Some(mac(value).ok_or(bad)?)
+                        }
+                        Some(("ifname", value)) if ifname.is_none() => {
+                            ifname = Some(IfName::new(value).ok_or(Fault::InterfaceName(line))?)
+                        }
                         _ => return Err(bad),
                     }
+                }
+                if derive {
+                    if host.is_some() || device.is_some() {
+                        return Err(bad);
+                    }
+                    return self.push(Listed::Derive { line, ifname }, line);
                 }
                 let (host, device) = (host.ok_or(bad)?, device.ok_or(bad)?);
                 if host == device {
                     return Err(bad);
                 }
-                return self.push(Listed::Fixed(GadgetFunction::Ncm { host, device }), line);
+                return self.push(
+                    Listed::Fixed(GadgetFunction::Ncm {
+                        host,
+                        device,
+                        ifname,
+                    }),
+                    line,
+                );
             }
             _ => return Err(bad),
         };
@@ -459,11 +480,12 @@ pub fn functions(interfaces: &str, macs: Option<Macs>) -> Result<Functions, Faul
     for function in layout.functions.iter().flatten() {
         items[len] = match *function {
             Listed::Fixed(function) => function,
-            Listed::Derive { line } => {
+            Listed::Derive { line, ifname } => {
                 let macs = macs.ok_or(Fault::NoIdentity(line))?;
                 GadgetFunction::Ncm {
                     host: macs.host,
                     device: macs.device,
+                    ifname,
                 }
             }
         };

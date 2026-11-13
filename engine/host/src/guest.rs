@@ -459,6 +459,10 @@ impl UsbFunction for ReadOnly<UsbFunctionHandle> {
         Err(REFUSED)
     }
 
+    fn interface_name(&mut self, into: &mut [u8]) -> Refusable<Option<usize>> {
+        self.0.interface_name(into)
+    }
+
     fn next_event(&mut self) -> Refusable<Option<UsbFunctionEvent>> {
         self.0.next_event()
     }

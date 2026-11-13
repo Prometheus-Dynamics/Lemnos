@@ -39,6 +39,7 @@ fn the_tag_and_the_method_numbers_are_the_contract() {
             ("set_halt", 8),
             ("cancel", 9),
             ("counters", 10),
+            ("ifname", 11),
         ]
     );
 }
