@@ -547,7 +547,7 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	}
 	/* Released by whoever takes the producer off the stream, stop or unbind. */
 	kref_get(&l->ref);
-	ret = lem_stream_attach(stream, &producer, s->stride, s->height, s->size);
+	ret = lem_stream_attach(stream, &producer, s->size);
 	if (ret) {
 		kref_put(&l->ref, lrc_free);
 		goto put_file;

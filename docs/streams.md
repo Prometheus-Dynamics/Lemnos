@@ -77,6 +77,29 @@ nanoseconds and an identity. The identity is 64 bits the producer chose. Lemnos 
 The consumer reads the buffer, then returns it. A buffer the consumer holds is not written by
 anyone else.
 
+A frame carries nothing else. There is no frame type, pixel format, size in pixels or codec on
+the ring, in the board file's stream, or in the daemon: what the bytes are is agreed by the
+contract and the driver (see [Movers](design.md#movers-dont-know-what-they-move)).
+
+### The timestamp's clock
+
+On Linux a frame's timestamp is **`CLOCK_MONOTONIC` in nanoseconds**, whoever made the frame, so a
+consumer compares it directly with its own `clock_gettime(CLOCK_MONOTONIC)`:
+
+- A stream made by the [kernel module](kernel-module.md) is stamped with `ktime_get_ns()`, which
+  is `CLOCK_MONOTONIC`. A receiver's frame takes the time of its frame start.
+- A driver that publishes from its tick (a USB camera, a scaler's or codec's completions) stamps
+  with the `now_ns` it is given. `lemnosd`'s clock is `CLOCK_MONOTONIC`.
+- A driver reading a V4L2 node passes on the buffer's own timestamp when the node flags it
+  `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC`, and otherwise the time it took the buffer off the queue.
+  A memory-to-memory node copies its input's timestamp, which is the caller's and not a time.
+- A driver reading a vendor kernel's interrupt events passes on their time, which those kernels
+  take with `ktime_get_ns()`.
+
+The clock stops while the system is suspended. A timestamp of 0 means the producer had no time for
+the frame: a job that failed, or one dropped before it ran. On a microcontroller the timestamp is on
+the firmware's monotonic clock, and on the simulated board on the simulated clock.
+
 ## Jobs
 
 A job is a small message from the consumer, at most `job_bytes` long. At most `job_slots` can

@@ -150,6 +150,8 @@ pub struct StreamFrame {
     pub sequence: u64,
     /// Means something only to the producer and the consumer.
     pub identity: u64,
+    /// When the frame was made, in nanoseconds on the host's monotonic clock
+    /// (`CLOCK_MONOTONIC` on Linux); 0 when the producer has no time for it.
     pub timestamp_ns: u64,
 }
 

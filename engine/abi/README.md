@@ -8,8 +8,9 @@ wrappers do not each invent their own.
   (`STALE_HANDLE`, `VERSION_MISMATCH`, `BUFFER_TOO_SMALL`, `PANIC`), positive a count.
 - `Handle`: a `u64` with a slot index and a generation; 0 is null. `Slab` (feature `alloc`)
   issues them, reuses released slots with a new generation and refuses stale handles.
-- `BufferDesc` (up to four `PlaneDesc`s: fd, offset, stride, size; DRM fourcc and modifier) and
-  `FenceDesc` (none, sync file, or syncobj with a timeline point), with `validate`.
+- `BufferDesc` (a memory location: a dma-buf, an offset and a size, nothing about what the bytes
+  are) and `FenceDesc` (none, sync file, or syncobj with a timeline point), with `validate`. A
+  buffer has no format, size in pixels or planes: those belong to the contract that uses it.
 - `MessageSink`: a C callback that takes a message, such as an error's text.
 - `AbiVersion`: major, minor, struct size and a layout hash (`layout_hash`, FNV-1a over sizes,
   alignments and field offsets, at compile time). `accepts` checks a caller against a surface.
@@ -75,16 +76,16 @@ package written in C that `lemnos-package`'s tests build and load.
 ## C header
 
 `include/lemnos/abi.h` declares these types for C: `LemnosStatus` and the `LEMNOS_E_*` codes,
-`LemnosHandle`, `LemnosFeatures`, `LemnosAbiVersion`, `LemnosMessageSink`, `LemnosPlaneDesc`,
-`LemnosBufferDesc` and `LemnosFenceDesc`, with `LEMNOS_ABI_TYPES_{MAJOR,MINOR,LAYOUT_HASH}`. Every
+`LemnosHandle`, `LemnosFeatures`, `LemnosAbiVersion`, `LemnosMessageSink`, `LemnosBufferDesc`
+and `LemnosFenceDesc`, with `LEMNOS_ABI_TYPES_{MAJOR,MINOR,LAYOUT_HASH}`. Every
 Lemnos surface's header includes it, so a program using two surfaces sees each type once. The
 header lives at `include/lemnos/abi.h` in the repository root, and this crate's tests check every
 value, size and offset in it against the Rust types with a C compiler.
 
 ## Stability (version 1.0, frozen 2026-11-06)
 
-- **Frozen layouts.** The layouts in the hash (`Status`, `Handle`, `PlaneDesc`, `BufferDesc`,
-  `FenceDesc`, `AbiVersion`) are frozen at version 1.0, layout hash `0xa02cfb4a8dd4545b`.
+- **Frozen layouts.** The layouts in the hash (`Status`, `Handle`, `BufferDesc`, `FenceDesc`,
+  `AbiVersion`) are frozen at version 1.0, layout hash `0xc1a33afa27dd77e3`.
   `src/version.rs` asserts that hash at compile time, so any change to them fails the build.
 - **Major version.** Changing a frozen layout, renaming or renumbering a status code, flag or
   fence kind, or changing what an existing value means is a new major. That is a new

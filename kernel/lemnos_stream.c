@@ -595,19 +595,18 @@ static void lem_stream_source(struct work_struct *work)
 
 /*
  * The checks every programmed frame must pass, against the module's own copies:
- * the frame's end, in device addresses, must lie inside the buffer. Lock held
+ * the frame's end, in device addresses, must lie inside the buffer. A frame is
+ * bytes here: what lines or planes fill them is the producer's to check. Lock held
  * or the values not yet in use. Without a pool each buffer was held to
  * buffer_bytes and the alignment when it was given its memory, and is again
  * each time it is handed out.
  */
-static int lem_stream_check_frame(const struct lem_stream *s, u32 stride, u32 height, u32 bytes)
+static int lem_stream_check_frame(const struct lem_stream *s, u32 bytes)
 {
 	const struct lem_stream_region *pool = &s->region[LEM_STREAM_POOL];
-	u64 lines, last, end;
+	u64 last, end;
 
-	if (!stride || !height || !bytes)
-		return -EINVAL;
-	if (check_mul_overflow((u64)stride, (u64)height, &lines) || lines > bytes)
+	if (!bytes)
 		return -EINVAL;
 	if (bytes > s->buffer_bytes || (u64)bytes > s->stride)
 		return -EINVAL;
@@ -634,8 +633,7 @@ struct lem_stream *lem_stream_from_file(struct file *file, struct device *dev)
 	return s;
 }
 
-int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 stride,
-		      u32 height, u32 bytes)
+int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 bytes)
 {
 	unsigned long flags;
 	int ret;
@@ -650,7 +648,7 @@ int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *pr
 	else if (producer->job_bytes && producer->job_bytes != s->job_bytes)
 		ret = -EINVAL;
 	else
-		ret = lem_stream_check_frame(s, stride, height, bytes);
+		ret = lem_stream_check_frame(s, bytes);
 	if (!ret) {
 		s->producer = *producer;
 		s->frame_bytes = bytes;
@@ -1571,7 +1569,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	lem_stream_init_ring(s);
 
 	if (producer) {
-		ret = lem_stream_attach(s, producer, c->buffer_bytes, 1, c->buffer_bytes);
+		ret = lem_stream_attach(s, producer, c->buffer_bytes);
 		if (ret)
 			goto free;
 	}

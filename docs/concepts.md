@@ -42,6 +42,14 @@ A driver knows how to talk to its part. It does not know what the caller's work 
 driver takes a configuration as bytes and checks every address in it. It does not do 3A. An NPU
 driver takes a compiled program as bytes. It does not compile one.
 
+**Movers don't know what they move.** What carries data between a driver and a program (a frame
+stream, its job ring, a bus, the socket) carries opaque bytes with an identity, a time and a
+memory location, and nothing else. It has no frame type, pixel format or codec. What the bytes
+are is the contract's and the driver's business. A driver that programs a block, such as an ISP,
+a scaler or a codec, still describes the layouts the block's registers need: that is the
+hardware's configuration, not a type in the mover. Times are `CLOCK_MONOTONIC` nanoseconds on
+Linux. See [the design](design.md#movers-dont-know-what-they-move).
+
 ## Description
 
 Every device describes itself: its contracts and their methods, and a list of **items**. An item is

@@ -324,7 +324,8 @@ impl Hardware for LinuxHardware {
         let frame = Frame {
             index: done.index,
             sequence: done.sequence,
-            timestamp_ns: u64::try_from(done.timestamp.as_nanos()).unwrap_or(u64::MAX),
+            // 0, no time, only if `CLOCK_MONOTONIC` cannot be read, which Linux never refuses.
+            timestamp_ns: done.monotonic_ns().unwrap_or(0),
             bad: done.flags.contains(BufferFlags::ERROR),
             planes: done.planes.len(),
             bytes: u32::try_from(done.bytes_used()).unwrap_or(u32::MAX),

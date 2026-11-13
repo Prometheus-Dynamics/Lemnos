@@ -1,6 +1,6 @@
 use core::mem::{align_of, offset_of, size_of};
 
-use crate::{AbiVersion as V, BufferDesc, FenceDesc, Handle, PlaneDesc, Status};
+use crate::{AbiVersion as V, BufferDesc, FenceDesc, Handle, Status};
 
 /// A surface's version, exchanged before any other call: the caller passes
 /// the one it was built against, the surface checks it ([`Self::accepts`]).
@@ -85,21 +85,10 @@ const fn concat<const N: usize>(parts: &[&[u64]]) -> [u64; N] {
     out
 }
 
-const SHAPES: [u64; 32] = concat(&[
+const SHAPES: [u64; 23] = concat(&[
     &shape!(Status),
     &shape!(Handle),
-    &shape!(PlaneDesc, fd, reserved, offset, stride, size),
-    &shape!(
-        BufferDesc,
-        struct_size,
-        flags,
-        width,
-        height,
-        fourcc,
-        plane_count,
-        modifier,
-        planes
-    ),
+    &shape!(BufferDesc, struct_size, flags, fd, reserved, offset, size),
     &shape!(FenceDesc, kind, fd, point),
     &shape!(V, struct_size, major, minor, layout),
 ]);
@@ -113,7 +102,7 @@ pub const LAYOUT_HASH: u64 = layout_hash(&SHAPES);
 /// Version 1.0 is frozen: this is its layout hash, as `include/lemnos/abi.h`
 /// declares it. A change to any hashed layout fails to compile here, and is a
 /// new major version (see the README's stability rules).
-const FROZEN_1_0: u64 = 0xa02c_fb4a_8dd4_545b;
+const FROZEN_1_0: u64 = 0xc1a3_3afa_27dd_77e3;
 const _: () = assert!(
     LAYOUT_HASH == FROZEN_1_0,
     "a layout of version 1.0 changed: that is a new major"

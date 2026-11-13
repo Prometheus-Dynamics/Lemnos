@@ -254,7 +254,33 @@ pub struct DequeuedBuffer {
     pub planes: Planes<(u32, u32)>,
 }
 
+/// `V4L2_BUF_FLAG_TIMESTAMP_MASK`: the bits that say which clock a buffer's timestamp is on.
+const TIMESTAMP_MASK: u32 = 0x0000_e000;
+
 impl DequeuedBuffer {
+    /// The buffer's time as `CLOCK_MONOTONIC` nanoseconds, the clock Lemnos stamps with. Its
+    /// own timestamp when the node says that timestamp is on `CLOCK_MONOTONIC`; otherwise
+    /// `now_ns`, the time it was taken off the queue. A memory-to-memory node copies the
+    /// timestamp its input was queued with, and a node that names no clock may stamp with
+    /// anything, so neither is passed on as a time.
+    pub fn monotonic_ns_or(&self, now_ns: u64) -> u64 {
+        if self.flags.bits() & TIMESTAMP_MASK == BufferFlags::TIMESTAMP_MONOTONIC.bits() {
+            u64::try_from(self.timestamp.as_nanos()).unwrap_or(u64::MAX)
+        } else {
+            now_ns
+        }
+    }
+
+    /// [`Self::monotonic_ns_or`] with `CLOCK_MONOTONIC` read now when it is needed. An error
+    /// only if the clock cannot be read.
+    pub fn monotonic_ns(&self) -> std::io::Result<u64> {
+        if self.flags.bits() & TIMESTAMP_MASK == BufferFlags::TIMESTAMP_MONOTONIC.bits() {
+            Ok(self.monotonic_ns_or(0))
+        } else {
+            lemnos_linux_sys::time::monotonic_ns()
+        }
+    }
+
     /// Total payload bytes over all planes.
     pub fn bytes_used(&self) -> usize {
         self.planes.iter().fold(0usize, |total, &(used, _)| {
@@ -539,6 +565,32 @@ mod tests {
     fn buffer_flags_debug() {
         let f = BufferFlags::DONE | BufferFlags::TIMESTAMP_MONOTONIC;
         assert_eq!(format!("{f:?}"), "DONE | TIMESTAMP_MONOTONIC");
+    }
+
+    #[test]
+    fn only_a_monotonic_timestamp_is_passed_on_as_a_time() {
+        let done = |flags: u32| DequeuedBuffer {
+            index: 0,
+            sequence: 0,
+            flags: BufferFlags(flags),
+            field: 0,
+            timestamp: Duration::new(3, 500),
+            planes: Planes::one((0, 0)),
+        };
+        let mono = done(BufferFlags::DONE.bits() | BufferFlags::TIMESTAMP_MONOTONIC.bits());
+        assert_eq!(mono.monotonic_ns_or(7), 3_000_000_500);
+        assert_eq!(mono.monotonic_ns().unwrap(), 3_000_000_500);
+        // Copied from the queued input (memory to memory), or no clock named: the time it was
+        // dequeued instead.
+        let copied = done(BufferFlags::TIMESTAMP_COPY.bits());
+        assert_eq!(copied.monotonic_ns_or(7), 7);
+        assert_eq!(done(0).monotonic_ns_or(7), 7);
+        let before = lemnos_linux_sys::time::monotonic_ns().unwrap();
+        let read = copied.monotonic_ns().unwrap();
+        let after = lemnos_linux_sys::time::monotonic_ns().unwrap();
+        assert!(before <= read && read <= after);
+        // A clock this crate doesn't know (another value under the mask) is not believed.
+        assert_eq!(done(0x0000_6000).monotonic_ns_or(7), 7);
     }
 
     #[test]

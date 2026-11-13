@@ -224,6 +224,28 @@ on the ring. Whoever hands a job to hardware checks every buffer it names. Lemno
 `u64` frame identity it never interprets. Image, codec and USB jobs use the same ring.
 [Frame streams](streams.md) has the details.
 
+Every time Lemnos hands out on Linux (a frame's timestamp, a value's stamp, an interrupt's or an
+edge's time, a driver's `tick(now_ns)`) is nanoseconds on `CLOCK_MONOTONIC`, the clock of the
+kernel's `ktime_get_ns()`.
+
+### Movers don't know what they move
+
+The parts of Lemnos that move data are the movers: frame streams and their ring, the job ring,
+the buses, the kernel module's streams, the socket, and the [shared-memory ring](ring.md) family
+in `shm/`, whose entries carry the caller's metadata as bytes and `CLOCK_MONOTONIC` sample times. A
+mover carries opaque bytes with an identity, a time and a memory location (a buffer number, an
+offset and a length, or a file descriptor), and nothing else. No mover has a frame type, a pixel
+format, an image size, a stride or a codec. It cannot tell a camera frame from a tensor or a USB
+transfer, and nothing in it changes when a new format appears.
+
+What the bytes are belongs to the contract that names the stream and the driver that serves it:
+`camera.frames/1` says how a frame is laid out, `image.scaler/1` what a job's bytes mean.
+
+A block driver that programs hardware (an ISP, a scaler, a codec) still describes the layouts its
+registers need: a format code, a width, a height, a stride. That is the hardware's configuration,
+written by the driver that owns the block and checked against the buffer it lands in. It is not
+a type in the mover, and it never travels in a frame's or a buffer's description.
+
 ## Driver forms
 
 - **Built in:** a crate in the image.

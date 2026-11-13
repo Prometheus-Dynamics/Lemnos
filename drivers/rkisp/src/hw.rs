@@ -468,7 +468,8 @@ impl Hardware for LinuxHardware {
         let finished = Done {
             index: done.index,
             sequence: done.sequence,
-            timestamp_ns: u64::try_from(done.timestamp.as_nanos()).unwrap_or(u64::MAX),
+            // 0, no time, only if `CLOCK_MONOTONIC` cannot be read, which Linux never refuses.
+            timestamp_ns: done.monotonic_ns().unwrap_or(0),
             bad: done.flags.contains(BufferFlags::ERROR),
         };
         if let Some(slot) = self.current.get_mut(queue as usize) {

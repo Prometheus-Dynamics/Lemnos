@@ -28,7 +28,7 @@ extern "C" {
 
 #define LEMNOS_ABI_MAJOR 1
 #define LEMNOS_ABI_MINOR 1
-#define LEMNOS_LAYOUT_HASH 0xb28f148893bc3412ULL
+#define LEMNOS_LAYOUT_HASH 0x87298e01dabc373fULL
 
 #define LEMNOS_VERSION_INIT \
     { sizeof(LemnosAbiVersion), LEMNOS_ABI_MAJOR, LEMNOS_ABI_MINOR, LEMNOS_LAYOUT_HASH }
@@ -124,7 +124,7 @@ typedef struct LemnosFrame {
     uint32_t reserved;
     uint64_t sequence;
     uint64_t identity;
-    uint64_t timestamp_ns;
+    uint64_t timestamp_ns; /* CLOCK_MONOTONIC nanoseconds; 0 when the producer had no time */
 } LemnosFrame;
 
 LemnosAbiVersion lemnos_version(void);

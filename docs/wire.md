@@ -81,6 +81,10 @@ closes the connection on a kind it doesn't know (rule 3).
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
 reads them, and no field names a kind of device.
 
+`stamp_ns` in Value, like a frame's timestamp on a stream's ring, is nanoseconds on the host's
+clock: `CLOCK_MONOTONIC` on Linux, the same clock as the kernel's `ktime_get_ns()`, so it compares
+directly with a client's own `clock_gettime(CLOCK_MONOTONIC)`.
+
 ## Rules
 
 Each of these closes a way the earlier protocol could go wrong.
@@ -243,7 +247,8 @@ queue's capacity, which is a power of two. A writer writes the slot, then stores
 release ordering. A reader loads the head with acquire ordering, then the slot.
 
 A frame slot's words are: buffer in the low 32 bits with the length in the high 32, sequence,
-identity, timestamp in ns, fence. Identity is the producer's and is never read. A return slot is
+identity, timestamp in `CLOCK_MONOTONIC` ns (on Linux; see [Frames](streams.md#frames)), fence.
+Identity is the producer's and is never read. A return slot is
 the buffer in the low 32 bits and the frame's fence in the high 32. A job slot is its length, then
 its bytes, little-endian, the last word zero-padded.
 

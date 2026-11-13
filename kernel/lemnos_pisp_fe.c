@@ -781,8 +781,7 @@ static long lpf_start_locked(struct lem_pisp_fe *fe, const struct lemnos_pisp_fe
 		return -EBUSY;
 
 	lrc_ref_get(l);
-	ret = lem_stream_attach(stream, &producer, a->output_stride, a->output_height,
-				a->output_size);
+	ret = lem_stream_attach(stream, &producer, a->output_size);
 	if (ret) {
 		lrc_ref_put(l);
 		return ret;

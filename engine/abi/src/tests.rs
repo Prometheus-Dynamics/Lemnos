@@ -5,11 +5,12 @@ fn layouts_are_pinned() {
     // The C side declares these same sizes; a change here is a major version.
     assert_eq!(size_of::<Status>(), 4);
     assert_eq!(size_of::<Handle>(), 8);
-    assert_eq!(size_of::<PlaneDesc>(), 32);
-    assert_eq!(size_of::<BufferDesc>(), 32 + 32 * MAX_PLANES);
+    assert_eq!(size_of::<BufferDesc>(), 32);
     assert_eq!(size_of::<FenceDesc>(), 16);
     assert_eq!(size_of::<AbiVersion>(), 16);
-    assert_eq!(core::mem::offset_of!(BufferDesc, planes), 32);
+    assert_eq!(core::mem::offset_of!(BufferDesc, fd), 8);
+    assert_eq!(core::mem::offset_of!(BufferDesc, offset), 16);
+    assert_eq!(core::mem::offset_of!(BufferDesc, size), 24);
 }
 
 #[test]
@@ -77,43 +78,35 @@ fn a_released_handle_is_stale_and_its_slot_is_reused() {
 fn buffers_are_validated_before_use() {
     let bytes = BufferDesc::bytes(5, 4096);
     assert_eq!(bytes.validate(), Status::OK);
-    assert_eq!(bytes.planes().len(), 1);
+    assert_eq!((bytes.fd, bytes.offset, bytes.size), (5, 0, 4096));
     assert_eq!(
         BufferDesc::bytes(-1, 4096).validate(),
         Status::INVALID_ARGUMENT
     );
-
-    const NV12: u32 = u32::from_le_bytes(*b"NV12");
-    let plane = |offset, size| PlaneDesc {
-        fd: 9,
-        reserved: 0,
-        offset,
-        stride: 640,
-        size,
-    };
-    let image = BufferDesc::image(640, 480, NV12, 0)
-        .with_plane(plane(0, 640 * 480))
-        .and_then(|d| d.with_plane(plane(640 * 480, 640 * 240)))
-        .unwrap();
-    assert_eq!(image.validate(), Status::OK);
-    assert_eq!(
-        BufferDesc::image(640, 480, NV12, 0).validate(),
-        Status::INVALID_ARGUMENT
-    );
-    let mut no_stride = image;
-    no_stride.planes[1].stride = 0;
-    assert_eq!(no_stride.validate(), Status::INVALID_ARGUMENT);
-    let mut overflow = image;
-    overflow.planes[0].offset = u64::MAX;
+    let inside = BufferDesc::new(9, 640 * 480, 640 * 240);
+    assert_eq!(inside.validate(), Status::OK);
+    let overflow = BufferDesc::new(9, u64::MAX, 1);
     assert_eq!(overflow.validate(), Status::INVALID_ARGUMENT);
-    let mut old = image;
+    let mut old = inside;
     old.struct_size = 16;
     assert_eq!(old.validate(), Status::INVALID_ARGUMENT);
-    let mut full = BufferDesc::image(1, 1, NV12, 0);
-    for _ in 0..MAX_PLANES {
-        full = full.with_plane(plane(0, 1)).unwrap();
-    }
-    assert_eq!(full.with_plane(plane(0, 1)), Err(Status::INVALID_ARGUMENT));
+}
+
+#[test]
+fn a_buffer_says_where_its_bytes_are_and_nothing_about_them() {
+    // A mover's buffer is a memory location: the fields are exactly these, so no format,
+    // size in pixels or plane layout can come back without failing here.
+    let desc = BufferDesc::new(3, 64, 128);
+    let BufferDesc {
+        struct_size,
+        flags,
+        fd,
+        reserved,
+        offset,
+        size,
+    } = desc;
+    assert_eq!(struct_size as usize, size_of::<BufferDesc>());
+    assert_eq!((flags, fd, reserved, offset, size), (0, 3, 0, 64, 128));
 }
 
 #[test]
@@ -276,7 +269,6 @@ fn the_header_matches_the_crate() {
         define("LEMNOS_ABI_TYPES_MINOR"),
         format!("{}", VERSION.minor)
     );
-    assert_eq!(define("LEMNOS_MAX_PLANES"), format!("{MAX_PLANES}"));
 
     if !Command::new("cc")
         .arg("--version")
@@ -285,7 +277,7 @@ fn the_header_matches_the_crate() {
     {
         return;
     }
-    let checks: [(&str, i64); 26] = [
+    let checks: [(&str, i64); 23] = [
         ("LEMNOS_OK", Status::OK.0.into()),
         ("LEMNOS_E_BASE", Status::LEMNOS_BASE.into()),
         ("LEMNOS_E_STALE_HANDLE", Status::STALE_HANDLE.0.into()),
@@ -311,27 +303,18 @@ fn the_header_matches_the_crate() {
             offset_of!(AbiVersion, layout) as i64,
         ),
         ("sizeof(LemnosMessageSink)", size_of::<MessageSink>() as i64),
-        ("sizeof(LemnosPlaneDesc)", size_of::<PlaneDesc>() as i64),
-        (
-            "offsetof(LemnosPlaneDesc, offset)",
-            offset_of!(PlaneDesc, offset) as i64,
-        ),
-        (
-            "offsetof(LemnosPlaneDesc, size)",
-            offset_of!(PlaneDesc, size) as i64,
-        ),
         ("sizeof(LemnosBufferDesc)", size_of::<BufferDesc>() as i64),
         (
-            "offsetof(LemnosBufferDesc, plane_count)",
-            offset_of!(BufferDesc, plane_count) as i64,
+            "offsetof(LemnosBufferDesc, fd)",
+            offset_of!(BufferDesc, fd) as i64,
         ),
         (
-            "offsetof(LemnosBufferDesc, modifier)",
-            offset_of!(BufferDesc, modifier) as i64,
+            "offsetof(LemnosBufferDesc, offset)",
+            offset_of!(BufferDesc, offset) as i64,
         ),
         (
-            "offsetof(LemnosBufferDesc, planes)",
-            offset_of!(BufferDesc, planes) as i64,
+            "offsetof(LemnosBufferDesc, size)",
+            offset_of!(BufferDesc, size) as i64,
         ),
         ("sizeof(LemnosFenceDesc)", size_of::<FenceDesc>() as i64),
         (
