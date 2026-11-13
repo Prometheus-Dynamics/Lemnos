@@ -5,10 +5,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// The bytes an unprivileged writer may still use on the filesystem that holds `path`.
-// The fields are narrower than 64 bits on some 32-bit targets.
-#[allow(clippy::useless_conversion)]
-pub fn free_bytes(path: &Path) -> io::Result<u64> {
+fn stat(path: &Path) -> io::Result<libc::statvfs> {
     let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: `statvfs` is plain data; all zeros is a valid value of it.
@@ -18,7 +15,22 @@ pub fn free_bytes(path: &Path) -> io::Result<u64> {
     if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(stat)
+}
+
+/// The bytes an unprivileged writer may still use on the filesystem that holds `path`.
+// The fields are narrower than 64 bits on some 32-bit targets.
+#[allow(clippy::useless_conversion)]
+pub fn free_bytes(path: &Path) -> io::Result<u64> {
+    let stat = stat(path)?;
     Ok(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
+}
+
+/// The size of the filesystem that holds `path`, in bytes.
+#[allow(clippy::useless_conversion)]
+pub fn total_bytes(path: &Path) -> io::Result<u64> {
+    let stat = stat(path)?;
+    Ok(u64::from(stat.f_blocks).saturating_mul(u64::from(stat.f_frsize)))
 }
 
 #[cfg(test)]
@@ -30,5 +42,11 @@ mod tests {
         assert!(free_bytes(&std::env::temp_dir()).unwrap() > 0);
         let missing = free_bytes(Path::new("/nonexistent/lemnos")).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_directory_is_in_a_filesystem_of_some_size() {
+        let total = total_bytes(&std::env::temp_dir()).unwrap();
+        assert!(total >= free_bytes(&std::env::temp_dir()).unwrap());
     }
 }

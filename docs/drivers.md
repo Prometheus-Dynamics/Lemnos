@@ -67,6 +67,7 @@ python3 scripts/generate-builtins.py --check
 | `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its schema 3 manifest and refused when built for another board (the board file's `[board] id`); a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. Keeps the boot history (`boots`, one line per boot, `docs/slots.md`). With an `indicator` need (`uses = { indicator = "<id>" }`) it shows `receiving` (with its progress), `verifying`, `done` or `failed` as an install runs. Never over the running or the default slot. On raw NAND (`ubi`, `record = "ubi"`) the images and the record are UBI volumes, replaced by atomic rename. Untested on board (`I5.md`, `I5c.md`) |
 | `system-identity` | `system.identity/1` | nothing; `serial` source, `name`, `revision`, `data` in `config`; the family is the board's `[board] id` | Serves the board's identity facts: `serial`, `family`, `model` and the running slot's `version.slot`, `version.product`, `version.os`. Binds fail when a serial source cannot be read, so the host retries. Untested on board (`P1.md`) |
 | `system-reboot` | `system.reboot/1` | `data` (the data partition, `/data` by default) | Serves its contract. Leaves the caller's request for the boot history, then runs `systemctl reboot` |
+| `named-files` | `lemnos.files/1` | `data`, `boot`, `sys_block`, `module`, and the image's `tree_overlay`, `tree_boot`, `tree_modprobe` paths (all optional, with the defaults `docs/daemon.md` gives) | Serves the `lemnos/` names (`docs/daemon.md`, "Named files"): each is a snapshot taken when a reader opens it, read in pieces, and closed. Lists what it serves in `lemnos/index` |
 
 ## USB
 
@@ -278,6 +279,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `system.flash/1` | 1 info, 2 manifest, 3 write (a long job), 4 data, 5 verify (a long job) | `system-flash` |
 | `system.slots/1` | 1 list, 2 install (a long job), 3 write, 4 set_default, 5 trial, 6 confirm, 7 remove, 8 pin, 9 set_keep, 10 accept, 11 install_file (a long job), 12 boots (the boot history) | `system-slots` |
 | `system.reboot/1` | 1 reboot | `system-reboot` |
+| `lemnos.files/1` | 1 index, 2 open, 3 size, 4 read, 5 close | `named-files` |
 
 A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board
 file's `link` to its receiver and from there to its ISP. A USB camera is one device with

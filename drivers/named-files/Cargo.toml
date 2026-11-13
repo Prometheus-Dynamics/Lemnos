@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-named-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-named-files = { path = "../../contracts/named-files" }
+lemnos-slot-store = { path = "../slot-store" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[package.metadata.lemnos]
+driver = "NamedFilesDriver"
