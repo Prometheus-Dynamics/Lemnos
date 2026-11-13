@@ -1,0 +1,50 @@
+# The managed USB link identity: what every gadget this project builds presents to a host.
+#
+# Read by the tests of drivers/usb-gadget (tests/link_contract.rs), which fail if the code's
+# constants and this file disagree, and by other teams' tests and device data instead of copying
+# the numbers. A reader refuses a version it does not know and any key it does not know.
+# Changing an identity value here means changing the constant it matches; the tests say which.
+version = 1
+
+[device]
+vendor = 0x1d6b          # PLACEHOLDER until the user settles a product id; see docs/boards.md
+product = 0x0104         # PLACEHOLDER, as above
+bcd_device = 0x0200      # the release presented now; only ever rises (drivers/usb-gadget revision.rs)
+class = 0xef             # composite, with interface association descriptors
+subclass = 0x02
+protocol = 0x01
+
+[link]
+interface_string = "orion-link"  # the vendor interface's name; the host matches VID:PID, then this
+class = 0xff
+subclass = 0x00
+protocol = 0x00
+interface = 0                    # the link is interface 0 of the composite: first function, no IAD
+property = "DeviceInterfaceGUID" # the singular REG_SZ property (MS OS 1.0, extended properties)
+guid = "{CF13388F-BE34-4A1E-94C2-9AAFEF9A04E9}"
+compatible_id = "WINUSB"
+
+[functions.ncm]
+compatible_id = "WINNCM"         # NCM control interface; not in Microsoft's list (untested)
+
+[functions.acm]
+compatible_id = ""               # none: in-box usbser needs no OS descriptor
+
+[os]
+vendor_code = 0x51               # bMS_VendorCode for the Microsoft OS 1.0 requests
+qw_sign = "MSFT100"              # string 0xEE
+
+# bcdDevice reservations. The managed identity keeps 1d6b:0104 and its releases in the managed range
+# until the user settles a product id; another team's bring-up images use 1d6b:0103 from the other
+# range. Releases only ever rise inside a range.
+[reservation.managed]
+vendor = 0x1d6b
+product = 0x0104
+bcd_min = 0x0100
+bcd_max = 0x0aff
+
+[reservation.other]
+vendor = 0x1d6b
+product = 0x0103
+bcd_min = 0x0b00
+bcd_max = 0xffff

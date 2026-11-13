@@ -332,12 +332,36 @@ fn enable_writes_descriptors_to_ep0_then_binds_and_touches_no_configfs_directory
     // every string of the table.
     let mut blob = Vec::new();
     blob.extend(3u32.to_le_bytes());
-    blob.extend(66u32.to_le_bytes());
-    blob.extend(83u32.to_le_bytes()); // FS | HS | VIRTUAL_ADDR | ALL_CTRL_RECIP
+    blob.extend(0u32.to_le_bytes()); // the descriptors' length, set below
+    // FS | HS | MS OS | VIRTUAL_ADDR | ALL_CTRL_RECIP
+    blob.extend(91u32.to_le_bytes());
     blob.extend(3u32.to_le_bytes());
     blob.extend(3u32.to_le_bytes());
+    blob.extend(2u32.to_le_bytes()); // two Microsoft OS 1.0 sections
     blob.extend(function(64));
     blob.extend(function(512));
+    // The link's compatible ID section and its GUID property section (the golden bytes of
+    // both are in the FunctionFS tests).
+    blob.extend(
+        functionfs::os_compat_section(&[CompatEntry {
+            interface: 0,
+            compatible: ms_os::LINK_COMPATIBLE_ID,
+            sub_compatible: [0; 8],
+        }])
+        .unwrap(),
+    );
+    blob.extend(
+        functionfs::os_prop_section(
+            0,
+            &[ExtProp {
+                name: ms_os::LINK_GUID_PROPERTY,
+                data: ms_os::LINK_GUID,
+            }],
+        )
+        .unwrap(),
+    );
+    let descriptors_length = blob.len() as u32;
+    blob[4..8].copy_from_slice(&descriptors_length.to_le_bytes());
     blob.extend(2u32.to_le_bytes());
     blob.extend(45u32.to_le_bytes());
     blob.extend(5u32.to_le_bytes());
@@ -694,7 +718,11 @@ fn one_speed_and_no_strings_writes_only_what_the_set_has() {
     let mut gadget = tree.gadget();
     gadget.enable(&descriptors).unwrap();
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
-    assert_eq!(ep0[8..16], [81, 0, 0, 0, 3, 0, 0, 0], "full speed only");
+    assert_eq!(
+        ep0[8..16],
+        [89, 0, 0, 0, 3, 0, 0, 0],
+        "full speed only, with the OS sections"
+    );
     assert_eq!(
         ep0[ep0.len() - 16..],
         [2, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -1351,4 +1379,52 @@ fn a_functionfs_mount_that_is_not_there_is_mounted_as_before() {
     let recorder = setup(&tree);
     assert_eq!(recorder.mounts.len(), 1);
     assert_eq!(recorder.unmounts.len(), 1);
+}
+
+#[test]
+fn the_link_presents_its_microsoft_os_descriptors_on_every_gadget() {
+    // configfs: the OS descriptors are on, with the vendor code and signature, and the
+    // configuration is linked under `os_desc`, which is what makes the kernel answer for it.
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs, ncm()]).unwrap();
+    assert_eq!(tree.attribute("os_desc/use"), "1\n");
+    assert_eq!(tree.attribute("os_desc/b_vendor_code"), "0x51\n");
+    assert_eq!(tree.attribute("os_desc/qw_sign"), "MSFT100\n");
+    assert_eq!(
+        fs::read_link(tree.gadget_dir().join("os_desc/c.1")).unwrap(),
+        tree.gadget_dir().join("configs/c.1")
+    );
+    // The NCM interface's compatible ID is written raw: six bytes, no newline.
+    let ncm_id = tree
+        .gadget_dir()
+        .join("functions/ncm.usb0/os_desc/interface.ncm/compatible_id");
+    assert_eq!(fs::read(ncm_id).unwrap(), b"WINNCM");
+
+    // The blob ep0 takes: the OS flag, two sections counted before the descriptors, and the
+    // link's GUID as UTF-8 with a NUL (the kernel converts it to UTF-16 for the host).
+    let plan = Plan::of(&UsbDescriptors::parse(&set()).unwrap()).unwrap();
+    let flags = u32::from_le_bytes(plan.descriptors[8..12].try_into().unwrap());
+    assert_ne!(flags & functionfs::HAS_MS_OS_DESC, 0);
+    assert_eq!(&plan.descriptors[20..24], &2u32.to_le_bytes());
+    let guid = b"{CF13388F-BE34-4A1E-94C2-9AAFEF9A04E9}\0";
+    assert!(plan.descriptors.windows(guid.len()).any(|w| w == guid));
+    // The link's compatible ID section: WinUSB for interface 0 only.
+    let winusb = b"WINUSB\0\0";
+    assert!(plan.descriptors.windows(winusb.len()).any(|w| w == winusb));
+}
+
+#[test]
+fn a_second_setup_takes_the_previous_os_link_down_first() {
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap();
+    assert_eq!(
+        fs::read_link(tree.gadget_dir().join("os_desc/c.1")).unwrap(),
+        tree.gadget_dir().join("configs/c.1")
+    );
+    let links = fs::read_dir(tree.gadget_dir().join("os_desc"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_symlink())
+        .count();
+    assert_eq!(links, 1, "one configuration under os_desc, not two");
 }

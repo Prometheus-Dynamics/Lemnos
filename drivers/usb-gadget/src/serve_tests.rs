@@ -403,14 +403,19 @@ fn a_caller_answers_a_request_and_echoes_bytes_on_an_endpoint_pair() {
     assert_eq!(rig.done(11), b"", "a send's completion carries no bytes");
     assert_eq!(rig.host.host_received(), [(IN, b"ping".to_vec())]);
 
-    // A zero-length packet each way.
+    // A zero-length packet from the host is received as an empty read. A send of no bytes is done
+    // without a transfer: nothing reaches the host, so no zero-length packet is emitted.
     rig.receive(12, OUT, 4, 64);
     rig.host.host_sends(OUT, b"");
     rig.send(13, IN, 5, b"");
     rig.tick();
     assert_eq!(rig.done(12), b"");
     assert_eq!(rig.done(13), b"");
-    assert_eq!(rig.host.host_received()[1], (IN, Vec::new()));
+    assert_eq!(
+        rig.host.host_received().len(),
+        1,
+        "no zero-length packet was sent"
+    );
     let counters = rig.counters();
     assert_eq!((counters.jobs, counters.errors), (8, 0));
 }

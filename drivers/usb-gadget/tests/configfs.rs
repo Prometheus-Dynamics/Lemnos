@@ -179,7 +179,7 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
         ("idProduct", "0x0001\n"),
         ("bcdDevice", "0x0100\n"),
         ("bcdUSB", "0x0200\n"),
-        ("bDeviceClass", "0x00\n"),
+        ("bDeviceClass", "0xef\n"),
         ("bMaxPacketSize0", "0x40\n"),
         ("strings/0x409/manufacturer", "Maker\n"),
         ("strings/0x409/product", "Thing\n"),
@@ -198,7 +198,10 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
     // FunctionFS got the interface at both speeds and the four strings.
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert_eq!(ep0[..4], [3, 0, 0, 0]);
-    assert_eq!(ep0[8..20], [83, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0]);
+    // Flags 91: FS, HS, the Microsoft OS descriptors (8), virtual addresses and all recipients.
+    assert_eq!(ep0[8..20], [91, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0]);
+    // Two Microsoft OS 1.0 sections (compatible ID, extended properties), counted before the descriptors.
+    assert_eq!(ep0[20..24], [2, 0, 0, 0]);
     assert!(ep0.ends_with(b"Maker\0Thing\x000001\0data\0"));
 
     // The host configures the device and asks something of it: the driver sees both.

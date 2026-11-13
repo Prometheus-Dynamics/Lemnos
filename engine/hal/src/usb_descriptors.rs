@@ -492,3 +492,31 @@ fn well_formed(units: impl Iterator<Item = u16>) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// The Microsoft OS 1.0 descriptors the link function presents, so Windows binds its driver
+/// with no INF file. Every gadget of ours presents these, because the FunctionFS link is in
+/// every gadget's function list (`description::functions` adds it when the board does not).
+///
+/// The bytes are built by `lemnos_linux_sys::functionfs` and their layout is pinned there.
+/// Sources, all read 2026-11-13: Microsoft, "Microsoft OS 1.0 Descriptors Specification"
+/// (string 0xEE, `qwSignature`, `bMS_VendorCode`, the extended compatible ID and extended
+/// properties descriptors, requests `wIndex` 4 and 5); Microsoft, "WinUSB installation" (the
+/// `DeviceInterfaceGUID` property name and its UTF-16 length of 78 bytes). Linux 7.3
+/// `drivers/usb/gadget/composite.c` and `function/f_fs.c` for what the kernel emits from them.
+pub mod ms_os {
+    /// The Lemnos link GUID: the device interface GUID WinUSB registers for the link, the same
+    /// on every product and every gadget of ours. It never changes; a change is a new link.
+    pub const LINK_GUID: &str = "{CF13388F-BE34-4A1E-94C2-9AAFEF9A04E9}";
+    /// The registry property that carries [`LINK_GUID`] (MS OS 1.0, a REG_SZ).
+    pub const LINK_GUID_PROPERTY: &str = "DeviceInterfaceGUID";
+    /// `bMS_VendorCode`: the request code Windows sends to read the descriptors. Nothing else in
+    /// the gadget uses this code.
+    pub const VENDOR_CODE: u8 = 0x51;
+    /// `qwSignature`, the signature Windows looks for in string 0xEE.
+    pub const QW_SIGN: &str = "MSFT100";
+    /// The compatible ID of the link interface: WinUSB, padded with NULs to 8 bytes.
+    pub const LINK_COMPATIBLE_ID: [u8; 8] = *b"WINUSB\0\0";
+    /// The compatible ID of the NCM interface. Microsoft's MS OS 1.0 list does not name it; it is
+    /// what community reports say Windows matches for the in-box NCM driver (untested).
+    pub const NCM_COMPATIBLE_ID: [u8; 8] = *b"WINNCM\0\0";
+}
