@@ -332,6 +332,10 @@ device again when lemnosd's event says it is running (see [Events](wire.md#event
 Orion comm core restarts, the bridge connects again and says every topic, action and resource
 again. Both sides retry forever.
 
+The board's identity facts are topics too, `hello.<fact>`, from the identity device and the
+bridge's own `offers`; [Identity](identity.md#how-the-bridge-publishes-them) says which, when each
+is republished, and what is absent when.
+
 It reads:
 
 - `LEMNOSD_SOCKET`;

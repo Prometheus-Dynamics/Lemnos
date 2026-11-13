@@ -12,11 +12,11 @@ library `engine/identity` (crate `lemnos-identity`) holds the serial sources and
 | `family` | the board's name: lowercase `[a-z0-9-]`, at most 64 bytes | `[board] id` in the board file |
 | `serial` | lowercase hex, no `0x`, no separators, leading zeros kept, 8 to 32 digits | the `system-identity` device's serial source (see [settings](#serial-source-settings)) |
 | `model` | display name with the revision, free text, at most 64 bytes, never parsed | `[board] name`, then ` ` and `[board] revision` when given |
-| `version.slot` | the running slot's id, as `system.slots/1 list` names it | `board/slots/booted` on the data partition |
+| `version.slot` | the running slot's id, as `system.slots/1 list` names it | `board/slots/booted` on the data partition, read again on each `facts` call |
 | `version.lemnos` | lemnosd's package version | the daemon: `Config::host_version()`, given to each driver as it binds |
 | `version.product` | product name: lowercase `[a-z0-9-]` | `product` in the running slot's `slots/<id>.json` |
 | `version.os` | the running slot's version | `version` in the running slot's `slots/<id>.json` |
-| `offers` | space-separated contract ids the node serves, as Lemnos names them, e.g. `system.slots/1 system.reboot/1` | the daemon's devices |
+| `offers` | space-separated contract ids the node serves, as Lemnos names them, e.g. `system.slots/1 system.reboot/1` | the devices lemnosd lists that are running now, computed by the bridge |
 
 `state`, `name` and `revision` are not facts. A fact that cannot be known is absent. It is never
 guessed, and the library says why in its notes.
@@ -87,12 +87,40 @@ kind, never by product. "Verified" means read on a board. Everything else is unt
 |---|---|---|---|---|
 | Reference board (Raspberry Pi firmware serial) | `device-tree` | `/proc/device-tree/serial-number`; the kernel reads it into `Serial` (`init_machine_late`, `of_property_read_string(root, "serial-number", ...)`, `arch/arm/kernel/setup.c`, raspberrypi/linux `rpi-6.6.y`) | torvalds/linux and raspberrypi/linux `arch/arm/kernel/setup.c` | documented source is `/proc/device-tree/serial-number` with NULs stripped and lowercased. Verified read-only by the requester: it equals cpuinfo's `Serial`, both 16 lowercase hex digits. Re-check in `testing/board-runs/P1.md` |
 | Rockchip (vendor kernel) | `device-tree` | candidate: the device tree's `serial-number`, which the vendor kernel fills from the OTP CPU id. The OTP cell itself, if a source names it, would be `nvmem` instead: candidate offset 0x07, length 16 from memory, not read | torvalds/linux `arch/arm64/boot/dts/rockchip/rk3588-base.dtsi` (`otp: efuse@fecc0000`, only the `cpu-code` cell read, not a serial); the `Serial` line copies `serial-number` per `arch/arm/kernel/setup.c` (read in this session) | untested on board. Read on a real board before the source is fixed |
+| Rockchip RK3566, mainline-based kernel (Linux 7.3.3) | `device-tree` | `/proc/device-tree/serial-number`, read as is: 16 lowercase hex digits, already in the normalised form. `/proc/cpuinfo` has no `Serial` line on this kernel, so `cpuinfo` is not a source here | Read on a board on 2026-11-13 by another team (read-only). Not checked whether the boot loader fills this property from the OTP CPU id or from elsewhere; the vendor kernel may differ | verified on board (read-only check by another team). Re-check in `testing/board-runs/P1c.md` |
 | Allwinner SID | `nvmem` | candidate: the chip ID at offset 0x200, length 16 bytes, in the SID block `efuse@3006000` (H6) | the offset is `value_offset = 0x200` in `drivers/nvmem/sunxi_sid.c` (`sun50i_h6_cfg`), read in this session (torvalds/linux master). The 16-byte length is from memory and is not in the sources read. The H6 device tree (`arch/arm64/boot/dts/allwinner/sun50i-h6.dtsi`) names only `ths_calibration` (0x14, 8) and `cpu_speed_grade` (0x1c, 4) | untested on board. The length is unconfirmed |
 | K230 | `nvmem` | candidate: an OTP node in the K230 device tree, reached through the nvmem binding, cell not known. Old software tried cpuinfo `Serial`, then `serial-number`, then a MAC address; the source is one named kind per board file and no fallback is kept | the K230 Linux SDK's `arch/riscv/boot/dts/canaan/k230.dtsi`, not yet read: the URL tried on `kendryte/k230_linux_sdk` returned 404. The K230 driver API reference says the OTP is on nvmem and holds security data (https://developer.canaan-creative.com/k230/en/v1.7/01_software/board/osdrv/K230_Little_Core_Linux_Driver_API_Reference.html) | untested on board |
 | Small NAND SoC boards | `device-tree` | candidate: the device tree's `serial-number`. Old software tried cpuinfo `Serial` (skipping all-zero), then `serial-number`, then the first MAC address. No board is recorded as having taken which branch; the MAC step is not kept | the old code's order, as the requester described it. No source read in this session | untested on board. Nothing depends on this row |
 
 When a row is added, its source file and the offset and length must come from a source read,
 with its URL and commit, not from memory.
+
+## How the bridge publishes them
+
+`lemnos-orion` reads the identity device's `facts` (method 4) from lemnosd, and publishes one
+topic per fact, `hello.<fact>`, on its Orion session. Orion's hello document carries the newest
+value of each. The bridge is the one path: there is no mode without lemnosd, and with lemnosd
+down nothing is published.
+
+- **Values.** UTF-8 text, no trailing newline, one text field named `value`.
+- **Limits.** At most 64 facts, each value at most 256 bytes, no control character, no empty
+  value. A fact that does not fit is left out and the log says why. The rule is enforced in the
+  bridge (`service/orion/src/hello.rs`), whatever the driver sent.
+- **Absent.** A fact the device does not give is not published at all. When the device cannot be
+  read (it is off, or its call fails), none of its facts is published; `offers` still is.
+- **When each is republished.** `offers` when a device starts or stops running, since only running
+  devices offer their contracts. The identity device's facts are read every 2 seconds, and a
+  changed value is published as it changes. The running slot is read again on every `facts`
+  call, so `version.slot`, `version.product` and `version.os` follow the boot marker without a
+  rebind.
+- **A new fact** (one that was absent and now is, or one that goes away) changes the set of
+  topics. Orion has no way to take one topic back, so the bridge publishes its session again:
+  every topic is said again, and the facts are then as they are.
+- **Reconnect.** After Orion goes away and comes back, every fact's value is said again.
+
+`version.slot` after a confirm: the confirm sets the default slot, not the running one. The
+running slot moves only when the boot marker does, at boot, before lemnosd binds the device. So
+the bridge's periodic read is there for a marker that moves while lemnosd runs, not for a confirm.
 
 ## Who checks what
 

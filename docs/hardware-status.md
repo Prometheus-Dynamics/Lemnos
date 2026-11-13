@@ -261,3 +261,4 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B22.md`](../testing/board-runs/B22.md) | The bench's reference set, measured for real |
 | [`A17.md`](../testing/board-runs/A17.md) | The hardware performance counters on the reference board's cores |
 | [`P1.md`](../testing/board-runs/P1.md) | The identity facts on the reference board: the serial from the device tree equals cpuinfo's `Serial`, and the daemon serves the same serial |
+| [`P1c.md`](../testing/board-runs/P1c.md) | The bridge publishes the identity facts as `hello.*` on the reference board: the facts match the board file and the daemon, `offers` follows a device off and on, and a moved boot marker is followed without a rebind. Also records the RK3566 serial source on a mainline kernel (read on a board by another team) |

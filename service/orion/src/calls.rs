@@ -358,7 +358,7 @@ pub fn serve(client: &Client, job: &Job) -> Result<Served, Failure> {
             job.verb.name()
         )));
     };
-    let description = client.describe(device.index).map_err(failed)?;
+    let description = crate::source::describe(client, device.index).map_err(failed)?;
     let (contract, method) = if job.verb == Verb::Set {
         let item = find_item(&description, wanted).map_err(Failure::Refused)?;
         if item.kind == ItemKind::Value {

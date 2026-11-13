@@ -5,11 +5,13 @@
 //! text and in the names the checks read. What the checks see is what any Orion program sees:
 //! resources found by prefix, topics read by subscribing, actions run by name.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use lemnos_driver_system_identity::Identity;
 use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
 use lemnos_host::board::parse;
 use lemnos_host::{Options as HostOptions, entry};
@@ -20,7 +22,8 @@ use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target};
 use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, Status, Subscriber};
-use orion::{Address, Orion};
+use orion::types::Error as Refusal;
+use orion::{Address, ClientError, Orion};
 use orion_node_app::{Node, NodeSettings};
 use orion_stubs::Board;
 use tokio::sync::oneshot;
@@ -195,6 +198,33 @@ fn run(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished 
         .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"))
 }
 
+/// A run of an action, asked again while the comm core does not run it yet. After a comm core
+/// restart Orion lists a resource with its actions before it takes the actions back, so until the
+/// bridge has said them all a run is refused as not found. Asked again for at most [`WAIT`].
+fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let mut run = dashboard
+            .run(&ActionCall {
+                name: action,
+                target: Target::Resource(resource.parse().expect("name")),
+                args: args.as_bytes(),
+                deadline_ms: 0,
+                detached: false,
+            })
+            .expect("run");
+        match run.finish(WAIT) {
+            Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => {
+                return other
+                    .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn devices_are_resources_their_values_and_status_are_topics() {
     let dir = dir("pushed");
@@ -364,11 +394,21 @@ fn a_comm_core_restart_gets_every_device_and_value_again() {
     wait_for("the imu's resource after the restart", || {
         resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
     });
+    // The counter's actions are said after the imu's, one by one: wait until they are there.
+    wait_for(
+        "the counter's resource and its call action after the restart",
+        || {
+            resource(&dashboard, "lemnos.thing").filter(|found| {
+                found.state == ResourceState::Ready
+                    && found.actions.contains(&"lemnos.thing.call".to_owned())
+            })
+        },
+    );
     let mut values = dashboard.subscribe("lemnos.imu.values").expect("subscribe");
     wait_for("the imu's x after the restart", || {
         (latest(&mut values, 0).and_then(|b| float(&b)) == Some(1.5)).then_some(())
     });
-    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
@@ -436,6 +476,12 @@ fn a_stopped_lemnosd_takes_its_devices_and_topics_away_and_brings_them_back() {
     // lemnosd comes back: the devices are published again, in the same topics.
     let _service = start_lemnosd(&lemnosd);
     wait_for("the imu back", || resource(&dashboard, "lemnos.imu"));
+    wait_for("the counter back, with its call action", || {
+        resource(&dashboard, "lemnos.thing").filter(|found| {
+            found.state == ResourceState::Ready
+                && found.actions.contains(&"lemnos.thing.call".to_owned())
+        })
+    });
     wait_for("the status topic live again", || {
         let _ = status.wait(Duration::from_millis(50));
         (status.status() == Status::Live
@@ -443,7 +489,7 @@ fn a_stopped_lemnosd_takes_its_devices_and_topics_away_and_brings_them_back() {
         .then_some(())
     });
     // The call thread's old connection is dead; the first call after the return still works.
-    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
@@ -486,4 +532,234 @@ fn a_device_that_starts_running_later_is_described_then() {
     wait_for("a counter value", || {
         latest(&mut count, 0).and_then(|b| float(&b))
     });
+}
+
+/// The board's identity device, with its files in `dir`: the cpuinfo its serial is read from,
+/// and the data partition its running slot is read from.
+struct IdentityFiles {
+    dir: PathBuf,
+}
+
+const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The contract ids the three devices of [`identity_board`] offer, sorted.
+const OFFERS: &str = "accelerometer/1 example.counter/1 system.identity/1";
+
+impl IdentityFiles {
+    fn new(dir: &Path, cpuinfo: &str) -> Self {
+        let files = Self {
+            dir: dir.to_path_buf(),
+        };
+        std::fs::write(files.dir.join("cpuinfo"), cpuinfo).expect("cpuinfo");
+        files
+    }
+
+    /// Boots `slot`: the marker names it and its manifest is on the data partition, as the
+    /// initramfs leaves them.
+    fn boot(&self, slot: &str, product: &str, version: &str) {
+        let slots = self.dir.join("data/slots");
+        std::fs::create_dir_all(&slots).expect("slots");
+        let marker = self.dir.join("data/board/slots");
+        std::fs::create_dir_all(&marker).expect("marker");
+        std::fs::write(
+            slots.join(format!("{slot}.json")),
+            manifest(slot, product, version),
+        )
+        .expect("manifest");
+        std::fs::write(marker.join("booted"), format!("{slot}\n")).expect("booted");
+    }
+
+    /// The board file: the two devices of [`BOARD`], and the identity device.
+    fn board(&self) -> String {
+        format!(
+            "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"reference\"\n\
+             [[devices]]\nid = \"imu\"\ndriver = \"fake-accelerometer\"\n\
+             [devices.config]\nx = 1.5\ny = 0\nz = 2\n\
+             [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n\
+             [[devices]]\nid = \"identity\"\ndriver = \"system-identity\"\n[devices.config]\n\
+             serial = \"cpuinfo\"\nserial_path = \"{cpuinfo}\"\nname = \"Alpha\"\nrevision = \"r2\"\n\
+             data = \"{data}\"\n",
+            cpuinfo = self.dir.join("cpuinfo").display(),
+            data = self.dir.join("data").display(),
+        )
+    }
+}
+
+/// A slot manifest, schema 3, as the slots driver writes it.
+fn manifest(slot: &str, product: &str, version: &str) -> String {
+    format!(
+        "{{\"schema\":3,\"id\":\"{slot}\",\"product\":\"{product}\",\"version\":\"{version}\",\"board\":\"reference\",\
+         \"image\":{{\"size\":4096,\"sha256\":\"{HASH}\"}},\
+         \"verity\":{{\"root_hash\":\"{HASH}\",\"salt\":\"{HASH}\",\"data_blocks\":1,\"hash_offset\":4096}},\
+         \"boot\":{{\"files\":{{\"cmdline.txt\":\"{HASH}\"}}}}}}"
+    )
+}
+
+/// lemnosd over a board file's text, with the identity driver as well as the fake devices.
+fn start_lemnosd_board(socket: &Path, board: &str) -> Service {
+    Service::start(LemnosdConfig {
+        socket: socket.to_path_buf(),
+        name: "t".to_string(),
+        board: parse(board).expect("board"),
+        drivers: vec![
+            entry::<FakeAccelerometer>(),
+            entry::<FakeCounter>(),
+            entry::<Identity>(),
+        ],
+        backend: Box::new(SimBoard::new()),
+        options: HostOptions::default(),
+    })
+    .expect("lemnosd")
+}
+
+/// The facts the node's hello document carries now, by name. `None` until a session has them.
+fn hello(dashboard: &Orion) -> Option<BTreeMap<String, String>> {
+    let node = dashboard.node().ok()?;
+    Some(
+        node.facts
+            .into_iter()
+            .map(|fact| (fact.name, String::from_utf8_lossy(&fact.value).into_owned()))
+            .collect(),
+    )
+}
+
+/// Waits until the hello document has `name`, and returns the facts.
+fn hello_with(dashboard: &Orion, name: &str) -> BTreeMap<String, String> {
+    wait_for(&format!("the fact {name}"), || {
+        hello(dashboard).filter(|facts| facts.contains_key(name))
+    })
+}
+
+#[test]
+fn the_board_publishes_its_identity_facts_and_what_it_offers() {
+    let dir = dir("facts");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
+    files.boot("os-2", "an-os", "2.0");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+
+    let facts = hello_with(&dashboard, "offers");
+    let expected: BTreeMap<String, String> = [
+        ("family", "reference"),
+        ("model", "Alpha r2"),
+        ("offers", OFFERS),
+        ("serial", "0000000000abcdef"),
+        ("version.lemnos", env!("CARGO_PKG_VERSION")),
+        ("version.os", "2.0"),
+        ("version.product", "an-os"),
+        ("version.slot", "os-2"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect();
+    assert_eq!(facts, expected);
+}
+
+#[test]
+fn a_fact_that_cannot_be_read_is_absent() {
+    let dir = dir("absent");
+    let lemnosd = dir.join("lemnosd.sock");
+    // No Serial line, and no slot is booted: those two facts cannot be known.
+    let files = IdentityFiles::new(&dir, "model name : no serial here\n");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+
+    let facts = hello_with(&dashboard, "offers");
+    let names: Vec<&str> = facts.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["family", "model", "offers", "version.lemnos"],
+        "no serial and no running slot: absent, not guessed"
+    );
+}
+
+#[test]
+fn the_running_slot_is_followed_without_a_rebind() {
+    let dir = dir("slot");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
+    files.boot("os-2", "an-os", "2.0");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    hello_with(&dashboard, "version.slot");
+
+    // The boot marker moves to another slot while lemnosd keeps running: the fact follows it.
+    files.boot("os-3", "other-os", "3.0");
+    wait_for("the running slot is os-3", || {
+        hello(&dashboard).filter(|facts| {
+            facts.get("version.slot").map(String::as_str) == Some("os-3")
+                && facts.get("version.product").map(String::as_str) == Some("other-os")
+                && facts.get("version.os").map(String::as_str) == Some("3.0")
+        })
+    });
+}
+
+#[test]
+fn a_slot_that_becomes_known_after_the_start_is_published() {
+    let dir = dir("late-slot");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    let before = hello_with(&dashboard, "serial");
+    assert!(!before.contains_key("version.slot"), "{before:?}");
+
+    // A new fact is a new topic: the session is published again, and the fact is there.
+    files.boot("os-2", "an-os", "2.0");
+    let after = hello_with(&dashboard, "version.slot");
+    assert_eq!(after.get("version.slot").map(String::as_str), Some("os-2"));
+    assert_eq!(
+        after.get("serial").map(String::as_str),
+        Some("0000000000abcdef")
+    );
+}
+
+#[test]
+fn offers_follow_a_device_going_and_coming() {
+    let dir = dir("offers");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
+    files.boot("os-2", "an-os", "2.0");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let service = start_lemnosd_board(&lemnosd, &files.board());
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    hello_with(&dashboard, "offers");
+    let offers =
+        |dashboard: &Orion| hello(dashboard).and_then(|facts| facts.get("offers").cloned());
+    wait_for("every device offered", || {
+        (offers(&dashboard).as_deref() == Some(OFFERS)).then_some(())
+    });
+
+    // The counter is switched off: its contract is no longer offered; on again, it is.
+    let client = lemnos_client::Client::connect(&lemnosd, "test").expect("lemnosd");
+    let counter = client
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|device| device.name == "thing")
+        .expect("the counter");
+    client.set_power(counter.index, false).expect("off");
+    wait_for("the counter's contract not offered", || {
+        (offers(&dashboard).as_deref() == Some("accelerometer/1 system.identity/1")).then_some(())
+    });
+    client.set_power(counter.index, true).expect("on");
+    wait_for("the counter's contract offered again", || {
+        (offers(&dashboard).as_deref() == Some(OFFERS)).then_some(())
+    });
+    drop(service);
 }
