@@ -39,10 +39,10 @@ pub mod handles {
         pub const MAX_HANDLE_BUFFERS: u32 = 128;
         /// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
         pub const MAX_PLANES: u32 = 8;
-        /// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
+        /// Bytes one plane's length takes in StreamRingHandles' `plane_bytes`.
         pub const PLANE_LENGTH_BYTES: usize = 4;
-        /// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
-        pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
+        /// The descriptors that come before the buffers' in StreamRingHandles: the ring and the doorbell.
+        pub const HANDLE_DESCRIPTORS_BEFORE: u32 = crate::ring::fds::BEFORE as u32;
     }
 }
 pub use handles::{HANDLE_DESCRIPTORS_BEFORE, MAX_HANDLE_BUFFERS, MAX_PLANES, PLANE_LENGTH_BYTES};
@@ -57,7 +57,7 @@ pub const REPLY_OVERHEAD: usize = 32;
 /// is one part of the wire, with its own hash: see [`PART_HASHES`].
 pub mod feature {
     constants! {
-        /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
+        /// The host takes StreamOpenHandles and may answer it with StreamRingHandles: a stream whose
         /// buffers are one descriptor each.
         pub const STREAM_HANDLES: u64 = 1;
         /// The host takes Packages, and answers it with what became of its driver packages.
@@ -65,8 +65,12 @@ pub mod feature {
         /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
         /// whoever started them.
         pub const JOBS: u64 = 4;
-        /// Every bit of the parts that are folded into the core hash.
-        pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS;
+        /// The host's streams are shared-memory rings (`docs/ring.md`): StreamRings and
+        /// StreamRingHandles are laid out as [`crate::ring::fds`] says. A host without this bit
+        /// answers with the older layout, which this build does not read.
+        pub const SHARED_RINGS: u64 = 8;
+        /// Every bit of the parts that are folded into the core hash, and of the shared-rings part.
+        pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS | SHARED_RINGS;
     }
     /// The host takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints: a
     /// function's two bulk endpoints, borrowed by one connection at a time. Added after the core
@@ -79,7 +83,7 @@ pub mod feature {
 
 /// The parts a feature bit stands for, in bit order: part `n` is bit `1 << (n - 1)`. A part is
 /// numbered where its frames are declared in [`frames!`]; 0 is the core.
-pub const PARTS: usize = 3;
+pub const PARTS: usize = 4;
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -373,7 +377,7 @@ frames! {
         16 SetPower { id: u32, device: u32, on: bool }
         17 StreamOpen { id: u32, device: u32, name: &'a str }
         /// `descriptors` file descriptors travel with this frame over `SCM_RIGHTS`.
-        18 StreamReady {
+        18 StreamRings {
             id: u32,
             buffers: u32,
             descriptors: u8,
@@ -399,16 +403,16 @@ frames! {
     // The stream-handles part: a stream whose buffers are one descriptor each. Its constants are
     // in [`handles`].
     stream_handles = 1 {
-        /// StreamOpen from a client that can also take StreamHandles for an answer. Sent only to a
+        /// StreamOpen from a client that can also take StreamRingHandles for an answer. Sent only to a
         /// host whose Welcome set [`feature::STREAM_HANDLES`].
         22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
-        /// StreamReady for a stream whose buffers are one descriptor each, or one per plane.
+        /// StreamRings for a stream whose buffers are one descriptor each, or one per plane.
         /// `plane_bytes` is each plane's length, [`PLANE_LENGTH_BYTES`] little-endian bytes each,
         /// adding up to `buffer_bytes`; empty when a buffer is one plane. `descriptors` is 2 plus
         /// `buffers` times the planes, all with this frame over `SCM_RIGHTS`: the ring, the
         /// doorbell, then buffer 0's planes in order, buffer 1's, and so on. At most
         /// [`MAX_HANDLE_BUFFERS`] buffer descriptors.
-        23 StreamHandles {
+        23 StreamRingHandles {
             id: u32,
             buffers: u32,
             descriptors: u8,
@@ -451,9 +455,15 @@ frames! {
         /// JobDone follows.
         31 JobCancel { id: u32, job: u64 }
     }
+    // The shared-rings part: the stream answers are shared-memory rings. Its frames are
+    // StreamRings and StreamRingHandles, which are declared in the core and the stream-handles
+    // part; this part states the bit, so a peer can see whether the host's layout is the one
+    // this build reads.
+    shared_rings = 4 {
+    }
 }
 
-/// How many descriptors StreamHandles carries for a stream of `buffers` buffers of `planes`
+/// How many descriptors StreamRingHandles carries for a stream of `buffers` buffers of `planes`
 /// planes each, or `None` when that many can't each be a descriptor.
 #[must_use]
 pub const fn handle_descriptors(buffers: u32, planes: u32) -> Option<u8> {
@@ -469,7 +479,7 @@ pub const fn handle_descriptors(buffers: u32, planes: u32) -> Option<u8> {
     }
 }
 
-/// A buffer's planes, by length: what StreamHandles' `plane_bytes` carries.
+/// A buffer's planes, by length: what StreamRingHandles' `plane_bytes` carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Planes {
     lengths: [u32; MAX_PLANES as usize],
@@ -507,7 +517,7 @@ impl Planes {
         })
     }
 
-    /// Reads `plane_bytes` from StreamHandles, checked as [`new`](Self::new) checks; empty is
+    /// Reads `plane_bytes` from StreamRingHandles, checked as [`new`](Self::new) checks; empty is
     /// one plane of `buffer_bytes`.
     #[must_use]
     pub fn decode(plane_bytes: &[u8], buffer_bytes: u32) -> Option<Self> {
@@ -531,7 +541,7 @@ impl Planes {
         Self::new(lengths.get(..count)?, buffer_bytes)
     }
 
-    /// The bytes StreamHandles carries for these planes: empty for one plane.
+    /// The bytes StreamRingHandles carries for these planes: empty for one plane.
     #[must_use]
     pub fn encode(&self, out: &mut [u8; PLANE_LENGTH_BYTES * MAX_PLANES as usize]) -> usize {
         if self.count == 1 {
@@ -705,11 +715,11 @@ fn check_parts(bytes: &[u8]) -> Result<(), WireError> {
 }
 
 /// The names of the parts, in the order [`PART_HASHES`] lists them.
-pub const PART_NAMES: [&str; PARTS] = ["stream-handles", "packages", "jobs"];
+pub const PART_NAMES: [&str; PARTS] = ["stream-handles", "packages", "jobs", "shared-rings"];
 
 /// The hash of each part: its base frames, and its constants. Index `n` is the part numbered
 /// `n + 1` in [`frames!`]. Each one moves only when that part's base changes.
-pub const PART_HASHES: [u64; PARTS] = [part_hash(1), part_hash(2), part_hash(3)];
+pub const PART_HASHES: [u64; PARTS] = [part_hash(1), part_hash(2), part_hash(3), part_hash(4)];
 
 const fn part_hash(part: u8) -> u64 {
     let mut hash = hash::OFFSET;
@@ -719,6 +729,10 @@ const fn part_hash(part: u8) -> u64 {
     }
     if part == 2 {
         hash = package_mode::fold_constants(hash);
+    }
+    if part == 4 {
+        // The descriptors of the shared rings: their order is the layout this part stands for.
+        hash = crate::ring::fds::fold_constants(hash);
     }
     hash
 }
@@ -736,7 +750,6 @@ pub const CORE_HASH: u64 = {
     hash = Frame::fold_part(hash, 0);
     hash = description::fold_framing(hash);
     hash = crate::ring::fold_constants(hash);
-    hash = crate::ring::offsets::fold_constants(hash);
     hash
 };
 

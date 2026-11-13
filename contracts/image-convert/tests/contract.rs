@@ -7,7 +7,8 @@ use lemnos_core::{
     Shape, Status, Writer,
 };
 use lemnos_measure::test_alloc::{Counting, allocations};
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout, Producer, STATE_FAULT, heap_words};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
+use lemnos_wire::testing::Harness;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -222,55 +223,75 @@ fn a_caller_finds_the_conversions_and_the_stream() {
 const BUFFERS: u32 = 4;
 const BUFFER_BYTES: usize = 256;
 
-/// The block's end: reads a job, writes its output, publishes the completion.
-struct Block {
-    ring: Producer,
+/// The host's end (the harness) and the consumer's end, over one stream.
+struct Rig {
+    host: Harness,
+    consumer: Consumer,
     sequence: u64,
     counters: Counters,
 }
 
-impl Block {
-    /// Takes at most one job. Returns `false` when none is waiting.
-    fn run_one(&mut self, pool: &mut [Vec<u8>]) -> bool {
-        // Collect the buffers the consumer has released, so its return queue never fills.
-        while self.ring.pop_return().unwrap().is_some() {}
+impl Rig {
+    fn new() -> Self {
+        let layout = Layout::new(BUFFERS, BUFFER_BYTES as u32, 4, JOB_BYTES as u32).unwrap();
+        let (host, consumer) = Harness::new(layout, true, true).unwrap();
+        Self {
+            host,
+            consumer,
+            sequence: 0,
+            counters: Counters::default(),
+        }
+    }
+
+    /// The block's end: takes at most one job, writes its output, publishes the completion.
+    /// Returns `false` when none is waiting.
+    fn run_one(&mut self) -> bool {
+        // Collect the buffers the consumer has released, so they can be published again.
+        self.host.reclaim();
         let mut bytes = [0u8; JOB_BYTES];
-        let Some(len) = self.ring.pop_job(&mut bytes).unwrap() else {
+        let Some(len) = self.host.pop_job(&mut bytes).unwrap() else {
             return false;
         };
         let job = match ConvertJob::decode(&mut Reader::new(&bytes[..len])) {
             Ok(job) => job,
             Err(_) => {
-                self.ring.close(STATE_FAULT);
+                self.host.end(STATE_FAULT);
                 return false;
             }
         };
-        let written = convert(pool, &job).unwrap_or_else(|| {
+        let written = convert(&self.consumer, &mut self.host, &job).unwrap_or_else(|| {
             self.counters.errors += 1;
             0
         });
         if written != 0 {
             self.counters.jobs += 1;
         }
-        let sent = self
-            .ring
-            .push_frame(FrameSlot {
-                buffer: job.output.buffer,
-                bytes: written,
-                sequence: self.sequence,
-                identity: job.identity,
-                timestamp_ns: 0,
-                fence: 0,
-            })
-            .unwrap();
-        assert!(sent, "the completion ring is full");
+        assert!(
+            self.host
+                .publish(job.output.buffer, written, self.sequence, job.identity, 0),
+            "the completion was not published"
+        );
         self.sequence += 1;
         true
     }
+
+    /// Posts one job, lets the block run it, and takes its completion.
+    fn convert(&mut self, job: &ConvertJob) -> FrameSlot {
+        let mut bytes = [0u8; JOB_BYTES];
+        let used = {
+            let mut writer = Writer::new(&mut bytes);
+            job.encode(&mut writer).unwrap();
+            writer.len()
+        };
+        assert!(self.consumer.jobs().post(&bytes[..used]).unwrap());
+        assert!(self.run_one());
+        self.consumer.pop_frame().unwrap().expect("a completion")
+    }
 }
 
-/// Converts the job. `None` when the job is refused.
-fn convert(pool: &mut [Vec<u8>], job: &ConvertJob) -> Option<u32> {
+/// Converts the job. `None` when the job is refused. The input is read through the consumer's view
+/// of the shared buffers, and the output is written by the host.
+fn convert(consumer: &Consumer, host: &mut Harness, job: &ConvertJob) -> Option<u32> {
     let (i, o) = (job.input, job.output);
     let pair = ConversionPair {
         from: i.fourcc,
@@ -293,49 +314,18 @@ fn convert(pool: &mut [Vec<u8>], job: &ConvertJob) -> Option<u32> {
     {
         return None;
     }
-    let [src, dst] = pool
-        .get_disjoint_mut([i.buffer as usize, o.buffer as usize])
-        .ok()?;
-    for at in (0..o.stride as usize * o.height as usize).step_by(PIXEL) {
+    let n = (o.stride * o.height) as usize;
+    let mut src = [0u8; BUFFER_BYTES];
+    let mut dst = [0u8; BUFFER_BYTES];
+    if !consumer.read(i.buffer, 0, &mut src[..n]) {
+        return None;
+    }
+    for at in (0..n).step_by(PIXEL) {
         dst[at..at + 3].copy_from_slice(&src[at..at + 3]);
         dst[at + 3] = 255;
     }
-    Some(o.stride * o.height)
-}
-
-struct Rig {
-    block: Block,
-    consumer: Consumer,
-    pool: Vec<Vec<u8>>,
-}
-
-impl Rig {
-    fn new() -> Self {
-        let layout = Layout::new(BUFFERS, BUFFER_BYTES as u32, 4, JOB_BYTES as u32).unwrap();
-        let memory = heap_words(layout.ring_words());
-        Self {
-            block: Block {
-                ring: Producer::new(memory.clone(), layout).unwrap(),
-                sequence: 0,
-                counters: Counters::default(),
-            },
-            consumer: Consumer::attach(memory, layout).unwrap(),
-            pool: vec![vec![0; BUFFER_BYTES]; BUFFERS as usize],
-        }
-    }
-
-    /// Posts one job, lets the block run it, and takes its completion.
-    fn convert(&mut self, job: &ConvertJob) -> FrameSlot {
-        let mut bytes = [0u8; JOB_BYTES];
-        let used = {
-            let mut writer = Writer::new(&mut bytes);
-            job.encode(&mut writer).unwrap();
-            writer.len()
-        };
-        assert!(self.consumer.push_job(&bytes[..used]).unwrap());
-        assert!(self.block.run_one(&mut self.pool));
-        self.consumer.pop_frame().unwrap().expect("a completion")
-    }
+    host.write(o.buffer, 0, &dst[..n])
+        .then_some(o.stride * o.height)
 }
 
 fn two_by_one(output_fourcc: u32) -> ConvertJob {
@@ -349,12 +339,14 @@ fn two_by_one(output_fourcc: u32) -> ConvertJob {
 #[test]
 fn a_simulated_conversion_keeps_colour_and_drops_alpha() {
     let mut rig = Rig::new();
-    rig.pool[0][..8].copy_from_slice(&[1, 2, 3, 9, 4, 5, 6, 0]);
+    assert!(rig.consumer.write(0, 0, &[1, 2, 3, 9, 4, 5, 6, 0]));
     let done = rig.convert(&two_by_one(XRGB));
     assert_eq!(done.identity, 0xcafe);
     assert_eq!(done.bytes, 8);
-    assert_eq!(&rig.pool[1][..8], &[1, 2, 3, 255, 4, 5, 6, 255]);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+    let mut out = [0u8; 8];
+    assert!(rig.consumer.read(1, 0, &mut out));
+    assert_eq!(out, [1, 2, 3, 255, 4, 5, 6, 255]);
+    assert!(rig.consumer.release(done.buffer));
 }
 
 #[test]
@@ -363,7 +355,7 @@ fn a_conversion_the_block_lacks_completes_as_failed() {
     let done = rig.convert(&two_by_one(ARGB));
     assert_eq!(done.identity, 0xcafe);
     assert_eq!(done.bytes, 0);
-    assert_eq!(rig.block.counters, Counters { jobs: 0, errors: 1 });
+    assert_eq!(rig.counters, Counters { jobs: 0, errors: 1 });
 }
 
 #[test]
@@ -382,14 +374,14 @@ fn jobs_in_a_row_reuse_the_buffers_without_allocating() {
     let job = two_by_one(XRGB);
     // Warm up: the first job sets up whatever the thread needs, and its output is released.
     let done = rig.convert(&job);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+    assert!(rig.consumer.release(done.buffer));
     let ((), count) = allocations(|| {
         for identity in 1..1001 {
             let done = rig.convert(&ConvertJob { identity, ..job });
             assert_eq!(done.identity, identity);
-            assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+            assert!(rig.consumer.release(done.buffer));
         }
     });
     assert_eq!(count, 0, "allocations in 1000 jobs");
-    assert_eq!(rig.block.counters.jobs, 1001);
+    assert_eq!(rig.counters.jobs, 1001);
 }

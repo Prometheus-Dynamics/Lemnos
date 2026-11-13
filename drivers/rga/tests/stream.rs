@@ -13,7 +13,6 @@ use lemnos_driver_rga::Rga;
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::Consumer;
 
 #[derive(Clone, Default)]
 struct Clock(Arc<AtomicU64>);
@@ -79,15 +78,13 @@ fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks()
     assert!(job_stream(&host, index, 2).is_err());
 
     let lease = host.stream_attach(index, "convert", CallerId(5)).unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    let mut consumer = lease.consumer_writable().unwrap();
     for _ in 0..4 {
         clock.0.fetch_add(1_000_000, Ordering::Relaxed);
         host.tick();
     }
-    let offset = lease.layout.buffer_offset(0).unwrap();
-    assert!(lease.buffers.write(offset, &[1, 2, 3, 4, 5, 6]));
-    let output = lease.layout.buffer_offset(1).unwrap();
-    assert!(lease.buffers.write(output, &[0x5a; 8]));
+    assert!(consumer.write(0, 0, &[1, 2, 3, 4, 5, 6]));
+    assert!(consumer.write(1, 0, &[0x5a; 8]));
     let job = ConvertJob {
         identity: 77,
         input: ImageRef {
@@ -109,7 +106,7 @@ fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks()
     let mut writer = Writer::new(&mut bytes);
     job.encode(&mut writer).unwrap();
     let used = writer.len();
-    assert!(consumer.push_job(&bytes[..used]).unwrap());
+    assert!(consumer.jobs().post(&bytes[..used]).unwrap());
     let mut done = None;
     for _ in 0..4 {
         clock.0.fetch_add(1_000_000, Ordering::Relaxed);
@@ -123,7 +120,7 @@ fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks()
     assert_eq!((done.buffer, done.identity, done.bytes), (1, 77, 0));
     // Nothing was computed in software.
     let mut out = [0u8; 8];
-    assert!(lease.buffers.read(output, &mut out));
+    assert!(consumer.read(1, 0, &mut out));
     assert_eq!(out, [0x5a; 8]);
     // Counted as an error of the contract.
     let id = MethodId {

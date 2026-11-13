@@ -112,6 +112,25 @@ impl Pool {
     /// # Errors
     ///
     /// [`RingError`] if the shape isn't allowed or the memory can't be made.
+    /// A pool of `buffers`, each a slice of one of `fds`, which this process fills: the publisher
+    /// maps the descriptors writable and writes buffers it has taken back ([`Pool::bytes_mut`] reaches
+    /// them through [`crate::BufferWriter::buffer_mut`]). The descriptors go to subscribers too, as
+    /// with [`Pool::new`]; a subscriber maps them read-only unless it asks for [`PoolView::attach_writable`].
+    ///
+    /// # Errors
+    ///
+    /// [`RingError`] if a buffer names a descriptor that isn't there or runs past its end, or a
+    /// descriptor can't be mapped writable.
+    pub fn mapped(
+        generation: u32,
+        fds: Vec<OwnedFd>,
+        buffers: Vec<BufferDesc>,
+    ) -> Result<Self, RingError> {
+        let maps = map_all(fds, &buffers, true)?;
+        Self::with(generation, Backing::Memory(maps), buffers)
+    }
+
+    /// The pool's buffers, mapped in this process for writing.
     pub fn in_memory(generation: u32, count: u32, size: usize) -> Result<Self, RingError> {
         let total = (count as usize)
             .checked_mul(size)
@@ -174,6 +193,20 @@ impl Pool {
         PoolView::attach(self.page_fd()?, fds, &self.buffers)
     }
 
+    /// A subscriber's view of this pool in this process whose buffers it may write, for a
+    /// consumer that fills buffers for the publisher. The pool page stays read-only.
+    ///
+    /// # Errors
+    ///
+    /// As [`PoolView::attach_writable`].
+    pub fn writable_view(&self) -> Result<PoolView, RingError> {
+        let fds = self
+            .descriptors()
+            .map(|fd| fd.try_clone_to_owned())
+            .collect::<Result<Vec<_>, _>>()?;
+        PoolView::attach_writable(self.page_fd()?, fds, &self.buffers)
+    }
+
     /// The pool page, as the publisher writes it: tickets and cut-offs.
     #[must_use]
     pub const fn page(&self) -> &WriteMap {
@@ -199,6 +232,7 @@ pub struct PoolView {
     page: ReadMap,
     maps: Vec<Mapped>,
     buffers: Vec<BufferDesc>,
+    writable: bool,
 }
 
 impl PoolView {
@@ -215,6 +249,29 @@ impl PoolView {
         fds: Vec<OwnedFd>,
         buffers: &[BufferDesc],
     ) -> Result<Self, RingError> {
+        Self::with_access(page, fds, buffers, false)
+    }
+
+    /// As [`attach`](Self::attach), but the buffers are mapped writable, for a consumer that fills
+    /// them for the publisher. The descriptors must be writable too: a read-only one fails here.
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`](Self::attach), and [`RingError`] if a descriptor can't be mapped writable.
+    pub fn attach_writable(
+        page: OwnedFd,
+        fds: Vec<OwnedFd>,
+        buffers: &[BufferDesc],
+    ) -> Result<Self, RingError> {
+        Self::with_access(page, fds, buffers, true)
+    }
+
+    fn with_access(
+        page: OwnedFd,
+        fds: Vec<OwnedFd>,
+        buffers: &[BufferDesc],
+        writable: bool,
+    ) -> Result<Self, RingError> {
         let page = ReadMap::new(page)?;
         let (generation, count) = page::read(&page)?;
         if count as usize != buffers.len() {
@@ -223,9 +280,23 @@ impl PoolView {
         Ok(Self {
             generation,
             page,
-            maps: map_all(fds, buffers, false)?,
+            maps: map_all(fds, buffers, writable)?,
             buffers: buffers.to_vec(),
+            writable,
         })
+    }
+
+    /// The bytes of `buffer`, to write, if this view was attached writable and the buffer is in
+    /// the pool. What the consumer writes is only ever read by the publisher after the job that
+    /// names it (see the contract's rule for consumer-filled buffers).
+    pub fn bytes_mut(&mut self, buffer: BufferIndex) -> Option<&mut [u8]> {
+        if !self.writable {
+            return None;
+        }
+        let desc = *self.buffers.get(buffer.0 as usize)?;
+        self.maps
+            .get_mut(usize::from(desc.descriptor))?
+            .bytes_mut(desc.offset as usize, desc.size as usize)
     }
 
     /// The pool's generation.
@@ -258,7 +329,9 @@ impl PoolView {
         &self.page
     }
 
-    pub(crate) fn bytes(&self, buffer: BufferIndex) -> Option<&[u8]> {
+    /// The bytes of `buffer`, to read. Only while the frame that names it is held, for a
+    /// consumer's read of a frame's bytes; see [`crate::Held`].
+    pub fn bytes(&self, buffer: BufferIndex) -> Option<&[u8]> {
         let desc = self.buffers.get(buffer.0 as usize)?;
         self.maps
             .get(usize::from(desc.descriptor))?

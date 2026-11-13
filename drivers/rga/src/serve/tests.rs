@@ -6,7 +6,7 @@
 //! device node.
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_image_blend::{self as blend, BlendJob, BlendOp};
@@ -17,12 +17,12 @@ use lemnos_driver_rga_sys::request::Job as Request;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::StreamEndpoint;
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
 use lemnos_host::{Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
-use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, FrameSlot, Layout as RingLayout, STATE_FAULT};
 
 use lemnos_contract_image_blend::ImageBlend;
@@ -58,69 +58,38 @@ enum Memory {
     ShortHandles,
 }
 
-/// The pool as the host addresses it, over one mapping per buffer.
-struct Mapped {
-    buffers: Vec<Mapping>,
-    stride: usize,
-    bytes: usize,
-}
-
-impl Mapped {
-    fn at(&self, offset: usize, len: usize) -> Option<(&Mapping, usize)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        fits.then(|| self.buffers.get(offset / self.stride).map(|m| (m, inner)))?
-    }
-}
-
-impl BufferMemory for Mapped {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        self.at(offset, data.len())
-            .is_some_and(|(map, inner)| map.write_bytes(inner, data).is_some())
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        let Some((map, inner)) = self.at(offset, out.len()) else {
-            return false;
-        };
-        out.copy_from_slice(&map.as_slice()[inner..inner + out.len()]);
-        true
-    }
-}
-
+/// Each buffer of a stream its own sealed memfd, lent as its handle: what a stream of dma-bufs
+/// looks like to a driver. `ShortHandles` lends a memfd shorter than the buffer.
 struct Allocator(Memory);
 
 impl StreamAllocator for Allocator {
-    fn allocate(&self, name: &str, layout: &RingLayout) -> Result<Backing, Status> {
-        HeapAllocator.allocate(name, layout)
+    fn allocate(&self, name: &str, layout: &RingLayout) -> Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(
+    fn allocate_planes(
         &self,
         name: &str,
         layout: &RingLayout,
-        _: &str,
-    ) -> Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let (mut handles, mut buffers) = (Vec::new(), Vec::new());
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Buffers, Status> {
+        let _ = (name, heap);
+        let mut fds = Vec::new();
         for _ in 0..layout.buffers {
-            let fd: OwnedFd =
-                sealed_memfd(c"rga-stream-test", layout.stride()).map_err(|_| Status::IO)?;
-            let bytes = layout.buffer_bytes as usize;
-            buffers.push(Mapping::new(fd.as_fd(), bytes, 0, true).map_err(|_| Status::IO)?);
-            handles.push(match self.0 {
-                Memory::ShortHandles => sealed_memfd(c"rga-short", 4096).map_err(|_| Status::IO)?,
-                _ => fd,
-            });
+            for length in planes.lengths() {
+                let made = match self.0 {
+                    Memory::ShortHandles => 4096,
+                    _ if planes.count() == 1 => layout.stride(),
+                    _ => u64::from(*length),
+                };
+                fds.push(sealed_memfd(c"rga-stream-test", made).map_err(|_| Status::IO)?);
+            }
         }
-        Ok(Backing {
-            buffers: Arc::new(Mapped {
-                buffers,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync: None,
         })
     }
 }
@@ -261,28 +230,27 @@ fn driver(
     Rga::serving(needs, settings, soc, Routes::new(soc, m2m, multi))
 }
 
-/// A consumer attached to stream `name`.
+/// A consumer attached to stream `name`, writable, with the handles it was lent.
 struct Client {
-    lease: Lease,
+    handles: Option<Arc<[OwnedFd]>>,
     ring: Consumer,
 }
 
 impl Client {
     fn attach(host: &Host, name: &str, caller: u64) -> Self {
         let lease = host.stream_attach(0, name, CallerId(caller)).unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
+        let handles = lease.handles.clone();
+        let ring = lease.consumer_writable().unwrap();
+        Self { handles, ring }
     }
 
-    fn fill(&self, buffer: u32, bytes: &[u8]) {
-        let offset = self.lease.layout.buffer_offset(buffer).unwrap();
-        assert!(self.lease.buffers.write(offset, bytes));
+    fn fill(&mut self, buffer: u32, bytes: &[u8]) {
+        assert!(self.ring.write(buffer, 0, bytes));
     }
 
     fn bytes(&self, buffer: u32, len: usize) -> Vec<u8> {
         let mut out = vec![0u8; len];
-        let offset = self.lease.layout.buffer_offset(buffer).unwrap();
-        assert!(self.lease.buffers.read(offset, &mut out));
+        assert!(self.ring.read(buffer, 0, &mut out));
         out
     }
 
@@ -291,7 +259,7 @@ impl Client {
         let mut writer = Writer::new(&mut bytes);
         job.encode(&mut writer).unwrap();
         let used = writer.len();
-        assert!(self.ring.push_job(&bytes[..used]).unwrap());
+        assert!(self.ring.jobs().post(&bytes[..used]).unwrap());
     }
 
     fn done(&mut self) -> FrameSlot {
@@ -299,12 +267,12 @@ impl Client {
     }
 
     fn release(&mut self, frame: FrameSlot) {
-        assert!(self.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(self.ring.release(frame.buffer));
     }
 
     /// The raw descriptor of `buffer`'s handle, as the driver is lent it.
     fn fd(&self, buffer: u32) -> u64 {
-        self.lease.handles.as_ref().unwrap()[buffer as usize].as_raw_fd() as u64
+        self.handles.as_ref().unwrap()[buffer as usize].as_raw_fd() as u64
     }
 }
 
@@ -368,7 +336,7 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 const UNTOUCHED: u8 = 0x5a;
 
 /// Fills `buffer` of `client` with [`UNTOUCHED`].
-fn mark(client: &Client, buffer: u32, len: usize) {
+fn mark(client: &mut Client, buffer: u32, len: usize) {
     client.fill(buffer, &vec![UNTOUCHED; len]);
 }
 
@@ -394,7 +362,7 @@ fn a_job_no_hardware_route_does_fails_and_nothing_is_written() {
     let mut conv = Client::attach(&host, "convert", 2);
     rga.tick(0);
     scale.fill(0, &pattern(16 * 16 * 4, 1));
-    mark(&scale, 1, 8 * 8 * 4);
+    mark(&mut scale, 1, 8 * 8 * 4);
     // A bilinear downscale: neither unit's filter does it.
     scale.post(&ScaleJob {
         filter: Filter::Bilinear,
@@ -410,7 +378,7 @@ fn a_job_no_hardware_route_does_fails_and_nothing_is_written() {
     );
     // RGB to AR24 at 2 by 1: below both units' smallest frame.
     conv.fill(0, &[10, 20, 30, 40, 50, 60]);
-    mark(&conv, 1, 8);
+    mark(&mut conv, 1, 8);
     conv.post(&ConvertJob {
         identity: 0xB,
         input: convert_ref(0, 2, 1, RGB3, 3),
@@ -490,7 +458,7 @@ fn bytes_that_are_no_job_fault_that_consumers_stream_and_no_other() {
     let mut scale = Client::attach(&host, "scale", 1);
     let mut conv = Client::attach(&host, "convert", 2);
     rga.tick(0);
-    assert!(scale.ring.push_job(&[1, 2, 3]).unwrap());
+    assert!(scale.ring.jobs().post(&[1, 2, 3]).unwrap());
     scale.post(&scale_job(1, 0, 1, 256, 128));
     // A job the converter completes, as failed: no route does it.
     conv.post(&ConvertJob {
@@ -830,7 +798,7 @@ fn a_unit_whose_node_is_not_there_fails_its_jobs_and_is_looked_for_again() {
     let mut rga = Rga::serving(needs, Settings::default(), soc, routes);
     let mut scale = Client::attach(&host, "scale", 1);
     rga.tick(0);
-    mark(&scale, 1, 128 * 128 * 4);
+    mark(&mut scale, 1, 128 * 128 * 4);
     scale.post(&scale_job(1, 0, 1, 256, 128));
     rga.tick(MS);
     assert_eq!(scale.done().bytes, 0);
@@ -901,7 +869,7 @@ fn dev_rga_takes_dma_bufs_only_so_a_blend_on_a_plain_stream_fails() {
     rga.tick(0);
     blend.fill(0, &[0, 0, 128, 128].repeat(4));
     blend.fill(1, &[200, 0, 0, 255].repeat(4));
-    mark(&blend, 2, 16);
+    mark(&mut blend, 2, 16);
     blend.post(&blend_job(7, 0, 1, 2));
     rga.tick(1);
     let done = blend.done();
@@ -916,25 +884,19 @@ fn dev_rga_takes_dma_bufs_only_so_a_blend_on_a_plain_stream_fails() {
     assert_eq!((c.jobs, c.errors), (0, 1));
 }
 
+/// A handle shorter than its buffer is refused when a consumer attaches, before anything is mapped:
+/// the engine never sees a job that names memory the handle doesn't have.
 #[test]
-fn a_handle_shorter_than_its_image_is_caught_by_its_real_size() {
+fn a_handle_shorter_than_its_buffer_is_refused_when_the_consumer_attaches() {
     let host = host(Memory::ShortHandles);
     let (mock, _) = m2m_mock();
     let rec = Recorder::default();
     let mut rga = rk3588(&host, &mock, &rec);
-    let mut blend = Client::attach(&host, "blend", 1);
+    // The 4 KiB handles are shorter than the 256 KiB buffers the stream declares.
+    assert!(host.stream_attach(0, "blend", CallerId(1)).is_err());
     rga.tick(0);
-    // 64 by 32 at four bytes is 8 KiB: inside the stream's buffer, past the 4 KiB handle.
-    blend.post(&BlendJob {
-        foreground: blend_ref(0, 64, 32),
-        background: blend_ref(1, 64, 32),
-        output: blend_ref(2, 64, 32),
-        ..blend_job(3, 0, 1, 2)
-    });
-    rga.tick(1);
-    assert_eq!(rga.last_failure(), Some(Failure::Size));
-    assert_eq!(blend.done().bytes, 0);
-    assert!(rec.take().is_empty(), "no request left");
+    assert_eq!(rga.last_failure(), None);
+    assert!(rec.take().is_empty(), "no request was made");
 }
 
 #[test]
@@ -944,7 +906,7 @@ fn packed_gray_input_goes_to_dev_rga_and_padded_gray_fails() {
         let mut conv = Client::attach(&host, "convert", 1);
         rga.tick(0);
         conv.fill(0, &[16, 235, 128, 0, 9, 9, 9, 9]);
-        mark(&conv, 1, 16);
+        mark(&mut conv, 1, 16);
         conv.post(&ConvertJob {
             identity: 4,
             input: convert::ImageRef {
@@ -983,7 +945,7 @@ fn a_failing_dev_rga_fails_the_blend_and_runs_it_nowhere_else() {
     rga.tick(0);
     blend.fill(0, &[0, 0, 128, 128].repeat(4));
     blend.fill(1, &[200, 0, 0, 255].repeat(4));
-    mark(&blend, 2, 16);
+    mark(&mut blend, 2, 16);
     blend.post(&blend_job(7, 0, 1, 2));
     rga.tick(MS);
     let done = blend.done();

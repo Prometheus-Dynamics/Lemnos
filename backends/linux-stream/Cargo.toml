@@ -6,13 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Linux support for taking a Lemnos frame stream: receiving descriptors and mapping them"
+description = "Linux support for taking a Lemnos frame stream: receiving descriptors and bracketing dma-buf access"
 
 [lints]
 workspace = true
 
-# With no features: the mappings alone, over lemnos-linux-sys and lemnos-wire's ring, with no
-# part of the engine.
+# With no features: the descriptor receive and the dma-buf brackets alone, over lemnos-linux-sys,
+# with no part of the engine.
 [features]
 default = ["client"]
 # The `StreamPlatform` lemnos-client takes.
@@ -20,5 +20,4 @@ client = ["dep:lemnos-client"]
 
 [dependencies]
 lemnos-client = { path = "../../engine/client", optional = true }
-lemnos-wire = { path = "../../engine/wire", default-features = false }
 lemnos-linux-sys = { path = "../linux-sys" }

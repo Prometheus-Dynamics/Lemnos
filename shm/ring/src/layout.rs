@@ -27,6 +27,9 @@ pub(crate) const W_TOTAL: usize = 4;
 pub(crate) const W_HEAD: usize = 8;
 /// How many subscribers there are. Written by the ring's owner only.
 pub(crate) const W_SUBSCRIBERS: usize = 9;
+/// Why the topic ended: 0 while it runs, nonzero once its owner says it has. Written by the ring's
+/// owner only.
+pub(crate) const W_END: usize = 10;
 
 /// The most fields one ring holds.
 pub const MAX_FIELDS: u32 = 65_535;
@@ -248,7 +251,7 @@ mod tests {
             (W_MAGIC, W_LAYOUT, W_SHAPE, W_SIZES, W_TOTAL),
             (0, 1, 2, 3, 4)
         );
-        assert_eq!((W_HEAD, W_SUBSCRIBERS), (8, 9));
+        assert_eq!((W_HEAD, W_SUBSCRIBERS, W_END), (8, 9, 10));
         let g = Geometry::for_spec(&spec(3, 5, 20)).expect("shape");
         // History 5 rounds to 8; 24 lane slots round to a 32-entry index; a slot is 4 + 3 words.
         assert_eq!((g.history, g.index_slots, g.slot_words), (8, 32, 7));

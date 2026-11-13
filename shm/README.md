@@ -63,7 +63,8 @@ the same way by every party, so there is no stored offset to point somewhere els
 | 5 to 7 | Reserved, zero | |
 | 8 | Head: how many samples were ever published | Writer |
 | 9 | Subscriber count (low 32) | Owner |
-| 10 to 15 | Reserved, zero | |
+| 10 | End: 0 while the topic runs; the owner stores a nonzero code once it has ended. Written by the owner only. Was reserved zero; a reader that ignores it is unaffected, so the layout number is unchanged | Owner |
+| 11 to 15 | Reserved, zero | |
 | 16 | Lane heads: one word per field, how many samples that field ever had | Writer |
 | 16 + fields | Index: `index_slots` words | Writer |
 | 16 + fields + index_slots | Slots: `fields × history` slots of `slot_words` words | Writer |
@@ -246,8 +247,13 @@ frame only while each buffer's ticket is exactly the one in the entry.
 ## Hold marks
 
 `shm-ring-holds`. A reader's marks are a sealed page only that reader writes: word 0 is a
-version, and word `1 + b` is nonzero while it holds buffer `b`. The publisher maps each reader's
-page read-only. A buffer is free when no reader marks it.
+version, word `1 + b` is nonzero while it holds buffer `b`, and word `1 + buffers + b` is its taken
+stamp for buffer `b`: one more than the ring sequence of the last frame it read from that buffer,
+zero before any. The publisher maps each reader's page read-only. A buffer is free when no reader
+marks it.
+
+The stamp is what lets the publisher tell a replaced frame the reader read from one it never
+read: a frame is taken when a reader's stamp for its buffer is past the frame's sequence.
 
 The version is odd while the reader is changing a mark and different after every change. It is
 what lets the publisher count a reader's marks at one instant.
@@ -262,8 +268,10 @@ One fence comes first, so either the publisher sees the mark or the reader sees 
 buffer is never reused; checked with `loom`, with a reader that checks before marking as the
 variant that must be caught.
 
-The publisher never waits. It takes back the buffer published longest ago that nobody holds, never
-the newest frame, and when there is none it drops the frame.
+The publisher never waits. It takes back the buffer published longest ago that nobody holds. A
+frame some reader has read goes back at any time, so nothing is lost. A frame no reader has read
+goes back only when the publisher holds no buffer of its own to fill, and never while it is the
+newest frame. When there is none, it drops the frame.
 
 Limits, per reader, applied by the publisher from what it sees:
 

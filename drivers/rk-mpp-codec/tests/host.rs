@@ -18,7 +18,7 @@ use lemnos_driver_rk_mpp::played::{Kernel, iova};
 use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, MAX_RUNS, Message, Session};
 use lemnos_driver_rk_mpp_codec::{RkMpp, RkMppNeeds};
 use lemnos_host::board::parse;
-use lemnos_host::stream::HeapAllocator;
+use lemnos_host::stream::MemfdAllocator;
 use lemnos_host::{Host, Options, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::{SimBoard, SimClock};
@@ -107,7 +107,7 @@ impl Rig {
                 Box::new(sim),
                 Arc::new(clock.clone()),
                 Options::default(),
-                Arc::new(HeapAllocator),
+                Arc::new(MemfdAllocator),
             )
         }
         .unwrap();

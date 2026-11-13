@@ -14,7 +14,6 @@ use lemnos_core::{
 };
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
-use lemnos_wire::ring::Consumer;
 
 use super::fixture::{self, CONTROL_INTERFACE, MODE_MJPEG, STREAM_INTERFACE};
 use super::mock::MockUsb;
@@ -224,7 +223,7 @@ fn frames_reach_a_consumer_and_a_camera_that_leaves_is_opened_again_by_name() {
         .host
         .stream_attach(rig.index, "frames", CONSUMER)
         .unwrap();
-    let mut consumer = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    let mut consumer = lease.consumer().unwrap();
     first.queue(vec![
         payload(EOF, b""),
         payload(FID, b"one "),
@@ -233,10 +232,9 @@ fn frames_reach_a_consumer_and_a_camera_that_leaves_is_opened_again_by_name() {
     rig.ticks();
     let frame = consumer.pop_frame().unwrap().expect("a frame on the ring");
     let mut bytes = vec![0u8; frame.bytes as usize];
-    let offset = lease.layout.buffer_offset(frame.buffer).unwrap();
-    assert!(lease.buffers.read(offset, &mut bytes));
+    assert!(consumer.read(frame.buffer, 0, &mut bytes));
     assert_eq!(bytes, b"one frame");
-    assert!(consumer.release(frame.buffer, frame.fence).unwrap());
+    assert!(consumer.release(frame.buffer));
     assert_eq!(rig.counters().unwrap().frames, 1);
 
     // The camera leaves; another is plugged in where it was. The old handle can't reach it. The

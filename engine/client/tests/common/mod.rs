@@ -25,7 +25,7 @@ pub struct StreamScript {
 
 #[derive(Default)]
 pub struct Control {
-    /// StreamHandles' `plane_bytes`: empty for buffers of one plane.
+    /// StreamRingHandles' `plane_bytes`: empty for buffers of one plane.
     pub plane_bytes: Mutex<Vec<u8>>,
     pub connections: AtomicU32,
     /// 0 means answer with the real version.
@@ -40,7 +40,7 @@ pub struct Control {
     pub stream: Mutex<Option<StreamScript>>,
     /// The `features` of Welcome. 0 is a service from before any were added.
     pub features: AtomicU64,
-    /// Answer a stream being opened with StreamHandles, not StreamReady.
+    /// Answer a stream being opened with StreamRingHandles, not StreamRings.
     pub answer_handles: AtomicBool,
     /// The kind of every frame that asked for a stream, in order.
     pub opens: Mutex<Vec<u16>>,
@@ -387,7 +387,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             let descriptors = script.claimed;
                             let plane_bytes = control.plane_bytes.lock().unwrap().clone();
                             let answer = if control.answer_handles.load(Ordering::SeqCst) {
-                                Frame::StreamHandles {
+                                Frame::StreamRingHandles {
                                     id,
                                     buffers,
                                     descriptors,
@@ -398,7 +398,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                                     plane_bytes: &plane_bytes,
                                 }
                             } else {
-                                Frame::StreamReady {
+                                Frame::StreamRings {
                                     id,
                                     buffers,
                                     descriptors,
@@ -486,5 +486,177 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
         if stream.write_all(&out).is_err() {
             return;
         }
+    }
+}
+
+// The host's end of a stream, made over the shm objects a service makes. The descriptors come
+// out in the order `lemnos_wire::ring::fds` gives, so a fake service can send them as it would.
+
+use lemnos_wire::ring::{FrameInfo, JOB_ACK_BYTES, JobCollector};
+use shm_ring::{
+    FieldId, Flags, ReadMap, Ring as ShmRing, SampleTime, WriteMap, read_only, sealed_memfd,
+};
+use shm_ring_buffers::{BufferIndex, BufferWriter, MAX_PER_FRAME, Pool};
+use shm_ring_doorbell::{Bell, Doorbell};
+use shm_ring_holds::{HoldTable, Limits, Marks};
+
+pub struct StreamHost {
+    layout: lemnos_wire::ring::Layout,
+    planes: u32,
+    ring: ShmRing,
+    publisher: BufferWriter<WriteMap>,
+    jobs: JobCollector,
+    holds: HoldTable<ReadMap>,
+    bell: Bell,
+}
+
+impl StreamHost {
+    /// A stream of `layout`, with each plane's length in `planes` (empty for one plane of a whole
+    /// stride). `shared` makes the pool one descriptor; otherwise each plane of each buffer is its
+    /// own. Returns the host's end and the descriptors a service sends, in order.
+    pub fn make(
+        layout: lemnos_wire::ring::Layout,
+        planes: &[u32],
+        shared: bool,
+    ) -> (Self, Vec<OwnedFd>) {
+        let layout = layout.checked().unwrap();
+        let descs = layout.pool_descs(shared, planes);
+        let pool_fds: Vec<OwnedFd> = if shared {
+            vec![sealed_memfd(layout.pool_bytes() as usize).unwrap()]
+        } else {
+            descs
+                .iter()
+                .map(|d| sealed_memfd(d.size as usize).unwrap())
+                .collect()
+        };
+        let copies: Vec<OwnedFd> = pool_fds.iter().map(|fd| fd.try_clone().unwrap()).collect();
+        let pool = Pool::mapped(1, copies, descs).unwrap();
+        let ring = ShmRing::create(&layout.frame_spec()).unwrap();
+        let jobs_ring = ShmRing::create(&layout.job_spec()).unwrap();
+        let acks = sealed_memfd(JOB_ACK_BYTES).unwrap();
+        let publisher = BufferWriter::new(ring.writer().unwrap(), FieldId(0), pool);
+        let marks_page =
+            sealed_memfd(Marks::<WriteMap>::page_bytes(layout.buffers).unwrap()).unwrap();
+        let mut holds = HoldTable::new(layout.buffers);
+        holds
+            .add(0, read_only(marks_page.as_fd()).unwrap(), Limits::default())
+            .unwrap();
+        let doorbell = Doorbell::create().unwrap();
+        let (bell_fd, bell_page) = doorbell.subscriber_fds().unwrap();
+        let (host_eventfd, host_page) = doorbell.bell_fds().unwrap();
+        let bell = Bell::attach(host_eventfd, host_page).unwrap();
+
+        let mut out = vec![
+            ring.read_fd().unwrap(),
+            publisher.pool().page_fd().unwrap(),
+            jobs_ring.write_fd().unwrap(),
+            read_only(acks.as_fd()).unwrap(),
+            bell_fd,
+            bell_page,
+            marks_page,
+        ];
+        for fd in publisher.pool().descriptors() {
+            out.push(fd.try_clone_to_owned().unwrap());
+        }
+        let jobs = JobCollector::new(
+            jobs_ring.read_fd().unwrap(),
+            acks.try_clone().unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let host = Self {
+            layout,
+            planes: planes.len().max(1) as u32,
+            ring,
+            publisher,
+            jobs,
+            holds,
+            bell,
+        };
+        (host, out)
+    }
+
+    /// Writes `data` into pool buffer `index` (buffer `b`'s plane `p` is `b × planes + p`) at
+    /// `offset`. Only a buffer that isn't published can be written: before its frame goes out, or
+    /// once it has been reclaimed.
+    pub fn write(&mut self, index: u32, offset: usize, data: &[u8]) -> bool {
+        let end = offset.checked_add(data.len());
+        self.publisher
+            .buffer_mut(BufferIndex(index))
+            .and_then(|bytes| bytes.get_mut(offset..end?))
+            .map(|dst| dst.copy_from_slice(data))
+            .is_some()
+    }
+
+    /// The bytes of pool buffer `index`, whatever its state.
+    pub fn bytes(&self, index: u32) -> Vec<u8> {
+        let view = self.publisher.pool().view().unwrap();
+        view.bytes(BufferIndex(index))
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    /// Publishes buffer `buffer` (all its planes) as a frame of `bytes` bytes. `false` if a plane
+    /// isn't free to publish.
+    pub fn push(
+        &mut self,
+        buffer: u32,
+        bytes: u32,
+        sequence: u64,
+        identity: u64,
+        timestamp_ns: u64,
+    ) -> bool {
+        let meta = FrameInfo {
+            sequence,
+            identity,
+            bytes,
+        }
+        .encode();
+        let count = self.planes as usize;
+        let mut names = [BufferIndex(0); MAX_PER_FRAME];
+        for (plane, name) in names.iter_mut().take(count).enumerate() {
+            *name = BufferIndex(buffer * self.planes + plane as u32);
+        }
+        self.publisher
+            .publish(&names[..count], SampleTime::from_nanos(timestamp_ns), &meta)
+            .is_ok()
+    }
+
+    /// Publishes a frame whose payload is `payload` as it is, for a producer that doesn't keep
+    /// the frame format. `false` if the ring refused it.
+    pub fn push_raw(&mut self, payload: &[u8]) -> bool {
+        self.ring
+            .writer()
+            .unwrap()
+            .publish(FieldId(0), SampleTime::ZERO, Flags::NONE, payload)
+            .is_ok()
+    }
+
+    /// Takes back buffer `buffer`'s planes once no consumer holds them. `true` when all are free.
+    pub fn reclaim(&mut self, buffer: u32) -> bool {
+        let mut free = true;
+        for plane in 0..self.planes {
+            let index = BufferIndex(buffer * self.planes + plane);
+            free &= self.publisher.reclaim(index, &self.holds);
+        }
+        free
+    }
+
+    /// Ends the stream with `state`, and rings the consumer's bell.
+    pub fn end(&mut self, state: u32) {
+        self.ring.set_end(state);
+        self.bell.ring();
+    }
+
+    /// The next job the consumer posted, into `out`.
+    pub fn pop_job(
+        &mut self,
+        out: &mut [u8],
+    ) -> Result<Option<usize>, lemnos_wire::ring::RingError> {
+        self.jobs.next(out)
+    }
+
+    pub const fn layout(&self) -> &lemnos_wire::ring::Layout {
+        &self.layout
     }
 }

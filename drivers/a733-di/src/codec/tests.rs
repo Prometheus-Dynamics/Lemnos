@@ -7,7 +7,7 @@ use lemnos_contract_codec_block::{BufferRef, JobStatus};
 use lemnos_core::Lifecycle;
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_host::board::parse;
-use lemnos_host::stream::HeapAllocator;
+use lemnos_host::stream::MemfdAllocator;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::SimBoard;
@@ -101,7 +101,7 @@ fn host(text: &str, handles: bool) -> Host {
     let allocator: Arc<dyn lemnos_host::stream::StreamAllocator> = if handles {
         Arc::new(PerBuffer)
     } else {
-        Arc::new(HeapAllocator)
+        Arc::new(MemfdAllocator)
     };
     Host::start_with_streams(
         &parse(text).unwrap(),

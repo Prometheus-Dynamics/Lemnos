@@ -419,6 +419,10 @@ dependencies = [
  "lemnos-macros",
  "lemnos-measure",
  "lemnos-wire",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-doorbell",
+ "shm-ring-holds",
  "tokio",
 ]
 
@@ -1644,6 +1648,11 @@ dependencies = [
  "lemnos-sim",
  "lemnos-wire",
  "serde",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-doorbell",
+ "shm-ring-holds",
+ "shm-sample-time",
  "thiserror",
  "toml",
 ]
@@ -1697,7 +1706,6 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-linux-sys",
- "lemnos-wire",
 ]
 
 [[package]]
@@ -1865,6 +1873,10 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-measure",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-doorbell",
+ "shm-ring-holds",
 ]
 
 [[package]]
@@ -1931,6 +1943,10 @@ dependencies = [
  "lemnos-package",
  "lemnos-sim",
  "lemnos-wire",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-doorbell",
+ "shm-ring-holds",
  "toml",
 ]
 

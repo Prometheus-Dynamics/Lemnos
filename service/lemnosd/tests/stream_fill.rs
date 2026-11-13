@@ -125,7 +125,12 @@ fn a_consumer_that_takes_the_stream_read_only_reads_it_as_before_and_cannot_fill
     let mut out = [0xFFu8; 4];
     input.read(0, 0, &mut out).unwrap();
     assert_eq!(out, [0; 4], "fresh memory, untouched");
-    assert_eq!(input.next_frame(Duration::from_millis(5)).unwrap(), None);
+    assert!(
+        input
+            .next_frame(Duration::from_millis(5))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

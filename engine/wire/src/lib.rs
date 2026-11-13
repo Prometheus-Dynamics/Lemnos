@@ -37,6 +37,8 @@ mod hash;
 #[cfg(feature = "protocol")]
 mod protocol;
 pub mod ring;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(feature = "protocol")]
 pub mod text;
 

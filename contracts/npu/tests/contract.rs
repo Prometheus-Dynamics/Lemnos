@@ -3,7 +3,8 @@ use lemnos_contract_npu::{
 };
 use lemnos_core::{Contract, Decode, Encode, REPLY_INLINE, Reader, Result, Shape, Status, Writer};
 use lemnos_measure::test_alloc::{Counting, allocations};
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout, Producer, STATE_FAULT, heap_words};
+use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
+use lemnos_wire::testing::Harness;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -156,10 +157,14 @@ struct Program {
 }
 
 /// The NPU's end: loads and attaches, and runs jobs on the ring.
+///
+/// It is the host's end (the harness) and the consumer's end over one stream: the NPU reads its
+/// program and inputs through the consumer's view of the shared buffers, and writes its outputs and
+/// results through the host.
 struct SimNpu {
-    pool: Vec<Vec<u8>>,
+    host: Harness,
+    consumer: Consumer,
     programs: Vec<Option<Program>>,
-    ring: Producer,
     sequence: u64,
     counters: Counters,
 }
@@ -167,16 +172,16 @@ struct SimNpu {
 impl SimNpu {
     /// Takes at most one job. Returns `false` when none is waiting.
     fn run_one(&mut self) -> bool {
-        // Collect the buffers the consumer has released, so its return queue never fills.
-        while self.ring.pop_return().unwrap().is_some() {}
+        // Collect the buffers the consumer has released, so they can be published again.
+        self.host.reclaim();
         let mut bytes = [0u8; JOB_BYTES];
-        let Some(len) = self.ring.pop_job(&mut bytes).unwrap() else {
+        let Some(len) = self.host.pop_job(&mut bytes).unwrap() else {
             return false;
         };
         let job = match RunJob::decode(&mut Reader::new(&bytes[..len])) {
-            Ok(job) if (job.result as usize) < self.pool.len() => job,
+            Ok(job) if job.result < BUFFERS => job,
             _ => {
-                self.ring.close(STATE_FAULT);
+                self.host.end(STATE_FAULT);
                 return false;
             }
         };
@@ -191,19 +196,15 @@ impl SimNpu {
             RunResult { status }.encode(&mut writer).unwrap();
             writer.len()
         };
-        self.pool[job.result as usize][..used].copy_from_slice(&record[..used]);
-        let sent = self
-            .ring
-            .push_frame(FrameSlot {
-                buffer: job.result,
-                bytes: used as u32,
-                sequence: self.sequence,
-                identity: job.identity,
-                timestamp_ns: 0,
-                fence: 0,
-            })
-            .unwrap();
-        assert!(sent, "the completion ring is full");
+        assert!(
+            self.host.write(job.result, 0, &record[..used]),
+            "the result does not fit its buffer"
+        );
+        assert!(
+            self.host
+                .publish(job.result, used as u32, self.sequence, job.identity, 0),
+            "the completion was not published"
+        );
         self.sequence += 1;
         true
     }
@@ -231,12 +232,16 @@ impl SimNpu {
             return RunStatus::Failed;
         }
         let n = input.bytes.min(output.bytes) as usize;
-        let [src, dst] = self
-            .pool
-            .get_disjoint_mut([input.buffer as usize, output.buffer as usize])
-            .unwrap();
+        let mut src = [0u8; BUFFER_BYTES];
+        let mut dst = [0u8; BUFFER_BYTES];
+        if !self.consumer.read(input.buffer, 0, &mut src[..n]) {
+            return RunStatus::Failed;
+        }
         for (to, from) in dst[..n].iter_mut().zip(&src[..n]) {
             *to = from.wrapping_add(1);
+        }
+        if !self.host.write(output.buffer, 0, &dst[..n]) {
+            return RunStatus::Failed;
         }
         RunStatus::Done
     }
@@ -262,7 +267,10 @@ impl Npu for SimNpu {
         if buffer >= BUFFERS || bytes == 0 || bytes > MAX_PROGRAM || bytes as usize > BUFFER_BYTES {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let program = self.pool[buffer as usize][..bytes as usize].to_vec();
+        let mut program = vec![0; bytes as usize];
+        if !self.consumer.read(buffer, 0, &mut program) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         if program.first() == Some(&REFUSED_BY_CHIP) {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -325,28 +333,26 @@ impl Npu for SimNpu {
 
 struct Rig {
     npu: SimNpu,
-    consumer: Consumer,
 }
 
 impl Rig {
     fn new() -> Self {
         let layout = Layout::new(BUFFERS, BUFFER_BYTES as u32, 4, JOB_BYTES as u32).unwrap();
-        let memory = heap_words(layout.ring_words());
+        let (host, consumer) = Harness::new(layout, true, true).unwrap();
         Self {
             npu: SimNpu {
-                pool: vec![vec![0; BUFFER_BYTES]; BUFFERS as usize],
+                host,
+                consumer,
                 programs: vec![None; PROGRAMS],
-                ring: Producer::new(memory.clone(), layout).unwrap(),
                 sequence: 0,
                 counters: Counters::default(),
             },
-            consumer: Consumer::attach(memory, layout).unwrap(),
         }
     }
 
     /// Writes program bytes into buffer 0 and loads them, the way a caller does.
     fn load(&mut self, bytes: &[u8]) -> Result<u32> {
-        self.npu.pool[0][..bytes.len()].copy_from_slice(bytes);
+        assert!(self.npu.consumer.write(0, 0, bytes));
         self.npu.load(0, bytes.len() as u32)
     }
 
@@ -358,17 +364,20 @@ impl Rig {
             job.encode(&mut writer).unwrap();
             writer.len()
         };
-        assert!(self.consumer.push_job(&bytes[..used]).unwrap());
+        assert!(self.npu.consumer.jobs().post(&bytes[..used]).unwrap());
         assert!(self.npu.run_one());
-        let done = self.consumer.pop_frame().unwrap().expect("a completion");
+        let done = self
+            .npu
+            .consumer
+            .pop_frame()
+            .unwrap()
+            .expect("a completion");
         assert_eq!(done.buffer, job.result);
         assert_eq!(done.bytes as usize, RESULT_BYTES);
-        let status = RunResult::decode(&mut Reader::new(
-            &self.npu.pool[done.buffer as usize][..RESULT_BYTES],
-        ))
-        .unwrap()
-        .status;
-        assert!(self.consumer.release(done.buffer, done.fence).unwrap());
+        let mut record = [0u8; RESULT_BYTES];
+        assert!(self.npu.consumer.read(done.buffer, 0, &mut record));
+        let status = RunResult::decode(&mut Reader::new(&record)).unwrap().status;
+        assert!(self.npu.consumer.release(done.buffer));
         (done.identity, status)
     }
 }
@@ -384,14 +393,16 @@ fn a_loaded_program_runs_on_its_attached_buffers() {
     let program = rig.load(&[1, 2, 3]).unwrap();
     assert_eq!(program, 1);
     attach_pair(&mut rig, program);
-    rig.npu.pool[1][..4].copy_from_slice(&[10, 20, 30, 40]);
+    assert!(rig.npu.consumer.write(1, 0, &[10, 20, 30, 40]));
     let (identity, status) = rig.run(&RunJob {
         identity: 0xabc,
         program,
         result: 3,
     });
     assert_eq!((identity, status), (0xabc, RunStatus::Done));
-    assert_eq!(&rig.npu.pool[2][..4], &[11, 21, 31, 41]);
+    let mut out = [0u8; 4];
+    assert!(rig.npu.consumer.read(2, 0, &mut out));
+    assert_eq!(out, [11, 21, 31, 41]);
     assert_eq!(rig.npu.counters, Counters { jobs: 1, errors: 0 });
 }
 
@@ -479,9 +490,9 @@ fn a_result_buffer_off_the_stream_faults_the_stream() {
         .unwrap();
         writer.len()
     };
-    assert!(rig.consumer.push_job(&bytes[..used]).unwrap());
+    assert!(rig.npu.consumer.jobs().post(&bytes[..used]).unwrap());
     assert!(!rig.npu.run_one());
-    assert_eq!(rig.consumer.state(), STATE_FAULT);
+    assert_eq!(rig.npu.consumer.state(), STATE_FAULT);
 }
 
 #[test]

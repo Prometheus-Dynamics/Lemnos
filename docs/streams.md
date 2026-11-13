@@ -20,8 +20,10 @@ buffer_bytes = 2097152
 
 - **The buffers**: `buffers` of them, each `buffer_bytes` long. [Buffer length](#buffer-length)
   says how a consumer reads them back.
-- **The ring**: shared memory with three queues. *Frames* go from the driver to the program.
-  *Returns* give buffers back. *Jobs* go from the program to the driver.
+- **The rings**: shared memory, built from the shm crates ([the shared ring](ring.md)). *Frames* go
+  from the driver to the program, one entry per frame. *Holds* say which buffers the program is
+  reading, so the driver never reuses one of them. *Jobs* go from the program to the driver, and
+  a page the driver writes says how many it has collected.
 - **The doorbell**: an eventfd the daemon rings after each frame, for a program that wants to
   sleep until one arrives.
 
@@ -29,8 +31,9 @@ The driver is the **producer**. The program that opened the stream is the **cons
 has one consumer at a time: a second open is refused with `BUSY`.
 
 The daemon makes the memory, fresh for each consumer, and passes it over the socket as file
-descriptors. A consumer never sees what the one before it left, and a consumer that goes away
-takes nothing with it: the buffers its driver held come back empty-handed.
+descriptors, in the order [Reading with the shm crates alone](#reading-with-the-shm-crates-alone)
+gives. A consumer never sees what the one before it left, and a consumer that goes away takes
+nothing with it: the buffers its driver held come back empty-handed.
 
 The device's contract says which stream to open: a method such as `frame_stream` or `job_stream`
 returns its name.
@@ -104,8 +107,25 @@ checks the copy, because the consumer shares the memory and can change it at any
 
 The driver publishes a frame: a buffer number, a length, a sequence number, a timestamp in
 nanoseconds and an identity. The identity is 64 bits the producer chose. Lemnos never reads it.
-The consumer reads the buffer, then returns it. A buffer the consumer holds is not written by
-anyone else.
+Every published frame carries its capture time, the driver's timestamp (`CLOCK_MONOTONIC` ns), as
+the time of its ring batch (the shm sample time of the entry): not the time of publishing. A foreign
+reader gets it from the batch's `time`, and `lemnos-client` from the frame.
+The consumer reads the buffer, then releases it (dropping the frame it took). A buffer the
+consumer holds is not written by anyone else.
+
+**The replacement rule.** A buffer the consumer has read and let go goes back to the driver as
+soon as the driver asks for one: nothing is lost. A frame the consumer has not read yet stays in
+its buffer while the driver holds a buffer of its own to fill; only when the driver holds none is
+the oldest such frame taken back, and the consumer sees it skipped. The newest frame is never
+taken back while unread. A consumer that holds every buffer stops the driver without a fault.
+
+A consumer that must not lose frames holds each frame it takes until it has finished with it, and
+releases it then. While it holds them the driver has nothing to take back, and its publishes are
+dropped and counted, which is the stop; the consumer is not faulted. A consumer that takes its
+frames promptly never sees a replacement. Each frame replaced before the consumer took it counts in
+the stream's `dropped` statistic, as does each frame the driver could not publish; a replaced
+frame the consumer had read does not count. `returned` counts the buffers taken back. This is the shared ring's rule (see [`ring.md`](ring.md)), not a
+Lemnos choice.
 
 A frame carries nothing else. There is no frame type, pixel format, size in pixels or codec on
 the ring, in the board file's stream, or in the daemon: what the bytes are is agreed by the
@@ -212,10 +232,13 @@ The camera ISP's job sequence, step by step, as the reference board runs it, is 
 
 Neither side trusts the ring. Each value is read once and checked.
 
-- A consumer that corrupts the ring, returns a buffer it does not hold or posts bytes that are no
-  job **loses that stream**. Its state becomes *faulted* and the doorbell rings. The connection,
-  the device and every other stream carry on. Opening the stream again starts clean, on new
-  memory.
+- A consumer that posts more jobs than the job ring holds without the driver collecting them, or
+  whose holds are stuck (its marks cannot be read at one instant, or it holds past the hold time),
+  **loses that stream**. Its state becomes *faulted* and the doorbell rings. The connection, the
+  device and every other stream carry on. Opening the stream again starts clean, on new memory.
+  A consumer cannot corrupt the driver's side of the rings: it has read-only access to the frame
+  ring and the pool, and the only words it writes are its own holds, its doorbell page and the
+  job ring.
 - A consumer that closes its connection gives up every stream it held.
 
 ## Giving a stream back
@@ -228,7 +251,8 @@ sends the close first, so it is never refused for a stream the client already le
 When the service ends a stream it does the following, however the consumer went:
 
 - the buffers the consumer still held go back to the free pool, and nothing it held is kept;
-- the ring is marked closed, so a consumer that is still reading it sees the stream has ended;
+- the ring's end word is set (closed, or faulted), so a consumer that is still reading it sees the
+  stream has ended and why;
 - until a consumer attaches again, each frame the producer publishes is counted as dropped, and
   `stream_stats` reports `attached` as false. A driver learns the consumer is gone from those
   counts and from its own `publish` results, not from a callback.
@@ -241,10 +265,10 @@ seconds by default, `set_timeout` changes it); it never waits without one.
 
 `lemnos-client` opens a stream with `open_stream`, or `open_stream_writable` for one the consumer
 fills. Both take a `StreamPlatform`, which does what only the operating system can: receive the
-descriptors and map them. On Linux that is `LinuxStreams` from `lemnos-linux-stream`
-(`backends/linux-stream`). It also tells the kernel around each access to a dma-buf. With its
-default features off it is the mappings alone, over `lemnos-wire`'s ring, for a program that has
-no client: see [Used as libraries](drivers.md#used-as-libraries).
+descriptors, and tell the kernel around each access to a dma-buf. On Linux that is `LinuxStreams`
+from `lemnos-linux-stream` (`backends/linux-stream`). The rings and the buffers are mapped by the
+shm crates, so the client has no `unsafe` of its own. A program with no client reads the stream
+with the shm crates alone: see [Reading with the shm crates alone](#reading-with-the-shm-crates-alone).
 
 ```rust
 let devices = client.list()?;
@@ -269,12 +293,40 @@ a consumer that fills buffers, dma-bufs, and each fault.
 cargo test -q -p lemnosd --test stream --test stream_fill --test stream_dma
 ```
 
+## Reading with the shm crates alone
+
+A program that has the descriptors of a stream can read its frames with the shm crates
+(`shm-ring`, `shm-ring-buffers`, `shm-ring-holds`, `shm-ring-doorbell`) and nothing of Lemnos. The
+descriptors come in this order (`lemnos_wire::ring::fds`):
+
+| Index | Descriptor | Map it as |
+|---|---|---|
+| 0 | frame ring | `shm_ring::Reader::attach_from_start`: the ring, read-only |
+| 1 | pool page | with the pool's buffer descriptors: `shm_ring_buffers::PoolView::attach` |
+| 2 | job ring | `shm_ring::Writer::attach`, if the program posts jobs |
+| 3 | job acks | `shm_ring::ReadMap::new`: one word, how many jobs the driver collected |
+| 4 | doorbell eventfd | `shm_ring_doorbell::Doorbell::attach(eventfd, page)`, with 5 |
+| 5 | doorbell page | writable: the program's own page |
+| 6 | holds page | writable: `shm_ring_holds::Marks::over(WriteMap::new(fd), buffers, 0, 0)` |
+| 7 and on | pool buffers | one per buffer for shared memory (one descriptor), or one per plane of each buffer for dma-bufs |
+
+Then `shm_ring_buffers::BufferReader::new(reader, FieldId(0), pool_view, marks)` gives frames:
+`next()` returns a batch whose `held` keeps its buffers until dropped, and whose `meta` is the
+frame's metadata (sequence, identity and length, 20 little-endian bytes: see
+`lemnos_wire::ring::FrameInfo`). The frame's time is the batch's time (`CLOCK_MONOTONIC`). The
+ring's end word (`Reader::end`) is 0 while the stream runs, 1 once it closed, 2 once it faulted.
+
+The descriptors of a stream of planes name each plane as its own pool buffer: buffer `b`'s plane `p`
+is pool buffer `b × planes + p`, and a frame names all of them in its entry. `FrameInfo` and the
+frame's first pool buffer are the whole frame as far as the shm crates are concerned.
+
 ## Streams made by the kernel module
 
 A block whose DMA must be checked in the kernel has its stream's producer there. The
 [kernel module](kernel-module.md) is given the stream's dma-bufs, pins them, and lets the block
-write only inside them. The ring is the same ring and the consumer cannot tell the difference. The
-receiver and both halves of the ISP on the BCM2712 work this way.
+write only inside them. The receiver and both halves of the ISP on the BCM2712 work this way. The
+module's own ring keeps the protocol it had, which the driver that runs the block reads; it is not
+yet the shm ring a consumer reads, and [`TODO.md`](../TODO.md) lists it.
 
 ## What is not proven
 

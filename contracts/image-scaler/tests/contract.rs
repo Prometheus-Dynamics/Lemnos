@@ -6,7 +6,8 @@ use lemnos_core::{
     Shape, Status, Writer,
 };
 use lemnos_measure::test_alloc::{Counting, allocations};
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout, Producer, heap_words};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
+use lemnos_wire::testing::Harness;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -225,55 +226,9 @@ fn a_caller_finds_the_formats_and_the_stream() {
 const BUFFERS: u32 = 4;
 const BUFFER_BYTES: usize = 256;
 
-/// The block's end: reads a job, writes its output, publishes the completion.
-struct Block {
-    ring: Producer,
-    sequence: u64,
-    counters: Counters,
-}
-
-impl Block {
-    /// Takes at most one job. Returns `false` when none is waiting.
-    fn run_one(&mut self, pool: &mut [Vec<u8>]) -> bool {
-        // Collect the buffers the consumer has released, so its return queue never fills.
-        while self.ring.pop_return().unwrap().is_some() {}
-        let mut bytes = [0u8; JOB_BYTES];
-        let Some(len) = self.ring.pop_job(&mut bytes).unwrap() else {
-            return false;
-        };
-        let job = match ScaleJob::decode(&mut Reader::new(&bytes[..len])) {
-            Ok(job) => job,
-            Err(_) => {
-                self.ring.close(lemnos_wire::ring::STATE_FAULT);
-                return false;
-            }
-        };
-        let written = scale(pool, &job).unwrap_or_else(|| {
-            self.counters.errors += 1;
-            0
-        });
-        if written != 0 {
-            self.counters.jobs += 1;
-        }
-        let sent = self
-            .ring
-            .push_frame(FrameSlot {
-                buffer: job.output.buffer,
-                bytes: written,
-                sequence: self.sequence,
-                identity: job.identity,
-                timestamp_ns: 0,
-                fence: 0,
-            })
-            .unwrap();
-        assert!(sent, "the completion ring is full");
-        self.sequence += 1;
-        true
-    }
-}
-
-/// Nearest sampling from the input to the output. `None` when the job is refused.
-fn scale(pool: &mut [Vec<u8>], job: &ScaleJob) -> Option<u32> {
+/// Nearest sampling from the input to the output. `None` when the job is refused. The input is read
+/// through the consumer's view of the shared buffers, and the output is written by the host.
+fn scale(consumer: &Consumer, host: &mut Harness, job: &ScaleJob) -> Option<u32> {
     let (i, o) = (job.input, job.output);
     let sized = |img: ImageRef| {
         img.width > 0
@@ -294,9 +249,12 @@ fn scale(pool: &mut [Vec<u8>], job: &ScaleJob) -> Option<u32> {
     {
         return None;
     }
-    let [src, dst] = pool
-        .get_disjoint_mut([i.buffer as usize, o.buffer as usize])
-        .ok()?;
+    let mut src = [0u8; BUFFER_BYTES];
+    let mut dst = [0u8; BUFFER_BYTES];
+    let n_in = (i.stride * i.height) as usize;
+    if !consumer.read(i.buffer, 0, &mut src[..n_in]) {
+        return None;
+    }
     for y in 0..o.height {
         let sy = y * i.height / o.height;
         for x in 0..o.width {
@@ -306,28 +264,61 @@ fn scale(pool: &mut [Vec<u8>], job: &ScaleJob) -> Option<u32> {
             dst[to..to + PIXEL].copy_from_slice(&src[from..from + PIXEL]);
         }
     }
-    Some(o.stride * o.height)
+    let n_out = (o.stride * o.height) as usize;
+    host.write(o.buffer, 0, &dst[..n_out])
+        .then_some(o.stride * o.height)
 }
 
+/// The host's end (the harness) and the consumer's end, over one stream.
 struct Rig {
-    block: Block,
+    host: Harness,
     consumer: Consumer,
-    pool: Vec<Vec<u8>>,
+    sequence: u64,
+    counters: Counters,
 }
 
 impl Rig {
     fn new() -> Self {
         let layout = Layout::new(BUFFERS, BUFFER_BYTES as u32, 4, JOB_BYTES as u32).unwrap();
-        let memory = heap_words(layout.ring_words());
+        let (host, consumer) = Harness::new(layout, true, true).unwrap();
         Self {
-            block: Block {
-                ring: Producer::new(memory.clone(), layout).unwrap(),
-                sequence: 0,
-                counters: Counters::default(),
-            },
-            consumer: Consumer::attach(memory, layout).unwrap(),
-            pool: vec![vec![0; BUFFER_BYTES]; BUFFERS as usize],
+            host,
+            consumer,
+            sequence: 0,
+            counters: Counters::default(),
         }
+    }
+
+    /// The block's end: takes at most one job, writes its output, publishes the completion.
+    /// Returns `false` when none is waiting.
+    fn run_one(&mut self) -> bool {
+        // Collect the buffers the consumer has released, so they can be published again.
+        self.host.reclaim();
+        let mut bytes = [0u8; JOB_BYTES];
+        let Some(len) = self.host.pop_job(&mut bytes).unwrap() else {
+            return false;
+        };
+        let job = match ScaleJob::decode(&mut Reader::new(&bytes[..len])) {
+            Ok(job) => job,
+            Err(_) => {
+                self.host.end(STATE_FAULT);
+                return false;
+            }
+        };
+        let written = scale(&self.consumer, &mut self.host, &job).unwrap_or_else(|| {
+            self.counters.errors += 1;
+            0
+        });
+        if written != 0 {
+            self.counters.jobs += 1;
+        }
+        assert!(
+            self.host
+                .publish(job.output.buffer, written, self.sequence, job.identity, 0),
+            "the completion was not published"
+        );
+        self.sequence += 1;
+        true
     }
 
     /// Posts one job, lets the block run it, and takes its completion.
@@ -338,8 +329,8 @@ impl Rig {
             job.encode(&mut writer).unwrap();
             writer.len()
         };
-        assert!(self.consumer.push_job(&bytes[..used]).unwrap());
-        assert!(self.block.run_one(&mut self.pool));
+        assert!(self.consumer.jobs().post(&bytes[..used]).unwrap());
+        assert!(self.run_one());
         self.consumer.pop_frame().unwrap().expect("a completion")
     }
 }
@@ -349,7 +340,7 @@ fn a_simulated_job_completes_with_its_identity_and_output() {
     let mut rig = Rig::new();
     // A 4x2 input, one row of pixels 0..4 then 4..8, so each output pixel is recognisable.
     for n in 0..8 {
-        rig.pool[0][n * PIXEL..n * PIXEL + PIXEL].copy_from_slice(&[n as u8, 0, 0, 255]);
+        assert!(rig.consumer.write(0, n * PIXEL, &[n as u8, 0, 0, 255]));
     }
     let job = ScaleJob {
         identity: 0xfeed,
@@ -362,9 +353,11 @@ fn a_simulated_job_completes_with_its_identity_and_output() {
     assert_eq!(done.buffer, 1);
     assert_eq!(done.bytes, 8);
     // Output pixel 1 samples input column 2 of row 0: pixel 2.
-    assert_eq!(&rig.pool[1][..8], &[0, 0, 0, 255, 2, 0, 0, 255]);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
-    assert_eq!(rig.block.counters, Counters { jobs: 1, errors: 0 });
+    let mut out = [0u8; 8];
+    assert!(rig.consumer.read(1, 0, &mut out));
+    assert_eq!(out, [0, 0, 0, 255, 2, 0, 0, 255]);
+    assert!(rig.consumer.release(done.buffer));
+    assert_eq!(rig.counters, Counters { jobs: 1, errors: 0 });
 }
 
 #[test]
@@ -379,7 +372,7 @@ fn a_refused_job_still_completes_as_failed() {
     let done = rig.scale(&job);
     assert_eq!(done.identity, 5);
     assert_eq!(done.bytes, 0);
-    assert_eq!(rig.block.counters, Counters { jobs: 0, errors: 1 });
+    assert_eq!(rig.counters, Counters { jobs: 0, errors: 1 });
 }
 
 #[test]
@@ -405,14 +398,14 @@ fn jobs_in_a_row_reuse_the_buffers_without_allocating() {
     };
     // Warm up: the first job sets up whatever the thread needs, and its output is released.
     let done = rig.scale(&job);
-    assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+    assert!(rig.consumer.release(done.buffer));
     let ((), count) = allocations(|| {
         for identity in 2..1002 {
             let done = rig.scale(&ScaleJob { identity, ..job });
             assert_eq!(done.identity, identity);
-            assert!(rig.consumer.release(done.buffer, done.fence).unwrap());
+            assert!(rig.consumer.release(done.buffer));
         }
     });
     assert_eq!(count, 0, "allocations in 1000 jobs");
-    assert_eq!(rig.block.counters.jobs, 1001);
+    assert_eq!(rig.counters.jobs, 1001);
 }

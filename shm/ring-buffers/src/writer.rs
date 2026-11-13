@@ -104,6 +104,16 @@ impl<M: MemMut> BufferWriter<M> {
         Ok(seq)
     }
 
+    /// Whether a reader took the frame now published in `buffer`: replacing that frame then loses
+    /// nothing the reader had not read. `false` if no frame is published there.
+    #[must_use]
+    pub fn taken(&self, buffer: BufferIndex, holders: &impl Holders) -> bool {
+        match self.published.get(buffer.0 as usize) {
+            Some(Some(seq)) => holders.taken(buffer, *seq),
+            _ => false,
+        }
+    }
+
     /// Takes `buffer` back if no reader holds it, and says whether it is now free. From this
     /// call on no reader can newly hold the frame that was in it, even if this returns `false`
     /// because one already does; call again later for that one.

@@ -158,6 +158,13 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         }
     }
 
+    /// The end code the owner recorded for the topic, 0 while it runs. See
+    /// [`shm_ring::Ring::set_end`].
+    #[must_use]
+    pub fn end(&self) -> u32 {
+        self.reader.end()
+    }
+
     /// How many entries have been published that [`BufferReader::next`] has not looked at
     /// yet. One memory read.
     #[must_use]
@@ -287,6 +294,11 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
             if !page::still(pool.page(), *buffer, *ticket) {
                 return Step::Gone;
             }
+        }
+        // Read and checked: every buffer of the frame is now taken, as far as the publisher can
+        // tell a replacement.
+        for (buffer, _) in &entry.buffers[..entry.count] {
+            self.shared.marker.taken(*buffer, sample.seq);
         }
         self.meta[..entry.meta.len()].copy_from_slice(entry.meta);
         Step::Frame {

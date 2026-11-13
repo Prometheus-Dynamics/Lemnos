@@ -13,4 +13,4 @@ lemnos-core = { path = "../../engine/core" }
 
 [dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
-lemnos-wire = { path = "../../engine/wire" }
+lemnos-wire = { path = "../../engine/wire", features = ["testing"] }

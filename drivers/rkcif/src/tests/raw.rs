@@ -14,7 +14,7 @@ use lemnos_driver_v4l2_capture::{Frame, Granted, Graph, Hardware as Capture, Mod
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_host::board::parse;
-use lemnos_host::stream::{HeapAllocator, Lease, ProducerEndpoint, StreamAllocator};
+use lemnos_host::stream::{MemfdAllocator, ProducerEndpoint, StreamAllocator};
 use lemnos_host::{Host, Options, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -259,24 +259,23 @@ struct Rig {
 }
 
 struct Client {
-    lease: Lease,
     ring: Consumer,
 }
 
 impl Client {
     fn attach(rig: &Rig, caller: u64) -> Self {
-        let lease = rig
+        let ring = rig
             .host
             .stream_attach(0, "frames", CallerId(caller))
+            .unwrap()
+            .consumer()
             .unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
+        Self { ring }
     }
 
     fn bytes(&self, buffer: u32) -> Vec<u8> {
         let mut out = vec![0u8; FRAME];
-        let at = self.lease.layout.buffer_offset(buffer).unwrap();
-        assert!(self.lease.buffers.read(at, &mut out));
+        assert!(self.ring.read(buffer, 0, &mut out));
         out
     }
 }
@@ -304,7 +303,7 @@ impl Rig {
         let allocator: Arc<dyn StreamAllocator> = if dma_buf {
             Arc::new(PerBuffer)
         } else {
-            Arc::new(HeapAllocator)
+            Arc::new(MemfdAllocator)
         };
         let sim = SimBoard::new();
         let clock = sim.clock();
@@ -399,7 +398,7 @@ fn the_capture_node_fills_the_streams_own_buffers_and_nothing_is_copied() {
         let frame = client.ring.pop_frame().unwrap().expect("a frame");
         assert_eq!((frame.buffer, frame.bytes), (slot, FRAME as u32));
         assert_eq!(client.bytes(slot), vec![byte; FRAME]);
-        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(client.ring.release(frame.buffer));
     }
     assert_eq!(
         rig.writes.load(Ordering::Relaxed),
@@ -486,7 +485,7 @@ fn raw_frames_through_the_streams_own_buffers_allocate_nothing() {
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
         let frame = client.ring.pop_frame().unwrap().expect("a frame");
-        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
     }
@@ -602,7 +601,7 @@ fn embedded_driver() -> (Host, Rkcif, Node) {
         Box::new(sim),
         Arc::new(clock),
         Options::default(),
-        Arc::new(HeapAllocator),
+        Arc::new(MemfdAllocator),
     )
     .unwrap();
     let stream = host.stream_producer(0, "embedded").unwrap();
@@ -647,18 +646,14 @@ fn embedded_lines_come_off_the_metadata_node_onto_the_embedded_stream() {
         assert_eq!(n.streamed, [4], "started with every buffer queued");
     });
     let lease = host.stream_attach(0, "embedded", CallerId(7)).unwrap();
-    let mut ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    let mut ring = lease.consumer().unwrap();
     node.with(|n| n.filled.push_back((0, 5)));
     Lifecycle::tick(&mut driver, 1_000_000).expect("a started driver ticks");
     let line = ring.pop_frame().unwrap().expect("the line is published");
     assert_eq!((line.bytes, line.sequence), (FRAME as u32, 5));
-    assert!(ring.release(line.buffer, line.fence).unwrap());
+    assert!(ring.release(line.buffer));
     let mut out = vec![0u8; FRAME];
-    assert!(
-        lease
-            .buffers
-            .read(lease.layout.buffer_offset(line.buffer).unwrap(), &mut out)
-    );
+    assert!(ring.read(line.buffer, 0, &mut out));
     assert!(out.iter().all(|&b| b == 0x5a), "the line's bytes, copied");
     assert_eq!(
         node.with(|n| n.requeued),

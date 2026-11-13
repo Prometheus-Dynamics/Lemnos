@@ -57,6 +57,12 @@ pub trait Holders {
     /// Whether any reader holds `buffer`. Called after the buffer's ticket has gone up, so a
     /// reader that has not marked it by now never will.
     fn held(&self, buffer: BufferIndex) -> bool;
+    /// Whether a reader that has not been cut off took the frame with ring sequence `seq`, which
+    /// is the frame `buffer` holds. A frame a reader has read and let go of counts as taken.
+    /// Nobody took anything unless a reader says so.
+    fn taken(&self, _buffer: BufferIndex, _seq: u64) -> bool {
+        false
+    }
 }
 
 /// Nobody ever holds anything: the publisher reuses buffers as it likes.
@@ -81,6 +87,9 @@ pub trait Marker {
     fn slot(&self) -> Option<u32> {
         None
     }
+    /// Records that the reader took the frame with ring sequence `seq` from `buffer`: it read the
+    /// frame and checked it, so the publisher can tell a frame it replaces was not lost.
+    fn taken(&self, _buffer: BufferIndex, _seq: u64) {}
 }
 
 /// Holds nothing: frames can change while they are read.
@@ -107,6 +116,10 @@ impl<K: Marker> Marker for &K {
     fn slot(&self) -> Option<u32> {
         (**self).slot()
     }
+
+    fn taken(&self, buffer: BufferIndex, seq: u64) {
+        (**self).taken(buffer, seq);
+    }
 }
 
 impl<K: Marker> Marker for std::sync::Arc<K> {
@@ -120,6 +133,10 @@ impl<K: Marker> Marker for std::sync::Arc<K> {
 
     fn slot(&self) -> Option<u32> {
         (**self).slot()
+    }
+
+    fn taken(&self, buffer: BufferIndex, seq: u64) {
+        (**self).taken(buffer, seq);
     }
 }
 

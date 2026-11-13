@@ -10,7 +10,7 @@ use lemnos_core::{Bound, Caller as CoreCaller, Health, Lifecycle, MethodId};
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_m2m_decode::Event;
 use lemnos_host::board::parse;
-use lemnos_host::stream::HeapAllocator;
+use lemnos_host::stream::MemfdAllocator;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::v4l2::{BUF_FLAG_LAST, EVENT_SOURCE_CHANGE, SRC_CH_RESOLUTION};
 use lemnos_measure::test_alloc::allocations;
@@ -75,7 +75,7 @@ impl Rig {
         let allocator: Arc<dyn lemnos_host::stream::StreamAllocator> = if dma_buf {
             Arc::new(PerBuffer)
         } else {
-            Arc::new(HeapAllocator)
+            Arc::new(MemfdAllocator)
         };
         let host = Host::start_with_streams(
             &parse(text).unwrap(),

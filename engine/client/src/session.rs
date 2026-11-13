@@ -284,12 +284,12 @@ struct Shared {
 pub(crate) struct StreamAnswer {
     layout: Layout,
     descriptors: u8,
-    /// StreamHandles: a descriptor per buffer, or per plane of each. Otherwise StreamReady.
+    /// StreamRingHandles: a descriptor per buffer, or per plane of each. Otherwise StreamRings.
     handles: bool,
-    /// Each buffer's planes, as StreamHandles gave them; `None` when what it gave is no
-    /// planes of the buffer. One plane for StreamReady.
+    /// Each buffer's planes, as StreamRingHandles gave them; `None` when what it gave is no
+    /// planes of the buffer. One plane for StreamRings.
     planes: Option<Planes>,
-    /// Whether the request said this client takes StreamHandles.
+    /// Whether the request said this client takes StreamRingHandles.
     asked_handles: bool,
 }
 
@@ -503,8 +503,8 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::Description { id, .. }
         | Frame::Reply { id, .. }
         | Frame::Subscribed { id, .. }
-        | Frame::StreamReady { id, .. }
-        | Frame::StreamHandles { id, .. }
+        | Frame::StreamRings { id, .. }
+        | Frame::StreamRingHandles { id, .. }
         | Frame::Endpoints { id }
         | Frame::Package { id, .. }
         | Frame::PackagesDone { id, .. }
@@ -1656,6 +1656,14 @@ impl Session {
         platform: &Arc<dyn StreamPlatform>,
     ) -> Result<(u32, impl Pick<StreamAnswer> + use<>), Error> {
         let id = self.shared.id();
+        // A service without shared rings answers with the older layout, which this build does not
+        // read: it is refused here, before anything is asked.
+        if self.shared.features & feature::SHARED_RINGS == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service's streams are not shared rings".to_string(),
+            });
+        }
         // Only a service that said so knows the second way of asking. To any other it is an
         // unknown kind, which ends the connection.
         let asked_handles = self.shared.features & feature::STREAM_HANDLES != 0;
@@ -1672,7 +1680,7 @@ impl Session {
         Ok((id, move |frame: Frame<'_>| {
             let (handles, buffers, descriptors, buffer_bytes, frame_slots, job_slots, job_bytes) =
                 match frame {
-                    Frame::StreamReady {
+                    Frame::StreamRings {
                         buffers,
                         descriptors,
                         buffer_bytes,
@@ -1689,7 +1697,7 @@ impl Session {
                         job_slots,
                         job_bytes,
                     ),
-                    Frame::StreamHandles {
+                    Frame::StreamRingHandles {
                         buffers,
                         descriptors,
                         buffer_bytes,
@@ -1739,7 +1747,7 @@ impl Session {
         let answer = match ready {
             Ok(ready) => ready,
             Err(Error::TimedOut) => {
-                // A late StreamReady would carry descriptors that a plain read
+                // A late StreamRings would carry descriptors that a plain read
                 // loses, and a stream nobody can use. End it.
                 self.lost();
                 return Err(Error::TimedOut);
@@ -1771,11 +1779,15 @@ impl Session {
             self.lost();
             return Err(Error::Wire(lemnos_wire::WireError::Malformed));
         }
-        let built = if handles {
-            FrameStream::with_handles(device, name, layout, planes, fds, writable, platform)
-        } else {
-            FrameStream::new(device, name, layout, fds, writable, platform)
-        };
+        let built = FrameStream::new(
+            device,
+            name,
+            (layout, planes),
+            !handles,
+            fds,
+            writable,
+            platform,
+        );
         if built.is_err() {
             self.give_back(device, name);
         }

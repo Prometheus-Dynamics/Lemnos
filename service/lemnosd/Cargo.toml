@@ -82,5 +82,10 @@ lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+# The shm crates alone: the stream test reads a stream with nothing above them.
+shm-ring = { path = "../../shm/ring" }
+shm-ring-buffers = { path = "../../shm/ring-buffers" }
+shm-ring-holds = { path = "../../shm/ring-holds" }
+shm-ring-doorbell = { path = "../../shm/ring-doorbell" }
 # Signs a package for the test that starts the daemon in signed mode.
 ed25519-dalek = { version = "2.2", default-features = false }

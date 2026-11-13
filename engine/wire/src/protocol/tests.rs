@@ -190,11 +190,11 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         (
-            "stream-ready",
-            Frame::StreamReady {
+            "stream-rings",
+            Frame::StreamRings {
                 id: 11,
                 buffers: 4,
-                descriptors: 3,
+                descriptors: 8,
                 buffer_bytes: 256,
                 frame_slots: 4,
                 job_slots: 2,
@@ -218,11 +218,11 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         (
-            "stream-handles",
-            Frame::StreamHandles {
+            "stream-ring-handles",
+            Frame::StreamRingHandles {
                 id: 13,
                 buffers: 4,
-                descriptors: 6,
+                descriptors: 11,
                 buffer_bytes: 256,
                 frame_slots: 4,
                 job_slots: 2,
@@ -231,11 +231,11 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         (
-            "stream-handles-planes",
-            Frame::StreamHandles {
+            "stream-ring-handles-planes",
+            Frame::StreamRingHandles {
                 id: 14,
                 buffers: 2,
-                descriptors: 6,
+                descriptors: 11,
                 buffer_bytes: 256,
                 frame_slots: 2,
                 job_slots: 1,
@@ -312,15 +312,15 @@ fn every_vector_in_the_spec_matches_byte_for_byte() {
 }
 
 #[test]
-fn a_stream_of_handles_has_two_descriptors_more_than_buffers_and_at_most_128_buffers() {
+fn a_stream_of_handles_has_seven_descriptors_more_than_buffers_and_at_most_128_buffers() {
     assert_eq!(handle_descriptors(0, 1), None);
-    assert_eq!(handle_descriptors(1, 1), Some(3));
-    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS, 1), Some(130));
+    assert_eq!(handle_descriptors(1, 1), Some(8));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS, 1), Some(135));
     assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS + 1, 1), None);
     assert_eq!(handle_descriptors(u32::MAX, 1), None);
     // A descriptor per plane: the same limit over every plane of every buffer.
-    assert_eq!(handle_descriptors(4, 2), Some(10));
-    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS / 2, 2), Some(130));
+    assert_eq!(handle_descriptors(4, 2), Some(15));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS / 2, 2), Some(135));
     assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS / 2 + 1, 2), None);
     assert_eq!(handle_descriptors(1, 0), None);
     assert_eq!(handle_descriptors(1, MAX_PLANES + 1), None);
@@ -855,7 +855,6 @@ mod layout {
         hash = Frame::fold_part(hash, 0);
         hash = crate::protocol::description::fold_framing(hash);
         hash = crate::ring::fold_constants(hash);
-        hash = crate::ring::offsets::fold_constants(hash);
         assert_eq!(hash, CORE_HASH);
     }
 
@@ -868,11 +867,20 @@ mod layout {
         hash = package_mode::fold_constants(hash);
         assert_eq!(PART_HASHES[1], hash);
         assert_eq!(PART_HASHES[2], Frame::fold_part(hash::OFFSET, 3));
+        let mut hash = Frame::fold_part(hash::OFFSET, 4);
+        hash = crate::ring::fds::fold_constants(hash);
+        assert_eq!(PART_HASHES[3], hash);
     }
 
     #[test]
     fn the_parts_and_the_core_are_different_hashes() {
-        let all = [CORE_HASH, PART_HASHES[0], PART_HASHES[1], PART_HASHES[2]];
+        let all = [
+            CORE_HASH,
+            PART_HASHES[0],
+            PART_HASHES[1],
+            PART_HASHES[2],
+            PART_HASHES[3],
+        ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b);

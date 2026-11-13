@@ -7,7 +7,6 @@
 #![cfg(target_os = "linux")]
 
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -20,12 +19,12 @@ use lemnos_driver_g2d::{Engine, G2dDriver, G2dDriverNeeds, HardwareVersion, Job,
 use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
+use lemnos_host::stream::{Buffers, Lease, MemfdAllocator, StreamAllocator};
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
-use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, FrameSlot, Layout};
 
 #[global_allocator]
@@ -37,75 +36,40 @@ const ARGB: u32 = u32::from_le_bytes(*b"AR24");
 const XRGB: u32 = u32::from_le_bytes(*b"XR24");
 const MS: u64 = 1_000_000;
 
-/// The pool as the host addresses it, over one mapping per buffer.
-struct Mapped {
-    buffers: Vec<Mapping>,
-    stride: usize,
-    bytes: usize,
-}
-
-impl Mapped {
-    fn at(&self, offset: usize, len: usize) -> Option<(&Mapping, usize)> {
-        let inner = offset % self.stride;
-        let fits = inner.checked_add(len).is_some_and(|end| end <= self.bytes);
-        let map = self.buffers.get(offset / self.stride)?;
-        fits.then_some((map, inner))
-    }
-}
-
-impl BufferMemory for Mapped {
-    fn write(&self, offset: usize, data: &[u8]) -> bool {
-        self.at(offset, data.len())
-            .is_some_and(|(map, inner)| map.write_bytes(inner, data).is_some())
-    }
-
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
-        let Some((map, inner)) = self.at(offset, out.len()) else {
-            return false;
-        };
-        match map.as_slice().get(inner..inner + out.len()) {
-            Some(from) => {
-                out.copy_from_slice(from);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-/// Each buffer of a stream its own sealed memfd, mapped for the host and lent as its handle.
+/// Each buffer of a stream its own sealed memfd, lent as its handle: what a stream of dma-bufs
+/// looks like to a driver.
 struct PerBuffer;
 
 impl StreamAllocator for PerBuffer {
-    fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
-        let plain = HeapAllocator.allocate(name, layout)?;
-        let mut handles = Vec::new();
-        let mut buffers = Vec::new();
-        for _ in 0..layout.buffers {
-            let fd: OwnedFd =
-                sealed_memfd(c"g2d-driver-test", layout.stride()).map_err(|_| Status::IO)?;
-            let bytes = layout.buffer_bytes as usize;
-            buffers.push(Mapping::new(fd.as_fd(), bytes, 0, true).map_err(|_| Status::IO)?);
-            handles.push(fd);
-        }
-        Ok(Backing {
-            buffers: Arc::new(Mapped {
-                buffers,
-                stride: layout.stride() as usize,
-                bytes: layout.buffer_bytes as usize,
-            }),
-            handles: Some(handles.into()),
-            ..plain
-        })
+    fn allocate(&self, name: &str, layout: &Layout) -> Result<Buffers, Status> {
+        MemfdAllocator.allocate(name, layout)
     }
 
-    fn allocate_handles(
+    fn allocate_planes(
         &self,
         name: &str,
         layout: &Layout,
-        _heap: &str,
-    ) -> Result<Backing, Status> {
-        self.allocate(name, layout)
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Buffers, Status> {
+        let _ = (name, heap);
+        let mut fds = Vec::new();
+        for _ in 0..layout.buffers {
+            for length in planes.lengths() {
+                // A buffer of one plane keeps the whole stride, as a heap rounds up.
+                let made = if planes.count() == 1 {
+                    layout.stride()
+                } else {
+                    u64::from(*length)
+                };
+                fds.push(sealed_memfd(c"driver-test", made).map_err(|_| Status::IO)?);
+            }
+        }
+        Ok(Buffers {
+            fds,
+            dma: true,
+            sync: None,
+        })
     }
 }
 
@@ -184,11 +148,11 @@ fn post(consumer: &mut Consumer, job: &ConvertJob) {
     let mut writer = Writer::new(&mut bytes);
     job.encode(&mut writer).unwrap();
     let used = writer.len();
-    assert!(consumer.push_job(&bytes[..used]).unwrap());
+    assert!(consumer.jobs().post(&bytes[..used]).unwrap());
 }
 
-fn consumer(lease: &Lease) -> Consumer {
-    Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap()
+fn consumer(lease: Lease) -> Consumer {
+    lease.consumer_writable().unwrap()
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
@@ -210,7 +174,7 @@ fn a_board_file_binds_it_and_the_host_reaches_its_contract_and_its_jobs() {
     // No engine is at the configured path: a job is completed as failed on its output, and the
     // driver keeps trying, reporting it.
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     rig.after(Duration::from_millis(1));
     post(&mut consumer, &job(0xBEEF, 0, 1, 32, 32));
     rig.after(Duration::from_millis(1));
@@ -229,8 +193,8 @@ fn a_board_file_binds_it_and_the_host_reaches_its_contract_and_its_jobs() {
 
 #[test]
 fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes() {
-    // `HeapAllocator` makes plain shared memory, with no handles.
-    let rig = Rig::start(&board("g2d", false), Arc::new(HeapAllocator));
+    // `MemfdAllocator` makes plain shared memory, with no handles.
+    let rig = Rig::start(&board("g2d", false), Arc::new(MemfdAllocator));
     rig.host.tick();
     let DeviceState::Backoff { reason, .. } = rig.host.device("g").unwrap().state else {
         panic!("the driver bound to a stream it cannot use");
@@ -304,7 +268,7 @@ fn jobs_run_on_the_engine_and_a_new_consumer_gets_its_own_buffers() {
     let plan = Arc::new(Plan::default());
     let mut driver = driver_on(&rig.host, &plan);
     let first = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer1 = consumer(&first);
+    let mut consumer1 = consumer(first);
     assert_eq!(driver.tick(0), Some(POLL_NS));
     post(&mut consumer1, &job(1, 0, 1, 32, 32));
     driver.tick(MS);
@@ -316,7 +280,7 @@ fn jobs_run_on_the_engine_and_a_new_consumer_gets_its_own_buffers() {
     // gives that up and runs on the new consumer's memory.
     rig.host.stream_detach(0, "jobs", CallerId(1)).unwrap();
     let second = rig.host.stream_attach(0, "jobs", CallerId(2)).unwrap();
-    let mut consumer2 = consumer(&second);
+    let mut consumer2 = consumer(second);
     post(&mut consumer2, &job(2, 2, 3, 32, 32));
     driver.tick(2 * MS);
     let done = completion(&mut consumer2);
@@ -331,7 +295,7 @@ fn a_frame_larger_than_the_dma_buf_never_reaches_the_engine() {
     let plan = Arc::new(Plan::default());
     let mut driver = driver_on(&rig.host, &plan);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     driver.tick(0);
     // 32 by 33 at four bytes is one row past the page behind the output.
     post(&mut consumer, &job(9, 0, 1, 32, 33));
@@ -349,7 +313,7 @@ fn an_engine_that_wont_open_is_tried_again_doubling_to_8_s_and_never_given_up() 
     plan.open_failures.store(u32::MAX, Ordering::Relaxed);
     let mut driver = driver_on(&rig.host, &plan);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let mut now = 0;
     for (n, want_ms) in [250, 500, 1000, 2000, 4000, 8000, 8000, 8000]
         .into_iter()
@@ -359,7 +323,7 @@ fn an_engine_that_wont_open_is_tried_again_doubling_to_8_s_and_never_given_up() 
         driver.tick(now);
         let done = completion(&mut consumer);
         assert_eq!((done.identity, done.bytes), (n as u64, 0));
-        consumer.release(done.buffer, done.fence).unwrap();
+        assert!(consumer.release(done.buffer));
         let State::BackingOff { retry_at_ns, .. } = driver.converter().engine().state() else {
             panic!("backing off");
         };
@@ -402,14 +366,14 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
     let plan = Arc::new(Plan::default());
     let mut driver = driver_on(&rig.host, &plan);
     let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
+    let mut consumer = consumer(lease);
     let mut cycle = |n: u64| {
         let output = 1 + (n % 3) as u32;
         post(&mut consumer, &job(n, 0, output, 32, 32));
         assert_eq!(driver.tick(n * MS), Some((n + 1) * MS));
         let done = completion(&mut consumer);
         assert_eq!((done.buffer, done.identity, done.bytes), (output, n, BYTES));
-        assert!(consumer.release(done.buffer, done.fence).unwrap());
+        assert!(consumer.release(done.buffer));
     };
     for n in 0..10 {
         cycle(n);

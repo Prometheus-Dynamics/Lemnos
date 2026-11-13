@@ -82,13 +82,8 @@ impl Slot {
             let attached = self.attachments.front().filter(|a| a.at == self.sent);
             let result = match attached {
                 Some(attachment) => {
-                    let handles = attachment.handles.iter().flat_map(|h| h.iter());
-                    let borrowed: Vec<BorrowedFd<'_>> = attachment
-                        .fds
-                        .iter()
-                        .chain(handles)
-                        .map(AsFd::as_fd)
-                        .collect();
+                    let borrowed: Vec<BorrowedFd<'_>> =
+                        attachment.fds.iter().map(AsFd::as_fd).collect();
                     let sent = send_with_fds(
                         self.conn.stream().as_fd(),
                         &self.sending[self.sent..],

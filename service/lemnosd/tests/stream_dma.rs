@@ -136,15 +136,40 @@ fn a_board_with_a_dma_buf_stream_attaches_and_the_handles_memory_is_what_the_con
         [("system".to_string(), 8192, BUFFERS)]
     );
     let mut producing = producer(&running);
-    // More frames than buffers, so every buffer goes round.
-    for sequence in 0..3 * u64::from(BUFFERS) {
+    // Many more frames than buffers, so every buffer goes round many times.
+    let frames = 10 * u64::from(BUFFERS);
+    for sequence in 0..frames {
         a_frame_crosses(&mut producing, &mut stream, sequence);
     }
     let stats = host(&running).stream_stats(DEVICE, DMA).unwrap();
-    assert_eq!(stats.delivered, 3 * u64::from(BUFFERS));
-    assert_eq!((stats.dropped, stats.faults), (0, 0));
+    assert_eq!(stats.delivered, frames);
+    // Every frame past the first round replaces one the consumer had already read and let go,
+    // so none is dropped, and none is a fault.
+    assert_eq!(stats.faults, 0);
+    assert_eq!(stats.dropped, 0);
     // The connection went unused for all of that, and still works.
     assert!(session.list().unwrap().iter().any(|d| d.name == "s"));
+    session.close_stream(stream).unwrap();
+}
+
+/// A consumer that never reads: each frame past the first round replaces one it never took, so each
+/// one is dropped, and exactly those are.
+#[test]
+fn a_consumer_that_stalls_loses_exactly_the_frames_replaced() {
+    let (running, _source) = service();
+    let (mut session, stream) = open(&running);
+    let mut producing = producer(&running);
+    let frames = 3 * u64::from(BUFFERS);
+    for sequence in 0..frames {
+        let buffer = producing.next_buffer().unwrap().unwrap();
+        producing.publish(frame(buffer, sequence)).unwrap();
+    }
+    let stats = host(&running).stream_stats(DEVICE, DMA).unwrap();
+    assert_eq!(stats.delivered, frames);
+    assert_eq!(stats.faults, 0);
+    let replaced = frames - u64::from(BUFFERS);
+    assert_eq!(stats.returned, replaced);
+    assert_eq!(stats.dropped, replaced);
     session.close_stream(stream).unwrap();
 }
 
@@ -305,7 +330,9 @@ fn a_stream_with_as_many_buffers_as_one_message_carries_attaches_and_delivers() 
         assert_eq!(stream.bytes(&got), [got.buffer() as u8, 0xEE]);
         // Held, so the next frame is in the next buffer and every one is used.
     }
-    assert!(producing.next_buffer().unwrap().is_none());
+    // Every buffer has been published and released, so the producer takes the oldest again: the
+    // newest frame is the one left alone.
+    assert_eq!(producing.next_buffer().unwrap(), Some(0));
 }
 
 /// A client written against the protocol, with nothing checking its behaviour.
@@ -389,22 +416,22 @@ impl RawClient {
 /// What a stream being opened was answered with.
 #[derive(Debug, PartialEq)]
 enum Answer {
-    /// StreamReady: buffers, descriptors claimed.
+    /// StreamRings: buffers, descriptors claimed.
     Ready(u32, u8),
-    /// StreamHandles: buffers, descriptors claimed.
+    /// StreamRingHandles: buffers, descriptors claimed.
     Handles(u32, u8),
     Refusal(i32, String),
 }
 
 fn answer(raw: &mut RawClient, id: u32) -> Answer {
     raw.next(|frame| match frame {
-        Frame::StreamReady {
+        Frame::StreamRings {
             id: got,
             buffers,
             descriptors,
             ..
         } if got == id => Some(Answer::Ready(buffers, descriptors)),
-        Frame::StreamHandles {
+        Frame::StreamRingHandles {
             id: got,
             buffers,
             descriptors,
@@ -464,8 +491,8 @@ fn a_client_from_before_handles_is_refused_a_dma_buf_stream_cleanly_and_keeps_ev
         device: DEVICE,
         name: SHARED,
     });
-    assert_eq!(answer(&mut old, 2), Answer::Ready(2, 3));
-    assert_eq!(old.fds.len(), 3);
+    assert_eq!(answer(&mut old, 2), Answer::Ready(2, 8));
+    assert_eq!(old.fds.len(), 8);
     let (_session, _stream) = open(&running);
 }
 
@@ -478,8 +505,8 @@ fn asking_the_new_way_gets_handles_for_dma_bufs_and_the_old_answer_for_shared_me
         device: DEVICE,
         name: SHARED,
     });
-    assert_eq!(answer(&mut raw, 1), Answer::Ready(2, 3));
-    assert_eq!(raw.fds.len(), 3);
+    assert_eq!(answer(&mut raw, 1), Answer::Ready(2, 8));
+    assert_eq!(raw.fds.len(), 8);
     raw.fds.clear();
 
     raw.send(&Frame::StreamOpenHandles {
@@ -489,16 +516,16 @@ fn asking_the_new_way_gets_handles_for_dma_bufs_and_the_old_answer_for_shared_me
     });
     assert_eq!(
         answer(&mut raw, 2),
-        Answer::Handles(BUFFERS, 2 + BUFFERS as u8)
+        Answer::Handles(BUFFERS, 7 + BUFFERS as u8)
     );
     assert_eq!(
         raw.fds.len(),
-        2 + BUFFERS as usize,
+        7 + BUFFERS as usize,
         "all in the one message"
     );
-    // The ring, the doorbell, then a buffer each: every buffer at least its bytes long, and
+    // The seven base descriptors, then a buffer each: every buffer at least its bytes long, and
     // none of them able to shrink under whoever maps it.
-    for buffer in &raw.fds[2..] {
+    for buffer in &raw.fds[7..] {
         assert!(dma_buf::size(buffer.as_fd()).unwrap() >= BYTES as u64);
         assert!(
             std::fs::File::from(buffer.try_clone().unwrap())

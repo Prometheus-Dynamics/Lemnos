@@ -2,6 +2,7 @@
 //! memfds stand in for them). The stand-in node keeps a hold on each dma-buf it is queued, as
 //! the kernel does, and fills a frame by writing through that hold, as the hardware would.
 
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -12,11 +13,12 @@ use lemnos_driver_codec_jobs::testing::PerBuffer;
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_host::board::parse;
-use lemnos_host::stream::{Lease, ProducerEndpoint};
+use lemnos_host::stream::ProducerEndpoint;
 use lemnos_host::{Host, Options as HostOptions, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::Consumer;
+use lemnos_wire::Planes;
+use lemnos_wire::ring::{Consumer, pool_index};
 
 use super::{FRAME, Handle, Hw, options, raw10};
 use crate::{Mode, SunxiVin};
@@ -110,9 +112,11 @@ struct Rig {
     now: u64,
 }
 
-/// What a consumer holds: its lease on the stream, and its end of the ring.
+/// What a consumer holds: its end of the ring, the stream's planes, and the dma-bufs behind its
+/// buffers when they are dma-bufs.
 struct Client {
-    lease: Lease,
+    planes: Planes,
+    handles: Option<Arc<[OwnedFd]>>,
     ring: Consumer,
 }
 
@@ -122,21 +126,25 @@ impl Client {
             .host
             .stream_attach(0, "frames", CallerId(caller))
             .unwrap();
-        let ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
-        Self { lease, ring }
+        let (planes, handles) = (lease.planes, lease.handles.clone());
+        let ring = lease.consumer().unwrap();
+        Self {
+            planes,
+            handles,
+            ring,
+        }
     }
 
     /// The bytes of `buffer`, as the consumer reads its own memory.
     fn bytes(&self, buffer: u32, len: usize) -> Vec<u8> {
         let mut out = vec![0u8; len];
-        let at = self.lease.layout.buffer_offset(buffer).unwrap();
-        assert!(self.lease.buffers.read(at, &mut out));
+        assert!(self.ring.read(buffer, 0, &mut out));
         out
     }
 
     /// The inode of the memory behind `buffer`: which dma-buf it is.
     fn memory(&self, buffer: u32) -> u64 {
-        let handles = self.lease.handles.as_ref().expect("a stream of handles");
+        let handles = self.handles.as_ref().expect("a stream of handles");
         let file = std::fs::File::from(handles[buffer as usize].try_clone().unwrap());
         file.metadata().unwrap().ino()
     }
@@ -277,7 +285,7 @@ fn the_node_fills_the_streams_own_buffers_and_the_driver_copies_nothing() {
         assert_eq!(frame.sequence, sequence as u64);
         assert_eq!(client.bytes(slot, FRAME), vec![byte; FRAME]);
         // Given back, it goes to the node again.
-        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(client.ring.release(frame.buffer));
         rig.tick();
         assert_eq!(
             rig.node.with(|n| n.last_handle.map(|(index, _)| index)),
@@ -437,7 +445,7 @@ fn frames_through_the_streams_own_buffers_allocate_nothing() {
         allocated += count;
         let frame = client.ring.pop_frame().unwrap().expect("a frame");
         assert_eq!(frame.buffer, slot);
-        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
     }
@@ -465,7 +473,7 @@ fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
     );
     assert_eq!(rig.driver.mode(), Mode::Direct);
     let mut client = Client::attach(&rig, 1);
-    assert_eq!(client.lease.planes.lengths(), PLANES);
+    assert_eq!(client.planes.lengths(), PLANES);
     rig.tick();
     assert_eq!(
         rig.node.with(|n| n.handles),
@@ -473,25 +481,24 @@ fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
         "every buffer, every plane"
     );
     let sizes = [PLANES[0] as usize, PLANES[1] as usize];
-    let at = |buffer: u32, offset: usize, len: usize| {
+    let at = |ring: &Consumer, buffer: u32, plane: u32, len: usize| {
         let mut out = vec![0u8; len];
-        let start = client.lease.layout.buffer_offset(buffer).unwrap() + offset;
-        assert!(client.lease.buffers.read(start, &mut out));
+        assert!(ring.read(pool_index(buffer, plane, PLANES.len() as u32), 0, &mut out));
         out
     };
     rig.node_fills_planes(2, 0, 0x40, &sizes);
     rig.tick();
     let frame = client.ring.pop_frame().unwrap().expect("a frame");
     assert_eq!((frame.buffer, frame.bytes), (2, FRAME as u32));
-    // Each plane is where the stream's planes put it: the second after the first.
-    assert_eq!(at(2, 0, sizes[0]), vec![0x40; sizes[0]]);
-    assert_eq!(at(2, sizes[0], sizes[1]), vec![0x41; sizes[1]]);
+    // Each plane is its own pool buffer, the second one after the first.
+    assert_eq!(at(&client.ring, 2, 0, sizes[0]), vec![0x40; sizes[0]]);
+    assert_eq!(at(&client.ring, 2, 1, sizes[1]), vec![0x41; sizes[1]]);
     assert_eq!(
         rig.writes.load(Ordering::Relaxed),
         0,
         "the driver copied nothing"
     );
-    assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+    assert!(client.ring.release(frame.buffer));
     // Round after round, nothing allocated.
     rig.tick();
     let mut allocated = 0;
@@ -504,7 +511,7 @@ fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
         let frame = client.ring.pop_frame().unwrap().expect("a frame");
-        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
     }
@@ -543,7 +550,7 @@ fn a_node_that_takes_no_dma_bufs_copies_each_plane_into_its_plane_of_the_stream(
     );
     assert_eq!(rig.driver.mode(), Mode::Copy);
     let mut client = Client::attach(&rig, 1);
-    // A short first plane still puts the second at the second plane's start.
+    // A short first plane leaves the second plane in its own buffer, as it was given.
     rig.node.with(|n| {
         n.filled
             .push_back((0, 0, false, vec![vec![7; 16], vec![8; 32]]))
@@ -552,12 +559,18 @@ fn a_node_that_takes_no_dma_bufs_copies_each_plane_into_its_plane_of_the_stream(
     let frame = client.ring.pop_frame().unwrap().expect("a frame");
     assert_eq!(frame.bytes, PLANES[0] + 32);
     let mut out = vec![0u8; 32];
-    let start = client.lease.layout.buffer_offset(frame.buffer).unwrap() + PLANES[0] as usize;
-    assert!(client.lease.buffers.read(start, &mut out));
+    assert!(client.ring.read(
+        pool_index(frame.buffer, 1, PLANES.len() as u32),
+        0,
+        &mut out
+    ));
     assert_eq!(out, vec![8; 32]);
     let mut first = vec![0u8; 16];
-    let start = client.lease.layout.buffer_offset(frame.buffer).unwrap();
-    assert!(client.lease.buffers.read(start, &mut first));
+    assert!(client.ring.read(
+        pool_index(frame.buffer, 0, PLANES.len() as u32),
+        0,
+        &mut first
+    ));
     assert_eq!(first, vec![7; 16]);
 }
 

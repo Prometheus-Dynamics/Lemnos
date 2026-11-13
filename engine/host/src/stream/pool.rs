@@ -52,6 +52,15 @@ impl BufferPool {
         Some(buffer)
     }
 
+    /// Grants a published buffer back to the producer under `epoch`: the publisher took it back
+    /// because no consumer holds it. The caller has checked the ring agrees.
+    pub(super) fn grant(&mut self, buffer: u32, epoch: u64) {
+        self.free.retain(|free| *free != buffer);
+        if let Some(state) = self.states.get_mut(buffer as usize) {
+            *state = BufferState::Producer { epoch };
+        }
+    }
+
     /// Marks a buffer the producer holds as published, returning its fence. The caller has
     /// checked it was held.
     pub(super) fn publish(&mut self, buffer: u32) -> u32 {

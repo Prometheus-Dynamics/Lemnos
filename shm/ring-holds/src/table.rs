@@ -1,12 +1,13 @@
 //! The publisher's side: every reader's marks, and the limits on them.
 
 use std::os::fd::OwnedFd;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use shm_ring::{Mem, MemMut, ReadMap, RingError};
 use shm_ring_buffers::{BufferIndex, Holders, MAX_READERS, page};
 
-use crate::marks::{MARKS_AT, count, marked};
+use crate::marks::{MARKS_AT, count, marked, taken_at};
 
 /// What one reader is allowed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,7 +79,7 @@ impl<M: Mem> HoldTable<M> {
     ///
     /// [`RingError`] if the slot is out of range or taken, or the page is too small.
     pub fn add_over(&mut self, slot: u32, page: M, limits: Limits) -> Result<(), RingError> {
-        if page.words() < MARKS_AT + self.buffers as usize {
+        if page.words() < MARKS_AT + 2 * self.buffers as usize {
             return Err(RingError::Malformed(
                 "the marks page is smaller than the pool",
             ));
@@ -188,6 +189,20 @@ impl<M: Mem> Holders for HoldTable<M> {
                 .flatten()
                 .any(|reader| !reader.cut_off && marked(&reader.page, buffer))
     }
+
+    fn taken(&self, buffer: BufferIndex, seq: u64) -> bool {
+        // A reader's stamp is one more than the last frame it took from the buffer. Frames in one
+        // buffer come in sequence, and the publisher asks while `seq` is the one in it, so a stamp
+        // past `seq` means this frame was taken.
+        buffer.0 < self.buffers
+            && self.slots.iter().flatten().any(|reader| {
+                !reader.cut_off
+                    && reader
+                        .page
+                        .load(taken_at(self.buffers, buffer.0 as usize), Ordering::SeqCst)
+                        > seq
+            })
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +267,7 @@ mod tests {
     fn a_reader_swapping_buffers_during_the_count_is_not_seen_over_its_limit() {
         // The swap can land between any two of the publisher's loads.
         for after in 1..=8 {
-            let marks = Heap::new(MARKS_AT + BUFFERS as usize);
+            let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
             set(&marks, 0, 1);
             set(&marks, 1, 1);
             let racing = Racing {
@@ -277,7 +292,7 @@ mod tests {
 
     #[test]
     fn a_reader_really_over_its_limit_is_cut_off() {
-        let marks = Heap::new(MARKS_AT + BUFFERS as usize);
+        let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
         for buffer in 0..3 {
             set(&marks, buffer, 1);
         }
@@ -294,7 +309,7 @@ mod tests {
     /// looks; it is one that is stuck, and it is judged by the time a hold may last.
     #[test]
     fn a_reader_stopped_mid_change_is_judged_by_time_not_by_how_often_it_is_looked_at() {
-        let marks = Heap::new(MARKS_AT + BUFFERS as usize);
+        let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
         set(&marks, 0, 1);
         marks.store(VERSION_WORD, 3, Ordering::SeqCst);
         let pool = pool_page();

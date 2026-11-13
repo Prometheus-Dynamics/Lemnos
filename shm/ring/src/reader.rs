@@ -3,7 +3,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
 
-use crate::layout::{Geometry, SLOT_HEADER_WORDS, W_HEAD, stamp};
+use crate::layout::{Geometry, SLOT_HEADER_WORDS, W_END, W_HEAD, stamp};
 use crate::{FieldId, Flags, Mem, ReadMap, RingError, SampleTime};
 
 /// How many samples one [`Reader::next`] call steps over looking for one that is still there.
@@ -69,6 +69,15 @@ impl Reader<ReadMap> {
     pub fn attach(fd: OwnedFd) -> Result<Self, RingError> {
         Self::over(ReadMap::new(fd)?)
     }
+
+    /// Attaches to the ring behind `fd` at its first sample. See [`Reader::over_from_start`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::attach`].
+    pub fn attach_from_start(fd: OwnedFd) -> Result<Self, RingError> {
+        Self::over_from_start(ReadMap::new(fd)?)
+    }
 }
 
 impl<M: Mem> Reader<M> {
@@ -78,8 +87,24 @@ impl<M: Mem> Reader<M> {
     ///
     /// [`RingError::Malformed`] if `mem` doesn't hold a ring.
     pub fn over(mem: M) -> Result<Self, RingError> {
-        let geometry = Geometry::read(&mem)?;
         let cursor = mem.load(W_HEAD, Ordering::Acquire);
+        Self::over_at(mem, cursor)
+    }
+
+    /// Attaches to the ring in `mem` at its first sample: the first [`Reader::next`] returns the
+    /// oldest sample the ring still holds, which for a ring made just now is the first one ever
+    /// published. For a consumer of a ring whose publisher published before the consumer could
+    /// map it.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError::Malformed`] if `mem` doesn't hold a ring.
+    pub fn over_from_start(mem: M) -> Result<Self, RingError> {
+        Self::over_at(mem, 0)
+    }
+
+    fn over_at(mem: M, cursor: u64) -> Result<Self, RingError> {
+        let geometry = Geometry::read(&mem)?;
         Ok(Self {
             scratch: vec![0; geometry.max_payload as usize].into_boxed_slice(),
             mem,
@@ -93,6 +118,12 @@ impl<M: Mem> Reader<M> {
     #[must_use]
     pub const fn geometry(&self) -> &Geometry {
         &self.geometry
+    }
+
+    /// The end code the owner recorded, 0 while the topic runs. See [`Ring::set_end`](crate::Ring::set_end).
+    #[must_use]
+    pub fn end(&self) -> u32 {
+        self.mem.load(W_END, Ordering::Acquire) as u32
     }
 
     /// How many samples this reader has been told it missed, in total.

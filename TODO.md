@@ -97,12 +97,12 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Frame streams and the shared ring
 
-- [ ] **Frame streams on the shared ring** (I2). `lemnosd`'s streams, the client and the C API still
-      use their own ring and doorbell (`docs/streams.md`), and move onto `shm-ring`,
-      `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`), with
-      descriptors passed by `shm-fdpass`. Open:
-  - I2a (PR #221, in CI): the streams on the shared ring. Until it merges, the entry above stands.
-  - I2b: the kernel module's stream ring onto the shared layout.
+- [ ] **Kernel module, job ring and outside readers** (I2b, I2c, I2d). The frame streams are on the
+      shared ring (I2a). Still open:
+  - I2b: the kernel module's own stream ring (`kernel/lemnos.h`, `LEMNOS_RING_*`, read by
+    `drivers/pisp-fe-sys`, `drivers/pisp-sys`, `drivers/rp1-csi2-sys` and `drivers/k230-gsdma-sys`)
+    moves onto the shared layout. Until it does, kernel-backed streams are not expected to work on
+    a board.
   - I2c: the job ring.
   - I2d: outside readers by ticket. A third process gets a reader slot from the service, and the
     service asks the daemon for a ticket on its own connection. Read and import rights are kept
