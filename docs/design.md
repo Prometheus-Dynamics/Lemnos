@@ -175,7 +175,7 @@ device tree sensor entry.
 ## The block rule
 
 The BCM2712 board is the template for every hardware block. Each block gets a driver that knows how to talk to
-it and takes work from whoever calls it. No vendor library lives in Lemnos. What runs on a block (a
+it and takes work from whoever calls it. No vendor library lives in Lemnos: register facts may be transcribed from open-source vendor user-space code with provenance (source file and version); the libraries themselves are neither used nor linked. What runs on a block (a
 compiled model, an encoder's settings, 3A) is the caller's business.
 
 | Block on that board | How it works |

@@ -173,7 +173,7 @@ a test sets and reads back. Steady-state reads must allocate nothing; prove it w
 allocator in `lemnos-measure`, as `drivers/generic-sensor` does.
 
 A driver for a hardware block follows the block rule in [the design](design.md#the-block-rule): no
-vendor library, and no doing the block's work in software. Its kernel interface (structures,
+vendor library (register facts may be transcribed from open-source vendor user-space code with provenance (source file and version); the libraries themselves are neither used nor linked.), and no doing the block's work in software. Its kernel interface (structures,
 request numbers, the `unsafe` that issues them) goes in a crate of its own, `drivers/<name>-sys`,
 and the driver crate has no `unsafe`. Every path by which a caller's bytes become an address, an
 offset, a size or a descriptor the block will use is checked against a buffer the caller really

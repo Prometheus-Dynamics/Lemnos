@@ -27,6 +27,7 @@ lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
 lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }
+lemnos-driver-rkvenc = { path = "../rkvenc" }
 
 [package.metadata.lemnos]
 driver = "RkMpp"

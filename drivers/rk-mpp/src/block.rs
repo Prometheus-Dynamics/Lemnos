@@ -15,8 +15,8 @@
 //! - `MPP_DEVICE_RKVDEC` and `MPP_DEVICE_HEVC_DEC`: the type is served by `mpp_rkvdec.c` on some
 //!   chips, which reads a descriptor out of the caller's PPS buffer (`fill_scaling_list_pps`), and
 //!   by `mpp_rkvdec2.c` on others; the type alone does not say which.
-//! - `MPP_DEVICE_RKVENC` (`mpp_rkvenc.c` or `mpp_rkvenc2.c`, register classes), `MPP_DEVICE_AV1DEC`
-//!   (register classes), `MPP_DEVICE_VDPP` (two windows),
+//! - `MPP_DEVICE_RKVENC` on `mpp_rkvenc2.c` (register classes, each with its own byte range),
+//!   `MPP_DEVICE_AV1DEC` (register classes), `MPP_DEVICE_VDPP` (two windows),
 //!   `MPP_DEVICE_VEPU2_JPEG` (multi-core task path), `MPP_DEVICE_VDPU1_PP`, `MPP_DEVICE_VDPU2_PP`,
 //!   `MPP_DEVICE_AVSPLUS_DEC` and `MPP_DEVICE_VEPU22`.
 
@@ -252,6 +252,9 @@ pub enum Block {
     JpegDecoder,
     /// The JPEG encoder (`MPP_DEVICE_RKJPEGE`, `mpp_jpgenc.c`).
     JpegEncoder,
+    /// The first rkvenc generation, the VEPU541 class (`MPP_DEVICE_RKVENC`, `mpp_rkvenc.c`): one
+    /// flat register array, the task's `reg` of 780 words, which the kernel's checks bound.
+    Rkvenc,
     /// The IEP2 deinterlacer (`MPP_DEVICE_IEP2`, `mpp_iep2.c`): a parameter block, whose jobs
     /// are [`crate::ParamJob`]s.
     Iep2,
@@ -298,18 +301,21 @@ pub struct Facts {
     pub direct: Option<Direct>,
 }
 
-/// The most registers of any block here: [`Block::Vepu2`]'s.
-pub const MAX_REGISTERS: usize = 184;
+/// The most registers of any block here: [`Block::Rkvenc`]'s task array. A job's registers are
+/// copied only as far as the job reaches, so the size of the largest block costs a claim its
+/// staging memory once and no job anything.
+pub const MAX_REGISTERS: usize = 780;
 
 impl Block {
     /// Every block a claim may bind to.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Vdpu1,
         Self::Vdpu2,
         Self::Vepu1,
         Self::Vepu2,
         Self::JpegDecoder,
         Self::JpegEncoder,
+        Self::Rkvenc,
         Self::Iep2,
     ];
 
@@ -385,6 +391,17 @@ impl Block {
             Self::JpegEncoder => Facts {
                 client: client::RKJPEGE,
                 registers: 79,
+                first: 0,
+                direct: None,
+            },
+            // `mpp_rkvenc.c`: `struct rkvenc_task` holds `reg[RKVENC_REG_L1_NUM]`, 780 words,
+            // and every register read and write is checked against its size (`mpp_check_req`),
+            // so a job may name up to there. The driver's own `reg_num` (112) and `reg_end`
+            // (131) describe its normal write window, not a bound on what the kernel accepts. The
+            // second register window at 0x10000 is a separate array the job cannot name.
+            Self::Rkvenc => Facts {
+                client: client::RKVENC,
+                registers: 780,
                 first: 0,
                 direct: None,
             },

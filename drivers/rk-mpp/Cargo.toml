@@ -10,14 +10,19 @@ description = "The video codec blocks behind the vendor kernel's /dev/mpp_servic
 workspace = true
 
 [features]
+default = ["device"]
+# The block's engine side: the claim on the service, the `codec.block/1` block and the job stream
+# it serves. Off, the crate is the uAPI, the message and job layouts and their checks, and it has
+# no engine crate in its tree (`scripts/check-libraries.sh` builds it so).
+device = ["dep:lemnos-core", "dep:lemnos-contract-codec-block", "dep:lemnos-driver-codec-jobs"]
 # The played kernel of this crate's tests, for the tests of the crates that drive it.
 played = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
-lemnos-core = { path = "../../engine/core", features = ["std"] }
-lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
-lemnos-driver-codec-jobs = { path = "../codec-jobs" }
+lemnos-core = { path = "../../engine/core", features = ["std"], optional = true }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block", optional = true }
+lemnos-driver-codec-jobs = { path = "../codec-jobs", optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }

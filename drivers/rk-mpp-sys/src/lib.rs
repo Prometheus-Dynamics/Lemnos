@@ -24,7 +24,7 @@
 //!
 //! # Not a vendor library
 //!
-//! No vendor library is used or followed. The facts this crate relies on (which commands read or
+//! Vendor user-space code is governed by the block rule: register facts may be transcribed from open-source vendor user-space code with provenance (source file and version); the libraries themselves are neither used nor linked. The facts this crate relies on (which commands read or
 //! write how many bytes at `data_ptr`, when read-backs are copied, what closing the file does) were
 //! read from rockchip-linux/kernel `develop-6.1` at `77168c8d5ab82399f65a80e9f807b50ba37cf483`:
 //! `drivers/video/rockchip/mpp/mpp_common.c` (`mpp_process_request`, `mpp_collect_msgs`,

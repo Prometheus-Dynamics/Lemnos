@@ -58,8 +58,11 @@
 //! is taken only on a block behind one, and the claim is the only session on the service, so the
 //! only buffers mapped for the block are the claim's own (see [`crate::Claim`]).
 
+#[cfg(feature = "device")]
 use crate::block::{Facts, MAX_REGISTERS, ParamFacts};
+#[cfg(feature = "device")]
 use crate::message::READ_BACK_BYTES;
+#[cfg(feature = "device")]
 use crate::uapi::{FD_MASK, RegOffsetElem};
 
 /// The most addresses one job may name.
@@ -214,6 +217,7 @@ impl std::fmt::Display for JobError {
 impl std::error::Error for JobError {}
 
 /// The claim's memory for building a job's messages, made once with the claim.
+#[cfg(feature = "device")]
 pub(crate) struct Staging {
     pub(crate) registers: [u8; 4 * MAX_REGISTERS],
     pub(crate) table: [u8; 2 * MAX_ADDRESSES],
@@ -221,6 +225,7 @@ pub(crate) struct Staging {
     pub(crate) read_back: [u8; READ_BACK_BYTES],
 }
 
+#[cfg(feature = "device")]
 impl Staging {
     pub(crate) fn new() -> Box<Self> {
         Box::new(Self {
@@ -234,6 +239,7 @@ impl Staging {
 
 /// A buffer as the plan sees it.
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "device")]
 pub(crate) struct Held {
     pub(crate) slot: u8,
     /// Between 1 and [`FD_MASK`].
@@ -243,6 +249,7 @@ pub(crate) struct Held {
 
 /// A checked job, staged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "device")]
 pub(crate) struct Plan {
     /// Byte offset of the write in the register file, and its bytes in `Staging::registers`.
     pub(crate) write: (u32, usize, usize),
@@ -257,6 +264,7 @@ pub(crate) struct Plan {
 }
 
 /// The run `first..first + count` inside `facts`' registers and reaching its first, as bytes.
+#[cfg(feature = "device")]
 fn run(facts: &Facts, first: u16, count: usize) -> Option<Result<(usize, usize), ()>> {
     let first = usize::from(first);
     let end = first.checked_add(count)?;
@@ -270,6 +278,7 @@ fn run(facts: &Facts, first: u16, count: usize) -> Option<Result<(usize, usize),
 }
 
 /// Checks `job` against the block and the claim's buffers, and stages its messages' payloads.
+#[cfg(feature = "device")]
 pub(crate) fn plan(
     facts: &Facts,
     job: &Job<'_>,
@@ -377,12 +386,14 @@ pub(crate) fn plan(
 }
 
 /// The native-endian word at byte `at` of `bytes`.
+#[cfg(feature = "device")]
 fn word_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
 /// Checks a parameter job against the block and the claim's buffers, and stages its messages'
 /// payloads: the structure with every descriptor word the driver's, and the offset list.
+#[cfg(feature = "device")]
 pub(crate) fn plan_params(
     facts: &ParamFacts,
     job: &ParamJob<'_>,
