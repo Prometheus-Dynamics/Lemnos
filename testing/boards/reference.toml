@@ -210,3 +210,12 @@ id = "fan-control"
 driver = "fan-control"
 uses = { fan = "fan", t0 = "cpu-thermal" }
 config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50 }
+
+# The board's self-test: the members that serve `self-test/1`, in the order they run. `watchdog`
+# answers its timeout, `mag` reads its chip ID and `power` reads its bus voltage (skipped until a
+# `self_test_bus_min_mv`/`self_test_bus_max_mv` range is given to `power`). The intrusive tests stay
+# out of `all` unless `include_intrusive = true`.
+[[devices]]
+id = "selftest"
+driver = "board-self-test"
+config = { members = ["watchdog", "mag", "power"], include_intrusive = false }

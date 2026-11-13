@@ -689,13 +689,84 @@ hand in both forms.
 
 ## The self-test of a board
 
-`board-self-test` serves [`self-test/1`](drivers.md#self-tests) for the board. Its `config` names the
-members, in the order they run:
+`board-self-test` serves [`self-test/1`](drivers.md#self-tests) for the board. It runs the tests that
+its members serve and knows no kind of hardware: a member is any device whose driver serves
+`self-test/1`.
 
-| Key | Type | Meaning |
+### The reference board's entry
+
+This is the entry on the reference board, [`testing/boards/reference.toml`](../testing/boards/reference.toml),
+verbatim:
+
+```toml
+# The board's self-test: the members that serve `self-test/1`, in the order they run. `watchdog`
+# answers its timeout, `mag` reads its chip ID and `power` reads its bus voltage (skipped until a
+# `self_test_bus_min_mv`/`self_test_bus_max_mv` range is given to `power`). The intrusive tests stay
+# out of `all` unless `include_intrusive = true`.
+[[devices]]
+id = "selftest"
+driver = "board-self-test"
+config = { members = ["watchdog", "mag", "power"], include_intrusive = false }
+```
+
+The reference board's own test (`service/lemnosd/tests/reference_self_test.rs`) binds this entry: a
+member the board lacks refuses the bind, so the entry is checked by the daemon's own build.
+
+### Keys
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `members` | a list of device ids, or the string `"all"` | none (required) | The members, in the order they run. `"all"` takes every device whose driver serves `self-test/1`, in board order. At most 16 |
+| `include_intrusive` | bool | `false` | Whether `all` runs the members' intrusive tests too (a test that changes the device's output while it runs) |
+
+A name in `members` that the board does not have, or a device whose driver serves no `self-test/1`,
+refuses the bind: the device does not start, and its state says why. A member that is not running is
+not an error: its tests are skipped as `ABSENT`, so the board starts with no member running.
+
+### Test names and what runs
+
+The board lists each member's tests as `member:test`, in member order, then `all`. A name is stable for
+a driver version.
+
+- `member:test` runs that one test on that member.
+- `all` runs every member's test in member order. Intrusive tests are left out unless
+  `include_intrusive = true`. An operator test (one that needs a person to watch the device) is skipped
+  as `NEEDS_OPERATOR` until it is run with `confirmed = true`.
+
+On the reference board the tests are:
+
+| Name | Test | Intrusive | Needs |
+|---|---|---|---|
+| `watchdog:answers` | the device's timeout reads back | no | nothing |
+| `mag:identity` | the chip ID reads `0x32` | no | nothing |
+| `power:bus_voltage` | the bus voltage is inside the board's range | no | `self_test_bus_min_mv` and `self_test_bus_max_mv` in `power`'s config; without them the test is skipped as `NOT_CONFIGURED` |
+
+The reference board's entry gives no range for `power`, so `power:bus_voltage` is `skipped` until the
+board's rail range is written into `power`'s `config` (a board fact, not in this file).
+
+### A board without some member
+
+The board writes only the members it has. A board with no magnetometer writes
+`members = ["watchdog", "power"]`; a board whose watchdog is not a `self-test/1` device writes the
+members that remain. A board with no member that serves `self-test/1` omits the device entirely.
+
+### Cross-member checks and operator tests
+
+Neither is on the reference board yet. A cross-member check (set an actuator, read an observer, expect
+the observer to move) is designed in the self-test brief, and its board-file keys are not built. The
+operator tests of the fan (`spin`, on a fan with a tachometer) and the indicator (`lamp`) are served by
+drivers that the reference board does not use.
+
+### Over Orion
+
+The board is the device `selftest`, so its resource is `lemnos.selftest`. From an Orion client the calls
+are actions on that resource, named `lemnos.selftest.call`, with the method and its arguments as the
+text of the action (`service/orion/tests/orion_bridge.rs` runs these):
+
+| Args | What it does | Reply |
 |---|---|---|
-| `members` | a list of device ids, or the string `"all"` | the members to run; `"all"` takes every device whose driver serves `self-test/1`, in board order. At most 16 |
-| `include_intrusive` | bool, default `false` | whether `all` runs the members' intrusive tests too |
+| `tests` | lists the tests | the list: a count, then one record per test (binary, not text) |
+| `run NAME CONFIRMED`, for example `run mag:identity false` | starts the test as a long job | progress as `done of total` in steps; the end is one 373-byte result record (binary) |
+| `last` | the last result of each test that has one | a count, then each test's name and its record (binary) |
 
-Its tests are each member's, named `member:test`, and `all`. A member that is not running is skipped
-as `ABSENT`. The board needs no member to be running to start.
+A long job can be cancelled from the client, which cancels the member's job it is waiting on.
