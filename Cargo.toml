@@ -54,11 +54,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# lemnosd and lemnos-ctl as shipped in OS images. Unwinding is required: it is
+# The shipped programs (lemnosd, lemnos-ctl, lemnos-orion; packaging/shipped.txt), as OS images
+# build them: `cargo build --locked --profile service --target <triple>`. The smallest reasonable
+# footprint: size-optimised, one codegen unit and fat LTO (about 1 to 2 percent smaller than the
+# default 16 units, measured on aarch64, docs/building.md), stripped. Unwinding is required: it is
 # what lets the host contain a panicking driver.
 [profile.service]
 inherits = "release"
 opt-level = "z"
 lto = "fat"
+codegen-units = 1
 panic = "unwind"
 strip = true

@@ -96,6 +96,77 @@ For a board, give `KDIR` the board kernel's build tree, and `ARCH` and `CROSS_CO
 building on another machine. `make modules_install` installs it stripped. The PIO part is built
 only for a kernel that has the RP1 PIO driver.
 
+### For an image builder
+
+What an image builder needs to build `lemnos.ko` against a board kernel's build tree (`KDIR`):
+
+- **Invocation.** The module's `Makefile` wraps the kernel's module build. Run it from a copy of
+  `kernel/` or from the checkout, with the board kernel's built tree:
+
+  ```text
+  make -C kernel KDIR=/path/to/board-kernel-build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+  ```
+
+  `ARCH` and `CROSS_COMPILE` are passed to the kernel's build system. Use the values that tree was
+  built with: `ARCH=arm64` (or `arm`, `riscv`), and the cross prefix of its toolchain. The tree must
+  be a built one, with `Module.symvers`, `.config` and `include/generated`. Its `.config` decides
+  the Kconfig rules below.
+- **Output.** `lemnos.ko`, in the directory the make ran in. `make modules_install` installs it
+  stripped (`INSTALL_MOD_STRIP=1`, the default).
+- **Make variables.** `KDIR` (required, the built tree; defaults to this machine's headers).
+  `ARCH`, `CROSS_COMPILE`, `INSTALL_MOD_STRIP` (default 1), and `CONFIG_RP1_PIO` (set to `m` or `y`
+  to build the RP1 PIO part, see below). `KBUILD_EXTRA_SYMBOLS` names the `Module.symvers` of an
+  out-of-tree module the PIO part links against, when the board kernel builds the RP1 PIO driver
+  as a module. `LEMNOS_EXTRA_CFLAGS` is for the test harness only; leave it unset.
+- **Warnings.** The module is built with `-Werror`. A kernel that warns about the module's code
+  fails the build.
+
+Kconfig the board kernel must have, from the symbols `lemnos.ko` links against (checked by building
+it natively against this machine's kernel tree; the symbol list is from `nm -u`):
+
+| Symbol | Needed for | Required |
+| --- | --- | --- |
+| `CONFIG_MODULES` | loading the module | required |
+| `CONFIG_PM` | `devm_pm_runtime_enable` (lemnos_vip.c) | required |
+| `CONFIG_OF` | `of_pwm_xlate_with_flags` (lemnos_pwm.c), device properties | required |
+| `CONFIG_DMA_SHARED_BUFFER` | dma-buf export, import and mapping (every stream, the register jobs) | required |
+| `CONFIG_COMMON_CLK` | `clk_*` (power, register jobs, the camera receiver) | required |
+| `CONFIG_I2C` | `i2c_transfer`, `i2c_smbus_xfer` (the I2C bus driver, lemnos_bus.c) | required |
+| `CONFIG_SPI` | `spi_sync`, `spi_setup` (the SPI bus driver, lemnos_bus.c) | required |
+| `CONFIG_GPIOLIB` | `gpio_device_*`, `gpiod_*` (lemnos_gpio.c) | required |
+| `CONFIG_PWM` | `pwm_apply_might_sleep`, `pwm_get` (lemnos_pwm.c) | required |
+| `CONFIG_REGULATOR` | `regulator_*` (lemnos_power.c) | required |
+| `CONFIG_THERMAL` | `thermal_zone_get_temp` (lemnos_events.c) | required |
+| `CONFIG_RESET_CONTROLLER` | `reset_control_*` (lemnos_power.c, register jobs, VIP9000) | required |
+| `CONFIG_CPU_BIG_ENDIAN` | must be **off**: `BUILD_BUG_ON` in lemnos_stream.c | must be unset |
+| `CONFIG_IOMMU_SUPPORT` / `CONFIG_IOMMU_API` | the confined list (`confined=`): a block whose DMA an IOMMU really confines | optional: without it, only `unconfined=` blocks can be mapped |
+| `CONFIG_CMA` / `CONFIG_DMA_CMA` | large contiguous frame memory, only for allocation sizes that need it | optional |
+| `CONFIG_DMABUF_HEAPS` (and `_SYSTEM`, `_CMA`) | not referenced by the module; lemnosd's own heap allocations (`LEMNOS_TEST_DMA_HEAP`, docs/testing.md) | optional |
+| `CONFIG_RP1_PIO` | the RP1 PIO part (`lemnos_pio.c`, `pio-0`): built only when set to `m` or `y`, and then needs `<linux/pio_rp1.h>` from the board kernel | optional |
+
+The QEMU harness (`testing/qemu/kernel.config`) also sets the serial console, initrd, configfs,
+devtmpfs, I2C and SPI test helpers (`I2C_STUB`, `SPI_LOOPBACK_TEST`, `GPIO_SIM`), `PROVE_LOCKING`,
+`DEBUG_ATOMIC_SLEEP` and `KASAN`. These are for the tests, not for the module; a board kernel does
+not need them.
+
+Module parameters (`modinfo lemnos.ko`; set at load with `insmod lemnos.ko name=value` or from the
+image's modprobe.d). All are read-only at runtime (mode 0444). Empty means none:
+
+- `owned=` (compatibles the module may claim; required for any binding)
+- `confined=` (compatibles whose IOMMU really confines their DMA)
+- `unconfined=` (compatibles whose registers may be mapped with no IOMMU confinement)
+- `pisp_be=`, `gsdma=`, `vip9000=`, `a733_ve=`, `k230_isp=` (compatibles driven by the module, each
+  also listed in `owned=`)
+- `bus_buffer=` (largest bus transfer, bytes each way; default 4096)
+- Test only, never set on a board: `test_irq_inject`, `test_pb_fake_regs`, `test_stream_source`,
+  `test_pisp_fe`, `test_gsdma_fake_regs`, `test_gsdma_reach`, `test_rj_fake_regs`,
+  `test_vip_fake_regs`, `test_vip_timeout_ms`.
+
+Verified here: a native build against this machine's kernel tree (`7.2.9-200.nobara.fc44.x86_64`)
+with `make -C <copy of kernel> KDIR=/lib/modules/$(uname -r)/build modules` exits 0 and produces
+`lemnos.ko` (GPL, the parameter list above). A cross build and a board kernel have not been built
+here: they are untested.
+
 ## Loading and claiming
 
 The module claims a platform device only when two things agree: the module was loaded with the

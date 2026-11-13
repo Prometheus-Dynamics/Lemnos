@@ -1,0 +1,6 @@
+# The programs an OS image ships: <cargo package> <binary name> <targets it builds for, comma-separated>.
+# Read by scripts/check-shipped.sh (the dependency check, and that docs/building.md lists each one)
+# and by the image builder. Add a line when a shipped program is added.
+lemnosd lemnosd aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
+lemnos-ctl lemnos-ctl aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
+lemnos-orion lemnos-orion aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
