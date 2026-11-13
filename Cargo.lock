@@ -706,6 +706,7 @@ dependencies = [
  "lemnos-contract-usb-function",
  "lemnos-core",
  "lemnos-devtree",
+ "lemnos-driver-named-files",
  "lemnos-driver-system-slots",
  "lemnos-fake-devices",
  "lemnos-host",

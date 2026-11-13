@@ -304,6 +304,19 @@ driver a loaded one became, or why a refused one was refused.
 lemnos-ctl packages
 ```
 
+### files
+
+The named files a node serves (`lemnos/`, "Named files" above). With a device only, its index. With
+a name, that file: the snapshot is taken once and read back in pieces, so the bytes are what the node
+held when the transfer began. The file goes to stdout, or to a new file given as the last argument; the
+tool never overwrites one.
+
+```sh needs:a-daemon-with-a-named-files-device
+lemnos-ctl files files                                    # the index
+lemnos-ctl files files lemnos/trial-reason                # to stdout
+lemnos-ctl files files lemnos/tree/overlay.dts ./overlay.dts
+```
+
 ### validate
 
 Checks a board file the way `lemnosd --check` does, with no daemon and no socket, then prints what

@@ -29,6 +29,8 @@ lemnos-ctl [--socket PATH] COMMAND
                                  the tool cancels it)
   off DEVICE | on DEVICE
   packages                       driver packages: which loaded, which were refused and why
+  files DEVICE [NAME [FILE]]     the named files a node serves (`lemnos/`): its index, or one
+                                 file to stdout, or to FILE, which must not exist yet
   validate [--socs DIR] [--no-live] BOARD
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
@@ -40,6 +42,8 @@ lemnos-ctl [--socket PATH] COMMAND
                                  modprobe configuration, and for a module built into the kernel
                                  the same parameters as kernel command-line words, and the udev
                                  rules that give the daemon's nodes to its group, with no daemon";
+
+mod files;
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -142,6 +146,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         ("off", [device]) => tool.power(device, false),
         ("on", [device]) => tool.power(device, true),
         ("packages", []) => tool.packages(),
+        ("files", [device]) => tool.files_index(device),
+        ("files", [device, name]) => tool.files_fetch(device, name, None),
+        ("files", [device, name, path]) => tool.files_fetch(device, name, Some(path)),
         _ => Err(USAGE.to_string()),
     }
 }
