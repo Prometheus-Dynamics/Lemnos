@@ -170,7 +170,7 @@ impl ServiceSession {
             }),
             allowed: allowed
                 .iter()
-                .fold(0, |bits, b| bits | (1 << b.facts().client)),
+                .fold(0, |bits, &b| bits | check::block_bit(b)),
             bound: None,
             #[cfg(test)]
             played: None,
@@ -193,7 +193,7 @@ impl ServiceSession {
     /// call when the session is bound already or was not opened for `block`.
     pub fn bind(&mut self, block: Block) -> io::Result<()> {
         let client = block.facts().client;
-        if self.bound.is_some() || self.allowed & (1 << client) == 0 {
+        if self.bound.is_some() || self.allowed & check::block_bit(block) == 0 {
             return Err(refused());
         }
         self.call_u32(Command::InitClientType, client)?;

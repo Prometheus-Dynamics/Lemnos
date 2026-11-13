@@ -54,7 +54,8 @@ impl Device for Node {
         Ok(Played(Arc::clone(&self.0)))
     }
 
-    fn confined(&mut self, _block: Block) -> io::Result<bool> {
+    fn confined(&mut self, block: Block) -> io::Result<bool> {
+        self.0.lock().unwrap().bound = Some(block);
         Ok(self.0.lock().unwrap().confined)
     }
 

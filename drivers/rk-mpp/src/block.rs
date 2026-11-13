@@ -255,6 +255,9 @@ pub enum Block {
     /// The first rkvenc generation, the VEPU541 class (`MPP_DEVICE_RKVENC`, `mpp_rkvenc.c`): one
     /// flat register array, the task's `reg` of 780 words, which the kernel's checks bound.
     Rkvenc,
+    /// The second-generation encoder (`MPP_DEVICE_RKVENC` on `mpp_rkvenc2.c`, the VEPU580 class):
+    /// register classes, not one flat array. Its OSD class is left out ([`RKVENC2_WINDOWS`]).
+    Rkvenc2,
     /// The IEP2 deinterlacer (`MPP_DEVICE_IEP2`, `mpp_iep2.c`): a parameter block, whose jobs
     /// are [`crate::ParamJob`]s.
     Iep2,
@@ -334,9 +337,21 @@ pub struct Facts {
     pub first: u16,
     /// A register translated outside the table, if any.
     pub direct: Option<Direct>,
+    /// Whether the kernel takes a buffer's offset from the descriptor word's bits 10 and up (the
+    /// table's `reg >> 10`), and ignores the offset list for the table's registers. Then a job
+    /// puts the offset in the word and sends no offset list.
+    pub offset_in_descriptor: bool,
 }
 
 impl Facts {
+    /// The window the translation table's indices are relative to: the kernel translates the
+    /// registers of one array, and each table entry is an index into it. `None` when no window
+    /// is translated.
+    #[must_use]
+    pub fn table_window(&self) -> Option<Window> {
+        self.windows.iter().copied().find(|w| w.translated)
+    }
+
     /// The index in the block's flat register array of word `word`, or `None` when no window
     /// holds it. The flat array is the windows' words, in the order the windows are listed.
     #[must_use]
@@ -382,6 +397,55 @@ const RKVENC_WINDOWS: &[Window] = &[
         translated: false,
     },
 ];
+/// `mpp_rkvenc2.c`: the register classes of the second-generation encoder, in the kernel's
+/// `RKVENC_CLASS_TYPE` order, as `rkvenc_v2_hw_info` places them (`base_s / 4`, and the words
+/// `(base_e - base_s) / 4 + 1`). Only the picture class (PIC) is translated: the kernel translates
+/// its fd classes (PIC and OSD) through the session table with the table's indices relative to
+/// each class. The OSD class (`RKVENC_CLASS_OSD`, word 768 onwards) is not a window: a job may
+/// not name it, so the kernel never allocates it and never translates it. Its status class
+/// (ST) and debug class (DEBUG) are read only.
+const RKVENC2_WINDOWS: &[Window] = &[
+    Window {
+        first: 0,
+        words: 23,
+        translated: false,
+    },
+    Window {
+        first: 160,
+        words: 94,
+        translated: true,
+    },
+    Window {
+        first: 1024,
+        words: 57,
+        translated: false,
+    },
+    Window {
+        first: 1472,
+        words: 374,
+        translated: false,
+    },
+    Window {
+        first: 2048,
+        words: 122,
+        translated: false,
+    },
+    Window {
+        first: 2176,
+        words: 679,
+        translated: false,
+    },
+    Window {
+        first: 4096,
+        words: 180,
+        translated: false,
+    },
+    Window {
+        first: 5120,
+        words: 214,
+        translated: false,
+    },
+];
 const NO_WINDOWS: &[Window] = &[];
 
 /// The most registers in one window of any block here: [`Block::Rkvenc`]'s first window. A
@@ -389,12 +453,12 @@ const NO_WINDOWS: &[Window] = &[];
 pub const MAX_REGISTERS: usize = 780;
 
 /// The most words a job writes, in all its runs, on any block here: the flat register array of
-/// [`Block::Rkvenc`] (its two windows, 780 and 320 words).
-pub const MAX_JOB_WORDS: usize = 780 + 320;
+/// [`Block::Rkvenc2`] (its eight windows that are not the OSD class, 1743 words).
+pub const MAX_JOB_WORDS: usize = 1743;
 
 impl Block {
     /// Every block a claim may bind to.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Vdpu1,
         Self::Vdpu2,
         Self::Vepu1,
@@ -402,6 +466,7 @@ impl Block {
         Self::JpegDecoder,
         Self::JpegEncoder,
         Self::Rkvenc,
+        Self::Rkvenc2,
         Self::Iep2,
     ];
 
@@ -425,6 +490,7 @@ impl Block {
             // VDPU1_FMT_H264D 0.
             Self::Vdpu1 => Facts {
                 client: client::VDPU1,
+                offset_in_descriptor: false,
                 windows: VDPU1_WINDOWS,
                 first: 0,
                 direct: Some(Direct {
@@ -440,6 +506,7 @@ impl Block {
             // VDPU2_FMT_H264D 0.
             Self::Vdpu2 => Facts {
                 client: client::VDPU2,
+                offset_in_descriptor: false,
                 windows: VDPU2_WINDOWS,
                 first: 50,
                 direct: Some(Direct {
@@ -453,6 +520,7 @@ impl Block {
             // VEPU1_REG_NUM 164, reg_start 0.
             Self::Vepu1 => Facts {
                 client: client::VEPU1,
+                offset_in_descriptor: false,
                 windows: VEPU1_WINDOWS,
                 first: 0,
                 direct: None,
@@ -462,6 +530,7 @@ impl Block {
             // to that register's offset; it maps nothing there.
             Self::Vepu2 => Facts {
                 client: client::VEPU2,
+                offset_in_descriptor: false,
                 windows: VEPU2_WINDOWS,
                 first: 0,
                 direct: None,
@@ -469,6 +538,7 @@ impl Block {
             // JPGDEC_REG_NUM 42 (JPGDEC_VPU730_REG_NUM 70 on the newer variant), reg_start 0.
             Self::JpegDecoder => Facts {
                 client: client::RKJPEGD,
+                offset_in_descriptor: false,
                 windows: JPEG_DECODER_WINDOWS,
                 first: 0,
                 direct: None,
@@ -476,6 +546,7 @@ impl Block {
             // JPGENC_REG_NUM 79 (JPGENC_VPU730_REG_NUM 241 on the newer variant), reg_start 0.
             Self::JpegEncoder => Facts {
                 client: client::RKJPEGE,
+                offset_in_descriptor: false,
                 windows: JPEG_ENCODER_WINDOWS,
                 first: 0,
                 direct: None,
@@ -487,14 +558,25 @@ impl Block {
             // second window (0x10000, `reg_l2`) is a separate array of 320 words, written raw.
             Self::Rkvenc => Facts {
                 client: client::RKVENC,
+                offset_in_descriptor: false,
                 windows: RKVENC_WINDOWS,
                 first: 0,
                 direct: None,
+            },
+            // `mpp_rkvenc2.c`: the VEPU580 class layout. The kernel takes each buffer's offset from
+            // the descriptor word (`reg >> 10`), so the driver puts it there.
+            Self::Rkvenc2 => Facts {
+                client: client::RKVENC,
+                windows: RKVENC2_WINDOWS,
+                first: 0,
+                direct: None,
+                offset_in_descriptor: true,
             },
             // No register file: a register-file job is refused on it, as running past 0
             // registers. Its jobs are parameter blocks ([`Block::params`]).
             Self::Iep2 => Facts {
                 client: client::IEP2,
+                offset_in_descriptor: false,
                 windows: NO_WINDOWS,
                 first: 0,
                 direct: None,

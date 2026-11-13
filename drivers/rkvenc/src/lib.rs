@@ -17,6 +17,7 @@
 
 pub mod layout;
 pub mod vepu541_h264;
+pub mod vepu580_h264;
 
 #[cfg(test)]
 mod tests;

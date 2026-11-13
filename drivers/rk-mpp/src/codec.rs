@@ -73,6 +73,7 @@ pub const fn block_name(block: crate::Block) -> &'static str {
         crate::Block::JpegDecoder => "rk-mpp:jpeg-decoder",
         crate::Block::JpegEncoder => "rk-mpp:jpeg-encoder",
         crate::Block::Rkvenc => "rk-mpp:rkvenc",
+        crate::Block::Rkvenc2 => "rk-mpp:rkvenc2",
         crate::Block::Iep2 => "rk-mpp:iep2",
     }
 }

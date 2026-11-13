@@ -18,6 +18,15 @@ pub(crate) struct Checked {
     pub(crate) binds: Option<Block>,
 }
 
+/// The bit of `block` in a session's allowed set: one bit per block of [`Block::ALL`].
+pub(crate) fn block_bit(block: Block) -> u32 {
+    let index = Block::ALL
+        .iter()
+        .position(|b| *b == block)
+        .expect("a block of Block::ALL");
+    1 << index
+}
+
 pub(crate) fn refused() -> io::Error {
     io::Error::from_raw_os_error(libc::EINVAL)
 }
@@ -50,14 +59,6 @@ fn run(facts: &Facts, offset: u32, size: u32) -> Option<(usize, usize)> {
     (end >= usize::from(facts.first)).then_some((first, end))
 }
 
-/// The block whose client type `value` is, if the session may bind to it.
-fn block_of(value: u32, allowed: u32) -> Option<Block> {
-    Block::ALL
-        .into_iter()
-        .find(|b| b.facts().client == value)
-        .filter(|b| allowed & (1 << b.facts().client) != 0)
-}
-
 /// Checks `messages` against what the session issues: the chain's flags, the shape of the chain,
 /// each message's command, payload kind and size, and for a job the register runs and indices
 /// against the bound block. `bound` is the block the session is bound to; `allowed` a bit per
@@ -68,7 +69,8 @@ pub(crate) fn check(
     allowed: u32,
 ) -> io::Result<Checked> {
     let n = messages.len();
-    if n == 0 || n > 4 {
+    // A job is its table, at most `MAX_RUNS` writes, the offsets and the read-back.
+    if n == 0 || n > MAX_RUNS + 4 {
         return Err(refused());
     }
     // A job on a parameter block says, on every message, that a descriptor word holds no
@@ -207,7 +209,16 @@ fn single(m: &Message<'_>, bound: Option<Block>, allowed: u32) -> io::Result<Che
         (Command::InitClientType, Payload::In(_)) if m.size() == 4 && bound.is_none() => {
             let data = exact(m).ok_or_else(refused)?;
             let value = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
-            let block = block_of(value, allowed).ok_or_else(refused)?;
+            // The one allowed block with that client type. Two blocks can share a client type (the
+            // two rkvenc generations); when both are allowed the bind is refused, since nothing says
+            // which one the claim meant.
+            let mut found = Block::ALL
+                .into_iter()
+                .filter(|b| b.facts().client == value && allowed & block_bit(*b) != 0);
+            let block = match (found.next(), found.next()) {
+                (Some(block), None) => block,
+                _ => return Err(refused()),
+            };
             Ok(Checked { binds: Some(block) })
         }
         (Command::PollHwFinish | Command::ResetSession, Payload::None) if m.size() == 0 => Ok(none),
@@ -274,8 +285,12 @@ fn job(messages: &[Message<'_>], bound: Option<Block>) -> io::Result<()> {
     {
         return Err(refused());
     }
+    // A table entry is an index into the translated window, so the register it names is that
+    // window's first word plus the entry.
+    let base = facts.table_window().map_or(0, |w| usize::from(w.first));
     for entry in entries.as_chunks::<2>().0 {
-        if !inside(usize::from(u16::from_ne_bytes(*entry))) {
+        let index = base + usize::from(u16::from_ne_bytes(*entry));
+        if !inside(index) {
             return Err(refused());
         }
     }
@@ -284,6 +299,10 @@ fn job(messages: &[Message<'_>], bound: Option<Block>) -> io::Result<()> {
     if let [offsets, tail @ ..] = rest
         && matches!(offsets.cmd(), Command::SetRegAddrOffset)
     {
+        // A block that takes offsets in the descriptor word is sent none.
+        if facts.offset_in_descriptor {
+            return Err(refused());
+        }
         if !matches!(offsets.payload(), Payload::In(_)) || offsets.offset() != 0 {
             return Err(refused());
         }

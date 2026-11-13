@@ -227,7 +227,8 @@ impl Device for PlayedDevice {
         Ok(Played(Rc::clone(&self.0)))
     }
 
-    fn confined(&mut self, _block: Block) -> io::Result<bool> {
+    fn confined(&mut self, block: Block) -> io::Result<bool> {
+        self.0.borrow_mut().bound = Some(block);
         Ok(self.0.borrow().confined)
     }
 
@@ -1003,4 +1004,102 @@ fn submit_runs(
         "a refused job touches nothing"
     );
     result
+}
+
+// ---------------------------------------------------------------------------------------------
+// The second-generation encoder: register classes
+
+/// The picture class of the second-generation encoder: its first word and words.
+const RKVENC2_PIC: (u16, usize) = (160, 94);
+/// Its status class: read back, not written.
+const RKVENC2_ST: (u16, u16) = (4096, 180);
+
+#[test]
+fn a_class_job_translates_the_pic_class_relative_and_carries_the_offset_in_the_word() {
+    let (mut service, kernel) = service();
+    let mut claim = service.claim(Block::Rkvenc2, 0).unwrap();
+    let input = claim.add_buffer(memfd(1 << 20)).unwrap();
+    let pic = vec![0x5b00_0000u32; RKVENC2_PIC.1];
+    let addresses = [Address {
+        register: RKVENC2_PIC.0, // ADR_SRC0: the first word of the PIC class
+        buffer: input,
+        offset: 4096,
+    }];
+    claim
+        .submit(&Job {
+            identity: 9,
+            first: RKVENC2_PIC.0,
+            registers: &pic,
+            more: &[],
+            addresses: &addresses,
+            read: Some(ReadBack {
+                first: RKVENC2_ST.0,
+                count: RKVENC2_ST.1,
+            }),
+        })
+        .unwrap();
+    {
+        let k = kernel.borrow();
+        // The table names index 0 of the PIC array: relative to the class, not to the block.
+        assert_eq!(k.table[..k.table_len], [0]);
+        // No offset list: the offset is in the descriptor word.
+        let cmds: Vec<u32> = k.last[..k.last_len].iter().map(|c| c.0).collect();
+        assert_eq!(
+            cmds,
+            [
+                Command::InitTransTable.code(),
+                Command::SetRegWrite.code(),
+                Command::SetRegRead.code()
+            ]
+        );
+        let flat = Block::Rkvenc2
+            .facts()
+            .flat(usize::from(RKVENC2_PIC.0))
+            .unwrap();
+        let fd = kernel.borrow().translated[0];
+        assert_eq!(k.tasks[k.head].regs[flat], iova(fd) + 4096);
+    }
+    let mut back = [0u32; 180];
+    assert_eq!(claim.complete(&mut back).unwrap().registers, 180);
+}
+
+#[test]
+fn a_class_job_refuses_the_osd_class_untranslated_words_and_wide_offsets() {
+    let regs = [0u32; 4];
+    // The OSD class is not a window: a write there is refused.
+    assert!(matches!(
+        refused(submit_runs(
+            Block::Rkvenc2,
+            0x3000 / 4,
+            &regs,
+            &[],
+            at(0x3000 / 4, 0),
+            None
+        )),
+        JobError::WriteOutside
+    ));
+    // A write across two classes is refused: BASE ends at word 22 and RC starts at 1024.
+    assert!(matches!(
+        refused(submit_runs(Block::Rkvenc2, 22, &regs, &[], at(22, 0), None)),
+        JobError::WriteOutside
+    ));
+    // An address in a class the kernel does not translate (BASE) is refused.
+    let base = [0u32; 2];
+    assert!(matches!(
+        refused(submit_runs(Block::Rkvenc2, 0, &base, &[], at(0, 0), None)),
+        JobError::NotTranslated { register: 0 }
+    ));
+    // A PIC address with an offset that does not fit above the fd: refused.
+    let pic = [0u32; 2];
+    assert!(matches!(
+        refused(submit_runs(
+            Block::Rkvenc2,
+            160,
+            &pic,
+            &[],
+            at(160, 1 << 22),
+            None
+        )),
+        JobError::OffsetOutside { .. }
+    ));
 }

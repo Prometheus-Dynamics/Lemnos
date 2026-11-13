@@ -21,6 +21,8 @@ pub const fn driver_name(block: Block) -> &'static str {
         Block::JpegEncoder => "mpp_jpgenc",
         // `RKVENC_DRIVER_NAME` in `mpp_rkvenc.c`.
         Block::Rkvenc => "mpp_rkvenc",
+        // `RKVENC_DRIVER_NAME` in `mpp_rkvenc2.c`.
+        Block::Rkvenc2 => "mpp_rkvenc2",
         // `IEP2_DRIVER_NAME` in `mpp_iep2.c`.
         Block::Iep2 => "mpp-iep2",
     }
