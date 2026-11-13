@@ -316,3 +316,73 @@ pub const ADDRESS_REGISTERS: [u32; 6] = [
     FE_DMA_START,
     FE_DMA_ADDR,
 ];
+
+// The frame path, as the `k230isp-frames` driver programs it through `lemnos.ko` (which writes
+// the main path's addresses itself; see `kernel/lemnos_regjob_k230isp.c`). From
+// `vvcam/isp/mrv_all_regs.h` and `mrv_all_bits.h` (VeriSilicon, MIT) as published in
+// `nxp-imx/isp-vvcam` at `e6453233e67f5d2f180d6ec277158dd54fa67a25`, and how
+// `vvcam/isp/isp_miv2.c` there sets the main path up.
+
+/// `isp_acq_prop`: the input's Bayer order and bit width.
+pub const ISP_ACQ_PROP: u32 = ISP_BASE + 0x04;
+/// `isp_acq_h_offs`, then `_v_offs`, `_h_size`, `_v_size`, `isp_acq_nr_frames`.
+pub const ISP_ACQ_H_OFFS: u32 = ISP_BASE + 0x08;
+/// `isp_acq_v_offs`.
+pub const ISP_ACQ_V_OFFS: u32 = ISP_BASE + 0x0C;
+/// `isp_acq_h_size`: pixels per line taken in.
+pub const ISP_ACQ_H_SIZE: u32 = ISP_BASE + 0x10;
+/// `isp_acq_v_size`: lines taken in.
+pub const ISP_ACQ_V_SIZE: u32 = ISP_BASE + 0x14;
+/// `isp_acq_nr_frames`: 0 takes frames until stopped.
+pub const ISP_ACQ_NR_FRAMES: u32 = ISP_BASE + 0x18;
+/// `isp_out_h_offs`, then `_v_offs`, `_h_size`, `_v_size`: the output window.
+pub const ISP_OUT_H_OFFS: u32 = ISP_BASE + 0x194;
+/// `isp_out_v_offs`.
+pub const ISP_OUT_V_OFFS: u32 = ISP_BASE + 0x198;
+/// `isp_out_h_size`.
+pub const ISP_OUT_H_SIZE: u32 = ISP_BASE + 0x19C;
+/// `isp_out_v_size`.
+pub const ISP_OUT_V_SIZE: u32 = ISP_BASE + 0x1A0;
+/// `ISP_ENABLE`: the output formatter on.
+pub const CTRL_ENABLE: u32 = 1;
+/// `ISP_MODE` 3, Bayer RGB processing with H and V sync, in bits 3..1.
+pub const CTRL_MODE_BAYER_RGB: u32 = 3 << 1;
+/// `ISP_INFORM_ENABLE`: the input formatter on.
+pub const CTRL_INFORM_ENABLE: u32 = 1 << 4;
+/// `BAYER_PAT`, bits 4..3: 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR (the first line's first two colours).
+pub const ACQ_BAYER_SHIFT: u32 = 3;
+/// `INPUT_SELECTION`, bits 14..12: 0 12 bits, 1 10 bits with zeroes appended, 3 8 bits with
+/// zeroes appended.
+pub const ACQ_INPUT_SHIFT: u32 = 12;
+/// `miv2_mp_fmt`: the main path's write format. 0 is 4:2:0 semi-planar 8-bit (NV12).
+pub const MI_MP_FMT: u32 = 0x1314;
+/// `mp_wr_yuv_fmt` 1: 4:2:2 (NV16 when semi-planar).
+pub const MP_FMT_YUV422: u32 = 1 << 2;
+/// `miv2_mp_bus_id`.
+pub const MI_MP_BUS_ID: u32 = 0x131C;
+/// `MP_WR_ID_EN` and `MP_BUS_SW_EN`, as the published driver sets them.
+pub const MP_BUS_ID_ENABLE: u32 = 0x0200_0100;
+/// `miv2_mp_y_base_ad_init`: the luma plane's address, written by the module only.
+pub const MI_MP_Y_BASE: u32 = 0x1324;
+/// `miv2_mp_y_llength`: pixels per line.
+pub const MI_MP_Y_LLENGTH: u32 = 0x1330;
+/// `miv2_mp_y_pic_width`, then `_height` and `_size`.
+pub const MI_MP_Y_PIC_WIDTH: u32 = 0x1334;
+/// `miv2_mp_y_pic_height`.
+pub const MI_MP_Y_PIC_HEIGHT: u32 = 0x1338;
+/// `miv2_mp_y_pic_size`: pixels per picture.
+pub const MI_MP_Y_PIC_SIZE: u32 = 0x133C;
+/// `miv2_mp_cb_base_ad_init`: the chroma plane's address, written by the module only.
+pub const MI_MP_CB_BASE: u32 = 0x1340;
+/// `miv2_mp_cr_base_ad_init`: unused in semi-planar formats; the module writes it all the same.
+pub const MI_MP_CR_BASE: u32 = 0x134C;
+/// `miv2_mp_raw_base_ad_init`: the raw output's base. Written by `lemnos.ko` alone.
+pub const MI_MP_RAW_BASE: u32 = 0x1394;
+/// `MP_YCBCR_PATH_ENABLE` in `miv2_ctrl`: the value that starts a frame job.
+pub const MI_MP_YCBCR_ENABLE: u32 = 1;
+/// The alignment of a plane's address (`MP_Y_BASE_AD_INIT_MASK` is `0xFFFFFFF0`).
+pub const MI_ALIGN: u32 = 16;
+/// `MIV2_MIS_MP_FRAME_END` (bit 0 of the memory interface's interrupt status).
+pub const MI_MP_FRAME_END: u32 = 1;
+/// The main path's wrap bits (`wrap_mp_cr`, `_cb`, `_y`): a plane reached its size in a frame.
+pub const MI_MP_WRAP: u32 = 0x700;

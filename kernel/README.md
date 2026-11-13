@@ -37,6 +37,7 @@ as soon as the module loads.
 | `test_gsdma_fake_regs` | Test only. The graphics DMA engine's register window is ordinary memory, for the fake engine in QEMU. |
 | `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
 | `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`lemnos_regjob_a733.c`). Must also be in `owned`. Empty by default. |
+| `k230_isp` | Compatibles driven as the K230 ISP through register jobs (`lemnos_regjob_k230isp.c`): its main path's frames, and its configuration and statistics beside them. Must also be in `owned`. Empty by default. |
 | `test_rj_fake_regs` | Test only. A register-job block's window is ordinary memory, for the fake blocks in QEMU. |
 | `vip9000` | Compatibles driven as the VIP9000 neural accelerator (`lemnos_vip.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_vip_fake_regs` | Test only. The VIP9000's register window is ordinary memory, for the fake block in QEMU. |
@@ -265,14 +266,16 @@ notice is kept in the file header. The driver is `drivers/pisp/` (`PispFe`, the 
 ## Register jobs
 
 Some blocks are programmed by writing registers, and some of those registers take bus addresses or
-decide how far past one the block reaches. A block listed in a register-job parameter (`a733_ve`)
-is driven that way by the module (`lemnos_regjob.c`), with a profile per block that says which
+decide how far past one the block reaches. A block listed in a register-job parameter (`a733_ve`
+or `k230_isp`) is driven that way by the module (`lemnos_regjob.c`), with a profile per block that says which
 registers a caller may write, which take addresses, and what a job's geometry makes the block
 reach. Its registers can't be mapped, its interrupt isn't forwarded and its power isn't the
 caller's (`LEMNOS_IOC_POWER` gets `ENOTTY`).
 
-`LEMNOS_IOC_REGJOB_OPEN` opens a session on the block, one at a time (`EBUSY` for a second), as a
-file. On it (`lemnos_regjob.h`):
+`LEMNOS_IOC_REGJOB_OPEN` opens a session on the block as a file, in one of two roles, one session
+in each at a time (`EBUSY` for a second): the frames role (no flags), which runs jobs, and, on a
+profile that has one, the configuration role (`LEMNOS_REGJOB_OPEN_CONFIG`; `EINVAL` on the A733
+profile), described below. On a frames session (`lemnos_regjob.h`):
 
 - `LEMNOS_IOC_REGJOB_IMPORT` attaches and maps a dma-buf for the block and answers its index and
   bus address. A buffer whose mapping isn't one contiguous range of bus addresses is refused
@@ -283,6 +286,11 @@ file. On it (`lemnos_regjob.h`):
   checks all of it before writing anything, writes the plain values, writes every address
   register itself (the buffer's bus address plus the offset) and the registers the profile derives
   from a buffer (an end address, a size), enables the interrupt and writes the start value.
+- With `LEMNOS_REGJOB_RUN_NOWAIT` in the job's flags, `LEMNOS_IOC_REGJOB_RUN` returns once the
+  job is started, and `LEMNOS_IOC_REGJOB_WAIT` collects it without sleeping: `EAGAIN` while it
+  runs, its status and reads when it has ended, `ETIMEDOUT` once its time is past (after the reset
+  below). One job at a time: a run while one is not collected gets `EBUSY`. Reads are taken in the
+  interrupt handler, at the job's end.
 - `LEMNOS_IOC_REGJOB_RELEASE` lets a buffer go, refused with `EBUSY` while the block may use it.
 - `LEMNOS_IOC_REGJOB_INFO` answers the profile, the window and the counters.
 
@@ -302,10 +310,41 @@ that times out is wedged: its buffers are held until a reboot, `lemnos.ko` can't
 later jobs get `EIO`. An unbind stops the block, ends the session's jobs with `ENODEV`, and keeps
 the buffers pinned until the session closes.
 
+A block that runs continuously (the K230 ISP's main path, which writes every frame the sensor
+sends) takes a job's addresses at the end of a frame. The module writes the job's plain values and
+starts it at once; if the path is idle it also switches it to the job's buffers then, and otherwise
+it does so in its interrupt handler at the next frame's end, then reads the block's shadow
+registers back. The job completes at that frame end: the frame just finished is in the previous
+job's buffer, which the block has left and the module lets go. A block whose shadow registers don't
+show the job's buffers is answered `LEMNOS_REGJOB_STATUS_UNLATCHED` and keeps both jobs' buffers
+held until the session closes, which resets it. The K230 profile denies the main path's automatic
+update and ping-pong modes, so the block changes buffers only when the module says so, and it writes
+the size the block wraps within itself, from the buffer's range.
+
+The configuration role lets a second process program the same block while the first runs frames
+through it, as the K230 ISP's tuning and statistics driver does beside its capture driver. It has
+its own table of registers it may write, and no address register is in it.
+`LEMNOS_IOC_REGJOB_WRITE` (on either role, each against its own table) checks every write and
+read it is given, refuses all of them if one fails (as a job is refused), then writes them in
+order and reads the registers back, at once, without a job. A register both roles may write has
+a profile mask of the bits each sets: the module writes `(current & ~mask) | value` under the
+block's lock, so neither role's write undoes the other's bits. `LEMNOS_IOC_REGJOB_EVENT` (the
+configuration role only) takes the oldest of the block's events: the module's interrupt handler
+reads and clears the profile's event causes (on the K230 ISP, the core's frame-out in `ISP_MIS`,
+cleared through `ISP_ICR`) and queues up to 64 with their time, counting what it drops in `lost`;
+`EAGAIN` when there is none. If the events come on the same interrupt line as the frame ends, one
+handler serves both. A reset after a job's timeout is queued as an event with
+`LEMNOS_REGJOB_EVENT_RESET` set, and the events are enabled again, so the configuration driver
+knows to write its registers again. Closing one role leaves the other's session as it was; closing
+a frames session that was running resets the block, and the configuration session gets the reset
+event.
+
 The A733 profile's register facts come from the vendor kernel (window, top register, reset bits,
 interrupt registers) and from the mainline Cedrus register list and a public reverse-engineered
 H.264 encoder (the encoder's address and geometry registers); `lemnos_regjob_a733.c` names each
-source. No code of theirs is copied.
+source. The K230 profile's come from the VeriSilicon ISP register headers published under the MIT
+licence in `nxp-imx/isp-vvcam` and from the K230 SDK's device tree (`k230_linux_sdk` at
+`fc6cc21`); `lemnos_regjob_k230isp.c` names each. No code of theirs is copied.
 
 ## Buses
 

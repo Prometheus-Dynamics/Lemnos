@@ -12,7 +12,8 @@
  * is otherwise good, with the exact errno required and the registers required
  * untouched. A job that never finishes has to end with ETIMEDOUT, a pulse of
  * the reset line and nothing left live, and the block has to run the next job.
- * Unbinding with a session open ends it.
+ * A job started without waiting is collected by WAIT, which never sleeps and
+ * times the job out itself. Unbinding with a session open ends it.
  *
  * Usage: lemnos_regjob_check /dev/lemnos <device> <unbind> <heap>
  *
@@ -41,15 +42,23 @@ _Static_assert(sizeof(struct lemnos_regjob_open) == 24, "open");
 _Static_assert(sizeof(struct lemnos_regjob_import) == 24, "import");
 _Static_assert(sizeof(struct lemnos_regjob_write) == 8, "write");
 _Static_assert(sizeof(struct lemnos_regjob_addr) == 24, "addr");
-_Static_assert(sizeof(struct lemnos_regjob_run) == 56, "run");
+_Static_assert(sizeof(struct lemnos_regjob_run) == 64, "run");
 _Static_assert(offsetof(struct lemnos_regjob_run, start) == 44, "run start");
 _Static_assert(offsetof(struct lemnos_regjob_run, status) == 52, "run status");
+_Static_assert(offsetof(struct lemnos_regjob_run, flags) == 56, "run flags");
+_Static_assert(sizeof(struct lemnos_regjob_wait) == 24, "wait");
+_Static_assert(offsetof(struct lemnos_regjob_wait, timestamp_ns) == 16, "wait timestamp");
+_Static_assert(sizeof(struct lemnos_regjob_regs) == 32, "regs");
+_Static_assert(sizeof(struct lemnos_regjob_event) == 16, "event");
 _Static_assert(sizeof(struct lemnos_regjob_info) == 48, "info");
 _Static_assert(LEMNOS_IOC_REGJOB_OPEN == 0xc0184cf0u, "open request");
 _Static_assert(LEMNOS_REGJOB_IOC_IMPORT == 0xc0184cf1u, "import request");
 _Static_assert(LEMNOS_REGJOB_IOC_RELEASE == 0x40044cf2u, "release request");
-_Static_assert(LEMNOS_REGJOB_IOC_RUN == 0xc0384cf3u, "run request");
+_Static_assert(LEMNOS_REGJOB_IOC_RUN == 0xc0404cf3u, "run request");
 _Static_assert(LEMNOS_REGJOB_IOC_INFO == 0x80304cf4u, "info request");
+_Static_assert(LEMNOS_REGJOB_IOC_WAIT == 0xc0184cf5u, "wait request");
+_Static_assert(LEMNOS_REGJOB_IOC_WRITE == 0x40204cf6u, "write request");
+_Static_assert(LEMNOS_REGJOB_IOC_EVENT == 0x80104cf7u, "event request");
 
 /* The encoder's registers (kernel/lemnos_regjob_a733.c). */
 #define MODE 0x800
@@ -479,8 +488,12 @@ static void test_refusals(void)
 	refused(&j, EINVAL, "a read off its boundary");
 	good_job(&j), j.run.writes = 16;
 	refused(&j, EFAULT, "writes at an address the caller can't read");
+	good_job(&j), j.run.flags = 2;
+	refused(&j, EINVAL, "an unknown flag");
+	good_job(&j), j.run.reserved = 1;
+	refused(&j, EINVAL, "a reserved field set");
 
-	check(info().refused - refused_before == 41, "every refusal is counted");
+	check(info().refused - refused_before == 43, "every refusal is counted");
 	check(info().jobs == 1, "and none ran");
 	check(reg(TRIGGER) == 0, "the block was never started");
 }
@@ -522,6 +535,56 @@ static void test_timeout(void)
 	check(r.result == 0 && j.run.status == 1, "and it finishes at its own interrupt");
 }
 
+static int wait_job(struct job *j, struct lemnos_regjob_wait *w)
+{
+	memset(w, 0, sizeof(*w));
+	w->values = (uintptr_t)j->values;
+	w->nreads = j->run.nreads;
+	return ioctl(sess, LEMNOS_REGJOB_IOC_WAIT, w) ? errno : 0;
+}
+
+static void test_nowait(void)
+{
+	static struct job j, k;
+	struct lemnos_regjob_wait w;
+	uint64_t jobs = info().jobs;
+	int before = resets();
+
+	check(wait_job(&j, &w) == EINVAL, "nothing to collect (EINVAL)");
+	good_job(&j);
+	j.run.flags = LEMNOS_REGJOB_RUN_NOWAIT;
+	poke(TRIGGER, 0);
+	poke(STATUS, 0);
+	check(run(&j) == 0 && reg(TRIGGER) == 0x8, "a job started without waiting");
+	check(wait_job(&j, &w) == EAGAIN, "is not over until its interrupt (EAGAIN)");
+	good_job(&k);
+	check(run(&k) == EBUSY, "no other job starts before it is collected (EBUSY)");
+	j.run.nreads = 1;
+	check(wait_job(&j, &w) == EINVAL, "it is collected with its own reads (EINVAL)");
+	j.run.nreads = 2;
+	check(info().live == 1, "its buffer is live");
+	poke(STATUS, 1);
+	raise_irq();
+	sleep_ms(20);
+	j.values[0] = 0;
+	check(wait_job(&j, &w) == 0 && w.status == 1 && j.values[0] == VLE_BYTES * 8,
+	      "after its interrupt it is collected, with its status and reads");
+	check(info().jobs == jobs + 1 && info().live == 0, "counted, and nothing is live");
+	check(wait_job(&j, &w) == EINVAL, "and only once");
+
+	good_job(&j);
+	j.run.flags = LEMNOS_REGJOB_RUN_NOWAIT;
+	j.run.timeout_ms = 100;
+	poke(TRIGGER, 0);
+	poke(STATUS, 0);
+	check(run(&j) == 0, "a job started without waiting that never ends");
+	check(wait_job(&j, &w) == EAGAIN && resets() == before, "runs until its time is up");
+	sleep_ms(150);
+	check(wait_job(&j, &w) == ETIMEDOUT && resets() == before + 1 && info().live == 0,
+	      "then the collection resets the block (ETIMEDOUT) and nothing is live");
+	check(wait_job(&j, &w) == EINVAL, "and there is nothing more to collect");
+}
+
 static void test_one_session(void)
 {
 	struct lemnos_regjob_open o = { 0 };
@@ -530,8 +593,17 @@ static void test_one_session(void)
 	o.block = block;
 	check(ioctl(ctl, LEMNOS_IOC_REGJOB_OPEN, &o) && errno == EBUSY,
 	      "a second session on the block is refused (EBUSY)");
-	o.flags = 1;
+	o.flags = LEMNOS_REGJOB_OPEN_CONFIG;
+	check(ioctl(ctl, LEMNOS_IOC_REGJOB_OPEN, &o) && errno == EINVAL,
+	      "a configuration session on a profile with no such role (EINVAL)");
+	o.flags = 2;
 	check(ioctl(ctl, LEMNOS_IOC_REGJOB_OPEN, &o) && errno == EINVAL, "unknown flags (EINVAL)");
+	check(ioctl(sess, LEMNOS_REGJOB_IOC_WRITE,
+		    &(struct lemnos_regjob_regs){ 0 }) && errno == EINVAL,
+	      "writes outside a job, on a profile whose registers move with its jobs (EINVAL)");
+	check(ioctl(sess, LEMNOS_REGJOB_IOC_EVENT,
+		    &(struct lemnos_regjob_event){ 0 }) && errno == EINVAL,
+	      "events on a frames session (EINVAL)");
 	check(ioctl(sess, LEMNOS_REGJOB_IOC_RELEASE, &(uint32_t){ 63 }) && errno == ENOENT,
 	      "releasing an index never imported (ENOENT)");
 }
@@ -606,6 +678,7 @@ int main(int argc, char **argv)
 	test_good_job();
 	test_refusals();
 	test_timeout();
+	test_nowait();
 	check(!ioctl(sess, LEMNOS_REGJOB_IOC_RELEASE, &main_buf.index),
 	      "a buffer is released once the block is done with it");
 	check(!close(sess), "the session closes");

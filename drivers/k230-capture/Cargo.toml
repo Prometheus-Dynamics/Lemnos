@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The ISP8000 frame path, behind the vendor vvcam-isp device or through its own register window and interrupt from the kernel module as the board file chooses, and the CSI behind vvcam-mipi, as camera.receiver/1: frames written by the block into DMA memory the driver holds, copied into the frame stream with the driver's own sequence and the interrupt's time"
+description = "The ISP8000 frame path, behind the vendor vvcam-isp device or run by lemnos.ko as the board file chooses, and the CSI behind vvcam-mipi, as camera.receiver/1: frames written by the block into memory the driver or the module holds, copied into the frame stream with the driver's own sequence and the interrupt's time"
 
 [lints]
 workspace = true
@@ -14,11 +14,13 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
 lemnos-driver-k230-capture-sys = { path = "../k230-capture-sys" }
+lemnos-driver-regjob-sys = { path = "../regjob-sys" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
-lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-sim = { path = "../../backends/sim" }
 
 [package.metadata.lemnos]
 driver = "K230Capture"

@@ -92,7 +92,8 @@ scripts/check-docs.py --slow
 
 The kernel module is tested in a virtual machine. `testing/qemu/run.sh` builds the module, a test
 block with nothing behind it, fake blocks for the module's register jobs (a register window of
-ordinary memory, a simulated interrupt and a counted reset line) and a stand-in for the RP1 PIO
+ordinary memory, simulated interrupts and a counted reset line, one an encoder that finishes each
+job and one an ISP that runs continuously) and a stand-in for the RP1 PIO
 driver, boots a kernel with them as the
 whole image, and runs the checks in `kernel/test/` and `lemnos-module-check`, which drives the real
 Linux backend through the module and then through the stock interfaces. It fails unless every

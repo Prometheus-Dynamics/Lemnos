@@ -1,23 +1,19 @@
 //! The block as the driver sees it ([`Hardware`]), and the two ways to it the board file chooses
-//! between: the vendor kernel's `vvcam-isp` device ([`LinuxHardware`]), or the block's registers
-//! and interrupt from the host, which on Linux are the Lemnos kernel module's (`regs:`, `irq:`,
-//! and optionally `clocks:` and `resets:`; [`ModuleHardware`]).
+//! between: the vendor kernel's `vvcam-isp` device ([`LinuxHardware`]), or the configuration
+//! role of the block as `lemnos.ko` drives it ([`ModuleHardware`]), beside the frames role
+//! another driver holds.
 //!
 //! On either way every register access is checked against `lemnos-driver-k230isp-sys`'s table
 //! before it reaches the block ([`IspNode`](lemnos_driver_k230isp_sys::IspNode) on the vendor
-//! device, [`ModuleHardware`] itself on the module's registers); [`Hardware`] adds nothing that
+//! device, [`ModuleHardware`] itself, and the module after it); [`Hardware`] adds nothing that
 //! could widen it.
 
 #[cfg(target_os = "linux")]
 use std::io;
-use std::time::Duration;
 
-use lemnos_core::{
-    ClocksHandle, InterruptHandle, RegistersHandle, ResetHandle, Result, Status, status_of,
-};
-use lemnos_driver_k230isp_sys::access::{allowed, readable, writable};
-use lemnos_driver_k230isp_sys::regs::{ISP_ICR, ISP_IMSC, ISP_MIS, MIS_FRAME_OUT, WINDOW_BYTES};
-use lemnos_hal::blocks::{enable_clocks, pulse_resets};
+use lemnos_core::{Result, Status};
+#[cfg(target_os = "linux")]
+use lemnos_driver_k230isp_sys::access::{allowed, readable};
 
 /// The vendor driver's device node, the default for the `device` setting.
 pub const DEVICE_PATH: &str = "/dev/vvcam-isp.0";
@@ -146,42 +142,116 @@ impl Hardware for LinuxHardware {
     }
 }
 
-/// The block's own resources, from the host: on Linux, the Lemnos kernel module's, with the ISP
-/// bound to it in place of the vendor driver.
+/// The configuration session with `lemnos.ko`, one request each. The Linux one is
+/// [`LinuxConfigSession`]; tests play one back.
+#[cfg(target_os = "linux")]
+pub trait ConfigSession: Send {
+    /// Opens the session, closing one held.
+    fn open(&mut self) -> io::Result<()>;
+    /// Closes it. What it wrote stays.
+    fn close(&mut self);
+    /// Writes `writes` in order, then reads `reads` into `values`, at once.
+    fn write(
+        &mut self,
+        writes: &[lemnos_driver_regjob_sys::Write],
+        reads: &[u32],
+        values: &mut [u32],
+    ) -> io::Result<()>;
+    /// The next queued interrupt, or `None`. Never blocks.
+    fn next_event(&mut self) -> io::Result<Option<lemnos_driver_regjob_sys::Event>>;
+}
+
+/// The configuration session on Linux: the block whose device name is `block`, through the
+/// module's control node.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct LinuxConfigSession {
+    node: std::path::PathBuf,
+    block: String,
+    session: Option<lemnos_driver_regjob_sys::Session>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxConfigSession {
+    /// The block named `block`, through the control node at `node`. Opens nothing yet.
+    #[must_use]
+    pub fn new(node: std::path::PathBuf, block: String) -> Self {
+        Self {
+            node,
+            block,
+            session: None,
+        }
+    }
+
+    fn session(&self) -> io::Result<&lemnos_driver_regjob_sys::Session> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ConfigSession for LinuxConfigSession {
+    fn open(&mut self) -> io::Result<()> {
+        use lemnos_driver_regjob_sys::{Control, PROFILE_K230_ISP};
+        self.session = None;
+        let control = Control::open(&self.node)?;
+        let session = control.open_config(control.find_block(&self.block)?)?;
+        if session.profile() != PROFILE_K230_ISP {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.session = None;
+    }
+
+    fn write(
+        &mut self,
+        writes: &[lemnos_driver_regjob_sys::Write],
+        reads: &[u32],
+        values: &mut [u32],
+    ) -> io::Result<()> {
+        self.session()?.write(writes, reads, values)
+    }
+
+    fn next_event(&mut self) -> io::Result<Option<lemnos_driver_regjob_sys::Event>> {
+        self.session()?.next_event()
+    }
+}
+
+/// The ISP driven by `lemnos.ko` (bound to it, listed in its `k230_isp` parameter), through the
+/// block's configuration role: the module's other role, the frames, is another driver's
+/// (`k230-capture`), and both run on the block at once.
 ///
-/// - `regs`: the ISP's register window, at least [`WINDOW_BYTES`] long. Every read and write is
-///   checked against the sys crate's table exactly as on the vendor device: the table holds no
-///   register that takes an address, a length or a DMA control.
-/// - `irq`: the ISP core's interrupt. The vendor driver's handler reads and clears `ISP_MIS`; here
-///   the driver does, when the host reports the interrupt: it reads [`ISP_MIS`], writes it to
-///   [`ISP_ICR`] and enables the interrupt again.
-/// - `clocks`, `resets` (both optional): every clock the board names is turned on at each open,
-///   and every reset line asserted, then released, so the block starts from its reset state.
-///   Clocks stay on across a close: turning them off is the host's, when it lets the block go.
+/// - Every read and write is checked against the sys crate's table here, exactly as on the
+///   vendor device, and again by the module against its own copy of the same table: neither
+///   holds a register that takes an address, a length or a DMA control. `isp_ctrl` is shared
+///   with the frames role: the module writes only this role's bits of it (gamma out and the two
+///   update strobes) and keeps the frames role's.
+/// - The ISP core's frame-out interrupt is the module's, which reads and clears `ISP_MIS` in its
+///   handler and queues the status with the time. A reset of the block by the frames role (its
+///   frame didn't come, or its session closed on a running path) comes as an event too: the
+///   registers written before are gone, so it is an error here, and the driver starts over.
+/// - The clocks and the reset line are the module's: it turns the clocks on when the block binds
+///   and resets the block when a frame job fails.
 ///
 /// Nothing here allocates.
+#[cfg(target_os = "linux")]
 pub struct ModuleHardware {
-    regs: RegistersHandle,
-    irq: InterruptHandle,
-    clocks: Option<ClocksHandle>,
-    resets: Option<ResetHandle>,
+    session: Box<dyn ConfigSession>,
     open: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl ModuleHardware {
-    /// The block through `regs` and `irq`, and the `clocks` and `resets` the board names.
+    /// The block through `session`.
     #[must_use]
-    pub fn new(
-        regs: RegistersHandle,
-        irq: InterruptHandle,
-        clocks: Option<ClocksHandle>,
-        resets: Option<ResetHandle>,
-    ) -> Self {
+    pub fn new(session: Box<dyn ConfigSession>) -> Self {
         Self {
-            regs,
-            irq,
-            clocks,
-            resets,
+            session,
             open: false,
         }
     }
@@ -189,45 +259,25 @@ impl ModuleHardware {
     fn opened(&self) -> Result<()> {
         if self.open { Ok(()) } else { Err(Status::IO) }
     }
-
-    fn raw_read(&mut self, addr: u32) -> Result<u32> {
-        self.regs.read32(addr as usize).map_err(status_of)
-    }
-
-    fn raw_write(&mut self, addr: u32, value: u32) -> Result<()> {
-        self.regs.write32(addr as usize, value).map_err(status_of)
-    }
 }
 
+#[cfg(target_os = "linux")]
 impl Hardware for ModuleHardware {
     fn open(&mut self) -> Result<()> {
         self.open = false;
-        if self.regs.size() < WINDOW_BYTES as usize {
-            // The board named a region that isn't the ISP's whole window.
-            return Err(Status::INVALID_ARGUMENT);
+        self.session.open().map_err(|e| status(&e))?;
+        // What was queued before is not this open's.
+        for _ in 0..=lemnos_driver_regjob_sys::EVENTS {
+            if self.session.next_event().map_err(|e| status(&e))?.is_none() {
+                break;
+            }
         }
-        if let Some(clocks) = self.clocks.as_mut() {
-            enable_clocks(&mut **clocks).map_err(status_of)?;
-        }
-        if let Some(resets) = self.resets.as_mut() {
-            pulse_resets(&mut **resets).map_err(status_of)?;
-        }
-        // What is pending from before is not this open's.
-        let pending = self.raw_read(ISP_MIS)?;
-        self.raw_write(ISP_ICR, pending)?;
-        let mask = self.raw_read(ISP_IMSC)?;
-        if mask & MIS_FRAME_OUT == 0 {
-            self.raw_write(ISP_IMSC, mask | MIS_FRAME_OUT)?;
-        }
-        self.irq.enable().map_err(status_of)?;
         self.open = true;
         Ok(())
     }
 
     fn close(&mut self) {
-        if self.open {
-            let _ = self.irq.disable();
-        }
+        self.session.close();
         self.open = false;
     }
 
@@ -236,36 +286,38 @@ impl Hardware for ModuleHardware {
         if !readable(addr) {
             return Err(Status::INVALID_ARGUMENT);
         }
-        self.raw_read(addr)
+        let mut value = [0];
+        self.session
+            .write(&[], &[addr], &mut value)
+            .map_err(|e| status(&e))?;
+        Ok(value[0])
     }
 
     fn write(&mut self, addr: u32, value: u32) -> Result<()> {
         self.opened()?;
-        let Some(mask) = writable(addr) else {
-            return Err(Status::INVALID_ARGUMENT);
-        };
         if !allowed(addr, value) {
             return Err(Status::INVALID_ARGUMENT);
         }
-        if mask == u32::MAX {
-            self.raw_write(addr, value)
-        } else {
-            self.regs
-                .modify32(addr as usize, mask, value)
-                .map_err(status_of)
-        }
+        let write = lemnos_driver_regjob_sys::Write {
+            offset: addr,
+            value,
+        };
+        self.session
+            .write(&[write], &[], &mut [])
+            .map_err(|e| status(&e))
     }
 
     fn next_event(&mut self) -> Result<Option<Event>> {
         self.opened()?;
-        let Some(event) = self.irq.wait(Some(Duration::ZERO)).map_err(status_of)? else {
+        let Some(event) = self.session.next_event().map_err(|e| status(&e))? else {
             return Ok(None);
         };
-        let status = self.raw_read(ISP_MIS)?;
-        self.raw_write(ISP_ICR, status)?;
-        self.irq.enable().map_err(status_of)?;
+        if event.status & lemnos_driver_regjob_sys::EVENT_RESET != 0 {
+            // The frames role reset the block: what this driver wrote is gone.
+            return Err(Status::IO);
+        }
         Ok(Some(Event {
-            status,
+            status: event.status,
             timestamp_ns: event.timestamp_ns,
         }))
     }

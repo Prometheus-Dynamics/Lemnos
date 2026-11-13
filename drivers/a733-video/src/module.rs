@@ -41,8 +41,8 @@ use std::os::fd::BorrowedFd;
 use lemnos_contract_codec_block::BlockInfo;
 use lemnos_contract_codec_block::work::Work;
 use lemnos_core::Health;
-use lemnos_driver_a733_video_sys::regjob::{self, Addr, Job, Write};
 use lemnos_driver_codec_jobs::{Block, Buffers, Start};
+use lemnos_driver_regjob_sys::{self as regjob, Addr, Job, Write};
 
 use crate::block::backoff_ns;
 use crate::codec::{NAME, REOPENING, TAG_READ};

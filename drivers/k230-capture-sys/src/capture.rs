@@ -1,12 +1,5 @@
-//! [`Capture`]: the ISP's frame path, with every register write checked and every address the
-//! memory interface is given taken from memory it holds.
-//!
-//! The path is reached one of two ways, and [`Capture`] does the same on both: through the vendor
-//! kernel's `vvcam-isp` register requests and interrupt events ([`Capture::open`]), or through the
-//! block's own register window and interrupt as the host hands them out, which on Linux are the
-//! Lemnos kernel module's ([`Capture::on_block`]). On the second there is no vendor interrupt
-//! handler: [`Capture`] reads `MIV2_MIS` and clears it through `MIV2_ICR` itself when the host
-//! reports the interrupt, then enables it again.
+//! [`Capture`]: the ISP's frame path through `vvcam-isp`, with every register write checked and
+//! every address the memory interface is given taken from memory it holds.
 //!
 //! # The paths by which a caller's numbers reach the block, and the check on each
 //!
@@ -36,123 +29,26 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use lemnos_driver_k230isp_sys::uapi::{EVENT_ELEMS, EVENT_IRQ_TYPE, Event};
+use lemnos_driver_k230isp_sys::uapi::{EVENT_ELEMS, EVENT_IRQ_TYPE};
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::{DmaBuffers, Interrupt, Registers};
+use lemnos_hal::blocks::DmaBuffers;
 
 use crate::access::{readable, writable};
 use crate::memory::{FrameMemory, MemoryError, Planes};
 use crate::regs::{
-    MIS_MP_FRAME_END, MIV2_CTRL, MIV2_ICR, MIV2_IMSC, MIV2_MIS, MIV2_MP_RAW_PATH,
-    MIV2_MP_YCBCR_PATH, MP_CB_BASE_AD_INIT, MP_CB_BASE_AD_INIT2, MP_CB_OFFS_CNT_INIT,
-    MP_CB_SIZE_INIT, MP_CR_BASE_AD_INIT, MP_CR_BASE_AD_INIT2, MP_CR_OFFS_CNT_INIT, MP_CR_SIZE_INIT,
-    MP_CTRL, MP_CTRL_AUTO_UPDATE, MP_CTRL_CFG_UPD, MP_CTRL_INIT_BASE_EN, MP_CTRL_INIT_OFFSET_EN,
+    MIS_MP_FRAME_END, MIV2_CTRL, MIV2_IMSC, MIV2_MP_RAW_PATH, MIV2_MP_YCBCR_PATH,
+    MP_CB_BASE_AD_INIT, MP_CB_BASE_AD_INIT2, MP_CB_OFFS_CNT_INIT, MP_CB_SIZE_INIT,
+    MP_CR_BASE_AD_INIT, MP_CR_BASE_AD_INIT2, MP_CR_OFFS_CNT_INIT, MP_CR_SIZE_INIT, MP_CTRL,
+    MP_CTRL_AUTO_UPDATE, MP_CTRL_CFG_UPD, MP_CTRL_INIT_BASE_EN, MP_CTRL_INIT_OFFSET_EN,
     MP_JDP_BASE_AD_INIT, MP_JDP_OFFS_CNT_INIT, MP_JDP_SIZE_INIT, MP_RAW_BASE_AD_INIT,
     MP_RAW_BASE_AD_SHD, MP_RAW_OFFS_CNT_INIT, MP_RAW_SIZE_INIT, MP_Y_BASE_AD_INIT,
-    MP_Y_BASE_AD_INIT2, MP_Y_BASE_AD_SHD, MP_Y_OFFS_CNT_INIT, MP_Y_SIZE_INIT, WINDOW_BYTES,
+    MP_Y_BASE_AD_INIT2, MP_Y_BASE_AD_SHD, MP_Y_OFFS_CNT_INIT, MP_Y_SIZE_INIT,
 };
 
-/// How the frame path's registers and the memory interface's interrupt are reached. Private to
-/// the crate: every value written through it comes from [`Capture`], which checks it.
-pub(crate) trait Port: Send {
-    fn read_raw(&mut self, addr: u32) -> Result<u32, CaptureError>;
-    fn write_raw(&mut self, addr: u32, value: u32) -> Result<(), CaptureError>;
-    /// Starts taking the memory interface's interrupt, from nothing pending.
-    fn watch(&mut self) -> Result<(), CaptureError>;
-    /// The next memory-interface interrupt, if one came. Never blocks; allocates nothing.
-    fn next_event(&mut self) -> Result<Option<MiEvent>, CaptureError>;
-}
-
-impl Port for crate::node::IspNode {
-    fn read_raw(&mut self, addr: u32) -> Result<u32, CaptureError> {
-        Ok(crate::node::IspNode::read_raw(self, addr)?)
-    }
-
-    fn write_raw(&mut self, addr: u32, value: u32) -> Result<(), CaptureError> {
-        Ok(crate::node::IspNode::write_raw(self, addr, value)?)
-    }
-
-    fn watch(&mut self) -> Result<(), CaptureError> {
-        Ok(self.subscribe(EID_MIV2_MIS)?)
-    }
-
-    fn next_event(&mut self) -> Result<Option<MiEvent>, CaptureError> {
-        vendor_event(|| self.dequeue())
-    }
-}
-
-/// The next memory-interface event from the vendor device's queue, taken by `dequeue`. Only the
-/// one id is subscribed; anything else is passed over, at most a queue's worth.
-pub(crate) fn vendor_event(
-    mut dequeue: impl FnMut() -> io::Result<Option<Event>>,
-) -> Result<Option<MiEvent>, CaptureError> {
-    for _ in 0..=EVENT_ELEMS {
-        let Some(e) = dequeue()? else {
-            return Ok(None);
-        };
-        if e.kind == EVENT_IRQ_TYPE && e.id == EID_MIV2_MIS {
-            return Ok(Some(MiEvent {
-                status: e.irq_value,
-                timestamp_ns: e.timestamp,
-            }));
-        }
-    }
-    Ok(None)
-}
-
-/// The block's register window, as the host hands it out.
-pub type BlockRegisters = Box<dyn Registers<Error = ErrorKind> + Send>;
-/// The memory interface's interrupt, as the host hands it out.
-pub type BlockInterrupt = Box<dyn Interrupt<Error = ErrorKind> + Send>;
-
-/// The block's own window and the memory interface's interrupt, from the host.
-struct BlockPort {
-    regs: BlockRegisters,
-    irq: BlockInterrupt,
-}
-
-impl BlockPort {
-    /// Reads `MIV2_MIS` and clears what it says through `MIV2_ICR`: what the vendor's handler
-    /// does in the kernel.
-    fn take_status(&mut self) -> Result<u32, CaptureError> {
-        let status = self.read_raw(MIV2_MIS)?;
-        self.write_raw(MIV2_ICR, status)?;
-        Ok(status)
-    }
-}
-
-impl Port for BlockPort {
-    fn read_raw(&mut self, addr: u32) -> Result<u32, CaptureError> {
-        self.regs.read32(addr as usize).map_err(CaptureError::Block)
-    }
-
-    fn write_raw(&mut self, addr: u32, value: u32) -> Result<(), CaptureError> {
-        self.regs
-            .write32(addr as usize, value)
-            .map_err(CaptureError::Block)
-    }
-
-    fn watch(&mut self) -> Result<(), CaptureError> {
-        self.take_status()?;
-        self.irq.enable().map_err(CaptureError::Block)
-    }
-
-    fn next_event(&mut self) -> Result<Option<MiEvent>, CaptureError> {
-        let Some(event) = self
-            .irq
-            .wait(Some(Duration::ZERO))
-            .map_err(CaptureError::Block)?
-        else {
-            return Ok(None);
-        };
-        let status = self.take_status()?;
-        self.irq.enable().map_err(CaptureError::Block)?;
-        Ok(Some(MiEvent {
-            status,
-            timestamp_ns: event.timestamp_ns,
-        }))
-    }
-}
+#[cfg(not(test))]
+use crate::node::IspNode as Port;
+#[cfg(test)]
+use crate::tests::FakePort as Port;
 
 /// Memories in the ring: one the path writes, one armed to be written next, one being read back.
 pub const RING: usize = 3;
@@ -201,8 +97,6 @@ impl Output {
 pub enum CaptureError {
     /// The device refused a request.
     Io(io::Error),
-    /// The block's window or interrupt, from the host, refused.
-    Block(ErrorKind),
     /// The host's DMA memory refused.
     Dma(ErrorKind),
     /// The memory or the planes failed their check.
@@ -221,16 +115,15 @@ impl From<io::Error> for CaptureError {
 /// One interrupt of the memory interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiEvent {
-    /// `MIV2_MIS` as it was read and cleared: by the vendor's handler, or on the block's own
-    /// window by [`Capture`].
+    /// `MIV2_MIS` as the kernel's handler read and cleared it.
     pub status: u32,
-    /// When the interrupt was taken, on the kernel's monotonic clock (`ktime_get_ns`).
+    /// When the handler ran, on the kernel's monotonic clock (`ktime_get_ns`).
     pub timestamp_ns: u64,
 }
 
 /// The ISP's frame path. See the module documentation for what is checked.
 pub struct Capture {
-    port: Box<dyn Port>,
+    port: Port,
     dma: Dma,
     memory: [Option<FrameMemory>; RING],
     /// What the path was started with; `Some` while it is on.
@@ -251,39 +144,23 @@ impl core::fmt::Debug for Capture {
 impl Capture {
     /// Opens the `vvcam-isp` device at `path` (normally `/dev/vvcam-isp.0`; the path is always
     /// the caller's), with `dma` for the frame memory. On failure `dma` comes back with the error.
+    #[cfg(not(test))]
     pub fn open(path: impl AsRef<std::path::Path>, dma: Dma) -> Result<Self, (io::Error, Dma)> {
-        match crate::node::IspNode::open(path.as_ref()) {
-            Ok(port) => Ok(Self::with_port(Box::new(port), dma)),
+        match Port::open(path.as_ref()) {
+            Ok(port) => Ok(Self::with_port(port, dma)),
             Err(e) => Err((e, dma)),
         }
     }
 
     /// Opens the device at `path` again in place of the one held, and turns the path off
     /// through it: for a caller whose device stopped answering. The memory and its checks stay.
+    #[cfg(not(test))]
     pub fn reopen(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), CaptureError> {
-        self.port = Box::new(crate::node::IspNode::open(path.as_ref())?);
+        self.port = Port::open(path.as_ref())?;
         self.stop()
     }
 
-    /// The frame path through the block's own register window `regs`, which must be the ISP's
-    /// whole window ([`WINDOW_BYTES`]), and the memory interface's interrupt `irq`, with `dma`
-    /// for the frame memory: what the host gives a block bound to it rather than to the vendor
-    /// driver. On Linux these are the Lemnos kernel module's, and `dma` should be the same
-    /// block's memory, whose device addresses are then the ISP's own. A window too small is
-    /// refused, and `dma` comes back with the error. Nothing is written until
-    /// [`Self::watch_frames`].
-    pub fn on_block(
-        regs: BlockRegisters,
-        irq: BlockInterrupt,
-        dma: Dma,
-    ) -> Result<Self, (CaptureError, Dma)> {
-        if regs.size() < WINDOW_BYTES as usize {
-            return Err((CaptureError::Block(ErrorKind::InvalidInput), dma));
-        }
-        Ok(Self::with_port(Box::new(BlockPort { regs, irq }), dma))
-    }
-
-    pub(crate) fn with_port(port: Box<dyn Port>, dma: Dma) -> Self {
+    pub(crate) fn with_port(port: Port, dma: Dma) -> Self {
         Self {
             port,
             dma,
@@ -294,17 +171,17 @@ impl Capture {
     }
 
     /// The register at `addr`. Refused for one [`readable`] refuses.
-    pub fn read(&mut self, addr: u32) -> Result<u32, CaptureError> {
+    pub fn read(&self, addr: u32) -> Result<u32, CaptureError> {
         if !readable(addr) {
             return Err(CaptureError::Refused);
         }
-        self.port.read_raw(addr)
+        Ok(self.port.read_raw(addr)?)
     }
 
     /// Writes the bits of `value` that [`writable`] allows at `addr`; a register whose mask is not
     /// every bit is read first and its other bits written back as they were. Refused, before any
     /// request, for a register outside the table or a value with a bit outside its mask.
-    pub fn write(&mut self, addr: u32, value: u32) -> Result<(), CaptureError> {
+    pub fn write(&self, addr: u32, value: u32) -> Result<(), CaptureError> {
         let Some(mask) = writable(addr) else {
             return Err(CaptureError::Refused);
         };
@@ -316,21 +193,32 @@ impl Capture {
         } else {
             (self.port.read_raw(addr)? & !mask) | value
         };
-        self.port.write_raw(addr, value)
+        Ok(self.port.write_raw(addr, value)?)
     }
 
-    /// Takes the memory interface's interrupt (on the vendor device, queues it on this file as
-    /// events; on the block's window, clears what is pending and enables it) and lets the main
-    /// path's frame ends raise it.
-    pub fn watch_frames(&mut self) -> Result<(), CaptureError> {
-        self.port.watch()?;
+    /// Queues the memory interface's interrupt on this file as events ([`Self::next_event`]) and
+    /// lets the main path's frame ends raise it.
+    pub fn watch_frames(&self) -> Result<(), CaptureError> {
+        self.port.subscribe(EID_MIV2_MIS)?;
         self.write(MIV2_IMSC, MIS_MP_FRAME_END)
     }
 
     /// The next memory-interface interrupt, or `None` when none is queued. Never blocks;
     /// allocates nothing.
-    pub fn next_event(&mut self) -> Result<Option<MiEvent>, CaptureError> {
-        self.port.next_event()
+    pub fn next_event(&self) -> Result<Option<MiEvent>, CaptureError> {
+        // Only the one id is subscribed; anything else is passed over, at most a queue's worth.
+        for _ in 0..=EVENT_ELEMS {
+            let Some(e) = self.port.dequeue()? else {
+                return Ok(None);
+            };
+            if e.kind == EVENT_IRQ_TYPE && e.id == EID_MIV2_MIS {
+                return Ok(Some(MiEvent {
+                    status: e.irq_value,
+                    timestamp_ns: e.timestamp,
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// Makes sure every memory in the ring holds at least `bytes`, keeping memory that does and
@@ -422,7 +310,7 @@ impl Capture {
         let on = self.port.write_raw(MIV2_CTRL, output.enable());
         self.armed = Some((output, planes));
         self.stopped = None;
-        on
+        Ok(on?)
     }
 
     /// Points the main path at memory `slot` for the frame after the one being written. Refused
@@ -440,7 +328,7 @@ impl Capture {
 
     /// The memory the path is writing now, from its shadow base register; `None` when the path is
     /// off or the register names none of the ring (as before the first frame starts).
-    pub fn active(&mut self) -> Result<Option<usize>, CaptureError> {
+    pub fn active(&self) -> Result<Option<usize>, CaptureError> {
         let Some((output, planes)) = self.armed else {
             return Ok(None);
         };
@@ -510,7 +398,7 @@ impl Capture {
 
     /// Points every main-path address register at memory `slot`'s planes. The caller has checked
     /// the planes against every memory in the ring.
-    fn arm(&mut self, slot: usize, planes: &Planes) -> Result<(), CaptureError> {
+    fn arm(&self, slot: usize, planes: &Planes) -> Result<(), CaptureError> {
         let memory = self.held(slot)?;
         let (y, cb, cr) = (planes.y(), planes.cb_or_y(), planes.cr_or_y());
         let (ya, cba, cra) = (

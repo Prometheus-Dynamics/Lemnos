@@ -24,9 +24,9 @@
 //! Nothing here writes a register on the vendor node: the window is not mapped writable and no
 //! function takes a value for one. A register write can make the engine read or write memory,
 //! and how far it reaches cannot be bounded from user space, behind an IOMMU address space other
-//! devices' buffers share. [`regjob`] is the route that writes them: `lemnos.ko` drives the
-//! engine itself, checks every write and every address against the buffers a session holds, and
-//! writes the address registers itself. `IOCTL_SET_REFCOUNT`, `IOCTL_FLUSH_CACHE_RANGE`,
+//! devices' buffers share. The kernel module's register jobs (`lemnos-driver-regjob-sys`) are
+//! the route that writes them: `lemnos.ko` drives the engine itself, checks every write and every
+//! address against the buffers a session holds, and writes the address registers itself. `IOCTL_SET_REFCOUNT`, `IOCTL_FLUSH_CACHE_RANGE`,
 //! `IOCTL_GET_IOMMU_ADDR`, `IOCTL_GET_ENV_INFO` and the frequency requests are never issued.
 //!
 //! # Source
@@ -214,8 +214,6 @@ impl Node {
             .map(u32::from_ne_bytes)
     }
 }
-
-pub mod regjob;
 
 #[cfg(test)]
 mod tests;

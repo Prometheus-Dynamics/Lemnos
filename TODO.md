@@ -38,8 +38,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       (`testing/board-runs/E32.md`), it needs a kernel path too.
 - [ ] **Rockchip AI-ISP** (`drivers/rkaiisp`): the layouts and checks exist; running the block is
       left out until its kernel driver's unchecked fields are bounded on a board.
-- [ ] **K230 ISP frames** (`drivers/k230isp`): configuration and statistics only. No register that
-      takes an address may be written.
 
 ## Unfinished in the code
 

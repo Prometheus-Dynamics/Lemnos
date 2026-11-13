@@ -6,9 +6,12 @@
  * from a simulated controller and a reset line this module provides and
  * counts.
  *
- * Each device has, in sysfs:
+ * Two blocks: the A733 video engine's (a 4 KiB window, its interrupt first) and
+ * the K230 ISP's (a 36 KiB window, three interrupts, jobs completing on the
+ * second). Each device has, in sysfs:
  *   poke     "offset value" (hex): sets a register, as the hardware would
  *   irq      raises the block's interrupt
+ *   irq_line "n": raises the block's interrupt n (the K230 ISP's core is 0)
  *   regs     the register window, read-only
  *   stamp    "offset byte" (hex): writes the byte at the bus address the
  *            register at offset holds, as the block's DMA would. A bus address
@@ -32,20 +35,25 @@
 #include <linux/string.h>
 #include <linux/sysfs.h>
 
-#define TR_BLOCKS 1
-#define TR_WINDOW SZ_4K
+#define TR_BLOCKS 2
+#define TR_IRQS 3	/* per block; `irq` raises the one jobs complete on */
 
 struct tr_block {
 	const char *name;
 	const char *compatible;
+	u32 window;
+	u32 job_irq;
 	struct page *page;
 	struct platform_device *pdev;
-	int irq;
+	int irq[TR_IRQS];
 	atomic_t resets;
 };
 
+/* Each block's window and interrupts as its profile in lemnos.ko expects them. */
 static struct tr_block tr_blocks[TR_BLOCKS] = {
-	{ .name = "lemnos-test-ve", .compatible = "lemnos,test-ve" },
+	{ .name = "lemnos-test-ve", .compatible = "lemnos,test-ve", .window = SZ_4K },
+	{ .name = "lemnos-test-isp", .compatible = "lemnos,test-isp", .window = 0x9000,
+	  .job_irq = 1 },
 };
 
 static struct fwnode_handle *tr_fwnode;
@@ -142,7 +150,7 @@ static ssize_t poke_store(struct device *dev, struct device_attribute *attr, con
 	struct tr_block *b = tr_of(dev);
 	unsigned long offset, value;
 
-	if (!b || tr_pair(buf, &offset, &value) || offset >= TR_WINDOW || offset % 4)
+	if (!b || tr_pair(buf, &offset, &value) || offset >= b->window || offset % 4)
 		return -EINVAL;
 	WRITE_ONCE(*(u32 *)(tr_regs(b) + offset), (u32)value);
 	return count;
@@ -157,10 +165,26 @@ static ssize_t irq_store(struct device *dev, struct device_attribute *attr, cons
 
 	if (!b)
 		return -ENODEV;
-	ret = irq_set_irqchip_state(b->irq, IRQCHIP_STATE_PENDING, true);
+	ret = irq_set_irqchip_state(b->irq[b->job_irq], IRQCHIP_STATE_PENDING, true);
 	return ret ?: count;
 }
 static DEVICE_ATTR_WO(irq);
+
+static ssize_t irq_line_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			      size_t count)
+{
+	struct tr_block *b = tr_of(dev);
+	unsigned int n;
+	int ret;
+
+	if (!b)
+		return -ENODEV;
+	if (kstrtouint(buf, 0, &n) || n >= TR_IRQS)
+		return -EINVAL;
+	ret = irq_set_irqchip_state(b->irq[n], IRQCHIP_STATE_PENDING, true);
+	return ret ?: count;
+}
+static DEVICE_ATTR_WO(irq_line);
 
 static ssize_t stamp_store(struct device *dev, struct device_attribute *attr, const char *buf,
 			   size_t count)
@@ -169,7 +193,7 @@ static ssize_t stamp_store(struct device *dev, struct device_attribute *attr, co
 	unsigned long offset, value;
 	phys_addr_t at;
 
-	if (!b || tr_pair(buf, &offset, &value) || offset >= TR_WINDOW || offset % 4)
+	if (!b || tr_pair(buf, &offset, &value) || offset >= b->window || offset % 4)
 		return -EINVAL;
 	at = READ_ONCE(*(u32 *)(tr_regs(b) + offset));
 	if (!pfn_valid(PHYS_PFN(at)))
@@ -194,16 +218,17 @@ static ssize_t regs_read(struct file *f, struct kobject *kobj, const struct bin_
 
 	if (!b)
 		return -ENODEV;
-	if (off >= TR_WINDOW)
+	if (off >= b->window)
 		return 0;
-	count = min_t(size_t, count, TR_WINDOW - off);
+	count = min_t(size_t, count, b->window - off);
 	memcpy(buf, tr_regs(b) + off, count);
 	return count;
 }
-static const BIN_ATTR_RO(regs, TR_WINDOW);
+static const BIN_ATTR_RO(regs, 0x9000);
 
 static struct attribute *tr_attrs[] = { &dev_attr_poke.attr, &dev_attr_irq.attr,
-					&dev_attr_stamp.attr, &dev_attr_resets.attr, NULL };
+					&dev_attr_irq_line.attr, &dev_attr_stamp.attr,
+					&dev_attr_resets.attr, NULL };
 static const struct bin_attribute *const tr_bin_attrs[] = { &bin_attr_regs, NULL };
 static const struct attribute_group tr_group = {
 	.attrs = tr_attrs,
@@ -222,11 +247,13 @@ static void tr_teardown(void)
 			platform_device_unregister(b->pdev);
 		}
 		b->pdev = NULL;
-		if (b->irq)
-			irq_dispose_mapping(b->irq);
-		b->irq = 0;
+		for (int n = 0; n < TR_IRQS; n++) {
+			if (b->irq[n])
+				irq_dispose_mapping(b->irq[n]);
+			b->irq[n] = 0;
+		}
 		if (b->page)
-			__free_page(b->page);
+			__free_pages(b->page, get_order(b->window));
 		b->page = NULL;
 	}
 	if (!IS_ERR_OR_NULL(tr_rst_pdev))
@@ -251,7 +278,7 @@ static int tr_add(int i)
 		PROPERTY_ENTRY_REF("resets", &tr_rst_node, i),
 		{ }
 	};
-	struct resource res[2];
+	struct resource res[1 + TR_IRQS];
 	struct platform_device_info info = {
 		.name = b->name,
 		.id = PLATFORM_DEVID_NONE,
@@ -261,14 +288,16 @@ static int tr_add(int i)
 		.properties = props,
 	};
 
-	b->page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	b->page = alloc_pages(GFP_KERNEL | __GFP_ZERO, get_order(b->window));
 	if (!b->page)
 		return -ENOMEM;
-	b->irq = irq_create_mapping(tr_domain, i);
-	if (!b->irq)
-		return -EINVAL;
-	res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(b->page), TR_WINDOW);
-	res[1] = (struct resource)DEFINE_RES_IRQ(b->irq);
+	res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(b->page), b->window);
+	for (int n = 0; n < TR_IRQS; n++) {
+		b->irq[n] = irq_create_mapping(tr_domain, i * TR_IRQS + n);
+		if (!b->irq[n])
+			return -EINVAL;
+		res[1 + n] = (struct resource)DEFINE_RES_IRQ(b->irq[n]);
+	}
 	b->pdev = platform_device_register_full(&info);
 	if (IS_ERR(b->pdev))
 		return PTR_ERR(b->pdev);
@@ -282,7 +311,7 @@ static int __init tr_init(void)
 	tr_fwnode = irq_domain_alloc_named_fwnode("lemnos-test-regjob");
 	if (!tr_fwnode)
 		return -ENOMEM;
-	tr_domain = irq_domain_create_sim(tr_fwnode, TR_BLOCKS);
+	tr_domain = irq_domain_create_sim(tr_fwnode, TR_BLOCKS * TR_IRQS);
 	if (IS_ERR(tr_domain)) {
 		ret = PTR_ERR(tr_domain);
 		goto fail;

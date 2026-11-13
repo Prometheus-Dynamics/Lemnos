@@ -76,8 +76,9 @@ python3 scripts/generate-builtins.py --check
 | `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
 | `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |
 | `isp600` | `camera.isp/1`, `isp.isp600/1` | the vendor kernel's nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream |
-| `k230-capture` | `camera.receiver/1` | `dma`: `dma:BLOCK` from the kernel module; `frames` stream; the vendor's ISP node, or `regs` and `irq` (optional `clocks`, `resets`) from the module | Serves its contract. The board file chooses the way to the ISP: the vendor node, or the module's resources with the ISP bound to the module. The register facts it relies on are unconfirmed |
-| `k230isp` | `camera.isp/1` | `config`, `statistics` streams; the vendor node, or `regs` and `irq` (optional `clocks`, `resets`) from the module | Refuses to run frames. Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written. The board file chooses the way, as for `k230-capture` |
+| `k230-capture` | `camera.receiver/1` | `lemnos.ko` (`k230_isp`), or the vendor node with `dma`: `dma:BLOCK` from the kernel module; `frames` stream | Serves its contract. On the module's way it holds the ISP's frames role, so `k230isp` can configure the same ISP and read its statistics at once. The register facts it relies on are unconfirmed |
+| `k230isp` | `camera.isp/1` | the vendor node, or `lemnos.ko` (`k230_isp`); `config`, `statistics` streams | Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written. On the module's way it holds the ISP's configuration role, beside `k230-capture`'s frames. Frames through one driver go through `k230isp-frames` |
+| `k230isp-frames` | `camera.isp/1` | `lemnos.ko` (`k230_isp`); `config`, `statistics`, `output0` streams | Frames from the sensor into the caller's dma-bufs, NV12 or NV16 at the input's size, with the configuration and statistics of `k230isp`. The module writes every plane's address and the size the block wraps within, and switches buffers only at a frame's end. A frame comes out when the next job takes the path. No input stream. The register facts it relies on are unconfirmed |
 
 ## Image blocks
 
@@ -126,12 +127,19 @@ A board file cannot name these.
 ## Which drivers take a block's own resources
 
 A driver that programs a block itself (writes its registers, takes its interrupt, turns its
-clocks on) can take those from the host by the board file's names `regs:`, `irq:`, `clocks:` and
+clocks on) could take those from the host by the board file's names `regs:`, `irq:`, `clocks:` and
 `resets:` (see [Board files](boards.md#resource-names)). On Linux they are the
-[kernel module](kernel-module.md)'s, with the block bound to it. `k230isp` and `k230-capture` take
-them, and their vendor node otherwise: each driver's crate says which `uses` names choose the
-module's way, and naming half of it, or both ways, is refused when the device binds. Neither
-falls back from one way to the other.
+[kernel module](kernel-module.md)'s, with the block bound to it. No built-in driver takes them
+now.
+
+The K230 ISP's drivers reach the ISP through the module's register jobs instead, when the board
+file gives them the ISP's platform device as `block` in `config`: the module checks every write
+in the kernel and writes every address itself. One ISP serves two roles at once there.
+`k230-capture` holds its frames, and `k230isp` its configuration and statistics; the module
+merges the bits of the register both write (`isp_ctrl`) and hands each its own interrupt causes.
+`k230isp-frames` holds both roles itself. Without `block` each takes its vendor node, and giving
+`block` with a vendor setting is refused when the device binds. None falls back from one way to
+the other.
 
 The other block drivers keep the kernel driver's own interface, because there the kernel driver
 programs the block and Lemnos carries the caller's work to it: the V4L2 and media-graph drivers,
@@ -194,7 +202,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
 | `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern | `ov9782` |
 | `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
-| `camera.isp/1` | 1 info, 2 config_layout, 3 set_input, 4 set_output, 5 clear_output, 6 config_stream, 7 statistics_stream, 8 input_stream, 9 output_stream, 10 start, 11 stop, 12 counters | `pisp-be`, `pisp-fe`, `rkisp`, `isp600`, `k230isp` |
+| `camera.isp/1` | 1 info, 2 config_layout, 3 set_input, 4 set_output, 5 clear_output, 6 config_stream, 7 statistics_stream, 8 input_stream, 9 output_stream, 10 start, 11 stop, 12 counters | `pisp-be`, `pisp-fe`, `rkisp`, `isp600`, `k230isp`, `k230isp-frames` |
 | `isp.pisp/1` | 1 info, 2 set_front_end_compression, 3 enable_temporal_denoise, 4 reset_temporal_denoise, 5 set_line_event | `pisp-be`, `pisp-fe` |
 | `isp.isp600/1` | 1 info, 2 load_region, 3 statistics_region | `isp600` |
 | `camera.frames/1` | 1 format_count, 2 format, 3 select_format, 4 selected, 5 frame_stream, 6 start, 7 stop, 8 counters | `uvc` |

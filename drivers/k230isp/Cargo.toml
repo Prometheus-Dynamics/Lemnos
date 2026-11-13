@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The ISP8000 as camera.isp/1, behind the vendor vvcam-isp device or through its own register window and interrupt from the kernel module, as the board file chooses: register writes in, checked against the registers that carry no address, and the statistics registers out per frame. Carried, never read"
+description = "The ISP8000 as camera.isp/1: behind the vendor vvcam-isp device (register writes in, statistics out), or run by lemnos.ko with frames into the caller's dma-bufs at addresses the module writes and checks. Carried, never read"
 
 [lints]
 workspace = true
@@ -14,13 +14,23 @@ workspace = true
 [features]
 default = ["device"]
 # The `camera.isp/1` driver.
-device = ["dep:lemnos-core", "dep:lemnos-hal", "dep:lemnos-contract-camera-isp"]
+device = [
+    "dep:lemnos-core",
+    "dep:lemnos-hal",
+    "dep:lemnos-contract-camera-isp",
+    "dep:lemnos-driver-regjob-sys",
+    "dep:lemnos-linux-sys",
+    "dep:libc",
+]
 
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"], optional = true }
 lemnos-hal = { path = "../../engine/hal", features = ["std"], optional = true }
 lemnos-contract-camera-isp = { path = "../../contracts/camera-isp", optional = true }
 lemnos-driver-k230isp-sys = { path = "../k230isp-sys" }
+lemnos-driver-regjob-sys = { path = "../regjob-sys", optional = true }
+lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
@@ -28,4 +38,4 @@ lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]
-driver = "K230Isp"
+driver = ["K230Isp", "K230IspFrames"]
