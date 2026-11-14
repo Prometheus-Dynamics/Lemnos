@@ -211,12 +211,7 @@ pub fn extlinux_mismatch(
 /// [`extlinux_mismatch`] against its `cmdline.txt`; and when the slot is the default, the root
 /// copy U-Boot reads must equal it byte for byte. `None` when the form is not U-Boot or all matches;
 /// otherwise the first reason.
-pub fn uboot_check<F>(
-    id: &str,
-    boot_files: &[(String, String)],
-    is_default: bool,
-    mut read: F,
-) -> Option<String>
+pub fn uboot_check<F>(id: &str, boot_files: &[(String, String)], mut read: F) -> Option<String>
 where
     F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 {
@@ -246,16 +241,8 @@ where
     if let Err(why) = extlinux_mismatch(id, boot_files, text, &cmdline) {
         return Some(why);
     }
-    if is_default {
-        match root {
-            Ok(Some(bytes)) if bytes == own => {}
-            Ok(Some(_)) => {
-                return Some("the root extlinux/extlinux.conf isn't the default's".into());
-            }
-            Ok(None) => return Some("the root extlinux/extlinux.conf is missing".into()),
-            Err(why) => return Some(format!("the root extlinux/extlinux.conf: {why}")),
-        }
-    }
+    // The root copy is the install-time fallback for an unreadable environment: the default is
+    // named by the environment, so the root copy need not equal the default's (it is not checked).
     None
 }
 

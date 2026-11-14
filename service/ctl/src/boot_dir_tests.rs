@@ -201,10 +201,10 @@ fn a_board_with_another_record_is_refused_by_name() {
         text.contains("record = \"tryboot\""),
         "the reference board names its record"
     );
-    let board = board::parse(&text.replace("record = \"tryboot\"", "record = \"uboot\"")).unwrap();
+    let board = board::parse(&text.replace("record = \"tryboot\"", "record = \"file\"")).unwrap();
     let err = files(&board, "", "a1").unwrap_err();
     assert!(
-        err.contains("\"uboot\"") && err.contains("only \"tryboot\""),
+        err.contains("\"file\"") && err.contains("\"uboot\""),
         "{err}"
     );
 }
@@ -265,7 +265,7 @@ mod layout {
     #[test]
     fn the_contract_reads_and_its_rpi_list_is_the_slot_store_constants() {
         let files = read_layout(LAYOUT).unwrap();
-        assert_eq!(files.len(), 6);
+        assert_eq!(files.len(), 7);
         assert_eq!(
             required_for(&files, "rpi-tryboot"),
             names::RPI_TRYBOOT_REQUIRED
@@ -277,10 +277,10 @@ mod layout {
 
     #[test]
     fn a_version_other_than_two_is_refused() {
-        for other in ["version = 1", "version = 2", "version = 4"] {
-            let text = LAYOUT.replace("version = 3", other);
+        for other in ["version = 1", "version = 2", "version = 3", "version = 5"] {
+            let text = LAYOUT.replace("version = 4", other);
             let why = read_layout(&text).unwrap_err();
-            assert!(why.contains("reads 3"), "{why}");
+            assert!(why.contains("reads 4"), "{why}");
         }
     }
 
@@ -299,7 +299,7 @@ mod layout {
             .filter(|f| f.source == "generated")
             .map(|f| f.name.as_str())
             .collect();
-        assert_eq!(generated, [names::OVERLAY_README]);
+        assert_eq!(generated, [names::OVERLAY_README, "uboot-env.txt"]);
         assert!(
             files
                 .iter()
@@ -573,4 +573,278 @@ mod cmdline_slot {
         assert!(!out.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+const UBOOT_KEYS: &str = "record = \"uboot\", uboot_env_size = 8192, uboot_env_mmc_index = 0";
+
+fn text_bytes(out: &[(String, Vec<u8>)], name: &str) -> Vec<u8> {
+    out.iter().find(|(n, _)| n == name).unwrap().1.clone()
+}
+
+fn uboot_board_with(keys: &str) -> BoardFile {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/boards/reference.toml");
+    let text = std::fs::read_to_string(path).unwrap();
+    board::parse(&text.replace("record = \"tryboot\"", keys)).unwrap()
+}
+
+fn uboot_board() -> BoardFile {
+    uboot_board_with(UBOOT_KEYS)
+}
+
+/// The `uboot` record writes the locator slot-init reads, the boot script, and the contract copy;
+/// the locator parses with the slot-store reader to the board file's place (the GPT form: only the
+/// size), and the script has the board's USB controller and LED set before the static text.
+#[test]
+fn the_uboot_board_writes_the_locator_and_the_boot_script() {
+    use lemnos_slot_store::uboot_env::Place;
+    let out = files(&uboot_board(), "", "").unwrap();
+    let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "slot-layout.toml",
+            "uboot-env.txt",
+            "boot.cmd",
+            "reason.rec"
+        ]
+    );
+    assert_eq!(text_bytes(&out, "reason.rec").len(), 1024);
+    let locator = text(&out, lemnos_slot_store::uboot_env::LOCATOR);
+    assert_eq!(
+        Place::parse(&locator).unwrap(),
+        Place::Gpt { size: 8192 },
+        "{locator}"
+    );
+    let script = text(&out, "boot.cmd");
+    assert!(
+        script.ends_with(super::boot_dir::BOOT_CMD),
+        "the static script follows"
+    );
+    assert!(script.contains("\nsetenv lemnos_usb 0\n"));
+    assert!(
+        !script.contains("setenv lemnos_led"),
+        "no LED named, none set"
+    );
+    let led = uboot_board_with(&format!(
+        "{UBOOT_KEYS}, uboot_fastboot_usb = 2, uboot_led = \"red:status\""
+    ));
+    let script = text(&files(&led, "", "").unwrap(), "boot.cmd");
+    assert!(
+        script.contains("\nsetenv lemnos_usb 2\nsetenv lemnos_led red:status\n"),
+        "{script}"
+    );
+    // The fixed-offset form writes its device and offsets.
+    let device = uboot_board_with(
+        "record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mmcblk0\", uboot_env_offset = 4194304, uboot_env_offset_redund = 4202496",
+    );
+    let out = files(&device, "", "").unwrap();
+    let locator = text(&out, lemnos_slot_store::uboot_env::LOCATOR);
+    assert_eq!(
+        Place::parse(&locator).unwrap(),
+        Place::device("/dev/mmcblk0", 8192, 4194304, 4202496).unwrap()
+    );
+}
+
+/// The boot script reads the three variables the slot driver writes.
+#[test]
+fn the_boot_script_reads_the_variables_the_record_writes() {
+    for key in lemnos_slot_store::records::uboot::KEYS {
+        assert!(
+            super::boot_dir::BOOT_CMD.contains(key),
+            "boot.cmd reads {key}"
+        );
+    }
+}
+
+/// Every refusal is by name, and nothing is written.
+#[test]
+fn a_uboot_board_with_a_wrong_environment_description_is_refused_by_name() {
+    let refuse = |keys: &str| files(&uboot_board_with(keys), "", "").unwrap_err();
+    assert!(refuse("record = \"uboot\"").contains("uboot_env_size"));
+    let err = refuse(
+        "record = \"uboot\", uboot_env_size = 8192, uboot_env_partuuid = \"0a1b2c3d-0000-4000-8000-000000000042\"",
+    );
+    assert!(
+        err.contains("uboot_env_partuuid is not a key")
+            && err.contains("3de21764-95bd-54bd-a5c3-4abe786f38a8"),
+        "{err}"
+    );
+    let err = refuse("record = \"uboot\", uboot_env_size = 8192, uboot_env_offset = 0");
+    assert!(
+        err.contains("uboot_env_offset needs uboot_env_device"),
+        "{err}"
+    );
+    let err =
+        refuse("record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mmcblk0\"");
+    assert!(err.contains("uboot_env_offset"), "{err}");
+    let err = refuse(
+        "record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mtd2\", uboot_env_offset = 0, uboot_env_offset_redund = 65536",
+    );
+    assert!(err.contains("flash or a UBI volume"), "{err}");
+    let err = refuse("record = \"uboot\", uboot_env_size = 8192, uboot_led = \"a b\"");
+    assert!(err.contains("not a U-Boot LED label"), "{err}");
+}
+
+/// The contract names the uboot kind's file as the slot-store locator, and the rpi list is
+/// unchanged.
+#[test]
+fn the_contract_names_the_locator_for_the_uboot_kind() {
+    let layout = super::boot_dir::read_layout(super::boot_dir::LAYOUT).unwrap();
+    let uboot: Vec<&str> = layout
+        .iter()
+        .filter(|f| f.firmware.iter().any(|k| k == "uboot"))
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(uboot, [lemnos_slot_store::uboot_env::LOCATOR]);
+}
+
+/// `--uboot-config`: the Kconfig fragment. The GPT form names the type-GUID lookup and no offsets;
+/// the device form names the offsets and no GUID lookup; every board gets the environment, the boot
+/// script's commands, the fastboot gadget and the watchdog. Every name is U-Boot v2026.10's: they
+/// were checked against its Kconfig files (see testing/board-runs/I5i7.md).
+#[test]
+fn the_uboot_config_fragment_names_what_the_boot_path_needs() {
+    let config = |keys: &str| super::boot_dir::uboot_config(&uboot_board_with(keys)).unwrap();
+    let gpt = config(UBOOT_KEYS);
+    let lines: Vec<&str> = gpt.lines().filter(|l| l.starts_with("CONFIG_")).collect();
+    assert_eq!(
+        lines,
+        [
+            "CONFIG_ENV_IS_IN_MMC=y",
+            "CONFIG_ENV_MMC_DEVICE_INDEX=0",
+            "CONFIG_ENV_REDUNDANT=y",
+            "CONFIG_ENV_SIZE=0x2000",
+            "CONFIG_CMD_SAVEENV=y",
+            "CONFIG_EFI_PARTITION=y",
+            "CONFIG_PARTITION_TYPE_GUID=y",
+            "CONFIG_OF_CONTROL=y",
+            "CONFIG_HUSH_PARSER=y",
+            "CONFIG_CMD_FDT=y",
+            "CONFIG_CMD_SLEEP=y",
+            "CONFIG_CMD_SYSBOOT=y",
+            "CONFIG_USB_GADGET=y",
+            "CONFIG_USB_FUNCTION_FASTBOOT=y",
+            "CONFIG_CMD_FASTBOOT=y",
+            "CONFIG_FASTBOOT_USB_DEV=0",
+            "CONFIG_FASTBOOT_FLASH=y",
+            "CONFIG_FASTBOOT_FLASH_MMC=y",
+            "CONFIG_FASTBOOT_FLASH_MMC_DEV=0",
+            "CONFIG_WDT=y",
+            "CONFIG_WATCHDOG=y",
+            "CONFIG_WATCHDOG_AUTOSTART=y",
+        ]
+    );
+    assert!(!gpt.contains("CONFIG_ENV_OFFSET"));
+    assert!(!gpt.contains("CONFIG_LED"), "no LED named");
+    assert!(!gpt.contains("VENDOR_NUM"), "no VID and PID given");
+    let full = config(
+        "record = \"uboot\", uboot_env_size = 16384, uboot_env_mmc_index = 1, uboot_fastboot_usb = 1, uboot_led = \"act\", uboot_usb_vendor = 4617, uboot_usb_product = 1, uboot_watchdog_ms = 20000",
+    );
+    for want in [
+        "CONFIG_ENV_MMC_DEVICE_INDEX=1",
+        "CONFIG_ENV_SIZE=0x4000",
+        "CONFIG_FASTBOOT_USB_DEV=1",
+        "CONFIG_FASTBOOT_FLASH_MMC_DEV=1",
+        "CONFIG_USB_GADGET_VENDOR_NUM=0x1209",
+        "CONFIG_USB_GADGET_PRODUCT_NUM=0x0001",
+        "CONFIG_WATCHDOG_TIMEOUT_MSECS=20000",
+        "CONFIG_LED=y",
+        "CONFIG_CMD_LED=y",
+    ] {
+        assert!(full.lines().any(|l| l == want), "{want}\n{full}");
+    }
+    let device = config(
+        "record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mmcblk0\", uboot_env_offset = 4194304, uboot_env_offset_redund = 4202496",
+    );
+    assert!(
+        device.lines().any(|l| l == "CONFIG_ENV_OFFSET=0x400000"),
+        "{device}"
+    );
+    assert!(
+        device
+            .lines()
+            .any(|l| l == "CONFIG_ENV_OFFSET_REDUND=0x402000"),
+        "{device}"
+    );
+    assert!(!device.contains("PARTITION_TYPE_GUID"));
+    // The option names in the script's own comments are the ones in the fragment.
+    for needed in ["saveenv", "sysboot", "fdt", "sleep", "fastboot"] {
+        assert!(super::boot_dir::BOOT_CMD.contains(needed), "{needed}");
+    }
+    // A board of another record, a half-given VID and PID, and a VID out of range are refused.
+    let other = board::parse(
+        &std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testing/boards/reference.toml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        super::boot_dir::uboot_config(&other)
+            .unwrap_err()
+            .contains("is for \"uboot\"")
+    );
+    let half =
+        uboot_board_with("record = \"uboot\", uboot_env_size = 8192, uboot_usb_vendor = 4617");
+    assert!(
+        super::boot_dir::uboot_config(&half)
+            .unwrap_err()
+            .contains("together or not at all")
+    );
+    let big = uboot_board_with(
+        "record = \"uboot\", uboot_env_size = 8192, uboot_usb_vendor = 70000, uboot_usb_product = 1",
+    );
+    assert!(
+        super::boot_dir::uboot_config(&big)
+            .unwrap_err()
+            .contains("0 to 65535")
+    );
+}
+
+/// The command writes the fragment to the named file.
+#[test]
+fn tree_writes_the_uboot_config_to_its_file() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = std::env::temp_dir().join(format!("lemnos-uboot-config-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = std::fs::read_to_string(repo.join("testing/boards/reference.toml")).unwrap();
+    let board = dir.join("board.toml");
+    std::fs::write(&board, text.replace("record = \"tryboot\"", UBOOT_KEYS)).unwrap();
+    let out = dir.join("uboot.config");
+    let args: Vec<String> = [
+        "tree",
+        "--socs",
+        repo.join("socs").to_str().unwrap(),
+        board.to_str().unwrap(),
+        "--uboot-config",
+        out.to_str().unwrap(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    crate::run(&args, &mut Vec::new()).unwrap();
+    let fragment = std::fs::read_to_string(&out).unwrap();
+    assert!(fragment.contains("CONFIG_ENV_REDUNDANT=y\n"), "{fragment}");
+    // The tryboot reference board has no U-Boot configuration.
+    let args: Vec<String> = [
+        "tree",
+        "--socs",
+        repo.join("socs").to_str().unwrap(),
+        repo.join("testing/boards/reference.toml").to_str().unwrap(),
+        "--uboot-config",
+        dir.join("none").to_str().unwrap(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let error = crate::run(&args, &mut Vec::new()).unwrap_err();
+    assert!(
+        error.contains("--uboot-config") && error.contains("is for \"uboot\""),
+        "{error}"
+    );
+    assert!(!dir.join("none").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
 }

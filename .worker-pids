@@ -1,2 +1,3 @@
 2629187	/mnt/nvme-wd/lemnos-wI5i6	bash /mnt/nvme-wd/lemnos-gates/tmp/I5i6/run.sh
 2765489	/mnt/nvme-wd/lemnos-wI5i6	/bin/bash /mnt/nvme-wd/lemnos-gates/b-ci.sh I5i6 I5i6: the Pi firmware's boot count: mailbox, production count actions, tree --boot-dir /mnt/nvme-wd/lemnos-gates/tmp/I5i6/body.md
+4078216	/mnt/nvme-wd/lemnos-wI5i7	/bin/bash /mnt/nvme-wd/lemnos-gates/b-ci.sh I5i7 I5i7: the U-Boot form's trial and default in U-Boot's redundant environment /mnt/nvme-wd/lemnos-gates/tmp/I5i7/body.md

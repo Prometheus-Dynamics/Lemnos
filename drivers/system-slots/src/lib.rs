@@ -14,7 +14,9 @@
 //! - `boot`: the boot partition's mount point, `"/boot/firmware"` by default.
 //! - `record`: how the boot loader is told which slot to start: `"tryboot"` (the default: the
 //!   firmware's `default.txt`, `trial.txt` and tryboot restart), `"uboot"` (U-Boot's standard
-//!   boot flow: `boot-record.env`, a per-slot `extlinux.conf` and the static script in
+//!   boot flow: the record is U-Boot's own redundant environment on its own partition
+//!   (`uboot_env_device` or `uboot_env_partuuid`, `uboot_env_size`, `uboot_env_offset`,
+//!   `uboot_env_offset_redund`), a per-slot `extlinux.conf` and the static script in
 //!   `packaging/uboot`; see [`uboot`]), `"ubi"` (the same on raw NAND, the record being the UBI
 //!   volume `boot-record` and the script `packaging/uboot/boot-ubi.cmd`; needs `ubi`) or
 //!   `"file"` (one `boot-record` file, for a loader with one fixed kernel; see [`boot`]).
@@ -76,6 +78,8 @@ pub mod boot;
 mod boot_guard;
 #[cfg(test)]
 mod boot_guard_tests;
+#[cfg(test)]
+mod boot_writes_audit;
 mod count;
 #[cfg(test)]
 mod count_tests;
@@ -112,9 +116,10 @@ use lemnos_slot_store::disk::{self, Table};
 use lemnos_slot_store::security;
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
+use lemnos_slot_store::uboot_env::Place;
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
-use uboot::Uboot;
+use uboot::{Uboot, UbootEnv};
 
 #[driver("system-slots", provides = [Slots, SecurityPrecondition])]
 pub struct SystemSlots {
@@ -211,6 +216,17 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
     }
 }
 
+/// The boot disk's whole-disk node (`/dev/<disk>`), found as the boot partition is: from the boot
+/// chain's source and the board's `boot_sources`. The U-Boot environment is read and written on it
+/// (the GPT form finds its partition there); refused by name when the disk can't be found.
+fn boot_disk_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
+    match boot_table(cfg) {
+        Ok(Some(table)) => resolve_boot_disk(&BootRoots::current(), &table),
+        Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// The firmware's count and mailbox, for the `tryboot` form only: the other forms have no count.
 fn firmware_of(cfg: &Config<'_>) -> Option<count::Firmware> {
     (cfg.str("record").unwrap_or("tryboot") == "tryboot").then(|| count::Firmware {
@@ -275,6 +291,16 @@ pub fn resolve_boot_node(
         .ok_or_else(|| format!("{whole} has no partition 1 (the boot partition)"))
 }
 
+/// The boot disk's whole-disk node for the boot chain's source (see [`resolve_boot_node`]).
+pub fn resolve_boot_disk(
+    roots: &BootRoots,
+    table: &Table,
+) -> core::result::Result<PathBuf, String> {
+    let source = disk::boot_source(&roots.chosen)?;
+    let whole = disk::boot_disk(&roots.sys, table, &source)?;
+    Ok(roots.dev.join(whole))
+}
+
 /// The board's `boot_sources` table, parsed. Required on every board that boots from a disk (every
 /// record but `ubi`); `None` on the raw NAND form, which has no such table.
 fn boot_table(cfg: &Config<'_>) -> core::result::Result<Option<Table>, ConfigError<'static>> {
@@ -313,10 +339,10 @@ fn record_for(
             boot: layout.boot.clone(),
             restarter,
         }),
-        "uboot" => Box::new(Uboot {
-            boot: layout.boot.clone(),
+        "uboot" => Box::new(UbootEnv {
+            disk: boot_disk_of(cfg),
+            place: uboot_env_place(cfg).map_err(|_| Status::INVALID_ARGUMENT)?,
             restarter,
-            volume: None,
         }),
         "ubi" => match (&layout.ubi, ubi_write) {
             (Some(device), Some(writer)) => Box::new(Uboot {
@@ -328,6 +354,60 @@ fn record_for(
         },
         _ => return Err(Status::INVALID_ARGUMENT),
     })
+}
+
+/// The U-Boot environment's place: GPT (the one partition of the environment's type GUID on the boot
+/// disk, only `uboot_env_size` stated) or, with `uboot_env_device`, fixed offsets of that device.
+/// `uboot_env_partuuid` is refused by name: the environment is found by type, never by a PARTUUID.
+fn uboot_env_place(cfg: &Config<'_>) -> core::result::Result<Place, ConfigError<'static>> {
+    if cfg.str("uboot_env_partuuid").is_some() {
+        return Err(ConfigError::new(
+            "uboot_env_partuuid",
+            "is not a key: the U-Boot environment is found by its GPT partition type GUID 3de21764-95bd-54bd-a5c3-4abe786f38a8 on the boot disk (use uboot_env_device with offsets for an environment outside the GPT)",
+        ));
+    }
+    let size = cfg
+        .int("uboot_env_size")
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(ConfigError::new(
+            "uboot_env_size",
+            "is required for the uboot record: CONFIG_ENV_SIZE in bytes",
+        ))?;
+    let int = |key: &'static str| {
+        cfg.int(key)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(ConfigError::new(
+                key,
+                "is required with uboot_env_device: the copy's byte offset on the device",
+            ))
+    };
+    match cfg.str("uboot_env_device") {
+        None => {
+            for key in ["uboot_env_offset", "uboot_env_offset_redund"] {
+                if cfg.int(key).is_some() {
+                    return Err(ConfigError::new(
+                        key,
+                        "needs uboot_env_device: the GPT form places both copies itself",
+                    ));
+                }
+            }
+            Place::gpt(size).map_err(|_| {
+                ConfigError::new("uboot_env_size", "is too small: CONFIG_ENV_SIZE is at least 16 bytes")
+            })
+        }
+        Some(device) => Place::device(
+            device,
+            size,
+            int("uboot_env_offset")?,
+            int("uboot_env_offset_redund")?,
+        )
+        .map_err(|_| {
+            ConfigError::new(
+                "uboot_env_device",
+                "must be an absolute block device path (not /dev/mtd* or /dev/ubi*) with sector-aligned, non-overlapping offsets and a size of at least 16 bytes",
+            )
+        }),
+    }
 }
 
 /// The check over a record of its own: [`boot_guard::check`], which may point the record at the
@@ -1156,6 +1236,21 @@ const KEYS: &[Key] = &[
     Key::optional("device_tree", Kind::Str),
     Key::optional("vcio", Kind::Str),
     Key::optional("demote_after_episodes", Kind::Int),
+    Key::optional("uboot_env_size", Kind::Int),
+    Key::optional("uboot_env_device", Kind::Str),
+    Key::optional("uboot_env_offset", Kind::Int),
+    Key::optional("uboot_env_offset_redund", Kind::Int),
+    // Read by `lemnos-ctl tree --uboot-config` and `--boot-dir` for the image's U-Boot, not by the
+    // driver: the MMC index and the fastboot USB controller (U-Boot's numbering), the download-mode
+    // LED's label, the fastboot gadget's VID and PID, and the watchdog's timeout in ms.
+    Key::optional("uboot_env_mmc_index", Kind::Int),
+    Key::optional("uboot_fastboot_usb", Kind::Int),
+    Key::optional("uboot_led", Kind::Str),
+    Key::optional("uboot_usb_vendor", Kind::Int),
+    Key::optional("uboot_usb_product", Kind::Int),
+    Key::optional("uboot_watchdog_ms", Kind::Int),
+    // Listed only so that giving it is refused by name (see `uboot_env_place`).
+    Key::optional("uboot_env_partuuid", Kind::Str),
 ];
 
 /// The settings `SystemReboot` reads. The boot-file check before its restart reads the boot files
@@ -1349,6 +1444,20 @@ impl Lifecycle for SystemSlots {
                 .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
         }
         boot_table(cfg)?;
+        if cfg.str("record") == Some("uboot") {
+            uboot_env_place(cfg)?;
+        }
+        for key in [
+            "uboot_env_mmc_index",
+            "uboot_fastboot_usb",
+            "uboot_usb_vendor",
+            "uboot_usb_product",
+            "uboot_watchdog_ms",
+        ] {
+            if cfg.int(key).is_some_and(|n| n < 0) {
+                return Err(ConfigError::new(key, "must not be negative"));
+            }
+        }
         Ok(())
     }
 

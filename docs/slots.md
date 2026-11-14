@@ -691,6 +691,90 @@ This uses the board firmware's one-shot boot:
   with `0 tryboot`, which boots the trial. With 0, it clears the record and boots the default. See
   "The extra pass on tryboot", below.
 
+### The `uboot` record
+
+U-Boot's standard boot flow starts the slot. The record is U-Boot's own redundant environment, written
+raw: `default`, `trial` and `trial_attempts` are variables of it. Where it is, and the Kconfig
+fragment the board's U-Boot is built with, are in [Boards](boards.md#u-boot-environment-system-slots-record--uboot).
+The format is U-Boot's, from its sources at tag `v2026.10` (commit 5508406): `include/env_internal.h`,
+`env/common.c`, `env/mmc.c`. Each copy is a CRC-32 over the whole data area, a one-byte serial and the
+data (`env/common.c:582-600`, `env_export`); the serial is the active copy's plus one, wrapping from
+255 to 0; U-Boot takes the copy whose CRC is right, and of two, the higher serial (255 against 0: the 0
+is newer), and copy one on a tie (`env/common.c:484-551`, `env_check_redund`).
+
+- **Where the copies are.** The environment is the one partition on the boot disk whose GPT type GUID
+  is `3de21764-95bd-54bd-a5c3-4abe786f38a8` (`include/part_efi.h:61`). With `CONFIG_PARTITION_TYPE_GUID`
+  U-Boot puts copy 0 in the last `CONFIG_ENV_SIZE` bytes of that partition (rounded up to 512-byte
+  blocks) and copy 1 in the block run below it (`env/mmc.c:114-148`); a partition too small for two
+  copies is U-Boot's own refusal (`env/mmc.c:135-141`) and Lemnos's. Lemnos reads the primary GPT
+  (header at LBA 1, entry array, both CRC-checked) to find the partition: none, or more than one, is
+  refused by name. For an environment outside the GPT the board file names the device and the
+  offsets (`uboot_env_device`); flash and UBI volumes are refused by name.
+- **The first write is checked.** Before anything is written both stored copies are read and
+  CRC-checked at the board file's size. With neither valid nothing is written, by name:
+  `no valid U-Boot environment of N bytes here: U-Boot may be built with another CONFIG_ENV_SIZE`;
+  an erased area (every byte 0xFF, or every byte 0, in both copies) is its own case: `the U-Boot
+  environment area is erased: U-Boot has not saved an environment here yet (boot.cmd saves the first
+  one at the first start), so none is written`. The rule for the erased case: Lemnos never writes the
+  first environment, because an import replaces U-Boot's built-in defaults with what the environment
+  holds (`env/common.c:443-466`, `himport_r` without `H_NOCLEAR`), so an environment of only our three
+  variables would leave U-Boot without its own. `boot.cmd` saves the first one itself (below). With
+  one copy valid (the other torn by an earlier cut) the valid one is the active one and the other is
+  the copy written.
+- **Cut safety.** Lemnos writes only the copy that is not active, in one write of the copy's sectors,
+  with the serial of the active copy plus one, then reads both copies again: the new copy must be
+  valid and the one U-Boot's rule selects. A cut at any byte of the write leaves the active copy
+  untouched and valid, so U-Boot (and the next Lemnos read) takes the old environment or the new one,
+  never neither; the default it names was bootable before the write and is unchanged by it. The tests
+  cut at every byte of the write, from every serial value (the wrap included), with sectors landing
+  in any combination and torn over garbage (`drivers/slot-store/src/uboot_env_tests.rs`), and in
+  slot-init's fallback (`service/slot-init/src/boot/tests.rs`). `saveenv` in `boot.cmd` is U-Boot's
+  own write of the same kind (`env/mmc.c:329-376`: the copy that is not active, then the active one
+  flips).
+- **What `boot.cmd` does with it.** It reads the variables U-Boot loaded, takes one attempt for a
+  trial with attempts left, calls `saveenv`, and only then starts the trial. A save that fails skips
+  the trial. At 0 or none, it starts the default; the root `extlinux/extlinux.conf` is the last resort,
+  the install-time copy of the default's. The first start saves the environment once: `lemnos_env` is
+  not set while U-Boot runs on its built-in defaults, so the script sets it and runs `saveenv`.
+- The serial byte is not covered by the CRC. Its order makes that harmless: the new serial is the
+  active one plus one, so a torn copy whose serial still reads old loses to the active copy.
+- slot-init reaches the environment through `uboot-env.txt`, the locator at the boot partition's root,
+  which `lemnos-ctl tree --boot-dir` writes at image build from the board file (`form = "gpt"` with the
+  size, or `form = "device"` with the device, size and offsets; unknown keys, a wrong version or
+  sector and keys of the other form are refused by name). It is read raw (no mount). The fallback's
+  trial, the withdrawal of a held trial, and the repoint of `default` when the default's boot files
+  do not match are each one write of the inactive copy. The locator is not in any slot's signed
+  manifest: a bundle is per slot, not per board, so its check is the locator's own fit against the
+  device, not the every-boot hash (an open gap: the every-boot check cannot see this file; see
+  `testing/board-runs/I5i7.md`).
+- The kernel-gap reason goes to the pre-created `reason.rec` (raw), as on the other forms
+  (`--boot-dir` writes it for this record).
+- **Stated limits.** MMC only (`CONFIG_ENV_IS_IN_MMC`; the copies in one user area, not the two eMMC
+  boot partitions, `env/mmc.c:216-231`). Little-endian CRC word. A primary GPT that is damaged is
+  refused rather than read from the backup. 512-byte blocks. Not run on a board:
+  `testing/board-runs/I5i7.md`.
+
+### The `file` record
+
+The `file` form (one `boot-record` file on the boot partition, for a loader with one fixed kernel)
+has no raw path in the design, so no run-time code writes it. Its trial and default are refused by
+name: it is not a production slot form.
+
+### Boot partition writes audit
+
+`drivers/system-slots/src/boot_writes_audit.rs` scans the run-time sources (the slot store, the slot
+driver, slot-init, lemnosd) for every non-test line that writes under a boot-partition path. A line
+that is not in its list fails the test and names itself; a listed line that no longer exists fails
+it too. The verdicts of the listed lines:
+
+| Lines | Verdict |
+|---|---|
+| `boot.rs`: the renames of a slot's files and of `overlays` into `layout.boot`, the removal of the old `overlays`, `sync_dir(&layout.boot)`, `fs::copy` of a kept boot file; `lib.rs`: `sync_dir` of `slots` | **Install.** An install stages the slot's boot files on the boot partition, mounted for the install. This is the install-time write the design allows; the payload bays (I5i8) move it off the mounted partition. Not a run-time write of the record |
+| `uboot.rs`: `sync_dir(&self.boot)`, `replace(extlinux.conf)` | **UBI form only.** The raw-NAND form keeps a root copy of the default's `extlinux.conf` current on its UBIFS boot volume; the boot-partition form (`UbootEnv`) writes nothing here |
+
+The run-time record writes (trial, default, reason) are not on this list: they are raw sector or raw
+environment writes, which the scan does not take for a file write.
+
 ## Two-copy records
 
 State that must survive a power cut, and that a boot loader or the initramfs needs, is kept as
@@ -813,7 +897,7 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
 
 ### The slot layout (Pi firmware form)
 
-`contracts/slot-layout.toml` (version 3) lists every file of a slot's directory `slots/<id>/` on the
+`contracts/slot-layout.toml` (version 4) lists every file of a slot's directory `slots/<id>/` on the
 boot partition for the `rpi-tryboot` form, with its role, whether it is required, and its `source`:
 the kernel (`kernel8.img`), the initramfs (`initramfs.cpio`), the device tree the slot's kernel built
 (`board.dtb`) and `cmdline.txt` are `build` (the image builder supplies them), and `overlays/lemnos-board.dtbo`
@@ -949,9 +1033,9 @@ fails without it:
    Only a slot whose boot directory is on the boot partition can be started.
    - The trial goes into the record the boot partition holds: on the Pi firmware form, the trial
      pointer and the trial record, raw (see "Pointer files"), then a `0 tryboot` restart; on raw
-     NAND, the `boot-record` volume with `trial_attempts=`. The `boot-record` file and
-     `boot-record.env` of the other forms are not written at run time: an image has no pre-created
-     file for them, so the trial is refused by name. The attempts are the board's
+     NAND, the `boot-record` volume with `trial_attempts=`. On the `uboot` form the trial is in the
+     U-Boot environment (see "The `uboot` record"). The `boot-record` file and `boot-record.env` of
+     the other forms are not written at run time, so their trial is refused by name. The attempts are the board's
      `trial_attempts`, read from `board/slots/settings.env`.
    - When the default's own boot files don't match its manifest (Pi firmware form, and the previous
      slot's files match), the default pointer is moved to the previous by one raw write, the
@@ -1163,15 +1247,43 @@ attempt was taken, default, the root copy) with one block of commands:
 | `if fdt set /chosen lemnos,boot-source "${lemnos_src}"` | states the source in the loaded tree; a failure (no room) is reported and the next choice follows | `boot.cmd` |
 | `sysboot ... ${lemnos_conf}` | starts the label; it returns only when it could not start | `boot.cmd` |
 
-**A refusal never ends at a prompt.** A choice that cannot start is reported by name and the loop
-goes on: trial, then default, then the root copy. After the last, the script ends and U-Boot's own
-boot flow goes on with its next target. The one refusal that cannot fall through is a boot source
-that cannot be named (a non-mmc device, or no alias): nothing can boot safely then, so the script ends
-there, in ONE place, marked `# I5i7: replaced by the download-mode loop`. I5i7 replaces that place and
-the end of the script with a loop that never ends at a prompt.
+**The script never ends at a prompt.** A choice that cannot start is reported by name and the loop
+goes on: trial, then default, then the root copy. When none starts, or the boot source cannot be named
+at all (a non-mmc device, or no alias: nothing can boot safely then), the script offers the board for
+flashing and tries again, for ever. The whole script is one `while`; each pass names the boot source,
+runs the three choices, and ends in a 2-second sleep. The first two passes in a row that start
+nothing only say so and go round (a card that answered late, a read that failed once); the third
+offers download mode; after it returns the next pass tries the slots once before offering it again.
+The only ways out are a slot starting (`sysboot` does not return) and a reset.
+
+### Download mode (the end of every pass)
+
+The offer (the third pass in a row that starts nothing) is `fastboot usb <n>` on the OTG port, `n` from `uboot_fastboot_usb` (`--boot-dir` writes `boot.cmd` with
+`setenv lemnos_usb <n>` and, when the board names an LED, `setenv lemnos_led <label>` before the
+static script; the image builder compiles that file into `boot.scr`, not `packaging/uboot/boot.cmd`
+itself, unless the defaults, USB controller 0 and no LED, are the board's). What U-Boot v2026.10 does, from its sources:
+
+| Question | Answer | Source |
+|---|---|---|
+| Does `fastboot usb` take a time limit? | **No.** It registers the gadget and waits. It returns when the host sends `fastboot continue` (the gadget triggers the detach), on Ctrl-C (any key with `CONFIG_CMD_FASTBOOT_ABORT_KEYED`, not set), or at once when the board's cable check says there is no cable. `fastboot reboot` resets the board. | `cmd/fastboot.c:96-117`; `drivers/fastboot/fb_command.c:75-78`; `drivers/usb/gadget/f_fastboot.c:566-567`; `drivers/fastboot/fb_common.c:205-209` |
+| Is there a cable check? | `g_dnl_board_usb_cable_connected` is weak and returns `-EOPNOTSUPP` (not 0), so the wait goes on; a board that implements it with VBUS detect makes the command return at once without a cable, and the loop goes round | `drivers/usb/gadget/g_dnl.c:180-183`; `cmd/fastboot.c:96-101` |
+| Does the watchdog reset a flash? | No. With `CONFIG_WATCHDOG` the gadget loop calls `schedule()`, which runs the watchdog's cyclic servicing, so the watchdog is fed for as long as the loop spins | `cmd/fastboot.c:115`; `common/cyclic.c:118-131`; `drivers/watchdog/wdt-uclass.c:138` |
+| Does it catch a hung U-Boot? | Yes: a U-Boot that stops scheduling stops feeding it, and the board resets after `CONFIG_WATCHDOG_TIMEOUT_MSECS` | the same; `drivers/watchdog/Kconfig:3-30` |
+| LED | `led <label> on` before the wait and `off` after it, when the board file names `uboot_led` | `cmd/led.c:121-131` |
+| What the host sees | The fastboot gadget with `CONFIG_USB_GADGET_VENDOR_NUM:PRODUCT_NUM` (`uboot_usb_vendor`, `uboot_usb_product`; unset, U-Boot's SoC default stays: a placeholder the project replaces) | `drivers/usb/gadget/Kconfig:59`, `:71` |
+| Flashing | `CONFIG_FASTBOOT_FLASH` with the MMC provider writes the downloaded image to the MMC device `uboot_env_mmc_index` | `drivers/fastboot/Kconfig:91-133` |
+
+So the offer is bounded by the host, not by a timer: the command has no timeout in v2026.10 and none
+is invented here. A host that flashes ends the session with `fastboot continue` (or `reboot`), and
+the next pass tries the slots again. With no host attached on a board without VBUS detect, the board
+waits in download mode (LED on) until a host does that. A transient failure of the slots is retried by
+the two passes before download mode is reached, not while it waits. A board that must leave download mode by
+itself needs a U-Boot patch (a cable check or a timed abort); `testing/board-runs/I5i7.md` lists it.
+The case the loop cannot cover, accepted: a damaged U-Boot proper behind a valid first stage (SPL):
+the script never runs.
 
 U-Boot's hush has no functions, so there is no helper to call; the loop over the three choices is the
-helper. `for ... in ...; do`, `elif` and `if <command>; then` are in `common/cli_hush.c:2380-2386` (the reserved-word table; it has no function keyword).
+helper. `while`, `for ... in ...; do`, `elif` and `if <command>; then` are in `common/cli_hush.c:2378-2388` (the reserved-word table; it has no function keyword), and `break` and `continue` exist but are not written (`common/cli_hush.c:501-503`), so there is one `while` and no early exit from it.
 
 The same block serves the default's and the root copy's labels (`/extlinux/board.dtb`, which the
 installer copies beside the root label). The label has no `fdt` line, so U-Boot starts the working

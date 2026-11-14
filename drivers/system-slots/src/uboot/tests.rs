@@ -126,43 +126,65 @@ fn the_script_mirrors_the_decision() {
             .find(needle)
             .unwrap_or_else(|| panic!("the script has no `{needle}`"))
     };
-    assert!(SCRIPT.contains(&format!(
-        "env import -t ${{scriptaddr}} ${{filesize}} {}",
-        KEYS.join(" ")
-    )));
-    assert!(SCRIPT.contains(&format!("env export -t ${{scriptaddr}} {}", KEYS.join(" "))));
-    assert!(SCRIPT.contains(&format!(
-        "load ${{devtype}} ${{slot_part}} ${{scriptaddr}} {RECORD_FILE}"
-    )));
     ladder_is_there(SCRIPT);
     let ladder = at(r#"if test "${trial_attempts}" = "3"; then"#);
     let take = at("setenv trial_attempts ${left}");
-    let export = at("env export -t");
-    let save = at(&format!(
-        "save ${{devtype}} ${{slot_part}} ${{scriptaddr}} {RECORD_FILE} ${{filesize}}"
-    ));
-    let taken = at("setenv take_trial ${trial}");
-    let trial = at(&format!("/slots/${{take_trial}}/{EXTLINUX}"));
-    let default = at(&format!("/slots/${{take_default}}/{EXTLINUX}"));
+    let after = |from: usize, needle: &str| {
+        from + SCRIPT[from..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("the script has no `{needle}` after the ladder"))
+    };
+    let save = after(take, "if saveenv; then");
+    let taken = after(save, "setenv take_trial ${trial}");
+    let trial = at("/slots/${take_trial}/");
+    let default = at("/slots/${take_default}/");
     let root = SCRIPT.rfind("/extlinux/extlinux.conf").unwrap();
-    assert!(ladder < take && take < export && export < save && save < taken && taken < trial);
+    assert!(ladder < take && take < save && save < taken && taken < trial);
     assert!(trial < default && default < root);
     // One loop over the choices, in this order, with one sysboot.
     assert!(SCRIPT.contains("for step in trial default root; do"));
     assert_eq!(sysboots(SCRIPT), 1);
     assert!(SCRIPT.contains("any ${pxefile_addr_r} ${lemnos_conf}"));
     // The device comes from the standard boot flow, never a number written in.
-    for line in SCRIPT.lines().filter(|l| !l.trim_start().starts_with('#')) {
+    // (`setenv lemnos_usb 0` is the default of the USB controller index the fastboot offer takes.)
+    for line in SCRIPT
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.contains("setenv lemnos_usb"))
+    {
         for fixed in ["mmc 0", "mmc 1", "usb 0", "0:1", "1:1"] {
             assert!(!line.contains(fixed), "{line}");
         }
     }
     assert!(SCRIPT.contains("setenv slot_part ${devnum}:${distro_bootpart}"));
     boot_source_steps(SCRIPT);
-    // Nothing saved in U-Boot's own environment, no boot count.
-    for banned in ["saveenv", "bootcount", "bootlimit"] {
-        assert!(!SCRIPT.contains(banned), "{banned}");
+    // The record is U-Boot's environment: no FAT load or save of it, no import or export, and no
+    // boot count. The environment is saved twice: the first one, and the trial's attempt.
+    let code: Vec<&str> = SCRIPT
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    for banned in [
+        "env import",
+        "env export",
+        "boot-record.env",
+        "save ${devtype}",
+        "bootcount",
+        "bootlimit",
+    ] {
+        assert!(!code.iter().any(|l| l.contains(banned)), "{banned}");
     }
+    assert!(
+        !code
+            .iter()
+            .any(|l| l.starts_with("load ") && l.contains("scriptaddr")),
+        "no record is loaded from the boot partition"
+    );
+    assert_eq!(
+        code.iter().filter(|l| l.contains("saveenv")).count(),
+        2,
+        "the first environment and the trial's attempt"
+    );
 }
 
 /// The `sysboot` commands of a script (comments left out).
@@ -202,15 +224,67 @@ fn boot_source_steps(script: &str) {
     for line in code.iter().filter(|l| l.contains("load ${devtype}")) {
         assert!(line.starts_with("if "), "an unchecked load: {line}");
     }
-    let exits: Vec<usize> = (0..code.len()).filter(|&i| code[i] == "exit").collect();
-    assert_eq!(exits.len(), 1, "one exit, where the source cannot be named");
+    // The script never ends at a prompt: no `exit` anywhere, and nothing is left after the loop.
     assert!(
-        script.contains("# I5i7: replaced by the download-mode loop"),
-        "the exit is marked"
+        !code.iter().any(|l| *l == "exit" || l.starts_with("exit ")),
+        "an exit would end at a prompt"
     );
-    // Before the loop starts nothing has booted, so that exit is before any sysboot.
-    assert!(exits[0] < at("for step in"));
-    assert!(code[exits[0] - 1].contains("refusing"));
+    assert!(!script.contains("replaced by the download-mode loop"));
+    assert_eq!(code.last(), Some(&"done"), "the loop ends the script");
+    // One `while`, set to run for ever: lemnos_go is only ever set to 1, and never cleared.
+    let whiles: Vec<&&str> = code.iter().filter(|l| l.starts_with("while ")).collect();
+    assert_eq!(whiles, [&r#"while test "${lemnos_go}" = "1"; do"#]);
+    for line in code.iter().filter(|l| l.contains("lemnos_go")) {
+        assert!(
+            line.starts_with("setenv lemnos_go 1") || line.starts_with("while "),
+            "{line}"
+        );
+    }
+    // Every pass ends the same way, at the loop's own level (one tab, not inside an `if`): the
+    // counter grows by one, the third pass in a row that started nothing offers download mode (the
+    // fastboot offer, LED around it, then the counter goes back to two so that the next pass tries
+    // the slots once before offering again), the others say they try again, and a sleep ends the pass.
+    let level_one: Vec<&str> = script
+        .lines()
+        .filter(|l| l.starts_with('\t') && !l.starts_with("\t\t") && !l.starts_with("\t#"))
+        .collect();
+    assert!(
+        level_one.contains(&"\tsetenv lemnos_pass ${lemnos_pass}x"),
+        "{level_one:?}"
+    );
+    assert!(
+        level_one.contains(&"\tif test \"${lemnos_pass}\" = \"xxx\"; then"),
+        "{level_one:?}"
+    );
+    assert_eq!(
+        level_one.last(),
+        Some(&"\tsleep 2"),
+        "the pass ends in a sleep, not a busy loop"
+    );
+    let pass = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}`"))
+    };
+    let offer = pass("\t\tfastboot usb ${lemnos_usb}");
+    assert!(pass("\tif test \"${lemnos_pass}\" = \"xxx\"; then") < offer);
+    assert!(
+        offer < pass("\t\tsetenv lemnos_pass xx\n"),
+        "the counter backs off after the offer"
+    );
+    assert!(pass("\telse\n\t\techo \"lemnos: no slot started (pass") > offer);
+    assert_eq!(
+        code.iter().filter(|l| l.starts_with("fastboot ")).count(),
+        1,
+        "one place offers download mode"
+    );
+    // The offer comes after the `for` over the slots and after the refusal branch: a failed source
+    // and a failed boot reach the same offer.
+    let at_line = |needle: &str| code.iter().position(|l| l.starts_with(needle)).unwrap();
+    assert!(at_line("for step in") < at_line("fastboot usb"));
+    assert!(at_line("echo \"lemnos: ${lemnos_why}, starting no slot\"") < at_line("fastboot usb"));
+    // The wait is not a busy loop: a sleep follows the offer.
+    assert!(at_line("fastboot usb") < at_line("sleep 2"));
 }
 
 #[test]
@@ -285,61 +359,77 @@ fn what_cant_go_into_the_configuration_is_refused() {
 }
 
 #[test]
-fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
-    let dir = TempDir::new("uboot");
+fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
+    let dir = TempDir::new("uboot-env");
     let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
     fs::create_dir_all(layout.boot_dir("os-1")).unwrap();
-    let mut record = Uboot {
+    let restarter = || Restarter {
+        check: None,
+        systemctl: "/nonexistent/systemctl".into(),
+    };
+    // The file form (the record file on the boot partition) writes nothing at run time.
+    let mut file = Uboot {
         boot: layout.boot.clone(),
-        restarter: Restarter {
-            check: None,
-            systemctl: "/nonexistent/systemctl".into(),
-        },
+        restarter: restarter(),
         volume: None,
     };
-    record.set_default("os-1").unwrap();
-    record.set_trial("os-2", 3).unwrap();
-    assert_eq!(
-        fs::read_to_string(layout.boot.join(RECORD_FILE)).unwrap(),
-        "default=os-1\ntrial=os-2\ntrial_attempts=3\n"
+    let err = file.set_default("os-1").unwrap_err();
+    assert!(err.to_string().contains("not written at run time"), "{err}");
+    assert!(!layout.boot.join(RECORD_FILE).exists());
+
+    // The environment record: a disk image (GPT, the environment partition among others) holding
+    // a valid environment at the top of that partition, changed through the record.
+    let node = dir.0.join("disk.img");
+    let mut image = lemnos_slot_store::gpt::image(
+        &[
+            ([1; 16], 34, 99),
+            (lemnos_slot_store::gpt::ENV_TYPE_BYTES, 100, 227),
+        ],
+        256,
     );
-    record.set_default("os-2").unwrap();
-    assert_eq!(
-        record.read(),
-        Record {
-            default: "os-2".into(),
-            trial: "os-2".into(),
-            attempts: 3
-        }
-    );
-    // The attempts are the trial's own: set, read back, and cleared with it.
-    record.set_attempts(1).unwrap();
-    assert_eq!(record.pending().unwrap(), Some(("os-2".into(), 1)));
-    record.clear_trial().unwrap();
-    assert_eq!(record.pending().unwrap(), None);
-    assert_eq!(record.read().attempts, 0);
-    record.set_trial("os-2", 3).unwrap();
-    // Written beside and renamed: nothing else is left in the directory.
-    let names: Vec<String> = fs::read_dir(&layout.boot)
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "slots")
-        .collect();
-    assert_eq!(names, [RECORD_FILE]);
-    // The slot's configuration, prepared at install, and its copy at the root.
+    let place = Place::gpt(1024).unwrap();
+    let geometry = {
+        let mut dev = lemnos_slot_store::uboot_env::FileEnv::open_sized({
+            fs::write(&node, &image).unwrap();
+            &node
+        })
+        .unwrap();
+        place.geometry(&mut dev.0, dev.1).unwrap()
+    };
+    let list = vec![("default".to_string(), "os-1".to_string())];
+    let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
+    let at = geometry.offset as usize;
+    image[at..at + 1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
+    fs::write(&node, &image).unwrap();
+    let mut env = UbootEnv {
+        disk: Ok(node.clone()),
+        place: place.clone(),
+        restarter: restarter(),
+    };
+    let current = || {
+        let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
+        lemnos_slot_store::uboot_env::load(&mut dev, &geometry)
+            .unwrap()
+            .unwrap()
+            .1
+    };
+    assert_eq!(env.pending().unwrap(), None);
+    env.set_default("os-2").unwrap();
+    assert!(current().contains(&("default".to_string(), "os-2".to_string())));
+    env.set_trial("os-3", 3).unwrap();
+    assert_eq!(env.pending().unwrap(), Some(("os-3".to_string(), 3)));
+    env.set_attempts(2).unwrap();
+    assert_eq!(env.pending().unwrap(), Some(("os-3".to_string(), 2)));
+    env.clear_trial().unwrap();
+    assert_eq!(env.pending().unwrap(), None);
+    // The root copy is install-time only: nothing is written to the boot partition here.
     let slot = layout.boot_dir("os-1");
     fs::write(slot.join("Image"), "k").unwrap();
     fs::write(slot.join("initramfs"), "i").unwrap();
     fs::write(slot.join("board.dtb"), "d").unwrap();
-    record.prepare(&slot, "os-1", "b.slot=os-1").unwrap();
-    record.fallback_copy(&layout, "os-1").unwrap();
-    assert_eq!(
-        fs::read(layout.boot.join(EXTLINUX)).unwrap(),
-        fs::read(slot.join(EXTLINUX)).unwrap()
-    );
-    // No kernel at the root: U-Boot reads it from the slot's directory.
-    assert!(!layout.boot.join("Image").exists());
+    env.prepare(&slot, "os-1", "b.slot=os-1").unwrap();
+    env.fallback_copy(&layout, "os-1").unwrap();
+    assert!(!layout.boot.join(EXTLINUX).exists());
 }
 
 #[test]
@@ -394,4 +484,89 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
     // The two scripts take the same steps in the same order.
     assert_eq!(sysboots(SCRIPT_UBI), 3);
     assert_eq!(sysboots(SCRIPT), 1);
+}
+
+#[test]
+fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_not_there() {
+    let dir = TempDir::new("uboot-env-refuse");
+    let restarter = || Restarter {
+        check: None,
+        systemctl: "/nonexistent/systemctl".into(),
+    };
+    let gpt_disk = |name: &str, parts: &[([u8; 16], u64, u64)]| {
+        let node = dir.0.join(name);
+        fs::write(&node, lemnos_slot_store::gpt::image(parts, 256)).unwrap();
+        node
+    };
+    let env = |disk: Result<PathBuf, String>, size: usize| UbootEnv {
+        disk,
+        place: Place::gpt(size).unwrap(),
+        restarter: restarter(),
+    };
+    // No boot disk is known.
+    let mut record = env(
+        Err("no boot_sources entry names the controller".into()),
+        1024,
+    );
+    let err = record.set_default("a").unwrap_err().to_string();
+    assert!(err.contains("the boot disk isn't known"), "{err}");
+    assert!(record.pending().is_err());
+    // No partition of the environment's type, then two of them.
+    let none = gpt_disk("none.img", &[([1; 16], 34, 99)]);
+    let err = env(Ok(none), 1024)
+        .set_default("a")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no partition on the boot disk has the U-Boot environment type GUID"),
+        "{err}"
+    );
+    let kind = lemnos_slot_store::gpt::ENV_TYPE_BYTES;
+    let two = gpt_disk("two.img", &[(kind, 34, 99), (kind, 100, 227)]);
+    let err = env(Ok(two), 1024).set_default("a").unwrap_err().to_string();
+    assert!(err.contains("2 partitions on the boot disk have"), "{err}");
+    // The partition is there but erased (as flash is), then holds an environment of another size.
+    let node = gpt_disk("erased.img", &[(kind, 100, 227)]);
+    let mut bytes = fs::read(&node).unwrap();
+    bytes[100 * 512..228 * 512].fill(0xFF);
+    fs::write(&node, &bytes).unwrap();
+    let err = env(Ok(node.clone()), 1024)
+        .set_default("a")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("is erased: U-Boot has not saved an environment"),
+        "{err}"
+    );
+    let err = env(Ok(node.clone()), 1024)
+        .pending()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("is erased"), "{err}");
+    bytes[100 * 512..228 * 512].fill(0x5A);
+    fs::write(&node, &bytes).unwrap();
+    let err = env(Ok(node), 8192)
+        .set_default("a")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no valid U-Boot environment of 8192 bytes here: U-Boot may be built with another CONFIG_ENV_SIZE"), "{err}");
+    // The fixed-offset form: a plain file as the device, the copies where the board file says.
+    let plain = dir.0.join("plain.img");
+    let place = Place::device(plain.to_str().unwrap(), 1024, 0, 4096).unwrap();
+    let mut image = vec![0u8; 8192];
+    let g = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    let data = lemnos_slot_store::uboot_env::encode_vars(
+        &[("default".to_string(), "a".to_string())],
+        g.data_len(),
+    )
+    .unwrap();
+    image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 3));
+    fs::write(&plain, &image).unwrap();
+    let mut record = UbootEnv {
+        disk: Err("not needed: the device is named".into()),
+        place,
+        restarter: restarter(),
+    };
+    record.set_trial("b", 3).unwrap();
+    assert_eq!(record.pending().unwrap(), Some(("b".to_string(), 3)));
 }

@@ -23,6 +23,7 @@ pub mod disk;
 pub mod fallback;
 pub mod fatimage;
 pub mod firmware;
+pub mod gpt;
 pub mod json;
 pub mod layout;
 pub mod manifest;
@@ -32,6 +33,7 @@ pub mod signing;
 pub mod store;
 pub mod twocopy;
 pub mod ubi;
+pub mod uboot_env;
 
 #[cfg(test)]
 pub(crate) mod tests {

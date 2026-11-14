@@ -50,8 +50,8 @@ pub fn read_mounted(root: &std::path::Path, path: &str) -> Result<Option<Vec<u8>
 /// # Errors
 ///
 /// The manifest is missing or not readable, or a boot file does not match.
-pub fn verified(layout: &Layout, node: &Node, id: &str, is_default: bool) -> Result<(), String> {
-    verified_with(layout, id, is_default, &mut |path| read_raw(node, path))
+pub fn verified(layout: &Layout, node: &Node, id: &str) -> Result<(), String> {
+    verified_with(layout, id, &mut |path| read_raw(node, path))
 }
 
 /// [`verified`] through `read`.
@@ -59,12 +59,7 @@ pub fn verified(layout: &Layout, node: &Node, id: &str, is_default: bool) -> Res
 /// # Errors
 ///
 /// As [`verified`].
-pub fn verified_with(
-    layout: &Layout,
-    id: &str,
-    is_default: bool,
-    read: Read<'_>,
-) -> Result<(), String> {
+pub fn verified_with(layout: &Layout, id: &str, read: Read<'_>) -> Result<(), String> {
     if !valid_id(id) {
         return Err(format!("{id:?} isn't a slot id"));
     }
@@ -72,7 +67,7 @@ pub fn verified_with(
         .map_err(|e| format!("{id}'s manifest can't be read: {e}"))?;
     let manifest = Manifest::parse(&text).map_err(|e| format!("{id}'s manifest: {e}"))?;
     let found = bootcheck::check(id, &manifest.boot_files, |path| read(path));
-    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, is_default, |path| read(path));
+    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, |path| read(path));
     if found.is_empty() && uboot.is_none() {
         return Ok(());
     }
@@ -112,11 +107,11 @@ pub fn check_with(
     if !valid_id(&state.default) {
         return Ok(None);
     }
-    let why = match verified_with(layout, &state.default, true, read) {
+    let why = match verified_with(layout, &state.default, read) {
         Ok(()) => return Ok(None),
         Err(why) => why,
     };
-    if valid_id(&state.previous) && verified_with(layout, &state.previous, false, read).is_ok() {
+    if valid_id(&state.previous) && verified_with(layout, &state.previous, read).is_ok() {
         repoint(layout, record, &state, &why)?;
         return Ok(Some(format!(
             "{} doesn't match its manifest ({why}): {} is the default now",
