@@ -434,6 +434,33 @@ struct FrontStage {
     age_bad: u64,
 }
 
+/// One back-end job in flight, with the stamps the spans need. Every time is `CLOCK_MONOTONIC`
+/// nanoseconds: the front-end frame's end (its EOF, as the module stamped it; 0 when not stamped)
+/// and this client's time of kicking the job.
+struct Pending {
+    identity: u64,
+    eof_ns: u64,
+    kick_ns: u64,
+}
+
+/// Per-frame spans, in nanoseconds, and how many frames had no stamp to measure from. No queue depth
+/// is reported: each span is one frame's own stamps.
+#[derive(Default)]
+struct Spans {
+    /// Front-end EOF to this client's kick of the back-end job.
+    eof_to_kick: Vec<u64>,
+    /// The kick to the back end's finish (the block's job time, plus any wait in its ring).
+    kick_to_finish: Vec<u64>,
+    /// The back end's finish to this client taking the frame.
+    finish_to_client: Vec<u64>,
+    /// Front-end EOF to this client taking the frame: the product span.
+    eof_to_client: Vec<u64>,
+    /// Front-end frames the module did not stamp (never guessed from their start).
+    eof_unstamped: u64,
+    /// Back-end frames without a finish stamp.
+    finish_unstamped: u64,
+}
+
 /// The back end's streams, the jobs in flight and what the frames show.
 struct BackStage {
     cfg: FrameStream,
@@ -442,9 +469,10 @@ struct BackStage {
     /// Bytes of luma in one output 0 frame.
     luma_bytes: usize,
     track: Track,
-    /// The identities of the jobs posted and not yet answered, oldest first.
-    pending: VecDeque<u64>,
+    /// The jobs posted and not yet answered, oldest first.
+    pending: VecDeque<Pending>,
     latency: Vec<u64>,
+    spans: Spans,
     identity_bad: u64,
     zero_luma: u64,
     age_bad: u64,
@@ -457,9 +485,10 @@ impl BackStage {
     /// Takes the oldest back-end frame, checks its identity against its job, and releases it.
     /// `Ok(false)` when no frame came for 2 s, after which the jobs in flight are given up.
     fn take(&mut self) -> Result<bool, String> {
-        let Some(expected) = self.pending.pop_front() else {
+        let Some(job) = self.pending.pop_front() else {
             return Ok(true);
         };
+        let expected = job.identity;
         let Some(frame) = self
             .out
             .next_frame(Duration::from_secs(2))
@@ -472,6 +501,20 @@ impl BackStage {
             return Ok(false);
         };
         let now = now_ns();
+        let finish = frame.end_ns();
+        if finish == 0 {
+            self.spans.finish_unstamped += 1;
+        } else {
+            self.spans
+                .kick_to_finish
+                .push(finish.saturating_sub(job.kick_ns));
+            self.spans.finish_to_client.push(now.saturating_sub(finish));
+            if job.eof_ns != 0 {
+                self.spans
+                    .eof_to_client
+                    .push(now.saturating_sub(job.eof_ns));
+            }
+        }
         self.track.see(frame.sequence(), frame.timestamp_ns());
         self.latency.push(now.saturating_sub(frame.timestamp_ns()));
         self.age_bad += u64::from(age_bad(frame.timestamp_ns(), now));
@@ -556,6 +599,7 @@ fn pump(
         }
         let slot = (k % be_slots) as u32;
         let identity = frame.identity();
+        let eof_ns = frame.end_ns();
         let bytes = front.out.bytes(&frame);
         back.input
             .write(slot, 0, &bytes[..bytes.len().min(in_bytes)])
@@ -564,8 +608,18 @@ fn pump(
             .out
             .release(frame)
             .map_err(|e| format!("release: {e:?}"))?;
+        let kick_ns = now_ns();
+        if eof_ns == 0 {
+            back.spans.eof_unstamped += 1;
+        } else {
+            back.spans.eof_to_kick.push(kick_ns.saturating_sub(eof_ns));
+        }
         post_back(&mut back.cfg, identity, slot, (k % be_out_slots) as u32)?;
-        back.pending.push_back(identity);
+        back.pending.push_back(Pending {
+            identity,
+            eof_ns,
+            kick_ns,
+        });
     }
     while !back.pending.is_empty() {
         if !back.take()? {
@@ -768,6 +822,7 @@ fn run(args: &Args) -> Result<bool, String> {
         track: Track::default(),
         pending: VecDeque::new(),
         latency: Vec::new(),
+        spans: Spans::default(),
         identity_bad: 0,
         zero_luma: 0,
         age_bad: 0,
@@ -974,6 +1029,27 @@ fn run(args: &Args) -> Result<bool, String> {
         "back-end frame timestamp to client: median {} us, max {} us",
         percentile(&latency, 50) / 1000,
         latency.last().copied().unwrap_or(0) / 1000
+    ));
+    let span = |name: &str, values: &[u64]| {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        out(format_args!(
+            "span {name}: median {} us, max {} us over {} frames",
+            percentile(&sorted, 50) / 1000,
+            sorted.last().copied().unwrap_or(0) / 1000,
+            sorted.len()
+        ));
+    };
+    span("EOF to kick", &back.spans.eof_to_kick);
+    span("kick to back-end finish", &back.spans.kick_to_finish);
+    span("back-end finish to client", &back.spans.finish_to_client);
+    span(
+        "EOF to client (the product span)",
+        &back.spans.eof_to_client,
+    );
+    out(format_args!(
+        "stamps missing, not guessed: front-end EOF {} frames, back-end finish {} frames",
+        back.spans.eof_unstamped, back.spans.finish_unstamped
     ));
     if let Some(equal) = matched {
         out(format_args!(

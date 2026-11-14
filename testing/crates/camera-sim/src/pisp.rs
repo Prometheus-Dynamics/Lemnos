@@ -13,6 +13,10 @@ use std::collections::VecDeque;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::{Arc, Mutex, PoisonError};
 
+/// The simulated front end's readout, from a frame's start to its end of frame: the figure the
+/// c1 board run measured (about 7.3 ms, BR1 12.13). A stand-in for the sensor's timing.
+const SIM_READOUT_NS: u64 = 7_300_000;
+
 use lemnos_contract_camera_isp::Counters;
 use lemnos_core::{Result, Status};
 use lemnos_driver_pisp::be_hw as be;
@@ -223,7 +227,8 @@ impl FeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: due,
-            end_ns: 0,
+            // The simulated readout takes SIM_READOUT_NS after the frame starts; its EOF is that.
+            end_ns: due + SIM_READOUT_NS,
         });
         self.sequence += 1;
     }
@@ -462,7 +467,8 @@ impl BeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: self.last_ns,
-            end_ns: 0,
+            // The block's finish is both the frame's time and its end.
+            end_ns: self.last_ns,
         });
         self.sequence += 1;
     }
