@@ -323,10 +323,12 @@ impl Sink for Unpack {
                     Ok(parsed) => parsed,
                     Err(failure) => return self.fail(failure),
                 };
-                if let Err(failure) = self.guard.check(&parsed.id) {
+                // Kept before the check, so a refusal still names the slot it was for.
+                let checked = self.guard.check(&parsed.id);
+                self.parsed = Some(parsed);
+                if let Err(failure) = checked {
                     return self.fail(failure);
                 }
-                self.parsed = Some(parsed);
             }
             Some((Member::Signature, _)) => {
                 // The signature is complete: decided now, before any payload member begins.
@@ -417,6 +419,9 @@ pub struct Install {
     /// The signature policy's result for this bundle, once it was decided (at the end of slot.sig,
     /// or at the first payload member, or at `finish`): the outcome, or the refusal's text.
     pub signed: Option<Result<Outcome, String>>,
+    /// Whether a failure was a refusal (what the bundle or the board says turned it away before
+    /// the image was trusted) and not the work going wrong. Set when the failure is.
+    pub refused: bool,
     /// The bundle's file in `.incoming`, for an install from a file: read on the driver's ticks,
     /// and deleted when the install ends.
     pub source: Option<Source>,
@@ -558,6 +563,7 @@ impl Install {
             },
             end: None,
             signed: None,
+            refused: false,
             source: None,
         })
     }
@@ -577,7 +583,11 @@ impl Install {
         let fed = self.tar.feed(bytes, &mut self.unpack);
         self.signed = self.unpack.signed.clone();
         if let Err(text) = fed {
-            return Err(self.unpack.failure.take().unwrap_or_else(|| bad(text)));
+            let failure = self.unpack.failure.take().unwrap_or_else(|| bad(text));
+            // What the bundle's words or the board's rules refuse is a refusal; the disk failing
+            // is the work going wrong.
+            self.refused = failure.0 != Status::IO;
+            return Err(failure);
         }
         self.got = after;
         Ok(())
@@ -590,9 +600,20 @@ impl Install {
 
     /// Checks what came against the signed manifest and puts the slot in place. Returns its id.
     pub fn finish(&mut self, board: &Finish<'_>) -> Result<String, Failure> {
+        let mut refused = false;
+        let done = self.finish_checks(board, &mut refused);
+        self.refused = refused;
+        done
+    }
+
+    /// [`Install::finish`]'s work. `refused` says, at the point a failure returns, whether it is
+    /// a refusal (the bundle's words or the board's turn it away) or the work going wrong (the
+    /// disk, a hash or size that does not match).
+    fn finish_checks(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<String, Failure> {
         if !self.tar.finished() {
             return Err(bad("the bundle ends in the middle"));
         }
+        *refused = true;
         if self.unpack.manifest.is_empty() {
             return Err(bad("not a slot bundle: no slot.json"));
         }
@@ -608,6 +629,7 @@ impl Install {
             .ok_or_else(|| bad("slot.json isn't a slot manifest"))?;
         let id = manifest.id.clone();
         board.guard.check(&id)?;
+        *refused = false;
         let root_hash = manifest.verity.root_hash.as_str();
         let root = unpack.work.join("rootfs.erofs");
         let size = match (&unpack.volume, &board.layout.ubi) {
@@ -616,7 +638,18 @@ impl Install {
         }
         .filter(|_| unpack.hashes.iter().any(|(n, _)| n == "rootfs.erofs"));
         bundle::check_root(&manifest, size, &unpack.hashes).map_err(bad)?;
-        bundle::check_boot(&manifest, &unpack.hashes).map_err(bad)?;
+        if let Err(why) = bundle::check_boot(&manifest, &unpack.hashes) {
+            // A listed boot file missing or different is the work going wrong; a file the manifest
+            // does not list, with every listed one in place, is a refusal.
+            *refused = manifest.boot_files.iter().all(|(name, want)| {
+                unpack
+                    .hashes
+                    .iter()
+                    .any(|(n, h)| n.strip_prefix("boot/") == Some(name.as_str()) && h == want)
+            });
+            return Err(bad(why));
+        }
+        *refused = true;
         let boot_dir = unpack.work.join("boot");
         let args = board.boot_args;
         if args.is_empty() || !args.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -635,6 +668,7 @@ impl Install {
         // The boot side, kept on the data partition. A slot whose directory is already on the
         // boot partition (installed again) gets its new files there now.
         let io = disk("the slot's boot files");
+        *refused = false;
         fs::write(boot_dir.join("slot.json"), &unpack.manifest).map_err(&io)?;
         let readme = boot_dir.join("overlays/README");
         if boot_dir.join("overlays").is_dir() && !readme.exists() {
@@ -644,6 +678,7 @@ impl Install {
             )
             .map_err(&io)?;
         }
+        *refused = true;
         board
             .record
             .prepare(&boot_dir, &id, &cmdline)
@@ -662,6 +697,7 @@ impl Install {
             .record
             .install(&id, &payloads)
             .map_err(|error| bad(format!("slot {id}'s boot files: {error}")))?;
+        *refused = false;
         let layout = board.layout;
         boot::put(layout, &id, &boot_dir).map_err(&io)?;
         // The data side: the image, then the manifest, each by rename.
@@ -694,6 +730,11 @@ impl Install {
         meta.set("SEQ", &seq.to_string());
         meta.save(layout, &id).map_err(&io)?;
         Ok(id)
+    }
+
+    /// The slot the bundle's manifest names, once it has come and parsed.
+    pub fn slot_id(&self) -> Option<&str> {
+        self.unpack.parsed.as_ref().map(|m| m.id.as_str())
     }
 
     /// Removes what came so far.
