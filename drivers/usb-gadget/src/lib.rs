@@ -168,6 +168,11 @@ const IFNAME: MethodId = MethodId {
     contract: 0,
     method: 11,
 };
+/// The description item for whether the bulk pair is lent, read by the `pair_lent` method.
+const PAIR_LENT: MethodId = MethodId {
+    contract: 0,
+    method: 12,
+};
 /// Refused when a gadget derives its NCM addresses and names no `identity` device.
 pub const NO_IDENTITY_FOR_DERIVE: &str = "is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device";
 /// Health while up, when the gadget has no serial string: the board names no serial source.
@@ -444,6 +449,10 @@ impl UsbFunction for UsbGadget {
             .ok_or(Status::NOT_FOUND)
     }
 
+    fn pair_lent(&mut self) -> Result<bool> {
+        Ok(self.holder.is_some())
+    }
+
     fn data_stream(&mut self, into: &mut [u8]) -> Result<usize> {
         if self.data.is_none() {
             return Err(Status::NOT_SUPPORTED);
@@ -521,12 +530,14 @@ impl Lifecycle for UsbGadget {
     /// The holder of the bulk endpoints is told when it goes, so its hold ends with it.
     const TRACKS_CALLERS: bool = true;
 
-    /// The NCM interface's name, once the gadget is bound and the kernel has named it. Absent
-    /// otherwise, and while the gadget is down.
+    /// The NCM interface's name, once the gadget is bound and the kernel has named it (absent
+    /// otherwise, and while the gadget is down), and whether a caller holds the bulk pair (always
+    /// there).
     fn describe(&self, out: &mut Description) {
         if self.ifname.is_some() {
             out.add(Item::value("ifname", IFNAME));
         }
+        out.add(Item::value("pair_lent", PAIR_LENT));
     }
 
     /// Lends the bulk pair to `caller`, which holds it until it releases it or goes. One holder

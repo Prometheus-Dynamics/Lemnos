@@ -68,6 +68,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    if let Some(notice) = lemnos_orion::links::start_notice(&config.links) {
+        log(notice);
+    }
     // One thread per USB function whose endpoints are offered as a link.
     for link in config.links.clone() {
         let config = config.clone();

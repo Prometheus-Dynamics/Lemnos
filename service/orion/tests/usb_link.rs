@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_client::{Error as ClientError, Session};
 use lemnos_driver_usb_gadget::UsbGadget;
+use lemnos_hal::blocks::UsbFunctionEvent;
 use lemnos_hal::mock::MockUsbFunction;
 use lemnos_host::board::parse;
 use lemnos_host::{Options as HostOptions, entry};
@@ -158,6 +159,18 @@ fn spawn_hold(config: Config, link: &str) -> mpsc::Receiver<Result<(), String>> 
     result
 }
 
+/// The host keeps the gadget configured: the bridge offers the pair only to a configured host, and a
+/// let-go clears what the function knows, so the event is sent again for a while.
+fn keep_configured(function: &MockUsbFunction) {
+    let function = function.clone();
+    std::thread::spawn(move || {
+        for _ in 0..200 {
+            function.event(UsbFunctionEvent::Configured);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
 /// The host's end of the gadget's two endpoint files: what it writes goes to the OUT file, and
 /// what it reads comes from the IN file.
 struct Host {
@@ -219,6 +232,7 @@ fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_gadget_goes
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
     let lemnosd = dir.join("lemnosd.sock");
     let _service = start_lemnosd(&lemnosd, &function);
+    keep_configured(&function);
     let orion = dir.join("orion.sock");
     let _comm = start_comm(&orion, &["usb0"]);
     let config = bridge_config(&lemnosd, &orion);
@@ -258,6 +272,7 @@ fn a_link_the_comm_core_does_not_have_is_refused_and_the_pair_is_given_back() {
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
     let lemnosd = dir.join("lemnosd.sock");
     let _service = start_lemnosd(&lemnosd, &function);
+    keep_configured(&function);
     let orion = dir.join("orion.sock");
     let _comm = start_comm(&orion, &["usb0"]);
     let config = bridge_config(&lemnosd, &orion);
@@ -297,6 +312,7 @@ fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
     let lemnosd = dir.join("lemnosd.sock");
     let _service = start_lemnosd(&lemnosd, &function);
+    keep_configured(&function);
     let orion = dir.join("orion.sock");
     let _comm = start_comm(&orion, &["usb0"]);
     let hold = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");

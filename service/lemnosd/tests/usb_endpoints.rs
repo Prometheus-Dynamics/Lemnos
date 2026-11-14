@@ -330,3 +330,48 @@ fn the_end_hangs_up_when_the_device_is_switched_off() {
     one.set_power(device, false).unwrap();
     assert_eq!(end_reads(lent.end, WAIT), Some(0));
 }
+
+/// The `pair_lent` method of `usb.function/1`, an addition after the base shape.
+const PAIR_LENT: u16 = 12;
+
+/// What the gadget says of its pair through its description and the item's method: `pair_lent`.
+fn pair_lent(session: &mut Session, device: u32) -> bool {
+    let description = session.describe(device).unwrap();
+    let item = lemnos_wire::text::find_item(&description, "pair_lent").expect("the item");
+    assert_eq!(item.method, PAIR_LENT);
+    assert_eq!(item.reading, Some(lemnos_core::Reading::Switch));
+    let mut handle = session.open("gadget", "usb.function/1").unwrap();
+    let mut reply = [0u8; 8];
+    let len = session
+        .call(&mut handle, PAIR_LENT, &[], &mut reply)
+        .unwrap();
+    assert_eq!(len, 1);
+    reply[0] != 0
+}
+
+#[test]
+fn the_description_says_when_the_pair_is_lent_and_when_it_is_not_any_more() {
+    let (running, _host) = start();
+    let mut watcher = connect(&running.socket, "watcher");
+    let device = device_index(&mut watcher);
+    let mut one = connect(&running.socket, "one");
+    assert!(!pair_lent(&mut watcher, device), "nobody holds it yet");
+
+    take_pair(&mut one, device).unwrap();
+    assert!(pair_lent(&mut watcher, device), "lent to one");
+
+    one.usb_endpoints_release(device).unwrap();
+    assert!(!pair_lent(&mut watcher, device), "released");
+
+    take_pair(&mut one, device).unwrap();
+    assert!(pair_lent(&mut watcher, device));
+    drop(one);
+    let deadline = Instant::now() + WAIT;
+    while pair_lent(&mut watcher, device) {
+        assert!(
+            Instant::now() < deadline,
+            "a holder that goes frees the pair"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

@@ -520,6 +520,18 @@ pub fn check_link(text: &str) -> Result<(), Fault> {
     }
 }
 
+/// The name of the link in an `interfaces` text: the name on its first interface line, which is
+/// interface 0, the vendor-class link. `None` when that line gives no name. It is the string the
+/// host reads from the interface, and the name a comm core knows the link by. Fails as
+/// [`check_link`] does.
+pub fn link_name(text: &str) -> Result<Option<&str>, Fault> {
+    let layout = Layout::parse(text)?;
+    match layout.interfaces().next() {
+        Some((0, interface)) if interface.class == 0xff => Ok(interface.name),
+        _ => Err(Fault::LinkNotFirst),
+    }
+}
+
 /// The set for `identity` with the interfaces `interfaces` describes.
 pub fn build(identity: &Identity<'_>, interfaces: &str) -> Result<Set, Fault> {
     let layout = Layout::parse(interfaces)?;

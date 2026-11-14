@@ -772,8 +772,8 @@ one client at a time: the client reads the OUT endpoint and writes the IN endpoi
 daemon still owning the gadget, its control endpoint and the bus. A function with other than one
 bulk OUT and one bulk IN endpoint is not lent (`NOT_SUPPORTED`). See [the wire's Endpoints
 section](wire.md#endpoints) for the hand-off, its refusals and what a reconnect or a gadget restart
-means for a holder. `LEMNOS_ORION_LINKS=gadget=serial` on the Orion bridge offers the pair to the comm core as
-the link `serial`.
+means for a holder. The Orion bridge offers the pair to the comm core as a link when
+`LEMNOS_ORION_LINKS=<gadget device id>=<link name>` is set (see "Serving the link at boot", below).
 
 The gadget's `interfaces` text (`interfaces_file`, a path to a file holding it, is read only by a build with a
 filesystem; giving both is refused by name) lists its functions in configfs link order, one per line: `function ffs`
@@ -820,6 +820,29 @@ Nothing else is set up for that gadget.
 
 Once the gadget is bound the driver reads the name the kernel gave back, and describes it as the
 item `ifname` (text), and the `usb.function` contract's method 11, `ifname`, returns the same text. It is absent while the gadget is down, and absent when the gadget has no NCM function.
+
+The gadget also describes whether its bulk pair is lent: the item `pair_lent` (a switch; method 12 of
+`usb.function`, an addition after the base shape). It is on from the lend until the holder releases the pair,
+goes, or the device is switched off, and says nothing of the bus: a pair stays lent while the gadget is down, and
+a gadget can be up with the pair not lent. `lemnos-ctl describe gadget` lists it and `lemnos-ctl read gadget
+pair_lent` reads it. It does not say who holds the pair: the driver knows its holder only as a caller number.
+
+### Serving the link at boot
+
+For the USB link to be served when the board starts, an image needs these, and nothing else: the two units
+(`lemnosd.service` and `lemnos-orion.service`, or their init scripts); on systemd, the gadget drop-in
+`lemnosd.service.d/gadget.conf` (`packaging/README.md`); a `usb-gadget` device in the board file, with the
+default composition or an `interfaces` text whose first interface is the link; and one line in
+`/etc/lemnos/lemnos-orion.env`, `LEMNOS_ORION_LINKS=<the gadget's device id>=<the link name>`, which is
+`LEMNOS_ORION_LINKS=gadget=orion-link` for a gadget called `gadget` on the default composition. The link's name
+is the composition's own: the name on its first `interface` line. `lemnos-ctl tree BOARD --bridge-env FILE`
+writes that line from the board file, so an image takes it from there instead of typing it; a board with no
+gadget gets a file holding a comment and no line, and a gadget whose first interface has no name is refused by
+device. Without the line the bridge offers nothing and says so once in its log: `no USB link is configured
+(LEMNOS_ORION_LINKS is unset): none is offered`. The comm core must know a USB link by the same name, so its
+own configuration has a USB link called `orion-link` (or the composition's name); that is Orion's
+configuration, and is stated here, not specified or written by Lemnos. The QEMU check
+`testing/crates/orion-link-check` runs the whole join with the default names.
 
 ### The link's identity and its Windows descriptors
 

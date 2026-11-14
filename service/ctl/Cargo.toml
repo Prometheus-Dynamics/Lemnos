@@ -28,6 +28,8 @@ lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
 # For the slot layout contract (`contracts/slot-layout.toml`), read by `tree --boot-dir`.
 toml = { workspace = true }
+# For `tree --bridge-env`: the gadget's composition parser, which names the link.
+lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget", features = ["std"] }
 # For `tree`: the built-in drivers' manifests, which say what each device needs.
 lemnosd = { path = "../lemnosd" }
 

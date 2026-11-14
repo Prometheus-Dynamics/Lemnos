@@ -50,6 +50,7 @@ lemnos-ctl [--socket PATH] COMMAND
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
+                                 [--bridge-env FILE]
                                  [--security-unit FILE]
                                  [--manifest-boot FILE] [--cmdline-slot FILE --slot ID]
                                  write the device-tree overlay for a board (stdout by default),
@@ -61,8 +62,12 @@ lemnos-ctl [--socket PATH] COMMAND
                                  the same parameters as kernel command-line words, and the udev
                                  rules that give the daemon's nodes to its group, the same
                                  permissions as mdev.conf lines for a BusyBox image (--mdev FILE),
-                                 with no daemon";
+                                 and the bridge's `LEMNOS_ORION_LINKS=<gadget>=<link>` line for
+                                 the board's USB link (--bridge-env FILE), with no daemon";
 
+pub mod bridge_env;
+#[cfg(test)]
+mod bridge_env_tests;
 mod files;
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
@@ -342,6 +347,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut cmdline_out = None;
     let mut udev_out = None;
     let mut mdev_out = None;
+    let mut bridge_env_out = None;
     let mut security_out = None;
     let mut manifest_boot_out = None;
     let mut cmdline_slot_out = None;
@@ -362,6 +368,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--cmdline", Some(file)) => cmdline_out = Some(file),
             ("--udev", Some(file)) => udev_out = Some(file),
             ("--mdev", Some(file)) => mdev_out = Some(file),
+            ("--bridge-env", Some(file)) => bridge_env_out = Some(file),
             ("--security-unit", Some(file)) => security_out = Some(file),
             ("--manifest-boot", Some(file)) => manifest_boot_out = Some(file),
             ("--cmdline-slot", Some(file)) => cmdline_slot_out = Some(file),
@@ -433,6 +440,10 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     if let Some(file) = mdev_out {
         std::fs::write(&file, lemnos_devtree::mdev::fragment(&board))
             .map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = bridge_env_out {
+        let text = bridge_env::text(&board).map_err(|e| format!("{path}: --bridge-env: {e}"))?;
+        std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
     if let Some(file) = security_out {
         let security = board

@@ -91,6 +91,15 @@ has an addition. Other exposure is not allowed. Candidate hardenings that are no
 The bridge uses the same drop, from its environment: `LEMNOS_ORION_USER`, `LEMNOS_ORION_GROUP` and
 `LEMNOS_ORION_GROUPS` (`service/orion/src/privilege.rs`). It keeps no capability.
 
+**The USB link needs one line in the bridge's environment.** The bridge offers the gadget's bulk
+endpoints to the comm core only when `lemnos-orion.env` has `LEMNOS_ORION_LINKS=<gadget device id>=<link
+name>` (`gadget=orion-link` on the default composition); `lemnos-orion.env.example` has it commented, and an
+image that serves the link must set it. `lemnos-ctl tree BOARD --bridge-env FILE` writes the line from the board
+file, so an image cannot forget it or mistype the link's name; a board with no gadget gets a file with only a
+comment. Without it the bridge logs `no USB link is configured (LEMNOS_ORION_LINKS is unset): none is
+offered`, once. Everything the image needs for the link at boot is listed in
+[docs/boards.md](../docs/boards.md), "Serving the link at boot".
+
 ## The daemon under systemd
 
 `lemnosd.service` runs `lemnosd --board /etc/lemnos/board.toml --user lemnos --group lemnos` as root

@@ -732,6 +732,7 @@ dependencies = [
  "lemnos-devtree",
  "lemnos-driver-named-files",
  "lemnos-driver-system-slots",
+ "lemnos-driver-usb-gadget",
  "lemnos-fake-devices",
  "lemnos-host",
  "lemnos-linux",
@@ -1930,6 +1931,27 @@ dependencies = [
  "rustix",
  "sha2 0.10.9",
  "tokio",
+]
+
+[[package]]
+name = "lemnos-orion-link-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-ctl",
+ "lemnos-host",
+ "lemnos-linux-sys",
+ "orion-connect",
+ "orion-hello",
+ "orion-keys",
+ "orion-link-serial",
+ "orion-link-usb",
+ "orion-msg-session",
+ "orion-server",
+ "orion-unix",
+ "orion-wire",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

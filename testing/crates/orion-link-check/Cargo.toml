@@ -1,0 +1,29 @@
+[package]
+name = "lemnos-orion-link-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check in the QEMU harness: the real lemnosd and the real lemnos-orion bridge, a comm core and a host session over the emulated USB bus, end to end"
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+# The setting the bridge is started with comes from the tool an image builder runs: `tree --bridge-env`.
+lemnos-ctl = { path = "../../../service/ctl" }
+# The comm core and the host's session, from the one pinned Orion the bridge uses (service/orion).
+orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-link-serial = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }

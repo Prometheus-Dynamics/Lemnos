@@ -122,6 +122,10 @@ Exit 0; nothing refused. Files written: `overlay.dts` 2976 bytes (`-o`), `modpro
 `slot-layout.toml`, `uboot-env.txt`, `boot.cmd` and `reason.rec`; `--uboot-config FILE` writes the U-Boot Kconfig
 fragment the board's U-Boot is built with ([Boards](boards.md#u-boot-environment-system-slots-record--uboot)).
 
+`--bridge-env FILE` writes the bridge's USB link setting, the one line `LEMNOS_ORION_LINKS=<gadget device
+id>=<link name>` (a comment only for a board with no gadget; [Boards](boards.md#serving-the-link-at-boot)). It was
+not part of the run above: its golden test is `service/ctl/tests/bridge_env.rs`.
+
 **The SoC map.** A board with `soc = NAME` reads `DIR/NAME.toml`, where `DIR` is `--socs DIR`, or the relative
 directory `socs` in the working directory when `--socs` is absent (`load_map` in `service/ctl/src/lib.rs`).
 Nothing is compiled in. `--map FILE` names one map file instead. For the reference board the map is

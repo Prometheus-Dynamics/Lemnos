@@ -9,7 +9,9 @@
 //! service closed it because the driver ended the endpoints, or the hold was given up). This thread
 //! then gives all three back and offers again once the gadget is back. A gadget that goes down
 //! ends the hold too, as lemnosd sees it, so this thread gives the hold back and offers again once
-//! the gadget is up. Failures wait at 1 s, doubling, capped at 8 s, and never give up.
+//! the gadget is up. The pair is offered only while the host has the gadget configured, and the hold is
+//! given up when it deconfigures too: the comm core's reader reads an endpoint that is not enabled as the
+//! end of the stream and does not retry. Failures wait at 1 s, doubling, capped at 8 s, and never give up.
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
@@ -36,6 +38,17 @@ const TAG: &str = "usb.function/1";
 const STATE: u16 = 4;
 const FIRST: Duration = Duration::from_secs(1);
 const CAP: Duration = Duration::from_secs(8);
+
+/// What the bridge says once at start when no link is configured: an image that forgot
+/// `LEMNOS_ORION_LINKS` shows it in the log, not by a link that never comes.
+pub const NONE_CONFIGURED: &str =
+    "no USB link is configured (LEMNOS_ORION_LINKS is unset): none is offered";
+
+/// The line to log once at start, if `links` is empty.
+#[must_use]
+pub fn start_notice(links: &[Link]) -> Option<&'static str> {
+    links.is_empty().then_some(NONE_CONFIGURED)
+}
 
 /// Offers `link`'s device's endpoints for as long as the process runs.
 pub fn run(config: &Config, link: &Link) {
@@ -75,7 +88,7 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     watch
         .subscribe(&mut handle, STATE, 100_000, true)
         .map_err(|error| format!("watching {:?}: {error}", link.device))?;
-    wait_for_up(&mut watch, true, None)?;
+    wait_for_ready(&mut watch, true, None)?;
 
     let UsbEndpointsEnd { out, input, end } = lemnos
         .usb_endpoints_end(index, Arc::new(LinuxStreams))
@@ -86,7 +99,7 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     // and it is what says the hold is over for good.
     drop((out, input));
 
-    let over = wait_for_up(&mut watch, false, Some(&end))?;
+    let over = wait_for_ready(&mut watch, false, Some(&end))?;
     lemnos
         .usb_endpoints_release(index)
         .or_else(|error| match error {
@@ -97,7 +110,10 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     if over {
         log(&format!("link {}: the endpoints' hold is over", link.link));
     } else {
-        log(&format!("link {}: the gadget went down", link.link));
+        log(&format!(
+            "link {}: the gadget went down or lost its host configuration",
+            link.link
+        ));
     }
     Ok(())
 }
@@ -115,10 +131,14 @@ fn over(end: &OwnedFd) -> bool {
     }
 }
 
-/// Waits until the gadget's `up` is `want`. With `end`, also returns `Ok(true)` as soon as END says
-/// the hold is over for good; `Ok(false)` when the gadget got to `want` first.
-fn wait_for_up(watch: &mut Session, want: bool, end: Option<&OwnedFd>) -> Result<bool, String> {
-    // The state record is a block: its length, then its four bools, `up` first.
+/// Waits until the gadget is ready (`up` and the host has chosen its configuration) is `want`. The
+/// comm core's reader takes an `EAGAIN` from an endpoint that is not enabled for the end of the
+/// stream, and one that is not yet configured gives it, so the pair is offered only to a configured
+/// host and the hold is given up when the host deconfigures or the gadget goes down. With `end`, also
+/// returns `Ok(true)` as soon as END says the hold is over for good; `Ok(false)` when the gadget got
+/// to `want` first.
+fn wait_for_ready(watch: &mut Session, want: bool, end: Option<&OwnedFd>) -> Result<bool, String> {
+    // The state record is a block: its length, then its four bools, `up` and `configured` first.
     let mut state = [0u8; 64];
     loop {
         if end.is_some_and(over) {
@@ -127,7 +147,9 @@ fn wait_for_up(watch: &mut Session, want: bool, end: Option<&OwnedFd>) -> Result
         match watch.next_value(&mut state, Duration::from_secs(1)) {
             Ok(Some(info)) => {
                 let body = state.get(4..info.len).unwrap_or(&[]);
-                if body.first().is_some_and(|up| (*up != 0) == want) {
+                if let [up, configured, ..] = body
+                    && ((*up != 0 && *configured != 0) == want)
+                {
                     return Ok(false);
                 }
             }
@@ -159,4 +181,22 @@ fn offer(config: &Config, link: &Link, out: &OwnedFd, input: &OwnedFd) -> Result
     comm.answer(seq, <LinkTaken as Body>::KIND)
         .map_err(|error| format!("the comm core refused the endpoints: {error}"))?;
     Ok(comm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_configured_link_is_said_once_and_a_configured_one_is_not() {
+        assert_eq!(
+            start_notice(&[]),
+            Some("no USB link is configured (LEMNOS_ORION_LINKS is unset): none is offered")
+        );
+        let link = Link {
+            device: "gadget".to_owned(),
+            link: "orion-link".to_owned(),
+        };
+        assert_eq!(start_notice(&[link]), None);
+    }
 }

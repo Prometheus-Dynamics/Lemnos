@@ -76,7 +76,7 @@ python3 scripts/generate-builtins.py --check
 |---|---|---|---|
 | `uvc` | `camera.frames/1` | `usb`: a USB device; `frames` stream | Serves its contract. Keeps 4 isochronous transfers queued while streaming. A frame larger than `frame_bytes` is dropped and counted. An `[[each]]` entry matching `usb:class:0e` binds it to every camera plugged in |
 | `coral-loader` | no contract | `usb`: a USB device; `firmware`: a file | Runs. Loads the firmware file the board file names over DFU, then resets the device. It never reads the firmware |
-| `usb-gadget` | `usb.function/1` | `function`: `udc:NAME`; optional `data` stream | Serves its contract. A caller serves the endpoints, isochronous ones in alternate settings among them. An NCM function may name its interface (`ifname=`); the kernel's name is described as `ifname` once bound |
+| `usb-gadget` | `usb.function/1` | `function`: `udc:NAME`; optional `data` stream | Serves its contract. A caller serves the endpoints, isochronous ones in alternate settings among them. An NCM function may name its interface (`ifname=`); the kernel's name is described as `ifname` once bound; `pair_lent` says whether a caller holds the bulk pair |
 
 ## Camera receivers and ISPs
 
@@ -277,7 +277,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `image.blend/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga` |
 | `codec.block/1` | 1 info, 2 block, 3 job_stream, 4 counters | `rk-mpp`, `rk-iep`, `v4l2-stateless`, `a733-di`, `k230-vpu`, `a733-video` |
 | `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | `rknpu` |
-| `usb.function/1` | 1 info, 2 endpoint, 3 data_stream, 4 state, 5 control_in, 6 control_out, 7 control_stall, 8 set_halt, 9 cancel, 10 counters, 11 ifname | `usb-gadget` |
+| `usb.function/1` | 1 info, 2 endpoint, 3 data_stream, 4 state, 5 control_in, 6 control_out, 7 control_stall, 8 set_halt, 9 cancel, 10 counters, 11 ifname, 12 pair_lent | `usb-gadget` |
 | `system.flash/1` | 1 info, 2 manifest, 3 write (a long job), 4 data, 5 verify (a long job) | `system-flash` |
 | `system.slots/1` | 1 list, 2 install (a long job), 3 write, 4 set_default, 5 trial, 6 confirm, 7 remove, 8 pin, 9 set_keep, 10 accept, 11 install_file (a long job), 12 boots (the boot history), 13 list_page, 14 info | `system-slots` |
 | `system.security/1` | 1 state, 2 precheck, 3 set | `system-security` |

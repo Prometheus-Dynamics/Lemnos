@@ -567,6 +567,13 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos-nand-check", NULL }), "lemnos-nand-check");
 	check(!unload("nandsim"), "NAND simulator unloaded");
 
+	/*
+	 * The USB link end to end, last because it leaves processes running (the daemon, the bridge, the
+	 * comm core) that only the power-off ends: the real lemnosd and lemnos-orion on the dummy controller,
+	 * a comm core, and a host session over the emulated bus.
+	 */
+	check(!run((char *const[]){ "/lemnos-orion-link-check", NULL }), "lemnos_orion_link_check");
+
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
 	sync();
 	reboot(RB_POWER_OFF);

@@ -97,12 +97,13 @@ keepalive = true
 uses = { watchdog = "watchdog:/soc@107c000000/watchdog@7d200000" }
 config = { timeout_s = 15 }
 
-# The board as a USB device: the gadget's functions, its identity from the system identity device.
+# The board as a USB device: the managed default composition (the link `orion-link`, then NCM and ACM),
+# its identity from the system identity device.
 [[devices]]
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:1000480000.usb" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 pipe\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive\nfunction acm\n" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", identity = "identity" }
 
 # The LED strip on the PIO block: 16 SK6812-EC20 on GPIO13, 24 bits per LED on the wire, as the
 # product's overlay states (`ws2812-pio,gpio=13,num_leds=16`, 2026-11-13). The pixel order GRB is

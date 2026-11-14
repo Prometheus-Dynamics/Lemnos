@@ -346,6 +346,13 @@ pub trait UsbFunction {
     /// up or has no NCM function. `into` holds [`MAX_IFNAME_TEXT`] bytes.
     #[method(11, reading = text)]
     fn ifname(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// Whether the bulk endpoint pair is lent to a caller now (see the wire's Endpoints section):
+    /// `true` from the lend until the caller releases it, goes, or the device is switched off.
+    /// It says nothing of the bus: a pair can be lent while the gadget is down, and a gadget can
+    /// be up with the pair not lent.
+    #[added]
+    #[method(12, reading = switch)]
+    fn pair_lent(&mut self) -> Result<bool>;
 }
 
 /// The buffer the `ifname` method needs: a kernel interface name, 15 bytes at the most.

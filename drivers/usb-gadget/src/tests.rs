@@ -977,6 +977,36 @@ fn the_hold_survives_a_let_go_until_its_holder_gives_it_up() {
     assert_eq!(lent(&mut rig, 2), Ok(()));
 }
 
+#[cfg(unix)]
+#[test]
+fn the_description_says_whether_the_pair_is_lent() {
+    use lemnos_contract_usb_function::UsbFunction as Contract;
+    use lemnos_core::Description;
+
+    let mut rig = lending_rig();
+    let mut described = Description::new();
+    Driver::describe(&rig.driver, &mut described);
+    let item = described.find("pair_lent").expect("always described");
+    assert_eq!((item.method.contract, item.method.method), (0, 12));
+    // Up, not lent.
+    rig.step();
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(false));
+    // Lent: true through a let-go, until the holder releases it.
+    assert_eq!(lent(&mut rig, 1), Ok(()));
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(true));
+    rig.host.release();
+    rig.step();
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(true));
+    rig.step();
+    Driver::release_endpoints(&mut rig.driver, CallerId(1)).expect("release");
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(false));
+    // A holder that goes frees it too.
+    assert_eq!(lent(&mut rig, 2), Ok(()));
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(true));
+    Lifecycle::caller_gone(&mut rig.driver, CallerId(2));
+    assert_eq!(Contract::pair_lent(&mut rig.driver), Ok(false));
+}
+
 #[test]
 fn an_ncm_line_may_name_its_interface_with_a_template() {
     use crate::description::{Fault, functions};
@@ -1303,4 +1333,26 @@ fn a_text_that_drops_or_moves_the_link_is_refused_by_name() {
         functions(duplicated, None),
         Err(Fault::Function(2))
     ));
+}
+
+#[test]
+fn the_links_name_is_the_name_on_the_first_interface() {
+    use crate::DEFAULT_INTERFACES;
+    use crate::description::{Fault, link_name};
+
+    assert_eq!(link_name(DEFAULT_INTERFACES), Ok(Some("orion-link")));
+    assert_eq!(
+        link_name("interface 0xff 0 0 pipe\nendpoint in bulk\n"),
+        Ok(Some("pipe")),
+        "a board's own composition names its own link"
+    );
+    assert_eq!(
+        link_name("interface 0xff 0 0\nendpoint in bulk\n"),
+        Ok(None)
+    );
+    // Not the first interface: refused as the driver refuses it.
+    assert_eq!(
+        link_name("interface 0x02 0 0 other\ninterface 0xff 0 0 pipe\n"),
+        Err(Fault::LinkNotFirst)
+    );
 }
