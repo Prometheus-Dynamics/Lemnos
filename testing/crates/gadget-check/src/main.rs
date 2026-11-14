@@ -262,11 +262,11 @@ fn main() -> ExitCode {
             parent.is_some_and(|(_, uid, _, ppid)| uid == 0 && Some(ppid) == daemon.pid()),
             "the root parent runs as root, as the child of the daemon",
         );
-        // CAP_SYS_ADMIN, CAP_SETPCAP and CAP_SETGID (0x200140): no CAP_SETUID, which nothing in
+        // CAP_SYS_ADMIN and CAP_SETPCAP (0x200100): neither CAP_SETUID nor CAP_SETGID, which nothing
         // either process uses.
         check(
-            parent.is_some_and(|(_, _, caps, _)| caps == 0x20_0140),
-            "the root parent holds CAP_SYS_ADMIN, CAP_SETPCAP and CAP_SETGID only (CapEff 0x200140)",
+            parent.is_some_and(|(_, _, caps, _)| caps == 0x20_0100),
+            "the root parent holds CAP_SYS_ADMIN and CAP_SETPCAP only (CapEff 0x200100)",
         );
         check(
             fs::write("/sys/bus/platform/drivers/dummy_udc/bind", "dummy_udc.0").is_ok(),

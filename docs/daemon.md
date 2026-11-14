@@ -142,16 +142,16 @@ file, fixed when the parent is forked: each gadget's controller name, the owner 
 uid and gid), the gadget's settings, and the board's serial source (the identity device's settings).
 
 **What they can do.** The helper keeps uid 0 and the single capability `CAP_SYS_ADMIN`, which the
-FunctionFS mount and its unmount need. The parent keeps uid 0 and three: `CAP_SYS_ADMIN`, and
-`CAP_SETPCAP` and `CAP_SETGID`, which the helper needs to drop everything else when it
-starts and drops itself at once. The parent holds them because each helper it forks inherits its sets
-and `privilege::drop_to` runs in that child: `CAP_SETPCAP` is what removes every other capability from
-the helper's bounding set (`PR_CAPBSET_DROP`) and sets its permitted and effective sets to
-`CAP_SYS_ADMIN` alone; `CAP_SETGID` is what clears the supplementary groups (`setgroups`, made only when
-they are not already empty: the parent clears the groups it got from the root phase as it starts, and
-the helper it forks inherits none). Neither process changes its user or group id (root to root, so
-`drop_to` makes no `setuid` or `setgid`), so neither holds `CAP_SETUID`, and the parent's allowlist has
-no `setuid`, `setresuid`, `setgid` or `setresgid`; it keeps `setgroups`. Under systemd both also run under the unit's bounding set,
+FunctionFS mount and its unmount need. The parent keeps uid 0 and two: `CAP_SYS_ADMIN`, and
+`CAP_SETPCAP`, which each helper it forks needs to drop everything else when it starts and drops itself at
+once: `privilege::drop_to` runs in that child, and `CAP_SETPCAP` is what removes every other capability from the
+helper's bounding set (`PR_CAPBSET_DROP`) before its permitted and effective sets are set to `CAP_SYS_ADMIN`
+alone. It is used at every fork, so the parent keeps it. The parent holds no `CAP_SETGID` and no `CAP_SETUID`
+after it has started: it has every capability when the root phase forks it, its own `drop_to` clears the
+supplementary groups it got from the root phase (`setgroups`, using `CAP_SETGID`) and then, as its last step,
+narrows its sets to the two it keeps, all before its seccomp filter is installed; the helper it forks inherits
+no groups, and neither process changes its user or group id (root to root), so nothing after the start calls
+`setgroups`, `setuid`, `setgid`, `setresuid` or `setresgid`, and none is in either allowlist. Under systemd both also run under the unit's bounding set,
 `NoNewPrivileges`, `ProtectSystem=strict` and the unit's `SystemCallFilter` (which the gadget drop-in
 widens by `mount` and `umount2`). Each also runs under a seccomp allowlist of its own (below). The helper
 writes only under the configfs gadget tree it makes (`/sys/kernel/config/usb_gadget/lemnos-NAME`), the
@@ -187,8 +187,7 @@ madvise brk rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack clock_gettime g
 fcntl`, and on x86_64 the calls glibc makes under their own names there (`mkdir rmdir unlink symlink
 readlink chmod chown rename open stat lstat`). The parent's filter is that list and the calls that make, wait for and sleep
 in a process and that the helper's drop makes (`clone clone3 wait4 waitid clock_nanosleep nanosleep prctl
-capget capset getpid gettid set_robust_list rseq set_tid_address getppid getuid geteuid getgid getegid getgroups setgroups setuid setgid setresuid
-setresgid futex sched_yield seccomp ppoll`, and `fork vfork` on x86_64), because filters stack. A test
+capget capset getpid gettid set_robust_list rseq set_tid_address getppid getuid geteuid getgid getegid getgroups futex sched_yield seccomp ppoll`, and `fork vfork` on x86_64), because filters stack. A test
 runs each verb under the helper's filter in a forked child, and checks that a call outside the list kills
 it.
 
