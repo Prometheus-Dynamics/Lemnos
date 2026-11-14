@@ -128,8 +128,9 @@ impl Streamer {
     /// Drops the stream being received when no chunk has come for `idle`: the job it feeds would
     /// otherwise hold the device for ever. The receiver expires the file at the same time, so the
     /// sender could not send on either way. Nothing says a sender went; a quiet one is dropped the same.
-    // ORION-R2 (C33): the sender's session end (Orion's Cancel with its reason) would say the stream is
-    // over at once; until then the bound is the one `idle` gives.
+    // Not at Orion R2: the file sink's events (`Handed`) do not name the session that
+    // sent a chunk, so the stream cannot be ended at its sender's `CallerGone`. The bound is the one
+    // `idle` gives, for a sender that is alive and silent or gone.
     pub fn expire(&mut self, idle: Duration) {
         if self
             .active

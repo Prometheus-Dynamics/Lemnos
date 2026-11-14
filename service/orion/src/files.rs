@@ -424,11 +424,11 @@ fn serve(
     Ok(())
 }
 
-/// A chunk the bridge answers as still receiving renews the caller leases: a transfer making progress
-/// is a caller alive (see [`crate::calls`]). Pinned Orion does not say which session sent a chunk, so
-/// every caller's lease is renewed, not only the sender's; a dead caller's holds survive while any
-/// transfer is being accepted.
-// ORION-R2 (C33): the files events gain the sending session, and only that caller's lease is renewed.
+/// A chunk the bridge answers as still receiving renews the leases of the session 0 callers: a transfer
+/// making progress is a caller alive (see [`crate::calls`]). Orion's file events do not name the session
+/// that sent a chunk at the revision this bridge is pinned to, so every session 0 caller's lease is
+/// renewed, not only the sender's; a dead session 0 caller's holds survive while any transfer is being
+/// accepted. A caller with a session token is released at its `CallerGone`, not by the lease.
 fn accepted(shared: &Shared, answer: Answer) -> Answer {
     if answer.state == FileState::Receiving {
         shared.transferred();

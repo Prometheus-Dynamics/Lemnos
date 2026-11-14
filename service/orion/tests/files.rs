@@ -319,7 +319,7 @@ impl Setup {
                 name: "lemnos.slots.call",
                 target: Target::Resource("lemnos.slots".parse().expect("name")),
                 args: args.as_bytes(),
-                deadline_ms: 0,
+                deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
                 detached: false,
             })
             .expect("run")

@@ -62,12 +62,23 @@ pub struct Shared {
     /// When a file or stream chunk was last accepted: a transfer making progress renews the caller
     /// leases (see [`crate::calls`]).
     transferred: Mutex<Option<Instant>>,
+    /// How many Orion sessions the publisher has opened, and how many devices the last one published:
+    /// read by the tests, which wait for a connection before they ask anything (see [`Connected`]).
+    connected: Mutex<Connected>,
     /// Written by the other threads when there is something for the publisher. A byte waiting
     /// there is a wake-up; one is enough, so a full socket is not an error.
     bell: UnixStream,
     /// What the publisher waits on.
     woken: UnixStream,
     stop: AtomicBool,
+}
+
+/// What the publisher has connected: its sessions opened so far, and the devices the last of them
+/// published. A session is counted once its devices and actions are declared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Connected {
+    pub sessions: u64,
+    pub devices: usize,
 }
 
 impl Shared {
@@ -83,6 +94,7 @@ impl Shared {
             done: Mutex::new(Vec::new()),
             progress: Mutex::new(Vec::new()),
             transferred: Mutex::new(None),
+            connected: Mutex::new(Connected::default()),
             bell,
             woken,
             stop: AtomicBool::new(false),
@@ -93,6 +105,24 @@ impl Shared {
     pub fn with<R>(&self, f: impl FnOnce(&mut Mirror) -> R) -> R {
         let mut mirror = self.mirror.lock().unwrap_or_else(PoisonError::into_inner);
         f(&mut mirror)
+    }
+
+    /// Records a session opened with `devices` devices published.
+    pub fn connected(&self, devices: usize) {
+        let mut connected = self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        connected.sessions += 1;
+        connected.devices = devices;
+    }
+
+    /// What the publisher has connected so far.
+    pub fn connection(&self) -> Connected {
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// A file or stream chunk was accepted now.

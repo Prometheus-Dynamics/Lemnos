@@ -11,7 +11,7 @@
 //!
 //! Orion serves a prefix through its offer API: `Files::offer(prefix)` gives an offer, whose
 //! `next()` gives each `Asked { name, from }`, answered by `send(source)` or `refuse(why)`. That API
-//! is in Orion's rev R2/R3, not at the pinned rev 455a956e, so the glue is not compiled yet. When it
+//! is in Orion's R3, not at R2 (`dbd5fc08`), so the glue is not compiled yet. When it
 //! is, the glue is this loop, and only this loop is new:
 //!
 //! ```text

@@ -189,6 +189,41 @@ impl Host {
             .expect("the device takes the bytes");
     }
 
+    /// The next frame the device sends, or `None` when none comes within `wait`.
+    fn next_within(&mut self, wait: Duration) -> Option<(u8, Vec<u8>)> {
+        self.from_device
+            .set_read_timeout(Some(wait))
+            .expect("timeout");
+        let mut chunk = [0u8; 256];
+        let deadline = Instant::now() + wait;
+        loop {
+            let len = match self.from_device.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(len) => len,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return None;
+                }
+                Err(error) => panic!("reading the device: {error}"),
+            };
+            let mut at = 0;
+            while at < len {
+                let (used, pushed) = self.decoder.push_slice(&chunk[at..len]);
+                at += used;
+                if let Ok(Some(frame)) = pushed {
+                    return Some((frame.kind(), frame.payload().to_vec()));
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     /// The kind and payload of the next frame the device sends.
     fn next(&mut self) -> (u8, Vec<u8>) {
         let mut chunk = [0u8; 256];
@@ -314,8 +349,44 @@ fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
     function.release();
     assert_eq!(hold.recv_timeout(WAIT).expect("the hold ends"), Ok(()));
 
-    // The gadget reconnects: the bridge takes the pair again and offers it once more.
+    // The gadget comes back: an operator powers it off and on, and lemnosd enables the function again.
+    let mut control = Session::connect(&lemnosd, "reconnect-power").expect("lemnosd");
+    let index = control
+        .list()
+        .expect("the devices")
+        .into_iter()
+        .find(|device| device.name == "gadget")
+        .expect("the gadget")
+        .index;
+    control
+        .set_power(index, false)
+        .expect("the gadget goes off");
+    control
+        .set_power(index, true)
+        .expect("the gadget comes back");
+    // The bridge takes the pair again and offers it once more.
     let again = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+    // A new link is a new session: the host says hello, and says it again until it is welcomed. A host
+    // retries its hello on a link it cannot hear, so the test does too.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        host.send(&Hello {
+            name: "sensor",
+            roles: Roles::DEVICE,
+            max_frame: 512,
+            revision: 1,
+        });
+        if host
+            .next_within(Duration::from_millis(300))
+            .is_some_and(|(k, _)| k == kind::WELCOME)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the new link never welcomed the host"
+        );
+    }
     for round in 0..5u64 {
         host.send(&Ping { now_ms: round });
         let (kind_seen, payload) = host.next();
@@ -323,5 +394,59 @@ fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
         assert_eq!(Pong::decode(&payload).expect("pong").now_ms, round);
     }
     assert!(again.try_recv().is_err(), "the second hold stands");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The offer's third descriptor is END: when the hold ends, the comm core lets go of all three, so the
+/// link is gone. The gadget goes down, the bridge's hold ends, and a frame the host sends afterwards is
+/// not answered. With the pair alone the comm core keeps its copies, and this host still gets its PONG.
+/// Mutation: an offer of the pair alone, without END, makes the read below answer, and the test fails.
+#[test]
+fn the_comm_core_lets_go_of_the_endpoints_when_the_hold_ends() {
+    let dir = dir("end-lets-go");
+    let (out_device, out_host) = UnixStream::pair().expect("pair");
+    let (in_device, in_host) = UnixStream::pair().expect("pair");
+    let function =
+        MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
+    let lemnosd = dir.join("lemnosd.sock");
+    let _service = start_lemnosd(&lemnosd, &function);
+    let orion = dir.join("orion.sock");
+    let _comm = start_comm(&orion, &["usb0"]);
+    let config = bridge_config(&lemnosd, &orion);
+    let hold = spawn_hold(config, "usb0");
+
+    let mut host = Host::new(out_host, in_host);
+    host.send(&Hello {
+        name: "sensor",
+        roles: Roles::DEVICE,
+        max_frame: 512,
+        revision: 1,
+    });
+    assert_eq!(host.next().0, kind::WELCOME);
+
+    function.release();
+    assert_eq!(
+        hold.recv_timeout(WAIT)
+            .expect("the bridge gives the hold up when the gadget goes down"),
+        Ok(())
+    );
+    // The comm core has let go: a ping on the pair is not answered.
+    host.send(&Ping { now_ms: 7 });
+    host.from_device
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
+    let mut chunk = [0u8; 256];
+    match host.from_device.read(&mut chunk) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        Ok(0) => {}
+        Ok(len) => {
+            panic!("the comm core still answers on the pair ({len} bytes) after the hold ended")
+        }
+        Err(error) => panic!("reading the pair: {error}"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

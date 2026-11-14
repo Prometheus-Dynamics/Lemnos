@@ -26,10 +26,11 @@
 //!
 //! Nothing else on the session is said again. When Orion goes away and comes back, a new session
 //! says every topic, action and resource again, and the values and states are sent again. The
-//! bridge opens that session itself rather than with `Orion::reconnect`: that restores resource
-//! records before their actions, so a run in between finds a resource with no action (NotFound).
-//! Here each device's actions are registered before its resource is published, so a resource is
-//! never listed without its actions.
+//! bridge opens that session itself rather than with `Orion::reconnect`, and each device's actions
+//! are registered before its resource is published, so a resource is never listed without its
+//! actions. (`Orion::reconnect` restores topics, then actions, then records, which is the same
+//! order.) Each caller session whose runs came over a lost session is released as ended: its end
+//! is not said again to a session that is gone (see [`Session::tokens`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
@@ -37,7 +38,9 @@ use std::time::{Duration, Instant};
 
 use orion::actions::{ActionDecl, Admits, Outcome, Policy, Registration, Request, Target};
 use orion::provider::{Provider, Resource, ResourceState};
-use orion::topics::{Field, FieldId, FieldType, Publisher, SampleTime, TopicDecl, TopicError};
+use orion::topics::{
+    Field, FieldId, FieldType, OnSubscribe, Publisher, SampleTime, TopicDecl, TopicError,
+};
 use orion::types::Error as Refusal;
 use orion::{ClientError, Error, Options, Orion, Roles};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -88,9 +91,14 @@ pub enum Kind {
 /// What the bridge says of one of its topics: its name (a device's topics are named within its
 /// resource, a fact's with `hello.`), its kind, and `expiry_ms`, how long a sample stays valid
 /// after it is sent: zero for always, that is until the bridge changes it or withdraws the topic.
-/// Orion's device topics are declared with an expiry of zero whatever is given, so the device
-/// classes say zero: a device's state is served as current until the bridge publishes a change
-/// or withdraws the device's topics. The table is documented in `docs/daemon.md`.
+///
+/// Every state is declared with zero: a state is current until it changes, and the bridge says
+/// `gone` (or withdraws the topic) when it stops being true. The two topics the bridge declares
+/// itself, `hello.<fact>` and `lemnos.devices`, also start a subscriber on the network from their
+/// newest value (`on_subscribe` = `Latest`, see [`OnSubscribe`]). A device's topics (`values`,
+/// `status`, `description`) are declared by the provider's `topic`, which at Orion R2 takes
+/// neither an expiry nor an `on_subscribe`: they are zero and `FromNow` there. The table is documented
+/// in `docs/daemon.md`.
 #[derive(Clone, Copy, Debug)]
 pub struct Class {
     pub name: &'static str,
@@ -99,6 +107,9 @@ pub struct Class {
     /// Samples Orion keeps per field: 2 for a latest-value topic (a state), which is all a state
     /// needs, since the newest sample is the value.
     pub history: u32,
+    /// What a network subscriber gets first. `Latest` for the topics the bridge declares itself; the
+    /// provider's device topics are `FromNow` whatever this says (see the module's table).
+    pub on_subscribe: OnSubscribe,
 }
 
 /// A device's readings: the last reading is the value, published as the driver reads a change.
@@ -107,6 +118,7 @@ pub const VALUES: Class = Class {
     kind: Kind::State,
     expiry_ms: 0,
     history: LATEST,
+    on_subscribe: OnSubscribe::FromNow,
 };
 /// A device's state, health and reason: current until it changes; the bridge says `gone` when
 /// lemnosd stops listing the device.
@@ -115,6 +127,7 @@ pub const STATUS: Class = Class {
     kind: Kind::State,
     expiry_ms: 0,
     history: LATEST,
+    on_subscribe: OnSubscribe::FromNow,
 };
 /// A device's description generation: a counter that moves each time what `describe` says of the
 /// device changes (its state or reason). A client that sees it move asks `describe` again.
@@ -123,6 +136,7 @@ pub const DESCRIPTION: Class = Class {
     kind: Kind::State,
     expiry_ms: 0,
     history: LATEST,
+    on_subscribe: OnSubscribe::FromNow,
 };
 /// The device set's generation: a counter that moves when a device comes or goes.
 pub const DEVICE_SET: Class = Class {
@@ -130,6 +144,7 @@ pub const DEVICE_SET: Class = Class {
     kind: Kind::State,
     expiry_ms: 0,
     history: LATEST,
+    on_subscribe: OnSubscribe::Latest,
 };
 /// A board fact (`hello.<fact>`): current until the fact changes or the session ends.
 pub const FACT: Class = Class {
@@ -137,6 +152,7 @@ pub const FACT: Class = Class {
     kind: Kind::State,
     expiry_ms: 0,
     history: LATEST,
+    on_subscribe: OnSubscribe::Latest,
 };
 /// Every topic the bridge publishes, and how it is classified.
 pub const CLASSES: [Class; 5] = [VALUES, STATUS, DESCRIPTION, DEVICE_SET, FACT];
@@ -163,6 +179,19 @@ const fn text_field(name: &'static str) -> Field<'static> {
         unit: "",
         type_name: "",
     }
+}
+
+/// The named state a refusal of the Orion session is logged as. Every refusal, whatever Orion
+/// said, takes this one path, so it is never a timeout or a silent retry: the bridge logs it, waits
+/// its backoff, and tries again. (Facts are published only inside a session, so a refused bridge has
+/// none to say: the log line is its state.)
+pub fn refusal(why: &str) -> String {
+    format!("orion: refused: {why}")
+}
+
+/// The named state a lost session is logged as, see [`refusal`].
+pub fn lost(why: &str) -> String {
+    format!("orion: lost: {why}; connecting again")
 }
 
 /// Publishes what lemnosd has, for as long as the process runs or until `shared` is stopped.
@@ -216,12 +245,19 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             session.node,
             session.devices.len()
         ));
+        shared.connected(session.devices.len());
         backoff.reset();
         shared.with(|mirror| mirror.mark_all());
         match session.serve(shared, jobs, &mut changes, &mut done) {
             End::Stopped => session.withdraw("lemnos-orion stopped"),
             End::Lost(message) => {
                 log(&message);
+                // The sessions this one served are not told they ended: say so to the call thread,
+                // which releases what they held. A session that is still alive gets its holds back
+                // only by asking again.
+                for token in session.tokens.drain() {
+                    let _ = jobs.send(Message::CallerGone { token });
+                }
                 // Dropped first: the next session says the same names, which the old one holds
                 // until it is gone. [`Held`] keeps those names and until when.
                 held = Some(Held::of(&session));
@@ -339,6 +375,10 @@ struct Session {
     facts: Vec<Fact>,
     /// `lemnos.devices`: the device set's generation.
     device_set: Publisher,
+    /// The tokens of the caller sessions whose runs this session has been asked for, and whose end
+    /// Orion has not said yet. A session that is lost takes them with it: their end is never said
+    /// to this program, so the call thread is told it here instead.
+    tokens: HashSet<u64>,
 }
 
 /// Why a device or fact could not be described.
@@ -400,6 +440,7 @@ impl Session {
                 history: DEVICE_SET.history,
                 expiry_ms: DEVICE_SET.expiry_ms,
                 max_payload: 8,
+                on_subscribe: DEVICE_SET.on_subscribe,
             })
             .map_err(|error| {
                 opening(
@@ -423,6 +464,7 @@ impl Session {
             retry_at: None,
             facts: Vec::new(),
             device_set,
+            tokens: HashSet::new(),
         };
         for (slot, spec) in devices {
             match session.adopt(*slot, spec) {
@@ -503,10 +545,13 @@ impl Session {
                 })
                 .and_then(|()| self.retry_states());
             if let Err(error) = turned {
-                if error.is_lost() {
-                    return End::Lost(format!("Orion lost ({error}); connecting again"));
+                // Node logic away (`Unavailable`) is the same as a lost connection: the program is
+                // not served until it is back, so the session is given up and connected again on
+                // the one backoff path, with the reason logged.
+                if is_connecting(&error) {
+                    return End::Lost(lost(&error.to_string()));
                 }
-                log(&format!("Orion refused: {error}"));
+                log(&refusal(&error.to_string()));
                 continue;
             }
             self.wait(shared);
@@ -555,33 +600,43 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args, caller) = match request {
+            let (call, name, target, args, caller, token) = match request {
                 Request::Run {
                     call,
                     name,
                     target,
                     args,
                     caller,
+                    session,
                     ..
-                } => (call, name, target, args, caller),
+                } => (call, name, target, args, caller, session),
                 // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
-                // the call does.
-                // ORION-R2: `Request::Cancel` gains the reason Orion's Cancel carries; it is passed
-                // into `Message::Cancel` (calls.rs), which closes a caller's connection only for
-                // reason 2 (the caller's session ended).
-                Request::Cancel { call } => {
+                // the call does. The reason is passed on: a cancel for a session that ended renews
+                // nothing, and the session's end is what releases its holds (see `CallerGone`).
+                Request::Cancel { call, reason } => {
                     if self.pending.contains(&call) {
                         let _ = jobs.send(Message::Cancel {
                             session: self.number,
                             call,
+                            reason,
                         });
                     }
                     continue;
                 }
+                // The session with this token ended, for whatever cause. Its runs end, and its
+                // connection closes at once: see the call thread.
+                Request::CallerGone { session } => {
+                    self.tokens.remove(&session);
+                    let _ = jobs.send(Message::CallerGone { token: session });
+                    continue;
+                }
             };
-            let job = self.job(call, &name, &target, args, caller);
+            let job = self.job(call, &name, &target, args, caller, token);
             match job {
                 Ok(job) => {
+                    if token != 0 {
+                        self.tokens.insert(token);
+                    }
                     if jobs.send(Message::Run(job)).is_ok() {
                         self.pending.insert(call);
                     } else if let Some(requests) = self.requests() {
@@ -616,6 +671,7 @@ impl Session {
         target: &Target,
         args: Vec<u8>,
         caller: String,
+        token: u64,
     ) -> Result<Job, String> {
         let &(slot, verb) = self
             .actions
@@ -640,6 +696,7 @@ impl Session {
             verb,
             args,
             caller,
+            token,
         })
     }
 
@@ -883,6 +940,7 @@ fn declare_fact(
         history: FACT.history,
         expiry_ms: FACT.expiry_ms,
         max_payload: hello::MAX_VALUE_BYTES as u32,
+        on_subscribe: FACT.on_subscribe,
     };
     match orion.declare(&decl) {
         Ok(mut publisher) => {
@@ -1018,6 +1076,28 @@ fn topic_refused(error: TopicError) -> Refused {
     }
 }
 
+/// ORION-PIN(C36): the wire code of Orion's `Error::Restoring`, which C36 adds at code 20. A listed name
+/// whose owner is away is answered with it until the owner is connected again. At the pinned revision no
+/// case has this code (a refusal with an unknown code is `Internal`), so the arm below is inert until the
+/// pin moves. Matched by code, not by name, so the same arm compiles at both revisions.
+const RESTORING_CODE: u16 = 20;
+
+/// Whether an error means the bridge must connect again rather than carry on: a lost connection, or Orion
+/// refusing with `Unavailable` (node logic is away) or with `Restoring` (ORION-PIN(C36): a name's owner is
+/// away and is not back yet). Both are the one backoff path. Nothing else is retried in place: a `NotFound`
+/// is an answer about the names, not the session.
+fn is_connecting(error: &Error) -> bool {
+    if error.is_lost() {
+        return true;
+    }
+    let refusal = match error {
+        Error::Client(ClientError::Refused(refusal))
+        | Error::Topic(TopicError::Client(ClientError::Refused(refusal))) => *refusal,
+        _ => return false,
+    };
+    refusal == Refusal::Unavailable || refusal.code() == RESTORING_CODE
+}
+
 /// A name Orion will not take is this device's problem, and so is a name another session holds
 /// (`Taken`, which the caller may retry: see [`Held`]); any other refusal or a lost connection
 /// ends the session.
@@ -1139,6 +1219,48 @@ mod tests {
     /// Every topic the bridge publishes is classified, by name, and each is a state with an
     /// expiry of zero (current until changed or withdrawn), as the docs say.
     #[test]
+    fn an_unavailable_refusal_is_connecting() {
+        // Node logic away: connect again, on the one backoff path.
+        let unavailable = Error::Client(ClientError::Refused(Refusal::Unavailable));
+        assert!(is_connecting(&unavailable));
+        let topic = Error::Topic(TopicError::Client(ClientError::Refused(
+            Refusal::Unavailable,
+        )));
+        assert!(is_connecting(&topic));
+        // A lost connection is connecting too.
+        assert!(is_connecting(&Error::Client(ClientError::Lost)));
+        // A name the comm core will not give is an answer about the name, not a reason to connect.
+        let not_found = Error::Client(ClientError::Refused(Refusal::NotFound));
+        assert!(!is_connecting(&not_found));
+    }
+
+    /// ORION-PIN(C36): `Error::Restoring` (code 20) is connecting, on the same path as `Unavailable`. This
+    /// needs the pinned Orion revision with C36, where code 20 exists: at dbd5fc08 `from_code(20)` is `None`.
+    #[test]
+    #[ignore = "needs the Orion rev with C36: Error::Restoring"]
+    fn a_restoring_refusal_is_connecting_and_a_not_found_is_not() {
+        let restoring =
+            Refusal::from_code(RESTORING_CODE).expect("Orion C36 has code 20 (Restoring)");
+        assert!(is_connecting(&Error::Client(ClientError::Refused(
+            restoring
+        ))));
+        assert!(is_connecting(&Error::Topic(TopicError::Client(
+            ClientError::Refused(restoring)
+        ))));
+        assert!(!is_connecting(&Error::Client(ClientError::Refused(
+            Refusal::NotFound
+        ))));
+    }
+
+    /// A refusal with no code this build knows is not connecting: the arm matches only the code it names.
+    #[test]
+    fn a_refusal_with_another_code_is_not_connecting() {
+        let denied = Error::Client(ClientError::Refused(Refusal::Denied));
+        assert!(!is_connecting(&denied));
+        assert_eq!(Refusal::Unavailable.code(), 14);
+    }
+
+    #[test]
     fn every_topic_is_classified_as_a_state_valid_until_changed() {
         let names: Vec<&str> = CLASSES.iter().map(|class| class.name).collect();
         assert_eq!(
@@ -1193,6 +1315,18 @@ mod tests {
             ResourceState::Failed
         );
         assert_eq!(resource_state(&status(Off, Ok)), ResourceState::Pending);
+    }
+
+    #[test]
+    fn every_refusal_and_loss_is_a_named_state_in_the_log() {
+        assert_eq!(
+            refusal("not available at /run/orion/orion.sock: refused"),
+            "orion: refused: not available at /run/orion/orion.sock: refused"
+        );
+        assert_eq!(
+            lost("the connection was lost"),
+            "orion: lost: the connection was lost; connecting again"
+        );
     }
 
     #[test]

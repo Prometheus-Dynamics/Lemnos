@@ -18,18 +18,27 @@
 //! ends as the job does: its result as the output (text when it is UTF-8, hex otherwise),
 //! `Cancelled` when it was cancelled, `Failed` otherwise. Cancelling the run cancels the job.
 //!
-//! Each Orion caller has a lemnosd connection of its own. lemnosd keeps the callers of a driver
-//! apart by connection, so a driver that tracks callers sees each Orion caller as its own.
+//! Each Orion session has a lemnosd connection of its own, keyed by the session's token (see
+//! [`CallerKey`]). lemnosd keeps the callers of a driver apart by connection, so a driver that tracks
+//! callers sees each Orion session as its own, also when one identity runs two.
 //!
 //! A cancel stops the run and nothing else: the job is cancelled on lemnosd, and the caller's
-//! connection stays for now, so the drivers keep what the caller holds. At Orion's pinned revision a
-//! cancel does not say why it was sent. Orion sends the same `Cancel` when the caller stops the run,
-//! when the caller's session ends, when the run's deadline passes and when the node stops, and a caller
-//! that is still there cannot be told from one that is gone. So the connection is closed when the
-//! caller's lease runs out (see [`expire`]): a caller silent for the lease is gone, and lemnosd then
-//! tells the drivers so. Only silence expires a lease: a request, a transfer chunk or a run's progress
-//! renews it (see [`expire`] for the list). The `ORION-R2 (C33)` notes mark where Orion's
-//! reason replaces the lease.
+//! connection stays, so the drivers keep what the caller holds. Orion says why a cancel was sent
+//! ([`CancelReason`]). A cancel for a session that ended ([`CancelReason::CallerGone`]) does not renew
+//! anything: the session's end is then said by [`Message::CallerGone`], which closes its connection
+//! at once (see [`gone`]).
+//!
+//! The session's end releases its plain holds. Orion's `CallerGone`, sent once for each session that
+//! ends for any cause, closes the session's connection: lemnosd releases what that connection held, and
+//! tells the drivers the caller is gone. Orion also cancels each run of that session that is not
+//! detached (`CancelReason::CallerGone`). A detached run belongs to the run, not to the session: its job
+//! and its holds are on the run's own connection ([`CallerKey::Run`]), which stays until the job ends, is
+//! cancelled, or reaches its deadline. A new session of the same identity finds such a run with Orion's
+//! `attach` and reads its progress and result (see docs/daemon.md, "Detached runs").
+//!
+//! The timed lease ([`lapsed`]) remains only for a host that does not say which session asked (session
+//! 0, an Orion older than the revision that names sessions): a silent caller of that kind is dropped
+//! when its lease runs out. A session 0 caller's silence is renewed as documented in [`lapsed`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -43,6 +52,7 @@ use lemnos_wire::text::{
     Call, encode_call_within, find_item, find_method, method_of, render_reply, too_small,
 };
 use orion::actions::Outcome;
+use orion_msg_actions::CancelReason;
 
 use crate::{LEMNOSD_CALLS_NAME, Shared, log};
 
@@ -50,6 +60,11 @@ use crate::{LEMNOSD_CALLS_NAME, Shared, log};
 const REPLY_MAX: usize = 64 * 1024;
 /// The word `call` answers with the device's description, as text. No device method takes it.
 pub const DESCRIBE: &str = "describe";
+/// The deadline a run passes when it is detached: Orion refuses a detached run without one (`NoDeadline`)
+/// and one longer than the node takes (`actions.max_detached_ms`, an hour by default, so `DeadlineTooLong`).
+/// The bridge's own callers (its tests) pass this one. It is a decision, not a measurement: thirty minutes
+/// is under the default hour, and a longer job is asked with a longer deadline on a node that allows it.
+pub const RUN_DEADLINE_MS: u64 = 30 * 60 * 1000;
 /// The most reply an action's output carries. Orion's client and comm core take frames of 64 KiB
 /// (`client/connect` `Options::max_frame`, `comm/server` `Limits::max_frame`), and the action result
 /// frame also carries the call, the outcome and the detail, so 4 KiB is kept for those. A reply
@@ -93,7 +108,8 @@ impl Verb {
 /// One run of an action, handed to the call thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
-    /// The Orion session the run came on. An answer for a session that has ended is dropped.
+    /// The bridge's own Orion session the run came on. An answer for a session that has ended is
+    /// dropped.
     pub session: u64,
     /// The run, as Orion numbered it.
     pub call: u64,
@@ -103,6 +119,8 @@ pub struct Job {
     /// Who asked for the run, as Orion names the caller (`local:<uid>`, `operator:<key>`,
     /// `peer:<node>`, `device:<name>` or `anonymous`). Empty when Orion did not say.
     pub caller: String,
+    /// The token of the Orion session that asked, as Orion gives it: zero when Orion does not say.
+    pub token: u64,
 }
 
 /// What the publisher hands the call thread.
@@ -110,8 +128,41 @@ pub struct Job {
 pub enum Message {
     /// Run this.
     Run(Job),
-    /// Stop run `call` of session `session`, if it is a long job still going.
-    Cancel { session: u64, call: u64 },
+    /// Stop run `call` of session `session`, for `reason`, if it is a long job still going.
+    Cancel {
+        session: u64,
+        call: u64,
+        reason: CancelReason,
+    },
+    /// The Orion session with this token ended, for whatever cause: release what it held.
+    CallerGone { token: u64 },
+}
+
+/// The key a caller's lemnosd connection is kept under.
+///
+/// A session that Orion names by its token is kept by that token: each session is a caller of its
+/// own, also when one identity runs two. A session 0 (a host that does not say) has no token, so it is
+/// kept by its identity, and only that kind is dropped for silence (see [`lapsed`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallerKey {
+    /// The Orion session's token, never zero.
+    Session(u64),
+    /// The identity of a session 0 caller, as Orion names it.
+    Unsaid(String),
+    /// A long job's own lemnosd connection, kept until the job ends, is cancelled, or passes its
+    /// deadline. A job is owned by its run, not by its caller's session: when the session ends, a
+    /// detached run carries on on this connection, and a run that is not detached is cancelled by Orion
+    /// (`Cancel` with `CallerGone`), which closes it.
+    Run { session: u64, call: u64 },
+}
+
+/// The key of the caller a run came from.
+pub fn key_of(token: u64, caller: &str) -> CallerKey {
+    if token == 0 {
+        CallerKey::Unsaid(caller.to_owned())
+    } else {
+        CallerKey::Session(token)
+    }
 }
 
 /// How far a run that is a long job has got.
@@ -148,21 +199,32 @@ struct Running {
     session: u64,
     call: u64,
     job: u64,
-    /// The caller the run came from: the key of its lemnosd connection.
-    caller: String,
+    /// The run's own lemnosd connection: the key its news and its cancel are found by.
+    caller: CallerKey,
+    /// The caller that asked (its session or identity): what keeps that caller alive while the run is
+    /// in flight (see [`lapsed`]).
+    owner: CallerKey,
 }
 
-/// A caller's lemnosd connection, and when the caller last had a request: a run, a run's end or a
-/// cancel. Its holds last for the lease after that, while no run of the caller is in progress.
+/// The callers that have a run in flight, by who asked: a session 0 caller with a run going is alive.
+fn in_flight(running: &[Running]) -> Vec<CallerKey> {
+    running.iter().map(|r| r.owner.clone()).collect()
+}
+
+/// A caller's lemnosd connection, its class for the log, and when the caller last had a request: a
+/// run, a run's end or a cancel. A session 0 caller's holds last for the lease after that, while no
+/// run of the caller is in progress.
 struct Lemnosd {
     client: Client,
+    class: &'static str,
     seen: Instant,
 }
 
 impl Lemnosd {
-    fn new(client: Client) -> Self {
+    fn new(client: Client, class: &'static str) -> Self {
         Self {
             client,
+            class,
             seen: Instant::now(),
         }
     }
@@ -190,9 +252,10 @@ pub struct Done {
 
 /// Runs what the publisher hands over until it stops sending.
 ///
-/// Each caller's connection is made when a run from it comes and none is up, so a call made just
+/// Each session's connection is made when a run from it comes and none is up, so a call made just
 /// after lemnosd comes back reaches it, rather than waiting out a retry delay from while it was
-/// away. A connection is kept for as long as the caller's lease lasts ([`expire`]).
+/// away. A connection is kept until its session ends ([`gone`]), or, for a session 0 caller, until
+/// its lease runs out ([`lapsed`]).
 pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: Option<Duration>) {
     let mut clients: Callers = HashMap::new();
     let mut running: Vec<Running> = Vec::new();
@@ -200,7 +263,7 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
     loop {
         expire(
             &mut clients,
-            &mut running,
+            &running,
             &mut ended,
             lease,
             Instant::now(),
@@ -228,27 +291,29 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             Some(Message::Run(job)) => {
                 run_one(socket, &mut clients, &job, &mut running, &mut ended, shared);
             }
-            Some(Message::Cancel { session, call }) => {
+            Some(Message::Cancel {
+                session,
+                call,
+                reason,
+            }) => {
                 cancel(
                     &mut clients,
                     &mut running,
                     &mut ended,
                     session,
                     call,
+                    reason,
                     shared,
                 );
+            }
+            Some(Message::CallerGone { token }) => {
+                gone(&mut clients, &mut ended, token, shared);
             }
             None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}
         }
     }
 }
-
-/// The key a caller's lemnosd connection is kept under: the Orion caller's identity.
-// ORION-R2 (C33): the key becomes the session token Orion gives each Claim (`Claim.session`), so a
-// session's connection is kept apart from another session of the same identity. This alias is the
-// one place the key type is named.
-pub type CallerKey = String;
 
 /// The class of a caller, as its identity names it: `local`, `operator`, `peer`, `device` or
 /// `anonymous`. The class is all a log line or the hello document says of a caller; never its key.
@@ -262,29 +327,56 @@ pub fn caller_class(caller: &str) -> &'static str {
     }
 }
 
-/// Drops the connection of each caller whose lease has run out, when the lease is on. Each one is
-/// released through [`release`], and its jobs end with its connection.
+/// Whether a cancel renews its caller's lease. Every reason does but a session's end: a session that
+/// ended is not alive, and its cancel is not a sign of life.
+pub fn renews(reason: CancelReason) -> bool {
+    reason != CancelReason::CallerGone
+}
+
+/// The callers whose lease has run out, of the callers that are kept by their identity only (session
+/// 0). `held` is each kept caller with when it last had a request; `in_flight` the callers with a run
+/// going; `transferred` when the bridge last accepted a file or stream chunk.
 ///
-/// Only silence expires a lease. A caller's last renewal is the latest of:
+/// A session 0 caller is alive while it has a run in flight, whether or not the run reports progress.
+/// Otherwise its last renewal is the latest of:
 ///
-/// - a request of it: a `call`, `set` or `power` run, or a `cancel` of its run;
+/// - a request of it: a `call`, `set` or `power` run, or a `cancel` of its run that renews (see
+///   [`renews`]);
 /// - the end of one of its runs (its job's last news);
 /// - a progress report of a long job it started (`Progress` news of its run);
-/// - a file or stream chunk the bridge accepted (its answer says it is still receiving). Pinned Orion
-///   does not say which session sent a chunk, so an accepted chunk renews every caller's lease.
+/// - a file or stream chunk the bridge accepted. A host that does not say which session sent a
+///   chunk gets every session 0 caller's lease renewed, as it always was: Orion's file events do not
+///   name the sender at the revision this bridge is pinned to.
 ///
 /// The bridge's own housekeeping (its publishing, its hello document, its ticks) renews nothing, and
-/// neither does a topic published to a caller. A caller with a silent run in progress is not renewed
-/// by it: its run is silent too and its lease runs out like any caller's.
+/// neither does a topic published to a caller. A holder keeps its holds by renewing them:
+/// `<resource>.call describe` is the renewal with nothing else to do.
 ///
-/// A holder keeps its holds by renewing them: `<resource>.call describe` is the renewal with nothing
-/// else to do.
-// ORION-R2 (C33): the lease is removed at R2. Orion's CALLER_GONE, sent once for each session that
-// ends, releases that session's connection at once, idle or busy; this function is then not called.
-// The lease is kept only as the documented behaviour against an Orion older than R2.
+/// A caller with a token is never dropped for silence: its session's end releases it ([`gone`]).
+pub fn lapsed(
+    held: &[(CallerKey, Instant)],
+    in_flight: &[CallerKey],
+    transferred: Option<Instant>,
+    now: Instant,
+    lease: Duration,
+) -> Vec<CallerKey> {
+    held.iter()
+        .filter(|(key, _)| matches!(key, CallerKey::Unsaid(_)))
+        .filter(|(key, _)| !in_flight.contains(key))
+        .filter(|(_, seen)| {
+            let renewed = transferred.map_or(*seen, |at| at.max(*seen));
+            now.saturating_duration_since(renewed) >= lease
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// Drops the connection of each session 0 caller whose lease has run out, when the lease is on. Each
+/// one is released through [`release`]. A caller with a run in flight is not lapsed ([`lapsed`]), so no
+/// run of its is cut short here.
 fn expire(
     clients: &mut Callers,
-    running: &mut Vec<Running>,
+    running: &[Running],
     ended: &mut Vec<CallerKey>,
     lease: Option<Duration>,
     now: Instant,
@@ -293,30 +385,17 @@ fn expire(
     let Some(lease) = lease else {
         return;
     };
-    let transferred = shared.last_transfer();
-    let gone: Vec<CallerKey> = clients
+    let held: Vec<(CallerKey, Instant)> = clients
         .iter()
-        .filter(|(caller, held)| {
-            // ORION-R2 (C33): a caller with any run in flight is alive, whether or not the run reports
-            // progress. The comm core cancels the runs of a session that ends (a reason-less Cancel for
-            // a non-detached run), and a cancelled run no longer counts; a DETACHED run from a dead
-            // caller is not cancelled and the bridge cannot see the flag, so it holds that caller's
-            // holds until the run itself ends. The later protocol revision closes that.
-            if running.iter().any(|r| r.caller == **caller) {
-                return false;
-            }
-            let renewed = transferred.map_or(held.seen, |at| at.max(held.seen));
-            now.saturating_duration_since(renewed) >= lease
-        })
-        .map(|(caller, _)| caller.clone())
+        .map(|(key, lemnosd)| (key.clone(), lemnosd.seen))
         .collect();
-    for caller in gone {
-        ended_with(
-            &caller,
-            running,
-            shared,
-            "its lease ran out; the job ended with its connection",
-        );
+    for caller in lapsed(
+        &held,
+        &in_flight(running),
+        shared.last_transfer(),
+        now,
+        lease,
+    ) {
         release(clients, ended, &caller, "its lease ran out", shared);
     }
 }
@@ -326,23 +405,24 @@ fn expire(
 pub const ENDED_MAX: usize = 64;
 
 /// The note a caller's first reply after its lease ended carries, at the start of its `detail`. A
-/// client matches the prefix `lease-ended:`; the rest of the detail is free text.
+/// client matches the prefix `lease-ended:`; the rest of the detail is free text. Only a session 0
+/// caller's lease ends this way: a session that ends is not sent a reply.
 pub const LEASE_ENDED_NOTE: &str = "lease-ended: holds released";
 
 /// Remembers that `caller`'s lease ended, so its next reply carries [`LEASE_ENDED_NOTE`].
-fn remember(ended: &mut Vec<CallerKey>, caller: &str) {
-    if ended.iter().any(|c| c == caller) {
+fn remember(ended: &mut Vec<CallerKey>, caller: &CallerKey) {
+    if ended.contains(caller) {
         return;
     }
     if ended.len() == ENDED_MAX {
         ended.remove(0);
     }
-    ended.push(caller.to_owned());
+    ended.push(caller.clone());
 }
 
 /// `detail` with the note in front when `caller`'s lease ended and it has had no reply since; the
 /// note is given once.
-fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> String {
+fn noted(ended: &mut Vec<CallerKey>, caller: &CallerKey, detail: String) -> String {
     let Some(at) = ended.iter().position(|c| c == caller) else {
         return detail;
     };
@@ -354,39 +434,53 @@ fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> String {
     }
 }
 
-// ORION-R2 (C33): the one trigger that releases a caller's holds. Dropping the connection closes it
-// on lemnosd, which calls `caller_gone` on the drivers. At R2 the trigger is CALLER_GONE for the
-// session token; the drop, the log and the count below stay.
+/// The one trigger that releases a caller's holds: dropping its connection closes it on lemnosd,
+/// which calls `caller_gone` on the drivers. It is the session's end ([`gone`]) or a session 0
+/// caller's lease running out ([`expire`]).
 fn release(
     clients: &mut Callers,
     ended: &mut Vec<CallerKey>,
-    caller: &str,
+    caller: &CallerKey,
     why: &str,
     shared: &Shared,
 ) {
-    if clients.remove(caller).is_some() {
+    let Some(lemnosd) = clients.remove(caller) else {
+        return;
+    };
+    if matches!(caller, CallerKey::Unsaid(_)) {
         remember(ended, caller);
-        log(&format!(
-            "caller of class {} dropped: {why}; its connection to lemnosd closed, and lemnosd released what it held (1 connection)",
-            caller_class(caller)
-        ));
-        shared.with(|mirror| mirror.note_lease_end());
     }
+    log(&format!(
+        "caller of class {} dropped: {why}; its connection to lemnosd closed, and lemnosd released what it held (1 connection)",
+        lemnosd.class
+    ));
+    shared.with(|mirror| mirror.note_lease_end());
 }
 
-/// Stops run `call` of `session`. A long job is cancelled on lemnosd, and the run ends as cancelled
-/// at once: nothing else would answer it. The caller's connection is kept, and its lease starts
-/// from now: a caller whose session ended is gone within a lease of its cancel.
-// ORION-R2 (C33): Orion's Cancel gains `reason` (0 not said, 1 caller asked, 2 caller's session ended,
-// 3 deadline, 4 node stopping). With reason 2 only, the caller's lemnosd connection is closed here
-// after its job is cancelled (`clients.remove`), which is what tells lemnosd's drivers the caller
-// is gone. Every other reason keeps the connection, as this does now.
+/// The Orion session with `token` ended, for whatever cause. Its connection is closed at once, which
+/// releases the plain holds it made: nothing is renewed, since the session cannot ask again. The runs
+/// are not touched here. A run that is not detached is cancelled by Orion (`CancelReason::CallerGone`),
+/// and a detached run keeps its own connection and its job until they end.
+fn gone(clients: &mut Callers, ended: &mut Vec<CallerKey>, token: u64, shared: &Shared) {
+    release(
+        clients,
+        ended,
+        &CallerKey::Session(token),
+        "its session ended",
+        shared,
+    );
+}
+
+/// Stops run `call` of `session`, for `reason`. A long job is cancelled on lemnosd, and the run ends
+/// as cancelled at once: nothing else would answer it. The caller's connection is kept, and a cancel
+/// that renews ([`renews`]) starts the lease of a session 0 caller from now.
 fn cancel(
     clients: &mut Callers,
     running: &mut Vec<Running>,
     ended: &mut Vec<CallerKey>,
     session: u64,
     call: u64,
+    reason: CancelReason,
     shared: &Shared,
 ) {
     let Some(at) = running
@@ -399,9 +493,13 @@ fn cancel(
     if let Some(lemnosd) = clients.get_mut(&r.caller) {
         // Its end, cancelled or not, comes as the job's news, which finds no run and is dropped.
         let _ = lemnosd.client.cancel_job(r.job);
-        lemnosd.seen = Instant::now();
+        if renews(reason) {
+            lemnosd.seen = Instant::now();
+        }
     }
-    let detail = noted(ended, &r.caller, "cancelled".to_owned());
+    // A job's own connection ends with it: its holds are released now.
+    clients.remove(&r.caller);
+    let detail = noted(ended, &r.owner, "cancelled".to_owned());
     shared.finished(Done {
         session: r.session,
         call: r.call,
@@ -412,9 +510,9 @@ fn cancel(
 }
 
 /// Connects the caller's connection to lemnosd, when it can be made.
-fn connect(socket: &Path, clients: &mut Callers, caller: &str) {
+fn connect(socket: &Path, clients: &mut Callers, caller: &CallerKey, class: &'static str) {
     if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
-        clients.insert(caller.to_owned(), Lemnosd::new(client));
+        clients.insert(caller.clone(), Lemnosd::new(client, class));
     }
 }
 
@@ -427,41 +525,56 @@ fn run_one(
     ended: &mut Vec<CallerKey>,
     shared: &Shared,
 ) {
-    let caller = job.caller.as_str();
-    if let Some(lemnosd) = clients.get_mut(caller) {
+    let caller = key_of(job.token, &job.caller);
+    let class = caller_class(&job.caller);
+    let mut run_client = None;
+    if let Some(lemnosd) = clients.get_mut(&caller) {
         lemnosd.seen = Instant::now();
     }
-    if !clients.get(caller).is_some_and(|l| l.client.is_connected()) {
-        // Jobs on the connection that went are over: lemnosd ended them with it.
-        lost(caller, running, shared);
-        clients.remove(caller);
-        connect(socket, clients, caller);
+    if !clients
+        .get(&caller)
+        .is_some_and(|l| l.client.is_connected())
+    {
+        // A session's connection holds plain holds only: a run's job is on the run's own connection.
+        lost(&caller, running, shared);
+        clients.remove(&caller);
+        connect(socket, clients, &caller, class);
     }
-    let mut served = match clients.get(caller) {
-        Some(lemnosd) => serve(&lemnosd.client, job, shared),
+    let connect_run = || Client::connect(socket, LEMNOSD_CALLS_NAME).map_err(failed);
+    let mut served = match clients.get(&caller) {
+        Some(lemnosd) => serve(&lemnosd.client, job, shared, &connect_run, &mut run_client),
         None => Err(Failure::Failed("lemnosd is not there".to_owned())),
     };
     // A connection that went quiet with lemnosd is found dead only when used: connect
     // again and run the job once more: the call never reached the lemnosd that is there now.
     if served.is_err()
         && clients
-            .get(caller)
+            .get(&caller)
             .is_some_and(|l| !l.client.is_connected())
     {
-        lost(caller, running, shared);
-        clients.remove(caller);
+        lost(&caller, running, shared);
+        clients.remove(&caller);
         if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
-            served = serve(&client, job, shared);
-            clients.insert(caller.to_owned(), Lemnosd::new(client));
+            served = serve(&client, job, shared, &connect_run, &mut run_client);
+            clients.insert(caller.clone(), Lemnosd::new(client, class));
         }
     }
     let (outcome, output, detail) = match served {
         Ok(Served::Started(started)) => {
+            // The job's own connection: its holds and its news are that run's, not the session's.
+            let run = CallerKey::Run {
+                session: job.session,
+                call: job.call,
+            };
+            if let Some(client) = run_client.take() {
+                clients.insert(run.clone(), Lemnosd::new(client, class));
+            }
             running.push(Running {
                 session: job.session,
                 call: job.call,
                 job: started,
-                caller: caller.to_owned(),
+                caller: run,
+                owner: caller.clone(),
             });
             return;
         }
@@ -469,7 +582,7 @@ fn run_one(
         Err(Failure::Refused(why)) => (Outcome::Rejected, String::new(), why),
         Err(Failure::Failed(why)) => (Outcome::Failed, String::new(), why),
     };
-    let detail = noted(ended, caller, detail);
+    let detail = noted(ended, &caller, detail);
     shared.finished(Done {
         session: job.session,
         call: job.call,
@@ -535,8 +648,10 @@ fn follow(
                 if let Some(lemnosd) = clients.get_mut(&caller) {
                     lemnosd.seen = Instant::now();
                 }
+                // A job's own connection ends with the job: its holds are released.
+                clients.remove(&caller);
                 let mut done = job_done(&r, status, &result);
-                done.detail = noted(ended, &r.caller, done.detail);
+                done.detail = noted(ended, &r.owner, done.detail);
                 shared.finished(done);
             }
         }
@@ -573,9 +688,8 @@ pub fn result_text(result: &[u8]) -> String {
     }
 }
 
-/// Ends the followed jobs of one caller as failed: its lemnosd connection went, and its jobs
-/// with it.
-fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
+/// Ends the job on a run's connection as failed: that connection went, and so did its job.
+fn lost(caller: &CallerKey, running: &mut Vec<Running>, shared: &Shared) {
     ended_with(
         caller,
         running,
@@ -584,11 +698,12 @@ fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
     );
 }
 
-/// Ends the followed jobs of one caller as failed, with `detail` as the reason.
-fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail: &str) {
+/// Ends the followed jobs on one connection as failed, with `detail` as the reason. Matched by the
+/// run's own connection (`CallerKey::Run`): a session's connection carries no job.
+fn ended_with(caller: &CallerKey, running: &mut Vec<Running>, shared: &Shared, detail: &str) {
     let mut kept = Vec::with_capacity(running.len());
     for r in running.drain(..) {
-        if r.caller != caller {
+        if r.caller != *caller {
             kept.push(r);
             continue;
         }
@@ -605,7 +720,7 @@ fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail:
 
 /// Ends every followed job as failed, when there is no connection at all.
 fn lost_all(running: &mut Vec<Running>, shared: &Shared) {
-    let callers: Vec<String> = running.iter().map(|r| r.caller.clone()).collect();
+    let callers: Vec<CallerKey> = running.iter().map(|r| r.caller.clone()).collect();
     for caller in callers {
         lost(&caller, running, shared);
     }
@@ -649,7 +764,13 @@ fn refused_reply(error: Error, call: &Call) -> Failure {
 /// # Errors
 ///
 /// Why it did not succeed.
-pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Failure> {
+pub fn serve(
+    client: &Client,
+    job: &Job,
+    shared: &Shared,
+    connect_run: &dyn Fn() -> Result<Client, Failure>,
+    run_out: &mut Option<Client>,
+) -> Result<Served, Failure> {
     let words: Vec<&str> = job.args.split_whitespace().collect();
     let device = client
         .list()
@@ -711,13 +832,17 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
     };
     let call = encode_call_within(method, values, ORION_REPLY_MAX).map_err(Failure::Refused)?;
     let tag = &description.contracts[contract].tag;
-    let mut handle = client.open_tag(&device.name, tag).map_err(failed)?;
     if method.job {
-        let started = client
+        // A long job runs on a connection of its own, kept by the run until the job ends.
+        let run = connect_run()?;
+        let mut handle = run.open_tag(&device.name, tag).map_err(failed)?;
+        let started = run
             .start_job(&mut handle, method.id, &call.args)
             .map_err(failed)?;
+        *run_out = Some(run);
         return Ok(Served::Started(started));
     }
+    let mut handle = client.open_tag(&device.name, tag).map_err(failed)?;
     let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
     let len = client
         .call(&mut handle, method.id, &call.args, &mut reply)
@@ -777,5 +902,98 @@ mod tests {
         assert_eq!(result_text(b"os-2"), "os-2");
         assert_eq!(result_text(&[0xff, 0x01]), "ff01");
         assert_eq!(result_text(b""), "");
+    }
+
+    #[test]
+    fn a_session_is_kept_by_its_token_and_a_session_0_caller_by_its_identity() {
+        // Two sessions of one identity are two callers: the token tells them apart.
+        assert_eq!(key_of(7, "local:1000"), CallerKey::Session(7));
+        assert_eq!(key_of(7, "local:1000"), key_of(7, "local:2000"));
+        assert_ne!(key_of(7, "local:1000"), key_of(8, "local:1000"));
+        // A host that does not say (token 0) is kept by its identity, as before.
+        assert_eq!(
+            key_of(0, "local:1000"),
+            CallerKey::Unsaid("local:1000".to_owned())
+        );
+        assert_ne!(key_of(0, "local:1000"), key_of(0, "local:2000"));
+    }
+
+    #[test]
+    fn a_cancel_for_a_session_that_ended_renews_nothing_and_the_others_renew() {
+        assert!(!renews(CancelReason::CallerGone));
+        for reason in [
+            CancelReason::Unsaid,
+            CancelReason::Asked,
+            CancelReason::Deadline,
+            CancelReason::Stopping,
+        ] {
+            assert!(renews(reason), "{reason:?} renews");
+        }
+    }
+
+    /// The lease, for a test: five seconds.
+    const LEASE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn only_a_session_0_caller_is_ever_dropped_for_silence() {
+        let t0 = Instant::now();
+        let held = [
+            (CallerKey::Session(7), t0),
+            (CallerKey::Unsaid("local:1000".to_owned()), t0),
+        ];
+        let later = t0 + LEASE * 10;
+        assert_eq!(
+            lapsed(&held, &[], None, later, LEASE),
+            [CallerKey::Unsaid("local:1000".to_owned())],
+            "a session is released by its CALLER_GONE, never by silence"
+        );
+        assert!(
+            lapsed(&held, &[], None, t0 + LEASE / 2, LEASE).is_empty(),
+            "a silent caller is kept until its lease has run out"
+        );
+    }
+
+    #[test]
+    fn a_run_in_flight_is_its_askers_and_not_its_own_connection() {
+        // A run keeps its own connection (`Run`), so the asker is found by `owner`: a session 0 caller
+        // with a run going must be shielded from its lease, whatever connection the run is on.
+        let asker = CallerKey::Unsaid("local:1000".to_owned());
+        let run = Running {
+            session: 1,
+            call: 2,
+            job: 3,
+            caller: CallerKey::Run {
+                session: 1,
+                call: 2,
+            },
+            owner: asker.clone(),
+        };
+        assert_eq!(
+            in_flight(std::slice::from_ref(&run)),
+            std::slice::from_ref(&asker).to_vec()
+        );
+        let t0 = Instant::now();
+        let held = [(asker.clone(), t0)];
+        assert!(
+            lapsed(&held, &in_flight(&[run]), None, t0 + LEASE * 3, LEASE).is_empty(),
+            "a run in flight shields the session 0 caller that asked, not only a run keyed by it"
+        );
+    }
+
+    #[test]
+    fn a_session_0_caller_with_a_run_in_flight_is_alive_and_a_chunk_renews_it() {
+        let t0 = Instant::now();
+        let held = [(CallerKey::Unsaid("local:1000".to_owned()), t0)];
+        let later = t0 + LEASE * 3;
+        let running = [CallerKey::Unsaid("local:1000".to_owned())];
+        assert!(
+            lapsed(&held, &running, None, later, LEASE).is_empty(),
+            "a run in flight shields a session 0 caller"
+        );
+        assert!(
+            lapsed(&held, &[], Some(later), later, LEASE).is_empty(),
+            "an accepted chunk renews every session 0 caller's lease"
+        );
+        assert_eq!(lapsed(&held, &[], None, later, LEASE).len(), 1);
     }
 }

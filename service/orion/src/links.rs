@@ -3,7 +3,8 @@
 //! lemnosd lends the bulk pair to one connection at a time, with a third descriptor, END. This
 //! thread holds them, sends a `LinkOffer` with the pair to the comm core over the board's socket,
 //! and keeps the hold while the gadget is up. The pair goes as `[read, write]`: the OUT endpoint's
-//! file first (the host's writes, which the comm core reads), then the IN endpoint's.
+//! file first (the host's writes, which the comm core reads), then the IN endpoint's, and END last
+//! (`[read, write, end]`: the comm core lets go of all three when END reads EOF or hangs up).
 //!
 //! END is the hold's own word. It reads EOF or hangs up when the hold is over for good (the
 //! service closed it because the driver ended the endpoints, or the hold was given up). This thread
@@ -80,10 +81,10 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     let UsbEndpointsEnd { out, input, end } = lemnos
         .usb_endpoints_end(index, Arc::new(LinuxStreams))
         .map_err(|error| format!("taking the endpoints: {error}"))?;
-    let _comm = offer(config, link, &out, &input)?;
+    let _comm = offer(config, link, &out, &input, &end)?;
     log(&format!("link {}: offered the endpoints", link.link));
-    // OUT and IN are closed here: the comm core holds its own copies. END stays with this hold,
-    // and it is what says the hold is over for good.
+    // OUT and IN are closed here: the comm core holds its own copies. END stays with this hold
+    // too, as the comm core's copy of it: whichever is written or closed first, the hold is over.
     drop((out, input));
 
     let over = wait_for_up(&mut watch, false, Some(&end))?;
@@ -137,10 +138,16 @@ fn wait_for_up(watch: &mut Session, want: bool, end: Option<&OwnedFd>) -> Result
     }
 }
 
-/// Sends the offer to the comm core, with the endpoints as `[read, write]`: the OUT endpoint, then
-/// the IN endpoint. END is not sent: the pinned comm core's `LinkOffer` takes two. Returns the comm
-/// core's session, which stays open with the link.
-fn offer(config: &Config, link: &Link, out: &OwnedFd, input: &OwnedFd) -> Result<Comm, String> {
+/// Sends the offer to the comm core, with the endpoints as `[read, write, end]`: the OUT endpoint,
+/// then the IN endpoint, then END (the third descriptor, which the comm core lets go of all three on
+/// when it reads EOF or hangs up). Returns the comm core's session, which stays open with the link.
+fn offer(
+    config: &Config,
+    link: &Link,
+    out: &OwnedFd,
+    input: &OwnedFd,
+    end: &OwnedFd,
+) -> Result<Comm, String> {
     let mut comm = Comm::connect(&config.orion, COMM_NAME, Options::default())
         .map_err(|error| format!("the comm core: {error}"))?;
     let offer = LinkOffer {
@@ -150,10 +157,10 @@ fn offer(config: &Config, link: &Link, out: &OwnedFd, input: &OwnedFd) -> Result
         endpoint_in: 0,
         endpoint_out: 0,
     };
-    // ORION-R2: at R2 the descriptors are `[OUT, IN]` plus an optional END, in that order (END is
-    // R1f's third descriptor, which the bridge keeps); `LinkOffer` takes the same list then.
+    // The comm core takes two descriptors, or three with END as the last. Without END it keeps its
+    // copies of the endpoints until the link ends some other way, and the gadget cannot be taken down.
     let seq = comm
-        .send_with_fds(&offer, &[out.as_fd(), input.as_fd()])
+        .send_with_fds(&offer, &[out.as_fd(), input.as_fd(), end.as_fd()])
         .map_err(|error| format!("offering the endpoints: {error}"))?;
     // Taken only once the comm core answers LinkTaken; a refusal (no such link, say) is an error.
     comm.answer(seq, <LinkTaken as Body>::KIND)

@@ -29,8 +29,7 @@ use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target};
 use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, Next, Subscriber};
-use orion::types::Error as Refusal;
-use orion::{Address, ClientError, Orion};
+use orion::{Address, Orion};
 use orion_node_app::{Node, NodeSettings};
 use orion_stubs::Board;
 use tokio::sync::oneshot;
@@ -170,46 +169,20 @@ fn resource(dashboard: &Orion, name: &str) -> Option<Found> {
         .find(|found| found.name == name)
 }
 
-/// A run of an action, asked again while the comm core does not run it yet. After a comm core
-/// restart Orion lists a resource with its actions before it takes the actions back, so until the
-/// bridge has said them all a run is refused as not found. Asked again for at most [`WAIT`].
-// ORION-R2: Orion restores actions before records at R2, so this retry is removed and every caller
-// uses `run`. The bridge no longer waits on Orion's restore order: after a comm core restart it
-// opens a new session that registers each device's actions before its resource, so a resource is
-// never listed without them (`a_comm_core_restart_gets_every_device_and_value_again` checks this
-// with `run`, not this helper).
-fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let mut run = dashboard
-            .run(&ActionCall {
-                name: action,
-                target: Target::Resource(resource.parse().expect("name")),
-                args: args.as_bytes(),
-                deadline_ms: 0,
-                detached: false,
-            })
-            .expect("run");
-        match run.finish(WAIT) {
-            Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            // The device is not running (-19): it was refused before the call ran, so it is asked
-            // again once it runs, within the same bound. A bind that misses its deadline under
-            // load leaves it retrying for a moment.
-            Ok(done)
-                if done.outcome == Outcome::Failed
-                    && done.detail.contains("refused (-19)")
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => {
-                return other
-                    .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"));
-            }
-        }
-    }
+/// A run of an action, asked once. Orion restores topics, then actions, then records after a comm core
+/// restart, so a resource is never listed before its actions are back (C23).
+fn run(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
+    let mut run = dashboard
+        .run(&ActionCall {
+            name: action,
+            target: Target::Resource(resource.parse().expect("name")),
+            args: args.as_bytes(),
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .expect("run");
+    run.finish(WAIT)
+        .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"))
 }
 
 const CPUINFO: &str = "Serial\t\t: 0000000000ABCDEF\n";
@@ -292,7 +265,7 @@ fn start_walk(dir: &Path, sim: SimBoard) -> Walk {
     let bridge = start_bridge(&lemnosd, board.socket(), None);
     let dashboard = dashboard(board.socket());
     // Each device is listed. A device whose bind misses its deadline under load is still retrying
-    // for a moment, and a call to it is asked again by `run_once_said` until it runs.
+    // for a moment, and a call to it is asked once, by `run`.
     for device in WAIT_NAMES {
         wait_for(device, || resource(&dashboard, &format!("lemnos.{device}")));
     }
@@ -351,7 +324,7 @@ fn the_out_buffer_methods_the_simulator_hosts_answer_through_the_bridge() {
     let walk = start_walk(&dir, sim);
     let dashboard = &walk.dashboard;
     let call = |device: &str, words: &str| {
-        run_once_said(
+        run(
             dashboard,
             &format!("lemnos.{device}.call"),
             &format!("lemnos.{device}"),
@@ -481,7 +454,7 @@ fn a_description_generation_moves_once_per_change_and_holds_while_nothing_change
         ("off", ResourceState::Pending),
         ("on", ResourceState::Ready),
     ] {
-        let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", word);
+        let done = run(dashboard, "lemnos.imu.power", "lemnos.imu", word);
         assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
         // Settled: no sample for SETTLE, and the resource in the state the power-on asked for. A
         // missed bind is retried after its first backoff, which is shorter than SETTLE.
@@ -544,7 +517,7 @@ fn the_describe_generation_is_the_topic_generation_and_moves_with_it() {
         .expect("subscribe");
     // `describe` answers only while the device runs, so each reading is taken while it does.
     let described_generation = |dashboard: &Orion| -> Option<i64> {
-        let done = run_once_said(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
+        let done = run(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
         if done.outcome != Outcome::Succeeded {
             return None;
         }
@@ -559,20 +532,20 @@ fn the_describe_generation_is_the_topic_generation_and_moves_with_it() {
         )
     };
     // Running: the reading is the topic's, and both are the same number.
-    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
+    let done = run(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
     assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
     let running = wait_for("the imu described", || {
         let reading = described_generation(dashboard)?;
         (generation(&mut described) == Some(reading)).then_some(reading)
     });
     // Off: the topic moves by one, and the device is not described while it is off.
-    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "off");
+    let done = run(dashboard, "lemnos.imu.power", "lemnos.imu", "off");
     assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
     wait_for("the topic after off", || {
         (generation(&mut described) == Some(running + 1)).then_some(())
     });
     // Off is described, not refused: the device record says so, at the generation the topic shows.
-    let done = run_once_said(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
+    let done = run(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
     assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
     let text = String::from_utf8(done.output).expect("text");
     let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
@@ -585,7 +558,7 @@ fn the_describe_generation_is_the_topic_generation_and_moves_with_it() {
         "described at the topic's generation"
     );
     // On again: the topic moves by one more, and the description carries the same number.
-    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
+    let done = run(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
     assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
     wait_for("the topic after on", || {
         (generation(&mut described) == Some(running + 2)).then_some(())

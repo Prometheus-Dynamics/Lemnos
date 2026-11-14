@@ -21,11 +21,13 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-wire = { path = "../../engine/wire" }
 # Orion is not published: its one client crate, pinned to a revision of its `next` branch.
-orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8", default-features = false, features = ["provider", "files"] }
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df", default-features = false, features = ["provider", "files"] }
 # Sends a `LinkOffer` with a gadget's endpoints to the comm core over the board's socket.
-orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+# The cancel reason (`CancelReason`) of a run, which the facade does not re-export.
+orion-msg-actions = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-slot-store = { path = "../../drivers/slot-store" }
 # Already in the tree through Orion's client: waits on the Orion session and the wake-up together.
@@ -37,9 +39,9 @@ rustix = { version = "1", default-features = false, features = ["std", "event"] 
 # The test relay forwards the file descriptors Orion's transport passes with its frames.
 rustix = { version = "1", default-features = false, features = ["std", "net"] }
 # A real comm core and real node logic, in-process, for the integration tests.
-orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8", default-features = false }
-orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df", default-features = false }
+orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-driver-board-self-test = { path = "../../drivers/board-self-test" }
@@ -53,12 +55,12 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 lemnos-driver-indicator = { path = "../../drivers/indicator" }
 lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
-orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-link-serial = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
-orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
+orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-link-serial = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
+orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "dbd5fc08b9e55a117f10105ae103d2ad04cd14df" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim-walk = { path = "../../testing/crates/sim-walk" }
 lemnos-sim = { path = "../../backends/sim" }

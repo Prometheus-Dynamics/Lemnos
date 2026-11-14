@@ -287,7 +287,7 @@ fn tracked_call(orion: &Orion, args: &str) -> String {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: args.as_bytes(),
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -447,11 +447,9 @@ fn keep_open(orion: &Orion, window: Duration) {
     }
 }
 
-/// A push that keeps sending renews the caller's lease: its hold on the tracked device survives a
-/// push three lease periods long, with the caller sending nothing else. The lease is five seconds, so
-/// the bridge's own device writes (two to four seconds each on a loaded machine) fit inside it. The
-/// sender reads 8 KiB every 60 ms, a chunk each few hundred milliseconds. Mutation: with the accepted
-/// chunk not renewing the lease the hold is released at the lease and this test fails.
+/// A push that keeps sending: the caller's hold on the tracked device survives a push three lease periods
+/// long, with the caller sending nothing else. The holder's session has a token, so it is alive and its hold
+/// needs no renewal. The sender reads 8 KiB every 60 ms.
 #[test]
 fn a_push_lasting_three_leases_keeps_a_held_device_hold() {
     use sha2::{Digest, Sha256};
@@ -515,19 +513,20 @@ fn a_push_lasting_three_leases_keeps_a_held_device_hold() {
     );
 }
 
-/// A push that starts and then sends no chunk does not renew the lease: the caller's hold on the
-/// tracked device is released once the lease runs out, though the transfer itself is still open
-/// (the stall bound of the files, not the lease, is what ends it). Mutation: with `expire` a no-op
-/// the hold stays and this test fails.
+/// A push that starts and then sends no chunk ends at the stall bound: its stream is dropped and the
+/// device is free again. The caller's hold is not the stall's business: the holder's session has a token,
+/// so it is alive, and its hold stays with no renewal (the lease is for a session 0 caller only). The
+/// stall bound is one second here. Mutation: with the stall bound off the device stays busy and the first
+/// check fails.
 #[test]
-fn a_stalled_push_lets_the_lease_expire() {
+fn a_stalled_push_ends_at_the_stall_bound_and_keeps_a_live_callers_hold() {
     use sha2::{Digest, Sha256};
     const SIZE: usize = 64 * 1024;
     let lease = Duration::from_secs(5);
     let s = setup_with(
         "push-stalled",
         SIZE as u64 + 4096,
-        lemnos_orion::files::IDLE,
+        Duration::from_secs(1),
         Some(lease),
     );
     tracked_call(&s.dashboard, "take");
@@ -560,14 +559,15 @@ fn a_stalled_push_lets_the_lease_expire() {
             .push("lemnos/flash/image.img", &mut quiet, |_, _| {});
     });
     wait_for("the stream to begin", || device_busy(&s).then_some(()));
+    wait_for("the stalled stream is ended at the stall bound", || {
+        (!device_busy(&s)).then_some(())
+    });
+    // Three leases on, the holder is alive and silent: its hold is still there.
     keep_open(&s.dashboard, lease * 3);
     let held = tracked_call(&s.dashboard, "held");
     let _ = let_go.send(());
     let _ = pushing.join();
-    assert_eq!(
-        held, "0",
-        "a stalled push kept the caller's hold past the lease"
-    );
+    assert_eq!(held, "1", "a stalled push took a live caller's hold");
 }
 
 /// Whether the device is busy: a write (size 1, raw, which it can never start) is refused `BUSY`
@@ -585,7 +585,7 @@ fn device_busy(s: &Setup) -> bool {
             name: "lemnos.flash.call",
             target: Target::Resource("lemnos.flash".parse().expect("name")),
             args: b"write 1 0",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");

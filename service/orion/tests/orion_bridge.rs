@@ -28,7 +28,6 @@ use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target, Update};
 use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, SampleTime, Status, Subscriber};
-use orion::types::Error as Refusal;
 use orion::{Address, ClientError, Orion};
 use orion_node_app::{Node, NodeSettings};
 use orion_stubs::{Board, Options as BoardOptions};
@@ -38,6 +37,9 @@ const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid 
     [[devices]]\nid = \"imu\"\ndriver = \"fake-accelerometer\"\n\
     [devices.config]\nx = 1.5\ny = 0\nz = 2\n\
     [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n";
+
+/// The devices in `BOARD`: the bridge publishes them all in each session it opens after the first.
+const BOARD_DEVICES: usize = 2;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -236,53 +238,12 @@ fn run(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished 
             name: action,
             target: Target::Resource(resource.parse().expect("name")),
             args: args.as_bytes(),
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
     run.finish(WAIT)
         .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"))
-}
-
-/// A run of an action, asked again while the comm core does not run it yet. After a comm core
-/// restart Orion lists a resource with its actions before it takes the actions back, so until the
-/// bridge has said them all a run is refused as not found. Asked again for at most [`WAIT`].
-// ORION-R2: Orion restores actions before records at R2, so this retry is removed and every caller
-// uses `run`. The bridge no longer waits on Orion's restore order: after a comm core restart it
-// opens a new session that registers each device's actions before its resource, so a resource is
-// never listed without them (`a_comm_core_restart_gets_every_device_and_value_again` checks this
-// with `run`, not this helper).
-fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let mut run = dashboard
-            .run(&ActionCall {
-                name: action,
-                target: Target::Resource(resource.parse().expect("name")),
-                args: args.as_bytes(),
-                deadline_ms: 0,
-                detached: false,
-            })
-            .expect("run");
-        match run.finish(WAIT) {
-            Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            // The device is not running (-19): refused before the call ran, so it is asked again
-            // once it runs, within the same bound. A bind that misses under load leaves it retrying.
-            Ok(done)
-                if done.outcome == Outcome::Failed
-                    && done.detail.contains("refused (-19)")
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => {
-                return other
-                    .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"));
-            }
-        }
-    }
 }
 
 #[test]
@@ -407,7 +368,7 @@ fn actions_set_call_and_switch_a_device() {
             name: "lemnos.thing.call",
             target: Target::Resource("lemnos.imu".parse().expect("name")),
             args: b"peek",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -567,7 +528,7 @@ fn a_stopped_lemnosd_takes_its_devices_and_topics_away_and_brings_them_back() {
         .then_some(())
     });
     // The call thread's old connection is dead; the first call after the return still works.
-    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
@@ -734,6 +695,9 @@ fn the_board_publishes_its_identity_facts_and_what_it_offers() {
         ("model", "Alpha r2"),
         ("offers", OFFERS),
         ("serial", "0000000000abcdef"),
+        // The comm core's own `hello.state`: a fact published before this node subscribed, which a node
+        // now gets with the newest sample of each topic (`on_subscribe` = `Latest`).
+        ("state", "running"),
         ("version.lemnos", env!("CARGO_PKG_VERSION")),
         ("version.os", "2.0"),
         ("version.product", "an-os"),
@@ -767,6 +731,7 @@ fn a_fact_that_cannot_be_read_is_absent() {
             "leases.ended",
             "model",
             "offers",
+            "state",
             "version.lemnos"
         ],
         "no serial and no running slot: absent, not guessed"
@@ -892,7 +857,7 @@ fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
     });
 
     // `facts` takes an out buffer and no arguments: the bridge sends the size itself.
-    let facts = run_once_said(
+    let facts = run(
         &dashboard,
         "lemnos.identity.call",
         "lemnos.identity",
@@ -903,7 +868,7 @@ fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
     assert!(text.contains("serial=0000000000abcdef"), "{text}");
 
     // `list` on the slot device: JSON, as text.
-    let list = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    let list = run(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
     assert_eq!(list.outcome, Outcome::Succeeded, "{list:?}");
     let json = String::from_utf8(list.output).expect("text");
     assert!(json.starts_with("{\"slot_active\":"), "{json}");
@@ -920,7 +885,7 @@ fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
         .expect("manifest");
         image(&files.dir, &id);
     }
-    let big = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    let big = run(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
     assert_ne!(big.outcome, Outcome::Succeeded, "{big:?}");
     assert!(big.output.is_empty(), "no partial reply: {big:?}");
     assert!(big.detail.contains("no paged form"), "{big:?}");
@@ -978,7 +943,7 @@ fn the_slot_list_is_walked_page_by_page_through_the_bridge_with_nothing_lost_or_
         image(&files.dir, &id);
         expected.push(id);
     }
-    let whole = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    let whole = run(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
     assert_ne!(whole.outcome, Outcome::Succeeded, "{whole:?}");
 
     // Page by page, the cursor the last page named. After the first page a slot is installed:
@@ -987,7 +952,7 @@ fn the_slot_list_is_walked_page_by_page_through_the_bridge_with_nothing_lost_or_
     let mut after = "-".to_string();
     let mut pages = 0;
     loop {
-        let reply = run_once_said(
+        let reply = run(
             &dashboard,
             "lemnos.slots.call",
             "lemnos.slots",
@@ -1298,7 +1263,7 @@ fn start_tracked_opt(
 
 /// Runs `args` on the tracked device, and its reply as text.
 fn tracked_call(orion: &Orion, args: &str) -> String {
-    let finished = run_once_said(orion, "lemnos.tracked.call", "lemnos.tracked", args);
+    let finished = run(orion, "lemnos.tracked.call", "lemnos.tracked", args);
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
     String::from_utf8(finished.output).expect("text")
 }
@@ -1363,27 +1328,27 @@ fn second_session(board: &Board) -> Orion {
     })
 }
 
-/// A caller that goes away (its session ends) and whose holds are idle: the holds are released
-/// within its lease. Every local session is one caller, so the dashboard is the caller's lemnosd
-/// connection too; it stays silent so that nothing renews the lease. Mutation: with the lease's
-/// `expire` made a no-op the holds stay (`held` is 1) and this test fails.
+/// A caller whose session ends (its `CallerGone`) has its idle holds released when it ends, not within
+/// a lease: the session has a token, and the token's end releases it. The lease is a second here, and
+/// the hold goes well inside it. Mutation: with the release on `CallerGone` undone, the hold stays and
+/// the poll below times out.
 #[test]
-fn a_dead_callers_idle_holds_are_released_within_its_lease() {
-    let dir = dir("lease-dead-idle");
+fn a_dead_callers_idle_holds_are_released_when_its_session_ends() {
+    let dir = dir("gone-idle");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
     let caller = second_session(&board);
     let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
-    // The caller's session ends.
+    let ended = Instant::now();
     drop(caller);
-    // Its lease (and one more tick) runs out with nothing sent on the connection.
-    std::thread::sleep(TEST_LEASE * 3);
-    assert_eq!(
-        tracked_call(&dashboard, "held"),
-        "0",
-        "the dead caller's hold outlived its lease"
+    wait_for("the dead session's hold is released", || {
+        (held_of(&dashboard).as_deref() == Some("0")).then_some(())
+    });
+    assert!(
+        ended.elapsed() < TEST_LEASE,
+        "released after {:?}: that is a lease, not the session's end",
+        ended.elapsed()
     );
-    // The bridge says so in its hello document: the lease, and how many leases have ended.
     let facts = hello(&dashboard).expect("the hello document");
     assert_eq!(facts.get("lease.seconds").map(String::as_str), Some("1"));
     assert_eq!(
@@ -1393,92 +1358,56 @@ fn a_dead_callers_idle_holds_are_released_within_its_lease() {
     );
 }
 
-/// A dropped caller is told once: its first reply after the lease ended is served normally, on a fresh
-/// connection, with its holds gone, and its `detail` begins with the note `lease-ended:`. The reply
-/// after it carries no note. The hello document's `leases.ended` counts the drop for everyone.
+/// A live session keeps its holds with no renewal at all: the lease is for a host that does not say
+/// which session asked, and a session that says is kept until its end is said. Mutation: a lease that
+/// applies to every caller releases the hold within three leases, and this test fails.
 #[test]
-fn a_dropped_caller_is_told_once_by_the_note_on_its_next_reply() {
-    let dir = dir("lease-dropped-reply");
-    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
-    let caller = second_session(&board);
-    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
-    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
-    drop(caller);
-    std::thread::sleep(TEST_LEASE * 3);
-    let first = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
-    assert_eq!(first.outcome, Outcome::Succeeded, "{first:?}");
-    assert_eq!(String::from_utf8(first.output).expect("text"), "0");
-    assert_eq!(
-        first.detail,
-        lemnos_orion::calls::LEASE_ENDED_NOTE,
-        "the first reply after the drop carries the note"
-    );
-    let second = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
-    assert_eq!(second.outcome, Outcome::Succeeded, "{second:?}");
-    assert_eq!(second.detail, "", "the note is given once");
-    let facts = hello(&dashboard).expect("the hello document");
-    assert_eq!(facts.get("leases.ended").map(String::as_str), Some("1"));
-}
-
-/// A caller that is alive and renews its lease keeps its holds for as long as it renews them.
-/// `describe` is the renewal with nothing to do. Mutation: a lease that expires at once releases
-/// the hold and this test fails.
-#[test]
-fn an_alive_caller_that_renews_its_lease_keeps_its_holds() {
-    let dir = dir("lease-alive");
+fn an_alive_caller_keeps_its_holds_with_no_renewal() {
+    let dir = dir("alive-silent");
     let (_board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
     tracked_call(&dashboard, "take");
     assert_eq!(tracked_call(&dashboard, "held"), "1");
-    let until = Instant::now() + TEST_LEASE * 3;
-    while Instant::now() < until {
-        std::thread::sleep(TEST_LEASE / 3);
-        tracked_call(&dashboard, "describe");
-    }
+    std::thread::sleep(TEST_LEASE * 3);
     assert_eq!(
         tracked_call(&dashboard, "held"),
         "1",
-        "a caller that renewed its lease lost its hold"
+        "an alive caller lost its hold while it was silent"
     );
 }
 
-/// A caller whose session ends while its long job runs: the job is cancelled at once (the Orion
-/// Cancel), and the holds it took are released within its lease, after its last request. Mutation:
-/// with `expire` a no-op the hold stays and this test fails.
+/// A caller whose session ends while its long job runs: Orion cancels the job (a cancel for a session
+/// that ended renews nothing), and the holds are released with the session's end. Mutation: as the test
+/// above, the hold stays and the poll times out.
 #[test]
-fn a_dead_callers_long_job_ends_and_its_holds_are_released_within_its_lease() {
-    let dir = dir("lease-dead-job");
+fn a_dead_callers_long_job_ends_and_its_holds_are_released_when_its_session_ends() {
+    let dir = dir("gone-job");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
     let caller = second_session(&board);
     let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
-    let _long = caller
+    let long = caller
         .run(&ActionCall {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: b"hold_until_cancelled",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
     std::thread::sleep(Duration::from_millis(300));
-    drop(_long);
+    drop(long);
     drop(caller);
-    std::thread::sleep(TEST_LEASE * 3);
-    assert_eq!(
-        tracked_call(&dashboard, "held"),
-        "0",
-        "the dead caller's hold outlived its lease after its long job was cancelled"
-    );
+    wait_for("the dead session's hold is released", || {
+        (held_of(&dashboard).as_deref() == Some("0")).then_some(())
+    });
 }
 
-/// A silent long job keeps its caller alive: a caller with any run in flight is alive, whether or not
-/// the run reports progress, so its other hold stays for three leases while the job runs with the
-/// caller sending nothing. Cancelling the run ends its shield: the caller, still silent, loses its
-/// hold one lease after the cancel. Mutation: with the in-flight shield removed the hold is released at
-/// the lease and the first check fails.
+/// A live caller's holds survive a silent long job, and its cancel: the caller is alive, so no lease
+/// runs out. Its holds go with its session's end, and not before. Mutation: a lease on a live session
+/// releases the hold during the job and the first check fails.
 #[test]
-fn a_silent_long_job_keeps_its_callers_other_hold_until_it_is_cancelled() {
-    let dir = dir("lease-silent-run");
+fn a_live_callers_holds_survive_a_silent_long_job_and_its_cancel() {
+    let dir = dir("alive-silent-run");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
     let caller = second_session(&board);
     let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
@@ -1488,7 +1417,7 @@ fn a_silent_long_job_keeps_its_callers_other_hold_until_it_is_cancelled() {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: b"hold_until_cancelled",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -1498,22 +1427,25 @@ fn a_silent_long_job_keeps_its_callers_other_hold_until_it_is_cancelled() {
     assert_eq!(
         String::from_utf8(held.output).expect("text"),
         "1",
-        "a silent long job lost its caller's hold at the lease"
+        "a silent live caller lost its hold during its long job"
     );
     long.cancel().expect("cancel");
     let _ = long.finish(WAIT);
-    // The run is over, and the caller is silent: its lease counts from the cancel.
     std::thread::sleep(TEST_LEASE * 2);
     assert_eq!(
         tracked_call(&dashboard, "held"),
-        "0",
-        "the caller's hold outlived its lease after its run was cancelled"
+        "1",
+        "a live caller lost its hold after its run was cancelled"
     );
+    drop(caller);
+    wait_for("the caller's hold goes with its session", || {
+        (held_of(&dashboard).as_deref() == Some("0")).then_some(())
+    });
 }
 
-/// A long job that reports progress renews its caller's lease: the caller, silent otherwise, keeps
-/// its hold for three leases while the job reports. Mutation: with the progress not renewing the
-/// lease the hold is released at the lease and this test fails.
+/// A live caller's long job that reports progress keeps its hold while the job reports. The caller is
+/// alive: its progress is not what keeps it, and the hold stays with no progress either (see the test
+/// above).
 #[test]
 fn a_long_job_reporting_progress_keeps_its_callers_other_hold() {
     let dir = dir("lease-progress");
@@ -1525,11 +1457,10 @@ fn a_long_job_reporting_progress_keeps_its_callers_other_hold() {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: b"count_until_cancelled",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
-    // The caller sends nothing for three leases: only the job's progress is news.
     std::thread::sleep(TEST_LEASE * 3);
     let held = tracked_call(&dashboard, "held");
     long.cancel().expect("cancel");
@@ -1578,7 +1509,7 @@ fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: b"hold_until_cancelled",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -1594,8 +1525,46 @@ fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
     );
 }
 
+/// Whether a new long job of the tracked device starts, that is whether the device is free. A job that
+/// starts is cancelled again.
+fn long_job_starts(dashboard: &Orion) -> bool {
+    let Ok(mut run) = dashboard.run(&ActionCall {
+        name: "lemnos.tracked.call",
+        target: Target::Resource("lemnos.tracked".parse().expect("name")),
+        args: b"hold_until_cancelled",
+        deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+        detached: false,
+    }) else {
+        return false;
+    };
+    match run.finish(Duration::from_millis(200)) {
+        // Refused at once: the driver is still busy with another caller's job.
+        Ok(_) => false,
+        Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+            let _ = run.cancel();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The count of holds the tracked device has, or `None` while it cannot answer (a job is running).
+fn held_of(dashboard: &Orion) -> Option<String> {
+    let mut run = dashboard
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"held",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .ok()?;
+    let finished = run.finish(WAIT).ok()?;
+    (finished.outcome == Outcome::Succeeded).then(|| String::from_utf8(finished.output).ok())?
+}
+
 #[test]
-fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
+fn a_caller_that_goes_away_ends_its_run_and_keeps_the_other_holds() {
     let dir = dir("callers");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
     tracked_call(&dashboard, "take");
@@ -1612,8 +1581,8 @@ fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
         "the driver holds for the caller"
     );
 
-    // The caller starts a long job, then goes away while it runs. Orion cancels its run with the
-    // same cancel a caller's explicit cancel is sent with, so the bridge cannot tell them apart.
+    // The caller starts a long job, then goes away while it runs. Orion cancels its run for its
+    // session's end and says the session ended: the job goes, and its holds with it.
     let caller = wait_for("a second Orion session", || {
         Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
     });
@@ -1622,7 +1591,7 @@ fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
             name: "lemnos.tracked.call",
             target: Target::Resource("lemnos.tracked".parse().expect("name")),
             args: b"hold_until_cancelled",
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -1630,36 +1599,179 @@ fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
     std::thread::sleep(Duration::from_millis(300));
     drop(long);
     drop(caller);
-    // The run's job is over on the driver: a new long job starts (it is refused while one runs).
     wait_for("the caller's job is over on the driver", || {
-        let mut run = dashboard
-            .run(&ActionCall {
-                name: "lemnos.tracked.call",
-                target: Target::Resource("lemnos.tracked".parse().expect("name")),
-                args: b"hold_until_cancelled",
-                deadline_ms: 0,
-                detached: false,
-            })
-            .ok()?;
-        match run.finish(Duration::from_millis(200)) {
-            // Refused at once: the driver is still busy with the caller's job.
-            Ok(_) => None,
-            Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
-                // Started: it is the one that is wanted; cancel it again so the device is free.
-                let _ = run.cancel();
-                Some(())
-            }
-            Err(_) => None,
-        }
+        long_job_starts(&dashboard).then_some(())
     });
-    // ORION-R2: at R2 the bridge reads a session end as `caller_gone` (reason 2), and the driver
-    // drops the caller's holds: `held` is then "0". At this revision the same cancel says no more
-    // than a plain one, so the holds stay.
+    // The dashboard's own hold stays: only the dead session's connection went.
+    wait_for("the dashboard's hold is still there", || {
+        (held_of(&dashboard).as_deref() == Some("1")).then_some(())
+    });
+}
+
+/// A detached run belongs to the run, not to its caller's session. The caller takes a hold (plain, on
+/// its session) and starts a detached long job, then goes away mid-run: its session ends, so Orion
+/// says `CallerGone`. The job keeps the device busy for the whole window: a second job is refused
+/// at once (`long_job_starts` is false). A new session of the same identity attaches to the run
+/// and cancels it; the end of the job releases the session's plain hold (`held` is `0` again).
+/// Before this, the run ended with its caller's connection (the rule this replaces).
+#[test]
+fn a_detached_run_outlives_its_killed_caller_and_a_new_session_attaches_to_it() {
+    let dir = dir("detached-kill");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: true,
+        })
+        .expect("run");
+    let call = long.call();
+    wait_for("the detached job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    drop(long);
+    drop(caller);
+    let until = Instant::now() + Duration::from_millis(1600);
+    while Instant::now() < until {
+        assert!(
+            !long_job_starts(&dashboard),
+            "the detached job ended when its caller went away"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let next = second_session(&board);
+    let mut back = next.attach(call).expect("attach to the detached run");
+    back.cancel().expect("cancel");
+    let finished = back.finish(WAIT).expect("the run's end");
+    assert_eq!(finished.outcome, Outcome::Cancelled, "{finished:?}");
+    wait_for(
+        "the dead caller's hold is released once the job is over",
+        || (held_of(&dashboard).as_deref() == Some("0")).then_some(()),
+    );
+}
+
+/// A detached run ends at its deadline without its caller: the caller takes a hold and starts a
+/// detached job with a short deadline, then goes away. Orion ends the run at its deadline and tells
+/// the bridge to stop it (`Cancel`), so the job is cancelled and the caller's hold is released. A new
+/// session attaches afterwards and reads the run as timed out.
+#[test]
+fn a_detached_run_ends_at_its_deadline_and_releases_its_holds() {
+    let dir = dir("detached-deadline");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 1000,
+            detached: true,
+        })
+        .expect("run");
+    let call = long.call();
+    wait_for("the detached job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    drop(long);
+    drop(caller);
+    wait_for(
+        "the deadline ended the job and released the caller's hold",
+        || (held_of(&dashboard).as_deref() == Some("0")).then_some(()),
+    );
+    let next = second_session(&board);
+    let finished = next
+        .attach(call)
+        .expect("attach")
+        .finish(WAIT)
+        .expect("the run's end");
+    assert_eq!(finished.outcome, Outcome::TimedOut, "{finished:?}");
+}
+
+/// Two sessions of one identity are two callers: each has its own lemnosd connection, so each holds for
+/// itself, and the end of one releases only its own hold. Before the token keyed the connections, both
+/// shared one connection and one count covered both. Mutation: keyed by identity again, `held` is 1 and
+/// the first check fails.
+#[test]
+fn two_sessions_of_one_identity_hold_apart() {
+    let dir = dir("two-sessions");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    tracked_call(&dashboard, "take");
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "2",
+        "two sessions, two holds"
+    );
+    drop(caller);
+    wait_for("the other session's hold is released", || {
+        (held_of(&dashboard).as_deref() == Some("1")).then_some(())
+    });
     assert_eq!(
         tracked_call(&dashboard, "held"),
         "1",
-        "the holds stay until Orion says why a run was cancelled"
+        "the dashboard's own hold stays"
     );
+}
+
+/// A comm core that goes away takes its sessions with it, and no `CallerGone` can reach this program for
+/// them. When the bridge loses its session it releases the holds of the sessions it served, so no hold
+/// outlives the comm core that gave it. Mutation: without that release the hold stays for ever.
+#[test]
+fn a_comm_core_restart_releases_the_holds_of_the_sessions_it_ended() {
+    let dir = dir("restart-holds");
+    let (mut board, _logic, _service, _bridge, before) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    assert_eq!(tracked_call(&before, "held"), "1", "the caller's hold");
+    // The comm core goes away with both sessions; it comes back empty.
+    drop(caller);
+    drop(before);
+    drop(board);
+    std::thread::sleep(Duration::from_millis(300));
+    board = Board::start_for_node(&dir);
+    let dashboard = dashboard(board.socket());
+    wait_for("the tracked device's resource after the restart", || {
+        resource(&dashboard, "lemnos.tracked").filter(|found| found.state == ResourceState::Ready)
+    });
+    wait_for(
+        "the holds of the sessions the comm core took are released",
+        || (held_of(&dashboard).as_deref() == Some("0")).then_some(()),
+    );
+}
+
+/// A network subscriber starts from the newest device-set generation. `lemnos.devices` is a `Latest`
+/// topic (C29): a subscriber that comes after the devices are described is sent the newest sample at
+/// once, not only at the next change, and nothing changes here. Mutation: `FromNow` for the topic and
+/// the poll times out.
+#[test]
+fn a_network_subscriber_starts_from_the_newest_device_set() {
+    let dir = dir("latest-network");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    wait_for("the tracked device is listed", || {
+        resource(&dashboard, "lemnos.tracked")
+    });
+    let address = Address::Network {
+        host: board.network().to_string(),
+        key: None,
+    };
+    let network = wait_for("a network session", || {
+        Orion::connect(&address, "reader").ok()
+    });
+    let mut devices = network.subscribe("lemnos.devices").expect("subscribe");
+    let newest = wait_for("the newest generation, sent when subscribed", || {
+        latest(&mut devices, 0)
+    });
+    assert_eq!(newest.len(), 8, "one u64 generation");
 }
 
 #[test]
@@ -1724,35 +1836,183 @@ fn an_idle_session_is_kept_while_nothing_changes() {
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
+/// The comm core restarts: the bridge notices the lost session and connects again, and the device
+/// comes back Ready with its call action, so a run goes through. Both sides are waited on by their
+/// events. Idle time is 1000 ms, above the floor Orion keeps (three heartbeats, at least a second).
 #[test]
-fn a_comm_core_with_a_short_idle_time_is_connected_to_again() {
-    let dir = dir("short-idle");
+// The restart timing is printed for the measurement only (LEMNOS_ORION_TIMING).
+#[allow(clippy::print_stderr)]
+fn a_comm_core_restart_is_connected_to_again() {
+    let dir = dir("restart");
     let lemnosd = dir.join("lemnosd.sock");
     let options = || BoardOptions {
         for_node: true,
-        heartbeat_ms: 50,
-        idle_ms: 400,
+        heartbeat_ms: 100,
+        idle_ms: 1000,
         ..BoardOptions::default()
     };
     let board = Board::start_with(&dir, options());
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
     let socket = board.socket().to_path_buf();
-    let _bridge = start_bridge(&lemnosd, &socket, None);
+    let bridge = start_bridge(&lemnosd, &socket, None);
+    // The bridge's own record says when its first session is up (its count of devices is what it knew
+    // at that moment: the first session can open before lemnosd has described the board).
+    wait_for("the bridge's first session", || {
+        Some(bridge.shared.connection()).filter(|c| c.sessions == 1)
+    });
     {
         let dashboard = dashboard(&socket);
         wait_for("the imu's resource", || resource(&dashboard, "lemnos.imu"));
     }
-    // The comm core goes away: the bridge notices within the idle time and connects again when it
-    // is back.
-    drop(board);
-    let board = Board::start_with(&dir, options());
-    let dashboard = dashboard(board.socket());
-    wait_for("the imu's resource after the comm core came back", || {
-        resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    // Twice: every reconnect declares everything again. Nothing the old session named (a resource,
+    // a topic, an action, a call) is carried into the next one, so each run goes through the
+    // session that is up.
+    let mut board = board;
+    for (restart, sessions) in [("the first", 2), ("the second", 3)] {
+        drop(board);
+        board = Board::start_with(&dir, options());
+        let back = Instant::now();
+        // ORION-PIN(C36): at dbd5fc08 the comm core's record of a restarted node does not say a device is
+        // back, and a run that reaches it before the bridge has declared its actions is refused NotFound
+        // (the design gap C36 closes: it writes `Restoring` and then `Ready`). So the test waits for the
+        // bridge's own session, with both devices declared, and only then asks. This proves the bridge
+        // has connected and declared, not that a refused run was retried. At C36 this wait goes: the
+        // record wait below is then the whole wait.
+        wait_for(
+            &format!("the bridge's session after {restart} restart"),
+            || {
+                Some(bridge.shared.connection())
+                    .filter(|c| c.sessions == sessions && c.devices == BOARD_DEVICES)
+            },
+        );
+        if std::env::var_os("LEMNOS_ORION_TIMING").is_some() {
+            // Measurement only: from the comm core's return to every device declared again.
+            eprintln!(
+                "restart-timing {restart}: {} ms",
+                back.elapsed().as_millis()
+            );
+        }
+        let dashboard = dashboard(board.socket());
+        wait_for(
+            &format!("the counter's resource after {restart} restart"),
+            || {
+                resource(&dashboard, "lemnos.thing")
+                    .filter(|found| found.state == ResourceState::Ready)
+                    .filter(|found| found.actions.contains(&"lemnos.thing.call".to_owned()))
+            },
+        );
+        let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+        assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
+    }
+}
+
+/// Node logic restarts while the comm core stays up. At this pin the bridge asks node logic for
+/// nothing during the gap, so its session is not disturbed; the device is Ready again when node
+/// logic is back and a run goes through. The `Unavailable` path itself is pinned by the unit test
+/// `an_unavailable_refusal_is_connecting`, not here: no request of the bridge reaches node logic in
+/// this test.
+#[test]
+fn node_logic_restarting_leaves_the_bridge_serving_its_devices() {
+    let dir = dir("logic-away");
+    let lemnosd = dir.join("lemnosd.sock");
+    let options = BoardOptions {
+        for_node: true,
+        heartbeat_ms: 100,
+        idle_ms: 1000,
+        ..BoardOptions::default()
+    };
+    let board = Board::start_with(&dir, options);
+    let logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let socket = board.socket().to_path_buf();
+    let _bridge = start_bridge(&lemnosd, &socket, None);
+    {
+        let dashboard = dashboard(&socket);
+        wait_for("the counter's resource", || {
+            resource(&dashboard, "lemnos.thing")
+                .filter(|found| found.state == ResourceState::Ready)
+                .filter(|found| found.actions.contains(&"lemnos.thing.call".to_owned()))
+        });
+    }
+    drop(logic);
+    let _logic = Logic::start(&dir);
+    let dashboard = dashboard(&socket);
+    wait_for("the counter's resource after node logic came back", || {
+        resource(&dashboard, "lemnos.thing")
+            .filter(|found| found.state == ResourceState::Ready)
+            .filter(|found| found.actions.contains(&"lemnos.thing.call".to_owned()))
     });
-    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
+}
+
+/// A device method that blocks for three idle times ties up the call thread, not the session: the
+/// session is pumped on the main thread, so the comm core keeps hearing it. The device stays listed
+/// and Ready for the whole call, the call ends with its own result, and a run asked while it blocks
+/// is answered after it (the calls thread takes one run at a time).
+#[test]
+fn a_call_that_blocks_longer_than_the_idle_time_keeps_the_session_up() {
+    let dir = dir("starved");
+    let lemnosd = dir.join("lemnosd.sock");
+    let options = BoardOptions {
+        for_node: true,
+        heartbeat_ms: 100,
+        idle_ms: 1000,
+        ..BoardOptions::default()
+    };
+    let board = Board::start_with(&dir, options);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let socket = board.socket().to_path_buf();
+    let _bridge = start_bridge(&lemnosd, &socket, None);
+    let dashboard = dashboard(&socket);
+    wait_for("the counter's resource", || {
+        resource(&dashboard, "lemnos.thing")
+            .filter(|found| found.state == ResourceState::Ready)
+            .filter(|found| found.actions.contains(&"lemnos.thing.call".to_owned()))
+    });
+    let target = || Target::Resource("lemnos.thing".parse().expect("name"));
+    let started = Instant::now();
+    let mut hang = dashboard
+        .run(&ActionCall {
+            name: "lemnos.thing.call",
+            target: target(),
+            args: b"hang 1500",
+            deadline_ms: calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .expect("run");
+    let mut describe = dashboard
+        .run(&ActionCall {
+            name: "lemnos.thing.call",
+            target: target(),
+            args: b"describe",
+            deadline_ms: calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .expect("run");
+    let finished = loop {
+        assert!(
+            resource(&dashboard, "lemnos.thing")
+                .is_some_and(|found| found.state == ResourceState::Ready),
+            "the device left the bridge while its call was blocked"
+        );
+        if let Some(Update::Finished(finished)) =
+            hang.wait(Duration::from_millis(100)).expect("news")
+        {
+            break finished;
+        }
+    };
+    assert!(
+        started.elapsed() > Duration::from_millis(1000),
+        "the call did not block longer than the idle time"
+    );
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let described = describe
+        .finish(WAIT)
+        .expect("the run asked while blocked is answered");
+    assert_eq!(described.outcome, Outcome::Succeeded, "{described:?}");
 }
 
 /// A reply the bridge sends as the run's output: its bytes when they are not all hex digits (a
@@ -1777,7 +2037,7 @@ fn run_watched(dashboard: &Orion, device: &str, args: &str) -> (Vec<(u64, u64)>,
             name: &action,
             target: Target::Resource(format!("lemnos.{device}").parse().expect("name")),
             args: args.as_bytes(),
-            deadline_ms: 0,
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
         .expect("run");
@@ -1823,7 +2083,7 @@ fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
     });
 
     // `tests` is an out-buffer method: the bridge sends the size, and the reply is the list.
-    let listed = run_once_said(
+    let listed = run(
         &dashboard,
         "lemnos.selftest.call",
         "lemnos.selftest",
@@ -1838,23 +2098,23 @@ fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
     assert_eq!(names.last().map(String::as_str), Some("all"), "{names:?}");
 
     // `run` is a long job: its end is the run's end, and its result is the record.
-    let run = run_once_said(
+    let ran = run(
         &dashboard,
         "lemnos.selftest.call",
         "lemnos.selftest",
         "run a:bad false",
     );
-    assert_eq!(run.outcome, Outcome::Succeeded, "{run:?}");
-    let answer = Record::read(&mut Reader::new(&reply(&run.output))).expect("a record");
+    assert_eq!(ran.outcome, Outcome::Succeeded, "{ran:?}");
+    let answer = Record::read(&mut Reader::new(&reply(&ran.output))).expect("a record");
     assert_eq!(answer.outcome, SelfOutcome::Fail);
     assert_eq!(
         answer.reason,
         lemnos_contract_self_test::reason::OUT_OF_RANGE
     );
-    assert_eq!(reply(&run.output).len(), RECORD_BYTES);
+    assert_eq!(reply(&ran.output).len(), RECORD_BYTES);
 
     // `last` gives the result the run left.
-    let last = run_once_said(
+    let last = run(
         &dashboard,
         "lemnos.selftest.call",
         "lemnos.selftest",
@@ -1900,7 +2160,7 @@ fn a_device_that_cannot_come_up_is_described_with_its_state_and_reason() {
         resource(&dashboard, "lemnos.bad")
     });
     let done = wait_for("the refused device's describe", || {
-        let done = run_once_said(&dashboard, "lemnos.bad.call", "lemnos.bad", "describe");
+        let done = run(&dashboard, "lemnos.bad.call", "lemnos.bad", "describe");
         (done.outcome == Outcome::Succeeded).then_some(done)
     });
     let text = String::from_utf8(done.output).expect("text");
