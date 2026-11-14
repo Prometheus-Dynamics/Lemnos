@@ -841,6 +841,7 @@ impl CameraIsp for Isp600 {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATISTICS_BYTES as u32,
+            input_lend: false,
         })
     }
 

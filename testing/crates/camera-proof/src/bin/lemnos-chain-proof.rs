@@ -355,6 +355,8 @@ fn post_front(cfg: &mut FrameStream, identity: u64, buffer: u32) -> Result<(), S
         config_buffer: buffer,
         input_buffer: NO_BUFFER,
         outputs: [NO_BUFFER, NO_BUFFER, buffer, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     };
     post_job(cfg, &job)
 }
@@ -367,6 +369,8 @@ fn post_back(cfg: &mut FrameStream, identity: u64, slot: u32, output: u32) -> Re
         config_buffer: slot,
         input_buffer: slot,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     };
     post_job(cfg, &job)
 }

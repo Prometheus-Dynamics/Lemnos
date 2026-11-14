@@ -223,6 +223,7 @@ impl FeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: due,
+            end_ns: 0,
         });
         self.sequence += 1;
     }
@@ -461,6 +462,7 @@ impl BeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: self.last_ns,
+            end_ns: 0,
         });
         self.sequence += 1;
     }
@@ -494,11 +496,12 @@ impl be::Hardware for BeBlock {
         })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|b| {
             b.regions.clear();
             b.pending.clear();
         });
+        false
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<be::Registered> {

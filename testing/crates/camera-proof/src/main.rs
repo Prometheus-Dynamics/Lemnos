@@ -227,6 +227,13 @@ fn next_through_stall(stream: &mut FrameStream, tracker: &mut Tracker) -> Result
                 }
                 return Ok(Got::Silent);
             }
+            Next::JobEnded { identity, reason } => {
+                out(format_args!(
+                    "[{now} ns] job {identity} ended without a result: {}",
+                    reason.word()
+                ));
+                continue;
+            }
             Next::Ended(kind) => Event::Ended(kind.to_string()),
         };
         let ended = matches!(event, Event::Ended(_));

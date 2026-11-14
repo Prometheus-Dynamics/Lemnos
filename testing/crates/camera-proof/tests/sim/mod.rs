@@ -953,6 +953,7 @@ impl CameraIsp for SimIsp {
             config_layouts: 0,
             statistics_layout: 0,
             statistics_bytes: 0,
+            input_lend: false,
         })
     }
 

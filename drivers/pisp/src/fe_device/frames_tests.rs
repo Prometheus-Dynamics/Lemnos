@@ -400,6 +400,8 @@ impl Client {
             config_buffer: 0,
             input_buffer: NO_BUFFER,
             outputs: [NO_BUFFER, NO_BUFFER, output0, NO_BUFFER],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);

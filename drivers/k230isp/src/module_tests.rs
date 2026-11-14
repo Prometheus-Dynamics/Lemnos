@@ -167,6 +167,8 @@ fn post(stream: &MockStream, identity: u64, config_buffer: u32) {
         config_buffer,
         input_buffer: NO_BUFFER,
         outputs: [NO_BUFFER; 4],
+        input_lent: false,
+        lent_buffer: 0,
     };
     let mut buf = [0; 128];
     let mut w = Writer::new(&mut buf);

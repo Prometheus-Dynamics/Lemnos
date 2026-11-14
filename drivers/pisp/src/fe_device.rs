@@ -1111,6 +1111,7 @@ impl CameraIsp for PispFe {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATS_BYTES as u32,
+            input_lend: false,
         })
     }
 

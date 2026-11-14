@@ -336,6 +336,8 @@ fn job(identity: u64, config_buffer: u32, output0: u32) -> IspJob {
         config_buffer,
         input_buffer: NO_BUFFER,
         outputs: [output0, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 
@@ -634,7 +636,8 @@ fn a_job_carries_its_image_in_and_its_statistics_and_image_out() {
         Counters {
             jobs: 1,
             dropped: 0,
-            errors: 0
+            errors: 0,
+            lent: 0,
         }
     );
     // Every image went back to the node.
@@ -800,7 +803,8 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         Counters {
             jobs: 1,
             dropped: 1,
-            errors: 0
+            errors: 0,
+            lent: 0,
         }
     );
     // And its frame comes out on the buffer the consumer gave back.
@@ -817,7 +821,8 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         Counters {
             jobs: 2,
             dropped: 1,
-            errors: 0
+            errors: 0,
+            lent: 0,
         }
     );
 }
@@ -950,7 +955,8 @@ fn a_bad_image_or_one_too_big_counts_as_an_error() {
         Counters {
             jobs: 0,
             dropped: 0,
-            errors: 1
+            errors: 1,
+            lent: 0,
         }
     );
 
@@ -1085,7 +1091,8 @@ fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_cont
         Counters {
             jobs: 4,
             dropped: 0,
-            errors: 0
+            errors: 0,
+            lent: 0,
         }
     );
 }

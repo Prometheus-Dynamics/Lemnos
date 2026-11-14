@@ -55,6 +55,8 @@ fn job(config_buffer: u32, output: u32) -> IspJob {
         config_buffer,
         input_buffer: NO_BUFFER,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 

@@ -989,6 +989,7 @@ impl CameraIsp for Rkisp {
             config_layouts: 1,
             statistics_layout: statistics.layout,
             statistics_bytes: statistics.bytes,
+            input_lend: false,
         })
     }
 

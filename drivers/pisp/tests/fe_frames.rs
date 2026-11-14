@@ -607,6 +607,8 @@ impl App {
             config_buffer: config,
             input_buffer: NO_BUFFER,
             outputs: [NO_BUFFER, NO_BUFFER, output0, output1],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);

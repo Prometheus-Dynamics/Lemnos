@@ -53,7 +53,7 @@ memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
-buffers = 4
+buffers = 6
 buffer_bytes = 2052096
 memory = "dma-buf"
 heap = "linux,cma"

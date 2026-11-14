@@ -45,6 +45,8 @@ struct Mock {
     given_back: Vec<u32>,
     /// Registered and not let go of: size, by region.
     regions: Vec<Option<u64>>,
+    /// What `stop` reports: the block could not be seen to stop.
+    wedged_on_stop: bool,
 }
 
 impl Default for Mock {
@@ -59,6 +61,7 @@ impl Default for Mock {
             finished: Vec::with_capacity(64),
             given_back: Vec::with_capacity(64),
             regions: Vec::with_capacity(64),
+            wedged_on_stop: false,
         }
     }
 }
@@ -117,8 +120,8 @@ impl Hardware for Hw {
         self.with(|m| {
             m.stopped += 1;
             m.regions.clear();
-        });
-        false
+            m.wedged_on_stop
+        })
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
@@ -303,6 +306,8 @@ fn job_on(identity: u64, config: u32, input: u32, output: u32) -> IspJob {
         config_buffer: config,
         input_buffer: input,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 
@@ -1065,4 +1070,50 @@ fn stop_gives_every_config_buffer_back_and_each_one_runs_its_rewrite_after_resta
         assert_eq!(&sent[..], &bytes_of(&second)[..]);
     }
     assert_eq!(dropped(&mut be), 0);
+}
+
+/// A job that names a lent input (no buffer of its own) is refused with `not-lent`, and its
+/// consumer is told by the job's end, on the output it posted for.
+#[test]
+fn a_lent_job_is_refused_not_lent_and_its_consumer_is_told() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&IspJob {
+        input_lent: true,
+        lent_buffer: 2,
+        ..job_on(9, 1, NO_BUFFER, 0)
+    });
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((9, lemnos_wire::ring::reason::NOT_LENT, 0))
+    );
+    assert_eq!(dropped(&mut be), 1);
+    assert_eq!(
+        hw.with(|m| m.posted.len()),
+        0,
+        "a refused job is never posted"
+    );
+}
+
+/// A wedged block keeps the buffers its jobs held, and its health says that only a board restart
+/// frees them, with the front-end buffers it holds.
+#[test]
+fn a_wedged_block_keeps_its_buffers_and_its_health_says_so() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    match be.health() {
+        Health::Failed(text) => assert_eq!(
+            text,
+            "the back end is wedged; 0 front-end buffers stay with it until the board restarts"
+        ),
+        other => panic!("a wedged block is failed, not {other:?}"),
+    }
 }

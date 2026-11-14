@@ -384,6 +384,7 @@ impl Hardware for LinuxHardware {
             jobs: info.written,
             dropped: info.dropped,
             errors: info.errors,
+            lent: 0,
         })
     }
 

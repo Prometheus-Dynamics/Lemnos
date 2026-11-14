@@ -201,6 +201,7 @@ impl Hardware for Hw {
             jobs: 9,
             dropped: 2,
             errors: 1,
+            lent: 0,
         })
     }
 
@@ -345,6 +346,8 @@ fn job(identity: u64, config: u32, output0: u32, output1: u32) -> IspJob {
         config_buffer: config,
         input_buffer: NO_BUFFER,
         outputs: [NO_BUFFER, NO_BUFFER, output0, output1],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 

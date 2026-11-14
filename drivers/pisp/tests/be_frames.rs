@@ -33,7 +33,7 @@ use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
-use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
+use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT, frame, reason};
 
 /// The driver's entry with its real manifest, so each stream's kind is the one the driver declares.
 /// The device is never bound (this binder refuses), so the test drives the driver itself.
@@ -468,6 +468,8 @@ impl Client {
             config_buffer: config,
             input_buffer: input,
             outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);
@@ -617,6 +619,18 @@ fn a_job_naming_an_input_buffer_the_driver_does_not_hold_is_dropped() {
     app.config.post(3, 0, 1, 2);
     let now = be.tick(1).unwrap();
     be.tick(now).unwrap();
+    // A refused job's end is published when it is taken, with no buffer and its reason. The result
+    // comes when the block finishes it, after the refusals taken in the same look.
+    let end = app.output.ring.pop_frame().unwrap().unwrap();
+    assert_eq!(
+        (end.identity, end.buffer, end.reason),
+        (1, frame::NO_BUFFER, reason::FAILED)
+    );
+    let end = app.output.ring.pop_frame().unwrap().unwrap();
+    assert_eq!(
+        (end.identity, end.buffer, end.reason),
+        (3, frame::NO_BUFFER, reason::FAILED)
+    );
     let frame = app.output.ring.pop_frame().unwrap().unwrap();
     assert_eq!((frame.identity, frame.buffer), (2, 1));
     assert!(app.output.ring.pop_frame().unwrap().is_none());
@@ -708,6 +722,11 @@ fn a_job_on_an_output_the_client_holds_is_dropped() {
     app.config.post(2, 0, 0, 1);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
+    let end = app.output.ring.pop_frame().unwrap().unwrap();
+    assert_eq!(
+        (end.identity, end.buffer, end.reason),
+        (2, frame::NO_BUFFER, reason::FAILED)
+    );
     assert!(app.output.ring.pop_frame().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
     assert!(

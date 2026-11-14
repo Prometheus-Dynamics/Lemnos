@@ -79,6 +79,7 @@ use lemnos_core::{
 };
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
+use lemnos_wire::ring::reason;
 
 use crate::be_hw::{Finished, Hardware, Placed, Plan, Registered, Settings};
 use crate::be_job::{self, JobMemory, KernelJob};
@@ -107,6 +108,25 @@ pub const OUTPUT_STREAMS: [&str; BE_NUM_OUTPUTS] = ["output0", "output1"];
 const MAX_BUFFERS: usize = 32;
 /// Jobs the block may hold at once, the most `buffers` allows.
 const MAX_JOBS: usize = 32;
+
+/// The health text of a wedged block. Only a board restart frees the buffers it holds, and Lemnos
+/// never reboots on its own, so the text says so. `held` is the number of front-end buffers.
+fn wedged_text(held: u32) -> &'static str {
+    const TEXT: [&str; 9] = [
+        "the back end is wedged; 0 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 1 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 2 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 3 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 4 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 5 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 6 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 7 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 8 front-end buffers stay with it until the board restarts",
+    ];
+    TEXT.get(held as usize).copied().unwrap_or(
+        "the back end is wedged; more front-end buffers stay with it until the board restarts",
+    )
+}
 /// A buffer's largest size (`LEMNOS_STREAM_MAX_BUFFER_BYTES`).
 const MAX_IMAGE_BYTES: u64 = 1 << 28;
 /// The input's alignment; the block needs 4, and importers like more.
@@ -270,6 +290,8 @@ pub struct PispBe {
     jobs: [Option<InFlight>; MAX_JOBS],
     /// The block is wedged: the module keeps the buffers it could not prove idle until a reboot.
     wedged: bool,
+    /// Jobs in flight when the block wedged: the front-end buffers they hold stay with it.
+    wedged_held: u32,
     /// The driver's copy of the job being taken, parsed.
     parsed: Box<BeTilesConfig>,
     /// The driver's copy of the job being taken, as read: what goes to the module.
@@ -358,6 +380,9 @@ impl Lifecycle for PispBe {
     }
 
     fn health(&self) -> Health {
+        if self.wedged {
+            return Health::Failed(wedged_text(self.wedged_held));
+        }
         match self.state {
             State::Recovering { .. } => {
                 Health::Failed("the back end's stream ended while running: restarting it")
@@ -445,6 +470,7 @@ impl PispBe {
             outputs: [Buffers::NONE; BE_NUM_OUTPUTS],
             jobs: [None; MAX_JOBS],
             wedged: false,
+            wedged_held: 0,
             parsed: Box::default(),
             bytes: Box::new([0; CONFIG_BYTES]),
         }
@@ -486,7 +512,9 @@ impl PispBe {
     /// had are the driver's again.
     fn stop_block(&mut self) {
         if self.hw.stop() {
+            // The block may still read the buffers its jobs named: they stay with it, until a restart.
             self.wedged = true;
+            self.wedged_held = self.jobs.iter().flatten().count() as u32;
         }
         self.jobs = [None; MAX_JOBS];
         self.inputs.busy = [false; MAX_BUFFERS];
@@ -557,8 +585,12 @@ impl PispBe {
             // Again for each job: its consumer may have given a buffer back and named it in
             // this job since the last look.
             self.take_returns()?;
-            if !self.submit(&job)? {
+            if let Some(reason) = self.submit(&job)? {
+                // Refused: the job's consumer is told why, so it releases what it held for it.
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
+                self.output0
+                    .publish_job_end(job.identity, reason, 0)
+                    .map_err(|_| Status::IO)?;
             }
         }
         Ok(())
@@ -654,7 +686,16 @@ impl PispBe {
 
     /// Sends one job. `false` for a job that can't be sent, a caller's mistake or no room; an
     /// error means the stream is over.
-    fn submit(&mut self, job: &IspJob) -> Result<bool> {
+    /// Takes a job for the block, or says why it is refused: `None` when it is taken, else the
+    /// [`reason`](lemnos_wire::ring::reason) its consumer is told in the job's end.
+    fn submit(&mut self, job: &IspJob) -> Result<Option<u32>> {
+        if self.wedged {
+            return Ok(Some(reason::WEDGED));
+        }
+        // No lent input is wired to this block yet: a lent job names a buffer it was never lent.
+        if job.input_lent {
+            return Ok(Some(reason::NOT_LENT));
+        }
         let named = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
         if job.layout != LAYOUT_BACK_END
             || !self.configs.free(job.config_buffer)
@@ -662,7 +703,7 @@ impl PispBe {
             || !self.inputs.free(job.input_buffer)
             || (BE_NUM_OUTPUTS..MAX_OUTPUTS).any(|i| named(i) != NO_BUFFER)
         {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         }
         for o in 0..BE_NUM_OUTPUTS {
             let buffer = named(o);
@@ -672,21 +713,21 @@ impl PispBe {
             let on = self.output_bytes.get(o).copied().flatten().is_some();
             if !on || !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
                 // An output that's off, or a buffer the client has or the block is writing.
-                return Ok(false);
+                return Ok(Some(reason::FAILED));
             }
         }
         let Some(token) = (0..self.options.buffers as usize)
             .find(|&at| self.jobs.get(at).is_some_and(Option::is_none))
         else {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         };
         // The one read of the client's buffer. Everything after uses the copy.
         match self.config.read(job.config_buffer, 0, &mut self.bytes[..]) {
             Ok(true) => {}
-            Ok(false) | Err(_) => return Ok(false),
+            Ok(false) | Err(_) => return Ok(Some(reason::FAILED)),
         }
         if self.parsed.read_from(&self.bytes[..]).is_err() || be_job::check(&self.parsed).is_err() {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         }
         let c = &self.parsed.config;
         // The configuration must describe the frame set_input described: its size and stride.
@@ -697,13 +738,13 @@ impl PispBe {
             .raw_layout
             .is_some_and(|l| u32::try_from(c.input_format.stride).ok() == Some(l.stride));
         if !frame_ok {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         }
         let bayer = c.global.bayer_enables;
         let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
         let writes_average = bayer & bayer_enable::TDN_OUTPUT != 0;
         if reads_average && (!self.tdn_valid || self.tdn_reset) {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         }
         // The averages are the driver's memory: an image larger than they are is refused here
         // rather than by the module, which would end the stream.
@@ -714,7 +755,7 @@ impl PispBe {
         if !average_fits(reads_average, &c.tdn_input_format)
             || !average_fits(writes_average, &c.tdn_output_format)
         {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         }
         let input_bytes = be_job::image_bytes(&c.input_format);
         let output_bytes = c.output_format.map(|o| be_job::image_bytes(&o.image));
@@ -728,7 +769,7 @@ impl PispBe {
         }
 
         let Some(input) = self.lend(Image::Input, job.input_buffer, input_bytes)? else {
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         };
         memory.input = input.0;
         let mut flight = InFlight {
@@ -748,13 +789,13 @@ impl PispBe {
                 }
                 None => {
                     self.release(&flight)?;
-                    return Ok(false);
+                    return Ok(Some(reason::FAILED));
                 }
             }
         }
         let Ok(addr) = be_job::addresses(&self.parsed.config, &memory) else {
             self.release(&flight)?;
-            return Ok(false);
+            return Ok(Some(reason::FAILED));
         };
         let kernel = KernelJob {
             identity: job.identity,
@@ -766,7 +807,7 @@ impl PispBe {
             Ok(()) => {}
             Err(Status::BUSY) => {
                 self.release(&flight)?;
-                return Ok(false);
+                return Ok(Some(reason::FAILED));
             }
             Err(e) => return Err(e),
         }
@@ -785,7 +826,7 @@ impl PispBe {
             self.tdn_next = 1 - self.tdn_next;
             self.tdn_reset = false;
         }
-        Ok(true)
+        Ok(None)
     }
 
     /// Lets go of what a job that won't be sent had registered.
@@ -907,6 +948,7 @@ impl CameraIsp for PispBe {
             config_layouts: 1,
             statistics_layout: 0,
             statistics_bytes: 0,
+            input_lend: false,
         })
     }
 
