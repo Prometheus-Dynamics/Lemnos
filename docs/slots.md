@@ -827,6 +827,11 @@ copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree
   so give the partition some headroom.
 - **Live installs keep their reserve.** A live install needs free space of the slot plus `reserve_mb`
   from the board file's system-slots device (2048 MiB when it is not given). That rule is unchanged.
+- **The boot image's bay is compared by hash.** The slot's bay in the boot image must hold this
+  bundle's build: each of its five boot files hashes the same as the bundle's payload for that role
+  (`bays::compare_hashes`). A bay of another build of the same slot id is refused by name, and
+  nothing is left. `--verify` with `--boot-image` checks the bay's stored hashes against the tree's
+  `slot.json`.
 - **`--verify` shows it.** With `--layout-of`, `--verify` prints the reserve the board will keep for
   live installs: `the board keeps N MiB free for live installs (its reserve_mb); the offline writer
   applies none`.

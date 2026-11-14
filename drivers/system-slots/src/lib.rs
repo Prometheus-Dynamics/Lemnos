@@ -129,7 +129,8 @@ use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::Place;
 pub use offline::{
-    FirstSlot, OfflineBoard, check_bay, check_layout, open_boot_image, write_first_slot,
+    FirstSlot, OfflineBoard, check_bay, check_bay_manifest, check_layout, open_boot_image,
+    write_first_slot,
 };
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};

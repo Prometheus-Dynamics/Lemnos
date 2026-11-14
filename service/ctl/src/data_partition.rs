@@ -398,7 +398,10 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         let bytes = std::fs::read(image).map_err(|e| format!("{image}: {e}"))?;
         let check = (|| {
             let mut boot: Boot<Mem> = offline::open_boot_image(&bytes)?;
-            offline::check_bay(&mut boot, &id)
+            let text = std::fs::read_to_string(dir.join("slots").join(format!("{id}.json")))
+                .map_err(|e| format!("slots/{id}.json: {e}"))?;
+            let manifest = Manifest::parse(&text).map_err(|e| format!("slots/{id}.json: {e}"))?;
+            offline::check_bay_manifest(&mut boot, &id, &manifest.boot_files)
         })();
         r.check(check, &format!("the boot image's bay holds slot {id}"));
     }

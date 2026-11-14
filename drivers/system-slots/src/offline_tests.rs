@@ -378,6 +378,62 @@ fn a_data_size_too_small_for_the_tree_is_refused_and_nothing_is_left() {
 }
 
 #[test]
+fn a_bay_of_another_build_of_the_same_slot_is_refused_by_name_and_nothing_is_left() {
+    let root = TempDir::new("offline-other-build");
+    let (bundle, payloads) = bundle_and_payloads("os-1");
+    // The same slot id, one boot file changed: another build, which the bundle does not make.
+    let mut other = payloads.clone();
+    other[0][0] ^= 0xff;
+    let image = boot_image("os-1", &other);
+    let err = write_first_slot(FirstSlot {
+        out: &root.0.join("out"),
+        bundle: &bundle,
+        boot_image: image,
+        keys: trusted(),
+        keys_name: "the keys file",
+        board: board(),
+        time: TIME,
+        free: 1 << 40,
+    })
+    .unwrap_err();
+    // The install's own hash check reaches the default's bay first, with the same words.
+    assert!(
+        err.contains("bay0 holds boot file kernel8.img with a different hash than slot.json says"),
+        "{err}"
+    );
+    assert!(!root.0.join("out").exists());
+}
+
+#[test]
+fn a_tree_verified_against_a_bay_of_another_build_is_refused_by_name() {
+    let root = TempDir::new("offline-verify-build");
+    let (bundle, payloads) = bundle_and_payloads("os-1");
+    let out = offline(
+        &root.0,
+        "out",
+        &bundle,
+        &boot_image("os-1", &payloads),
+        TIME,
+    )
+    .unwrap();
+    let manifest_text = fs::read_to_string(out.join("slots/os-1.json")).unwrap();
+    let manifest = lemnos_slot_store::manifest::Manifest::parse(&manifest_text).unwrap();
+    let mut other = payloads.clone();
+    other[0][0] ^= 0xff;
+    let mut boot = Boot::on(Mem(boot_image("os-1", &other))).unwrap();
+    let err =
+        crate::offline::check_bay_manifest(&mut boot, "os-1", &manifest.boot_files).unwrap_err();
+    assert!(
+        err.starts_with(
+            "bay0 holds boot file kernel8.img with a different hash than slot.json says"
+        ),
+        "{err}"
+    );
+    let mut same = Boot::on(Mem(boot_image("os-1", &payloads))).unwrap();
+    crate::offline::check_bay_manifest(&mut same, "os-1", &manifest.boot_files).unwrap();
+}
+
+#[test]
 fn an_existing_output_directory_is_refused_and_left_alone() {
     let root = TempDir::new("offline-exists");
     let (bundle, payloads) = bundle_and_payloads("os-1");

@@ -22,6 +22,7 @@ use core::result::Result;
 use lemnos_slot_store::bays::{self, ROLES};
 use lemnos_slot_store::boot_raw::{Boot, BootRaw, Pointer};
 use lemnos_slot_store::bootimage::Mem;
+use lemnos_slot_store::bundle;
 use std::sync::Arc;
 
 /// The bundle is handed to the installer in pieces of this size, as a sender would stream it.
@@ -68,12 +69,17 @@ pub struct FirstSlot<'a> {
     pub free: u64,
 }
 
+/// The slot and the five payloads its install wrote, shared between the record and the writer.
+type Installed = Arc<Mutex<Option<(String, [Vec<u8>; 5])>>>;
+
 /// The boot record of the offline writer: the daemon's raw boot-partition writers, run over an
 /// in-memory copy of the image. A write changes the copy and nothing else; the copy is never
 /// written back, so the boot partition is never touched. A restart has no board to restart, so it
 /// does nothing; the trial is armed in the copy, then confirmed.
 pub struct OfflineRecord {
     boot: Arc<Mutex<Boot<Mem>>>,
+    /// The slot and the five payloads its install wrote: the bundle's boot files, for the bay check.
+    installed: Installed,
 }
 
 fn io_of(message: String) -> std::io::Error {
@@ -111,6 +117,8 @@ impl BootRecord for OfflineRecord {
     }
 
     fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> std::io::Result<()> {
+        let kept: [Vec<u8>; 5] = std::array::from_fn(|i| payloads[i].to_vec());
+        *self.installed.lock().unwrap_or_else(|p| p.into_inner()) = Some((slot.to_string(), kept));
         self.lock()
             .install_slot(slot, payloads)
             .map(|_| ())
@@ -160,10 +168,18 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
     let copy = Arc::new(Mutex::new(
         Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?,
     ));
-    let record = OfflineRecord { boot: copy.clone() };
+    let installed = Arc::new(Mutex::new(None));
+    let record = OfflineRecord {
+        boot: copy.clone(),
+        installed: installed.clone(),
+    };
 
     fs::create_dir(input.out).map_err(|e| format!("{}: {e}", input.out.display()))?;
-    let mut pair = Pair { reference, copy };
+    let mut pair = Pair {
+        reference,
+        copy,
+        installed,
+    };
     let result = write_into(&input, record, &mut pair)
         .and_then(|id| fix_modes(input.out).map(|()| id))
         .and_then(|id| fit(input.out, input.free, id));
@@ -332,6 +348,8 @@ fn fix_modes(root: &Path) -> Result<(), String> {
 struct Pair {
     reference: Boot<Mem>,
     copy: Arc<Mutex<Boot<Mem>>>,
+    /// The slot and payloads the install wrote (see [`OfflineRecord`]).
+    installed: Installed,
 }
 
 fn write_into(
@@ -358,9 +376,16 @@ fn write_into(
     // The signature policy: decided on the outcome the install recorded, before anything is kept.
     let word = store::Meta::load(&layout, &id).get("SIGNATURE").to_string();
     signature_policy(&word, input.bundle, input)?;
-    // The boot image: the slot's bay must hold it, and the default must name a bay that holds
-    // it. The bay check is `check_bay`, the one call site of it.
-    check_bay(&mut pair.reference, &id)?;
+    // The boot image: the slot's bay must hold this bundle's build of the slot, and the default must
+    // name a bay that holds it. The bay check is `check_bay`, the one call site of it.
+    let (_, files) = pair
+        .installed
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .ok_or_else(|| "the install wrote no boot files".to_string())?;
+    let payloads: [&[u8]; 5] = std::array::from_fn(|i| files[i].as_slice());
+    check_bay(&mut pair.reference, &id, &payloads)?;
     let mut copy = pair
         .copy
         .lock()
@@ -387,18 +412,50 @@ fn write_into(
     Ok(id)
 }
 
-/// Check 11: the boot image's bay for `id` holds the slot. TODO(M35): compare the bay's payload
-/// hashes with the bundle's payloads, and refuse a different build (the bay record's
-/// `SHA-256` per file). Until M35 merges, only the slot id is compared, and a bay whose payloads
-/// differ from the bundle's passes here. The bay sizes are checked by [`check_layout`].
+/// Check 11: the boot image's bay for `id` holds this bundle's build of the slot. The bay's stored
+/// record names the slot, and each of its five boot files hashes the same as the bundle's payload
+/// for that role (`bays::compare_hashes`): a bay of another build of the same slot id is refused.
+/// The bay sizes are checked by [`check_layout`].
 ///
 /// # Errors
 ///
-/// The reason the bay does not hold `id`.
-pub fn check_bay(boot: &mut Boot<Mem>, id: &str) -> Result<(), String> {
-    boot.bay_of(id).map(drop).map_err(|_| {
+/// The reason the bay does not hold this build of `id`.
+pub fn check_bay(boot: &mut Boot<Mem>, id: &str, payloads: &[&[u8]; 5]) -> Result<(), String> {
+    let (set, info) = boot.bay_record(id).map_err(|_| {
         format!("the boot image holds no bay for slot {id}: build the image from this bundle")
-    })
+    })?;
+    bays::compare_hashes(set, &info, payloads)
+        .map_err(|why| format!("{why}: build the image from this bundle"))
+}
+
+/// Check 11 for a tree with no bundle (`--verify`): the bay's stored hashes are the ones the tree's
+/// `slot.json` lists for the same boot files, so the bay holds this tree's build of the slot.
+///
+/// # Errors
+///
+/// The reason the bay does not hold this build of `id`.
+pub fn check_bay_manifest(
+    boot: &mut Boot<Mem>,
+    id: &str,
+    boot_files: &[(String, String)],
+) -> Result<(), String> {
+    let (set, info) = boot.bay_record(id).map_err(|_| {
+        format!("the boot image holds no bay for slot {id}: build the image from this bundle")
+    })?;
+    for (i, role) in bays::ROLES.iter().enumerate() {
+        let want = boot_files
+            .iter()
+            .find(|(path, _)| path == role.path)
+            .map(|(_, sha)| sha.as_str())
+            .ok_or_else(|| format!("slot.json lists no hash for boot file {}", role.path))?;
+        if !bundle::hex(&info.files[i].1).eq_ignore_ascii_case(want) {
+            return Err(format!(
+                "bay{set} holds boot file {} with a different hash than slot.json says: build the image from this tree",
+                role.path
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Opens the boot image's bays for [`check_bay`] and the layout check: what `--verify` needs.

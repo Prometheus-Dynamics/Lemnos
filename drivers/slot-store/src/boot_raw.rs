@@ -414,6 +414,18 @@ impl<D: Sectors + ReadAt> Boot<D> {
         self.set_for(slot)
     }
 
+    /// The bay set a slot is in, and the record that set holds: each boot file's stored length and
+    /// hash. Refused by name when the slot has no bay or the bay holds no record.
+    pub fn bay_record(&mut self, slot: &str) -> Result<(u8, bays::Info), String> {
+        let set = self.set_for(slot)?;
+        let layout = self.layout.clone()?;
+        let placed = bays::place(&mut self.dev, &layout)?;
+        let info = bays::read_info(&mut self.dev, placed.info[set as usize])
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("bay{set} holds no record for {slot}"))?;
+        Ok((set, info))
+    }
+
     /// Installs a slot's five payloads into its bay (see [`bays::stage`]): the set that already holds
     /// the slot, else a set no pointer names. No pointer moves.
     pub fn install_slot(
