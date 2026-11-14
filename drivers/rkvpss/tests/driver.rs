@@ -729,3 +729,58 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
     assert_eq!(count, 0, "allocations in 1000 jobs");
     assert_eq!(log.runs(), 1010);
 }
+
+/// How many descriptors this process holds on the memfds with these inodes. Counts only the
+/// stream's own memfds, so another test running alongside does not change the answer.
+fn held_of(inodes: &[u64]) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::metadata(entry.unwrap().path()).ok())
+        .filter(|meta| inodes.contains(&meta.ino()))
+        .count()
+}
+
+/// The inode of each descriptor's memfd: its identity, which no other memfd of the process has.
+fn inodes_of(fds: &[std::os::fd::OwnedFd]) -> Vec<u64> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    fds.iter()
+        .map(|fd| {
+            std::fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                .unwrap()
+                .ino()
+        })
+        .collect()
+}
+
+/// A job that completes leaves its stream holding nothing once its consumer has detached, with
+/// no driver tick in between: the driver's handles went with the job.
+#[test]
+fn a_finished_job_leaves_its_stream_holding_nothing_once_the_consumer_detaches() {
+    let rig = counter_rig();
+    let log = log(16);
+    let mut driver = driver_on(&rig.host, &log);
+    let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
+    let inodes = inodes_of(lease.handles.as_deref().unwrap_or(&[]));
+    assert!(!inodes.is_empty(), "the stream's buffers are dma-bufs");
+    let mut consumer1 = consumer(lease);
+    assert_eq!(driver.tick(0), Some(POLL_NS));
+    post(&mut consumer1, &job(1, 0, 1));
+    driver.tick(MS);
+    let done = completion(&mut consumer1);
+    assert_eq!((done.buffer, done.identity, done.bytes), (1, 1, OUT_BYTES));
+    drop(consumer1);
+    rig.host.stream_detach(0, "jobs", CallerId(1)).unwrap();
+    let held = held_of(&inodes);
+    assert_eq!(
+        held, 0,
+        "driver stream jobs still holds {held} of its dma-bufs after its consumer detached, with no job running"
+    );
+    let stats = rig.host.stream_stats(0, "jobs").unwrap();
+    assert_eq!(
+        (stats.standby_bytes, stats.held_by_driver),
+        (0, 0),
+        "{stats:?}"
+    );
+}

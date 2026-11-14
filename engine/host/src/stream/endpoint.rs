@@ -6,7 +6,7 @@
 //! read from its hold marks, never from the shared memory's words.
 
 use std::os::fd::{AsFd, OwnedFd};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use lemnos_core::{CallerId, Status};
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
@@ -106,7 +106,14 @@ pub(crate) struct StreamCore {
     producer: ProducerWords,
     /// The device was bound again while retrying, so what it recovers to is a new instance.
     producer_lost: bool,
+    /// The descriptor sets of memory this stream has let go of, weakly: while a driver's handle
+    /// still holds one, the set's dma-bufs stay open. Counted by `stats` as held by the driver.
+    /// Fixed size, so none is allocated; a set past the last slot's reach is not counted.
+    released: [Option<Weak<[OwnedFd]>>; RELEASED_SLOTS],
 }
+
+/// How many released descriptor sets are tracked at once.
+const RELEASED_SLOTS: usize = 8;
 
 pub(super) fn lock(core: &Mutex<StreamCore>) -> std::sync::MutexGuard<'_, StreamCore> {
     core.lock().unwrap_or_else(PoisonError::into_inner)
@@ -153,6 +160,7 @@ impl StreamCore {
             counters: Counters::default(),
             producer: ProducerWords::default(),
             producer_lost: false,
+            released: std::array::from_fn(|_| None),
         }
     }
 
@@ -418,6 +426,9 @@ impl StreamCore {
         attached.memory.ring.set_end(state);
         let mut bell = attached.bell;
         bell.ring();
+        if let Some(set) = &attached.memory.handles {
+            self.note_released(set);
+        }
         self.epoch += 1;
         self.pool.reclaim_published();
         // Fresh memory for the next consumer, if on standby, when the producer next asks.
@@ -428,10 +439,36 @@ impl StreamCore {
     pub(crate) fn close(&mut self, state: u32) {
         self.closed = true;
         self.detach(state);
-        if self.waiting.take().is_some() {
+        if let Some(memory) = self.waiting.take() {
+            if let Some(set) = &memory.handles {
+                self.note_released(set);
+            }
             self.drop_kept();
             self.epoch += 1;
         }
+    }
+
+    /// Records a descriptor set this stream has let go of. A dead slot is reused first; with
+    /// every slot still held, the first is overwritten (its bytes go uncounted).
+    fn note_released(&mut self, set: &Arc<[OwnedFd]>) {
+        let slot = self
+            .released
+            .iter()
+            .position(|slot| slot.as_ref().is_none_or(|weak| weak.strong_count() == 0))
+            .unwrap_or(0);
+        self.released[slot] = Some(Arc::downgrade(set));
+    }
+
+    /// Bytes of released memory a handle still holds open: each set is the whole attachment's
+    /// buffers, so one live handle holds all of them.
+    fn held_by_driver(&self) -> u64 {
+        let set_bytes = u64::from(self.layout.buffers) * u64::from(self.layout.buffer_bytes);
+        self.released
+            .iter()
+            .flatten()
+            .filter(|weak| weak.strong_count() > 0)
+            .count() as u64
+            * set_bytes
     }
 
     fn drop_kept(&mut self) {
@@ -758,6 +795,12 @@ impl StreamCore {
             consumer_held,
             kept,
             standby: self.waiting.is_some(),
+            held_by_driver: self.held_by_driver(),
+            standby_bytes: if self.waiting.is_some() {
+                u64::from(self.layout.buffers) * u64::from(self.layout.buffer_bytes)
+            } else {
+                0
+            },
         }
     }
 }
@@ -845,17 +888,31 @@ pub struct ProducerEndpoint {
     buffers: u32,
     /// What the board file says the buffers are. An attachment is never made of anything else.
     kind: BufferKind,
-    /// The dma-bufs of the attachment the last buffer was taken in, kept here so one can be
-    /// lent for as long as this end is borrowed. Changed only when a buffer is taken, which
-    /// needs this end exclusively, so never while a handle is out.
-    lent: Option<Arc<[OwnedFd]>>,
-    /// The epoch `lent` belongs to.
-    lent_epoch: u64,
     /// Each buffer's planes.
     planes: Planes,
 }
 
 impl ProducerEndpoint {
+    /// The handle for `plane` of `buffer`, sharing the attachment's descriptors. Nothing is kept
+    /// here: the handle is the only thing holding the dma-buf open, besides the attachment itself.
+    fn plane_share(
+        &self,
+        buffer: u32,
+        plane: u32,
+    ) -> Result<Option<BufferHandle<'static>>, ErrorKind> {
+        let core = lock(&self.core);
+        if core.lendable(buffer)?.is_none() {
+            return Ok(None);
+        }
+        let Some(set) = core.in_place().and_then(|memory| memory.handles.clone()) else {
+            return Ok(None);
+        };
+        let index = (buffer as usize)
+            .checked_mul(self.planes.count() as usize)
+            .and_then(|first| first.checked_add(plane as usize));
+        Ok(index.and_then(|index| BufferHandle::shared(set, index)))
+    }
+
     pub(super) fn claim(core: Arc<Mutex<StreamCore>>) -> Result<Self, Status> {
         let (buffers, kind, planes) = {
             let mut guard = lock(&core);
@@ -873,8 +930,6 @@ impl ProducerEndpoint {
             core,
             buffers,
             kind,
-            lent: None,
-            lent_epoch: 0,
             planes,
         })
     }
@@ -924,25 +979,11 @@ impl StreamEndpoint for ProducerEndpoint {
     }
 
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
-        let mut core = lock(&self.core);
-        let buffer = core.next_buffer();
-        if buffer.is_some() && self.lent_epoch != core.epoch {
-            // Cloning shares the descriptors, and allocates nothing.
-            self.lent = core.in_place().and_then(|memory| memory.handles.clone());
-            self.lent_epoch = core.epoch;
-        }
-        Ok(buffer)
+        Ok(lock(&self.core).next_buffer())
     }
 
     fn ask_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
-        let mut core = lock(&self.core);
-        let buffer = core.ask_buffer();
-        if buffer.is_some() && self.lent_epoch != core.epoch {
-            // Cloning shares the descriptors, and allocates nothing.
-            self.lent = core.in_place().and_then(|memory| memory.handles.clone());
-            self.lent_epoch = core.epoch;
-        }
-        Ok(buffer)
+        Ok(lock(&self.core).ask_buffer())
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
@@ -977,19 +1018,7 @@ impl StreamEndpoint for ProducerEndpoint {
         if plane >= self.planes.count() {
             return Err(ErrorKind::InvalidInput);
         }
-        let current = lock(&self.core).lendable(buffer)?;
-        // A buffer taken on the memory that is still in place was taken through this end, so
-        // `lent` is that memory's.
-        if current != Some(self.lent_epoch) {
-            return Ok(None);
-        }
-        let index = (buffer as usize)
-            .checked_mul(self.planes.count() as usize)
-            .and_then(|first| first.checked_add(plane as usize));
-        let handles = self.lent.as_ref();
-        Ok(index
-            .and_then(|index| handles.and_then(|handles| handles.get(index)))
-            .map(|fd| BufferHandle::from(fd.as_fd())))
+        self.plane_share(buffer, plane)
     }
 
     fn fault_consumer(&mut self) -> Result<(), ErrorKind> {

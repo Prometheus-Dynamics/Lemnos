@@ -85,7 +85,7 @@ use lemnos_core::{
     Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_codec_jobs::{Block, Buffers, Server, Start, name_into};
-use lemnos_hal::blocks::BufferKind;
+use lemnos_hal::blocks::{BufferHandle, BufferKind};
 use lemnos_linux_sys::dma_buf;
 use lemnos_linux_sys::v4l2::device::ExtControl;
 use lemnos_linux_sys::v4l2::{
@@ -415,7 +415,9 @@ impl<N: Node, F: FnMut() -> io::Result<N>> StatelessBlock<N, F> {
             return Start::Refused;
         }
 
-        // Each picture plane: a dma-buf at least as large as the device's plane.
+        // Each picture plane: a dma-buf at least as large as the device's plane. The handles are
+        // pinned here, so the descriptors queued below live as long as the request does.
+        let mut pins: [Option<BufferHandle<'_>>; MAX_PLANES] = std::array::from_fn(|_| None);
         let mut queue = [QueuePlane {
             memory: PlaneMemory::Mmap,
             length: 0,
@@ -441,11 +443,17 @@ impl<N: Node, F: FnMut() -> io::Result<N>> StatelessBlock<N, F> {
                 index = reference.buffer;
             }
             queue[plane] = QueuePlane {
-                memory: PlaneMemory::Dmabuf(handle.fd()),
+                memory: PlaneMemory::Mmap,
                 length,
                 bytes_used: 0,
                 data_offset: 0,
             };
+            pins[plane] = Some(handle);
+        }
+        for (entry, pin) in queue.iter_mut().zip(pins.iter()).take(planes) {
+            if let Some(handle) = pin {
+                entry.memory = PlaneMemory::Dmabuf(handle.fd());
+            }
         }
         if index >= session.capture_buffers() {
             return Start::Refused;

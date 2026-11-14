@@ -5,8 +5,9 @@ mod description;
 
 pub use description::{
     DeviceDescription, Identity, MAX_RUNNING_JOBS, OwnedContract, OwnedItem, OwnedMethod,
-    OwnedParam, OwnedShape, RunningJob, decode_description, device_kind, effective_reading,
-    encode_description, parse_running_jobs, running_jobs_text,
+    OwnedParam, OwnedShape, RunningJob, StreamStandby, decode_description, device_kind,
+    effective_reading, encode_description, parse_running_jobs, parse_stream_standby,
+    running_jobs_text, stream_standby_text,
 };
 
 use lemnos_core::{Decode, Encode, Reader, Shape, Status, Writer};

@@ -104,7 +104,7 @@ In a stream:
 | `memory` | `"shared"` (the default): memory shared with the consumer, filled by the driver in software. `"dma-buf"`: one dma-buf per buffer, so hardware can fill it or read it |
 | `heap` | Only with `memory = "dma-buf"`: the dma-heap the buffers come from, by its name under `/dev/dma_heap`. `"system"` when left out |
 | `planes` | Only with `memory = "dma-buf"`: the lengths of a buffer's memory planes, for hardware that writes one frame into several (a node of the multi-plane V4L2 API). Each plane is its own dma-buf, 1 to 8 of them, and they add up to `buffer_bytes`. `buffers` times the plane count is at most 128. Left out, a buffer is one plane |
-| `standby` | `true`: the stream has memory while no consumer is attached, so hardware keeps filling it and a consumer that attaches is handed the newest frame at once, with nothing copied. `false` (the default): memory is made only for a consumer |
+| `standby` | `false` (the default): memory is made only for a consumer, and when the last consumer detaches every descriptor of its memory is let go, so the stream holds nothing until the next attach. `true`: the stream keeps memory while no consumer is attached, so hardware keeps filling it and a consumer that attaches is handed the newest frame at once, with nothing copied. It costs `buffers * buffer_bytes` bytes of memory for as long as nobody is attached (the ring, job and ack pages are not counted); a stream with `standby = true` holds that from its first frame to the end of the host. |
 
 [Frame streams](streams.md) says which to choose.
 

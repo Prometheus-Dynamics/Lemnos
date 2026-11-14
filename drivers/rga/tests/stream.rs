@@ -199,3 +199,86 @@ fn a_result_released_and_named_again_is_completed_again_through_the_hosts_ticks(
     }
     assert_eq!(host.stream_stats(index, "convert").unwrap().faults, 0);
 }
+
+/// How many descriptors this process holds on the memfds with these inodes. Counts only the
+/// stream's own memfds, so another test running alongside does not change the answer.
+fn held_of(inodes: &[u64]) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::metadata(entry.unwrap().path()).ok())
+        .filter(|meta| inodes.contains(&meta.ino()))
+        .count()
+}
+
+/// The inode of each descriptor's memfd: its identity, which no other memfd of the process has.
+fn inodes_of(fds: &[std::os::fd::OwnedFd]) -> Vec<u64> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    fds.iter()
+        .map(|fd| {
+            std::fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                .unwrap()
+                .ino()
+        })
+        .collect()
+}
+
+/// A control, not a regression test: on this board the job completes as failed before any
+/// handle is taken, and the convert stream is plain shared memory, so the driver never holds a
+/// dma-buf and the stream holds nothing at origin or here.
+#[test]
+fn a_finished_job_leaves_the_convert_stream_holding_nothing_once_the_consumer_detaches() {
+    let (host, clock, index) = start("config = { soc = \"rk3576\" }\n");
+    let lease = host.stream_attach(index, "convert", CallerId(5)).unwrap();
+    let inodes = inodes_of(lease.handles.as_deref().unwrap_or(&[]));
+    let mut consumer = lease.consumer_writable().unwrap();
+    for _ in 0..4 {
+        clock.0.fetch_add(1_000_000, Ordering::Relaxed);
+        host.tick();
+    }
+    assert!(consumer.write(0, 0, &[1, 2, 3, 4, 5, 6]));
+    assert!(consumer.write(1, 0, &[0x5a; 8]));
+    let job = ConvertJob {
+        identity: 77,
+        input: ImageRef {
+            buffer: 0,
+            width: 2,
+            height: 1,
+            fourcc: RGB3,
+            stride: 6,
+        },
+        output: ImageRef {
+            buffer: 1,
+            width: 2,
+            height: 1,
+            fourcc: AR24,
+            stride: 8,
+        },
+    };
+    let mut bytes = [0u8; 64];
+    let mut writer = Writer::new(&mut bytes);
+    job.encode(&mut writer).unwrap();
+    let used = writer.len();
+    assert!(consumer.jobs().post(&bytes[..used]).unwrap());
+    for _ in 0..4 {
+        clock.0.fetch_add(1_000_000, Ordering::Relaxed);
+        host.tick();
+        if consumer.pop_frame().unwrap().is_some() {
+            break;
+        }
+    }
+    drop(consumer);
+    host.stream_detach(index, "convert", CallerId(5)).unwrap();
+    let held = held_of(&inodes);
+    assert_eq!(
+        held, 0,
+        "driver stream convert still holds {held} memfds after its consumer detached"
+    );
+    let stats = host.stream_stats(index, "convert").unwrap();
+    assert_eq!(
+        (stats.standby_bytes, stats.held_by_driver),
+        (0, 0),
+        "{stats:?}"
+    );
+}

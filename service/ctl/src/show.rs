@@ -32,6 +32,16 @@ pub fn panel(description: &DeviceDescription) -> Vec<String> {
     for job in &description.jobs {
         lines.push(format!("  {}", job.words()));
     }
+    for stream in &description.streams {
+        lines.push(format!(
+            "  stream   {} standby: {} bytes held",
+            stream.name, stream.standby
+        ));
+        lines.push(format!(
+            "  stream   {} held by driver {}: {} bytes",
+            stream.name, description.label, stream.held
+        ));
+    }
     if !description.contracts.is_empty() {
         lines.push(format!("  provides {}", contract_list(description)));
     }

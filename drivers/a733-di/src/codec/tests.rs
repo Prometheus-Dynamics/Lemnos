@@ -450,3 +450,47 @@ fn the_config_check_takes_a_device_path_and_refuses_bad_settings() {
     let error = <crate::A733Di as Driver>::check_config(&Config::new(&empty)).unwrap_err();
     assert_eq!(error.reason, "must not be empty");
 }
+
+/// How many descriptors this process holds on the memfds with these inodes. Counts only the
+/// stream's own memfds, so another test running alongside does not change the answer.
+fn held_of(inodes: &[u64]) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::metadata(entry.unwrap().path()).ok())
+        .filter(|meta| inodes.contains(&meta.ino()))
+        .count()
+}
+
+/// A bob that completes leaves its stream holding nothing once its caller has detached, with no
+/// driver tick in between: the driver's handles went with the job.
+#[test]
+fn a_finished_job_leaves_its_stream_holding_nothing_once_the_caller_detaches() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.bob(usual_frame()), JobStatus::Done);
+    let Rig {
+        _host: host,
+        driver,
+        device,
+        caller,
+        now,
+    } = rig;
+    let inodes = caller.inodes();
+    assert!(!inodes.is_empty(), "the stream's buffers are dma-bufs");
+    drop(caller);
+    host.stream_detach(0, "jobs", lemnos_core::CallerId(1))
+        .unwrap();
+    let held = held_of(&inodes);
+    assert_eq!(
+        held, 0,
+        "driver stream jobs still holds {held} of its dma-bufs after its caller detached, with no job running"
+    );
+    let stats = host.stream_stats(0, "jobs").unwrap();
+    assert_eq!(
+        (stats.standby_bytes, stats.held_by_driver),
+        (0, 0),
+        "{stats:?}"
+    );
+    // The driver and the device outlive the check: nothing ran after the detach.
+    drop((driver, device, now));
+}

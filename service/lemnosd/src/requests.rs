@@ -13,6 +13,7 @@ use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
     PLANE_LENGTH_BYTES, REPLY_OVERHEAD, RunningJob, Tail, VERSION, WireError, check_parts, decode,
     encode_description, feature, handle_descriptors, package_mode, running_jobs_text,
+    stream_standby_text,
 };
 
 use crate::Core;
@@ -334,6 +335,15 @@ impl Client {
             reason: &reason,
             not_live,
             jobs: &running_jobs_text(&self.running_jobs(device)),
+            streams: &stream_standby_text(
+                &self
+                    .core
+                    .host
+                    .stream_standby(device)
+                    .iter()
+                    .map(|(name, standby, held)| (name.as_str(), *standby, *held))
+                    .collect::<Vec<_>>(),
+            ),
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {

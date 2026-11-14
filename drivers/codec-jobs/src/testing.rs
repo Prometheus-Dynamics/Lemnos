@@ -78,6 +78,23 @@ impl Caller {
         }
     }
 
+    /// The inodes of the stream's stand-in dma-bufs this caller holds, for a test that counts how
+    /// many of them stay open. Empty for a stream of plain memory.
+    pub fn inodes(&self) -> Vec<u64> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        self.handles
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|fd| {
+                std::fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                    .unwrap()
+                    .ino()
+            })
+            .collect()
+    }
+
     /// Writes `data` into `buffer` at `offset`.
     pub fn fill(&mut self, buffer: u32, offset: usize, data: &[u8]) {
         assert!(self.ring.write(buffer, offset, data));
