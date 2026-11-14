@@ -521,29 +521,68 @@ that the reply is larger than 61440 bytes and that the method has no paged form.
 pieces. `lemnos-ctl`, on the board's own socket, carries a frame of 1 MiB and reads such a reply
 whole. A method whose reply can exceed 60 KiB needs a paged form to be called through the bridge.
 
-**The description through `.call`.** `.call describe`, with no arguments, answers the device's
-description as text in format version 1. The format is defined in `service/orion/src/description.rs`,
-and `lemnos_orion::description::parse` reads it back:
+**The description through `.call`.** `.call describe`, with no arguments, answers the device's description as text in format version 1. `lemnos_orion::description::render` writes it and `lemnos_orion::description::parse` reads it, both in `service/orion/src/description.rs`.
 
-- The first line is `describe 1`. A reader refuses any other first line, so a change of format is a new
-  number. A reader ignores a key it does not know and a record whose word it does not know; a version 1
-  record keeps every key listed here.
-- Every other line is a record: a word, then `key=value` pairs separated by single spaces.
-- **One rule for values.** A text value is always in double quotes. Inside them `\\` is a backslash, `\"`
-  a quote, `\n` a newline, `\r` a carriage return and `\t` a tab; every other character, non-ASCII text
-  included, is written as it is. A text value never holds a raw newline. A number is bare, decimal, or hex
-  with `0x` (the address and the hash). An enum word is bare (`running`, `retrying`, `off`, `unknown`,
-  `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`,
-  `colour_array`, `three_axes`, `true`, `false`). A figure the device does not give is `unknown`; an option
-  that is not set is `none`. The quoted text `"none"` is a value, not the absent option.
-- `device generation lease_seconds label kind bus address location state reason`: `lease_seconds` is the
-  bridge's caller lease (the hello fact `lease.seconds`); `generation` is the device's
-  description generation, the same number as its `lemnos.<device>.description` topic (the two come from one
-  field, so a change moves both), or `unknown` before the device has one.
-- `contract index tag kind hash methods`; `method contract id name params returns out_buffer job`, where
-  `params` is each `name:shape` joined by a space; `item kind name unit unit_state exponent min max real_min
-  real_max real_step step warn_low warn_high contract method field reading group`, where `real_min`,
-  `real_max` and `real_step` are the item's real-valued range (decimal, or `none`).
+**The grammar.**
+
+- The text is lines, each ended by one `\n`, the last one included. No line is empty and no line has a trailing space.
+- The first line is exactly `describe 1`. A reader refuses any other first line, so a change of format is a new number.
+- Every other line is a record: a record word, `[a-z_][a-z0-9_]*`, then zero or more pairs, each preceded by exactly one space, `key=value`. A key is `[a-z0-9_]+`.
+- A value is a text value or a bare token. A bare token is `[A-Za-z0-9_.:+-]+`. A text value is in double quotes. Inside the quotes `\\` is a backslash, `\"` a quote, `\n` a newline, `\r` a carriage return and `\t` a tab. Those are the only escapes: any other backslash sequence is an error. A raw control character is an error too (a tab, a newline or a carriage return is written as its escape). Every other character, non-ASCII text included, is written as it is. The closing quote is followed by a space or the end of the line.
+- A key appears once per record, a record has at most 64 keys, and a line is at most 4096 bytes without its newline.
+- A reader ignores a key it does not know and a record whose word it does not know. Anything else is refused by name, with its line number.
+
+**The values.** A number is bare: decimal, or hex with `0x` (an address and a hash). A real number is its shortest round-trip form (`-1.5`, `-0.0`, `1e300`). A number the device does not give is an absent key, never a placeholder, and a real number that is NaN or infinite is absent too. An enum word is bare: `running`, `retrying`, `off`, `unknown`, `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`, `colour_array`, `three_axes`, `true`, `false`. A text option the device does not set is the bare word `none`; the quoted `"none"` is the text `none`.
+
+**The records.**
+
+- `device generation lease_seconds label kind bus address location state reason live`. `generation` is the device's description generation, the number its `lemnos.<device>.description` topic carries, and is absent before the device has one. `lease_seconds` is the bridge's caller lease (the hello fact `lease.seconds`), absent when the lease is off. `address` is `0xNN` or `none`. `state` is `running`, `retrying`, `off`, or `unknown` when none is given, and `reason` says why the device is not running or what its last failure was (empty when it runs). `live` is `true` when the device's running driver gave the rest of the description, and `false` when the device is not running (off, retrying, failed or never started).
+- `contract index tag kind hash methods`. `index` is the contract's position, which an item's `contract` names. `hash` is hex. `methods` is the count of the `method` records that follow for this contract: those are the records whose `contract` is `index`.
+- `method contract id name params returns out_buffer job`. `params` is each `name:shape`, joined by a space, as one quoted text. `out_buffer` and `job` are `true` or `false`.
+- `item kind name unit unit_state exponent min max real_min real_max real_step step warn_low warn_high contract method field reading group`. `min`, `max`, `real_min`, `real_max`, `real_step`, `step`, `warn_low` and `warn_high` are absent when the device gives no such bound. `field` and `group` are quoted or `none`. `reading` is one of the reading words, or `unknown`.
+
+**Devices that are not running.** lemnosd answers a description for every device in the board file, whatever its state. A device whose driver is not running (off by the operator, retrying a bind that keeps failing, failed, or never started because the board file disables it) has no driver to describe it. Its device record still comes, with its `state` and `reason` and `live=false`. Its contracts and methods come from the driver's manifest, which lemnosd has for every device, and it has no `item` records, no address and no location: those are what a running driver reports. The generation moves when the state or the reason changes, as it does for a running device. Those are the only answers that differ: a call in flight answers `BUSY`, and the bridge asks again.
+
+**Which records each state carries.** The description has the same records for every device; the state decides what is in them.
+
+| device's state | `device` record | `live` | `contract` and `method` records | `item` records | `address` and `location` |
+|---|---|---|---|---|---|
+| `running` (driver bound) | yes, with `state=running`, `reason=""` | `true` | from the driver's manifest | from the running driver | from the running driver |
+| `off` (switched off by the operator) | yes, with `state=off` and the reason | `false` | from the manifest | none | `none` and empty |
+| `retrying` (the bind failed or missed, or its settings were refused) | yes, with `state=retrying` and the reason the bind gave | `false` | from the manifest | none | `none` and empty |
+| `unknown` (no state given) | yes, with `state=unknown` | `false` | from the manifest | none | `none` and empty |
+
+The contract and method records come from the manifest because lemnosd has it for every device in the board file, so a device that does not run still says what it offers. A device with no manifest is not in the board file and is not described (`NO_DEVICE`).
+
+
+**Bounds.** A reader takes at most 60 KiB of text, 4 KiB per line, 4096 records, 64 keys per record, 256 `contract` records, 2048 `method` records and 2048 `item` records. The encoder refuses a description that would pass one of them, by name, with the count and the bound. It never cuts a description short: the bridge sends the whole text or a failure that says why. A text value that holds a control character other than tab, newline or carriage return cannot be written in the format, so the description is refused by name too. `service/orion/tests/description_bounds.rs` describes every built-in driver through this text form and fails if one is over a bound. Measured then: the largest description is 3775 bytes (`ov9782`, 21 lines, 20 records, a manifest-only description since its driver does not bind on the simulated board), and the largest one from a running driver is 2149 bytes (`rp1-csi2`, 17 lines, 10 keys in a record). The longest line is 783 bytes. The most keys in one record is 19 (`pisp-be`). No driver comes near 60 KiB, so there is no paged form: a description that would pass a bound is refused by name. The items of a driver the simulator cannot host are not in those figures, since only a running driver gives items; a running item record is about 150 to 300 bytes, so a device would need hundreds of items to reach 60 KiB.
+
+**Examples.** Two real replies from the walk board, and one for a device whose bind keeps failing. The running one's `location` is shortened to a `/sys` path.
+
+```describe
+describe 1
+device label="zone" kind="sensor" bus="" address=none location="/sys/class/thermal/thermal_zone0" state=running reason="" live=true
+contract index=0 tag="temperature/1" kind="sensor" hash=0xc77f0ded2da1235c methods=1
+method contract=0 id=1 name="read" params="" returns="f32" out_buffer=false job=false
+item kind=value name="temperature" unit="°C" unit_state=known exponent=0 contract=0 method=1 field=none reading=number group=none
+```
+
+```describe
+describe 1
+device label="zone" kind="sensor" bus="" address=none location="" state=off reason="manual" live=false
+contract index=0 tag="temperature/1" kind="sensor" hash=0xc77f0ded2da1235c methods=1
+method contract=0 id=1 name="read" params="" returns="f32" out_buffer=false job=false
+```
+
+```describe
+describe 1
+device label="n-a733-di" kind="compute" bus="" address=none location="" state=retrying reason="bind failed: Status(-2)" live=false
+contract index=0 tag="codec.block/1" kind="compute" hash=0x7c1ff4f41c048c36 methods=4
+method contract=0 id=1 name="info" params="" returns="{max_work_bytes: u32, max_refs: u16, max_items: u16, max_read_back: u32, max_buffers: u32}" out_buffer=false job=false
+method contract=0 id=2 name="block" params="" returns="bytes" out_buffer=true job=false
+method contract=0 id=3 name="job_stream" params="" returns="bytes" out_buffer=true job=false
+method contract=0 id=4 name="counters" params="" returns="{jobs: u64, refused: u64, failed: u64}" out_buffer=false job=false
+```
 
 `describe` is a word of the bridge, not a method: no device has a method of that name. `describe x` is
 refused. The text is held to 60 KiB like any reply.

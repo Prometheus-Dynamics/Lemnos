@@ -291,9 +291,13 @@ impl Client {
         let Some(manifest) = self.core.host.manifest(device) else {
             return self.refuse(id, Status::NOT_FOUND, "no such device");
         };
-        let description = match self.core.host.describe(device) {
-            Ok(description) => description,
-            Err(status) => return self.refuse(id, status, "the device isn't running"),
+        // A device whose driver is not running (off, retrying, failed, never started) has no
+        // driver to describe it: it is described from its manifest alone, and says so (`not_live`).
+        // Only a call in flight (BUSY) or a panic refuses.
+        let (description, not_live) = match self.core.host.describe(device) {
+            Ok(description) => (description, false),
+            Err(status) if status == Status::NO_DEVICE => (lemnos_core::Description::new(), true),
+            Err(status) => return self.refuse(id, status, "the device can't be described now"),
         };
         // The identity the board and the host give: its label, bus and state. Read after the
         // description, so a state that changed in between is the one reported.
@@ -312,6 +316,7 @@ impl Client {
             bus: info.bus.as_deref().unwrap_or(""),
             state,
             reason: &reason,
+            not_live,
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {

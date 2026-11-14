@@ -157,6 +157,15 @@ fn described_moved(held: &Status, new: &Status) -> bool {
     held.state != new.state || held.reason != new.reason
 }
 
+/// Whether the items or controls `describe` shows for a device changed. A device that is not
+/// running shows none of them, so when neither the held nor the new spec runs, a change in its
+/// held items is not a change of what is described: the state change that took it off already
+/// was one. A device that comes back with a new shape while it runs is a change.
+fn shown_shape_moved(held: &DeviceSpec, new: &DeviceSpec) -> bool {
+    (held.status.state == DeviceState::Running || new.status.state == DeviceState::Running)
+        && (held.items != new.items || held.controls != new.controls)
+}
+
 /// Whether two specs describe the same device, apart from its index and its status: what its
 /// resource, topics and actions are made from.
 fn same_shape(held: &DeviceSpec, new: &DeviceSpec) -> bool {
@@ -199,10 +208,22 @@ impl Mirror {
                     let slot = self.next_slot;
                     self.next_slot += 1;
                     self.added.push(slot);
+                    // The same device with another shape (its items, say, once it runs) is a new
+                    // slot, but not a new device: its generation carries on, one step on, so a
+                    // generation never goes back.
+                    let (generation, generation_dirty) =
+                        match held.iter().find(|d| d.spec.name == spec.name) {
+                            Some(d) => {
+                                let moved = described_moved(&d.spec.status, &spec.status)
+                                    || shown_shape_moved(&d.spec, &spec);
+                                (d.generation + u64::from(moved), moved)
+                            }
+                            None => (1, true),
+                        };
                     kept.push(Device {
                         slot,
-                        generation: 1,
-                        generation_dirty: true,
+                        generation,
+                        generation_dirty,
                         items: spec
                             .items
                             .iter()
@@ -680,6 +701,94 @@ mod tests {
         // Steady: the same status again is not a change.
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone");
         assert!(take(&mut mirror).described.is_empty());
+        // Off, and back: each is a change of state, so each moves the generation.
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off");
+        assert_eq!(take(&mut mirror).described, [(0, 5)], "off is a state");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off");
+        assert!(take(&mut mirror).described.is_empty());
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Failed, "bus gone");
+        assert_eq!(take(&mut mirror).described, [(0, 6)], "retrying is a state");
+    }
+
+    /// What `describe` reads is the mirror's generation, and a generation the topic publishes is taken
+    /// from the same mirror: so the mirror has the new generation before it is published, and is never
+    /// older than a published one. Ordered by the calls, not by time.
+    #[test]
+    fn a_description_generation_is_never_older_than_one_published() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        assert_eq!(take(&mut mirror).described, [(0, 1)]);
+        assert_eq!(mirror.description_generation("a"), Some(1));
+
+        // The change is in the mirror as soon as it arrives: `describe` answers it before the topic
+        // is published, and the publish that follows carries the same number.
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual");
+        assert_eq!(mirror.description_generation("a"), Some(2));
+        let published = take(&mut mirror).described;
+        assert_eq!(published, [(0, 2)]);
+        assert_eq!(mirror.description_generation("a"), Some(2));
+
+        // Nothing published is ever ahead of what describe would answer.
+        for (_, generation) in published {
+            assert!(mirror.description_generation("a").unwrap() >= generation);
+        }
+    }
+
+    /// Switching a device off is one change of its description, even when the list is taken again
+    /// (a new session after a lost connection): the new list shows it off with no items, which is
+    /// what the state change already said, so the generation does not move again.
+    #[test]
+    fn a_device_switched_off_and_listed_again_is_one_change() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &["x"])], None);
+        take(&mut mirror);
+        assert_eq!(mirror.description_generation("a"), Some(1));
+
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual");
+        assert_eq!(
+            mirror.description_generation("a"),
+            Some(2),
+            "off is one change"
+        );
+        take(&mut mirror);
+
+        let mut listed = spec(0, "a", &[]);
+        listed.status = Status {
+            state: DeviceState::Off,
+            health: DeviceHealth::Failed,
+            reason: "manual".to_owned(),
+        };
+        mirror.set_devices(vec![listed], None);
+        assert_eq!(
+            mirror.description_generation("a"),
+            Some(2),
+            "listed again while off: the same description"
+        );
+        let changes = take(&mut mirror);
+        assert!(changes.described.is_empty(), "{changes:?}");
+    }
+
+    #[test]
+    fn a_device_whose_shape_changes_keeps_its_generation_counting_on() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        take(&mut mirror);
+        assert_eq!(mirror.description_generation("a"), Some(1));
+
+        // Running after being off gives the device items: a new shape, so a new slot. It is the
+        // same device, so its generation goes on by one rather than starting again at one.
+        mirror.set_devices(vec![spec(0, "a", &["x"])], None);
+        assert_eq!(mirror.description_generation("a"), Some(2));
+        let changes = take(&mut mirror);
+        assert_eq!(changes.removed, [0], "the old slot is taken away");
+        assert_eq!(
+            changes
+                .described
+                .iter()
+                .map(|(_, g)| *g)
+                .collect::<Vec<_>>(),
+            [2]
+        );
     }
 
     #[test]

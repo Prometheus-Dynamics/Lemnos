@@ -65,6 +65,23 @@ fn start_lemnosd(socket: &Path) -> Service {
     .expect("lemnosd")
 }
 
+/// A board with one device that cannot come up: its driver refuses it (`refuse = true`), so its bind
+/// fails, and lemnosd keeps it retrying with the reason.
+const REFUSED_BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+    [[devices]]\nid = \"bad\"\ndriver = \"fake-accelerometer\"\n[devices.config]\nrefuse = true\n";
+
+fn start_lemnosd_refused(socket: &Path) -> Service {
+    Service::start(LemnosdConfig {
+        socket: socket.to_path_buf(),
+        name: "t".to_string(),
+        board: parse(REFUSED_BOARD).expect("board"),
+        drivers: vec![entry::<FakeAccelerometer>()],
+        backend: Box::new(SimBoard::new()),
+        options: HostOptions::default(),
+    })
+    .expect("lemnosd")
+}
+
 /// Orion node logic in a thread of its own, until dropped.
 struct Logic {
     kill: Option<oneshot::Sender<()>>,
@@ -249,6 +266,15 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
             .expect("run");
         match run.finish(WAIT) {
             Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The device is not running (-19): refused before the call ran, so it is asked again
+            // once it runs, within the same bound. A bind that misses under load leaves it retrying.
+            Ok(done)
+                if done.outcome == Outcome::Failed
+                    && done.detail.contains("refused (-19)")
+                    && Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(20));
             }
             other => {
@@ -1665,14 +1691,17 @@ fn values_keep_the_time_the_driver_read_them_on_the_monotonic_clock() {
 fn an_idle_session_is_kept_while_nothing_changes() {
     let dir = dir("idle");
     let lemnosd = dir.join("lemnosd.sock");
-    // The comm core gives a quiet session 400 ms, with a 50 ms heartbeat. The bridge pings, so it
-    // is never quiet for that long, and nothing is said to Orion meanwhile.
+    // The comm core gives a quiet session 2 s, with a 50 ms heartbeat. The bridge pings, so it is
+    // never quiet for that long, and nothing is said to Orion meanwhile. The idle time is long so
+    // that only a bridge thread not run for 2 s could be dropped: a shorter one let a loaded machine
+    // starve the bridge past the idle time (the comm core then closes the session, correctly).
+    const IDLE_MS: u32 = 2000;
     let board = Board::start_with(
         &dir,
         BoardOptions {
             for_node: true,
             heartbeat_ms: 50,
-            idle_ms: 400,
+            idle_ms: IDLE_MS,
             ..BoardOptions::default()
         },
     );
@@ -1683,8 +1712,9 @@ fn an_idle_session_is_kept_while_nothing_changes() {
     wait_for("the imu's resource", || {
         resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
     });
-    // The dashboard's own session must keep pinging too, or the comm core closes it.
-    let until = Instant::now() + Duration::from_millis(1600);
+    // The dashboard's own session must keep pinging too, or the comm core closes it. Two and a half
+    // idle times: the comm core would have closed a quiet session several times over.
+    let until = Instant::now() + Duration::from_millis(u64::from(IDLE_MS) * 5 / 2);
     while Instant::now() < until {
         let _ = dashboard.pump(Duration::from_millis(20));
     }
@@ -1852,4 +1882,40 @@ fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
     assert!(seen.iter().all(|&(_, total)| total == 1000), "{seen:?}");
     assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0), "{seen:?}");
     assert!(seen.iter().all(|&(done, _)| done <= 1000), "{seen:?}");
+}
+
+/// A device that cannot come up is described through the bridge all the same: its device record
+/// says its state and why, it is not live, and it has no items. Its contracts and methods come from
+/// the manifest, which lemnosd has for every device on the board.
+#[test]
+fn a_device_that_cannot_come_up_is_described_with_its_state_and_reason() {
+    let dir = dir("refused");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_refused(&lemnosd);
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the refused device's resource", || {
+        resource(&dashboard, "lemnos.bad")
+    });
+    let done = wait_for("the refused device's describe", || {
+        let done = run_once_said(&dashboard, "lemnos.bad.call", "lemnos.bad", "describe");
+        (done.outcome == Outcome::Succeeded).then_some(done)
+    });
+    let text = String::from_utf8(done.output).expect("text");
+    let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
+    let device = records.iter().find(|r| r.word == "device").expect("device");
+    assert_eq!(device.get("live"), Some("false"), "{text}");
+    assert_eq!(device.get("state"), Some("retrying"), "{text}");
+    let reason = device.get("reason").expect("a reason");
+    assert!(!reason.is_empty(), "the reason is said: {text}");
+    assert!(
+        records.iter().all(|r| r.word != "item"),
+        "a device that does not run has no items: {text}"
+    );
+    assert!(
+        records.iter().any(|r| r.word == "method"),
+        "its methods come from the manifest: {text}"
+    );
 }

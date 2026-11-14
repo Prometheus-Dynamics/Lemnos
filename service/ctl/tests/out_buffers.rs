@@ -62,6 +62,7 @@ fn described() -> DeviceDescription {
         bus: "",
         state: 0,
         reason: "",
+        not_live: false,
     };
     let n = encode_description(&manifest, &Description::new(), &identity, &mut bytes).unwrap();
     decode_description(&bytes[..n]).unwrap()

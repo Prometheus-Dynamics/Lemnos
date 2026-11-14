@@ -173,6 +173,8 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut number = 0u64;
     let mut changes = Changes::default();
     let mut done = Vec::new();
+    // What the lost session still holds on the comm core, until it is gone: see [`Held`].
+    let mut held: Option<Held> = None;
     while !shared.stopping() {
         let (devices, facts, set) = shared.with(|mirror| {
             let (devices, facts) = mirror.snapshot();
@@ -187,14 +189,28 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             continue;
         }
         number += 1;
-        let mut session = match Session::open(config, number, &devices, &facts, set) {
+        let mut session = match Session::open(config, number, &devices, &facts, set, held.as_ref())
+        {
             Ok(session) => session,
-            Err(message) => {
+            Err(Opening::StillHeld(message)) => {
+                // The old session is still closing on the comm core. Said once per loss, then
+                // retried on the short interval, with the backoff left where it is.
+                if let Some(held) = held.as_mut()
+                    && !held.told
+                {
+                    held.told = true;
+                    log(&message);
+                }
+                pause(shared, held.as_ref().map_or(RECONNECT, |held| held.every));
+                continue;
+            }
+            Err(Opening::Failed(message)) => {
                 log(&message);
-                wait_bell(shared, backoff.next_delay());
+                pause(shared, backoff.next_delay());
                 continue;
             }
         };
+        held = None;
         log(&format!(
             "connected to Orion node {}; {} devices published",
             session.node,
@@ -207,12 +223,76 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             End::Lost(message) => {
                 log(&message);
                 // Dropped first: the next session says the same names, which the old one holds
-                // until it is gone.
+                // until it is gone. [`Held`] keeps those names and until when.
+                held = Some(Held::of(&session));
                 drop(session);
                 wait_bell(shared, RECONNECT);
             }
         }
     }
+}
+
+/// What the session that was lost still holds on the comm core, and until when.
+///
+/// The comm core frees a session's names when it closes the session, and it closes a session it
+/// has not heard from for `idle`. A session the bridge gave up on keeps its names for up to that
+/// long, so a new session's declarations and action registrations of those names are refused
+/// until then. Orion's answer is `AlreadyExists` (`ClientError::Refused`, wire value 9) for a name
+/// another session holds, whoever it is: the value does not say who holds it. What tells the two
+/// apart is the bridge's own record. A refusal of a name this bridge published in the session
+/// that was lost, while `until` has not passed, is that old session still closing: it is retried
+/// every `every` (heartbeat / 2, bounded by idle / 4, as the publisher's own wait), and the backoff
+/// does not grow. Any other refusal is a genuine conflict and backs off as before. Nothing gives
+/// up. `until` is the loss plus `idle` and a heartbeat: the comm core closes the old session at
+/// most a heartbeat after the bridge notices the loss, so it is gone by then.
+struct Held {
+    names: HashSet<String>,
+    until: Instant,
+    every: Duration,
+    /// Whether the first retry of this loss has been logged.
+    told: bool,
+}
+
+impl Held {
+    /// What `session` holds on the comm core, from the moment its loss is noticed.
+    fn of(session: &Session) -> Self {
+        let welcomed = session.orion.welcomed();
+        let mut names = HashSet::new();
+        names.insert(ANCHOR.to_owned());
+        names.insert(DEVICE_SET.name.to_owned());
+        names.extend(
+            session
+                .devices
+                .values()
+                .map(|device| device.resource.name().as_str().to_owned()),
+        );
+        names.extend(
+            session
+                .facts
+                .iter()
+                .map(|fact| format!("{}{}", hello::TOPIC_PREFIX, fact.name)),
+        );
+        Self {
+            names,
+            until: Instant::now() + welcomed.idle + welcomed.heartbeat,
+            every: (welcomed.heartbeat / 2)
+                .min(welcomed.idle / 4)
+                .max(Duration::from_millis(10)),
+            told: false,
+        }
+    }
+
+    /// Whether `name` may still be held by the session that was lost.
+    fn covers(&self, name: &str) -> bool {
+        Instant::now() < self.until && self.names.contains(name)
+    }
+}
+
+/// Why a session could not be opened. A name the lost session still holds is retried on the
+/// short interval, not a failure: see [`Held`].
+enum Opening {
+    StillHeld(String),
+    Failed(String),
 }
 
 /// Why a session ended.
@@ -263,10 +343,21 @@ struct Session {
 
 /// Why a device or fact could not be described.
 enum Refused {
-    /// Orion will not take this device: its name, or a name another program holds.
+    /// Orion will not take this device or fact: its name, or a refusal that says so.
     Device(String),
+    /// Orion answers `already exists`: the name is held by some session. See [`Held`].
+    Taken(String),
     /// The session cannot go on: a lost connection, or a refusal of the session.
     Session(Error),
+}
+
+impl Refused {
+    fn why(&self) -> String {
+        match self {
+            Self::Device(why) | Self::Taken(why) => why.clone(),
+            Self::Session(error) => error.to_string(),
+        }
+    }
 }
 
 impl Session {
@@ -279,15 +370,17 @@ impl Session {
         devices: &[(u64, DeviceSpec)],
         facts: &[(String, String)],
         set: u64,
-    ) -> Result<Self, String> {
+        held: Option<&Held>,
+    ) -> Result<Self, Opening> {
         let options = Options {
             roles: Roles::CLIENT.and(Roles::PROVIDER),
             ..Options::default()
         };
-        let orion = Orion::connect_with(&config.orion, CLIENT_NAME, options)
-            .map_err(|error| format!("Orion not available at {}: {error}", config.orion))?;
+        let orion = Orion::connect_with(&config.orion, CLIENT_NAME, options).map_err(|error| {
+            Opening::Failed(format!("Orion not available at {}: {error}", config.orion))
+        })?;
         let node = orion.welcomed().node.as_str().to_owned();
-        check_node(&node, config.node_id.as_deref())?;
+        check_node(&node, config.node_id.as_deref()).map_err(Opening::Failed)?;
         let anchor = orion
             .register_action(
                 &ActionDecl {
@@ -297,7 +390,9 @@ impl Session {
                 },
                 ANCHOR_POLICY,
             )
-            .map_err(|error| format!("Orion did not take {ANCHOR}: {error}"))?;
+            .map_err(|error| {
+                opening(held, ANCHOR, error, &format!("Orion did not take {ANCHOR}"))
+            })?;
         let mut device_set = orion
             .declare(&TopicDecl {
                 name: DEVICE_SET.name,
@@ -306,9 +401,17 @@ impl Session {
                 expiry_ms: DEVICE_SET.expiry_ms,
                 max_payload: 8,
             })
-            .map_err(|error| format!("Orion did not take {}: {error}", DEVICE_SET.name))?;
-        sample(&mut device_set, 0, now(), &generation_bytes(set))
-            .map_err(|error| format!("{}: not written: {error}", DEVICE_SET.name))?;
+            .map_err(|error| {
+                opening(
+                    held,
+                    DEVICE_SET.name,
+                    error,
+                    &format!("Orion did not take {}", DEVICE_SET.name),
+                )
+            })?;
+        sample(&mut device_set, 0, now(), &generation_bytes(set)).map_err(|error| {
+            Opening::Failed(format!("{}: not written: {error}", DEVICE_SET.name))
+        })?;
         let mut session = Self {
             orion,
             node,
@@ -322,39 +425,59 @@ impl Session {
             device_set,
         };
         for (slot, spec) in devices {
-            session
-                .adopt(*slot, spec)
-                .map_err(|error| format!("Orion did not take {}: {error}", spec.name))?;
+            match session.adopt(*slot, spec) {
+                Ok(()) => {}
+                Err(Refused::Taken(why))
+                    if held.is_some_and(|held| {
+                        held.covers(&format!("{RESOURCE_PREFIX}{}", spec.name))
+                    }) =>
+                {
+                    return Err(Opening::StillHeld(format!(
+                        "{}: still held by the lost session: {why}",
+                        spec.name
+                    )));
+                }
+                Err(Refused::Session(error)) => {
+                    return Err(Opening::Failed(format!(
+                        "Orion did not take {}: {error}",
+                        spec.name
+                    )));
+                }
+                Err(refused) => log(&format!("{}: not published: {}", spec.name, refused.why())),
+            }
         }
         for (name, value) in facts {
-            let fact = declare_fact(&session.orion, name, value)
-                .map_err(|error| format!("Orion did not take hello.{name}: {error}"))?;
-            session.facts.push(fact);
+            match declare_fact(&session.orion, name, value, held) {
+                Ok(fact) => session.facts.push(fact),
+                Err(Refused::Taken(why)) => {
+                    return Err(Opening::StillHeld(format!(
+                        "hello.{name}: still held by the lost session: {why}"
+                    )));
+                }
+                Err(refused) => {
+                    return Err(Opening::Failed(format!(
+                        "Orion did not take hello.{name}: {}",
+                        refused.why()
+                    )));
+                }
+            }
         }
         Ok(session)
     }
 
-    /// Describes a device Orion has not seen: its resource, topics and actions. One Orion will
-    /// not take is logged and left out. Only a lost connection, or a session Orion refuses,
-    /// is an error.
-    fn adopt(&mut self, slot: u64, spec: &DeviceSpec) -> Result<(), Error> {
-        match describe(&self.orion.provider(), spec) {
-            Ok((published, verbs)) => {
-                for verb in verbs {
-                    self.actions.insert(
-                        format!("{}.{}", published.resource.name().as_str(), verb.name()),
-                        (slot, verb),
-                    );
-                }
-                self.devices.insert(slot, published);
-                Ok(())
-            }
-            Err(Refused::Device(why)) => {
-                log(&format!("{}: not published: {why}", spec.name));
-                Ok(())
-            }
-            Err(Refused::Session(error)) => Err(error),
+    /// Describes a device Orion has not seen: its resource, topics and actions. A refusal comes
+    /// back as it is, for the caller to decide: a session that is opening may retry a name the
+    /// lost session holds (see [`Held`]), and otherwise the device is logged and left out.
+    fn adopt(&mut self, slot: u64, spec: &DeviceSpec) -> Result<(), Refused> {
+        let (published, verbs) = describe(&self.orion.provider(), spec)?;
+        for verb in verbs {
+            self.actions.insert(
+                format!("{}.{}", published.resource.name().as_str(), verb.name()),
+                (slot, verb),
+            );
         }
+        self.devices.insert(slot, published);
+        Ok(())
     }
 
     /// Serves the session until Orion is lost for good, or the service stops.
@@ -527,7 +650,11 @@ impl Session {
             self.remove(slot)?;
         }
         for (slot, spec) in &changes.added {
-            self.adopt(*slot, spec)?;
+            match self.adopt(*slot, spec) {
+                Ok(()) => {}
+                Err(Refused::Session(error)) => return Err(error),
+                Err(refused) => log(&format!("{}: not published: {}", spec.name, refused.why())),
+            }
         }
         if let Some(facts) = &changes.hello {
             self.publish_facts(facts)?;
@@ -664,8 +791,12 @@ impl Session {
         }
         for (name, value) in facts {
             let Some(at) = self.facts.iter().position(|fact| fact.name == *name) else {
-                let fact = declare_fact(&self.orion, name, value)?;
-                self.facts.push(fact);
+                match declare_fact(&self.orion, name, value, None) {
+                    Ok(fact) => self.facts.push(fact),
+                    Err(Refused::Session(error)) => return Err(error),
+                    // Without a held name, `declare_fact` answers only a session error.
+                    Err(_) => {}
+                }
                 continue;
             };
             let fact = &mut self.facts[at];
@@ -738,7 +869,12 @@ fn device_name(device: &Published) -> String {
 /// Declares the `hello.<fact>` topic and says its value. A fact another program already
 /// publishes, or one Orion will not take, is logged and held as not published; a lost
 /// connection is an error.
-fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
+fn declare_fact(
+    orion: &Orion,
+    name: &str,
+    value: &str,
+    held: Option<&Held>,
+) -> Result<Fact, Refused> {
     let topic = format!("{}{name}", hello::TOPIC_PREFIX);
     let fields = [text_field("value")];
     let decl = TopicDecl {
@@ -750,7 +886,7 @@ fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
     };
     match orion.declare(&decl) {
         Ok(mut publisher) => {
-            sample(&mut publisher, 0, now(), value.as_bytes())?;
+            sample(&mut publisher, 0, now(), value.as_bytes()).map_err(Refused::Session)?;
             Ok(Fact {
                 name: name.to_owned(),
                 publisher: Some(publisher),
@@ -758,7 +894,10 @@ fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
             })
         }
         Err(error) => match fact_refused(error) {
-            Refused::Device(why) => {
+            Refused::Taken(why) if held.is_some_and(|held| held.covers(&topic)) => {
+                Err(Refused::Taken(why))
+            }
+            Refused::Device(why) | Refused::Taken(why) => {
                 log(&format!("{topic}: not published: {why}"));
                 Ok(Fact {
                     name: name.to_owned(),
@@ -766,7 +905,7 @@ fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
                     value: None,
                 })
             }
-            Refused::Session(error) => Err(error),
+            Refused::Session(error) => Err(Refused::Session(error)),
         },
     }
 }
@@ -849,6 +988,28 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
     ))
 }
 
+/// Whether Orion refused a session's declaration or registration because the name is held.
+fn is_taken(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Client(ClientError::Refused(Refusal::AlreadyExists))
+            | Error::Topic(TopicError::Client(ClientError::Refused(
+                Refusal::AlreadyExists
+            )))
+    )
+}
+
+/// The failure to open a session for `what` (`error` says why). Held by the lost session is
+/// retried; anything else is a failure.
+fn opening(held: Option<&Held>, name: &str, error: Error, what: &str) -> Opening {
+    let message = format!("{what}: {error}");
+    if held.is_some_and(|held| held.covers(name)) && is_taken(&error) {
+        Opening::StillHeld(message)
+    } else {
+        Opening::Failed(message)
+    }
+}
+
 fn topic_refused(error: TopicError) -> Refused {
     match error {
         TopicError::Invalid(why) => Refused::Device(why),
@@ -857,15 +1018,16 @@ fn topic_refused(error: TopicError) -> Refused {
     }
 }
 
-/// A name another program holds, or one Orion will not take, is this device's problem; any
-/// other refusal or a lost connection ends the session.
+/// A name Orion will not take is this device's problem, and so is a name another session holds
+/// (`Taken`, which the caller may retry: see [`Held`]); any other refusal or a lost connection
+/// ends the session.
 fn client_refused(error: ClientError) -> Refused {
     match error {
+        ClientError::Refused(why @ Refusal::AlreadyExists) => {
+            Refused::Taken(why.as_str().to_owned())
+        }
         ClientError::Refused(
-            why @ (Refusal::AlreadyExists
-            | Refusal::InvalidName
-            | Refusal::NameTooLong
-            | Refusal::EmptyName),
+            why @ (Refusal::InvalidName | Refusal::NameTooLong | Refusal::EmptyName),
         ) => Refused::Device(why.as_str().to_owned()),
         ClientError::Protocol(why) => Refused::Device(why.to_owned()),
         other => Refused::Session(Error::Client(other)),
@@ -932,6 +1094,21 @@ fn timespec(wait: Duration) -> Timespec {
     Timespec {
         tv_sec: i64::try_from(wait.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: i64::from(wait.subsec_nanos()),
+    }
+}
+
+/// Waits `wait` before the next try of a session, and ends early only when the service stops. A
+/// change in the mirror does not end it: with no session there is nothing to publish it on, and a
+/// wake-up per change (a device's values stream) would turn the backoff into a retry every few
+/// milliseconds.
+fn pause(shared: &Shared, wait: Duration) {
+    let until = Instant::now() + wait;
+    while !shared.stopping() {
+        let now = Instant::now();
+        if now >= until {
+            break;
+        }
+        std::thread::sleep((until - now).min(Duration::from_millis(20)));
     }
 }
 

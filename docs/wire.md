@@ -540,7 +540,9 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   last failure; empty when none), `address` (a presence bool, then a u8: the 7-bit I2C address the
   driver named), `kind` str (the first contract kind that is not `other`, else `other`), and
   `location` str (where the driver says the device is, in words, for what an address cannot say;
-  empty when none). `location` is the last field of the block: a reader from before it skips it.
+  empty when none), and `not_live` (a bool: true when the device's driver is not running, so the description
+  is the manifest's alone, with no items and no address or location; absent reads as false). `not_live` is the
+  last field of the block: a reader from before it skips it, and a host from before it sends none.
 - A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
   `other`).
 - A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0

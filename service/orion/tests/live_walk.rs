@@ -4,6 +4,7 @@
 //! I2C, SPI and UART, a USB gadget on a mock function with a data stream, and an indicator on a
 //! WS2812 strip on a second simulated SPI. The methods none of these can host are named in the
 //! bridge's docs as covered by the text path only.
+#![allow(clippy::print_stderr)]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -26,8 +27,8 @@ use lemnos_orion::{Shared, calls, publish, source};
 use lemnos_sim::{Layout, SimBoard};
 use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target};
-use orion::provider::Found;
-use orion::topics::{FieldId, Subscriber};
+use orion::provider::{Found, ResourceState};
+use orion::topics::{FieldId, Next, Subscriber};
 use orion::types::Error as Refusal;
 use orion::{Address, ClientError, Orion};
 use orion_node_app::{Node, NodeSettings};
@@ -35,6 +36,9 @@ use orion_stubs::Board;
 use tokio::sync::oneshot;
 
 const WAIT: Duration = Duration::from_secs(20);
+/// How long a power-on's changes must stay quiet, and the device must hold its state, before the
+/// test reads the generation: longer than a missed bind's first retry (one second).
+const SETTLE: Duration = Duration::from_millis(2500);
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -190,6 +194,16 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
             Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // The device is not running (-19): it was refused before the call ran, so it is asked
+            // again once it runs, within the same bound. A bind that misses its deadline under
+            // load leaves it retrying for a moment.
+            Ok(done)
+                if done.outcome == Outcome::Failed
+                    && done.detail.contains("refused (-19)")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             other => {
                 return other
                     .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"));
@@ -277,6 +291,8 @@ fn start_walk(dir: &Path, sim: SimBoard) -> Walk {
     .expect("lemnosd");
     let bridge = start_bridge(&lemnosd, board.socket(), None);
     let dashboard = dashboard(board.socket());
+    // Each device is listed. A device whose bind misses its deadline under load is still retrying
+    // for a moment, and a call to it is asked again by `run_once_said` until it runs.
     for device in WAIT_NAMES {
         wait_for(device, || resource(&dashboard, &format!("lemnos.{device}")));
     }
@@ -394,9 +410,34 @@ fn generation(subscriber: &mut Subscriber) -> Option<i64> {
     Some(i64::from_le_bytes(bytes.try_into().ok()?))
 }
 
-/// The description generation of the fake accelerometer moves by exactly one each time its state
-/// changes (off, then on through the bridge's `power` action), and the device-set generation and
-/// the description generation hold still while nothing changes.
+/// The generations the description topic has carried since the last read, in order. Each sample is
+/// one change the bridge published. A sample lost before the test read it fails the test: the count
+/// would not be exact.
+fn published(subscriber: &mut Subscriber) -> Vec<i64> {
+    let mut said = Vec::new();
+    loop {
+        match subscriber.next() {
+            Next::Sample(sample) => {
+                let bytes: [u8; 8] = sample
+                    .payload
+                    .try_into()
+                    .expect("a generation is eight bytes");
+                said.push(i64::from_le_bytes(bytes));
+            }
+            Next::Empty => return said,
+            Next::Skipped(lost) => {
+                panic!("{lost} samples of the description were lost before the test read them")
+            }
+        }
+    }
+}
+
+/// The description generation of the fake accelerometer moves once for each change the bridge
+/// publishes, and holds still while nothing changes. The changes are counted, not assumed: a power-on
+/// whose bind misses its deadline is retried, and the retry is a change of its own (`retrying`, then
+/// `running`), so one power-on can publish two. The generation must move by exactly the number of
+/// samples published, each one step on from the last, and the device must be in the state the
+/// power-on asked for once the changes have settled.
 #[test]
 fn a_description_generation_moves_once_per_change_and_holds_while_nothing_changes() {
     let dir = dir("generation");
@@ -413,9 +454,17 @@ fn a_description_generation_moves_once_per_change_and_holds_while_nothing_change
     let first = wait_for("the description generation", || generation(&mut described));
     let devices = wait_for("the device-set generation", || generation(&mut set));
     assert_eq!(first, 1, "a device's first generation");
+    // What the topic has carried so far is the first generation, which is said; from here every
+    // sample is a change after it.
+    let _ = published(&mut described);
 
-    // Steady: nothing changes, so nothing moves.
+    // Steady: nothing changes, so nothing is published and nothing moves.
     std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        published(&mut described),
+        Vec::<i64>::new(),
+        "published while steady"
+    );
     assert_eq!(
         generation(&mut described),
         Some(first),
@@ -427,17 +476,49 @@ fn a_description_generation_moves_once_per_change_and_holds_while_nothing_change
         "the device set moved while steady"
     );
 
-    for (word, expected) in [("off", first + 1), ("on", first + 2)] {
+    let mut current = first;
+    for (word, state) in [
+        ("off", ResourceState::Pending),
+        ("on", ResourceState::Ready),
+    ] {
         let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", word);
         assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
-        wait_for(&format!("the generation after {word}"), || {
-            (generation(&mut described) == Some(expected)).then_some(())
-        });
-        std::thread::sleep(Duration::from_millis(1000));
+        // Settled: no sample for SETTLE, and the resource in the state the power-on asked for. A
+        // missed bind is retried after its first backoff, which is shorter than SETTLE.
+        let mut said = Vec::new();
+        let mut quiet_since = Instant::now();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let more = published(&mut described);
+            if !more.is_empty() {
+                said.extend(more);
+                quiet_since = Instant::now();
+            }
+            let settled = resource(dashboard, "lemnos.imu").map(|found| found.state) == Some(state);
+            if settled && quiet_since.elapsed() >= SETTLE {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{word} did not settle");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for (step, generation) in said.iter().enumerate() {
+            assert_eq!(
+                *generation,
+                current + step as i64 + 1,
+                "a published change moved the generation by other than one"
+            );
+        }
+        let changes = said.len() as i64;
+        assert!(changes >= 1, "{word} published no change");
+        if word == "off" {
+            assert_eq!(changes, 1, "switching off is one change");
+        }
+        current += changes;
+        eprintln!("live_walk: {word}: {changes} change(s) published; generation {current}");
         assert_eq!(
             generation(&mut described),
-            Some(expected),
-            "moved more than once for {word}"
+            Some(current),
+            "the generation after {word} is not the changes published"
         );
     }
     assert_eq!(
@@ -490,7 +571,19 @@ fn the_describe_generation_is_the_topic_generation_and_moves_with_it() {
     wait_for("the topic after off", || {
         (generation(&mut described) == Some(running + 1)).then_some(())
     });
-    assert_eq!(described_generation(dashboard), None, "described while off");
+    // Off is described, not refused: the device record says so, at the generation the topic shows.
+    let done = run_once_said(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
+    assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
+    let text = String::from_utf8(done.output).expect("text");
+    let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
+    let device = records.iter().find(|r| r.word == "device").expect("device");
+    assert_eq!(device.get("state"), Some("off"), "{text}");
+    assert_eq!(device.get("live"), Some("false"), "{text}");
+    assert_eq!(
+        device.get("generation").and_then(|g| g.parse::<i64>().ok()),
+        Some(running + 1),
+        "described at the topic's generation"
+    );
     // On again: the topic moves by one more, and the description carries the same number.
     let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
     assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
@@ -570,6 +663,7 @@ fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_boun
             bus: info.bus.as_deref().unwrap_or(""),
             state: 0,
             reason: "",
+            not_live: false,
         };
         let mut bytes = vec![0; 1 << 20];
         let len = lemnos_wire::encode_description(&manifest, &description, &identity, &mut bytes)

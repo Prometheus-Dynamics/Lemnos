@@ -689,7 +689,9 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
                 mirror.lease_seconds(),
             )
         });
-        let text = crate::description::render(&description, generation, lease);
+        // A description the format cannot take in full (a bound, a control character) is refused by name.
+        let text =
+            crate::description::render(&description, generation, lease).map_err(Failure::Failed)?;
         if text.len() > ORION_REPLY_MAX as usize {
             return Err(Failure::Failed(format!(
                 "the description is {} bytes; the reply carries at most {ORION_REPLY_MAX}, and a partial one is never sent",

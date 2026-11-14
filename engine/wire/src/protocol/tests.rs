@@ -587,6 +587,7 @@ mod description {
             bus: "i2c-1",
             state: crate::state::BACKOFF,
             reason: "bus error",
+            not_live: false,
         }
     }
 
@@ -838,6 +839,36 @@ mod description {
         );
         assert_eq!(back.contracts[0].kind, "");
         assert_eq!(back.contracts[0].methods.len(), 2);
+        assert!(
+            back.live,
+            "a host from before the identity described a running driver"
+        );
+    }
+
+    /// A device whose driver is not running is described from the manifest alone: the identity
+    /// says so (`not_live`), its contracts and methods come through, and it has no items. A
+    /// description with a running driver reads as live.
+    #[test]
+    fn a_device_whose_driver_is_not_running_says_so_and_keeps_its_manifest() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[CONTRACT],
+        };
+        let mut buf = [0; 512];
+        let not_live = Identity {
+            not_live: true,
+            ..identity()
+        };
+        let n = encode_description(&manifest, &Description::new(), &not_live, &mut buf).unwrap();
+        let back = decode_description(&buf[..n]).unwrap();
+        assert!(!back.live);
+        assert_eq!((back.state, back.reason.as_str()), (Some(1), "bus error"));
+        assert_eq!(back.contracts[0].methods.len(), 2);
+        assert!(back.items.is_empty());
+
+        let n = encode_description(&manifest, &Description::new(), &identity(), &mut buf).unwrap();
+        assert!(decode_description(&buf[..n]).unwrap().live);
     }
 
     #[test]

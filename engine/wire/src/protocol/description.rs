@@ -162,6 +162,10 @@ pub struct DeviceDescription {
     /// when it is running). `None` from a host that sends no identity.
     pub state: Option<u8>,
     pub reason: String,
+    /// Whether the running driver gave this description. False when the device is not running
+    /// (off, retrying, failed, never started): its contracts and methods are the manifest's, and
+    /// it has no items. True from a host that sends no identity, which only answered running devices.
+    pub live: bool,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
 }
@@ -178,6 +182,10 @@ pub struct Identity<'a> {
     pub state: u8,
     /// Why the device is not running, or its last failure; empty when there is none.
     pub reason: &'a str,
+    /// The driver is not running, so the description is the manifest's alone: its contracts and
+    /// methods, with no items and no address or location. A host from before it sends none, which
+    /// reads as a running driver.
+    pub not_live: bool,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -241,6 +249,8 @@ struct DescIdentity<'a> {
     /// Appended after the fields above (the identity's struct block grew by it): a reader from
     /// before it skips it.
     location: &'a str,
+    /// Appended after `location`: true when the driver is not running. Absent reads as false.
+    not_live: bool,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -579,6 +589,7 @@ pub(crate) fn encode_trailer(
         address: description.address(),
         kind: device_kind(manifest),
         location: description.location(),
+        not_live: identity.not_live,
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -694,14 +705,17 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             found.job = true;
         }
     }
+    // A host from before the identity ends here: its fields read as unknown, and its description
+    // is of a running driver.
     let mut out = DeviceDescription {
         contracts,
         items,
+        live: true,
         ..DeviceDescription::default()
     };
-    // A host from before the identity ends here: its fields read as unknown.
     if from.remaining() > 0 {
         let identity = Tail::<DescIdentity>::decode(from)?.0;
+        out.live = !identity.not_live;
         out.label = identity.label.to_string();
         out.bus = identity.bus.to_string();
         out.state = identity.state;

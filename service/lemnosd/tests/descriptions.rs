@@ -104,7 +104,15 @@ fn a_device_that_does_not_run_says_why_and_has_no_description() {
         .unwrap();
     assert_ne!(entry.state, lemnos_client::DeviceState::Running);
     assert!(!entry.reason.is_empty());
-    assert!(client.describe(entry.index).is_err());
+    // Described from its manifest alone, and says it is not live: no items, nothing read from a driver.
+    let description = client
+        .describe(entry.index)
+        .expect("described from the manifest");
+    assert!(!description.live, "a device that does not run is not live");
+    assert!(
+        description.items.is_empty(),
+        "no values for a device that does not run"
+    );
 }
 
 #[test]

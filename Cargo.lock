@@ -1865,6 +1865,7 @@ dependencies = [
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnos-sim",
+ "lemnos-sim-walk",
  "lemnos-slot-store",
  "lemnos-wire",
  "lemnosd",

@@ -108,13 +108,13 @@ fn a_device_that_is_retrying_then_binds_at_a_hint_is_announced() {
 }
 
 #[test]
-fn a_refused_describe_of_an_off_device_does_not_hide_its_later_event() {
+fn a_not_live_describe_of_an_off_device_does_not_hide_its_later_event() {
     let running = start_with("[[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n");
     let client = Client::connect(&running.socket, "t").unwrap();
     let watcher = Client::connect(&running.socket, "w").unwrap();
     client.set_power(0, false).unwrap();
     assert!(an_event_for(&watcher, 0, DeviceState::Off));
-    assert!(watcher.describe(0).is_err());
+    assert!(!watcher.describe(0).unwrap().live, "off is not live");
     client.set_power(0, true).unwrap();
     assert!(
         an_event_for(&watcher, 0, DeviceState::Running),
@@ -127,11 +127,11 @@ fn a_client_that_listed_a_device_off_hears_it_run() {
     let running = start_with("[[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n");
     let client = Client::connect(&running.socket, "t").unwrap();
     client.set_power(0, false).unwrap();
-    // The bridge's own start: a connection made lazily, a list, and a describe that is refused
-    // because the device is off. Then the device comes up with no pause in between.
+    // The bridge's own start: a connection made lazily, a list, and a describe that says the device
+    // is not live because it is off. Then the device comes up with no pause in between.
     let watcher = Client::connecting(&running.socket, "w");
     assert_eq!(watcher.list().unwrap()[0].state, DeviceState::Off);
-    assert!(watcher.describe(0).is_err());
+    assert!(!watcher.describe(0).unwrap().live, "off is not live");
     client.set_power(0, true).unwrap();
     assert!(
         an_event_for(&watcher, 0, DeviceState::Running),

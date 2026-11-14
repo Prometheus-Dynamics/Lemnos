@@ -895,6 +895,11 @@ const NOT_OURS: Status = Status::NOT_PERMITTED;
 /// Whether `method` only reads, by the device's own description: an item names it as a value and
 /// none as a control or an action. A method the description doesn't name, or a description that
 /// overflowed, isn't known to only read. Allocates nothing.
+/// Whether the device is off. Decided by its state, which `off` sets first.
+fn is_off(slot: &Slot) -> bool {
+    matches!(*lock(&slot.state), DeviceState::Off(_))
+}
+
 fn only_reads(instance: &dyn Instance, method: MethodId) -> bool {
     let mut description = Description::new();
     instance.describe(&mut description);
@@ -1567,6 +1572,11 @@ impl Inner {
             }
             _ => {}
         }
+        // Off is decided by the state: a device that went off is not called, even when an instance
+        // is still there (a call held it when `off` ran).
+        if is_off(slot) {
+            return Err(Status::NO_DEVICE);
+        }
         let mut guard = lock(&slot.instance);
         let Some(instance) = guard.as_mut() else {
             return Err(Status::NO_DEVICE);
@@ -1603,7 +1613,15 @@ impl Inner {
             (status, asks_rebind(instance.as_ref()))
         }));
         let status = match outcome {
-            Ok((status, None)) => status,
+            Ok((status, None)) => {
+                // The device went off while this call ran: `off` could not let go of the instance
+                // then, so it is let go now.
+                if is_off(slot) {
+                    let dead = guard.take();
+                    drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+                }
+                status
+            }
             // The call's own answer stands. The driver goes, and is bound again.
             Ok((status, Some(reason))) => {
                 self.rebind(slot, guard, reason);
@@ -2510,6 +2528,9 @@ impl Host {
     pub fn describe(&self, device: u32) -> Result<Description> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
         let mut guard = slot.instance.try_lock().map_err(|_| Status::BUSY)?;
+        if is_off(&slot) {
+            return Err(Status::NO_DEVICE);
+        }
         let instance = guard.as_mut().ok_or(Status::NO_DEVICE)?;
         let mut out = Description::new();
         catch_unwind(AssertUnwindSafe(|| instance.describe(&mut out)))
@@ -2917,12 +2938,14 @@ impl Host {
     pub fn on(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
         slot.short_runs.store(0, Ordering::Release);
+        // Not announced: the bind that follows announces the device once, as running, or as
+        // retrying with the reason its bind gave. Announcing "switched on" first would be a
+        // second state change for one power-on.
         *lock(&slot.state) = DeviceState::Backoff {
             attempts: 0,
             next_retry_ns: 0,
             reason: "switched on".to_string(),
         };
-        self.inner.moved(&slot);
         self.inner.bind(slot);
         Ok(())
     }

@@ -212,8 +212,8 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
 /// Only a failure to list the devices, or a lost connection, fails the whole discovery. Any
 /// other error on one device or item leaves that item out and logs why, so one bad device does
 /// not hold back the rest.
-/// The indexes of devices that could not be described come back too: lemnosd describes only a
-/// running device, and an event says when one starts running, which is when it is read again.
+/// The indexes of devices that could not be described, or are not live (their driver does not run),
+/// come back too: an event says when one starts running, which is when it is read again.
 /// The identity device, when one is described, comes back with the name it is called and the
 /// method number of its `facts`.
 #[allow(clippy::type_complexity)]
@@ -236,6 +236,9 @@ fn discover(
         let mut items = Vec::new();
         let mut controls = Vec::new();
         match describe(client, entry.index) {
+            // Not live: lemnosd describes a device that does not run from its manifest alone, with
+            // no items. It is asked again when it runs, as one that could not be described.
+            Ok(description) if !description.live => undescribed.push(entry.index),
             Ok(description) => {
                 controls = controls_of(&description);
                 if identity.is_none() && entry.tags.iter().any(|t| t == hello::IDENTITY_TAG) {

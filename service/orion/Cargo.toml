@@ -34,6 +34,8 @@ sha2 = { version = "0.10", default-features = false }
 rustix = { version = "1", default-features = false, features = ["std", "event"] }
 
 [dev-dependencies]
+# The test relay forwards the file descriptors Orion's transport passes with its frames.
+rustix = { version = "1", default-features = false, features = ["std", "net"] }
 # A real comm core and real node logic, in-process, for the integration tests.
 orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8", default-features = false }
 orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
@@ -58,5 +60,6 @@ orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "
 orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
 orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
 lemnos-host = { path = "../../engine/host" }
+lemnos-sim-walk = { path = "../../testing/crates/sim-walk" }
 lemnos-sim = { path = "../../backends/sim" }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
