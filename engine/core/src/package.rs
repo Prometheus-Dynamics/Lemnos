@@ -61,7 +61,7 @@ use crate::{
 /// The boundary's own types, for [`export_package!`](crate::export_package) and the loader.
 pub use lemnos_abi::package as abi;
 
-const BUSES: [BusKind; 15] = [
+const BUSES: [BusKind; 16] = [
     BusKind::I2c,
     BusKind::Spi,
     BusKind::Gpio,
@@ -77,6 +77,7 @@ const BUSES: [BusKind; 15] = [
     BusKind::Stream,
     BusKind::Pio,
     BusKind::Watchdog,
+    BusKind::Lend,
 ];
 
 const UNITS: [Unit; 14] = [

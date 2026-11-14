@@ -28,6 +28,8 @@ pub enum BusKind {
     Stream,
     Pio,
     Watchdog,
+    /// A stream's buffers lent to a block that only reads them (see `lemnos_hal::LendSource`).
+    Lend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,9 @@ pub type DmaHandle = Held<dyn DmaBuffers<Error = ErrorKind> + Send>;
 pub type ClocksHandle = Held<dyn Clocks<Error = ErrorKind> + Send>;
 pub type ResetHandle = Held<dyn Reset<Error = ErrorKind> + Send>;
 pub type StreamHandle = Held<dyn StreamEndpoint<Error = ErrorKind> + Send>;
+
+/// A stream's buffers lent to the block that reads them: the upstream device's output, by its link.
+pub type LendHandle = Held<dyn lemnos_hal::LendSource<Error = ErrorKind> + Send>;
 /// A PIO state machine on one GPIO line (see [`lemnos_hal::pio`]).
 pub type Pio = Held<dyn PioMachine + Send>;
 
@@ -237,6 +242,9 @@ pub trait Provider {
     fn stream(&mut self, _need: &str) -> Result<StreamHandle> {
         Err(Status::NOT_SUPPORTED)
     }
+    fn lend(&mut self, _need: &str) -> Result<LendHandle> {
+        Err(Status::NOT_SUPPORTED)
+    }
     fn pio(&mut self, _need: &str) -> Result<Pio> {
         Err(Status::NOT_SUPPORTED)
     }
@@ -341,6 +349,7 @@ resources! {
     ClocksHandle => Clocks, clocks;
     ResetHandle => Reset, reset;
     StreamHandle => Stream, stream;
+    LendHandle => Lend, lend;
     Pio => Pio, pio;
     Watchdog => Watchdog, watchdog;
 }

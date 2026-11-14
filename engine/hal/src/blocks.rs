@@ -208,6 +208,33 @@ extern crate std;
 #[cfg(not(all(feature = "std", unix)))]
 type HandleInner<'a> = (core::convert::Infallible, core::marker::PhantomData<&'a ()>);
 
+/// One frame lent to a block that only reads it: the buffer's handle, and the frame's length.
+#[derive(Debug, Clone)]
+pub struct LentFrame<'a> {
+    /// The buffer's memory, shared with the holder for as long as this lives.
+    pub handle: BufferHandle<'a>,
+    /// The frame's length, across its planes.
+    pub bytes: u32,
+}
+
+/// A stream's buffers lent to a block that only reads them: a front end's output0, read by the back
+/// end as its input. The block never names a descriptor. The holder of the stream answers with the
+/// buffer's handle for the frame it is publishing as `identity`, and the block gives the buffer back
+/// with [`unlend`](Self::unlend). A buffer is lent to one block at a time, and a lent buffer is never
+/// taken back for the producer's next frame until it is unlent.
+pub trait LendSource {
+    /// Every stream's errors have the kinds' meaning, so a default here can refuse.
+    type Error: HalError + From<crate::ErrorKind>;
+
+    /// Lends `buffer` for the frame `identity`: its handle and length, when the buffer holds that
+    /// frame and is not already lent. `Ok(None)` when it can't be lent now: not published, another
+    /// frame, or lent already. Allocates nothing.
+    fn lend(&mut self, buffer: u32, identity: u64) -> Result<Option<LentFrame<'static>>, Self::Error>;
+
+    /// Gives `buffer` back, lent for `identity`. Refused (`InvalidInput`) for a buffer not lent.
+    fn unlend(&mut self, buffer: u32, identity: u64) -> Result<(), Self::Error>;
+}
+
 /// What names a buffer on a host that has file descriptors.
 #[cfg(all(feature = "std", unix))]
 #[derive(Debug, Clone)]
