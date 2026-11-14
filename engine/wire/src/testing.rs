@@ -66,7 +66,7 @@ impl Harness {
         let jobs = Ring::create(&layout.job_spec())?;
         let acks = sealed_memfd(JOB_ACK_BYTES)?;
         let publisher = BufferWriter::new(ring.writer()?, FieldId(0), pool);
-        let holds_page = sealed_memfd(Marks::<WriteMap>::page_bytes(layout.buffers)?)?;
+        let holds_page = Marks::<WriteMap>::create(layout.buffers, 0, 0)?.writable_fd()?;
         let mut holds = HoldTable::new(layout.buffers);
         holds.add(
             0,

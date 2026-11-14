@@ -7,7 +7,7 @@ use std::time::Duration;
 use shm_ring::{Mem, MemMut, ReadMap, RingError};
 use shm_ring_buffers::{BufferIndex, Holders, MAX_READERS, page};
 
-use crate::marks::{MARKS_AT, count, marked, taken_at};
+use crate::marks::{MARKS_AT, check_layout, count, marked, taken_at};
 
 /// What one reader is allowed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,6 +79,8 @@ impl<M: Mem> HoldTable<M> {
     ///
     /// [`RingError`] if the slot is out of range or taken, or the page is too small.
     pub fn add_over(&mut self, slot: u32, page: M, limits: Limits) -> Result<(), RingError> {
+        // The layout first: a page of another layout is refused as that, not by its size.
+        check_layout(&page)?;
         if page.words() < MARKS_AT + 2 * self.buffers as usize {
             return Err(RingError::Malformed(
                 "the marks page is smaller than the pool",
@@ -213,7 +215,7 @@ mod tests {
     use shm_ring::Heap;
 
     use super::*;
-    use crate::marks::VERSION_WORD;
+    use crate::marks::{VERSION_WORD, stamp};
 
     const BUFFERS: u32 = 4;
     const MS: u64 = 1_000_000;
@@ -239,6 +241,13 @@ mod tests {
             }
             self.page.load(index, order)
         }
+    }
+
+    /// A marks page of this build's layout, zeroed but for its stamp, as `Marks::create` makes it.
+    fn fresh_page() -> Heap {
+        let page = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+        page.store(VERSION_WORD, stamp(0), Ordering::SeqCst);
+        page
     }
 
     /// Changes one mark the way `Marks` does: version odd, the mark, version even.
@@ -267,7 +276,7 @@ mod tests {
     fn a_reader_swapping_buffers_during_the_count_is_not_seen_over_its_limit() {
         // The swap can land between any two of the publisher's loads.
         for after in 1..=8 {
-            let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+            let marks = fresh_page();
             set(&marks, 0, 1);
             set(&marks, 1, 1);
             let racing = Racing {
@@ -292,7 +301,7 @@ mod tests {
 
     #[test]
     fn a_reader_really_over_its_limit_is_cut_off() {
-        let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+        let marks = fresh_page();
         for buffer in 0..3 {
             set(&marks, buffer, 1);
         }
@@ -309,9 +318,9 @@ mod tests {
     /// looks; it is one that is stuck, and it is judged by the time a hold may last.
     #[test]
     fn a_reader_stopped_mid_change_is_judged_by_time_not_by_how_often_it_is_looked_at() {
-        let marks = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+        let marks = fresh_page();
         set(&marks, 0, 1);
-        marks.store(VERSION_WORD, 3, Ordering::SeqCst);
+        marks.store(VERSION_WORD, stamp(3), Ordering::SeqCst);
         let pool = pool_page();
         let limits = Limits {
             max_held: 2,
@@ -325,10 +334,10 @@ mod tests {
         }
         assert!(table.held(BufferIndex(0)));
         // It runs again and finishes the change: counted, and the clock starts over.
-        marks.store(VERSION_WORD, 4, Ordering::SeqCst);
+        marks.store(VERSION_WORD, stamp(4), Ordering::SeqCst);
         set(&marks, 0, 0);
         assert_eq!(table.enforce(260 * MS, &pool), 0);
-        marks.store(VERSION_WORD, 7, Ordering::SeqCst);
+        marks.store(VERSION_WORD, stamp(7), Ordering::SeqCst);
         assert_eq!(table.enforce(700 * MS, &pool), 0);
         // Stopped for longer than a hold may last, it is cut off like any stuck reader.
         assert_eq!(table.enforce(1201 * MS, &pool), 1);

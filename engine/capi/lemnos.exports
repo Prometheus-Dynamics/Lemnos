@@ -24,6 +24,7 @@ lemnos_package_list
 lemnos_package_info
 lemnos_package_text
 lemnos_stream_open
+lemnos_layout_refusal
 lemnos_stream_info
 lemnos_stream_next_frame
 lemnos_stream_release

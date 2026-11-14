@@ -195,6 +195,7 @@ impl From<Error> for Status {
             Error::TimedOut => Status::TIMED_OUT,
             Error::TooSmall => Status::BUFFER_TOO_SMALL,
             Error::Full => Status::BUSY,
+            Error::Stream(RingError::Layout { .. }) => Status::LAYOUT_MISMATCH,
             Error::Stream(_) | Error::StreamWait(_) => Status::IO,
             Error::StreamUnsupported | Error::StreamUnmapped => Status::NOT_SUPPORTED,
             Error::StreamReadOnly | Error::StreamBuffersReadOnly => Status::ACCESS,

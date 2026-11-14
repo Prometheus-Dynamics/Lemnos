@@ -42,16 +42,21 @@ read orders, why a reader never sees a torn sample, doorbells, buffer topics and
 
 ## Where Lemnos stands
 
-Lemnos's frame streams are this ring. Word 10 of the ring header, the end code, was reserved zero in
-layout 1; giving it a meaning that a reader may ignore is additive, so the layout number stays 1. A stream is a frame ring (`shm-ring`), a buffer pool and
+Lemnos's frame streams are this ring. The ring's layout is 2: word 10 of the header is the end code, which
+layout 1 kept reserved and zero, and a layout 1 reader would take a closed or faulted topic for a running one.
+Each structure's layout value is in the table at the end of [`shm/README.md`](../shm/README.md#layout-values).
+A stream is a frame ring (`shm-ring`), a buffer pool and
 its page (`shm-ring-buffers`), a hold page per consumer (`shm-ring-holds`), a doorbell
 (`shm-ring-doorbell`) and a job ring with an acknowledgement page, all made by the host and
 handed to the consumer as descriptors. [Frame streams](streams.md) says which descriptor is
 which, and [Reading with the shm crates alone](streams.md#reading-with-the-shm-crates-alone) shows
 a program that maps a stream with these crates and nothing else.
 
-The kernel module's own streams are not on this ring yet: the module keeps the stream protocol it
-had, which the driver that runs it reads. That is listed in [`TODO.md`](../TODO.md).
+A kernel module stream is on this ring when it is created with the shm flag (`LEMNOS_STREAM_CREATE_SHM`);
+the module writes layout 2 and refuses a reader's marks page of another layout. The module's refusal reaches
+the program that registered the reader as `-EPROTO`, with no found value; the only caller in the tree is the
+holds check. The typed error for that path is follow-up P2s2 (`kernel/` and `backends/linux-sys`). lemnosd never
+registers a kernel reader, so it has nothing to report it through.
 
 ## Measured
 

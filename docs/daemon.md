@@ -385,6 +385,7 @@ error numbers, and Lemnos's own codes below -4095:
 | -95 | `NOT_SUPPORTED` | The driver or the hardware does not do this |
 | -110 | `TIMED_OUT` | The call ran past its deadline: 2 s, or the board file's `call_deadline_ms` |
 | -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
+| -4100 | `LAYOUT_MISMATCH` | A frame stream's shared memory (its ring header or its marks page) is of another layout than this build reads. The message names the structure and both values; the C surface reports them with `lemnos_layout_refusal` |
 
 ## Named files (`lemnos/`)
 

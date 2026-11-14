@@ -7,12 +7,54 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use shm_ring::{Mem, MemMut, RingError, WriteMap, read_only, sealed_memfd};
 use shm_ring_buffers::{BufferIndex, MAX_BUFFERS, Marker};
 
-/// The word of a marks page that holds its version: odd while the reader is changing a mark,
-/// and different after every change. It is what lets the publisher know that the marks it
-/// counted were all true at one instant.
+/// The layout of a marks page. Layout 1 has the version and one mark per buffer: `1 + b` words.
+/// Layout 2 adds a taken stamp per buffer after the marks: `1 + 2b` words. A page of layout 1
+/// never wrote its layout, so its layout byte is zero and reads as 1. Every attach checks it
+/// first, and refuses a page of another layout with [`RingError::Layout`].
+pub const LAYOUT: u64 = 2;
+
+/// Where the layout sits in word 0: its top byte. The rest of the word is the version.
+const LAYOUT_SHIFT: u32 = 56;
+/// The version: the low 56 bits of word 0. It never reaches the layout byte, so the layout is
+/// the same in every write.
+const VERSION_MASK: u64 = (1 << LAYOUT_SHIFT) - 1;
+
+/// The word of a marks page that holds its layout and its version: the version is odd while the
+/// reader is changing a mark, and different after every change. It is what lets the publisher
+/// know that the marks it counted were all true at one instant.
 pub(crate) const VERSION_WORD: usize = 0;
 /// The word of buffer 0's mark. Buffer `b`'s is `b` words after it.
 pub(crate) const MARKS_AT: usize = 1;
+
+/// Word 0 of a page of this build's layout with `version`.
+pub(crate) const fn stamp(version: u64) -> u64 {
+    (LAYOUT << LAYOUT_SHIFT) | (version & VERSION_MASK)
+}
+
+/// The layout of a marks page from its word 0. A page of layout 1 has no layout byte.
+const fn layout_of(word: u64) -> u64 {
+    match word >> LAYOUT_SHIFT {
+        0 => 1,
+        layout => layout,
+    }
+}
+
+/// Refuses a marks page that is not of this build's layout. Called first by every attach.
+pub(crate) fn check_layout(page: &impl Mem) -> Result<(), RingError> {
+    if page.words() == 0 {
+        return Err(RingError::Malformed("the marks page is empty"));
+    }
+    let found = layout_of(page.load(VERSION_WORD, Ordering::SeqCst));
+    if found == LAYOUT {
+        Ok(())
+    } else {
+        Err(RingError::Layout {
+            what: "this marks page",
+            found,
+            reads: LAYOUT,
+        })
+    }
+}
 
 /// The word of buffer `buffer`'s taken stamp in a page for `buffers` buffers: after every mark. It
 /// holds one more than the ring sequence of the last frame the reader took from that buffer, and
@@ -52,11 +94,12 @@ impl Marks<WriteMap> {
     /// If the page can't be made.
     pub fn create(buffers: u32, slot: u32, max_held: u32) -> Result<Self, RingError> {
         let page = WriteMap::new(sealed_memfd(Self::page_bytes(buffers)?)?)?;
-        Ok(Self::over(page, buffers, slot, max_held))
+        page.store(VERSION_WORD, stamp(0), Ordering::SeqCst);
+        Self::over(page, buffers, slot, max_held)
     }
 
-    /// The size of a marks page for a pool of `buffers` buffers, in bytes: what
-    /// [`create`](Self::create) makes, and what a reader that makes its own page must make too.
+    /// The size of a marks page of this layout for a pool of `buffers` buffers, in bytes: what
+    /// [`create`](Self::create) makes.
     ///
     /// # Errors
     ///
@@ -89,10 +132,18 @@ impl Marks<WriteMap> {
 }
 
 impl<M: MemMut> Marks<M> {
-    /// Marks kept in `page`, which must be zeroed and hold the version and two words per buffer.
-    pub fn over(page: M, buffers: u32, slot: u32, max_held: u32) -> Self {
+    /// Marks kept in `page`, a page of this layout with the version and two words per buffer:
+    /// one [`create`](Self::create) made, or one a reader was given.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError::Layout`] if the page is not of this layout, which is checked before anything
+    /// else. [`RingError::Malformed`] if it is empty.
+    pub fn over(page: M, buffers: u32, slot: u32, max_held: u32) -> Result<Self, RingError> {
+        check_layout(&page)?;
+        let version = page.load(VERSION_WORD, Ordering::SeqCst) & VERSION_MASK;
         let buffers = (buffers as usize).min(page.words().saturating_sub(MARKS_AT) / 2);
-        Self {
+        Ok(Self {
             page,
             buffers: buffers as u32,
             slot: AtomicU32::new(slot),
@@ -100,9 +151,9 @@ impl<M: MemMut> Marks<M> {
             counts: Mutex::new(Counts {
                 each: vec![0; buffers].into_boxed_slice(),
                 total: 0,
-                version: 0,
+                version,
             }),
-        }
+        })
     }
 
     /// Changes the reader slot, when the publisher's side gives this reader another one: a
@@ -120,14 +171,14 @@ impl<M: MemMut> Marks<M> {
     /// Writes one mark, with the version odd while it is being written and moved on after.
     /// Called with the lock held, so the version only ever has one writer.
     fn change(&self, counts: &mut Counts, buffer: BufferIndex, mark: u64) {
-        counts.version = counts.version.wrapping_add(1);
+        counts.version = counts.version.wrapping_add(1) & VERSION_MASK;
         self.page
-            .store(VERSION_WORD, counts.version, Ordering::SeqCst);
+            .store(VERSION_WORD, stamp(counts.version), Ordering::SeqCst);
         self.page
             .store(MARKS_AT + buffer.0 as usize, mark, Ordering::SeqCst);
-        counts.version = counts.version.wrapping_add(1);
+        counts.version = counts.version.wrapping_add(1) & VERSION_MASK;
         self.page
-            .store(VERSION_WORD, counts.version, Ordering::SeqCst);
+            .store(VERSION_WORD, stamp(counts.version), Ordering::SeqCst);
     }
 
     fn counts(&self) -> std::sync::MutexGuard<'_, Counts> {

@@ -152,7 +152,7 @@ therefore keeps its hash. The values this build computes are:
 
 `jobs part hash: 0x353035866faf89f5`
 
-`shared-rings part hash: 0xa8c95a7c8c5834e7`
+`shared-rings part hash: 0x8b6a280430008fea`
 
 `endpoints part hash: 0x0360342362a7f9d9`
 
@@ -252,7 +252,7 @@ A client sends Packages only to a host that set bit 1 of `features` (rule 10).
 stream's shared-memory descriptors in the order of [`lemnos_wire::ring::fds`] (seven before the
 buffers). The earlier answers, which carried three (or two plus buffers) with the older ring, are
 gone: a host and a client built from different revisions cannot share a stream. What is additive:
-the feature bit `SHARED_RINGS` (8), which is part 4 (`shared-rings`, whose hash folds the descriptor layout of [`ring::fds`](../engine/wire/src/ring.rs)): a client refuses to open a stream from a host that does not set it, and the new end code in the ring header. What is not: the
+the feature bit `SHARED_RINGS` (8), which is part 4 (`shared-rings`, whose hash folds the descriptor layout of [`ring::fds`](../engine/wire/src/ring.rs)): a client refuses to open a stream from a host that does not set it, and the shm layouts that the ring header and the marks page carry (`ring::layouts`). What is not: the
 meaning of the descriptors of the answer kinds, which is why those kinds were renamed (the layout
 hash moves with the names, so a mismatch is refused at the handshake rather than misread).
 
@@ -620,7 +620,7 @@ Each vector is one complete frame.
 
 <!-- vector: hello -->
 ```hex
-95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e7 34 58 8c 7c 5a c9 a8 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 ea 8f 00 30 04 28 6a 8b 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### welcome
@@ -629,7 +629,7 @@ Each vector is one complete frame.
 
 <!-- vector: welcome -->
 ```hex
-99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e7 34 58 8c 7c 5a c9 a8 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 ea 8f 00 30 04 28 6a 8b 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### list

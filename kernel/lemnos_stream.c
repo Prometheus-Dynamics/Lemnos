@@ -142,8 +142,9 @@ struct lem_bell {
 
 /*
  * A reader's marks page, pinned for the stream's life: the reader's own memfd,
- * mapped read-only here. Its words are shm/ring-holds' layout (marks.rs): the
- * version, then one mark per buffer, nonzero while the reader holds it.
+ * mapped read-only here. Its words are shm/ring-holds' layout 2 (marks.rs): the
+ * layout and version in word 0, one mark per buffer, nonzero while the reader
+ * holds it, then one taken stamp per buffer.
  */
 struct lem_reader {
 	struct page **pages;
@@ -300,7 +301,7 @@ static void lem_stream_wake(struct lem_stream *s)
 }
 
 /*
- * The shm form (LEMNOS_STREAM_CREATE_SHM): shm/README.md's ring (layout 1),
+ * The shm form (LEMNOS_STREAM_CREATE_SHM): shm/README.md's ring (layout 2),
  * one field, one sample per frame, and the pool page of
  * shm/ring-buffers/src/page.rs after it. Every number here is what the Rust
  * crates say (testing/crates/shm-ring-check reads what this writes, and its
@@ -308,7 +309,7 @@ static void lem_stream_wake(struct lem_stream *s)
  * entry, the stamps, and the pool page's ticket words.
  */
 #define LEM_SHM_MAGIC		0x31474e49524d4853ull	/* "SHMRING1" */
-#define LEM_SHM_LAYOUT		1ull
+#define LEM_SHM_LAYOUT		2ull	/* shm-ring's LAYOUT: a reader of another layout refuses the ring */
 #define LEM_SHM_W_MAGIC		0
 #define LEM_SHM_W_LAYOUT	1
 #define LEM_SHM_W_SHAPE		2
@@ -324,9 +325,19 @@ static void lem_stream_wake(struct lem_stream *s)
 #define LEM_POOL_MAGIC		0x314c4f4f504d4853ull	/* "SHMPOOL1" */
 #define LEM_POOL_TICKETS	8	/* one word per buffer, from here */
 #define LEM_POOL_READERS	64	/* shm-ring-buffers' MAX_READERS: cut-off words after the tickets */
-#define LEM_MARKS_AT		1	/* a marks page's first mark: word 0 is its version (marks.rs) */
+#define LEM_MARKS_AT		1	/* a marks page's first mark: word 0 is its layout and version (marks.rs) */
+#define LEM_MARKS_LAYOUT	2ull	/* shm-ring-holds' LAYOUT: a marks page of another layout is refused */
+#define LEM_MARKS_LAYOUT_SHIFT	56	/* the layout is word 0's top byte; a layout 1 page has zero there */
 /* How long a reader's marks may stay uncountable when it has no hold time of its own (table.rs). */
 #define LEM_UNCOUNTED_NS	(10ull * NSEC_PER_SEC)
+
+/* The layout of a reader's marks page (marks.rs layout_of): zero in the top byte is layout 1. */
+static u64 lem_marks_layout(const u64 *marks)
+{
+	u64 layout = READ_ONCE(marks[0]) >> LEM_MARKS_LAYOUT_SHIFT;
+
+	return layout ? layout : 1;
+}
 
 static u64 lem_shm_stamp(u64 seq)
 {
@@ -1565,6 +1576,13 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	r.marks = vmap(r.pages, r.npages, VM_MAP, PAGE_KERNEL_RO);
 	if (!r.marks) {
 		ret = -ENOMEM;
+		goto unpin;
+	}
+	/* The layout first: a page of another layout is refused as that. unpin unmaps it. */
+	if (lem_marks_layout(r.marks) != LEM_MARKS_LAYOUT) {
+		pr_err("lemnos: a reader's marks page is layout %llu; this build reads layout %llu\n",
+		       lem_marks_layout(r.marks), LEM_MARKS_LAYOUT);
+		ret = -EPROTO;
 		goto unpin;
 	}
 	r.max_held = a->max_held;

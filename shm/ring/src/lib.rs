@@ -38,7 +38,7 @@ mod writer;
 use core::fmt;
 use std::io;
 
-pub use layout::{Geometry, MAX_FIELDS, MAX_HISTORY, MAX_PAYLOAD, Spec, format};
+pub use layout::{Geometry, LAYOUT, MAX_FIELDS, MAX_HISTORY, MAX_PAYLOAD, Spec, format};
 #[cfg(target_os = "linux")]
 pub use map::{ReadMap, WriteMap, read_only, sealed_memfd};
 pub use mem::{Heap, Mem, MemMut};
@@ -93,6 +93,16 @@ pub enum RingError {
     Spec(&'static str),
     /// The memory doesn't hold a ring this build reads. Says what was wrong.
     Malformed(&'static str),
+    /// A shared layout whose value is not the one this build reads. `what` names the structure,
+    /// `found` is the value in the memory and `reads` the one this build implements.
+    Layout {
+        /// What the value is in, as a person reads it: "this ring", "this marks page".
+        what: &'static str,
+        /// The value in the memory.
+        found: u64,
+        /// The value this build implements.
+        reads: u64,
+    },
     /// The descriptor isn't a memfd sealed against shrinking, so reading it could fault.
     Unsealed,
     /// A system call failed.
@@ -104,6 +114,12 @@ impl fmt::Display for RingError {
         match self {
             Self::Spec(why) => write!(f, "ring shape not allowed: {why}"),
             Self::Malformed(why) => write!(f, "not a ring: {why}"),
+            Self::Layout { what, found, reads } => {
+                write!(
+                    f,
+                    "{what} is layout {found}; this build reads layout {reads}"
+                )
+            }
             Self::Unsealed => f.write_str("ring descriptor is not sealed against shrinking"),
             Self::Io(err) => write!(f, "ring: {err}"),
         }

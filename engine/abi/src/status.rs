@@ -43,6 +43,9 @@ impl Status {
     /// The entry point panicked ([`guard`](crate::guard)); its state may be
     /// half-updated, so the handle it was called on should be released.
     pub const PANIC: Self = Self(Self::LEMNOS_BASE - 3);
+    /// A shared layout (a stream's ring or marks page) is not the one this build reads. The
+    /// message names the structure and both values; the C surface also reports them.
+    pub const LAYOUT_MISMATCH: Self = Self(Self::LEMNOS_BASE - 4);
 
     /// Success, or success with a count.
     pub const fn is_ok(self) -> bool {
