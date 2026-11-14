@@ -9,8 +9,8 @@ use lemnos_contract_fan::Fan;
 use lemnos_contract_fan_control::{POINT_BYTES, Point, State};
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
-    Config, Decode, Encode, Health, Lifecycle, MethodId, Reader, Result, Status, Writer, contract,
-    driver,
+    Config, ConfigError, Decode, Encode, Health, Key, Kind, Lifecycle, MethodId, Reader, Result,
+    Status, Writer, contract, driver,
 };
 use lemnos_driver_fan_control::FanController;
 use lemnos_host::board::parse;
@@ -35,6 +35,10 @@ pub struct SimTemperature {
 
 impl Lifecycle for SimTemperature {
     type Needs = SimTemperatureNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("milli", Kind::Int)])
+    }
 
     fn start(_: SimTemperatureNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

@@ -38,6 +38,29 @@ daemon at start is in [Start-up](daemon.md#start-up). A check that needs the har
 register the chip answers, a device node that opens, the board's serial) is not made here: it is
 checked when the driver binds, and a device that fails to bind is listed with the reason.
 
+**A `uses` or `config` entry nothing consumes is refused by name, on every device.** Each driver
+declares what it takes: the need names of its manifest (the keys of `uses`) and the `config` keys it
+reads. `lemnos-ctl validate` and the daemon's start refuse, naming the device and the key (the daemon
+refuses that device only, as above):
+
+```
+board.toml: device "security": `uses` key "zzz" is not a resource this driver takes (it takes: "slots", "flash", "identity")
+board.toml: device "lease": `uses` key "zzz" is not a resource this driver takes (it takes none)
+board.toml: device "security": `uses` key "flash" names device "flash", which the board does not have
+board.toml: device "security": `uses` key "flash" names device "lease", which does not serve system.security-precondition/1
+board.toml: device "lease": setting "zzz" is not a setting this driver reads
+```
+
+A `uses` value for a need that takes a device must be the id of a device the board has (an
+`[[each]]` entry's devices count by the id before the `@`), and that device must serve the contract
+the need asks for. This holds for an optional need too: to leave an optional stakeholder out, do not
+name it. A need that takes a bus or a block names it in the backend's words, which no board file can
+check without the hardware, so a wrong name there is reported when the driver binds. A driver with no
+settings refuses every `config` key; a driver built outside this tree that reads settings must
+declare them in `check_config` ([Settings](writing-a-driver.md#settings-check_config)), or its bind
+refuses them. One specific text stays: a gadget's `identity` under `uses` is refused as a setting that
+belongs in `config`.
+
 ## The keys
 
 At the top:
@@ -59,9 +82,9 @@ In a device:
 | `label` | The name a person reads for the device, shown in place of its id. Optional |
 | `driver` | The driver's name, as in [Drivers and contracts](drivers.md). An unknown name leaves the device `retrying` with that as its reason |
 | `bus` | The resource this device sits on, by the backend's name for it (below) |
-| `uses` | A table from one of the driver's need names to a device `id` or a resource name |
+| `uses` | A table from one of the driver's need names to a device `id` or a resource name. A key the driver does not take, or a device id the board does not have or that does not serve the need's contract, is refused by name (above) |
 | `link` | The `id` of another device this one is wired to. The host only hands it over, and `lemnos-ctl validate` refuses a `link` to a device the board doesn't have. `lemnos-ctl chain` follows it. A driver that needs the link takes it at bind (a `#[link]` field) and confirms it from the hardware side: see [Drivers and contracts](drivers.md#contracts) |
-| `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own |
+| `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own; a key it does not read is refused by name (above) |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
 | `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |
 | `owner` | `"lemnos"` (the default) or `"host"`. With `"host"` the operating system owns the hardware and Lemnos only reads it. See [Concepts](concepts.md#who-owns-the-hardware) |

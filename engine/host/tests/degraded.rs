@@ -9,7 +9,12 @@ use std::time::Duration;
 
 #[test]
 fn no_magnetometer_gives_degraded_six_axis() {
-    let (host, _) = host(SIX_AXIS);
+    // A `uses` naming a device the board does not have is refused (`service/ctl/tests/uses.rs`), so the
+    // magnetometer the board names is there and off.
+    let text = format!(
+        "{SIX_AXIS}\n[[devices]]\nid = \"mag\"\ndriver = \"fake-magnetometer\"\ndisabled = true\n"
+    );
+    let (host, _) = host(&text);
     let info = host.device("orientation").unwrap();
     assert_eq!(info.state, DeviceState::Running);
     assert!(

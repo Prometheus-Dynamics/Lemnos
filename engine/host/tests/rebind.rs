@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use lemnos_core::{Config, Health, Lifecycle, MethodId, Result, Status, contract, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, MethodId, Result, Status, contract, driver,
+};
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
@@ -47,6 +49,14 @@ pub struct Leaver {
 
 impl Lifecycle for Leaver {
     type Needs = LeaverNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("key", Kind::Int),
+            Key::optional("always", Kind::Bool),
+            Key::optional("period_ns", Kind::Int),
+        ])
+    }
     const TICKS: bool = true;
 
     fn start(_: LeaverNeeds, cfg: &Config<'_>) -> Result<Self> {

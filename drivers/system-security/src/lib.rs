@@ -9,12 +9,21 @@
 //!   answers only for itself. A board with neither bound judges on the trust root alone. `identity`
 //!   is the `system-identity` device: its serial names this board in an off's authorization.
 //!
+//! `slots` and `flash` are optional. A board with slots and no flash device names `slots` only: `precheck`
+//! and `set` ask `slots` alone, `flash` is not asked and is not a fault, and the switch adds no trust-root
+//! answer of its own while `slots` answers. Naming a device the board does not have is refused at
+//! validation by name.
+//!
+//! On a board whose `[security]` says `orion = false`, `state` says `orion: not covered by this switch on
+//! this board (the board file says orion = false)` and a `set` to on replies the same sentence after
+//! `note: `.
+//!
 //! ```toml
 //! [[devices]]
 //! id = "security"
 //! driver = "system-security"
 //! uses = { slots = "slots", flash = "flash", identity = "identity" }
-//! config = { orion = false }  # record and keys come from the board file's [security] table
+//! # no config: record, keys and orion come from the board file's [security] table
 //! ```
 //!
 //! # Configuration
@@ -33,11 +42,11 @@ pub mod flow;
 
 use std::path::PathBuf;
 
-use flow::{Answer, Board, Flow, judge, lines_of, trust_root};
+use flow::{Answer, Board, Flow, ORION_NOT_COVERED, judge, lines_of, trust_root};
 use lemnos_contract_security::Security;
 use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_identity::{MAX_TEXT as IDENTITY_MAX, SystemIdentity};
-use lemnos_core::{Config, Dev, Lifecycle, Result, Status, driver};
+use lemnos_core::{Config, ConfigError, Dev, Key, Kind, Lifecycle, Result, Status, driver};
 use lemnos_slot_store::security::RUN_DIR;
 
 /// The most a stakeholder's answer may say.
@@ -58,8 +67,22 @@ pub struct SystemSecurity {
     keys: Option<PathBuf>,
 }
 
+/// The settings the driver reads. The board file gives none of them: the host puts the `[security]`
+/// table in as `record`, `keys` and `orion` when it binds the device (a device that names one is
+/// refused there), so a board file's `config` for this device holds nothing. `record` is checked
+/// when the device starts, as the host gives it.
+const KEYS: &[Key] = &[
+    Key::optional("record", Kind::Str),
+    Key::optional("keys", Kind::Str),
+    Key::optional("orion", Kind::Bool),
+];
+
 impl Lifecycle for SystemSecurity {
     type Needs = SystemSecurityNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)
+    }
 
     fn start(needs: SystemSecurityNeeds, cfg: &Config<'_>) -> Result<Self> {
         let record = cfg.str("record").ok_or(Status::INVALID_ARGUMENT)?;
@@ -185,7 +208,7 @@ impl Security for SystemSecurity {
         copy_out(&text, into)
     }
 
-    fn set(&mut self, on: bool, authorization: &[u8]) -> Result<()> {
+    fn set(&mut self, on: bool, authorization: &[u8], into: &mut [u8]) -> Result<usize> {
         let answers = self.answers(on);
         let serial = self.serial();
         let board = Board {
@@ -195,7 +218,15 @@ impl Security for SystemSecurity {
         let mut boot = |on: bool| apply_to(self.slots.as_mut(), self.flash.as_mut(), on);
         self.flow
             .set(on, &answers, board, authorization, &mut boot)
-            .map_err(|(status, _)| status)
+            .map_err(|(status, _)| status)?;
+        // A change to on is made; say what the switch does not cover. With Orion on the board the
+        // change is refused above, so this is the `orion = false` board only.
+        if on && !self.flow.orion() {
+            let mut text = format!("note: {ORION_NOT_COVERED}");
+            text.push('\n');
+            return copy_out(&text, into);
+        }
+        Ok(0)
     }
 
     fn request_off(&mut self, into: &mut [u8]) -> Result<usize> {

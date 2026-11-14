@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use lemnos_core::{Config, Lifecycle, MethodId, Result, contract, driver};
+use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, MethodId, Result, contract, driver};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
@@ -31,6 +31,10 @@ pub struct Ticker {
 
 impl Lifecycle for Ticker {
     type Needs = TickerNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("period_ns", Kind::Int)])
+    }
     const TICKS: bool = true;
 
     fn start(_: TickerNeeds, cfg: &Config<'_>) -> Result<Self> {

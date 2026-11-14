@@ -19,7 +19,7 @@ use lemnos_contract_camera_sensor::{
     AppliedLanding, CameraSensor, Controls, FrameValues, InForce, Landing, LinkCheck, Mode,
     SensorInfo, check_link,
 };
-use lemnos_core::{Config, Dev, Health, Lifecycle, Result, Status, driver};
+use lemnos_core::{Config, ConfigError, Dev, Health, Key, Kind, Lifecycle, Result, Status, driver};
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
@@ -39,6 +39,10 @@ struct LinkedProvider {
 
 impl Lifecycle for LinkedProvider {
     type Needs = LinkedProviderNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("source", Kind::Str)])
+    }
 
     fn start(needs: LinkedProviderNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

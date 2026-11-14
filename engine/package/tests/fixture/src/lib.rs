@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use lemnos_core::package::status_of_bus;
-use lemnos_core::{
+use lemnos_core::{ConfigError, Key, Kind, 
     ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c, InterruptHandle,
     Item, Lifecycle, Line, MethodId, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Result, Spi,
     Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, contract, driver, status_of,
@@ -137,6 +137,13 @@ pub struct Fixture {
 
 impl Lifecycle for Fixture {
     type Needs = FixtureNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("panic_binds", Kind::Int),
+            Key::optional("start", Kind::Int),
+        ])
+    }
 
     fn start(needs: FixtureNeeds, cfg: &Config<'_>) -> Result<Self> {
         // `panic_binds = N` in the board file: the first N binds panic.

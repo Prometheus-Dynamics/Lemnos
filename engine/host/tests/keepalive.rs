@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use lemnos_core::{Config, Lifecycle, MethodId, Result, contract, driver};
+use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, MethodId, Result, contract, driver};
 use lemnos_host::board::parse;
 use lemnos_host::{Host, Liveness, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
@@ -27,6 +27,13 @@ pub struct Ticks {
 
 impl Lifecycle for Ticks {
     type Needs = TicksNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("panic", Kind::Bool),
+            Key::optional("hang_ms", Kind::Int),
+        ])
+    }
     const TICKS: bool = true;
 
     fn start(_: TicksNeeds, cfg: &Config<'_>) -> Result<Self> {

@@ -1573,6 +1573,8 @@ dependencies = [
  "lemnos-contract-security-precondition",
  "lemnos-contract-system-identity",
  "lemnos-core",
+ "lemnos-host",
+ "lemnos-sim",
  "lemnos-slot-store",
 ]
 

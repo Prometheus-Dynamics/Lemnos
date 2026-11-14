@@ -124,10 +124,11 @@ pub trait Driver: Sized {
     fn bind(res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Self>;
     /// Checks the settings a board file gives this driver. Needs no hardware and no bind, so the
     /// host runs it when it checks a board file, before any device is made; a built-in driver's
-    /// bind runs it too. Accepts every setting by default, which is what a driver built outside
-    /// this tree gets.
-    fn check_config<'a>(_cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        Ok(())
+    /// bind runs it too. By default a driver reads no settings: every key the board gives is
+    /// refused by name, so a setting nothing reads is never silently accepted. A driver that reads
+    /// settings names them (see [`Config::check_keys`]).
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[])
     }
     /// Binds into `place`, which is where the driver will live: a host with no allocator keeps
     /// each driver in a `static`, and a large one built on the stack and moved there costs the
@@ -196,10 +197,10 @@ pub trait Lifecycle: Sized {
 
     fn start(needs: Self::Needs, cfg: &Config<'_>) -> Result<Self>;
     /// The settings check, as [`Driver::check_config`]. A driver written with `#[driver]` binds
-    /// only after it passes: the generated bind refuses with `INVALID_ARGUMENT` otherwise. Accepts
-    /// every setting by default.
-    fn check_config<'a>(_cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        Ok(())
+    /// only after it passes: the generated bind refuses with `INVALID_ARGUMENT` otherwise. By
+    /// default the driver reads no settings, and any key is refused by name.
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[])
     }
     /// [`Lifecycle::start`], into the place the driver will live. A driver whose state is large
     /// can write this to fill `place` field by field, so that it is never whole on the stack of
