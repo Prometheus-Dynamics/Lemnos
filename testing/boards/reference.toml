@@ -90,8 +90,8 @@ config = { timeout_s = 15 }
 [[devices]]
 id = "gadget"
 driver = "usb-gadget"
-uses = { function = "udc:1000480000.usb", identity = "identity" }
-config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", interfaces = "function ffs\nfunction ncm derive\nfunction acm\n" }
+uses = { function = "udc:1000480000.usb" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 pipe\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive\nfunction acm\n" }
 
 # The LED strip on the PIO block: 16 SK6812-EC20 on GPIO13, 24 bits per LED on the wire, as the
 # product's overlay states (`ws2812-pio,gpio=13,num_leds=16`, 2026-11-13). The pixel order GRB is
@@ -177,7 +177,7 @@ heap = "linux,cma"
 id = "cam0-fe"
 driver = "pisp-fe"
 link = "cam0-isp"
-config = { device = "1f00110000.csi" }
+config = { device = "1f00110000.csi", lanes = 2, mbps = 800, data_type = 0x2b, job_slots = 8 }
 
 # 8 of 632 bytes: one front-end configuration (`fe_job::CONFIG_BYTES`, `FeConfig::SIZE`), per job.
 [devices.streams.config]

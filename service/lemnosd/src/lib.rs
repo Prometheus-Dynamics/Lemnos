@@ -20,6 +20,25 @@ mod requests;
 mod serve;
 mod streams;
 
+/// The daemon's `--check` of a board file: the file as the daemon reads it (a device whose own
+/// entry is wrong is kept and refused), each gadget's board serial, then each driver's settings
+/// check. `Ok` when nothing is refused, else the first refusal, by device and key.
+///
+/// # Errors
+///
+/// The file does not parse, or a device's settings are refused (the first one, as its reason).
+pub fn check(text: &str, drivers: &[lemnos_host::DriverEntry]) -> Result<(), String> {
+    let mut board_file = lemnos_host::board::parse_lenient(text).map_err(|e| e.to_string())?;
+    gadget::resolve(&mut board_file);
+    match lemnos_host::settings_refusals(&board_file, drivers)
+        .into_iter()
+        .next()
+    {
+        Some((_, reason)) => Err(reason),
+        None => Ok(()),
+    }
+}
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;

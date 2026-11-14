@@ -150,6 +150,12 @@ fn main() -> ExitCode {
         Ok(text) => text,
         Err(error) => return complain(&format!("{board}: {error}")),
     };
+    if check {
+        return match lemnosd::check(&text, &drivers()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(reason) => complain(&format!("{board}: {reason}")),
+        };
+    }
     // A device whose own entry is wrong is kept, refused with its reason: the file is refused only
     // for what nothing in it can run without (see `parse_lenient`).
     let mut board_file = match parse_lenient(&text) {
@@ -161,15 +167,9 @@ fn main() -> ExitCode {
     gadget::resolve(&mut board_file);
     // Each driver's settings check, before anything is made. A device whose settings a driver
     // refuses is not made: the daemon starts without it, and says so here; its state carries the
-    // same reason. `--check` refuses the board instead, as `lemnos-ctl validate` does.
+    // same reason. `--check` refused the board above instead, as `lemnos-ctl validate` does.
     let mut drivers = drivers();
     let refused = lemnos_host::settings_refusals(&board_file, &drivers);
-    if check {
-        return match refused.first() {
-            Some((_, reason)) => complain(&format!("{board}: {reason}")),
-            None => ExitCode::SUCCESS,
-        };
-    }
     for (_, reason) in &refused {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
     }

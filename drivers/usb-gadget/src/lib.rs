@@ -631,8 +631,8 @@ impl Drop for UsbGadget {
 /// written by the daemon from the board's identity device, and `identity` names that device: the
 /// daemon reads them, and a board file that sets the first two is refused by the daemon.
 const KEYS: &[Key] = &[
-    Key::required("vendor", KeyKind::Int),
-    Key::required("product", KeyKind::Int),
+    Key::optional("vendor", KeyKind::Int),
+    Key::optional("product", KeyKind::Int),
     Key::optional("release", KeyKind::Int),
     Key::optional("class", KeyKind::Int),
     Key::optional("subclass", KeyKind::Int),

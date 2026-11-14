@@ -17,7 +17,8 @@ lemnos-ctl validate docs/examples/full-board.toml
 `--check` parses the file and exits, 0 when it is well formed. `lemnos-ctl validate` checks it the
 same way with no daemon, and also prints the host settings the file gives, defaults filled in, and
 the devices that opted in to auto-off. Both check the keys on this page, and both run every built-in
-driver's check of its own `config` keys, with no hardware and no device made. `lemnos-ctl validate`
+driver's check of its own `config` keys, with no hardware and no device made. Every board file in the repository is checked by both,
+and each one's expected outcome is listed in `service/ctl/tests/board_files.rs`. `lemnos-ctl validate`
 refuses a board file with a setting a driver refuses, and names the device and the key:
 
 ```
