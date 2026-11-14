@@ -2,14 +2,15 @@
 //!
 //! Each slot keeps its own kernel, device trees and initramfs, so the loader chooses before any
 //! kernel runs. At install the driver writes `slots/<id>/extlinux/extlinux.conf` from the slot's
-//! files and its command line. The record is `boot-record.env` on the boot partition, in the text
-//! form U-Boot's `env import -t` reads: `default=<id>`, `trial=<id>` (empty when none) and
+//! files and its command line. The record is U-Boot's own redundant environment, on its own raw
+//! partition ([`UbootEnv`]): the variables `default=<id>`, `trial=<id>` (unset when none) and
 //! `trial_attempts=0..3`, the boots that may still start the trial. A static script,
-//! `packaging/uboot/boot.cmd`, loads the record and, for a trial with attempts, takes one, writes
-//! the record and then starts the trial; when that returns, or there are none, it starts the
-//! default; when the record can't be read, the fixed `extlinux/extlinux.conf` at the boot
-//! partition's root, a copy of the default's this driver keeps current. [`steps`] is that
-//! decision, which the script mirrors.
+//! `packaging/uboot/boot.cmd`, reads them, and for a trial with attempts takes one, saves the
+//! environment and then starts the trial; when that returns, or there are none, it starts the
+//! default; when the default can't be started, the fixed `extlinux/extlinux.conf` at the boot
+//! partition's root, the install-time copy of the default's. [`steps`] is that decision, which the
+//! script mirrors. The file-based record of the earlier design (`boot-record.env` on the boot
+//! partition) is refused at run time: nothing on the boot partition is written for it.
 
 use std::fs;
 use std::io;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
+use lemnos_slot_store::uboot_env::{self, FileEnv, Geometry, Place};
 
 use crate::boot::{BootRecord, Restarter};
 use crate::store::{Layout, replace, sync_dir, valid_id};
@@ -178,7 +180,12 @@ impl Uboot {
                 ubi::RECORD_VOLUME,
                 record.text().as_bytes(),
             ),
-            None => replace(&self.path(), record.text().as_bytes()),
+            // A record file on the boot partition is changed by no run-time code: the U-Boot form
+            // keeps its record in the U-Boot environment (see [`UbootEnv`]).
+            None => Err(io::Error::other(format!(
+                "{} is not written at run time: the U-Boot record is in the U-Boot environment",
+                self.path().display()
+            ))),
         }
     }
 }
@@ -231,6 +238,11 @@ impl BootRecord for Uboot {
     }
 
     fn fallback_copy(&self, layout: &Layout, id: &str) -> io::Result<()> {
+        // Only the UBI form keeps a root copy current; on a boot partition the root copy is the
+        // install-time fallback, and nothing writes it at run time.
+        if self.volume.is_none() {
+            return Ok(());
+        }
         let from = layout.boot_dir(id).join(EXTLINUX);
         let text = fs::read(&from)?;
         let dir = self.boot.join("extlinux");
@@ -240,6 +252,117 @@ impl BootRecord for Uboot {
         replace(&dir.join(BOARD_DTB), &dtb)?;
         replace(&dir.join("extlinux.conf"), &text)?;
         sync_dir(&self.boot)
+    }
+}
+
+/// The loader configuration the install writes for slot `id` (see [`extlinux`]), into the slot's
+/// boot directory `dir`, which holds the slot's files.
+fn write_extlinux(dir: &Path, id: &str, cmdline: &str) -> io::Result<()> {
+    let files = files_under(dir)?;
+    let text = extlinux(id, &files, cmdline).map_err(io::Error::other)?;
+    fs::create_dir_all(dir.join("extlinux"))?;
+    fs::write(dir.join(EXTLINUX), text)
+}
+
+/// The `uboot` record: `default`, `trial` and `trial_attempts` are variables of U-Boot's own
+/// redundant environment, at `place` (a raw, two-copy record, `lemnos_slot_store::uboot_env`).
+/// `packaging/uboot/boot.cmd` reads them and saves the environment with `saveenv` before it starts a
+/// trial. Nothing on the boot partition is written at run time.
+pub struct UbootEnv {
+    /// The boot disk's whole-disk node, or why it is not known.
+    pub disk: Result<PathBuf, String>,
+    pub place: Place,
+    pub restarter: Restarter,
+}
+
+impl UbootEnv {
+    /// The environment opened: its device and the geometry the place gives on it. The boot disk is
+    /// only needed for the GPT form; the device form names its device.
+    fn open(&self) -> io::Result<(FileEnv, Geometry)> {
+        let node = match &self.place {
+            Place::Gpt { .. } => {
+                let disk = self.disk.as_ref().map_err(|why| {
+                    io::Error::other(format!(
+                        "the boot disk isn't known, so the U-Boot environment can't be found: {why}"
+                    ))
+                })?;
+                self.place.node(disk)
+            }
+            Place::Device { .. } => self.place.node(Path::new("")),
+        };
+        let (mut dev, bytes) = FileEnv::open_sized(&node)
+            .map_err(|e| io::Error::other(format!("{}: {e}", node.display())))?;
+        let geometry = self
+            .place
+            .geometry(&mut dev, bytes)
+            .map_err(io::Error::other)?;
+        Ok((dev, geometry))
+    }
+
+    fn set(&self, updates: &[(&str, Option<&str>)]) -> io::Result<()> {
+        let (mut dev, geometry) = self.open()?;
+        uboot_env::set(&mut dev, &geometry, updates).map_err(io::Error::other)
+    }
+
+    /// The variables as they stand: `(default, trial, attempts)`, empty and 0 when unset.
+    fn read(&self) -> io::Result<(String, String, u8)> {
+        let (mut dev, geometry) = self.open()?;
+        let (_, list) = uboot_env::load_checked(&mut dev, &geometry).map_err(io::Error::other)?;
+        let get = |name: &str| {
+            list.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        let attempts = get("trial_attempts")
+            .parse::<u8>()
+            .unwrap_or(0)
+            .min(MAX_ATTEMPTS);
+        Ok((get("default"), get("trial"), attempts))
+    }
+}
+
+impl BootRecord for UbootEnv {
+    fn set_default(&mut self, id: &str) -> io::Result<()> {
+        self.set(&[("default", Some(id))])
+    }
+
+    fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
+        self.set(&[
+            ("trial", Some(id)),
+            ("trial_attempts", Some(&attempts.to_string())),
+        ])
+    }
+
+    fn pending(&self) -> io::Result<Option<(String, u8)>> {
+        let (_, trial, attempts) = self.read()?;
+        Ok((!trial.is_empty()).then_some((trial, attempts)))
+    }
+
+    fn set_attempts(&mut self, attempts: u8) -> io::Result<()> {
+        let (_, trial, _) = self.read()?;
+        if trial.is_empty() {
+            return Ok(());
+        }
+        self.set(&[("trial_attempts", Some(&attempts.to_string()))])
+    }
+
+    fn clear_trial(&mut self) -> io::Result<()> {
+        self.set(&[("trial", None), ("trial_attempts", None)])
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        // The script starts a trial that has attempts left on any restart.
+        self.restarter.run(None)
+    }
+
+    fn prepare(&self, dir: &Path, id: &str, cmdline: &str) -> io::Result<()> {
+        write_extlinux(dir, id, cmdline)
+    }
+
+    /// The root copy is the install-time fallback (see [`Uboot`]): nothing is rewritten here.
+    fn fallback_copy(&self, _layout: &Layout, _id: &str) -> io::Result<()> {
+        Ok(())
     }
 }
 

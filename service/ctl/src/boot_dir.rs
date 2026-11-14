@@ -153,7 +153,7 @@ pub struct LayoutFile {
     pub source: String,
 }
 
-/// Reads the layout contract. It refuses any version but 2, any key it does not know (at the top
+/// Reads the layout contract. It refuses any version but 4, any key it does not know (at the top
 /// level or in an entry), a `source` other than `build` or `generated`, and an entry without the
 /// fields it needs.
 pub fn read_layout(text: &str) -> Result<Vec<LayoutFile>, String> {
@@ -164,10 +164,10 @@ pub fn read_layout(text: &str) -> Result<Vec<LayoutFile>, String> {
         }
     }
     match table.get("version").and_then(toml::Value::as_integer) {
-        Some(3) => {}
+        Some(4) => {}
         other => {
             return Err(format!(
-                "slot-layout.toml: version {other:?}; this reader reads 3"
+                "slot-layout.toml: version {other:?}; this reader reads 4"
             ));
         }
     }
@@ -358,7 +358,11 @@ pub fn cmdline_slot(board: &BoardFile, slot: &str) -> Result<String, String> {
     Ok(words)
 }
 
-/// The files `--boot-dir` writes, `(name, bytes)`, for a board whose record is `tryboot`.
+/// The U-Boot script's source, which the image builder compiles with `mkimage` into `boot.scr`.
+pub const BOOT_CMD: &str = include_str!("../../../packaging/uboot/boot.cmd");
+
+/// The files `--boot-dir` writes, `(name, bytes)`, for a board whose record is `tryboot` (the Pi
+/// firmware's files) or `uboot` (the locator of U-Boot's environment and the boot script).
 /// `fragment` is the board's firmware lines (the `--boot` fragment); `slot` names the pointers.
 pub fn files(
     board: &BoardFile,
@@ -366,10 +370,14 @@ pub fn files(
     slot: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     let record = record_of(board)?;
-    if record != "tryboot" {
-        return Err(format!(
-            "--boot-dir writes the Raspberry Pi firmware's files, and this board's record is {record:?}: only \"tryboot\" has boot files written here"
-        ));
+    match record.as_str() {
+        "tryboot" => {}
+        "uboot" => return uboot_files(board),
+        other => {
+            return Err(format!(
+                "--boot-dir writes the boot files of the \"tryboot\" and \"uboot\" records, and this board's record is {other:?}: it has no boot files written here"
+            ));
+        }
     }
     // The contract is read before anything is written: a contract this tool does not read, or one
     // whose rpi-tryboot list is not the slot-store constants, refuses the boot directory by name.
@@ -398,7 +406,10 @@ pub fn files(
     ];
     // The contract's generated files, under the slot directory's name (`slot/`), each with the text
     // this tool makes for it. A generated file this tool does not make is refused by name.
-    for entry in layout.iter().filter(|f| f.source == "generated") {
+    for entry in layout
+        .iter()
+        .filter(|f| f.source == "generated" && f.firmware.iter().any(|k| k == "rpi-tryboot"))
+    {
         let text = match entry.name.as_str() {
             OVERLAY_README => OVERLAY_README_TEXT,
             other => return Err(format!("slot-layout.toml: no generator for {other:?}")),
@@ -423,6 +434,276 @@ pub fn files(
     let precreated = precreate(&kinds).map_err(|e| format!("the record files: {e:?}"))?;
     for (record, (_, bytes)) in records.iter().zip(precreated) {
         out.push((record.name.clone(), bytes));
+    }
+    Ok(out)
+}
+
+/// The `system-slots` device's settings of a `uboot` board.
+fn slots_config(board: &BoardFile) -> Result<&toml::Table, String> {
+    let device = board
+        .devices
+        .iter()
+        .find(|device| device.driver == "system-slots")
+        .ok_or("this board has no system-slots device")?;
+    Ok(&device.config)
+}
+
+/// A non-negative integer setting, or `default` when it is not given (`None`: it is required).
+fn setting(config: &toml::Table, key: &str, default: Option<u64>) -> Result<u64, String> {
+    match config.get(key) {
+        None => default.ok_or_else(|| {
+            format!("system-slots: {key} is needed for the \"uboot\" record (an integer)")
+        }),
+        Some(value) => value
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| format!("system-slots: {key} must be a non-negative integer")),
+    }
+}
+
+/// Where the environment is, from the board file: the GPT form (only `uboot_env_size`), or with
+/// `uboot_env_device` the fixed-offset form. `uboot_env_partuuid` is refused by name.
+pub fn uboot_place(board: &BoardFile) -> Result<lemnos_slot_store::uboot_env::Place, String> {
+    use lemnos_slot_store::uboot_env::Place;
+    let config = slots_config(board)?;
+    if config.contains_key("uboot_env_partuuid") {
+        return Err(format!(
+            "system-slots: uboot_env_partuuid is not a key: the environment is found by its GPT partition type GUID {} on the boot disk (uboot_env_device with offsets names one outside the GPT)",
+            lemnos_slot_store::gpt::ENV_TYPE_GUID
+        ));
+    }
+    let size = usize::try_from(setting(config, "uboot_env_size", None)?)
+        .map_err(|_| "system-slots: uboot_env_size is out of range".to_string())?;
+    match config.get("uboot_env_device") {
+        None => {
+            for key in ["uboot_env_offset", "uboot_env_offset_redund"] {
+                if config.contains_key(key) {
+                    return Err(format!(
+                        "system-slots: {key} needs uboot_env_device: the GPT form places both copies itself"
+                    ));
+                }
+            }
+            Place::gpt(size).map_err(|e| format!("system-slots: uboot_env_size: {e}"))
+        }
+        Some(device) => {
+            let device = device
+                .as_str()
+                .ok_or("system-slots: uboot_env_device must be a string")?;
+            Place::device(
+                device,
+                size,
+                setting(config, "uboot_env_offset", None)?,
+                setting(config, "uboot_env_offset_redund", None)?,
+            )
+            .map_err(|e| format!("system-slots: uboot_env_device: {e}"))
+        }
+    }
+}
+
+/// The `uboot` record's files: the locator of U-Boot's environment, from the board file's
+/// `uboot_env_*` keys (the same facts the image's U-Boot is built with), the boot script (with the
+/// board's USB controller and LED set before it), and the contract copy. Refused by name when a key
+/// is missing or not one the locator takes.
+fn uboot_files(board: &BoardFile) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let config = slots_config(board)?;
+    let place = uboot_place(board)?;
+    let usb = setting(config, "uboot_fastboot_usb", Some(0))?;
+    let led = match config.get("uboot_led") {
+        None => String::new(),
+        Some(value) => {
+            let label = value
+                .as_str()
+                .ok_or("system-slots: uboot_led must be a string")?;
+            if label.is_empty()
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-:.".contains(&b))
+            {
+                return Err(format!(
+                    "system-slots: uboot_led {label:?} is not a U-Boot LED label (letters, digits, `_-:.`)"
+                ));
+            }
+            format!("setenv lemnos_led {label}\n")
+        }
+    };
+    let layout = read_layout(LAYOUT)?;
+    let named = layout
+        .iter()
+        .find(|f| f.firmware.iter().any(|k| k == "uboot"))
+        .ok_or("slot-layout.toml lists no uboot file")?;
+    if named.name != lemnos_slot_store::uboot_env::LOCATOR {
+        return Err("slot-layout.toml's uboot file isn't the slot-store locator name".into());
+    }
+    let script = format!(
+        "# Written by lemnos-ctl tree --boot-dir from the board file: the USB controller the download\n\
+         # mode uses and the LED it lights. The script follows.\n\
+         setenv lemnos_usb {usb}\n{led}{BOOT_CMD}"
+    );
+    let mut out = vec![
+        ("slot-layout.toml".to_string(), LAYOUT.as_bytes().to_vec()),
+        (
+            lemnos_slot_store::uboot_env::LOCATOR.to_string(),
+            place.encode().into_bytes(),
+        ),
+        ("boot.cmd".to_string(), script.into_bytes()),
+    ];
+    // The records the contract lists for the uboot form (the reason record), pre-created empty.
+    let records: Vec<RecordFile> = read_records(LAYOUT)?
+        .into_iter()
+        .filter(|r| r.firmware.iter().any(|k| k == "uboot"))
+        .collect();
+    let mut kinds = Vec::new();
+    for record in &records {
+        kinds.push((kind_of_role(&record.role)?, &b""[..]));
+    }
+    let precreated = precreate(&kinds).map_err(|e| format!("the record files: {e:?}"))?;
+    for (record, (_, bytes)) in records.iter().zip(precreated) {
+        out.push((record.name.clone(), bytes));
+    }
+    Ok(out)
+}
+
+/// The U-Boot configuration fragment the board's U-Boot is built with, for `record = "uboot"`:
+/// Kconfig lines the image builder includes verbatim (`scripts/kconfig/merge_config.sh`). Every name
+/// is a U-Boot v2026.10 option, with the file and line that define it in the comment above its
+/// group. The board's own storage, USB device controller, watchdog and LED drivers
+/// (`CONFIG_MMC_*`, `CONFIG_USB_GADGET_*` for the controller, `CONFIG_WDT_*`, `CONFIG_LED_*`) are the
+/// board's defconfig and are not named here.
+pub fn uboot_config(board: &BoardFile) -> Result<String, String> {
+    use lemnos_slot_store::uboot_env::Place;
+    if record_of(board)? != "uboot" {
+        return Err(format!(
+            "this board's record is {:?}: the U-Boot configuration is for \"uboot\"",
+            record_of(board)?
+        ));
+    }
+    let config = slots_config(board)?;
+    let place = uboot_place(board)?;
+    let mmc = setting(config, "uboot_env_mmc_index", Some(0))?;
+    let usb = setting(config, "uboot_fastboot_usb", Some(0))?;
+    let mut out = String::from(
+        "# Written by lemnos-ctl tree --uboot-config from the board file. Include it verbatim in the\n\
+         # U-Boot build for this board (U-Boot v2026.10 Kconfig names). Do not edit.\n\n",
+    );
+    let mut group = |title: &str, lines: &[String]| {
+        out.push_str(&format!("# {title}\n"));
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    };
+    group(
+        "The environment: in the MMC device, redundant, saved by `saveenv` (env/Kconfig:229 ENV_IS_IN_MMC,\n\
+         # :522 ENV_REDUNDANT, :700 ENV_SIZE, :781 ENV_MMC_DEVICE_INDEX; cmd/Kconfig:727 CMD_SAVEENV).\n\
+         # CONFIG_ENV_SIZE is uboot_env_size: both copies are that many bytes, and slot-init and lemnosd\n\
+         # refuse an environment whose copies do not check at that size.",
+        &[
+            "CONFIG_ENV_IS_IN_MMC=y".into(),
+            format!("CONFIG_ENV_MMC_DEVICE_INDEX={mmc}"),
+            "CONFIG_ENV_REDUNDANT=y".into(),
+            format!("CONFIG_ENV_SIZE=0x{:x}", place.size()),
+            "CONFIG_CMD_SAVEENV=y".into(),
+        ],
+    );
+    match &place {
+        Place::Gpt { .. } => group(
+            "Where the copies are: at the top of the one GPT partition of type\n\
+             # 3de21764-95bd-54bd-a5c3-4abe786f38a8 (env/mmc.c:114-148, GUID in include/part_efi.h:61),\n\
+             # which needs the GPT reader and the control device tree (env/mmc.c:51 OF_CONTROL;\n\
+             # disk/Kconfig:165 PARTITION_TYPE_GUID). The image has exactly one such partition, at least\n\
+             # two copies long; the offsets are not configured.",
+            &[
+                "CONFIG_EFI_PARTITION=y".into(),
+                "CONFIG_PARTITION_TYPE_GUID=y".into(),
+                "CONFIG_OF_CONTROL=y".into(),
+            ],
+        ),
+        Place::Device { geometry, .. } => group(
+            "Where the copies are: fixed byte offsets of the MMC device (env/Kconfig:644 ENV_OFFSET,\n\
+             # :675 ENV_OFFSET_REDUND), uboot_env_offset and uboot_env_offset_redund.",
+            &[
+                format!("CONFIG_ENV_OFFSET=0x{:x}", geometry.offset),
+                format!("CONFIG_ENV_OFFSET_REDUND=0x{:x}", geometry.offset_redund),
+            ],
+        ),
+    }
+    group(
+        "The boot script: hush with while and for, sysboot, fdt, sleep (cmd/Kconfig:574 CMD_FDT,\n\
+         # :2545 CMD_SLEEP, :2574 CMD_SYSBOOT; common/cli_hush.c:2383-2388).",
+        &[
+            "CONFIG_HUSH_PARSER=y".into(),
+            "CONFIG_CMD_FDT=y".into(),
+            "CONFIG_CMD_SLEEP=y".into(),
+            "CONFIG_CMD_SYSBOOT=y".into(),
+        ],
+    );
+    let mut fastboot = vec![
+        "CONFIG_USB_GADGET=y".into(),
+        "CONFIG_USB_FUNCTION_FASTBOOT=y".into(),
+        "CONFIG_CMD_FASTBOOT=y".into(),
+        format!("CONFIG_FASTBOOT_USB_DEV={usb}"),
+        "CONFIG_FASTBOOT_FLASH=y".into(),
+        "CONFIG_FASTBOOT_FLASH_MMC=y".into(),
+        format!("CONFIG_FASTBOOT_FLASH_MMC_DEV={mmc}"),
+    ];
+    match (
+        config.get("uboot_usb_vendor"),
+        config.get("uboot_usb_product"),
+    ) {
+        (None, None) => {}
+        (Some(_), Some(_)) => {
+            for (key, name) in [
+                ("uboot_usb_vendor", "CONFIG_USB_GADGET_VENDOR_NUM"),
+                ("uboot_usb_product", "CONFIG_USB_GADGET_PRODUCT_NUM"),
+            ] {
+                let id = setting(config, key, None)?;
+                if id > 0xffff {
+                    return Err(format!("system-slots: {key} must be 0 to 65535"));
+                }
+                fastboot.push(format!("{name}=0x{id:04x}"));
+            }
+        }
+        _ => {
+            return Err(
+                "system-slots: uboot_usb_vendor and uboot_usb_product are given together or not at all"
+                    .into(),
+            );
+        }
+    }
+    group(
+        "Download mode: the fastboot gadget (drivers/fastboot/Kconfig:20 USB_FUNCTION_FASTBOOT, :82\n\
+         # FASTBOOT_USB_DEV, :91 FASTBOOT_FLASH, :115 FASTBOOT_FLASH_MMC; cmd/Kconfig:1199 CMD_FASTBOOT;\n\
+         # drivers/usb/gadget/Kconfig:59 and :71 for the VID and PID). The VID and PID are only emitted\n\
+         # when the board file gives uboot_usb_vendor and uboot_usb_product; otherwise U-Boot's own\n\
+         # defaults for the SoC stay, a placeholder the project replaces with its own. The buffer\n\
+         # (FASTBOOT_BUF_ADDR, FASTBOOT_BUF_SIZE) is the board's defconfig: it is RAM the board knows.",
+        &fastboot,
+    );
+    let mut watchdog = vec!["CONFIG_WDT=y".into(), "CONFIG_WATCHDOG=y".into()];
+    if config.contains_key("uboot_watchdog_ms") {
+        watchdog.push(format!(
+            "CONFIG_WATCHDOG_TIMEOUT_MSECS={}",
+            setting(config, "uboot_watchdog_ms", None)?
+        ));
+    }
+    watchdog.push("CONFIG_WATCHDOG_AUTOSTART=y".into());
+    group(
+        "The watchdog, started at init and serviced by U-Boot itself, also inside the fastboot loop\n\
+         # (drivers/watchdog/Kconfig:3 WATCHDOG, :14 WATCHDOG_AUTOSTART, :30 WATCHDOG_TIMEOUT_MSECS, :82\n\
+         # WDT; cmd/fastboot.c:115 schedule()): a flash in progress is not reset, a U-Boot that hangs is.\n\
+         # The board's own watchdog driver (CONFIG_WDT_*) is its defconfig.",
+        &watchdog,
+    );
+    if config.contains_key("uboot_led") {
+        group(
+            "The download-mode LED (drivers/led/Kconfig:3 LED; cmd/Kconfig:2479 CMD_LED, cmd/led.c:121).\n\
+             # The board's LED driver and its device-tree node with the label are the board's.",
+            &["CONFIG_LED=y".into(), "CONFIG_CMD_LED=y".into()],
+        );
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
     }
     Ok(out)
 }

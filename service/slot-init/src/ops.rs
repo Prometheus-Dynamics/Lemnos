@@ -51,6 +51,21 @@ pub trait Ops {
         lemnos_slot_store::boot_raw::Boot::open(dev)
             .map(|boot| Box::new(boot) as Box<dyn lemnos_slot_store::boot_raw::BootRaw>)
     }
+    /// The U-Boot environment's node, opened read-write (nothing is mounted), and its length in
+    /// bytes. The tests use an in-memory device, with a cut at a chosen byte.
+    fn open_uboot_env(
+        &self,
+        node: &Path,
+    ) -> Result<(Box<dyn lemnos_slot_store::uboot_env::EnvDev>, u64), String> {
+        lemnos_slot_store::uboot_env::FileEnv::open_sized(node)
+            .map(|(dev, bytes)| {
+                (
+                    Box::new(dev) as Box<dyn lemnos_slot_store::uboot_env::EnvDev>,
+                    bytes,
+                )
+            })
+            .map_err(|error| format!("{}: {error}", node.display()))
+    }
     /// A file on the boot partition, `path` relative to its root, read without a mount: the FAT
     /// volume at `dev` is read raw ([`lemnos_slot_store::bootcheck::fat_read`]). `None` when the file
     /// is not there. The tests read their tree of files instead.

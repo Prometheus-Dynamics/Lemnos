@@ -297,29 +297,26 @@ fn the_uboot_check_reads_the_slot_its_cmdline_and_the_root_copy_when_default() {
         let files = files.clone();
         move |path: &str| Ok(files.get(path).cloned())
     };
-    assert_eq!(uboot_check("s1", &slot_files(), true, read(&files)), None);
+    assert_eq!(uboot_check("s1", &slot_files(), read(&files)), None);
     // A changed append in the slot's copy is refused.
     let mut edited = files.clone();
     edited.insert(
         "slots/s1/extlinux/extlinux.conf".into(),
         generated("s1", &format!("{line} mem=128M")).into_bytes(),
     );
-    assert!(uboot_check("s1", &slot_files(), true, read(&edited)).is_some());
-    // A root copy that is not the default's is refused only for the default slot.
+    assert!(uboot_check("s1", &slot_files(), read(&edited)).is_some());
+    // The root copy is the install-time fallback: one that is not the default's is not a mismatch.
     let mut root_other = files.clone();
     root_other.insert("extlinux/extlinux.conf".into(), b"other\n".to_vec());
-    assert!(uboot_check("s1", &slot_files(), true, read(&root_other)).is_some());
-    assert_eq!(
-        uboot_check("s1", &slot_files(), false, read(&root_other)),
-        None
-    );
+    assert_eq!(uboot_check("s1", &slot_files(), read(&root_other)), None);
+    assert_eq!(uboot_check("s1", &slot_files(), read(&root_other)), None);
     // A board with no extlinux anywhere is not the U-Boot form: nothing to check.
-    assert_eq!(uboot_check("s1", &slot_files(), true, |_| Ok(None)), None);
+    assert_eq!(uboot_check("s1", &slot_files(), |_| Ok(None)), None);
     // A U-Boot board whose slot copy is gone does not match.
     let mut gone = files.clone();
     gone.remove("slots/s1/extlinux/extlinux.conf");
     gone.insert("boot-record.env".into(), b"x".to_vec());
-    assert!(uboot_check("s1", &slot_files(), true, read(&gone)).is_some());
+    assert!(uboot_check("s1", &slot_files(), read(&gone)).is_some());
 }
 
 mod overlay_marker {

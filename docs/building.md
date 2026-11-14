@@ -118,8 +118,9 @@ lemnos-ctl tree --socs <repo>/socs testing/boards/reference.toml -o overlay.dts 
 Exit 0; nothing refused. Files written: `overlay.dts` 2976 bytes (`-o`), `modprobe.conf` 949, `cmdline.txt` 86,
 `udev.rules` 1124, `mdev.conf` 1141. `boot/`: `config.txt` 1318, `tryboot.txt` 1274, `default.txt` 512,
 `previous.txt` 512, `trial.txt` 512, `trial.rec` 1024, `reason.rec` 1024, `episodes.rec` 1024,
-`slot-layout.toml` 1820, and `slot/overlays/README` 162. For a `record = "uboot"` board the `boot/` files are
-`slot-layout.toml`, `uboot-env.txt` and `boot.cmd` (I5i7).
+`slot-layout.toml` 4769, and `slot/overlays/README` 162. For a `record = "uboot"` board the `boot/` files are
+`slot-layout.toml`, `uboot-env.txt`, `boot.cmd` and `reason.rec`; `--uboot-config FILE` writes the U-Boot Kconfig
+fragment the board's U-Boot is built with ([Boards](boards.md#u-boot-environment-system-slots-record--uboot)).
 
 **The SoC map.** A board with `soc = NAME` reads `DIR/NAME.toml`, where `DIR` is `--socs DIR`, or the relative
 directory `socs` in the working directory when `--socs` is absent (`load_map` in `service/ctl/src/lib.rs`).

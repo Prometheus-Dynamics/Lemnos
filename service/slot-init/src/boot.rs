@@ -44,6 +44,7 @@ use lemnos_slot_store::records::{KERNEL_GAP, MAX_ATTEMPTS, attempts, file, trybo
 use lemnos_slot_store::signing::{self, BOOT_UNVERIFIED};
 use lemnos_slot_store::store::{self, Layout, Meta, State, read_line, valid_id};
 use lemnos_slot_store::ubi::{self, Ubi};
+use lemnos_slot_store::uboot_env::{self, EnvDev, Geometry, Place};
 
 use crate::cmdline::Args;
 use crate::decide::{
@@ -107,6 +108,8 @@ impl Env {
 enum Record {
     Tryboot,
     File,
+    /// The U-Boot environment on its own raw partition, named by the boot partition's locator.
+    UbootEnv,
     Uboot,
     /// The U-Boot record as a UBI volume, on raw NAND.
     UbiVolume,
@@ -401,6 +404,10 @@ impl Boot<'_> {
         match record {
             Record::Tryboot => self.open_raw()?.arm_trial(id, left),
             Record::File => Err(refused(file::FILE)),
+            Record::UbootEnv => {
+                let left = left.to_string();
+                self.uboot_env_set(&[("trial", Some(id)), ("trial_attempts", Some(left.as_str()))])
+            }
             Record::Uboot => Err(refused(uboot::RECORD_FILE)),
             Record::UbiVolume => {
                 let Some(device) = &self.layout.ubi else {
@@ -464,16 +471,10 @@ impl Boot<'_> {
         Some((read("lemnos,board")?, read("lemnos,overlay-sha256")?))
     }
 
-    fn verify_boot_files(
-        &self,
-        slot: &str,
-        manifest: &Manifest,
-        is_default: bool,
-    ) -> Result<(), String> {
+    fn verify_boot_files(&self, slot: &str, manifest: &Manifest) -> Result<(), String> {
         let (found, uboot) = self.with_boot_files(|read| {
             let found = bootcheck::check(slot, &manifest.boot_files, |path| read(path));
-            let uboot =
-                bootcheck::uboot_check(slot, &manifest.boot_files, is_default, |path| read(path));
+            let uboot = bootcheck::uboot_check(slot, &manifest.boot_files, |path| read(path));
             (found, uboot)
         })?;
         if found.is_empty() && uboot.is_none() {
@@ -523,6 +524,8 @@ impl Boot<'_> {
             .is_some_and(|ubi| ubi.volume(ubi::RECORD_VOLUME).is_some())
         {
             Record::UbiVolume
+        } else if self.boot_text(uboot_env::LOCATOR).is_some() {
+            Record::UbootEnv
         } else if self.boot_text(uboot::RECORD_FILE).is_some() {
             Record::Uboot
         } else if self.boot_text(file::FILE).is_some() {
@@ -530,6 +533,41 @@ impl Boot<'_> {
         } else {
             Record::Tryboot
         }
+    }
+
+    /// The U-Boot environment the boot record is in, and where the locator puts it. The locator is
+    /// read raw from the boot partition (no mount). The GPT form finds the partition of the
+    /// environment's type GUID on the boot disk; the device form opens the device it names. The two
+    /// copies' geometry must fit the node. Refused by name otherwise, and nothing is written.
+    fn uboot_env(&self) -> Result<(Box<dyn EnvDev>, Geometry), String> {
+        let bytes = self.boot_text(uboot_env::LOCATOR).ok_or_else(|| {
+            format!(
+                "{} is not readable on the boot partition: this image has no U-Boot environment locator",
+                uboot_env::LOCATOR
+            )
+        })?;
+        let text =
+            String::from_utf8(bytes).map_err(|_| format!("{} isn't text", uboot_env::LOCATOR))?;
+        let place = Place::parse(&text)?;
+        let node = match &place {
+            Place::Gpt { .. } => {
+                let disk = self.disk.get().ok_or("the boot disk isn't known")?;
+                place.node(&self.env.dev.join(disk))
+            }
+            Place::Device { .. } => place.node(Path::new("")),
+        };
+        let (mut dev, bytes) = self
+            .ops
+            .open_uboot_env(&node)
+            .map_err(|error| format!("the U-Boot environment's device: {error}"))?;
+        let geometry = place.geometry(&mut *dev, bytes)?;
+        Ok((dev, geometry))
+    }
+
+    /// Sets U-Boot environment variables, in one write of the inactive copy (`uboot_env::set`).
+    fn uboot_env_set(&self, updates: &[(&str, Option<&str>)]) -> Result<(), String> {
+        let (mut dev, geometry) = self.uboot_env()?;
+        uboot_env::set(&mut *dev, &geometry, updates)
     }
 
     /// The boot partition's raw records and pointers, opened on its block node.
@@ -546,11 +584,12 @@ impl Boot<'_> {
     fn boot_files_mismatch(&self, slot: &str, why: &str) -> String {
         let state = State::load(&self.layout);
         let previous = state.previous.clone();
+        let form = self.record_form();
         if self.trial
             || slot != state.default
             || !valid_id(&previous)
             || previous == slot
-            || self.record_form() != Record::Tryboot
+            || !matches!(form, Record::Tryboot | Record::UbootEnv)
         {
             return self.fail(why);
         }
@@ -565,16 +604,23 @@ impl Boot<'_> {
                 ));
             }
         };
-        if let Err(prev_why) = self.verify_boot_files(&previous, &manifest, false) {
+        if let Err(prev_why) = self.verify_boot_files(&previous, &manifest) {
             return self.rescue(&format!(
                 "{why}; its previous {previous} doesn't match its manifest either: {prev_why}"
             ));
         }
-        let mut raw = match self.open_raw() {
-            Ok(raw) => raw,
-            Err(error) => return self.rescue(&format!("{why}; the boot partition: {error}")),
+        // The default moves by the form's own write: the Pi firmware's pointer sector, or the U-Boot
+        // environment's `default` variable (one write of the inactive copy).
+        let moved = match form {
+            Record::UbootEnv => self.uboot_env_set(&[("default", Some(previous.as_str()))]),
+            _ => match self.open_raw() {
+                Ok(mut raw) => raw.set_pointer(Pointer::Default, &previous),
+                Err(error) => {
+                    return self.rescue(&format!("{why}; the boot partition: {error}"));
+                }
+            },
         };
-        if let Err(error) = raw.set_pointer(Pointer::Default, &previous) {
+        if let Err(error) = moved {
             return self.rescue(&format!(
                 "{why}; couldn't point the default at {previous}: {error}"
             ));
@@ -819,7 +865,7 @@ impl Boot<'_> {
                 let (_, trial, left) = file::parse(&String::from_utf8_lossy(&text));
                 (!trial.is_empty() && left > 0).then_some(Record::File)
             }
-            Record::Uboot | Record::UbiVolume => self
+            Record::UbootEnv | Record::Uboot | Record::UbiVolume => self
                 .record_now(form)
                 .filter(|(trial, left)| !trial.is_empty() && *left > 0)
                 .map(|_| form),
@@ -830,6 +876,18 @@ impl Boot<'_> {
     /// The trial and attempts a U-Boot or UBI record holds now.
     fn record_now(&self, form: Record) -> Option<(String, u8)> {
         let text = match form {
+            Record::UbootEnv => {
+                let (mut dev, geometry) = self.uboot_env().ok()?;
+                let (_, vars) = uboot_env::load(&mut *dev, &geometry).ok()??;
+                let get = |name: &str| {
+                    vars.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_default()
+                };
+                let left = get("trial_attempts").parse::<u8>().unwrap_or(0);
+                return Some((get("trial"), left.min(MAX_ATTEMPTS)));
+            }
             Record::Uboot => {
                 String::from_utf8_lossy(&self.boot_text(uboot::RECORD_FILE)?).into_owned()
             }
@@ -863,6 +921,14 @@ impl Boot<'_> {
                 }
             }
             Record::File => {}
+            // The loader takes an attempt for every trial start and can't be told to wait, so the
+            // trial is withdrawn from U-Boot's environment (one write of the inactive copy).
+            Record::UbootEnv => {
+                if let Err(error) = self.uboot_env_set(&[("trial", None), ("trial_attempts", None)])
+                {
+                    self.log(&format!("the trial is not withdrawn: {error}"));
+                }
+            }
             Record::Uboot | Record::UbiVolume => {
                 self.log(&format!(
                     "the trial is not withdrawn: {}",
@@ -1050,7 +1116,7 @@ impl Boot<'_> {
             }
             Some(_) => {}
         }
-        if let Err(why) = self.verify_boot_files(&slot, &manifest, slot == state.default) {
+        if let Err(why) = self.verify_boot_files(&slot, &manifest) {
             return self.boot_files_mismatch(&slot, &why);
         }
         // The board overlay the firmware should have loaded: its marker is in the live tree. The

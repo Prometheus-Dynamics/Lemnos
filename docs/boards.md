@@ -221,6 +221,62 @@ The Pi firmware's behaviour behind this (`os_prefix` covers kernels, initramfs, 
 overlays need `overlays/README`; a missing kernel or dtb makes the firmware ignore the prefix) is from the
 documentation only until `testing/board-runs/I5i6.md` records a run.
 
+## U-Boot environment (`system-slots`, `record = "uboot"`)
+
+The `uboot` record keeps the trial and the default in U-Boot's own redundant environment, written raw
+(see [Slots](slots.md#the-uboot-record)). The environment is found by its GPT partition type GUID
+`3de21764-95bd-54bd-a5c3-4abe786f38a8` on the boot disk, the lookup U-Boot v2026.10 does itself
+(`env/mmc.c:187-193`): the image has exactly one such partition, and U-Boot places both copies at the
+top of it (`env/mmc.c:114-148`). The board file states the size only. `lemnos-ctl tree BOARD
+--uboot-config FILE` writes the U-Boot Kconfig fragment the board's U-Boot is built with, so the image
+cannot lack an option; `--boot-dir` writes the locator `uboot-env.txt`, `boot.cmd` and the pre-created
+`reason.rec`.
+
+| Driver | Key | Default | Range | Meaning |
+|---|---|---|---|---|
+| `system-slots` | `uboot_env_size` | required | at least 16 | `CONFIG_ENV_SIZE`, the size of one copy in bytes, header included. Both copies are checked at this size before the first write |
+| `system-slots` | `uboot_env_partuuid` | refused | | Not a key. A board file that gives it is refused by name: the environment is found by type, never by a PARTUUID |
+| `system-slots` | `uboot_env_device` | unset | an absolute block device path | The explicit form for an environment outside the GPT (fixed `CONFIG_ENV_OFFSET`s): the device, with `uboot_env_offset` and `uboot_env_offset_redund`, all required together, none allowed without it. `/dev/mtd*` and `/dev/ubi*` are refused by name: their writes need an erase the raw writer does not do |
+| `system-slots` | `uboot_env_offset`, `uboot_env_offset_redund` | with `uboot_env_device` | multiples of 512, 0 up | The two copies' byte offsets on the device (`CONFIG_ENV_OFFSET`, `CONFIG_ENV_OFFSET_REDUND`). The copies must not overlap |
+| `system-slots` | `uboot_env_mmc_index` | `0` | 0 up | The MMC device U-Boot keeps the environment on and flashes in download mode (`CONFIG_ENV_MMC_DEVICE_INDEX`, `CONFIG_FASTBOOT_FLASH_MMC_DEV`; `mmc list`'s number). Read by `--uboot-config` only |
+| `system-slots` | `uboot_fastboot_usb` | `0` | 0 up | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `--boot-dir` |
+| `system-slots` | `uboot_led` | unset | a U-Boot LED label | The LED that is on while the board waits in download mode (`led <label> on`). `--boot-dir` sets it in `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
+| `system-slots` | `uboot_usb_vendor`, `uboot_usb_product` | unset | 0 to 65535, given together | The fastboot gadget's VID and PID (`CONFIG_USB_GADGET_VENDOR_NUM`, `CONFIG_USB_GADGET_PRODUCT_NUM`). Unset, U-Boot's own default for the SoC stays: a placeholder the project replaces with its own |
+| `system-slots` | `uboot_watchdog_ms` | unset | 0 up | `CONFIG_WATCHDOG_TIMEOUT_MSECS`. Unset, U-Boot's default for the SoC stays |
+
+The fragment (`--uboot-config`), for the GPT form with a 8192-byte environment, MMC 0 and USB 0:
+
+```text
+CONFIG_ENV_IS_IN_MMC=y
+CONFIG_ENV_MMC_DEVICE_INDEX=0
+CONFIG_ENV_REDUNDANT=y
+CONFIG_ENV_SIZE=0x2000
+CONFIG_CMD_SAVEENV=y
+CONFIG_EFI_PARTITION=y
+CONFIG_PARTITION_TYPE_GUID=y
+CONFIG_OF_CONTROL=y
+CONFIG_HUSH_PARSER=y
+CONFIG_CMD_FDT=y
+CONFIG_CMD_SLEEP=y
+CONFIG_CMD_SYSBOOT=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_FUNCTION_FASTBOOT=y
+CONFIG_CMD_FASTBOOT=y
+CONFIG_FASTBOOT_USB_DEV=0
+CONFIG_FASTBOOT_FLASH=y
+CONFIG_FASTBOOT_FLASH_MMC=y
+CONFIG_FASTBOOT_FLASH_MMC_DEV=0
+CONFIG_WDT=y
+CONFIG_WATCHDOG=y
+CONFIG_WATCHDOG_AUTOSTART=y
+```
+
+The device form replaces the three GUID lines with `CONFIG_ENV_OFFSET=0x...` and
+`CONFIG_ENV_OFFSET_REDUND=0x...`. The file has a comment above each group naming the U-Boot v2026.10
+file and line that define the options. What the fragment leaves to the board's own defconfig: the
+storage, USB device-controller, watchdog and LED drivers, and the fastboot buffer
+(`CONFIG_FASTBOOT_BUF_ADDR`, `CONFIG_FASTBOOT_BUF_SIZE`: RAM only the board knows).
+
 ## `[board]` identity
 
 `[board] id` is the board's family, and the driver `system-identity` reads the rest of the

@@ -1446,13 +1446,22 @@ config = {{ systemctl = "{ctl}" }}
 fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_it() {
     let mut board = Board::new("os-1");
     let boot = board.layout().boot.clone();
-    board.slots.record = Box::new(crate::uboot::Uboot {
-        boot: boot.clone(),
+    // The environment: a valid copy on a node of its own (the partition U-Boot keeps it on).
+    let node = board.layout().boot.join("uboot-env.img");
+    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    let list = vec![("default".to_string(), String::new())];
+    let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
+    let mut image = vec![0u8; 8192];
+    image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
+    fs::write(&node, &image).unwrap();
+    board.slots.record = Box::new(crate::uboot::UbootEnv {
+        disk: Err("the device is named, the disk is not needed".into()),
+        place: lemnos_slot_store::uboot_env::Place::device(node.to_str().unwrap(), 1024, 0, 4096)
+            .unwrap(),
         restarter: crate::boot::Restarter {
             check: None,
             systemctl: "/bin/true".into(),
         },
-        volume: None,
     });
     board.install_ok("os-2");
     let kept = fs::read_to_string(board.layout().boot_list("os-2")).unwrap();
@@ -1471,18 +1480,35 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
         )),
         "{conf}"
     );
-    assert_eq!(
-        fs::read_to_string(boot.join(crate::uboot::RECORD_FILE)).unwrap(),
-        "default=\ntrial=os-2\ntrial_attempts=3\n"
+    let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
+    let (_, vars) = lemnos_slot_store::uboot_env::load(&mut dev, &geometry)
+        .unwrap()
+        .unwrap();
+    assert!(
+        vars.contains(&("trial".to_string(), "os-2".to_string())),
+        "{vars:?}"
+    );
+    assert!(
+        vars.contains(&("trial_attempts".to_string(), "3".to_string())),
+        "{vars:?}"
+    );
+    assert!(
+        !boot.join(crate::uboot::RECORD_FILE).exists(),
+        "no record file on the boot partition"
     );
     board.boot_into("os-2");
     board.slots.confirm().unwrap();
-    let record = fs::read_to_string(boot.join(crate::uboot::RECORD_FILE)).unwrap();
-    assert!(record.starts_with("default=os-2\n"), "{record}");
-    assert_eq!(
-        fs::read(boot.join("extlinux/extlinux.conf")).unwrap(),
-        conf.into_bytes()
+    let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
+    let (_, vars) = lemnos_slot_store::uboot_env::load(&mut dev, &geometry)
+        .unwrap()
+        .unwrap();
+    assert!(
+        vars.contains(&("default".to_string(), "os-2".to_string())),
+        "{vars:?}"
     );
+    // The root copy is the install-time fallback: a confirm rewrites nothing on the boot partition.
+    assert!(!boot.join("extlinux/extlinux.conf").exists());
+    assert!(conf.contains("  kernel /slots/os-2/kernel8.img\n"));
 }
 
 impl Board {
@@ -2551,7 +2577,7 @@ fn once_the_reason_can_be_written_the_deadline_restart_goes_and_nothing_is_repor
 }
 
 #[test]
-fn a_reason_the_state_never_held_is_read_from_the_boot_partition_at_the_next_start() {
+fn a_reason_the_state_never_held_is_not_kept_on_the_boot_partition() {
     let mut board = trial_board();
     board.slots.boot_node = Ok(reason_node(&board));
     board.baseline("a", "dev builtin\n");
@@ -2964,6 +2990,7 @@ fn check_config_names_the_bad_setting() {
     }
     let full = [
         ("record", ConfigValue::Str("uboot")),
+        ("uboot_env_size", ConfigValue::Int(8192)),
         ("reserve_mb", ConfigValue::Int(64)),
         ("keep", ConfigValue::Int(3)),
         ("boots_keep", ConfigValue::Int(10)),
@@ -2995,6 +3022,70 @@ fn check_config_names_the_bad_setting() {
             .unwrap_err()
             .key,
         "boot_sources"
+    );
+
+    // The U-Boot environment's keys: the size is required, the partition is found by type (a
+    // PARTUUID is refused by name), the fixed-offset form needs all of its facts and nothing else
+    // takes them, and flash or UBI is not a block device this writer applies to.
+    let env = |extra: &[(&'static str, ConfigValue<'static>)]| {
+        let mut all = vec![("record", ConfigValue::Str("uboot"))];
+        all.extend_from_slice(extra);
+        let all: &'static [(&'static str, ConfigValue<'static>)] =
+            Box::leak(all.into_boxed_slice());
+        let cfg = Config::new(all)
+            .with_lists(&[("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"])]);
+        <SystemSlots as Lifecycle>::check_config(&cfg).map_err(|e| (e.key.to_string(), e.reason))
+    };
+    assert_eq!(env(&[]).unwrap_err().0, "uboot_env_size");
+    assert!(env(&[("uboot_env_size", ConfigValue::Int(8192))]).is_ok());
+    let err = env(&[
+        ("uboot_env_size", ConfigValue::Int(8192)),
+        (
+            "uboot_env_partuuid",
+            ConfigValue::Str("0a1b2c3d-0000-4000-8000-000000000042"),
+        ),
+    ])
+    .unwrap_err();
+    assert_eq!(err.0, "uboot_env_partuuid");
+    assert!(
+        err.1.contains("3de21764-95bd-54bd-a5c3-4abe786f38a8"),
+        "{}",
+        err.1
+    );
+    assert_eq!(
+        env(&[("uboot_env_size", ConfigValue::Int(4))])
+            .unwrap_err()
+            .0,
+        "uboot_env_size"
+    );
+    let device = [
+        ("uboot_env_size", ConfigValue::Int(8192)),
+        ("uboot_env_device", ConfigValue::Str("/dev/mmcblk0")),
+        ("uboot_env_offset", ConfigValue::Int(0x400000)),
+        ("uboot_env_offset_redund", ConfigValue::Int(0x410000)),
+    ];
+    assert!(env(&device).is_ok());
+    assert_eq!(env(&device[..3]).unwrap_err().0, "uboot_env_offset_redund");
+    assert_eq!(env(&device[..2]).unwrap_err().0, "uboot_env_offset");
+    assert_eq!(
+        env(&[
+            ("uboot_env_size", ConfigValue::Int(8192)),
+            ("uboot_env_offset", ConfigValue::Int(512)),
+        ])
+        .unwrap_err()
+        .0,
+        "uboot_env_offset"
+    );
+    assert_eq!(
+        env(&[
+            ("uboot_env_size", ConfigValue::Int(8192)),
+            ("uboot_env_device", ConfigValue::Str("/dev/mtd3")),
+            ("uboot_env_offset", ConfigValue::Int(0)),
+            ("uboot_env_offset_redund", ConfigValue::Int(0x10000)),
+        ])
+        .unwrap_err()
+        .0,
+        "uboot_env_device"
     );
 
     let bogus = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();

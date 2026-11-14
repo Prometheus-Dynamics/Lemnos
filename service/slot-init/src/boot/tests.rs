@@ -2,8 +2,9 @@
 //! partitions and the kernel command line are files there, and a fake [`Ops`] writes down what it
 //! was asked. Nothing touches a disk, a mount or the boot configuration.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -11,9 +12,11 @@ use std::time::Duration;
 use lemnos_slot_store::boot_raw::{BootRaw, Pointer, Trial};
 use lemnos_slot_store::bootcheck::sha256_hex;
 use lemnos_slot_store::firmware;
+use lemnos_slot_store::gpt::{self, ENV_TYPE_BYTES};
 use lemnos_slot_store::manifest::{BLOCK, Verity, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
+use lemnos_slot_store::uboot_env::{self, EnvDev, FileEnv, Geometry, Place};
 
 use super::{DATA_LOG, Env, boot};
 use crate::boot::{BOOT_COUNT, FLASH_AFTER};
@@ -121,6 +124,32 @@ struct Fake {
     nand: Option<ubi::Fake>,
     /// The device-mapper targets the kernel has; `None` when there is no control node.
     dm: Option<Vec<String>>,
+    /// The next U-Boot environment write keeps this many bytes and fails, as a power cut does.
+    cut: Cell<Option<usize>>,
+}
+
+/// A U-Boot environment device on a file: the first write is cut after the bytes `cut` allows.
+struct CutEnv {
+    inner: FileEnv,
+    cut: Option<usize>,
+}
+
+impl EnvDev for CutEnv {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        match self.cut.take() {
+            Some(keep) if keep < bytes.len() => {
+                if keep > 0 {
+                    self.inner.write_at(offset, &bytes[..keep])?;
+                }
+                Err(io::Error::other("power cut"))
+            }
+            _ => self.inner.write_at(offset, bytes),
+        }
+    }
 }
 
 impl Fake {
@@ -255,6 +284,17 @@ impl Ops for Fake {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// The environment partition is a plain file here; its next write may be cut.
+    fn open_uboot_env(&self, node: &Path) -> Result<(Box<dyn EnvDev>, u64), String> {
+        let (inner, bytes) =
+            FileEnv::open_sized(node).map_err(|error| format!("{}: {error}", node.display()))?;
+        let cut = CutEnv {
+            inner,
+            cut: self.cut.take(),
+        };
+        Ok((Box::new(cut), bytes))
     }
 }
 
@@ -459,6 +499,11 @@ impl Board {
     }
 
     fn boot(&self, refuse: &[&'static str]) -> (Fake, String) {
+        self.boot_cut(refuse, None)
+    }
+
+    /// As [`Board::boot`], with the U-Boot environment's first write cut after `cut` bytes.
+    fn boot_cut(&self, refuse: &[&'static str], cut: Option<usize>) -> (Fake, String) {
         let fake = Fake {
             root: self.env.root.clone(),
             calls: RefCell::new(Vec::new()),
@@ -469,9 +514,65 @@ impl Board {
                 refuse: std::sync::Mutex::new(Vec::new()),
             }),
             dm: self.dm_targets.clone(),
+            cut: Cell::new(cut),
         };
         let why = boot(&fake, &self.env);
         (fake, why)
+    }
+
+    /// The same board with its record in U-Boot's environment: the boot partition holds
+    /// `uboot-env.txt` (`locator`), and the environment partition, `device` bytes long, is at
+    /// `/dev/disk/by-partuuid/<UBOOT_UUID>`. Both copies hold `default=os-2` (copy one active).
+    /// A board whose boot disk is a GPT disk with an environment partition of `blocks` blocks at
+    /// block 64 (among others): the environment's two copies sit at its top, as U-Boot puts them,
+    /// copy 0 with serial 6 and copy 1 with serial 5, both `default=os-2`. `locator` is the boot
+    /// partition's `uboot-env.txt`.
+    fn uboot(locator: &str, blocks: u64) -> Self {
+        let board = Self::new();
+        board.write("boot/uboot-env.txt", locator.as_bytes());
+        board.write(
+            "dev/mmcblk0",
+            &Self::gpt_disk(&[(ENV_TYPE_BYTES, 64, 63 + blocks)]),
+        );
+        board
+    }
+
+    /// A GPT disk with `parts`, the MBR's disk signature and boot marker kept; each environment
+    /// partition holds the two copies at its top (see [`Board::uboot`]).
+    fn gpt_disk(parts: &[([u8; 16], u64, u64)]) -> Vec<u8> {
+        let end = parts.iter().map(|p| p.2).max().unwrap() + 34;
+        let mut image = gpt::image(parts, end);
+        image[440..444].copy_from_slice(&0x1234_abcdu32.to_le_bytes());
+        image[510..512].copy_from_slice(&[0x55, 0xaa]);
+        for (kind, first, last) in parts {
+            if *kind != ENV_TYPE_BYTES {
+                continue;
+            }
+            if let Ok(g) = Geometry::in_partition(1024, *first, last - first + 1) {
+                for (at, serial) in [(g.offset, 6), (g.offset_redund, 5)] {
+                    let at = at as usize;
+                    image[at..at + 1024].copy_from_slice(&env_copy(&[("default", "os-2")], serial));
+                }
+            }
+        }
+        image
+    }
+
+    /// The raw disk bytes, for a check that nothing was written.
+    fn uboot_vars_raw(&self) -> Vec<u8> {
+        fs::read(self.env.dev.join("mmcblk0")).unwrap()
+    }
+
+    /// The environment's variables as U-Boot's rule reads them, sorted.
+    fn uboot_vars(&self) -> Vec<(String, String)> {
+        let node = self.env.dev.join("mmcblk0");
+        let (mut dev, bytes) = FileEnv::open_sized(&node).unwrap();
+        let geometry = Place::gpt(1024).unwrap().geometry(&mut dev, bytes).unwrap();
+        let (_, mut vars) = uboot_env::load(&mut dev, &geometry)
+            .unwrap()
+            .expect("an environment");
+        vars.sort();
+        vars
     }
 
     /// The same board on raw NAND: the data and boot directories are UBIFS volumes (here plain
@@ -1320,6 +1421,28 @@ fn a_uboot_trial_held_for_a_kernel_gap_is_withdrawn_with_its_attempt_given_back(
     );
 }
 
+/// On the environment form the held trial is withdrawn from U-Boot's environment (one write of the
+/// inactive copy): the loader takes an attempt on every trial start and cannot be told to wait.
+#[test]
+fn a_trial_in_the_uboot_environment_held_for_a_kernel_gap_is_withdrawn() {
+    let mut board = Board::uboot(&uboot_locator(), 64);
+    board.dm_targets = Some(Vec::new());
+    let node = board.env.dev.join("mmcblk0");
+    let (mut dev, bytes) = FileEnv::open_sized(&node).unwrap();
+    let g = Place::gpt(1024).unwrap().geometry(&mut dev, bytes).unwrap();
+    uboot_env::set(
+        &mut dev,
+        &g,
+        &[("trial", Some("os-1")), ("trial_attempts", Some("2"))],
+    )
+    .unwrap();
+    drop(dev);
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("the kernel lacks CONFIG_DM_VERITY"), "{why}");
+    assert_eq!(fake.last(), "restart");
+    assert_eq!(board.uboot_vars(), sorted(&[("default", "os-2")]));
+}
+
 /// Appends one argument to a slot's boot `cmdline.txt` in place, as an in-place edit did.
 fn append_argument(board: &Board, slot: &str) {
     let path = board.env.at(&format!("boot/slots/{slot}/cmdline.txt"));
@@ -1483,6 +1606,30 @@ fn slot_records(board: &Board) -> Vec<(String, String)> {
             }
         }
     }
+    out.sort();
+    out
+}
+
+/// A copy of `pairs` at serial `flags`, 1024 bytes, as U-Boot writes a 1024-byte environment.
+fn env_copy(pairs: &[(&str, &str)], flags: u8) -> Vec<u8> {
+    let list: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    let data = uboot_env::encode_vars(&list, 1024 - uboot_env::HEADER).unwrap();
+    uboot_env::encode_copy(&data, flags)
+}
+
+/// The locator of the GPT form with a 1024-byte environment.
+fn uboot_locator() -> String {
+    Place::gpt(1024).unwrap().encode()
+}
+
+fn sorted(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
     out.sort();
     out
 }
@@ -1735,4 +1882,206 @@ fn devtmpfs_is_mounted_before_anything_that_can_need_the_mailbox() {
     assert!(first_other.is_none_or(|i| devtmpfs < i), "{calls:?}");
     let flash = calls.iter().position(|c| c == "flash mode").expect("asked");
     assert!(devtmpfs < flash, "{calls:?}");
+}
+
+/// The default's boot files do not match: the previous is pointed to in the U-Boot environment,
+/// by one write of the inactive copy, and the board restarts.
+#[test]
+fn a_default_mismatch_on_the_uboot_form_moves_the_default_through_the_environment() {
+    let board = Board::uboot(&uboot_locator(), 64);
+    append_argument(&board, "os-2");
+    let (fake, why) = board.boot(&[]);
+    assert!(!fake.called("switch_root"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart", "{why}");
+    assert_eq!(board.uboot_vars(), sorted(&[("default", "os-1")]), "{why}");
+    assert_eq!(board.state().default, "os-1");
+}
+
+/// A failed default with no mismatch: the trial is armed in the environment with the board's
+/// attempts, and the default is kept.
+#[test]
+fn a_trial_fallback_on_the_uboot_form_arms_the_trial_in_the_environment() {
+    let board = Board::uboot(&uboot_locator(), 64);
+    let (fake, why) = board.boot(&["verity "]);
+    assert!(why.contains("dm-verity"), "{why}");
+    assert_eq!(
+        board.uboot_vars(),
+        sorted(&[
+            ("default", "os-2"),
+            ("trial", "os-1"),
+            ("trial_attempts", "3")
+        ]),
+    );
+    assert_eq!(fake.last(), "restart");
+    assert!(!fake.called("switch_root"));
+}
+
+/// A power cut at every byte of the environment write: U-Boot's rule must find the old or the new
+/// environment, never neither, and only a whole write changes it.
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment() {
+    let old = sorted(&[("default", "os-2")]);
+    let moved = sorted(&[("default", "os-1")]);
+    let armed = sorted(&[
+        ("default", "os-2"),
+        ("trial", "os-1"),
+        ("trial_attempts", "3"),
+    ]);
+    for trial in [false, true] {
+        let (new, cases) = if trial {
+            (&armed, "dm-verity")
+        } else {
+            (&moved, "mismatch")
+        };
+        for cut in 0..=1024usize {
+            let board = Board::uboot(&uboot_locator(), 64);
+            let refuse: &[&'static str] = if trial { &["verity "] } else { &[] };
+            if !trial {
+                append_argument(&board, "os-2");
+            }
+            let (fake, why) = board.boot_cut(refuse, Some(cut));
+            let got = board.uboot_vars();
+            assert!(
+                got == old || got == *new,
+                "{cases} cut {cut} left {got:?} ({why})"
+            );
+            if cut == 1024 {
+                assert_eq!(got, *new, "a whole write is the new environment");
+                assert!(fake.called("restart"), "{:?}", fake.calls());
+            } else {
+                // A cut keeps the old environment, or the new one when the bytes that were cut
+                // off already equal the new copy's (the torn copy is then whole, and its CRC holds).
+                // The log shows the write was refused.
+                assert!(
+                    fake.logs.borrow().iter().any(|l| l.contains("power cut")),
+                    "{cases} cut {cut}: the write was not refused: {:?}",
+                    fake.logs.borrow()
+                );
+            }
+        }
+    }
+}
+
+/// An environment partition too small for two copies is refused by name (U-Boot's own refusal),
+/// and the disk is left as it was.
+#[test]
+fn an_environment_partition_too_small_for_two_copies_is_refused_by_name() {
+    let board = Board::uboot(&uboot_locator(), 2);
+    append_argument(&board, "os-2");
+    let before = board.uboot_vars_raw();
+    let (_fake, why) = board.boot(&[]);
+    assert!(
+        why.contains("too small for two copies of 1024 bytes"),
+        "{why}"
+    );
+    assert_eq!(board.uboot_vars_raw(), before);
+    assert_eq!(board.state().default, "os-2");
+}
+
+/// A locator in the form of the earlier design (a PARTUUID), a wrong version and an overlapping
+/// device form are refused by name when it is read, before any device is opened.
+#[test]
+fn a_locator_that_is_not_one_is_refused_by_name() {
+    for (text, why) in [
+        (
+            "version = 1\npartuuid = \"0a1b2c3d-0000-4000-8000-000000000042\"\nsize = 1024\nsector = 512\noffset = 0\noffset_redund = 4096\n"
+                .to_string(),
+            "unknown key \"partuuid\"",
+        ),
+        (uboot_locator().replace("version = 1", "version = 2"), "version"),
+        (
+            "version = 1\nform = \"device\"\ndevice = \"/dev/mmcblk0\"\nsize = 1024\nsector = 512\noffset = 0\noffset_redund = 512\n"
+                .to_string(),
+            "overlap",
+        ),
+    ] {
+        let board = Board::uboot(&text, 64);
+        append_argument(&board, "os-2");
+        let before = board.uboot_vars_raw();
+        let (_fake, got) = board.boot(&[]);
+        assert!(got.contains(why), "{why}: {got}");
+        assert_eq!(board.uboot_vars_raw(), before);
+    }
+}
+
+/// A boot disk with no partition of the environment's type, or with two, is refused by name; so is
+/// a disk with no GPT.
+#[test]
+fn a_boot_disk_without_exactly_one_environment_partition_is_refused_by_name() {
+    let none = Board::uboot(&uboot_locator(), 64);
+    none.write("dev/mmcblk0", &Board::gpt_disk(&[([7; 16], 64, 127)]));
+    append_argument(&none, "os-2");
+    let (_fake, why) = none.boot(&[]);
+    assert!(
+        why.contains("no partition on the boot disk has the U-Boot environment type GUID"),
+        "{why}"
+    );
+    let two = Board::uboot(&uboot_locator(), 64);
+    two.write(
+        "dev/mmcblk0",
+        &Board::gpt_disk(&[(ENV_TYPE_BYTES, 64, 127), (ENV_TYPE_BYTES, 128, 191)]),
+    );
+    append_argument(&two, "os-2");
+    let (_fake, why) = two.boot(&[]);
+    assert!(why.contains("2 partitions on the boot disk have"), "{why}");
+    let mbr = Board::uboot(&uboot_locator(), 64);
+    let mut disk = vec![0u8; 512 * 100];
+    disk[510..512].copy_from_slice(&[0x55, 0xaa]);
+    mbr.write("dev/mmcblk0", &disk);
+    append_argument(&mbr, "os-2");
+    let (_fake, why) = mbr.boot(&[]);
+    assert!(why.contains("no GPT"), "{why}");
+}
+
+/// An environment U-Boot has not saved (erased flash), and one saved at another size, are refused by
+/// name and not written; each fallback stays as it was.
+#[test]
+fn an_erased_or_wrong_size_environment_is_refused_by_name_and_not_written() {
+    let erased = Board::uboot(&uboot_locator(), 64);
+    let mut disk = erased.uboot_vars_raw();
+    let g = Geometry::in_partition(1024, 64, 64).unwrap();
+    for at in [g.offset, g.offset_redund] {
+        disk[at as usize..at as usize + 1024].fill(0xFF);
+    }
+    erased.write("dev/mmcblk0", &disk);
+    append_argument(&erased, "os-2");
+    let before = erased.uboot_vars_raw();
+    let (_fake, why) = erased.boot(&[]);
+    assert!(
+        why.contains("is erased: U-Boot has not saved an environment"),
+        "{why}"
+    );
+    assert_eq!(erased.uboot_vars_raw(), before);
+    // Saved by a U-Boot built with 2048, read at 1024.
+    let wrong = Board::uboot(&Place::gpt(2048).unwrap().encode(), 64);
+    append_argument(&wrong, "os-2");
+    let before = wrong.uboot_vars_raw();
+    let (_fake, why) = wrong.boot(&[]);
+    assert!(
+        why.contains("no valid U-Boot environment of 2048 bytes here: U-Boot may be built with another CONFIG_ENV_SIZE"),
+        "{why}"
+    );
+    assert_eq!(wrong.uboot_vars_raw(), before);
+}
+
+/// The fixed-offset form: a device named by the locator, written where the locator says.
+#[test]
+fn the_device_form_writes_the_environment_where_the_locator_says() {
+    let board = Board::new();
+    let device = board.env.dev.join("envdev");
+    let place = Place::device(device.to_str().unwrap(), 1024, 0, 4096).unwrap();
+    board.write("boot/uboot-env.txt", place.encode().as_bytes());
+    let mut image = vec![0xEEu8; 8192];
+    image[..1024].copy_from_slice(&env_copy(&[("default", "os-2")], 6));
+    board.write("dev/envdev", &image);
+    append_argument(&board, "os-2");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(fake.last(), "restart", "{why}");
+    let mut dev = FileEnv::open(&device).unwrap();
+    let g = Geometry::new(1024, 0, 4096).unwrap();
+    let (_, vars) = uboot_env::load(&mut dev, &g).unwrap().unwrap();
+    assert!(
+        vars.contains(&("default".to_string(), "os-1".to_string())),
+        "{vars:?}"
+    );
 }

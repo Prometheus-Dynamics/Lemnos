@@ -1,5 +1,5 @@
 //! The file names of one slot's boot directory on the Raspberry Pi firmware's boot partition. The
-//! list itself is `contracts/slot-layout.toml` (version 3): the image builder fills the directory
+//! list itself is `contracts/slot-layout.toml` (version 4): the image builder fills the directory
 //! from it, `lemnos-ctl tree --boot-dir` writes a copy beside the firmware's text, and `lemnos-ctl`'s
 //! tests check these constants against that file. The generated `config.txt` and `tryboot.txt`
 //! (`firmware.rs`) name the same files with the same spelling, and the installer and the every-boot

@@ -48,12 +48,15 @@ lemnos-ctl [--socket PATH] COMMAND
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]] [--uboot FILE]
+                                 [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
                                  [--security-unit FILE]
                                  [--manifest-boot FILE] [--cmdline-slot FILE --slot ID]
                                  write the device-tree overlay for a board (stdout by default),
                                  its firmware boot fragment, its U-Boot fragment (`gpio set`
-                                 and `gpio clear` for a boot script), the kernel module's
+                                 and `gpio clear` for a boot script), the Kconfig fragment the
+                                 board's U-Boot is built with for the uboot record
+                                 (--uboot-config), the kernel module's
                                  modprobe configuration, and for a module built into the kernel
                                  the same parameters as kernel command-line words, and the udev
                                  rules that give the daemon's nodes to its group, the same
@@ -334,6 +337,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut boot_dir_out = None;
     let mut slot = None;
     let mut uboot_out = None;
+    let mut uboot_config_out = None;
     let mut modprobe_out = None;
     let mut cmdline_out = None;
     let mut udev_out = None;
@@ -353,6 +357,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--boot-dir", Some(dir)) => boot_dir_out = Some(dir),
             ("--slot", Some(id)) => slot = Some(id),
             ("--uboot", Some(file)) => uboot_out = Some(file),
+            ("--uboot-config", Some(file)) => uboot_config_out = Some(file),
             ("--modprobe", Some(file)) => modprobe_out = Some(file),
             ("--cmdline", Some(file)) => cmdline_out = Some(file),
             ("--udev", Some(file)) => udev_out = Some(file),
@@ -407,6 +412,11 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         let text = generated
             .uboot
             .map_err(|why| format!("{path}: --uboot: {why}"))?;
+        std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = uboot_config_out {
+        let text =
+            boot_dir::uboot_config(&board).map_err(|e| format!("{path}: --uboot-config: {e}"))?;
         std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
     if let Some(file) = modprobe_out {
