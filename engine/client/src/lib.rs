@@ -37,6 +37,6 @@ pub use session::{
     follow,
 };
 pub use stream::{
-    Access, Carried, FrameStream, HeldFrame, MemoryKind, Next, ProducerState, Region, StreamEnd,
-    StreamPlatform,
+    Access, Carried, FrameStream, HeldFrame, JobReason, MemoryKind, Next, ProducerState, Region,
+    StreamEnd, StreamPlatform,
 };

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use common::{FakeHost, StreamHost, StreamScript};
 use lemnos_client::{
-    Access, Carried, Error, FrameStream, MemoryKind, Next, ProducerState, Session, StreamEnd,
-    StreamPlatform,
+    Access, Carried, Error, FrameStream, JobReason, MemoryKind, Next, ProducerState, Session,
+    StreamEnd, StreamPlatform,
 };
 use lemnos_core::Status;
 use lemnos_linux_stream::LinuxStreams;
@@ -79,6 +79,37 @@ fn a_good_stream_delivers_frames_and_reads_them_from_shared_memory() {
     stream.release(frame).unwrap();
     assert!(host.reclaim(1), "a released frame's buffer comes back");
     assert!(stream.is_open());
+}
+
+#[test]
+fn a_job_end_comes_back_as_next_job_ended_with_its_reason_and_is_not_a_frame() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    // A job refused for a lent buffer that was not lent, then a result after it.
+    assert!(host.push_job_end(41, lemnos_wire::ring::reason::NOT_LENT, 900));
+    assert!(host.write(1, 0, &[9]));
+    assert!(host.push(1, 1, 12, 42, 13));
+    match stream.next_or_end(Duration::from_millis(200)).unwrap() {
+        Next::JobEnded { identity, reason } => {
+            assert_eq!(identity, 41);
+            assert_eq!(reason, JobReason::NotLent);
+            assert_eq!(reason.word(), "not-lent");
+        }
+        other => panic!("the job's end comes first, not {other:?}"),
+    }
+    match stream.next_or_end(Duration::from_millis(200)).unwrap() {
+        Next::Frame(frame) => {
+            assert_eq!(frame.identity(), 42);
+            assert!(frame.failure().is_none(), "a result is not a failure");
+            stream.release(frame).unwrap();
+        }
+        other => panic!("the result follows, not {other:?}"),
+    }
+    // try_next passes a job end over and counts it, so the wait never returns it as nothing.
+    assert!(host.push_job_end(43, lemnos_wire::ring::reason::WEDGED, 0));
+    assert!(stream.try_next().unwrap().is_none());
+    assert_eq!(stream.job_ends(), 1);
 }
 
 #[test]

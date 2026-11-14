@@ -324,6 +324,20 @@ pub trait StreamEndpoint {
     fn buffer_kind(&self) -> BufferKind;
     /// Passes a filled buffer to the consumer.
     fn publish(&mut self, frame: StreamFrame) -> Result<(), Self::Error>;
+    /// Ends a job with no result, a refusal or a timeout: the consumer gets the job's end with
+    /// `identity` and `reason` (a nonzero `lemnos_wire::ring::reason` word), in order with the
+    /// frames, and no buffer. `end_ns` is the end's time on the monotonic clock, 0 for none.
+    /// Nothing is published when no consumer is attached, and it is counted as dropped. A stream
+    /// that cannot say so refuses, rather than leaving the consumer waiting on the identity.
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), Self::Error> {
+        let _ = (identity, reason, end_ns);
+        Err(crate::ErrorKind::Unsupported.into())
+    }
     /// The next buffer the consumer has returned, if any. This is collection: finding none is
     /// nothing, and is not counted as a refusal.
     fn next_buffer(&mut self) -> Result<Option<u32>, Self::Error>;

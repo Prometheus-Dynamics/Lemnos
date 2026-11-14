@@ -620,6 +620,42 @@ impl StreamCore {
         Ok(())
     }
 
+    /// Puts a job's end on the ring: no buffer, only the metadata, so the consumer learns the job
+    /// ended and why. Lock held; bounded. Refused for a reason of 0, which is a result.
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), ErrorKind> {
+        if reason == lemnos_wire::ring::reason::NONE {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let meta = FrameInfo {
+            sequence: 0,
+            identity,
+            bytes: 0,
+            reason,
+            end_ns,
+        }
+        .encode();
+        let published = match self.attached.as_mut() {
+            Some(attached) => {
+                let time = SampleTime::from_nanos(end_ns);
+                let result = attached.memory.publisher.publish_empty(time, &meta);
+                if result.is_ok() {
+                    attached.bell.ring();
+                }
+                result.is_ok()
+            }
+            None => false,
+        };
+        if !published {
+            self.counters.dropped += 1;
+        }
+        Ok(())
+    }
+
     /// Puts a frame the consumer attached now is due on its ring: the frame's buffer's planes, and
     /// its metadata.
     fn deliver(&mut self, frame: StreamFrame) {
@@ -631,11 +667,17 @@ impl StreamCore {
         for plane in 0..planes {
             names[plane as usize] = BufferIndex(frame.buffer * planes + plane);
         }
+        // A frame of no bytes is a result the block flagged bad: its reason says so.
+        let reason = if frame.bytes == 0 {
+            lemnos_wire::ring::reason::FAILED
+        } else {
+            lemnos_wire::ring::reason::NONE
+        };
         let meta = FrameInfo {
             sequence: frame.sequence,
             identity: frame.identity,
             bytes: frame.bytes,
-            reason: 0,
+            reason,
             end_ns: frame.end_ns,
         }
         .encode();
@@ -978,6 +1020,15 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {
         lock(&self.core).publish(frame)
+    }
+
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), ErrorKind> {
+        lock(&self.core).publish_job_end(identity, reason, end_ns)
     }
 
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {

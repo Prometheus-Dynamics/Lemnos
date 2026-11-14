@@ -643,6 +643,22 @@ impl StreamHost {
             .is_ok()
     }
 
+    /// Puts a job's end on the ring, as the host does: no buffer, the job's identity and why it
+    /// ended. `false` if the ring refused it.
+    pub fn push_job_end(&mut self, identity: u64, reason: u32, end_ns: u64) -> bool {
+        let meta = FrameInfo {
+            sequence: 0,
+            identity,
+            bytes: 0,
+            reason,
+            end_ns,
+        }
+        .encode();
+        self.publisher
+            .publish_empty(SampleTime::from_nanos(end_ns), &meta)
+            .is_ok()
+    }
+
     /// Publishes a frame whose payload is `payload` as it is, for a producer that doesn't keep
     /// the frame format. `false` if the ring refused it.
     pub fn push_raw(&mut self, payload: &[u8]) -> bool {
