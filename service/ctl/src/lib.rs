@@ -17,6 +17,7 @@ mod boot_dir;
 mod boot_dir_tests;
 mod boot_partition;
 mod bundle;
+mod data_partition;
 mod show;
 
 pub const USAGE: &str = "\
@@ -63,6 +64,12 @@ lemnos-ctl [--socket PATH] COMMAND
                                  Ed25519 seed) from the same payload directory `boot-partition`
                                  takes, or verify one with the installer's own checks, read-only:
                                  one line per check
+  data-partition --layout-of BOARD [--socs DIR] --install BUNDLE --boot-image FILE --keys FILE
+                 --time UTC --data-size BYTES --out DIR [--switch off]
+                 | --verify DIR [--layout-of BOARD [--socs DIR]] [--boot-image FILE] [--deep]
+                                 write the data partition's tree for a board's first slot, as the
+                                 daemon's install, trial and confirm leave it, with nothing written
+                                 outside DIR (which must not exist), or verify one, read-only
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
@@ -180,6 +187,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if command == "bundle" {
         return bundle::run(tail, out);
+    }
+    if command == "data-partition" {
+        return data_partition::run(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };

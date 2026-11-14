@@ -90,7 +90,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
 
 /// The board's rules for a slot, from its board file: the record's form and bays, the command
 /// line's prefix and sources, the board id and the overlay marker.
-fn rules_of(
+pub(crate) fn rules_of(
     path: &str,
     socs: Option<&str>,
 ) -> Result<(Rules, lemnos_host::board::BoardFile), String> {
