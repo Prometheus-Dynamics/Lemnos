@@ -17,6 +17,8 @@ lemnos-slot-store = { path = "../slot-store" }
 ed25519-dalek = { version = "2.2", default-features = false }
 
 [dev-dependencies]
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
 lemnos-slot-store = { path = "../slot-store", features = ["testing"] }
 
 [package.metadata.lemnos]

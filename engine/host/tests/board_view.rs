@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use lemnos_core::{
-    BoardDevice, BoardView, Config, Health, Lifecycle, Origin, Result, UsbDeviceHandle, driver,
+    BoardDevice, BoardView, Config, ConfigError, Health, Key, Kind, Lifecycle, Origin, Result,
+    UsbDeviceHandle, driver,
 };
 use lemnos_hal::usb_match::UsbCodes;
 use lemnos_host::board::parse;
@@ -58,6 +59,10 @@ pub struct Watch {}
 
 impl Lifecycle for Watch {
     type Needs = WatchNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("health", Kind::List)])
+    }
     const TICKS: bool = true;
     const WATCHES_BOARD: bool = true;
 

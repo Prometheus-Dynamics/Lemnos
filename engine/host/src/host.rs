@@ -16,7 +16,9 @@ use lemnos_core::{
     UsbFunctionHandle, Watchdog,
 };
 
-use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner, resolve_kinds};
+use crate::board::{
+    BoardError, BoardFile, DeviceSpec, EACH_SEPARATOR, EachSpec, OwnedValue, Owner, resolve_kinds,
+};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
     Lease, MemfdAllocator, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
@@ -209,12 +211,17 @@ fn accept<'a>(_: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
 pub fn settings_refusals(board: &BoardFile, drivers: &[DriverEntry]) -> Vec<(String, String)> {
     let mut refused = Vec::new();
     for device in &board.devices {
-        if let Some(problem) = refusal_for(board, device, drivers) {
+        if let Some(problem) = refusal_for(board, device, drivers, None) {
             refused.push((device.id.clone(), problem));
         }
     }
     for each in &board.each {
-        if let Some(problem) = refusal_for(board, &each.device(&each.pattern), drivers) {
+        if let Some(problem) = refusal_for(
+            board,
+            &each.device(&each.pattern),
+            drivers,
+            each.need.as_deref(),
+        ) {
             refused.push((each.id.clone(), problem));
         }
     }
@@ -223,10 +230,15 @@ pub fn settings_refusals(board: &BoardFile, drivers: &[DriverEntry]) -> Vec<(Str
 
 /// The whole reason a device is refused, naming the device, or `None`: the reason the board or the
 /// daemon gives it (already whole), else the reason its driver refuses its settings.
-fn refusal_for(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> Option<String> {
+fn refusal_for(
+    board: &BoardFile,
+    spec: &DeviceSpec,
+    drivers: &[DriverEntry],
+    found: Option<&str>,
+) -> Option<String> {
     match &spec.refused {
         Some(reason) => Some(reason.clone()),
-        None => refusal_of(board, spec, drivers)
+        None => refusal_of(board, spec, drivers, found)
             .map(|problem| format!("device {:?}: {problem}", spec.id)),
     }
 }
@@ -248,11 +260,19 @@ pub fn check_settings(
 
 /// The reason the device's driver refuses its settings, or `None` when it takes them, or has no
 /// driver the host knows (that is named at bind).
-fn refusal_of(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> Option<String> {
+fn refusal_of(
+    board: &BoardFile,
+    spec: &DeviceSpec,
+    drivers: &[DriverEntry],
+    found: Option<&str>,
+) -> Option<String> {
     let entry = drivers
         .iter()
         .rev()
         .find(|driver| driver.manifest.name == spec.driver)?;
+    if let Some(problem) = uses_refusal(board, spec, entry, drivers, found) {
+        return Some(problem);
+    }
     let owned = match spec.owned_config() {
         Ok(owned) => owned,
         Err(error) => return Some(error.to_string()),
@@ -288,6 +308,73 @@ fn refusal_of(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> 
         .with_lists(&borrowed)
         .on_board(&board.board.id);
     (entry.check)(&config).err().map(|error| error.to_string())
+}
+
+/// The first `uses` entry of the device that its driver does not take, or that names a device the
+/// board does not have, or one that does not serve what the need asks for; `None` when every entry
+/// is taken. Known from each driver's manifest and the board file alone, with no hardware.
+///
+/// A name a driver takes may also be a bus or a block, which only the backend knows (the host never
+/// learns what hardware is), so a need that is not a device is not checked against the board here: if
+/// the name is wrong, the bind fails and says so. `found` is the key an `[[each]]` entry fills with
+/// the resource it found, whose value is a pattern and not a device id.
+fn uses_refusal(
+    board: &BoardFile,
+    spec: &DeviceSpec,
+    entry: &DriverEntry,
+    drivers: &[DriverEntry],
+    found: Option<&str>,
+) -> Option<String> {
+    let needs = entry.manifest.needs;
+    for (key, value) in &spec.uses {
+        let Some(need) = needs.iter().find(|need| need.name == key) else {
+            let takes = if needs.is_empty() {
+                "it takes none".to_string()
+            } else {
+                let names: Vec<String> = needs.iter().map(|n| format!("{:?}", n.name)).collect();
+                format!("it takes: {}", names.join(", "))
+            };
+            return Some(format!(
+                "`uses` key {key:?} is not a resource this driver takes ({takes})"
+            ));
+        };
+        let NeedKind::Device(tag) = need.kind else {
+            continue;
+        };
+        if found == Some(key.as_str()) {
+            continue;
+        }
+        let Some(target) = device_driver(board, value) else {
+            return Some(format!(
+                "`uses` key {key:?} names device {value:?}, which the board does not have"
+            ));
+        };
+        let serves = drivers
+            .iter()
+            .rev()
+            .find(|driver| driver.manifest.name == target)
+            .is_none_or(|driver| driver.manifest.provides.iter().any(|c| c.tag == tag));
+        if !serves {
+            return Some(format!(
+                "`uses` key {key:?} names device {value:?}, which does not serve {}",
+                tag.as_str()
+            ));
+        }
+    }
+    None
+}
+
+/// The driver of the device `id` names: a device of the board, or one an `[[each]]` entry makes
+/// (its id before the `@`). `None` when the board has no such device.
+fn device_driver<'a>(board: &'a BoardFile, id: &str) -> Option<&'a str> {
+    if let Some(device) = board.devices.iter().find(|device| device.id == id) {
+        return Some(&device.driver);
+    }
+    board
+        .each
+        .iter()
+        .find(|each| id.starts_with(&format!("{}{EACH_SEPARATOR}", each.id)))
+        .map(|each| each.driver.as_str())
 }
 
 /// The entry for a driver type.
@@ -2496,11 +2583,18 @@ impl Host {
         let order = crate::board::bind_order(&devices);
         let refusals: Vec<Option<String>> = devices
             .iter()
-            .map(|spec| refusal_for(board, spec, drivers))
+            .map(|spec| refusal_for(board, spec, drivers, None))
             .collect();
         let each_refusals: Vec<Option<String>> = each
             .iter()
-            .map(|spec| refusal_for(board, &spec.device(&spec.pattern), drivers))
+            .map(|spec| {
+                refusal_for(
+                    board,
+                    &spec.device(&spec.pattern),
+                    drivers,
+                    spec.need.as_deref(),
+                )
+            })
             .collect();
         let security = board.security_config();
         let mut slots = Vec::with_capacity(devices.len());

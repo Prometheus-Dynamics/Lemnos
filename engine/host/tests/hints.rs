@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use lemnos_core::{
-    Config, Dev, ErrorKind, Health, Hint, Lifecycle, Line, Result, contract, driver,
+    Config, ConfigError, Dev, ErrorKind, Health, Hint, Key, Kind, Lifecycle, Line, Result,
+    contract, driver,
 };
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
@@ -37,6 +38,10 @@ pub struct Plug {
 
 impl Lifecycle for Plug {
     type Needs = PlugNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("counts_ticks", Kind::Bool)])
+    }
     const TICKS: bool = true;
 
     fn start(needs: PlugNeeds, cfg: &Config<'_>) -> Result<Self> {

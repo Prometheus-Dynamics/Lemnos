@@ -45,7 +45,10 @@ use lemnos_contract_camera_sensor::{
     AppliedLanding, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, InForce,
     Landing, Mode, Rect, SensorInfo, landing_of, launch_frame,
 };
-use lemnos_core::{Config, ConfigValue, Dev, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, ConfigValue, Dev, Key, Kind, Lifecycle, Result, Status, StreamHandle,
+    driver,
+};
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
 use lemnos_host::{Host, Options, entry};
@@ -415,6 +418,20 @@ pub struct SimSensor {
 
 impl Lifecycle for SimSensor {
     type Needs = SimSensorNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("free_running", Kind::Bool),
+            Key::optional("period_us", Kind::Int),
+            Key::optional("write_us", Kind::Int),
+            Key::optional("exposure_delay", Kind::Int),
+            Key::optional("gain_delay", Kind::Int),
+            Key::optional("frame_length_delay", Kind::Int),
+            Key::optional("drop_frames", Kind::Int),
+            Key::optional("embedded", Kind::Bool),
+            Key::optional("naive_landing", Kind::Bool),
+        ])
+    }
 
     fn start(needs: SimSensorNeeds, cfg: &Config<'_>) -> Result<Self> {
         let config = SimConfig::from_config(cfg)?;

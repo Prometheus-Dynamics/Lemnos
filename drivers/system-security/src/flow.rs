@@ -51,6 +51,12 @@ pub fn lines_of(judged: &std::result::Result<(), Refusal>) -> Vec<String> {
     }
 }
 
+/// What the switch says on a board whose file has `orion = false`: Orion on that board stays open
+/// whatever the switch is, so the switch must not look complete. The `state` line, and (after
+/// `note: `) the reply to a `set` to on.
+pub const ORION_NOT_COVERED: &str =
+    "orion: not covered by this switch on this board (the board file says orion = false)";
+
 /// Judges a change to `on`. `answers` are the stakeholders' lines (already named by their
 /// stakeholder), `orion` is whether Orion ships on this board. The authorization for an off is
 /// checked by [`authorize_off`], not here.
@@ -475,6 +481,9 @@ impl Flow {
                 if held.is_empty() { "absent" } else { "present" }
             ),
         ];
+        if !self.orion {
+            lines.insert(4, ORION_NOT_COVERED.into());
+        }
         for key in &held {
             lines.push(format!("key {} {}", hex(&key.id), key.owner));
         }

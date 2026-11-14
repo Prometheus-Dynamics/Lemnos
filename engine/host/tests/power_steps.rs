@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use lemnos_core::{Config, Lifecycle, Result, Status, contract, driver};
+use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
@@ -41,6 +41,10 @@ pub struct Stepper {
 
 impl Lifecycle for Stepper {
     type Needs = StepperNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("key", Kind::Int)])
+    }
     const TICKS: bool = true;
 
     fn start(_: StepperNeeds, cfg: &Config<'_>) -> Result<Self> {

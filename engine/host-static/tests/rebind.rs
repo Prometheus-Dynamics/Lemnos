@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use embedded_hal::i2c::{self, I2c as _, Operation};
 use lemnos_core::{
-    Config, ConfigValue, Decode, Health, HostClock, I2c, Lifecycle, MethodId, Reader, Result,
-    Status, Vector3, contract, driver,
+    Config, ConfigError, ConfigValue, Decode, Health, HostClock, I2c, Key, Kind, Lifecycle,
+    MethodId, Reader, Result, Status, Vector3, contract, driver,
 };
 use lemnos_driver_bmi088::Bmi088;
 use lemnos_driver_orientation::Orientation;
@@ -141,6 +141,10 @@ pub struct Probe {
 
 impl Lifecycle for Probe {
     type Needs = ProbeNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("case", Kind::Int)])
+    }
     const TICKS: bool = true;
 
     fn start(needs: ProbeNeeds, cfg: &Config<'_>) -> Result<Self> {

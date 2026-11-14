@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::Client;
-use lemnos_core::{Config as DriverConfig, Lifecycle, Result, contract, driver};
+use lemnos_core::{
+    Config as DriverConfig, ConfigError, Key, Kind, Lifecycle, Result, contract, driver,
+};
 use lemnos_host::board::parse;
 use lemnos_host::{Options, entry};
 use lemnos_sim::SimBoard;
@@ -31,6 +33,10 @@ pub struct Ticker {
 
 impl Lifecycle for Ticker {
     type Needs = TickerNeeds;
+
+    fn check_config<'a>(cfg: &DriverConfig<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("period_ns", Kind::Int)])
+    }
     const TICKS: bool = true;
 
     fn start(_: TickerNeeds, cfg: &DriverConfig<'_>) -> Result<Self> {

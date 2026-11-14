@@ -10,7 +10,8 @@ use lemnos_contract_magnetometer::Magnetometer;
 
 pub mod probe;
 use lemnos_core::{
-    Config, Description, Item, Lifecycle, MethodId, Result, Status, Unit, Vector3, contract, driver,
+    Config, ConfigError, Description, Item, Key, Kind, Lifecycle, MethodId, Result, Status, Unit,
+    Vector3, contract, driver,
 };
 pub use probe::FakeProbe;
 
@@ -55,6 +56,15 @@ macro_rules! fake_vector {
 
         impl Lifecycle for $name {
             type Needs = $needs;
+
+            fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+                cfg.check_keys(&[
+                    Key::optional("x", Kind::Float),
+                    Key::optional("y", Kind::Float),
+                    Key::optional("z", Kind::Float),
+                    Key::optional("refuse", Kind::Bool),
+                ])
+            }
 
             fn start(_needs: $needs, cfg: &Config<'_>) -> Result<Self> {
                 if cfg.bool("refuse").unwrap_or(false) {
@@ -129,6 +139,10 @@ pub struct FakeCounter {
 
 impl Lifecycle for FakeCounter {
     type Needs = FakeCounterNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::optional("start", Kind::Int)])
+    }
 
     fn start(_needs: FakeCounterNeeds, cfg: &Config<'_>) -> Result<Self> {
         COUNTER_BINDS.fetch_add(1, Ordering::Relaxed);

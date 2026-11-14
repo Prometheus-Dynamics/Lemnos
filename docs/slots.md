@@ -344,10 +344,20 @@ uses = { slots = "slots", flash = "flash", identity = "identity" }   # the stake
 ```
 
 - `uses` names the stakeholders: the `system-slots` and `system-flash` devices, which serve
-  `system.security-precondition/1`. Each answers only for itself. A board with neither bound judges
-  on its trust root alone. `identity` is the board's `system-identity` device: its serial names the
+  `system.security-precondition/1`. Each answers only for itself. Both are optional needs. A board with
+  `slots` and no flash device names only `slots`: `precheck` and `set` ask `slots` alone (its answer, and
+  its boot mark through `apply`), `flash` is not asked and is not a fault, and no trust-root answer of
+  the switch's own is added while `slots` answers. A board with neither bound judges on its trust root
+  alone. Naming a stakeholder the board does not have (`flash = "flash"` with no such device) is refused
+  by name at validation and at start, not run degraded: leave the key out instead. `identity` is the board's `system-identity` device: its serial names the
   board in an authorization to turn the switch off (below). Without it an off on a board with a trust
   root cannot be authorized.
+- With `orion = false` in `[security]` the switch can be turned on while Orion on that board stays
+  open, so it says so. `state` has the line `orion: not covered by this switch on this board (the board
+  file says orion = false)` after `orion absent`, and the reply to `set` to on is
+  `note: orion: not covered by this switch on this board (the board file says orion = false)`. A change
+  to off replies empty. With `orion = true` there is no such line, and a change to on stays refused by
+  name until Orion can be asked.
 - The view is not configurable. It is rendered into `/run/board`, which the image links `/etc/board`
   to. A board file that names a view or a render directory (`security_view`, `run`) is refused by name
   or does not start the driver: no board file can point the switch's readers somewhere else.

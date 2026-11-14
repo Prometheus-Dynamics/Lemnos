@@ -237,7 +237,11 @@ not refuse the board for it: the refused device is not made, shows as failed wit
 state, and is retried under the failure rule, while the other devices run. A check that needs the
 hardware, a file the board holds, or the state of the system is not in `check_config`: it stays in
 `start`, and the driver says so in its documentation. A driver built outside this tree that does not
-override `check_config` accepts every setting, as it did before.
+override `check_config` accepts every setting at validation (its entry has no key table), and its own
+bind refuses any it does not declare: the default `check_config` of a driver reads no settings, so a key
+nothing reads is refused by name and never silently accepted. The host also checks every device's `uses`
+against the driver's manifest (a need name the driver does not declare, a device the board lacks, a
+device of the wrong contract): see [the board file](boards.md).
 
 ### Long jobs
 
