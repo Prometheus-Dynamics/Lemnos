@@ -56,6 +56,24 @@ fn boot_files(id: &str) -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// A FAT boot partition image: the record files pre-created, and the three pointer files naming `default`.
+fn boot_image(default: &str) -> Vec<u8> {
+    use lemnos_slot_store::twocopy::{Kind, precreate};
+    let mut files = precreate(&[
+        (Kind::TRIAL, b""),
+        (Kind::REASON, b""),
+        (Kind::EPISODES, b""),
+    ])
+    .unwrap();
+    let pointer = lemnos_slot_store::firmware::pointer_sector(default)
+        .unwrap()
+        .to_vec();
+    for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
+        files.push((name, pointer.clone()));
+    }
+    lemnos_slot_store::fatimage::fat16(&files)
+}
+
 fn hash(id: &str) -> String {
     let digit = id.chars().last().unwrap();
     std::iter::repeat_n(digit, 64).collect()
@@ -94,6 +112,7 @@ struct Board {
     _dir: Dir,
     layout: Layout,
     record: Tryboot,
+    node: std::path::PathBuf,
 }
 
 impl Board {
@@ -111,9 +130,11 @@ impl Board {
         };
         state.save(&layout).unwrap();
         fs::create_dir_all(&layout.boot).unwrap();
-        fs::write(layout.boot.join("default.txt"), "os_prefix=slots/os-2/\n").unwrap();
+        let node = layout.boot.join("boot.img");
+        fs::write(&node, boot_image("os-2")).unwrap();
         let record = Tryboot {
             boot: layout.boot.clone(),
+            node: Ok(node.clone()),
             restarter: Restarter {
                 systemctl: "/nonexistent/systemctl".into(),
                 check: None,
@@ -123,6 +144,7 @@ impl Board {
             _dir: dir,
             layout,
             record,
+            node,
         }
     }
 
@@ -137,8 +159,13 @@ impl Board {
         State::load(&self.layout)
     }
 
+    /// The slot the default pointer names, read from the boot partition's node.
     fn default_txt(&self) -> String {
-        fs::read_to_string(self.layout.boot.join("default.txt")).unwrap_or_default()
+        let mut raw = lemnos_slot_store::boot_raw::Boot::open(&self.node).unwrap();
+        let which = lemnos_slot_store::boot_raw::Pointer::Default;
+        lemnos_slot_store::boot_raw::BootRaw::pointer(&mut raw, which)
+            .unwrap()
+            .unwrap_or_default()
     }
 
     fn check(&mut self, restart: bool) -> Result<Option<String>, String> {
@@ -151,7 +178,7 @@ fn an_untouched_default_passes_before_a_restart_and_nothing_changes() {
     let mut board = Board::new("untouched");
     assert_eq!(board.check(true), Ok(None));
     assert_eq!(board.state().default, "os-2");
-    assert_eq!(board.default_txt(), "os_prefix=slots/os-2/\n");
+    assert_eq!(board.default_txt(), "os-2");
 }
 
 #[test]
@@ -168,7 +195,7 @@ fn lemnosd_repoints_default_to_verified_previous_before_restart() {
         (state.default.as_str(), state.previous.as_str()),
         ("os-1", "os-2")
     );
-    assert_eq!(board.default_txt(), "os_prefix=slots/os-1/\n");
+    assert_eq!(board.default_txt(), "os-1");
     assert_eq!(Meta::load(&board.layout, "os-2").get("FAILED"), "yes");
     assert!(
         Meta::load(&board.layout, "os-2")
@@ -187,7 +214,7 @@ fn default_and_previous_both_bad_stay_and_report() {
     assert!(why.contains("os-2 doesn't match its manifest"), "{why}");
     assert!(why.contains("the restart is refused"), "{why}");
     assert_eq!(board.state().default, "os-2");
-    assert_eq!(board.default_txt(), "os_prefix=slots/os-2/\n");
+    assert_eq!(board.default_txt(), "os-2");
     assert_eq!(Meta::load(&board.layout, "os-2").get("FAILED"), "");
 }
 

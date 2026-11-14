@@ -39,6 +39,15 @@ pub trait Ops {
     /// Into the new root, as PID 1. On a board it returns only when it couldn't.
     fn switch_root(&self, new_root: &Path) -> Result<(), String>;
     fn sleep(&self, time: Duration);
+    /// The boot partition's raw records and pointers, opened on its block node `dev` (nothing is
+    /// mounted). The tests use an in-memory fake.
+    fn open_boot(
+        &self,
+        dev: &Path,
+    ) -> Result<Box<dyn lemnos_slot_store::boot_raw::BootRaw>, String> {
+        lemnos_slot_store::boot_raw::Boot::open(dev)
+            .map(|boot| Box::new(boot) as Box<dyn lemnos_slot_store::boot_raw::BootRaw>)
+    }
     /// A file on the boot partition, `path` relative to its root, read without a mount: the FAT
     /// volume at `dev` is read raw ([`lemnos_slot_store::bootcheck::fat_read`]). `None` when the file
     /// is not there. The tests read their tree of files instead.

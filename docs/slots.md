@@ -318,100 +318,17 @@ The `record` setting chooses how the boot loader is told which slot to start.
 This uses the board firmware's one-shot boot:
 
 - `config.txt` includes `default.txt`, and `tryboot.txt` includes `trial.txt`. Each of those is
-  one line, `os_prefix=slots/<id>/`.
+  one sector (512 bytes) at a fixed place on the boot partition, pre-created at image build. Its
+  first line is `os_prefix=slots/<id>/`, then a `#lemnos-crc32=` checksum line over that first line,
+  then `#` padding. The checksum is what refuses a torn sector (see "Pointer files", below).
 - A restart with the argument `0 tryboot` reads `tryboot.txt` once. The firmware keeps no
-  count, so a trial's attempts are the file `trial-attempts` beside it, `0` to `3`.
+  count, so a trial's attempts are in the trial record `TRIAL   REC` (`lemnos_slot_store::boot_raw`),
+  `0` to `3`.
 - The initramfs knows a trial boot from `/proc/device-tree/chosen/bootloader/tryboot`.
-- The default slot's `lemnos-slot-init` takes the attempt. When `trial.txt` names a slot, the
-  firmware didn't boot the trial, and `trial-attempts` is above 0, it writes one fewer and
-  restarts with `0 tryboot`, which boots the trial. With 0, it removes `trial.txt` and boots the
-  default. See "The extra pass on tryboot", below.
-
-### `uboot`
-
-This uses U-Boot's standard boot flow. There is no saved U-Boot environment and no boot count.
-
-- At install, each slot gets `slots/<id>/extlinux/extlinux.conf`:
-  - `kernel` is the slot's `Image`, `Image.gz`, `zImage`, `vmlinuz*` or `kernel*.img`.
-  - `initrd` is its `initramfs*` or `initrd*`.
-  - `fdt` names a single top-level device tree. With several device trees, or a `dtbs/`
-    directory, it is `fdtdir`.
-  - `append` is the slot's command line.
-- The record is `boot-record.env` at the boot partition's root, with three lines: `default=`,
-  `trial=` and `trial_attempts=0..3`, the boots that may still start the trial. The driver
-  writes it atomically: a temporary file, an fsync, a rename, then an fsync of the directory. A
-  trial is written with the board's `trial_attempts`.
-- `packaging/uboot/boot.cmd` is a fixed script, built with
-  `mkimage -T script -d boot.cmd boot.scr`. It loads the record and then does the following:
-  1. If a trial has attempts (1 to 3), it takes one: the record is written back with one fewer
-     and only then the trial's `extlinux.conf` is booted. A trial that doesn't reach the daemon
-     has used its attempt, and the next boot takes another. At 0, the trial is not started.
-  2. Otherwise it boots the default's `extlinux.conf`.
-  3. If that fails or there is no record, it boots `/extlinux/extlinux.conf`. The driver keeps
-     that file as a copy of the default's.
-
-  It needs U-Boot built with `sysboot` (extlinux), `env import -t` and `env export -t`,
-  `test`, and write support for the boot partition's filesystem (`save`; FAT write).
-
-The tests check the extlinux files, the record's round trip, the atomic writes, and a decision
-table that the script's text is checked against. **The script itself has never been run by
-U-Boot.** The first board run with `record = "uboot"` is its first real test.
-
-### `file`
-
-This is for a loader with one fixed kernel that can't pick a slot's kernel.
-
-- The record is one `boot-record` file with a `default=` line, and for a trial a `trial=` line
-  and `trial_attempts=`.
-- The loader always starts the kernel and initramfs at the boot partition's root. The driver
-  keeps those as a copy of the default slot's.
-- The slot's initramfs (`slot-init`) picks the slot from the record. A trial with attempts takes
-  one and writes the record back before it boots; with none left it clears `trial=` and the
-  default starts.
-
-What this gives up: every slot runs the default's kernel. A slot whose image needs a different
-kernel can't boot until it is the default. Even then the root copy changes only on `confirm` or
-`set_default`, so a trial of a new kernel isn't possible.
-
-### Raw NAND, over UBI
-
-On a board whose storage is raw NAND, the same slots live in UBI volumes. Set `ubi = "ubi0"`
-and `record = "ubi"`. The volumes on that UBI device are:
-
-| Volume | Type | What it holds |
-|---|---|---|
-| `data` | dynamic, UBIFS | the data directory, mounted at `data` |
-| `boot` | dynamic, UBIFS | the boot directory, mounted at `boot`: `slots/<id>/` with each slot's kernel and `extlinux.conf` |
-| `slot-<id>` | static | the slot's image with its hash tree, exactly `image.size` bytes |
-| `slot-new-<n>` | static | an image while install job `n` writes it |
-| `boot-record` | static | the U-Boot record, the same three lines as `boot-record.env` |
-
-- **An install** makes `slot-new-<n>` the size of `rootfs.erofs`, writes it whole as the bundle
-  streams in (`UBI_IOCVOLUP`), checks it like a file, and renames it to `slot-<id>`. UBI renames
-  atomically and removes a volume already called `slot-<id>` in the same step. A refused,
-  cancelled or interrupted install removes its work volume. `remove` removes the slot's volume.
-  `accept` and the reserve count the UBI device's free erase blocks.
-- **The record** is replaced whole: written to `boot-record-new`, then renamed over
-  `boot-record`. A power cut leaves the old record or the new one.
-- **The loader** runs `packaging/uboot/boot-ubi.cmd`. It is the `uboot` script's decision over
-  the volume:
-  - `ubi part ${ubi_mtd}` and `ubifsmount ubi0:boot`;
-  - `ubi read` the record;
-  - for a trial with attempts, `ubi write` it back with one fewer, then sysboot the trial;
-  - then the default;
-  - then `/extlinux/extlinux.conf`.
-
-  U-Boot's `ubi write` of the record isn't atomic. A power cut in it leaves the volume
-  unreadable, and the script then boots the root copy, which is the default's.
-- **The kernel** attaches UBI itself: a slot's `boot/cmdline.txt` must carry `ubi.mtd=<n>`.
-  When the UBI device `ubi0` is attached, `lemnos-slot-init` takes its volume `data` as the data
-  partition (no command-line argument names it). It mounts the data and boot
-  volumes as UBIFS, makes a read-only `ubiblock` device over `slot-<id>`, and opens dm-verity on
-  it. A fallback writes its trial into `boot-record` the same atomic way.
-
-The script and the UBI calls have run only against fakes. The tests check the volume names, the
-structures and request numbers against `mtd/ubi-user.h`, and the script's text against the
-decision table. `testing/board-runs/I5c.md` is the board run.
+- The default slot's `lemnos-slot-init` takes the attempt. When the trial record names a slot, the
+  firmware didn't boot the trial, and its attempts are above 0, it writes one fewer and restarts
+  with `0 tryboot`, which boots the trial. With 0, it clears the record and boots the default. See
+  "The extra pass on tryboot", below.
 
 ## Two-copy records
 
@@ -437,6 +354,33 @@ One honest limit: on a board whose firmware reads its pointer files (`default.tx
 promoting a trial to default is a single-sector write with no second copy. Its safety rests on the
 storage device completing or not starting a single-sector write, and it is what the pull-the-plug
 procedure in `testing/board-runs/I5i.md` measures.
+
+### Pointer files, and the run-time rule for the boot partition
+
+The Pi firmware's pointer files (`DEFAULT TXT`, `PREVIOUS TXT`, `TRIAL   TXT`, each one sector) and
+the trial record are changed only by one raw sector write on the partition's block node
+(`lemnos_slot_store::boot_raw::Boot`), found read-only through the FAT. A pointer that is torn by a
+cut is refused by its checksum, never read as another slot: slot ids have different lengths, so an
+unchecked sector could be cut into a whole, valid, different line.
+
+No run-time code mounts the boot partition for writing. slot-init's only boot mount is a read-only
+one for raw NAND's UBIFS volume, which has no raw reader. lemnosd finds the node from the boot
+source and the board's `boot_sources` (see [The boot source](#the-boot-source)) and writes it raw.
+An image without the pre-created files refuses the write by name; nothing falls back to a
+filesystem write. The trial's reason is kept the same way, in the pre-created `reason.rec`
+(`lemnos_slot_store::boot_raw::REASON_FILE`): a missing `reason.rec` refuses the reason by name, and
+the boot goes on from the kernel log alone. On raw NAND (`record = "ubi"`) no reason is kept on the
+boot partition at all: there is no `reason.rec` there, so the reason is in the kernel log only.
+
+The records a boot may write (`TRIAL   REC`, `REASON  REC`, `EPISODESREC`, and the three pointer
+files) are created when the image is built, and nothing creates them at run time.
+
+Arming a trial writes the trial pointer first and the record second. A cut after the pointer leaves
+no record, so no tryboot restart happens; the record is written only once the pointer names its slot.
+
+Promoting the default (`DEFAULT TXT`) is a single-sector write with no second copy, as stated
+above. A default whose boot files don't match its manifest is moved to the previous slot by that
+write; the next boot starts the previous.
 
 ## Booting a slot: `lemnos-slot-init`
 
@@ -519,10 +463,10 @@ Then, per boot:
 - **Trial boot** (the firmware's tryboot flag, a `file` record's trial with attempts, or a
   U-Boot or UBI record's trial): the attempt the boot that started the trial took is given back
   (`tryboot` counter and the U-Boot or UBI record count, up to the board's `trial_attempts`), the
-  reason is written to `trial-reason` on the boot partition, and the board restarts plainly.
+  reason is written to `reason.rec` on the boot partition, and the board restarts plainly.
   - A `tryboot` or `file` trial stays in its record, held: the default boot takes no attempt for
-    it while `trial-reason` holds a kernel-gap reason, and the default slot starts. The daemon
-    reads `trial-reason` when it resolves the trial, so `list` shows the kernel option, not a bare
+    it while `reason.rec` holds a kernel-gap reason, and the default slot starts. The daemon
+    reads `reason.rec` when it resolves the trial, so `list` shows the kernel option, not a bare
     mount error. A trial whose kernel was rebuilt is resolved by the daemon, which clears the
     reason.
   - A U-Boot or UBI record's trial is withdrawn (its trial cleared), because the loader takes an
@@ -552,10 +496,16 @@ fails without it:
    - any other slot, newest first.
 
    Only a slot whose boot directory is on the boot partition can be started.
-   - The trial goes into the record the boot partition holds: `trial.txt` and a `0 tryboot`
-     restart, `boot-record.env` with `trial_attempts=`, `boot-record`'s `trial=` and
-     `trial_attempts=`, or on raw NAND the `boot-record` volume with `trial_attempts=`. The
-     attempts are the board's `trial_attempts`, read from `board/slots/settings.env`.
+   - The trial goes into the record the boot partition holds: on the Pi firmware form, the trial
+     pointer and the trial record, raw (see "Pointer files"), then a `0 tryboot` restart; on raw
+     NAND, the `boot-record` volume with `trial_attempts=`. The `boot-record` file and
+     `boot-record.env` of the other forms are not written at run time: an image has no pre-created
+     file for them, so the trial is refused by name. The attempts are the board's
+     `trial_attempts`, read from `board/slots/settings.env`.
+   - When the default's own boot files don't match its manifest (Pi firmware form, and the previous
+     slot's files match), the default pointer is moved to the previous by one raw write, the
+     default is marked failed, and the board restarts into the previous. If the previous doesn't
+     match either, nothing is moved: the board reports both and waits.
    - The board's state gets `TRIAL` set to that slot, so a `confirm` from it makes it the default:
      the board has rolled back.
 4. **With no candidate**, such as a board with one slot, the board waits, then restarts into the
@@ -640,7 +590,7 @@ back with that reason. With `auto_confirm = false`, nothing confirms or restarts
 held for long. The reason is written to the state (the trial's `trial.env`) with the attempts set
 to 0. If the state can't be written, the driver tries again with a capped backoff: at 0, 1, 3, 7,
 15 and 23 s after the deadline (the waits double from 1 s and stop at 8 s), and restarts at the
-last try whatever happened. The reason is also written to `trial-reason` on the boot partition, beside
+last try whatever happened. The reason is also written to `reason.rec` on the boot partition, beside
 the boot record, whenever that can be written, and the next start reads it there when the state
 has no reason. The boot loader never reads that file, so it can't change what boots. `list` shows
 the failure as `trial.record_error`, and it is null once the reason is kept.
@@ -679,7 +629,7 @@ its count. `testing/board-runs/I5f.md` measures it. **Untested on board.**
 
 The history is `lemnos/boots`: one line per boot, kept with the slot records in
 `board/slots/boots` on the data partition. When the state directory can't be written, the same
-history is kept on the boot partition as `boot-history`, beside `trial-reason`; the reader takes
+history is kept on the boot partition as `boot-history`, beside `reason.rec`; the reader takes
 the copy with the later boot. The loader never reads it.
 
 Each line is seven space-separated fields, a value's whitespace replaced by `_`:
@@ -702,13 +652,96 @@ The history keeps the newest `boots_keep` boots (16 by default). It is written a
 start, once per boot, after the trial's accounting. It is a record like the slot records: the
 rule that drivers keep no state across restarts is about run-time state, not this.
 
+## The boot source
+
+Everything the boot chain reads or writes on a board is on the boot disk, the one whole disk the
+board booted from, and nothing else. A second disk with the same partition labels is never used.
+The boot chain states where it booted from; the board file says which of those sources it has, and
+where each one's storage controller is in the kernel's device tree. The disk is the one whole disk
+under that controller.
+
+The board file's `boot_sources` lists the allowed sources, one `source=kernel path` entry each:
+
+- `rpi-boot-mode-<n>=<path>`: the Raspberry Pi firmware's `/chosen/bootloader/boot-mode`. Code 1
+  is the SD card or the eMMC (measured on the reference board, where the eMMC is code 1). Other codes are from
+  the firmware documentation and are not verified on a board.
+- `<U-Boot path>=<kernel path>`: U-Boot's own device-tree path of the controller it booted from,
+  which the boot script names in `/chosen/lemnos,boot-source`. The path is U-Boot's, the kernel path
+  is the kernel's (they differ where the two trees name the node differently).
+
+Examples. A board with one medium (the reference board's eMMC):
+
+```toml
+boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"]
+```
+
+A board with two media, the SD card and the eMMC of a RK3588 U-Boot board (the kernel paths from the
+kernel's device tree; U-Boot's paths are the same nodes, to be confirmed on the board):
+
+```toml
+boot_sources = ["/mmc@fe2c0000=/mmc@fe2c0000", "/mmc@fe2e0000=/mmc@fe2e0000"]
+```
+
+`boot_sources` is required on every board that boots from a disk (every `record` but `ubi`), and
+refused by name when missing or malformed. `boot_device` is removed: it is refused by name.
+
+The boot chain's statement, the table and the disk are checked before anything is written. A
+refusal of the board's own facts (no source stated, the source not listed, no disk or two disks
+under its controller) restarts the board into rescue with nothing demoted and no slot record
+changed. The reason goes to the kernel log, since the boot partition is the disk the refusal is about.
+
+The boot's command line carries the table as `<boot_args>.src.<source>=<kernel path>` words, one per
+entry, so the slot's initramfs finds the same disk. The install refuses a bundle whose command line
+does not carry each of them, by name.
+
+### The U-Boot chain (`packaging/uboot/boot.cmd`)
+
+The U-Boot form has no `fdt` line in any label. Before each label starts, the script loads the
+slot's `board.dtb` (the fixed contract name) and names the boot source in the tree it hands on:
+
+The script names the boot source once, up front, then loops over its three choices (trial if its
+attempt was taken, default, the root copy) with one block of commands:
+
+| boot.cmd step | What it does | Source |
+|---|---|---|
+| `if test "${devtype}" != "mmc"; then` | a non-mmc boot device cannot be named (scsi and UFS are unsupported: U-Boot's scsi uclass has no sequence alias, so the path form cannot name them) | `packaging/uboot/boot.cmd` |
+| `fdt addr -c` | selects U-Boot's control device tree as the working tree | U-Boot `cmd/fdt.c:1118` (`-c`) |
+| `fdt get value lemnos_src /aliases ${devtype}${devnum}` | copies the controller's path into `lemnos_src`; the alias `mmc<n>` is the device `mmc <n>` selects (U-Boot's mmc uclass has `DM_UC_FLAG_SEQ_ALIAS`, `drivers/mmc/mmc-uclass.c:550`) | U-Boot `cmd/fdt.c:1132` |
+| `if load ... ${lemnos_dtb}` | loads the choice's `board.dtb`; a failed load is reported by name and the next choice follows | `boot.cmd` |
+| `fdt addr ${fdt_addr_r}`, `fdt resize 400` | selects the loaded tree and makes room in it: the argument is hex (`hextoul`), the tree shrinks to its size rounded up to 4 KiB plus 0x400 bytes | U-Boot `cmd/fdt.c:775-783`, help `cmd/fdt.c:1129` |
+| `if fdt set /chosen lemnos,boot-source "${lemnos_src}"` | states the source in the loaded tree; a failure (no room) is reported and the next choice follows | `boot.cmd` |
+| `sysboot ... ${lemnos_conf}` | starts the label; it returns only when it could not start | `boot.cmd` |
+
+**A refusal never ends at a prompt.** A choice that cannot start is reported by name and the loop
+goes on: trial, then default, then the root copy. After the last, the script ends and U-Boot's own
+boot flow goes on with its next target. The one refusal that cannot fall through is a boot source
+that cannot be named (a non-mmc device, or no alias): nothing can boot safely then, so the script ends
+there, in ONE place, marked `# I5i7: replaced by the download-mode loop`. I5i7 replaces that place and
+the end of the script with a loop that never ends at a prompt.
+
+U-Boot's hush has no functions, so there is no helper to call; the loop over the three choices is the
+helper. `for ... in ...; do`, `elif` and `if <command>; then` are in `common/cli_hush.c:2380-2386` (the reserved-word table; it has no function keyword).
+
+The same block serves the default's and the root copy's labels (`/extlinux/board.dtb`, which the
+installer copies beside the root label). The label has no `fdt` line, so U-Boot starts the working
+tree the script prepared. A label with an `fdt` line is refused by name at the every-boot check.
+
+### What is verified, and what is not
+
+- Verified by reading the sources (U-Boot v2026.10, commit 5508406): the alias and `fdt` commands
+  above, and the mmc uclass's sequence aliases. Not run on a board.
+- Not verified on a board: `fdt get value` of the alias on the control tree, `fdt set` on an
+  existing `/chosen` surviving to the kernel, a label with no `fdt` line booting the prepared tree.
+  The board check is written in `testing/board-runs/I5i5.md`.
+- The Pi firmware's boot-mode codes other than 1 are from documentation only.
+
 ## Settings
 
 ```toml
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = { data = "/data", boot = "/boot/firmware", record = "tryboot", keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
 # On raw NAND: config = { data = "/data", boot = "/boot", ubi = "ubi0", record = "ubi", boot_args = "os" }
 
 [[devices]]

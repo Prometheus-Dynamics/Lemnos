@@ -1,5 +1,6 @@
 use super::*;
 use crate::bootfat::tests::{Entry, build, data_start};
+use crate::firmware;
 use crate::twocopy::{SECTOR, Sector, precreate};
 
 /// A whole partition device: writes are counted, can be cut after `cut.0` full sector writes (the
@@ -352,4 +353,239 @@ fn an_episodes_count_of_zero_or_a_bad_slot_is_refused() {
     );
     assert_eq!(decode_episodes(b"os-1 300"), None, "past one byte");
     assert_eq!(decode_episodes(b"os-1 2"), Some(("os-1".into(), 2)));
+}
+
+/// The partition of [`partition`] with the three pointer files added, each one sector at its own
+/// cluster, all pointing at `os-1`.
+fn partition_with_pointers() -> (Vec<u8>, Records, Pointers) {
+    let mut vol = build(
+        false,
+        1,
+        16_384,
+        &[
+            Entry {
+                name: TRIAL_FILE,
+                size: 1024,
+                chain: vec![3, 4],
+            },
+            Entry {
+                name: REASON_FILE,
+                size: 1024,
+                chain: vec![5, 6],
+            },
+            Entry {
+                name: EPISODES_FILE,
+                size: 1024,
+                chain: vec![7, 8],
+            },
+            Entry {
+                name: DEFAULT_POINTER,
+                size: 512,
+                chain: vec![9],
+            },
+            Entry {
+                name: PREVIOUS_POINTER,
+                size: 512,
+                chain: vec![10],
+            },
+            Entry {
+                name: TRIAL_POINTER,
+                size: 512,
+                chain: vec![11],
+            },
+        ],
+    );
+    let records = Records::place(&mut vol).unwrap();
+    let pointers = Pointers::place(&mut vol).unwrap();
+    let (trial_lba, reason_lba) = records.lbas();
+    let made = precreate(&[
+        (Kind::TRIAL, b""),
+        (Kind::REASON, b""),
+        (Kind::EPISODES, b""),
+    ])
+    .unwrap();
+    for ((_, bytes), lba) in made
+        .iter()
+        .zip([trial_lba, reason_lba, records.episodes_lba()])
+    {
+        let at = lba as usize * SECTOR;
+        vol.0[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
+        let sector = firmware::pointer_sector("os-1").unwrap();
+        let at = pointers.lba(which) as usize * SECTOR;
+        vol.0[at..at + SECTOR].copy_from_slice(&sector);
+    }
+    (vol.0, records, pointers)
+}
+
+#[test]
+fn the_pointer_files_are_placed_at_their_sectors_and_read_back() {
+    let (image, _, pointers) = partition_with_pointers();
+    let mut dev = Cut::new(image);
+    for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
+        assert_eq!(
+            pointers.read(&mut dev, which).unwrap().as_deref(),
+            Some("os-1")
+        );
+    }
+    assert_ne!(
+        pointers.lba(Pointer::Default),
+        pointers.lba(Pointer::Previous)
+    );
+}
+
+#[test]
+fn a_pointer_write_changes_only_its_own_sector() {
+    let (image, _, pointers) = partition_with_pointers();
+    let mut dev = Cut::new(image.clone());
+    pointers.write(&mut dev, Pointer::Default, "os-22").unwrap();
+    let lba = pointers.lba(Pointer::Default) as usize * SECTOR;
+    assert_eq!(
+        dev.image[..lba],
+        image[..lba],
+        "bytes before the pointer changed"
+    );
+    assert_eq!(
+        dev.image[lba + SECTOR..],
+        image[lba + SECTOR..],
+        "bytes after changed"
+    );
+    assert_eq!(
+        pointers
+            .read(&mut dev, Pointer::Default)
+            .unwrap()
+            .as_deref(),
+        Some("os-22")
+    );
+    assert_eq!(
+        pointers
+            .read(&mut dev, Pointer::Previous)
+            .unwrap()
+            .as_deref(),
+        Some("os-1")
+    );
+}
+
+#[test]
+fn a_pointer_cut_at_every_byte_is_the_old_slot_the_new_slot_or_refused() {
+    // Each pair has ids of different lengths: a cut inside the id must never read as a third slot.
+    for (old, new) in [
+        ("a", "bb"),
+        ("bb", "a"),
+        ("x.y-1", "z_2"),
+        ("q", "q.r"),
+        ("os-1", "os-2"),
+    ] {
+        let (image, _, pointers) = partition_with_pointers();
+        let mut seed = Cut::new(image);
+        pointers.write(&mut seed, Pointer::Default, old).unwrap();
+        let before = seed.image.clone();
+        let mut refused = 0;
+        for tear in 0..=SECTOR {
+            let mut dev = Cut::new(before.clone());
+            if tear < SECTOR {
+                dev.cut = Some((0, tear));
+            }
+            let lba = pointers.lba(Pointer::Default);
+            let wrote = pointers.write(&mut dev, Pointer::Default, new);
+            assert_eq!(wrote.is_err(), tear < SECTOR, "{old}->{new} tear {tear}");
+            let read = pointers.read(&mut dev, Pointer::Default).unwrap();
+            match read.as_deref() {
+                None => refused += 1,
+                Some(id) => assert!(id == old || id == new, "{old}->{new} tear {tear} read {id}"),
+            }
+            // Nothing but this sector changed.
+            let at = lba as usize * SECTOR;
+            assert_eq!(dev.image[..at], before[..at], "{old}->{new} tear {tear}");
+            assert_eq!(
+                dev.image[at + SECTOR..],
+                before[at + SECTOR..],
+                "{old}->{new} tear {tear}"
+            );
+        }
+        assert!(
+            refused > 0,
+            "{old}->{new}: a torn pointer was never refused"
+        );
+    }
+}
+
+#[test]
+fn a_boot_on_a_real_file_places_every_file_and_round_trips_the_pointers_and_trial() {
+    let dir = crate::tests::TempDir::new("boot-raw");
+    let node = dir.0.join("boot.img");
+    let (image, _, _) = partition_with_pointers();
+    std::fs::write(&node, &image).unwrap();
+    let mut boot = Boot::open(&node).unwrap();
+    assert_eq!(
+        boot.pointer(Pointer::Default).unwrap().as_deref(),
+        Some("os-1")
+    );
+    boot.set_pointer(Pointer::Default, "os-2").unwrap();
+    assert_eq!(
+        boot.pointer(Pointer::Default).unwrap().as_deref(),
+        Some("os-2")
+    );
+    boot.arm_trial("os-1", 2).unwrap();
+    assert_eq!(
+        boot.trial().unwrap(),
+        Some(Trial {
+            slot: "os-1".into(),
+            attempts: 2
+        })
+    );
+    assert_eq!(
+        boot.pointer(Pointer::Trial).unwrap().as_deref(),
+        Some("os-1")
+    );
+    boot.clear_trial().unwrap();
+    assert_eq!(boot.trial().unwrap(), None);
+    // The bytes on the file are the bytes the pointers and records read back: a reopen agrees.
+    drop(boot);
+    let mut again = Boot::open(&node).unwrap();
+    assert_eq!(
+        again.pointer(Pointer::Default).unwrap().as_deref(),
+        Some("os-2")
+    );
+}
+
+#[test]
+fn a_partition_without_its_pointer_files_is_refused_by_the_pointers_name() {
+    let dir = crate::tests::TempDir::new("boot-raw-missing");
+    let node = dir.0.join("boot.img");
+    // The records are there, the pointer files are not: refused, and the message names the file.
+    let (image, _) = partition();
+    std::fs::write(&node, &image).unwrap();
+    let why = Boot::open(&node).err().expect("refused");
+    assert!(why.contains("default.txt"), "{why}");
+}
+
+#[test]
+fn an_arm_cut_at_every_byte_never_leaves_a_trial_record_without_its_pointer() {
+    // Arming writes the trial pointer, then the record. A cut in either write, at any byte, must
+    // leave: no record, or a record whose slot the trial pointer names. The pointer is always one of
+    // the two slots or refused.
+    let (image, records, pointers) = partition_with_pointers();
+    for write in 0..2usize {
+        for tear in 0..=SECTOR {
+            let mut dev = Cut::new(image.clone());
+            dev.cut = Some((write, tear));
+            let _ = arm_trial_raw(&records, &pointers, &mut dev, "os-2", 2);
+            let trial = records.trial(&mut dev).unwrap();
+            let pointer = pointers.read(&mut dev, Pointer::Trial).unwrap();
+            if let Some(t) = trial {
+                assert_eq!(t.slot, "os-2", "write {write} tear {tear}");
+                assert_eq!(
+                    pointer.as_deref(),
+                    Some("os-2"),
+                    "write {write} tear {tear}: record without pointer"
+                );
+            }
+            assert!(matches!(
+                pointer.as_deref(),
+                None | Some("os-1") | Some("os-2")
+            ));
+        }
+    }
 }

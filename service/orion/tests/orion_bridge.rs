@@ -863,7 +863,7 @@ fn outbuf_board(files: &IdentityFiles) -> String {
     format!(
         "{}[[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
          config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", \
-         boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n",
+         boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n",
         files.board(),
         files.dir.join("data").display(),
         files.dir.join("boot").display()

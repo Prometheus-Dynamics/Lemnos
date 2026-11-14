@@ -331,6 +331,9 @@ pub struct Finish<'a> {
     /// shows as untrusted or unsigned.
     pub require_signed: bool,
     pub boot_args: &'a str,
+    /// The board's `boot_sources` entries (`source=path`): the bundle's command line must carry
+    /// `<boot_args>.src.<entry>` for each.
+    pub boot_sources: &'a [String],
     /// The board file's `[board] id`: a slot built for another board is refused.
     pub board_id: &'a str,
     pub guard: Guard,
@@ -623,6 +626,18 @@ impl Install {
             return Err(bad(format!(
                 "boot/cmdline.txt doesn't carry the root hash slot.json names: it needs {args}.roothash={root_hash}"
             )));
+        }
+        // The boot sources the board lists, which the slot's initramfs finds its boot disk by.
+        for entry in board.boot_sources {
+            let (source, _) = entry.split_once('=').unwrap_or((entry, ""));
+            if !cmdline
+                .split_ascii_whitespace()
+                .any(|w| w == format!("{args}.src.{entry}"))
+            {
+                return Err(bad(format!(
+                    "boot/cmdline.txt doesn't list the board's boot source {source}: it needs {args}.src.{entry}"
+                )));
+            }
         }
         // The boot side, kept on the data partition. A slot whose directory is already on the
         // boot partition (installed again) gets its new files there now.

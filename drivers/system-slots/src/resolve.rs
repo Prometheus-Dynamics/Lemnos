@@ -97,7 +97,7 @@ impl SystemSlots {
         }
         let reason = if !log.reason.is_empty() {
             log.reason.clone()
-        } else if let Some(reason) = boot::read_reason(&self.layout.boot) {
+        } else if let Some(reason) = boot::read_reason(&self.boot_node) {
             reason
         } else {
             self.trial_reason(&trial).unwrap_or_else(|| {
@@ -108,7 +108,7 @@ impl SystemSlots {
             })
         };
         log.note("fell-back");
-        boot::clear_reason(&self.layout.boot);
+        boot::clear_reason(&self.boot_node);
         let _ = self.record.clear_trial();
         self.end_trial_failed(&trial, &reason);
         Log::remove(&self.layout);
@@ -329,7 +329,7 @@ impl SystemSlots {
     /// when the state could not hold it, so the caller tries again; a boot partition copy that
     /// could not be written is returned as a warning instead.
     fn write_give_up(&mut self, reason: &str) -> std::result::Result<Option<String>, String> {
-        let boot_copy = boot::write_reason(&self.layout.boot, reason);
+        let boot_copy = boot::write_reason(&self.boot_node, reason);
         let state = self.state();
         let mut log = Log::load(&self.layout).unwrap_or_else(|| Log {
             slot: state.trial.clone(),
@@ -442,7 +442,7 @@ impl SystemSlots {
         self.save(&state)?;
         if resolved_here {
             Log::remove(&self.layout);
-            boot::clear_reason(&self.layout.boot);
+            boot::clear_reason(&self.boot_node);
             let _ = Resolved {
                 slot: running.clone(),
                 outcome: "confirmed".into(),

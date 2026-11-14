@@ -141,18 +141,16 @@ fn the_script_mirrors_the_decision() {
     let save = at(&format!(
         "save ${{devtype}} ${{slot_part}} ${{scriptaddr}} {RECORD_FILE} ${{filesize}}"
     ));
-    let trial = at(&format!("/slots/${{trial}}/{EXTLINUX}"));
-    let default = at(&format!("/slots/${{default}}/{EXTLINUX}"));
+    let taken = at("setenv take_trial ${trial}");
+    let trial = at(&format!("/slots/${{take_trial}}/{EXTLINUX}"));
+    let default = at(&format!("/slots/${{take_default}}/{EXTLINUX}"));
     let root = SCRIPT.rfind("/extlinux/extlinux.conf").unwrap();
-    assert!(ladder < take && take < export && export < save && save < trial);
+    assert!(ladder < take && take < export && export < save && save < taken && taken < trial);
     assert!(trial < default && default < root);
-    assert!(
-        SCRIPT
-            .lines()
-            .last()
-            .unwrap()
-            .contains("any ${pxefile_addr_r} /extlinux/extlinux.conf")
-    );
+    // One loop over the choices, in this order, with one sysboot.
+    assert!(SCRIPT.contains("for step in trial default root; do"));
+    assert_eq!(sysboots(SCRIPT), 1);
+    assert!(SCRIPT.contains("any ${pxefile_addr_r} ${lemnos_conf}"));
     // The device comes from the standard boot flow, never a number written in.
     for line in SCRIPT.lines().filter(|l| !l.trim_start().starts_with('#')) {
         for fixed in ["mmc 0", "mmc 1", "usb 0", "0:1", "1:1"] {
@@ -160,20 +158,70 @@ fn the_script_mirrors_the_decision() {
         }
     }
     assert!(SCRIPT.contains("setenv slot_part ${devnum}:${distro_bootpart}"));
+    boot_source_steps(SCRIPT);
     // Nothing saved in U-Boot's own environment, no boot count.
     for banned in ["saveenv", "bootcount", "bootlimit"] {
         assert!(!SCRIPT.contains(banned), "{banned}");
     }
 }
 
+/// The `sysboot` commands of a script (comments left out).
+fn sysboots(script: &str) -> usize {
+    script
+        .lines()
+        .filter(|l| l.trim_start().starts_with("sysboot"))
+        .count()
+}
+
+/// The boot-source steps: the tree is resized before the property is set, every `load` is a
+/// condition (a failed one is reported and the next choice follows), and the only `exit` is the
+/// one place where the boot source cannot be named.
+fn boot_source_steps(script: &str) {
+    let code: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    let at = |needle: &str| {
+        code.iter()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("the script has no `{needle}`"))
+    };
+    let addr = at("fdt addr ${fdt_addr_r}");
+    let resize = at("fdt resize ");
+    let set = at("if fdt set /chosen lemnos,boot-source");
+    assert!(addr < resize && resize < set, "resize between addr and set");
+    assert!(
+        code[resize]
+            .split(' ')
+            .nth(2)
+            .unwrap()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+    );
+    for line in code.iter().filter(|l| l.contains("load ${devtype}")) {
+        assert!(line.starts_with("if "), "an unchecked load: {line}");
+    }
+    let exits: Vec<usize> = (0..code.len()).filter(|&i| code[i] == "exit").collect();
+    assert_eq!(exits.len(), 1, "one exit, where the source cannot be named");
+    assert!(
+        script.contains("# I5i7: replaced by the download-mode loop"),
+        "the exit is marked"
+    );
+    // Before the loop starts nothing has booted, so that exit is before any sysboot.
+    assert!(exits[0] < at("for step in"));
+    assert!(code[exits[0] - 1].contains("refusing"));
+}
+
 #[test]
 fn extlinux_names_the_slots_files_by_absolute_path() {
     let conf = extlinux(
         "os-1",
-        &files(&["Image", "board-a.dtb", "initramfs", "cmdline.txt"]),
+        &files(&["Image", "board.dtb", "initramfs", "cmdline.txt"]),
         "console=ttyS0 root=x b.slot=os-1",
     )
     .unwrap();
+    // The label has no fdt line: the boot script loads board.dtb and names the boot source first.
     assert_eq!(
         conf,
         "# Written by the board's slot driver for slot os-1. Rewritten at each install.\n\
@@ -181,20 +229,19 @@ fn extlinux_names_the_slots_files_by_absolute_path() {
          timeout 0\n\
          label os-1\n\
          \x20 kernel /slots/os-1/Image\n\
-         \x20 fdt /slots/os-1/board-a.dtb\n\
          \x20 initrd /slots/os-1/initramfs\n\
          \x20 append console=ttyS0 root=x b.slot=os-1\n"
     );
 }
 
 #[test]
-fn several_device_trees_go_through_fdtdir() {
+fn a_slot_without_board_dtb_is_refused_and_no_other_dtb_is_used() {
     let top = extlinux(
         "os-1",
         &files(&[
             "kernel8.img",
             "a.dtb",
-            "b.dtb",
+            "board.dtb",
             "initramfs",
             "overlays/x.dtbo",
         ]),
@@ -202,16 +249,14 @@ fn several_device_trees_go_through_fdtdir() {
     )
     .unwrap();
     assert!(top.contains("  kernel /slots/os-1/kernel8.img\n"));
-    assert!(top.contains("  fdtdir /slots/os-1/\n"));
-    let sub = extlinux(
+    assert!(!top.contains("fdt"), "{top}");
+    let err = extlinux(
         "os-1",
-        &files(&["vmlinuz-6.12", "initrd.img", "dtbs/vendor/a.dtb"]),
+        &files(&["vmlinuz-6.12", "initrd.img", "dtbs/vendor/board.dtb"]),
         "x",
     )
-    .unwrap();
-    assert!(sub.contains("  kernel /slots/os-1/vmlinuz-6.12\n"));
-    assert!(sub.contains("  fdtdir /slots/os-1/dtbs/\n"));
-    assert!(sub.contains("  initrd /slots/os-1/initrd.img\n"));
+    .unwrap_err();
+    assert!(err.contains("no board.dtb"), "{err}");
 }
 
 #[test]
@@ -227,10 +272,15 @@ fn what_cant_go_into_the_configuration_is_refused() {
             .contains("initramfs")
     );
     assert!(extlinux("../x", &files(&["Image", "initramfs"]), "x").is_err());
-    for bad in ["my board.dtb", "a#b.dtb", "a\"b.dtb"] {
-        let err = extlinux("os-1", &files(&["Image", "initramfs", bad]), "x").unwrap_err();
+    for bad in ["kernel#1.img", "kernel\"1.img"] {
+        let err = extlinux("os-1", &files(&[bad, "initramfs", "board.dtb"]), "x").unwrap_err();
         assert!(err.contains("can't go into"), "{bad}: {err}");
     }
+    assert!(
+        extlinux("os-1", &files(&["Image", "initramfs"]), "x")
+            .unwrap_err()
+            .contains("board.dtb")
+    );
     assert!(extlinux("os-1", &files(&["Image", "initramfs"]), "a\nb").is_err());
 }
 
@@ -281,6 +331,7 @@ fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
     let slot = layout.boot_dir("os-1");
     fs::write(slot.join("Image"), "k").unwrap();
     fs::write(slot.join("initramfs"), "i").unwrap();
+    fs::write(slot.join("board.dtb"), "d").unwrap();
     record.prepare(&slot, "os-1", "b.slot=os-1").unwrap();
     record.fallback_copy(&layout, "os-1").unwrap();
     assert_eq!(
@@ -341,8 +392,6 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
         assert!(!SCRIPT_UBI.contains(banned), "{banned}");
     }
     // The two scripts take the same steps in the same order.
-    assert_eq!(
-        SCRIPT_UBI.matches("sysboot").count(),
-        SCRIPT.matches("sysboot").count()
-    );
+    assert_eq!(sysboots(SCRIPT_UBI), 3);
+    assert_eq!(sysboots(SCRIPT), 1);
 }

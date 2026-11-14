@@ -3,11 +3,13 @@
 //! that file byte for byte (its hash is in the signed manifest):
 //!
 //! ```text
-//! <prefix>.slot=<id> <prefix>.roothash=<64 hex> ... panic=5
+//! <prefix>.slot=<id> <prefix>.roothash=<64 hex> <prefix>.src.<source>=<device-tree path> ... panic=5
 //! ```
 //!
 //! The prefix is whatever comes before `.slot=`, so the initramfs needs no setting of its own. The
-//! data partition is not named here: it is found by a fixed rule ([`crate::boot`]).
+//! `.src.` words are the board's boot-source table (one per medium the board boots from; see
+//! [`lemnos_slot_store::disk`]). The data partition is not named here: it is found on the boot disk
+//! by a fixed rule ([`crate::boot`]).
 
 /// The value of `key=` on `cmdline`, the last one when it is given twice (as the kernel takes
 /// it).
@@ -18,6 +20,18 @@ pub fn arg<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
         .next_back()
 }
 
+/// The boot-source table on `cmdline`: `<prefix>.src.<source>=<path>` as `<source>=<path>`.
+pub fn sources(cmdline: &str, prefix: &str) -> Vec<String> {
+    let key = format!("{prefix}.src.");
+    cmdline
+        .split_ascii_whitespace()
+        .filter_map(|word| {
+            let (name, path) = word.split_once('=')?;
+            Some(format!("{}={path}", name.strip_prefix(&key)?))
+        })
+        .collect()
+}
+
 /// The slot arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -25,6 +39,9 @@ pub struct Args {
     pub slot: String,
     /// `""` when missing: the slot then fails, and falls back.
     pub roothash: String,
+    /// The boot-source table: each `<prefix>.src.<source>=<path>` word as `<source>=<path>`, in
+    /// order. Empty when the command line has none.
+    pub sources: Vec<String>,
 }
 
 impl Args {
@@ -46,6 +63,7 @@ impl Args {
             roothash: arg(cmdline, &format!("{prefix}.roothash"))
                 .unwrap_or_default()
                 .to_string(),
+            sources: sources(cmdline, prefix),
         })
     }
 
@@ -69,6 +87,15 @@ mod tests {
         assert_eq!(args.roothash, "ab");
         assert_eq!(args.roothash_in("x os.roothash=cd y"), "cd");
         assert_eq!(arg("a=1 a=2", "a"), Some("2"));
+    }
+
+    #[test]
+    fn the_boot_source_table_is_read_in_order() {
+        let args =
+            Args::parse("os.slot=a os.src.mmc0=/soc/mmc@1 os.src.nvme0=/axi/pcie@2 x.src.usb0=/y")
+                .unwrap();
+        assert_eq!(args.sources, ["mmc0=/soc/mmc@1", "nvme0=/axi/pcie@2"]);
+        assert!(Args::parse("os.slot=a").unwrap().sources.is_empty());
     }
 
     #[test]

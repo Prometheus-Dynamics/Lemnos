@@ -1,5 +1,5 @@
-//! Finding the data partition by its ext2/3/4 label, and the boot partition beside it, from sysfs
-//! and the disks themselves: an initramfs has no blkid.
+//! Finding the data partition by its ext2/3/4 label, on the boot disk only (its disk is
+//! [`lemnos_slot_store::disk`]'s to find), from sysfs and the disks themselves: an initramfs has no blkid.
 //!
 //! The kernel lists every block device under `/sys/class/block`; a partition's directory has a
 //! `partition` file (its number) and sits in its disk's directory. The label is the superblock's
@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The ext2/3/4 volume name, from a partition's first 2 KiB.
 pub fn ext_label(head: &[u8]) -> Option<String> {
@@ -40,64 +40,27 @@ pub fn head(dev: &Path) -> Option<Vec<u8>> {
     read_at(dev, 0, 2048)
 }
 
-/// One partition the kernel lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Part {
-    pub name: String,
-    pub number: u32,
-    pub disk: String,
-}
+pub use lemnos_slot_store::disk::{Part, partitions};
 
-/// Every partition under `sys/class/block`, by name.
-pub fn partitions(sys: &Path) -> Vec<Part> {
-    let mut found: Vec<Part> = std::fs::read_dir(sys.join("class/block"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let real = std::fs::canonicalize(entry.path()).ok()?;
-            let number = std::fs::read_to_string(real.join("partition"))
-                .ok()?
-                .trim()
-                .parse()
-                .ok()?;
-            let disk = real.parent()?.file_name()?.to_string_lossy().into_owned();
-            Some(Part { name, number, disk })
-        })
-        .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
-}
-
-/// Every partition whose ext superblock label is `label`, with the names of the others it saw
-/// (for the sentence when none matches).
-pub fn labelled(label: &str, sys: &Path, dev: &Path) -> (Vec<Part>, Vec<String>) {
+/// Every partition of `disk` whose ext superblock label is `label`, with the names of the others
+/// on that disk (for the sentence when none matches). Other disks are never looked at.
+pub fn labelled(label: &str, sys: &Path, dev: &Path, disk: &str) -> (Vec<Part>, Vec<String>) {
     let mut hits = Vec::new();
     let mut seen = Vec::new();
-    for part in partitions(sys) {
+    for part in partitions(sys).into_iter().filter(|p| p.disk == disk) {
         let text = head(&dev.join(&part.name)).and_then(|h| ext_label(&h));
         if text.as_deref() == Some(label) {
             hits.push(part);
         } else {
             seen.push(format!(
-                "{} (partition {} of {}, LABEL {})",
+                "{} (partition {}, LABEL {})",
                 part.name,
                 part.number,
-                part.disk,
                 text.as_deref().unwrap_or("-")
             ));
         }
     }
     (hits, seen)
-}
-
-/// The boot partition: partition 1 of the data partition's disk.
-pub fn boot_beside(sys: &Path, dev: &Path, data: &Part) -> Option<PathBuf> {
-    partitions(sys)
-        .into_iter()
-        .find(|p| p.disk == data.disk && p.number == 1)
-        .map(|p| dev.join(p.name))
 }
 
 #[cfg(test)]

@@ -71,6 +71,43 @@ fn a_pointer_torn_at_any_byte_is_one_of_the_old_line_the_new_line_or_refused() {
 }
 
 #[test]
+fn a_pointer_torn_between_ids_of_different_length_is_never_another_slot() {
+    // "a" to "bb": a cut inside the id can leave "os_prefix=slots/b/" whole, which a reader
+    // without the checksum would take for slot "b". Every cut must read as "a", "bb" or nothing.
+    for (old_id, new_id) in [("a", "bb"), ("bb", "a"), ("x.y-1", "z_2"), ("q", "q.r")] {
+        let old = pointer_sector(old_id).unwrap();
+        let new = pointer_sector(new_id).unwrap();
+        let mut refused = 0;
+        for cut in 0..=POINTER_BYTES {
+            let mut torn = old;
+            torn[..cut].copy_from_slice(&new[..cut]);
+            match pointer_slot(&torn) {
+                None => refused += 1,
+                Some(id) => assert!(
+                    id == old_id || id == new_id,
+                    "{old_id}->{new_id} cut {cut} read {id}"
+                ),
+            }
+        }
+        assert!(refused > 0, "{old_id}->{new_id}: no cut was refused");
+    }
+}
+
+#[test]
+fn a_pointer_whose_checksum_does_not_match_its_line_is_refused() {
+    let mut s = pointer_sector("os-2").unwrap();
+    // Change one digit of the checksum: the line itself is still a valid prefix line.
+    let at = s.iter().position(|&b| b == b'=').unwrap() + 1;
+    s[at] = if s[at] == b'0' { b'1' } else { b'0' };
+    assert_eq!(pointer_slot(&s), None);
+    // A line with a different id under the old checksum is refused too.
+    let mut swapped = pointer_sector("os-1").unwrap();
+    let other = pointer_sector("os-2").unwrap();
+    swapped[..21].copy_from_slice(&other[..21]);
+    assert_eq!(pointer_slot(&swapped), None);
+}
+
+#[test]
 fn a_board_with_rpi_tryboot_gets_the_fixed_text_and_no_other_firmware_does() {
     let files = generated_for("rpi-tryboot").unwrap();
     assert_eq!(files[0], ("config.txt", CONFIG_TXT));
