@@ -306,7 +306,7 @@ mod tests {
         set_sectors(&mut after, 1, 1_000_000);
         let changed = changed_bytes(&before, &after);
         assert!(changed.iter().all(|&i| (474..478).contains(&i)));
-        assert!(changed.iter().all(|&i| i < 440 || i > 445));
+        assert!(changed.iter().all(|&i| !(440..=445).contains(&i)));
     }
 
     #[test]

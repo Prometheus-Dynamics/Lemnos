@@ -357,7 +357,7 @@ fn write_into(
     })?;
     // The signature policy: decided on the outcome the install recorded, before anything is kept.
     let word = store::Meta::load(&layout, &id).get("SIGNATURE").to_string();
-    signature_policy(&word, input.bundle, &input)?;
+    signature_policy(&word, input.bundle, input)?;
     // The boot image: the slot's bay must hold it, and the default must name a bay that holds
     // it. The bay check is `check_bay`, the one call site of it.
     check_bay(&mut pair.reference, &id)?;
