@@ -114,6 +114,7 @@ fn run(every: u64) -> (Vec<u64>, u64, u64, u64, u64) {
                         sequence: p,
                         identity: 0,
                         timestamp_ns: p + 1,
+                        end_ns: 0,
                     })
                     .unwrap();
             }
@@ -181,6 +182,7 @@ fn collecting_returns_before_each_job_counts_no_refusal_for_a_consumer_that_keep
                 sequence: p,
                 identity: 0,
                 timestamp_ns: p + 1,
+                end_ns: 0,
             })
             .unwrap();
         // The consumer takes the result and releases it at once.

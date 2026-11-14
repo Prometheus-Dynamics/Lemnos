@@ -460,6 +460,7 @@ mod package {
             sequence: 1 << 40,
             identity: u64::MAX,
             timestamp_ns: 5,
+            end_ns: 0,
         };
         assert_eq!(frame_in(frame_out(frame)), frame);
 

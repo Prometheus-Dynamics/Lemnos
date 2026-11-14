@@ -110,6 +110,7 @@ fn run(buffers: u32, working: u32, lag: u64) -> Run {
                         sequence: p,
                         identity: 0,
                         timestamp_ns: p + 1,
+                        end_ns: 0,
                     })
                     .unwrap();
             }

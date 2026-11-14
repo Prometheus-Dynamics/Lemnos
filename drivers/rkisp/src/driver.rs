@@ -757,6 +757,7 @@ impl Rkisp {
             sequence,
             identity: p.identity,
             timestamp_ns: done.timestamp_ns,
+            end_ns: 0,
         };
         let delivered = match part {
             Part::Statistics => {
@@ -880,6 +881,7 @@ impl Rkisp {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             self.held.config = with(self.held.config, buffer, false);

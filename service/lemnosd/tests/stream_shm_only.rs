@@ -159,6 +159,7 @@ fn a_process_with_only_the_shm_crates_reads_a_lemnosd_stream() {
             sequence: 42,
             identity: 7,
             timestamp_ns: CAPTURED_NS,
+            end_ns: 0,
         })
         .unwrap();
 

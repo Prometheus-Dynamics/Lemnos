@@ -457,6 +457,7 @@ impl K230Isp {
             sequence: p.frame,
             identity: p.identity,
             timestamp_ns: self.frames.last_ns,
+            end_ns: 0,
         };
         let reached = match self.statistics.write(buffer, 0, &self.stats) {
             Ok(true) => true,

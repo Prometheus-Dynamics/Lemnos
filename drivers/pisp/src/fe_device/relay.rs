@@ -116,6 +116,7 @@ impl Relay {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         });
     }
 
@@ -254,6 +255,7 @@ impl Relay {
                 sequence: done.sequence,
                 identity: done.identity,
                 timestamp_ns: done.timestamp_ns,
+                end_ns: 0,
             };
             let published = frames.publish(frame).is_ok();
             if let Some(slot) = self.slot(done.buffer) {

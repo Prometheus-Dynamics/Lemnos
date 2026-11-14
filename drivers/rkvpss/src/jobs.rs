@@ -158,6 +158,7 @@ const fn empty(buffer: u32, identity: u64, sequence: u64, now_ns: u64) -> Stream
         sequence,
         identity,
         timestamp_ns: now_ns,
+        end_ns: 0,
     }
 }
 

@@ -635,6 +635,8 @@ impl StreamCore {
             sequence: frame.sequence,
             identity: frame.identity,
             bytes: frame.bytes,
+            reason: 0,
+            end_ns: frame.end_ns,
         }
         .encode();
         let time = SampleTime::from_nanos(frame.timestamp_ns);

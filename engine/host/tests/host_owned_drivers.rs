@@ -288,6 +288,7 @@ impl Lifecycle for JobReader {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: now_ns,
+                end_ns: 0,
             });
         }
         Some(now_ns + 1_000_000)

@@ -301,6 +301,7 @@ impl Server {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         })?;
         lane.set_held(buffer, false);
         Ok(())
@@ -428,6 +429,7 @@ impl Server {
             sequence: lane.sequence,
             identity: job.identity(),
             timestamp_ns: now_ns,
+            end_ns: 0,
         };
         let mut outcome = outcome;
         let mut published = Ok(());

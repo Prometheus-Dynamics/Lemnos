@@ -111,6 +111,7 @@ impl Node for Holder {
                 sequence: 1,
                 identity: 1,
                 timestamp_ns: 5,
+                end_ns: 0,
             })
             .map_err(|_| Status::IO)?;
         Ok(buffer)

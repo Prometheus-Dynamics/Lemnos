@@ -629,6 +629,8 @@ impl StreamHost {
             sequence,
             identity,
             bytes,
+            reason: 0,
+            end_ns: 0,
         }
         .encode();
         let count = self.planes as usize;

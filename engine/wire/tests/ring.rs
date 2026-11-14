@@ -25,9 +25,24 @@ fn a_frame_round_trips_through_its_metadata_and_a_short_one_is_refused() {
         sequence: 7,
         identity: 0xfeed,
         bytes: 1234,
+        reason: 0,
+        end_ns: 987_654_321,
     };
     assert_eq!(FrameInfo::decode(&info.encode()), Some(info));
-    assert_eq!(FrameInfo::decode(&[0; 19]), None);
+    assert_eq!(FrameInfo::decode(&[0; 31]), None);
+    // The layout, by byte: a reader that counts from these offsets reads the same fields.
+    let bytes = info.encode();
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(&bytes[24..32], &987_654_321u64.to_le_bytes());
+    let job_end = FrameInfo {
+        bytes: 0,
+        reason: 3,
+        ..info
+    };
+    assert_eq!(
+        FrameInfo::decode(&job_end.encode()).map(|i| i.reason),
+        Some(3)
+    );
 }
 
 #[test]

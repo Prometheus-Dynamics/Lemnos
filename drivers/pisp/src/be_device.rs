@@ -575,6 +575,7 @@ impl PispBe {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             Buffers::set(&mut self.configs.held, buffer, false);
@@ -631,6 +632,7 @@ impl PispBe {
                 sequence: done.sequence,
                 identity: done.identity,
                 timestamp_ns: done.timestamp_ns,
+                end_ns: 0,
             };
             let (stream, buffers, _) = self.parts(Image::Output(o));
             let published = stream.map(|stream| stream.publish(frame));
@@ -817,6 +819,7 @@ impl PispBe {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             });
             Buffers::set(&mut buffers.held, buffer, false);
             buffers.take(stream)?;

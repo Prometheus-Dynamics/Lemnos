@@ -931,6 +931,7 @@ mod tests {
             sequence: 1,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         };
         wrapped.publish(frame).unwrap();
         assert_eq!(mock.take_frame(), Some(frame));

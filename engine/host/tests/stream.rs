@@ -63,6 +63,7 @@ impl Emitting for Emitter {
                 sequence: 41,
                 identity: 0xABCD,
                 timestamp_ns: 5,
+                end_ns: 0,
             })
             .map_err(|_| Status::IO)?;
         Ok(buffer)
@@ -269,6 +270,7 @@ fn a_released_newest_frame_comes_back_without_another_publish() {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         })
         .unwrap();
     let frame = consumer.pop_frame().unwrap().expect("the frame");
@@ -318,6 +320,7 @@ fn a_buffer_granted_before_a_consumer_attached_is_dropped_not_delivered() {
             sequence: 1,
             identity: 2,
             timestamp_ns: 3,
+            end_ns: 0,
         })
         .unwrap();
     assert_eq!(consumer.pop_frame().unwrap(), None);
@@ -337,6 +340,7 @@ fn a_producer_cant_publish_or_write_what_it_doesnt_hold() {
         sequence: 1,
         identity: 2,
         timestamp_ns: 3,
+        end_ns: 0,
     };
     assert_eq!(producer.publish(frame), Err(ErrorKind::InvalidInput));
     assert_eq!(
@@ -376,6 +380,7 @@ fn write_and_publish(stream: &mut dyn StreamEndpoint<Error = ErrorKind>, bytes: 
             sequence: 1,
             identity: 2,
             timestamp_ns: 3,
+            end_ns: 0,
         })
         .unwrap();
     buffer

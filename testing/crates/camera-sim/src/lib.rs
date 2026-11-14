@@ -471,6 +471,7 @@ impl Lifecycle for SimReceiver {
                         sequence: self.emitted,
                         identity: 0,
                         timestamp_ns: at_ns,
+                        end_ns: 0,
                     };
                     match frames.publish(frame) {
                         Ok(()) => self.counters.frames += 1,

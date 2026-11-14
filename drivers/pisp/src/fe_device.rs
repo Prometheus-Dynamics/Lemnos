@@ -665,6 +665,7 @@ impl PispFe {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             Buffers::set(&mut self.configs.held, buffer, false);
@@ -1037,6 +1038,7 @@ fn give_up(stream: &mut StreamHandle, buffer: u32) {
         sequence: 0,
         identity: 0,
         timestamp_ns: 0,
+        end_ns: 0,
     });
 }
 
@@ -1067,6 +1069,7 @@ fn publish(
         sequence: done.sequence,
         identity: done.identity,
         timestamp_ns: done.timestamp_ns,
+        end_ns: 0,
     };
     let published = stream.publish(frame).is_ok();
     if published {

@@ -325,6 +325,7 @@ pub fn frame_in(frame: PackageFrame) -> StreamFrame {
         sequence: frame.sequence,
         identity: frame.identity,
         timestamp_ns: frame.timestamp_ns,
+        end_ns: 0,
     }
 }
 

@@ -243,6 +243,7 @@ impl Serve {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })?;
             self.set_held(buffer, false);
         }
@@ -321,6 +322,7 @@ impl Serve {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         })?;
         self.set_held(job.buffer, false);
         self.sequence = self.sequence.wrapping_add(1);

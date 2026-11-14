@@ -196,6 +196,9 @@ pub struct StreamFrame {
     /// When the frame was made, in nanoseconds on the host's monotonic clock
     /// (`CLOCK_MONOTONIC` on Linux); 0 when the producer has no time for it.
     pub timestamp_ns: u64,
+    /// When the frame ended (the sensor's end of frame, or the block's finish), on the same
+    /// clock; 0 when the producer has no time for the end. Never a guess from the start.
+    pub end_ns: u64,
 }
 
 #[cfg(all(feature = "std", unix))]

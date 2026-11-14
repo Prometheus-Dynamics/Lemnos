@@ -746,6 +746,7 @@ impl Lifecycle for SimReceiver {
                             sequence,
                             identity: 0,
                             timestamp_ns: next,
+                            end_ns: 0,
                         };
                         match self.frames.publish(frame) {
                             Ok(()) => self.counters.frames += 1,
@@ -921,6 +922,7 @@ fn publish_embedded(stream: &mut StreamHandle, sequence: u64, values: [u32; 3], 
         sequence,
         identity: 0,
         timestamp_ns: at_ns,
+        end_ns: 0,
     };
     let _ = stream.publish(frame);
 }

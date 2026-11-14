@@ -8,6 +8,9 @@
 //! | 8 on | For each buffer: its index (4 bytes) and its ticket (4 bytes, the low half) |
 //! | then | Metadata, opaque, to the end |
 //!
+//! An entry may name no buffer (count 0): a job's end with nothing to show, which carries only
+//! its metadata. The writer makes one with `Writer::publish_empty`; `publish` still needs a buffer.
+//!
 //! Little-endian.
 
 use crate::{BufferIndex, MAX_PER_FRAME};
@@ -22,14 +25,14 @@ pub const fn len(buffers: usize, meta: usize) -> usize {
 }
 
 /// Writes an entry at the start of `out` and returns its length, or `None` if it doesn't fit or
-/// names no buffers or too many.
+/// names too many buffers. Zero buffers is allowed: see the module docs.
 pub fn write(
     out: &mut [u8],
     generation: u32,
     buffers: &[(BufferIndex, u64)],
     meta: &[u8],
 ) -> Option<usize> {
-    if buffers.is_empty() || buffers.len() > MAX_PER_FRAME {
+    if buffers.len() > MAX_PER_FRAME {
         return None;
     }
     let total = len(buffers.len(), meta.len());
@@ -64,7 +67,7 @@ pub fn read(payload: &[u8]) -> Option<Entry<'_>> {
     let header = payload.get(..HEADER)?;
     let generation = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let count = usize::from(header[4]);
-    if count == 0 || count > MAX_PER_FRAME {
+    if count > MAX_PER_FRAME {
         return None;
     }
     let list = payload.get(HEADER..HEADER + count * PER_BUFFER)?;
