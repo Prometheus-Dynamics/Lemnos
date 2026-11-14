@@ -74,6 +74,7 @@
 //! again. Nothing is kept across a restart of the service but the board's own files: an install
 //! the restart cut short is cleared when the driver starts and reported as interrupted.
 
+mod attempt;
 #[cfg(test)]
 mod bay_fixture;
 pub mod boot;
@@ -109,6 +110,7 @@ use lemnos_core::{
     Result, Status, driver,
 };
 
+use attempt::{Attempt, Ended};
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
 pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
@@ -180,6 +182,9 @@ pub struct SystemSlots {
     /// The last install's signature result, and the slot it made (`""` when it was refused):
     /// `info` shows it.
     last_signed: Option<(String, std::result::Result<Outcome, String>)>,
+    /// How the last install attempt stands or ended, for `info`: kept for the daemon's life, and
+    /// replaced when the next attempt starts (see [`attempt`]).
+    attempt: Option<Attempt>,
     /// The boot-file check before lemnosd's own restarts and on a slow period (see
     /// [`boot_guard`]), and when the next slow-period check is due.
     check: Option<Check>,
@@ -491,12 +496,18 @@ impl SystemSlots {
             boots_keep: boots::DEFAULT_KEEP,
             reset_reason: None,
             last_signed: None,
+            attempt: None,
             check: None,
             firmware: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
         };
         slots.clear_interrupted();
+        // The one thing the board's own record keeps of an install is that a restart cut it short.
+        let kept = State::load(&slots.layout);
+        if kept.state == "error" && kept.error == attempt::INTERRUPTED {
+            slots.attempt = Some(Attempt::restart_cut_short());
+        }
         // What a sender left in `.incoming` belongs to no install now.
         let _ = install::reset_incoming(&slots.layout);
         slots
@@ -508,7 +519,7 @@ impl SystemSlots {
             let mut state = State::load(&self.layout);
             if state.state == "staging" {
                 state.state = "error".into();
-                state.error = "an install was interrupted: the service restarted".into();
+                state.error = attempt::INTERRUPTED.into();
                 let _ = state.save(&self.layout);
             }
         }
@@ -558,6 +569,12 @@ impl SystemSlots {
         let status = failure.0;
         self.show("failed", NO_PROGRESS);
         install.discard();
+        let ended = if install.refused {
+            Ended::Refused
+        } else {
+            Ended::Failed
+        };
+        self.end_attempt(ended, &failure.1, Some(install));
         let mut state = State::load(&self.layout);
         state.state = "error".into();
         state.error = failure.1.clone();
@@ -565,6 +582,35 @@ impl SystemSlots {
         let _ = state.save(&self.layout);
         install.end = Some(Err(failure));
         status
+    }
+
+    /// Records how the attempt ended, with the bytes and slot of `install` when there is one.
+    fn end_attempt(&mut self, ended: Ended, reason: &str, install: Option<&Install>) {
+        let now = lemnos_linux_sys::time::monotonic_ns().ok();
+        let Some(attempt) = self.attempt.as_mut() else {
+            return;
+        };
+        attempt.ended = ended;
+        attempt.reason.set(reason);
+        attempt.ended_ns = now;
+        if let Some(install) = install {
+            attempt.received = Some(install.got);
+            attempt.total = Some(install.size);
+            attempt.slot.set(install.slot_id().unwrap_or(""));
+        }
+    }
+
+    /// Starts the record of a new attempt, replacing the last one's.
+    fn start_attempt(&mut self, total: u64) {
+        let now = lemnos_linux_sys::time::monotonic_ns().ok();
+        self.attempt = Some(Attempt::running(self.calling, total, now));
+    }
+
+    /// An attempt turned away before it started: the record says so, and the reason is the one the
+    /// starter's call was given.
+    fn refuse_attempt(&mut self, size: u64, reason: &str) {
+        self.start_attempt(size);
+        self.end_attempt(Ended::Refused, reason, None);
     }
 
     /// The install's next bytes; the last of them puts the slot in place.
@@ -611,6 +657,7 @@ impl SystemSlots {
                 self.save(&state)?;
                 install.drop_source();
                 install.end = Some(Ok(id));
+                self.end_attempt(Ended::Installed, "", Some(install));
                 self.show("done", NO_PROGRESS);
                 Ok(())
             }
@@ -735,9 +782,18 @@ impl SystemSlots {
             return Err(Status::BUSY);
         }
         if security::enforced() && self.keys.is_empty() {
+            self.refuse_attempt(size, attempt::NO_KEYS);
             return Err(Status::NOT_PERMITTED);
         }
-        self.room(size)?;
+        if let Err(status) = self.room(size) {
+            let why = if status == NO_SPACE {
+                self.state().error
+            } else {
+                "the data partition's free space could not be read".to_string()
+            };
+            self.refuse_attempt(size, &why);
+            return Err(status);
+        }
         let mut state = self.state();
         let guard = Guard {
             running: self.running(),
@@ -761,7 +817,10 @@ impl SystemSlots {
             admit,
             self.ubi_write.clone(),
         )
-        .map_err(|failure| failure.0)?;
+        .map_err(|failure| {
+            self.refuse_attempt(size, &failure.1);
+            failure.0
+        })?;
         install.source = source;
         state.state = "staging".into();
         state.error.clear();
@@ -769,6 +828,7 @@ impl SystemSlots {
         state.started_by = "lemnos".into();
         self.save(&state)?;
         self.install = Some(install);
+        self.start_attempt(size);
         self.show("receiving", 0);
         Ok(job)
     }
@@ -958,7 +1018,20 @@ impl SystemSlots {
             quoted(&key.owner, &mut out);
             out.push('}');
         }
-        out.push_str("]}");
+        out.push(']');
+        // Appended after `key_ids`: how the last install attempt stands or ended.
+        out.push_str(",\"last_attempt\":");
+        let mut shown = self.attempt;
+        if let (Some(attempt), Some(install)) = (shown.as_mut(), self.install.as_ref())
+            && attempt.ended == Ended::Running
+        {
+            // While it runs, the numbers are the job's own: `list` and `describe` show the same.
+            attempt.received = Some(install.got);
+            attempt.total = Some(install.size);
+            attempt.slot.set(install.slot_id().unwrap_or(""));
+        }
+        Attempt::json(shown.as_ref(), &self.boot, &mut out);
+        out.push('}');
         out
     }
 
@@ -1522,6 +1595,18 @@ impl Lifecycle for SystemSlots {
         self.calling = caller;
     }
 
+    /// The host cancels the jobs a gone caller started (`job_cancel`) and then tells the driver
+    /// it went: a cancel that was the starter's own connection ending says so.
+    fn caller_gone(&mut self, caller: CallerId) {
+        if let Some(attempt) = self.attempt.as_mut()
+            && attempt.ended == Ended::Cancelled
+            && attempt.owner == caller
+            && attempt.reason.as_str() == attempt::CANCELLED
+        {
+            attempt.reason.set(attempt::GONE);
+        }
+    }
+
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
         let Some(install) = self.install.as_ref().filter(|i| i.job == job) else {
             return JobState::Finished(Status::NOT_FOUND);
@@ -1544,13 +1629,11 @@ impl Lifecycle for SystemSlots {
     }
 
     fn job_cancel(&mut self, job: JobId) {
-        if let Some(install) = self
-            .install
-            .as_mut()
-            .filter(|i| i.job == job && i.end.is_none())
-        {
+        if let Some(mut install) = self.install.take_if(|i| i.job == job && i.end.is_none()) {
             install.discard();
             install.end = Some(Err((Status::CANCELLED, String::new())));
+            self.end_attempt(Ended::Cancelled, attempt::CANCELLED, Some(&install));
+            self.install = Some(install);
             let mut state = State::load(&self.layout);
             state.state = "cancelled".into();
             state.error.clear();
