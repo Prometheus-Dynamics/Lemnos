@@ -327,7 +327,7 @@ refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is i
   `not_checked_unknown_key`, though that install may have been a bad signature under a known key
   (the record kept no key id), so the label cannot say more.
 
-`info` shows the policy and the last install's signature result: `require_signed` (now always the security view's value, see "The security switch"), and
+`info` shows the policy, the last install's signature result and, last, how the last install attempt ended (`last_attempt`, see "The last install attempt" below): `require_signed` (now always the security view's value, see "The security switch"), and
 `last_install` with `slot` (empty when refused), `signature` (the outcome, or `refused`), `signer`
 and `reason`. The install's job result is still the slot's id.
 
@@ -339,6 +339,65 @@ its 4 KiB buffer for a board with a few keys).
 
 With the security switch on, only bundles signed by a trusted key install. The switch is off by
 default: see "The security switch" below.
+
+### The last install attempt
+
+A slot install is a long job, and a job belongs to its starter's connection: a session that did not
+start it reads only its id, state and progress while it runs, and when the starter's connection ends
+the host cancels it (`docs/daemon.md`, "What a session that did not start a job can do with its id").
+An app that reconnects after an install therefore sees only the slot store: a new slot when it worked,
+and nothing when it did not. So how the last install attempt ended is a fact about the device, and
+`info` (method 14) states it for any session, appended after `key_ids` (additive: the fields before it
+are unchanged and the contract's hash does not move):
+
+```text
+"last_attempt":{"state":"failed","slot":"os-2","reason":"rootfs.erofs doesn't match slot.json's sha256",
+ "received":41943040,"total":104857600,"boot":"0123abcd-4567-89ab-cdef-000000000000",
+ "started_ms":1203400,"ended_ms":1234500,
+ "text":"last install: slot os-2 failed: rootfs.erofs doesn't match slot.json's sha256 (41943040 of 104857600 bytes; boot 0123abcd, +1234.5 s)"}
+```
+
+- `state`: `none` (no attempt known), `running`, `installed`, `refused`, `cancelled`, `interrupted`
+  or `failed`.
+  - `refused`: turned away by what the bundle says or the board requires, before the image was
+    trusted: the signature or the policy, the manifest, the order of the members, a slot that is the
+    running or default one, a boot file the manifest does not list, the boot loader's files, a payload
+    that does not fit its bay, no room, a board that requires signing and holds no key.
+  - `failed`: the work went wrong: the disk, an image or boot file that does not match the manifest, a
+    bundle that ends in the middle, a bundle file that could not be read.
+  - `cancelled`: the starter cancelled it, or its connection ended and the host cancelled it.
+  - `interrupted`: the daemon restarted in the middle of it (see below).
+  - `installed`: the slot is in place.
+- `slot`: the slot id the attempt was for, from the bundle's `slot.json` (empty when the attempt ended
+  before that member was read, or was turned away before it started). At most 64 bytes.
+- `reason`: the words the starter was given: the board's state `error` that `list` shows for a refusal
+  or a failure, and for a cancel `cancelled by the caller that started it` or, when the starter's
+  connection ended, `the caller that started it went away`. Empty for `installed` and `running`.
+  At most 192 bytes: a longer reason is cut on a character boundary and ends with `...` (the state
+  keeps the whole text).
+- `received` and `total`: the bytes taken and the bytes announced, the numbers the job's progress
+  shows. For a refusal they are the bytes taken before it.
+- `boot`, `started_ms`, `ended_ms`: when, by the host's monotonic clock (`CLOCK_MONOTONIC`, in
+  milliseconds from the start of the boot `boot` names), never wall time. `ended_ms` is `null` while it runs.
+- `text`: the record as one line, for a person: `last install: slot ID STATE: REASON (RECEIVED of TOTAL
+  bytes; boot ID8, +SECONDS s)`, the reason and its colon left out when empty. `lemnos-ctl call slots info`
+  prints it with the rest of the reply; there is no other text form.
+
+Every install path records it: a streamed `install`, an `install_file`, and the Orion bridge's, which
+reach the driver the same way. A new attempt replaces the record the moment it starts, so while an
+install runs `info` says `running` with the job's own `received` and `total` (the figures `list` and
+`describe` show for the job; the two never disagree) and the slot once `slot.json` has come. An
+`install` turned away as `BUSY` is not an attempt and leaves the record alone.
+
+**What survives a restart.** The record is kept in memory, for the daemon's life: the slot store
+persists nothing about an install but the board's state record (`state.json`, on the data partition),
+which holds a word and one error text, not the slot, the bytes or the time, and no new file or boot
+partition write was added for this. After a restart `info` says `none`, with one exception: an install the
+restart cut short. Its work directory is found and removed when the driver starts, and the state
+record is set to `error` with the text `an install was interrupted: the service restarted`; the driver
+reads that record when it starts and reports `interrupted` with that reason, an empty `slot`, and
+`null` bytes and times. That holds until a later install or board operation rewrites the state record.
+An install that ended any other way before the restart is not known after it.
 
 ## The security switch
 
@@ -677,7 +736,7 @@ Tested against a real Orion node and comm core on a PC, in-process
 | --- | --- |
 | `list` | Every slot (with its `product`, `version` and `board`), the pointers, free space, the reserve, the number kept, the last error |
 | `list_page(after, size)` | The same object with one page of the slots: as many whole slots as fit the buffer, newest first, then `more` and `next`. `after` is `-` for the first page and the previous page's `next` after it (see below) |
-| `info` | The signature policy (`require_signed`) and the last install's signature result |
+| `info` | The signature policy (`require_signed`), the last install's signature result and how the last install attempt ended (`last_attempt`) |
 | `install`, `write` | A streamed install (a long job) |
 | `accept`, `install_file` | An install from a file in `.incoming` (a long job) |
 | `set_default(id, force)` | The default from the next boot. The slot must have booted well, unless `force` |

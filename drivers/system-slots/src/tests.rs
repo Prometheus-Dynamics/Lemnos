@@ -1420,6 +1420,66 @@ config = {{ systemctl = "{ctl}" }}
     assert_eq!(end, (Status::OK, b"os-2".to_vec()));
     assert!(updates.iter().all(|u| u.owner == caller));
 
+    // `info` through the host, as a session that started nothing reads it.
+    let info = |host: &Host| {
+        let mut out = vec![0u8; 4096];
+        let n = host
+            .call(slots, method(14), &4096u32.to_le_bytes(), &mut out)
+            .unwrap();
+        let json = Json::parse(core::str::from_utf8(&out[..n]).unwrap()).unwrap();
+        let a = json.get("last_attempt").unwrap();
+        let text = |key: &str| a.get(key).and_then(Json::text).unwrap().to_string();
+        (
+            text("state"),
+            text("slot"),
+            text("reason"),
+            a.get("received").and_then(Json::u64),
+        )
+    };
+    assert_eq!(
+        info(&host),
+        (
+            "installed".into(),
+            "os-2".into(),
+            String::new(),
+            Some(bundle.len() as u64)
+        )
+    );
+    // A starter whose connection ends mid-install: the host cancels its job and tells the driver
+    // it went, and the record says why. (Stands in for nothing here: the host is the real one;
+    // what it does not share with lemnosd is the socket, whose end calls the same `caller_gone`.)
+    let gone = CallerId(6);
+    let bundle3 = Bundle::new("os-3").pack();
+    let len = {
+        let mut w = Writer::new(&mut args);
+        (bundle3.len() as u64).encode(&mut w).unwrap();
+        false.encode(&mut w).unwrap();
+        false.encode(&mut w).unwrap();
+        w.len()
+    };
+    host.start_job(gone, slots, method(2), &args[..len])
+        .unwrap();
+    let mut piece = vec![0u8; 3016];
+    let len = {
+        let mut w = Writer::new(&mut piece);
+        0u64.encode(&mut w).unwrap();
+        bundle3[..3000].encode(&mut w).unwrap();
+        w.len()
+    };
+    host.call_as(gone, slots, method(3), &piece[..len], &mut [])
+        .unwrap();
+    assert_eq!(info(&host).0, "running");
+    host.caller_gone(gone);
+    assert_eq!(
+        info(&host),
+        (
+            "cancelled".into(),
+            "os-3".into(),
+            crate::attempt::GONE.into(),
+            Some(3000)
+        )
+    );
+
     let mut args = [0u8; 32];
     let len = {
         let mut w = Writer::new(&mut args);
@@ -3951,4 +4011,447 @@ fn the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can
         written, listed,
         "what the writers wrote is the documented list"
     );
+}
+
+// ---- The last install attempt (`info`'s `last_attempt`, docs/slots.md) ----
+
+/// What `info` says about the last attempt.
+#[derive(Debug)]
+struct Seen {
+    state: String,
+    slot: String,
+    reason: String,
+    received: Option<u64>,
+    total: Option<u64>,
+    boot: String,
+    started_ms: Option<u64>,
+    ended_ms: Option<u64>,
+    text: String,
+}
+
+/// Reads `info` as a session that started nothing (caller 9).
+fn attempt_seen(slots: &mut SystemSlots) -> Seen {
+    slots.caller(CallerId(9));
+    let mut out = vec![0u8; 4096];
+    let len = slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    // Appended after `key_ids`, which is after everything `info` said before.
+    let keys: Vec<&str> = json.members().iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "require_signed",
+            "last_install",
+            "default_signature",
+            "boot_unverified",
+            "key_ids",
+            "last_attempt"
+        ]
+    );
+    let a = json.get("last_attempt").unwrap();
+    let text = |key: &str| a.get(key).and_then(Json::text).unwrap().to_string();
+    let num = |key: &str| a.get(key).and_then(Json::u64);
+    Seen {
+        state: text("state"),
+        slot: text("slot"),
+        reason: text("reason"),
+        received: num("received"),
+        total: num("total"),
+        boot: text("boot"),
+        started_ms: num("started_ms"),
+        ended_ms: num("ended_ms"),
+        text: text("text"),
+    }
+}
+
+fn attempt_of(board: &mut Board) -> Seen {
+    attempt_seen(&mut board.slots)
+}
+
+#[test]
+fn with_no_attempt_ever_the_field_says_none() {
+    let dir = TempDir::new("none");
+    let mut slots = SystemSlots::new(layout(&dir.0), Box::new(Told::default()), Vec::new());
+    let seen = attempt_seen(&mut slots);
+    assert_eq!(seen.state, "none");
+    assert_eq!(seen.text, "last install: none");
+    assert_eq!((seen.slot.as_str(), seen.reason.as_str()), ("", ""));
+    assert_eq!((seen.received, seen.total), (None, None));
+}
+
+#[test]
+fn an_installed_slot_is_recorded_with_its_bytes_and_time_for_a_second_session() {
+    let mut board = Board::new("os-1");
+    board.slots.boot = "0123abcd-4567-89ab-cdef-000000000000".into();
+    let bundle = Bundle::new("os-2").pack();
+    let (status, _, _) = board.stream(1, &bundle, 4096);
+    assert_eq!(status, Status::OK);
+    // The starter's connection ends: the record stays.
+    board.slots.caller_gone(CallerId(1));
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "installed");
+    assert_eq!(seen.slot, "os-2");
+    assert_eq!(seen.reason, "");
+    assert_eq!(seen.received, Some(bundle.len() as u64));
+    assert_eq!(seen.total, Some(bundle.len() as u64));
+    assert_eq!(seen.boot, "0123abcd-4567-89ab-cdef-000000000000");
+    assert!(seen.ended_ms >= seen.started_ms && seen.started_ms.is_some());
+    assert!(
+        seen.text.starts_with(&format!(
+            "last install: slot os-2 installed ({0} of {0} bytes; boot 0123abcd, +",
+            bundle.len()
+        )) && seen.text.ends_with(" s)"),
+        "{}",
+        seen.text
+    );
+}
+
+#[test]
+fn a_refusal_is_recorded_with_the_reason_the_starter_was_given() {
+    let mut board = Board::new("os-1");
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
+    // Signed by a key the board does not hold, with the switch on: refused by the policy.
+    let mut bundle = Bundle::new("os-2");
+    bundle.signer = SigningKey::from_bytes(&[9; 32]);
+    let pack = bundle.pack();
+    let (status, _, _) = board.stream(1, &pack, 4096);
+    assert_eq!(status, Status::NOT_PERMITTED);
+    let given = board.state().error;
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "refused");
+    assert_eq!(seen.slot, "os-2");
+    assert_eq!(seen.reason, given);
+    assert!(seen.reason.contains("does not trust"), "{}", seen.reason);
+    assert!(seen.received < seen.total, "{seen:?}");
+    assert_eq!(seen.total, Some(pack.len() as u64));
+    assert!(
+        seen.text
+            .starts_with(&format!("last install: slot os-2 refused: {}", seen.reason)),
+        "{}",
+        seen.text
+    );
+    security::set_view_for_thread(None);
+
+    // For the running slot: refused before its image comes.
+    let (status, _, _) = board.stream(1, &Bundle::new("os-1").pack(), 4096);
+    assert_eq!(status, Status::BUSY);
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("refused", "os-1")
+    );
+    assert_eq!(seen.reason, board.state().error);
+    assert!(seen.reason.contains("running slot"));
+
+    // A boot file the manifest doesn't list: refused once everything came.
+    let mut extra = Bundle::new("os-2");
+    extra.extra.push(("evil.dtbo".into(), b"x".to_vec()));
+    let pack = extra.pack();
+    let (status, _, _) = board.stream(1, &pack, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("refused", "os-2")
+    );
+    assert_eq!(seen.reason, board.state().error);
+    assert!(seen.reason.contains("evil.dtbo"));
+    // Refused as its header came: the bytes taken are those before it.
+    assert!(
+        seen.received > Some(0) && seen.received < Some(pack.len() as u64),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_refusal_before_the_install_starts_is_recorded_too() {
+    let dir = TempDir::new("nokeys-attempt");
+    let mut slots = SystemSlots::new(layout(&dir.0), Box::new(Told::default()), Vec::new());
+    security::set_view_for_thread(Some(view_file(&dir.0, true)));
+    slots.caller(CallerId(1));
+    assert_eq!(slots.install(10, false, false), Err(Status::NOT_PERMITTED));
+    security::set_view_for_thread(None);
+    let seen = attempt_seen(&mut slots);
+    assert_eq!(seen.state, "refused");
+    assert_eq!(seen.reason, crate::attempt::NO_KEYS);
+    assert_eq!((seen.received, seen.total), (Some(0), Some(10)));
+    // No room: the reason is the board's.
+    let mut board = Board::new("os-1");
+    board.slots.reserve = u64::MAX / 2;
+    board.slots.caller(CallerId(1));
+    assert_eq!(
+        board.slots.install(10, false, false),
+        Err(crate::install::NO_SPACE)
+    );
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "refused");
+    assert_eq!(seen.reason, board.state().error);
+    assert!(seen.reason.contains("no room"), "{}", seen.reason);
+    // A second install turned away as busy is no attempt: it leaves the record alone.
+    board.slots.reserve = 0;
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    assert_eq!(board.slots.install(10, false, false), Err(Status::BUSY));
+    assert_eq!(attempt_of(&mut board).state, "running");
+}
+
+#[test]
+fn a_failure_in_the_work_is_recorded_as_failed_with_its_reason() {
+    let mut board = Board::new("os-1");
+    // The image isn't what the manifest says: found at the end.
+    let mut wrong = Bundle::new("os-2");
+    wrong.manifest_image_sha = Some(sha(b"something else"));
+    let pack = wrong.pack();
+    let (status, _, _) = board.stream(1, &pack, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("failed", "os-2")
+    );
+    assert_eq!(seen.reason, board.state().error);
+    assert!(seen.reason.contains("sha256"), "{}", seen.reason);
+    assert_eq!(seen.received, Some(pack.len() as u64));
+    assert!(
+        seen.text.contains("failed: rootfs.erofs doesn't match"),
+        "{}",
+        seen.text
+    );
+    // Cut short: every announced byte came but the bundle is not whole.
+    let mut short = Bundle::new("os-2").pack();
+    short.truncate(short.len() - 1024);
+    let (status, _, _) = board.stream(1, &short, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "failed");
+    assert_eq!(seen.reason, board.state().error);
+    assert!(
+        seen.reason.contains("ends in the middle"),
+        "{}",
+        seen.reason
+    );
+}
+
+#[test]
+fn a_cancel_by_the_starter_and_one_by_its_connection_ending_are_told_apart() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle[..3000]).unwrap();
+    board.slots.job_cancel(job);
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("cancelled", "os-2")
+    );
+    assert_eq!(seen.reason, crate::attempt::CANCELLED);
+    assert_eq!(seen.received, Some(3000));
+    assert_eq!(seen.total, Some(bundle.len() as u64));
+    // Another session going away changes nothing.
+    board.slots.caller_gone(CallerId(7));
+    assert_eq!(attempt_of(&mut board).reason, crate::attempt::CANCELLED);
+    let mut out = [0u8; 8];
+    board.slots.job(job, &mut Reply::new(&mut out));
+
+    // The starter's connection ends: the host cancels its job, then tells the driver it went.
+    board.slots.caller(CallerId(2));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle[..2000]).unwrap();
+    board.slots.job_cancel(job);
+    board.slots.caller_gone(CallerId(2));
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "cancelled");
+    assert_eq!(seen.reason, crate::attempt::GONE);
+    assert_eq!(seen.received, Some(2000));
+    assert!(
+        seen.text
+            .contains("cancelled: the caller that started it went away (2000 of "),
+        "{}",
+        seen.text
+    );
+    // The record outlives the job: the job's end is collected and it is still there.
+    board.slots.job(job, &mut Reply::new(&mut out));
+    assert_eq!(attempt_of(&mut board).reason, crate::attempt::GONE);
+}
+
+#[test]
+fn a_session_that_did_not_start_it_sees_a_running_install_as_the_job_shows_it() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "running");
+    assert_eq!(
+        (seen.received, seen.total),
+        (Some(0), Some(bundle.len() as u64))
+    );
+    assert_eq!(seen.slot, "");
+    assert_eq!(seen.ended_ms, None);
+    board.slots.caller(CallerId(1));
+    board.slots.write(0, &bundle[..3000]).unwrap();
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "running");
+    // The job's own figures, which `list` and `describe` show.
+    let Some(JobState::Running { done, total }) = board.poll(job) else {
+        panic!("not running")
+    };
+    assert_eq!((seen.received, seen.total), (Some(done), Some(total)));
+    assert_eq!(seen.slot, "os-2");
+    assert!(
+        seen.text.contains("slot os-2 running (3000 of "),
+        "{}",
+        seen.text
+    );
+    board.slots.caller(CallerId(1));
+    board.slots.write(3000, &bundle[3000..]).unwrap();
+    assert_eq!(attempt_of(&mut board).state, "installed");
+}
+
+#[test]
+fn a_new_attempt_replaces_the_record_when_it_starts() {
+    let mut board = Board::new("os-1");
+    let mut wrong = Bundle::new("os-2");
+    wrong.manifest_image_sha = Some(sha(b"x"));
+    board.stream(1, &wrong.pack(), 4096);
+    assert_eq!(attempt_of(&mut board).state, "failed");
+    let bundle = Bundle::new("os-3").pack();
+    board.slots.caller(CallerId(1));
+    board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "running");
+    assert_eq!(seen.reason, "", "the earlier reason is gone");
+    board.slots.caller(CallerId(1));
+    board.slots.write(0, &bundle).unwrap();
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("installed", "os-3")
+    );
+}
+
+#[test]
+fn an_install_from_a_file_is_recorded_as_a_streamed_one_is() {
+    let mut board = Board::new("os-1");
+    let incoming = board.incoming();
+    let bundle = big_bundle("os-2");
+    fs::write(incoming.join("a"), &bundle).unwrap();
+    board.slots.caller(CallerId(3));
+    let job = board.slots.install_file("a", false, false).unwrap();
+    let (status, _, _) = board.run_file_job(job);
+    assert_eq!(status, Status::OK);
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("installed", "os-2")
+    );
+    assert_eq!(seen.received, Some(bundle.len() as u64));
+    // Failed: the file ends before its tar does.
+    let bundle = big_bundle("os-3");
+    fs::write(incoming.join("b"), &bundle[..bundle.len() / 2]).unwrap();
+    let job = board.slots.install_file("b", false, false).unwrap();
+    let (status, _, _) = board.run_file_job(job);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    let seen = attempt_of(&mut board);
+    assert_eq!(seen.state, "failed");
+    assert_eq!(seen.reason, board.state().error);
+    // Cancelled by its starter's connection ending.
+    fs::write(incoming.join("c"), &bundle).unwrap();
+    board.slots.caller(CallerId(3));
+    let job = board.slots.install_file("c", false, false).unwrap();
+    board.slots.tick(0);
+    board.slots.job_cancel(job);
+    board.slots.caller_gone(CallerId(3));
+    let seen = attempt_of(&mut board);
+    assert_eq!(
+        (seen.state.as_str(), seen.slot.as_str()),
+        ("cancelled", "os-3")
+    );
+    assert_eq!(seen.reason, crate::attempt::GONE);
+    assert!(
+        seen.received > Some(0) && seen.received < seen.total,
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_install_a_restart_cut_short_is_known_after_it_and_nothing_else_is() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle[..3000]).unwrap();
+    let layout = board.layout().clone();
+    // The service stops and a new driver starts: the state record says an install was cut short.
+    let mut again = SystemSlots::new(layout.clone(), Box::new(Told::default()), Vec::new());
+    let seen = attempt_seen(&mut again);
+    assert_eq!(seen.state, "interrupted");
+    assert_eq!(seen.reason, crate::attempt::INTERRUPTED);
+    assert_eq!(seen.reason, State::load(&layout).error);
+    // The slot, the bytes and the time were never kept.
+    assert_eq!(
+        (seen.slot.as_str(), seen.received, seen.total),
+        ("", None, None)
+    );
+    assert_eq!(
+        (seen.started_ms, seen.ended_ms, seen.boot.as_str()),
+        (None, None, "")
+    );
+    assert!(
+        seen.text
+            .contains("interrupted: an install was interrupted"),
+        "{}",
+        seen.text
+    );
+    // Another restart with the record untouched says the same.
+    let mut third = SystemSlots::new(layout.clone(), Box::new(Told::default()), Vec::new());
+    assert_eq!(attempt_seen(&mut third).state, "interrupted");
+    // (The old driver's job is ended here, as the host ends it.)
+    board.slots.job_cancel(job);
+    board.slots.job(job, &mut Reply::new(&mut [0u8; 8]));
+    // A failed attempt, a refused one and an installed one are not kept: after a restart, none.
+    let mut wrong = Bundle::new("os-2");
+    wrong.manifest_image_sha = Some(sha(b"x"));
+    board.stream(1, &wrong.pack(), 4096);
+    assert_eq!(attempt_of(&mut board).state, "failed");
+    let mut fresh = SystemSlots::new(layout, Box::new(Told::default()), Vec::new());
+    assert_eq!(attempt_seen(&mut fresh).state, "none");
+}
+
+#[test]
+fn a_reason_past_the_bound_is_cut_with_the_marker_and_the_state_keeps_it_whole() {
+    let mut board = Board::new("os-1");
+    let mut bundle = Bundle::new("os-2");
+    bundle.id = "X".repeat(400);
+    let (status, _, _) = board.stream(1, &bundle.pack(), 4096);
+    assert_ne!(status, Status::OK);
+    let whole = board.state().error;
+    let seen = attempt_of(&mut board);
+    assert!(whole.len() > crate::attempt::REASON_MAX, "{whole}");
+    assert!(seen.reason.len() <= crate::attempt::REASON_MAX);
+    assert!(seen.reason.ends_with(crate::attempt::MARKER));
+    let keep = seen.reason.len() - crate::attempt::MARKER.len();
+    assert_eq!(&seen.reason[..keep], &whole[..keep]);
+    // The slot id is bounded the same way.
+    assert!(seen.slot.len() <= crate::attempt::SLOT_MAX);
 }

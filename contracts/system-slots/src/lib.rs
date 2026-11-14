@@ -44,10 +44,19 @@
 //!  "signature":"verified|not_checked_unknown_key|not_checked_unsigned|refused","signer":"<owner>",
 //!  "reason":"<the reason in words>"},"default_signature":"<the default's signature word>",
 //!  "boot_unverified":"<the slot the boot side started unverified, or \"\">",
-//!  "key_ids":[{"id":"<64 hex: SHA-256 of a held public key>","owner":"<owner>"}]}
+//!  "key_ids":[{"id":"<64 hex: SHA-256 of a held public key>","owner":"<owner>"}],
+//!  "last_attempt":{"state":"none|running|installed|refused|cancelled|interrupted|failed",
+//!   "slot":"<the slot id the attempt was for, or \"\">","reason":"<the reason the starter was given, at most 192 bytes>",
+//!   "received":N,"total":N,"boot":"<boot id>","started_ms":N,"ended_ms":N,"text":"last install: ..."}}
 //! ```
 //!
-//! An empty id is `""`.
+//! An empty id is `""`. `last_attempt` is the last install attempt, appended after `key_ids` (so the
+//! fields before it are unchanged): any session reads how the last install ended, though a job belongs
+//! to its starter's connection. `received` of `total` bytes are the job's own figures; `started_ms` and
+//! `ended_ms` are the host's monotonic clock in milliseconds, counting from the boot `boot` names
+//! (`ended_ms` is `null` while it runs). An attempt a daemon restart cut short is `interrupted`
+//! with `null` for the bytes and times. `text` is the same record as one line. It is kept until the
+//! next attempt starts, in memory for the daemon's life (`docs/slots.md`, "The last install attempt").
 //!
 //! `list_page` writes the same object with `slots` holding one page, then `"more":<bool>` and
 //! `"next":"<seq>:<id>"` (`""` when no page follows) before `trial` and `resolved`. Pages run
