@@ -151,7 +151,8 @@ fn sha(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-pub(crate) const ROOT_HASH: &str = "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
+pub(crate) const ROOT_HASH: &str =
+    "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
 
 /// A bundle's parts, to be changed by a test before it is packed.
 struct Bundle {
@@ -1289,18 +1290,19 @@ struct TestRoots;
 
 impl TestRoots {
     fn set(dir: &Path) -> Self {
-        *crate::TEST_ROOTS.lock().unwrap() = Some(crate::BootRoots {
-            chosen: dir.join("chosen"),
-            sys: dir.join("sys"),
-            dev: dir.join("dev"),
-        });
+        *lemnos_slot_store::boot_node::TEST_ROOTS.lock().unwrap() =
+            Some(lemnos_slot_store::boot_node::BootRoots {
+                chosen: dir.join("chosen"),
+                sys: dir.join("sys"),
+                dev: dir.join("dev"),
+            });
         Self
     }
 }
 
 impl Drop for TestRoots {
     fn drop(&mut self) {
-        *crate::TEST_ROOTS.lock().unwrap() = None;
+        *lemnos_slot_store::boot_node::TEST_ROOTS.lock().unwrap() = None;
     }
 }
 

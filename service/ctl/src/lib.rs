@@ -41,9 +41,13 @@ lemnos-ctl [--socket PATH] COMMAND
                                  authorization signed for the generation `request-off` names
   security DEVICE request-off    what an authorization to turn the switch off must sign, from the board
   security DEVICE precheck on|off  what would stop the change, with no change made
-  security render --record FILE [--dir DIR]
+  security render (--record FILE | --boot-image FILE) [--dir DIR]
                                  render the switch's view from its record, with no daemon (the
-                                 image runs it before the daemon starts; DIR is /run/board)
+                                 image runs it before the daemon starts; DIR is /run/board).
+                                 --boot-image reads SECURE.REC in a boot partition image instead
+  security set --boot-image FILE on|off
+                                 set the switch in a boot partition image, offline (a new image or
+                                 a board's copy); a board's switch is set through the daemon
   packages                       driver packages: which loaded, which were refused and why
   files DEVICE [NAME [FILE]]     the named files a node serves (`lemnos/`): its index, or one
                                  file to stdout, or to FILE, which must not exist yet
@@ -181,6 +185,12 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if command == "security" && tail.first().is_some_and(|word| word == "render") {
         return security_render(&tail[1..], out);
+    }
+    if command == "security"
+        && tail.first().is_some_and(|word| word == "set")
+        && tail.get(1).is_some_and(|word| word == "--boot-image")
+    {
+        return security_set_image(&tail[1..], out);
     }
     if command == "boot-partition" {
         return boot_partition::run(tail, out);
@@ -535,23 +545,64 @@ fn kernel_cmdline(modprobe: &str) -> String {
     line
 }
 
+/// The switch's record, named by exactly one of `--record FILE` (a file) and `--boot-image FILE` (the
+/// `SECURE.REC` of a boot partition image): its name for the messages, and the store.
+fn switch_store(
+    record: Option<String>,
+    boot_image: Option<String>,
+) -> Result<(String, Box<dyn lemnos_slot_store::security::Store>), String> {
+    use lemnos_slot_store::security::{BootSwitch, PlainFile};
+    match (record, boot_image) {
+        (Some(path), None) => Ok((path.clone(), Box::new(PlainFile::new(path)))),
+        (None, Some(image)) => Ok((image.clone(), Box::new(BootSwitch::new(image)))),
+        _ => Err("security needs exactly one of --record FILE and --boot-image FILE".into()),
+    }
+}
+
+/// `security set --boot-image FILE on|off`: the switch in a boot partition image, written offline.
+/// A board's switch is set through the daemon; this writes only the image it is given.
+fn security_set_image(args: &[String], out: &mut dyn Write) -> Outcome {
+    let [flag, image, value] = args else {
+        return Err(USAGE.to_string());
+    };
+    if flag != "--boot-image" {
+        return Err(USAGE.to_string());
+    }
+    let on = match value.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return Err(USAGE.to_string()),
+    };
+    let store = lemnos_slot_store::security::BootSwitch::new(image.as_str());
+    let generation = lemnos_slot_store::security::Store::write(&store, on)
+        .map_err(|error| format!("{image}: the switch can't be set: {error}"))?;
+    line(
+        out,
+        format_args!(
+            "switch {} in {image}: generation {generation}",
+            if on { "on" } else { "off" }
+        ),
+    )
+}
+
 /// `security render`: the view from the record, written with no daemon. An absent record is off;
 /// an unreadable one renders on, as the switch reads it.
 fn security_render(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut record = None;
+    let mut boot_image = None;
     let mut dir = lemnos_slot_store::security::RUN_DIR.to_string();
     let mut i = 0;
     while i < args.len() {
         match (args[i].as_str(), args.get(i + 1)) {
             ("--record", Some(path)) if record.is_none() => record = Some(path.clone()),
+            ("--boot-image", Some(path)) if boot_image.is_none() => boot_image = Some(path.clone()),
             ("--dir", Some(path)) => dir.clone_from(path),
             _ => return Err(USAGE.to_string()),
         }
         i += 2;
     }
-    let record = record.ok_or_else(|| USAGE.to_string())?;
-    let store = lemnos_slot_store::security::PlainFile::new(record.as_str());
-    let switch = match lemnos_slot_store::security::Store::read(&store) {
+    let (record, store) = switch_store(record, boot_image)?;
+    let switch = match store.read() {
         Ok(Some(switch)) => switch,
         Ok(None) => lemnos_slot_store::security::Switch {
             on: false,

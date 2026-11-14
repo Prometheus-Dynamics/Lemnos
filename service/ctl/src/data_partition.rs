@@ -14,18 +14,21 @@
 //! The writer holds no logic of its own: `lemnos_driver_system_slots::offline` runs the daemon's
 //! install, trial and confirm over `--out`. This module reads the board file and the files it is
 //! given, passes them on, and prints the result. `--verify` reads the tree and checks what a boot
-//! and the driver rely on; it writes nothing.
+//! and the driver rely on; it writes nothing. The writer applies no reserve: `--data-size` must hold
+//! the slot and its records. `--verify` with `--layout-of` prints the reserve the board keeps for
+//! live installs (its `reserve_mb`).
 
 use crate::boot_dir;
 use crate::boot_partition::{board_parts, load_board};
+use lemnos_driver_system_slots::DEFAULT_RESERVE;
 use lemnos_driver_system_slots::offline::{self, FirstSlot, OfflineBoard, bundle_key_id};
 use lemnos_driver_system_slots::{TrustedKey, parse_keys};
+use lemnos_slot_store::boot_raw::Boot;
+use lemnos_slot_store::bootimage::Mem;
 use lemnos_slot_store::json::Json;
 use lemnos_slot_store::manifest::{self, Manifest};
-use lemnos_slot_store::store::Layout;
-use lemnos_slot_store::bootimage::Mem;
 use lemnos_slot_store::signing::{NOT_CHECKED_UNKNOWN_KEY, NOT_CHECKED_UNSIGNED};
-use lemnos_slot_store::boot_raw::Boot;
+use lemnos_slot_store::store::Layout;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -115,13 +118,29 @@ fn board_facts(path: &str, socs: Option<&str>) -> Result<OfflineBoard, String> {
     let (boot_args, boot_sources) =
         boot_dir::slot_words(&board).map_err(|e| format!("{path}: {e}"))?;
     let signature_required = signature_required_of(&board).map_err(|e| format!("{path}: {e}"))?;
+    let reserve = reserve_of(&board).map_err(|e| format!("{path}: {e}"))?;
     Ok(OfflineBoard {
         id: board.board.id.clone(),
         boot_args,
         boot_sources,
         layout: parts.layout,
         signature_required,
+        reserve,
     })
+}
+
+/// The free space live installs keep back: `reserve_mb` on the board's system-slots device, else
+/// the driver's default. A negative value is refused by name.
+fn reserve_of(board: &lemnos_host::board::BoardFile) -> Result<u64, String> {
+    let device = board.devices.iter().find(|d| d.driver == "system-slots");
+    match device.and_then(|d| d.config.get("reserve_mb")) {
+        None => Ok(DEFAULT_RESERVE),
+        Some(value) => value
+            .as_integer()
+            .and_then(|mb| u64::try_from(mb).ok())
+            .map(|mb| mb << 20)
+            .ok_or_else(|| format!("system-slots: reserve_mb is a number of MiB, not {value:?}")),
+    }
 }
 
 /// The board's signing policy: `signature` on its system-slots device, `"required"` (the default) or
@@ -142,9 +161,8 @@ fn signature_required_of(board: &lemnos_host::board::BoardFile) -> Result<bool, 
 
 /// The board's trust root from `--keys FILE`: a key list, or one bare 64-hex public key.
 fn keys_of(path: &str) -> Result<Vec<TrustedKey>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        format!("the key file {path} can't be read here ({e}); pass --keys FILE")
-    })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("the key file {path} can't be read here ({e}); pass --keys FILE"))?;
     let line = text.trim();
     let text = if manifest::is_hex(line, 64) {
         format!("{line} pubkey")
@@ -173,7 +191,9 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         Some(other) => return Err(format!("--switch is off or on, not {other:?}")),
     }
     if !valid_time(time) {
-        return Err(format!("--time is UTC as YYYY-MM-DDTHH:MM:SSZ, not {time:?}"));
+        return Err(format!(
+            "--time is UTC as YYYY-MM-DDTHH:MM:SSZ, not {time:?}"
+        ));
     }
     let free: u64 = data_size
         .parse()
@@ -193,8 +213,12 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         free,
     })?;
     let (files, bytes) = tree_size(Path::new(dir));
-    let meta = std::fs::read_to_string(Path::new(dir).join("board/slots").join(format!("{id}.meta")))
-        .unwrap_or_default();
+    let meta = std::fs::read_to_string(
+        Path::new(dir)
+            .join("board/slots")
+            .join(format!("{id}.meta")),
+    )
+    .unwrap_or_default();
     let signature = meta_value(&meta, "SIGNATURE");
     // The data partition keeps the outcome word, not the key id: the id is the bundle's own `slot.sig`.
     let signed = if signature == NOT_CHECKED_UNSIGNED {
@@ -202,7 +226,9 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     } else {
         match bundle_key_id(&bundle) {
             Some(key) => format!("signed with key id {key}"),
-            None => format!("signed (the bundle's slot.sig names no key id; signature {signature})"),
+            None => {
+                format!("signed (the bundle's slot.sig names no key id; signature {signature})")
+            }
         }
     };
     let root = std::fs::read_to_string(Path::new(dir).join("slots").join(format!("{id}.json")))
@@ -221,7 +247,10 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
 /// The value of `KEY` in a `KEY=value` meta text, quotes off.
 fn meta_value(text: &str, key: &str) -> String {
     text.lines()
-        .find_map(|line| line.strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+        .find_map(|line| {
+            line.strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('='))
+        })
         .unwrap_or_default()
         .trim_matches('\'')
         .to_string()
@@ -256,7 +285,9 @@ fn sha256_of(path: &Path) -> Result<String, String> {
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
-        let n = file.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -305,7 +336,9 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         ("--switch", &o.switch),
     ] {
         if given.is_some() {
-            return Err(format!("{flag} is for writing the partition, not for --verify"));
+            return Err(format!(
+                "{flag} is for writing the partition, not for --verify"
+            ));
         }
     }
     let dir = PathBuf::from(o.verify.as_deref().unwrap_or_default());
@@ -315,10 +348,21 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     };
     let board_id = facts.as_ref().map(|f| f.id.clone());
     let required = facts.as_ref().map(|f| f.signature_required);
-    let mut r = Report { bad: 0, lines: Vec::new() };
+    let reserve = facts.as_ref().map(|f| f.reserve);
+    let mut r = Report {
+        bad: 0,
+        lines: Vec::new(),
+    };
+    if let Some(reserve) = reserve {
+        r.ok(format!(
+            "the board keeps {} MiB free for live installs (its reserve_mb); the offline writer applies none",
+            reserve >> 20
+        ));
+    }
     let layout = Layout::new(&dir, dir.join(".boot-not-mounted"));
     let state_env = std::fs::read_to_string(dir.join("board/slots/state.env")).unwrap_or_default();
-    let state_json = std::fs::read_to_string(dir.join("board/slots/state.json")).unwrap_or_default();
+    let state_json =
+        std::fs::read_to_string(dir.join("board/slots/state.json")).unwrap_or_default();
     let default_env = meta_value(&state_env, "DEFAULT");
     let default_json = Json::parse(&state_json)
         .and_then(|j| j.get("default").and_then(Json::text).map(str::to_string))
@@ -330,7 +374,9 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
             "state.env names default {default_env}, state.json names {default_json:?}"
         ));
     } else {
-        r.ok(format!("default is {default_env} in state.env and state.json"));
+        r.ok(format!(
+            "default is {default_env} in state.env and state.json"
+        ));
     }
     if meta_value(&state_env, "STATE") != "confirmed" {
         r.bad("state is not confirmed".to_string());
@@ -369,7 +415,9 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
 
 /// The signing outcome the tree records, against the board's policy (`None`: no board file given).
 fn verify_signature(layout: &Layout, id: &str, required: Option<bool>, r: &mut Report) {
-    let word = lemnos_slot_store::store::Meta::load(layout, id).get("SIGNATURE").to_string();
+    let word = lemnos_slot_store::store::Meta::load(layout, id)
+        .get("SIGNATURE")
+        .to_string();
     match (word.as_str(), required) {
         (NOT_CHECKED_UNKNOWN_KEY, _) => r.bad(format!(
             "slot {id} is signed by a key the board does not hold: the writer refuses that"
@@ -416,13 +464,18 @@ fn verify_slot(
     } else if let Some(board) = board
         && m.board != board
     {
-        r.bad(format!("slot {id} is built for board {}, not {board}", m.board));
+        r.bad(format!(
+            "slot {id} is built for board {}, not {board}",
+            m.board
+        ));
     } else {
         r.ok(format!("slot {id}'s manifest is for this slot and board"));
     }
     let image = dir.join("slots").join(format!("{id}.erofs"));
     match std::fs::metadata(&image) {
-        Ok(meta) if meta.len() == m.image_size => r.ok(format!("slot {id}'s image is {} bytes", m.image_size)),
+        Ok(meta) if meta.len() == m.image_size => {
+            r.ok(format!("slot {id}'s image is {} bytes", m.image_size))
+        }
         Ok(meta) => r.bad(format!(
             "slot {id}'s image is {} bytes; its manifest says {}",
             meta.len(),
@@ -433,8 +486,13 @@ fn verify_slot(
     if deep {
         // The image's own hash: boot does not read it (dm-verity checks the blocks it reads).
         match sha256_of(&image) {
-            Ok(got) if got == m.image_sha256 => r.ok(format!("slot {id}'s image hashes to its manifest's sha256")),
-            Ok(got) => r.bad(format!("slot {id}'s image hashes to {got}; its manifest says {}", m.image_sha256)),
+            Ok(got) if got == m.image_sha256 => {
+                r.ok(format!("slot {id}'s image hashes to its manifest's sha256"))
+            }
+            Ok(got) => r.bad(format!(
+                "slot {id}'s image hashes to {got}; its manifest says {}",
+                m.image_sha256
+            )),
             Err(e) => r.bad(format!("slot {id}'s image: {e}")),
         }
     }
@@ -451,7 +509,9 @@ fn verify_slot(
         match sha256_of(&stored) {
             Ok(got) if got == *sha => {}
             Ok(got) => {
-                r.bad(format!("boot file {path} is stored as {sha} but hashes to {got}"));
+                r.bad(format!(
+                    "boot file {path} is stored as {sha} but hashes to {got}"
+                ));
                 boot_ok = false;
             }
             Err(e) => {
@@ -464,12 +524,16 @@ fn verify_slot(
     required.extend(m.boot_files.iter().cloned());
     for (path, sha) in &required {
         if !lines.iter().any(|(s, p)| p == path && s == sha) {
-            r.bad(format!("the boot list has no {path} with the manifest's hash"));
+            r.bad(format!(
+                "the boot list has no {path} with the manifest's hash"
+            ));
             boot_ok = false;
         }
     }
     if boot_ok {
-        r.ok(format!("slot {id}'s boot files are stored and match its manifest"));
+        r.ok(format!(
+            "slot {id}'s boot files are stored and match its manifest"
+        ));
     }
 }
 
@@ -494,6 +558,9 @@ fn verify_leftovers(dir: &Path, r: &mut Report) {
     if stray.is_empty() {
         r.ok("no leftovers of an unfinished install".to_string());
     } else {
-        r.bad(format!("leftovers of an unfinished install: {}", stray.join(", ")));
+        r.bad(format!(
+            "leftovers of an unfinished install: {}",
+            stray.join(", ")
+        ));
     }
 }

@@ -16,6 +16,7 @@
 
 pub mod arrival;
 pub mod bays;
+pub mod boot_node;
 pub mod boot_raw;
 pub mod bootcheck;
 pub mod bootfat;

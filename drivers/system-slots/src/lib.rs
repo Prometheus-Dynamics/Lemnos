@@ -75,6 +75,9 @@
 //! the restart cut short is cleared when the driver starts and reported as interrupted.
 
 mod attempt;
+/// The free space a live install keeps back when the board file names no `reserve_mb`.
+pub const DEFAULT_RESERVE: u64 = 2048 << 20;
+
 #[cfg(test)]
 mod bay_fixture;
 pub mod boot;
@@ -116,15 +119,18 @@ use lemnos_core::{
 use attempt::{Attempt, Ended};
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
 pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check};
-pub use offline::{FirstSlot, OfflineBoard, check_bay, check_layout, open_boot_image, write_first_slot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
+use lemnos_slot_store::boot_node;
 use lemnos_slot_store::boots;
-use lemnos_slot_store::disk::{self, Table};
+use lemnos_slot_store::disk::Table;
 use lemnos_slot_store::security;
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::Place;
+pub use offline::{
+    FirstSlot, OfflineBoard, check_bay, check_layout, open_boot_image, write_first_slot,
+};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
 use uboot::{Uboot, UbootEnv};
@@ -223,7 +229,7 @@ fn layout_of(cfg: &Config<'_>) -> (Layout, Option<Arc<dyn UbiWrite>>) {
 /// `boot_sources`; refused by name when it can't be.
 fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
     match boot_table(cfg) {
-        Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
+        Ok(Some(table)) => boot_node::node_for_table(&table),
         Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
         Err(error) => Err(error.to_string()),
     }
@@ -234,7 +240,7 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
 /// (the GPT form finds its partition there); refused by name when the disk can't be found.
 fn boot_disk_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
     match boot_table(cfg) {
-        Ok(Some(table)) => resolve_boot_disk(&BootRoots::current(), &table),
+        Ok(Some(table)) => boot_node::disk_for_table(&table),
         Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
         Err(error) => Err(error.to_string()),
     }
@@ -256,62 +262,6 @@ fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
         systemctl: PathBuf::from(cfg.str("systemctl").unwrap_or("systemctl")),
         check,
     }
-}
-
-/// Where the boot chain's source and the boot disk are read from: the device tree's `chosen`
-/// node, sysfs and the device nodes. The real paths on the board; a test may stand a tree in.
-#[derive(Debug, Clone)]
-pub struct BootRoots {
-    pub chosen: PathBuf,
-    pub sys: PathBuf,
-    pub dev: PathBuf,
-}
-
-impl BootRoots {
-    /// The board's own paths.
-    pub fn system() -> Self {
-        Self {
-            chosen: PathBuf::from("/proc/device-tree/chosen"),
-            sys: PathBuf::from("/sys"),
-            dev: PathBuf::from("/dev"),
-        }
-    }
-
-    /// The paths the driver reads: the board's, or a test's tree while a test holds one.
-    fn current() -> Self {
-        #[cfg(test)]
-        if let Some(roots) = TEST_ROOTS.lock().ok().and_then(|g| g.clone()) {
-            return roots;
-        }
-        Self::system()
-    }
-}
-
-/// A test's boot roots, held by the test that stands a board tree in (see the tests module).
-#[cfg(test)]
-pub(crate) static TEST_ROOTS: Mutex<Option<BootRoots>> = Mutex::new(None);
-
-/// The boot partition's block node for the boot chain's source: the source is looked up in the
-/// board's table, its one whole disk found under the controller, and that disk's partition 1
-/// returned. Every refusal is named.
-pub fn resolve_boot_node(
-    roots: &BootRoots,
-    table: &Table,
-) -> core::result::Result<PathBuf, String> {
-    let source = disk::boot_source(&roots.chosen)?;
-    let whole = disk::boot_disk(&roots.sys, table, &source)?;
-    disk::boot_partition(&roots.sys, &roots.dev, &whole)
-        .ok_or_else(|| format!("{whole} has no partition 1 (the boot partition)"))
-}
-
-/// The boot disk's whole-disk node for the boot chain's source (see [`resolve_boot_node`]).
-pub fn resolve_boot_disk(
-    roots: &BootRoots,
-    table: &Table,
-) -> core::result::Result<PathBuf, String> {
-    let source = disk::boot_source(&roots.chosen)?;
-    let whole = disk::boot_disk(&roots.sys, table, &source)?;
-    Ok(roots.dev.join(whole))
 }
 
 /// The board's `boot_sources` table, parsed. Required on every board that boots from a disk (every
@@ -479,7 +429,7 @@ impl SystemSlots {
             boot_node: core::result::Result::Err("the board file's boot_sources is not set".into()),
             board_id: String::new(),
             running: None,
-            reserve: 2048 << 20,
+            reserve: DEFAULT_RESERVE,
             keep: DEFAULT_KEEP,
             calling: CallerId::LOCAL,
             install: None,

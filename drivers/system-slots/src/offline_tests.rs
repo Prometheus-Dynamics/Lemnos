@@ -4,10 +4,10 @@
 //! byte and mode for mode, and load in the driver as installed, confirmed and default.
 
 use super::*;
-use core::result::Result;
+use crate::boot::Restarter;
 use crate::offline::{FirstSlot, OfflineBoard, write_first_slot};
 use crate::tests::{BOARD, TempDir, bundle_and_payloads, bundle_with_bad_signature, key};
-use crate::boot::Restarter;
+use core::result::Result;
 use lemnos_contract_system_slots::Slots as _;
 use lemnos_core::{JobState, Reply, Status};
 use lemnos_slot_store::bays;
@@ -45,6 +45,7 @@ fn board() -> OfflineBoard {
         boot_sources: vec![BOOT_SOURCE.into()],
         layout: bay_fixture::layout(),
         signature_required: true,
+        reserve: crate::DEFAULT_RESERVE,
     }
 }
 
@@ -86,9 +87,9 @@ fn live(dir: &Path, bundle: &[u8], image: &[u8], time: &str) -> (Status, String)
             }
             let mut out = [0u8; 256];
             let id = match slots.job(job, &mut Reply::new(&mut out)) {
-                JobState::Finished(Status::OK) => {
-                    String::from_utf8_lossy(&out).trim_end_matches('\0').to_string()
-                }
+                JobState::Finished(Status::OK) => String::from_utf8_lossy(&out)
+                    .trim_end_matches('\0')
+                    .to_string(),
                 JobState::Finished(status) => return (status, String::new()),
                 JobState::Running { .. } => panic!("the install never ended"),
             };
@@ -122,7 +123,13 @@ fn tree(root: &Path) -> BTreeMap<String, (Option<Vec<u8>>, u32)> {
 }
 
 /// The output of an offline write of `bundle` over `image` into a fresh directory under `dir`.
-fn offline(dir: &Path, name: &str, bundle: &[u8], image: &[u8], time: &str) -> Result<PathBuf, String> {
+fn offline(
+    dir: &Path,
+    name: &str,
+    bundle: &[u8],
+    image: &[u8],
+    time: &str,
+) -> Result<PathBuf, String> {
     let out = dir.join(name);
     let keys = trusted();
     write_first_slot(FirstSlot {
@@ -154,7 +161,10 @@ fn the_offline_tree_equals_a_live_install_trial_and_confirm_and_reads_as_default
     let mut live_tree = tree(&live_dir.join("data"));
     live_tree.remove("slots/.incoming");
     let offline_tree = tree(&out);
-    assert!(!offline_tree.contains_key("slots/.incoming"), "no staging directory is left");
+    assert!(
+        !offline_tree.contains_key("slots/.incoming"),
+        "no staging directory is left"
+    );
     assert_eq!(
         offline_tree.keys().collect::<Vec<_>>(),
         live_tree.keys().collect::<Vec<_>>(),
@@ -189,7 +199,10 @@ fn the_offline_tree_equals_a_live_install_trial_and_confirm_and_reads_as_default
     assert_eq!(meta.get("GOOD"), "yes");
     assert!(!meta.failed());
     assert!(layout.image("os-1").exists(), "the image is in place");
-    assert!(slots.list_json().contains("os-1"), "the driver lists the slot");
+    assert!(
+        slots.list_json().contains("os-1"),
+        "the driver lists the slot"
+    );
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -285,9 +298,67 @@ fn a_boot_image_with_another_bay_layout_is_refused() {
     assert!(!root.0.join("out").exists());
 }
 
+/// The bytes of the tree the writer makes for `slot` with room to spare: the threshold the
+/// `--data-size` tests are built on.
+fn tree_size_of(root: &Path, bundle: &[u8], image: &[u8]) -> u64 {
+    let out = offline(root, "measure", bundle, image, TIME).unwrap();
+    let bytes = crate::offline::tree_bytes(&out);
+    fs::remove_dir_all(&out).unwrap();
+    bytes
+}
+
 #[test]
-fn too_little_room_is_refused_with_the_reserve_and_the_need() {
+fn a_data_size_that_fits_the_slot_and_its_records_is_written_with_no_reserve() {
+    let root = TempDir::new("offline-fits");
+    let (bundle, payloads) = bundle_and_payloads("os-1");
+    let image = boot_image("os-1", &payloads);
+    let need = tree_size_of(&root.0, &bundle, &image);
+    // Far below the live reserve: the writer keeps no reserve back.
+    assert!(need < crate::DEFAULT_RESERVE, "the tree is {need} bytes");
+    write_first_slot(FirstSlot {
+        out: &root.0.join("out"),
+        bundle: &bundle,
+        boot_image: image,
+        keys: trusted(),
+        keys_name: "the keys file",
+        board: board(),
+        time: TIME,
+        free: need,
+    })
+    .unwrap();
+    assert!(root.0.join("out").is_dir());
+}
+
+#[test]
+fn one_byte_short_of_the_slot_and_its_records_is_refused_with_both_sizes() {
     let root = TempDir::new("offline-room");
+    let (bundle, payloads) = bundle_and_payloads("os-1");
+    let image = boot_image("os-1", &payloads);
+    let need = tree_size_of(&root.0, &bundle, &image);
+    let err = write_first_slot(FirstSlot {
+        out: &root.0.join("out"),
+        bundle: &bundle,
+        boot_image: image,
+        keys: trusted(),
+        keys_name: "the keys file",
+        board: board(),
+        time: TIME,
+        free: need - 1,
+    })
+    .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "no room for this slot: the slot and its records need {need} bytes, --data-size gives {} bytes: give the data partition more room",
+            need - 1
+        )
+    );
+    assert!(!root.0.join("out").exists());
+}
+
+#[test]
+fn a_data_size_too_small_for_the_tree_is_refused_and_nothing_is_left() {
+    let root = TempDir::new("offline-slot-room");
     let (bundle, payloads) = bundle_and_payloads("os-1");
     let image = boot_image("os-1", &payloads);
     let err = write_first_slot(FirstSlot {
@@ -314,7 +385,10 @@ fn an_existing_output_directory_is_refused_and_left_alone() {
     fs::create_dir_all(root.0.join("out")).unwrap();
     fs::write(root.0.join("out/keep"), b"mine").unwrap();
     let err = offline(&root.0, "out", &bundle, &image, TIME).unwrap_err();
-    assert!(err.contains("exists: the data partition is written to a new directory only"), "{err}");
+    assert!(
+        err.contains("exists: the data partition is written to a new directory only"),
+        "{err}"
+    );
     assert_eq!(fs::read(root.0.join("out/keep")).unwrap(), b"mine");
 }
 
@@ -365,7 +439,8 @@ fn a_default_that_would_change_to_another_bay_is_refused() {
     let (_, other) = bundle_and_payloads("os-2");
     // bay 0 holds os-2 and is the default; os-1 is also in the image, in bay 1.
     let mut boot = Boot::on(Mem(boot_image("os-2", &other))).unwrap();
-    boot.install_slot("os-1", &bay_fixture::refs(&payloads)).unwrap();
+    boot.install_slot("os-1", &bay_fixture::refs(&payloads))
+        .unwrap();
     let image = boot.into_device().0;
     let err = offline(&root.0, "out", &bundle, &image, TIME).unwrap_err();
     assert!(

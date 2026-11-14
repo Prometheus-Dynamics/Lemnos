@@ -28,6 +28,17 @@ pub const FIRST_SET: u8 = 0;
 pub const RECORDS: [&str; 3] = ["trial.rec", "reason.rec", "episodes.rec"];
 /// The restart count's baseline record at the boot partition's root (`twocopy::Kind::BASELINE`).
 pub const BASELINE_FILE: &str = "count.rec";
+
+/// The switch record a new image holds: one two-copy record, off, at generation 0.
+fn switch_off_record() -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 * SECTOR);
+    for (_, bytes) in
+        crate::twocopy::precreate(&[(crate::twocopy::Kind::SECURITY, b"off")]).unwrap_or_default()
+    {
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
 /// The U-Boot form's composed extlinux file, its path under each set and its bay size.
 pub const EXTLINUX: &str = "extlinux/extlinux.conf";
 /// The bay size of the composed extlinux file.
@@ -183,6 +194,13 @@ fn tree(parts: &Parts) -> Vec<Node> {
         root.push(Node::File {
             name: BASELINE_FILE,
             data: vec![0; INFO_BYTES as usize],
+        });
+        // The security switch on a slot board: `SECURE.REC`, pre-created off, a two-copy record of
+        // the switch's first generation. Pre-created so that an image without it is refused, not read
+        // as off (`security::BootSwitch`).
+        root.push(Node::File {
+            name: crate::security::BOOT_RECORD,
+            data: switch_off_record(),
         });
     }
     if parts.family == Family::UbootBlock {
@@ -383,8 +401,8 @@ pub fn install_first<D: Sectors + ReadAt>(
                 &format!("{}/{EXTLINUX}", bays::set_dir(FIRST_SET)),
                 EXTLINUX_BYTES,
             )
-                .map_err(|e| e.to_string())?
-                .first_lba;
+            .map_err(|e| e.to_string())?
+            .first_lba;
             bays::commit_set_with(
                 dev,
                 &parts.layout,

@@ -42,12 +42,16 @@ pub mod flow;
 
 use std::path::PathBuf;
 
-use flow::{Answer, Board, Flow, ORION_NOT_COVERED, judge, lines_of, trust_root};
+use flow::{Answer, Board, Flow, ORION_NOT_COVERED, SwitchRecord, judge, lines_of, trust_root};
 use lemnos_contract_security::Security;
 use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_identity::{MAX_TEXT as IDENTITY_MAX, SystemIdentity};
 use lemnos_core::{Config, ConfigError, Dev, Key, Kind, Lifecycle, Result, Status, driver};
-use lemnos_slot_store::security::RUN_DIR;
+use lemnos_slot_store::boot_node;
+use lemnos_slot_store::security::{BootSwitch, PlainFile, RUN_DIR};
+
+/// The `record` value that names the boot partition's `SECURE.REC` (slot boards).
+const BOOT_RECORD: &str = "boot";
 
 /// The most a stakeholder's answer may say.
 const ANSWER_MAX: usize = lemnos_contract_security_precondition::TEXT_MAX;
@@ -90,11 +94,28 @@ impl Lifecycle for SystemSecurity {
             return Err(Status::INVALID_ARGUMENT);
         }
         let orion = cfg.bool("orion").unwrap_or(false);
+        // `record = "boot"`: the boot partition's `SECURE.REC`, on the node the slots driver finds from
+        // the same `boot_sources` (`docs/slots.md`, "The security switch"). A node that cannot be found
+        // is kept as the record's reason: the switch then reads on, reported.
+        let record = if record == BOOT_RECORD {
+            let node = match cfg.list("boot_sources") {
+                Some(items) => boot_node::node_for_items(items),
+                None => Err("boot_sources is not set, so the boot partition can't be found".into()),
+            };
+            match node {
+                Ok(node) => SwitchRecord::Boot(BootSwitch::new(node)),
+                Err(why) => SwitchRecord::Unreachable(format!(
+                    "the switch's record can't be reached ({why}): the switch reads as on"
+                )),
+            }
+        } else {
+            SwitchRecord::File(PlainFile::new(record))
+        };
         let mut dev = Self {
             slots: needs.slots,
             flash: needs.flash,
             identity: needs.identity,
-            flow: Flow::open(record, RUN_DIR, orion),
+            flow: Flow::open_record(record, RUN_DIR, orion),
             keys: cfg.str("keys").map(PathBuf::from),
         };
         // The start-up repair: the boot side's marks follow the record, whatever a crash left.

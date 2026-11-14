@@ -75,7 +75,9 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::NoSignature => write!(f, "the MBR has no 0x55 0xAA signature: nothing changed"),
+            Refusal::NoSignature => {
+                write!(f, "the MBR has no 0x55 0xAA signature: nothing changed")
+            }
             Refusal::NotDataPartition(why) => write!(f, "{why}: nothing changed"),
             Refusal::NotLast => write!(f, "data partition is not the last one: nothing grown"),
             Refusal::DiskSmaller { end, disk } => write!(
@@ -140,10 +142,16 @@ pub fn plan_grow(sector: &[u8; SECTOR], index: usize, disk_sectors: u64) -> Resu
     }
     let end = part.end();
     if end > disk_sectors {
-        return Err(Refusal::DiskSmaller { end, disk: disk_sectors });
+        return Err(Refusal::DiskSmaller {
+            end,
+            disk: disk_sectors,
+        });
     }
     let Some(target) = grow_target(u64::from(part.start), disk_sectors) else {
-        return Err(Refusal::DiskSmaller { end, disk: disk_sectors });
+        return Err(Refusal::DiskSmaller {
+            end,
+            disk: disk_sectors,
+        });
     };
     if target < u64::from(part.sectors) + MIN_GAIN_SECTORS {
         return Ok(Plan::Done);
@@ -224,7 +232,9 @@ mod tests {
         assert_eq!(target % ALIGN_SECTORS, 0);
         assert_eq!(
             plan_grow(&s, 1, disk),
-            Ok(Plan::Grow { sectors: target as u32 })
+            Ok(Plan::Grow {
+                sectors: target as u32
+            })
         );
     }
 
@@ -311,6 +321,10 @@ mod tests {
     #[test]
     fn the_refusals_say_what_is_left_alone() {
         assert!(Refusal::NotLast.to_string().contains("nothing grown"));
-        assert!(Refusal::DiskSmaller { end: 2, disk: 1 }.to_string().contains("nothing changed"));
+        assert!(
+            Refusal::DiskSmaller { end: 2, disk: 1 }
+                .to_string()
+                .contains("nothing changed")
+        );
     }
 }

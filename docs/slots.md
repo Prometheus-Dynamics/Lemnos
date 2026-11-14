@@ -478,7 +478,7 @@ device takes them as its config (the host gives them to the one device that serv
 
 ```toml
 [security]
-record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth
+record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth; "boot" on a slot board (below)
 keys = "/etc/lemnos/slot-keys"            # absolute, optional: the board's trust root (see "Turning it off")
 orion = false                             # true: Orion ships here, and answers before a switch goes on
 
@@ -521,6 +521,17 @@ renamed into place, so a cut before the rename leaves no record (absent, off). A
 present but has no valid copy reads as corrupt (on). The record is written before the view is
 rendered; if the render fails the view is `pending`, the record stands, and each later call retries
 the render. The daemon renders the view from the record again at start.
+
+**On a slot board the truth is the boot partition's `SECURE.REC`**: the same two-copy record, in the
+boot partition's file of that name, which the image builder pre-creates as off, at generation 0. The
+security device takes it when its own `record` is `"boot"` (the board's `[security] record` is
+`"boot"` too, which the host gives it). The device finds the boot partition's node the way the slots
+device does, from its own `boot_sources` config. A node that cannot be found, or an image without
+`SECURE.REC`, reads as corrupt (on), reported; the switch is never off by accident.
+`lemnos-ctl security render` takes exactly one of `--record FILE` (a file) and `--boot-image FILE` (the
+`SECURE.REC` of a boot partition image). `lemnos-ctl security set --boot-image FILE on|off` writes that
+image's record offline. On a board the switch is set through the daemon, as before. A missing or
+unreadable record reads as on, and the render line says so.
 
 **A change** (`set`, `lemnos-ctl security DEVICE on|off`) runs: the stakeholders' prechecks; Orion's
 answer when Orion is on the board; for an off on a board with a trust root, the authorization (below);
@@ -799,6 +810,26 @@ Orion frames are at most 64 KiB, so a bundle doesn't travel as an action argumen
 
 Tested against a real Orion node and comm core on a PC, in-process
 (`service/orion/tests/files.rs`). There, pushes of up to 258 MiB were committed.
+
+## The first slot, written offline
+
+`lemnos-ctl data-partition --layout-of BOARD --install BUNDLE --boot-image FILE --keys FILE --time UTC
+--data-size BYTES --out DIR` writes a data partition's tree for one slot, with no daemon running. It
+runs the daemon's own install, trial and confirm over `DIR`, and keeps the boot image's record in a
+copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree back, read-only.
+
+- **Room.** `--data-size` is the bytes the data partition has for the tree. The writer applies no
+  reserve. The slot and its records (the sum of their file bytes) must fit in it, and a write that
+  does not fit is refused, with both sizes named: `no room for this slot: the slot and its records
+  need N bytes, --data-size gives M bytes: give the data partition more room`. A refused write
+  leaves no directory.
+  The sum counts file contents only; the filesystem's own block and metadata overhead is not in it,
+  so give the partition some headroom.
+- **Live installs keep their reserve.** A live install needs free space of the slot plus `reserve_mb`
+  from the board file's system-slots device (2048 MiB when it is not given). That rule is unchanged.
+- **`--verify` shows it.** With `--layout-of`, `--verify` prints the reserve the board will keep for
+  live installs: `the board keeps N MiB free for live installs (its reserve_mb); the offline writer
+  applies none`.
 
 ## Actions
 

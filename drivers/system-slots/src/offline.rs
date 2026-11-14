@@ -10,6 +10,11 @@
 //!
 //! The boot image is read and checked, never changed: its default pointer and its bay for the
 //! slot are compared with what the writer produced, and a difference refuses the whole output.
+//!
+//! Free space: the writer applies no reserve. The output (the slot and its records, the sum of
+//! their file bytes) must fit in `--data-size`, and nothing more is asked. The reserve a live
+//! install keeps back (`reserve_mb` in the board file) is not the writer's to apply: `--verify`
+//! prints it so the operator sees what the board will keep once it boots.
 
 use super::*;
 // The driver's own `Result` takes a status; the writer's errors are words.
@@ -37,6 +42,9 @@ pub struct OfflineBoard {
     /// Whether the board requires its bundles to be signed (`signature = "required"`, the default).
     /// An unsigned bundle is refused when it is; an unknown key is refused either way.
     pub signature_required: bool,
+    /// The free space live installs keep back (`reserve_mb` on the board's system-slots device,
+    /// else [`crate::DEFAULT_RESERVE`]). Reported by `--verify`; the offline writer never applies it.
+    pub reserve: u64,
 }
 
 /// Everything the writer is given. Its output is a function of these fields alone.
@@ -56,7 +64,7 @@ pub struct FirstSlot<'a> {
     pub board: OfflineBoard,
     /// The time every stamp in the output carries, `YYYY-MM-DDTHH:MM:SSZ`.
     pub time: &'a str,
-    /// The bytes free on the data partition the tree is written to.
+    /// The bytes the data partition has for the tree: the slot and its records must fit in it.
     pub free: u64,
 }
 
@@ -74,9 +82,7 @@ fn io_of(message: String) -> std::io::Error {
 
 impl BootRecord for OfflineRecord {
     fn set_default(&mut self, id: &str) -> std::io::Result<()> {
-        self.lock()
-            .set_pointer(Pointer::Default, id)
-            .map_err(io_of)
+        self.lock().set_pointer(Pointer::Default, id).map_err(io_of)
     }
 
     fn set_trial(&mut self, id: &str, attempts: u8) -> std::io::Result<()> {
@@ -105,7 +111,10 @@ impl BootRecord for OfflineRecord {
     }
 
     fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> std::io::Result<()> {
-        self.lock().install_slot(slot, payloads).map(|_| ()).map_err(io_of)
+        self.lock()
+            .install_slot(slot, payloads)
+            .map(|_| ())
+            .map_err(io_of)
     }
 
     fn free(&self, slot: &str) -> std::io::Result<()> {
@@ -119,7 +128,9 @@ impl BootRecord for OfflineRecord {
 
 impl OfflineRecord {
     fn lock(&self) -> std::sync::MutexGuard<'_, Boot<Mem>> {
-        self.boot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.boot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -140,7 +151,8 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
     check_signing(&input)?;
     // The boot image as the board has it. The writer's copy is the one its record writes into;
     // this one is the reference the result is compared with.
-    let reference = Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?;
+    let reference =
+        Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?;
     let image_layout = reference
         .bay_layout()
         .map_err(|e| format!("the boot image's bays: {e}"))?;
@@ -152,12 +164,49 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
 
     fs::create_dir(input.out).map_err(|e| format!("{}: {e}", input.out.display()))?;
     let mut pair = Pair { reference, copy };
-    let result = write_into(&input, record, &mut pair).and_then(|id| fix_modes(input.out).map(|()| id));
+    let result = write_into(&input, record, &mut pair)
+        .and_then(|id| fix_modes(input.out).map(|()| id))
+        .and_then(|id| fit(input.out, input.free, id));
     if result.is_err() {
         // The directory this call created, with nothing in it that is kept.
         let _ = fs::remove_dir_all(input.out);
     }
     result
+}
+
+/// The written tree's bytes, checked against the data partition's free bytes: the slot and its
+/// records together, no reserve. Refused with both sizes named.
+fn fit(out: &Path, free: u64, id: String) -> Result<String, String> {
+    let need = tree_bytes(out);
+    if need > free {
+        return Err(format!(
+            "no room for this slot: the slot and its records need {need} bytes, --data-size gives {free} bytes: give the data partition more room"
+        ));
+    }
+    Ok(id)
+}
+
+/// The bytes of every file under `root`: the sum of their lengths, directories not counted.
+pub fn tree_bytes(root: &Path) -> u64 {
+    let mut total = 0_u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 /// The signature policy of the offline writer, on the outcome word the install recorded. An unknown
@@ -244,7 +293,9 @@ fn check_signing(input: &FirstSlot<'_>) -> Result<(), String> {
 const UNSIGNED_REFUSAL: &str = "the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device";
 
 fn unknown_key_refusal(key: &str, keys_name: &str) -> String {
-    format!("the bundle is signed by key id {key}, which {keys_name} does not hold: a bundle this board cannot check is refused")
+    format!(
+        "the bundle is signed by key id {key}, which {keys_name} does not hold: a bundle this board cannot check is refused"
+    )
 }
 
 /// The modes the output carries whatever the umask of the process: 0644 for files, 0755 for
@@ -262,7 +313,11 @@ fn fix_modes(root: &Path) -> Result<(), String> {
         for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
             let path = entry.path();
-            if entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir() {
+            if entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .is_dir()
+            {
                 set(&path, 0o755)?;
                 stack.push(path);
             } else {
@@ -279,13 +334,22 @@ struct Pair {
     copy: Arc<Mutex<Boot<Mem>>>,
 }
 
-fn write_into(input: &FirstSlot<'_>, record: OfflineRecord, pair: &mut Pair) -> Result<String, String> {
+fn write_into(
+    input: &FirstSlot<'_>,
+    record: OfflineRecord,
+    pair: &mut Pair,
+) -> Result<String, String> {
     let layout = Layout::new(input.out, input.out.join(".boot-not-mounted"));
-    let mut slots = SystemSlots::with_volumes(layout.clone(), Box::new(record), input.keys.clone(), None);
+    let mut slots =
+        SystemSlots::with_volumes(layout.clone(), Box::new(record), input.keys.clone(), None);
     slots.boot_args = input.board.boot_args.clone();
     slots.boot_sources = input.board.boot_sources.clone();
     slots.board_id = input.board.id.clone();
-    slots.offline_free = Some(input.free);
+    // The install's own room check does not apply here: the bundle is not the tree (the tree is what
+    // the install keeps), and the tree is checked against --data-size once it is written (`fit`).
+    slots.offline_free = Some(u64::MAX);
+    // The offline writer applies no reserve.
+    slots.reserve = 0;
     // Nothing is running yet: the first slot is tried, then the board boots into it.
     slots.running = Some(String::new());
     let id = security::with_enforced(false, || {
@@ -297,8 +361,13 @@ fn write_into(input: &FirstSlot<'_>, record: OfflineRecord, pair: &mut Pair) -> 
     // The boot image: the slot's bay must hold it, and the default must name a bay that holds
     // it. The bay check is `check_bay`, the one call site of it.
     check_bay(&mut pair.reference, &id)?;
-    let mut copy = pair.copy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let default = copy.pointer(Pointer::Default).map_err(|e| format!("the boot image's default.txt: {e}"))?;
+    let mut copy = pair
+        .copy
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let default = copy
+        .pointer(Pointer::Default)
+        .map_err(|e| format!("the boot image's default.txt: {e}"))?;
     let expected = pair.reference.pointer(Pointer::Default).ok().flatten();
     if default != expected || copy.trial().map_err(|e| e.to_string())?.is_some() {
         // The pointer names the slot in the default's bay; the words name the bay.
@@ -356,15 +425,6 @@ pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), St
 
 /// The install, the trial and the confirm, through the driver's own methods.
 fn drive(slots: &mut SystemSlots, bundle: &[u8], layout: &Layout) -> Result<String, String> {
-    let free = slots.offline_free.unwrap_or(0);
-    let need = (bundle.len() as u64).saturating_add(slots.reserve);
-    if free < need {
-        return Err(format!(
-            "no room for this slot: it needs {} MiB with the reserve, the data partition has {} MiB free: give the data partition more room",
-            need >> 20,
-            free >> 20
-        ));
-    }
     let job = slots
         .install(bundle.len() as u64, false, false)
         .map_err(|status| refusal(layout, status))?;
@@ -381,7 +441,9 @@ fn drive(slots: &mut SystemSlots, bundle: &[u8], layout: &Layout) -> Result<Stri
             String::from_utf8_lossy(&out[..len]).into_owned()
         }
         JobState::Finished(status) => return Err(refusal(layout, status)),
-        JobState::Running { .. } => return Err("the install did not finish: the bundle is short".into()),
+        JobState::Running { .. } => {
+            return Err("the install did not finish: the bundle is short".into());
+        }
     };
     slots
         .trial(&id, false, false, false)

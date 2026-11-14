@@ -303,11 +303,16 @@ fn with_signature(dir: &Path, name: &str, bundle: &str, sig: &[u8]) -> String {
     Tar::default()
         .feed(&std::fs::read(bundle).unwrap(), &mut m)
         .unwrap();
-    let members: Vec<(String, Vec<u8>)> = m
-        .0
-        .into_iter()
-        .map(|(n, b)| if n == "slot.sig" { (n, sig.to_vec()) } else { (n, b) })
-        .collect();
+    let members: Vec<(String, Vec<u8>)> =
+        m.0.into_iter()
+            .map(|(n, b)| {
+                if n == "slot.sig" {
+                    (n, sig.to_vec())
+                } else {
+                    (n, b)
+                }
+            })
+            .collect();
     let borrowed: Vec<(&str, &[u8])> = members
         .iter()
         .map(|(n, b)| (n.as_str(), b.as_slice()))
@@ -416,11 +421,15 @@ fn driver(dir: &Path, data: &Path, image: &str) -> (SystemSlots, Layout) {
         },
     };
     let keys = parse_keys(&format!("{PUBKEY7} pubkey")).unwrap();
-    (SystemSlots::new(layout.clone(), Box::new(tryboot), keys), layout)
+    (
+        SystemSlots::new(layout.clone(), Box::new(tryboot), keys),
+        layout,
+    )
 }
 
 #[test]
-fn the_written_partition_verifies_and_the_driver_reads_the_slot_as_installed_confirmed_and_default() {
+fn the_written_partition_verifies_and_the_driver_reads_the_slot_as_installed_confirmed_and_default()
+{
     let slot = slot_in("flow");
     let out = slot.dir.join("data");
     let (r, text) = write_partition(&slot, &out, &[]);
@@ -429,9 +438,13 @@ fn the_written_partition_verifies_and_the_driver_reads_the_slot_as_installed_con
         text.starts_with(&format!("wrote {}: ", out.display())),
         "{text}"
     );
-    assert!(text.contains("slot a1, board reference, root hash "), "{text}");
     assert!(
-        text.trim_end().ends_with(&format!("signed with key id {KEY_ID7}")),
+        text.contains("slot a1, board reference, root hash "),
+        "{text}"
+    );
+    assert!(
+        text.trim_end()
+            .ends_with(&format!("signed with key id {KEY_ID7}")),
         "the summary names the key id: {text}"
     );
 
@@ -468,7 +481,95 @@ fn the_written_partition_verifies_and_the_driver_reads_the_slot_as_installed_con
     let mut info = vec![0u8; 65536];
     let n = slots.info(&mut info).unwrap();
     let info = String::from_utf8_lossy(&info[..n]).to_string();
-    assert!(info.contains("\"default_signature\":\"verified\""), "the driver verifies the default: {info}");
+    assert!(
+        info.contains("\"default_signature\":\"verified\""),
+        "the driver verifies the default: {info}"
+    );
+}
+
+/// `data-partition` with the usual inputs and an explicit `--data-size`, writing `out`.
+fn write_with_size(slot: &Slot, out: &Path, size: &str) -> (Result<(), String>, String) {
+    let out = out.display().to_string();
+    let socs = socs();
+    run(&[
+        "data-partition",
+        "--layout-of",
+        &slot.board,
+        "--socs",
+        &socs,
+        "--install",
+        &slot.bundle,
+        "--boot-image",
+        &slot.image,
+        "--keys",
+        &slot.keys,
+        "--time",
+        TIME,
+        "--data-size",
+        size,
+        "--out",
+        &out,
+    ])
+}
+
+#[test]
+fn a_data_size_of_the_slot_and_its_records_is_written_and_one_byte_less_is_refused_with_both_sizes()
+{
+    let slot = slot_in("small-room");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let need = lemnos_driver_system_slots::offline::tree_bytes(&out);
+    std::fs::remove_dir_all(&out).unwrap();
+    // Far below the 2048 MiB live reserve: the writer keeps none back.
+    assert!(need < (2048_u64 << 20), "the tree is {need} bytes");
+
+    let (r, text) = write_with_size(&slot, &out, &need.to_string());
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert!(out.is_dir());
+    std::fs::remove_dir_all(&out).unwrap();
+
+    let (r, text) = write_with_size(&slot, &out, &(need - 1).to_string());
+    let why = r.unwrap_err();
+    assert_eq!(
+        why,
+        format!(
+            "no room for this slot: the slot and its records need {need} bytes, --data-size gives {} bytes: give the data partition more room",
+            need - 1
+        ),
+        "{text}"
+    );
+    assert!(!out.exists(), "a refused write leaves no directory");
+}
+
+#[test]
+fn verify_shows_the_reserve_the_board_applies_to_live_installs_from_its_file() {
+    let slot = slot_in("reserve-shown");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+
+    // The reference board says reserve_mb = 2048; a copy saying 64 shows 64, so the file is read.
+    let board64 = slot.dir.join("board-64.toml");
+    let text = std::fs::read_to_string(&slot.board)
+        .unwrap()
+        .replace("reserve_mb = 2048", "reserve_mb = 64");
+    std::fs::write(&board64, text).unwrap();
+    let (r, report) = run(&[
+        "data-partition",
+        "--verify",
+        out.to_str().unwrap(),
+        "--layout-of",
+        board64.to_str().unwrap(),
+        "--socs",
+        &socs(),
+    ]);
+    r.unwrap_or_else(|e| panic!("{e}\n{report}"));
+    assert!(
+        report.contains("ok  the board keeps 64 MiB free for live installs (its reserve_mb); the offline writer applies none"),
+        "{report}"
+    );
+    assert_eq!(report.lines().last(), Some("ok"), "{report}");
 }
 
 #[test]
@@ -476,13 +577,28 @@ fn a_bundle_signed_by_a_key_the_list_does_not_hold_is_refused_and_nothing_is_lef
     let slot = slot_in("unknown-key");
     let other = bundle_with(&slot, "other.bundle", Some(SEED8));
     let out = slot.dir.join("data");
-    let other_slot = Slot { bundle: other, ..slot };
+    let other_slot = Slot {
+        bundle: other,
+        ..slot
+    };
     let parent = out.parent().unwrap().to_path_buf();
-    let before: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.file_name()).collect();
+    let before: Vec<_> = std::fs::read_dir(&parent)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
     let (r, ever) = exists_during(&out, || write_partition(&other_slot, &out, &[]).0);
     assert!(!ever, "the output directory is never created on a refusal");
-    let after: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.file_name()).collect();
-    assert_eq!(before.len(), after.len(), "the directory's listing is unchanged");
+    let after: Vec<_> = std::fs::read_dir(&parent)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the directory's listing is unchanged"
+    );
     let why = r.unwrap_err();
     assert!(
         why.contains("the bundle is signed by key id ")
@@ -496,7 +612,10 @@ fn a_bundle_signed_by_a_key_the_list_does_not_hold_is_refused_and_nothing_is_lef
 fn an_unsigned_bundle_is_refused_by_a_board_that_requires_signing() {
     let slot = slot_in("unsigned-required");
     let unsigned = bundle_with(&slot, "unsigned.bundle", None);
-    let u = Slot { bundle: unsigned, ..slot };
+    let u = Slot {
+        bundle: unsigned,
+        ..slot
+    };
     let out = u.dir.join("data");
     let (r, ever) = exists_during(&out, || write_partition(&u, &out, &[]).0);
     assert!(!ever, "the output directory is never created on a refusal");
@@ -565,7 +684,10 @@ fn a_signing_policy_other_than_required_or_not_required_is_refused_by_name() {
     let out = bad.dir.join("data");
     let (r, _) = write_partition(&bad, &out, &[]);
     let why = r.unwrap_err();
-    assert!(why.contains("signature is \"required\" or \"not-required\""), "{why}");
+    assert!(
+        why.contains("signature is \"required\" or \"not-required\""),
+        "{why}"
+    );
     assert!(!out.exists());
 }
 
@@ -576,7 +698,10 @@ fn a_bundle_whose_signature_does_not_verify_under_its_key_is_refused_and_writes_
     let last = sig.len() - 1;
     sig[last] ^= 0x01;
     let bad = with_signature(&slot.dir, "bad.bundle", &slot.bundle, &sig);
-    let bad_slot = Slot { bundle: bad, ..slot };
+    let bad_slot = Slot {
+        bundle: bad,
+        ..slot
+    };
     let out = bad_slot.dir.join("data");
     let (r, _) = write_partition(&bad_slot, &out, &[]);
     let why = r.unwrap_err();
@@ -588,7 +713,10 @@ fn a_bundle_whose_signature_does_not_verify_under_its_key_is_refused_and_writes_
 fn a_boot_image_without_the_bundles_slot_is_refused_by_name() {
     let slot = slot_in("bay0");
     let other = boot_image(&slot.dir, &slot.board, "a2", &slot.payloads);
-    let mismatched = Slot { image: other, ..slot };
+    let mismatched = Slot {
+        image: other,
+        ..slot
+    };
     let out = mismatched.dir.join("data");
     let (r, _) = write_partition(&mismatched, &out, &[]);
     let why = r.unwrap_err();
@@ -639,7 +767,10 @@ fn the_switch_is_not_set_by_this_command_and_its_refusal_names_the_later_step() 
     let out = slot.dir.join("data");
     let (r, _) = write_partition(&slot, &out, &["--switch", "on"]);
     let why = r.unwrap_err();
-    assert!(why.contains("set it after the first boot with lemnos-ctl security set on"), "{why}");
+    assert!(
+        why.contains("set it after the first boot with lemnos-ctl security set on"),
+        "{why}"
+    );
     assert!(!out.exists());
 }
 
@@ -697,11 +828,17 @@ fn the_modes_and_bytes_are_the_same_whatever_the_umask_is() {
             "umask {umask}: the same paths"
         );
         for (path, value) in &got {
-            assert_eq!(value, &reference[path], "umask {umask}: {path} has the same bytes and mode");
+            assert_eq!(
+                value, &reference[path],
+                "umask {umask}: {path} has the same bytes and mode"
+            );
         }
     }
     // The fixed modes: 0644 for files, 0755 for directories, whatever the umask.
-    assert_eq!(std::fs::metadata(&library).unwrap().permissions().mode() & 0o7777, 0o755);
+    assert_eq!(
+        std::fs::metadata(&library).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
     for (path, (bytes, mode)) in &reference {
         let want = if bytes.is_some() { 0o644 } else { 0o755 };
         assert_eq!(*mode, want, "{path}");
@@ -723,6 +860,90 @@ fn verify_refuses_a_tree_whose_slot_is_not_good_and_names_the_line() {
     let (r, report) = run(&["data-partition", "--verify", copy.to_str().unwrap()]);
     let why = r.unwrap_err();
     assert!(why.contains("check(s) failed"), "{why}");
-    assert!(report.contains("BAD slot a1 is not good, or has failed"), "{report}");
+    assert!(
+        report.contains("BAD slot a1 is not good, or has failed"),
+        "{report}"
+    );
     assert!(report.contains("refused: 1"), "{report}");
+}
+
+/// `security render` and `security set` on a boot partition image: the switch is read from the
+/// image's `SECURE.REC`, and a fresh image reads off.
+fn security_run(args: &[&str]) -> (Result<(), String>, String) {
+    run(args)
+}
+
+#[test]
+fn security_render_reads_a_fresh_image_as_off_and_a_set_round_trips_through_it() {
+    let slot = slot_in("security-image");
+    let image = slot.image.clone();
+    let view = slot.dir.join("view");
+    std::fs::create_dir_all(&view).unwrap();
+    let view_path = view.display().to_string();
+    let render = |image: &str| {
+        security_run(&[
+            "security",
+            "render",
+            "--boot-image",
+            image,
+            "--dir",
+            &view_path,
+        ])
+    };
+    let (r, out) = render(&image);
+    r.unwrap_or_else(|e| panic!("{e}\n{out}"));
+    assert!(
+        out.contains(": off generation"),
+        "a fresh image reads off: {out}"
+    );
+
+    let (r, out) = security_run(&["security", "set", "--boot-image", &image, "on"]);
+    r.unwrap_or_else(|e| panic!("{e}\n{out}"));
+    assert!(out.starts_with("switch on in "), "{out}");
+    let (_, out) = render(&image);
+    assert!(out.contains(": on generation"), "set on reads on: {out}");
+
+    let (r, out) = security_run(&["security", "set", "--boot-image", &image, "off"]);
+    r.unwrap_or_else(|e| panic!("{e}\n{out}"));
+    let (_, out) = render(&image);
+    assert!(out.contains(": off generation"), "set off reads off: {out}");
+}
+
+#[test]
+fn security_takes_exactly_one_of_record_and_boot_image_and_a_missing_record_reads_on() {
+    let slot = slot_in("security-one");
+    let view = slot.dir.join("view");
+    std::fs::create_dir_all(&view).unwrap();
+    let view_path = view.display().to_string();
+    let (r, _) = security_run(&[
+        "security",
+        "render",
+        "--record",
+        "x",
+        "--boot-image",
+        &slot.image,
+        "--dir",
+        &view_path,
+    ]);
+    assert!(r.is_err(), "--record and --boot-image together are refused");
+
+    // An image with no SECURE.REC: the record can't be read, and the switch reads on, said so.
+    let bare = slot.dir.join("bare.img");
+    std::fs::write(&bare, vec![0u8; 1024 * 1024]).unwrap();
+    let (r, out) = security_run(&[
+        "security",
+        "render",
+        "--boot-image",
+        bare.to_str().unwrap(),
+        "--dir",
+        &view_path,
+    ]);
+    r.unwrap_or_else(|e| panic!("{e}\n{out}"));
+    assert!(
+        out.contains("unreadable") && out.contains("the switch reads on"),
+        "{out}"
+    );
+    let rendered = std::fs::read_to_string(view.join(lemnos_slot_store::security::FILE_NAME))
+        .unwrap_or_default();
+    assert!(rendered.contains("on"), "the view renders on: {rendered}");
 }
