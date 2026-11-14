@@ -8,18 +8,17 @@ use std::sync::Arc;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use lemnos_core::{CallerId, JobId, Status};
+use lemnos_slot_store::bundle::{self, Member};
 use lemnos_slot_store::signing::RECORD_LEN;
 use lemnos_slot_store::signing::{self, Check, Outcome, Refusal};
 use sha2::{Digest, Sha256};
 
 use crate::boot::{self, hex};
 use crate::manifest::Manifest;
-use crate::store::{Layout, Meta, valid_id};
+use crate::store::{Layout, Meta};
 use crate::tar::{Kind, Sink, Tar};
 use lemnos_slot_store::ubi::{self, UbiWrite};
 
-/// The largest manifest taken.
-const MAX_MANIFEST: u64 = 64 * 1024;
 /// The length of a bundle's `slot.sig`: the shared signature record (`lemnos_slot_store::signing`),
 /// 108 bytes. The bare 64-byte signature of the first version is no longer accepted.
 pub const SIGNATURE_LEN: usize = RECORD_LEN;
@@ -86,25 +85,6 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// What a bundle may hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Member {
-    Manifest,
-    Signature,
-    Root,
-    Boot,
-}
-
-fn member(name: &str) -> Option<Member> {
-    match name {
-        "slot.json" => Some(Member::Manifest),
-        "slot.sig" => Some(Member::Signature),
-        "rootfs.erofs" => Some(Member::Root),
-        name if name.starts_with("boot/") => Some(Member::Boot),
-        _ => None,
-    }
-}
-
 /// The slots a bundle may not replace.
 #[derive(Debug, Clone, Default)]
 pub struct Guard {
@@ -114,9 +94,7 @@ pub struct Guard {
 
 impl Guard {
     fn check(&self, id: &str) -> Result<(), Failure> {
-        if !valid_id(id) {
-            return Err(bad(format!("slot.json: `{id}` isn't a slot id")));
-        }
+        bundle::check_slot_id(id).map_err(bad)?;
         if id == self.running {
             return Err((Status::BUSY, format!("{id} is the running slot")));
         }
@@ -175,47 +153,23 @@ impl Unpack {
 
     /// The member's place in the bundle's order, refused by a sentence naming the rule.
     fn order(&mut self, name: &str, kind: Kind) -> Result<Member, Failure> {
-        let what = if name == "boot" && kind == Kind::Dir {
-            Member::Boot
-        } else {
-            member(name).ok_or_else(|| {
-                bad(format!(
-                    "the bundle has {name}: only slot.json, slot.sig, rootfs.erofs and boot/"
-                ))
-            })?
-        };
-        if self.entries.is_empty() && what != Member::Manifest {
-            return Err(bad(format!(
-                "the bundle starts with {name}, and slot.json must be its first member: the order is slot.json, then slot.sig when the bundle is signed, then rootfs.erofs and boot/ in any order"
-            )));
-        }
-        if self.entries.iter().any(|seen| seen == name) {
-            return Err(bad(format!("the bundle has {name} twice")));
-        }
-        match what {
-            Member::Signature if self.entries.len() != 1 => Err(bad(
-                "slot.sig must be the bundle's second member, right after slot.json: the signature is decided before any payload is written",
-            )),
-            Member::Root | Member::Boot => {
-                // The first payload member: the signature and the board are decided now, so a
-                // refused bundle has written nothing and the root image is not consumed.
-                self.settle()?;
-                if what == Member::Boot && kind == Kind::File {
-                    let file = name.strip_prefix("boot/").unwrap_or(name);
-                    let listed = self
-                        .parsed
-                        .as_ref()
-                        .is_some_and(|m| m.boot_files.iter().any(|(l, _)| l == file));
-                    if !listed {
-                        return Err(bad(format!(
-                            "boot file {file} isn't in slot.json: a file the manifest does not list is refused"
-                        )));
-                    }
+        let what = bundle::check_order(&self.entries, name, kind).map_err(bad)?;
+        if matches!(what, Member::Root | Member::Boot) {
+            // The first payload member: the signature and the board are decided now, so a
+            // refused bundle has written nothing and the root image is not consumed.
+            self.settle()?;
+            if what == Member::Boot && kind == Kind::File {
+                let file = name.strip_prefix("boot/").unwrap_or(name);
+                if let Some(manifest) = &self.parsed {
+                    bundle::check_listed(manifest, file).map_err(bad)?;
+                } else {
+                    return Err(bad(format!(
+                        "boot file {file} isn't in slot.json: a file the manifest does not list is refused"
+                    )));
                 }
-                Ok(what)
             }
-            _ => Ok(what),
         }
+        Ok(what)
     }
 
     /// The signature decision and the board's checks, made once.
@@ -275,13 +229,10 @@ impl Sink for Unpack {
                 fs::create_dir_all(self.work.join(name)).map_err(|e| e.to_string())
             }
             (_, Kind::Dir) => self.fail(bad(format!("{name} is a directory in the bundle"))),
-            (Member::Manifest, _) if size > MAX_MANIFEST => {
-                self.fail(bad("slot.json is too large"))
-            }
-            (Member::Signature, _) if size != SIGNATURE_LEN as u64 => self.fail(bad(
-                "slot.sig is not a signature record: 108 bytes, the magic LMNSSIG1, algorithm 1 (a bare 64-byte signature is refused)",
-            )),
             (Member::Manifest | Member::Signature, _) => {
+                if let Err(why) = bundle::check_member_size(what, size) {
+                    return self.fail(bad(why));
+                }
                 self.current = Some((what, None));
                 Ok(())
             }
@@ -395,7 +346,7 @@ impl Sink for Unpack {
 /// What `slot.sig` shows, as the shared policy takes it: the signature record names its key by
 /// id (SHA-256 of the public key). A key the board holds is checked; any other is unknown. The
 /// signed message is `lemnos_slot_store::signing::slot_bundle_message` over the manifest's bytes.
-fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]) -> Check<'a> {
+pub fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]) -> Check<'a> {
     if signature.is_empty() {
         return Check::Unsigned;
     }
@@ -654,43 +605,14 @@ impl Install {
         let id = manifest.id.clone();
         board.guard.check(&id)?;
         let root_hash = manifest.verity.root_hash.as_str();
-        let image_size = manifest.image_size;
-        let image_sha = manifest.image_sha256.as_str();
-        let hash_of = |name: &str| {
-            unpack
-                .hashes
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, sha)| sha.as_str())
-        };
         let root = unpack.work.join("rootfs.erofs");
         let size = match (&unpack.volume, &board.layout.ubi) {
             (Some(volume), Some(device)) => device.volume(&volume.name).map(|v| v.bytes),
             _ => fs::metadata(&root).ok().map(|m| m.len()),
         }
-        .filter(|_| hash_of("rootfs.erofs").is_some())
-        .ok_or_else(|| bad("not a slot bundle: no rootfs.erofs"))?;
-        if size != image_size {
-            return Err(bad("rootfs.erofs isn't the size slot.json says"));
-        }
-        if hash_of("rootfs.erofs") != Some(image_sha) {
-            return Err(bad("rootfs.erofs doesn't match slot.json's sha256"));
-        }
-        let listed = &manifest.boot_files;
-        for (name, want) in listed {
-            match hash_of(&format!("boot/{name}")) {
-                Some(got) if got == want => {}
-                None => return Err(bad(format!("the bundle has no boot file {name}"))),
-                _ => return Err(bad(format!("boot file {name} doesn't match slot.json"))),
-            }
-        }
-        for (name, _) in &unpack.hashes {
-            if let Some(file) = name.strip_prefix("boot/")
-                && !listed.iter().any(|(listed, _)| listed == file)
-            {
-                return Err(bad(format!("boot file {file} isn't in slot.json")));
-            }
-        }
+        .filter(|_| unpack.hashes.iter().any(|(n, _)| n == "rootfs.erofs"));
+        bundle::check_root(&manifest, size, &unpack.hashes).map_err(bad)?;
+        bundle::check_boot(&manifest, &unpack.hashes).map_err(bad)?;
         let boot_dir = unpack.work.join("boot");
         let args = board.boot_args;
         if args.is_empty() || !args.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -704,33 +626,8 @@ impl Install {
         // and root hash; a bundle whose line does not is refused.
         let line = fs::read_to_string(boot_dir.join("cmdline.txt"))
             .map_err(|_| bad("the bundle has no boot/cmdline.txt"))?;
-        let cmdline = line.trim_end_matches(['\r', '\n']).to_string();
-        let names = |key: &str, value: &str| {
-            let word = format!("{args}.{key}={value}");
-            cmdline.split_ascii_whitespace().any(|w| w == word)
-        };
-        if !names("slot", &id) {
-            return Err(bad(format!(
-                "boot/cmdline.txt doesn't name its slot: it needs {args}.slot={id}"
-            )));
-        }
-        if !names("roothash", root_hash) {
-            return Err(bad(format!(
-                "boot/cmdline.txt doesn't carry the root hash slot.json names: it needs {args}.roothash={root_hash}"
-            )));
-        }
-        // The boot sources the board lists, which the slot's initramfs finds its boot disk by.
-        for entry in board.boot_sources {
-            let (source, _) = entry.split_once('=').unwrap_or((entry, ""));
-            if !cmdline
-                .split_ascii_whitespace()
-                .any(|w| w == format!("{args}.src.{entry}"))
-            {
-                return Err(bad(format!(
-                    "boot/cmdline.txt doesn't list the board's boot source {source}: it needs {args}.src.{entry}"
-                )));
-            }
-        }
+        let cmdline = bundle::cmdline_line(&line).to_string();
+        bundle::check_cmdline(args, &id, root_hash, board.boot_sources, &cmdline).map_err(bad)?;
         // The boot side, kept on the data partition. A slot whose directory is already on the
         // boot partition (installed again) gets its new files there now.
         let io = disk("the slot's boot files");

@@ -17,10 +17,10 @@ use crate::boot::{BootRecord, hex};
 use crate::json::Json;
 use crate::manifest::BLOCK;
 use crate::store::{self, Layout, Meta, State};
-use crate::tar::tests::archive;
 use crate::trial::{Log, Resolved, Source};
 use crate::{SystemReboot, SystemSlots, TrustedKey};
 use lemnos_slot_store::security;
+use lemnos_slot_store::tar::write::archive;
 use lemnos_slot_store::ubi::{Fake, Ubi, UbiWrite, image_volume};
 
 pub struct TempDir(pub PathBuf);
@@ -3711,4 +3711,322 @@ fn a_malformed_view_reads_on_on_a_board_with_no_trust_root_and_info_says_so() {
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
     assert_eq!(json.get("require_signed"), Some(&Json::Bool(false)));
     assert!(slots.install(10, false, false).is_ok());
+}
+
+/// A bundle made by the writer `lemnos-ctl bundle` calls (`lemnos_slot_store::bundle::build`, with the
+/// real signature of the test key) installs through the real driver on both record forms, each over
+/// the boot partition image the image builder makes: the Pi firmware's form with a gzip kernel stored as
+/// shipped, the U-Boot form with a raw one. Its bytes are the writer's alone.
+#[test]
+fn a_bundle_made_by_the_writer_installs_on_both_record_forms() {
+    use lemnos_slot_store::bays::Layout as Bays;
+    use lemnos_slot_store::bootimage::Family;
+    use lemnos_slot_store::bundle::{self, Build, Rules, Signer};
+    use lemnos_slot_store::verity;
+
+    let data_blocks = 5u64;
+    let mut data: Vec<u8> = (0..data_blocks * 4096).map(|i| (i % 249) as u8).collect();
+    data[1024..1028].copy_from_slice(&[0xe2, 0xe1, 0xf5, 0xe0]);
+    data[1024 + 12] = 12;
+    data[1024 + 36..1024 + 40].copy_from_slice(&(data_blocks as u32).to_le_bytes());
+    let salt = [0x33u8; 32];
+    let tree = verity::tree_of(salt, &data).unwrap();
+    let mut whole = data.clone();
+    whole.extend_from_slice(&tree.tree);
+    let table = verity::Table {
+        root_hash: hex(&tree.root_hash),
+        salt: hex(&salt),
+        data_blocks,
+        hash_offset: data.len() as u64,
+        tree_bytes: tree.tree.len() as u64,
+        image_bytes: whole.len() as u64,
+    };
+    for family in [Family::Tryboot, Family::UbootBlock] {
+        let mut board = Board::new("os-1");
+        let mut kernel = vec![0u8; 3000];
+        if family == Family::Tryboot {
+            kernel[..2].copy_from_slice(&[0x1f, 0x8b]);
+        }
+        real_record(&mut board, family);
+        let rules = Rules {
+            board: BOARD.into(),
+            prefix: "board".into(),
+            boot_sources: Vec::new(),
+            family,
+            layout: Bays::new([8192, 4096, 4096, 4096, 4096]).unwrap(),
+            overlay: None,
+        };
+        let key_id: [u8; 32] = Sha256::digest(key().verifying_key().as_bytes()).into();
+        let sign = |m: &[u8]| key().sign(m).to_bytes();
+        let payloads = [
+            kernel,
+            b"initramfs".to_vec(),
+            b"device tree".to_vec(),
+            b"console=tty1 board.slot=os-2 board.roothash=@roothash@ panic=5\n".to_vec(),
+            b"overlay".to_vec(),
+        ];
+        let built = bundle::build(
+            &Build {
+                id: "os-2",
+                product: "an-os",
+                version: "1",
+                variant: "",
+                kernel: "",
+                display_name: "",
+                table: &table,
+                rules: &rules,
+                signer: Some(Signer {
+                    key_id,
+                    sign: &sign,
+                }),
+            },
+            payloads,
+            &mut &whole[..],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        bundle::write_to(&built, &mut std::io::Cursor::new(whole.clone()), &mut bytes).unwrap();
+        let (status, result, _) = board.stream(1, &bytes, 4096);
+        assert_eq!(status, Status::OK, "{family:?}: {}", board.state().error);
+        assert_eq!(result, b"os-2");
+        assert_eq!(
+            board.slots.record.slot_bay("os-2").unwrap().0,
+            "slots/bay1",
+            "{family:?}"
+        );
+        assert_eq!(last_install(&mut board).1, "verified", "{family:?}");
+    }
+}
+
+/// Swaps the board's record for the real one of `family` over the boot partition image the image builder
+/// makes (os-1 in bay 0): the Pi firmware's `Tryboot`, or the U-Boot environment record.
+fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) {
+    use lemnos_slot_store::bootimage::Family;
+    let boot = board.layout().boot.clone();
+    let node = board.dir.0.join("boot.img");
+    if family == Family::Tryboot {
+        fs::write(&node, crate::bay_fixture::tryboot_image("os-1")).unwrap();
+        board.slots.record = Box::new(crate::boot::Tryboot {
+            boot: boot.clone(),
+            node: Ok(node.clone()),
+            restarter: crate::boot::Restarter {
+                check: None,
+                systemctl: "/bin/true".into(),
+            },
+        });
+    } else {
+        fs::write(&node, crate::bay_fixture::uboot_image("os-1")).unwrap();
+        let env = board.layout().boot.join("uboot-env.img");
+        let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+        let list = vec![
+            ("default".to_string(), "os-1".to_string()),
+            ("default_bay".to_string(), "bay0".to_string()),
+        ];
+        let vars = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
+        let mut image = vec![0u8; 8192];
+        image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&vars, 1));
+        fs::write(&env, &image).unwrap();
+        board.slots.record = Box::new(crate::uboot::UbootEnv {
+            disk: Err("the device is named, the disk is not needed".into()),
+            place: lemnos_slot_store::uboot_env::Place::device(
+                env.to_str().unwrap(),
+                1024,
+                0,
+                4096,
+            )
+            .unwrap(),
+            restarter: crate::boot::Restarter {
+                check: None,
+                systemctl: "/bin/true".into(),
+            },
+            boot_node: Ok(node.clone()),
+        });
+    }
+}
+
+/// The file `lemnos-ctl bundle` wrote (the real command, run through the library entry the binary
+/// calls, with a key file and `--expect-key-id`) is installed through the real driver on the board's
+/// record of each form, with the board's key list holding the test key and the security switch ON, so the
+/// signature is enforced; `info` and `list` then say the slot is there and verified by that key.
+/// Stand-ins: the boot partition is the image builder's file image and the environment a file, not a
+/// device; the board is the driver over temporary directories (the kernel's block layer and the
+/// firmware are not involved).
+#[test]
+fn the_file_lemnos_ctl_bundle_wrote_installs_on_the_board_with_the_signature_enforced() {
+    use lemnos_slot_store::bootimage::Family;
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let socs = repo.join("socs").display().to_string();
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut out = Vec::new();
+        let r = lemnos_ctl::run(&args, &mut out);
+        (r, String::from_utf8(out).unwrap())
+    };
+    for family in [Family::Tryboot, Family::UbootBlock] {
+        let mut board = Board::new("os-1");
+        real_record(&mut board, family);
+        let dir = board.dir.0.join("ctl");
+        fs::create_dir_all(&dir).unwrap();
+        let text = fs::read_to_string(repo.join("testing/boards/reference.toml")).unwrap();
+        let text = if family == Family::UbootBlock {
+            text.replace(
+                "record = \"tryboot\"",
+                "record = \"uboot\", uboot_env_size = 8192",
+            )
+        } else {
+            text
+        };
+        let board_file = dir.join("board.toml");
+        fs::write(&board_file, &text).unwrap();
+        let board_file = board_file.display().to_string();
+        // The board the bundle is for: its id, command-line prefix and boot sources are the board file's.
+        let parsed = lemnos_host::board::parse(&text).unwrap();
+        board.slots.board_id = parsed.board.id.clone();
+        board.slots.boot_args = "os".into();
+        board.slots.boot_sources = vec!["rpi-boot-mode-1=/soc@107c000000/mmc@fff000".into()];
+        // The payloads: the command line is what `tree --cmdline-slot` writes, hole and all.
+        let payload = dir.join("payload");
+        fs::create_dir_all(&payload).unwrap();
+        let mut kernel = vec![0u8; 3000];
+        if family == Family::Tryboot {
+            kernel[..2].copy_from_slice(&[0x1f, 0x8b]);
+        }
+        fs::write(payload.join("kernel"), kernel).unwrap();
+        fs::write(payload.join("initramfs"), b"initramfs").unwrap();
+        fs::write(payload.join("device-tree"), b"device tree").unwrap();
+        fs::write(payload.join("board-overlay"), b"overlay").unwrap();
+        let cmdline = payload.join("cmdline");
+        run(&[
+            "tree",
+            "--socs",
+            &socs,
+            &board_file,
+            "--slot",
+            "os-2",
+            "--cmdline-slot",
+            cmdline.to_str().unwrap(),
+        ])
+        .0
+        .unwrap();
+        // The image with its tree appended, and the builder's table.
+        let blocks = 5usize;
+        let mut data: Vec<u8> = (0..blocks * 4096).map(|i| (i % 249) as u8).collect();
+        data[1024..1028].copy_from_slice(&[0xe2, 0xe1, 0xf5, 0xe0]);
+        data[1024 + 12] = 12;
+        data[1024 + 36..1024 + 40].copy_from_slice(&(blocks as u32).to_le_bytes());
+        let salt: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let tree = lemnos_slot_store::verity::tree_of(salt, &data).unwrap();
+        let mut whole = data.clone();
+        whole.extend_from_slice(&tree.tree);
+        let rootfs = dir.join("rootfs.erofs");
+        fs::write(&rootfs, &whole).unwrap();
+        let table = dir.join("verity.txt");
+        fs::write(
+            &table,
+            format!(
+                "hash_type 1\nalgorithm sha256\nroot_hash {}\nsalt {}\ndata_blocks {blocks}\ndata_block_size 4096\nhash_block_size 4096\nhash_offset {}\ntree_bytes {}\nimage_bytes {}\nhash_start_block {blocks}\n",
+                hex(&tree.root_hash),
+                hex(&salt),
+                data.len(),
+                tree.tree.len(),
+                whole.len()
+            ),
+        )
+        .unwrap();
+        let seed = dir.join("signing.seed");
+        fs::write(&seed, [7u8; 32]).unwrap();
+        fs::set_permissions(&seed, fs::Permissions::from_mode(0o600)).unwrap();
+        let key_id: [u8; 32] = Sha256::digest(key().verifying_key().as_bytes()).into();
+        let bundle = dir.join("os-2.bundle");
+        let (r, out) = run(&[
+            "bundle",
+            "--layout-of",
+            &board_file,
+            "--socs",
+            &socs,
+            "--slot",
+            "os-2",
+            "--payload",
+            payload.to_str().unwrap(),
+            "--rootfs",
+            rootfs.to_str().unwrap(),
+            "--verity-table",
+            table.to_str().unwrap(),
+            "--product",
+            "an-os",
+            "--version",
+            "1",
+            "--key-file",
+            seed.to_str().unwrap(),
+            "--expect-key-id",
+            &hex(&key_id),
+            "--out",
+            bundle.to_str().unwrap(),
+        ]);
+        r.unwrap_or_else(|e| panic!("{family:?}: {e}\n{out}"));
+        assert!(
+            out.contains(&format!("signed with key id {}", hex(&key_id))),
+            "{out}"
+        );
+        // The switch is on and the board holds the test key: the signature is enforced.
+        security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
+        let bytes = fs::read(&bundle).unwrap();
+        let (status, result, _) = board.stream(1, &bytes, 4096);
+        assert_eq!(status, Status::OK, "{family:?}: {}", board.state().error);
+        assert_eq!(result, b"os-2");
+        assert!(board.layout().installed("os-2"), "{family:?}");
+        assert_eq!(last_install(&mut board).1, "verified", "{family:?}");
+        assert_eq!(listed(&mut board, "os-2").1, "verified", "{family:?}");
+        assert_eq!(board.meta("os-2").get("SIGNER"), "the build key");
+        // `info` names the key the board holds by the id the CLI printed.
+        let mut buf = vec![0u8; 4096];
+        let len = board.slots.info(&mut buf).unwrap();
+        let info = Json::parse(core::str::from_utf8(&buf[..len]).unwrap()).unwrap();
+        let Some(Json::List(ids)) = info.get("key_ids") else {
+            panic!("no key_ids")
+        };
+        assert!(
+            ids.iter()
+                .any(|k| k.get("id").and_then(Json::text) == Some(hex(&key_id).as_str())),
+            "{family:?}: {ids:?}"
+        );
+        assert_eq!(
+            board.slots.record.slot_bay("os-2").unwrap().0,
+            "slots/bay1",
+            "{family:?}"
+        );
+        // Unsigned, the same board refuses it: the switch really is enforcing.
+        let unsigned = dir.join("unsigned.bundle");
+        let (r, _) = run(&[
+            "bundle",
+            "--layout-of",
+            &board_file,
+            "--socs",
+            &socs,
+            "--slot",
+            "os-2",
+            "--payload",
+            payload.to_str().unwrap(),
+            "--rootfs",
+            rootfs.to_str().unwrap(),
+            "--verity-table",
+            table.to_str().unwrap(),
+            "--product",
+            "an-os",
+            "--version",
+            "1",
+            "--out",
+            unsigned.to_str().unwrap(),
+        ]);
+        r.unwrap();
+        let (status, _, _) = board.stream(1, &fs::read(&unsigned).unwrap(), 4096);
+        assert_eq!(status, Status::NOT_PERMITTED, "{family:?}");
+        assert!(
+            board.state().error.contains("not signed"),
+            "{}",
+            board.state().error
+        );
+    }
 }

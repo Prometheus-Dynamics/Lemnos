@@ -21,6 +21,7 @@ pub mod bootcheck;
 pub mod bootfat;
 pub mod bootimage;
 pub mod boots;
+pub mod bundle;
 pub mod disk;
 pub mod fallback;
 pub mod fatimage;
@@ -33,9 +34,11 @@ pub mod records;
 pub mod security;
 pub mod signing;
 pub mod store;
+pub mod tar;
 pub mod twocopy;
 pub mod ubi;
 pub mod uboot_env;
+pub mod verity;
 
 #[cfg(test)]
 pub(crate) mod tests {
