@@ -56,6 +56,10 @@ pub const REPLY_OVERHEAD: usize = 32;
 /// so it has no hash of its own and is not in the `feature` module: a host sets it in Welcome
 /// beside [`feature::EVERY`], and a host without it refuses the request by name.
 pub const ENDPOINTS_END: u64 = 64;
+/// The feature bit of CallJobWithin (kind 42, in the jobs part). Like [`ENDPOINTS_END`] it is not a
+/// part: a host sets it in Welcome beside [`feature::EVERY`], and a client sends the frame only to
+/// a host that did.
+pub const JOB_DEADLINE: u64 = 128;
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -478,6 +482,12 @@ frames! {
         /// Cancels a job this connection started. Answered with an empty Reply, and the job's
         /// JobDone follows.
         31 JobCancel { id: u32, job: u64 }
+        /// CallJob with the deadline the caller gives the job: `deadline_ms` milliseconds from its
+        /// start, never 0 (a job with no deadline is started with CallJob). Sent only to a host
+        /// whose Welcome set [`JOB_DEADLINE`]. Answered as CallJob is. The host passes the deadline
+        /// to the device's driver, which may refuse a start the deadline cannot be enough for, with
+        /// a Refusal whose text says why; the host does not end the job at its deadline.
+        added 42 CallJobWithin { id: u32, device: u32, contract: u8, method: u16, deadline_ms: u64, args: &'a [u8] }
     }
     // The shared-rings part: the stream answers are shared-memory rings. Its frames are
     // StreamRings and StreamRingHandles, which are declared in the core and the stream-handles

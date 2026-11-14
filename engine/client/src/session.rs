@@ -1171,6 +1171,7 @@ impl Session {
         handle: &Handle,
         method: u16,
         args: &[u8],
+        deadline_ms: Option<u64>,
     ) -> Result<(u32, impl Pick<u64> + use<>), Error> {
         if handle.generation != self.generation {
             return Err(Error::Stale);
@@ -1183,13 +1184,33 @@ impl Session {
                 .unusable(feature::JOBS, "the service does not run long jobs"));
         }
         let id = self.shared.id();
-        self.queue(&Frame::CallJob {
-            id,
-            device: handle.device,
-            contract: handle.contract,
-            method,
-            args,
-        })?;
+        match deadline_ms {
+            // A deadline of 0 is no deadline.
+            None | Some(0) => self.queue(&Frame::CallJob {
+                id,
+                device: handle.device,
+                contract: handle.contract,
+                method,
+                args,
+            })?,
+            Some(deadline_ms) => {
+                // An older service closes the connection on a kind it doesn't know.
+                if self.shared.features & lemnos_wire::JOB_DEADLINE == 0 {
+                    return Err(Error::Refused {
+                        status: Status::NOT_SUPPORTED,
+                        text: "the service does not take a deadline for a job".to_string(),
+                    });
+                }
+                self.queue(&Frame::CallJobWithin {
+                    id,
+                    device: handle.device,
+                    contract: handle.contract,
+                    method,
+                    deadline_ms,
+                    args,
+                })?;
+            }
+        }
         Ok((id, |frame: Frame<'_>| match frame {
             Frame::JobStarted { job, .. } => Some(Ok(job)),
             _ => None,
@@ -1398,7 +1419,38 @@ impl Session {
         if handle.generation != self.generation {
             *handle = self.open(&handle.name.clone(), &handle.tag.clone())?;
         }
-        let (id, pick) = self.op_start_job(handle, method, args)?;
+        let (id, pick) = self.op_start_job(handle, method, args, None)?;
+        self.wait(id, pick)
+    }
+
+    /// Whether the service takes a deadline with a job's start ([`Session::start_job_within`]):
+    /// known once the connection is up (`false` before). A client that must work with an older
+    /// service starts the job without one when this is `false`.
+    #[must_use]
+    pub fn takes_job_deadline(&self) -> bool {
+        self.shared.ready && self.shared.features & lemnos_wire::JOB_DEADLINE != 0
+    }
+
+    /// [`Session::start_job`] with the deadline the caller gives the job, in milliseconds from its
+    /// start. The service passes it to the device's driver, and a driver that sizes its work
+    /// refuses a start the deadline cannot be enough for, with `Refused` and the reason in `text`
+    /// (the job is then never started). The service does not end the job at its deadline: cancel
+    /// it. A deadline of 0 is no deadline. `Refused` with `NOT_SUPPORTED` from a service that does
+    /// not take one (it set no `JOB_DEADLINE` feature): nothing is sent.
+    pub fn start_job_within(
+        &mut self,
+        handle: &mut Handle,
+        method: u16,
+        args: &[u8],
+        deadline_ms: u64,
+    ) -> Result<u64, Error> {
+        if !self.shared.ready {
+            self.settle()?;
+        }
+        if handle.generation != self.generation {
+            *handle = self.open(&handle.name.clone(), &handle.tag.clone())?;
+        }
+        let (id, pick) = self.op_start_job(handle, method, args, Some(deadline_ms))?;
         self.wait(id, pick)
     }
 
@@ -1674,7 +1726,7 @@ impl Session {
     /// Starts a long job without waiting: [`Session::poll`] gives [`Incoming::JobStarted`] or
     /// [`Incoming::Refused`] with the id returned here, then the job's [`Incoming::Job`] events.
     pub fn send_job(&mut self, handle: &Handle, method: u16, args: &[u8]) -> Result<u32, Error> {
-        let (id, _) = self.op_start_job(handle, method, args)?;
+        let (id, _) = self.op_start_job(handle, method, args, None)?;
         if let Some(connection) = self.connection.as_mut()
             && connection.flush().is_err()
         {

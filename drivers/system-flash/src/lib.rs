@@ -67,6 +67,7 @@ use lemnos_core::{
     CallerId, Config, ConfigError, Dev, Health, JobId, JobState, Key, Kind as SettingKind,
     Lifecycle, Reply, Result, Status, driver,
 };
+use lemnos_slot_store::deadline;
 use lemnos_slot_store::json::quoted;
 use sha2::{Digest, Sha256};
 
@@ -284,6 +285,10 @@ pub struct SystemFlash {
     job: Option<Job>,
     next_job: u64,
     calling: CallerId,
+    /// The deadline the caller gave the write about to start, until the start takes it.
+    deadline_ms: Option<u64>,
+    /// Why the last start was refused for its deadline, until the next start.
+    deadline_refusal: String,
 }
 
 impl SystemFlash {
@@ -812,11 +817,22 @@ impl Lifecycle for SystemFlash {
             job: None,
             next_job: 0,
             calling: CallerId(0),
+            deadline_ms: None,
+            deadline_refusal: String::new(),
         })
     }
 
     fn caller(&mut self, caller: CallerId) {
         self.calling = caller;
+    }
+
+    fn job_deadline(&mut self, deadline_ms: Option<u64>) {
+        self.deadline_ms = deadline_ms;
+        self.deadline_refusal.clear();
+    }
+
+    fn job_refusal(&mut self, text: &mut Reply<'_>) {
+        let _ = text.write(self.deadline_refusal.as_bytes());
     }
 
     fn health(&self) -> Health {
@@ -1045,6 +1061,12 @@ impl Flash for SystemFlash {
         }
         if format == FORMAT_RAW && size != manifest.image_size {
             return Err(self.refuse(Status::INVALID_ARGUMENT, "a raw stream is the image's size"));
+        }
+        // The floor is for the raw image: what is written and read back, whatever the stream.
+        if let Some(text) = deadline::refusal("flash", manifest.image_size, self.deadline_ms.take())
+        {
+            self.deadline_refusal = text.clone();
+            return Err(self.refuse(Status::INVALID_ARGUMENT, text));
         }
         let found = match self.target() {
             Ok(found) => found,

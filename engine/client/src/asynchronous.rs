@@ -164,7 +164,7 @@ impl AsyncClient {
         args: &[u8],
     ) -> Result<u64, Error> {
         self.settle().await?;
-        let (id, pick) = self.session.op_start_job(handle, method, args)?;
+        let (id, pick) = self.session.op_start_job(handle, method, args, None)?;
         self.wait(id, pick).await
     }
 

@@ -314,12 +314,16 @@ impl Setup {
     }
 
     fn start(&self, args: &str) -> Run {
+        self.start_within(args, lemnos_orion::calls::RUN_DEADLINE_MS)
+    }
+
+    fn start_within(&self, args: &str, deadline_ms: u64) -> Run {
         self.dashboard
             .run(&ActionCall {
                 name: "lemnos.slots.call",
                 target: Target::Resource("lemnos.slots".parse().expect("name")),
                 args: args.as_bytes(),
-                deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+                deadline_ms,
                 detached: false,
             })
             .expect("run")
@@ -376,6 +380,37 @@ fn a_bundle_pushed_through_orion_installs_through_the_install_file_action() {
         "{:?}",
         entries(&s.incoming())
     );
+}
+
+/// The sizing rule's floor, end to end: the run's deadline goes through the bridge to lemnosd and the
+/// slot driver, which refuses an install whose deadline is under the floor for its size, by name and
+/// before anything is touched (the pushed file stays); at the floor the same install runs.
+#[test]
+fn an_install_run_with_a_deadline_under_the_floor_is_refused_at_start_by_name() {
+    let s = setup("floor", 0);
+    let bundle = bundle("os-2", 16);
+    assert_eq!(s.push("b.tar", &bundle).state, FileState::Committed);
+    let size = bundle.len() as u64;
+    let floor = lemnos_slot_store::deadline::floor_ms(size);
+
+    let mut run = s.start_within("install_file b.tar false false", floor - 1);
+    let finished = run.finish(WAIT).expect("finished");
+    assert_eq!(finished.outcome, Outcome::Failed, "{}", finished.detail);
+    assert!(
+        finished.detail.contains(&format!(
+            "this install needs at least {floor} ms for {size} bytes; the deadline given is {}",
+            floor - 1
+        )),
+        "{}",
+        finished.detail
+    );
+    assert!(!s.dir.join("data/slots/os-2.erofs").exists());
+    assert_eq!(entries(&s.incoming()), ["b.tar"], "the file is not touched");
+
+    let mut run = s.start_within("install_file b.tar false false", floor);
+    let finished = run.finish(WAIT).expect("finished");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{}", finished.detail);
+    assert!(s.dir.join("data/slots/os-2.erofs").exists());
 }
 
 #[test]

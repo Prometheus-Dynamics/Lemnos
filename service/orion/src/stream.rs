@@ -55,6 +55,21 @@ pub struct Streamer {
     active: Option<Active>,
 }
 
+/// A streamer that goes (the Orion session its transfers came on was lost, and the files thread
+/// builds a new one for the next) ends the stream it was receiving: the job is cancelled on its
+/// connection, so the device is free and the next stream can start. The same path as the stall rule
+/// ([`Streamer::drop_active`]), except that a connection to lemnosd that is already gone is not made
+/// again: the job went with it.
+impl Drop for Streamer {
+    fn drop(&mut self) {
+        if let Some(active) = self.active.take()
+            && let Some(client) = self.client.as_ref().filter(|client| client.is_connected())
+        {
+            let _ = client.cancel_job(active.job);
+        }
+    }
+}
+
 /// A stream being received: its transfer, the job it feeds, and the bytes so far.
 struct Active {
     transfer: u64,

@@ -61,6 +61,7 @@ closes the connection on a larger length, without reading it.
 | 29 | JobProgress | job u64, done u64, total u64 | to client |
 | 30 | JobDone | job u64, status i32, bytes | to client |
 | 31 | JobCancel | id u32, job u64 | to host |
+| 42 | CallJobWithin | id u32, device u32, contract u8, method u16, deadline_ms u64, args bytes | to host; `added` to the jobs part, sent only to a host that set `JOB_DEADLINE` |
 | 32 | EndpointsOpen | id u32, device u32 | to host |
 | 33 | Endpoints | id u32 | to client, with two descriptors |
 | 34 | EndpointsClose | id u32, device u32 | to host |
@@ -86,6 +87,7 @@ closes the connection on a kind it doesn't know (rule 3).
 | 1 | 2 | takes Packages |
 | 2 | 4 | takes CallJob and JobCancel |
 | 4 | 16 | takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints |
+| 7 | 128 | takes CallJobWithin (`JOB_DEADLINE`, not a part: it has no hash) |
 | 4 | 8 | frame streams are the shm rings of [`docs/ring.md`](ring.md), with the descriptors of this page's stream answers |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
@@ -403,6 +405,13 @@ daemon keeps the function, its control endpoint and the bus; the client gets onl
 EndpointsOpen is sent only to a host that set bit 4 (value 16) of `features` (rule 10). The three
 frames are `added` to the core: they are left out of the core hash, and a host without them refuses
 the kind alone with `UnknownKind`.
+
+CallJobWithin is CallJob with the deadline the caller gives the job, `deadline_ms` milliseconds from its start (never
+0: a job with no deadline is started with CallJob, and has no floor). It is sent only to a host that set `JOB_DEADLINE`
+(value 128) in `features`: a client that wants it refuses by name, `NOT_SUPPORTED`, without sending anything, to a host
+that did not. The host gives the deadline to the device's driver before the method, and a driver that sizes its work
+(a slot install, a flash) refuses a start whose deadline cannot be enough, with a Refusal of status `INVALID_ARGUMENT`
+whose text names the minimum and the deadline given. The host does not end a job at its deadline: the caller cancels.
 
 EndpointsOpenEnd is the same request for a client that wants the END descriptor too. It is sent only
 to a host that set `ENDPOINTS_END` (value 64) in `features`: a host without that bit is never
@@ -860,6 +869,15 @@ client reads that as `link: ""`.
 <!-- vector: call-job -->
 ```hex
 12 00 00 00 1b 00 0f 00 00 00 03 00 00 00 00 04 00 01 00 00 00 aa
+```
+
+### call-job-within
+
+`CallJobWithin { id: 15, device: 3, contract: 0, method: 4, deadline_ms: 90000, args: [aa] }`
+
+<!-- vector: call-job-within -->
+```hex
+1a 00 00 00 2a 00 0f 00 00 00 03 00 00 00 00 04 00 90 5f 01 00 00 00 00 00 01 00 00 00 aa
 ```
 
 ### job-started

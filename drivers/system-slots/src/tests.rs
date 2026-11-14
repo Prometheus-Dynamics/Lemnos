@@ -2979,3 +2979,79 @@ fn a_trial_is_not_armed_when_the_restart_it_needs_is_refused() {
         board.state().error
     );
 }
+
+/// The reason the driver gives for the start it just refused.
+fn refusal_text(board: &mut Board) -> String {
+    let mut text = [0u8; 256];
+    let mut said = Reply::new(&mut text);
+    board.slots.job_refusal(&mut said);
+    String::from_utf8(said.written().to_vec()).unwrap()
+}
+
+/// The rule's floor is enforced at the start: below it the install is refused by name, with the
+/// minimum, the size and the deadline given; at it the install runs; with no deadline there is no
+/// floor. A refused start touches nothing.
+#[test]
+fn an_install_under_the_deadline_floor_is_refused_at_start_and_writes_nothing() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    let size = bundle.len() as u64;
+    let floor = lemnos_slot_store::deadline::floor_ms(size);
+    let before = board.state().state;
+    board.slots.caller(CallerId(1));
+
+    board.slots.job_deadline(Some(floor - 1));
+    assert_eq!(
+        board.slots.install(size, false, false),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        refusal_text(&mut board),
+        format!(
+            "this install needs at least {floor} ms for {size} bytes; the deadline given is {}",
+            floor - 1
+        )
+    );
+    assert!(!board.work_left(), "nothing was staged");
+    assert_eq!(board.state().state, before, "the state did not move");
+    assert!(!board.layout().installed("os-2"));
+
+    // At the floor it starts, and runs to its end.
+    board.slots.job_deadline(Some(floor));
+    let job = board.slots.install(size, false, false).unwrap();
+    board.slots.job_cancel(job);
+    let mut out = [0; 8];
+    assert_eq!(
+        board.slots.job(job, &mut Reply::new(&mut out)),
+        JobState::Finished(Status::CANCELLED)
+    );
+    // The next start has no deadline of its own: no floor, and no stale reason.
+    board.slots.job_deadline(None);
+    assert_eq!(refusal_text(&mut board), "");
+    let (status, result, _) = board.stream(1, &bundle, 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(result, b"os-2");
+}
+
+/// A staged file refused for its deadline stays where it is: nothing of it is deleted.
+#[test]
+fn a_staged_file_refused_for_its_deadline_is_kept() {
+    let mut board = Board::new("os-1");
+    let incoming = board.incoming();
+    let bundle = big_bundle("os-2");
+    let floor = lemnos_slot_store::deadline::floor_ms(bundle.len() as u64);
+    fs::write(incoming.join("os-2.slot.tar"), &bundle).unwrap();
+    board.slots.caller(CallerId(3));
+    board.slots.job_deadline(Some(floor - 1));
+    assert_eq!(
+        board.slots.install_file("os-2.slot.tar", false, false),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert!(refusal_text(&mut board).starts_with("this install needs at least "));
+    assert!(incoming.join("os-2.slot.tar").exists());
+    board.slots.job_deadline(Some(floor));
+    board
+        .slots
+        .install_file("os-2.slot.tar", false, false)
+        .unwrap();
+}

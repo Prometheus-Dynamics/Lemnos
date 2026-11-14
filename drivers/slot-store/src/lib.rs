@@ -19,6 +19,7 @@ pub mod boot_raw;
 pub mod bootcheck;
 pub mod bootfat;
 pub mod boots;
+pub mod deadline;
 pub mod fallback;
 pub mod firmware;
 pub mod json;

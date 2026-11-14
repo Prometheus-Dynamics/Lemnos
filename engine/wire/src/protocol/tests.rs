@@ -47,6 +47,17 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         (
+            "call-job-within",
+            Frame::CallJobWithin {
+                id: 15,
+                device: 3,
+                contract: 0,
+                method: 4,
+                deadline_ms: 90_000,
+                args: &[0xaa],
+            },
+        ),
+        (
             "job-started",
             Frame::JobStarted {
                 id: 15,

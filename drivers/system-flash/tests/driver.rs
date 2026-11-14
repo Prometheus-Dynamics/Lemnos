@@ -1205,3 +1205,52 @@ fn the_nand_write_holds_one_erase_block_and_one_page_beyond_what_it_writes() {
         "peak {peak} bytes"
     );
 }
+
+/// The reason the driver gives for the start it just refused.
+fn refusal_text(driver: &mut SystemFlash) -> String {
+    let mut text = [0u8; 256];
+    let mut said = lemnos_core::Reply::new(&mut text);
+    driver.job_refusal(&mut said);
+    String::from_utf8(said.written().to_vec()).unwrap()
+}
+
+/// The sizing rule's floor, for the raw image's size: a write started under it is refused by name
+/// with the minimum, before the target is opened; at it the write runs; with no deadline there is
+/// no floor.
+#[test]
+fn a_write_under_the_deadline_floor_is_refused_at_start_and_writes_nothing() {
+    let rig = Rig::new("floor", SMALL);
+    let image = fixture("small.img");
+    let mut driver = ready(&rig, SMALL_SHA, SMALL);
+    let floor = lemnos_slot_store::deadline::floor_ms(SMALL);
+    driver.job_deadline(Some(floor - 1));
+    assert_eq!(
+        driver.write(SMALL, FORMAT_RAW),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        refusal_text(&mut driver),
+        format!(
+            "this flash needs at least {floor} ms for {SMALL} bytes; the deadline given is {}",
+            floor - 1
+        )
+    );
+    assert!(
+        rig.file_bytes().iter().all(|&b| b == 0),
+        "nothing was written"
+    );
+    driver.job_deadline(Some(floor));
+    let job = driver.write(SMALL, FORMAT_RAW).unwrap();
+    stream(&mut driver, &image, 1000).unwrap();
+    assert_eq!(
+        job_result(&mut driver, job),
+        (Status::OK, written(SMALL, 1))
+    );
+    assert_eq!(rig.file_bytes(), image);
+    // No deadline: no floor, and no stale reason.
+    driver.job_deadline(None);
+    assert_eq!(refusal_text(&mut driver), "");
+    let job = driver.write(SMALL, FORMAT_RAW).unwrap();
+    stream(&mut driver, &image, 1000).unwrap();
+    assert_eq!(job_result(&mut driver, job).0, Status::OK);
+}

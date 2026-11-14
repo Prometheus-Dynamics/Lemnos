@@ -96,6 +96,23 @@ impl Client {
         self.lock().start_job(handle, method, args)
     }
 
+    /// See [`Session::takes_job_deadline`].
+    pub fn takes_job_deadline(&self) -> bool {
+        self.lock().takes_job_deadline()
+    }
+
+    /// See [`Session::start_job_within`].
+    pub fn start_job_within(
+        &self,
+        handle: &mut Handle,
+        method: u16,
+        args: &[u8],
+        deadline_ms: u64,
+    ) -> Result<u64, Error> {
+        self.lock()
+            .start_job_within(handle, method, args, deadline_ms)
+    }
+
     /// See [`Session::cancel_job`].
     pub fn cancel_job(&self, job: u64) -> Result<(), Error> {
         self.lock().cancel_job(job)

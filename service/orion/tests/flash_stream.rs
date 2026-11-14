@@ -579,8 +579,17 @@ fn orion_status_busy() -> i32 {
 }
 
 fn device_busy(s: &Setup) -> bool {
-    let mut run = s
-        .dashboard
+    device_busy_through(&s.dashboard)
+}
+
+fn device_busy_through(dashboard: &Orion) -> bool {
+    probe(dashboard).unwrap_or(true)
+}
+
+/// Whether the device refuses a write start as busy; `None` while the probe cannot be answered
+/// (a bridge that has not yet declared its actions: ORION-PIN(C36), the run is refused NotFound).
+fn probe(dashboard: &Orion) -> Option<bool> {
+    let mut run = dashboard
         .run(&ActionCall {
             name: "lemnos.flash.call",
             target: Target::Resource("lemnos.flash".parse().expect("name")),
@@ -588,11 +597,13 @@ fn device_busy(s: &Setup) -> bool {
             deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
             detached: false,
         })
-        .expect("run");
-    let finished = run.finish(WAIT).expect("the probe ends");
-    finished
-        .detail
-        .contains(&format!("refused ({})", orion_status_busy()))
+        .ok()?;
+    let finished = run.finish(WAIT).ok()?;
+    Some(
+        finished
+            .detail
+            .contains(&format!("refused ({})", orion_status_busy())),
+    )
 }
 
 /// A stream whose sender goes quiet mid-image holds the device's job until the stall bound, then
@@ -641,6 +652,96 @@ fn a_stream_whose_sender_goes_quiet_frees_its_device_after_the_stall_bound() {
         freed,
         "the stream still held the device {stall:?} after its sender went quiet"
     );
+}
+
+/// A stream in progress when the comm core goes away: the bridge's session is lost, the stream it was
+/// feeding ends and its job on lemnosd is released with it, so once the bridge is connected again the
+/// device is free and a new stream can start and finish. The stall bound here is a minute, so it is
+/// the loss that frees the device, not the stall rule. Mutation: without the stream's end at a session
+/// loss the device stays busy until the bound and this test fails.
+#[test]
+fn a_comm_core_restart_ends_the_stream_in_progress_and_frees_its_device() {
+    let stall = Duration::from_secs(60);
+    let s = setup_stalled("stream-loss", SMALL + 4096, stall);
+    assert_eq!(
+        s.push("image.img.xz.json", &manifest(BOARD, SMALL_SHA, None))
+            .state,
+        FileState::Committed
+    );
+    let image = fixture("crc64.img.xz");
+    let (let_go, wait) = mpsc::channel();
+    let quiet = Quiet {
+        limit: image.len(),
+        image,
+        at: 0,
+        read_all: false,
+        pace: None,
+        first: None,
+        wait,
+    };
+    let socket = s._board.socket().to_path_buf();
+    let pushing = std::thread::spawn(move || {
+        let sender = wait_for("a quiet sender", || {
+            Orion::connect(&Address::Local(socket.clone()), "quiet").ok()
+        });
+        let mut quiet = quiet;
+        let _ = sender
+            .files()
+            .push("lemnos/flash/image.img.xz", &mut quiet, |_, _| {});
+    });
+    wait_for("the stream to hold the device", || {
+        device_busy(&s).then_some(())
+    });
+    // The comm core goes, with the sender's session and the bridge's; the sender is let go too.
+    let Setup {
+        dir,
+        target,
+        dashboard,
+        _bridge,
+        _service,
+        _logic,
+        _board,
+    } = s;
+    drop(dashboard);
+    drop(_board);
+    let _ = let_go.send(());
+    let _ = pushing.join();
+    let board = Board::start_for_node(&dir);
+    let dashboard = wait_for("a dashboard session", || {
+        Orion::connect(&Address::Local(board.socket().to_path_buf()), "dashboard").ok()
+    });
+    wait_for("the flash device again", || {
+        let found = dashboard.resources("lemnos.flash").ok()?;
+        found.iter().any(|f| f.name == "lemnos.flash").then_some(())
+    });
+    // Well inside the bound, the loss has freed the device.
+    wait_for("the device to be free", || {
+        probe(&dashboard).filter(|busy| !busy).map(|_| ())
+    });
+    // And a new stream starts and finishes through the new session.
+    let push = |name: &str, bytes: &[u8]| {
+        wait_for("a push the bridge answers", || {
+            dashboard
+                .files()
+                .push(
+                    &format!("lemnos/flash/{name}"),
+                    &mut Cursor::new(bytes),
+                    |_, _| {},
+                )
+                .ok()
+        })
+    };
+    assert_eq!(
+        push("image.img.xz.json", &manifest(BOARD, SMALL_SHA, None)).state,
+        FileState::Committed
+    );
+    let sent = push("image.img.xz", &fixture("crc64.img.xz"));
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    assert_eq!(
+        &std::fs::read(&target).expect("target")[..SMALL as usize],
+        fixture("small.img").as_slice()
+    );
+    drop((_bridge, _service, _logic));
 }
 
 #[test]

@@ -53,6 +53,10 @@ pub trait Instance: Send {
     }
     /// See [`Driver::job_cancel`].
     fn job_cancel(&mut self, _job: JobId) {}
+    /// See [`Driver::job_deadline`]. A package's driver is not told: it has no floor.
+    fn job_deadline(&mut self, _deadline_ms: Option<u64>) {}
+    /// See [`Driver::job_refusal`].
+    fn job_refusal(&mut self, _text: &mut Reply<'_>) {}
     /// See [`Driver::wait_fd`]: a duplicate of it, for the host to wait on.
     fn wait_fd(&self) -> Option<OwnedFd> {
         None
@@ -114,6 +118,14 @@ impl<D: Driver + Send> Instance for D {
 
     fn job_cancel(&mut self, job: JobId) {
         Driver::job_cancel(self, job);
+    }
+
+    fn job_deadline(&mut self, deadline_ms: Option<u64>) {
+        Driver::job_deadline(self, deadline_ms);
+    }
+
+    fn job_refusal(&mut self, text: &mut Reply<'_>) {
+        Driver::job_refusal(self, text);
     }
 }
 
@@ -402,6 +414,8 @@ struct Slot {
     refusal: Option<String>,
     /// Long jobs of this device's driver that are still open.
     open_jobs: AtomicU32,
+    /// Why the driver refused the job start of the caller named, until that start answers.
+    job_refusal: Mutex<Option<(CallerId, String)>>,
     /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
     end: Mutex<Option<EndHold>>,
     /// The callers that have called this device and have not gone, for [`Router::others_use`]. A
@@ -557,6 +571,7 @@ impl Slot {
             kicked: AtomicBool::new(false),
             made,
             open_jobs: AtomicU32::new(0),
+            job_refusal: Mutex::new(None),
             users: Mutex::new([None; MAX_USERS]),
         })
     }
@@ -687,6 +702,26 @@ struct Inner {
 
 /// The most long jobs open at once, across every device.
 pub const MAX_JOBS: usize = 64;
+
+/// The longest reason a driver gives for refusing a job start; a longer one is cut off.
+const REFUSAL_MAX: usize = 256;
+
+/// A job start the host or its driver refused: the status, and the driver's reason in words
+/// (empty when it gave none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRefusal {
+    pub status: Status,
+    pub reason: String,
+}
+
+impl JobRefusal {
+    fn of(status: Status) -> Self {
+        Self {
+            status,
+            reason: String::new(),
+        }
+    }
+}
 /// The largest result a long job can finish with.
 pub const JOB_RESULT_MAX: usize = 4096;
 
@@ -787,8 +822,15 @@ struct Reading(&'static Inner);
 impl Router for Reading {
     fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
         let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.0
-            .call_from(&slot, CallerId::LOCAL, true, false, method, args, reply)
+        self.0.call_from(
+            &slot,
+            CallerId::LOCAL,
+            true,
+            Start::Call,
+            method,
+            args,
+            reply,
+        )
     }
 
     fn health(&self, device: u32) -> Health {
@@ -821,7 +863,8 @@ impl Router for Routes {
             return Router::call(self.0, device, method, args, reply);
         }
         let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.0.call_here(&slot, caller, false, method, args, reply)
+        self.0
+            .call_here(&slot, caller, Start::Call, method, args, reply)
     }
 
     fn start_job(
@@ -835,7 +878,7 @@ impl Router for Routes {
         let mut reply = [0u8; 8];
         let n = self
             .0
-            .call_here(&slot, caller, true, method, args, &mut reply)?;
+            .call_here(&slot, caller, Start::Job(None), method, args, &mut reply)?;
         u64::decode(&mut Reader::new(&reply[..n]))
     }
 
@@ -854,13 +897,27 @@ pub struct Host {
     inner: &'static Inner,
 }
 
+/// What a call starts: a plain call, or a long job with the deadline its caller gave (`None` when
+/// it gave none: no deadline, no floor).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Start {
+    Call,
+    Job(Option<u64>),
+}
+
+impl Start {
+    fn is_job(self) -> bool {
+        matches!(self, Self::Job(_))
+    }
+}
+
 /// One driver call, as handed to its lane.
 pub(crate) struct CallWork {
     inner: &'static Inner,
     slot: Arc<Slot>,
     method: MethodId,
     caller: CallerId,
-    as_job: bool,
+    start: Start,
 }
 
 impl CallWork {
@@ -868,7 +925,7 @@ impl CallWork {
         self.inner.call_here(
             &self.slot,
             self.caller,
-            self.as_job,
+            self.start,
             self.method,
             args,
             reply,
@@ -1534,12 +1591,12 @@ impl Inner {
         &self,
         slot: &Slot,
         caller: CallerId,
-        as_job: bool,
+        start: Start,
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
     ) -> Result<usize> {
-        self.call_from(slot, caller, false, as_job, method, args, reply)
+        self.call_from(slot, caller, false, start, method, args, reply)
     }
 
     /// Runs a method here. `reads_only` is set for a caller that may change nothing: a
@@ -1552,7 +1609,7 @@ impl Inner {
         slot: &Slot,
         caller: CallerId,
         reads_only: bool,
-        as_job: bool,
+        start: Start,
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
@@ -1561,6 +1618,7 @@ impl Inner {
             return Err(Status::NO_DEVICE);
         }
         slot.note_user(caller);
+        let as_job = start.is_job();
         match (slot.starts_job(method), as_job) {
             // A job is started with the job form, which keeps it on the books; a plain call
             // would leave it running with no one to tell.
@@ -1592,7 +1650,21 @@ impl Inner {
             if tracks_callers {
                 instance.caller(caller);
             }
+            if let Start::Job(deadline_ms) = start {
+                instance.job_deadline(deadline_ms);
+            }
             let mut status = instance.dispatch(method, args, &mut writer);
+            if as_job && !status.is_ok() {
+                // The driver may say why it refused, with the numbers in it.
+                let mut text = [0u8; REFUSAL_MAX];
+                let mut said = Reply::new(&mut text);
+                instance.job_refusal(&mut said);
+                if let Ok(reason) = core::str::from_utf8(said.written())
+                    && !reason.is_empty()
+                {
+                    *lock(&slot.job_refusal) = Some((caller, reason.to_owned()));
+                }
+            }
             if as_job && status.is_ok() {
                 status = match JobId::decode(&mut Reader::new(writer.written())) {
                     Ok(job) if writer.len() == 8 => {
@@ -1794,7 +1866,7 @@ impl Inner {
         &'static self,
         slot: Arc<Slot>,
         caller: CallerId,
-        as_job: bool,
+        start: Start,
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
@@ -1805,7 +1877,7 @@ impl Inner {
             slot: Arc::clone(&slot),
             method,
             caller,
-            as_job,
+            start,
         });
         match lane.run(args, reply, self.options.call_deadline, work) {
             Ok(result) => result,
@@ -2102,7 +2174,7 @@ impl BoardView for BoardRead<'_> {
 impl Router for Inner {
     fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
         let slot = self.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.call_here(&slot, CallerId::LOCAL, false, method, args, reply)
+        self.call_here(&slot, CallerId::LOCAL, Start::Call, method, args, reply)
     }
 
     fn health(&self, device: u32) -> Health {
@@ -2581,7 +2653,8 @@ impl Host {
         reply: &mut [u8],
     ) -> Result<usize> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.inner.call(slot, caller, false, method, args, reply)
+        self.inner
+            .call(slot, caller, Start::Call, method, args, reply)
     }
 
     /// Borrows the two bulk endpoints of a device's function for `caller`, as `[OUT, IN]`
@@ -2643,12 +2716,51 @@ impl Host {
         method: MethodId,
         args: &[u8],
     ) -> Result<u64> {
-        let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        let mut reply = [0u8; 8];
-        let n = self
+        self.start_job_within(caller, device, method, args, None)
+            .map_err(|refusal| refusal.status)
+    }
+
+    /// [`Host::start_job`] with the deadline the caller gives the job, in milliseconds from its
+    /// start (`None`: no deadline, and so no floor). The deadline goes to the driver before the
+    /// method ([`Driver::job_deadline`]), and a driver that sizes its work refuses a start whose
+    /// deadline cannot be enough, saying why ([`Driver::job_refusal`]); the job is then never
+    /// started. The host itself neither enforces nor ends a job at its deadline: the caller's
+    /// cancel does that.
+    pub fn start_job_within(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+        deadline_ms: Option<u64>,
+    ) -> core::result::Result<u64, JobRefusal> {
+        let slot = self
             .inner
-            .call(slot, caller, true, method, args, &mut reply)?;
-        u64::decode(&mut Reader::new(&reply[..n]))
+            .slot(device)
+            .ok_or(JobRefusal::of(Status::NOT_FOUND))?;
+        let mut reply = [0u8; 8];
+        *lock(&slot.job_refusal) = None;
+        let started = self.inner.call(
+            Arc::clone(&slot),
+            caller,
+            Start::Job(deadline_ms),
+            method,
+            args,
+            &mut reply,
+        );
+        match started {
+            Ok(n) => u64::decode(&mut Reader::new(&reply[..n])).map_err(JobRefusal::of),
+            Err(status) => {
+                // The reason is the caller's own: another caller's start on the same device
+                // may have left one.
+                let reason = lock(&slot.job_refusal)
+                    .take()
+                    .filter(|(who, _)| *who == caller)
+                    .map(|(_, reason)| reason)
+                    .unwrap_or_default();
+                Err(JobRefusal { status, reason })
+            }
+        }
     }
 
     /// Cancels a job `caller` started. The driver stops it and it finishes as

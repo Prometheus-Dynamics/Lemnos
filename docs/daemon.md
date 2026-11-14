@@ -666,8 +666,10 @@ Orion transfer number is carried into the next one; a partial file on disk is ov
 again. What the bridge keeps across a reconnect is its own: the device slots (the bridge's numbering, not Orion's),
 lemnosd's handles and jobs, and the run table. The test that holds this to account is
 `a_comm_core_restart_is_connected_to_again`: after each of two restarts it waits for the bridge's own session with both
-devices declared, and each run then goes through the session that is up. Known gap: a stream in progress when the Orion connection
-goes keeps its lemnosd job, and the device it feeds, until the bridge process exits.
+devices declared, and each run then goes through the session that is up. A stream in progress when the Orion connection
+goes is ended with it: the files thread drops its streamer (`impl Drop for Streamer`, `stream.rs`), which cancels the
+stream's job on its lemnosd connection by the stall rule's own path, so the device is free for the next stream.
+`a_comm_core_restart_ends_the_stream_in_progress_and_frees_its_device` holds it (the stall bound there is a minute).
 
 **Cancels say why.** Orion's cancel carries a reason: `Asked` (the caller asked), `CallerGone` (its session
 ended), `Deadline` (the run's deadline passed), `Stopping` (node logic stopping), or none. Each ends the run as
@@ -721,7 +723,8 @@ are not released by a session's end or a lease.
 
 **Runs, deadlines and detached runs.** The bridge starts no Orion run and forwards none: it is a provider, and
 its only `ActionCall`s are its tests' (`grep ActionCall service/orion`). A run that a caller issues is the caller's:
-the deadline is the caller's, and the bridge neither passes nor checks one. What a caller can run, and what the
+the deadline is the caller's: the bridge does not check it, and passes it on with a long job's start (see "The install
+deadline"). What a caller can run, and what the
 bridge itself starts on lemnosd, is this table. A node refuses a detached run without a deadline (`NoDeadline`, 18)
 and one over `actions.max_detached_ms` (`DeadlineTooLong`, 19, default 3,600,000 ms).
 
@@ -729,9 +732,9 @@ and one over `actions.max_detached_ms` (`DeadlineTooLong`, 19, default 3,600,000
 |---|---|---|---|---|---|
 | any Orion run on this bridge | the caller | either | the caller's `deadline_ms` | the bridge does not decide a caller's run | yes, if the caller's job is that long; then the node sets `actions.max_detached_ms` (the Orion node's settings) above it and the caller passes a deadline at least as long |
 | the bridge's test runs (`service/orion/tests`) | the bridge's tests | `detached: true` only where a test says so | `calls::RUN_DEADLINE_MS` = 1,800,000 ms | a decision under the default hour, not a measurement of any job | no: the tests take milliseconds |
-| `.call` long job (a method the description marks as a job, the self-test and others) | the caller; the bridge starts the job on lemnosd (`calls.rs`, `start_job`) with no lemnosd deadline | the caller's choice | the caller's | the job's length is the driver's; the bridge gives it no bound beyond the run's cancel and the caller's end | yes in principle (a long self-test or a driver's long method); the node's `actions.max_detached_ms` and the caller's deadline must cover it |
-| a slot install or stage | a caller's `.call` on the system-slots driver, as above | the caller's choice | the caller's | the bridge does not run a slot install itself and has no formula for one | yes if the install is that long; same settings as above |
-| an image written to a flash device (`stream.rs`, `start_job` on lemnosd) | the bridge, from a transfer over Orion files | never a run | none: the bound is the stall rule (`files::IDLE`, ten minutes without a chunk) | the transfer is a file transfer, not an Orion run; no Orion deadline applies | yes by size; no Orion setting is needed |
+| `.call` long job (a method the description marks as a job, the self-test and others) | the caller; the bridge starts the job on lemnosd (`calls.rs`) with the run's `deadline_ms` (`start_job_within`; no deadline, or an older lemnosd, `start_job`) | the caller's choice | the caller's | the job's length is the driver's; the bridge gives it no bound beyond the run's cancel and the caller's end | yes in principle (a long self-test or a driver's long method); the node's `actions.max_detached_ms` and the caller's deadline must cover it |
+| a slot install or stage | a caller's `.call` on the system-slots driver, as above | the caller's choice | the caller's, and the driver refuses one under the floor at the start | the bridge does not run a slot install itself and has no formula for one: the driver has | yes if the install is that long; same settings as above |
+| an image written to a flash device (`stream.rs`, `start_job` on lemnosd) | the bridge, from a transfer over Orion files | never a run | none: the bound is the stall rule (`files::IDLE`, ten minutes without a chunk), so no floor applies | the transfer is a file transfer, not an Orion run; no Orion deadline applies | yes by size; no Orion setting is needed |
 
 A caller that wants a run longer than an hour names it by two settings: the node's `actions.max_detached_ms` in the
 Orion node settings, and the caller's `deadline_ms`. Neither is a board-file key.
@@ -766,12 +769,23 @@ target sustains less than about 39 kB/s (raw) or 30 kB/s (gzip), and then the im
 Orion node settings above the minimum, and the caller must pass that deadline. A flash's minimum cannot be stated yet: no
 flash image's raw size is in the repository (`W1b`, the first flash on raw NAND, has none).
 
-**The floor is not enforced yet.** The rule is the minimum a client must pass; the bridge does not check it. At this revision
-neither the driver nor lemnosd's job start receives a deadline: the caller's deadline stops at the bridge (Orion's run carries
-it, `Request::Run.deadline_ms`), and the install's size is an argument the bridge does not interpret (nothing in `service/`
-may know what a device does). Refusing at start by name therefore needs a shared change: either the install and flash
-methods take a deadline (an appended method, in `contracts/system-slots` and `contracts/system-flash`), or lemnosd's job
-start carries the run's deadline (`engine/wire`). Neither is in this bridge PR.
+**The floor is enforced at the start.** A long job's start can carry a deadline, in milliseconds from its start:
+
+- The caller gives it with lemnosd's `CallJobWithin` (wire kind 42, an `added` frame of the jobs part, sent only to a daemon
+  that set the `JOB_DEADLINE` feature bit, 128; `docs/wire.md`), or `Session::start_job_within` and `Client::start_job_within`
+  (`engine/client`). The bridge gives the run's `deadline_ms` (Orion's `Request::Run.deadline_ms`, zero for none), and starts
+  the job with no deadline on a daemon that does not take one.
+- The host gives it to the driver just before the job method (`Driver::job_deadline(Option<u64>)`, `Lifecycle::job_deadline`,
+  called for every job start, `None` when none was given; `Host::start_job_within`). A driver whose entry runs jobs but does not
+  size its work ignores it. A package's driver is not told.
+- The `system-slots` driver (`install`, `install_file`) and the `system-flash` driver (`write`, sized by the manifest's raw
+  image size, not the stream's) compare it with the floor (`lemnos_slot_store::deadline`, the one place `R` and `F` are
+  written, each marked an assumption) before anything is opened, staged or written. A deadline under the floor refuses the
+  start with `INVALID_ARGUMENT` and the driver's reason (`Driver::job_refusal`), which the daemon sends as the refusal's text:
+  `this install needs at least N ms for B bytes; the deadline given is M` (`flash` for a flash). A deadline at or over the floor
+  starts the job. The job is never cut part-way: the daemon does not end a job at its deadline, the caller's cancel does.
+- **No deadline is no floor.** A job started with `CallJob` (no deadline: `lemnos-ctl`, a typed handle's job method, the
+  bridge's stream of a flash image, a run whose `deadline_ms` is 0) is checked against nothing.
 
 **Refusals are named.** Every refusal of the Orion session, and every loss of it, is logged on one path as a named
 state: `orion: refused: <reason>` (the connect failed, the node is not the configured one, or Orion refused a

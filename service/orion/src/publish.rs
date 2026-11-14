@@ -248,7 +248,11 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             }
             Err(Opening::Failed(message)) => {
                 log(&message);
-                pause_for_socket(shared, backoff.next_delay(), watch.as_ref());
+                if pause_for_socket(shared, backoff.next_delay(), watch.as_ref()) {
+                    // The socket was just made, and is not listening yet or not ready: try soon
+                    // again, not after a delay grown while it was absent.
+                    backoff.reset();
+                }
                 continue;
             }
         };
@@ -357,6 +361,17 @@ struct Fact {
     name: String,
     publisher: Option<Publisher>,
     value: Option<String>,
+}
+
+/// What an Orion run asks for: its action, target and arguments, its deadline in milliseconds (zero
+/// for none), who asked and the token of the session they asked on.
+struct Asked {
+    name: String,
+    target: Target,
+    args: Vec<u8>,
+    deadline_ms: u64,
+    caller: String,
+    token: u64,
 }
 
 /// One device as published.
@@ -613,16 +628,26 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args, caller, token) = match request {
+            let (call, run) = match request {
                 Request::Run {
                     call,
                     name,
                     target,
                     args,
+                    deadline_ms,
                     caller,
                     session,
-                    ..
-                } => (call, name, target, args, caller, session),
+                } => (
+                    call,
+                    Asked {
+                        name,
+                        target,
+                        args,
+                        deadline_ms,
+                        caller,
+                        token: session,
+                    },
+                ),
                 // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
                 // the call does. The reason is passed on: a cancel for a session that ended renews
                 // nothing, and the session's end is what releases its holds (see `CallerGone`).
@@ -644,11 +669,11 @@ impl Session {
                     continue;
                 }
             };
-            let job = self.job(call, &name, &target, args, caller, token);
+            let job = self.job(call, run);
             match job {
                 Ok(job) => {
-                    if token != 0 {
-                        self.tokens.insert(token);
+                    if job.token != 0 {
+                        self.tokens.insert(job.token);
                     }
                     if jobs.send(Message::Run(job)).is_ok() {
                         self.pending.insert(call);
@@ -677,15 +702,16 @@ impl Session {
     }
 
     /// The job for a run, or why it is refused.
-    fn job(
-        &self,
-        call: u64,
-        name: &str,
-        target: &Target,
-        args: Vec<u8>,
-        caller: String,
-        token: u64,
-    ) -> Result<Job, String> {
+    fn job(&self, call: u64, run: Asked) -> Result<Job, String> {
+        let Asked {
+            name,
+            target,
+            args,
+            deadline_ms,
+            caller,
+            token,
+        } = run;
+        let name = name.as_str();
         let &(slot, verb) = self
             .actions
             .get(name)
@@ -695,7 +721,7 @@ impl Session {
             .get(&slot)
             .ok_or_else(|| format!("no action {name:?} here"))?;
         let resource = device.resource.name();
-        if *target != Target::Resource(resource.clone()) {
+        if target != Target::Resource(resource.clone()) {
             return Err(format!(
                 "{name} runs against the resource {}",
                 resource.as_str()
@@ -710,6 +736,7 @@ impl Session {
             args,
             caller,
             token,
+            deadline_ms,
         })
     }
 
@@ -1249,10 +1276,12 @@ impl SocketWatch {
     }
 }
 
-/// [`pause`], ended early by the comm core's socket appearing (when it can be watched).
-fn pause_for_socket(shared: &Shared, wait: Duration, watch: Option<&SocketWatch>) {
+/// [`pause`], ended early by the comm core's socket appearing (when it can be watched); says whether
+/// it was.
+fn pause_for_socket(shared: &Shared, wait: Duration, watch: Option<&SocketWatch>) -> bool {
     let Some(watch) = watch else {
-        return pause(shared, wait);
+        pause(shared, wait);
+        return false;
     };
     let until = Instant::now() + wait;
     while !shared.stopping() {
@@ -1268,9 +1297,10 @@ fn pause_for_socket(shared: &Shared, wait: Duration, watch: Option<&SocketWatch>
         // A change in the mirror is no reason to try again (see [`pause`]); a stop is.
         shared.quiet();
         if watch.appeared() {
-            break;
+            return true;
         }
     }
+    false
 }
 
 /// Waits up to `wait` for a wake-up, with no session.

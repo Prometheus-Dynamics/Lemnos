@@ -166,7 +166,15 @@ impl Client {
                 contract,
                 method,
                 args,
-            } => self.call_job(id, device, contract, method, args),
+            } => self.call_job(id, device, contract, method, args, None),
+            Frame::CallJobWithin {
+                id,
+                device,
+                contract,
+                method,
+                deadline_ms,
+                args,
+            } => self.call_job(id, device, contract, method, args, Some(deadline_ms)),
             Frame::JobCancel { id, job } => self.cancel_job(id, job),
             Frame::EndpointsOpen { id, device } => self.endpoints_open(id, device),
             Frame::EndpointsOpenEnd { id, device } => self.endpoints_open_end(id, device),
@@ -196,11 +204,17 @@ impl Client {
             parts: Tail(&PART_BYTES[..]),
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
-            // END belongs to the endpoints part: a client that refuses that part gets neither bit.
-            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END)
+            // END belongs to the endpoints part and JOB_DEADLINE to the jobs part: a client that
+            // refuses that part gets neither of its bits.
+            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END | lemnos_wire::JOB_DEADLINE)
                 & !theirs.refused
                 & if theirs.refused & feature::ENDPOINTS != 0 {
                     !lemnos_wire::ENDPOINTS_END
+                } else {
+                    !0
+                }
+                & if theirs.refused & feature::JOBS != 0 {
+                    !lemnos_wire::JOB_DEADLINE
                 } else {
                     !0
                 },
@@ -369,11 +383,31 @@ impl Client {
         true
     }
 
-    fn call_job(&self, id: u32, device: u32, contract: u8, method: u16, args: &[u8]) -> Keep {
+    fn call_job(
+        &self,
+        id: u32,
+        device: u32,
+        contract: u8,
+        method: u16,
+        args: &[u8],
+        deadline_ms: Option<u64>,
+    ) -> Keep {
         let method = MethodId { contract, method };
-        match self.core.host.start_job(self.conn.id, device, method, args) {
+        match self
+            .core
+            .host
+            .start_job_within(self.conn.id, device, method, args, deadline_ms)
+        {
             Ok(job) => self.conn.answer(&Frame::JobStarted { id, job }),
-            Err(status) => return self.refuse(id, status, "the job could not be started"),
+            Err(refusal) => {
+                // The driver's own reason, when it gave one: it names what it refused.
+                let text = if refusal.reason.is_empty() {
+                    "the job could not be started"
+                } else {
+                    refusal.reason.as_str()
+                };
+                return self.refuse(id, refusal.status, text);
+            }
         }
         // What the job has already done goes out after this answer.
         self.core.wake();

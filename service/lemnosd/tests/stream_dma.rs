@@ -455,7 +455,7 @@ fn the_service_says_it_has_streams_of_handles() {
         feature::STREAM_HANDLES
     );
     assert_eq!(
-        raw.features & !(feature::EVERY | lemnos_wire::ENDPOINTS_END),
+        raw.features & !(feature::EVERY | lemnos_wire::ENDPOINTS_END | lemnos_wire::JOB_DEADLINE),
         0,
         "and no bit this build doesn't know"
     );

@@ -102,6 +102,7 @@ use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::boots;
+use lemnos_slot_store::deadline;
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
@@ -122,6 +123,10 @@ pub struct SystemSlots {
     reserve: u64,
     keep: u32,
     calling: CallerId,
+    /// The deadline the caller gave the install about to start, until the start takes it.
+    deadline_ms: Option<u64>,
+    /// Why the last start was refused for its deadline, until the next start.
+    deadline_refusal: String,
     install: Option<Install>,
     next_job: u64,
     /// The board's indicator, when it has one: it shows the install's phase.
@@ -263,6 +268,8 @@ impl SystemSlots {
             reserve: 2048 << 20,
             keep: DEFAULT_KEEP,
             calling: CallerId::LOCAL,
+            deadline_ms: None,
+            deadline_refusal: String::new(),
             install: None,
             next_job: 0,
             indicator: None,
@@ -525,6 +532,19 @@ impl SystemSlots {
     }
 
     /// Starts an install of `size` bytes, written by its starter or read from `source`.
+    /// Refuses, by name, an install whose deadline is under the floor for `size` bytes
+    /// ([`lemnos_slot_store::deadline`]); the deadline is taken, so the check is made once. No
+    /// deadline has no floor.
+    fn deadline_floor(&mut self, size: u64) -> Result<()> {
+        match deadline::refusal("install", size, self.deadline_ms.take()) {
+            Some(text) => {
+                self.deadline_refusal = text;
+                Err(Status::INVALID_ARGUMENT)
+            }
+            None => Ok(()),
+        }
+    }
+
     fn begin(
         &mut self,
         size: u64,
@@ -535,6 +555,7 @@ impl SystemSlots {
         if self.install.is_some() {
             return Err(Status::BUSY);
         }
+        self.deadline_floor(size)?;
         if self.require_signed && self.keys.is_empty() {
             return Err(Status::NOT_PERMITTED);
         }
@@ -1250,6 +1271,15 @@ impl Lifecycle for SystemSlots {
         self.calling = caller;
     }
 
+    fn job_deadline(&mut self, deadline_ms: Option<u64>) {
+        self.deadline_ms = deadline_ms;
+        self.deadline_refusal.clear();
+    }
+
+    fn job_refusal(&mut self, text: &mut Reply<'_>) {
+        let _ = text.write(self.deadline_refusal.as_bytes());
+    }
+
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
         let Some(install) = self.install.as_ref().filter(|i| i.job == job) else {
             return JobState::Finished(Status::NOT_FOUND);
@@ -1334,6 +1364,8 @@ impl Slots for SystemSlots {
         }
         let incoming = self.layout.images().join(INCOMING);
         let (source, size) = install::open_incoming(&incoming, name)?;
+        // Refused for its deadline, the staged file stays where it is: nothing is touched.
+        self.deadline_floor(size)?;
         // A file that can't be installed is the driver's to delete too.
         let job = self.begin(size, pin, keep_old, Some(source));
         if job.is_err() {

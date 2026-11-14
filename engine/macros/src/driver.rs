@@ -261,6 +261,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::job_cancel(self, __job)
             }
 
+            fn job_deadline(&mut self, __deadline_ms: ::core::option::Option<u64>) {
+                <Self as ::lemnos_core::Lifecycle>::job_deadline(self, __deadline_ms)
+            }
+
+            fn job_refusal(&mut self, __text: &mut ::lemnos_core::Reply<'_>) {
+                <Self as ::lemnos_core::Lifecycle>::job_refusal(self, __text)
+            }
+
             fn dispatch(
                 &mut self,
                 __method: ::lemnos_core::MethodId,

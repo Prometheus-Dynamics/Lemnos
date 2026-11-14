@@ -121,6 +121,10 @@ pub struct Job {
     pub caller: String,
     /// The token of the Orion session that asked, as Orion gives it: zero when Orion does not say.
     pub token: u64,
+    /// The run's deadline in milliseconds, as the caller gave it to Orion; zero for none. It goes
+    /// to lemnosd with a long job's start, where a driver that sizes its work (an install, a
+    /// flash) refuses a start whose deadline is under its floor. Zero: no deadline, no floor.
+    pub deadline_ms: u64,
 }
 
 /// What the publisher hands the call thread.
@@ -836,9 +840,13 @@ pub fn serve(
         // A long job runs on a connection of its own, kept by the run until the job ends.
         let run = connect_run()?;
         let mut handle = run.open_tag(&device.name, tag).map_err(failed)?;
-        let started = run
-            .start_job(&mut handle, method.id, &call.args)
-            .map_err(failed)?;
+        // A lemnosd from before the deadline (it says so at connect) is started without one.
+        let started = if job.deadline_ms == 0 || !run.takes_job_deadline() {
+            run.start_job(&mut handle, method.id, &call.args)
+        } else {
+            run.start_job_within(&mut handle, method.id, &call.args, job.deadline_ms)
+        }
+        .map_err(failed)?;
         *run_out = Some(run);
         return Ok(Served::Started(started));
     }

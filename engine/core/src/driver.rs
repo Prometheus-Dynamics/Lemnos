@@ -187,6 +187,10 @@ pub trait Driver: Sized {
     }
     /// See [`Lifecycle::job_cancel`].
     fn job_cancel(&mut self, _job: JobId) {}
+    /// See [`Lifecycle::job_deadline`].
+    fn job_deadline(&mut self, _deadline_ms: Option<u64>) {}
+    /// See [`Lifecycle::job_refusal`].
+    fn job_refusal(&mut self, _text: &mut Reply<'_>) {}
 }
 
 /// The part of a driver its author writes when using `#[driver]`.
@@ -314,6 +318,18 @@ pub trait Lifecycle: Sized {
     /// [`JobState::Finished`] with [`Status::CANCELLED`] from then on. The host calls this when
     /// the starter cancels and when the starter goes. Must not block.
     fn job_cancel(&mut self, _job: JobId) {}
+    /// Says the deadline the caller gave the job about to start, in milliseconds from its start,
+    /// or `None` when it gave none. Called just before every job method (see
+    /// [`caller`](Self::caller)), so a driver that sizes its work keeps the value in a field,
+    /// takes it in the method, and may refuse the start (and never cut the job part-way) when the
+    /// deadline cannot be enough. A driver that does not size its work ignores it. No deadline
+    /// is no floor.
+    fn job_deadline(&mut self, _deadline_ms: Option<u64>) {}
+    /// Why the job start the driver just refused was refused, as text written to `text`: a
+    /// reason a person can read, with the numbers in it. The host asks right after a job method
+    /// answered with a status other than OK, and passes the text to the caller with the refusal.
+    /// Writes nothing by default.
+    fn job_refusal(&mut self, _text: &mut Reply<'_>) {}
 }
 
 /// A long job, by the number its driver gave it when it started.
