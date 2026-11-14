@@ -107,14 +107,23 @@ fn memory_that_could_shrink_or_is_not_a_ring_is_refused() {
         Reader::attach(OwnedFd::from(file)),
         Err(RingError::Unsealed)
     ));
-    // Sealed, but empty, too short, or zeroes.
-    for bytes in [0, 4, 64, 4096] {
+    // Sealed, but empty or too short for a header.
+    for bytes in [0, 4, 64] {
         let fd = memfd(bytes, libc::F_SEAL_SHRINK);
         assert!(
             matches!(Reader::attach(fd), Err(RingError::Malformed(_))),
             "{bytes}"
         );
     }
+    // Sealed zeroes are a header of layout 0: the layout is read first, so they are refused by it.
+    assert!(matches!(
+        Reader::attach(memfd(4096, libc::F_SEAL_SHRINK)),
+        Err(RingError::Layout {
+            found: 0,
+            reads: 2,
+            ..
+        })
+    ));
     // A real header in a file cut short of the ring it describes.
     let ring = Ring::create(&spec(4, 64, 256)).expect("ring");
     let short = memfd(4096, 0);

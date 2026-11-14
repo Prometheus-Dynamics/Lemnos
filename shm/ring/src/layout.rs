@@ -9,8 +9,11 @@ use crate::{Mem, MemMut, RingError};
 
 /// `SHMRING1`, little-endian.
 pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"SHMRING1");
-/// The layout this build reads and writes.
-pub(crate) const LAYOUT: u64 = 1;
+/// The layout this build reads and writes. Layout 1 is the ring as first published. Layout 2
+/// gives word 10 (the end code) a meaning: a layout 1 reader reads a closed or faulted topic as
+/// running, so the value had to move. Old and new readers refuse each other's rings, with a
+/// [`RingError::Layout`] naming both values where the reader is new.
+pub const LAYOUT: u64 = 2;
 /// Words in the header.
 pub(crate) const HEADER_WORDS: usize = 16;
 /// Words in a slot before its payload: stamp, time, meta, lane sequence.
@@ -123,11 +126,17 @@ impl Geometry {
             return Err(RingError::Malformed("shorter than a header"));
         }
         let word = |index| mem.load(index, Ordering::Relaxed);
+        // The layout is checked first: every other check below is only meaningful for the layout.
+        let layout = word(W_LAYOUT);
+        if layout != LAYOUT {
+            return Err(RingError::Layout {
+                what: "this ring",
+                found: layout,
+                reads: LAYOUT,
+            });
+        }
         if word(W_MAGIC) != MAGIC {
             return Err(RingError::Malformed("wrong magic"));
-        }
-        if word(W_LAYOUT) != LAYOUT {
-            return Err(RingError::Malformed("a layout this build does not read"));
         }
         let (shape, sizes) = (word(W_SHAPE), word(W_SIZES));
         let spec = Spec {
@@ -246,7 +255,7 @@ mod tests {
     #[test]
     fn the_layout_is_pinned() {
         assert_eq!(MAGIC.to_le_bytes(), *b"SHMRING1");
-        assert_eq!((LAYOUT, HEADER_WORDS, SLOT_HEADER_WORDS), (1, 16, 4));
+        assert_eq!((LAYOUT, HEADER_WORDS, SLOT_HEADER_WORDS), (2, 16, 4));
         assert_eq!(
             (W_MAGIC, W_LAYOUT, W_SHAPE, W_SIZES, W_TOTAL),
             (0, 1, 2, 3, 4)
@@ -308,9 +317,8 @@ mod tests {
         let made = format(&mem, &spec(3, 4, 100)).expect("format");
         assert_eq!(Geometry::read(&mem).expect("read"), made);
 
-        let damage: [(usize, u64, &str); 6] = [
+        let damage: [(usize, u64, &str); 5] = [
             (W_MAGIC, 7, "wrong magic"),
-            (W_LAYOUT, 2, "a layout this build does not read"),
             (W_SHAPE, 0, "shape out of range"),
             (W_SHAPE, 3 | 5 << 32, "history is not a power of two"),
             (W_TOTAL, 1, "size does not match the shape"),
@@ -337,5 +345,86 @@ mod tests {
             Geometry::read(&Heap::new(4)),
             Err(RingError::Malformed("shorter than a header"))
         ));
+    }
+
+    /// The header of a layout 1 ring, word for word, as the layout 1 build wrote it: one field,
+    /// history 2, payloads of 8 bytes, 29 words in all. Layout 1 wrote 1 in word 1 and kept word
+    /// 10 reserved and zero. Nothing else of the layout changed, so the rest is zero.
+    fn layout_one_ring() -> Heap {
+        let mem = Heap::new(29);
+        let header: [u64; 10] = [
+            u64::from_le_bytes(*b"SHMRING1"), // word 0: magic
+            1,                                // word 1: layout 1
+            1 | 2 << 32,                      // word 2: one field, history 2
+            8,                                // word 3: largest payload 8, expiry 0
+            29,                               // word 4: total words
+            0,
+            0,
+            0, // words 5 to 7: reserved
+            0, // word 8: head
+            0, // word 9: subscribers
+        ];
+        for (index, word) in header.iter().enumerate() {
+            mem.store(index, *word, Ordering::Relaxed);
+        }
+        mem
+    }
+
+    /// The error an attach gave, which must have been a refusal.
+    fn refused<T>(attached: Result<T, RingError>) -> RingError {
+        match attached {
+            Err(error) => error,
+            Ok(_) => panic!("a layout this build does not read was accepted"),
+        }
+    }
+
+    /// A layout 1 ring is refused by name, by a reader and by a writer, before its size or magic
+    /// are looked at.
+    #[test]
+    fn a_layout_one_ring_is_refused_naming_both_layouts() {
+        let mem = layout_one_ring();
+        let reader = refused(crate::Reader::over(&mem));
+        let writer = refused(crate::Writer::over(&mem));
+        for error in [reader, writer] {
+            match &error {
+                RingError::Layout {
+                    what: "this ring",
+                    found: 1,
+                    reads: 2,
+                } => {}
+                other => panic!("not the layout error: {other:?}"),
+            }
+            assert_eq!(
+                error.to_string(),
+                "this ring is layout 1; this build reads layout 2"
+            );
+        }
+    }
+
+    /// A layout 2 ring is written and read back by both ends, with a sample in it.
+    #[test]
+    fn a_layout_two_ring_round_trips_in_both_roles() {
+        let spec = Spec {
+            fields: 1,
+            history: 2,
+            max_payload: 8,
+            expiry_ms: 0,
+        };
+        let mem = Heap::new(Geometry::for_spec(&spec).expect("shape").total_words);
+        format(&mem, &spec).expect("format");
+        assert_eq!(mem.load(W_LAYOUT, Ordering::Relaxed), 2);
+        let mut writer = crate::Writer::over(&mem).expect("writer");
+        writer
+            .publish(
+                crate::FieldId(0),
+                crate::SampleTime::from_nanos(5),
+                crate::Flags::NONE,
+                &[7],
+            )
+            .expect("publish");
+        let mut reader = crate::Reader::over(&mem).expect("reader");
+        assert_eq!(reader.end(), 0, "a running topic has no end code");
+        let latest = reader.latest(crate::FieldId(0)).expect("latest");
+        assert_eq!((latest.seq, latest.payload), (0, &[7][..]));
     }
 }

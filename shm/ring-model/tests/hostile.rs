@@ -49,7 +49,7 @@ fn a_valid_header_over_random_contents_is_read_safely() {
             };
         }
         words[0] = u64::from_le_bytes(*b"SHMRING1");
-        words[1] = 1;
+        words[1] = shm_ring::LAYOUT;
         words[2] = fields | history << 32;
         words[3] = max_payload;
         words[4] = total;

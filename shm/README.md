@@ -32,8 +32,13 @@ gate checks for Windows and macOS (`x86_64-pc-windows-msvc`, `aarch64-apple-darw
 - `shm-ring-time`: `at_or_before` is portable; `wait_at_or_before` waits on a doorbell, so it is
   Linux only.
 
-The rest of this page pins the ring's layout: layout number 1. A change to anything here needs a
-new layout number.
+The rest of this page pins the layouts. Every structure that two processes share has a layout value,
+and the [table at the end](#layout-values) lists them. A change to a shared structure that an older side
+cannot use is a new value. A side that meets a value it does not implement refuses it with
+`RingError::Layout`, which names both values (`this ring is layout 1; this build reads layout 2`), and
+checks the value first, before any size or shape. The Lemnos client carries that refusal as
+`lemnos_wire::ring::RingError::Layout { which, found, expected }`, where `which` is `SharedLayout::Ring` or
+`SharedLayout::Marks`; the C surface reports it as `LEMNOS_E_LAYOUT_MISMATCH` with `lemnos_layout_refusal`.
 
 ## What it gives
 
@@ -68,14 +73,14 @@ the same way by every party, so there is no stored offset to point somewhere els
 | Word | Holds | Written by |
 | --- | --- | --- |
 | 0 | Magic: `SHMRING1` | Owner, once, last |
-| 1 | Layout number: 1 | Owner, once |
+| 1 | Layout number: 2 (see [Layout values](#layout-values)) | Owner, once |
 | 2 | Fields (low 32 bits), history (high 32 bits) | Owner, once |
 | 3 | Largest payload in bytes (low 32), expiry in ms (high 32) | Owner, once |
 | 4 | Total words in the ring | Owner, once |
 | 5 to 7 | Reserved, zero | |
 | 8 | Head: how many samples were ever published | Writer |
 | 9 | Subscriber count (low 32) | Owner |
-| 10 | End: 0 while the topic runs; the owner stores a nonzero code once it has ended. Written by the owner only. Was reserved zero; a reader that ignores it is unaffected, so the layout number is unchanged | Owner |
+| 10 | End: 0 while the topic runs; the owner stores a nonzero code once it has ended (Lemnos's streams: 1 closed, 2 faulted). Written by the owner only. Layout 1 kept it reserved and zero, so a layout 1 reader would take an ended topic for a running one: that is why the layout is 2 | Owner |
 | 11 to 15 | Reserved, zero | |
 | 16 | Lane heads: one word per field, how many samples that field ever had | Writer |
 | 16 + fields | Index: `index_slots` words | Writer |
@@ -258,10 +263,11 @@ frame only while each buffer's ticket is exactly the one in the entry.
 
 ## Hold marks
 
-`shm-ring-holds`. A reader's marks are a sealed page only that reader writes: word 0 is a
-version, word `1 + b` is nonzero while it holds buffer `b`, and word `1 + buffers + b` is its taken
-stamp for buffer `b`: one more than the ring sequence of the last frame it read from that buffer,
-zero before any. The publisher maps each reader's page read-only. A buffer is free when no reader
+`shm-ring-holds`. A reader's marks are a sealed page only that reader writes: word 0 is the page's layout in its top byte
+(2) and its version in the low 56 bits, word `1 + b` is nonzero while it holds buffer `b`, and word
+`1 + buffers + b` is its taken stamp for buffer `b`: one more than the ring sequence of the last frame it
+read from that buffer, zero before any. The page is `1 + 2 × buffers` words. Layout 1 had no taken stamps,
+no layout byte, and `1 + buffers` words; the publisher and the reader both refuse it. The publisher maps each reader's page read-only. A buffer is free when no reader
 marks it.
 
 The stamp is what lets the publisher tell a replaced frame the reader read from one it never
@@ -342,3 +348,26 @@ cargo run --release -p shm-ring-bench -- --cpus 2,3
 ```
 
 Measured figures are in [`testing/board-runs/I1.md`](../testing/board-runs/I1.md).
+
+## Layout values
+
+Each row is one structure two processes share: the value a build writes and reads, what each value means,
+and whether anything in P2s moved it. The rule is the one above: a change an older side cannot use gets a new
+value; an additive change that an older side ignores does not, and says so here.
+
+| Structure | Where the value is | Value now | Meaning of each value | Changed since 0aa30510 |
+| --- | --- | --- | --- | --- |
+| Ring header | word 1 | 2 | 1: the first publish, word 10 reserved zero. 2: word 10 is the end code, read by a reader | Yes: 1 to 2. Layout 1 readers read a closed or faulted ring as running |
+| Marks page | top byte of word 0 | 2 | 1 (no byte, zero): `1 + b` words, marks only. 2: `1 + 2b` words, marks and taken stamps | Yes: 1 to 2. Taken stamps were added without a value |
+| Pool page | word 0, magic `SHMPOOL1` | `SHMPOOL1` | The magic is its layout: the words in [`ring-buffers`](ring-buffers/src/page.rs) | No |
+| Entry (in a ring's payload) | the payload of the topic's field | none of its own | Carried under the ring's layout | No |
+| Doorbell page | word 0, `sleeps << 1 \| asleep` | none of its own | Unnumbered; the same since the first publish | No |
+| Sample time | the 8 bytes of a sample's time | none of its own | `CLOCK_MONOTONIC` nanoseconds on Linux and macOS. Windows reads `QueryPerformanceCounter`, which is a different clock, so Linux and Windows rings do not compare | No change on Linux |
+| Descriptor messages (`shm-fdpass`) | the message's ancillary data | none of its own | Unnumbered; the same since the first publish | No |
+| Kernel module's copies | `kernel/lemnos_stream.c`: `LEM_SHM_LAYOUT`, `LEM_MARKS_LAYOUT` | 2, 2 | The same values as the rows above | Carried, and checked: a reader's marks page of another layout is refused with a log line naming both |
+| Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x8b6a280430008fea` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before |
+
+A reader refuses a value it does not implement, with `RingError::Layout`. Readers built from 0aa30510 do not
+check the value at all, so they read a layout 2 ring as layout 1: that is the one direction this layout cannot
+protect, and why the consumers rebuild with P2s.
+

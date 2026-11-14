@@ -483,7 +483,7 @@ frames! {
     // StreamRings and StreamRingHandles, which are declared in the core and the stream-handles
     // part; this part states the bit, so a peer can see whether the host's layout is the one
     // this build reads.
-    "shared-rings" = 4 bit SHARED_RINGS folds crate::ring::fds::fold_constants {
+    "shared-rings" = 4 bit SHARED_RINGS folds crate::ring::fold_shared {
     }
     // The endpoints part: a function's two bulk endpoints, lent to one connection at a time. Its
     // frames are all additions after the base, so its hash is its name, number and bit.

@@ -36,5 +36,5 @@
 mod marks;
 mod table;
 
-pub use marks::Marks;
+pub use marks::{LAYOUT, Marks};
 pub use table::{HoldTable, Limits};

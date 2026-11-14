@@ -548,8 +548,10 @@ impl StreamHost {
         let publisher = BufferWriter::new(ring.writer().unwrap(), FieldId(0), pool);
         // Holds are per pool buffer: one per plane of each buffer, as the host makes them.
         let pool_buffers = layout.buffers * planes.len().max(1) as u32;
-        let marks_page =
-            sealed_memfd(Marks::<WriteMap>::page_bytes(pool_buffers).unwrap()).unwrap();
+        let marks_page = Marks::<WriteMap>::create(pool_buffers, 0, 0)
+            .unwrap()
+            .writable_fd()
+            .unwrap();
         let mut holds = HoldTable::new(pool_buffers);
         holds
             .add(0, read_only(marks_page.as_fd()).unwrap(), Limits::default())

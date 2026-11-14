@@ -5,7 +5,7 @@ wrappers do not each invent their own.
 
 - `Status`: an `i32`. 0 is success, -1 to -4095 a negated Linux errno (a kernel error passes
   through as is), `Status::LEMNOS_BASE` (-4096) and below this crate's own codes
-  (`STALE_HANDLE`, `VERSION_MISMATCH`, `BUFFER_TOO_SMALL`, `PANIC`), positive a count.
+  (`STALE_HANDLE`, `VERSION_MISMATCH`, `BUFFER_TOO_SMALL`, `PANIC`, `LAYOUT_MISMATCH`), positive a count.
 - `Handle`: a `u64` with a slot index and a generation; 0 is null. `Slab` (feature `alloc`)
   issues them, reuses released slots with a new generation and refuses stale handles.
 - `BufferDesc` (a memory location: a dma-buf, an offset and a size, nothing about what the bytes

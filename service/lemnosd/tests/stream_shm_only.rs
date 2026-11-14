@@ -183,7 +183,8 @@ fn a_process_with_only_the_shm_crates_reads_a_lemnosd_stream() {
         BUFFERS,
         0,
         0,
-    );
+    )
+    .unwrap();
     let mut frames = BufferReader::new(reader, FieldId(0), view, marks);
     let doorbell = Doorbell::attach(
         base[fds::BELL].try_clone().unwrap(),

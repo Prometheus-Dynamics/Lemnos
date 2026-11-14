@@ -2,7 +2,9 @@
 
 mod common;
 
+use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -15,7 +17,7 @@ use lemnos_linux_sys::descriptor::{SEAL_FUTURE_WRITE, add_seals, sealable_memfd}
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGUSR1, catch_without_restart, interrupt_this_thread_after};
-use lemnos_wire::ring::{Layout, RingError, STATE_CLOSED, fds};
+use lemnos_wire::ring::{Layout, RingError, STATE_CLOSED, SharedLayout, fds};
 use lemnos_wire::{MAX_HANDLE_BUFFERS, feature};
 use shm_ring::read_only;
 use shm_ring_doorbell::Doorbell;
@@ -129,10 +131,86 @@ fn a_ring_descriptor_shorter_than_the_layout_is_refused_without_mapping_it() {
     let (_, mut fds) = good();
     fds[fds::RING] = sealed_memfd(c"short", 4096).unwrap();
     let (_fake, mut session) = host_with(layout(), 8, fds);
-    assert!(matches!(
+    // The layout is read before the size: zeroes are layout 0, refused as that.
+    assert_eq!(
         session.open_stream(1, "s", platform()).unwrap_err(),
-        Error::Stream(RingError::Shm(_))
-    ));
+        Error::Stream(RingError::Layout {
+            which: SharedLayout::Ring,
+            found: 0,
+            expected: shm_ring::LAYOUT,
+        })
+    );
+}
+
+/// The seals a ring or a marks page is made with: sealed against shrinking and growing. The values
+/// are the kernel's `F_SEAL_SEAL`, `F_SEAL_SHRINK` and `F_SEAL_GROW`.
+const SEALS: i32 = 0x1 | 0x2 | 0x4;
+
+/// A copy of `fd`'s bytes with `patch` applied, in a new sealed memfd of the same length: the
+/// structure as a build of an older layout wrote it, with its layout value changed.
+fn patched(fd: &OwnedFd, patch: impl FnOnce(&mut [u8])) -> OwnedFd {
+    let source = File::from(fd.try_clone().unwrap());
+    let len = source.metadata().unwrap().len();
+    let mut bytes = vec![0; len as usize];
+    source.read_exact_at(&mut bytes, 0).unwrap();
+    patch(&mut bytes);
+    let copy = sealable_memfd(c"old-layout", len).unwrap();
+    File::from(copy.try_clone().unwrap())
+        .write_all_at(&bytes, 0)
+        .unwrap();
+    add_seals(copy.as_fd(), SEALS).unwrap();
+    copy
+}
+
+#[test]
+fn an_old_ring_header_is_refused_typed_with_the_value_found_and_read() {
+    let (_, mut fds) = good();
+    // Word 1 is the layout: a layout 1 ring has 1 there.
+    fds[fds::RING] = patched(&fds[fds::RING], |bytes| {
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+    });
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let error = session.open_stream(1, "s", platform()).unwrap_err();
+    assert_eq!(
+        error,
+        Error::Stream(RingError::Layout {
+            which: SharedLayout::Ring,
+            found: 1,
+            expected: shm_ring::LAYOUT,
+        })
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the frame stream: this ring is layout 1; this build reads layout {}",
+            shm_ring::LAYOUT
+        )
+    );
+    assert_eq!(Status::from(error), Status::LAYOUT_MISMATCH);
+}
+
+#[test]
+fn an_old_marks_page_is_refused_typed_with_the_value_found_and_read() {
+    let (_, mut fds) = good();
+    // The top byte of word 0 is the layout; a layout 1 page has none, so it reads as 1.
+    fds[fds::MARKS] = patched(&fds[fds::MARKS], |bytes| bytes[7] = 0);
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let error = session.open_stream(1, "s", platform()).unwrap_err();
+    assert_eq!(
+        error,
+        Error::Stream(RingError::Layout {
+            which: SharedLayout::Marks,
+            found: 1,
+            expected: shm_ring_holds::LAYOUT,
+        })
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the frame stream: this marks page is layout 1; this build reads layout {}",
+            shm_ring_holds::LAYOUT
+        )
+    );
 }
 
 #[test]
@@ -152,10 +230,15 @@ fn a_header_that_doesnt_match_is_refused() {
     let (_, mut fds) = good();
     fds[fds::RING] = sealed_memfd(c"blank", 1 << 16).unwrap();
     let (_fake, mut session) = host_with(layout(), 8, fds);
-    assert!(matches!(
+    // Zeroes have no layout value: the layout is read first, so this is layout 0.
+    assert_eq!(
         session.open_stream(1, "s", platform()).unwrap_err(),
-        Error::Stream(RingError::Shm(_))
-    ));
+        Error::Stream(RingError::Layout {
+            which: SharedLayout::Ring,
+            found: 0,
+            expected: shm_ring::LAYOUT,
+        })
+    );
 }
 
 #[test]

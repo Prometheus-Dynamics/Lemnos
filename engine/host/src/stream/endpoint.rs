@@ -309,8 +309,10 @@ impl StreamCore {
         memory: &Memory,
     ) -> Result<(Vec<OwnedFd>, HoldTable<ReadMap>, JobCollector, Bell), Status> {
         let buffers = self.pool_buffers();
-        let marks = sealed_memfd(Marks::<WriteMap>::page_bytes(buffers).map_err(ring_status)?)
-            .map_err(io_status)?;
+        // The consumer's marks page: made by `Marks`, so it carries this build's layout.
+        let marks = Marks::<WriteMap>::create(buffers, 0, 0)
+            .and_then(|marks| marks.writable_fd())
+            .map_err(ring_status)?;
         let mut holds = HoldTable::new(buffers);
         holds
             .add(

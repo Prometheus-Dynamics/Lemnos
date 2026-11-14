@@ -55,6 +55,22 @@ pub const STATE_FAULT: u32 = 2;
 /// Where each descriptor of a stream is in the order the host passes them: the frame ring, the
 /// pool page, the job ring, the job acks, the doorbell's eventfd, its page, the holds page, and then
 /// the pool's buffers, one descriptor per plane of each buffer (shared memory is one descriptor).
+/// The shm layouts this build reads: the ring's header and the marks page. A change to either is
+/// a new layout value, and folding them into the shared-rings part's hash moves that hash, so a
+/// peer whose layouts differ is told at the part, not by a misread stream.
+pub mod layouts {
+    constants! {
+    pub const RING: u64 = shm_ring::LAYOUT;
+    pub const MARKS: u64 = shm_ring_holds::LAYOUT;
+    }
+}
+
+/// Folds the shared-rings part's constants into `hash`: the descriptor layout and the shm layouts.
+#[cfg_attr(not(feature = "protocol"), allow(dead_code))]
+pub(crate) const fn fold_shared(hash: u64) -> u64 {
+    layouts::fold_constants(fds::fold_constants(hash))
+}
+
 pub mod fds {
     constants! {
     pub const RING: usize = 0;
@@ -68,6 +84,35 @@ pub mod fds {
     pub const BUFFERS: usize = 7;
     /// How many descriptors come before the buffers'.
     pub const BEFORE: usize = BUFFERS;
+    }
+}
+
+/// A shared structure whose layout value is not the one this build reads. Only the structures that
+/// carry a layout value have one: the pool page, the doorbell and the entries are checked by their
+/// magic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedLayout {
+    /// The frame ring's header (`shm_ring::LAYOUT`, word 1).
+    Ring,
+    /// A reader's marks page (`shm_ring_holds::LAYOUT`, the top byte of word 0).
+    Marks,
+}
+
+impl SharedLayout {
+    /// The structure as a person reads it: the start of the message, "this ring is layout 1".
+    #[must_use]
+    pub const fn what(self) -> &'static str {
+        match self {
+            Self::Ring => "this ring",
+            Self::Marks => "this marks page",
+        }
+    }
+
+    /// The structure whose message `what` is: the shm crate's words for it, or `None`.
+    fn named(what: &str) -> Option<Self> {
+        [Self::Ring, Self::Marks]
+            .into_iter()
+            .find(|structure| structure.what() == what)
     }
 }
 
@@ -86,6 +131,16 @@ pub enum RingError {
     BadBuffer,
     /// A length or range outside a buffer.
     BadLength,
+    /// A shared structure's layout value is not the one this build reads. `which` names the
+    /// structure, `found` is the value in the memory and `expected` the one this build implements.
+    Layout {
+        /// The structure whose layout is refused.
+        which: SharedLayout,
+        /// The value in the memory (0 for a structure never formatted).
+        found: u64,
+        /// The value this build reads.
+        expected: u64,
+    },
     /// The shared memory isn't the one the layout describes; the shm crate's message.
     Shm(String),
 }
@@ -98,6 +153,15 @@ impl core::fmt::Display for RingError {
             Self::Broken => f.write_str("the stream's peer is malformed"),
             Self::BadBuffer => f.write_str("a buffer number outside the stream"),
             Self::BadLength => f.write_str("a length out of range"),
+            Self::Layout {
+                which,
+                found,
+                expected,
+            } => write!(
+                f,
+                "{} is layout {found}; this build reads layout {expected}",
+                which.what()
+            ),
             Self::Shm(error) => write!(f, "shared memory: {error}"),
         }
     }
@@ -113,7 +177,18 @@ impl From<std::io::Error> for RingError {
 
 impl From<ShmError> for RingError {
     fn from(error: ShmError) -> Self {
-        Self::Shm(error.to_string())
+        match error {
+            // The shm crate's layout refusal, typed: which structure, and the two values.
+            ShmError::Layout { what, found, reads } => match SharedLayout::named(what) {
+                Some(which) => Self::Layout {
+                    which,
+                    found,
+                    expected: reads,
+                },
+                None => Self::Shm(error.to_string()),
+            },
+            other => Self::Shm(other.to_string()),
+        }
     }
 }
 
@@ -552,7 +627,7 @@ impl Consumer {
             layout.buffers * planes.len().max(1) as u32,
             0,
             0,
-        );
+        )?;
         let frames = shm_ring_buffers::BufferReader::new(reader, FieldId(0), view, marks);
         let jobs = JobPoster::new(job_ring, job_acks, &layout)?;
         let bell = shm_ring_doorbell::Doorbell::attach(bell_fd, bell_page)?;
@@ -742,4 +817,76 @@ fn clone_owned(fd: &OwnedFd) -> Result<OwnedFd, RingError> {
 
 fn clone_all(fds: &[OwnedFd]) -> Result<Vec<OwnedFd>, RingError> {
     fds.iter().map(clone_owned).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RingError, SharedLayout};
+    use shm_ring::RingError as ShmError;
+
+    #[test]
+    fn a_shm_layout_refusal_crosses_typed_with_its_structure_and_both_values() {
+        let ring = ShmError::Layout {
+            what: "this ring",
+            found: 1,
+            reads: 2,
+        };
+        assert_eq!(
+            RingError::from(ring),
+            RingError::Layout {
+                which: SharedLayout::Ring,
+                found: 1,
+                expected: 2,
+            }
+        );
+        let marks = ShmError::Layout {
+            what: "this marks page",
+            found: 1,
+            reads: 2,
+        };
+        assert_eq!(
+            RingError::from(marks),
+            RingError::Layout {
+                which: SharedLayout::Marks,
+                found: 1,
+                expected: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_layout_refusal_says_what_it_is_in_the_words_the_shm_crate_uses() {
+        let marks = RingError::from(ShmError::Layout {
+            what: "this marks page",
+            found: 1,
+            reads: 2,
+        });
+        assert_eq!(
+            marks.to_string(),
+            "this marks page is layout 1; this build reads layout 2"
+        );
+        let ring = RingError::from(ShmError::Layout {
+            what: "this ring",
+            found: 1,
+            reads: 2,
+        });
+        assert_eq!(
+            ring.to_string(),
+            "this ring is layout 1; this build reads layout 2"
+        );
+    }
+
+    #[test]
+    fn a_shm_error_that_is_not_a_layout_refusal_stays_text() {
+        assert!(matches!(
+            RingError::from(ShmError::Unsealed),
+            RingError::Shm(_)
+        ));
+        let unknown = ShmError::Layout {
+            what: "some other structure",
+            found: 1,
+            reads: 2,
+        };
+        assert!(matches!(RingError::from(unknown), RingError::Shm(_)));
+    }
 }

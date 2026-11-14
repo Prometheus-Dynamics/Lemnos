@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use lemnos_abi::{Handle, MessageSink, Status, guard};
 use lemnos_client::{Error, FrameStream, HeldFrame, StreamPlatform};
-use lemnos_wire::ring::RingError;
+use lemnos_wire::ring::{RingError, SharedLayout};
 
 use super::{checked, count, entry, fail, out_bytes, text, with_entry};
 
@@ -154,6 +154,7 @@ pub unsafe extern "C" fn lemnos_stream_open(
             return Status::NOT_SUPPORTED;
         };
         with_entry(client, |entry| {
+            entry.layout_refusal = None;
             let Some(index) = entry.devices.get(device as usize).map(|d| d.index) else {
                 return Status::NOT_FOUND;
             };
@@ -166,7 +167,10 @@ pub unsafe extern "C" fn lemnos_stream_open(
             };
             let taken = match taken {
                 Ok(taken) => taken,
-                Err(error) => return fail(error, sink),
+                Err(error) => {
+                    entry.layout_refusal = layout_refusal(&error);
+                    return fail(error, sink);
+                }
             };
             let held = (0..taken.layout().buffers).map(|_| None).collect();
             let slot = Arc::new(Mutex::new(Some(Stream {
@@ -186,6 +190,73 @@ pub unsafe extern "C" fn lemnos_stream_open(
                     status
                 }
             }
+        })
+    })
+}
+
+/// `LEMNOS_LAYOUT_RING`: the frame ring's header, which `lemnos_layout_refusal` reports.
+pub const LAYOUT_RING: u32 = 0;
+/// `LEMNOS_LAYOUT_MARKS`: a reader's marks page.
+pub const LAYOUT_MARKS: u32 = 1;
+
+/// The shared layout a stream open refused: the structure, and the value it found and the one this
+/// build reads.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LayoutRefusal {
+    which: u32,
+    found: u64,
+    expected: u64,
+}
+
+/// The refusal an open's error is, when the error is a shared layout's.
+fn layout_refusal(error: &Error) -> Option<LayoutRefusal> {
+    let Error::Stream(RingError::Layout {
+        which,
+        found,
+        expected,
+    }) = error
+    else {
+        return None;
+    };
+    let which = match which {
+        SharedLayout::Ring => LAYOUT_RING,
+        SharedLayout::Marks => LAYOUT_MARKS,
+    };
+    Some(LayoutRefusal {
+        which,
+        found: *found,
+        expected: *expected,
+    })
+}
+
+/// # Safety
+/// `which`, `found` and `expected` are each null, or valid for a write during the call.
+/// Reports the shared layout that the client's last `lemnos_stream_open` refused with
+/// `LEMNOS_E_LAYOUT_MISMATCH`: which structure (`LEMNOS_LAYOUT_RING` or `LEMNOS_LAYOUT_MARKS`), the
+/// value it found and the value this build reads. `-ENOENT` when that open refused no layout, or
+/// none was made; the next open on the client replaces what this reports.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_layout_refusal(
+    client: Handle,
+    which: *mut u32,
+    found: *mut u64,
+    expected: *mut u64,
+) -> Status {
+    guard(|| {
+        if which.is_null() || found.is_null() || expected.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_entry(client, |entry| {
+            let Some(refusal) = entry.layout_refusal else {
+                return Status::NOT_FOUND;
+            };
+            // SAFETY: not null, and valid for a write during this call.
+            unsafe { which.write(refusal.which) };
+            // SAFETY: not null, and valid for a write during this call.
+            unsafe { found.write(refusal.found) };
+            // SAFETY: not null, and valid for a write during this call.
+            unsafe { expected.write(refusal.expected) };
+            Status::OK
         })
     })
 }
@@ -690,5 +761,42 @@ unsafe fn in_bytes<'a>(data: *const u8, len: usize) -> Result<&'a [u8], Status> 
     } else {
         // SAFETY: not null, and valid for `len` bytes by the contract.
         Ok(unsafe { core::slice::from_raw_parts(data, len) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LAYOUT_MARKS, LAYOUT_RING, layout_refusal};
+    use lemnos_abi::Status;
+    use lemnos_client::Error;
+    use lemnos_wire::ring::{RingError, SharedLayout};
+
+    #[test]
+    fn a_layout_refusal_is_reported_with_its_structure_and_values() {
+        let marks = Error::Stream(RingError::Layout {
+            which: SharedLayout::Marks,
+            found: 1,
+            expected: 2,
+        });
+        let refusal = layout_refusal(&marks).expect("a layout refusal");
+        assert_eq!(
+            (refusal.which, refusal.found, refusal.expected),
+            (LAYOUT_MARKS, 1, 2)
+        );
+        assert_eq!(Status::from(marks), Status::LAYOUT_MISMATCH);
+
+        let ring = Error::Stream(RingError::Layout {
+            which: SharedLayout::Ring,
+            found: 0,
+            expected: 2,
+        });
+        let refusal = layout_refusal(&ring).expect("a layout refusal");
+        assert_eq!((refusal.which, refusal.found), (LAYOUT_RING, 0));
+    }
+
+    #[test]
+    fn an_error_that_is_not_a_layout_refusal_reports_none() {
+        assert!(layout_refusal(&Error::Stream(RingError::BadBuffer)).is_none());
+        assert!(layout_refusal(&Error::Stream(RingError::Shm("x".into()))).is_none());
     }
 }

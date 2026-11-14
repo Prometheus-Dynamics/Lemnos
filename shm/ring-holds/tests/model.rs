@@ -10,7 +10,7 @@ use loom::sync::Arc;
 use loom::sync::atomic::AtomicU64;
 use shm_ring::{Mem, MemMut};
 use shm_ring_buffers::{BufferIndex, Holders, Marker, page};
-use shm_ring_holds::{HoldTable, Limits, Marks};
+use shm_ring_holds::{HoldTable, LAYOUT, Limits, Marks};
 
 #[derive(Clone)]
 struct Model(Arc<Vec<AtomicU64>>);
@@ -19,6 +19,13 @@ impl Model {
     fn new(words: usize) -> Self {
         Self(Arc::new((0..words).map(|_| AtomicU64::new(0)).collect()))
     }
+}
+
+/// A marks page of this build's layout: three words, the layout stamped in word 0.
+fn stamped_page() -> Model {
+    let page = Model::new(3);
+    page.store(0, LAYOUT << 56, Ordering::SeqCst);
+    page
 }
 
 impl Mem for Model {
@@ -50,7 +57,7 @@ const BUFFER: BufferIndex = BufferIndex(0);
 fn race(mark_first: bool) {
     let pool = Model::new(page::bytes(1) / 8);
     page::format(&pool, 1, 1).expect("pool page");
-    let marks_page = Model::new(3);
+    let marks_page = stamped_page();
     let published_with = page::ticket(&pool, BUFFER) as u32;
 
     let mut table = HoldTable::new(1);
@@ -69,7 +76,7 @@ fn race(mark_first: bool) {
             free
         })
     };
-    let marks = Marks::over(marks_page, 1, 0, 0);
+    let marks = Marks::over(marks_page, 1, 0, 0).expect("marks");
     let holds = if mark_first {
         marks.mark(BUFFER) && page::still(&pool, BUFFER, published_with)
     } else {
@@ -101,12 +108,12 @@ fn letting_go_frees_the_buffer_and_never_before() {
     loom::model(|| {
         let pool = Model::new(page::bytes(1) / 8);
         page::format(&pool, 1, 1).expect("pool page");
-        let marks_page = Model::new(3);
+        let marks_page = stamped_page();
         let mut table = HoldTable::new(1);
         table
             .add_over(0, marks_page.clone(), Limits::default())
             .expect("reader");
-        let marks = Marks::over(marks_page, 1, 0, 0);
+        let marks = Marks::over(marks_page, 1, 0, 0).expect("marks");
         assert!(marks.mark(BUFFER) && page::still(&pool, BUFFER, 0));
         let publisher = {
             let pool = pool.clone();

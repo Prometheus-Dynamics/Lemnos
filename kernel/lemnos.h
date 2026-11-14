@@ -276,7 +276,7 @@ struct lemnos_claim {
  */
 #define LEMNOS_STREAM_CREATE_BUFFERS	(1u << 0)
 /*
- * The frame ring is the shared-memory ring of shm/README.md (layout 1), not the
+ * The frame ring is the shared-memory ring of shm/README.md (layout 2), not the
  * LEMNOS_RING_* layout: one field, one sample per frame, each sample's entry
  * naming its buffer and ticket (shm/ring-buffers/src/entry.rs). The pool page
  * (shm/ring-buffers/src/page.rs) follows the ring in the mapping, then the

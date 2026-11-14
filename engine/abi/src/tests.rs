@@ -277,7 +277,7 @@ fn the_header_matches_the_crate() {
     {
         return;
     }
-    let checks: [(&str, i64); 23] = [
+    let checks: [(&str, i64); 24] = [
         ("LEMNOS_OK", Status::OK.0.into()),
         ("LEMNOS_E_BASE", Status::LEMNOS_BASE.into()),
         ("LEMNOS_E_STALE_HANDLE", Status::STALE_HANDLE.0.into()),
@@ -290,6 +290,7 @@ fn the_header_matches_the_crate() {
             Status::BUFFER_TOO_SMALL.0.into(),
         ),
         ("LEMNOS_E_PANIC", Status::PANIC.0.into()),
+        ("LEMNOS_E_LAYOUT_MISMATCH", Status::LAYOUT_MISMATCH.0.into()),
         ("LEMNOS_BUFFER_OWNED", BufferDesc::OWNED.into()),
         ("LEMNOS_FENCE_NONE", FenceDesc::NONE.into()),
         ("LEMNOS_FENCE_SYNC_FILE", FenceDesc::SYNC_FILE.into()),

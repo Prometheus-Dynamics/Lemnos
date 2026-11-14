@@ -295,3 +295,15 @@ fn every_field_of_a_hashed_type_is_in_the_layout() {
         );
     }
 }
+
+#[test]
+fn the_layout_defines_match() {
+    assert_eq!(
+        define("LEMNOS_LAYOUT_RING"),
+        crate::surface::LAYOUT_RING.to_string()
+    );
+    assert_eq!(
+        define("LEMNOS_LAYOUT_MARKS"),
+        crate::surface::LAYOUT_MARKS.to_string()
+    );
+}

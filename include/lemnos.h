@@ -71,6 +71,10 @@ extern "C" {
 #define LEMNOS_STREAM_BUFFER_HANDLES (1u << 1)
 #define LEMNOS_STREAM_OPEN (1u << 2)
 #define LEMNOS_STREAM_UNMAPPED (1u << 3)
+
+/* lemnos_layout_refusal's `which`: the shared structure whose layout a stream open refused. */
+#define LEMNOS_LAYOUT_RING 0
+#define LEMNOS_LAYOUT_MARKS 1
 /* LemnosStreamRegion flags. */
 #define LEMNOS_REGION_WRITABLE (1u << 0)
 #define LEMNOS_REGION_DMA_BUF (1u << 1)
@@ -253,6 +257,12 @@ LemnosStatus lemnos_package_text(LemnosHandle client, uint32_t package, uint32_t
  * -EINVAL. */
 LemnosStatus lemnos_stream_open(LemnosHandle client, uint32_t device, const char *name,
                                 uint32_t flags, LemnosHandle *stream, LemnosMessageSink sink);
+/* After a lemnos_stream_open that returned LEMNOS_E_LAYOUT_MISMATCH: which shared structure refused
+ * (LEMNOS_LAYOUT_RING or LEMNOS_LAYOUT_MARKS), the value it found and the value this build reads.
+ * -ENOENT when the client's last open refused no layout. The next open on the client replaces it.
+ * Writes the three outputs only on LEMNOS_OK. */
+LemnosStatus lemnos_layout_refusal(LemnosHandle client, uint32_t *which, uint64_t *found,
+                                   uint64_t *expected);
 LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, LemnosStreamInfo *info);
 /* Returns 1 with a frame, 0 when timeout_ms passed or the host ended the stream
  * (LEMNOS_STREAM_OPEN then clears). 0 ms takes a frame only if one is there.

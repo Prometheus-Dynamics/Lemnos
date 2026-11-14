@@ -183,6 +183,8 @@ struct Entry {
     packages: Option<PackageList>,
     /// The frame streams this client took.
     streams: Slab<StreamSlot>,
+    /// The shared layout the client's last stream open refused, for `lemnos_layout_refusal`.
+    layout_refusal: Option<streams::LayoutRefusal>,
 }
 
 /// The lock is held only to find an entry. Each entry has its own, so waiting
@@ -335,6 +337,7 @@ pub unsafe extern "C" fn lemnos_client_open(
             descriptions: HashMap::new(),
             packages: None,
             streams: Slab::new(),
+            layout_refusal: None,
         }));
         match clients().insert(entry) {
             Ok(handle) => {
