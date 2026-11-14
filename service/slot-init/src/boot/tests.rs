@@ -905,6 +905,76 @@ fn a_foreign_disk_at_a_count_of_eight_writes_nothing_asks_for_no_flash_mode_and_
     );
 }
 
+/// M36c: a refusal on a board whose count is past the limit asks for the flashing mode only when
+/// the boot disk is a Lemnos disk. Here it is not, or it is not read: the rescue logs the reason,
+/// waits the rescue time and restarts into the board's own boot order.
+fn assert_no_flash_mode_past_the_limit(board: &Board, expect: &str) {
+    boot_count(board, FLASH_AFTER + 3);
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains(expect), "{why}");
+    assert!(!fake.called("flash mode"), "{:?}", fake.calls());
+    assert!(fake.called("sleep 30"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart");
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("not a Lemnos disk: no flashing mode is asked")),
+        "{:?}",
+        fake.logs.borrow()
+    );
+}
+
+#[test]
+fn a_boot_source_the_table_does_not_list_asks_for_no_flash_mode_past_the_limit() {
+    let board = Board::new();
+    board.write("proc/device-tree/chosen/lemnos,boot-source", b"/usb@1\0");
+    assert_no_flash_mode_past_the_limit(&board, "boot_sources does not list");
+}
+
+#[test]
+fn a_boot_chain_with_no_source_asks_for_no_flash_mode_past_the_limit() {
+    let board = Board::new();
+    fs::remove_file(board.env.at("proc/device-tree/chosen/lemnos,boot-source")).unwrap();
+    assert_no_flash_mode_past_the_limit(&board, "the boot chain states no boot source");
+}
+
+#[test]
+fn an_unreadable_boot_disk_asks_for_no_flash_mode_past_the_limit() {
+    let board = Board::new();
+    fs::remove_file(board.env.at("sys/devices/sd-host/of_node")).unwrap();
+    assert_no_flash_mode_past_the_limit(&board, "no whole disk sits under");
+}
+
+#[test]
+fn a_command_line_with_no_slot_asks_for_no_flash_mode_past_the_limit() {
+    let board = Board::new();
+    board.write("proc/cmdline", b"console=tty1");
+    assert_no_flash_mode_past_the_limit(&board, ".slot=");
+}
+
+#[test]
+fn two_lemnos_data_partitions_ask_for_no_flash_mode_past_the_limit() {
+    let board = Board::new();
+    board.write("dev/mmcblk0p1", &ext("lemnos-data", false));
+    assert_no_flash_mode_past_the_limit(&board, "2 partitions on mmcblk0 are labelled lemnos-data");
+}
+
+#[test]
+fn a_kernel_gap_on_a_foreign_disk_asks_for_no_flash_mode_past_the_limit() {
+    let board = kernel_without("EXT4_FS");
+    board.write("dev/mmcblk0p2", &ext("other", false));
+    assert_no_flash_mode_past_the_limit(&board, "CONFIG_EXT4_FS");
+}
+
+#[test]
+fn a_kernel_gap_on_raw_nand_asks_for_no_flash_mode_past_the_limit() {
+    // NAND has no data partition label and no boot disk: the rescue is never a Lemnos disk's.
+    let board = Board::nand();
+    board.kernel(&["ext4", "vfat", "erofs"]);
+    assert_no_flash_mode_past_the_limit(&board, "UBIFS_FS");
+}
+
 #[test]
 fn two_partitions_labelled_lemnos_data_are_refused_at_once_by_name() {
     // The disk has a second partition with the same label: slot-init must not guess which is data.

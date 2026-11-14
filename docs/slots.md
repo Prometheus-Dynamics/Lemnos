@@ -1097,9 +1097,12 @@ rotation above still reads the raw count.
     value is one no rule names (`unknown`, reported with its raw value): no episode. The count is cleared.
   - Where the default stays, the next restart tries it again. A boot that is good clears the
     episodes of the slot it runs.
-- **Refusals that repeat go to the firmware's flashing mode.** A refusal no slot can answer (the
-  boot disk or table is wrong, the data volume is missing, a kernel piece is absent) goes to the
-  rescue: slot-init keeps the reason in the kernel log, waits 30 s and restarts. The same refusal
+- **Refusals that repeat go to the firmware's flashing mode, on a Lemnos disk only (M36c).** A refusal no
+  slot can answer (the boot disk or table is wrong, the data volume is missing, a kernel piece is absent)
+  goes to the rescue: slot-init keeps the reason in the kernel log, waits 30 s and restarts. The flashing
+  mode is asked only when the boot disk has exactly one partition labelled `lemnos-data` (or the data
+  partition is already found); any other refusal, including an unreadable or absent disk and raw NAND,
+  logs that it is not a Lemnos disk and restarts into the board's own boot order. The same refusal
   repeats on every restart, so slot-init also reads the firmware's count at the rescue: when `FLASH_AFTER`
   (8) restarts have gone by without a good boot (the daemon clears the count at a good boot, so the
   count is the run of restarts since the last one), it asks the firmware for RPIBOOT at the next boot
