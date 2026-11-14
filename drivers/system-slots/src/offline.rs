@@ -34,6 +34,9 @@ pub struct OfflineBoard {
     pub boot_sources: Vec<String>,
     /// The bay sizes the board file names (`[boot] bay_*`).
     pub layout: bays::Layout,
+    /// Whether the board requires its bundles to be signed (`signature = "required"`, the default).
+    /// An unsigned bundle is refused when it is; an unknown key is refused either way.
+    pub signature_required: bool,
 }
 
 /// Everything the writer is given. Its output is a function of these fields alone.
@@ -47,6 +50,8 @@ pub struct FirstSlot<'a> {
     pub boot_image: Vec<u8>,
     /// The trust root: the keys a signed bundle is checked against.
     pub keys: Vec<TrustedKey>,
+    /// The keys file's name as the refusals give it (the path the caller was given).
+    pub keys_name: &'a str,
     /// The board the bundle must be for.
     pub board: OfflineBoard,
     /// The time every stamp in the output carries, `YYYY-MM-DDTHH:MM:SSZ`.
@@ -153,6 +158,60 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
     result
 }
 
+/// The signature policy of the offline writer, on the outcome word the install recorded. An unknown
+/// key is refused for every board; an unsigned bundle only when the board requires signing.
+fn signature_policy(word: &str, bundle: &[u8], input: &FirstSlot<'_>) -> Result<(), String> {
+    use lemnos_slot_store::signing::{NOT_CHECKED_UNKNOWN_KEY, NOT_CHECKED_UNSIGNED};
+    match word {
+        NOT_CHECKED_UNKNOWN_KEY => {
+            let key = bundle_key_id(bundle).unwrap_or_else(|| "(unreadable)".into());
+            Err(format!(
+                "the bundle is signed by key id {key}, which {} does not hold: a bundle this board cannot check is refused",
+                input.keys_name
+            ))
+        }
+        NOT_CHECKED_UNSIGNED if input.board.signature_required => Err(
+            "the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device".into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// The key id the bundle's `slot.sig` names, in hex. `None` when the bundle has no such member or
+/// the record does not parse.
+pub fn bundle_key_id(bundle: &[u8]) -> Option<String> {
+    use lemnos_slot_store::bundle::hex;
+    use lemnos_slot_store::tar::{Kind, Sink, Tar};
+    #[derive(Default)]
+    struct SlotSig {
+        inside: bool,
+        found: Option<Vec<u8>>,
+    }
+    impl Sink for SlotSig {
+        fn begin(&mut self, name: &str, kind: Kind, _size: u64) -> Result<(), String> {
+            self.inside = kind == Kind::File && name == "slot.sig";
+            if self.inside {
+                self.found = Some(Vec::new());
+            }
+            Ok(())
+        }
+        fn data(&mut self, bytes: &[u8]) -> Result<(), String> {
+            if let Some(buf) = self.found.as_mut().filter(|_| self.inside) {
+                buf.extend_from_slice(bytes);
+            }
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), String> {
+            self.inside = false;
+            Ok(())
+        }
+    }
+    let mut sink = SlotSig::default();
+    Tar::default().feed(bundle, &mut sink).ok()?;
+    let record = lemnos_slot_store::signing::parse_record(&sink.found?).ok()?;
+    Some(hex(&record.key_id))
+}
+
 /// The modes the output carries whatever the umask of the process: 0644 for files, 0755 for
 /// directories, the output directory included. The daemon's own writes take the umask they run
 /// under, so the writer sets them after the fact, and the bytes of the tree do not depend on it.
@@ -197,6 +256,9 @@ fn write_into(input: &FirstSlot<'_>, record: OfflineRecord, pair: &mut Pair) -> 
     let id = security::with_enforced(false, || {
         store::with_clock(input.time, || drive(&mut slots, input.bundle, &layout))
     })?;
+    // The signature policy: decided on the outcome the install recorded, before anything is kept.
+    let word = store::Meta::load(&layout, &id).get("SIGNATURE").to_string();
+    signature_policy(&word, input.bundle, &input)?;
     // The boot image: the slot's bay must hold it, and the default must name a bay that holds
     // it. The bay check is `check_bay`, the one call site of it.
     check_bay(&mut pair.reference, &id)?;

@@ -328,18 +328,18 @@ fn slot_sig(bundle: &str) -> Vec<u8> {
         .1
 }
 
-/// A bundle signed with `seed`, in `dir`, for the slot's own inputs.
-fn bundle_signed_with(slot: &Slot, name: &str, seed: [u8; 32]) -> String {
-    let seed_file = file_with_mode(&slot.dir, &format!("{name}.seed"), &seed, 0o600);
+/// The slot's bundle again, signed with `seed` or unsigned (`None`), named `name` in its directory.
+fn bundle_with(slot: &Slot, name: &str, seed: Option<[u8; 32]>) -> String {
     let out = slot.dir.join(name).display().to_string();
     let (rootfs, table) = rootfs(&slot.dir, 300);
     let payload = slot.dir.join("payload").display().to_string();
-    let (r, text) = run(&[
+    let seed_file;
+    let mut args = vec![
         "bundle",
         "--layout-of",
         &slot.board,
         "--socs",
-        &socs(),
+        Box::leak(socs().into_boxed_str()),
         "--slot",
         "a1",
         "--payload",
@@ -352,13 +352,29 @@ fn bundle_signed_with(slot: &Slot, name: &str, seed: [u8; 32]) -> String {
         "an-os",
         "--version",
         "1.0",
-        "--key-file",
-        &seed_file,
         "--out",
         &out,
-    ]);
+    ];
+    if let Some(seed) = seed {
+        seed_file = file_with_mode(&slot.dir, &format!("{name}.seed"), &seed, 0o600);
+        args.extend(["--key-file", &seed_file]);
+    }
+    let (r, text) = run(&args);
     r.unwrap_or_else(|e| panic!("{e}\n{text}"));
     out
+}
+
+/// The reference board with its system-slots device's `signature` set to `value`.
+fn board_signed(dir: &Path, value: &str) -> String {
+    let text = std::fs::read_to_string(repo().join("testing/boards/reference.toml")).unwrap();
+    let text = text.replacen(
+        "config = { data = \"/data\", boot = \"/boot/firmware\", record = \"tryboot\"",
+        &format!("config = {{ signature = \"{value}\", data = \"/data\", boot = \"/boot/firmware\", record = \"tryboot\""),
+        1,
+    );
+    let path = dir.join(format!("board-{value}.toml"));
+    std::fs::write(&path, text).unwrap();
+    path.display().to_string()
 }
 
 /// The driver over a copy of `data` and `image`, the way the device would load them.
@@ -435,17 +451,95 @@ fn the_written_partition_verifies_and_the_driver_reads_the_slot_as_installed_con
 }
 
 #[test]
-fn a_bundle_signed_by_a_key_the_list_does_not_hold_is_written_as_not_checked() {
+fn a_bundle_signed_by_a_key_the_list_does_not_hold_is_refused_and_nothing_is_left() {
     let slot = slot_in("unknown-key");
-    let other = bundle_signed_with(&slot, "other.bundle", SEED8);
+    let other = bundle_with(&slot, "other.bundle", Some(SEED8));
     let out = slot.dir.join("data");
     let other_slot = Slot { bundle: other, ..slot };
-    let (r, text) = write_partition(&other_slot, &out, &[]);
+    let (r, _) = write_partition(&other_slot, &out, &[]);
+    let why = r.unwrap_err();
+    assert!(
+        why.contains("the bundle is signed by key id ")
+            && why.contains(&format!("which {} does not hold", other_slot.keys)),
+        "{why}"
+    );
+    assert!(!out.exists(), "a refused write leaves no directory");
+}
+
+#[test]
+fn an_unsigned_bundle_is_refused_by_a_board_that_requires_signing() {
+    let slot = slot_in("unsigned-required");
+    let unsigned = bundle_with(&slot, "unsigned.bundle", None);
+    let u = Slot { bundle: unsigned, ..slot };
+    let out = u.dir.join("data");
+    let (r, _) = write_partition(&u, &out, &[]);
+    let why = r.unwrap_err();
+    assert!(
+        why.contains("the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device"),
+        "{why}"
+    );
+    assert!(!out.exists(), "a refused write leaves no directory");
+}
+
+#[test]
+fn an_unsigned_bundle_is_written_on_a_board_that_does_not_require_signing_and_verify_says_so() {
+    let slot = slot_in("unsigned-allowed");
+    let unsigned = bundle_with(&slot, "unsigned.bundle", None);
+    let required_board = slot.board.clone();
+    let board = board_signed(&slot.dir, "not-required");
+    let u = Slot {
+        bundle: unsigned,
+        board: board.clone(),
+        ..slot
+    };
+    let out = u.dir.join("data");
+    let (r, text) = write_partition(&u, &out, &[]);
     r.unwrap_or_else(|e| panic!("{e}\n{text}"));
-    // A key the list does not hold is not refused: it is recorded as not checked, and says so.
-    let meta = std::fs::read_to_string(out.join("board/slots/a1.meta")).unwrap();
-    assert!(meta.contains("SIGNATURE=not_checked_unknown_key"), "{meta}");
-    assert!(text.contains("signed with key id "), "{text}");
+    assert!(text.trim_end().ends_with("unsigned"), "{text}");
+    let socs = socs();
+    let (r, report) = run(&[
+        "data-partition",
+        "--verify",
+        out.to_str().unwrap(),
+        "--layout-of",
+        &board,
+        "--socs",
+        &socs,
+        "--boot-image",
+        &u.image,
+    ]);
+    r.unwrap_or_else(|e| panic!("{e}\n{report}"));
+    assert!(
+        report.contains("ok  slot a1 is unsigned: this board does not require signing"),
+        "{report}"
+    );
+    // The same tree, checked against a board that requires signing, is refused by name.
+    let (r, report) = run(&[
+        "data-partition",
+        "--verify",
+        out.to_str().unwrap(),
+        "--layout-of",
+        &required_board,
+        "--socs",
+        &socs,
+    ]);
+    assert!(r.is_err());
+    assert!(
+        report.contains("BAD slot a1 is unsigned: this board requires signed bundles"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_signing_policy_other_than_required_or_not_required_is_refused_by_name() {
+    let slot = slot_in("bad-policy");
+    let board = board_signed(&slot.dir, "sometimes");
+    let bad = Slot { board, ..slot };
+    let out = bad.dir.join("data");
+    let (r, _) = write_partition(&bad, &out, &[]);
+    let why = r.unwrap_err();
+    assert!(why.contains("signature is \"required\" or \"not-required\""), "{why}");
+    assert!(!out.exists());
 }
 
 #[test]

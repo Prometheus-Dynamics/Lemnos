@@ -44,6 +44,7 @@ fn board() -> OfflineBoard {
         boot_args: "board".into(),
         boot_sources: vec![BOOT_SOURCE.into()],
         layout: bay_fixture::layout(),
+        signature_required: true,
     }
 }
 
@@ -129,6 +130,7 @@ fn offline(dir: &Path, name: &str, bundle: &[u8], image: &[u8], time: &str) -> R
         bundle,
         boot_image: image.to_vec(),
         keys,
+        keys_name: "the keys file",
         board: board(),
         time,
         free: 1 << 40,
@@ -273,6 +275,7 @@ fn a_boot_image_with_another_bay_layout_is_refused() {
         bundle: &bundle,
         boot_image: image,
         keys: trusted(),
+        keys_name: "the keys file",
         board: other,
         time: TIME,
         free: 1 << 40,
@@ -292,6 +295,7 @@ fn too_little_room_is_refused_with_the_reserve_and_the_need() {
         bundle: &bundle,
         boot_image: image,
         keys: trusted(),
+        keys_name: "the keys file",
         board: board(),
         time: TIME,
         free: 1024,
@@ -326,6 +330,7 @@ fn a_bundle_for_another_board_is_refused() {
         bundle: &bundle,
         boot_image: image,
         keys: trusted(),
+        keys_name: "the keys file",
         board: other,
         time: TIME,
         free: 1 << 40,

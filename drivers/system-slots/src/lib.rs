@@ -1292,6 +1292,8 @@ const KEYS: &[Key] = &[
     Key::optional("running", Kind::Str),
     Key::optional("boot_args", Kind::Str),
     Key::optional("require_signed", Kind::Bool),
+    // The offline writer's policy (`lemnos-ctl data-partition`): "required" (the default) or "not-required".
+    Key::optional("signature", Kind::Str),
     Key::optional("reserve_mb", Kind::Int),
     Key::optional("keep", Kind::Int),
     Key::optional("boots_keep", Kind::Int),

@@ -7,6 +7,10 @@
 //! lemnos-ctl data-partition --verify DIR [--layout-of BOARD [--socs DIR]] [--boot-image FILE] [--deep]
 //! ```
 //!
+//! Signing: a bundle signed by a key the `--keys` file does not hold is refused, always. An unsigned
+//! bundle is refused unless the board's system-slots device says `signature = "not-required"` (the
+//! default is `"required"`). A signed bundle whose signature does not verify is refused by the install.
+//!
 //! The writer holds no logic of its own: `lemnos_driver_system_slots::offline` runs the daemon's
 //! install, trial and confirm over `--out`. This module reads the board file and the files it is
 //! given, passes them on, and prints the result. `--verify` reads the tree and checks what a boot
@@ -14,20 +18,19 @@
 
 use crate::boot_dir;
 use crate::boot_partition::{board_parts, load_board};
-use lemnos_driver_system_slots::offline::{self, FirstSlot, OfflineBoard};
+use lemnos_driver_system_slots::offline::{self, FirstSlot, OfflineBoard, bundle_key_id};
 use lemnos_driver_system_slots::{TrustedKey, parse_keys};
 use lemnos_slot_store::json::Json;
 use lemnos_slot_store::manifest::{self, Manifest};
 use lemnos_slot_store::store::Layout;
 use lemnos_slot_store::bootimage::Mem;
-use lemnos_slot_store::signing;
-use lemnos_slot_store::tar::{Kind, Sink, Tar};
+use lemnos_slot_store::signing::{NOT_CHECKED_UNKNOWN_KEY, NOT_CHECKED_UNSIGNED};
 use lemnos_slot_store::boot_raw::Boot;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: lemnos-ctl data-partition --layout-of BOARD [--socs DIR] --install BUNDLE --boot-image FILE --keys FILE --time UTC --data-size BYTES --out DIR [--switch off] | --verify DIR [--layout-of BOARD [--socs DIR]] [--boot-image FILE] [--deep]";
+const USAGE: &str = "usage: lemnos-ctl data-partition --layout-of BOARD [--socs DIR] --install BUNDLE --boot-image FILE --keys FILE --time UTC --data-size BYTES --out DIR [--switch off] | --verify DIR [--layout-of BOARD [--socs DIR]] [--boot-image FILE] [--deep]; an unsigned bundle is written only when the board's system-slots device says signature = \"not-required\"";
 
 #[derive(Default)]
 struct Options {
@@ -111,12 +114,30 @@ fn board_facts(path: &str, socs: Option<&str>) -> Result<OfflineBoard, String> {
     let parts = board_parts(&board, &generated.boot).map_err(|e| format!("{path}: {e}"))?;
     let (boot_args, boot_sources) =
         boot_dir::slot_words(&board).map_err(|e| format!("{path}: {e}"))?;
+    let signature_required = signature_required_of(&board).map_err(|e| format!("{path}: {e}"))?;
     Ok(OfflineBoard {
         id: board.board.id.clone(),
         boot_args,
         boot_sources,
         layout: parts.layout,
+        signature_required,
     })
+}
+
+/// The board's signing policy: `signature` on its system-slots device, `"required"` (the default) or
+/// `"not-required"`. Any other value is refused by name.
+fn signature_required_of(board: &lemnos_host::board::BoardFile) -> Result<bool, String> {
+    let device = board.devices.iter().find(|d| d.driver == "system-slots");
+    match device.and_then(|d| d.config.get("signature")) {
+        None => Ok(true),
+        Some(value) => match value.as_str() {
+            Some("required") => Ok(true),
+            Some("not-required") => Ok(false),
+            _ => Err(format!(
+                "system-slots: signature is \"required\" or \"not-required\", not {value:?}"
+            )),
+        },
+    }
 }
 
 /// The board's trust root from `--keys FILE`: a key list, or one bare 64-hex public key.
@@ -166,6 +187,7 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         bundle: &bundle,
         boot_image,
         keys,
+        keys_name: keys_path,
         board: board.clone(),
         time,
         free,
@@ -175,10 +197,10 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         .unwrap_or_default();
     let signature = meta_value(&meta, "SIGNATURE");
     // The data partition keeps the outcome word, not the key id: the id is the bundle's own `slot.sig`.
-    let signed = if signature == "not_checked_unsigned" {
+    let signed = if signature == NOT_CHECKED_UNSIGNED {
         "unsigned".to_string()
     } else {
-        match signed_key_id(&bundle) {
+        match bundle_key_id(&bundle) {
             Some(key) => format!("signed with key id {key}"),
             None => format!("signed (the bundle's slot.sig names no key id; signature {signature})"),
         }
@@ -287,10 +309,12 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         }
     }
     let dir = PathBuf::from(o.verify.as_deref().unwrap_or_default());
-    let board_id = match &o.layout_of {
-        Some(path) => Some(board_facts(path, o.socs.as_deref())?.id),
+    let facts = match &o.layout_of {
+        Some(path) => Some(board_facts(path, o.socs.as_deref())?),
         None => None,
     };
+    let board_id = facts.as_ref().map(|f| f.id.clone());
+    let required = facts.as_ref().map(|f| f.signature_required);
     let mut r = Report { bad: 0, lines: Vec::new() };
     let layout = Layout::new(&dir, dir.join(".boot-not-mounted"));
     let state_env = std::fs::read_to_string(dir.join("board/slots/state.env")).unwrap_or_default();
@@ -321,6 +345,7 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     let id = default_env.clone();
     if !id.is_empty() {
         verify_slot(&dir, &layout, &id, board_id.as_deref(), o.deep, &mut r);
+        verify_signature(&layout, &id, required, &mut r);
     }
     verify_leftovers(&dir, &mut r);
     if let Some(image) = &o.boot_image {
@@ -339,6 +364,26 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     } else {
         writeln!(out, "refused: {}", r.bad).map_err(|e| e.to_string())?;
         Err(format!("{}: {} check(s) failed", dir.display(), r.bad))
+    }
+}
+
+/// The signing outcome the tree records, against the board's policy (`None`: no board file given).
+fn verify_signature(layout: &Layout, id: &str, required: Option<bool>, r: &mut Report) {
+    let word = lemnos_slot_store::store::Meta::load(layout, id).get("SIGNATURE").to_string();
+    match (word.as_str(), required) {
+        (NOT_CHECKED_UNKNOWN_KEY, _) => r.bad(format!(
+            "slot {id} is signed by a key the board does not hold: the writer refuses that"
+        )),
+        (NOT_CHECKED_UNSIGNED, Some(true)) => r.bad(format!(
+            "slot {id} is unsigned: this board requires signed bundles"
+        )),
+        (NOT_CHECKED_UNSIGNED, Some(false)) => r.ok(format!(
+            "slot {id} is unsigned: this board does not require signing"
+        )),
+        (NOT_CHECKED_UNSIGNED, None) => r.ok(format!(
+            "slot {id} is unsigned (give --layout-of BOARD to check the board's signing policy)"
+        )),
+        (word, _) => r.ok(format!("slot {id}'s signature is {word}")),
     }
 }
 
@@ -451,37 +496,4 @@ fn verify_leftovers(dir: &Path, r: &mut Report) {
     } else {
         r.bad(format!("leftovers of an unfinished install: {}", stray.join(", ")));
     }
-}
-
-/// The bundle's `slot.sig` member, as the key id it names, in hex. `None` when the bundle has no
-/// such member or the record does not parse.
-fn signed_key_id(bundle: &[u8]) -> Option<String> {
-    #[derive(Default)]
-    struct SlotSig {
-        inside: bool,
-        found: Option<Vec<u8>>,
-    }
-    impl Sink for SlotSig {
-        fn begin(&mut self, name: &str, kind: Kind, _size: u64) -> Result<(), String> {
-            self.inside = kind == Kind::File && name == "slot.sig";
-            if self.inside {
-                self.found = Some(Vec::new());
-            }
-            Ok(())
-        }
-        fn data(&mut self, bytes: &[u8]) -> Result<(), String> {
-            if let Some(buf) = self.found.as_mut().filter(|_| self.inside) {
-                buf.extend_from_slice(bytes);
-            }
-            Ok(())
-        }
-        fn end(&mut self) -> Result<(), String> {
-            self.inside = false;
-            Ok(())
-        }
-    }
-    let mut sink = SlotSig::default();
-    Tar::default().feed(bundle, &mut sink).ok()?;
-    let record = signing::parse_record(&sink.found?).ok()?;
-    Some(hex(&record.key_id))
 }
