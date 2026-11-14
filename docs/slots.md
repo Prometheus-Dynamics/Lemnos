@@ -233,7 +233,9 @@ install counter (`SEQ`) orders slots.
 | the default slot | refused at `slot.json`, `BUSY`: `<id> is the default slot` |
 | the previous slot (a bay form) | refused when the payloads are staged, after the bundle came, before any write: `bay<N> is the previous slot's bay: a new install takes one of the other bays` |
 | any id, while a trial is pending | refused before any write: `slot <trial> is on trial with <N> attempts left: nothing was written; wait until the trial is promoted or falls back, then install <id> again` |
-| installed, and none of the above (a `FAILED` slot included) | replaced in place: the same bay set, the image and manifest renamed over the old ones, fresh metadata (the `FAILED` mark and its count are gone, `GOOD` is `untried`) and a new `SEQ`; the default is not touched |
+| the default's bay holds the id, and a boot file's stored hash differs from the bundle's | refused when the payloads are staged, before any write, naming the first file that differs: `bay<N> holds boot file <path> with a different hash than slot.json says: nothing was written, the default keeps booting`. The daemon refuses the default id above, so this is the bay layer's own check, the one any caller of the bay install gets |
+| the default's bay holds the id with identical boot files | accepted and nothing is written (`AlreadyInstalled`) |
+| installed, and none of the above (a `FAILED` slot included) | replaced in place: the same bay set, the image and manifest renamed over the old ones, fresh metadata (the `FAILED` mark and its count are gone, `GOOD` is `untried`) and a new `SEQ`; the default is not touched. The bay's stored hashes are not compared here: a bay that is neither the default, the previous nor the trial is rewritten, as the install of any id is |
 
 A manifest with a `family` key is refused. That key belonged to schema 2.
 
@@ -994,8 +996,11 @@ written.
 already exists. The caller says which bays must not be touched (`bays::Protected`: the default's, the
 previous's, the trial's, and a pending trial with attempts left); the Pi form takes them from the pointers
 and the trial record, the U-Boot form from the environment (`default_bay`, `previous_bay`, `trial_bay`,
-`trial`, `trial_attempts`). The order is: refuse a slot that is on trial, a set a pointer names and a
-payload bigger than its bay, all before any write; clear the set's old record if it holds one; write each
+`trial`, `trial_attempts`). The order is: refuse a slot that is on trial, the previous's or the trial's bay, a payload bigger than its
+bay, and a default bay that holds the slot with a stored hash that differs from the payload's, all before any
+write (the hashes are compared by `bays::compare_hashes`, which a data-partition writer can reuse; the
+payloads are the bundle's boot files, which the bundle check has matched to `slot.json`); clear the set's old
+record if it holds one; write each
 file padded to its fixed size; read each back and compare its hash; commit `bayinfo.rec`; read it back.
 Switching the default or the trial is a separate step that moves a pointer (Pi) or environment variables
 (U-Boot) and no payload. A power cut at any moment, including during an install, leaves the default

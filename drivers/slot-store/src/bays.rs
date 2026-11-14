@@ -7,8 +7,11 @@
 //! a file that already exists at its fixed size.
 //!
 //! Order of an install (each step durable before the next; a cut leaves the old state or the new):
-//! 1. refuse, before any write, when the slot is on trial, when the set is the default's or the
-//!    previous's bay, or when a payload is larger than its bay (the answer names the reason);
+//! 1. refuse, before any write, when the slot is on trial, when the set is the previous's or the
+//!    trial's bay, when a payload is larger than its bay, or when the set is the default's and holds
+//!    the slot with a boot file whose stored hash differs from the bundle's (the answer names the
+//!    file). A set that is none of the protected three and holds the slot is rewritten, whatever its
+//!    hashes: a reinstall replaces it, as an install of a new id does;
 //! 2. when the set still holds an old committed record, clear it (one record write), then write each
 //!    payload file's sectors, padded to its fixed size;
 //! 3. read each file back and compare its hash with the hash of the payload;
@@ -170,8 +173,9 @@ pub fn set_of(name: &str) -> Option<u8> {
 pub enum Done {
     /// The payloads are in the set, committed, and the pointers name it.
     Installed,
-    /// The set already is the default and holds this slot: nothing was written (the re-run after an
-    /// interrupted install).
+    /// The set already is the default and holds this slot with every boot file's stored hash equal to
+    /// the payload's: nothing was written (the re-run after an interrupted install, or a reinstall of
+    /// identical files).
     AlreadyInstalled,
 }
 
@@ -250,6 +254,24 @@ impl Info {
         }
         (at == bytes.len()).then_some(Self { slot, files })
     }
+}
+
+/// Compares a set's stored hashes with the payloads' SHA-256 values, in [`ROLES`] order. The payloads
+/// are the bundle's boot files, which the bundle check has already matched to `slot.json`, so each
+/// payload hash is the manifest's entry. Writes nothing. The first file that differs is named, in the
+/// words `bay<N> holds boot file <path> with a different hash than slot.json says`. What a difference
+/// means is the caller's: the install refuses the default's bay, and a data-partition writer can reuse
+/// the same check.
+pub fn compare_hashes(set: u8, info: &Info, payloads: &[&[u8]; 5]) -> Result<(), String> {
+    for (i, r) in ROLES.iter().enumerate() {
+        if info.files[i].1 != sha(payloads[i]) {
+            return Err(format!(
+                "bay{set} holds boot file {} with a different hash than slot.json says",
+                r.path
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reads the pointer file's effective set: the last whole line of its two sectors (the one form,
@@ -529,7 +551,8 @@ pub fn install<D: Sectors + ReadAt>(
 
 /// The install's write part, which moves no pointer: the refusals, then the payloads in place, their
 /// read-back by hash, and the set's record (the commit). A default set that holds no committed
-/// record takes the install in place: nothing bootable is in it, so nothing bootable can be lost.
+/// record takes the install in place: nothing bootable is in it, so nothing bootable can be lost. A
+/// default set that holds the slot is compared by hash first ([`compare_hashes`]).
 pub fn stage<D: Sectors + ReadAt>(
     dev: &mut D,
     layout: &Layout,
@@ -566,7 +589,14 @@ pub fn stage_with<D: Sectors + ReadAt>(
     let (files, info) = sets[set as usize];
     if protected.default == Some(set) {
         match read_info(dev, info)? {
-            Some(i) if i.slot == slot => return Ok(Done::AlreadyInstalled),
+            Some(i) if i.slot == slot => {
+                compare_hashes(set, &i, payloads).map_err(|why| {
+                    Error::Refused(format!(
+                        "{why}: nothing was written, the default keeps booting"
+                    ))
+                })?;
+                return Ok(Done::AlreadyInstalled);
+            }
             Some(_) => {
                 return Err(Error::Refused(format!(
                     "bay{set} is the default and does not hold {slot}: nothing was written"
@@ -652,8 +682,9 @@ pub fn set_of_slot<D: ReadAt + Sectors>(
     Ok(None)
 }
 
-/// The set an install of `slot` takes: the set that already holds it (an install again), else the
-/// first set no pointer names (default, previous or trial). Refused by name when every set is named.
+/// The set an install of `slot` takes: the set that already holds it (an install again; the install
+/// then compares or rewrites it as its pointers say), else the first set no pointer names (default,
+/// previous or trial). Refused by name when every set is named.
 pub fn choose_set<D: ReadAt + Sectors>(
     dev: &mut D,
     layout: &Layout,

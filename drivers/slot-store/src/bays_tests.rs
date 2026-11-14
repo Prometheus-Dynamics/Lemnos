@@ -851,3 +851,141 @@ fn a_manifest_lists_exactly_the_role_files() {
 
 #[path = "bays_sweep_tests.rs"]
 mod sweeps;
+
+/// A volume where `bay2` holds `c` and `bay1` holds `b` (the default and the previous), so `bay0`
+/// holds `a` and nothing names it: the set an install of `a` takes, and may rewrite. The writes of
+/// the two setup installs are cleared.
+fn with_a_free_bay0(layout: &Layout) -> Dev {
+    let mut dev = Dev::new(volume_image(layout, None));
+    let c = stored(&payloads_c(), layout);
+    assert_eq!(
+        install(&mut dev, layout, 2, "c", &refs(&c)).unwrap(),
+        Done::Installed
+    );
+    let b = stored(&payloads_b(), layout);
+    assert_eq!(
+        install(&mut dev, layout, 1, "b", &refs(&b)).unwrap(),
+        Done::Installed
+    );
+    dev.written.clear();
+    dev
+}
+
+/// The sectors of set `set`: its five payload files and its record.
+fn set_sectors(placed: &Placed, layout: &Layout, set: usize) -> std::collections::HashSet<u64> {
+    let mut out = std::collections::HashSet::new();
+    for (i, lba) in placed.files[set].iter().enumerate() {
+        for k in 0..layout.bytes[i] / SECTOR as u64 {
+            out.insert(lba + k);
+        }
+    }
+    out.insert(placed.info[set]);
+    out.insert(placed.info[set] + 1);
+    out
+}
+
+/// A reinstall of the default's own slot with the same boot files: the bay's stored hashes match, so
+/// nothing is written and the answer is the re-run's `AlreadyInstalled`.
+#[test]
+fn a_reinstall_of_the_default_with_identical_boot_files_is_accepted_and_writes_nothing() {
+    let layout = test_layout();
+    let mut dev = Dev::new(volume_image(&layout, None));
+    let a = stored(&payloads_a(), &layout);
+    assert_eq!(
+        install(&mut dev, &layout, 0, "a", &refs(&a)).unwrap(),
+        Done::AlreadyInstalled
+    );
+    assert!(dev.written.is_empty(), "{:?}", dev.written);
+}
+
+/// A reinstall of a slot in a bay that is neither the default, the previous nor the trial, with the
+/// same boot files: installed in place, in the same bay, and only that bay is written.
+#[test]
+fn a_reinstall_with_identical_boot_files_installs_in_place() {
+    let layout = test_layout();
+    let mut dev = with_a_free_bay0(&layout);
+    let protected = Protected::from_volume(&mut dev, &layout).unwrap();
+    assert_eq!(protected.default, Some(1));
+    assert_eq!(protected.previous, Some(2));
+    assert_eq!(choose_set(&mut dev, &layout, "a", &protected).unwrap(), 0);
+    let a = stored(&payloads_a(), &layout);
+    assert_eq!(
+        stage_with(&mut dev, &layout, 0, "a", &refs(&a), None, &protected).unwrap(),
+        Done::Installed
+    );
+    let placed = place(&mut dev, &layout).unwrap();
+    let bay0 = set_sectors(&placed, &layout, 0);
+    assert!(!dev.written.is_empty());
+    assert!(
+        dev.written.iter().all(|lba| bay0.contains(lba)),
+        "a write outside bay0: {:?}",
+        dev.written
+    );
+    assert_eq!(
+        boot_view(&mut dev, &layout, placed.default).unwrap(),
+        (1, "b".into())
+    );
+    assert_eq!(
+        boot_view(&mut dev, &layout, placed.previous).unwrap(),
+        (2, "c".into())
+    );
+}
+
+/// The default's bay holds the slot with a boot file whose hash differs from the bundle's: the install
+/// is refused, names that file, and writes nothing. Each role is checked, and the answer names the
+/// role's own file. The record is the fixture's real commit of `a` (the same record code the install
+/// uses), not a stand-in. Before the fix this returned `AlreadyInstalled` on the slot id alone.
+#[test]
+fn a_default_bay_whose_boot_file_hash_differs_is_refused_by_name_and_never_written() {
+    let layout = test_layout();
+    for (role, file) in ROLES.iter().enumerate() {
+        let mut dev = Dev::new(volume_image(&layout, None));
+        let mut p = payloads_a();
+        p[role][0] ^= 0xff;
+        let altered = stored(&p, &layout);
+        let err = install(&mut dev, &layout, 0, "a", &refs(&altered)).unwrap_err();
+        match err {
+            Error::Refused(why) => assert_eq!(
+                why,
+                format!(
+                    "bay0 holds boot file {} with a different hash than slot.json says: nothing was written, the default keeps booting",
+                    file.path
+                ),
+                "role {}",
+                file.role
+            ),
+            other => panic!("{}: expected a refusal, got {other:?}", file.role),
+        }
+        assert!(dev.written.is_empty(), "{}: {:?}", file.role, dev.written);
+    }
+}
+
+/// A bay that holds the slot, is neither default, previous nor trial, and whose boot file hash differs:
+/// rewritten in place (the install replaces the id as any other install does). The default and the
+/// previous are not written, and the new hashes are what the bay records.
+#[test]
+fn a_bay_whose_boot_file_hash_differs_is_rewritten_when_nothing_names_it() {
+    let layout = test_layout();
+    let mut dev = with_a_free_bay0(&layout);
+    let protected = Protected::from_volume(&mut dev, &layout).unwrap();
+    let mut p = payloads_a();
+    p[0][0] ^= 0xff;
+    let altered = stored(&p, &layout);
+    assert_eq!(
+        stage_with(&mut dev, &layout, 0, "a", &refs(&altered), None, &protected).unwrap(),
+        Done::Installed
+    );
+    let placed = place(&mut dev, &layout).unwrap();
+    let bay0 = set_sectors(&placed, &layout, 0);
+    assert!(dev.written.iter().all(|lba| bay0.contains(lba)));
+    let info = read_info(&mut dev, placed.info[0]).unwrap().unwrap();
+    assert_eq!(info.slot, "a");
+    assert_eq!(
+        info.files[0].1,
+        <[u8; 32]>::from(Sha256::digest(&altered[0]))
+    );
+    assert_eq!(
+        boot_view(&mut dev, &layout, placed.default).unwrap(),
+        (1, "b".into())
+    );
+}
