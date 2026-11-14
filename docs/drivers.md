@@ -42,7 +42,7 @@ python3 scripts/generate-builtins.py --check
 | `ws2812` | `pixels/1` | `bus`: SPI device, or a `pio-out` name (PIO state machine running the strip's 800 kHz program) | Serves its contract. The PIO program's timing is untested on board (`Q1.md`) |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
 | `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm`, `uart` | Serves its contract. Closed by default: writes and each bus are allowed only by `config`. A UART's frame is set at bind; reading it needs no `writes` |
-| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and the clamp of a value outside the limits, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`) |
+| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and the clamp of a value outside the limits, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`). Restarts itself after a bus error and when its linked receiver's frame-start count stands still past `max(4 frame periods, 250 ms)` (`docs/streams.md`, "The sensor that stops sending"); health is `failed` meanwhile |
 
 ## Devices with no bus of their own
 
@@ -82,7 +82,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract. Run on the reference board at 57 to 145 fps, with 200 stops each by `STOP`, client kill, daemon kill and unbind (`D5.md`) |
+| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract. Run on the reference board at 57 to 145 fps, with 200 stops each by `STOP`, client kill, daemon kill and unbind (`D5.md`). Its `frames` stream takes `buffers` 1 to 64 (`MAX_BUFFERS` in `relay.rs`; 0 or more than 64 is refused at start); the receiver needs one buffer free to receive into and holds one more while a frame is written, so the usable minimum is the number of frames a consumer holds at once plus two; a consumer that holds every buffer stops frames arriving, and the receiver then answers `frame_starts` with "cannot say now", so a sensor's frame watch does not restart the sensor for it |
 | `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported. Outputs 0 and 1 and statistics run on the reference board, with 200 stops each way (`D7.md`) |
 | `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events. Run on the reference board: the same output and round trip as the stock driver (`D6.md`) |
 | `rkcif` | `camera.receiver/1` | the vendor kernel's media graph; optional `frames` stream | Serves its contract. Routes a MIPI channel and says which ISP it feeds. Frames only on the raw path, when `frames` and `capture` are set |

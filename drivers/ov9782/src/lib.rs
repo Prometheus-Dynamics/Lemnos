@@ -70,9 +70,29 @@
 //! Failures. A bus error on a control call while streaming is reported to its caller and starts
 //! recovery: the next ticks reprogram the sensor and restart it, with the delay between attempts
 //! doubling from 250 ms and capped at 8 s, and clearing when an attempt succeeds. While recovering,
-//! calls that write to the sensor return `BUSY` and health is degraded. The driver never gives up
-//! and never switches the sensor off on its own. A failed `start` or `stop` is reported and retried
-//! by its caller.
+//! calls that write to the sensor return `BUSY` and health is failed, with the reason. The driver
+//! never gives up and never switches the sensor off on its own. A failed `start` or `stop` is
+//! reported and retried by its caller.
+//!
+//! A sensor that stops sending. A brown-out or a glitch can put the chip in standby with no write
+//! failing, so recovery also starts when the linked receiver's frame-start count stops. Once a
+//! watch (`RECEIVER_WATCH_NS`, 100 ms) the driver reads the count it already reads for the landing
+//! frame; a KNOWN count that has not moved for longer than [`silence_bound_ns`] is a bus error for
+//! this purpose: health `Failed("no frame start for over N ms at the frame length in force:
+//! restarting the sensor")`, then the backoff and a full `program()`, which writes what the instance
+//! holds (mode, frame length, exposure, gain, flips, test pattern), so the recovery is `Kept`. The
+//! bound is `max(SILENCE_FRAMES * frame period, SILENCE_MIN_NS)` with the frame period
+//! `mode.period_ps(frame_length)` (the contract's one period, lines times line time plus the
+//! frame offset) of the longest frame length in force: four periods, never under 250 ms
+//! (two watches and a margin). A restart's first frame is given [`FIRST_FRAME_NS`] more, and a
+//! restart that still brings no frame fails again at the next backoff step: never a rebind, never
+//! giving up. Nothing is judged for a count that is unknown or unsupported (no receiver, a receiver
+//! that cannot count, a read that failed), a receiver that is itself failing, a mode whose frames
+//! come on demand (`ModeEntry::free_running`; every mode here runs free), a stream that has shown no
+//! frame since `start` (a receiver with nothing to write into counts none), or a count that went
+//! down (the receiver started again). The watch reads no register and allocates nothing. A receiver with no
+//! buffer to receive into answers `None` ("cannot say now"), so a consumer that holds every buffer
+//! is not taken for a silent sensor (`camera.receiver` `frame_starts`).
 //!
 //! The driver does not carry calibration, 3A or any tuning: those belong to the caller.
 
@@ -85,6 +105,25 @@ mod tests;
 
 #[cfg(test)]
 mod ring_tests;
+
+/// What a test sets to make the selected mode one that sends frames only on demand, which no
+/// mode of the table is.
+#[cfg(test)]
+mod test_hooks {
+    extern crate std;
+    std::thread_local! {
+        pub(crate) static ON_DEMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+}
+
+/// Whether the selected mode sends frames by itself.
+fn sends_by_itself(entry: &ModeEntry) -> bool {
+    #[cfg(test)]
+    if test_hooks::ON_DEMAND.with(|flag| flag.get()) {
+        return false;
+    }
+    entry.free_running
+}
 
 use chip::{
     ANA_CORE_2, ANALOGUE_GAIN, BAYER, CHIP_ID, CHIP_IDS, COMMON, DEFAULT_ADDRESS,
@@ -152,6 +191,23 @@ pub const VALUES_POLL_NS: u64 = 1_000_000;
 /// A receiver that has gone (unbound, or its handle stale) takes the stream with it: see
 /// [`Ov9782::lost_receiver`].
 pub const RECEIVER_WATCH_NS: u64 = 100_000_000;
+/// How many frame periods, at the frame length in force, the frame-start count may stand still
+/// before the sensor is judged silent. See [`silence_bound_ns`].
+pub const SILENCE_FRAMES: u64 = 4;
+/// The least time the count may stand still: two watch intervals and this margin. The count is
+/// read once a watch, so a frame start is seen up to one interval late and a freeze up to one
+/// interval late; this margin is what a late tick may add on top.
+pub const SILENCE_MARGIN_NS: u64 = 50_000_000;
+/// The floor of the silence bound: two watch intervals and the margin.
+pub const SILENCE_MIN_NS: u64 = 2 * RECEIVER_WATCH_NS + SILENCE_MARGIN_NS;
+/// What a restarted sensor is given, on top of the bound, to send its first frame: measured on a
+/// board, the first frame came about 2 s after a start. Applies after a recovery's `program()`
+/// (and after the receiver's count restarted), where frames had been seen before.
+pub const FIRST_FRAME_NS: u64 = 3_000_000_000;
+/// Frames that must be seen after a frame-length change before the longer of the old and new
+/// lengths stops being used for the bound: a change is launched at the next vertical blanking and
+/// shows two frames later, so up to three frames can still run at the old length.
+const SETTLE_FRAMES: u8 = 3;
 /// Most jobs one poll reads. The ring holds at most 64 (`lemnos-wire` `MAX_JOB_SLOTS`).
 const MAX_JOBS_PER_POLL: usize = 64;
 /// Bytes read of one job: an encoded `FrameValues` fits, and this runs on small stacks. A longer
@@ -165,6 +221,116 @@ const fn backoff_ns(attempt: u32) -> u64 {
         BACKOFF_MAX_NS
     } else {
         shifted
+    }
+}
+
+/// Why the driver is recovering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    /// A register write failed while streaming.
+    Bus,
+    /// The linked receiver's frame-start count stood still: the reason says how long, as far as a
+    /// fixed text can (see [`silence_reason`]).
+    Silent(&'static str),
+}
+
+/// The reason health gives when the count stood still for `ms` milliseconds. Health's reason is a
+/// fixed text, so the time is named by the largest step in the table that it reached: "over 250 ms"
+/// is a count that stood still for at least that long.
+const fn silence_reason(ms: u64) -> &'static str {
+    if ms >= 8000 {
+        "no frame start for over 8000 ms at the frame length in force: restarting the sensor"
+    } else if ms >= 4000 {
+        "no frame start for over 4000 ms at the frame length in force: restarting the sensor"
+    } else if ms >= 2000 {
+        "no frame start for over 2000 ms at the frame length in force: restarting the sensor"
+    } else if ms >= 1000 {
+        "no frame start for over 1000 ms at the frame length in force: restarting the sensor"
+    } else if ms >= 500 {
+        "no frame start for over 500 ms at the frame length in force: restarting the sensor"
+    } else {
+        "no frame start for over 250 ms at the frame length in force: restarting the sensor"
+    }
+}
+
+/// What the watch on the receiver's frame-start count knows. Judges nothing by itself: see
+/// [`Ov9782::judge`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Watch {
+    /// The next time the count is judged.
+    due: u64,
+    /// The count at the last watch, `None` when there is no baseline.
+    last: Option<u64>,
+    /// When the count last differed from the one before (the watch that saw it), or the baseline.
+    since: u64,
+    /// The count has moved since the sensor was last programmed: the sensor and the receiver are
+    /// both seen working.
+    advanced: bool,
+    /// The count has moved at some time since the stream started.
+    ever: bool,
+    /// Silent restarts in a row without a frame after them: the next backoff step.
+    streak: u32,
+    /// The longest frame length held since a change, until it has settled; 0 when none.
+    held_frame: u32,
+    settled: u8,
+}
+
+impl Watch {
+    /// One watch of a known count. Returns how long it has stood still, 0 when it moved or
+    /// this is the baseline.
+    fn observe(&mut self, now_ns: u64, count: u64) -> u64 {
+        match self.last {
+            Some(last) if count == last => now_ns.saturating_sub(self.since),
+            Some(last) if count > last => {
+                self.last = Some(count);
+                self.since = now_ns;
+                self.advanced = true;
+                self.ever = true;
+                self.streak = 0;
+                self.settled = self.settled.saturating_add(1);
+                if self.settled >= SETTLE_FRAMES {
+                    self.held_frame = 0;
+                }
+                0
+            }
+            // A first read, or a count lower than before: the receiver started again.
+            _ => {
+                self.last = Some(count);
+                self.since = now_ns;
+                self.advanced = false;
+                0
+            }
+        }
+    }
+
+    /// No judgement now: the count is not known, or not the sensor's to answer for.
+    fn forget(&mut self) {
+        self.last = None;
+        self.advanced = false;
+    }
+
+    /// The sensor was just programmed and told to stream: frames are due again.
+    fn programmed(&mut self) {
+        self.forget();
+        self.held_frame = 0;
+        self.settled = 0;
+        self.due = 0;
+    }
+}
+
+/// How long the receiver's frame-start count may stand still before the sensor is judged silent,
+/// at `frame_length` lines of `line_time_ps`:
+///
+/// `max(SILENCE_FRAMES * frame period, SILENCE_MIN_NS)`, the frame period being the one period of the
+/// contract, `mode.period_ps(frame_length)` (`frame_length * line_time + frame_offset_ps`), given
+/// here in picoseconds. It scales with the frame length in force: a long frame is a long
+/// silence that is not one.
+const fn silence_bound_ns(period_ps: u128) -> u64 {
+    let frames = SILENCE_FRAMES as u128 * period_ps / 1000;
+    if frames > SILENCE_MIN_NS as u128 {
+        frames as u64
+    } else {
+        SILENCE_MIN_NS
     }
 }
 
@@ -323,6 +489,9 @@ pub struct Ov9782 {
     /// The selected mode and its control values in force.
     selected: Option<(u16, Current)>,
     state: State,
+    /// Why, while the state is `Recovering`.
+    cause: Cause,
+    watch: Watch,
     flip_horizontal: bool,
     flip_vertical: bool,
     test_pattern: u16,
@@ -390,6 +559,8 @@ impl Lifecycle for Ov9782 {
             continuous_clock: continuous_clock_from_config(cfg)?,
             selected: None,
             state: State::Stopped,
+            cause: Cause::Bus,
+            watch: Watch::default(),
             flip_horizontal: false,
             flip_vertical: false,
             test_pattern: 0,
@@ -467,9 +638,10 @@ impl Lifecycle for Ov9782 {
             return Health::Failed(reason);
         }
         match (self.state, self.link_check) {
-            (State::Recovering { .. }, _) => {
-                Health::Failed("bus error while streaming: restarting the sensor")
-            }
+            (State::Recovering { .. }, _) => Health::Failed(match self.cause {
+                Cause::Bus => "bus error while streaming: restarting the sensor",
+                Cause::Silent(reason) => reason,
+            }),
             (State::PowerUp { .. }, _) => Health::Degraded("powering up"),
             (_, LinkCheck::Unknown(reason)) => Health::Degraded(reason),
             _ => Health::Ok,
@@ -498,6 +670,7 @@ impl Lifecycle for Ov9782 {
                         // The first attempt failed: recovery takes over, from the bottom of its
                         // backoff.
                         Err(_) => {
+                            self.cause = Cause::Bus;
                             self.state = State::Recovering {
                                 attempt: 0,
                                 due: None,
@@ -514,9 +687,16 @@ impl Lifecycle for Ov9782 {
                 }
             }
             State::Streaming => {
-                if self.receiver_lost() {
+                let read = self.read_starts();
+                if matches!(read, Some(Err(Status::NO_DEVICE | Status::STALE_HANDLE))) {
                     self.lost_receiver();
                     return None;
+                }
+                if let Some(read) = read
+                    && self.judge(now_ns, read)
+                {
+                    // Recovering now: its first tick schedules the attempt.
+                    return self.tick(now_ns);
                 }
                 self.take_values();
                 let poll = self
@@ -560,6 +740,7 @@ impl Ov9782 {
             Some(_) => match self.program() {
                 Ok(()) => {
                     self.state = State::Streaming;
+                    self.watch.programmed();
                     None
                 }
                 Err(_) => {
@@ -701,23 +882,96 @@ impl Ov9782 {
         Ok((&MODES[usize::from(index)], current))
     }
 
-    /// Remembers the control values in force for the selected mode.
+    /// Remembers the control values in force for the selected mode. A frame length that changes
+    /// keeps the longer of the two in the silence bound until frames at the new one are seen.
     fn keep(&mut self, current: Current) {
         if let Some((_, slot)) = &mut self.selected {
+            if slot.frame_length != current.frame_length {
+                self.watch.held_frame = self.watch.held_frame.max(slot.frame_length);
+                self.watch.settled = 0;
+            }
             *slot = current;
         }
+    }
+
+    /// Reads the linked receiver's frame-start count; `None` with no receiver linked.
+    fn read_starts(&mut self) -> Option<Result<Option<FrameStarts>>> {
+        self._receiver
+            .as_mut()
+            .map(|receiver| receiver.frame_starts())
     }
 
     /// Whether the linked receiver has gone: unbound, or its handle no longer names it. A receiver
     /// that answers with any other status is still there.
     fn receiver_lost(&mut self) -> bool {
-        match self._receiver.as_mut() {
-            Some(receiver) => matches!(
-                receiver.frame_starts(),
-                Err(Status::NO_DEVICE | Status::STALE_HANDLE)
-            ),
-            None => false,
+        matches!(
+            self.read_starts(),
+            Some(Err(Status::NO_DEVICE | Status::STALE_HANDLE))
+        )
+    }
+
+    /// The silence bound now, from the mode and the longest frame length in force.
+    fn silence_bound(&self) -> Option<u64> {
+        let (entry, current) = self.mode_entry().ok()?;
+        let mode = entry.describe(self.continuous_clock);
+        let frame_length = current.frame_length.max(self.watch.held_frame);
+        Some(silence_bound_ns(mode.period_ps(frame_length)))
+    }
+
+    /// Judges the receiver's frame-start count once a watch, while streaming. Returns true when it
+    /// found the sensor silent and has put the driver into recovery, as a failed write would.
+    ///
+    /// The sensor is silent when a KNOWN count has not moved for longer than the bound
+    /// ([`silence_bound_ns`]); after a restart of the sensor the first frame is also given
+    /// [`FIRST_FRAME_NS`]. Nothing is judged when
+    /// - the mode sends frames only on demand (`ModeEntry::free_running`),
+    /// - the receiver cannot say (no link, unknown, `NOT_SUPPORTED`, a failed read) or is failing
+    ///   itself (`Failed`, `Gone`): then the receiver is the failed device,
+    /// - the stream has never shown a frame since `start`: a receiver with nothing to write into
+    ///   counts nothing, and no frame has yet shown that this one counts,
+    /// - the count went down (the receiver started again): the watch begins again.
+    ///
+    /// A mode change and a stop need the sensor stopped, and a stopped sensor is not judged.
+    fn judge(&mut self, now_ns: u64, read: Result<Option<FrameStarts>>) -> bool {
+        if now_ns < self.watch.due {
+            return false;
         }
+        self.watch.due = now_ns.saturating_add(RECEIVER_WATCH_NS);
+        let free_running = self
+            .mode_entry()
+            .is_ok_and(|(entry, _)| sends_by_itself(entry));
+        let receiver_failing = self._receiver.as_ref().is_some_and(|receiver| {
+            matches!(receiver.health(), Health::Failed(_) | Health::Gone(_))
+        });
+        let count = match read {
+            Ok(Some(starts)) if free_running && !receiver_failing => starts.count,
+            _ => {
+                self.watch.forget();
+                return false;
+            }
+        };
+        let frozen = self.watch.observe(now_ns, count);
+        if frozen == 0 {
+            return false;
+        }
+        let Some(bound) = self.silence_bound() else {
+            return false;
+        };
+        let limit = if self.watch.advanced {
+            bound
+        } else if self.watch.ever {
+            bound.saturating_add(FIRST_FRAME_NS)
+        } else {
+            return false;
+        };
+        if frozen <= limit {
+            return false;
+        }
+        let attempt = self.watch.streak;
+        self.watch.streak = attempt.saturating_add(1);
+        self.cause = Cause::Silent(silence_reason(frozen / 1_000_000));
+        self.state = State::Recovering { attempt, due: None };
+        true
     }
 
     /// The receiver went while the sensor streamed, so the stream went with it. The sensor is put
@@ -727,6 +981,7 @@ impl Ov9782 {
     fn lost_receiver(&mut self) {
         let _ = self.reg(MODE_SELECT, STANDBY);
         self.state = State::Stopped;
+        self.watch = Watch::default();
     }
 
     /// Whether a method may write to the sensor now.
@@ -741,6 +996,7 @@ impl Ov9782 {
     /// Records a failed write. While streaming, this starts recovery.
     fn fail(&mut self, status: Status) -> Status {
         if self.state == State::Streaming {
+            self.cause = Cause::Bus;
             self.state = State::Recovering {
                 attempt: 0,
                 due: None,
@@ -909,6 +1165,7 @@ impl CameraSensor for Ov9782 {
         if self.state == State::Stopped {
             // Whoever starts the sensor owns it until it stops, even if this start then fails.
             self.owner = self.caller;
+            self.watch = Watch::default();
         }
         if matches!(self.state, State::Streaming | State::PowerUp { .. }) {
             return Ok(());
@@ -937,6 +1194,7 @@ impl CameraSensor for Ov9782 {
         }
         self.reg(MODE_SELECT, STANDBY)?;
         self.state = State::Stopped;
+        self.watch = Watch::default();
         Ok(())
     }
 

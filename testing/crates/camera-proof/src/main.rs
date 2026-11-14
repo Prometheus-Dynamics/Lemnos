@@ -4,6 +4,7 @@
 //! lemnos-camera-proof [--socket PATH] [--sensor ID] [--mode N] [--pattern CODE]
 //!                     [--exposure N] [--frame-length N] [--frames N] [--save DIR]
 //!                     [--hold-ms N] [--attach-late-ms N] [--reattach N] [--stop-first]
+//!                     [--through-stall] [--stall-limit SECONDS]
 //! ```
 //!
 //! Assembles the camera from the board's links, starts it, takes `--frames` frames off the
@@ -28,14 +29,26 @@
 //! stream back and takes it again that many times while the camera runs, reading 10 frames each
 //! time. `--stop-first` stops the camera before starting it: the camera drivers don't track who
 //! started them, so a camera whose caller died keeps running until a caller stops it.
+//!
+//! `--through-stall` reads with `next_or_end` and prints one line for each event, with the
+//! `CLOCK_MONOTONIC` nanoseconds it was seen at: each `Stalled` (the producer failed and is being
+//! retried: when, and the last frame before it), each `Resumed` (kept or lost, and the time since the
+//! stall), the first frame after it (sequence and timestamp, the time since the stall and since the
+//! resume, and whether the sequence continued or jumped), and the end of the stream with its kind.
+//! The reader does not give up on silence while the producer reads retrying, for at most
+//! `--stall-limit` seconds (default 30) of one stall. The summary then adds the number of stalls,
+//! the longest, and for each whether the sequence continued across it. Exit status 0 only when every
+//! stall resumed kept and frames came back; otherwise non-zero, with the reason. Without the flag
+//! nothing changes.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use lemnos_camera_proof::stall::{Event, Tracker};
 use lemnos_camera_proof::{Error, Options, SocketBus, assemble};
-use lemnos_client::Client;
+use lemnos_client::{Carried, Client, FrameStream, HeldFrame, Next, ProducerState};
 use lemnos_contract_camera_sensor::Controls;
 
 #[derive(Debug, Default)]
@@ -52,11 +65,14 @@ struct Args {
     attach_late_ms: u64,
     reattach: u32,
     stop_first: bool,
+    through_stall: bool,
+    stall_limit: u64,
 }
 
 fn parse() -> Option<Args> {
     let mut args = Args {
         frames: 100,
+        stall_limit: 30,
         ..Args::default()
     };
     let mut it = std::env::args().skip(1);
@@ -65,8 +81,13 @@ fn parse() -> Option<Args> {
             args.stop_first = true;
             continue;
         }
+        if flag == "--through-stall" {
+            args.through_stall = true;
+            continue;
+        }
         let value = it.next()?;
         match flag.as_str() {
+            "--stall-limit" => args.stall_limit = value.parse().ok()?,
             "--socket" => args.socket = Some(value),
             "--sensor" => args.sensor = Some(value),
             "--mode" => args.mode = value.parse().ok()?,
@@ -155,6 +176,67 @@ fn percentile(sorted: &[u64], p: usize) -> u64 {
 
 fn out(text: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout(), "{text}");
+}
+
+/// What one wait found, in `--through-stall` mode.
+enum Got {
+    Frame(HeldFrame),
+    /// A second with nothing, and no stall open.
+    Silent,
+    /// The reader stops: the stream ended, or a stall outlasted the limit.
+    Stop,
+}
+
+/// Waits for a frame with `next_or_end`, printing each event as it comes and keeping the book.
+/// Silence while the producer is stalled is waited through (up to the tracker's limit).
+fn next_through_stall(stream: &mut FrameStream, tracker: &mut Tracker) -> Result<Got, Error> {
+    loop {
+        let next = stream
+            .next_or_end(Duration::from_secs(1))
+            .map_err(|_| Error::ReadFailed)?;
+        let now = monotonic_ns();
+        let event = match next {
+            Next::Frame(frame) => {
+                let event = Event::Frame {
+                    sequence: frame.sequence(),
+                    timestamp_ns: frame.timestamp_ns(),
+                };
+                if let Some(line) = tracker.event(now, event) {
+                    out(format_args!("{line}"));
+                }
+                return Ok(Got::Frame(frame));
+            }
+            Next::Stalled(state) => Event::Stalled {
+                since_ns: match state {
+                    ProducerState::Retrying { since_ns } => Some(since_ns),
+                    _ => None,
+                },
+            },
+            Next::Resumed { state } => Event::Resumed {
+                kept: state == Carried::Kept,
+            },
+            Next::TimedOut => {
+                if tracker.idle(now) {
+                    out(format_args!(
+                        "[{now} ns] giving up: the producer has been retrying for more than the stall limit"
+                    ));
+                    return Ok(Got::Stop);
+                }
+                if tracker.stalled() {
+                    continue;
+                }
+                return Ok(Got::Silent);
+            }
+            Next::Ended(kind) => Event::Ended(kind.to_string()),
+        };
+        let ended = matches!(event, Event::Ended(_));
+        if let Some(line) = tracker.event(now, event) {
+            out(format_args!("{line}"));
+        }
+        if ended {
+            return Ok(Got::Stop);
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -258,11 +340,19 @@ fn run(args: &Args) -> Result<bool, Error> {
     let mut zero_frames = 0u64;
     let mut stalls = 0u32;
     let mut summary = Vec::new();
+    let mut tracker = args.through_stall.then(|| Tracker::new(args.stall_limit));
     while taken < args.frames {
-        let Some(frame) = stream
-            .next_frame(Duration::from_secs(1))
-            .map_err(|_| Error::ReadFailed)?
-        else {
+        let waited = match tracker.as_mut() {
+            Some(tracker) => match next_through_stall(&mut stream, tracker)? {
+                Got::Frame(frame) => Some(frame),
+                Got::Silent => None,
+                Got::Stop => break,
+            },
+            None => stream
+                .next_frame(Duration::from_secs(1))
+                .map_err(|_| Error::ReadFailed)?,
+        };
+        let Some(frame) = waited else {
             stalls += 1;
             out(format_args!("no frame for 1 s (after {taken})"));
             if stalls >= 5 {
@@ -429,14 +519,29 @@ fn run(args: &Args) -> Result<bool, Error> {
         taken.saturating_sub(1)
     ));
     out(format_args!("stop took {stop_us} us"));
-    Ok(taken == args.frames && zero_frames == 0)
+    let mut through = true;
+    if let Some(tracker) = &tracker {
+        for line in tracker.summary(monotonic_ns()) {
+            out(format_args!("{line}"));
+        }
+        match tracker.verdict() {
+            Ok(()) => out(format_args!(
+                "through-stall: every stall resumed kept and frames came back"
+            )),
+            Err(why) => {
+                through = false;
+                out(format_args!("through-stall: failed: {why}"));
+            }
+        }
+    }
+    Ok(taken == args.frames && zero_frames == 0 && through)
 }
 
 fn main() -> ExitCode {
     let Some(args) = parse() else {
         let _ = writeln!(
             std::io::stderr(),
-            "usage: lemnos-camera-proof [--socket PATH] [--sensor ID] [--mode N] [--pattern CODE] [--exposure N] [--frame-length N] [--frames N] [--save DIR] [--hold-ms N] [--attach-late-ms N] [--reattach N] [--stop-first]"
+            "usage: lemnos-camera-proof [--socket PATH] [--sensor ID] [--mode N] [--pattern CODE] [--exposure N] [--frame-length N] [--frames N] [--save DIR] [--hold-ms N] [--attach-late-ms N] [--reattach N] [--stop-first] [--through-stall] [--stall-limit SECONDS]"
         );
         return ExitCode::from(2);
     };

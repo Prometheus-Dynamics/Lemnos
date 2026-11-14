@@ -182,8 +182,8 @@ pub struct StreamStatus {
 }
 
 /// `struct lemnos_rp1_csi2_frame_starts`: the frame-start count, read with
-/// [`Node::frame_starts`]. `valid` is nonzero while the receiver is streaming, when the count is
-/// the one since START; zero means it is unknown, and is not a count of zero.
+/// [`Node::frame_starts`]. `valid` is nonzero while the receiver is streaming with a buffer armed,
+/// when the count is the one since START (with none armed no start can show); zero means it is unknown, and is not a count of zero.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameStarts {
@@ -191,7 +191,7 @@ pub struct FrameStarts {
     pub frames: u64,
     /// CLOCK_MONOTONIC at the latest start, or zero while `frames` is zero.
     pub latest_ns: u64,
-    /// Nonzero while streaming.
+    /// Nonzero while streaming with a buffer armed.
     pub valid: u32,
     /// Zero.
     pub reserved: u32,

@@ -464,6 +464,49 @@ static void test_frame_starts(int pool_fd)
 }
 
 /*
+ * Nothing armed, no count. With every buffer held by the consumer the channel has no address and
+ * makes no frame start, so the count cannot move and is not offered (`valid` zero), where it would
+ * read as a sensor gone quiet. Giving a buffer back arms the channel again, and the count is
+ * valid again with the starts it had.
+ */
+static void test_frame_starts_while_starved(int pool_fd)
+{
+	struct stream s;
+	struct frame f[BUFFERS];
+	struct lemnos_rp1_csi2_start a;
+	struct lemnos_rp1_csi2_frame_starts fs;
+	unsigned int n;
+
+	CHECK(!stream_open(&s, pool_fd), "stream made");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "START");
+	fs = frame_starts();
+	CHECK(fs.valid, "armed after START: the count is valid");
+	/* The consumer holds every buffer: each frame is read and not given back. */
+	for (n = 0; n < BUFFERS; n++) {
+		fire(TCSI_FS);
+		fire(TCSI_FE_ACK);
+		CHECK(pop_frame(&s, &f[n]), "frame %u published and held", n);
+	}
+	fs = frame_starts();
+	CHECK(!fs.valid, "every buffer held: nothing is armed, the count is not valid (valid %u)",
+	      fs.valid);
+	sleep_ms(20);
+	fs = frame_starts();
+	CHECK(!fs.valid, "and it stays so while they are held");
+	give_back(&s, f[0].buffer, f[0].fence);
+	sleep_ms(20);
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == BUFFERS,
+	      "a buffer given back arms the channel: the count is valid again with its starts (valid %u frames %llu)",
+	      fs.valid, (unsigned long long)fs.frames);
+	for (n = 1; n < BUFFERS; n++)
+		give_back(&s, f[n].buffer, f[n].fence);
+	CHECK(!stop(), "STOP");
+	stream_close(&s);
+}
+
+/*
  * A frame cut short: its frame start and end came, but the channel wrote one
  * line of it (seen on the board when a start catches a frame mid-way). It is
  * a frame gone wrong, not published; the next whole frame is.
@@ -573,12 +616,9 @@ static void test_jobs(int pool_fd)
 	i = info();
 	CHECK(i.dropped == 1, "a frame start with no job is dropped (%llu)",
 	      (unsigned long long)i.dropped);
+	/* Nothing is armed for a job-driven stream with no job: no count to give. */
 	fs = frame_starts();
-	CHECK(fs.valid && fs.frames == i.frames, "the count names the dropped start (%llu)",
-	      (unsigned long long)fs.frames);
-	CHECK(fs.latest_ns >= mono_ns(&t0) && fs.latest_ns <= mono_ns(&t1),
-	      "the latest start is the dropped one, at its own time (%llu)",
-	      (unsigned long long)fs.latest_ns);
+	CHECK(!fs.valid, "with no job armed the count is not valid (valid %u)", fs.valid);
 
 	/* A job whose frame goes wrong comes back with 0 bytes, identity intact. */
 	give_back(&s, f.buffer, f.fence);
@@ -586,7 +626,7 @@ static void test_jobs(int pool_fd)
 	post(&s, &job);
 	fire(TCSI_FE_ACK);	/* that frame end (no buffer) lets the job be armed */
 	fire(TCSI_FS);
-	bad = frame_starts().frames;	/* the frame on buffer 3 started at this count */
+	bad = info().frames;	/* the frame on buffer 3 started at this count (nothing is armed now, so the ioctl gives none) */
 	fire(TCSI_FS);		/* a second start: the frame on buffer 3 went wrong */
 	CHECK(pop_frame(&s, &f) && f.buffer == 3 && f.bytes == 0 && f.identity == 0xdef,
 	      "a bad frame on a job comes back with 0 bytes (buffer %u bytes %u identity %llx)",
@@ -1182,6 +1222,7 @@ int main(int argc, char **argv)
 	stream_close(&s);
 	test_frames(pool_fd);
 	test_frame_starts(pool_fd);
+	test_frame_starts_while_starved(pool_fd);
 	test_short_frame(pool_fd);
 	test_hostile_hw(pool_fd);
 	test_jobs(pool_fd);

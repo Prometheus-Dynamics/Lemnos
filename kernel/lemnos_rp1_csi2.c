@@ -893,7 +893,10 @@ static long lrc_info(struct lrc_dev *l, void __user *arg)
 /*
  * The frame-start count since START and the latest start's time, read together
  * under the frame path's lock. `valid` is zero when the receiver isn't streaming:
- * then the count isn't one since START and must not be read as zero.
+ * then the count isn't one since START and must not be read as zero. It is zero
+ * too while no buffer is armed: a channel with no buffer address makes no frame
+ * start (lrc_arm), so the count cannot move and a reader must not take its standing
+ * still for a silent sensor. Arming is what makes it valid again.
  */
 static long lrc_frame_starts(struct lrc_dev *l, void __user *arg)
 {
@@ -902,7 +905,7 @@ static long lrc_frame_starts(struct lrc_dev *l, void __user *arg)
 
 	mutex_lock(&l->ctl);
 	spin_lock_irqsave(&l->lock, flags);
-	fs.valid = l->streaming;
+	fs.valid = l->streaming && l->next.valid;
 	if (fs.valid) {
 		fs.frames = l->frames;
 		fs.latest_ns = l->fs_ns;

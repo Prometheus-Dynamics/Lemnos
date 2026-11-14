@@ -78,17 +78,19 @@ struct lemnos_rp1_csi2_start {
  * sequence a published frame carries (lemnos.h, "Frame streams"). A channel with
  * no buffer address raises no interrupt, so a start then is in no count: `frames`
  * is the sensor's frame starts only while every start shows (see the driver's
- * docs and testing/board-runs/J4b2.md).
+ * docs and testing/board-runs/J4b2.md). That is why `valid` is nonzero only
+ * while a buffer is armed: with none, the count cannot move, and `valid` is zero
+ * (not a count that stands still).
  * `latest_ns` is CLOCK_MONOTONIC (ktime_get_ns) at the latest start, the one
  * the count names, and 0 while `frames` is 0. `valid` is nonzero while the
- * receiver is streaming, which is when `frames` and `latest_ns` are the count
- * since START; it is zero before START and after STOP, and a restart starts
- * the count again at zero.
+ * receiver is streaming with a buffer armed, which is when `frames` and
+ * `latest_ns` are the count since START; it is zero before START and after
+ * STOP, and while no buffer is armed. A restart starts the count again at zero.
  */
 struct lemnos_rp1_csi2_frame_starts {
 	__u64 frames;		/* frame starts since START */
 	__u64 latest_ns;	/* CLOCK_MONOTONIC of the latest start, 0 with none */
-	__u32 valid;		/* nonzero while streaming */
+	__u32 valid;		/* nonzero while streaming with a buffer armed */
 	__u32 reserved;		/* zero */
 };
 

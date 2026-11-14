@@ -13,6 +13,7 @@
 pub mod chain;
 pub mod host;
 pub mod socket;
+pub mod stall;
 
 use std::fs;
 use std::io;

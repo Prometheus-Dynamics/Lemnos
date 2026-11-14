@@ -344,6 +344,12 @@ const WINDOW_400: Window = Window {
 pub struct ModeEntry {
     pub window: Window,
     pub depth: Depth,
+    /// Whether the sensor sends frames by itself in this mode, one every frame period. A mode
+    /// where frames come only on demand (an external trigger, a strobe input, a snapshot) sets this
+    /// false, and the driver then never judges silence in it: silence is what that mode does
+    /// between triggers. Every mode of the table runs free, because the driver writes no
+    /// register that makes the sensor wait for a trigger.
+    pub free_running: bool,
 }
 
 /// The modes, in the order `select_mode` numbers them.
@@ -351,26 +357,32 @@ pub const MODES: [ModeEntry; 6] = [
     ModeEntry {
         window: WINDOW_800,
         depth: RAW10,
+        free_running: true,
     },
     ModeEntry {
         window: WINDOW_800,
         depth: RAW8,
+        free_running: true,
     },
     ModeEntry {
         window: WINDOW_720,
         depth: RAW10,
+        free_running: true,
     },
     ModeEntry {
         window: WINDOW_720,
         depth: RAW8,
+        free_running: true,
     },
     ModeEntry {
         window: WINDOW_400,
         depth: RAW10,
+        free_running: true,
     },
     ModeEntry {
         window: WINDOW_400,
         depth: RAW8,
+        free_running: true,
     },
 ];
 

@@ -281,7 +281,10 @@ pub trait CameraReceiver {
     fn layout(&mut self) -> Result<Option<FrameLayout>>;
     /// The frame-start count since `start`, as [`FrameStarts`]. `None` is unknown, and a consumer
     /// must not read it as zero: nothing has started since `start`, or the receiver cannot see its
-    /// frame starts right now. `NOT_SUPPORTED` where the receiver cannot count frame starts at all,
+    /// frame starts right now. `None` also means the receiver cannot say whether frames are arriving
+    /// now, for example because it has no buffer to receive into: a block with nothing armed makes
+    /// no frame start, so a count that stands still then says nothing about the sensor, and a
+    /// consumer must not judge the sensor by it. `NOT_SUPPORTED` where the receiver cannot count frame starts at all,
     /// which is a fact about the receiver and not a read that failed. Any other error is a read
     /// that failed now.
     #[added]

@@ -493,12 +493,33 @@ Which recovery. `Lost` when the host bound the device again: a new driver instan
 caller gave the old one (mode, controls, started) is gone and the consumer selects, configures and
 starts again. `Kept` when the same instance's health went back to ok.
 
-Sequence across a stall (from `drivers/rp1-csi2`, not changed here): the frame's `sequence` is the
-receiver driver's count of the block's frame starts since its own `start`. While the sensor recovers
-by itself with the receiver still running, the receiver's count goes on, so the sequence continues
-with a gap for the frames lost. When the receiver driver is rebound (a new instance, `start` again)
-the count begins at zero: a sequence lower than the one before means a restart. A frame after a
-stall is identified by `Next::Resumed`, which comes before it.
+Sequence across a stall (from `drivers/rp1-csi2`): the frame's `sequence` is the receiver driver's
+count of the block's frame starts since its own `start`, less one. A silent sensor raises no frame
+start, so while the sensor recovers by itself with the receiver still running, the count does not
+move: the sequence CONTINUES, the first frame after the stall carrying the number after the last one
+before it, and the frames the sensor never made are not counted. The stall shows as `Next::Stalled`
+and `Next::Resumed` and as a gap in the frames' timestamps (the first timestamp after it is later
+than the last before it by about the stall). Counted gaps in the sequence are frames the block saw
+start while it was running and that were not delivered (dropped for want of a buffer, or taken back
+from a reader that fell behind), not the sensor's silence. When the receiver driver is rebound (a new
+instance, `start` again) the count begins at zero: a sequence lower than the one before means a
+restart. A frame after a stall is identified by `Next::Resumed`, which comes before it.
+
+The sensor that stops sending. The `ov9782` driver does not wait for a write to fail: while it
+streams it reads its linked receiver's frame-start count once a watch (100 ms), and when that known
+count has not moved for longer than `max(4 frame periods at the frame length in force, 250 ms), the period being the contract's `mode.period_ps(lines)`` it
+restarts itself, as it does after a bus error: health `failed (no frame start for over 250 ms at the
+frame length in force: restarting the sensor)`, the backoff from 250 ms to 8 s, then a full
+configuration from what the instance holds, and `Resumed { Kept }`. After a restart the first frame is
+given 3 s more. The longest from the sensor's last frame start to a reader's `Stalled` is the bound plus
+two watches: 450 ms at 60 fps (1742 lines), 2.2 s at the longest frame length the mode allows. It
+never judges a count that is unknown or unsupported, a receiver that is failing itself, a mode whose
+frames come on demand, a stream that has shown no frame since its start, or a count that went down. A
+consumer that holds every buffer of the receiver leaves `rp1-csi2` with nothing armed, so it makes no
+frame start; the receiver then answers `frame_starts` with `None` ("cannot say now"), which is no
+judgement, and counts again once a buffer is armed.
+The other frame sources do not watch for this yet: `k230-capture`, `rkcif` and `sunxi-vin` cannot
+count frame starts (`NOT_SUPPORTED`), and `rp1-csi2` reads the count but does not judge it.
 
 In Rust: `FrameStream::producer()` is `ProducerState::Running`, `Retrying { since_ns }` or
 `Unknown(n)` (atomic loads). `next_or_end` returns `Next::Stalled(state)` once for each failure the

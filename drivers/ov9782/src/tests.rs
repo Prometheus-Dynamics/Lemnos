@@ -22,6 +22,8 @@ use alloc::vec::Vec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+mod silence;
+
 const ADDR: u8 = DEFAULT_ADDRESS;
 
 /// Health of a sensor bound with no link: nothing to confirm, so degraded, and healthy otherwise.

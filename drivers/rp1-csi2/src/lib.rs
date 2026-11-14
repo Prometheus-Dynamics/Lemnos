@@ -46,6 +46,12 @@
 //!
 //! The frame memory is the stream's, so its buffer count and size are the board file's
 //! (`[devices.streams.frames]`: `buffers`, at most 64, and `buffer_bytes`, at least a frame).
+//! `buffers` is 1 to 64 (`MAX_BUFFERS` in `relay.rs`; 0 or more than 64 is refused at `start`).
+//! The receiver needs one buffer free to receive into, and holds one more while a frame is being
+//! written, so the usable minimum is the number of frames a consumer holds at once plus two. A
+//! consumer that holds every buffer stops frames arriving; the receiver then answers
+//! `frame_starts` with `None` ("cannot say now"), so a sensor watching the count is not restarted
+//! for it.
 //!
 //! The embedded data is a second stream on the same device, named `embedded` in the board file:
 //! one buffer per line, the frame's sequence on it, the line taken on the block's second DMA
@@ -63,7 +69,11 @@
 //! frame's sequence is the count at its start, less one, as the frame stream numbers it. A block
 //! with no buffer address raises no interrupt, and such a start is in no count (measured on the
 //! board: `testing/board-runs/D5.md`): the count is the sensor's starts only while every start
-//! shows. The count is unknown (`None`) before `start` and after `stop`. A recovery restart is a new
+//! shows. The count is unknown (`None`) before `start` and after `stop`, and while the block has no
+//! buffer armed (every buffer held by the consumer, or none given yet): then the block makes no frame
+//! start, the count cannot move, and a sensor watching it must not read that as the sensor going
+//! quiet. The kernel module answers `valid = 0` then, and the count is read again once a buffer is
+//! armed (`kernel/lemnos_rp1_csi2.c`, `lrc_frame_starts`). A recovery restart is a new
 //! start: the count begins again at zero, so a read lower than the one before means a restart.
 //!
 //! Failures. While streaming, every millisecond the driver moves finished frames and returned
@@ -652,7 +662,8 @@ impl CameraReceiver for Rp1Csi2 {
 
     /// The frame starts the block has counted since `start`, as the kernel's count: `None` before
     /// `start` and after `stop`, where nothing is counted and nothing is zero. Counted in the
-    /// kernel (`LEMNOS_RP1_CSI2_IOC_FRAME_STARTS`), so a read is the block's own count.
+    /// kernel (`LEMNOS_RP1_CSI2_IOC_FRAME_STARTS`), so a read is the block's own count. Also `None`
+    /// while no buffer is armed (the kernel's `valid` is 0): the block makes no frame start then.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
         if self.state == State::Stopped {
             return Ok(None);
