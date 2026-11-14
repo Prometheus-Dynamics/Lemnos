@@ -40,7 +40,7 @@ pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
 const CREATE_BUFFERS: u32 = 1;
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_FRAME_SLOTS: usize = 4;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;

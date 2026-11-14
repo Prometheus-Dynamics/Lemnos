@@ -255,7 +255,7 @@ impl Relay {
                 sequence: done.sequence,
                 identity: done.identity,
                 timestamp_ns: done.timestamp_ns,
-                end_ns: 0,
+                end_ns: done.end_ns,
             };
             let published = frames.publish(frame).is_ok();
             if let Some(slot) = self.slot(done.buffer) {

@@ -68,6 +68,8 @@ pub struct Finished {
     pub identity: u64,
     /// When the frame started.
     pub timestamp_ns: u64,
+    /// When the frame ended (the end of frame); 0 when not stamped.
+    pub end_ns: u64,
 }
 
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
@@ -352,6 +354,7 @@ impl Hardware for LinuxHardware {
             sequence: frame.sequence,
             identity: frame.identity,
             timestamp_ns: frame.timestamp_ns,
+            end_ns: frame.end_ns,
         }))
     }
 

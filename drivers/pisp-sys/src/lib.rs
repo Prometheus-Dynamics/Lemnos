@@ -28,7 +28,7 @@ pub const STATE_OPEN: u32 = 0;
 /// `sizeof(struct pisp_be_tiles_config)`, one configuration slot.
 pub const CONFIG_BYTES: usize = 16720;
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_JOB_SLOTS: usize = 5;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;
@@ -185,6 +185,8 @@ pub struct Frame {
     pub identity: u64,
     /// When it was published.
     pub timestamp_ns: u64,
+    /// When the frame ended (its end of frame, or the block's finish); 0 when not stamped.
+    pub end_ns: u64,
     /// What its return must carry.
     pub fence: u32,
 }
@@ -433,6 +435,7 @@ impl BeStream {
             identity: self.word(at + 2)?.load(Ordering::Relaxed),
             timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
             fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
+            end_ns: self.word(at + 5)?.load(Ordering::Relaxed),
         };
         self.frames_tail += 1;
         self.word(WORD_FRAMES_TAIL)?

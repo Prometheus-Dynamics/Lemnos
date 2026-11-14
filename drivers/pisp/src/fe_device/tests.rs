@@ -363,6 +363,7 @@ fn done(buffer: u32, identity: u64) -> Finished {
         sequence: identity,
         identity,
         timestamp_ns: 5,
+        end_ns: 0,
     }
 }
 

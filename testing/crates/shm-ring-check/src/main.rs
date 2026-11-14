@@ -38,13 +38,14 @@ const JOB_SLOTS: u32 = 4;
 /// `sizeof(struct lemnos_stream_job)`.
 const JOB_BYTES: u32 = 80;
 /// The shm ring's words for one field of `FRAME_SLOTS` samples: the header (16), the lane head,
-/// the index (`FRAME_SLOTS`), then the slots (`FRAME_SLOTS` of 9 words: 4 header words and the
-/// 40-byte entry).
-const RING_WORDS: usize = 17 + 10 * FRAME_SLOTS as usize;
+/// the index (`FRAME_SLOTS`), then the slots (`FRAME_SLOTS` of 10 words: 4 header words and the
+/// 48-byte entry).
+const RING_WORDS: usize = 17 + 11 * FRAME_SLOTS as usize;
 /// The pool page starts after the ring.
 const PAGE_AT: usize = RING_WORDS;
-/// The entry's metadata, after its 8-byte header and one buffer: sequence, identity, bytes, fence.
-const META_BYTES: usize = 24;
+/// The entry's metadata, after its 8-byte header and one buffer: sequence, identity, bytes, fence,
+/// and the end time (the last word).
+const META_BYTES: usize = 32;
 const WAIT: Duration = Duration::from_secs(10);
 
 /// A window of a mapping's words, from `base`, as a ring's memory.
@@ -319,7 +320,7 @@ fn main() -> ExitCode {
 mod tests {
     use shm_ring::{Geometry, Spec};
 
-    /// The shape the module writes for `FRAME_SLOTS` samples of 40-byte entries is the one this
+    /// The shape the module writes for `FRAME_SLOTS` samples of 48-byte entries is the one this
     /// check reads: the derived size of the ring is the words it lays out.
     #[test]
     fn the_module_shape_is_the_derived_one() {

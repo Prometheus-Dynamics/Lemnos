@@ -268,6 +268,8 @@ pub struct PispBe {
     outputs: [Buffers; BE_NUM_OUTPUTS],
     /// Jobs on the block, by pool buffer.
     jobs: [Option<InFlight>; MAX_JOBS],
+    /// The block is wedged: the module keeps the buffers it could not prove idle until a reboot.
+    wedged: bool,
     /// The driver's copy of the job being taken, parsed.
     parsed: Box<BeTilesConfig>,
     /// The driver's copy of the job being taken, as read: what goes to the module.
@@ -442,6 +444,7 @@ impl PispBe {
             inputs: Buffers::NONE,
             outputs: [Buffers::NONE; BE_NUM_OUTPUTS],
             jobs: [None; MAX_JOBS],
+            wedged: false,
             parsed: Box::default(),
             bytes: Box::new([0; CONFIG_BYTES]),
         }
@@ -482,7 +485,9 @@ impl PispBe {
     /// Ends the module's stream. What it had registered went with it, so the buffers the block
     /// had are the driver's again.
     fn stop_block(&mut self) {
-        self.hw.stop();
+        if self.hw.stop() {
+            self.wedged = true;
+        }
         self.jobs = [None; MAX_JOBS];
         self.inputs.busy = [false; MAX_BUFFERS];
         self.config_busy = [false; MAX_BUFFERS];
@@ -632,7 +637,7 @@ impl PispBe {
                 sequence: done.sequence,
                 identity: done.identity,
                 timestamp_ns: done.timestamp_ns,
-                end_ns: 0,
+                end_ns: done.end_ns,
             };
             let (stream, buffers, _) = self.parts(Image::Output(o));
             let published = stream.map(|stream| stream.publish(frame));

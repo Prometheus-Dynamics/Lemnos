@@ -35,7 +35,7 @@ pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
 const CREATE_BUFFERS: u32 = 1;
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_JOB_SLOTS: usize = 5;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;
@@ -251,6 +251,8 @@ pub struct Frame {
     pub timestamp_ns: u64,
     /// What its return must carry.
     pub fence: u32,
+    /// When the frame ended (its end of frame); 0 when not stamped.
+    pub end_ns: u64,
 }
 
 /// `LEMNOS_RP1_CSI2_PART_FE`: the front end's part of the receiver's node.
@@ -493,6 +495,7 @@ impl Stream {
             identity: self.word(at + 2)?.load(Ordering::Relaxed),
             timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
             fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
+            end_ns: self.word(at + 5)?.load(Ordering::Relaxed),
         };
         self.frames_tail += 1;
         self.word(WORD_FRAMES_TAIL)?

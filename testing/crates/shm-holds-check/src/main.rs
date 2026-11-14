@@ -57,7 +57,7 @@ const JOB_SLOTS: u32 = 4;
 /// `sizeof(struct lemnos_stream_job)`.
 const JOB_BYTES: u32 = 80;
 /// The shm ring's words for one field of `FRAME_SLOTS` samples (as `shm-ring-check`).
-const RING_WORDS: usize = 17 + 10 * FRAME_SLOTS as usize;
+const RING_WORDS: usize = 17 + 11 * FRAME_SLOTS as usize;
 /// The pool page starts after the ring.
 const PAGE_AT: usize = RING_WORDS;
 /// Frames the reader holds its buffer across. Four buffers and one held leave three to reuse.

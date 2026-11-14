@@ -41,6 +41,8 @@ pub struct Finished {
     pub identity: u64,
     /// When it was published.
     pub timestamp_ns: u64,
+    /// When the frame ended (the block's finish, or the sensor's end of frame); 0 when not stamped.
+    pub end_ns: u64,
 }
 
 /// A dma-buf the block may write, as the module pinned it.
@@ -61,8 +63,9 @@ pub trait Hardware: Send {
     /// Makes the memory and the stream.
     fn start(&mut self, plan: &Plan) -> Result<Placed>;
     /// Ends the stream. The module returns once the block's DMA has stopped, or keeps every
-    /// buffer it could not prove idle.
-    fn stop(&mut self);
+    /// buffer it could not prove idle. Returns whether the block is wedged: it may still be using
+    /// memory, and the module keeps its buffers until a reboot. Read before the stream closes.
+    fn stop(&mut self) -> bool;
     /// Lets the block reach `memory`, a dma-buf, until it is unregistered or the stream ends.
     /// The module checks every range a job names against what is registered, and refuses an
     /// unregister while a job still uses it.
@@ -235,10 +238,15 @@ impl Hardware for LinuxHardware {
         self.open(plan).map_err(|e| status(&e))
     }
 
-    fn stop(&mut self) {
-        // Dropping the stream closes it: the module waits for the block's DMA there, and keeps
-        // what it can't prove idle.
+    fn stop(&mut self) -> bool {
+        // The block's state is read before the stream closes: the module keeps what it can't
+        // prove idle, and says so in that state. Dropping the stream closes it.
+        let wedged = self
+            .running
+            .as_ref()
+            .is_some_and(|r| r.stream.block_status().is_ok_and(|s| s.wedged != 0));
         self.running = None;
+        wedged
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
@@ -297,6 +305,7 @@ impl Hardware for LinuxHardware {
             sequence: frame.sequence,
             identity: frame.identity,
             timestamp_ns: frame.timestamp_ns,
+            end_ns: frame.end_ns,
         }))
     }
 

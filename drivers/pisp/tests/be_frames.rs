@@ -251,6 +251,7 @@ impl Block {
             sequence: job.identity,
             identity: job.identity,
             timestamp_ns: 1,
+            end_ns: 0,
         });
     }
 }
@@ -294,8 +295,9 @@ impl Hardware for Hw {
         Ok(Placed { tdn: None })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|b| b.regions.clear());
+        false
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {

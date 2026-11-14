@@ -181,6 +181,7 @@ impl Block {
             sequence: identity,
             identity,
             timestamp_ns: 1,
+            end_ns: 0,
         });
         Some(index)
     }

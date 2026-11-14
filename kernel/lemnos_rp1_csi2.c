@@ -403,7 +403,7 @@ static void lrc_emb_sof(struct lrc_dev *l, u64 now)
  * board as a single line) is a frame gone wrong. Read at the frame end, which
  * the next frame's lines can't reach before its vertical blanking is over.
  */
-static void lrc_eof(struct lrc_dev *l, u16 line)
+static void lrc_eof(struct lrc_dev *l, u16 line, u64 now)
 {
 	u16 lines = line - l->fe_line;
 
@@ -412,8 +412,8 @@ static void lrc_eof(struct lrc_dev *l, u16 line)
 		if (lines == (u16)l->start.height) {
 			l->written++;
 			/* frames is the FS count: this frame's number is one below it. */
-			lem_stream_complete(l->stream, &l->cur.slot, l->cur.slot.bytes,
-					    l->frames - 1, l->fs_ns);
+			lem_stream_complete_at(l->stream, &l->cur.slot, l->cur.slot.bytes,
+					       l->frames - 1, l->fs_ns, now);
 		} else {
 			lem_stream_complete(l->stream, &l->cur.slot, 0, l->frames - 1, l->fs_ns);
 			l->errors++;
@@ -430,15 +430,15 @@ static void lrc_eof(struct lrc_dev *l, u16 line)
  * exactly one line since the last end (stock: the meta node's frame height is 1).
  * Otherwise the buffer goes out empty. Lock held.
  */
-static void lrc_emb_eof(struct lrc_dev *l, u16 line)
+static void lrc_emb_eof(struct lrc_dev *l, u16 line, u64 now)
 {
 	u16 lines = line - l->emb.fe_line;
 
 	l->emb.fe_line = line;
 	if (!l->emb.cur.valid)
 		return;
-	lem_stream_complete(l->emb.stream, &l->emb.cur.slot, lines == 1 ? l->emb.bytes : 0,
-			    l->emb.seq, l->emb.fs_ns);
+	lem_stream_complete_at(l->emb.stream, &l->emb.cur.slot, lines == 1 ? l->emb.bytes : 0,
+			       l->emb.seq, l->emb.fs_ns, now);
 	l->emb.cur.valid = false;
 	lrc_emb_arm(l);
 }
@@ -482,7 +482,7 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	if (l->streaming) {
 		/* The embedded line of the frame ending is in before the next frame's start. */
 		if (emb_eof)
-			lrc_emb_eof(l, emb_line);
+			lrc_emb_eof(l, emb_line, now);
 		/*
 		 * The orders cfe_isr handles: FE then FS of the next frame,
 		 * FS and FE of one frame, and an FS with no FE before it. The
@@ -494,7 +494,7 @@ static irqreturn_t lrc_isr(int irq, void *data)
 				lrc_sof(l, now);
 				sof = false;
 			}
-			lrc_eof(l, line);
+			lrc_eof(l, line, now);
 		}
 		if (sof)
 			lrc_sof(l, now);

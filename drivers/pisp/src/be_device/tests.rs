@@ -89,6 +89,7 @@ impl Hw {
                 sequence: identity,
                 identity,
                 timestamp_ns: 13,
+                end_ns: 0,
             });
         });
     }
@@ -112,11 +113,12 @@ impl Hardware for Hw {
         })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|m| {
             m.stopped += 1;
             m.regions.clear();
         });
+        false
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {

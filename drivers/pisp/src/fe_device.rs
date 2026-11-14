@@ -1069,7 +1069,7 @@ fn publish(
         sequence: done.sequence,
         identity: done.identity,
         timestamp_ns: done.timestamp_ns,
-        end_ns: 0,
+        end_ns: done.end_ns,
     };
     let published = stream.publish(frame).is_ok();
     if published {
