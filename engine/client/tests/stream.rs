@@ -1806,3 +1806,32 @@ fn next_frame_ignores_a_stall_and_an_unknown_producer_state_is_not_running() {
         7
     );
 }
+
+/// Every reason code this build knows is its word. A code it does not know keeps its number, and
+/// prints as `unknown job-end reason N`: it is never read as a known reason, `failed` included.
+#[test]
+fn an_unknown_job_end_reason_keeps_its_number_and_is_never_read_as_a_known_one() {
+    use lemnos_client::JobReason;
+    use lemnos_wire::ring::reason;
+    let known = [
+        (reason::FAILED, "failed"),
+        (reason::TIMEOUT, "timeout"),
+        (reason::NOT_LENT, "not-lent"),
+        (reason::IDENTITY_MISMATCH, "identity-mismatch"),
+        (reason::SIZE_OR_STRIDE, "size-or-stride"),
+        (reason::WEDGED, "wedged"),
+        (reason::BUSY, "busy"),
+        (reason::BAD_CONFIG, "bad-config"),
+    ];
+    for (code, word) in known {
+        let r = JobReason::from_code(code);
+        assert_eq!(r.code(), code);
+        assert_eq!(r.to_string(), word);
+        assert!(!matches!(r, JobReason::Unknown(_)));
+    }
+    let future = JobReason::from_code(99);
+    assert_eq!(future, JobReason::Unknown(99));
+    assert_eq!(future.code(), 99);
+    assert_eq!(future.to_string(), "unknown job-end reason 99");
+    assert_ne!(future, JobReason::Failed, "an unknown code is not failed");
+}

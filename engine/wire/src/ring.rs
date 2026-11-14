@@ -94,6 +94,10 @@ pub mod reason {
     pub const SIZE_OR_STRIDE: u32 = 5;
     /// The block is wedged: a reset that did not recover it. Only a board restart frees it.
     pub const WEDGED: u32 = 6;
+    /// The job names a buffer that is held or in use: by a consumer, or by a job in flight.
+    pub const BUSY: u32 = 7;
+    /// The job's configuration record is refused: a layout or field the block cannot run.
+    pub const BAD_CONFIG: u32 = 8;
     }
 
     /// The reason as the one word a reply names it by. An unknown code is `"unknown"`.
@@ -106,6 +110,8 @@ pub mod reason {
             IDENTITY_MISMATCH => "identity-mismatch",
             SIZE_OR_STRIDE => "size-or-stride",
             WEDGED => "wedged",
+            BUSY => "busy",
+            BAD_CONFIG => "bad-config",
             _ => "unknown",
         }
     }

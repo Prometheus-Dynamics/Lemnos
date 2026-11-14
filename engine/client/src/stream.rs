@@ -282,8 +282,22 @@ pub enum JobReason {
     SizeOrStride,
     /// The block is wedged: only a board restart frees it.
     Wedged,
-    /// A code this build does not know.
+    /// The job names a buffer that is held or in use.
+    Busy,
+    /// The job's configuration record is refused.
+    BadConfig,
+    /// A code this build does not know. Its number is kept, and it is never read as a known
+    /// reason: a reader prints it as `unknown job-end reason N`.
     Unknown(u32),
+}
+
+impl core::fmt::Display for JobReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unknown(code) => write!(f, "unknown job-end reason {code}"),
+            known => f.write_str(known.word()),
+        }
+    }
 }
 
 impl JobReason {
@@ -297,6 +311,8 @@ impl JobReason {
             wire_reason::IDENTITY_MISMATCH => Self::IdentityMismatch,
             wire_reason::SIZE_OR_STRIDE => Self::SizeOrStride,
             wire_reason::WEDGED => Self::Wedged,
+            wire_reason::BUSY => Self::Busy,
+            wire_reason::BAD_CONFIG => Self::BadConfig,
             other => Self::Unknown(other),
         }
     }
@@ -311,11 +327,14 @@ impl JobReason {
             Self::IdentityMismatch => wire_reason::IDENTITY_MISMATCH,
             Self::SizeOrStride => wire_reason::SIZE_OR_STRIDE,
             Self::Wedged => wire_reason::WEDGED,
+            Self::Busy => wire_reason::BUSY,
+            Self::BadConfig => wire_reason::BAD_CONFIG,
             Self::Unknown(code) => code,
         }
     }
 
-    /// The one word a reply names the reason by.
+    /// The one word a reply names a known reason by. An unknown code has no word: print it with
+    /// its number, through `Display`.
     #[must_use]
     pub const fn word(self) -> &'static str {
         match self {

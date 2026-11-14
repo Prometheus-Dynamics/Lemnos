@@ -1117,3 +1117,83 @@ fn a_wedged_block_keeps_its_buffers_and_its_health_says_so() {
         other => panic!("a wedged block is failed, not {other:?}"),
     }
 }
+
+/// A job in flight that holds a front-end buffer as its lent input, with no image of its own.
+fn lent_flight(config: u32) -> super::InFlight {
+    super::InFlight {
+        input: super::Lent {
+            buffer: 0,
+            region: 0,
+            bytes: 0,
+        },
+        outputs: [None; super::BE_NUM_OUTPUTS],
+        config,
+        lent: true,
+    }
+}
+
+fn wedged_health(be: &PispBe) -> &'static str {
+    match be.health() {
+        Health::Failed(text) => text,
+        other => panic!("a wedged block is failed, not {other:?}"),
+    }
+}
+
+/// The wedge text counts the front-end buffers in flight when the block wedged: two lent jobs in
+/// flight give 2, and a job that holds no front-end buffer is not counted.
+#[test]
+fn a_wedge_with_jobs_in_flight_counts_the_front_end_buffers_they_hold() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    be.jobs[0] = Some(lent_flight(1));
+    be.jobs[1] = Some(lent_flight(1));
+    be.jobs[2] = Some(super::InFlight {
+        lent: false,
+        ..lent_flight(1)
+    });
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    assert_eq!(
+        wedged_health(&be),
+        "the back end is wedged; 2 front-end buffers stay with it until the board restarts"
+    );
+}
+
+/// The table covers 0 to 8 exactly. From 9 the text says `9 or more`, and never a count it does
+/// not know.
+#[test]
+fn a_wedge_past_the_table_says_nine_or_more_not_a_wrong_number() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    for at in 0..12 {
+        be.jobs[at] = Some(lent_flight(1));
+    }
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    assert_eq!(
+        wedged_health(&be),
+        "the back end is wedged; 9 or more front-end buffers stay with it until the board restarts"
+    );
+}
+
+/// A job whose input is no buffer at all, and not lent, is refused for its configuration:
+/// `bad-config`, told to its consumer.
+#[test]
+fn a_job_with_no_input_buffer_is_refused_bad_config_and_its_consumer_is_told() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job_on(5, 1, NO_BUFFER, 0));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((5, lemnos_wire::ring::reason::BAD_CONFIG, 0))
+    );
+    assert_eq!(hw.with(|m| m.posted.len()), 0);
+}

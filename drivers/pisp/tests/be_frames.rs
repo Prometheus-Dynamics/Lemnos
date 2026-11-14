@@ -624,12 +624,12 @@ fn a_job_naming_an_input_buffer_the_driver_does_not_hold_is_dropped() {
     let end = app.output.ring.pop_frame().unwrap().unwrap();
     assert_eq!(
         (end.identity, end.buffer, end.reason),
-        (1, frame::NO_BUFFER, reason::FAILED)
+        (1, frame::NO_BUFFER, reason::BUSY)
     );
     let end = app.output.ring.pop_frame().unwrap().unwrap();
     assert_eq!(
         (end.identity, end.buffer, end.reason),
-        (3, frame::NO_BUFFER, reason::FAILED)
+        (3, frame::NO_BUFFER, reason::BUSY)
     );
     let frame = app.output.ring.pop_frame().unwrap().unwrap();
     assert_eq!((frame.identity, frame.buffer), (2, 1));
@@ -725,7 +725,7 @@ fn a_job_on_an_output_the_client_holds_is_dropped() {
     let end = app.output.ring.pop_frame().unwrap().unwrap();
     assert_eq!(
         (end.identity, end.buffer, end.reason),
-        (2, frame::NO_BUFFER, reason::FAILED)
+        (2, frame::NO_BUFFER, reason::BUSY)
     );
     assert!(app.output.ring.pop_frame().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);

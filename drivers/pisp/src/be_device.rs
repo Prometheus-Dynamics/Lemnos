@@ -109,8 +109,19 @@ const MAX_BUFFERS: usize = 32;
 /// Jobs the block may hold at once, the most `buffers` allows.
 const MAX_JOBS: usize = 32;
 
+/// Why an image's buffer was refused by [`PispBe::lend`]: an image size the block can't take is the
+/// job's configuration (`bad-config`); anything else is a buffer that is held or in use (`busy`).
+fn refused_image(bytes: Option<u64>) -> u32 {
+    match bytes {
+        Some(b) if b > 0 && b <= MAX_IMAGE_BYTES => reason::BUSY,
+        _ => reason::BAD_CONFIG,
+    }
+}
+
 /// The health text of a wedged block. Only a board restart frees the buffers it holds, and Lemnos
-/// never reboots on its own, so the text says so. `held` is the number of front-end buffers.
+/// never reboots on its own, so the text says so. `held` is the number of front-end buffers the
+/// block holds: the lent inputs of the jobs in flight. The table covers 0 to 8 exactly; from 9 on
+/// the text says `9 or more`, never a number it does not know.
 fn wedged_text(held: u32) -> &'static str {
     const TEXT: [&str; 9] = [
         "the back end is wedged; 0 front-end buffers stay with it until the board restarts",
@@ -124,7 +135,7 @@ fn wedged_text(held: u32) -> &'static str {
         "the back end is wedged; 8 front-end buffers stay with it until the board restarts",
     ];
     TEXT.get(held as usize).copied().unwrap_or(
-        "the back end is wedged; more front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 9 or more front-end buffers stay with it until the board restarts",
     )
 }
 /// A buffer's largest size (`LEMNOS_STREAM_MAX_BUFFER_BYTES`).
@@ -242,6 +253,8 @@ struct InFlight {
     outputs: [Option<Lent>; BE_NUM_OUTPUTS],
     /// The config buffer the job named.
     config: u32,
+    /// Whether the input is a front-end buffer lent to the block (a job with `input_lent`).
+    lent: bool,
 }
 
 /// Which stream an image is on.
@@ -514,7 +527,8 @@ impl PispBe {
         if self.hw.stop() {
             // The block may still read the buffers its jobs named: they stay with it, until a restart.
             self.wedged = true;
-            self.wedged_held = self.jobs.iter().flatten().count() as u32;
+            // The front-end buffers held: the lent inputs of the jobs in flight.
+            self.wedged_held = self.jobs.iter().flatten().filter(|j| j.lent).count() as u32;
         }
         self.jobs = [None; MAX_JOBS];
         self.inputs.busy = [false; MAX_BUFFERS];
@@ -697,13 +711,20 @@ impl PispBe {
             return Ok(Some(reason::NOT_LENT));
         }
         let named = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
+        // A job the block can't take as written: a layout it doesn't run, a named output past the
+        // block's, or no input at all. Its configuration record is refused.
         if job.layout != LAYOUT_BACK_END
-            || !self.configs.free(job.config_buffer)
-            || self.config_busy.get(job.config_buffer as usize) != Some(&false)
-            || !self.inputs.free(job.input_buffer)
+            || job.input_buffer == NO_BUFFER
             || (BE_NUM_OUTPUTS..MAX_OUTPUTS).any(|i| named(i) != NO_BUFFER)
         {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BAD_CONFIG));
+        }
+        // Buffers the job names that are held: by the client, or by a job in flight.
+        if !self.configs.free(job.config_buffer)
+            || self.config_busy.get(job.config_buffer as usize) != Some(&false)
+            || !self.inputs.free(job.input_buffer)
+        {
+            return Ok(Some(reason::BUSY));
         }
         for o in 0..BE_NUM_OUTPUTS {
             let buffer = named(o);
@@ -711,23 +732,27 @@ impl PispBe {
                 continue;
             }
             let on = self.output_bytes.get(o).copied().flatten().is_some();
-            if !on || !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
-                // An output that's off, or a buffer the client has or the block is writing.
-                return Ok(Some(reason::FAILED));
+            if !on {
+                // An output the configuration of this board does not have.
+                return Ok(Some(reason::BAD_CONFIG));
+            }
+            if !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
+                // A buffer the client has, or the block is writing.
+                return Ok(Some(reason::BUSY));
             }
         }
         let Some(token) = (0..self.options.buffers as usize)
             .find(|&at| self.jobs.get(at).is_some_and(Option::is_none))
         else {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BUSY));
         };
         // The one read of the client's buffer. Everything after uses the copy.
         match self.config.read(job.config_buffer, 0, &mut self.bytes[..]) {
             Ok(true) => {}
-            Ok(false) | Err(_) => return Ok(Some(reason::FAILED)),
+            Ok(false) | Err(_) => return Ok(Some(reason::BAD_CONFIG)),
         }
         if self.parsed.read_from(&self.bytes[..]).is_err() || be_job::check(&self.parsed).is_err() {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let c = &self.parsed.config;
         // The configuration must describe the frame set_input described: its size and stride.
@@ -738,13 +763,14 @@ impl PispBe {
             .raw_layout
             .is_some_and(|l| u32::try_from(c.input_format.stride).ok() == Some(l.stride));
         if !frame_ok {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let bayer = c.global.bayer_enables;
         let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
         let writes_average = bayer & bayer_enable::TDN_OUTPUT != 0;
         if reads_average && (!self.tdn_valid || self.tdn_reset) {
-            return Ok(Some(reason::FAILED));
+            // The averages a job reads are not there yet: the block's state, not the job's.
+            return Ok(Some(reason::BUSY));
         }
         // The averages are the driver's memory: an image larger than they are is refused here
         // rather than by the module, which would end the stream.
@@ -755,7 +781,7 @@ impl PispBe {
         if !average_fits(reads_average, &c.tdn_input_format)
             || !average_fits(writes_average, &c.tdn_output_format)
         {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let input_bytes = be_job::image_bytes(&c.input_format);
         let output_bytes = c.output_format.map(|o| be_job::image_bytes(&o.image));
@@ -769,13 +795,14 @@ impl PispBe {
         }
 
         let Some(input) = self.lend(Image::Input, job.input_buffer, input_bytes)? else {
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(refused_image(input_bytes)));
         };
         memory.input = input.0;
         let mut flight = InFlight {
             input: input.1,
             outputs: [None; BE_NUM_OUTPUTS],
             config: job.config_buffer,
+            lent: job.input_lent,
         };
         for (o, bytes) in output_bytes.into_iter().enumerate() {
             let buffer = named(o);
@@ -789,13 +816,13 @@ impl PispBe {
                 }
                 None => {
                     self.release(&flight)?;
-                    return Ok(Some(reason::FAILED));
+                    return Ok(Some(refused_image(bytes)));
                 }
             }
         }
         let Ok(addr) = be_job::addresses(&self.parsed.config, &memory) else {
             self.release(&flight)?;
-            return Ok(Some(reason::FAILED));
+            return Ok(Some(reason::BAD_CONFIG));
         };
         let kernel = KernelJob {
             identity: job.identity,
@@ -807,7 +834,7 @@ impl PispBe {
             Ok(()) => {}
             Err(Status::BUSY) => {
                 self.release(&flight)?;
-                return Ok(Some(reason::FAILED));
+                return Ok(Some(reason::BUSY));
             }
             Err(e) => return Err(e),
         }

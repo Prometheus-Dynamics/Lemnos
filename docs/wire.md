@@ -161,7 +161,7 @@ therefore keeps its hash. The values this build computes are:
 
 `jobs part hash: 0x353035866faf89f5`
 
-`shared-rings part hash: 0x78de1ebed2688190`
+`shared-rings part hash: 0x81a5753a1c9576e6`
 
 `endpoints part hash: 0x0360342362a7f9d9`
 
@@ -380,6 +380,31 @@ around its own accesses.
 The job acks word is the number of jobs the host has collected. The consumer posts a job only
 while fewer than `job_slots` are waiting, which it knows from that word, so the job ring can't
 overrun: a job posted beyond that is refused, not sent.
+
+### Job-end reasons
+
+A job that ends without a result is a zero-buffer entry on the frame ring, in order with the results:
+its `reason` is nonzero and its bytes are 0 (see [`ring.md`](ring.md) and [`FrameInfo`](../engine/wire/src/ring.rs)).
+A result the block ran and flagged bad is a frame of 0 bytes whose reason is `failed`. The codes, each
+with the one word a reply names it by:
+
+| Code | Word | Meaning |
+| --- | --- | --- |
+| 1 | `failed` | The block ran the job and reported that it failed. Only that. |
+| 2 | `timeout` | The job's time ran out, or the stream stopped with it in flight. |
+| 3 | `not-lent` | The job names a lent input the block was never lent. |
+| 4 | `identity-mismatch` | A lent buffer's frame identity is not the job's identity. |
+| 5 | `size-or-stride` | A lent buffer's size or stride does not fit the block's input. |
+| 6 | `wedged` | The block is wedged: a reset did not recover it. Only a board restart frees it. |
+| 7 | `busy` | The job names a buffer that is held or in use: by a consumer, by a job in flight, or not offered to the block. |
+| 8 | `bad-config` | The job's configuration record is refused: a layout or field the block cannot run, or an image the block cannot take. |
+
+**An unknown code is a failure of its own kind, never a known one.** A consumer keeps the number of an unknown
+code and shows it as `unknown job-end reason N`; it is not read as `failed`, and a future word is not hidden
+under an old one. The client's `JobReason` keeps the raw number (`Unknown(n)`) and prints it that way.
+
+These eight codes are part of the shared-rings part: adding one moves that part's hash, so the part is
+refused by name at the handshake by a build that does not know it.
 
 ### What each side checks
 
@@ -705,7 +730,7 @@ Each vector is one complete frame.
 
 <!-- vector: hello -->
 ```hex
-95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 90 81 68 d2 be 1e de 78 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e6 76 95 1c 3a 75 a5 81 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### welcome
@@ -714,7 +739,7 @@ Each vector is one complete frame.
 
 <!-- vector: welcome -->
 ```hex
-99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 90 81 68 d2 be 1e de 78 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e6 76 95 1c 3a 75 a5 81 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### list
