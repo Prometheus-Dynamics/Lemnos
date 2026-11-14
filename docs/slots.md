@@ -63,6 +63,62 @@ Any other member is refused by name. A bundle whose order differs from these rul
 sentence that names the rule it breaks: `slot.json` not first, `slot.sig` not second, a member
 repeated.
 
+### Writing one with lemnos-ctl
+
+A format is written by the program that reads it, so a builder does not assemble `slot.json`, the signed
+message, the `slot.sig` record or the member order itself: `lemnos-ctl bundle` does, through the same
+`lemnos_slot_store::bundle` functions the installer checks with (the manifest's bytes are
+`Manifest::to_json`, the message `signing::slot_bundle_message`, the record `signing::record_bytes`, the
+tar `tar::write`; the installer's member rules, size rules, content checks and command-line check are the
+functions `bundle::check_*` that `finish` calls).
+
+```text
+lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE \
+  --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] \
+  [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
+lemnos-ctl bundle --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]
+```
+
+The builder supplies the slot id, product, version (and optionally variant, kernel and display name), the
+payload directory (the five roles `boot-partition --payload` takes), the erofs image with its hash tree
+appended and the table of the verity step (`key value` lines: `hash_type 1`, `algorithm sha256`, `root_hash`,
+`salt`, `data_blocks`, `data_block_size 4096`, `hash_block_size 4096`, `hash_offset`, `tree_bytes`,
+`image_bytes`, `hash_start_block`; `uuid` and `table` are ignored). The tool derives `schema`, `board` and
+`boot.overlay` (from the board file, as `tree --manifest-boot` does), `boot.files` (exactly the five role
+files, in role order, with the SHA-256 of each as stored), `image.size`, `image.sha256`, the `verity` object,
+the key id and the signature. It fills the command line's `<prefix>.roothash=@roothash@` hole (the one
+`tree --cmdline-slot` writes) with the table's root hash; a line with no hole must already carry that hash.
+`--payload-out DIR` writes the five boot files as the bundle holds them, so the first slot's boot partition
+(`boot-partition --payload`) carries the same bytes as its bundle.
+
+Before anything is written it refuses, by name: a payload directory with a missing or extra file (the same
+rule as `boot-partition`); the wrong kernel form for the board's record (the Pi firmware form stores the
+kernel as shipped, gzip allowed; the U-Boot form refuses a compressed one); a file that does not fit its bay;
+a command line that does not name its slot, root hash and the board's boot sources; a slot id, product or
+version that is not valid; a table that contradicts itself (`hash_offset` is `data_blocks` times 4096,
+`tree_bytes` is the manifest's own computation, `image_bytes` is both, `hash_start_block` is `hash_offset`
+over 4096) or is not format 1, SHA-256, 4096-byte blocks; an image whose length is not the table's
+`image_bytes`, whose erofs superblock does not give the table's data length, whose tree is not the tree of its
+data or whose root hash is not the table's. The tree is recomputed in the tool (SHA-256 only, `slot-store`'s
+`verity`, checked against the `veritysetup` vectors in this document).
+
+The key file is a raw Ed25519 seed: exactly 32 bytes or 64 hex digits, one trailing newline allowed. Its
+path is on the command line; its bytes never are, and the tool never prints them. A file readable by group or
+others is refused (`the key file PATH is mode 0644: it must not be readable by group or others (0600 or
+0400)`). That is the only thing checked about the file: the group and other permission bits of the opened file (so a 0400 file, a read-only mount or another owner is accepted). A minisign key file is not read. The key id (SHA-256 of the public key, `signing::key_id`) is
+printed; `--expect-key-id HEX` refuses, before signing, a key whose id differs. Without `--key-file` the bundle
+is unsigned and the output says `unsigned`.
+
+`--verify` runs the installer's checks short of installing and prints one line per check (`ok `, `BAD` or
+`n/a `, then `check: what was found`), then `ok` or `refused: N`; it exits 0 or 1. The checks are `members`
+(framing and order), `manifest`, `signature`, `image`, `verity` (beyond the installer: the tree after the
+image recomputes to the manifest's root hash), `boot files`, `roles` (`boot.files` is exactly the five
+role files), and with `--layout-of` `board`, `kernel`, `bays`, `cmdline` and `overlay`. It reports the
+signature; it does not apply the board's security switch, which is the board's policy: unsigned is `ok`, a
+valid signature is `signed by key id X: signature valid`, a key it has no public half for (`--pubkey FILE`, a
+bare 64-hex public key or a key list, or the board's `[security] keys` file) is `n/a ... not checked`, and a
+bad signature is `BAD`.
+
 ### The signed message
 
 The signature is Ed25519 over a domain-separated message, built by
@@ -154,19 +210,30 @@ holds the rule; the check at boot names a listed file no bay stores as `not stor
 | Key | Format |
 | --- | --- |
 | `schema` | `3`. Any other schema is refused with a sentence saying so |
-| `id` | the slot id, `[A-Za-z0-9._-]` |
+| `id` | the slot id: lowercase `[a-z0-9._-]`, 1 to 64 bytes, not starting with a dot (`valid_id`) |
 | `product` | the operating system's product name, lowercase `[a-z0-9-]` |
-| `version` | the operating system's version, text, not empty |
+| `version` | the operating system's version, text: not empty, at most 256 bytes, no control character (a byte under 0x20 or 0x7f). The identity fact `version.os` takes it as it is and would drop a longer or controlled one quietly, so the manifest refuses it (`slot.json's version is N bytes; at most 256` / `... has a control character at byte N`) |
 | `variant` | optional text |
 | `board` | the board the slot is built for, lowercase `[a-z0-9-]` |
 | `kernel`, `display_name` | optional text, shown by `list` |
 | `image.size` | `rootfs.erofs`'s size in bytes, hash tree included |
 | `image.sha256` | `rootfs.erofs`'s SHA-256, 64 lowercase hex digits |
 | `verity.root_hash` | 64 lowercase hex digits |
-| `verity.salt` | exactly 64 lowercase hex digits (32 bytes), random per image; required |
+| `verity.salt` | exactly 64 lowercase hex digits (32 bytes), unique per image, required. It may be derived from the image's content (a reproducible build then gives the same salt and root hash); it need not be secret or unpredictable: the image is public and the root hash is what the signed manifest binds |
 | `verity.data_blocks` | how many 4096-byte data blocks the tree covers |
 | `verity.hash_offset` | the byte offset in `rootfs.erofs` where the hash tree starts |
 | `boot.files` | each file's path under `boot/` to its SHA-256 |
+
+**Installing an id that is already on the board**, exactly as the code behaves. Nothing compares versions: the
+install counter (`SEQ`) orders slots.
+
+| The id is... | Result |
+|---|---|
+| the running slot | refused at `slot.json`, `BUSY`: `<id> is the running slot` |
+| the default slot | refused at `slot.json`, `BUSY`: `<id> is the default slot` |
+| the previous slot (a bay form) | refused when the payloads are staged, after the bundle came, before any write: `bay<N> is the previous slot's bay: a new install takes one of the other bays` |
+| any id, while a trial is pending | refused before any write: `slot <trial> is on trial with <N> attempts left: nothing was written; wait until the trial is promoted or falls back, then install <id> again` |
+| installed, and none of the above (a `FAILED` slot included) | replaced in place: the same bay set, the image and manifest renamed over the old ones, fresh metadata (the `FAILED` mark and its count are gone, `GOOD` is `untried`) and a new `SEQ`; the default is not touched |
 
 A manifest with a `family` key is refused. That key belonged to schema 2.
 
@@ -215,7 +282,8 @@ An image builder makes a conforming image like this:
 ```text
 mkfs.erofs -b 4096 rootfs.erofs <rootfs dir>  # 4096-byte blocks: the size is a multiple of 4096
 DATA=$(stat -c %s rootfs.erofs)
-SALT=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')   # a new random salt per image
+SALT=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')   # one way: a new random salt per image
+# another: SALT=$(sha256sum rootfs.erofs | cut -d' ' -f1)       # derived from the content: a rebuild is byte-identical
 veritysetup format --no-superblock --format=1 --hash=sha256 --salt=$SALT \
   --data-block-size=4096 --hash-block-size=4096 --data-blocks=$((DATA / 4096)) \
   rootfs.erofs tree.bin                         # prints "Root hash:"

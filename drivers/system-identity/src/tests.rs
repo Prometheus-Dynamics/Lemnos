@@ -335,3 +335,26 @@ fn check_config_names_the_bad_setting() {
         "bogus"
     );
 }
+
+/// The manifest's version bound is the identity fact's own: a manifest that installs is a version the
+/// fact publishes, never one it drops quietly.
+#[test]
+fn the_manifests_version_bound_is_the_fact_s_limit() {
+    assert_eq!(
+        lemnos_slot_store::manifest::VERSION_MAX_BYTES,
+        lemnos_identity::facts::MAX_VALUE_BYTES
+    );
+    let mut facts = lemnos_identity::facts::Facts::default();
+    let longest = "v".repeat(lemnos_slot_store::manifest::VERSION_MAX_BYTES);
+    assert!(lemnos_slot_store::manifest::check_version(&longest, "v").is_ok());
+    assert!(facts.set("version.os", &longest).is_ok());
+    for bad in [
+        format!("{longest}v"),
+        "a\u{1f}b".to_string(),
+        "a\u{7f}".to_string(),
+        String::new(),
+    ] {
+        assert!(lemnos_slot_store::manifest::check_version(&bad, "v").is_err());
+        assert!(facts.set("version.os", &bad).is_err());
+    }
+}
