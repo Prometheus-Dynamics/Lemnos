@@ -20,6 +20,8 @@ use lemnos_slot_store::json::Json;
 use lemnos_slot_store::manifest::{self, Manifest};
 use lemnos_slot_store::store::Layout;
 use lemnos_slot_store::bootimage::Mem;
+use lemnos_slot_store::signing;
+use lemnos_slot_store::tar::{Kind, Sink, Tar};
 use lemnos_slot_store::boot_raw::Boot;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -172,10 +174,14 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     let meta = std::fs::read_to_string(Path::new(dir).join("board/slots").join(format!("{id}.meta")))
         .unwrap_or_default();
     let signature = meta_value(&meta, "SIGNATURE");
+    // The data partition keeps the outcome word, not the key id: the id is the bundle's own `slot.sig`.
     let signed = if signature == "not_checked_unsigned" {
         "unsigned".to_string()
     } else {
-        format!("signature {signature} by {}", meta_value(&meta, "SIGNER"))
+        match signed_key_id(&bundle) {
+            Some(key) => format!("signed with key id {key}"),
+            None => format!("signed (the bundle's slot.sig names no key id; signature {signature})"),
+        }
     };
     let root = std::fs::read_to_string(Path::new(dir).join("slots").join(format!("{id}.json")))
         .ok()
@@ -445,4 +451,37 @@ fn verify_leftovers(dir: &Path, r: &mut Report) {
     } else {
         r.bad(format!("leftovers of an unfinished install: {}", stray.join(", ")));
     }
+}
+
+/// The bundle's `slot.sig` member, as the key id it names, in hex. `None` when the bundle has no
+/// such member or the record does not parse.
+fn signed_key_id(bundle: &[u8]) -> Option<String> {
+    #[derive(Default)]
+    struct SlotSig {
+        inside: bool,
+        found: Option<Vec<u8>>,
+    }
+    impl Sink for SlotSig {
+        fn begin(&mut self, name: &str, kind: Kind, _size: u64) -> Result<(), String> {
+            self.inside = kind == Kind::File && name == "slot.sig";
+            if self.inside {
+                self.found = Some(Vec::new());
+            }
+            Ok(())
+        }
+        fn data(&mut self, bytes: &[u8]) -> Result<(), String> {
+            if let Some(buf) = self.found.as_mut().filter(|_| self.inside) {
+                buf.extend_from_slice(bytes);
+            }
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), String> {
+            self.inside = false;
+            Ok(())
+        }
+    }
+    let mut sink = SlotSig::default();
+    Tar::default().feed(bundle, &mut sink).ok()?;
+    let record = signing::parse_record(&sink.found?).ok()?;
+    Some(hex(&record.key_id))
 }

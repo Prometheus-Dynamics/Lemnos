@@ -145,12 +145,38 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
 
     fs::create_dir(input.out).map_err(|e| format!("{}: {e}", input.out.display()))?;
     let mut pair = Pair { reference, copy };
-    let result = write_into(&input, record, &mut pair);
+    let result = write_into(&input, record, &mut pair).and_then(|id| fix_modes(input.out).map(|()| id));
     if result.is_err() {
         // The directory this call created, with nothing in it that is kept.
         let _ = fs::remove_dir_all(input.out);
     }
     result
+}
+
+/// The modes the output carries whatever the umask of the process: 0644 for files, 0755 for
+/// directories, the output directory included. The daemon's own writes take the umask they run
+/// under, so the writer sets them after the fact, and the bytes of the tree do not depend on it.
+fn fix_modes(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    };
+    set(root, 0o755)?;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let path = entry.path();
+            if entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir() {
+                set(&path, 0o755)?;
+                stack.push(path);
+            } else {
+                set(&path, 0o644)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The reference boot image and the writer's copy, as one value for the final checks.
