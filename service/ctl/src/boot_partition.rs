@@ -106,14 +106,20 @@ pub fn read_payloads(dir: &Path) -> Result<[Vec<u8>; 5], String> {
         .collect::<Result<_, _>>()
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     present.sort();
-    for name in &present {
-        if !names.contains(name) {
-            return Err(format!(
-                "{}: {name:?} is not a build role; the payload directory holds the five roles, named {}",
-                dir.display(),
-                names.join(", ")
-            ));
-        }
+    // The files a slot has on the boot partition are the roles: a file of any other name is refused,
+    // in the words the install uses for a manifest that lists one (`bays::refuse_unstored`).
+    let extra: Vec<String> = present
+        .iter()
+        .filter(|name| !names.contains(name))
+        .map(|name| format!("{name:?}"))
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!(
+            "{}: the payload directory holds {}, which this board's boot partition does not store (it stores: {}): nothing was written",
+            dir.display(),
+            extra.join(", "),
+            names.join(", ")
+        ));
     }
     for name in &names {
         if !present.contains(name) {

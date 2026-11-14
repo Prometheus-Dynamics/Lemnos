@@ -85,6 +85,48 @@ pub const ROLES: [Role; 5] = [
     },
 ];
 
+/// The files a slot has on the boot partition, on every form: the role files' paths, in [`ROLES`]
+/// order. The install, the image builder and the every-boot check all name a slot's files by this
+/// list, so a slot that installs is a slot whose boot check can find every file it lists.
+pub fn stored_files() -> [&'static str; 5] {
+    std::array::from_fn(|i| ROLES[i].path)
+}
+
+/// The `boot.files` entries of a manifest that no bay stores, in the manifest's order.
+pub fn unstored(boot_files: &[(String, String)]) -> Vec<&str> {
+    boot_files
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !ROLES.iter().any(|r| r.path == *name))
+        .collect()
+}
+
+/// The refusal for a manifest whose `boot.files` lists a file no bay stores, or leaves a role file
+/// out; `Ok` when the list is exactly the role files. The install makes it before any write: a slot that lists such a file would install
+/// and then fail its own boot check, which finds the file missing.
+pub fn refuse_unstored(slot: &str, boot_files: &[(String, String)]) -> Result<(), String> {
+    let extra = unstored(boot_files);
+    if extra.is_empty() {
+        // The reverse: a role file the manifest does not list is never hashed, so it is refused too.
+        if let Some(unlisted) = stored_files()
+            .into_iter()
+            .find(|path| !boot_files.iter().any(|(name, _)| name == path))
+        {
+            return Err(format!(
+                "{slot}: boot.files does not list {unlisted:?}, which this board's boot partition stores (it stores: {}): nothing was written, the default keeps booting",
+                stored_files().join(", ")
+            ));
+        }
+        return Ok(());
+    }
+    let listed: Vec<String> = extra.iter().map(|name| format!("{name:?}")).collect();
+    Err(format!(
+        "{slot}: boot.files lists {}, which this board's boot partition does not store (it stores: {}): nothing was written, the default keeps booting",
+        listed.join(", "),
+        stored_files().join(", ")
+    ))
+}
+
 /// The fixed size of each role's file, in roles order. A multiple of the sector size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {

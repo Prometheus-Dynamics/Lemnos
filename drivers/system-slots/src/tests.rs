@@ -202,7 +202,6 @@ impl Bundle {
                 ("initramfs.cpio".into(), b"initramfs".to_vec()),
                 ("board.dtb".into(), b"device tree".to_vec()),
                 ("overlays/lemnos-board.dtbo".into(), b"overlay".to_vec()),
-                ("overlays/README".into(), b"readme".to_vec()),
             ],
             extra: Vec::new(),
             manifest_image_sha: None,
@@ -1451,31 +1450,9 @@ config = {{ systemctl = "{ctl}" }}
 fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_it() {
     let mut board = Board::new("os-1");
     let boot = board.layout().boot.clone();
-    // The boot partition, built by the image builder: os-1 in bay 0, no pointers or records.
-    let boot_node = board.dir.0.join("boot.img");
-    fs::write(&boot_node, crate::bay_fixture::uboot_image("os-1")).unwrap();
-    // The environment: a valid copy on a node of its own (the partition U-Boot keeps it on), whose
-    // default is os-1 in bay 0.
+    let boot_node = use_uboot(&mut board);
     let node = board.layout().boot.join("uboot-env.img");
     let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
-    let list = vec![
-        ("default".to_string(), "os-1".to_string()),
-        ("default_bay".to_string(), "bay0".to_string()),
-    ];
-    let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
-    let mut image = vec![0u8; 8192];
-    image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
-    fs::write(&node, &image).unwrap();
-    board.slots.record = Box::new(crate::uboot::UbootEnv {
-        disk: Err("the device is named, the disk is not needed".into()),
-        place: lemnos_slot_store::uboot_env::Place::device(node.to_str().unwrap(), 1024, 0, 4096)
-            .unwrap(),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
-        boot_node: Ok(boot_node.clone()),
-    });
     board.install_ok("os-2");
     // os-2 took the bay the environment names nothing for, and os-1's was not touched.
     let (dir, lengths) = board.slots.record.slot_bay("os-2").unwrap();
@@ -3711,4 +3688,181 @@ fn a_malformed_view_reads_on_on_a_board_with_no_trust_root_and_info_says_so() {
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
     assert_eq!(json.get("require_signed"), Some(&Json::Bool(false)));
     assert!(slots.install(10, false, false).is_ok());
+}
+
+/// The Pi firmware's record over a real boot partition image: os-1 in bay 0, as the image builder
+/// writes it. Returns the image's path.
+fn use_tryboot(board: &mut Board) -> PathBuf {
+    let node = board.dir.0.join("boot.img");
+    fs::write(&node, crate::bay_fixture::tryboot_image("os-1")).unwrap();
+    board.slots.record = Box::new(crate::boot::Tryboot {
+        boot: board.layout().boot.clone(),
+        node: Ok(node.clone()),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+    });
+    node
+}
+
+/// The extra file a bundle may try to carry in its boot files.
+const EXTRA: &str = "overlays/extra.dtbo";
+
+/// A bundle whose `boot.files` lists a sixth file, present in the bundle.
+fn bundle_with_extra(id: &str) -> Bundle {
+    let mut b = Bundle::new(id);
+    b.boot.push((EXTRA.into(), b"a second overlay".to_vec()));
+    b
+}
+
+/// The U-Boot record over a real boot partition image (os-1 in bay 0) and an environment whose
+/// default is os-1. Returns the image's path.
+fn use_uboot(board: &mut Board) -> PathBuf {
+    // The boot partition, built by the image builder: os-1 in bay 0, no pointers or records.
+    let boot_node = board.dir.0.join("boot.img");
+    fs::write(&boot_node, crate::bay_fixture::uboot_image("os-1")).unwrap();
+    // The environment: a valid copy on a node of its own (the partition U-Boot keeps it on), whose
+    // default is os-1 in bay 0.
+    let node = board.layout().boot.join("uboot-env.img");
+    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    let list = vec![
+        ("default".to_string(), "os-1".to_string()),
+        ("default_bay".to_string(), "bay0".to_string()),
+    ];
+    let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
+    let mut image = vec![0u8; 8192];
+    image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
+    fs::write(&node, &image).unwrap();
+    board.slots.record = Box::new(crate::uboot::UbootEnv {
+        disk: Err("the device is named, the disk is not needed".into()),
+        place: lemnos_slot_store::uboot_env::Place::device(node.to_str().unwrap(), 1024, 0, 4096)
+            .unwrap(),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+        boot_node: Ok(boot_node.clone()),
+    });
+    boot_node
+}
+
+/// The file form: one `boot-record` file, nothing of the slot's on the boot partition.
+fn use_file_record(board: &mut Board) {
+    board.slots.record = Box::new(crate::boot::FileRecord {
+        boot: board.layout().boot.clone(),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+    });
+}
+
+/// What the refusal says for os-2 and the extra entry.
+fn refusal_of_extra() -> String {
+    format!(
+        "os-2: boot.files lists \"{EXTRA}\", which this board's boot partition does not store (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo): nothing was written, the default keeps booting"
+    )
+}
+
+/// Each form, as a name, the board over it, and the boot partition image it writes (none for the
+/// file form, which writes nothing there).
+fn forms() -> Vec<(&'static str, Board, Option<PathBuf>)> {
+    let mut tryboot = Board::new("os-1");
+    let node = use_tryboot(&mut tryboot);
+    let mut uboot = Board::new("os-1");
+    let image = use_uboot(&mut uboot);
+    let mut file = Board::new("os-1");
+    use_file_record(&mut file);
+    vec![
+        ("tryboot", tryboot, Some(node)),
+        ("uboot", uboot, Some(image)),
+        ("file", file, None),
+    ]
+}
+
+/// A boot files entry that is not one of the stored role files is refused, by name, on every form
+/// and on both install paths (the stream and a file in incoming): the boot partition image is
+/// byte for byte what it was, nothing is installed and no work is left.
+#[test]
+fn a_boot_file_the_boot_partition_does_not_store_is_refused_before_any_write() {
+    for (form, mut board, image) in forms() {
+        let before = image.as_ref().map(|p| fs::read(p).unwrap());
+        let bundle = bundle_with_extra("os-2").pack();
+        // The stream.
+        let (status, _, _) = board.stream(1, &bundle, 4096);
+        assert_eq!(status, Status::INVALID_ARGUMENT, "{form}: stream");
+        assert_eq!(board.state().error, refusal_of_extra(), "{form}: stream");
+        assert!(!board.layout().installed("os-2"), "{form}: stream");
+        assert!(!board.work_left(), "{form}: stream");
+        // A file in incoming.
+        fs::write(board.incoming().join("os-2.slot.tar"), &bundle).unwrap();
+        board.slots.caller(CallerId(3));
+        let job = board
+            .slots
+            .install_file("os-2.slot.tar", false, false)
+            .unwrap();
+        let (status, _, _) = board.run_file_job(job);
+        assert_eq!(status, Status::INVALID_ARGUMENT, "{form}: file");
+        assert_eq!(board.state().error, refusal_of_extra(), "{form}: file");
+        assert!(!board.layout().installed("os-2"), "{form}: file");
+        assert!(!board.work_left(), "{form}: file");
+        if let (Some(image), Some(before)) = (image, before) {
+            assert_eq!(
+                fs::read(image).unwrap(),
+                before,
+                "{form}: the boot partition was not written"
+            );
+        }
+    }
+}
+
+/// The refusal comes with the manifest, before the root image is begun: a stream fed only as far as
+/// the root image's header has been refused, and its work directory holds nothing.
+#[test]
+fn the_refusal_of_a_stored_file_comes_before_the_first_payload_byte() {
+    let board = Board::new("os-1");
+    let b = bundle_with_extra("os-2");
+    let bytes = b.pack();
+    let prefix = up_to_header_of(&bytes, "rootfs.erofs");
+    let (got, work) = feed_raw(&board, &prefix, false);
+    let (status, text) = got.unwrap_err();
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert_eq!(text, refusal_of_extra());
+    assert!(!work.join("rootfs.erofs").exists());
+    assert!(!work.join("boot").exists() || fs::read_dir(work.join("boot")).unwrap().count() == 0);
+}
+
+/// The five role files, listed and carried, install on every form, and the slot then passes its
+/// own boot check where the form has a bay.
+#[test]
+fn the_five_role_files_install_and_the_slot_passes_its_boot_check() {
+    for (form, mut board, image) in forms() {
+        board.install_ok("os-2");
+        if let Some(image) = image {
+            let verdict = crate::boot_guard::verified(
+                board.layout(),
+                &Ok(image),
+                board.slots.record.as_ref(),
+                "os-2",
+            );
+            assert_eq!(verdict, Ok(()), "{form}");
+        }
+    }
+}
+
+/// The reverse: a role file the manifest leaves out is refused by name, before any write.
+#[test]
+fn a_role_file_the_manifest_leaves_out_is_refused_by_name() {
+    let mut board = Board::new("os-1");
+    let mut b = Bundle::new("os-2");
+    b.boot.retain(|(name, _)| name != "board.dtb");
+    let (status, _, _) = board.stream(1, &b.pack(), 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert_eq!(
+        board.state().error,
+        "os-2: boot.files does not list \"board.dtb\", which this board's boot partition stores (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo): nothing was written, the default keeps booting"
+    );
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
 }

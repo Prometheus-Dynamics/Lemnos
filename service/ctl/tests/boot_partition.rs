@@ -294,7 +294,34 @@ fn a_payload_directory_with_a_wrong_or_missing_role_is_refused_by_name() {
         payload.to_str().unwrap(),
     ]);
     let err = r.unwrap_err();
-    assert!(err.contains("\"kernel8.img\" is not a build role"), "{err}");
+    assert!(
+        err.ends_with(
+            "the payload directory holds \"kernel8.img\", which this board's boot partition does not store (it stores: kernel, initramfs, device-tree, cmdline, board-overlay): nothing was written"
+        ),
+        "{err}"
+    );
+    // The image build refuses the same way and writes no file.
+    let out = dir.join("refused.img");
+    let (r, _) = run(&[
+        "boot-partition",
+        "--layout-of",
+        board_path.to_str().unwrap(),
+        "--socs",
+        &socs(),
+        "--slot",
+        "a1",
+        "--payload",
+        payload.to_str().unwrap(),
+        "--size",
+        "100000000",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        r.unwrap_err()
+            .contains("which this board's boot partition does not store")
+    );
+    assert!(!out.exists());
     std::fs::remove_file(payload.join("kernel8.img")).unwrap();
     std::fs::remove_file(payload.join("cmdline")).unwrap();
     let (r, _) = run(&[

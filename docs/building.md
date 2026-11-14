@@ -133,7 +133,7 @@ lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
 
 The reference board's `--min-size` is 38242816 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
 `--payload DIR` (five files named for the roles: `kernel`, `initramfs`, `device-tree`, `cmdline`,
-`board-overlay`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds
+`board-overlay`, and nothing else: a file of any other name is refused by name, `<dir>: the payload directory holds "x", which this board's boot partition does not store (it stores: kernel, initramfs, device-tree, cmdline, board-overlay): nothing was written`, in `--min-size` and in the image build alike, the same rule the install applies to a slot bundle's `boot.files`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds
 `config.txt`, `tryboot.txt`, `default.txt`, `previous.txt`, `trial.txt` (two sectors each), `trial.rec`,
 `reason.rec`, `episodes.rec`, `slot-layout.toml` and the three bay sets; a `record = "uboot"` image holds
 `slot-layout.toml`, `uboot-env.txt`, `boot.cmd` (with the board's `lemnos_usb` and `lemnos_led` lines before

@@ -810,5 +810,44 @@ fn driver_path_power_cut_sweep_keeps_a_bootable_default_and_reruns() {
     assert_eq!(runs, writes * 4);
 }
 
+fn listing(names: &[&str]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .map(|n| ((*n).to_string(), "00".repeat(32)))
+        .collect()
+}
+
+#[test]
+fn a_manifest_lists_exactly_the_role_files() {
+    let five = stored_files();
+    assert_eq!(refuse_unstored("os-2", &listing(&five)), Ok(()));
+    // The order of the list does not matter.
+    let mut reversed = five;
+    reversed.reverse();
+    assert_eq!(refuse_unstored("os-2", &listing(&reversed)), Ok(()));
+    // An extra entry, by name.
+    let mut extra = five.to_vec();
+    extra.push("overlays/extra.dtbo");
+    assert_eq!(
+        refuse_unstored("os-2", &listing(&extra)).unwrap_err(),
+        "os-2: boot.files lists \"overlays/extra.dtbo\", which this board's boot partition does not store (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo): nothing was written, the default keeps booting"
+    );
+    // A role file left out, by name.
+    let short = &five[1..];
+    assert!(
+        refuse_unstored("os-2", &listing(short))
+            .unwrap_err()
+            .contains("does not list \"kernel8.img\"")
+    );
+    // The README the board writes itself is not a role file.
+    let mut readme = five.to_vec();
+    readme.push("overlays/README");
+    assert!(
+        refuse_unstored("os-2", &listing(&readme))
+            .unwrap_err()
+            .contains("\"overlays/README\"")
+    );
+}
+
 #[path = "bays_sweep_tests.rs"]
 mod sweeps;

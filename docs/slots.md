@@ -120,6 +120,7 @@ bound through it. Nothing else is trusted:
 | dm-verity | `verity.root_hash`, `salt`, `data_blocks`, `hash_offset` | the image size is the data plus its tree; the root hash goes in the command line |
 | each boot file | `boot.files`: path to SHA-256 | the file's SHA-256 (so its length too) at `finish`; a file the manifest does not list is refused at its header, before its bytes are written |
 | a listed member | `boot.files`, `image` | a listed member the bundle lacks is refused at `finish`, before the slot is put in place |
+| the set of boot files | `boot.files` | exactly the five role files the boot partition stores (`kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`), on every form: an entry that is not one of them, or a role file the list leaves out, is refused by name at the decision, before the first payload byte (see "Manifest and members") |
 | the kernel command line | `boot/cmdline.txt` (a listed file, so digested), `verity.root_hash`, `id`, the board's `boot_args` and PARTUUID | built only from those; no member outside the list reaches it |
 
 No member is installed unsigned: with the security switch off, an unsigned bundle installs as
@@ -132,6 +133,21 @@ malformed one is refused before anything else arrives. Then each member is check
 Each member's bytes are hashed as they arrive; `finish` compares them with the digests before
 `boot::put` and the rename that puts the slot in place, and a bundle that differs is refused with
 nothing left behind.
+
+**`boot.files` is exactly the role files.** A slot's boot files live in a bay, and a bay stores five files,
+one per role: `kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt` and `overlays/lemnos-board.dtbo`
+(the same names on the Pi firmware form, the U-Boot form and the file form, which keeps no bay). The
+every-boot check hashes each `boot.files` entry from the bay, so a manifest that lists any other file (a
+second overlay, `overlays/README`, anything else under `boot/`) would install and then fail its first boot.
+The install refuses it instead, at the same point as the signature and the board (before any payload
+byte, on the stream and on a file in `incoming`, so nothing is written and the default keeps booting):
+`<slot>: boot.files lists "overlays/extra.dtbo", which this board's boot partition does not store (it
+stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo): nothing was
+written, the default keeps booting`. A role file the list leaves out is refused the same way
+(`boot.files does not list "board.dtb", which this board's boot partition stores`). The board writes
+`overlays/README` itself; a bundle does not carry it. One function, `lemnos_slot_store::bays::refuse_unstored`,
+holds the rule; the check at boot names a listed file no bay stores as `not stored` when it meets one
+(a slot installed before the rule).
 
 ### The manifest, schema 3
 

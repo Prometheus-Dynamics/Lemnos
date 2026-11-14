@@ -120,6 +120,25 @@ fn a_missing_boot_file_is_missing_and_a_failing_read_is_unreadable() {
     );
 }
 
+/// On a bay form (the set's record gives stored lengths) a listed file that no bay stores is named
+/// as such, not as missing; a form with no bays reads the files as listed.
+#[test]
+fn a_listed_file_no_bay_stores_is_named_as_not_stored_on_a_bay_form() {
+    let files = vec![
+        ("kernel8.img", b"kernel".to_vec()),
+        ("overlays/extra.dtbo", b"extra".to_vec()),
+    ];
+    let lengths = vec![("kernel8.img".to_string(), 6u64)];
+    let got = check(DIR, &listed(&files), &lengths, |path| {
+        Ok(path.ends_with("kernel8.img").then(|| b"kernel".to_vec()))
+    });
+    assert_eq!(got, vec![Mismatch::NotStored("overlays/extra.dtbo".into())]);
+    assert_eq!(
+        got[0].to_string(),
+        "overlays/extra.dtbo is listed in boot.files, which this board's boot partition does not store (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo)"
+    );
+}
+
 #[test]
 fn the_fat_reader_gives_the_same_answer_as_the_files_on_a_fat_partition() {
     // The check through the raw FAT reader (no mount): the same files, in a FAT image.

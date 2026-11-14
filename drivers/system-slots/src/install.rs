@@ -258,6 +258,10 @@ impl Unpack {
                 ),
             ));
         }
+        // The boot partition stores the role files and nothing else, on every form: a slot that
+        // lists another would install and then fail its own boot check. Refused here, before the
+        // first payload byte, so nothing is written.
+        lemnos_slot_store::bays::refuse_unstored(&parsed.id, &parsed.boot_files).map_err(bad)?;
         Ok(outcome)
     }
 }

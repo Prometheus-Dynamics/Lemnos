@@ -45,6 +45,9 @@ pub enum Mismatch {
     Missing(String),
     /// The file could not be read: the reader's reason.
     Unreadable(String, String),
+    /// The manifest lists a file that no bay stores (the install refuses such a manifest, so this
+    /// is a slot installed before that rule).
+    NotStored(String),
     /// The file is there and its hash differs from the manifest's.
     Changed(String),
 }
@@ -54,6 +57,11 @@ impl fmt::Display for Mismatch {
         match self {
             Mismatch::Missing(name) => write!(f, "{name} is missing from the boot partition"),
             Mismatch::Unreadable(name, why) => write!(f, "{name} can't be read: {why}"),
+            Mismatch::NotStored(name) => write!(
+                f,
+                "{name} is listed in boot.files, which this board's boot partition does not store (it stores: {})",
+                crate::bays::stored_files().join(", ")
+            ),
             Mismatch::Changed(name) => write!(f, "{name} doesn't match its manifest hash"),
         }
     }
@@ -102,7 +110,14 @@ where
     F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 {
     let mut out = Vec::new();
+    // A bay form (the set's record gives lengths) stores the role files and nothing else.
+    let stored_only = !lengths.is_empty();
+    let unstored = crate::bays::unstored(boot_files);
     for (name, want) in boot_files {
+        if stored_only && unstored.contains(&name.as_str()) {
+            out.push(Mismatch::NotStored(name.clone()));
+            continue;
+        }
         let path = format!("{dir}/{name}");
         match read(&path) {
             Ok(None) => out.push(Mismatch::Missing(name.clone())),
