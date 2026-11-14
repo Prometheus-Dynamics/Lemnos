@@ -7,7 +7,7 @@
 //! says so at the row concerned.
 
 use lemnos_contract_camera_sensor::{
-    BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Mode, Rect, SensorInfo,
+    BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Mode, Rect, SensorInfo, fps_milli_of,
 };
 use lemnos_core::{Result, Status, status_of};
 use lemnos_hal::ErrorKind;
@@ -374,6 +374,17 @@ pub const MODES: [ModeEntry; 6] = [
     },
 ];
 
+/// The global line, `G`, in system clocks: the registers 0x382C/D (`hts_global_tx`) at their reset value
+/// 0x05B0. The sensor spends one line of this length in every frame: its frame period is `(VTS - 1) x HTS
+/// + G` system clocks, not `VTS x HTS`. The driver never writes 0x382C/D (no table or control touches them),
+/// so `G` is this reset default; a driver that programmed another value would pass it to
+/// [`ModeEntry::describe_with_global_line`]. Measured, not read from the datasheet: the frame period at
+/// seven frame lengths on a board, and a write of 0x382C/D from 1456 to 1536 that moved the period by 80
+/// system clocks (testing/board-runs/F2h3.md). The sensor uses it whatever bit 2 of 0x382E reads (0 on that
+/// board), so nothing here depends on that bit. In the continuous-clock mode HTS is 728 and `G` is twice it:
+/// the frame is `VTS + 1` lines of HTS.
+pub const GLOBAL_LINE_DEFAULT: u64 = 1456;
+
 /// The line length register for this clock mode.
 pub const fn line_length(continuous_clock: bool) -> u32 {
     if continuous_clock {
@@ -411,14 +422,27 @@ impl ModeEntry {
         }
     }
 
-    /// The whole description of the mode, in the contract's units.
+    /// The whole description of the mode, in the contract's units, with the global line at its reset
+    /// value ([`GLOBAL_LINE_DEFAULT`]).
     pub fn describe(&self, continuous_clock: bool) -> Mode {
+        self.describe_with_global_line(continuous_clock, GLOBAL_LINE_DEFAULT)
+    }
+
+    /// The description of the mode with the global line `global_line` system clocks long (what is in
+    /// registers 0x382C/D). The frame period is `(N - 1) x HTS + G` system clocks, which the contract
+    /// states as `N x line_time_ps + frame_offset_ps` with the offset `G - HTS` system clocks in
+    /// picoseconds; `max_fps_milli` is the rate at the shortest frame, on that same period.
+    pub fn describe_with_global_line(&self, continuous_clock: bool, global_line: u64) -> Mode {
         let line_length_reg = u64::from(line_length(continuous_clock));
         let line_time_ps = (line_length_reg * 1_000_000_000_000 / self.depth.sys_clk_hz) as u32;
         // Exact: the line length times the active lines, over the clock, before any rounding.
         let readout_ps = line_length_reg * u64::from(self.window.height) * 1_000_000_000_000
             / self.depth.sys_clk_hz;
         let frame_length_min = self.frame_length_min();
+        // `G` less one line of HTS, in picoseconds (negative when `G` is shorter than a line: the
+        // contract's offset is unsigned, so such a frame is reported with no offset).
+        let frame_offset_ps =
+            global_line.saturating_sub(line_length_reg) * 1_000_000_000_000 / self.depth.sys_clk_hz;
         Mode {
             link: LinkConfig {
                 lanes: LANES,
@@ -432,9 +456,8 @@ impl ModeEntry {
                 link_rate_mbps: LINK_RATE_MBPS,
             },
             bayer: BAYER,
-            max_fps_milli: (1_000_000_000_000_000
-                / (u64::from(line_time_ps) * u64::from(frame_length_min)))
-                as u32,
+            max_fps_milli: fps_milli_of(line_time_ps, frame_offset_ps, frame_length_min)
+                .unwrap_or(0),
             line_time_ps,
             line_length: (line_length_reg * 2) as u32,
             frame_length_min,
@@ -455,6 +478,7 @@ impl ModeEntry {
             gain_delay: 2,
             frame_length_delay: 2,
             readout_ps,
+            frame_offset_ps,
         }
     }
 }

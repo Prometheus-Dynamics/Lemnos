@@ -10,6 +10,11 @@
 //!   directions; see [`GainLaw`].
 //! - `line_time_ps` in picoseconds, `max_fps_milli` in thousandths of a frame per second,
 //!   `black_level` in codes at the mode's bit depth.
+//! - The frame period of a frame `N` lines long is `N × line_time_ps + frame_offset_ps`
+//!   ([`frame_period_ps`], [`Mode::period_ps`]): a sensor whose frame is exactly its lines has an
+//!   offset of 0. A sensor with a per-frame line of its own length (the OV9782's global line, whose
+//!   length is not its line length) reports the difference as the offset, so `(N − 1) × HTS + G`
+//!   is `N × HTS + (G − HTS)`. Every rate in this contract's functions is `1e15 / period`.
 //!
 //! Timing. `post_values` makes one group of the controls it names. The group is launched at the
 //! next vertical blanking after its last write, so a post whose launch completes during frame `F`
@@ -261,6 +266,14 @@ pub struct Mode {
     /// one line at a time, so the readout span is the rolling one. Zero: the sensor has no readout
     /// to report (a simulator).
     pub readout_ps: u64,
+    /// The frame period beyond its lines: a frame `N` lines long lasts `N × line_time_ps +
+    /// frame_offset_ps` picoseconds ([`frame_period_ps`]). The sensor's frame is `N - 1` lines of the
+    /// line length and one line of its own length `G`, so the offset is `G` less one line length, in
+    /// picoseconds. Zero when the frame is exactly its lines, which is also what a sensor from before
+    /// the field reports (absent means 0). A reader that leaves it at 0 computes periods 440 to 460 ppm
+    /// short on the OV9782 at 60 fps (more at shorter frames): use [`Mode::period_ps`] or the helpers.
+    #[added]
+    pub frame_offset_ps: u64,
 }
 
 /// The frames a post's controls first show on, as [`landing_of`] gives them. A control the post
@@ -485,24 +498,25 @@ pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<Link
 }
 
 /// The frame period, in picoseconds, of a frame `lines` long on a sensor whose line time is
-/// `line_time_ps`: `line_time_ps × lines`. The one period the rate functions, [`Mode::period_ps`],
-/// the rate proof and the simulated sensor's frame clock all take.
-pub fn frame_period_ps(line_time_ps: u32, lines: u32) -> u128 {
-    u128::from(line_time_ps) * u128::from(lines)
+/// `line_time_ps` and whose frame carries `offset_ps` beyond its lines: `lines × line_time_ps +
+/// offset_ps`. This is the one period: [`Mode::period_ps`], the rate functions below, the rate proof,
+/// the simulated sensor's frame clock and a driver's own bounds (a silence watch's, for one) all take
+/// it, so no caller multiplies a line time by a frame length itself.
+pub fn frame_period_ps(line_time_ps: u32, offset_ps: u64, lines: u32) -> u128 {
+    u128::from(line_time_ps) * u128::from(lines) + u128::from(offset_ps)
 }
 
 impl Mode {
     /// The frame period in picoseconds of a frame `lines` long in this mode ([`frame_period_ps`]).
     pub fn period_ps(&self, lines: u32) -> u128 {
-        frame_period_ps(self.line_time_ps, lines)
+        frame_period_ps(self.line_time_ps, self.frame_offset_ps, lines)
     }
 }
 
-/// The frame rate, in thousandths of a frame per second, of a frame `lines` long on a sensor whose
-/// line time is `line_time_ps` picoseconds: `1e15 / period`, with the period from
-/// [`frame_period_ps`], rounded to the nearest. `None` when the period is zero.
-pub fn fps_milli_of(line_time_ps: u32, lines: u32) -> Option<u32> {
-    let period = frame_period_ps(line_time_ps, lines);
+/// The frame rate, in thousandths of a frame per second, of a frame `lines` long: `1e15 / period`,
+/// rounded to the nearest, with the period from [`frame_period_ps`]. `None` when the period is zero.
+pub fn fps_milli_of(line_time_ps: u32, offset_ps: u64, lines: u32) -> Option<u32> {
+    let period = frame_period_ps(line_time_ps, offset_ps, lines);
     if period == 0 {
         return None;
     }
@@ -511,12 +525,15 @@ pub fn fps_milli_of(line_time_ps: u32, lines: u32) -> Option<u32> {
 }
 
 /// The frame length in lines, within `min..=max`, whose rate ([`fps_milli_of`]) is nearest to
-/// `asked_milli`, and that rate. A frame is a whole number of lines, so the rate steps by
-/// `fps / lines` at each line: the caller sees the residual in the answer, not a hidden one. A
-/// tie goes to the longer frame (the lower rate). `None` when the asked rate or the line time is
-/// zero, or the range is empty.
+/// `asked_milli`, and that rate. The period that gives the asked rate is `1e15 / asked_milli`; its
+/// lines are that less the offset, over the line time, and the whole neighbours of that count are
+/// tried with the ends of the range. A frame is a whole number of lines, so the rate steps by about
+/// `fps / lines` at each line: the caller sees the residual in the answer, not a hidden one. A tie
+/// goes to the longer frame (the lower rate). `None` when the asked rate or the line time is zero,
+/// or the range is empty.
 pub fn frame_length_for_fps_milli(
     line_time_ps: u32,
+    offset_ps: u64,
     min: u32,
     max: u32,
     asked_milli: u32,
@@ -524,13 +541,13 @@ pub fn frame_length_for_fps_milli(
     if asked_milli == 0 || line_time_ps == 0 || min == 0 || min > max {
         return None;
     }
-    // The continuous frame length for the asked rate, and its two whole neighbours.
-    let exact = 1_000_000_000_000_000u128 / (u128::from(line_time_ps) * u128::from(asked_milli));
+    let target = 1_000_000_000_000_000u128 / u128::from(asked_milli);
+    let exact = target.saturating_sub(u128::from(offset_ps)) / u128::from(line_time_ps);
     let near = u32::try_from(exact).unwrap_or(u32::MAX);
     let mut best: Option<(u32, u32)> = None;
     for lines in [near, near.saturating_add(1), min, max] {
         let lines = lines.clamp(min, max);
-        let Some(rate) = fps_milli_of(line_time_ps, lines) else {
+        let Some(rate) = fps_milli_of(line_time_ps, offset_ps, lines) else {
             continue;
         };
         let miss = rate.abs_diff(asked_milli);
@@ -559,30 +576,30 @@ mod rate_tests {
             ..Mode::default()
         };
         assert_eq!(mode.period_ps(1000), 8_333_333_000);
-        assert_eq!(mode.period_ps(1000), frame_period_ps(8_333_333, 1000));
+        assert_eq!(mode.period_ps(1000), frame_period_ps(8_333_333, 0, 1000));
         // The rate of that period is the rate the rate functions report for the same lines.
-        assert_eq!(fps_milli_of(8_333_333, 1000), Some(120_000));
+        assert_eq!(fps_milli_of(8_333_333, 0, 1000), Some(120_000));
     }
 
     #[test]
     fn the_rate_of_a_frame_is_rounded_to_the_nearest_milli_fps() {
         // 765 cycles at 96 MHz, 910 lines (the board's 137.901 fps mode).
-        assert_eq!(fps_milli_of(7_968_750, 910), Some(137_901));
+        assert_eq!(fps_milli_of(7_968_750, 0, 910), Some(137_901));
         // 2092 lines: 59.9858 fps, delivered as 59 986 milli-fps.
-        assert_eq!(fps_milli_of(7_968_750, 2092), Some(59_986));
-        assert_eq!(fps_milli_of(0, 910), None);
+        assert_eq!(fps_milli_of(7_968_750, 0, 2092), Some(59_986));
+        assert_eq!(fps_milli_of(0, 0, 910), None);
     }
 
     #[test]
     fn a_requested_rate_takes_the_nearest_whole_line_count() {
         // 60 fps at 7968.75 ns a line: 2091 lines is 60.0145, 2092 is 59.9858; 2092 is nearer.
         assert_eq!(
-            frame_length_for_fps_milli(7_968_750, 800, 4000, 60_000),
+            frame_length_for_fps_milli(7_968_750, 0, 800, 4000, 60_000),
             Some((2092, 59_986))
         );
         // 120 fps: 1045 lines is 120.09, 1046 is 119.97; 1046 is nearer.
         assert_eq!(
-            frame_length_for_fps_milli(7_968_750, 800, 4000, 120_000),
+            frame_length_for_fps_milli(7_968_750, 0, 800, 4000, 120_000),
             Some((1046, 119_972))
         );
     }
@@ -590,19 +607,46 @@ mod rate_tests {
     #[test]
     fn the_step_is_the_rate_over_the_lines_and_the_range_is_respected() {
         // One line at 60 fps is about 29 milli-fps; at 120 fps about 115 milli-fps.
-        let at = |asked| frame_length_for_fps_milli(7_968_750, 800, 4000, asked).unwrap();
+        let at = |asked| frame_length_for_fps_milli(7_968_750, 0, 800, 4000, asked).unwrap();
         let (l60, r60) = at(60_000);
         let (l61, r61) = at(60_000 + 30);
         assert!(r60.abs_diff(r61) > 0 && l61 < l60);
         assert!(r60.abs_diff(59_986) <= 1);
         // A rate above the fastest frame is answered with the shortest frame, and says so.
         assert_eq!(
-            frame_length_for_fps_milli(7_968_750, 800, 1000, 500_000),
-            Some((800, fps_milli_of(7_968_750, 800).unwrap()))
+            frame_length_for_fps_milli(7_968_750, 0, 800, 1000, 500_000),
+            Some((800, fps_milli_of(7_968_750, 0, 800).unwrap()))
         );
         assert_eq!(
-            frame_length_for_fps_milli(7_968_750, 900, 800, 60_000),
+            frame_length_for_fps_milli(7_968_750, 0, 900, 800, 60_000),
             None
         );
+    }
+
+    /// With the frame's offset (1456 system clocks less HTS 765, at 96 MHz, gated), the asked 60 fps is the
+    /// frame of 2091 lines: 2092 would give 59 960, 2091 gives 59 989, and the asked 60 000 is nearest 59 989
+    /// (one line steps the rate by about 28 milli-fps here). Without the offset the answer was 2092.
+    #[test]
+    fn a_frame_with_an_offset_asks_for_its_own_period() {
+        let line = 7_968_750;
+        let offset = 7_197_916;
+        let (lines, rate) = frame_length_for_fps_milli(line, offset, 910, 52_340, 60_000).unwrap();
+        assert_eq!(lines, 2091);
+        assert_eq!(fps_milli_of(line, offset, 2091), Some(rate));
+        assert_eq!(rate, 59_989);
+        assert_eq!(fps_milli_of(line, offset, 2092), Some(59_960));
+        let mode = Mode {
+            line_time_ps: line,
+            frame_offset_ps: offset,
+            ..Mode::default()
+        };
+        assert_eq!(mode.period_ps(2092), 2092 * 7_968_750 + 7_197_916);
+        assert_eq!(mode.period_ps(2092), frame_period_ps(line, offset, 2092));
+        // A mode that reports no offset has the period of its lines, as before the field.
+        let none = Mode {
+            frame_offset_ps: 0,
+            ..mode
+        };
+        assert_eq!(none.period_ps(2092), 2092 * 7_968_750);
     }
 }

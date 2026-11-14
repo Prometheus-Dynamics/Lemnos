@@ -533,7 +533,7 @@ fn mode_table_reports_the_values_the_registers_program() {
                 link_rate_mbps: 800,
             },
             bayer: BayerOrder::Bggr,
-            max_fps_milli: 114_917,
+            max_fps_milli: 114_804,
             line_time_ps: 9_562_500,
             line_length: 1530,
             frame_length_min: 910,
@@ -563,6 +563,8 @@ fn mode_table_reports_the_values_the_registers_program() {
             gain_delay: 2,
             frame_length_delay: 2,
             readout_ps: 7_650_000_000,
+            // (1456 - 765) system clocks at 80 MHz.
+            frame_offset_ps: 8_637_500,
         }
     );
 
@@ -618,7 +620,9 @@ fn continuous_clock_changes_line_length_and_link() {
     assert!(m.link.continuous_clock);
     assert_eq!(m.line_length, 1456);
     assert_eq!(m.line_time_ps, 9_100_000); // 728 / 80 MHz
-    assert_eq!(m.max_fps_milli, 120_758); // 80 MHz / (728 * 910)
+    // 910 lines is 909 lines of 728 and one global line of 1456 system clocks, at 80 MHz: 911 x 9.1 us.
+    assert_eq!(m.frame_offset_ps, 9_100_000);
+    assert_eq!(m.max_fps_milli, 120_626);
 }
 
 #[test]
@@ -1804,4 +1808,159 @@ fn a_bus_error_while_streaming_reads_as_a_failure_the_driver_recovers_from_and_c
     }
     assert_eq!(s.state, State::Streaming);
     assert!(!matches!(Driver::health(&s), Health::Failed(_)));
+}
+
+/// The measured frame periods of the board run of 2026-11-14 (a board run; serial and figures in testing/board-runs/F2h3.md):
+/// mode 1 (1280x800 RAW8, 96 MHz system clock), 5000 frames each, the mean interval being (last - first) / 4999
+/// from the timestamps. (lines, mean interval in ns). The crystal's own error is not modelled: every mean sits
+/// +7.5 to +8.1 ppm above the period, and the tests allow 10 ppm.
+const MEASURED_GATED: [(u32, u128); 7] = [
+    (1100, 8_772_889),
+    (2082, 16_598_264),
+    (2091, 16_669_986),
+    (2092, 16_677_956),
+    (2093, 16_685_925),
+    (2102, 16_757_645),
+    (4300, 34_273_081),
+];
+const MEASURED_CONTINUOUS: [(u32, u128); 5] = [
+    (2188, 16_600_050),
+    (2197, 16_668_301),
+    (2198, 16_675_885),
+    (2199, 16_683_468),
+    (2208, 16_751_719),
+];
+
+/// Parts per million of `measured` that `model` is off by (ceiling).
+fn ppm_off(model_ns: u128, measured_ns: u128) -> u128 {
+    model_ns.abs_diff(measured_ns) * 1_000_000 / measured_ns
+}
+
+/// The one period: `(N - 1) x HTS + G` system clocks. Within 10 ppm of every measured mean, in both clock
+/// modes; and the two periods the board ruled out, M0 (`N x HTS`) and A (`(N + 1) x HTS`), are not.
+#[test]
+fn the_frame_period_reproduces_the_measured_means_and_not_the_ruled_out_models() {
+    for (continuous, runs) in [
+        (false, &MEASURED_GATED[..]),
+        (true, &MEASURED_CONTINUOUS[..]),
+    ] {
+        let mode = chip::MODES[1].describe(continuous);
+        for &(lines, measured) in runs {
+            let model = mode.period_ps(lines) / 1000;
+            assert!(
+                ppm_off(model, measured) <= 10,
+                "continuous {continuous}, {lines} lines: period {model} ns against the measured {measured} ns"
+            );
+            // M0: lines x line time. Always more than 10 ppm away (217 ppm at 4300 lines, 829 at 1100).
+            let m0 = u128::from(mode.line_time_ps) * u128::from(lines) / 1000;
+            assert!(ppm_off(m0, measured) > 100, "M0 at {lines} lines is {m0}");
+            // A: one extra line. In the gated mode it is 15 to 80 ppm away, so a regression to it fails;
+            // in the continuous mode the global line is two lines, so A and the period are the same.
+            let a = u128::from(mode.line_time_ps) * u128::from(lines + 1) / 1000;
+            if continuous {
+                assert!(
+                    a.abs_diff(model) <= 1,
+                    "{lines} lines: A {a}, period {model}"
+                );
+            } else {
+                assert!(ppm_off(a, measured) > 10, "A at {lines} lines is {a}");
+            }
+        }
+    }
+}
+
+/// The period at the unit of the frame, an exact figure: 2092 lines gated is 2091 lines of 765 system clocks and
+/// one of 1456, at 96 MHz: 16 677 822.9 ns.
+#[test]
+fn the_frame_period_is_the_lines_less_one_plus_the_global_line_in_system_clocks() {
+    let gated = chip::MODES[1].describe(false);
+    assert_eq!(gated.line_time_ps, 7_968_750);
+    assert_eq!(gated.frame_offset_ps, 7_197_916);
+    assert_eq!(gated.period_ps(2092), 16_677_822_916);
+    assert_eq!(
+        gated.period_ps(2092),
+        (2091 * 765 + 1456) * 1_000_000_000_000 / 96_000_000
+    );
+    let cont = chip::MODES[1].describe(true);
+    // G is 2 x HTS: the frame is N + 1 lines of HTS (line time truncated to the picosecond).
+    assert_eq!(cont.frame_offset_ps, 7_583_333);
+    let exact = (2197 * 728 + 1456) * 1_000_000_000_000u128 / 96_000_000;
+    assert!(
+        cont.period_ps(2198).abs_diff(exact) < 1_000,
+        "truncated line time, under a nanosecond"
+    );
+    // The shortest frame's rate is on the same period.
+    assert_eq!(
+        Some(gated.max_fps_milli),
+        lemnos_contract_camera_sensor::fps_milli_of(
+            gated.line_time_ps,
+            gated.frame_offset_ps,
+            gated.frame_length_min
+        )
+    );
+}
+
+/// The write of 0x382C/D from 1456 to 1536 (80 system clocks) moved the mean period by +832 ns on the board
+/// (16 677 958 to 16 678 790 ns at 2092 lines); the model moves it by 80 / 96 MHz = 833.3 ns.
+#[test]
+fn a_longer_global_line_lengthens_the_period_by_its_system_clocks() {
+    let entry = chip::MODES[1];
+    let base = entry.describe(false);
+    let longer = entry.describe_with_global_line(false, chip::GLOBAL_LINE_DEFAULT + 80);
+    assert_eq!(
+        base,
+        entry.describe_with_global_line(false, chip::GLOBAL_LINE_DEFAULT)
+    );
+    let change = longer.period_ps(2092) - base.period_ps(2092);
+    assert!(change.abs_diff(833_333) <= 1, "{change} ps");
+    let board_change: u128 = 16_678_790 - 16_677_958;
+    assert!(
+        board_change.abs_diff(change / 1000) <= 2,
+        "{board_change} ns on the board"
+    );
+    // The frame length does not change what the global line adds.
+    assert_eq!(
+        longer.period_ps(910) - base.period_ps(910),
+        longer.period_ps(4000) - base.period_ps(4000)
+    );
+}
+
+/// The frame length for an asked rate is the nearest on the frame's own period, in both clock modes. 60 fps gated
+/// is 2091 lines (59 989 milli-fps; the lines alone gave 2092 and 59 986), continuous 2197 lines.
+#[test]
+fn the_frame_length_for_an_asked_rate_is_the_nearest_on_the_frame_period() {
+    use lemnos_contract_camera_sensor::{fps_milli_of, frame_length_for_fps_milli};
+    for continuous in [false, true] {
+        let mode = chip::MODES[1].describe(continuous);
+        for asked in [60_000u32, 120_000] {
+            let (lines, rate) = frame_length_for_fps_milli(
+                mode.line_time_ps,
+                mode.frame_offset_ps,
+                mode.frame_length_min,
+                mode.frame_length_max,
+                asked,
+            )
+            .unwrap();
+            let miss = rate.abs_diff(asked);
+            for other in [lines - 1, lines + 1] {
+                let other_rate =
+                    fps_milli_of(mode.line_time_ps, mode.frame_offset_ps, other).unwrap();
+                assert!(
+                    miss <= other_rate.abs_diff(asked),
+                    "continuous {continuous}, asked {asked}: {lines} lines ({rate}) is not nearest; {other} gives {other_rate}"
+                );
+            }
+        }
+    }
+    let gated = chip::MODES[1].describe(false);
+    assert_eq!(
+        frame_length_for_fps_milli(
+            gated.line_time_ps,
+            gated.frame_offset_ps,
+            gated.frame_length_min,
+            gated.frame_length_max,
+            60_000
+        ),
+        Some((2091, 59_989))
+    );
 }

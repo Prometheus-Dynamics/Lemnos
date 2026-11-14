@@ -159,8 +159,14 @@ fn a_mode_says_what_a_chip_agnostic_caller_needs() {
             "gain_delay",
             "frame_length_delay",
             "readout_ps",
+            "frame_offset_ps",
         ]
     );
+    // The offset is an addition (the last field, `#[added]`): a reader from before it gets 0, and the
+    // contract's base hash does not move.
+    let last = fields.last().unwrap();
+    assert!(last.added && last.name == "frame_offset_ps");
+    assert!(fields[..fields.len() - 1].iter().any(|f| !f.added));
 }
 
 const GAIN: GainRange = GainRange {
@@ -209,6 +215,7 @@ fn mode() -> Mode {
         gain_delay: 2,
         frame_length_delay: 2,
         readout_ps: 7_280_000_000,
+        frame_offset_ps: 0,
     }
 }
 

@@ -204,7 +204,12 @@ LemnosStatus lemnos_open(LemnosHandle client, const char *device, const char *ta
  * (how many of its methods are additions). The bind check that a typed client runs is in Rust. */
 LemnosStatus lemnos_contract_hash(LemnosHandle client, uint32_t opened, uint64_t *hash,
                                   uint32_t *level, LemnosMessageSink sink);
-/* Returns the reply's length. */
+/* Returns the reply's length. The reply is the contract's encoded result; the C API has no helper
+ * that reads one. A caller of camera.sensor/1 `mode` who computes a frame period or rate from the
+ * Mode's fields does its own arithmetic and must use the whole formula: a frame of N lines lasts
+ * N * line_time_ps + frame_offset_ps picoseconds (rate = 1e15 / that period, in milli-fps). A reader
+ * that leaves frame_offset_ps (the Mode's last field, absent in an older driver's reply) at 0
+ * computes periods 440 to 460 ppm short on the sensor in the tree, at 60 fps. */
 LemnosStatus lemnos_call(LemnosHandle client, uint32_t opened, uint16_t method, const uint8_t *args,
                          size_t args_len, uint8_t *reply, size_t reply_capacity,
                          LemnosMessageSink sink);

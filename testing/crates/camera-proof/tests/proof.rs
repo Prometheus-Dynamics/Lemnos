@@ -517,6 +517,7 @@ fn rates_of(asked_milli: u32, mode: u16, frames: u64) -> Rates {
     let m = *camera.mode();
     let (lines, computed) = frame_length_for_fps_milli(
         m.line_time_ps,
+        m.frame_offset_ps,
         m.frame_length_min,
         m.frame_length_max,
         asked_milli,

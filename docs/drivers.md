@@ -295,9 +295,26 @@ show on the frame `F + delay` for each control, where `F` is the frame in progre
 launches. Frames are named by sequence (receivers publish identity 0). `ov9782` has no embedded
 data, so a caller checks its posts from the timing rule. The simulated sensor in the camera proof
 has configurable delays, masked frames and embedded data, and its schedule test checks a 1,000-step
-run with unequal delays. Its frames last one period of the frame length in force (the mode's line time
-times the frame length, `Mode::period_ps`), so a frame length that is programmed shows in the timestamps:
+run with unequal delays. Its frames last one period of the frame length in force (`Mode::period_ps`, the mode's line time
+times the frame length plus its `frame_offset_ps`), so a frame length that is programmed shows in the timestamps:
 the rate tests check the measured rate against the computed one at 30, 60, 120 and an out-of-range ask.
+
+The frame period. A frame `N` lines long lasts `N x line_time_ps + frame_offset_ps` (`frame_period_ps`; the
+rates are `1e15 / period`, `fps_milli_of` and `frame_length_for_fps_milli` take the offset). For `ov9782` that is
+`(N - 1) x HTS + G` system clocks: the sensor spends one line of its own length `G` in every frame, the registers
+0x382C/D, left at their reset value 1456 (the driver never writes them; the sensor uses them whatever bit 2 of
+0x382E reads). The offset is `G - HTS` in picoseconds: 7 197 916 ps gated at HTS 765 on the 96 MHz clock (8 637 500
+ps at 80 MHz, the 10-bit modes), 7 583 333 ps continuous at HTS 728 (there `G = 2 x HTS`, the frame is `N + 1`
+lines). So 2092 lines gated last 16 677 822.9 ns, not 16 670 625.0 ns (the lines alone, `N x HTS`), and 60 fps asks for
+2091 lines (59 989 milli-fps), not 2092. Measured at seven frame lengths on a board
+(`testing/board-runs/F2h3.md`): every mean is 7.5 to 8.1 ppm above the period, the crystal, which is not modelled.
+`Mode.frame_offset_ps` is an added field (absent means 0, the period of the lines alone), so the contract's base
+hash does not move. A reader that leaves it at 0 computes periods 440 to 460 ppm short (at 60 fps; 830 ppm at 1100
+lines). Rust callers are forced to pass it by the helper signatures. The C API (`include/lemnos.h`) has no period or
+rate helper: `lemnos_call` returns the encoded `mode` result and a C caller does its own arithmetic, so the formula
+is stated in the header at `lemnos_call` and here: `period_ps = N * line_time_ps + frame_offset_ps`.
+The 10-bit modes and the other windows (720, 400) are not measured on a board: their offset is the same arithmetic on the
+mode's own clock.
 
 Confirming a link. `camera.receiver/1` `source` says which sensor its input is wired to, as the
 kernel names it; `camera.sensor/1` `identity` says what the kernel calls that sensor. The sensor

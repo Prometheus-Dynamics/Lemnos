@@ -1,5 +1,8 @@
 # F2h: the sensor's frame period, and the rate check
 
+Decided: the board run of 2026-11-14 (`F2h3.md`) confirmed B1, `(N - 1) x HTS + G`, and the contract and driver now
+state it. The text below is the reasoning and the step that led there, kept as it was written.
+
 Not run on a board: untested on board. Everything below comes from files already on disk (the other team's
 raw per-frame runs, read-only, under `h1-raw-run-3/rep/*.csv` with the JSON summaries beside them) and from the
 datasheet and two reference drivers. No sensor register was read on a board.

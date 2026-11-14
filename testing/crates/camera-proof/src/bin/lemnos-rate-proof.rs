@@ -11,7 +11,9 @@
 //! instead, to N lines (within the mode's range), so one mode can be run at VTS, VTS ± 1 and VTS ± 10
 //! and the slope and the intercept of the period read from the means (testing/board-runs/F2h.md). The camera runs `--frames` frames
 //! (at least 5000). The measured rate is `(frames - 1) / (last - first)` from the timestamps, which does
-//! not depend on how the single intervals spread. The computed rate is `1e15 / (line time × lines)`.
+//! not depend on how the single intervals spread. The computed rate is `1e15 / period`, the period being
+//! the mode's own ([`lemnos_contract_camera_sensor::Mode::period_ps`]: `lines × line time + frame offset`,
+//! that is `(lines - 1) × HTS + G` for the OV9782; testing/board-runs/F2h3.md).
 //! The check fails beyond 200 parts per million (0.02 %), on a dropped frame or a sequence gap, or on
 //! fewer than 5000 frames. Nothing is fitted: a difference is printed, not corrected.
 //!
@@ -36,6 +38,8 @@ use std::time::Duration;
 
 use lemnos_camera_proof::{Error, FrameSink, Options, SocketBus, assemble, capture};
 use lemnos_client::Client;
+#[cfg(test)]
+use lemnos_contract_camera_sensor::frame_period_ps;
 use lemnos_contract_camera_sensor::{Controls, fps_milli_of, frame_length_for_fps_milli};
 use lemnos_wire::ring::FrameSlot;
 
@@ -107,7 +111,8 @@ fn parse() -> Option<Args> {
 struct Mean {
     /// `(last - first) / (N - 1)`, in ns.
     measured_ns: u64,
-    /// The lines times the line time, in ns (the model the tool checks, with no extra term).
+    /// The mode's frame period at the run's frame length, in ns (`Mode::period_ps`, the global line
+    /// included; not fitted to any run).
     expected_ns: u64,
     /// Measured minus expected, in ns.
     difference_ns: i64,
@@ -243,6 +248,17 @@ fn shape(gaps: &[u64]) {
     out(format_args!("{line}"));
 }
 
+/// The nominal rate in milli-fps of a frame period, truncated as the timestamps' rate is.
+fn computed_milli(period_ps: u128) -> u128 {
+    1_000_000_000_000_000u128 / period_ps.max(1)
+}
+
+/// How far the measured rate is from the nominal one, in parts per million of the nominal. Both are whole
+/// milli-fps, so the figure moves in steps of 1e6 / rate: 16 ppm at 60 fps, 8 at 120 fps.
+fn rate_error_ppm(measured_milli: u64, computed_milli: u128) -> u128 {
+    u128::from(measured_milli.abs_diff(computed_milli as u64)) * 1_000_000 / computed_milli.max(1)
+}
+
 fn run(args: &Args) -> Result<u8, String> {
     let client = Client::connect(&args.socket, "lemnos-rate-proof")
         .map_err(|e| format!("{}: {e}", args.socket))?;
@@ -260,7 +276,8 @@ fn run(args: &Args) -> Result<u8, String> {
     let (lines, nominal) = match args.lines {
         Some(lines) if (mode.frame_length_min..=mode.frame_length_max).contains(&lines) => (
             lines,
-            fps_milli_of(mode.line_time_ps, lines).ok_or("the line time is zero")?,
+            fps_milli_of(mode.line_time_ps, mode.frame_offset_ps, lines)
+                .ok_or("the line time is zero")?,
         ),
         Some(lines) => {
             return Err(format!(
@@ -270,15 +287,16 @@ fn run(args: &Args) -> Result<u8, String> {
         }
         None => frame_length_for_fps_milli(
             mode.line_time_ps,
+            mode.frame_offset_ps,
             mode.frame_length_min,
             mode.frame_length_max,
             args.asked_milli,
         )
         .ok_or("no frame length gives the asked rate")?,
     };
-    let step = fps_milli_of(mode.line_time_ps, lines)
+    let step = fps_milli_of(mode.line_time_ps, mode.frame_offset_ps, lines)
         .unwrap_or(0)
-        .abs_diff(fps_milli_of(mode.line_time_ps, lines + 1).unwrap_or(0));
+        .abs_diff(fps_milli_of(mode.line_time_ps, mode.frame_offset_ps, lines + 1).unwrap_or(0));
     out(format_args!(
         "mode {}: line time {} ps; asked {} milli-fps: frame length {lines} lines (allowed {}..={}), nominal rate {nominal} milli-fps",
         args.mode,
@@ -305,10 +323,8 @@ fn run(args: &Args) -> Result<u8, String> {
     stopped.map_err(|e| format!("stop: {e:?}"))?;
 
     let measured = report.fps_milli();
-    let computed = 1_000_000_000_000_000u128 / mode.period_ps(lines);
-    let error_ppm = measured.map_or(u128::MAX, |m| {
-        u128::from(m.abs_diff(computed as u64)) * 1_000_000 / computed.max(1)
-    });
+    let computed = computed_milli(mode.period_ps(lines));
+    let error_ppm = measured.map_or(u128::MAX, |m| rate_error_ppm(m, computed));
     match measured {
         Some(measured) => out(format_args!(
             "frames {}, dropped {}, gaps {}; rate from timestamps {measured} milli-fps; nominal {computed} milli-fps; difference {error_ppm} ppm (limit {TOLERANCE_PPM})",
@@ -334,7 +350,7 @@ fn run(args: &Args) -> Result<u8, String> {
             mode.line_time_ps
         ));
         out(format_args!(
-            "measurement: mean interval {} ns, expected {} ns (lines x line time), difference {:+} ns ({:+} ppm)",
+            "measurement: mean interval {} ns, expected {} ns (the mode's frame period), difference {:+} ns ({:+} ppm)",
             m.measured_ns, m.expected_ns, m.difference_ns, m.difference_ppm
         ));
     }
@@ -441,5 +457,63 @@ mod tests {
             panic!("not unmade");
         };
         assert_eq!(why, ["10 frames, need 5000", "dropped 1 gaps 0"]);
+    }
+
+    /// The runs of 2026-11-14 (the BR1 board run, testing/board-runs/F2h3.md), mode 1 RAW8 on the 96 MHz clock:
+    /// (continuous clock, frame length, the rate from the timestamps in milli-fps that run printed). The
+    /// tool then failed every one of them at 205 to 823 ppm, against the limit of 200, because its expected
+    /// period was `lines x line time`. With the mode's own period (the global line included) they pass.
+    #[test]
+    fn the_runs_of_the_board_that_failed_on_lines_times_line_time_pass_on_the_frame_period() {
+        let runs: [(bool, u32, u64); 13] = [
+            (false, 2082, 60_247),
+            (false, 2091, 59_988),
+            (false, 2092, 59_959),
+            (false, 2093, 59_930),
+            (false, 2102, 59_674),
+            (false, 1100, 113_987),
+            (false, 4300, 29_177),
+            (true, 2188, 60_240),
+            (true, 2197, 59_994),
+            (true, 2198, 59_966),
+            (true, 2199, 59_939),
+            (true, 2208, 59_695),
+            // The run after 0x382C/D was written 1456 to 1536: the model is told nothing of the write,
+            // and says so by 50 ppm (its own period is 833 ns shorter than the board's).
+            (false, 2092, 59_956),
+        ];
+        for (continuous, lines, measured) in runs {
+            // Line time and offset as the driver reports them (96 MHz; HTS 765 gated, 728 continuous).
+            let (line_ps, offset_ps) = if continuous {
+                (7_583_333u32, 7_583_333u64)
+            } else {
+                (7_968_750, 7_197_916)
+            };
+            let was = rate_error_ppm(measured, computed_milli(frame_period_ps(line_ps, 0, lines)));
+            assert!(was > TOLERANCE_PPM, "{lines} lines, was {was} ppm");
+            let now = rate_error_ppm(
+                measured,
+                computed_milli(frame_period_ps(line_ps, offset_ps, lines)),
+            );
+            let allowed = if lines == 2092 && measured == 59_956 {
+                50
+            } else {
+                16
+            };
+            assert!(
+                now <= allowed && now <= TOLERANCE_PPM,
+                "{lines} lines, continuous {continuous}: {now} ppm"
+            );
+        }
+    }
+
+    /// The mean interval of the 2092-line gated run, against the period with the global line: +133 ns, +7 ppm.
+    #[test]
+    fn the_mean_reads_about_eight_ppm_over_the_period_with_the_global_line() {
+        let period = frame_period_ps(7_968_750, 7_197_916, 2092);
+        let m = Mean::of(0, 4999 * 16_677_956, 5000, period).unwrap();
+        assert_eq!(m.expected_ns, 16_677_822);
+        assert_eq!(m.difference_ns, 134);
+        assert_eq!(m.difference_ppm, 8);
     }
 }
