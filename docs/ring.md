@@ -53,10 +53,19 @@ which, and [Reading with the shm crates alone](streams.md#reading-with-the-shm-c
 a program that maps a stream with these crates and nothing else.
 
 A kernel module stream is on this ring when it is created with the shm flag (`LEMNOS_STREAM_CREATE_SHM`);
-the module writes layout 2 and refuses a reader's marks page of another layout. The module's refusal reaches
-the program that registered the reader as `-EPROTO`, with no found value; the only caller in the tree is the
-holds check. The typed error for that path is follow-up P2s2 (`kernel/` and `backends/linux-sys`). lemnosd never
-registers a kernel reader, so it has nothing to report it through.
+the module writes layout 2 and refuses a reader's marks page of another layout. It checks the layout
+before the page's size, as the shm crates do, because a layout 1 page is smaller. The refusal reaches the
+program that registered the reader typed, as the same `Layout { which: Marks, found, expected }` as user
+space's own refusal: `LEMNOS_STREAM_IOC_READER` fails with `EPROTO` and writes the refusal into its
+argument (`refused`, `layout`, `found`, `expected`; [`kernel-module.md`](kernel-module.md#the-modules-own-streams)),
+and `lemnos_linux_sys::stream::add_reader` returns it as `ReaderError::Layout(LayoutRefusal { which, found, expected })`.
+A module from before those fields gives a bare `EPROTO`, which `add_reader` returns as `ReaderError::Os`.
+The only caller of that ioctl in the tree is the QEMU harness's holds check (`layout` mode proves the
+refusal on the pinned kernel). Neither lemnosd nor the client library registers a kernel reader today
+(kernel-made rings reach clients through the daemon's own ring), so there is no daemon device state
+or client `Error::Stream(RingError::Layout { .. })` for this path yet; whichever component first
+registers a kernel reader on a client's behalf (outside readers, TODO I2d) converts a `LayoutRefusal` into
+`RingError::Layout` and `Structure::Marks` into `SharedLayout::Marks`, which are the same three values.
 
 ## Measured
 

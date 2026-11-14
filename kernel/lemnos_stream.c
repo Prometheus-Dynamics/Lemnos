@@ -1537,6 +1537,7 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	struct lem_reader_handle *h;
 	struct file *marks, *file;
 	unsigned long flags;
+	u64 found;
 	u32 slot;
 	int fd;
 	long ret = -EINVAL;
@@ -1552,12 +1553,13 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	marks = fget(a->fd);
 	if (!marks)
 		return -EBADF;
+	/* The page's size is checked after its layout: a page of an older layout is smaller. */
 	if (!shmem_file(marks) ||
 	    (READ_ONCE(SHMEM_I(file_inode(marks))->seals) & want) != want ||
-	    i_size_read(file_inode(marks)) < (loff_t)bytes)
+	    i_size_read(file_inode(marks)) < (loff_t)sizeof(u64))
 		goto put;
 
-	r.npages = DIV_ROUND_UP(bytes, PAGE_SIZE);
+	r.npages = DIV_ROUND_UP(min_t(loff_t, bytes, i_size_read(file_inode(marks))), PAGE_SIZE);
 	r.pages = kcalloc(r.npages, sizeof(*r.pages), GFP_KERNEL);
 	if (!r.pages) {
 		ret = -ENOMEM;
@@ -1578,13 +1580,23 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 		ret = -ENOMEM;
 		goto unpin;
 	}
-	/* The layout first: a page of another layout is refused as that. unpin unmaps it. */
-	if (lem_marks_layout(r.marks) != LEM_MARKS_LAYOUT) {
+	/*
+	 * The layout first: a page of another layout is refused as that, with both values in the
+	 * caller's argument. unpin unmaps it.
+	 */
+	found = lem_marks_layout(r.marks);
+	if (found != LEM_MARKS_LAYOUT) {
 		pr_err("lemnos: a reader's marks page is layout %llu; this build reads layout %llu\n",
-		       lem_marks_layout(r.marks), LEM_MARKS_LAYOUT);
+		       found, LEM_MARKS_LAYOUT);
+		a->refused = LEMNOS_REFUSED_LAYOUT;
+		a->layout = LEMNOS_LAYOUT_MARKS;
+		a->found = found;
+		a->expected = LEM_MARKS_LAYOUT;
 		ret = -EPROTO;
 		goto unpin;
 	}
+	if (i_size_read(file_inode(marks)) < (loff_t)bytes)
+		goto unpin;
 	r.max_held = a->max_held;
 	r.max_hold_ns = a->max_hold_ns;
 	r.seen = kvcalloc(2 * (size_t)s->buffers, sizeof(*r.seen), GFP_KERNEL);
@@ -1834,15 +1846,25 @@ static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long 
 		return ret;
 	}
 
-	if (cmd == LEMNOS_STREAM_IOC_READER) {
-		struct lemnos_stream_reader a;
+	/*
+	 * Both sizes of the request: the argument is the caller's, so nothing is read or written past
+	 * the size its number says, and the refusal fields stay zero for a caller that has none.
+	 */
+	if (cmd == LEMNOS_STREAM_IOC_READER || cmd == LEMNOS_STREAM_IOC_READER_V0) {
+		size_t size = _IOC_SIZE(cmd);
+		struct lemnos_stream_reader a = {};
 
-		if (copy_from_user(&a, uarg, sizeof(a)))
+		if (copy_from_user(&a, uarg, size))
 			return -EFAULT;
+		a.refused = LEMNOS_REFUSED_NONE;
+		a.layout = 0;
+		a.found = 0;
+		a.expected = 0;
 		mutex_lock(&s->ctl);
 		ret = s->dead ? -ENODEV : s->fault ? s->fault : lem_stream_reader_add(s, &a);
 		mutex_unlock(&s->ctl);
-		if (!ret && copy_to_user(uarg, &a, sizeof(a)))
+		/* A refusal is the one failure that carries an answer back. */
+		if ((!ret || ret == -EPROTO) && copy_to_user(uarg, &a, size))
 			ret = -EFAULT;
 		return ret;
 	}
@@ -2100,7 +2122,10 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	BUILD_BUG_ON(IS_ENABLED(CONFIG_CPU_BIG_ENDIAN));
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_job) % 8);
 	BUILD_BUG_ON(LEM_SHM_ENTRY_BYTES % 8 || LEM_SHM_SLOT_WORDS != 9);
-	BUILD_BUG_ON(sizeof(struct lemnos_stream_reader) != 24);
+	BUILD_BUG_ON(sizeof(struct lemnos_stream_reader_v0) != 24);
+	BUILD_BUG_ON(sizeof(struct lemnos_stream_reader) != 48);
+	BUILD_BUG_ON(offsetof(struct lemnos_stream_reader, refused) != sizeof(struct lemnos_stream_reader_v0));
+	BUILD_BUG_ON(offsetof(struct lemnos_stream_reader, max_hold_ns) != offsetof(struct lemnos_stream_reader_v0, max_hold_ns));
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_bell) != 8);
 	BUILD_BUG_ON(LEMNOS_STREAM_MAX_READERS != LEM_POOL_READERS);
 

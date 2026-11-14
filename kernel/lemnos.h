@@ -343,19 +343,54 @@ struct lemnos_stream_buffer {
  * over max_held, or holding a buffer longer than max_hold_ns, is cut off: its marks stop
  * holding, and its word after the tickets on the pool page is set (page::is_cut_off).
  * The page must be a sealed memfd (F_SEAL_SHRINK and F_SEAL_GROW) of at least
- * 8 * (1 + 2 * buffers) bytes. The reader table has LEMNOS_STREAM_MAX_READERS slots. A
+ * 8 * (1 + 2 * buffers) bytes. The page's layout (the top byte of its word 0, zero for layout 1) is
+ * checked before its size, so a page of another layout, whatever its size, is refused with EPROTO and
+ * the refusal fields of struct lemnos_stream_reader say which layout was found and which is read. The
+ * reader table has LEMNOS_STREAM_MAX_READERS slots. A
  * registration lasts while its reader_fd is open: closing that file (an exit does too) or
  * LEMNOS_READER_IOC_UNREGISTER frees the slot, its marks hold nothing from then on, and the page is
  * unpinned. The stream's end frees whatever is left.
  */
 #define LEMNOS_STREAM_MAX_READERS	64u
 
+/*
+ * A registration the module refused for what the page says rather than what the call asks: the
+ * ioctl fails with EPROTO and says why in the refusal fields below. 0 is no such refusal.
+ */
+#define LEMNOS_REFUSED_NONE		0u
+/* The layout of a shared structure is not the one this module reads: which, found, expected. */
+#define LEMNOS_REFUSED_LAYOUT		1u
+/* Which structure a LEMNOS_REFUSED_LAYOUT names. */
+#define LEMNOS_LAYOUT_RING		0u	/* the frame ring's header (the module writes it, never refuses it) */
+#define LEMNOS_LAYOUT_MARKS		1u	/* a reader's marks page */
+
+/*
+ * The reader registration as it was before the refusal fields: the first 24 bytes of the structure
+ * below, and the argument of LEMNOS_STREAM_IOC_READER_V0.
+ */
+struct lemnos_stream_reader_v0 {
+	__s32 fd;		/* in: the marks page, a memfd */
+	__u32 slot;		/* out: the reader slot the module gave it, 0 to 63 */
+	__u32 max_held;		/* in: buffers it may hold at once; 0 for no limit */
+	__s32 reader_fd;	/* out: a file that holds the registration; see LEMNOS_READER_IOC_UNREGISTER */
+	__u64 max_hold_ns;	/* in: how long one hold may last, ns; 0 for no limit */
+};
+
+/*
+ * The registration with its refusal. The first four fields are lemnos_stream_reader_v0's, at the same
+ * offsets. The module writes the last four when it fails with EPROTO, and writes them zero
+ * otherwise (LEMNOS_REFUSED_NONE); what the caller puts there is ignored.
+ */
 struct lemnos_stream_reader {
 	__s32 fd;		/* in: the marks page, a memfd */
 	__u32 slot;		/* out: the reader slot the module gave it, 0 to 63 */
 	__u32 max_held;		/* in: buffers it may hold at once; 0 for no limit */
 	__s32 reader_fd;	/* out: a file that holds the registration; see LEMNOS_READER_IOC_UNREGISTER */
 	__u64 max_hold_ns;	/* in: how long one hold may last, ns; 0 for no limit */
+	__u32 refused;		/* out, with EPROTO: LEMNOS_REFUSED_* */
+	__u32 layout;		/* out, LEMNOS_REFUSED_LAYOUT: LEMNOS_LAYOUT_*, the structure refused */
+	__u64 found;		/* out, LEMNOS_REFUSED_LAYOUT: the layout in the page (1 for a page that never said) */
+	__u64 expected;		/* out, LEMNOS_REFUSED_LAYOUT: the layout this module reads */
 };
 
 struct lemnos_stream_status {
@@ -383,6 +418,13 @@ struct lemnos_stream_test_source {
 #define LEMNOS_STREAM_IOC_TEST_SOURCE  _IOW('L', 0x85, struct lemnos_stream_test_source)
 #define LEMNOS_STREAM_IOC_BUFFER       _IOWR('L', 0x86, struct lemnos_stream_buffer)
 #define LEMNOS_STREAM_IOC_READER       _IOWR('L', 0x87, struct lemnos_stream_reader)
+/*
+ * The same request with the 24-byte argument of before the refusal fields. The module takes both
+ * numbers: with this one it never writes past the 24 bytes, and a refused layout is a bare EPROTO. A
+ * module from before the refusal fields does not know LEMNOS_STREAM_IOC_READER (ENOTTY); a caller
+ * that built against this header falls back to this number on ENOTTY.
+ */
+#define LEMNOS_STREAM_IOC_READER_V0    _IOWR('L', 0x87, struct lemnos_stream_reader_v0)
 
 /*
  * LEMNOS_READER_IOC_UNREGISTER, on the reader_fd that LEMNOS_STREAM_IOC_READER returned: frees the

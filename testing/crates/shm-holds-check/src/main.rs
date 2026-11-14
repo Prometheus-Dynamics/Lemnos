@@ -23,10 +23,18 @@
 //! unregister. A reader that holds a buffer and exits without unregistering frees its buffer and
 //! its slot; the same holds for `LEMNOS_READER_IOC_UNREGISTER`; and 200 arrive-and-leave cycles
 //! leave the table with its slots.
+//!
+//! `layout` mode: a reader whose marks page is of another layout is refused with the layout it
+//! found and the one the module reads (`stream::ReaderError::Layout`), and refusing it leaves no
+//! slot behind. The pages are layout 1 at its own size (smaller than layout 2's), layout 1 at
+//! layout 2's size, and a layout this build never had. A request at the size from before the
+//! refusal fields is answered with a bare `EPROTO` and nothing written past its 24 bytes, and
+//! still registers a page of the right layout.
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::FileExt;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -34,7 +42,7 @@ use std::time::{Duration, Instant};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::module;
-use lemnos_linux_sys::stream::{self, CREATE_SHM};
+use lemnos_linux_sys::stream::{self, CREATE_SHM, LayoutRefusal, ReaderError, Structure};
 use shm_ring::{Mem, Next, Reader};
 use shm_ring_buffers::Marker;
 use shm_ring_buffers::{BufferIndex, entry, page};
@@ -60,6 +68,9 @@ const FRAMES: u32 = 1000;
 const WAIT: Duration = Duration::from_secs(10);
 /// The most readers' marks the reader allows itself to hold at once.
 const MAX_HELD: u32 = 2;
+/// `EINVAL` and `EPROTO` (asm-generic errno.h, the same on every architecture the module runs on).
+const EINVAL: i32 = 22;
+const EPROTO: i32 = 71;
 
 /// A window of a mapping's words, from `base`, as a ring's memory.
 struct Words<'a> {
@@ -791,17 +802,141 @@ fn release(
     Ok(())
 }
 
+/// A sealed page of `words` words whose word 0 is `word0` and the rest zero: what a reader of an
+/// older (or newer) layout would give the module.
+fn page_of(words: usize, word0: u64) -> Result<OwnedFd, String> {
+    let fd = step(
+        "make a page",
+        lemnos_linux_sys::dma_buf::sealed_memfd(c"lemnos-holds-layout", words as u64 * 8),
+    )?;
+    let file = std::fs::File::from(fd);
+    step(
+        "write the page's word 0",
+        file.write_all_at(&word0.to_ne_bytes(), 0),
+    )?;
+    Ok(OwnedFd::from(file))
+}
+
+/// What the module refused a page of `words` words with `word0` as: its refusal, or why not.
+fn refusal_of(
+    fx: &Fixture,
+    words: usize,
+    word0: u64,
+) -> Result<Result<LayoutRefusal, String>, String> {
+    let page = page_of(words, word0)?;
+    Ok(
+        match stream::add_reader(fx.stream.fd.as_fd(), page.as_fd(), 0, 0) {
+            Err(ReaderError::Layout(refusal)) => Ok(refusal),
+            Err(other) => Err(format!("refused as {other:?}, not as a layout")),
+            Ok(registration) => Err(format!("registered, slot {}", registration.slot)),
+        },
+    )
+}
+
+/// The layout scenarios: a marks page of another layout is refused with both values.
+fn layout(
+    node_path: &str,
+    block_name: &str,
+    heap_path: &str,
+    report: &mut Report,
+) -> Result<(), String> {
+    let fx = fixture(node_path, block_name, heap_path)?;
+    let b = BUFFERS as usize;
+    let marks_word = |layout: u64| layout << 56;
+    // (what, words in the page, word 0, found)
+    let cases = [
+        ("layout 1, its own size", 1 + b, 0, 1),
+        ("layout 1, layout 2's size", 1 + 2 * b, 0, 1),
+        ("layout 1 with a version, its own size", 1 + b, 0x1234, 1),
+        ("layout 3, layout 2's size", 1 + 2 * b, marks_word(3), 3),
+        ("layout 255, one word", 1, marks_word(255), 255),
+    ];
+    for (what, words, word0, found) in cases {
+        let want = LayoutRefusal {
+            which: Structure::Marks,
+            found,
+            expected: 2,
+        };
+        let got = refusal_of(&fx, words, word0)?;
+        report.check(
+            got.as_ref() == Ok(&want),
+            format_args!("{what}: refused as {got:?}, wanted {want:?}"),
+        );
+    }
+
+    // A page of the right layout that is too small is still the size's refusal, not a layout's.
+    let small = page_of(b, marks_word(2))?;
+    let short = stream::add_reader(fx.stream.fd.as_fd(), small.as_fd(), 0, 0);
+    report.check(
+        matches!(&short, Err(ReaderError::Os(e)) if e.raw_os_error() == Some(EINVAL)),
+        format_args!("layout 2, too small: EINVAL ({short:?})"),
+    );
+    // A page too small to hold a word 0 has no layout to refuse.
+    let empty = step(
+        "make a page",
+        lemnos_linux_sys::dma_buf::sealed_memfd(c"lemnos-holds-layout", 4),
+    )?;
+    let none = stream::add_reader(fx.stream.fd.as_fd(), empty.as_fd(), 0, 0);
+    report.check(
+        matches!(&none, Err(ReaderError::Os(e)) if e.raw_os_error() == Some(EINVAL)),
+        format_args!("a page under one word: EINVAL ({none:?})"),
+    );
+
+    // The request at the size from before the refusal fields: bare EPROTO, inside its 24 bytes.
+    let old = page_of(1 + b, 0)?;
+    let answer = stream::add_reader_at_old_size(fx.stream.fd.as_fd(), old.as_fd(), 0, 0);
+    report.check(
+        matches!(&answer.result, Err(e) if e.raw_os_error() == Some(EPROTO)),
+        format_args!(
+            "old-size request, layout 1: bare EPROTO ({:?})",
+            answer.result
+        ),
+    );
+    report.check(
+        answer.tail_untouched,
+        "old-size request: nothing written past its 24 bytes",
+    );
+
+    // Refusing leaves no slot, and the stream still takes a reader of the right layout, in
+    // slot 0, at either request size.
+    let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+    let page_fd = step("read-only marks descriptor", marks.page_fd())?;
+    let current = step(
+        "register after the refusals",
+        stream::add_reader(fx.stream.fd.as_fd(), page_fd.as_fd(), 0, 0),
+    )?;
+    report.check(
+        current.slot == 0,
+        format_args!(
+            "after the refusals the first slot is free ({})",
+            current.slot
+        ),
+    );
+    let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+    let page_fd = step("read-only marks descriptor", marks.page_fd())?;
+    let answer = stream::add_reader_at_old_size(fx.stream.fd.as_fd(), page_fd.as_fd(), 0, 0);
+    report.check(
+        answer.result.as_ref().is_ok_and(|r| r.slot == 1) && answer.tail_untouched,
+        format_args!(
+            "old-size request, layout 2: registers in slot 1 ({:?}, tail untouched: {})",
+            answer.result.as_ref().map(|r| r.slot),
+            answer.tail_untouched
+        ),
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (node, block, heap, mode) = match args.as_slice() {
         [node, block, heap] => (node, block, heap, ""),
-        [node, block, heap, m] if m == "cutoff" || m == "release" => {
+        [node, block, heap, m] if m == "cutoff" || m == "release" || m == "layout" => {
             (node, block, heap, m.as_str())
         }
         _ => {
             let _ = writeln!(
                 std::io::stderr(),
-                "usage: lemnos-shm-holds-check <control node> <block name> <heap node> [cutoff|release]"
+                "usage: lemnos-shm-holds-check <control node> <block name> <heap node> [cutoff|release|layout]"
             );
             return ExitCode::from(2);
         }
@@ -809,6 +944,8 @@ fn main() -> ExitCode {
     let mut report = Report { failures: 0 };
     let outcome = if mode == "release" {
         release(node, block, heap, &mut report)
+    } else if mode == "layout" {
+        layout(node, block, heap, &mut report)
     } else if mode == "cutoff" {
         [
             Scenario {

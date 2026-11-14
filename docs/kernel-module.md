@@ -86,6 +86,25 @@ reader must not leak its registration. `testing/crates/shm-holds-check` `release
 on the pinned kernel: a reader that holds and exits without unregistering has its buffer reused and its
 slot free, 200 arrive-and-leave cycles all register, and the release hook disabled makes it fail.
 
+A marks page of another layout is refused with `EPROTO`, and the module says which layout and both
+values in the argument (`struct lemnos_stream_reader`, 48 bytes: the first 24 are the old structure at
+the same offsets, then `refused` (`LEMNOS_REFUSED_LAYOUT` = 1, or 0 for no such refusal), `layout`
+(`LEMNOS_LAYOUT_MARKS` = 1; `LEMNOS_LAYOUT_RING` = 0 is the user-space ring's value and is never sent
+by the module), `found` (1 for a page that never wrote its layout) and `expected` (2)). The module
+writes them only for this refusal and writes them zero otherwise; what the caller puts there is
+ignored. The layout is checked before the page's size, so a layout 1 page, which is smaller, is
+refused as a layout, and a page of layout 2 that is too small is still `EINVAL`. The two sizes are two
+request numbers of one request: `LEMNOS_STREAM_IOC_READER` (48 bytes) and `LEMNOS_STREAM_IOC_READER_V0`
+(24 bytes, the structure before the fields). Directions: a caller built against the old header uses
+the 24-byte number against a new module, which reads and writes only 24 bytes and answers a refused
+layout with a bare `EPROTO`; a caller built against the new header against an old module gets
+`ENOTTY` for the 48-byte number, and `lemnos_linux_sys::stream::add_reader` then asks again with the
+24-byte number (a refused layout is then a bare `EPROTO`, as that module always gave). So neither pair
+breaks, and the typed refusal needs both sides new. `testing/crates/shm-holds-check` `layout` proves
+the refusal (layout 1 at two sizes, layout 3, layout 255), the size order, the 24-byte request
+(bare `EPROTO`, nothing written past 24 bytes, a good page still registers) and that a refusal
+leaves no slot behind.
+
 The consumer's doorbell (`LEMNOS_STREAM_IOC_BELL`, shm form only) is the shm ring's doorbell
 (`shm/ring-doorbell`): the consumer gives the module an eventfd it sleeps on and its doorbell page,
 read-only (`Doorbell::bell_fds`). The page's word 0 is `sleeps << 1 | asleep`, written only by the
