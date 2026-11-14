@@ -61,6 +61,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lemnos_camera_proof::chain::{Stage, resolve};
 use lemnos_client::{Client, FrameStream, HeldFrame};
 use lemnos_contract_camera_isp::{BayerOrder, CameraIsp, IspInput, IspJob, IspOutput, NO_BUFFER};
 use lemnos_contract_camera_sensor::{CameraSensor, Controls};
@@ -85,8 +86,10 @@ const GUARD: usize = 4096;
 
 struct Args {
     socket: String,
-    fe: String,
-    sensor: String,
+    /// Not given: the front end the sensor's chain leads to.
+    fe: Option<String>,
+    /// Not given: the board's one camera sensor.
+    sensor: Option<String>,
     pattern: Option<u16>,
     frames: u32,
     frame_length: Option<u32>,
@@ -101,8 +104,8 @@ struct Args {
 fn parse() -> Option<Args> {
     let mut args = Args {
         socket: "/run/lemnos/lemnosd.sock".into(),
-        fe: "cam0-fe".into(),
-        sensor: "cam0-sensor".into(),
+        fe: None,
+        sensor: None,
         pattern: None,
         frames: 3600,
         frame_length: None,
@@ -118,8 +121,8 @@ fn parse() -> Option<Args> {
         let value = it.next()?;
         match flag.as_str() {
             "--socket" => args.socket = value,
-            "--fe" => args.fe = value,
-            "--sensor" => args.sensor = value,
+            "--fe" => args.fe = Some(value),
+            "--sensor" => args.sensor = Some(value),
             "--pattern" => args.pattern = Some(value.parse().ok()?),
             "--frames" => args.frames = value.parse().ok()?,
             "--frame-length" => args.frame_length = Some(value.parse().ok()?),
@@ -509,20 +512,38 @@ fn run(args: &Args) -> Result<bool, String> {
         .map_err(|e| format!("{}: {e}", args.socket))?;
     client.set_timeout(Duration::from_secs(5));
     let list = client.list().map_err(|e| format!("list: {e}"))?;
+    let names = resolve(
+        &list,
+        args.sensor.as_deref(),
+        &[
+            Stage {
+                label: "receiver",
+                flag: "(no flag)",
+                name: None,
+            },
+            Stage {
+                label: "front end",
+                flag: "--fe",
+                name: args.fe.as_deref(),
+            },
+        ],
+    )?;
+    let sensor_name = &names.sensor;
+    let fe_name = names.stages.last().ok_or("no front end resolved")?;
     let fe_index = list
         .iter()
-        .find(|d| d.name == args.fe)
+        .find(|d| d.name == *fe_name)
         .map(|d| d.index)
-        .ok_or(format!("no device {}", args.fe))?;
+        .ok_or(format!("no device {}", fe_name))?;
     let mut sensor = client
-        .open::<dyn CameraSensor>(&args.sensor)
-        .map_err(|e| format!("{}: {e}", args.sensor))?;
+        .open::<dyn CameraSensor>(sensor_name)
+        .map_err(|e| format!("{}: {e}", sensor_name))?;
     let mut fe = client
-        .open::<dyn CameraIsp>(&args.fe)
-        .map_err(|e| format!("{}: {e}", args.fe))?;
+        .open::<dyn CameraIsp>(fe_name)
+        .map_err(|e| format!("{}: {e}", fe_name))?;
     let mut pisp = client
-        .open::<dyn IspPisp>(&args.fe)
-        .map_err(|e| format!("{}: {e}", args.fe))?;
+        .open::<dyn IspPisp>(fe_name)
+        .map_err(|e| format!("{}: {e}", fe_name))?;
     let info = pisp.info().map_err(|s| format!("info: {s:?}"))?;
     out(format_args!("front end: {info:?}"));
 

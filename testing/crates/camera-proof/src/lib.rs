@@ -10,6 +10,7 @@
 //! Frames carry the sequence, identity and timestamp their producer gave them. A capture counts
 //! sequence gaps, the receiver's own drop count, and the frame rate measured from timestamps.
 
+pub mod chain;
 pub mod host;
 pub mod socket;
 

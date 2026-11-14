@@ -2,6 +2,10 @@
 //! here from the drivers' own constants and layout rules and the sensor's mode, and the board must
 //! agree with each one. A board that validates but states another size fails here.
 
+use lemnos_camera_proof::chain::{Stage, resolve};
+use lemnos_client::{DeviceEntry, DeviceHealth, DeviceState};
+use lemnos_contract_camera_sensor::CameraSensor;
+use lemnos_core::Contract;
 use lemnos_driver_ov9782::JOB_BYTES;
 use lemnos_driver_ov9782::chip::MODES;
 use lemnos_driver_pisp::fe::FE_OUTPUT_ALIGN;
@@ -139,4 +143,59 @@ fn the_camera_declares_no_stream_beyond_these() {
         })
         .sum();
     assert_eq!(declared, expected().len());
+}
+
+/// The device list the daemon would give for `board`: names, drivers and links as declared, the
+/// sensor tagged as a camera sensor.
+fn listed(board: &BoardFile) -> Vec<DeviceEntry> {
+    board
+        .devices
+        .iter()
+        .enumerate()
+        .map(|(i, d)| DeviceEntry {
+            index: u32::try_from(i).unwrap(),
+            name: d.id.clone(),
+            driver: d.driver.clone(),
+            tags: if d.driver == "ov9782" {
+                vec![<dyn CameraSensor as Contract>::TAG.as_str().to_string()]
+            } else {
+                Vec::new()
+            },
+            state: DeviceState::Running,
+            health: DeviceHealth::Ok,
+            reason: String::new(),
+            link: d.link.clone(),
+        })
+        .collect()
+}
+
+/// The chain proof takes its devices from the board's links: the reference board names the back
+/// end `cam0-isp`, the chain example `cam0-be`, and the same resolution finds each.
+#[test]
+fn the_chain_resolves_on_each_board_file_that_declares_one() {
+    let stages = [
+        Stage {
+            label: "receiver",
+            flag: "--receiver",
+            name: None,
+        },
+        Stage {
+            label: "front end",
+            flag: "--front-end",
+            name: None,
+        },
+        Stage {
+            label: "back end",
+            flag: "--back-end",
+            name: None,
+        },
+    ];
+    let chain_file = parse(include_str!("../../../boards/pisp-camera-chain.toml"))
+        .expect("the chain example validates");
+    for (board, back) in [(reference(), "cam0-isp"), (chain_file, "cam0-be")] {
+        let got = resolve(&listed(&board), Some("cam0-sensor"), &stages).unwrap();
+        assert_eq!(got.stages, ["cam0-receiver", "cam0-fe", back]);
+        let again = resolve(&listed(&board), None, &stages).unwrap();
+        assert_eq!(again, got, "the one camera sensor is found by its tag");
+    }
 }

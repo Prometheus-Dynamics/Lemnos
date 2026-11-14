@@ -46,6 +46,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lemnos_camera_proof::chain::{Stage, resolve_end};
 use lemnos_client::{Client, FrameStream};
 use lemnos_contract_camera_isp::BayerOrder;
 use lemnos_contract_camera_isp::{CameraIsp, IspInput, IspJob, IspOutput, NO_BUFFER};
@@ -73,8 +74,10 @@ const CSC: BeCcmConfig = BeCcmConfig {
 
 struct Args {
     socket: String,
-    isp: String,
-    sensor: String,
+    /// Not given: the ISP the sensor's chain ends at.
+    isp: Option<String>,
+    /// Not given: the board's one camera sensor.
+    sensor: Option<String>,
     input: PathBuf,
     jobs: u32,
     save: Option<PathBuf>,
@@ -88,8 +91,8 @@ struct Args {
 fn parse() -> Option<Args> {
     let mut args = Args {
         socket: "/run/lemnos/lemnosd.sock".into(),
-        isp: "cam0-be".into(),
-        sensor: "cam0-sensor".into(),
+        isp: None,
+        sensor: None,
         input: PathBuf::new(),
         jobs: 1000,
         save: None,
@@ -104,8 +107,8 @@ fn parse() -> Option<Args> {
         let value = it.next()?;
         match flag.as_str() {
             "--socket" => args.socket = value,
-            "--isp" => args.isp = value,
-            "--sensor" => args.sensor = value,
+            "--isp" => args.isp = Some(value),
+            "--sensor" => args.sensor = Some(value),
             "--input" => args.input = PathBuf::from(value),
             "--jobs" => args.jobs = value.parse().ok()?,
             "--save" => args.save = Some(PathBuf::from(value)),
@@ -337,23 +340,34 @@ fn run(args: &Args) -> Result<bool, String> {
         .map_err(|e| format!("{}: {e}", args.socket))?;
     client.set_timeout(Duration::from_secs(5));
     let list = client.list().map_err(|e| format!("list: {e}"))?;
+    let names = resolve_end(
+        &list,
+        args.sensor.as_deref(),
+        Stage {
+            label: "ISP",
+            flag: "--isp",
+            name: args.isp.as_deref(),
+        },
+    )?;
+    let sensor_name = &names.sensor;
+    let isp_name = names.stages.last().ok_or("no ISP resolved")?;
     let index = |name: &str| {
         list.iter()
             .find(|d| d.name == name)
             .map(|d| d.index)
             .ok_or(format!("no device {name}"))
     };
-    let isp_index = index(&args.isp)?;
+    let isp_index = index(isp_name)?;
     let mut sensor = client
-        .open::<dyn CameraSensor>(&args.sensor)
-        .map_err(|e| format!("{}: {e}", args.sensor))?;
+        .open::<dyn CameraSensor>(sensor_name)
+        .map_err(|e| format!("{}: {e}", sensor_name))?;
     let bayer = sensor
         .mode(0)
         .map_err(|s| format!("sensor mode: {s:?}"))?
         .bayer;
     let mut isp = client
-        .open::<dyn CameraIsp>(&args.isp)
-        .map_err(|e| format!("{}: {e}", args.isp))?;
+        .open::<dyn CameraIsp>(isp_name)
+        .map_err(|e| format!("{}: {e}", isp_name))?;
 
     let raw = std::fs::read(&args.input).map_err(|e| format!("{}: {e}", args.input.display()))?;
     let mut input = ImageFormatConfig {

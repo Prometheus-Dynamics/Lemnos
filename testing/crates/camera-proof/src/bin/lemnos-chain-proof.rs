@@ -1,7 +1,8 @@
 //! `lemnos-chain-proof`: the whole PiSP camera chain on a real board, through `lemnosd`'s socket.
 //!
 //! ```text
-//! lemnos-chain-proof [--socket PATH] [--frames N] [--frame-length N] [--pattern CODE]
+//! lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME]
+//!                    [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE]
 //!                    [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N]
 //!                    [--min-mean-luma N] [--allow-skip lit-scene]
 //! ```
@@ -20,9 +21,12 @@
 //! change for the receiver's node that another worker is writing. Until it is on the board, the
 //! receiver's line is a failure, as it should be.
 //!
-//! The chain is the board file `testing/boards/pisp-camera-chain.toml`: the sensor `cam0-sensor`
-//! feeds the receiver `cam0-receiver`, which feeds the front end `cam0-fe`, which feeds the back end
-//! `cam0-be`. The front end's `output0` (16-bit Bayer, 2560 bytes a line) is copied, frame by
+//! The devices are not named in the tool. It starts from the sensor (`--sensor`, or the board's one
+//! camera sensor) and follows the board's `link` from device to device, as `lemnos-ctl chain` does:
+//! the sensor feeds the receiver, which feeds the front end, which feeds the back end (the board
+//! files `testing/boards/reference.toml` and `pisp-camera-chain.toml` declare such a chain, with
+//! different names). `--receiver`, `--front-end` and `--back-end` name a stage instead. A stage it
+//! cannot resolve is an error naming what it looked for and what the board has. The front end's `output0` (16-bit Bayer, 2560 bytes a line) is copied, frame by
 //! frame, into the back end's `input` buffers, and one back-end job per frame carries the front
 //! end frame's identity, so the back end's frame names the same job. Each front-end frame is
 //! released once its bytes are copied. Two front-end jobs are kept queued (`--jobs-queued`,
@@ -63,6 +67,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lemnos_camera_proof::chain::{Stage, resolve};
 use lemnos_client::{Client, FrameStream};
 use lemnos_contract_camera_isp::{BayerOrder, CameraIsp, IspInput, IspJob, IspOutput, NO_BUFFER};
 use lemnos_contract_camera_receiver::CameraReceiver;
@@ -89,11 +94,7 @@ const CSC: BeCcmConfig = BeCcmConfig {
     pad: [0; 2],
     offsets: [0, 33_554_432, 33_554_432],
 };
-const SENSOR: &str = "cam0-sensor";
-const RECEIVER: &str = "cam0-receiver";
-const FRONT: &str = "cam0-fe";
-const BACK: &str = "cam0-be";
-const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene]";
+const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME] [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene]";
 /// A timestamp older than this, at the moment the frame is taken, is not a frame start of this run.
 const MAX_AGE_NS: u64 = 1_000_000_000;
 /// The dark scene's back-end mean luma was about 20 on the board (black level 16); a lit scene is
@@ -113,6 +114,12 @@ fn age_bad(stamp: u64, now: u64) -> bool {
 
 struct Args {
     socket: String,
+    /// The sensor the chain starts from. Not given: the board's one camera sensor.
+    sensor: Option<String>,
+    /// Each stage named on the command line instead of followed from the sensor's links.
+    receiver: Option<String>,
+    front_end: Option<String>,
+    back_end: Option<String>,
     frames: u64,
     frame_length: Option<u32>,
     pattern: Option<u16>,
@@ -131,6 +138,10 @@ struct Args {
 fn parse() -> Option<Args> {
     let mut args = Args {
         socket: "/run/lemnos/lemnosd.sock".into(),
+        sensor: None,
+        receiver: None,
+        front_end: None,
+        back_end: None,
         frames: 600,
         frame_length: None,
         pattern: None,
@@ -146,6 +157,10 @@ fn parse() -> Option<Args> {
         let value = it.next()?;
         match flag.as_str() {
             "--socket" => args.socket = value,
+            "--sensor" => args.sensor = Some(value),
+            "--receiver" => args.receiver = Some(value),
+            "--front-end" => args.front_end = Some(value),
+            "--back-end" => args.back_end = Some(value),
             "--frames" => args.frames = value.parse().ok()?,
             "--frame-length" => args.frame_length = Some(value.parse().ok()?),
             "--pattern" => args.pattern = Some(value.parse().ok()?),
@@ -517,26 +532,54 @@ fn run(args: &Args) -> Result<bool, String> {
         .map_err(|e| format!("{}: {e}", args.socket))?;
     client.set_timeout(Duration::from_secs(5));
     let list = client.list().map_err(|e| format!("list: {e}"))?;
+    let names = resolve(
+        &list,
+        args.sensor.as_deref(),
+        &[
+            Stage {
+                label: "receiver",
+                flag: "--receiver",
+                name: args.receiver.as_deref(),
+            },
+            Stage {
+                label: "front end",
+                flag: "--front-end",
+                name: args.front_end.as_deref(),
+            },
+            Stage {
+                label: "back end",
+                flag: "--back-end",
+                name: args.back_end.as_deref(),
+            },
+        ],
+    )?;
+    let (sensor_name, receiver_name, front_name, back_name) = match names.stages.as_slice() {
+        [receiver, front, back] => (&names.sensor, receiver, front, back),
+        _ => return Err("the chain resolved to the wrong number of stages".into()),
+    };
+    out(format_args!(
+        "chain: {sensor_name} -> {receiver_name} -> {front_name} -> {back_name}"
+    ));
     let index = |name: &str| {
         list.iter()
             .find(|d| d.name == name)
             .map(|d| d.index)
             .ok_or(format!("no device {name}"))
     };
-    let fe_index = index(FRONT)?;
-    let be_index = index(BACK)?;
+    let fe_index = index(front_name)?;
+    let be_index = index(back_name)?;
     let mut sensor = client
-        .open::<dyn CameraSensor>(SENSOR)
-        .map_err(|e| format!("{SENSOR}: {e}"))?;
+        .open::<dyn CameraSensor>(sensor_name)
+        .map_err(|e| format!("{sensor_name}: {e}"))?;
     let mut receiver = client
-        .open::<dyn CameraReceiver>(RECEIVER)
-        .map_err(|e| format!("{RECEIVER}: {e}"))?;
+        .open::<dyn CameraReceiver>(receiver_name)
+        .map_err(|e| format!("{receiver_name}: {e}"))?;
     let mut fe = client
-        .open::<dyn CameraIsp>(FRONT)
-        .map_err(|e| format!("{FRONT}: {e}"))?;
+        .open::<dyn CameraIsp>(front_name)
+        .map_err(|e| format!("{front_name}: {e}"))?;
     let mut be = client
-        .open::<dyn CameraIsp>(BACK)
-        .map_err(|e| format!("{BACK}: {e}"))?;
+        .open::<dyn CameraIsp>(back_name)
+        .map_err(|e| format!("{back_name}: {e}"))?;
 
     let _ = sensor.stop();
     let _ = fe.stop();
@@ -700,7 +743,7 @@ fn run(args: &Args) -> Result<bool, String> {
     fe.start().map_err(|s| format!("front end start: {s:?}"))?;
     sensor.start().map_err(|s| format!("sensor start: {s:?}"))?;
     // The sensor's latch (`lemnos-sensor-proof latch`) runs beside the chain, as its own process.
-    let latch = spawn_latch(args)?;
+    let latch = spawn_latch(args, sensor_name)?;
     let started = Instant::now();
     let pumped = pump(args, &mut front, &mut back, reference.as_deref());
     out(format_args!(
@@ -971,7 +1014,7 @@ fn run(args: &Args) -> Result<bool, String> {
 
 /// Starts `lemnos-sensor-proof latch` beside this tool, with the same socket. Its output is read
 /// when it finishes; only its own child is waited for.
-fn spawn_latch(args: &Args) -> Result<Option<Child>, String> {
+fn spawn_latch(args: &Args, sensor: &str) -> Result<Option<Child>, String> {
     let Some(trials) = args.latch_trials else {
         return Ok(None);
     };
@@ -984,7 +1027,7 @@ fn spawn_latch(args: &Args) -> Result<Option<Child>, String> {
             "--socket",
             &args.socket,
             "--sensor",
-            SENSOR,
+            sensor,
             "--trials",
         ])
         .arg(trials.to_string())
