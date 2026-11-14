@@ -244,7 +244,7 @@ fn board_text(dir: &Path) -> String {
          [[devices]]\nid = \"identity\"\ndriver = \"system-identity\"\n\
          config = {{ serial = \"cpuinfo\", serial_path = \"{cpuinfo}\", name = \"Alpha\", revision = \"r2\", data = \"{data}\" }}\n\
          [[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
-         config = {{ data = \"{data}\", boot = \"{boot}\", record = \"file\", partuuid = \"abcd-02\", boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n\
+         config = {{ data = \"{data}\", boot = \"{boot}\", record = \"file\", partuuid = \"abcd-02\", boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n\
          [[devices]]\nid = \"bus\"\ndriver = \"raw-bus\"\nuses = {{ i2c = \"i2c\", spi = \"spi\", uart = \"uart\" }}\n\
          config = {{ writes = true, allow_i2c = 80 }}\n\
          [[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = {{ function = \"usb\", data = \"data\" }}\n\

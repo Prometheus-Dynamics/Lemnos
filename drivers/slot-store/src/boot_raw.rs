@@ -8,9 +8,12 @@
 //! reason's text, empty for none.
 
 use crate::bootfat::{self, ReadAt, Refusal};
+use crate::firmware;
 use crate::records::MAX_ATTEMPTS;
-use crate::twocopy::{Error, Kind, Pair, Sectors};
+use crate::twocopy::{Error, FileSectors, Kind, Pair, SECTOR, Sectors};
+use std::fs::OpenOptions;
 use std::io;
+use std::path::Path;
 
 /// The FAT directory name of the trial record's file.
 pub const TRIAL_FILE: &[u8; 11] = b"TRIAL   REC";
@@ -41,9 +44,18 @@ pub struct Trial {
 impl Records {
     /// Finds both record files, read-only. Each refusal names the file, and nothing is written.
     pub fn place<D: ReadAt>(dev: &mut D) -> Result<Self, Refusal> {
-        let trial = bootfat::locate(dev, TRIAL_FILE, RECORD_BYTES)?;
-        let reason = bootfat::locate(dev, REASON_FILE, RECORD_BYTES)?;
-        let episodes = bootfat::locate(dev, EPISODES_FILE, RECORD_BYTES)?;
+        Self::place_named(dev).map_err(|(_, why)| why)
+    }
+
+    /// As [`Records::place`], refusing by the record file's name (`TRIAL   REC` and so on).
+    pub fn place_named<D: ReadAt>(dev: &mut D) -> Result<Self, (&'static str, Refusal)> {
+        let mut named = |name: &'static [u8; 11]| {
+            bootfat::locate(dev, name, RECORD_BYTES)
+                .map_err(|why| (std::str::from_utf8(name).unwrap_or("?"), why))
+        };
+        let trial = named(TRIAL_FILE)?;
+        let reason = named(REASON_FILE)?;
+        let episodes = named(EPISODES_FILE)?;
         Ok(Self {
             trial: Pair::at(trial.first_lba),
             reason: Pair::at(reason.first_lba),
@@ -171,6 +183,202 @@ pub fn decode_episodes(payload: &[u8]) -> Option<(String, u8)> {
 
 fn invalid(why: &'static str) -> Error {
     Error::Io(io::Error::new(io::ErrorKind::InvalidInput, why))
+}
+
+/// The FAT directory names of the three pointer files: one sector each, read by the Pi firmware as
+/// `default.txt`, `previous.txt` and `trial.txt` (see [`crate::firmware`]).
+pub const DEFAULT_POINTER: &[u8; 11] = b"DEFAULT TXT";
+/// See [`DEFAULT_POINTER`].
+pub const PREVIOUS_POINTER: &[u8; 11] = b"PREVIOUSTXT";
+/// See [`DEFAULT_POINTER`].
+pub const TRIAL_POINTER: &[u8; 11] = b"TRIAL   TXT";
+
+/// One of the pointer files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pointer {
+    /// `default.txt`: the slot the firmware starts.
+    Default,
+    /// `previous.txt`: the slot a count-based fallback starts.
+    Previous,
+    /// `trial.txt`: the trial slot, which `tryboot.txt` includes.
+    Trial,
+}
+
+impl Pointer {
+    /// The FAT directory name of the file.
+    pub const fn file_name(self) -> &'static [u8; 11] {
+        match self {
+            Self::Default => DEFAULT_POINTER,
+            Self::Previous => PREVIOUS_POINTER,
+            Self::Trial => TRIAL_POINTER,
+        }
+    }
+
+    /// The name the firmware reads the file by, for messages.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default.txt",
+            Self::Previous => "previous.txt",
+            Self::Trial => "trial.txt",
+        }
+    }
+}
+
+/// Where the three pointer files are on the partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pointers {
+    lbas: [u64; 3],
+}
+
+impl Pointers {
+    /// Finds the three pointer files, read-only. A missing, fragmented or wrongly sized file is
+    /// refused by name, and nothing is written.
+    pub fn place<D: ReadAt>(dev: &mut D) -> Result<Self, (&'static str, Refusal)> {
+        let mut lbas = [0; 3];
+        for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
+            let found = bootfat::locate(dev, which.file_name(), SECTOR as u64)
+                .map_err(|why| (which.name(), why))?;
+            lbas[which as usize] = found.first_lba;
+        }
+        Ok(Self { lbas })
+    }
+
+    /// The sector of `which`.
+    pub fn lba(&self, which: Pointer) -> u64 {
+        self.lbas[which as usize]
+    }
+
+    /// The slot the file names, `None` when the sector is torn or is not a pointer.
+    pub fn read<D: Sectors>(&self, dev: &mut D, which: Pointer) -> io::Result<Option<String>> {
+        let mut sector = [0u8; SECTOR];
+        dev.read(self.lba(which), &mut sector)?;
+        Ok(firmware::pointer_slot(&sector))
+    }
+
+    /// Points `which` at slot `id`: one sector write, durable when it returns.
+    pub fn write<D: Sectors>(&self, dev: &mut D, which: Pointer, id: &str) -> Result<(), Error> {
+        let sector =
+            firmware::pointer_sector(id).ok_or_else(|| invalid("pointer slot id is not valid"))?;
+        dev.write(self.lba(which), &sector).map_err(Error::Io)
+    }
+}
+
+/// The boot partition's raw records, as the code that changes them sees them. Each method is one
+/// step that is durable when it returns, so a cut between two steps leaves each file old or new.
+/// The daemon and slot-init use [`Boot`]; their tests use an in-memory fake.
+pub trait BootRaw {
+    /// The slot pointer `which` names, `None` when it is torn or not a pointer.
+    fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String>;
+    /// Points `which` at `slot`.
+    fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String>;
+    /// The pending trial, if any.
+    fn trial(&mut self) -> Result<Option<Trial>, String>;
+    /// Makes `slot` the pending trial with `attempts` left (the record only).
+    fn set_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String>;
+    /// Takes the pending trial out (the record only).
+    fn clear_trial(&mut self) -> Result<(), String>;
+    /// The kept reason of the last held trial, `None` when none is kept.
+    fn reason(&mut self) -> Result<Option<String>, String>;
+    /// Keeps `reason` in the reason record (the record only; empty text clears it).
+    fn set_reason(&mut self, reason: &str) -> Result<(), String>;
+
+    /// Arms a trial: the trial pointer first, then the record. A cut after the pointer leaves no
+    /// record, so no tryboot restart happens and the old pointer is never read; the record is written
+    /// only once the pointer names its slot.
+    fn arm_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String> {
+        self.set_pointer(Pointer::Trial, slot)?;
+        self.set_trial(slot, attempts)
+    }
+}
+
+/// Arms a trial on the partition: the trial pointer first, then the record. A cut after the pointer
+/// leaves no record, so no tryboot restart happens and the old pointer is never read; the record is
+/// written only once the pointer names its slot.
+pub fn arm_trial_raw<D: Sectors>(
+    records: &Records,
+    pointers: &Pointers,
+    dev: &mut D,
+    slot: &str,
+    attempts: u8,
+) -> Result<(), Error> {
+    pointers.write(dev, Pointer::Trial, slot)?;
+    records.set_trial(dev, slot, attempts)
+}
+
+/// The boot partition's block node, opened for the raw records and pointers. Nothing mounts it.
+pub struct Boot {
+    dev: FileSectors,
+    records: Records,
+    pointers: Pointers,
+}
+
+impl Boot {
+    /// Opens the node read-write and finds every record and pointer file on it. A file that is
+    /// missing or not placeable is refused by name.
+    pub fn open(node: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(node)
+            .map_err(|e| format!("{}: {e}", node.display()))?;
+        let mut dev = FileSectors::new(file, 0);
+        let records = Records::place_named(&mut dev)
+            .map_err(|(name, why)| format!("{}: {name} {why}", node.display()))?;
+        let pointers = Pointers::place(&mut dev)
+            .map_err(|(name, why)| format!("{}: {name} {why}", node.display()))?;
+        Ok(Self {
+            dev,
+            records,
+            pointers,
+        })
+    }
+}
+
+impl BootRaw for Boot {
+    fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
+        self.pointers
+            .read(&mut self.dev, which)
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String> {
+        self.pointers
+            .write(&mut self.dev, which, slot)
+            .map_err(|e| e.to_string())
+    }
+
+    fn trial(&mut self) -> Result<Option<Trial>, String> {
+        self.records.trial(&mut self.dev).map_err(|e| e.to_string())
+    }
+
+    fn set_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String> {
+        self.records
+            .set_trial(&mut self.dev, slot, attempts)
+            .map_err(|e| e.to_string())
+    }
+
+    fn arm_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String> {
+        arm_trial_raw(&self.records, &self.pointers, &mut self.dev, slot, attempts)
+            .map_err(|e| e.to_string())
+    }
+
+    fn clear_trial(&mut self) -> Result<(), String> {
+        self.records
+            .clear_trial(&mut self.dev)
+            .map_err(|e| e.to_string())
+    }
+
+    fn reason(&mut self) -> Result<Option<String>, String> {
+        self.records
+            .reason(&mut self.dev)
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_reason(&mut self, reason: &str) -> Result<(), String> {
+        self.records
+            .set_reason(&mut self.dev, reason)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

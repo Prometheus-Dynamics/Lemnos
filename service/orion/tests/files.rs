@@ -79,7 +79,7 @@ fn bundle(id: &str, data_blocks: usize) -> Vec<u8> {
     // The command line is the bundle's, byte for byte: it names its own slot and root hash (the
     // board's `boot_args` prefix is `os`).
     let cmdline = format!(
-        "console=tty1 rootwait os.slot={id} os.roothash={} panic=5\n",
+        "console=tty1 rootwait os.slot={id} os.roothash={} os.src.rpi-boot-mode-1=/soc/mmc@7e202000 panic=5\n",
         "ab".repeat(32)
     );
     let boot: [(&str, &[u8]); 3] = [
@@ -173,7 +173,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64) -> Service {
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [host]\ncall_deadline_ms = 30000\n\
          [[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
-         config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", boot_args = \"os\", reserve_mb = {reserve_mb}, running = \"\" }}\n",
+         config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = {reserve_mb}, running = \"\" }}\n",
         data.display(),
         boot.display()
     );

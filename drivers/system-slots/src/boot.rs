@@ -22,9 +22,10 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use lemnos_slot_store::boot_raw::{BootRaw, Pointer};
 use lemnos_slot_store::records;
 
-use crate::store::{Layout, read_line, replace, sync_dir, valid_id};
+use crate::store::{Layout, replace, sync_dir, valid_id};
 
 /// Tells the boot loader which slot to start.
 ///
@@ -56,31 +57,34 @@ pub trait BootRecord: Send {
     }
 }
 
-/// The boot partition's copy of a trial's reason (`records::REASON_FILE`). The driver writes it
-/// when the state directory can't hold the reason at a deadline restart, and reads it at the next
-/// start, when the state has no reason of its own. The loader never reads it, so it can't change
-/// what boots.
-pub use lemnos_slot_store::records::REASON_FILE;
-
-/// Keeps `reason` on the boot partition.
-pub fn write_reason(boot: &Path, reason: &str) -> io::Result<()> {
-    replace(
-        &boot.join(REASON_FILE),
-        format!("{}\n", reason.replace(['\n', '\r'], " ")).as_bytes(),
-    )
+/// The boot partition's copy of a trial's reason: the pre-created reason record (`reason.rec`),
+/// one raw sector write on the partition's node. The driver writes it when the state directory
+/// can't hold the reason at a deadline restart, and reads it at the next start, when the state has
+/// no reason of its own. The loader never reads it, so it can't change what boots. Nothing mounts
+/// the partition for it, and a missing record refuses the write by name.
+pub fn write_reason(node: &Result<PathBuf, String>, reason: &str) -> io::Result<()> {
+    let node = node.as_ref().map_err(|why| io::Error::other(why.clone()))?;
+    let text = reason.replace(['\n', '\r'], " ");
+    lemnos_slot_store::boot_raw::Boot::open(node)
+        .and_then(|mut raw| raw.set_reason(&text))
+        .map_err(io::Error::other)
 }
 
 /// The reason kept on the boot partition, if there is one.
-pub fn read_reason(boot: &Path) -> Option<String> {
-    let text = fs::read_to_string(boot.join(REASON_FILE)).ok()?;
-    let reason = text.trim();
-    (!reason.is_empty()).then(|| reason.to_string())
+pub fn read_reason(node: &Result<PathBuf, String>) -> Option<String> {
+    let node = node.as_ref().ok()?;
+    let mut raw = lemnos_slot_store::boot_raw::Boot::open(node).ok()?;
+    raw.reason()
+        .ok()
+        .flatten()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
 }
 
 /// Forgets the reason kept on the boot partition. Never fails: a stale copy is only ever read
 /// when the state has no reason, and it is cleared again at each resolution.
-pub fn clear_reason(boot: &Path) {
-    let _ = fs::remove_file(boot.join(REASON_FILE));
+pub fn clear_reason(node: &Result<PathBuf, String>) {
+    let _ = write_reason(node, "");
 }
 
 /// Runs the system's restart: `<systemctl> reboot`, with `--reboot-argument=0 tryboot` for a
@@ -131,69 +135,72 @@ impl Restarter {
 /// `lemnos-slot-init` takes one from it before each trial boot (see `docs/slots.md`).
 #[derive(Debug, Clone)]
 pub struct Tryboot {
+    /// Where the boot partition is mounted: its boot files are read there.
     pub boot: PathBuf,
+    /// The boot partition's block node, where the pointers and the trial record are written, one
+    /// raw sector at a time: found from the boot chain's source and the board's `boot_sources`
+    /// (see `lemnos_slot_store::disk`). The reason it is not known is kept, and its writes are
+    /// refused by that reason.
+    pub node: Result<PathBuf, String>,
     pub restarter: Restarter,
 }
 
-fn prefix(id: &str) -> String {
-    lemnos_slot_store::records::tryboot::entry(id)
-}
-
 impl Tryboot {
-    fn attempts_file(&self) -> PathBuf {
-        self.boot.join(records::tryboot::ATTEMPTS_FILE)
-    }
-
-    fn trial_file(&self) -> PathBuf {
-        self.boot.join(records::tryboot::TRIAL_FILE)
+    /// The boot partition's raw records and pointers, opened on its node. Refused by name when the
+    /// node is not known.
+    fn raw(&self) -> io::Result<Box<dyn BootRaw>> {
+        let node = self.node.as_ref().map_err(|why| {
+            io::Error::other(format!(
+                "the boot partition's device isn't known ({why}): its pointers can't be written"
+            ))
+        })?;
+        lemnos_slot_store::boot_raw::Boot::open(node)
+            .map(|boot| Box::new(boot) as Box<dyn BootRaw>)
+            .map_err(io::Error::other)
     }
 }
 
 impl BootRecord for Tryboot {
     fn set_default(&mut self, id: &str) -> io::Result<()> {
-        replace(&self.boot.join("default.txt"), prefix(id).as_bytes())
+        self.raw()?
+            .set_pointer(Pointer::Default, id)
+            .map_err(io::Error::other)
     }
 
     fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
-        // The counter first: a trial file never names a slot without its attempts beside it.
-        replace(&self.attempts_file(), format!("{attempts}\n").as_bytes())?;
-        replace(&self.trial_file(), prefix(id).as_bytes())
+        // The record first, then the trial pointer: a trial never names a slot without its attempts.
+        self.raw()?
+            .arm_trial(id, attempts)
+            .map_err(io::Error::other)
     }
 
     fn pending(&self) -> io::Result<Option<(String, u8)>> {
-        let Ok(text) = fs::read_to_string(self.trial_file()) else {
-            return Ok(None);
-        };
-        let Some(id) = records::tryboot::slot(&text) else {
-            return Ok(None);
-        };
-        let attempts = fs::read_to_string(self.attempts_file())
-            .ok()
-            .and_then(|text| records::attempts(&text))
-            .unwrap_or(0);
-        Ok(Some((id.to_string(), attempts)))
+        let trial = self.raw()?.trial().map_err(io::Error::other)?;
+        Ok(trial.map(|t| (t.slot, t.attempts)))
     }
 
     fn set_attempts(&mut self, attempts: u8) -> io::Result<()> {
-        if self.pending()?.is_some() {
-            replace(&self.attempts_file(), format!("{attempts}\n").as_bytes())?;
+        let mut raw = self.raw()?;
+        if let Some(trial) = raw.trial().map_err(io::Error::other)? {
+            raw.set_trial(&trial.slot, attempts)
+                .map_err(io::Error::other)?;
         }
         Ok(())
     }
 
     fn clear_trial(&mut self) -> io::Result<()> {
-        for path in [self.trial_file(), self.attempts_file()] {
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        sync_dir(&self.boot)
+        self.raw()?.clear_trial().map_err(io::Error::other)
     }
 
     fn restart(&mut self) -> io::Result<()> {
         self.restarter.run(None)
+    }
+
+    /// The Pi firmware reads its slot from the pointer files; the boot partition's root holds no
+    /// copy of the slot's files, so nothing is copied there (a copy of kernels is a file write this
+    /// form does not make).
+    fn fallback_copy(&self, _layout: &Layout, _id: &str) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -475,13 +482,6 @@ pub fn root_copy(layout: &Layout, id: &str) -> io::Result<()> {
     sync_dir(&layout.boot)
 }
 
-/// The slot the boot partition's `default.txt` names, if any.
-pub fn tryboot_default(boot: &Path) -> Option<String> {
-    let line = read_line(&boot.join("default.txt"));
-    let id = line.strip_prefix("os_prefix=slots/")?.strip_suffix('/')?;
-    valid_id(id).then(|| id.to_string())
-}
-
 /// The reboot request `system.reboot` leaves in the state directory before it restarts, for the
 /// next boot's history (`requested` in `lemnos/boots`), and which that boot takes and removes.
 pub const REQUEST_FILE: &str = "reboot-request";
@@ -538,6 +538,114 @@ pub fn reset_reason(path: Option<&Path>) -> String {
 mod tests {
     use super::*;
     use crate::tests::TempDir;
+    use lemnos_slot_store::boot_raw::{Boot as RawBoot, BootRaw, Pointer, Trial};
+    use lemnos_slot_store::fatimage;
+    use lemnos_slot_store::firmware;
+    use lemnos_slot_store::twocopy::{Kind, precreate};
+
+    /// A boot partition image in `dir`: the record files pre-created, and the three pointer files
+    /// each naming `os-1`. Returns its node.
+    fn fat_boot(dir: &TempDir) -> std::path::PathBuf {
+        let mut files = precreate(&[
+            (Kind::TRIAL, b""),
+            (Kind::REASON, b""),
+            (Kind::EPISODES, b""),
+        ])
+        .unwrap();
+        let pointer = firmware::pointer_sector("os-1").unwrap().to_vec();
+        for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
+            files.push((name, pointer.clone()));
+        }
+        let node = dir.0.join("boot.img");
+        fs::write(&node, fatimage::fat16(&files)).unwrap();
+        node
+    }
+
+    fn tryboot(dir: &TempDir, node: Result<std::path::PathBuf, String>) -> Tryboot {
+        Tryboot {
+            boot: dir.0.clone(),
+            node,
+            restarter: Restarter {
+                check: None,
+                systemctl: "/nonexistent/systemctl".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_tryboot_record_writes_the_pointers_the_firmware_reads_one_sector_each() {
+        let dir = TempDir::new("tryboot");
+        let node = fat_boot(&dir);
+        let mut record = tryboot(&dir, Ok(node.clone()));
+        record.set_default("a-1").unwrap();
+        record.set_trial("b-2", 3).unwrap();
+        let mut raw = RawBoot::open(&node).unwrap();
+        assert_eq!(
+            raw.pointer(Pointer::Default).unwrap().as_deref(),
+            Some("a-1")
+        );
+        assert_eq!(raw.pointer(Pointer::Trial).unwrap().as_deref(), Some("b-2"));
+        assert_eq!(
+            raw.trial().unwrap(),
+            Some(Trial {
+                slot: "b-2".into(),
+                attempts: 3
+            })
+        );
+        // No file is created, renamed or removed on the boot partition: the boot directory is untouched.
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        assert!(record.restart().is_err());
+    }
+
+    #[test]
+    fn the_tryboot_trial_has_its_attempts_beside_it_and_goes_with_it() {
+        let dir = TempDir::new("tryboot-attempts");
+        let node = fat_boot(&dir);
+        let mut record = tryboot(&dir, Ok(node.clone()));
+        assert_eq!(record.pending().unwrap(), None);
+        record.set_trial("b-2", 2).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
+        record.set_attempts(1).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 1)));
+        record.clear_trial().unwrap();
+        assert_eq!(record.pending().unwrap(), None);
+        // Setting attempts with no trial pending writes nothing.
+        record.set_attempts(2).unwrap();
+        assert_eq!(record.pending().unwrap(), None);
+    }
+
+    #[test]
+    fn lemnosd_never_mounts_the_boot_partition() {
+        // Grep proof: this file calls no mount. The node is found from the disk's sysfs, never mounted.
+        let src = include_str!("boot.rs");
+        // The needles are split so that this test's own text does not match them.
+        assert!(!src.contains(concat!("Command::new(\"", "mount", "\")")));
+        assert!(!src.contains(concat!("rootfs", "::mount")));
+        assert!(!src.contains(concat!("libc", "::mount")));
+    }
+
+    #[test]
+    fn a_tryboot_record_with_no_known_device_or_no_pointer_file_refuses_by_name() {
+        let dir = TempDir::new("tryboot-refused");
+        let mut record = tryboot(
+            &dir,
+            Err("no boot_sources entry names the controller".into()),
+        );
+        let why = record.set_default("a-1").unwrap_err().to_string();
+        assert!(why.contains("device isn't known"), "{why}");
+        // A partition without its pointer files is refused by the first file it lacks.
+        let files = precreate(&[
+            (Kind::TRIAL, b""),
+            (Kind::REASON, b""),
+            (Kind::EPISODES, b""),
+        ])
+        .unwrap();
+        let node = dir.0.join("bare.img");
+        fs::write(&node, fatimage::fat16(&files)).unwrap();
+        let mut record = tryboot(&dir, Ok(node));
+        let why = record.set_default("a-1").unwrap_err().to_string();
+        assert!(why.contains("default.txt"), "{why}");
+    }
 
     fn layout(dir: &TempDir) -> Layout {
         let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
@@ -556,60 +664,6 @@ mod tests {
     fn install(layout: &Layout, id: &str) {
         fs::write(layout.manifest(id), "{}").unwrap();
         fs::write(layout.image(id), "img").unwrap();
-    }
-
-    #[test]
-    fn the_tryboot_record_writes_the_lines_the_firmware_reads() {
-        let dir = TempDir::new("tryboot");
-        let mut record = Tryboot {
-            boot: dir.0.clone(),
-            restarter: Restarter {
-                check: None,
-                systemctl: "/nonexistent/systemctl".into(),
-            },
-        };
-        record.set_default("a-1").unwrap();
-        record.set_trial("b-2", 3).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.0.join("default.txt")).unwrap(),
-            "os_prefix=slots/a-1/\n"
-        );
-        assert_eq!(
-            fs::read_to_string(dir.0.join("trial.txt")).unwrap(),
-            "os_prefix=slots/b-2/\n"
-        );
-        assert_eq!(
-            fs::read_to_string(dir.0.join("trial-attempts")).unwrap(),
-            "3\n"
-        );
-        assert_eq!(tryboot_default(&dir.0).as_deref(), Some("a-1"));
-        // No half-written file is left beside them.
-        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 3);
-        assert!(record.restart().is_err());
-    }
-
-    #[test]
-    fn the_tryboot_trial_has_its_attempts_beside_it_and_goes_with_it() {
-        let dir = TempDir::new("tryboot-attempts");
-        let mut record = Tryboot {
-            boot: dir.0.clone(),
-            restarter: Restarter {
-                check: None,
-                systemctl: "/nonexistent/systemctl".into(),
-            },
-        };
-        assert_eq!(record.pending().unwrap(), None);
-        record.set_trial("b-2", 2).unwrap();
-        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
-        record.set_attempts(1).unwrap();
-        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 1)));
-        record.clear_trial().unwrap();
-        assert_eq!(record.pending().unwrap(), None);
-        assert!(!dir.0.join("trial.txt").exists());
-        assert!(!dir.0.join("trial-attempts").exists());
-        // Setting attempts with no trial pending writes nothing.
-        record.set_attempts(2).unwrap();
-        assert!(!dir.0.join("trial-attempts").exists());
     }
 
     #[test]

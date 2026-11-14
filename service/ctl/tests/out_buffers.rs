@@ -315,7 +315,7 @@ fn start_slots() -> Running {
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
          config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", \
-         boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n",
+         boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n",
         data.display(),
         boot.display()
     );

@@ -98,6 +98,26 @@ The cap can be shorter than 8 s but never longer: that is [the failure rule](con
 and a longer value is refused. There is no host-wide auto-off: only a device's own
 `auto_off_after` turns a device off.
 
+## Boot sources (`system-slots`)
+
+A board that boots from a disk must give `boot_sources` in its slot device's `config`: one
+`source=kernel path` entry per medium the board boots from. The boot disk is the one whole disk under
+that controller, and nothing else on the boot chain is read from another disk. `boot_device` is
+removed (refused by name). [Slots: the boot source](slots.md#the-boot-source) has the rules and the
+U-Boot chain line by line.
+
+| Board | Family | Boot chain | Medium | Entry | Status |
+|---|---|---|---|---|---|
+| Radxa ZERO 3E | RK35xx (RK3566) | U-Boot | microSD | `/mmc@fe2b0000=/mmc@fe2b0000` | the path is the kernel's; the U-Boot alias number is decided by U-Boot's live tree, not verified on a board |
+| Radxa ROCK 5C | RK3588S | U-Boot | microSD | `/mmc@fe2c0000=/mmc@fe2c0000` | kernel path from `rk3588-base.dtsi`; U-Boot path unverified |
+| Radxa ROCK 5C | RK3588S | U-Boot | eMMC | `/mmc@fe2e0000=/mmc@fe2e0000` | kernel path; U-Boot path unverified |
+| Radxa ROCK 4D | RK3576 | U-Boot | microSD | `/soc/mmc@2a310000=/soc/mmc@2a310000` | the RK3576 node sits under `/soc`; the U-Boot path is unverified |
+| Radxa CUBIE A7A, A7S, A7Z | A733 (sun60i) | U-Boot | microSD, eMMC | `/soc@0/mmc@4020000=…`, `/soc@0/mmc@4022000=…` | from the patch series; the Radxa U-Boot tree is not read; UNVERIFIED |
+| Raspberry Pi compute module with the BCM2712 (the reference board) | BCM2712 | Pi firmware, no U-Boot | on-board eMMC | `rpi-boot-mode-1=/soc@107c000000/mmc@fff000` | code 1 is the SD card or the eMMC on the Pi family (measured on the reference board); other codes are from documentation, unverified |
+
+Unsupported: a scsi or UFS boot device on a U-Boot board is refused by name (the path form cannot
+name it). A raw NAND board (`record = "ubi"`) has no disk and no `boot_sources`.
+
 ## Trials of a slot (`system-slots`)
 
 The `system-slots` driver's `config` (see [Slots](slots.md)) takes these trial settings. Each is

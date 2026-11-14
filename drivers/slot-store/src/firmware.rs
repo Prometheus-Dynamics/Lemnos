@@ -57,31 +57,59 @@ pub const fn pick(count: u8) -> Pick {
     }
 }
 
-/// A pointer file's content: one `os_prefix` line naming the slot, padded with a comment line to
-/// exactly one sector. `None` for an id that is not a valid slot id.
+/// The line that carries the checksum of the pointer line above it: `#lemnos-crc32=` and eight hex
+/// digits, then a newline. It is a comment to the firmware.
+const CHECK_PREFIX: &str = "#lemnos-crc32=";
+/// The checksum line's length in bytes, newline included.
+const CHECK_BYTES: usize = CHECK_PREFIX.len() + 8 + 1;
+
+/// A pointer file's content: the `os_prefix` line naming the slot, a checksum line over that
+/// line's bytes, then `#` padding and a final newline, exactly one sector. The checksum is what
+/// lets a torn sector be refused: slot ids have different lengths, so a cut inside the new line
+/// could otherwise leave a whole, valid, different line. `None` for an id that is not a valid slot id.
 pub fn pointer_sector(id: &str) -> Option<[u8; POINTER_BYTES]> {
     if !crate::store::valid_id(id) {
         return None;
     }
     let line = format!("os_prefix=slots/{id}/\n");
+    let check = format!(
+        "{CHECK_PREFIX}{:08x}\n",
+        crate::twocopy::crc32(line.as_bytes())
+    );
+    if line.len() + check.len() >= POINTER_BYTES {
+        return None;
+    }
     let mut out = [b'#'; POINTER_BYTES];
     out[..line.len()].copy_from_slice(line.as_bytes());
+    out[line.len()..line.len() + check.len()].copy_from_slice(check.as_bytes());
     out[POINTER_BYTES - 1] = b'\n';
     Some(out)
 }
 
-/// The slot a pointer sector names, if it is one whole pointer line and nothing else but padding.
+/// The slot a pointer sector names: exactly one whole `os_prefix` line, a checksum line that
+/// matches it, and `#` padding ending in a newline. Anything else (a torn or foreign sector, a
+/// line with a bad checksum) is `None`.
 pub fn pointer_slot(sector: &[u8; POINTER_BYTES]) -> Option<String> {
-    let end = sector.iter().position(|&b| b == b'\n')?;
-    let text = std::str::from_utf8(&sector[..end]).ok()?;
-    let id = text.strip_prefix("os_prefix=slots/")?.strip_suffix('/')?;
-    if !crate::store::valid_id(id) || end + 1 > POINTER_BYTES {
+    let end = sector.iter().position(|&b| b == b'\n')? + 1;
+    let line = &sector[..end];
+    let text = std::str::from_utf8(line).ok()?;
+    let id = text.strip_prefix("os_prefix=slots/")?.strip_suffix("/\n")?;
+    if !crate::store::valid_id(id) {
         return None;
     }
-    let rest = &sector[end + 1..];
-    rest.iter()
-        .all(|&b| b == b'#' || b == b'\n')
-        .then(|| id.to_string())
+    let check = sector.get(end..end + CHECK_BYTES)?;
+    let check = std::str::from_utf8(check).ok()?;
+    let hex = check.strip_prefix(CHECK_PREFIX)?.strip_suffix('\n')?;
+    if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let want = u32::from_str_radix(hex, 16).ok()?;
+    if crate::twocopy::crc32(line) != want {
+        return None;
+    }
+    let rest = &sector[end + CHECK_BYTES..];
+    let (last, body) = rest.split_last()?;
+    (*last == b'\n' && body.iter().all(|&b| b == b'#')).then(|| id.to_string())
 }
 
 #[cfg(test)]

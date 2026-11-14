@@ -102,6 +102,7 @@ use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::boots;
+use lemnos_slot_store::disk::{self, Table};
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
@@ -116,6 +117,12 @@ pub struct SystemSlots {
     require_signed: bool,
     partuuid: String,
     boot_args: String,
+    /// The board's `boot_sources` entries as given (`source=path`): each slot's command line must
+    /// carry `<boot_args>.src.<entry>` for every one.
+    boot_sources: Vec<String>,
+    /// The boot partition's block node, found from the boot chain's source and `boot_sources`
+    /// (refused by name when not found). Its reason record is written raw here.
+    boot_node: core::result::Result<PathBuf, String>,
     /// The board file's `[board] id`. A slot built for another board is never booted.
     board_id: String,
     running: Option<String>,
@@ -190,6 +197,72 @@ fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
     }
 }
 
+/// Where the boot chain's source and the boot disk are read from: the device tree's `chosen`
+/// node, sysfs and the device nodes. The real paths on the board; a test may stand a tree in.
+#[derive(Debug, Clone)]
+pub struct BootRoots {
+    pub chosen: PathBuf,
+    pub sys: PathBuf,
+    pub dev: PathBuf,
+}
+
+impl BootRoots {
+    /// The board's own paths.
+    pub fn system() -> Self {
+        Self {
+            chosen: PathBuf::from("/proc/device-tree/chosen"),
+            sys: PathBuf::from("/sys"),
+            dev: PathBuf::from("/dev"),
+        }
+    }
+
+    /// The paths the driver reads: the board's, or a test's tree while a test holds one.
+    fn current() -> Self {
+        #[cfg(test)]
+        if let Some(roots) = TEST_ROOTS.lock().ok().and_then(|g| g.clone()) {
+            return roots;
+        }
+        Self::system()
+    }
+}
+
+/// A test's boot roots, held by the test that stands a board tree in (see the tests module).
+#[cfg(test)]
+pub(crate) static TEST_ROOTS: Mutex<Option<BootRoots>> = Mutex::new(None);
+
+/// The boot partition's block node for the boot chain's source: the source is looked up in the
+/// board's table, its one whole disk found under the controller, and that disk's partition 1
+/// returned. Every refusal is named.
+pub fn resolve_boot_node(
+    roots: &BootRoots,
+    table: &Table,
+) -> core::result::Result<PathBuf, String> {
+    let source = disk::boot_source(&roots.chosen)?;
+    let whole = disk::boot_disk(&roots.sys, table, &source)?;
+    disk::boot_partition(&roots.sys, &roots.dev, &whole)
+        .ok_or_else(|| format!("{whole} has no partition 1 (the boot partition)"))
+}
+
+/// The board's `boot_sources` table, parsed. Required on every board that boots from a disk (every
+/// record but `ubi`); `None` on the raw NAND form, which has no such table.
+fn boot_table(cfg: &Config<'_>) -> core::result::Result<Option<Table>, ConfigError<'static>> {
+    if cfg.str("record") == Some("ubi") {
+        return Ok(None);
+    }
+    let items = cfg
+        .list("boot_sources")
+        .ok_or(ConfigError::new(
+            "boot_sources",
+            "is required on a board that boots from a disk: source=device-tree path entries (see docs/boards.md)",
+        ))?;
+    Table::parse(items)
+        .map(Some)
+        .map_err(|_| ConfigError::new(
+            "boot_sources",
+            "must list source=device-tree path entries: a source is rpi-boot-mode-<n> or a path starting with /",
+        ))
+}
+
 /// The boot record the `record` setting names, with its restarter (checked when `check` is given).
 fn record_for(
     cfg: &Config<'_>,
@@ -201,6 +274,10 @@ fn record_for(
     Ok(match cfg.str("record").unwrap_or("tryboot") {
         "tryboot" => Box::new(Tryboot {
             boot: layout.boot.clone(),
+            node: match boot_table(cfg) {
+                Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
+                _ => Err("the board file's boot_sources is not set".into()),
+            },
             restarter,
         }),
         "file" => Box::new(FileRecord {
@@ -258,6 +335,8 @@ impl SystemSlots {
             require_signed: false,
             partuuid: String::new(),
             boot_args: String::new(),
+            boot_sources: Vec::new(),
+            boot_node: core::result::Result::Err("the board file's boot_sources is not set".into()),
             board_id: String::new(),
             running: None,
             reserve: 2048 << 20,
@@ -392,6 +471,7 @@ impl SystemSlots {
             keys: &self.keys,
             require_signed: self.require_signed,
             boot_args: &self.boot_args,
+            boot_sources: &self.boot_sources,
             board_id: &self.board_id,
             guard: Guard {
                 running: self.running(),
@@ -1004,6 +1084,7 @@ const KEYS: &[Key] = &[
     Key::optional("confirm_deadline_s", Kind::Int),
     Key::optional("trial_attempts", Kind::Int),
     Key::optional("health", Kind::List),
+    Key::optional("boot_sources", Kind::List),
 ];
 
 /// The settings `SystemReboot` reads.
@@ -1188,6 +1269,7 @@ impl Lifecycle for SystemSlots {
             usize::try_from(keep)
                 .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
         }
+        boot_table(cfg)?;
         Ok(())
     }
 
@@ -1220,6 +1302,17 @@ impl Lifecycle for SystemSlots {
             .unwrap_or_default();
         slots.running = cfg.str("running").map(str::to_string);
         slots.boot_args = cfg.str("boot_args").unwrap_or("").to_string();
+        slots.boot_sources = cfg
+            .list("boot_sources")
+            .unwrap_or(&[])
+            .iter()
+            .map(|entry| entry.to_string())
+            .collect();
+        slots.boot_node = match boot_table(cfg) {
+            Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
+            Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
+            Err(error) => Err(error.to_string()),
+        };
         slots.board_id = cfg.board().to_string();
         slots.require_signed = cfg.bool("require_signed").unwrap_or(false);
         signing::set_security(&slots.layout, slots.require_signed).map_err(|_| Status::IO)?;
@@ -1400,7 +1493,7 @@ impl Slots for SystemSlots {
         self.evict(&state, id)?;
         boot::stage(&self.layout, id, false).map_err(|_| Status::IO)?;
         self.mark_keep_old(id, keep_old)?;
-        boot::clear_reason(&self.layout.boot);
+        boot::clear_reason(&self.boot_node);
         self.record
             .set_trial(id, self.policy.attempts)
             .map_err(|_| Status::IO)?;

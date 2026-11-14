@@ -59,6 +59,9 @@ pub fn steps(record: Option<&Record>) -> Vec<Step> {
     steps
 }
 
+/// The slot's device tree, by the fixed contract name the boot script loads it by.
+pub const BOARD_DTB: &str = "board.dtb";
+
 /// Whether a file name may go into a loader configuration as it is: the configuration's words
 /// are split at white space, and `#` starts a comment.
 fn plain(name: &str) -> bool {
@@ -71,8 +74,9 @@ fn plain(name: &str) -> bool {
 /// The loader configuration for slot `id`, whose boot directory holds `files` (paths relative to
 /// it), started with `append` as its command line. The kernel is the first of `Image`,
 /// `Image.gz`, `zImage`, `vmlinuz`, `kernel*.img`; the initramfs `initramfs*` or `initrd*`; the
-/// device tree the one `.dtb` at the top, else every `.dtb` there or in `dtbs/` through
-/// `fdtdir`, which U-Boot picks from by the board's `fdtfile`.
+/// device tree is `board.dtb` at the top, the contract name the boot script loads it by. The label
+/// has no `fdt` line: the script loads the dtb, takes the boot device's path from U-Boot's own
+/// tree, and names the boot source in `/chosen` before the label starts.
 pub fn extlinux(id: &str, files: &[String], append: &str) -> Result<String, String> {
     if !valid_id(id) {
         return Err(format!("`{id}` isn't a slot id"));
@@ -91,24 +95,13 @@ pub fn extlinux(id: &str, files: &[String], append: &str) -> Result<String, Stri
         .ok_or("the slot has no kernel (Image, zImage, vmlinuz or kernel*.img)")?;
     let initrd = find(&|f| f.starts_with("initramfs") || f.starts_with("initrd"))
         .ok_or("the slot has no initramfs (initramfs* or initrd*)")?;
-    let dtbs: Vec<&str> = top
-        .iter()
-        .copied()
-        .filter(|f| f.ends_with(".dtb"))
-        .collect();
+    if !top.contains(&BOARD_DTB) {
+        return Err(format!(
+            "the slot has no {BOARD_DTB} (the device tree the boot script loads)"
+        ));
+    }
     let dir = format!("/slots/{id}");
-    let fdt = match dtbs.as_slice() {
-        [one] => format!("  fdt {dir}/{one}\n"),
-        [] if files
-            .iter()
-            .any(|f| f.starts_with("dtbs/") && f.ends_with(".dtb")) =>
-        {
-            format!("  fdtdir {dir}/dtbs/\n")
-        }
-        [] => String::new(),
-        _ => format!("  fdtdir {dir}/\n"),
-    };
-    for name in [kernel, initrd].into_iter().chain(dtbs.iter().copied()) {
+    for name in [kernel, initrd] {
         if !plain(name) {
             return Err(format!(
                 "the boot file name `{name}` can't go into extlinux.conf"
@@ -124,7 +117,6 @@ pub fn extlinux(id: &str, files: &[String], append: &str) -> Result<String, Stri
          timeout 0\n\
          label {id}\n\
          \x20 kernel {dir}/{kernel}\n\
-         {fdt}\
          \x20 initrd {dir}/{initrd}\n\
          \x20 append {append}\n"
     ))
@@ -243,6 +235,9 @@ impl BootRecord for Uboot {
         let text = fs::read(&from)?;
         let dir = self.boot.join("extlinux");
         fs::create_dir_all(&dir)?;
+        // The label has no fdt line: the script loads the device tree beside it, the same slot's.
+        let dtb = fs::read(layout.boot_dir(id).join(BOARD_DTB))?;
+        replace(&dir.join(BOARD_DTB), &dtb)?;
         replace(&dir.join("extlinux.conf"), &text)?;
         sync_dir(&self.boot)
     }

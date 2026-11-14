@@ -32,7 +32,7 @@ fn read_mounted(root: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
 /// # Errors
 ///
 /// The manifest is missing or not readable, or a boot file does not match.
-pub fn verified(layout: &Layout, id: &str) -> Result<(), String> {
+pub fn verified(layout: &Layout, id: &str, is_default: bool) -> Result<(), String> {
     if !valid_id(id) {
         return Err(format!("{id:?} isn't a slot id"));
     }
@@ -42,10 +42,14 @@ pub fn verified(layout: &Layout, id: &str) -> Result<(), String> {
     let found = bootcheck::check(id, &manifest.boot_files, |path| {
         read_mounted(&layout.boot, path)
     });
-    if found.is_empty() {
+    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, is_default, |path| {
+        read_mounted(&layout.boot, path)
+    });
+    if found.is_empty() && uboot.is_none() {
         return Ok(());
     }
-    let list: Vec<String> = found.iter().map(|m| m.to_string()).collect();
+    let mut list: Vec<String> = found.iter().map(|m| m.to_string()).collect();
+    list.extend(uboot);
     Err(list.join("; "))
 }
 
@@ -64,11 +68,11 @@ pub fn check(
     if !valid_id(&state.default) {
         return Ok(None);
     }
-    let why = match verified(layout, &state.default) {
+    let why = match verified(layout, &state.default, true) {
         Ok(()) => return Ok(None),
         Err(why) => why,
     };
-    if valid_id(&state.previous) && verified(layout, &state.previous).is_ok() {
+    if valid_id(&state.previous) && verified(layout, &state.previous, false).is_ok() {
         repoint(layout, record, &state, &why)?;
         return Ok(Some(format!(
             "{} doesn't match its manifest ({why}): {} is the default now",

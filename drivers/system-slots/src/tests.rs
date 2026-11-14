@@ -170,12 +170,13 @@ impl Bundle {
                 (
                     "cmdline.txt".into(),
                     format!(
-                        "console=tty1 rootwait board.slot={id} board.roothash={ROOT_HASH} panic=5\n"
+                        "console=tty1 rootwait board.slot={id} board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
                     )
                     .into_bytes(),
                 ),
                 ("initramfs".into(), b"initramfs".to_vec()),
                 ("overlays/README".into(), b"readme".to_vec()),
+                ("board.dtb".into(), b"device tree".to_vec()),
             ],
             extra: Vec::new(),
             manifest_image_sha: None,
@@ -460,7 +461,9 @@ fn a_signed_bundle_streams_in_and_is_put_where_the_boot_chain_looks() {
     let cmdline = kept.iter().find(|(_, n)| n == "cmdline.txt").unwrap();
     assert_eq!(
         fs::read_to_string(layout.bootfiles().join(&cmdline.0)).unwrap(),
-        format!("console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} panic=5\n")
+        format!(
+            "console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
+        )
     );
     assert!(kept.iter().any(|(_, n)| n == "slot.json"));
     assert!(!layout.boot_dir("os-2").exists());
@@ -1187,6 +1190,71 @@ fn keys_are_read_as_the_package_keys_are() {
 
 /// The same through a host, as the service runs it: the install as a long job, the trial's and
 /// the reboot's restarts through the program the board file names.
+/// A FAT boot partition image with the records pre-created and the three pointers naming `default`.
+/// A fake board tree under `dir` for the boot disk: the SD controller's device-tree node, one whole
+/// disk under it with its partition 1 (the boot partition, holding `image`), and the boot chain's
+/// source. Returns the partition's device node.
+fn boot_tree(dir: &Path, image: &[u8]) -> PathBuf {
+    let sys = dir.join("sys");
+    let node = sys.join("firmware/devicetree/base/soc/mmc@7e202000");
+    fs::create_dir_all(&node).unwrap();
+    let controller = sys.join("devices/sd-host");
+    fs::create_dir_all(&controller).unwrap();
+    std::os::unix::fs::symlink(&node, controller.join("of_node")).unwrap();
+    let disk = controller.join("mmcblk0");
+    fs::create_dir_all(&disk).unwrap();
+    fs::create_dir_all(sys.join("class/block")).unwrap();
+    std::os::unix::fs::symlink(&disk, sys.join("class/block/mmcblk0")).unwrap();
+    let part = disk.join("mmcblk0p1");
+    fs::create_dir_all(&part).unwrap();
+    fs::write(part.join("partition"), "1\n").unwrap();
+    std::os::unix::fs::symlink(&part, sys.join("class/block/mmcblk0p1")).unwrap();
+    let chosen = dir.join("chosen");
+    fs::create_dir_all(&chosen).unwrap();
+    fs::write(chosen.join("lemnos,boot-source"), b"/soc/mmc@7e202000\0").unwrap();
+    let dev = dir.join("dev");
+    fs::create_dir_all(&dev).unwrap();
+    fs::write(dev.join("mmcblk0p1"), image).unwrap();
+    dev.join("mmcblk0p1")
+}
+
+/// The boot roots the driver reads while a test holds them: restored when dropped.
+struct TestRoots;
+
+impl TestRoots {
+    fn set(dir: &Path) -> Self {
+        *crate::TEST_ROOTS.lock().unwrap() = Some(crate::BootRoots {
+            chosen: dir.join("chosen"),
+            sys: dir.join("sys"),
+            dev: dir.join("dev"),
+        });
+        Self
+    }
+}
+
+impl Drop for TestRoots {
+    fn drop(&mut self) {
+        *crate::TEST_ROOTS.lock().unwrap() = None;
+    }
+}
+
+fn fat_boot_image(default: &str) -> Vec<u8> {
+    use lemnos_slot_store::twocopy::{Kind, precreate};
+    let mut files = precreate(&[
+        (Kind::TRIAL, b""),
+        (Kind::REASON, b""),
+        (Kind::EPISODES, b""),
+    ])
+    .unwrap();
+    let pointer = lemnos_slot_store::firmware::pointer_sector(default)
+        .unwrap()
+        .to_vec();
+    for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
+        files.push((name, pointer.clone()));
+    }
+    lemnos_slot_store::fatimage::fat16(&files)
+}
+
 #[test]
 fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     use lemnos_core::{Encode, MethodId, Writer};
@@ -1199,6 +1267,8 @@ fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     fs::create_dir_all(layout.state_dir()).unwrap();
     fs::create_dir_all(layout.boot.join("slots")).unwrap();
     fs::write(layout.marker("booted"), "os-1\n").unwrap();
+    let node = boot_tree(&dir.0, &fat_boot_image("os-1"));
+    let _roots = TestRoots::set(&dir.0);
     let keys = dir.0.join("keys");
     fs::write(
         &keys,
@@ -1228,7 +1298,7 @@ call_deadline_ms = 30000
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", keys = "{keys}", systemctl = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], keys = "{keys}", systemctl = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
 
 [[devices]]
 id = "reboot"
@@ -1306,8 +1376,13 @@ config = {{ systemctl = "{ctl}" }}
     };
     host.call(slots, method(5), &args[..len], &mut []).unwrap();
     assert_eq!(
-        fs::read_to_string(layout.boot.join("trial.txt")).unwrap(),
-        "os_prefix=slots/os-2/\n"
+        lemnos_slot_store::boot_raw::BootRaw::pointer(
+            &mut lemnos_slot_store::boot_raw::Boot::open(&node).unwrap(),
+            lemnos_slot_store::boot_raw::Pointer::Trial,
+        )
+        .unwrap()
+        .as_deref(),
+        Some("os-2")
     );
     let reboot = host.device("reboot").unwrap().index;
     host.call(reboot, method(1), &[], &mut []).unwrap();
@@ -1341,7 +1416,7 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     assert!(conf.contains("  initrd /slots/os-2/initramfs\n"), "{conf}");
     assert!(
         conf.contains(&format!(
-            "  append console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} panic=5\n"
+            "  append console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
         )),
         "{conf}"
     );
@@ -2332,6 +2407,14 @@ fn a_cancelled_install_shows_failed() {
     assert_eq!(shown.last().map(|(s, _)| s.as_str()), Some("failed"));
 }
 
+/// The boot partition's node for a board whose reason is kept raw: a FAT image with the records and
+/// pointers pre-created, beside the board's boot directory.
+fn reason_node(board: &Board) -> PathBuf {
+    let node = board.layout().boot.with_file_name("reason.img");
+    fs::write(&node, fat_boot_image("os-1")).unwrap();
+    node
+}
+
 fn secs(s: u64) -> u64 {
     s * 1_000_000_000
 }
@@ -2360,6 +2443,7 @@ fn failing() -> View {
 #[test]
 fn a_deadline_restart_retries_the_reason_with_capped_backoff_before_it_restarts() {
     let mut board = trial_board();
+    board.slots.boot_node = Ok(reason_node(&board));
     board.baseline("a", "dev builtin\n");
     board.next_boot(1);
     let view = failing();
@@ -2388,7 +2472,7 @@ fn a_deadline_restart_retries_the_reason_with_capped_backoff_before_it_restarts(
     );
     // The reason is kept on the boot partition, where the next boot reads it.
     assert!(
-        crate::boot::read_reason(&board.layout().boot)
+        crate::boot::read_reason(&board.slots.boot_node)
             .unwrap()
             .contains("broken")
     );
@@ -2397,6 +2481,7 @@ fn a_deadline_restart_retries_the_reason_with_capped_backoff_before_it_restarts(
 #[test]
 fn once_the_reason_can_be_written_the_deadline_restart_goes_and_nothing_is_reported() {
     let mut board = trial_board();
+    board.slots.boot_node = Ok(reason_node(&board));
     board.baseline("a", "dev builtin\n");
     board.next_boot(1);
     let view = failing();
@@ -2417,6 +2502,7 @@ fn once_the_reason_can_be_written_the_deadline_restart_goes_and_nothing_is_repor
 #[test]
 fn a_reason_the_state_never_held_is_read_from_the_boot_partition_at_the_next_start() {
     let mut board = trial_board();
+    board.slots.boot_node = Ok(reason_node(&board));
     board.baseline("a", "dev builtin\n");
     board.next_boot(1);
     let view = failing();
@@ -2437,7 +2523,7 @@ fn a_reason_the_state_never_held_is_read_from_the_boot_partition_at_the_next_sta
     );
     assert!(record.reason.contains("broken"), "{}", record.reason);
     assert!(
-        crate::boot::read_reason(&board.layout().boot).is_none(),
+        crate::boot::read_reason(&board.slots.boot_node).is_none(),
         "the copy is cleared once the trial is resolved"
     );
 }
@@ -2832,10 +2918,30 @@ fn check_config_names_the_bad_setting() {
         ("confirm_deadline_s", ConfigValue::Int(30)),
         ("trial_attempts", ConfigValue::Int(3)),
     ];
-    assert!(<SystemSlots as Lifecycle>::check_config(&Config::new(&full)).is_ok());
-    let listed = Config::new(&full).with_lists(&[("health", &["device:x", "file:/run/ok"])]);
+    // Every disk boot names its boot sources; the raw NAND form does not.
+    assert_eq!(check(&[]).unwrap_err().key, "boot_sources");
+    assert!(
+        check(&[
+            ("record", ConfigValue::Str("ubi")),
+            ("ubi", ConfigValue::Str("ubi0")),
+        ])
+        .is_ok()
+    );
+    let sourced = Config::new(&full)
+        .with_lists(&[("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"])]);
+    assert!(<SystemSlots as Lifecycle>::check_config(&sourced).is_ok());
+    let listed = Config::new(&full).with_lists(&[
+        ("health", &["device:x", "file:/run/ok"]),
+        ("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"]),
+    ]);
     assert!(<SystemSlots as Lifecycle>::check_config(&listed).is_ok());
-    assert!(check(&[]).is_ok());
+    let malformed = Config::new(&full).with_lists(&[("boot_sources", &["mmc0"])]);
+    assert_eq!(
+        <SystemSlots as Lifecycle>::check_config(&malformed)
+            .unwrap_err()
+            .key,
+        "boot_sources"
+    );
 
     let bogus = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();
     assert_eq!(bogus.key, "bogus");
@@ -2898,8 +3004,10 @@ fn check_config_names_the_bad_setting() {
         "trial_attempts"
     );
     let bad = <SystemSlots as Lifecycle>::check_config(
-        &Config::new(&[("record", ConfigValue::Str("tryboot"))])
-            .with_lists(&[("health", &["file:relative/path"])]),
+        &Config::new(&[("record", ConfigValue::Str("tryboot"))]).with_lists(&[
+            ("health", &["file:relative/path"]),
+            ("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"]),
+        ]),
     );
     assert_eq!(bad.unwrap_err().key, "health");
     let reboot = <SystemReboot as Lifecycle>::check_config(&Config::new(&[(

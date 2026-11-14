@@ -8,12 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use lemnos_slot_store::boot_raw::{BootRaw, Pointer, Trial};
 use lemnos_slot_store::bootcheck::sha256_hex;
+use lemnos_slot_store::firmware;
 use lemnos_slot_store::manifest::{BLOCK, Verity, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 
-use super::{BOOT_LOG, DATA_LOG, Env, boot};
+use super::{DATA_LOG, Env, boot};
 use crate::decide::MAX_FALLBACKS;
 use crate::ops::Ops;
 
@@ -28,6 +30,72 @@ impl Drop for Root {
 fn hash(id: &str) -> String {
     let digit = id.chars().last().unwrap();
     std::iter::repeat_n(digit, 64).collect()
+}
+
+/// The boot partition's raw files, in the tree: each pointer is its one sector under its 8.3 name,
+/// and the trial record is `slot attempts` under its visible name `trial.rec` (the generator's name,
+/// see `Kind::visible_name`). A missing pointer file refuses the
+/// open, as the real partition does.
+struct RawFake {
+    boot: PathBuf,
+}
+
+impl BootRaw for RawFake {
+    fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
+        let bytes = fs::read(self.boot.join(pointer_name(which))).map_err(|e| e.to_string())?;
+        let Ok(sector) = <[u8; 512]>::try_from(bytes) else {
+            return Ok(None);
+        };
+        Ok(firmware::pointer_slot(&sector))
+    }
+
+    fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String> {
+        let sector = firmware::pointer_sector(slot).ok_or("bad slot id")?;
+        fs::write(self.boot.join(pointer_name(which)), sector).map_err(|e| e.to_string())
+    }
+
+    fn trial(&mut self) -> Result<Option<Trial>, String> {
+        let text = match fs::read_to_string(self.boot.join(TRIAL_RECORD)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        // An empty record is no trial: what a cleared record holds.
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let (slot, attempts) = text.trim().split_once(' ').ok_or("torn trial record")?;
+        Ok(Some(Trial {
+            slot: slot.to_string(),
+            attempts: attempts.parse().map_err(|_| "bad attempts")?,
+        }))
+    }
+
+    fn set_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String> {
+        fs::write(self.boot.join(TRIAL_RECORD), format!("{slot} {attempts}"))
+            .map_err(|e| e.to_string())
+    }
+
+    fn clear_trial(&mut self) -> Result<(), String> {
+        fs::write(self.boot.join(TRIAL_RECORD), b"").map_err(|e| e.to_string())
+    }
+
+    fn reason(&mut self) -> Result<Option<String>, String> {
+        let text = fs::read_to_string(self.boot.join(REASON_RECORD)).map_err(|e| e.to_string())?;
+        Ok((!text.is_empty()).then_some(text))
+    }
+
+    fn set_reason(&mut self, reason: &str) -> Result<(), String> {
+        fs::write(self.boot.join(REASON_RECORD), reason).map_err(|e| e.to_string())
+    }
+}
+
+const TRIAL_RECORD: &str = "trial.rec";
+/// The reason record's visible name (the generator's `Kind::REASON`), pre-created on the image.
+const REASON_RECORD: &str = "reason.rec";
+
+fn pointer_name(which: Pointer) -> &'static str {
+    std::str::from_utf8(which.file_name()).unwrap()
 }
 
 /// What the fake was asked, and which calls it refuses (by prefix).
@@ -145,6 +213,24 @@ impl Ops for Fake {
         }
     }
 
+    fn open_boot(&self, _dev: &Path) -> Result<Box<dyn BootRaw>, String> {
+        let boot = self.root.join("boot");
+        for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
+            if !boot.join(pointer_name(which)).is_file() {
+                return Err(format!("{} is missing", which.name()));
+            }
+        }
+        // The records are pre-created on the image; nothing creates them at run time.
+        for record in [TRIAL_RECORD, REASON_RECORD] {
+            if !boot.join(record).is_file() {
+                return Err(format!(
+                    "{record} is missing: this image has no pre-created file for it"
+                ));
+            }
+        }
+        Ok(Box::new(RawFake { boot }))
+    }
+
     /// The boot partition's files are plain files in the tree here (the fake volume is no FAT).
     fn read_boot_file(&self, _dev: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
         match fs::read(self.root.join("boot").join(path)) {
@@ -168,6 +254,31 @@ struct Board {
 }
 
 impl Board {
+    /// The slot a pointer file names, `None` when it is torn or not a pointer.
+    fn pointer(&self, which: Pointer) -> Option<String> {
+        let bytes = fs::read(self.env.at(&format!("boot/{}", pointer_name(which)))).ok()?;
+        firmware::pointer_slot(&<[u8; 512]>::try_from(bytes).ok()?)
+    }
+
+    fn set_pointer(&self, which: Pointer, slot: &str) {
+        let sector = firmware::pointer_sector(slot).unwrap();
+        self.write(&format!("boot/{}", pointer_name(which)), &sector);
+    }
+
+    /// The pending trial, as the raw record holds it.
+    fn trial(&self) -> Option<(String, u8)> {
+        let text = fs::read_to_string(self.env.at(&format!("boot/{TRIAL_RECORD}"))).ok()?;
+        let (slot, attempts) = text.trim().split_once(' ')?;
+        Some((slot.to_string(), attempts.parse().ok()?))
+    }
+
+    fn set_trial(&self, slot: &str, attempts: u8) {
+        self.write(
+            &format!("boot/{TRIAL_RECORD}"),
+            format!("{slot} {attempts}").as_bytes(),
+        );
+    }
+
     fn new() -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -199,16 +310,43 @@ impl Board {
         mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
         board.write("dev/mmcblk0", &mbr);
         board.write("dev/mmcblk0p1", &[0u8; 2048]);
+        // The disk sits under the SD controller, whose device-tree node is `/soc/mmc@7e202000`; the
+        // chain states U-Boot's path of the controller (here the kernel's own path), which the
+        // command line's table maps to that controller.
+        board.write("sys/firmware/devicetree/base/soc/mmc@7e202000/.keep", b"");
+        board.write(
+            "proc/device-tree/chosen/lemnos,boot-source",
+            b"/soc/mmc@7e202000\0",
+        );
+        let controller = root.join("sys/devices/sd-host");
+        fs::create_dir_all(&controller).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("sys/firmware/devicetree/base/soc/mmc@7e202000"),
+            controller.join("of_node"),
+        )
+        .unwrap();
+        for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
+            let sector = firmware::pointer_sector("os-1").unwrap();
+            board.write(&format!("boot/{}", pointer_name(which)), &sector);
+        }
+        // The trial and reason records are pre-created, empty: no trial, no reason.
+        board.write(&format!("boot/{TRIAL_RECORD}"), b"");
+        board.write(&format!("boot/{REASON_RECORD}"), b"");
         board.write("dev/mmcblk0p2", &ext("lemnos-data", false));
+        fs::create_dir_all(root.join("sys/class/block")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../devices/sd-host/mmcblk0",
+            root.join("sys/class/block/mmcblk0"),
+        )
+        .unwrap();
         for n in 1..=2 {
             let name = format!("mmcblk0p{n}");
             board.write(
-                &format!("sys/devices/mmcblk0/{name}/partition"),
+                &format!("sys/devices/sd-host/mmcblk0/{name}/partition"),
                 format!("{n}\n").as_bytes(),
             );
-            fs::create_dir_all(root.join("sys/class/block")).unwrap();
             std::os::unix::fs::symlink(
-                format!("../../devices/mmcblk0/{name}"),
+                format!("../../devices/sd-host/mmcblk0/{name}"),
                 root.join("sys/class/block").join(&name),
             )
             .unwrap();
@@ -217,7 +355,7 @@ impl Board {
         board.write("proc/sys/kernel/osrelease", b"6.12.0-board\n");
         board.slot("os-1", 1);
         board.slot("os-2", 2);
-        board.write("boot/default.txt", b"os_prefix=slots/os-2/\n");
+        board.set_pointer(Pointer::Default, "os-2");
         board.write(
             "data/board/slots/state.env",
             b"DEFAULT=os-2\nPREVIOUS=os-1\nSTATE=confirmed\n",
@@ -256,7 +394,7 @@ impl Board {
     fn cmdline(&self, slot: &str, roothash: &str) {
         self.write(
             "proc/cmdline",
-            format!("console=tty1 rootwait os.slot={slot} os.roothash={roothash} panic=5\n")
+            format!("console=tty1 rootwait os.slot={slot} os.roothash={roothash} os.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n")
                 .as_bytes(),
         );
     }
@@ -341,7 +479,7 @@ impl Board {
             ubi::RECORD_VOLUME,
             b"default=os-2\ntrial=\ntrial_attempts=0\n",
         );
-        fs::remove_file(board.env.at("boot/default.txt")).unwrap();
+        fs::remove_file(board.env.at("boot/DEFAULT TXT")).unwrap();
         board.write(
             "proc/cmdline",
             format!("os.slot=os-2 os.roothash={}", hash("os-2")).as_bytes(),
@@ -373,7 +511,7 @@ impl Board {
 
     /// The board's default is untouched: slot-init never writes it.
     fn default_kept(&self) {
-        assert_eq!(self.read("boot/default.txt"), "os_prefix=slots/os-2/\n");
+        assert_eq!(self.pointer(Pointer::Default).as_deref(), Some("os-2"));
         assert_eq!(self.state().default, "os-2");
     }
 }
@@ -395,7 +533,10 @@ fn the_default_slot_boots_through_dm_verity() {
     let calls = fake.calls();
     let at = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
     assert!(calls.contains(&"mount ext4 noatime,errors=remount-ro dev/mmcblk0p2 data".to_string()));
-    assert!(calls.contains(&"mount vfat ro dev/mmcblk0p1 boot".to_string()));
+    assert!(
+        !calls.iter().any(|c| c.starts_with("mount vfat")),
+        "the boot partition was mounted"
+    );
     let verity = format!(
         "verity data/slots/os-2.erofs slot 0 8 verity 1 loop loop 4096 4096 1 1 sha256 {} {}",
         hash("os-2"),
@@ -449,7 +590,7 @@ fn two_partitions_labelled_lemnos_data_are_refused_at_once_by_name() {
     board.write("dev/mmcblk0p1", &ext("lemnos-data", false));
     let (fake, why) = board.boot(&[]);
     assert!(
-        why.contains("2 partitions are labelled lemnos-data"),
+        why.contains("2 partitions on mmcblk0 are labelled lemnos-data"),
         "{why}"
     );
     assert!(
@@ -515,9 +656,9 @@ fn assert_fell_back(board: &Board, fake: &Fake, reason: &str) {
         "{:?}",
         meta.get("FAIL_REASON")
     );
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(board.trial().map(|t| t.0).as_deref(), Some("os-1"));
     // The trial's attempts are the board's: the default's kernel takes one before the trial boots.
-    assert_eq!(board.read("boot/trial-attempts"), "3\n");
+    assert_eq!(board.trial().map(|t| t.1), Some(3));
     assert_eq!(board.read("data/board/slots/fallbacks"), "1\n");
     assert_eq!(board.state().trial, "os-1");
     // A plain restart: the loader's pass takes the attempt, then the trial boots.
@@ -546,11 +687,10 @@ fn a_verity_failure_is_recorded_and_the_board_falls_back() {
         board.read(&format!("data/board/slots/{DATA_LOG}")),
         "the kernel's log\n"
     );
-    assert_eq!(
-        board.read(&format!("boot/{BOOT_LOG}")),
-        "the kernel's log\n"
+    assert!(
+        !fake.called("mount vfat rw"),
+        "the boot partition was mounted read-write"
     );
-    assert!(fake.called("mount vfat rw dev/mmcblk0p1 boot"));
 }
 
 #[test]
@@ -730,7 +870,7 @@ fn rule_1_a_failed_trial_restarts_plainly_into_the_default() {
     );
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(fake.last(), "restart");
-    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(board.trial(), None);
     assert_eq!(board.meta("os-2").get("FAILED"), "yes");
     assert!(!fake.called("sleep"));
     board.default_kept();
@@ -745,7 +885,7 @@ fn rule_2_falling_back_stops_after_three_in_a_row() {
     );
     let (fake, why) = board.boot(&["verity "]);
     assert!(why.contains("in a row"), "{why}");
-    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(board.trial(), None);
     assert!(fake.called("sleep 30"));
     assert_eq!(fake.last(), "restart");
     board.default_kept();
@@ -760,7 +900,7 @@ fn rule_3_a_previous_slot_that_failed_gives_way_to_a_good_one() {
         b"GOOD=yes\nSEQ=1\nFAILED=yes\n",
     );
     let (fake, _) = board.boot(&["verity "]);
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-3/\n");
+    assert_eq!(board.trial().map(|t| t.0).as_deref(), Some("os-3"));
     assert_eq!(fake.last(), "restart");
 }
 
@@ -770,7 +910,7 @@ fn rule_3_only_a_slot_with_boot_files_on_the_boot_partition_is_tried() {
     fs::remove_dir_all(board.env.at("boot/slots/os-1")).unwrap();
     let (fake, why) = board.boot(&["verity "]);
     assert!(why.contains("no other slot"), "{why}");
-    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(board.trial(), None);
     assert_eq!(fake.last(), "restart");
 }
 
@@ -781,93 +921,10 @@ fn rule_4_a_board_with_one_slot_waits_and_restarts_into_it() {
     board.write("data/board/slots/state.env", b"DEFAULT=os-2\n");
     let (fake, why) = board.boot(&["verity "]);
     assert!(why.contains("no other slot"), "{why}");
-    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(board.trial(), None);
     assert!(fake.called("sleep 30"));
     assert_eq!(fake.last(), "restart");
     board.default_kept();
-}
-
-#[test]
-fn a_uboot_board_falls_back_through_a_trial_with_attempts() {
-    let board = Board::new();
-    board.write(
-        "boot/boot-record.env",
-        b"default=os-2\ntrial=\ntrial_attempts=0\n",
-    );
-    let (fake, _) = board.boot(&["verity "]);
-    assert_eq!(
-        board.read("boot/boot-record.env"),
-        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
-    );
-    assert_eq!(board.read("boot/trial.txt"), "");
-    assert_eq!(fake.last(), "restart");
-}
-
-#[test]
-fn a_file_record_trial_takes_one_attempt_and_keeps_the_trial() {
-    let board = Board::new();
-    board.write(
-        "boot/boot-record",
-        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
-    );
-    let (fake, why) = board.boot(&[]);
-    assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert_eq!(
-        board.read("boot/boot-record"),
-        "default=os-2\ntrial=os-1\ntrial_attempts=1\n"
-    );
-    assert!(fake.called("verity data/slots/os-1.erofs"));
-    assert_eq!(board.read("data/board/slots/trial-init"), "os-1\n");
-    assert_eq!(board.read("newroot/data/board/slots/booted"), "os-1\n");
-}
-
-#[test]
-fn a_file_record_trial_with_no_attempts_left_is_cleared_and_the_default_boots() {
-    let board = Board::new();
-    board.write(
-        "boot/boot-record",
-        b"default=os-2\ntrial=os-1\ntrial_attempts=0\n",
-    );
-    let (fake, why) = board.boot(&[]);
-    assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert_eq!(board.read("boot/boot-record"), "default=os-2\n");
-    assert!(!fake.called("verity data/slots/os-1.erofs"));
-    assert!(fake.called("verity data/slots/os-2.erofs"));
-    assert!(!board.env.at("data/board/slots/trial-init").exists());
-}
-
-#[test]
-fn a_file_record_trial_takes_its_root_hash_from_its_own_command_line() {
-    let board = Board::new();
-    board.write(
-        "boot/boot-record",
-        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
-    );
-    board.write(
-        "boot/slots/os-1/cmdline.txt",
-        b"os.slot=os-1 os.roothash=bad\n",
-    );
-    let (fake, _) = board.boot(&[]);
-    assert!(!fake.called("verity "));
-    assert!(board.meta("os-1").get("FAIL_REASON").contains("root hash"));
-    // A failed trial keeps its attempts: the next boot takes one more.
-    assert_eq!(
-        board.read("boot/boot-record"),
-        "default=os-2\ntrial=os-1\ntrial_attempts=1\n"
-    );
-    assert_eq!(fake.last(), "restart");
-}
-
-#[test]
-fn a_file_record_falls_back_through_its_trial_line() {
-    let board = Board::new();
-    board.write("boot/boot-record", b"default=os-2\n");
-    let (fake, _) = board.boot(&["verity "]);
-    assert_eq!(
-        board.read("boot/boot-record"),
-        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
-    );
-    assert_eq!(fake.last(), "restart");
 }
 
 #[test]
@@ -935,10 +992,9 @@ fn on_nand_a_verity_failure_falls_back_and_the_default_stays() {
         "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
     );
     assert!(board.meta("os-2").get("FAIL_REASON").contains("dm-verity"));
-    assert!(fake.called("mount ubifs rw ubi0:boot boot"));
-    assert_eq!(
-        board.read(&format!("boot/{BOOT_LOG}")),
-        "the kernel's log\n"
+    assert!(
+        !fake.called("mount ubifs rw"),
+        "the boot volume was mounted read-write"
     );
     assert_eq!(fake.last(), "restart");
 }
@@ -965,15 +1021,15 @@ fn on_nand_a_failed_trial_restarts_plainly_and_leaves_the_record() {
 #[test]
 fn a_pending_tryboot_trial_takes_an_attempt_and_restarts_into_it_before_anything_else() {
     let board = Board::new();
-    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
-    board.write("boot/trial-attempts", b"2\n");
+    board.set_trial("os-1", 2);
     let (fake, why) = board.boot(&[]);
     assert!(why.contains("restarting into trial os-1"), "{why}");
-    assert_eq!(board.read("boot/trial-attempts"), "1\n");
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(board.trial().map(|t| t.1), Some(1));
+    assert_eq!(board.trial().map(|t| t.0).as_deref(), Some("os-1"));
     assert_eq!(fake.last(), "restart 0 tryboot");
-    // Only the boot partition was mounted for it: the data partition came later, if at all.
-    assert!(fake.called("mount vfat rw dev/mmcblk0p1 boot"));
+    // The boot partition was not mounted: the trial record was read and written raw, and the data
+    // partition came later, if at all.
+    assert!(!fake.called("mount vfat"));
     assert!(!fake.called("mount ext4"));
     assert!(!fake.called("verity "));
 }
@@ -985,35 +1041,38 @@ fn a_tryboot_trial_boot_takes_nothing_more() {
         lemnos_slot_store::records::tryboot::TRIAL_FLAG,
         &[0, 0, 0, 1],
     );
-    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
-    board.write("boot/trial-attempts", b"2\n");
+    board.set_trial("os-1", 2);
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert_eq!(board.trial().map(|t| t.1), Some(2));
     assert!(!fake.called("restart"));
 }
 
 #[test]
 fn a_tryboot_trial_with_no_attempts_left_is_removed_and_the_default_boots() {
     let board = Board::new();
-    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
-    board.write("boot/trial-attempts", b"0\n");
+    board.set_trial("os-1", 0);
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert!(!board.env.at("boot/trial.txt").exists());
-    assert!(!board.env.at("boot/trial-attempts").exists());
+    assert_eq!(board.trial(), None);
     assert!(!fake.called("restart"));
     assert!(fake.called("verity data/slots/os-2.erofs"));
 }
 
 #[test]
-fn a_tryboot_trial_without_a_counter_is_left_as_it_always_was() {
+fn a_torn_trial_record_boots_the_default_and_never_restarts_into_a_trial() {
+    // A record without its attempts is not a trial: the default boots, and nothing restarts.
     let board = Board::new();
-    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    board.write(&format!("boot/{TRIAL_RECORD}"), b"os-1");
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "", "{:?}", fake.logs.borrow());
     assert!(!fake.called("restart"));
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("the trial can't be read"))
+    );
 }
 
 #[test]
@@ -1021,7 +1080,7 @@ fn a_fallback_trial_gets_the_attempts_the_board_was_given() {
     let board = Board::new();
     board.write("data/board/slots/settings.env", b"TRIAL_ATTEMPTS=2\n");
     let (fake, _) = board.boot(&["verity "]);
-    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert_eq!(board.trial().map(|t| t.1), Some(2));
     assert_eq!(fake.last(), "restart");
 }
 
@@ -1070,7 +1129,13 @@ fn each_missing_kernel_piece_is_named_and_no_slot_is_failed_or_spent() {
         // The default slot can't open either: the boot waits, keeps the log, and restarts.
         assert!(fake.called("sleep 30"), "{option}: {:?}", fake.calls());
         assert_eq!(fake.last(), "restart", "{option}");
-        assert!(board.env.at("boot/slot-init.log").exists(), "{option}");
+        assert!(
+            fake.logs
+                .borrow()
+                .iter()
+                .any(|line| line.starts_with("slot-init: no slot can start: ")),
+            "{option}"
+        );
     }
 }
 
@@ -1081,7 +1146,7 @@ fn a_kernel_without_a_storage_driver_names_it_when_no_data_partition_answers() {
     fs::create_dir_all(board.env.sys.join("class/block")).unwrap();
     let (fake, why) = board.boot(&[]);
     assert!(
-        why.starts_with("no slot can start: no data partition"),
+        why.starts_with("no slot can start: the kernel lacks CONFIG_MMC_BLOCK"),
         "{why}"
     );
     assert!(
@@ -1102,17 +1167,17 @@ fn a_tryboot_trial_held_for_a_kernel_gap_gives_back_its_attempt_and_takes_no_mor
         lemnos_slot_store::records::tryboot::TRIAL_FLAG,
         &[0, 0, 0, 1],
     );
-    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
-    board.write("boot/trial-attempts", b"1\n");
+    board.set_pointer(Pointer::Trial, "os-1");
+    board.set_trial("os-1", 1);
     let (fake, why) = board.boot(&[]);
     assert!(why.contains("the kernel lacks CONFIG_DM_VERITY"), "{why}");
     // The trial's boot gives back the attempt the default's boot took for it, and restarts plainly.
     assert_eq!(fake.last(), "restart");
-    assert_eq!(board.read("boot/trial-attempts"), "2\n");
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(board.trial(), Some(("os-1".into(), 2)));
+    assert_eq!(board.pointer(Pointer::Trial).as_deref(), Some("os-1"));
     assert!(
         board
-            .read("boot/trial-reason")
+            .read("boot/reason.rec")
             .contains("the kernel lacks CONFIG_DM_VERITY")
     );
     assert!(!board.meta("os-1").failed());
@@ -1132,7 +1197,7 @@ fn a_tryboot_trial_held_for_a_kernel_gap_gives_back_its_attempt_and_takes_no_mor
     .unwrap();
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert_eq!(board.trial(), Some(("os-1".into(), 2)));
     assert!(!fake.called("restart 0 tryboot"));
     assert!(fake.called("verity data/slots/os-2.erofs"));
 }
@@ -1177,10 +1242,12 @@ fn a_uboot_trial_held_for_a_kernel_gap_is_withdrawn_with_its_attempt_given_back(
         lemnos_slot_store::records::uboot::Record::parse(&board.read("boot/boot-record.env"));
     // U-Boot takes an attempt on every trial start, so the trial is withdrawn; the attempt given
     // back is counted up to the board's attempts.
-    assert_eq!((record.trial.as_str(), record.attempts), ("", 3));
+    // Run time writes nothing to the U-Boot record (no pre-created file): the trial stays, and the
+    // reason goes to the kernel log.
+    assert_eq!((record.trial.as_str(), record.attempts), ("os-1", 2));
     assert!(
         board
-            .read("boot/trial-reason")
+            .read("boot/reason.rec")
             .contains("the kernel lacks CONFIG_DM_VERITY")
     );
 }
@@ -1215,15 +1282,20 @@ fn an_untouched_slot_passes_the_every_boot_check() {
 
 #[test]
 fn default_boot_files_that_do_not_match_fall_back_to_previous() {
-    // The default's files changed: it is not started, the previous is put on trial, and the
-    // default itself is not rewritten (the fall-back is a trial, as for any failed slot).
+    // The default's files changed: it is not started, and the default pointer is moved to the
+    // previous by one raw sector write, so the next boot starts the previous directly.
     let board = Board::new();
     append_argument(&board, "os-2");
     let (fake, _) = board.boot(&[]);
     assert!(!fake.called("switch_root"));
-    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(
+        board.trial(),
+        None,
+        "no trial: the default pointer moved instead"
+    );
     assert_eq!(board.meta("os-2").get("FAILED"), "yes");
-    assert_eq!(board.read("boot/default.txt"), "os_prefix=slots/os-2/\n");
+    assert_eq!(board.pointer(Pointer::Default).as_deref(), Some("os-1"));
+    assert_eq!(board.state().default, "os-1");
     assert_eq!(fake.last(), "restart");
 }
 
@@ -1238,7 +1310,7 @@ fn trial_boot_files_that_do_not_match_fail_the_trial() {
     let (fake, _) = board.boot(&[]);
     assert!(!fake.called("switch_root"));
     assert_eq!(board.meta("os-2").get("FAILED"), "yes");
-    assert_eq!(board.read("boot/trial.txt"), "");
+    assert_eq!(board.trial(), None);
     assert_eq!(fake.last(), "restart");
 }
 
@@ -1256,6 +1328,196 @@ fn default_and_previous_both_bad_stay_and_report() {
     let (fake, why) = board.boot(&[]);
     assert!(!fake.called("switch_root"), "{:?}", fake.calls());
     assert!(why.contains("don't match its manifest"), "{why}");
-    assert!(why.contains("in a row"), "{why}");
+    assert!(why.contains("doesn't match its manifest either"), "{why}");
     assert!(fake.called("sleep 30"));
+}
+
+#[test]
+fn a_file_record_trial_is_not_started_when_its_attempt_cannot_be_written() {
+    // The `file` record's trial needs its attempt written back before it boots, and this image has
+    // no pre-created file to write it to: the trial is refused by name, the default boots, and the
+    // record is left as it was.
+    let board = Board::new();
+    board.write(
+        "boot/boot-record",
+        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
+    );
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(fake.called("switch_root"));
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("boot-record is not written at run time"))
+    );
+    assert_eq!(
+        board.read("boot/boot-record"),
+        "default=os-2\ntrial=os-1\ntrial_attempts=2\n"
+    );
+    assert!(!fake.called("restart"));
+}
+
+#[test]
+fn a_uboot_fallback_is_refused_by_name_and_the_record_is_left_alone() {
+    // A U-Boot board's failed default would fall back to a trial, whose attempts are in the boot
+    // record: that file is not written at run time, so the trial is refused and the board waits.
+    let board = Board::new();
+    board.write(
+        "boot/boot-record.env",
+        b"default=os-2\ntrial=\ntrial_attempts=0\n",
+    );
+    append_argument(&board, "os-2");
+    let (fake, why) = board.boot(&[]);
+    assert!(!fake.called("switch_root"), "{:?}", fake.calls());
+    assert!(
+        why.contains("boot-record.env is not written at run time"),
+        "{why}"
+    );
+    assert_eq!(
+        board.read("boot/boot-record.env"),
+        "default=os-2\ntrial=\ntrial_attempts=0\n"
+    );
+}
+
+#[test]
+fn no_run_time_path_mounts_the_boot_partition_read_write() {
+    // Grep proof: slot-init's run-time code never mounts the boot partition for writing, and its
+    // only mount of it is the read-only one for raw NAND's UBIFS volume, in `with_boot_files`.
+    let src = include_str!("../boot.rs");
+    assert_eq!(
+        src.matches("mount_boot(true)").count(),
+        0,
+        "a read-write boot mount"
+    );
+    assert_eq!(
+        src.matches("mount_boot(false)").count(),
+        1,
+        "a boot mount outside the NAND read"
+    );
+    assert!(src.contains("self.mount_boot(false)?;"));
+}
+
+/// Every file under the slots' state directory, with its text: the slot records a boot may change.
+fn slot_records(board: &Board) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut dirs = vec![board.env.at("data/board/slots")];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                out.push((
+                    path.display().to_string(),
+                    fs::read_to_string(&path).unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A board refusal of the boot disk: the boot stops in the rescue (a restart after the rescue
+/// wait), no slot record changes, and no slot's failure is counted.
+fn assert_board_refusal(board: &Board, expect: &str) {
+    let before = slot_records(board);
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains(expect), "{why}");
+    assert!(
+        fake.called("sleep 30"),
+        "the rescue waits: {:?}",
+        fake.calls()
+    );
+    assert_eq!(fake.last(), "restart");
+    assert!(
+        !fake.called("mount ext4"),
+        "no data partition is mounted: {:?}",
+        fake.calls()
+    );
+    assert_eq!(
+        slot_records(board),
+        before,
+        "a board refusal changes no slot record"
+    );
+    assert_eq!(
+        board.meta("os-2").get("FAILURES"),
+        "",
+        "the default is not charged with it"
+    );
+    assert_eq!(
+        board.meta("os-1").get("FAILURES"),
+        "",
+        "the previous slot is not charged with it"
+    );
+}
+
+#[test]
+fn a_board_that_states_no_boot_source_is_refused_without_touching_a_slot() {
+    let board = Board::new();
+    fs::remove_file(board.env.at("proc/device-tree/chosen/lemnos,boot-source")).unwrap();
+    assert_board_refusal(&board, "the boot chain states no boot source");
+}
+
+#[test]
+fn a_source_the_table_does_not_list_is_refused_without_touching_a_slot() {
+    let board = Board::new();
+    board.write("proc/device-tree/chosen/lemnos,boot-source", b"/usb@1\0");
+    assert_board_refusal(
+        &board,
+        "booted from /usb@1, which this board's boot_sources does not list (it lists: /soc/mmc@7e202000)",
+    );
+}
+
+#[test]
+fn no_disk_under_the_named_controller_is_refused_without_touching_a_slot() {
+    let board = Board::new();
+    fs::remove_file(board.env.at("sys/devices/sd-host/of_node")).unwrap();
+    assert_board_refusal(&board, "no whole disk sits under /soc/mmc@7e202000");
+}
+
+#[test]
+fn two_disks_under_the_named_controller_are_refused_without_touching_a_slot() {
+    let board = Board::new();
+    board.write("sys/devices/sd-host/mmcblk1/partition-none", b"");
+    std::os::unix::fs::symlink(
+        "../../devices/sd-host/mmcblk1",
+        board.env.at("sys/class/block/mmcblk1"),
+    )
+    .unwrap();
+    assert_board_refusal(
+        &board,
+        "2 whole disks sit under /soc/mmc@7e202000 (mmcblk0, mmcblk1)",
+    );
+}
+
+#[test]
+fn a_foreign_disk_with_the_same_label_on_another_controller_is_ignored() {
+    // A second card with a data partition of the same label, on the USB controller: the board
+    // boots from its SD card and mounts that card's data, and logs the choice.
+    let board = Board::new();
+    let usb_node = board.env.at("sys/firmware/devicetree/base/axi/usb@1");
+    fs::create_dir_all(&usb_node).unwrap();
+    board.write("sys/devices/usb-host/.keep", b"");
+    std::os::unix::fs::symlink(&usb_node, board.env.at("sys/devices/usb-host/of_node")).unwrap();
+    board.write("sys/devices/usb-host/sda/sda1/partition", b"1\n");
+    board.write("dev/sda1", &ext("lemnos-data", false));
+    std::os::unix::fs::symlink(
+        "../../devices/usb-host/sda",
+        board.env.at("sys/class/block/sda"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../../devices/usb-host/sda/sda1",
+        board.env.at("sys/class/block/sda1"),
+    )
+    .unwrap();
+    let (fake, why) = board.boot(&[]);
+    assert!(
+        fake.called("mount ext4 noatime,errors=remount-ro dev/mmcblk0p2 data"),
+        "{why} {:?}",
+        fake.calls()
+    );
+    assert!(!fake.called("mount ext4 noatime,errors=remount-ro dev/sda1"));
 }

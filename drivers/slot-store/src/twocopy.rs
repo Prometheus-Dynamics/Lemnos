@@ -340,6 +340,12 @@ impl FileSectors {
     }
 }
 
+impl crate::bootfat::ReadAt for FileSectors {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.file.read_exact_at(buf, self.base + offset)
+    }
+}
+
 impl Sectors for FileSectors {
     fn read(&mut self, lba: u64, buf: &mut Sector) -> io::Result<()> {
         self.file
