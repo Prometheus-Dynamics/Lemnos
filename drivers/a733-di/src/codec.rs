@@ -201,7 +201,11 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Block for DiBlock<D, F> {
         }
         // Each frame: its reference's buffer by handle, its item's layout, checked against
         // the dma-buf's real size.
-        let mut frames = [None; MAX_FRAMES];
+        // The handles are pinned first, so the frames built from them below borrow descriptors
+        // that live as long as the job does.
+        let mut pins: [Option<lemnos_hal::blocks::BufferHandle<'_>>; MAX_FRAMES] =
+            std::array::from_fn(|_| None);
+        let mut staged = [None; MAX_FRAMES];
         for (at, (reference, (tag, bytes))) in work.refs().zip(items).enumerate() {
             if tag != TAG_FRAME
                 || bytes.len() != FRAME_BYTES
@@ -225,14 +229,25 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Block for DiBlock<D, F> {
                 chroma_offset: u64::from(field(16)),
                 chroma2_offset: u64::from(field(20)),
             };
-            let (width, height) = (config.settings().size.width, config.settings().size.height);
-            let Ok(frame) = Frame::new(handle.fd(), format, width, height, layout) else {
+            let Some(slot) = pins.get_mut(at) else {
                 return Start::Refused;
             };
-            let Some(slot) = frames.get_mut(at) else {
+            *slot = Some(handle);
+            let Some(staged_slot) = staged.get_mut(at) else {
                 return Start::Refused;
             };
-            *slot = Some(frame);
+            *staged_slot = Some((format, layout));
+        }
+        let (width, height) = (config.settings().size.width, config.settings().size.height);
+        let mut frames = [None; MAX_FRAMES];
+        for (at, (pin, meta)) in pins.iter().zip(staged.iter()).enumerate() {
+            let (Some(handle), Some((format, layout))) = (pin, meta) else {
+                continue;
+            };
+            let Ok(frame) = Frame::new(handle.fd(), *format, width, height, *layout) else {
+                return Start::Refused;
+            };
+            frames[at] = Some(frame);
         }
         if frames[..count].iter().any(Option::is_none) {
             return Start::Refused;

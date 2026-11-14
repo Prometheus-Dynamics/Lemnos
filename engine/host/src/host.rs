@@ -2760,6 +2760,29 @@ impl Host {
         Some(self.inner.slot(device)?.entry?.manifest)
     }
 
+    /// Each stream the board declares for `device`, with the bytes it holds on standby
+    /// (`buffers * buffer_bytes` while memory waits for a consumer, else 0) and the bytes a driver's
+    /// handle still holds open after the last consumer left (0 when none). Empty for an unknown
+    /// device.
+    #[must_use]
+    pub fn stream_standby(&self, device: u32) -> Vec<(String, u64, u64)> {
+        let Some(slot) = self.inner.slot(device) else {
+            return Vec::new();
+        };
+        slot.spec
+            .streams
+            .keys()
+            .map(|name| {
+                let (standby, held) = self
+                    .inner
+                    .streams
+                    .stats(device, name)
+                    .map_or((0, 0), |stats| (stats.standby_bytes, stats.held_by_driver));
+                (name.clone(), standby, held)
+            })
+            .collect()
+    }
+
     /// Asks a running device to describe itself. The ask takes its turn on the device's lane like
     /// a call does: while the driver is in a tick or another call it waits, up to the call
     /// deadline, and is never answered `BUSY` for that. A driver that doesn't come back in time

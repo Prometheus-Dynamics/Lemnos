@@ -75,7 +75,11 @@ A stream's memory is made for each consumer and goes with it, so a consumer neve
 one before it left. That leaves hardware with nothing to fill while nobody is attached, and a
 consumer that attaches waits for the next whole frame.
 
-`standby = true` changes that. While no consumer is attached, the daemon makes the stream's
+With the default, `standby = false`, the last consumer's detach lets go of every descriptor of its memory,
+the producer's borrowed handles included: the producer's own copy of them is let go at its next call
+(one per frame, so within a frame), and the next attach makes fresh memory. Nothing is held for a
+reattach. `standby = true` changes that. It costs `buffers * buffer_bytes` bytes for as long as no
+consumer is attached. While no consumer is attached, the daemon makes the stream's
 memory and the driver fills it as if one were. The newest frame is kept, and the rest go back to
 be filled again. A consumer that attaches takes that memory over, nothing copied, and the kept
 frame is the first it reads. When it leaves, its memory goes with it and fresh memory is made for

@@ -7,7 +7,7 @@ use lemnos_contract_codec_block::work::{Builder, Work};
 use lemnos_contract_codec_block::{
     BufferRef, COMPLETION_BYTES, CodecBlock, Completion, DATA_OFFSET, JOB_BYTES, Job, JobStatus,
 };
-use lemnos_core::{Decode, Encode, Health, Lifecycle, Reader, Writer};
+use lemnos_core::{CallerId, Decode, Encode, Health, Lifecycle, Reader, Writer};
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_codec_jobs::{Block, Buffers, POLL_NS, Server, Start};
 use lemnos_hal::mock::MockStream;
@@ -770,4 +770,58 @@ fn check_config_refuses_an_empty_device_and_a_timeout_out_of_range() {
     assert_eq!(refusal(&slow).unwrap().key, "timeout_ms");
     let fast = [("device", Str("/dev/video10")), ("timeout_ms", Int(1))];
     assert_eq!(refusal(&fast), None);
+}
+
+/// How many descriptors this process holds on the memfds with these inodes. Counts only the
+/// stream's own memfds, so another test running alongside does not change the answer.
+fn held_of(inodes: &[u64]) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::metadata(entry.unwrap().path()).ok())
+        .filter(|meta| inodes.contains(&meta.ino()))
+        .count()
+}
+
+/// A job that completes on the real host leaves its stream holding nothing once the caller has
+/// detached, with no driver tick in between: the driver's handles went with the job.
+#[test]
+fn a_finished_job_leaves_its_stream_holding_nothing_once_the_caller_detaches() {
+    let host = host(&board("nothing", "memory = \"dma-buf\"\n"));
+    let mock = Mock::new(true);
+    let jobs = Box::new(host.stream_producer(0, "jobs").unwrap());
+    let mut driver = M2mCodec::on(
+        M2mCodecNeeds {
+            jobs: lemnos_core::Held::boxed(jobs),
+        },
+        Box::new(block_on(&mock)),
+    );
+    let mut name = [0u8; 48];
+    CodecBlock::block(&mut driver, &mut name).unwrap();
+    let mut caller = Caller::attach(&host, 0, "jobs", 1);
+    let mut now = driver.tick(1).unwrap();
+    caller.fill(2, 0, &[0xb5; 100]);
+    let setup = usual_setup();
+    let stamp = 40_000_000u64.to_le_bytes();
+    let items: [(u32, &[u8]); 2] = [(TAG_SETUP, &setup), (TAG_STAMP, &stamp)];
+    caller.post(7, 0, 1, &[source(2, 0, 100), picture(0, 3)], &items);
+    now = driver.tick(now).unwrap();
+    let (identity, record, _) = caller.completion().unwrap();
+    assert_eq!((identity, record.status), (7, JobStatus::Done));
+    let _ = now;
+    let inodes = caller.inodes();
+    assert!(!inodes.is_empty(), "the stream's buffers are dma-bufs");
+    drop(caller);
+    host.stream_detach(0, "jobs", CallerId(1)).unwrap();
+    let held = held_of(&inodes);
+    assert_eq!(
+        held, 0,
+        "driver stream jobs still holds {held} of its dma-bufs after its caller detached, with no job running"
+    );
+    let stats = host.stream_stats(0, "jobs").unwrap();
+    assert_eq!(
+        (stats.standby_bytes, stats.held_by_driver),
+        (0, 0),
+        "{stats:?}"
+    );
 }

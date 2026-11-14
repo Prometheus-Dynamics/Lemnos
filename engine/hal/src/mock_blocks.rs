@@ -1789,10 +1789,10 @@ mod tests {
         // Two at once, as a block with an input and an output needs.
         let a = stream.buffer_handle(first).unwrap().unwrap();
         let b = stream.buffer_handle(second).unwrap().unwrap();
-        assert_eq!(through(a).metadata().unwrap().len(), 8);
-        assert_eq!(through(b).metadata().unwrap().len(), 16);
+        assert_eq!(through(a.clone()).metadata().unwrap().len(), 8);
+        assert_eq!(through(b.clone()).metadata().unwrap().len(), 16);
         // What hardware writes through the handle is what the consumer and `read` see.
-        through(a).write_all_at(&[1, 2, 3], 5).unwrap();
+        through(a.clone()).write_all_at(&[1, 2, 3], 5).unwrap();
         assert_eq!(consumer.contents(first), [0, 0, 0, 0, 0, 1, 2, 3]);
         let mut out = [0; 3];
         assert_eq!(stream.read(first, 5, &mut out), Ok(true));

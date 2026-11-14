@@ -143,6 +143,15 @@ pub struct StreamStats {
     pub kept: u32,
     /// Whether memory is waiting for the next consumer, on a stream kept on standby.
     pub standby: bool,
+    /// Bytes of memory held for the next consumer while no consumer is attached, on a stream kept
+    /// on standby: `buffers * buffer_bytes` while memory waits, 0 otherwise. The ring, job and ack
+    /// pages (a few pages of fixed size) are not counted.
+    pub standby_bytes: u64,
+    /// Bytes of released memory that a driver's handle still holds open after the last consumer
+    /// left: `buffers * buffer_bytes` for each attachment whose handle is alive, 0 otherwise. A
+    /// handle keeps the whole attachment's dma-bufs open, so this is what a driver that caches a
+    /// handle past its job costs.
+    pub held_by_driver: u64,
 }
 
 /// What a consumer gets when it attaches: the descriptors of the stream, in the order of

@@ -328,7 +328,7 @@ impl Pump {
         // real size, asked of the kernel, must hold it. A stream whose buffers are too small
         // is the board file's mistake, not the node's: counted, and nothing is queued.
         let queued = {
-            let mut planes: [Option<BufferHandle<'_>>; MAX_PLANES] = [None; MAX_PLANES];
+            let mut planes: [Option<BufferHandle<'_>>; MAX_PLANES] = std::array::from_fn(|_| None);
             let mut found = Found::All;
             for (plane, (slot, need)) in planes
                 .iter_mut()
@@ -350,9 +350,10 @@ impl Pump {
                     }
                 }
             }
-            match (found, planes[0]) {
+            match (found, planes[0].clone()) {
                 (Found::All, Some(first)) => {
-                    let mut handles = [first; MAX_PLANES];
+                    let mut handles: [BufferHandle<'_>; MAX_PLANES] =
+                        std::array::from_fn(|_| first.clone());
                     for (into, from) in handles.iter_mut().zip(planes) {
                         if let Some(handle) = from {
                             *into = handle;
@@ -464,5 +465,158 @@ impl Pump {
 impl Default for Pump {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The direct-import path through `queue_handles`, end to end over real memfds.
+#[cfg(test)]
+mod handle_tests {
+    use std::fs;
+    use std::os::fd::OwnedFd;
+
+    use lemnos_core::{Result, Status};
+    use lemnos_hal::blocks::BufferHandle;
+    use lemnos_hal::mock::MockStream;
+    use lemnos_linux_sys::dma_buf::sealed_memfd;
+    use lemnos_v4l2::FourCc;
+
+    use super::{Mode, Pump};
+    use crate::hw::{Frame, Granted, Graph, Hardware, MAX_PLANES, Wanted};
+
+    /// How many descriptors this process holds on the memfds with these inodes. Counts only the
+    /// stream's own memfds, so another test running alongside does not change the answer.
+    fn held_of(inodes: &[u64]) -> usize {
+        use std::os::unix::fs::MetadataExt;
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::metadata(entry.unwrap().path()).ok())
+            .filter(|meta| inodes.contains(&meta.ino()))
+            .count()
+    }
+
+    /// A node that imports dma-bufs: a queued slot comes back filled on the next dequeue. It keeps
+    /// no handle; the `BufferHandle`s it is given are used within the call and go.
+    #[derive(Default)]
+    struct Importer {
+        queued: Vec<u32>,
+        sequence: u32,
+        imports: u32,
+        dequeued: u32,
+    }
+
+    impl Hardware for Importer {
+        fn open(&mut self, wanted: &Wanted) -> Result<Granted> {
+            let mut plane_sizes = [0u32; MAX_PLANES];
+            plane_sizes[0] = wanted.size;
+            Ok(Granted {
+                fourcc: wanted.fourcc,
+                width: wanted.width,
+                height: wanted.height,
+                stride: wanted.stride,
+                size: wanted.size,
+                planes: 1,
+                plane_sizes,
+            })
+        }
+        fn stream_on(&mut self, _buffers: u32) -> Result<()> {
+            Err(Status::NOT_SUPPORTED)
+        }
+        fn stream_on_importing(&mut self, _slots: u32) -> Result<()> {
+            Ok(())
+        }
+        fn queue_handles(&mut self, index: u32, planes: &[BufferHandle<'_>]) -> Result<()> {
+            assert_eq!(planes.len(), 1);
+            self.imports += 1;
+            self.queued.push(index);
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<()> {
+            self.queued.clear();
+            Ok(())
+        }
+        fn dequeue(&mut self) -> Result<Option<Frame>> {
+            if self.queued.is_empty() {
+                return Ok(None);
+            }
+            let index = self.queued.remove(0);
+            self.dequeued += 1;
+            self.sequence += 1;
+            Ok(Some(Frame {
+                index,
+                sequence: self.sequence,
+                timestamp_ns: 500 + u64::from(self.sequence),
+                bad: false,
+                planes: 1,
+                bytes: 16,
+            }))
+        }
+        fn payload(&self, _frame: &Frame, _plane: usize) -> Result<&[u8]> {
+            Err(Status::NOT_SUPPORTED)
+        }
+        fn requeue(&mut self, index: u32) -> Result<()> {
+            self.queued.push(index);
+            Ok(())
+        }
+        fn graph(&mut self) -> Result<Graph> {
+            Err(Status::NOT_SUPPORTED)
+        }
+        fn inputs(&mut self) -> Result<Vec<lemnos_v4l2::v4l2::InputInfo>> {
+            Err(Status::NOT_SUPPORTED)
+        }
+        fn input(&mut self) -> Result<u32> {
+            Err(Status::NOT_SUPPORTED)
+        }
+    }
+
+    fn wanted() -> Wanted {
+        Wanted {
+            input: None,
+            fourcc: FourCc::new(b"NV12"),
+            width: 64,
+            height: 32,
+            stride: 64,
+            size: 3072,
+            mode: 0,
+        }
+    }
+
+    /// A control, not a regression test. It passes at origin too, and that is the point: the
+    /// driver's handles are borrowed from the stream's descriptors for one `queue_handles` call and
+    /// never kept, so once the stream is gone no fd of it is open anywhere in the driver. A driver
+    /// that stored a handle would keep the stream's memfds open after the stream went, and this
+    /// count would not return to its before-value. The mock stands in for the kernel's queue; it
+    /// has real memfds, so the descriptors are the kernel's own kind.
+    #[test]
+    fn a_cycle_through_the_handles_leaves_no_fd_of_the_stream_open_in_the_driver() {
+        let fds: Vec<OwnedFd> = (0..4)
+            .map(|_| sealed_memfd(c"v4l2-control", 4096).unwrap())
+            .collect();
+        let inodes: Vec<u64> = fds
+            .iter()
+            .map(|fd| {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::fs::MetadataExt;
+                fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                    .unwrap()
+                    .ino()
+            })
+            .collect();
+        let mut stream = MockStream::with_handles(fds);
+        let consumer = stream.clone();
+        let mut node = Importer::default();
+        let mut pump = Pump::new();
+        pump.begin(&mut node, &stream, &wanted(), 4).unwrap();
+        assert_eq!(pump.mode(), Mode::Direct);
+        pump.pump(&mut node, &mut stream).unwrap();
+        assert!(node.imports >= 1, "a buffer was queued through its handle");
+        // The stream and its consumer go; the driver (the pump and the node) stays.
+        drop(consumer);
+        drop(stream);
+        assert_eq!(
+            held_of(&inodes),
+            0,
+            "the driver still holds an fd of the stream after it went"
+        );
+        drop((pump, node));
     }
 }

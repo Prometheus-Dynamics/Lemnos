@@ -169,8 +169,53 @@ pub struct DeviceDescription {
     /// The long jobs open on the device right now, from the host's job table. Empty when there is
     /// none, and from a host from before it.
     pub jobs: Vec<RunningJob>,
+    /// The device's streams, each with the bytes of memory it holds on standby and the bytes a
+    /// driver's handle still holds open (both 0 when none), as [`stream_standby_text`] writes
+    /// them. Empty when there are none, and from a host from before it.
+    pub streams: Vec<StreamStandby>,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
+}
+
+/// One stream of a device: `standby` is `buffers * buffer_bytes` while no consumer is attached on
+/// a stream with `standby = true` (0 otherwise), and `held` is the bytes a driver's handle still
+/// holds open after the last consumer left (0 when none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStandby {
+    pub name: String,
+    pub standby: u64,
+    pub held: u64,
+}
+
+/// The streams as the wire carries them: `NAME STANDBY HELD` for each, joined by a space, in
+/// decimal. Stream names are board identifiers, so they hold no space.
+#[must_use]
+pub fn stream_standby_text(streams: &[(&str, u64, u64)]) -> String {
+    let mut out = String::new();
+    for (name, standby, held) in streams {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("{name} {standby} {held}"));
+    }
+    out
+}
+
+/// [`stream_standby_text`] read back. An entry that does not parse is skipped.
+#[must_use]
+pub fn parse_stream_standby(text: &str) -> Vec<StreamStandby> {
+    let mut words = text.split_whitespace();
+    let mut out = Vec::new();
+    while let (Some(name), Some(standby), Some(held)) = (words.next(), words.next(), words.next()) {
+        if let (Ok(standby), Ok(held)) = (standby.parse(), held.parse()) {
+            out.push(StreamStandby {
+                name: name.to_string(),
+                standby,
+                held,
+            });
+        }
+    }
+    out
 }
 
 /// A long job that is open on a device, as the host's job table has it. `done` and `total` are in
@@ -258,6 +303,9 @@ pub struct Identity<'a> {
     /// The long jobs open on the device, from the host's job table, as [`running_jobs_text`]
     /// writes them. Empty when there are none, and from a host from before it.
     pub jobs: &'a str,
+    /// The device's streams and their standby bytes, as [`stream_standby_text`] writes them.
+    /// Empty when there are none, and from a host from before it.
+    pub streams: &'a str,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -325,6 +373,9 @@ struct DescIdentity<'a> {
     not_live: bool,
     /// Appended after `not_live`: the open jobs, as [`running_jobs_text`]. Absent reads as none.
     jobs: &'a str,
+    /// Appended after `jobs`: the streams and their standby bytes, as [`stream_standby_text`].
+    /// Absent reads as none.
+    streams: &'a str,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -665,6 +716,7 @@ pub(crate) fn encode_trailer(
         location: description.location(),
         not_live: identity.not_live,
         jobs: identity.jobs,
+        streams: identity.streams,
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -799,6 +851,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.kind = identity.kind.to_string();
         out.location = identity.location.to_string();
         out.jobs = parse_running_jobs(identity.jobs);
+        out.streams = parse_stream_standby(identity.streams);
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {

@@ -598,6 +598,7 @@ mod tests {
             reason: reason.to_owned(),
             live: true,
             jobs: Vec::new(),
+            streams: Vec::new(),
             contracts: vec![OwnedContract {
                 tag: "imu/1".to_owned(),
                 kind: "sensor".to_owned(),

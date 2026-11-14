@@ -649,7 +649,7 @@ mod hardware {
 
     /// The existing check on the real size of the dma-buf behind `handle`: `side`'s extent fits
     /// it.
-    fn fits_handle(side: Side, handle: BufferHandle<'_>) -> bool {
+    fn fits_handle(side: Side, handle: &BufferHandle<'_>) -> bool {
         lemnos_linux_sys::dma_buf::size(handle.fd())
             .ok()
             .and_then(|n| usize::try_from(n).ok())
@@ -777,7 +777,7 @@ mod hardware {
             if self.imports
                 && let (Some(i), Some(o)) = (handle(stream, src), handle(stream, dst))
             {
-                if !(fits_handle(src, i) && fits_handle(dst, o)) {
+                if !(fits_handle(src, &i) && fits_handle(dst, &o)) {
                     return Err(Failure::Size);
                 }
                 let result = match filter {
@@ -825,11 +825,11 @@ mod hardware {
             now_ns: u64,
         ) -> Result<(), Failure> {
             let stream = &*stream;
-            let mut handles = [None; 3];
+            let mut handles: [Option<BufferHandle<'_>>; 3] = std::array::from_fn(|_| None);
             for (slot, side) in handles.iter_mut().zip(plan.sides()) {
                 let h = handle(stream, side).ok_or(Failure::NoHandles)?;
                 // Every check, on the real size of the dma-buf behind the handle.
-                if !fits_handle(side, h) {
+                if !fits_handle(side, &h) {
                     return Err(Failure::Size);
                 }
                 *slot = Some(h);

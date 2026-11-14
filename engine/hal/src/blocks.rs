@@ -201,22 +201,35 @@ pub struct StreamFrame {
 #[cfg(all(feature = "std", unix))]
 extern crate std;
 
-/// What names a buffer on a host that has file descriptors.
-#[cfg(all(feature = "std", unix))]
-type HandleInner<'a> = std::os::fd::BorrowedFd<'a>;
-
 /// Nothing: there is no value of this type, so no handle can be made here.
 #[cfg(not(all(feature = "std", unix)))]
 type HandleInner<'a> = (core::convert::Infallible, core::marker::PhantomData<&'a ()>);
 
-/// One stream buffer's memory, borrowed, in the form hardware takes it. On a host with file
-/// descriptors it is the buffer's dma-buf descriptor: one dma-buf per buffer, holding the whole
-/// buffer from its first byte. Nowhere else can one be made, so a stream there answers
+/// What names a buffer on a host that has file descriptors.
+#[cfg(all(feature = "std", unix))]
+#[derive(Debug, Clone)]
+enum HandleInner<'a> {
+    /// A descriptor the caller holds for as long as the borrow.
+    Borrowed(std::os::fd::BorrowedFd<'a>),
+    /// A buffer's dma-buf out of an attachment's descriptor set, shared with the stream. The
+    /// handle keeps the set open: the dma-buf is released when the last handle to it drops.
+    Shared(std::sync::Arc<[std::os::fd::OwnedFd]>, usize),
+}
+
+/// One stream buffer's memory, in the form hardware takes it. On a host with file descriptors it
+/// is the buffer's dma-buf descriptor: one dma-buf per buffer, holding the whole buffer from its
+/// first byte. Nowhere else can one be made, so a stream there answers
 /// [`StreamEndpoint::buffer_handle`] without one.
 ///
-/// The type is the same with every feature. `fd` and the conversion from a descriptor come
-/// with the `std` feature on Unix.
-#[derive(Debug, Clone, Copy)]
+/// A handle either borrows a descriptor its caller holds, or owns a share of the stream's
+/// descriptors (from [`StreamEndpoint::buffer_handle`]). Holding a shared handle keeps the
+/// attachment's dma-bufs open, so a driver that keeps one for a job holds that memory until the
+/// job ends, and when the consumer has gone the memory goes with the last handle. Making one
+/// clones an `Arc`: no system call, and no allocation.
+///
+/// Without file descriptors (`no_std`, or not Unix) no handle exists.
+#[cfg_attr(not(all(feature = "std", unix)), derive(Debug, Clone, Copy))]
+#[cfg_attr(all(feature = "std", unix), derive(Debug, Clone))]
 pub struct BufferHandle<'a> {
     #[cfg_attr(
         not(all(feature = "std", unix)),
@@ -229,23 +242,38 @@ pub struct BufferHandle<'a> {
 impl<'a> BufferHandle<'a> {
     /// The buffer's dma-buf. It is as large as the stream's buffers or larger (a heap rounds
     /// up), so check what hardware is told to write against its real size, not the stream's.
+    /// Valid for as long as the handle is.
     #[must_use]
-    pub fn fd(&self) -> std::os::fd::BorrowedFd<'a> {
-        self.inner
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        match &self.inner {
+            HandleInner::Borrowed(fd) => *fd,
+            HandleInner::Shared(set, index) => std::os::fd::AsFd::as_fd(&set[*index]),
+        }
+    }
+
+    /// A handle that shares `set`'s descriptor `index` (a buffer's dma-buf, by its index in the
+    /// set). `None` when `index` is outside `set`.
+    #[must_use]
+    pub fn shared(set: std::sync::Arc<[std::os::fd::OwnedFd]>, index: usize) -> Option<Self> {
+        (index < set.len()).then_some(Self {
+            inner: HandleInner::Shared(set, index),
+        })
     }
 }
 
 #[cfg(all(feature = "std", unix))]
 impl<'a> From<std::os::fd::BorrowedFd<'a>> for BufferHandle<'a> {
     fn from(fd: std::os::fd::BorrowedFd<'a>) -> Self {
-        Self { inner: fd }
+        Self {
+            inner: HandleInner::Borrowed(fd),
+        }
     }
 }
 
 #[cfg(all(feature = "std", unix))]
 impl std::os::fd::AsFd for BufferHandle<'_> {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.inner
+        self.fd()
     }
 }
 

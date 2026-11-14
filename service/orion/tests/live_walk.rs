@@ -665,6 +665,7 @@ fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_boun
             reason: "",
             not_live: false,
             jobs: "",
+            streams: "",
         };
         let mut bytes = vec![0; 1 << 20];
         let len = lemnos_wire::encode_description(&manifest, &description, &identity, &mut bytes)

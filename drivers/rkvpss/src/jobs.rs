@@ -489,13 +489,17 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Jobs<D, F> {
         };
         let (format, side) = PROBE;
         let stride = side * format.bytes_per_pixel();
-        let fallback = (0..MAX_BUFFERS)
+        let fallback: Option<lemnos_hal::blocks::BufferHandle<'_>> = (0..MAX_BUFFERS)
             .filter(|b| self.holds(*b) && !self.held_back(*b))
             .find_map(|b| match stream.buffer_handle(b) {
-                Ok(Some(handle)) => Some(handle.fd()),
+                Ok(Some(handle)) => Some(handle),
                 _ => None,
             });
-        let Some(source) = taken.next().map(AsFd::as_fd).or(fallback) else {
+        let Some(source) = taken
+            .next()
+            .map(AsFd::as_fd)
+            .or(fallback.as_ref().map(AsFd::as_fd))
+        else {
             return Ok(());
         };
         let surfaces = (

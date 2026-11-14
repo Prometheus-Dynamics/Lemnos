@@ -569,8 +569,9 @@ mod description {
     };
 
     use super::{
-        Identity, MAX_RUNNING_JOBS, OwnedShape, RunningJob, decode_description, encode_description,
-        parse_running_jobs, running_jobs_text,
+        Identity, MAX_RUNNING_JOBS, OwnedShape, RunningJob, StreamStandby, decode_description,
+        encode_description, parse_running_jobs, parse_stream_standby, running_jobs_text,
+        stream_standby_text,
     };
 
     const CONTRACT: ContractInfo = ContractInfo {
@@ -615,6 +616,7 @@ mod description {
             reason: "bus error",
             not_live: false,
             jobs: "",
+            streams: "",
         }
     }
 
@@ -695,6 +697,45 @@ mod description {
     /// The running jobs ride in the identity block: they come back, none reads as none, and a
     /// description from a host that never wrote them (the identity block without the field) reads
     /// as none too. The text form holds at most `MAX_RUNNING_JOBS`.
+    #[test]
+    fn the_streams_standby_and_held_bytes_round_trip_and_their_absence_reads_as_none() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[],
+        };
+        let mut buf = [0; 512];
+        let mut at = |streams: &str| {
+            let identity = Identity {
+                streams,
+                ..identity()
+            };
+            let n =
+                encode_description(&manifest, &Description::new(), &identity, &mut buf).unwrap();
+            decode_description(&buf[..n]).unwrap().streams
+        };
+        assert_eq!(at(""), []);
+        let text = stream_standby_text(&[("frames", 256, 0), ("plain", 0, 64)]);
+        assert_eq!(text, "frames 256 0 plain 0 64");
+        assert_eq!(
+            at(&text),
+            [
+                StreamStandby {
+                    name: "frames".to_string(),
+                    standby: 256,
+                    held: 0
+                },
+                StreamStandby {
+                    name: "plain".to_string(),
+                    standby: 0,
+                    held: 64
+                },
+            ]
+        );
+        // An entry missing a number is skipped, and so is a garbled one.
+        assert_eq!(parse_stream_standby("frames x 1 plain 4"), []);
+    }
+
     #[test]
     fn the_running_jobs_round_trip_and_their_absence_reads_as_none() {
         let manifest = Manifest {
