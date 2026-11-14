@@ -377,6 +377,27 @@ fn board_signed(dir: &Path, value: &str) -> String {
     path.display().to_string()
 }
 
+/// Runs `f`, polling `path` every 200 microseconds, and reports whether it ever existed meanwhile.
+fn exists_during<T>(path: &Path, f: impl FnOnce() -> T) -> (T, bool) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicBool::new(false));
+    let (p, stop2, seen2) = (path.to_path_buf(), stop.clone(), seen.clone());
+    let poller = std::thread::spawn(move || {
+        while !stop2.load(Ordering::SeqCst) {
+            if p.exists() {
+                seen2.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+    });
+    let out = f();
+    stop.store(true, Ordering::SeqCst);
+    poller.join().unwrap();
+    (out, seen.load(Ordering::SeqCst))
+}
+
 /// The driver over a copy of `data` and `image`, the way the device would load them.
 fn driver(dir: &Path, data: &Path, image: &str) -> (SystemSlots, Layout) {
     let read = dir.join("read");
@@ -456,7 +477,12 @@ fn a_bundle_signed_by_a_key_the_list_does_not_hold_is_refused_and_nothing_is_lef
     let other = bundle_with(&slot, "other.bundle", Some(SEED8));
     let out = slot.dir.join("data");
     let other_slot = Slot { bundle: other, ..slot };
-    let (r, _) = write_partition(&other_slot, &out, &[]);
+    let parent = out.parent().unwrap().to_path_buf();
+    let before: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.file_name()).collect();
+    let (r, ever) = exists_during(&out, || write_partition(&other_slot, &out, &[]).0);
+    assert!(!ever, "the output directory is never created on a refusal");
+    let after: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(before.len(), after.len(), "the directory's listing is unchanged");
     let why = r.unwrap_err();
     assert!(
         why.contains("the bundle is signed by key id ")
@@ -472,7 +498,8 @@ fn an_unsigned_bundle_is_refused_by_a_board_that_requires_signing() {
     let unsigned = bundle_with(&slot, "unsigned.bundle", None);
     let u = Slot { bundle: unsigned, ..slot };
     let out = u.dir.join("data");
-    let (r, _) = write_partition(&u, &out, &[]);
+    let (r, ever) = exists_during(&out, || write_partition(&u, &out, &[]).0);
+    assert!(!ever, "the output directory is never created on a refusal");
     let why = r.unwrap_err();
     assert!(
         why.contains("the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device"),

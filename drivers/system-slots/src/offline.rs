@@ -136,6 +136,8 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
             input.out.display()
         ));
     }
+    // The signing policy is decided before the output directory is made, so a refusal writes nothing.
+    check_signing(&input)?;
     // The boot image as the board has it. The writer's copy is the one its record writes into;
     // this one is the reference the result is compared with.
     let reference = Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?;
@@ -165,14 +167,9 @@ fn signature_policy(word: &str, bundle: &[u8], input: &FirstSlot<'_>) -> Result<
     match word {
         NOT_CHECKED_UNKNOWN_KEY => {
             let key = bundle_key_id(bundle).unwrap_or_else(|| "(unreadable)".into());
-            Err(format!(
-                "the bundle is signed by key id {key}, which {} does not hold: a bundle this board cannot check is refused",
-                input.keys_name
-            ))
+            Err(unknown_key_refusal(&key, input.keys_name))
         }
-        NOT_CHECKED_UNSIGNED if input.board.signature_required => Err(
-            "the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device".into(),
-        ),
+        NOT_CHECKED_UNSIGNED if input.board.signature_required => Err(UNSIGNED_REFUSAL.into()),
         _ => Ok(()),
     }
 }
@@ -181,6 +178,12 @@ fn signature_policy(word: &str, bundle: &[u8], input: &FirstSlot<'_>) -> Result<
 /// the record does not parse.
 pub fn bundle_key_id(bundle: &[u8]) -> Option<String> {
     use lemnos_slot_store::bundle::hex;
+    let record = lemnos_slot_store::signing::parse_record(&bundle_sig(bundle)?).ok()?;
+    Some(hex(&record.key_id))
+}
+
+/// The bundle's `slot.sig` member's bytes. `None` when the bundle has no such member.
+fn bundle_sig(bundle: &[u8]) -> Option<Vec<u8>> {
     use lemnos_slot_store::tar::{Kind, Sink, Tar};
     #[derive(Default)]
     struct SlotSig {
@@ -208,8 +211,40 @@ pub fn bundle_key_id(bundle: &[u8]) -> Option<String> {
     }
     let mut sink = SlotSig::default();
     Tar::default().feed(bundle, &mut sink).ok()?;
-    let record = lemnos_slot_store::signing::parse_record(&sink.found?).ok()?;
-    Some(hex(&record.key_id))
+    sink.found
+}
+
+/// The signing policy before anything is written: a bundle signed by a key the keys list does not
+/// hold, or unsigned on a board that requires signing, is refused. A malformed record is left to the
+/// install, which names it.
+fn check_signing(input: &FirstSlot<'_>) -> Result<(), String> {
+    use lemnos_slot_store::bundle::hex;
+    use lemnos_slot_store::signing;
+    let Some(sig) = bundle_sig(input.bundle) else {
+        return if input.board.signature_required {
+            Err(UNSIGNED_REFUSAL.into())
+        } else {
+            Ok(())
+        };
+    };
+    let Ok(record) = signing::parse_record(&sig) else {
+        return Ok(());
+    };
+    let held = input
+        .keys
+        .iter()
+        .any(|k| signing::key_id(k.key.as_bytes()) == record.key_id);
+    if held {
+        Ok(())
+    } else {
+        Err(unknown_key_refusal(&hex(&record.key_id), input.keys_name))
+    }
+}
+
+const UNSIGNED_REFUSAL: &str = "the bundle is unsigned, and this board requires signed bundles: sign it, or set signature = \"not-required\" on the board's system-slots device";
+
+fn unknown_key_refusal(key: &str, keys_name: &str) -> String {
+    format!("the bundle is signed by key id {key}, which {keys_name} does not hold: a bundle this board cannot check is refused")
 }
 
 /// The modes the output carries whatever the umask of the process: 0644 for files, 0755 for
