@@ -225,8 +225,8 @@ fn end_to_end_pi_firmware_form_install_trial_confirm_keep_previous_free() {
         !diff.is_empty() && diff.iter().all(|l| info.contains(l)),
         "the removal wrote {diff:?}, not only bay2's record {info:?}"
     );
-    // A, the previous, and B, the default, are refused and untouched.
-    assert!(record.free("os-1").is_err());
+    // B, the default, is refused and untouched. (A, the previous, now falls back to B's bay when it
+    // is removed: M36b, covered by `removing_the_previous_slot_falls_previous_back_to_the_default_bay`.)
     assert!(record.free("os-2").is_err());
     boots(&board, "os-2", "C removed");
     verify(&board, &parts, "C removed");

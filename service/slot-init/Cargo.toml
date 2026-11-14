@@ -20,6 +20,7 @@ path = "src/main.rs"
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
+lemnos-driver-hw-watchdog-sys = { path = "../../drivers/hw-watchdog-sys" }
 
 [dev-dependencies]
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }

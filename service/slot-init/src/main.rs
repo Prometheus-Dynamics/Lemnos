@@ -21,6 +21,9 @@ fn main() {
     let system = sys::System::new();
     let env = boot::Env::board();
     let why = boot::boot(&system, &env);
+    // boot returns only when a restart was asked for and did not happen, or when the slot could not
+    // start. The watchdog is not fed from here on, so a loop in this final stage resets the board.
+    system.stop_feeding();
     // PID 1 never exits: the kernel would panic. Keep asking for a restart.
     loop {
         system.log(&format!(

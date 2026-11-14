@@ -1,8 +1,9 @@
 //! [`Ops`] on a board: lemnos-linux-sys's safe wrappers over the system calls.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,11 +14,22 @@ use lemnos_slot_store::ubi::{self, Ubi};
 use crate::boot::INIT;
 use crate::ops::Ops;
 
+/// The watchdog's timeout in seconds: the device's maximum, capped here (bcm2835's is about 15 s).
+pub const DOG_SECONDS: u32 = 15;
+/// The longest a wait goes between two feeds of the watchdog.
+const FEED_EVERY: Duration = Duration::from_secs(5);
+
 /// The system calls, with the device nodes in `dev`.
 pub struct System {
     pub dev: PathBuf,
     /// The loop devices under the verity devices, held until `switch_root` closes them.
     loops: RefCell<Vec<Loop>>,
+    /// The armed watchdog device, once [`Ops::arm_watchdog`] has opened it. Never closed with the
+    /// magic character, so the device stays armed after this process is gone (see `watchdog`).
+    dog: RefCell<Option<fs::File>>,
+    /// Whether the watchdog is fed. Turned off once `boot` has returned, so a slot-init that
+    /// fails and loops is not kept alive by its own log lines.
+    feeding: Cell<bool>,
 }
 
 impl System {
@@ -25,8 +37,50 @@ impl System {
         Self {
             dev: PathBuf::from("/dev"),
             loops: RefCell::new(Vec::new()),
+            dog: RefCell::new(None),
+            feeding: Cell::new(true),
         }
     }
+
+    /// One feed of the armed watchdog. A write that fails feeds nothing, so the board resets.
+    fn feed(&self) {
+        if !self.feeding.get() {
+            return;
+        }
+        if let Some(dog) = self.dog.borrow_mut().as_mut() {
+            let _ = dog.write_all(&[FEED_BYTE]);
+        }
+    }
+}
+
+/// The byte a feed writes. Any byte but the magic close character `V` feeds the watchdog; `V`
+/// would stop it, and it is never written.
+pub const FEED_BYTE: u8 = 0;
+
+/// Opens `<dev>/watchdog`, sets its timeout to [`DOG_SECONDS`] and reads it back. Opening arms the
+/// device; the timeout the device applies is returned.
+///
+/// If the device refuses the new timeout, the one it already has is taken when it is within the cap.
+/// Otherwise the device is an error and is not kept.
+pub fn arm(dev: &Path) -> Result<(fs::File, u32), String> {
+    let node = dev.join("watchdog");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&node)
+        .map_err(|e| format!("{}: {e}", node.display()))?;
+    let timeout = match lemnos_driver_hw_watchdog_sys::set_timeout(file.as_fd(), DOG_SECONDS) {
+        Ok(applied) => applied,
+        // A device that refuses the request keeps the timeout it has, which is taken if it is in range.
+        Err(_) => lemnos_driver_hw_watchdog_sys::get_timeout(file.as_fd())
+            .map_err(|e| format!("{}: {e}", node.display()))?,
+    };
+    if timeout == 0 || timeout > DOG_SECONDS {
+        return Err(format!(
+            "{}: the timeout the device applies is {timeout} s, not within {DOG_SECONDS} s",
+            node.display()
+        ));
+    }
+    Ok((file, timeout))
 }
 
 /// The major and minor numbers in a `dev_t` (glibc's and musl's encoding).
@@ -55,6 +109,7 @@ pub fn mount_options(opts: &str) -> (MountFlags, String) {
 
 impl Ops for System {
     fn log(&self, line: &str) {
+        self.feed();
         let text = format!("{line}\n");
         let written = fs::OpenOptions::new()
             .append(true)
@@ -148,7 +203,33 @@ impl Ops for System {
     }
 
     fn sleep(&self, time: Duration) {
-        std::thread::sleep(time);
+        // A wait that is meant to end feeds the watchdog as it goes, so a long wait (the rescue's)
+        // does not reset the board on purpose. The feeding stops with `stop_feeding`.
+        let mut left = time;
+        while !left.is_zero() {
+            self.feed();
+            let step = left.min(FEED_EVERY);
+            std::thread::sleep(step);
+            left -= step;
+        }
+    }
+
+    fn arm_watchdog(&self) {
+        match arm(&self.dev) {
+            Ok((file, timeout)) => {
+                *self.dog.borrow_mut() = Some(file);
+                self.log(&format!(
+                    "slot-init: watchdog armed: {timeout} s; slot-init feeds it while it works and never closes it with the magic character"
+                ));
+            }
+            Err(error) => self.log(&format!(
+                "slot-init: NO WATCHDOG: {error}: a hang before the daemon takes the device is not reset"
+            )),
+        }
+    }
+
+    fn stop_feeding(&self) {
+        self.feeding.set(false);
     }
 
     fn request_flash_mode(&self) -> Result<(), String> {
@@ -188,5 +269,83 @@ mod tests {
         assert!(flags.read_only && flags.no_atime);
         assert_eq!(data, "errors=remount-ro");
         assert_eq!(mount_options("rw"), (MountFlags::default(), String::new()));
+    }
+
+    /// A directory with `watchdog` as a plain file. The stand-in differs from a watchdog device in
+    /// that it refuses the watchdog's requests (ENOTTY) and takes writes as ordinary file bytes.
+    fn stand_in() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "slot-init-dog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let node = dir.join("watchdog");
+        fs::write(&node, b"").unwrap();
+        (dir, node)
+    }
+
+    #[test]
+    fn the_feed_byte_is_never_the_magic_close() {
+        assert_ne!(FEED_BYTE, b'V');
+    }
+
+    #[test]
+    fn arming_a_device_that_refuses_the_timeout_and_has_none_in_range_is_an_error() {
+        // Real-failing case: a plain file refuses SETTIMEOUT, and GETTIMEOUT on it fails too, so
+        // the arm gives an error and keeps no device. A real watchdog would accept the timeout.
+        let (dir, _node) = stand_in();
+        let result = arm(&dir);
+        assert!(result.is_err(), "a plain file must not arm");
+        assert!(result.unwrap_err().contains("watchdog"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_feed_writes_one_byte_that_is_not_the_magic_close_and_a_stopped_feed_writes_nothing() {
+        let (dir, node) = stand_in();
+        let system = System {
+            dev: dir.clone(),
+            loops: RefCell::new(Vec::new()),
+            dog: RefCell::new(None),
+            feeding: Cell::new(true),
+        };
+        *system.dog.borrow_mut() = Some(fs::OpenOptions::new().write(true).open(&node).unwrap());
+        system.feed();
+        assert_eq!(fs::read(&node).unwrap(), vec![FEED_BYTE]);
+        system.stop_feeding();
+        system.feed();
+        assert_eq!(
+            fs::read(&node).unwrap(),
+            vec![FEED_BYTE],
+            "a stopped feed writes nothing"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_long_wait_feeds_while_it_runs_and_a_stopped_one_does_not() {
+        let (dir, node) = stand_in();
+        let system = System {
+            dev: dir.clone(),
+            loops: RefCell::new(Vec::new()),
+            dog: RefCell::new(Some(
+                fs::OpenOptions::new().write(true).open(&node).unwrap(),
+            )),
+            feeding: Cell::new(true),
+        };
+        system.sleep(Duration::from_millis(12));
+        assert!(!fs::read(&node).unwrap().is_empty(), "a wait feeds");
+        fs::write(&node, b"").unwrap();
+        system.stop_feeding();
+        system.sleep(Duration::from_millis(12));
+        assert!(
+            fs::read(&node).unwrap().is_empty(),
+            "a stopped system does not feed"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
