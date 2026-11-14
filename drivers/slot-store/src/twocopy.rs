@@ -58,8 +58,9 @@ impl Kind {
     pub const EPISODES: Kind = Kind(5);
     /// A payload bay set's record: the slot installed in it and the hashes of its payload files (I5i8).
     pub const BAY_INFO: Kind = Kind(6);
-    /// The restart count's baseline: the boot count the board started from, as decimal text; empty
-    /// (no valid copy) until one is written. Pre-created at the boot partition's root.
+    /// The restart count's baseline: the restart count the last good boot (or the first boot) started from,
+    /// as decimal text: the base the restarts since then are counted from (M36b). Empty (no valid copy)
+    /// is no baseline yet. Pre-created at the boot partition's root.
     pub const BASELINE: Kind = Kind(7);
 
     /// The pre-created file's FAT directory name for this kind (eleven bytes: 8.3, space padded,

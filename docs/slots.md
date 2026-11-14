@@ -1157,6 +1157,16 @@ pattern never breaks. `tryboot.txt` has no count filter. The filter, the `kernel
 keys and the count's read and clear are verified from the Raspberry Pi documentation
 (`conditional.adoc`, `config_txt_boot.adoc`), not yet on a board: `testing/board-runs/I5i6.md`.
 
+**The rule for `previous.txt` (M36b).** `previous.txt` names the default's bay until a real previous
+slot exists, and never an empty bay. On a fresh image all three pointers name `bay0`, where the first
+slot is installed, so a count with bit 2 set (4 to 7, 12 to 15, ...) starts the default's own files: a
+fresh board does not start from an empty bay. A default switch points `previous.txt` at the old
+default's bay (`Boot::set_pointer`). Removing the previous slot's bay points `previous.txt` back at the
+default's bay before the old bay is freed (`Boot::free_slot`); removing the default's bay is refused.
+The restart count that slot-init and lemnosd act on is not the raw count but the restarts since the
+last good boot (`COUNT   REC`, see `lemnos_slot_store::firmware::since_good`); the firmware's own
+rotation above still reads the raw count.
+
 - The count is read from `/proc/device-tree/chosen/bootloader/count` and the reset status from
   `rsts` (four big-endian bytes each; `device_tree` names the directory). It is cleared through the
   property mailbox on `/dev/vcio` (`vcio`), tag `0x0003808d` with the value zero
