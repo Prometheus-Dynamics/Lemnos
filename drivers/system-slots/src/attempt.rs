@@ -175,7 +175,11 @@ impl Attempt {
         }
         out.push_str(",\"boot\":");
         // `none` names the boot too: it says only what this daemon, started in that boot, knows.
-        let boot = if a.started_ns.is_some() || !known { boot } else { "" };
+        let boot = if a.started_ns.is_some() || !known {
+            boot
+        } else {
+            ""
+        };
         quoted(boot, out);
         for (key, value) in [("started_ms", a.started_ns), ("ended_ms", a.ended_ns)] {
             out.push_str(",\"");

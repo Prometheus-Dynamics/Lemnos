@@ -4445,7 +4445,12 @@ fn an_install_a_restart_cut_short_is_known_after_it_and_nothing_else_is() {
     let seen = attempt_seen(&mut fresh);
     assert_eq!(seen.state, "none");
     assert_eq!(seen.boot, "feedbeef-0000-0000-0000-000000000000");
-    assert!(seen.text.ends_with("since the service started (boot feedbeef)"), "{}", seen.text);
+    assert!(
+        seen.text
+            .ends_with("since the service started (boot feedbeef)"),
+        "{}",
+        seen.text
+    );
 }
 
 #[test]
