@@ -14,7 +14,7 @@ use lemnos_slot_store::boots;
 use lemnos_slot_store::fallback::POWER_ON_RESET;
 use lemnos_slot_store::store::{Layout, Meta, State};
 
-use super::count::{ClearCount, Fallback, Firmware};
+use super::count::{ClearCount, Fallback, Firmware, keep_baseline};
 use crate::boot::BootRecord;
 
 /// A directory for one test, removed after it.
@@ -50,6 +50,7 @@ struct Rec<'a> {
     episodes: Option<(String, u8)>,
     fail_at: Option<usize>,
     writes: usize,
+    baseline: Option<u32>,
 }
 
 impl Rec<'_> {
@@ -64,6 +65,16 @@ impl Rec<'_> {
 }
 
 impl BootRecord for Rec<'_> {
+    fn baseline(&self) -> io::Result<Option<u32>> {
+        Ok(self.baseline)
+    }
+
+    fn set_baseline(&mut self, count: u32) -> io::Result<()> {
+        self.step(format!("baseline={count}"))?;
+        self.baseline = Some(count);
+        Ok(())
+    }
+
     fn set_default(&mut self, id: &str) -> io::Result<()> {
         self.step(format!("default={id}"))?;
         self.default = id.to_string();
@@ -182,6 +193,7 @@ fn rec<'a>(log: &'a Log, episodes: Option<(&str, u8)>) -> Rec<'a> {
         episodes: episodes.map(|(s, n)| (s.to_string(), n)),
         fail_at: None,
         writes: 0,
+        baseline: None,
     }
 }
 
@@ -490,4 +502,29 @@ fn a_count_the_mailbox_cannot_clear_is_named_not_refused() {
         "the reason names the count: {why}"
     );
     assert!(why.contains("no /dev/vcio"), "{why}");
+}
+
+/// M36b: the good boot keeps the firmware's count as the baseline, whole (above 255 too), before any
+/// clear; a record that cannot keep it says so and the count is not taken as the baseline.
+#[test]
+fn a_good_boot_keeps_the_whole_count_as_the_baseline() {
+    let dir = Dir::new("baseline-whole");
+    let firmware = device_tree(&dir, &[0, 0, 1, 44], &[0, 0, 0, 0]);
+    let log = Log::default();
+    let mut rec = rec(&log, None);
+    assert_eq!(keep_baseline(&mut rec, &firmware), Ok(300));
+    assert_eq!(rec.baseline, Some(300), "not capped at the 8-bit count");
+    assert_eq!(log.lock().unwrap().as_slice(), ["baseline=300"]);
+}
+
+#[test]
+fn a_baseline_the_record_cannot_keep_is_named_and_not_taken() {
+    let dir = Dir::new("baseline-cut");
+    let firmware = device_tree(&dir, &[0, 0, 0, 50], &[0, 0, 0, 0]);
+    let log = Log::default();
+    let mut rec = rec(&log, None);
+    rec.fail_at = Some(1);
+    let why = keep_baseline(&mut rec, &firmware).unwrap_err();
+    assert!(why.contains("cut"), "{why}");
+    assert_eq!(rec.baseline, None);
 }

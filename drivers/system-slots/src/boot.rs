@@ -64,6 +64,15 @@ pub trait BootRecord: Send {
     fn clear_episodes(&mut self) -> io::Result<()> {
         Err(no_episodes())
     }
+    /// The restart baseline (M36b): the firmware count the last good boot started from, `None` when
+    /// unknown. Only the `tryboot` form keeps one; the others refuse by name.
+    fn baseline(&self) -> io::Result<Option<u32>> {
+        Err(no_baseline())
+    }
+    /// Keeps `count` as the restart baseline, written before the good boot's count clear.
+    fn set_baseline(&mut self, _count: u32) -> io::Result<()> {
+        Err(no_baseline())
+    }
     /// Adds what this boot loader needs to a slot's boot directory `dir` at install, before it
     /// is kept: `cmdline` is the slot's kernel command line.
     fn prepare(&self, _dir: &Path, _id: &str, _cmdline: &str) -> io::Result<()> {
@@ -86,6 +95,11 @@ fn no_episodes() -> io::Error {
     io::Error::other(
         "the episodes are kept on the boot partition's raw records, which this boot record form doesn't have",
     )
+}
+
+/// The boot loader keeps no restart baseline (only the `tryboot` form does, on its boot records).
+fn no_baseline() -> io::Error {
+    io::Error::other("this boot loader keeps no restart baseline")
 }
 
 /// The boot partition's copy of a trial's reason: the pre-created reason record (`reason.rec`),
@@ -233,6 +247,14 @@ impl BootRecord for Tryboot {
 
     fn clear_episodes(&mut self) -> io::Result<()> {
         self.raw()?.clear_episodes().map_err(io::Error::other)
+    }
+
+    fn baseline(&self) -> io::Result<Option<u32>> {
+        self.raw()?.baseline().map_err(io::Error::other)
+    }
+
+    fn set_baseline(&mut self, count: u32) -> io::Result<()> {
+        self.raw()?.set_baseline(count).map_err(io::Error::other)
     }
 
     fn restart(&mut self) -> io::Result<()> {
