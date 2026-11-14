@@ -12,10 +12,12 @@ workspace = true
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-security = { path = "../../contracts/security" }
 lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
+lemnos-contract-system-identity = { path = "../../contracts/system-identity" }
 lemnos-slot-store = { path = "../slot-store" }
+ed25519-dalek = { version = "2.2", default-features = false }
 
 [dev-dependencies]
-lemnos-slot-store = { path = "../slot-store" }
+lemnos-slot-store = { path = "../slot-store", features = ["testing"] }
 
 [package.metadata.lemnos]
 driver = "SystemSecurity"

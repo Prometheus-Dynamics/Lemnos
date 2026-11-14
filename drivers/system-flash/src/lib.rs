@@ -22,7 +22,9 @@
 //!   flasher's board file sets it.
 //! - `max_dict_mb`: 8 by default (1 to 8, the ceiling): the largest xz dictionary a stream may
 //!   declare. A board file may lower it, never raise it.
-//! - `keys`: the trusted keys file (one per line: 64 hex digits, a space, the owner).
+//! - `keys`: given by the host from the board file's `[security] keys` (the board's one trust root,
+//!   the same keys that authorize turning the switch off); a device that names it itself is refused.
+//!   The file has one key per line: 64 hex digits, a space, the owner.
 //!   The security switch (`lemnos_slot_store::security`, `docs/slots.md`) sets the signature
 //!   policy, read at each decision. The view is not a board-file setting: a board file that names
 //!   `security_view` or `require_signed` is refused.
@@ -1281,7 +1283,7 @@ impl SecurityPrecondition for SystemFlash {
             lines.push("busy: a write or verify is running".to_string());
         }
         if on && self.keys.is_empty() {
-            lines.push("missing: no trust root: the keys list (keys in the system-flash config) has no valid line".to_string());
+            lines.push("missing: no trust root: the keys list (`keys` in the board file's [security] table) has no valid line".to_string());
         }
         let mut text = lines.join("\n");
         text.push('\n');

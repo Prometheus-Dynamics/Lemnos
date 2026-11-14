@@ -250,6 +250,19 @@ impl PlainFile {
     }
 }
 
+#[cfg(feature = "testing")]
+impl PlainFile {
+    /// Test seam (feature `testing`): a write cut after `limit` bytes, as a power cut would leave it.
+    /// The record is then what a reader finds after the cut.
+    ///
+    /// # Errors
+    ///
+    /// The cut's error, when the write is cut; any other I/O error.
+    pub fn write_cut(&self, on: bool, limit: usize) -> io::Result<u64> {
+        self.write_limited(on, limit)
+    }
+}
+
 impl Store for PlainFile {
     fn read(&self) -> io::Result<Option<Switch>> {
         if !self.present()? {

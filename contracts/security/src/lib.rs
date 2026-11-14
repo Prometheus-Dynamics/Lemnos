@@ -7,7 +7,9 @@
 //!   then `precheck: ok` or one `precheck: missing: ...` / `precheck: busy: ...` line per fact
 //!   the last check named.
 //! - `precheck`: `ok`, or one `missing: ...` or `busy: ...` line per fact that stops the change.
-//!   Ours alone: Orion's side answers its own precheck, and this one never asks Orion.
+//!   Ours alone: Orion's side answers its own precheck, and this one never asks Orion. For an off
+//!   on a board with a trust root, `ok` is followed by a `note:` line that names the authorization.
+//! - `request_off`: the facts an authorization signs (see `docs/slots.md`, "Turning it off").
 
 #![no_std]
 
@@ -29,6 +31,18 @@ pub trait Security {
 
     /// Changes the switch: the precheck, Orion's answer when Orion is on the board, the record
     /// written, the view rendered. Refused by name when a fact stops it.
+    ///
+    /// Turning it off needs `authorization` when the board holds a trust root: a 108-byte signature
+    /// record (`LMNSSIG1`) over the message `request_off` describes, signed under a key the board
+    /// holds. Without a trust root an off needs none, and one given is ignored. Turning it on
+    /// takes no authorization: `authorization` is ignored (empty by convention). Method 3 is the
+    /// argument list of `system.security/1` version 1, which is not yet released.
     #[method(3)]
-    fn set(&mut self, on: bool) -> Result<()>;
+    fn set(&mut self, on: bool, authorization: &[u8]) -> Result<()>;
+
+    /// What an authorization to turn the switch off must sign, from the board: the target, the
+    /// generation, the board's serial, the message in hex, and the keys the board holds. One fact
+    /// per line; the message is the only thing the signer signs.
+    #[method(4)]
+    fn request_off(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

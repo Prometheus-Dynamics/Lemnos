@@ -25,7 +25,9 @@
 //!   `<boot_args>.data=UBI=ubi0:data`. Unset, the images are files on the data partition.
 //! - `systemctl`: the program that restarts the board, `"systemctl"` by default; it is run as
 //!   `systemctl reboot`, with `--reboot-argument=0 tryboot` for a trial.
-//! - `keys`: a file of the keys the board trusts, one per line: 64 hex digits, a space, and the
+//! - `keys`: given by the host from the board file's `[security] keys` (the board's one trust root,
+//!   the same keys that authorize turning the switch off); a device that names it itself is refused.
+//!   The file holds the keys the board trusts, one per line: 64 hex digits, a space, and the
 //!   key's owner. A signed bundle's `slot.sig` is the 108-byte signature record, which names its
 //!   key by id; the signature is checked against that key when the board holds it. The policy for each case is
 //!   the table in [`lemnos_slot_store::signing`], shared with first flash. `list` shows each slot
@@ -1426,7 +1428,7 @@ impl SecurityPrecondition for SystemSlots {
         }
         if on {
             if self.keys.is_empty() {
-                lines.push("missing: no trust root: the keys list (keys in the system-slots config) has no valid line".to_string());
+                lines.push("missing: no trust root: the keys list (`keys` in the board file's [security] table) has no valid line".to_string());
             }
             for (role, id) in [
                 ("default", state.default.clone()),

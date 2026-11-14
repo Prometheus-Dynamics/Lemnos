@@ -104,12 +104,14 @@ fn start_lemnosd(dir: &Path, socket: &Path, target: &Path, size_ok: bool) -> Ser
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"flash-test\"\n\
          [host]\ncall_deadline_ms = 30000\n\
+         [security]\nrecord = \"{}\"\nkeys = \"{}\"\n\
          [[devices]]\nid = \"flash\"\ndriver = \"system-flash\"\n\
-         config = {{ path = \"{}\", kind = \"file\", allow_first_flash = true, mountinfo = \"{}\", keys = \"{}\" }}\n\
+         config = {{ path = \"{}\", kind = \"file\", allow_first_flash = true, mountinfo = \"{}\" }}\n\
          [[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n",
+        dir.join("security.rec").display(),
+        keys.display(),
         target.display(),
-        mountinfo.display(),
-        keys.display()
+        mountinfo.display()
     );
     Service::start(LemnosdConfig {
         socket: socket.to_path_buf(),

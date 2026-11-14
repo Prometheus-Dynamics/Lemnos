@@ -276,7 +276,11 @@ corruption, and against tampering with the data partition alone. It is **not** v
 unless the SoC's secure boot verifies the boot partition. When the security switch is on, the
 signature on `slot.json` protects what gets installed, not what boots.
 
-Signing is a board setting. The `keys` file lists the keys the board trusts, one per line: 64 hex
+Signing is a board setting, and the board has one trust root: the `[security] keys` file (the board file's
+`[security]` table, "The security switch" below). The host gives that one file to `system-slots`,
+`system-flash` and `system-security`, and refuses a `keys` setting in any of those devices' own config, so
+there is no second key list. The same keys verify a slot bundle, a first-flash image and the authorization
+that turns the switch off. The file lists the keys the board trusts, one per line: 64 hex
 digits, a space, then the key's owner. The record's key id is matched against those keys (the same
 key id, SHA-256 of the public key, as first flash uses); a signature is checked against that key
 when the board holds it. The policy is the table below. It is the same table first
@@ -330,18 +334,20 @@ device takes them as its config (the host gives them to the one device that serv
 ```toml
 [security]
 record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth
-keys = "/etc/lemnos/slot-keys"            # absolute, optional: the trust root the switch checks itself
+keys = "/etc/lemnos/slot-keys"            # absolute, optional: the board's trust root (see "Turning it off")
 orion = false                             # true: Orion ships here, and answers before a switch goes on
 
 [[devices]]
 id = "security"
 driver = "system-security"
-uses = { slots = "slots", flash = "flash" }   # the stakeholders that answer for themselves
+uses = { slots = "slots", flash = "flash", identity = "identity" }   # the stakeholders, and the board's identity
 ```
 
 - `uses` names the stakeholders: the `system-slots` and `system-flash` devices, which serve
   `system.security-precondition/1`. Each answers only for itself. A board with neither bound judges
-  on its trust root alone.
+  on its trust root alone. `identity` is the board's `system-identity` device: its serial names the
+  board in an authorization to turn the switch off (below). Without it an off on a board with a trust
+  root cannot be authorized.
 - The view is not configurable. It is rendered into `/run/board`, which the image links `/etc/board`
   to. A board file that names a view or a render directory (`security_view`, `run`) is refused by name
   or does not start the driver: no board file can point the switch's readers somewhere else.
@@ -362,15 +368,133 @@ rendered; if the render fails the view is `pending`, the record stands, and each
 the render. The daemon renders the view from the record again at start.
 
 **A change** (`set`, `lemnos-ctl security DEVICE on|off`) runs: the stakeholders' prechecks; Orion's
-answer when Orion is on the board; the record; the render. Refused by name when a fact stops it.
-Refused in either direction while an install or a trial is running, or a write or verify is running
-on first flash. Off has no other precondition. On needs:
+answer when Orion is on the board; for an off on a board with a trust root, the authorization (below);
+the record; the render. Refused by name when a fact stops it. Refused in either direction while an
+install or a trial is running, or a write or verify is running on first flash. An off has no other
+precondition. On needs:
 
-- a trust root (a `keys` list with a valid line), in each stakeholder, or in the switch's own `keys`
-  when no stakeholder is bound;
+- a trust root: the board's `[security] keys` list has a valid line (one list, seen by each stakeholder
+  and by the switch);
 - on slots, the default slot and the running slot `verified` under that list;
 - Orion's answer, when `orion = true`. Orion's precheck is not at Orion's current revision, so ON is
   refused with that reason until it is.
+
+### Turning it off
+
+Turning the switch on is free of authorization: it only raises protection, and it already needs the
+proof above. **Turning it off needs an authorization signed under the board's trust root** when the
+board holds one. The board holds a trust root when its `[security] keys` file (the one list the slot and
+flash drivers verify against) has at least one valid key line. Without a trust root, off needs no authorization, and one given is ignored (the
+reply says so). That is the never-strand case: a board that has never had keys is never locked.
+
+The authorization is an ordinary signature record, the form every signature in this document takes
+(108 bytes, `docs/slots.md`, "The signed message and the record" and the signing table in "Signing"):
+
+| offset | bytes | field |
+|---|---|---|
+| 0 | 8 | `LMNSSIG1` |
+| 8 | 1 | algorithm: `1` = Ed25519 |
+| 9 | 3 | zero |
+| 12 | 32 | key id: SHA-256 of the signing public key (a key the board holds) |
+| 44 | 64 | Ed25519 signature over the message below |
+
+The signed message is built by `lemnos_slot_store::signing::security_switch_message`, in its own domain
+(`lemnos-security-switch`), so a signature made for any other kind of message never verifies here:
+
+| offset | bytes | field |
+|---|---|---|
+| 0 | 23 | `lemnos-security-switch\0`: the domain tag, with its NUL |
+| 23 | 4 | u32 LE version = `1` |
+| 27 | 4 | u32 LE length `L` of the board's serial |
+| 31 | `L` | the board's serial, as `system.identity/1` `serial` gives it (lowercase hex) |
+| 31+`L` | 1 | target: `0` = off (this message is only for off) |
+| 32+`L` | 8 | u64 LE generation: the switch record's sequence number when the change is made |
+
+**The board's identity is its serial**, not its family: the family (`[board] id`) is the model, the
+same on every unit, and the serial is per unit (the source the board file gives `system-identity`).
+So a signature made for one unit verifies on no other. A board with no serial (the identity device
+absent or not answering) cannot be named, so an off on it with a trust root is refused: see "lost key",
+below.
+
+**The generation** is what binds the authorization to a moment. Each change of the record moves the
+generation by exactly one, so after the change an authorization for the old generation no longer
+verifies: it is spent by the change it allowed.
+
+**Test vector.** Test key = seed `0x07` repeated (32 bytes of `07`; public key `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c`; key id `fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`).
+Serial `0123456789abcdef`, target off, generation 1. Message (56 bytes):
+`6c656d6e6f732d73656375726974792d73776974636800010000001000000030313233343536373839616263646566000100000000000000`.
+Record (108 bytes): `4c4d4e535349473101000000fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`
+followed by the 64-byte signature `f42567f5963b8e7333394a8c248e380617a7d964d5e5509b8f99dbe56c9e32376275c457f831a4163d5e959a584694e06fab342ebf036002b97d4190888aad00`.
+Checked by a Rust test (`the_documented_vector_is_the_message_and_the_record`) and by an independent
+Ed25519 implementation.
+
+**What the check does** (`set(off, authorization)`): when the board holds a trust root, it reads the
+record's current generation and the board's serial, then:
+
+| refusal (`NOT_PERMITTED` unless noted) | the reason, in words |
+|---|---|
+| no serial | `missing: this board has no serial, so no authorization can name it: the switch cannot be turned off by software (reflash over USB boot, docs/slots.md)` |
+| nothing given | `missing: no authorization given: off needs one signed under this board's trust root for generation N (lemnos-ctl security DEVICE request-off)` |
+| not a 108-byte record (`INVALID_ARGUMENT`) | `malformed authorization: <why>: a 108-byte signature record is needed (LMNSSIG1, algorithm 1, zero padding)` |
+| key id not in the trust root | `signed by a key this board does not hold: the key id is not on this board's trust root` |
+| held key, the message is for on | `made for another state: it turns the switch on, not off` |
+| held key, the message is for an earlier generation | `made for generation G, the switch is at M: the switch changed after it was signed` (the earlier generations are tried, up to 4096) |
+| held key, none of the above | `signature does not verify for this board: it was made for another board, or it is corrupted` |
+
+The last line is honest about what the board can see: the authorization carries no fields, so a
+signature made for another board fails here the same way as a corrupt one. The text does not claim
+more than that. A pass is the only way to a change; a refusal changes nothing, and the record is not
+written.
+
+**The request.** `lemnos-ctl security DEVICE request-off` (the device's `request_off`) prints, from the
+board, what a signer must sign: the target, the generation, the serial, the message in hex, and the
+keys the board holds (`key <id> <owner>`). A signer takes the message bytes, signs them with one of
+those keys, and writes the 108-byte record: no field is guessed. Without a trust root it says that off
+needs no authorization. It is read only: it changes nothing.
+
+**The CLI.** `lemnos-ctl security DEVICE off --authorization FILE` sends the file (its bytes, as hex)
+to the daemon's `set`; with a trust root, `off` without `--authorization` is refused by name. `on` takes
+no authorization (`--authorization` with `on` is refused by the CLI). `state` names the serial, the
+trust root, each held key id and owner, and the generation. `lemnos-ctl security render --record FILE`
+reads the record and renders the view: it never writes the record, so it cannot turn the switch off.
+
+**On is unchanged.** Turning on takes no authorization: it needs the proof of the stakeholders and the
+trust root, which raise protection only. An authorization given with an on is ignored, and the reply says so.
+
+**A lost key.** If every key the board holds is lost, no authorization can be made, and an off is
+impossible by software. Nothing in software bypasses this, by design. The way out is physical: a
+reflash over USB boot writes the board's image afresh, and the switch's record is part of what it
+writes, so the switch comes back off at generation 0 (absent). Until then the switch stays on and its
+readers stay enforcing.
+
+**Crash safety.** An off checks the authorization first, before any step runs, then writes in the order
+"The order of a change" gives: the record (the truth: the generation moves by one, the value is off), then
+the view (rendered from the record; if the render fails the view is `pending` and the record stands), then
+the boot mark. A power cut at any point leaves the board on, or consistently off, and the same
+authorization ends in the same state. The view rule keeps a cut from reading as off by mistake: a view
+that is absent reads off, one that is malformed reads **on**, and the daemon renders it from the record at
+each start.
+
+| the cut comes | the record reads | the view | the boot mark | the authorization |
+|---|---|---|---|---|
+| before the record's sector is complete (any byte) | on, generation G | old (on) | on | still verifies: a retry ends at off, G+1 |
+| after the record, before the view | off, G+1 | stale (on) | on | spent |
+| after the view, before the mark | off, G+1 | off | on (stricter) | spent |
+| after the mark | off, G+1 | off | off | spent |
+
+After a cut past the record, the next start renders the view and clears the mark from the record. The
+board is never "the view says off while the record says on": the view is written only after the record.
+A spent authorization is refused with `made for generation G, the switch is at G+1`, so it cannot be
+replayed to any other end state, and a replay after a later on is refused the same way.
+
+Tests: a cut at every byte of the record write
+(`a_cut_at_every_byte_of_the_off_leaves_the_same_end_state_or_a_spent_authorization`), a power cut before
+each step of an authorized off (`an_authorized_off_cut_before_each_step_ends_consistently_and_the_authorization_follows_the_record`)
+and a failed render (`a_cut_after_the_record_and_before_the_view_leaves_the_view_pending_and_the_authorization_spent`).
+
+**Why not a binding on on.** An on binds nothing: it only raises protection, and its precheck already
+names what is missing. An authorization for on would add a key-holder's step to every enable for no
+gain in protection.
 
 `lemnos-ctl security DEVICE precheck on|off` says what would stop a change, with no change made. The
 switch applies at once: the slot and flash drivers read the view at each decision, with no restart.
@@ -396,7 +520,7 @@ present but unreadable, or not exactly those two lines, reads **on**, whatever t
 record is the truth; the view is its copy for the readers, rendered at each daemon start and each
 change, and by `lemnos-ctl security render` (below).
 
-A board in that state, with no trust root (no valid line in `keys`):
+A board in that state, with no trust root (no valid line in `[security] keys`):
 
 - **What a person sees.** `lemnos-ctl security state` (method `state` of `system.security/1`) says
   `view corrupt: readers read on, whatever the record says` and names the render command, next to
@@ -420,12 +544,11 @@ A board in that state, with no trust root (no valid line in `keys`):
      progress (`busy:`). Turning the switch **on** is never done to fix a view: it is refused until the
      board has a trust root and its default and running slot verify under it.
 - **The protection, stated plainly.** Turning on needs proof: a trust root, and the default and running
-  slots verified under it. Turning off needs no proof beyond what every daemon call needs, access to the
-  daemon's socket, and the stakeholders' "not busy". So anyone who can call the daemon can turn the switch
-  off, as they can install. A process that can write `/etc/board/security` directly (root on the image)
+  slots verified under it. Turning off needs an authorization signed under the board's trust root when the board holds one
+  ("Turning it off" above); without a trust root it needs only access to the daemon's socket, and the
+  stakeholders' "not busy", so anyone who can call the daemon can turn the switch off, as they can install. A process that can write `/etc/board/security` directly (root on the image)
   can also set the view; the view is what the readers read until the next render, which the daemon does
-  at its next start or change. Whether `set(off)` should need a proof of presence is a decision for the
-  board's owner, not made here.
+  at its next start or change. 
 - **A corrupt record** (both copies of the two-copy record unreadable) reads on, and the view is
   rendered on. `set(off)` writes a valid record as the next generation and repairs both.
 
@@ -979,7 +1102,7 @@ tree the script prepared. A label with an `fdt` line is refused by name at the e
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", reserve_mb = 2048, keep = 3 }
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], boot_args = "os", reserve_mb = 2048, keep = 3 }
 # On raw NAND: config = { data = "/data", boot = "/boot", ubi = "ubi0", record = "ubi", boot_args = "os" }
 
 [[devices]]
@@ -1006,7 +1129,7 @@ comes from), `allow_first_flash` (`false` by default: a write is refused unless 
 only a flasher's board file sets), `kind` (`block`, `file` for a regular file in tests, or `mtd`
 for a raw NAND partition: see "Raw NAND" below),
 `max_dict_mb` (8 by default; 1 to 8, the ceiling: a board file may lower it, never raise it),
-`keys` (the trusted keys: one per line, 64 hex digits, a space, then the owner), and `mountinfo` (the mount table the running-system
+`keys` (given by the host from `[security] keys`, the board's one trust root: one per line, 64 hex digits, a space, then the owner; a `keys` in the device's own config is refused), and `mountinfo` (the mount table the running-system
 check reads, `/proc/self/mountinfo` by default). A board's `[board] id` is given to the driver, and a
 manifest for another board is refused first.
 
@@ -1079,7 +1202,7 @@ The board checks, in order, and before the first byte is written:
    board X, and this is board Y" (`-95`), before any signature is looked at.
 2. The record is empty, or 108 bytes with the magic, algorithm 1 and zero padding. Anything else is
    refused in every row: "malformed signature record" (`-22`).
-3. The record's key id is looked up in `keys`. A board with no key list has no known keys.
+3. The record's key id is looked up in the board's keys (`[security] keys`). A board with no key list has no known keys.
 4. The table decides. The size and the raw SHA-256 are enforced during the stream in every row.
 
 | security switch | image | key | result | outcome |

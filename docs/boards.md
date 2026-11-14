@@ -367,7 +367,8 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 # `[security]`: the board's security switch (docs/slots.md, "The security switch"). The record is the
 # switch's truth (an absolute path; on a board with slots it is the boot partition's record), `keys` is the
-# trust root for the switch's own check, and `orion = true` means Orion ships here and answers before a switch
+# board's one trust root (the host gives it to the slots, flash and security devices; they name no keys
+# of their own), and `orion = true` means Orion ships here and answers before a switch
 # goes on. The device below gets these facts as its config; no other device does.
 [security]
 record = "/var/lib/lemnos/security.rec"

@@ -97,6 +97,9 @@ pub enum Domain {
     FirstFlash,
     /// A slot bundle's message (`system-slots`, since I5g2): tag `lemnos-slot-bundle\0`.
     SlotBundle,
+    /// The authorization that turns the board's security switch off (`system-security`): tag
+    /// `lemnos-security-switch\0`. See [`security_switch_message`].
+    SecuritySwitch,
 }
 
 impl Domain {
@@ -105,6 +108,7 @@ impl Domain {
         match self {
             Self::FirstFlash => b"lemnos-first-flash\0",
             Self::SlotBundle => b"lemnos-slot-bundle\0",
+            Self::SecuritySwitch => b"lemnos-security-switch\0",
         }
     }
 }
@@ -136,6 +140,34 @@ pub fn slot_bundle_message(manifest: &[u8]) -> Vec<u8> {
     body.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
     body.extend_from_slice(manifest);
     signed_message(Domain::SlotBundle, &body)
+}
+
+/// The version of the security switch's authorization message.
+pub const SECURITY_SWITCH_VERSION: u32 = 1;
+
+/// The message an authorization signs to turn the security switch to `on`, on the board whose
+/// identity (its serial, as `system.identity/1` gives it) is `serial`, while the switch's record is
+/// at `generation`. Turning it off needs this message signed under a key the board holds:
+///
+/// ```text
+/// "lemnos-security-switch\0"   23 bytes: the domain tag, with its NUL
+/// u32 LE version = 1
+/// u32 LE length, then the board's serial bytes
+/// u8     target: 0 = off, 1 = on
+/// u64 LE generation of the switch's record
+/// ```
+///
+/// Every field is bound: another board's serial, another target or another generation gives other
+/// bytes, which do not verify. The generation moves on each change, so an authorization is spent by
+/// the change it allowed.
+pub fn security_switch_message(serial: &[u8], on: bool, generation: u64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + 4 + serial.len() + 1 + 8);
+    body.extend_from_slice(&SECURITY_SWITCH_VERSION.to_le_bytes());
+    body.extend_from_slice(&(serial.len() as u32).to_le_bytes());
+    body.extend_from_slice(serial);
+    body.push(u8::from(on));
+    body.extend_from_slice(&generation.to_le_bytes());
+    signed_message(Domain::SecuritySwitch, &body)
 }
 
 /// A key id: the SHA-256 of a public key's bytes. Records and the board's key lists name keys by it.
@@ -361,6 +393,38 @@ mod tests {
             VECTOR_MANIFEST.to_vec(),
             "a bare manifest is not the signed message"
         );
+    }
+
+    #[test]
+    fn the_security_switch_message_binds_serial_target_and_generation() {
+        let message = security_switch_message(b"0123456789abcdef", false, 1);
+        assert_eq!(
+            hex(&message),
+            "6c656d6e6f732d73656375726974792d73776974636800010000001000000030313233343536373839616263646566000100000000000000"
+        );
+        assert_ne!(
+            message,
+            security_switch_message(b"fedcba9876543210", false, 1),
+            "board"
+        );
+        assert_ne!(
+            message,
+            security_switch_message(b"0123456789abcdef", true, 1),
+            "target"
+        );
+        assert_ne!(
+            message,
+            security_switch_message(b"0123456789abcdef", false, 2),
+            "generation"
+        );
+        assert!(message.starts_with(Domain::SecuritySwitch.tag()));
+    }
+
+    #[test]
+    fn the_security_switch_domain_is_its_own() {
+        assert_ne!(Domain::SecuritySwitch.tag(), Domain::SlotBundle.tag());
+        assert_ne!(Domain::SecuritySwitch.tag(), Domain::FirstFlash.tag());
+        assert_eq!(Domain::SecuritySwitch.tag(), b"lemnos-security-switch\0");
     }
 
     fn policy(require: bool, check: Check<'_>) -> Result<Outcome, Refusal> {

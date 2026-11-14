@@ -1317,10 +1317,15 @@ id = "slots-test"
 [host]
 call_deadline_ms = 30000
 
+# One trust root per board: the host gives these keys to the slots driver.
+[security]
+record = "{record}"
+keys = "{keys}"
+
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], keys = "{keys}", systemctl = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], systemctl = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
 
 [[devices]]
 id = "reboot"
@@ -1330,6 +1335,7 @@ config = {{ systemctl = "{ctl}" }}
         data = layout.data.display(),
         boot = layout.boot.display(),
         keys = keys.display(),
+        record = dir.0.join("security.rec").display(),
         ctl = systemctl.display(),
     );
     let sim = lemnos_sim::SimBoard::new();

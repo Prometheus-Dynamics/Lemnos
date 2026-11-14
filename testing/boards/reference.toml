@@ -67,6 +67,12 @@ line = "gpio:pinctrl-rp1:45"
 boot = "high"
 reason = "the fan header's line: at full speed from power-on, until Lemnos's fan driver takes it"
 
+# The board's security facts. `keys` is the one trust root: the host gives it to the slots driver below
+# (and to the flash and security devices a board has), which name no key list of their own.
+[security]
+record = "/var/lib/lemnos/security.rec"
+keys = "/etc/lemnos/slot-keys"
+
 # The system: who the board is, what it can install and boot, and reboot.
 [[devices]]
 id = "identity"
@@ -76,7 +82,7 @@ config = { serial = "device-tree" }
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", reserve_mb = 2048, keep = 3 }
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], boot_args = "os", reserve_mb = 2048, keep = 3 }
 
 [[devices]]
 id = "reboot"

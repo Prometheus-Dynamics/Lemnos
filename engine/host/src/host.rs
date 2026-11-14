@@ -265,6 +265,17 @@ fn refusal_of(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> 
         Ok(lists) => lists,
         Err(error) => return Some(error.to_string()),
     };
+    let tags: Vec<&str> = entry
+        .manifest
+        .provides
+        .iter()
+        .map(|c| c.tag.as_str())
+        .collect();
+    if owned.iter().any(|(key, _)| key == "keys") && takes_trust_root(&tags) {
+        return Some(
+            "setting \"keys\": the board has one trust root, `[security] keys`, which the host gives to this driver; name no key list of its own".to_string(),
+        );
+    }
     let refs: Vec<(&str, Vec<&str>)> = lists
         .iter()
         .map(|(key, items)| (key.as_str(), items.iter().map(String::as_str).collect()))
@@ -439,6 +450,43 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// How many distinct callers a device keeps track of for [`Router::others_use`].
 const MAX_USERS: usize = 16;
 
+/// Whether a driver that provides these contracts is given the board's trust root.
+fn takes_trust_root(provides: &[&str]) -> bool {
+    ["system.security/", "system.slots/", "system.flash/"]
+        .iter()
+        .any(|prefix| provides.iter().any(|tag| tag.starts_with(prefix)))
+}
+
+/// One trust root per board. The `[security]` facts go to the device that serves `system.security/1`,
+/// and to no other. The trust root's key file (`[security] keys`) also goes to the devices that serve
+/// `system.slots/` and `system.flash/`: the keys that verify a slot bundle or a flash image are the keys
+/// that verify an authorization to turn the switch off. A device that names `keys` itself is refused, so
+/// there is no second key list.
+fn add_security_facts(
+    id: &str,
+    config: &mut Vec<(String, OwnedValue)>,
+    provides: &[&str],
+    security: &[(String, OwnedValue)],
+) -> core::result::Result<(), BoardError> {
+    let serves_security = provides
+        .iter()
+        .any(|tag| tag.starts_with("system.security/"));
+    let takes_keys = takes_trust_root(provides);
+    if takes_keys && config.iter().any(|(own, _)| own == "keys") {
+        return Err(BoardError::Config(id.to_string(), "keys".to_string()));
+    }
+    for (key, value) in security {
+        if !(serves_security || (takes_keys && key == "keys")) {
+            continue;
+        }
+        if config.iter().any(|(own, _)| own == key) {
+            return Err(BoardError::Config(id.to_string(), key.clone()));
+        }
+        config.push((key.clone(), value.clone()));
+    }
+    Ok(())
+}
+
 impl Slot {
     /// Ends the watcher of the wait descriptor, if any: its file is written so the watcher's read
     /// returns, and it sees its generation is gone. Called whenever the driver goes.
@@ -529,21 +577,11 @@ impl Slot {
                 reason: "starting".to_string(),
             }
         };
-        // The security facts go to the device that serves `system.security/1`, and to no other.
-        let serves_security = entry.is_some_and(|e| {
-            e.manifest
-                .provides
-                .iter()
-                .any(|c| c.tag.as_str().starts_with("system.security/"))
-        });
-        if serves_security {
-            for (key, value) in security {
-                if config.iter().any(|(own, _)| own == key) {
-                    return Err(BoardError::Config(spec.id.clone(), key.clone()));
-                }
-                config.push((key.clone(), value.clone()));
-            }
-        }
+        let tags: Vec<&str> = entry
+            .iter()
+            .flat_map(|e| e.manifest.provides.iter().map(|c| c.tag.as_str()))
+            .collect();
+        add_security_facts(&spec.id, &mut config, &tags, security)?;
         Ok(Self {
             index,
             lane_key: match &spec.bus {
@@ -3006,5 +3044,57 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod security_facts_tests {
+    use super::*;
+
+    fn facts() -> Vec<(String, OwnedValue)> {
+        vec![
+            ("record".into(), OwnedValue::Str("/r".into())),
+            ("keys".into(), OwnedValue::Str("/k".into())),
+            ("orion".into(), OwnedValue::Bool(false)),
+        ]
+    }
+
+    fn names(config: &[(String, OwnedValue)]) -> Vec<&str> {
+        config.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    #[test]
+    fn the_security_device_gets_every_fact_and_slots_and_flash_get_only_the_keys() {
+        let mut security = Vec::new();
+        add_security_facts("s", &mut security, &["system.security/1"], &facts()).unwrap();
+        assert_eq!(names(&security), ["record", "keys", "orion"]);
+        for tag in ["system.slots/1", "system.flash/1"] {
+            let mut config = Vec::new();
+            add_security_facts("d", &mut config, &[tag], &facts()).unwrap();
+            assert_eq!(names(&config), ["keys"], "{tag}");
+            assert_eq!(config[0].1, OwnedValue::Str("/k".into()));
+        }
+        let mut other = Vec::new();
+        add_security_facts("o", &mut other, &["power.sensor/1"], &facts()).unwrap();
+        assert!(other.is_empty(), "no other device gets a security fact");
+    }
+
+    #[test]
+    fn a_device_that_names_its_own_key_list_is_refused_even_with_no_trust_root() {
+        let own = vec![("keys".to_string(), OwnedValue::Str("/mine".into()))];
+        for tag in ["system.slots/1", "system.flash/1", "system.security/1"] {
+            for security in [facts(), Vec::new()] {
+                let mut config = own.clone();
+                let refused = add_security_facts("d", &mut config, &[tag], &security);
+                assert_eq!(
+                    refused,
+                    Err(BoardError::Config("d".into(), "keys".into())),
+                    "{tag}"
+                );
+            }
+        }
+        let mut config = own;
+        add_security_facts("o", &mut config, &["power.sensor/1"], &facts()).unwrap();
+        assert_eq!(config.len(), 1, "another device's own key is its own");
     }
 }

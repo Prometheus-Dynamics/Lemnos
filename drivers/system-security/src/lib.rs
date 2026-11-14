@@ -4,16 +4,17 @@
 //!
 //! # Wiring
 //!
-//! - `uses = { slots = "<id>", flash = "<id>" }` names the stakeholders: the `system-slots` and
-//!   `system-flash` devices, which serve `system.security-precondition/1`. Each answers only for
-//!   itself. A board with neither bound judges on the trust root alone.
+//! - `uses = { slots = "<id>", flash = "<id>", identity = "<id>" }` names the stakeholders: the
+//!   `system-slots` and `system-flash` devices, which serve `system.security-precondition/1`. Each
+//!   answers only for itself. A board with neither bound judges on the trust root alone. `identity`
+//!   is the `system-identity` device: its serial names this board in an off's authorization.
 //!
 //! ```toml
 //! [[devices]]
 //! id = "security"
 //! driver = "system-security"
-//! uses = { slots = "slots", flash = "flash" }
-//! config = { record = "/var/lib/lemnos/security.rec", keys = "/etc/lemnos/slot-keys", orion = false }
+//! uses = { slots = "slots", flash = "flash", identity = "identity" }
+//! config = { orion = false }  # record and keys come from the board file's [security] table
 //! ```
 //!
 //! # Configuration
@@ -21,7 +22,7 @@
 //! | Key | Default | Meaning |
 //! |---|---|---|
 //! | `record` | required | The record file (two copies; `docs/slots.md`). On a board with slots it moves to the boot partition once I5i1 lands. |
-//! | `keys` | none | The trust root's key file. Read here only when no stakeholder is bound. |
+//! | `keys` | none | The board's one trust root (`[security] keys`, given by the host to this device and to `system-slots` and `system-flash`): the keys that verify slots, flash images and an off's authorization. No keys: off needs no authorization, and `state` says `trust root absent`. Read at each change, and by `state`. |
 //! | `orion` | `false` | Whether Orion ships on this board: its answer is then needed for `on`, and `on` is refused until Orion can be asked. |
 //!
 //! The view is not configurable: it is rendered into `/run/board`, which the image links `/etc/board`
@@ -32,9 +33,10 @@ pub mod flow;
 
 use std::path::PathBuf;
 
-use flow::{Answer, Flow, judge, lines_of, trust_root};
+use flow::{Answer, Board, Flow, judge, lines_of, trust_root};
 use lemnos_contract_security::Security;
 use lemnos_contract_security_precondition::SecurityPrecondition;
+use lemnos_contract_system_identity::{MAX_TEXT as IDENTITY_MAX, SystemIdentity};
 use lemnos_core::{Config, Dev, Lifecycle, Result, Status, driver};
 use lemnos_slot_store::security::RUN_DIR;
 
@@ -49,6 +51,9 @@ pub struct SystemSecurity {
     /// The `system-flash` device, when the board has a first-flash target.
     #[needs(optional)]
     flash: Option<Dev<dyn SecurityPrecondition>>,
+    /// The `system-identity` device, when the board has one: its serial names the board.
+    #[needs(optional)]
+    identity: Option<Dev<dyn SystemIdentity>>,
     flow: Flow,
     keys: Option<PathBuf>,
 }
@@ -65,6 +70,7 @@ impl Lifecycle for SystemSecurity {
         let mut dev = Self {
             slots: needs.slots,
             flash: needs.flash,
+            identity: needs.identity,
             flow: Flow::open(record, RUN_DIR, orion),
             keys: cfg.str("keys").map(PathBuf::from),
         };
@@ -79,6 +85,15 @@ impl Lifecycle for SystemSecurity {
 }
 
 impl SystemSecurity {
+    /// The board's serial, from the identity device; `None` when there is none or it does not
+    /// answer.
+    fn serial(&mut self) -> Option<String> {
+        let dev = self.identity.as_mut()?;
+        let mut buffer = [0u8; IDENTITY_MAX];
+        let n = dev.serial(&mut buffer).ok()?;
+        String::from_utf8(buffer[..n].to_vec()).ok()
+    }
+
     /// Every stakeholder's answer for a change to `on`, and the switch's own trust root when no
     /// stakeholder is bound.
     fn answers(&mut self, on: bool) -> Vec<Answer> {
@@ -93,7 +108,7 @@ impl SystemSecurity {
             answers.push(Answer {
                 from: "security",
                 lines: vec![
-                    "missing: no trust root: the board names no key file that has a valid line (keys in this device's config)"
+                    "missing: no trust root: the board names no key file that has a valid line (`keys` in the board file's [security] table)"
                         .into(),
                 ],
             });
@@ -145,25 +160,52 @@ fn copy_out(text: &str, into: &mut [u8]) -> Result<usize> {
 impl Security for SystemSecurity {
     fn state(&mut self, into: &mut [u8]) -> Result<usize> {
         self.flow.retry_render();
-        let mut text = self.flow.state_lines().join("\n");
+        let serial = self.serial();
+        let board = Board {
+            keys: self.keys.as_deref(),
+            serial: serial.as_deref(),
+        };
+        let mut text = self.flow.state_lines(board).join("\n");
         text.push('\n');
         copy_out(&text, into)
     }
 
     fn precheck(&mut self, on: bool, into: &mut [u8]) -> Result<usize> {
         let answers = self.answers(on);
-        let lines = lines_of(&judge(on, self.flow.orion(), &answers));
+        let mut lines = lines_of(&judge(on, self.flow.orion(), &answers));
+        if !on && trust_root(self.keys.as_deref()) {
+            lines.push(
+                "note: off needs an authorization made for the current generation (request_off says what it signs)"
+                    .into(),
+            );
+        }
         self.flow.note(lines.clone());
         let mut text = lines.join("\n");
         text.push('\n');
         copy_out(&text, into)
     }
 
-    fn set(&mut self, on: bool) -> Result<()> {
+    fn set(&mut self, on: bool, authorization: &[u8]) -> Result<()> {
         let answers = self.answers(on);
+        let serial = self.serial();
+        let board = Board {
+            keys: self.keys.as_deref(),
+            serial: serial.as_deref(),
+        };
         let mut boot = |on: bool| apply_to(self.slots.as_mut(), self.flash.as_mut(), on);
         self.flow
-            .set(on, &answers, &mut boot)
+            .set(on, &answers, board, authorization, &mut boot)
             .map_err(|(status, _)| status)
+    }
+
+    fn request_off(&mut self, into: &mut [u8]) -> Result<usize> {
+        let serial = self.serial();
+        let board = Board {
+            keys: self.keys.as_deref(),
+            serial: serial.as_deref(),
+        };
+        let mut text = self.flow.request_off_lines(board).join("\n");
+        text.push('\n');
+        copy_out(&text, into)
     }
 }

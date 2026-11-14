@@ -29,7 +29,11 @@ lemnos-ctl [--socket PATH] COMMAND
                                  the tool cancels it)
   off DEVICE | on DEVICE
   security DEVICE state          the board's security switch: on or off, its generation, the view
-  security DEVICE on|off         change the switch (the device's `set`: its precheck first)
+  security DEVICE on             change the switch on (the device's `set`: its precheck first)
+  security DEVICE off [--authorization FILE]
+                                 change the switch off; a board with a trust root needs FILE, the
+                                 authorization signed for the generation `request-off` names
+  security DEVICE request-off    what an authorization to turn the switch off must sign, from the board
   security DEVICE precheck on|off  what would stop the change, with no change made
   security render --record FILE [--dir DIR]
                                  render the switch's view from its record, with no daemon (the
@@ -162,8 +166,22 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         ("files", [device, name]) => tool.files_fetch(device, name, None),
         ("files", [device, name, path]) => tool.files_fetch(device, name, Some(path)),
         ("security", [device, word]) if word == "state" => tool.call(device, "state", &[]),
-        ("security", [device, word]) if word == "on" || word == "off" => {
-            tool.call(device, "set", std::slice::from_ref(word))
+        ("security", [device, word]) if word == "request-off" => {
+            tool.call(device, "request_off", &[])
+        }
+        ("security", [device, word]) if word == "on" => {
+            tool.call(device, "set", &["on".to_string(), String::new()])
+        }
+        ("security", [device, word]) if word == "off" => {
+            tool.call(device, "set", &["off".to_string(), String::new()])
+        }
+        ("security", [device, word, flag, file]) if word == "off" && flag == "--authorization" => {
+            let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            tool.call(device, "set", &["off".to_string(), hex])
+        }
+        ("security", [_, word, flag, _]) if word == "on" && flag == "--authorization" => {
+            Err("--authorization belongs to off: turning the switch on needs none".to_string())
         }
         ("security", [device, verb, word])
             if verb == "precheck" && (word == "on" || word == "off") =>
