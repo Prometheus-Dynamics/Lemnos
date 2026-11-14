@@ -3,6 +3,7 @@
 //! and a boot record that counts its writes. The mailbox is a recorder, and the sequence is cut at
 //! every step.
 
+use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -14,7 +15,10 @@ use lemnos_slot_store::boots;
 use lemnos_slot_store::fallback::POWER_ON_RESET;
 use lemnos_slot_store::store::{Layout, Meta, State};
 
-use super::count::{ClearCount, Fallback, Firmware, keep_baseline};
+use super::count::{
+    ClearCount, Fallback, Firmware, Uncleared, cleared_text, health_text, keep_baseline,
+    tick_pending,
+};
 use crate::boot::BootRecord;
 
 /// A directory for one test, removed after it.
@@ -140,6 +144,158 @@ impl ClearCount for Mailbox<'_> {
         self.log.lock().unwrap().push("count-clear".into());
         Ok(())
     }
+}
+
+/// A firmware mailbox that refuses the first `refusals` clears and accepts the next. `u32::MAX`
+/// refuses for ever. `calls` counts every clear attempt.
+struct Flaky {
+    refusals: Cell<u32>,
+    calls: Cell<u32>,
+}
+
+impl Flaky {
+    fn new(refusals: u32) -> Self {
+        Self {
+            refusals: Cell::new(refusals),
+            calls: Cell::new(0),
+        }
+    }
+}
+
+impl ClearCount for Flaky {
+    fn clear_count(&self) -> io::Result<()> {
+        self.calls.set(self.calls.get() + 1);
+        let left = self.refusals.get();
+        if left > 0 {
+            self.refusals.set(left - 1);
+            return Err(io::Error::other("injected refusal"));
+        }
+        Ok(())
+    }
+}
+
+const SECOND: u64 = 1_000_000_000;
+
+/// The driver's tick, asked again at each time it returns, until the clear is done, or the time
+/// goes past `until_ns`. Returns the times the mailbox was tried, and the last time returned.
+fn run_ticks(
+    layout: &Layout,
+    pending: &mut Option<Uncleared>,
+    mailbox: &Flaky,
+    until_ns: u64,
+) -> (Vec<u64>, Option<u64>) {
+    let mut attempts = Vec::new();
+    let mut now = 0;
+    loop {
+        let before = mailbox.calls.get();
+        let next = tick_pending(layout, pending, now, mailbox);
+        if mailbox.calls.get() != before {
+            attempts.push(now);
+        }
+        match next {
+            Some(at) if at <= until_ns => now = at,
+            last => return (attempts, last),
+        }
+    }
+}
+
+/// M36c: a refused clear is retried from the tick. The wait starts at 1 s, doubles, and stops at
+/// 8 s. Six refusals then an accepted clear: the state names each refusal's wait, and the clear
+/// once, with its tries (the good boot's first try included).
+#[test]
+fn a_refused_clear_is_retried_on_a_wait_that_doubles_to_eight_seconds_and_then_clears() {
+    let (_dir, layout) = fixture("retry", "boot-1");
+    let mailbox = Flaky::new(6);
+    // The good boot's clear was refused: that is the first refusal, its wait not yet timed.
+    let mut pending = Some(Uncleared::refused("injected refusal"));
+    // The first tick times the first wait and tries nothing.
+    assert_eq!(
+        tick_pending(&layout, &mut pending, 0, &mailbox),
+        Some(SECOND)
+    );
+    assert_eq!(mailbox.calls.get(), 0);
+    // The first retry, at 1 s, is refused: the next is two seconds later, and the words say so.
+    assert_eq!(
+        tick_pending(&layout, &mut pending, SECOND, &mailbox),
+        Some(3 * SECOND)
+    );
+    assert_eq!(
+        State::load(&layout).error,
+        "the boot count is not cleared: the firmware mailbox could not clear it: injected refusal; retrying every 2s"
+    );
+    // The rest of the sequence: refused until the sixth refusal, then accepted.
+    let (rest, last) = run_ticks(&layout, &mut pending, &mailbox, 3600 * SECOND);
+    assert_eq!(last, None, "the clear is done: nothing is owed");
+    assert_eq!(pending, None);
+    assert_eq!(
+        rest,
+        [3, 7, 15, 23, 31, 39].map(|s| s * SECOND),
+        "the retries after the first, at 3, 7, 15, 23, 31 and 39 s"
+    );
+    assert_eq!(
+        mailbox.calls.get(),
+        7,
+        "the ticks made seven tries; the good boot's refusal is the eighth"
+    );
+    assert_eq!(
+        State::load(&layout).error,
+        "the boot count is cleared after 8 tries"
+    );
+}
+
+/// M36c: a clear that the firmware refuses for ever is never given up. Ten minutes of ticks each
+/// owe a wait of at most 8 s, the words keep saying so, and nothing else changes: no state change,
+/// no demotion, no off.
+#[test]
+fn a_clear_refused_for_ever_is_never_given_up_and_nothing_turns_off() {
+    let (_dir, layout) = fixture("forever", "boot-1");
+    let mailbox = Flaky::new(u32::MAX);
+    let mut pending = Some(Uncleared::refused("injected refusal"));
+    let ten_minutes = 600 * SECOND;
+    let (attempts, last) = run_ticks(&layout, &mut pending, &mailbox, ten_minutes);
+    let last = last.expect("a wait is always owed");
+    assert!(
+        last > ten_minutes,
+        "the retries go on past ten minutes: {last}"
+    );
+    assert!(pending.is_some(), "the count is still owed");
+    let gaps: Vec<u64> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.len() > 60, "about one try every 8 s: {}", gaps.len());
+    assert!(
+        gaps.iter().all(|gap| *gap <= 8 * SECOND),
+        "no wait is longer than 8 s: {gaps:?}"
+    );
+    assert_eq!(gaps.last(), Some(&(8 * SECOND)));
+    let state = State::load(&layout);
+    assert_eq!(state.state, "confirmed", "nothing turns off");
+    assert_eq!(state.default, "a", "nothing is demoted");
+    assert!(
+        state.error.ends_with("retrying every 8s"),
+        "{}",
+        state.error
+    );
+    assert!(!state.error.contains("cleared after"), "{}", state.error);
+}
+
+/// The words: `health` and the state name the wait in seconds, and a cleared count names its tries
+/// with the right word for one and for more.
+#[test]
+fn the_words_name_the_wait_and_the_clear() {
+    for (wait_ns, secs) in [
+        (SECOND, 1),
+        (2 * SECOND, 2),
+        (4 * SECOND, 4),
+        (8 * SECOND, 8),
+    ] {
+        assert_eq!(
+            health_text(wait_ns),
+            format!(
+                "the boot count is not cleared: the firmware mailbox could not clear it; retrying every {secs}s"
+            )
+        );
+    }
+    assert_eq!(cleared_text(1), "the boot count is cleared after 1 try");
+    assert_eq!(cleared_text(3), "the boot count is cleared after 3 tries");
 }
 
 /// A data directory with state `default`, `previous`, and a boot history entry for `boot`.

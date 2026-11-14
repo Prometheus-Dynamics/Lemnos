@@ -1177,6 +1177,13 @@ rotation above still reads the raw count.
   manifest) and before each restart Lemnos makes. The restart check runs first: a refused check
   makes no restart. A count that can't be cleared does not refuse the restart the board was asked for:
   the state names it ("this boot is counted") and the indicator shows failed.
+- **A refused clear is retried (M36c).** A clear the mailbox refuses after a good boot, or on an arrival
+  from the count, is owed: the driver's tick tries it again, the wait starting at 1 s, doubling after
+  each refusal and stopping at 8 s, and it never gives up or turns off. While it is owed, `health` is
+  degraded, `retrying` shows the attempts and the next try, `info` carries `"boot_count"`, and the state
+  says `the boot count is not cleared: <why>; retrying every Ns`. When the clear goes through, the state
+  says `the boot count is cleared after N tries` once. A clear refused on the way to a restart is not
+  retried: the board restarts, and the next good boot clears the count.
 - A boot that arrives on the previous slot because of the count (the reading picks previous, and
   the board runs the previous) is reported first: the state's error and the boot history's entry
   for this boot name the count, `rsts`, and whether the default's files match. Then:
