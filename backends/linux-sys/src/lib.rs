@@ -9,6 +9,7 @@
 #![cfg(target_os = "linux")]
 
 pub mod aio;
+pub mod confined;
 pub mod descriptor;
 pub mod dma_buf;
 pub mod dma_heap;
@@ -32,6 +33,7 @@ pub mod process;
 pub mod rootfs;
 pub mod rp1_pio;
 pub mod scm;
+pub mod seccomp;
 pub mod serial;
 pub mod signal;
 pub mod spi;

@@ -463,6 +463,10 @@ impl UsbFunction for ReadOnly<UsbFunctionHandle> {
         self.0.interface_name(into)
     }
 
+    fn serial_string_set(&mut self) -> Refusable<Option<bool>> {
+        self.0.serial_string_set()
+    }
+
     fn next_event(&mut self) -> Refusable<Option<UsbFunctionEvent>> {
         self.0.next_event()
     }

@@ -191,9 +191,12 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
     for (file, value) in expected {
         assert_eq!(tree.attribute(file), value, "{file}");
     }
-    assert_eq!(
-        fs::read_link(tree.gadget().join(format!("configs/c.1/ffs.{UDC}"))).unwrap(),
-        tree.gadget().join(format!("functions/ffs.{UDC}"))
+    // The link names its target through a descriptor (`/proc/self/fd/N/ffs.NAME`), which configfs
+    // resolves and shows by its own name.
+    assert!(
+        fs::read_link(tree.gadget().join(format!("configs/c.1/ffs.{UDC}")))
+            .unwrap()
+            .ends_with(format!("ffs.{UDC}"))
     );
     // FunctionFS got the interface at both speeds and the four strings.
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();

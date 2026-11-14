@@ -58,19 +58,31 @@ no `--user`, it runs as root and says so.
 `service/lemnosd/src/privilege.rs`, a list of `Step { name, run }`. `run` is `fn(&Context) -> io::Result<()>`,
 and the `Context` holds `board: &BoardFile`, `socket: &Path`, `uid` and `gid` (the ids the daemon will run as,
 so a step can `chown` what it creates). A step runs as root, before the drop, and a failure is an error
-that names the step. The USB gadget's configfs and FunctionFS setup is the second entry, `usb gadget`
-(`service/lemnosd/src/gadget.rs`): it makes each gadget's configfs tree and mounts its FunctionFS with
-the daemon's uid and gid, and chowns each `UDC` attribute to it. The daemon then writes `UDC` and ep0
-after the drop. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
+that names the step. The USB gadgets are not a step: the root phase forks a small root parent and the
+gadget helper under it (`service/lemnosd/src/supervisor.rs`, `helper.rs`, `gadget::spawn`). The parent
+(`lemnosd-gsuper` in `ps`) forks the helper again, after 1, 2, 4 and 8 s at most, whenever it dies. The helper
+(`lemnosd-gadget`) keeps uid 0 and `CAP_SYS_ADMIN` after the drop, reads the board serial from the source the
+board file names, makes each gadget's configfs tree and FunctionFS mount (or adopts the identical tree that is
+there), and binds and unbinds each `UDC` on the daemon's request, by index, for that daemon only. A gadget that
+cannot be made yet is retried by its driver, not refused. The parent keeps `CAP_SYS_ADMIN`, `CAP_SETPCAP`,
+`CAP_SETUID` and `CAP_SETGID` (the helper drops the last three at start: `CAP_SETPCAP` clears the helper's
+bounding set, `CAP_SETGID` its supplementary groups, `CAP_SETUID` only matters if the ids change, which root to root
+does not; see `docs/daemon.md`); each runs under its own seccomp
+allowlist (`docs/daemon.md`, "Privileged helper"). Do not
+add an `ExecStartPre=+` for it: that would be a second privileged path.
 The gadget's three unit settings are in an optional drop-in, `packaging/systemd/lemnosd.service.d/gadget.conf`,
 not in the base unit. Install it as `/etc/systemd/system/lemnosd.service.d/gadget.conf` on a board whose
 board file has a `usb-gadget` device, and only then (its `when` in `files.txt` is `gadget`). The board file is the
 source: a `[[devices]]` table with `driver = "usb-gadget"` (see [docs/boards.md](../docs/boards.md)). `lemnos-ctl tree`
 does not write this drop-in, and does not say whether a board has a gadget. Its settings: `CAP_SYS_ADMIN` in
-`CapabilityBoundingSet` (the FunctionFS mount and its unmount need it; the daemon drops it with the rest
-after the root phase, `backends/linux-sys/src/privilege.rs` `drop_to`), `mount umount2` in
-`SystemCallFilter` (not in `@system-service`), and `ReadWritePaths=-/sys/kernel/config/usb_gadget`, which
-keeps the tree writable under `ProtectKernelTunables`. The QEMU check (`testing/crates/gadget-check`)
+`CapabilityBoundingSet` (the gadget helper's mount and unmount need it: the helper keeps it after the drop,
+the daemon keeps none of it; the parent's `CAP_SETPCAP`, `CAP_SETUID` and `CAP_SETGID` are in the base unit's
+set already), `mount umount2` in `SystemCallFilter` (not in `@system-service`; the helper and its parent
+inherit the filter, and narrow it with their own seccomp allowlists), and `ReadWritePaths=-/sys/kernel/config/usb_gadget`, which keeps the tree writable
+under `ProtectKernelTunables`. The `CapabilityBoundingSet` and `SystemCallFilter` values did not change in
+V1g: the helper and its parent use what the base unit and the drop-in already give, and nothing else: an
+image installs no new file. A board with no BusyBox `S50lemnosd` change needs none either: the script starts
+`lemnosd` as root with `--user`, and the parent and helper are its children. The QEMU check (`testing/crates/gadget-check`)
 runs the daemon's privileged start and reads the capability sets after it. The sandbox itself has not run
 on a board (`testing/board-runs/R1d.md`).
 

@@ -17,6 +17,8 @@ pub const CAP_SETGID: u32 = 6;
 pub const CAP_SETUID: u32 = 7;
 /// `CAP_SETPCAP`: change the capability sets and the bounding set.
 pub const CAP_SETPCAP: u32 = 8;
+/// `CAP_SYS_ADMIN`: mount and unmount FunctionFS, which the gadget helper does.
+pub const CAP_SYS_ADMIN: u32 = 21;
 /// `CAP_SYS_RAWIO`: map a block's registers through `/dev/lemnos`.
 pub const CAP_SYS_RAWIO: u32 = 17;
 
@@ -143,7 +145,14 @@ pub fn drop_to(plan: &Plan) -> io::Result<()> {
     if sorted(before.groups.clone()) != want {
         set_groups(&want)?;
     }
-    set_ids(plan.gid, plan.uid)?;
+    // Only when the ids change: a process that is already the plan's user (the gadget helper, root
+    // to root) makes no `setuid`, which libc may carry out as a multi-call dance a seccomp
+    // allowlist inherited from its parent has no place for.
+    if (before.uid, before.euid, before.gid, before.egid)
+        != (plan.uid, plan.uid, plan.gid, plan.gid)
+    {
+        set_ids(plan.gid, plan.uid)?;
+    }
     prctl_flag(libc::PR_SET_KEEPCAPS, 0)?;
     capset(keep, keep, 0)?;
     prctl_flag(libc::PR_SET_NO_NEW_PRIVS, 1)?;
@@ -499,6 +508,102 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
 
 fn c_name(name: &str) -> io::Result<std::ffi::CString> {
     std::ffi::CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+/// Forks the process, which must have no other thread: the child gets `0` and the parent the
+/// child's process id. The root phase forks before any thread starts.
+///
+/// # Errors
+///
+/// `fork` fails.
+pub fn fork() -> io::Result<libc::pid_t> {
+    // SAFETY: `fork` takes no arguments; the caller guarantees one thread, so the child is a
+    // copy of a process whose only thread is the one that runs it.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid)
+}
+
+/// How a child ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildEnd {
+    /// It returned this status.
+    Exit(i32),
+    /// A signal ended it.
+    Signal(i32),
+}
+
+/// Waits for the child `pid` to end (a stop is not an end), and says how it ended.
+///
+/// # Errors
+///
+/// `waitpid` fails other than by interruption.
+pub fn wait_child(pid: libc::pid_t) -> io::Result<ChildEnd> {
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` is a writable c_int for the call.
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc == pid {
+            break;
+        }
+        if rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(if libc::WIFSIGNALED(status) {
+        ChildEnd::Signal(libc::WTERMSIG(status))
+    } else {
+        ChildEnd::Exit(libc::WEXITSTATUS(status))
+    })
+}
+
+/// The process id of the calling process's parent.
+#[must_use]
+pub fn parent_pid() -> libc::pid_t {
+    // SAFETY: `getppid` takes no arguments and cannot fail.
+    unsafe { libc::getppid() }
+}
+
+/// Names the calling process, as `ps` shows it: at most 15 bytes are kept.
+///
+/// # Errors
+///
+/// The name cannot be set.
+pub fn set_name(name: &str) -> io::Result<()> {
+    let mut bytes = [0u8; 16];
+    let take = name.len().min(15);
+    bytes[..take].copy_from_slice(&name.as_bytes()[..take]);
+    // SAFETY: `PR_SET_NAME` reads a NUL-terminated name of at most 16 bytes from `bytes`, which
+    // outlives the call and ends in a NUL.
+    let r = unsafe { libc::prctl(libc::PR_SET_NAME, bytes.as_ptr() as libc::c_ulong) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Asks the kernel to kill the calling process when its parent dies (`PR_SET_PDEATHSIG`).
+///
+/// # Errors
+///
+/// The option cannot be set.
+pub fn die_with_parent() -> io::Result<()> {
+    prctl_flag(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong).map(|_| ())
+}
+
+/// Ignores `signal` for the calling process (`SIG_IGN`).
+///
+/// # Errors
+///
+/// The disposition cannot be set.
+pub fn ignore_signal(signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: `signal` with `SIG_IGN` installs no handler code; it only changes the disposition.
+    if unsafe { libc::signal(signal, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

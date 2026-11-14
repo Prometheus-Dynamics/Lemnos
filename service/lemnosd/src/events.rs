@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Health, HostClock};
+use lemnos_core::{Health, HostClock, Retry};
 use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
 use lemnos_wire::{Frame, health, state};
 
@@ -17,14 +17,51 @@ const MAX_SLEEP: Duration = Duration::from_millis(250);
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
 /// A device's state as the wire carries it: its state, and its health and reason with it.
-pub(crate) fn wire_state(info: &DeviceInfo) -> (u8, u8, String) {
-    wire_of(&info.state, &info.health)
+pub(crate) fn wire_state(info: &DeviceInfo, now_ns: u64) -> (u8, u8, String) {
+    wire_of(&info.state, info.retry, &info.health, now_ns)
 }
 
-fn wire_of(device: &DeviceState, health_now: &Health) -> (u8, u8, String) {
+/// The most of a reason's text the wire carries: a longer one is cut and marked with `...`.
+const MAX_REASON: usize = 160;
+
+/// A retry as the reason reads: how many attempts have failed, why the last one did, and how
+/// long until the next. Attempt 0 is a device switched on, which has no attempt to show.
+pub(crate) fn retry_text(attempts: u32, last: &str, next_ns: u64, now_ns: u64) -> String {
+    if attempts == 0 {
+        return last.to_owned();
+    }
+    let ms = next_ns.saturating_sub(now_ns) / 1_000_000;
+    let last = if last.chars().count() > MAX_REASON {
+        let cut: String = last.chars().take(MAX_REASON - 3).collect();
+        format!("{cut}...")
+    } else {
+        last.to_owned()
+    };
+    format!("retrying: attempt {attempts}, last reason: {last}, next try in {ms} ms")
+}
+
+fn wire_of(
+    device: &DeviceState,
+    retry: Option<Retry>,
+    health_now: &Health,
+    now_ns: u64,
+) -> (u8, u8, String) {
     let (state, mut reason) = match device {
-        DeviceState::Running => (state::RUNNING, String::new()),
-        DeviceState::Backoff { reason, .. } => (state::BACKOFF, reason.clone()),
+        DeviceState::Running => match retry {
+            Some(retry) => (
+                state::RUNNING,
+                retry_text(retry.attempts, retry.reason, retry.next_ns, now_ns),
+            ),
+            None => (state::RUNNING, String::new()),
+        },
+        DeviceState::Backoff {
+            attempts,
+            next_retry_ns,
+            reason,
+        } => (
+            state::BACKOFF,
+            retry_text(*attempts, reason, *next_retry_ns, now_ns),
+        ),
         DeviceState::Off(why) => (state::OFF, format!("{why:?}").to_lowercase()),
     };
     let health = match health_now {
@@ -75,7 +112,8 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>) {
         let Some(info) = devices.iter().find(|info| info.index == index as u32) else {
             continue;
         };
-        let (state, health, reason) = wire_of(&info.state, &health);
+        let (state, health, reason) =
+            wire_of(&info.state, info.retry, &health, core.clock.now_ns());
         let event = Frame::Event {
             device: info.index,
             state,
@@ -167,5 +205,39 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
             Duration::from_nanos(at.saturating_sub(core.clock.now_ns()))
         });
         core.wait_stop(until_wake.clamp(Duration::from_millis(1), MAX_SLEEP));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retry_reads_its_attempts_reason_and_wait() {
+        assert_eq!(
+            retry_text(
+                3,
+                "the controller is not there",
+                5_000_000_000,
+                3_000_000_000
+            ),
+            "retrying: attempt 3, last reason: the controller is not there, next try in 2000 ms"
+        );
+        // A device switched on has no attempt to show: its reason is the word alone.
+        assert_eq!(retry_text(0, "switched on", 9, 1), "switched on");
+        // A wait already past reads as zero, never as a wrapped number.
+        assert!(retry_text(1, "x", 1, 5).ends_with("next try in 0 ms"));
+    }
+
+    #[test]
+    fn a_long_reason_is_cut_to_the_bound_and_marked() {
+        let long = "x".repeat(400);
+        let text = retry_text(2, &long, 0, 0);
+        let cut = format!("{}...", "x".repeat(MAX_REASON - 3));
+        assert!(
+            text.contains(&format!("last reason: {cut}, next try")),
+            "{text}"
+        );
+        assert!(text.len() < MAX_REASON + 64, "{}", text.len());
     }
 }

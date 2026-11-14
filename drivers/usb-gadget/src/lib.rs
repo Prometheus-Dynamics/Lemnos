@@ -129,7 +129,7 @@ use lemnos_contract_usb_function::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Health, Item, Key, Kind as KeyKind,
-    Lifecycle, MethodId, Result, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
+    Lifecycle, MethodId, Result, Retry, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -159,6 +159,8 @@ pub const STARTING: &str = "not enabled yet";
 pub const NOT_THERE: &str = "the USB device controller, or what the board sets up for it, is \
                              not there: retrying";
 pub const REFUSED: &str = "the controller can't carry this gadget's descriptors: retrying";
+pub const SERIAL_WAIT: &str = "the board serial the gadget's addresses come from is not readable \
+                               yet: retrying";
 pub const DENIED: &str = "not allowed to set the gadget up: retrying";
 pub const IN_USE: &str = "something else holds the controller: retrying";
 pub const ENABLE_FAILED: &str = "the gadget could not be enabled: retrying";
@@ -194,6 +196,7 @@ fn enable_fault(kind: ErrorKind) -> &'static str {
         ErrorKind::InvalidInput | ErrorKind::Unsupported => REFUSED,
         ErrorKind::PermissionDenied => DENIED,
         ErrorKind::Busy => IN_USE,
+        ErrorKind::Configuration => SERIAL_WAIT,
         _ => ENABLE_FAILED,
     }
 }
@@ -213,6 +216,9 @@ pub struct UsbGadget {
     ifname: Option<InterfaceName>,
     /// Why the gadget is up but missing something: its health while up.
     note: Option<&'static str>,
+    /// The note the settings gave at start (the daemon's own read of the serial), kept as the
+    /// reason for a gadget whose setup reports it has no serial string.
+    start_note: Option<&'static str>,
     /// Whether the host has the device configured.
     configured: bool,
     /// Whether the bus is idle.
@@ -254,6 +260,19 @@ impl UsbGadget {
         self.next_ns
     }
 
+    /// The note about the serial string, from what the setup that just bound the gadget made:
+    /// cleared when the gadget carries the serial (the privileged helper reads the serial itself
+    /// at each setup, so a gadget that came up by retry may have one the daemon's read at start
+    /// did not), and the start's reason (or a read one) when it has none. A backend that cannot say
+    /// leaves the note as it was.
+    fn read_serial_note(&mut self) {
+        match self.function.serial_string_set() {
+            Ok(Some(true)) => self.note = None,
+            Ok(Some(false)) => self.note = Some(self.start_note.unwrap_or(NO_SERIAL_READ)),
+            _ => {}
+        }
+    }
+
     /// The name the kernel gave the NCM interface, read after the bind. `None` when the function
     /// has no NCM function or the backend cannot say.
     fn read_interface_name(&mut self) -> Option<InterfaceName> {
@@ -268,6 +287,7 @@ impl UsbGadget {
         match self.function.enable(self.set.bytes()) {
             Ok(()) => {
                 self.up = true;
+                self.read_serial_note();
                 self.ifname = self.read_interface_name();
                 self.up_since_ns = now_ns;
                 self.next_ns = now_ns.saturating_add(POLL_NS);
@@ -573,7 +593,7 @@ impl Lifecycle for UsbGadget {
     }
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let (set, _) = settings(cfg)?;
+        let set = descriptor_set(cfg)?;
         let note = if cfg.str("serial").is_some() || cfg.str("board_serial").is_some() {
             None
         } else if cfg.str("board_serial_error").is_some() {
@@ -606,6 +626,7 @@ impl Lifecycle for UsbGadget {
             up: false,
             ifname: None,
             note,
+            start_note: note,
             configured: false,
             suspended: false,
             control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
@@ -626,6 +647,19 @@ impl Lifecycle for UsbGadget {
             (false, STARTING) => Health::Degraded(STARTING),
             (false, fault) => Health::Failed(fault),
         }
+    }
+
+    /// Down after at least one failed attempt: how many failed in a row, the last reason without
+    /// its `: retrying` (the host adds that word), and when the next attempt is due.
+    fn retrying(&self) -> Option<Retry> {
+        if self.up || self.attempts == 0 {
+            return None;
+        }
+        Some(Retry {
+            attempts: self.attempts,
+            next_ns: self.next_ns,
+            reason: self.fault.strip_suffix(": retrying").unwrap_or(self.fault),
+        })
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
@@ -822,6 +856,21 @@ pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> 
     Ok(())
 }
 
+/// The descriptor set the settings describe, with no functions: what the driver writes to ep0. It
+/// does not need the board serial that a derived NCM address needs, so a gadget whose serial cannot
+/// be read yet still starts (the privileged helper, which makes the tree and reads the serial at
+/// each setup, is what waits for it).
+///
+/// # Errors
+///
+/// The settings [`check`] refuses.
+pub fn descriptor_set(cfg: &Config<'_>) -> Result<Set> {
+    check(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let identity = identity(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let text = interfaces_text(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    description::build(&identity, text.as_str()).map_err(|_: Fault| Status::INVALID_ARGUMENT)
+}
+
 /// The descriptor set and the functions the settings describe. The setup that makes the
 /// gadget's configfs tree reads the same settings through this, so the two agree.
 ///
@@ -830,12 +879,9 @@ pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> 
 /// The settings [`check`] refuses, and an interfaces description whose derived addresses have no
 /// board serial to come from.
 pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
-    check(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
-    let identity = identity(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let set = descriptor_set(cfg)?;
     let text = interfaces_text(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
     let interfaces = text.as_str();
-    let set =
-        description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
     // The addresses come from the board's serial fact, and only when there is one in the format.
     let macs = cfg
         .str("board_serial")

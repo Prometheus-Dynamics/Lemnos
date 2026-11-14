@@ -1156,6 +1156,7 @@ struct UsbFunctionState {
     refuse_enable: Option<ErrorKind>,
     /// The NCM interface's name the function reports once enabled.
     interface: Option<Vec<u8>>,
+    serial_string: Option<bool>,
     enables: u32,
     events: VecDeque<(UsbFunctionEvent, Vec<u8>)>,
     /// The request being answered, its `wLength`, and the data stage the host sends with it.
@@ -1254,6 +1255,12 @@ impl MockUsbFunction {
         });
     }
 
+    /// Whether the function reports a USB serial string once it is enabled (`None`: it cannot
+    /// say). Read at each `serial_string_set`, so a test changes it between enables.
+    pub fn set_serial_string(&self, set: Option<bool>) {
+        with(&self.state, |s| s.serial_string = set);
+    }
+
     /// The descriptors the function is enabled with.
     pub fn descriptors(&self) -> Option<Vec<u8>> {
         with(&self.state, |s| s.descriptors.clone())
@@ -1336,6 +1343,12 @@ impl UsbFunction for MockUsbFunction {
                 .ok_or(ErrorKind::InvalidInput)?
                 .copy_from_slice(name);
             Ok(Some(name.len()))
+        })
+    }
+
+    fn serial_string_set(&mut self) -> Result<Option<bool>, ErrorKind> {
+        with(&self.state, |s| {
+            Ok(s.serial_string.filter(|_| s.descriptors.is_some()))
         })
     }
 

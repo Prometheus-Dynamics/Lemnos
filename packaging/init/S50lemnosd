@@ -9,6 +9,12 @@
 # shutdown: it sends TERM, then KILLs after STOP_TIMEOUT seconds. The hardware watchdog is the
 # escalation; this script does not feed it (lemnosd does).
 #
+# On a board whose board file has a usb-gadget device, lemnosd's root phase forks two more root processes,
+# `lemnosd-gsuper` (forks the gadget helper again when it dies) and its child `lemnosd-gadget` (keeps
+# CAP_SYS_ADMIN). Neither is started here, and none needs a line here: both end with lemnosd
+# (PR_SET_PDEATHSIG). Without systemd they have no unit filter; the helper's own seccomp allowlist and the
+# capability set apply (docs/daemon.md, "Privileged helper").
+#
 # Plain POSIX sh: it must run under BusyBox ash.
 
 SELF=/etc/init.d/S50lemnosd

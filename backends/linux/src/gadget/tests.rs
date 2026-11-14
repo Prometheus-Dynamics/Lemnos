@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use lemnos_core::{Provider, Status};
 use lemnos_measure::test_alloc::allocations;
@@ -255,9 +256,12 @@ fn setup_writes_the_identity_the_configuration_and_the_function_and_leaves_udc_u
     for (file, value) in expected {
         assert_eq!(tree.attribute(file), value, "{file}");
     }
-    assert_eq!(
-        fs::read_link(tree.gadget_dir().join("configs/c.1/ffs.udc0")).unwrap(),
-        tree.gadget_dir().join("functions/ffs.udc0")
+    // The link's target is the directory named through a descriptor (`/proc/self/fd/N/ffs.udc0`);
+    // configfs resolves it and shows its own, so the name is what is checked.
+    assert!(
+        fs::read_link(tree.gadget_dir().join("configs/c.1/ffs.udc0"))
+            .unwrap()
+            .ends_with("ffs.udc0")
     );
     // The fixture's mount is already there, with its ep0: it is reused, not mounted again.
     assert!(
@@ -526,6 +530,12 @@ fn what_an_earlier_setup_left_is_removed_before_the_gadget_is_made() {
     fs::write(dir.join("strings/0x407/product"), "old\n").unwrap();
     fs::create_dir_all(dir.join("functions/ncm.usb0")).unwrap();
     fs::write(dir.join("UDC"), "udc0\n").unwrap();
+
+    // Bound, a tree that differs is not remade under its binding.
+    let error = setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EBUSY), "{error}");
+    assert!(dir.join("configs/c.7").is_dir(), "left as it was");
+    fs::write(dir.join("UDC"), "\n").unwrap();
 
     let recorder = setup(&tree);
     assert_eq!(tree.entries("configs"), ["c.1"]);
@@ -1390,9 +1400,10 @@ fn the_link_presents_its_microsoft_os_descriptors_on_every_gadget() {
     assert_eq!(tree.attribute("os_desc/use"), "1\n");
     assert_eq!(tree.attribute("os_desc/b_vendor_code"), "0x51\n");
     assert_eq!(tree.attribute("os_desc/qw_sign"), "MSFT100\n");
-    assert_eq!(
-        fs::read_link(tree.gadget_dir().join("os_desc/c.1")).unwrap(),
-        tree.gadget_dir().join("configs/c.1")
+    assert!(
+        fs::read_link(tree.gadget_dir().join("os_desc/c.1"))
+            .unwrap()
+            .ends_with("c.1")
     );
     // The NCM interface's compatible ID is written raw: six bytes, no newline.
     let ncm_id = tree
@@ -1418,13 +1429,355 @@ fn a_second_setup_takes_the_previous_os_link_down_first() {
     let tree = Tree::new();
     setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap();
     setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap();
-    assert_eq!(
-        fs::read_link(tree.gadget_dir().join("os_desc/c.1")).unwrap(),
-        tree.gadget_dir().join("configs/c.1")
+    assert!(
+        fs::read_link(tree.gadget_dir().join("os_desc/c.1"))
+            .unwrap()
+            .ends_with("c.1")
     );
     let links = fs::read_dir(tree.gadget_dir().join("os_desc"))
         .unwrap()
         .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_symlink())
         .count();
     assert_eq!(links, 1, "one configuration under os_desc, not two");
+}
+
+/// A gadget helper that keeps root, in the test's stand-in tree: its setup is [`prepare_for_helper`],
+/// its bind and unbind write `UDC` as the helper does. `failing` setups fail first with `ENOENT`,
+/// as a helper whose step failed would answer. Every call is recorded in order.
+struct Helped {
+    configfs: PathBuf,
+    mounts: PathBuf,
+    udc: PathBuf,
+    failing: u32,
+    calls: Vec<&'static str>,
+}
+
+impl Helped {
+    fn roots(&self) -> Roots<'_> {
+        Roots {
+            configfs: &self.configfs,
+            mounts: &self.mounts,
+            udc_class: &self.udc,
+        }
+    }
+}
+
+impl GadgetHelper for Helped {
+    fn setup(&mut self, index: u32) -> io::Result<SerialString> {
+        assert_eq!(index, 0);
+        self.calls.push("setup");
+        if self.failing > 0 {
+            self.failing -= 1;
+            return Err(io::Error::from_raw_os_error(libc::ENOENT));
+        }
+        let roots = self.roots();
+        let owner = own();
+        prepare_for_helper(
+            &roots,
+            UDC,
+            owner,
+            &set(),
+            &[GadgetFunction::Ffs],
+            &mut Recorder::default(),
+        )?;
+        // The FunctionFS mount is what makes `ep0`: the stand-in mount does not, so it is made here.
+        fs::write(self.mounts.join(UDC).join("ep0"), "")?;
+        Ok(SerialString::Absent)
+    }
+
+    fn bind(&mut self, index: u32) -> io::Result<()> {
+        assert_eq!(index, 0);
+        self.calls.push("bind");
+        bind(&self.roots(), UDC)
+    }
+
+    fn unbind(&mut self, index: u32) -> io::Result<()> {
+        assert_eq!(index, 0);
+        self.calls.push("unbind");
+        unbind(&self.roots(), UDC)
+    }
+}
+
+/// The helper as the gadget holds it, and the shared handle the test reads its calls through.
+fn helped(tree: &Tree, failing: u32) -> Arc<Mutex<Helped>> {
+    Arc::new(Mutex::new(Helped {
+        configfs: tree.config_root.clone(),
+        mounts: tree.mounts_root.clone(),
+        udc: tree.udc_root.clone(),
+        failing,
+        calls: Vec::new(),
+    }))
+}
+
+fn with_helper(tree: &Tree, helper: &Arc<Mutex<Helped>>) -> FunctionFsGadget {
+    let shared: SharedHelper = helper.clone();
+    tree.gadget().with_helper(shared, 0)
+}
+
+#[test]
+fn with_a_helper_the_gadget_is_made_and_bound_through_it_and_the_daemon_writes_no_udc() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &helper);
+    // Nothing made yet: the helper is asked to make it, then to bind, in that order.
+    gadget.enable(&set()).unwrap();
+    assert_eq!(helper.lock().unwrap().calls, ["setup", "unbind", "bind"]);
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    // The helper's setup leaves UDC as root's: the owner hand-over (mode 0600) is not made.
+    let mode = fs::metadata(tree.gadget_dir().join("UDC"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o777, 0o600);
+    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+}
+
+#[test]
+fn a_controller_absent_at_start_is_retried_and_comes_up_without_a_restart() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &helper);
+    // UDC not there yet (the controller is not bound, or is in host role): the helper's setup
+    // fails with the missing controller, and nothing is bound.
+    let udc = tree.udc_root.join(UDC);
+    fs::remove_dir_all(&udc).unwrap();
+    assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
+    assert_eq!(helper.lock().unwrap().calls, ["setup"]);
+    // The controller appears (what its uevent says): the next attempt, by the same gadget and
+    // the same helper, brings it up. No restart of anything.
+    fs::create_dir_all(&udc).unwrap();
+    gadget.enable(&set()).unwrap();
+    assert_eq!(
+        helper.lock().unwrap().calls,
+        ["setup", "setup", "unbind", "bind"]
+    );
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+}
+
+#[test]
+fn a_setup_that_fails_n_times_then_succeeds_is_retried_each_time() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 3);
+    let mut gadget = with_helper(&tree, &helper);
+    for attempt in 0..3 {
+        assert_eq!(
+            gadget.enable(&set()),
+            Err(ErrorKind::NotFound),
+            "attempt {attempt} fails"
+        );
+    }
+    gadget.enable(&set()).unwrap();
+    assert_eq!(
+        helper.lock().unwrap().calls,
+        ["setup", "setup", "setup", "setup", "unbind", "bind"]
+    );
+}
+
+#[test]
+fn teardown_then_setup_again_makes_the_gadget_again_and_binds_it() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &helper);
+    gadget.enable(&set()).unwrap();
+    gadget.disable().unwrap();
+    assert_eq!(
+        helper.lock().unwrap().calls,
+        ["setup", "unbind", "bind", "unbind"]
+    );
+    // unbind wrote the empty line: nothing is bound.
+    assert_eq!(tree.attribute("UDC").trim(), "");
+    // The helper takes the gadget down for good, then makes it again on the next enable.
+    teardown(&tree.roots(), UDC, &mut Recorder::default()).unwrap();
+    assert!(!tree.gadget_dir().join("functions/ffs.udc0").exists());
+    // The stand-in unmount does nothing, so the mount's ep0 stays; a real unmount takes it with
+    // the mount. Remove it as the unmount would, so the setup makes the mount again.
+    fs::remove_file(tree.mount().join("ep0")).unwrap();
+    gadget.enable(&set()).unwrap();
+    assert_eq!(
+        helper.lock().unwrap().calls,
+        [
+            "setup", "unbind", "bind", "unbind", "setup", "unbind", "bind"
+        ]
+    );
+}
+
+#[test]
+fn the_controller_name_is_one_directory_name_for_the_helper() {
+    // The controller name is one directory name: a name with a separator is never a path the
+    // helper writes under.
+    assert!(is_controller_name("fe980000.usb"));
+    assert!(!is_controller_name("../x"));
+    assert!(!is_controller_name("a/b"));
+    assert!(!is_controller_name(""));
+}
+
+/// What a helper's setup does on `trees`, with the functions the link needs.
+fn helper_setup(trees: &mut Trees, recorder: &mut Recorder) -> io::Result<Outcome> {
+    trees.setup_for_helper(UDC, own(), &set(), &[GadgetFunction::Ffs], recorder)
+}
+
+#[test]
+fn a_tree_that_is_the_boards_is_adopted_bound_or_not_and_never_mounted_again() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    // The image left a bare gadget: not the board's, unbound, so it is made.
+    assert_eq!(
+        helper_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Remade
+    );
+    // A helper that starts again finds its own tree and takes it as it is.
+    let mut again = Trees::new(&tree.roots());
+    assert_eq!(
+        helper_setup(&mut again, &mut recorder).unwrap(),
+        Outcome::Adopted
+    );
+    fs::write(tree.gadget_dir().join("UDC"), "udc0\n").unwrap();
+    assert_eq!(
+        helper_setup(&mut again, &mut recorder).unwrap(),
+        Outcome::Adopted
+    );
+    assert_eq!(
+        tree.attribute("UDC"),
+        "udc0\n",
+        "a bound gadget stays bound"
+    );
+    assert!(recorder.mounts.is_empty() && recorder.unmounts.is_empty());
+}
+
+/// The test set with no serial string: the device descriptor's `iSerialNumber` is 0.
+fn set_without_serial() -> Vec<u8> {
+    let mut bytes = set();
+    bytes[16] = 0;
+    bytes
+}
+
+#[test]
+fn the_serial_a_setup_reports_is_the_trees_own_made_or_adopted() {
+    // Made with a serial: the tree has it.
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    helper_setup(&mut trees, &mut recorder).unwrap();
+    assert_eq!(trees.serial_string(UDC).unwrap(), SerialString::Set);
+    // Adopted: the same tree is there, and a setup that now names no serial finds the tree's own
+    // string: no stale "no serial".
+    let mut again = Trees::new(&tree.roots());
+    let outcome = again
+        .setup_for_helper(
+            UDC,
+            own(),
+            &set_without_serial(),
+            &[GadgetFunction::Ffs],
+            &mut recorder,
+        )
+        .unwrap();
+    assert_eq!(outcome, Outcome::Adopted);
+    assert_eq!(again.serial_string(UDC).unwrap(), SerialString::Set);
+    // Made with no serial: the tree has none.
+    let bare = Tree::new();
+    let mut trees = Trees::new(&bare.roots());
+    trees
+        .setup_for_helper(
+            UDC,
+            own(),
+            &set_without_serial(),
+            &[GadgetFunction::Ffs],
+            &mut recorder,
+        )
+        .unwrap();
+    assert_eq!(trees.serial_string(UDC).unwrap(), SerialString::Absent);
+    // An empty serial file is none.
+    fs::create_dir_all(bare.gadget_dir().join("strings/0x409")).unwrap();
+    fs::write(bare.gadget_dir().join("strings/0x409/serialnumber"), "\n").unwrap();
+    assert_eq!(trees.serial_string(UDC).unwrap(), SerialString::Absent);
+}
+
+#[test]
+fn a_tree_of_the_same_name_with_other_content_is_remade_only_while_unbound() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    helper_setup(&mut trees, &mut recorder).unwrap();
+    fs::write(tree.gadget_dir().join("idVendor"), "0x1d6b\n").unwrap();
+    fs::write(tree.gadget_dir().join("UDC"), "udc0\n").unwrap();
+    let error = helper_setup(&mut trees, &mut recorder).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EBUSY), "{error}");
+    assert_eq!(tree.attribute("idVendor"), "0x1d6b\n", "left as it was");
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    assert_eq!(
+        helper_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Remade
+    );
+    assert_ne!(tree.attribute("idVendor"), "0x1d6b\n");
+}
+
+#[test]
+fn a_tree_the_helper_did_not_make_is_left_alone_and_named() {
+    let tree = Tree::new();
+    fs::create_dir_all(tree.gadget_dir().join("functions/mass_storage.0")).unwrap();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    let error = helper_setup(&mut trees, &mut recorder).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EEXIST), "{error}");
+    let text = error.to_string();
+    assert!(
+        text.contains("mass_storage.0") && text.contains("left alone"),
+        "{text}"
+    );
+    assert!(tree.is_bare(), "nothing was made or removed");
+    assert!(tree.gadget_dir().join("functions/mass_storage.0").is_dir());
+    // A configuration of another name is foreign too.
+    fs::remove_dir(tree.gadget_dir().join("functions/mass_storage.0")).unwrap();
+    fs::create_dir_all(tree.gadget_dir().join("configs/mine")).unwrap();
+    let error = helper_setup(&mut trees, &mut recorder).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EEXIST), "{error}");
+    assert!(tree.gadget_dir().join("configs/mine").is_dir());
+}
+
+#[test]
+fn nothing_is_followed_out_of_the_directories_the_helper_opened() {
+    // `usb_gadget` is a link to somewhere else: the setup is refused and nothing lands there.
+    let tree = Tree::new();
+    let outside = tree.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::remove_dir_all(tree.config_root.join("usb_gadget")).unwrap();
+    std::os::unix::fs::symlink(&outside, tree.config_root.join("usb_gadget")).unwrap();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    let error = helper_setup(&mut trees, &mut recorder).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ELOOP), "{error}");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    // The gadget directory itself a link: refused the same way, and its target is untouched.
+    let tree = Tree::new();
+    let elsewhere = tree.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::remove_dir_all(tree.gadget_dir()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, tree.gadget_dir()).unwrap();
+    let error = helper_setup(&mut Trees::new(&tree.roots()), &mut recorder).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EEXIST), "{error}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    // Names that are paths never reach the kernel.
+    for name in ["..", "../x", "a/b", "/etc", ""] {
+        let mut trees = Trees::new(&tree.roots());
+        assert!(trees.bind(name).is_err(), "{name:?}");
+        assert!(trees.unbind(name).is_err(), "{name:?}");
+        assert!(trees.teardown(name, &mut recorder).is_err(), "{name:?}");
+        assert!(
+            trees
+                .setup_for_helper(name, own(), &set(), &[GadgetFunction::Ffs], &mut recorder)
+                .is_err(),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_configfs_directory_that_is_not_a_mounted_configfs_is_not_there_yet() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots()).verifying_configfs();
+    let error = trees.open().unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT), "{error}");
+    let error = helper_setup(&mut trees, &mut Recorder::default()).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT), "{error}");
 }

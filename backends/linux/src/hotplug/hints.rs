@@ -117,6 +117,12 @@ fn fits_for(name: &str) -> Option<Fits> {
     if name.contains('/') {
         return None;
     }
+    // A USB device controller, by its name in `/sys/class/udc`: it appears when the controller
+    // comes up or switches to the device role, and a gadget waiting for it is tried then.
+    if let Some(controller) = name.strip_prefix("udc:") {
+        return (!controller.is_empty())
+            .then(|| node(["udc", ""], [controller.to_string(), String::new()], false));
+    }
     let one =
         |subsystem: &'static str| node([subsystem, ""], [name.to_string(), String::new()], false);
     if numbered(name, "i2c-").is_some() {
@@ -376,6 +382,25 @@ mod tests {
     const USB_DEVICE: [(&str, &str); 2] = [("SUBSYSTEM", "usb"), ("DEVTYPE", "usb_device")];
 
     #[test]
+    fn a_usb_device_controller_is_hinted_by_its_own_class_event_when_it_appears_or_changes() {
+        // A gadget waiting for its controller (`udc:NAME`) is tried when the controller's class
+        // device comes or goes, as a controller comes up or switches to the device role.
+        let names = ["udc:fe980000.usb", "udc:other.usb"];
+        let class = [("SUBSYSTEM", "udc")];
+        let path = "/devices/platform/soc/fe980000.usb/udc/fe980000.usb";
+        assert_eq!(
+            hints_among(&names, "add", path, &class),
+            ["Changed(\"udc:fe980000.usb\")"]
+        );
+        assert_eq!(
+            hints_among(&names, "remove", path, &class),
+            ["Changed(\"udc:fe980000.usb\")"]
+        );
+        // Another subsystem's event with the same name hints nothing.
+        assert!(hints_among(&names, "add", path, &[("SUBSYSTEM", "usb")]).is_empty());
+    }
+
+    #[test]
     fn a_stable_gpio_or_pwm_name_is_hinted_by_its_subsystem_as_the_numbered_one_is() {
         let names = [
             "gpio:pinctrl-rp1:34",
@@ -493,7 +518,8 @@ mod tests {
         let none = [
             "usb:nonsense",
             "pio-i2c:sda=8,scl=7",
-            "udc:fe980000.usb",
+            "udc:",
+            "udc:a/b",
             "dma:91400000.isp",
             "imu",
             "i2c-",

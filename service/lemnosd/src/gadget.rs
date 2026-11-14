@@ -1,28 +1,33 @@
-//! The root phase of the daemon for USB gadgets: makes every gadget the board file describes in
-//! configfs, and mounts its FunctionFS for the daemon's user, before the daemon drops to that user.
+//! The USB gadgets of the board, as the root phase hands them to the gadget helper.
 //!
-//! configfs and mounts need root. [`privileged_step`] is the `usb gadget` entry of the daemon's
-//! privileged start (`STEPS` in `privilege.rs`): it runs as root, before the drop, with the parsed
-//! board file and the uid and gid the daemon runs as after the drop. It does what
-//! `lemnos_linux::prepare_gadget` does: the tree, the mount, and the chown of each `UDC` attribute
-//! to the daemon's owner. Those are the only things the unprivileged daemon writes in configfs.
-//! Its open descriptors are not needed after the drop: configfs and FunctionFS check permissions
-//! when a file is opened, and the chown makes the file the daemon's, so it opens `UDC` as `lemnos`
-//! after the drop.
+//! configfs and FunctionFS mounts need root, and the daemon does not keep it. The root phase
+//! forks the gadget helper (`helper.rs`) before the drop, with each gadget's description taken
+//! from the board file here ([`describe`]): the controller, the descriptor set, the functions. The
+//! helper makes a gadget's tree and mount, and binds and unbinds the controller, when the daemon
+//! asks for it by index. A gadget the helper cannot make yet is not refused: its driver retries.
+//! Only a board file that is wrong is refused here, and it is refused with the reason.
 //!
-//! The board's serial is read once, by [`resolve`], before the root phase: the gadget's `identity`
-//! names the identity device whose serial source it is, and the result is written into the
-//! gadget's settings as `board_serial` (or `board_serial_error`, with the reason). The root phase
-//! and the daemon's driver both read the same settings, through `settings_for`, so the tree and the
-//! descriptors, and the NCM addresses derived from the serial, agree (`docs/boards.md`).
+//! The board's serial is read twice, by two readers of one fixed source. [`resolve`] reads it once
+//! before the root phase: the gadget's `identity` names the identity device whose serial source it
+//! is, and the result is written into the gadget's settings as `board_serial` (or
+//! `board_serial_error`, with the reason) for the daemon's driver, which needs it only for its
+//! health note. The helper keeps that source (the identity device's settings, fixed at fork) and
+//! reads it again at every `setup`, so a source that is not readable yet (an nvmem cell that probes
+//! late) makes the setup fail with the reason and be retried, not the gadget be refused for good.
+//! What the tree holds, and the NCM addresses derived from the serial, are the helper's
+//! ([`settings_now`]; `docs/boards.md`). The daemon never passes the helper a string.
 
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-use crate::privilege::{Context, Refusals};
+use crate::helper;
+use crate::privilege::Refusals;
+use crate::supervisor;
 use lemnos_core::{Config, ConfigValue};
 use lemnos_driver_usb_gadget::description::{Functions, Set};
 use lemnos_host::board::{BoardFile, DeviceSpec};
-use lemnos_linux::{Mounts, Owner, Roots, SystemMounts, prepare_gadget};
+use lemnos_linux::{Owner, Roots, is_controller_name};
+use lemnos_linux_sys::privilege;
 
 /// The driver a gadget device names in the board file.
 const DRIVER: &str = "usb-gadget";
@@ -38,29 +43,95 @@ const BOARD_SERIAL_ERROR: &str = "board_serial_error";
 const CONFIGFS: &str = "/sys/kernel/config";
 const MOUNTS: &str = "/dev/usb-ffs";
 const UDC_CLASS: &str = "/sys/class/udc";
-/// Said of a gadget refused at start: the daemon reads the board file and the root phase once, so
-/// the fix is a board-file edit or a restart, never a retry in place.
-const RESTART: &str = "needs a restart of the daemon to retry";
 
-/// The root phase's step for USB gadgets (`STEPS` in `privilege.rs`): the gadgets the board file
-/// describes, for the uid and gid the daemon runs as. A gadget that cannot be set up is returned
-/// as refused, with the reason; the others are set up.
-pub fn privileged_step(context: &Context<'_>) -> std::io::Result<Refusals> {
-    let owner = Owner {
-        uid: context.uid,
-        gid: context.gid,
-    };
-    let roots = Roots {
+/// The system's roots: configfs, the FunctionFS mount points, and the controllers.
+#[must_use]
+pub fn system_roots() -> Roots<'static> {
+    Roots {
         configfs: Path::new(CONFIGFS),
         mounts: Path::new(MOUNTS),
         udc_class: Path::new(UDC_CLASS),
-    };
-    Ok(privileged_start_in(
-        context.board,
+    }
+}
+
+/// The gadget devices of the board, as the helper holds them: each gadget's controller, descriptor
+/// set and functions, from the same settings the driver binds with. A gadget whose settings the
+/// board file gets wrong is refused with the reason (validation: nothing a retry could mend). The
+/// list's index is the gadget's index in the helper.
+#[must_use]
+pub fn describe(board: &BoardFile, owner: Owner) -> (Vec<helper::Gadget>, Refusals) {
+    let mut gadgets = Vec::new();
+    let mut refused = Vec::new();
+    for device in board.devices.iter().filter(|d| d.driver == DRIVER) {
+        if device.refused.is_some() {
+            continue;
+        }
+        match describe_one(&board.board.id, device, owner) {
+            Ok(mut gadget) => {
+                gadget.identity = identity_entries(board, device);
+                gadgets.push(gadget);
+            }
+            Err(reason) => refused.push((device.id.clone(), reason)),
+        }
+    }
+    (gadgets, refused)
+}
+
+fn describe_one(board: &str, device: &DeviceSpec, owner: Owner) -> Result<helper::Gadget, String> {
+    let function = device
+        .uses
+        .get("function")
+        .ok_or_else(|| "no `function` need".to_string())?;
+    let name = function
+        .strip_prefix("udc:")
+        .ok_or_else(|| "`function` must be udc:NAME".to_string())?;
+    if !is_controller_name(name) {
+        return Err(format!(
+            "`function` names {name:?}, which is not a controller's name"
+        ));
+    }
+    validate(device)?;
+    Ok(helper::Gadget {
+        udc: name.to_string(),
         owner,
-        &roots,
-        &mut SystemMounts,
-    ))
+        board: board.to_string(),
+        config: owned_entries(device, true).map_err(|reason| format!("{}: {reason}", device.id))?,
+        identity: None,
+    })
+}
+
+/// The root phase's gadget helper: forks the helper's root parent (`supervisor.rs`) with the board's
+/// gadgets, fixed, which forks the helper and forks it again when it dies, and returns the daemon's
+/// end of the socket (`None` when the board has no gadget) with the gadgets refused by validation.
+/// Only the root phase calls it, before the drop, so the parent and the helper keep root.
+///
+/// # Errors
+///
+/// The socket pair or the fork fails: the process cannot run as asked.
+pub fn spawn(
+    board: &BoardFile,
+    owner: Owner,
+) -> Result<(Option<helper::Client>, Refusals), String> {
+    let (gadgets, refused) = describe(board, owner);
+    if gadgets.is_empty() {
+        return Ok((None, refused));
+    }
+    let (parent, child) =
+        UnixStream::pair().map_err(|error| format!("gadget helper: socket pair: {error}"))?;
+    let names: Vec<(String, u32)> = gadgets
+        .iter()
+        .enumerate()
+        .map(|(index, gadget)| (gadget.udc.clone(), index as u32))
+        .collect();
+    let pid = privilege::fork().map_err(|error| format!("gadget helper: fork: {error}"))?;
+    if pid == 0 {
+        drop(parent);
+        supervisor::run(child, &gadgets);
+    }
+    drop(child);
+    let client =
+        helper::Client::new(parent, names).map_err(|error| format!("gadget helper: {error}"))?;
+    Ok((Some(client), refused))
 }
 
 /// The gadget devices the board file gets wrong about their identity, and the reason for each,
@@ -124,9 +195,10 @@ pub fn link_refusals(board: &BoardFile) -> Refusals {
 /// daemon right after the board file is parsed, before the root phase, so that both see it.
 ///
 /// A gadget whose identity link is wrong is refused, with the reason in its [`DeviceSpec::refused`]
-/// (see [`link_refusals`]). A serial that cannot be read is kept as `board_serial_error`: the gadget
-/// fails only if it derives its addresses from the serial, and is then refused with that reason.
-/// Every other device is unaffected.
+/// (see [`link_refusals`]). A serial that cannot be read is kept as `board_serial_error`, and is
+/// not a refusal: the helper reads the source again at each setup, so a gadget that derives its
+/// addresses from the serial is retried until the source can be read. Every other device is
+/// unaffected.
 pub fn resolve(board: &mut BoardFile) {
     for (id, reason) in link_refusals(board) {
         if let Some(device) = board.devices.iter_mut().find(|d| d.id == id) {
@@ -135,7 +207,6 @@ pub fn resolve(board: &mut BoardFile) {
                 .get_or_insert(format!("device {id:?}: {reason}"));
         }
     }
-    let name = board.board.id.clone();
     for index in 0..board.devices.len() {
         let device = &board.devices[index];
         if device.driver != DRIVER || device.refused.is_some() {
@@ -150,13 +221,6 @@ pub fn resolve(board: &mut BoardFile) {
         device
             .config
             .insert(key.to_string(), toml::Value::String(value));
-        if key == BOARD_SERIAL_ERROR
-            && let Err(problem) = settings_for(&name, device)
-        {
-            let own = format!("{}: ", device.id);
-            let problem = problem.strip_prefix(&own).unwrap_or(&problem).to_string();
-            device.refused = Some(format!("device {:?}: {problem}; {RESTART}", device.id));
-        }
     }
 }
 
@@ -175,81 +239,6 @@ fn read_serial(board: &BoardFile, device: &DeviceSpec) -> Result<String, String>
         .ok_or_else(|| format!("`{IDENTITY}` names {link}, which the board file does not have"))?;
     let entries = config_entries(identity).map_err(|reason| format!("{link}: {reason}"))?;
     lemnos_driver_system_identity::board_serial(&Config::new(&entries))
-}
-
-/// The root phase's gadget setup for each gadget device in the board file that is not refused.
-/// Returns the devices whose setup failed, with the reason; the others are set up, in order.
-#[must_use]
-pub fn privileged_start(board: &BoardFile, owner: Owner) -> Refusals {
-    let roots = Roots {
-        configfs: Path::new(CONFIGFS),
-        mounts: Path::new(MOUNTS),
-        udc_class: Path::new(UDC_CLASS),
-    };
-    privileged_start_in(board, owner, &roots, &mut SystemMounts)
-}
-
-/// [`privileged_start`] with the roots and the mounts given: the paths the gadgets are made under,
-/// and what mounts FunctionFS. The system's are the daemon's; a test passes its own.
-pub fn privileged_start_in(
-    board: &BoardFile,
-    owner: Owner,
-    roots: &Roots<'_>,
-    system: &mut dyn Mounts,
-) -> Refusals {
-    let mut refused = Vec::new();
-    for device in board
-        .devices
-        .iter()
-        .filter(|device| device.driver == DRIVER)
-    {
-        // A gadget the daemon or the board refuses is not made. The host lists it as failed with
-        // the reason, and the other gadgets are set up.
-        if device.refused.is_some() || gadget_refused(device) {
-            continue;
-        }
-        if let Err(reason) = setup_one(&board.board.id, roots, device, owner, system) {
-            refused.push((
-                device.id.clone(),
-                format!("device {:?}: {reason}; {RESTART}", device.id),
-            ));
-        }
-    }
-    refused
-}
-
-/// Whether the gadget's own check refuses the device's settings. Checked with no hardware.
-fn gadget_refused(device: &DeviceSpec) -> bool {
-    match config_entries(device) {
-        Ok(entries) => lemnos_driver_usb_gadget::check(&Config::new(&entries)).is_err(),
-        Err(_) => true,
-    }
-}
-
-fn setup_one(
-    board: &str,
-    roots: &Roots<'_>,
-    device: &DeviceSpec,
-    owner: Owner,
-    system: &mut dyn Mounts,
-) -> Result<(), String> {
-    let function = device
-        .uses
-        .get("function")
-        .ok_or_else(|| "no `function` need".to_string())?;
-    let name = function
-        .strip_prefix("udc:")
-        .ok_or_else(|| "`function` must be udc:NAME".to_string())?;
-    let (set, functions) = settings_for(board, device)?;
-    prepare_gadget(
-        roots,
-        name,
-        owner,
-        set.bytes(),
-        functions.as_slice(),
-        system,
-    )
-    .map_err(|error| error.to_string())
 }
 
 /// The descriptor set and the functions a gadget device is set up with, from the same settings the
@@ -275,6 +264,113 @@ pub fn settings_for(board: &str, device: &DeviceSpec) -> Result<(Set, Functions)
             }
             _ => format!("{id}: {status:?}"),
         }
+    })
+}
+
+/// The settings checks a board file can fail with no hardware read: the driver's own check.
+fn validate(device: &DeviceSpec) -> Result<(), String> {
+    let id = &device.id;
+    let entries = config_entries(device).map_err(|reason| format!("{id}: {reason}"))?;
+    lemnos_driver_usb_gadget::check(&Config::new(&entries))
+        .map_err(|error| format!("{id}: {error}"))
+}
+
+/// One setting, owned: what the helper keeps of a device's `config`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Entry {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+/// A device's settings, owned.
+pub type Entries = Vec<(String, Entry)>;
+
+/// The device's settings, owned. With `without_serial` the two keys the daemon writes
+/// (`board_serial`, `board_serial_error`) are left out: the helper sets them itself at each setup.
+fn owned_entries(device: &DeviceSpec, without_serial: bool) -> Result<Entries, String> {
+    let mut out = Vec::with_capacity(device.config.len());
+    for (key, value) in &device.config {
+        if without_serial && (key == BOARD_SERIAL || key == BOARD_SERIAL_ERROR) {
+            continue;
+        }
+        let entry = if let Some(int) = value.as_integer() {
+            Entry::Int(int)
+        } else if let Some(float) = value.as_float() {
+            Entry::Float(float)
+        } else if let Some(bool) = value.as_bool() {
+            Entry::Bool(bool)
+        } else if let Some(text) = value.as_str() {
+            Entry::Str(text.to_string())
+        } else {
+            return Err(format!(
+                "setting `{key}` is not a number, boolean or string"
+            ));
+        };
+        out.push((key.clone(), entry));
+    }
+    Ok(out)
+}
+
+/// The entries as the driver's [`Config`] reads them.
+fn borrowed(entries: &Entries) -> Vec<(&str, ConfigValue<'_>)> {
+    entries
+        .iter()
+        .map(|(key, entry)| {
+            let value = match entry {
+                Entry::Int(v) => ConfigValue::Int(*v),
+                Entry::Float(v) => ConfigValue::Float(*v),
+                Entry::Bool(v) => ConfigValue::Bool(*v),
+                Entry::Str(v) => ConfigValue::Str(v),
+            };
+            (key.as_str(), value)
+        })
+        .collect()
+}
+
+/// The identity device's settings, when the gadget names one that is a `system-identity`.
+fn identity_entries(board: &BoardFile, device: &DeviceSpec) -> Option<Entries> {
+    let link = device.config.get(IDENTITY)?.as_str()?;
+    let identity = board
+        .devices
+        .iter()
+        .find(|other| other.id == link && other.driver == IDENTITY_DRIVER)?;
+    owned_entries(identity, false).ok()
+}
+
+/// Why a gadget cannot be made now.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unready {
+    /// The board serial the gadget derives from cannot be read yet: the reason. A retry may mend it.
+    Serial(String),
+    /// The settings are refused: nothing a retry could mend (the board file is wrong).
+    Refused(String),
+}
+
+/// What a gadget is set up with now: its descriptor set and functions, with the board serial read
+/// from the source the board file names, at this moment. The helper calls it at every `setup`.
+///
+/// # Errors
+///
+/// [`Unready::Serial`] when the gadget derives its addresses from a serial that cannot be read.
+pub fn settings_now(gadget: &helper::Gadget) -> Result<(Set, Functions), Unready> {
+    let mut entries = gadget.config.clone();
+    let mut serial_error = None;
+    if let Some(identity) = &gadget.identity {
+        match lemnos_driver_system_identity::board_serial(&Config::new(&borrowed(identity))) {
+            Ok(serial) => entries.push((BOARD_SERIAL.to_string(), Entry::Str(serial))),
+            Err(reason) => {
+                entries.push((BOARD_SERIAL_ERROR.to_string(), Entry::Str(reason.clone())));
+                serial_error = Some(reason);
+            }
+        }
+    }
+    let borrow = borrowed(&entries);
+    let config = Config::new(&borrow).on_board(&gadget.board);
+    lemnos_driver_usb_gadget::settings(&config).map_err(|status| match serial_error {
+        Some(reason) => Unready::Serial(reason),
+        None => Unready::Refused(format!("{status:?}")),
     })
 }
 
@@ -385,23 +481,48 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
     }
 
     #[test]
-    fn derive_with_an_unreadable_serial_fails_the_gadget_with_the_reason() {
+    fn derive_with_an_unreadable_serial_is_not_refused_the_helper_waits_for_the_source() {
         let missing =
             std::env::temp_dir().join(format!("lemnosd-gadget-{}-missing", std::process::id()));
         let mut board = board_at(&missing.to_string_lossy(), DERIVE);
         resolve(&mut board);
+        // The daemon's own read failed, and the settings that need the serial say so.
         let error = settings_for("alpha", gadget(&board))
             .err()
             .expect("derive needs the serial");
         assert!(error.contains("the board serial is not known"), "{error}");
         assert!(error.contains("cannot read"), "{error}");
-        // The gadget is refused by the daemon, with that reason, and the reason says what to do.
-        let refused = gadget(&board).refused.clone().expect("refused");
+        // But the gadget is not refused: the helper holds the source and reads it at each setup.
+        assert_eq!(gadget(&board).refused, None);
+        let (gadgets, refused) = describe(&board, Owner { uid: 1, gid: 1 });
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(gadgets.len(), 1);
+        let gadget = &gadgets[0];
+        assert!(gadget.identity.is_some());
         assert!(
-            refused.contains("the board serial is not known"),
-            "{refused}"
+            !gadget
+                .config
+                .iter()
+                .any(|(key, _)| key == BOARD_SERIAL || key == BOARD_SERIAL_ERROR),
+            "the daemon's one read is not handed on"
         );
-        assert!(refused.ends_with(RESTART), "{refused}");
+        match settings_now(gadget) {
+            Err(Unready::Serial(reason)) => assert!(reason.contains("cannot read"), "{reason}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        // The source appears: the same description now gives its settings, with no restart.
+        std::fs::write(&missing, b"0123456789abcdef\0").unwrap();
+        let (_, functions) = settings_now(gadget).expect("readable now");
+        let pair = lemnos_driver_usb_gadget::derive::macs("alpha", "0123456789abcdef").unwrap();
+        assert_eq!(
+            ncm_of(&functions),
+            Some(GadgetFunction::Ncm {
+                host: pair.host,
+                device: pair.device,
+                ifname: None,
+            })
+        );
+        let _ = std::fs::remove_file(missing);
     }
 
     #[test]
@@ -502,82 +623,55 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
         );
         let _ = std::fs::remove_file(path);
     }
+}
 
-    /// Mounts that do nothing: the root phase's FunctionFS mount is not the thing under test.
-    struct NoMounts;
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
 
-    impl Mounts for NoMounts {
-        fn functionfs(&mut self, _: &str, _: &Path, _: &str) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn unmount(&mut self, _: &Path) -> std::io::Result<()> {
-            Ok(())
-        }
+    fn board(udc: &str) -> BoardFile {
+        let text = format!(
+            "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"alpha\"\n\
+             [[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\n\
+             uses = {{ function = \"udc:{udc}\" }}\n\
+             config = {{ vendor = 0x1209, product = 1, interfaces = \"interface 0xff 0 0 pipe\\nendpoint in bulk\\nendpoint out bulk\\n\" }}\n"
+        );
+        lemnos_host::board::parse(&text).expect("the test board parses")
     }
 
     fn owner() -> Owner {
         Owner { uid: 987, gid: 987 }
     }
 
-    /// Roots in a directory of the test's own: configfs with `usb_gadget` given as `configfs_usb`
-    /// (a file, so making the gadget under it fails), the UDC class with `udc0`. Nothing under
-    /// `/sys` is touched.
-    fn roots_in(name: &str, usb_is_a_file: bool) -> (std::path::PathBuf, [std::path::PathBuf; 3]) {
-        let dir = std::env::temp_dir().join(format!(
-            "lemnosd-gadget-roots-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (configfs, mounts, udc) = (dir.join("configfs"), dir.join("mounts"), dir.join("udc"));
-        std::fs::create_dir_all(&configfs).unwrap();
-        std::fs::create_dir_all(&mounts).unwrap();
-        std::fs::create_dir_all(udc.join("udc0")).unwrap();
-        if usb_is_a_file {
-            std::fs::write(configfs.join("usb_gadget"), b"").unwrap();
-        }
-        (dir, [configfs, mounts, udc])
+    #[test]
+    fn a_gadget_whose_tree_cannot_be_made_yet_is_described_not_refused() {
+        // Nothing is made here: the description only needs the settings and the controller name.
+        let (gadgets, refused) = describe(&board("udc0"), owner());
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(gadgets.len(), 1);
+        assert_eq!(gadgets[0].udc, "udc0");
+        assert_eq!(gadgets[0].owner, owner());
+        assert_eq!(gadgets[0].board, "alpha");
+        assert!(!gadgets[0].config.is_empty());
     }
 
     #[test]
-    fn a_gadget_whose_configfs_setup_fails_is_refused_with_the_reason_and_the_others_are_set_up() {
-        let path = serial_file("configfs", b"0123456789abcdef\0");
-        let mut board = board_at(&path.to_string_lossy(), PLAIN);
-        resolve(&mut board);
-        let (dir, [configfs, mounts, udc]) = roots_in("configfs", true);
-        let roots = Roots {
-            configfs: &configfs,
-            mounts: &mounts,
-            udc_class: &udc,
-        };
-        let refused = privileged_start_in(&board, owner(), &roots, &mut NoMounts);
+    fn a_controller_name_that_is_not_one_directory_name_is_refused_as_validation() {
+        let (gadgets, refused) = describe(&board("../x"), owner());
+        assert!(gadgets.is_empty());
         assert_eq!(refused.len(), 1, "{refused:?}");
-        assert_eq!(refused[0].0, "gadget");
         assert!(
-            refused[0].1.starts_with("device \"gadget\": "),
+            refused[0].1.contains("not a controller's name"),
             "{refused:?}"
         );
-        assert!(refused[0].1.ends_with(RESTART), "{refused:?}");
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn a_gadget_the_daemon_refused_is_not_set_up_and_a_good_one_is() {
-        let path = serial_file("refused", b"0123456789abcdef\0");
-        let mut board = board_at(&path.to_string_lossy(), PLAIN);
-        let gadget = board.devices.iter_mut().find(|d| d.id == "gadget").unwrap();
-        gadget.refused = Some("refused by the board".to_string());
-        let (dir, [configfs, mounts, udc]) = roots_in("refused", true);
-        let roots = Roots {
-            configfs: &configfs,
-            mounts: &mounts,
-            udc_class: &udc,
-        };
-        // Refused gadgets are skipped, so the file that would make the configfs setup fail is not
-        // even tried: the list is empty, and nothing was made under the configfs root.
-        assert!(privileged_start_in(&board, owner(), &roots, &mut NoMounts).is_empty());
-        assert!(!configfs.join("usb_gadget").is_dir());
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_file(path);
+    fn a_gadget_the_daemon_already_refused_is_left_out_of_the_helper() {
+        let mut board = board("udc0");
+        board.devices[0].refused = Some("refused before the root phase".into());
+        let (gadgets, refused) = describe(&board, owner());
+        assert!(gadgets.is_empty());
+        assert!(refused.is_empty());
     }
 }

@@ -24,6 +24,20 @@ pub struct Manifest {
     pub provides: &'static [ContractInfo],
 }
 
+/// A driver that retries a failed step itself says so here while it is down: how many attempts
+/// have failed in a row, the reason the last one failed (a fixed text, as [`Health`] texts are),
+/// and when the next attempt is due on the host's clock. The host and the daemon show all three
+/// as `retrying: attempt N, last reason: ..., next try in M ms`. Nothing is allocated to say it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// Failed attempts in a row, the one just failed included. At least 1.
+    pub attempts: u32,
+    /// When the next attempt is due, on the host's clock (the `now_ns` the driver is ticked with).
+    pub next_ns: u64,
+    /// Why the last attempt failed.
+    pub reason: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Health {
     #[default]
@@ -142,6 +156,10 @@ pub trait Driver: Sized {
     fn health(&self) -> Health {
         Health::Ok
     }
+    /// See [`Lifecycle::retrying`].
+    fn retrying(&self) -> Option<Retry> {
+        None
+    }
     /// Runs a method. `args` and `reply` mean something only to the contract.
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     /// Whether the host should call [`Driver::tick`]. See [`Lifecycle::TICKS`].
@@ -213,6 +231,11 @@ pub trait Lifecycle: Sized {
     fn describe(&self, _out: &mut Description) {}
     fn health(&self) -> Health {
         Health::Ok
+    }
+    /// Whether the driver is retrying a failed step itself, and how far it has got. See [`Retry`].
+    /// `None` by default: a driver the host retries (a failed bind) says nothing here.
+    fn retrying(&self) -> Option<Retry> {
+        None
     }
     /// Set this to `true` to have [`Lifecycle::tick`] called. Other drivers cost the host nothing.
     const TICKS: bool = false;

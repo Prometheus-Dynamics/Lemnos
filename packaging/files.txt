@@ -23,6 +23,9 @@
 #                 never    never installed: documents and this list (no install path; `always` and `never` stand alone)
 #
 # Systemd and BusyBox images both take the same daemon and privilege path (packaging/README.md).
+# The USB gadget helper (lemnosd-gadget) and its root parent (lemnosd-gsuper) are lemnosd's own children, made
+# by its root phase: no file below is theirs but the gadget drop-in (capability and syscall filter), and a
+# BusyBox image installs nothing for them.
 
 packaging/README.md                              -                                              -     never
 packaging/shipped.txt                            -                                              -     never

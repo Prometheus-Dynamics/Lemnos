@@ -332,9 +332,13 @@ fn the_daemon_runs_the_packages_it_loads_and_says_what_it_refused() {
     ));
     client.call(&mut pin, 1, &[], &mut reply).unwrap();
     let (down, _, reason) = state(&client, "thing");
-    assert_eq!(
-        (down, reason.as_str()),
-        (DeviceState::BackingOff, "the driver panicked")
+    // The reason says the attempt, the last reason and the wait; the wait is timing, so only its
+    // frame is fixed.
+    assert_eq!(down, DeviceState::BackingOff);
+    assert!(
+        reason.starts_with("retrying: attempt 1, last reason: the driver panicked, next try in ")
+            && reason.ends_with(" ms"),
+        "{reason}"
     );
     eventually(
         || (state(&client, "thing").0 == DeviceState::Running).then_some(()),

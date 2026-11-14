@@ -57,18 +57,13 @@ pub struct Step {
     pub run: fn(&Context<'_>) -> io::Result<Refusals>,
 }
 
-/// The privileged start's steps, in order. The first is built in: the socket's directory, owned by
-/// the daemon's user, so the socket is made in it after the drop.
-pub const STEPS: &[Step] = &[
-    Step {
-        name: "runtime directory",
-        run: runtime_directory,
-    },
-    Step {
-        name: "usb gadget",
-        run: crate::gadget::privileged_step,
-    },
-];
+/// The privileged start's steps, in order. The one built in step makes the socket's directory,
+/// owned by the daemon's user, so the socket is made in it after the drop. The USB gadgets are not
+/// a step: the root phase forks the gadget helper for them, which keeps root (see `gadget::spawn`).
+pub const STEPS: &[Step] = &[Step {
+    name: "runtime directory",
+    run: runtime_directory,
+}];
 
 /// Builds the request from `--user` and `--group`, or their environment variables. A group needs a
 /// user.
@@ -96,15 +91,18 @@ pub fn resolve(request: &Request) -> Result<(u32, u32), String> {
     privilege::resolve(&request.user, request.group.as_deref())
 }
 
-/// What the privileged start left: the devices a step refused, and what it noticed without
-/// refusing anything.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// What the privileged start left: the devices a step refused, what it noticed without refusing
+/// anything, and the gadget helper it forked, if the board has a gadget.
+#[derive(Default)]
 pub struct Started {
     /// The devices refused by a step, with the reason ([`refuse`] puts them on the board).
     pub refused: Refusals,
     /// Lines for the error output: a node the daemon cannot open, say. Devices that need it fail
     /// at their bind with their own reason.
     pub warnings: Vec<String>,
+    /// The daemon's end of the gadget helper, which keeps root. `None` without a gadget, or when
+    /// the start was not asked for one (the simulated board).
+    pub helper: Option<crate::helper::Client>,
 }
 
 /// Runs every step of `steps` in order, as root, and returns the devices they refused.
@@ -123,14 +121,21 @@ pub fn run_steps(steps: &[Step], cx: &Context<'_>) -> Result<Refusals, String> {
     Ok(refused)
 }
 
-/// Runs the privileged start and the drop, and verifies the result.
+/// Runs the privileged start and the drop, and verifies the result. With `helper`, the gadget
+/// helper is forked for the board's USB gadgets, before the drop.
 ///
 /// # Errors
 ///
-/// A request that does not resolve, a process-level step failure, a drop that fails, or a state
-/// after the drop that is not the one asked for. Each is a reason to stop, with the reason in words.
-/// A device a step cannot set up is not one of them: it is in [`Started::refused`].
-pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<Started, String> {
+/// A request that does not resolve, a process-level step failure, a helper that cannot be forked,
+/// a drop that fails, or a state after the drop that is not the one asked for. Each is a reason to
+/// stop, with the reason in words. A device a step cannot set up is not one of them: it is in
+/// [`Started::refused`].
+pub fn start(
+    request: &Request,
+    board: &BoardFile,
+    socket: &Path,
+    helper: bool,
+) -> Result<Started, String> {
     let (uid, gid) = resolve(request)?;
     let cx = Context {
         board,
@@ -138,7 +143,14 @@ pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<Star
         uid,
         gid,
     };
-    let refused = run_steps(STEPS, &cx)?;
+    let mut refused = run_steps(STEPS, &cx)?;
+    let client = if helper {
+        let (client, invalid) = crate::gadget::spawn(board, lemnos_linux::Owner { uid, gid })?;
+        refused.extend(invalid);
+        client
+    } else {
+        None
+    };
     let plan = Plan {
         uid,
         gid,
@@ -159,7 +171,11 @@ pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<Star
     if let Err(why) = check_nodes(&module_and_heap_nodes(board), now.euid, now.egid, &group) {
         warnings.push(why);
     }
-    Ok(Started { refused, warnings })
+    Ok(Started {
+        refused,
+        warnings,
+        helper: client,
+    })
 }
 
 /// Puts the devices a privileged start refused on the board, as refused with their reason. A device

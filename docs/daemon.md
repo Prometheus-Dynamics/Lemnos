@@ -79,12 +79,21 @@ One device's problem never stops the daemon. A device the daemon cannot start is
 reason: a setting its driver refuses, a device entry that is wrong on its own (a duplicate id, a
 `config` value that is not a number, boolean, string or list of strings, a stream its driver cannot
 take), a loop of `uses` (the device that closes the loop is refused, so the others bind), a gadget
-whose `identity` names no device or the wrong one, or whose root-phase setup fails. It shows failed in
-`lemnos-ctl list` and in its state, with the reason, and the devices that use or are linked to it
-behave as they do when a device fails to bind. Every other device runs, and the daemon starts. A
-refused device is not made, so its retries repeat the same refusal; a refusal that only a board-file
-edit or a restart can change says so in its reason (a gadget's root phase runs as root, once, before
-the drop, so it needs a restart to retry).
+whose `identity` names no device or the wrong one, or whose description the board file gets wrong (a
+`function` that is not `udc:NAME`, a controller name that is not one directory name, a setting its
+gadget driver refuses). It shows failed in `lemnos-ctl list` and in its state, with the reason, and the
+devices that use or are linked to it behave as they do when a device fails to bind. Every other device
+runs, and the daemon starts. A refused device is not made, so its retries repeat the same refusal; a
+refusal that only a board-file edit can change says so in its reason.
+
+A USB gadget that cannot be made yet is not refused. Its controller is not there, or its configfs is not
+mounted, or a module it needs is still loading: its driver retries, on the backoff of
+[the failure rule](design.md), with the gadget's setup done by the [privileged helper](#privileged-helper)
+each time. A controller that appears later (a uevent for `udc:NAME`) brings the next attempt forward.
+A gadget that cannot be made because the kernel lacks a feature it needs (an NCM interface name on a
+kernel before 5.12) is retried all the same, under the failure rule; its reason is written to the error
+output on each attempt. The one refusal that stays a restart is a board serial that cannot be read at
+start, which the gadget needs for its addresses.
 
 The daemon starts, or stops at start, for these reasons only:
 
@@ -105,17 +114,150 @@ exits 1. Nothing else is checked at start: a check that needs the hardware is ma
 
 Started as root with `--user` (or `LEMNOSD_USER`), lemnosd runs its privileged start, then drops to that
 user and group, keeps only `CAP_SYS_RAWIO`, and verifies the result before it listens. A step that
-cannot set up one device (a gadget whose configfs setup the kernel refuses) refuses that device with
-the reason, and the daemon starts without it ([Start-up](#start-up)). A step that fails for the process
-itself, a failed drop, or a state after the drop that is not the one asked for stops it, with the
-reason on its error output. A node the daemon cannot open after the drop is a line on the error output,
-and the device that opens it fails at its bind with its own reason. Started without root, it runs as it is and says which capabilities it lacks. The
-privileged start is the list `STEPS` in `service/lemnosd/src/privilege.rs`: each step runs as root, with
-the board file and the socket and ids the daemon will run as, and a step added there (the USB gadget's
-configfs setup is the second) runs before the drop. A step returns the devices it cannot set up, with
-their reasons, and returns an error only for the process itself. No unit or script gives the daemon a user, or a
-file capability. The steps and the drop are described in
+cannot set up one device refuses that device with the reason, and the daemon starts without it
+([Start-up](#start-up)). A step that fails for the process itself, a failed drop, or a state after the
+drop that is not the one asked for stops it, with the reason on its error output. A node the daemon cannot
+open after the drop is a line on the error output, and the device that opens it fails at its bind with its
+own reason. Started without root, it runs as it is and says which capabilities it lacks. The privileged
+start is the list `STEPS` in `service/lemnosd/src/privilege.rs`: each step runs as root, with the board
+file and the socket and ids the daemon will run as, before the drop. Its one built-in step makes the
+socket's directory. The USB gadgets are not a step: the root phase describes them (`gadget::describe`) and
+forks the [privileged helper](#privileged-helper) and its root parent for them, which keep root after the drop. No unit or
+script gives the daemon a user, or a file capability. The steps and the drop are described in
 [`packaging/README.md`](../packaging/README.md#one-privilege-path).
+
+## Privileged helper
+
+A USB gadget needs root for three things: its configfs tree, the FunctionFS mount, and the `UDC`
+attribute that binds it. Each can fail at boot for a reason that goes away: the controller is not bound
+yet, or is in host role, configfs is not mounted, a module is still loading. A root phase that runs once
+would make such a failure final, so the gadget is set up by a helper that outlives the drop.
+
+**What it is.** Two processes, forked by the root phase before the drop. The first is a small root
+parent (`service/lemnosd/src/supervisor.rs`, `lemnosd-gsuper` in `ps`), the daemon's child. It does one thing:
+it forks the helper and forks it again when it dies, so a helper crash needs neither the daemon (which has
+dropped root) nor a person. The second is the helper (`service/lemnosd/src/helper.rs`, `lemnosd-gadget` in
+`ps`), the parent's child. Both are the same binary as the daemon. The helper has the gadgets of the board
+file, fixed when the parent is forked: each gadget's controller name, the owner of its mount (the daemon's
+uid and gid), the gadget's settings, and the board's serial source (the identity device's settings).
+
+**What they can do.** The helper keeps uid 0 and the single capability `CAP_SYS_ADMIN`, which the
+FunctionFS mount and its unmount need. The parent keeps uid 0 and four: `CAP_SYS_ADMIN`, and
+`CAP_SETPCAP`, `CAP_SETUID` and `CAP_SETGID`, which the helper needs to drop everything else when it
+starts and drops itself at once. The parent holds them because each helper it forks inherits its sets
+and `privilege::drop_to` runs in that child: `CAP_SETPCAP` is what removes every other capability from
+the helper's bounding set (`PR_CAPBSET_DROP`) and sets its permitted and effective sets to
+`CAP_SYS_ADMIN` alone; `CAP_SETGID` is what clears the supplementary groups the child inherited
+(`setgroups`); `CAP_SETUID` is there for `drop_to`'s change of user id, which the helper does not make
+(root to root, so no `setuid` is called and its seccomp allowlist does not need one for it). Under systemd both also run under the unit's bounding set,
+`NoNewPrivileges`, `ProtectSystem=strict` and the unit's `SystemCallFilter` (which the gadget drop-in
+widens by `mount` and `umount2`). Each also runs under a seccomp allowlist of its own (below). The helper
+writes only under the configfs gadget tree it makes (`/sys/kernel/config/usb_gadget/lemnos-NAME`), the
+FunctionFS mount point it makes (`/dev/usb-ffs/NAME`), and the `UDC` attribute of that gadget. It needs no
+`CAP_CHOWN`, since `UDC` stays root's and the daemon binds through the helper.
+
+**Every file it touches is an entry of a directory it opened once.** It opens configfs
+(`/sys/kernel/config`, which must be a mounted configfs: the directory of an unmounted configfs is "not
+there yet" and is tried again at the next setup), the directory of the FunctionFS mount points, and
+`/sys/class/udc`, and from then on names one entry of one of them: `usb_gadget`, `lemnos-NAME`, `UDC`. An
+entry name that is empty, `.`, `..`, has a `/` or a NUL, or is over 255 bytes is refused before a system
+call. An entry is opened with `openat2` (`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS`)
+where the kernel has it, and `O_NOFOLLOW` where it does not, so a link in the tree is never followed. The
+FunctionFS mount's target is `/proc/self/fd/N` of the mount point's descriptor, and a configuration's links
+name their targets the same way. No absolute path is built from anything the daemon sent.
+
+**What they cannot do.** The helper reads nothing from the daemon after it is forked: no path, name,
+string or value crosses after the start, and the board serial is read by the helper from the source the
+board file names, not handed to it. They open no network socket, mount nothing else (they do not mount
+configfs: that is the system's, and a missing configfs is retried), and the helper takes no capability but
+`CAP_SYS_ADMIN`. Both ignore `SIGINT`, `SIGTERM` and `SIGHUP`, so a signal to the daemon's process group
+does not take them. The helper acts only for the daemon that started it: the socket pair was made by the
+root phase, so the kernel records the daemon's process (`SO_PEERCRED`) as the maker of both ends, and the
+helper checks the peer's process id and user id on every request. Another peer is answered `refused: not
+the lemnosd that started this helper (peer pid P uid U, expected pid P uid U)` and nothing runs. The socket
+has no name in the file system, so nothing else can reach it.
+
+**Seccomp.** After its start-up (names, signals, the drop to its capabilities, the opening of its
+directories) the helper installs a filter that allows exactly these calls and kills the process (`SIGSYS`)
+on any other: `read write close openat openat2 mkdirat unlinkat symlinkat readlinkat newfstatat fstat
+fstatfs statx getdents64 lseek fsync fchownat fchmodat mount umount2 getsockopt recvfrom sendto mmap munmap mremap mprotect
+madvise brk rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack clock_gettime getrandom exit exit_group
+fcntl`, and on x86_64 the calls glibc makes under their own names there (`mkdir rmdir unlink symlink
+readlink chmod chown rename open stat lstat`). The parent's filter is that list and the calls that make, wait for and sleep
+in a process and that the helper's drop makes (`clone clone3 wait4 waitid clock_nanosleep nanosleep prctl
+capget capset getpid gettid set_robust_list rseq set_tid_address getppid getuid geteuid getgid getegid getgroups setgroups setuid setgid setresuid
+setresgid futex sched_yield seccomp ppoll`, and `fork vfork` on x86_64), because filters stack. A test
+runs each verb under the helper's filter in a forked child, and checks that a call outside the list kills
+it.
+
+**Their lifetime.** The parent and the helper end when the daemon stops or dies: the helper when the
+daemon's end of its socket closes, the parent when its own parent dies (`PR_SET_PDEATHSIG`) or when the
+helper ends with status 0. When the daemon stops it takes every gadget down first: unbound, the tree
+removed, the mount unmounted (`teardown`); a daemon that crashes takes nothing down, so the tree stays
+and the helper of the next daemon adopts it.
+
+**When the helper dies.** The parent says so on the error output (`lemnosd: the gadget helper (pid N) was
+killed by signal 31; starting it again in 1000 ms (restart 1)`), throws away the requests the dead helper
+never read, waits 1, 2, 4 and then 8 seconds (the failure rule's cap; the wait starts over after the helper
+has run for 30 s), and forks a new helper, for as long as the daemon runs. The parent never gives up and
+never turns anything off. The new helper adopts the tree the old one left (below). The daemon keeps its end
+of the socket for life, and the parent keeps the helper's end across forks, so nothing about the socket
+changes: a call that was in flight fails after its 10 s wait, or at once if the helper's end closed, and the
+gadget's driver retries it on its backoff. A call that failed is not latched: the next one is served by the
+new helper. Only a socket whose other end is gone for good (the parent was killed from outside) fails every
+call after it, with the reason, until the daemon restarts.
+
+**The vocabulary.** A request is one line, `VERB INDEX SEQ`. `VERB` is `setup` (read the board serial, make
+the gadget's tree and mount, or adopt the one that is there), `bind` (write the controller's name to `UDC`),
+`unbind` (write an empty line to it), or `teardown` (unbind, remove the tree, unmount). `INDEX` is the
+gadget's index in the fixed list and `SEQ` the daemon's count of its requests, each as canonical decimal: no
+sign and no leading zero, a line of at most 32 bytes. Any other line is answered `0 refused ...` and runs
+nothing; a fuzz test checks this against the canonical spelling of every line it accepts. The reply starts
+with the request's `SEQ`: `SEQ ok`, `SEQ fail ERRNO REASON` (the errno is the step's and the reason is one
+line of text the daemon writes to its error output) or `SEQ refused REASON`. The daemon reads until it finds
+its own number, so a late answer to a request it gave up on is dropped. No file descriptor passes: the
+daemon opens `ep0` and the endpoint files itself, through the mount it owns, as before.
+
+**The board serial.** A gadget that derives its NCM addresses from the board serial names an `identity`
+device, whose `serial` settings say where the serial is (device tree, cpuinfo, the kernel command line or an
+nvmem cell). The helper keeps those settings from the fork and reads the source again at every `setup`. A
+source that cannot be read yet (an nvmem cell that probes late) makes the setup fail with `ENODATA` and the
+reason (`the board serial is not readable yet: REASON`, on the daemon's error output), the gadget's state
+reads `the board serial the gadget's addresses come from is not readable yet: retrying`, and the gadget
+retries on its backoff until the source can be read, with no restart. The daemon reads the source once
+at start as well, for the gadget's health note only (`no USB serial string`); a gadget is no longer refused
+for a serial that could not be read at start. The note does not stay stale: a successful `setup` replies
+`ok serial` or `ok no-serial` (the closed set; any other reply to `setup` is a failed setup, named), from
+the serial string the helper finds in the tree it made or adopted, and the driver clears the note on
+`serial`, and sets it (the start's reason) on `no-serial`, at every setup.
+
+**A tree that is already there.** `setup` looks at `usb_gadget/lemnos-NAME` before it makes anything.
+Nothing there: it is made. The same content as the board file asks for (every attribute, function, link and
+the mount): it is adopted as it is, bound or not, with one line on the error output. The same name and a
+different content with every part of a kind the helper makes, and unbound: it is taken down and made again.
+The same, and bound: it is left, and the setup fails with `EBUSY` (`the gadget tree lemnos-NAME differs from
+the board file's (WHY) and is bound to a controller: not remade while bound`); the daemon unbinds the
+gadget, as it does before every attach, and asks once more. A part the helper never makes (a function other
+than `ffs.NAME`, `ncm.usb0` or `acm.GS0`, a configuration not named `c.N`): the tree is not the helper's,
+it is left alone, and the setup fails with `EEXIST` and names the part (`a gadget tree named lemnos-NAME is
+there with a function mass_storage.0, which this helper never makes: it is not the helper's, and is left
+alone`).
+
+**How a gadget uses it.** The gadget's driver asks for the gadget's bind as before. Each time it enables,
+the gadget asks for `setup` first, and the step's errno decides what the driver reports (a missing
+controller is "not there", retried). A failure is retried on the driver's backoff: 1 s, then 2, 4 and 8 s,
+and every 8 s after, with no automatic off. A `udc:NAME` uevent (a controller coming up or switching to the
+device role) brings the next attempt forward, so the gadget does not wait out its timer when the hardware
+changes. The gadget's state shows the driver's fixed text for that kind of failure. Each failed attempt is one
+line on the daemon's error output, with the step and the helper's reason. The gadget's state shows the attempt
+count, its last reason and the next try (`retrying: attempt N, last reason: ..., next try in M ms`, see
+[`list`](#list)): the driver reports them through `Lifecycle::retrying` (`engine/core`), which the host reads
+beside the health text. The helper's own errno reason is not in that line: it is on the error output.
+
+**Not on the board.** The helper's behaviour on a real controller (the controller appearing late, host-role
+then device-role, configfs not mounted at start) is untested on board: [`testing/board-runs/V1g.md`](../testing/board-runs/V1g.md).
+The QEMU check (`testing/crates/gadget-check`) takes `dummy_udc.0` away before the daemon starts, shows the
+gadget retrying while the daemon serves its other devices, and gives the controller back.
 
 ## Running under systemd
 
@@ -190,7 +332,15 @@ named, as any caller is (see [the client's typed bind](client.md#the-typed-bind)
 ### list
 
 Every device and how it stands: name, driver, state, health, tags, then `-> NAME` when the board
-file links it to another device, then the reason in brackets when there is one.
+file links it to another device, then the reason in brackets when there is one. A device that is
+retrying (backed off by the host, or a driver that retries a step itself) has this reason:
+
+`retrying: attempt N, last reason: TEXT, next try in M ms`
+
+`N` is the failed attempts in a row, the last one included. `TEXT` is why the last one failed, cut to
+160 characters with `...` at the end when longer. `M` is the time to the next try, zero when it is due.
+A device switched on has no attempt to show, so its reason is the word alone (`switched on`). The same
+text is the reason in `describe` and `show`, which read the state and reason of the device.
 
 ```sh
 lemnos-ctl list

@@ -148,6 +148,16 @@ fn main() -> ExitCode {
         }
     };
 
+    // 0. The controller is not there yet: the platform driver of `dummy_udc.0` lets go of it, so
+    // `/sys/class/udc` lists none, and takes it back after the daemon has started (case 1b). The
+    // gadget is then made by the helper's retry, not at the daemon's start.
+    let late = fs::write("/sys/bus/platform/drivers/dummy_udc/unbind", "dummy_udc.0").is_ok()
+        && !Path::new("/sys/class/udc/dummy_udc.0").exists();
+    check(
+        late,
+        "the controller is taken away before the daemon starts (no entry in /sys/class/udc)",
+    );
+
     // 1. The daemon, as its own process: its privileged start, the drop, and the gadget's enable.
     let mut daemon = match Lemnosd::start(
         &me.with_file_name("lemnosd"),
@@ -199,16 +209,88 @@ fn main() -> ExitCode {
         bounding & !keep == 0,
         "CapBnd keeps only the capabilities the daemon keeps",
     );
-    let refused = Command::new(&me)
-        .arg("probe")
-        .uid(999)
-        .gid(999)
-        .status()
-        .is_ok_and(|status| status.success());
-    check(
-        refused,
-        "a FunctionFS mount is refused to the daemon's user (EPERM)",
-    );
+    // 1b. The controller is not there: the daemon runs and serves, and the gadget retries.
+    if late {
+        let list = |daemon: &Lemnosd| {
+            daemon
+                .connect()
+                .ok()
+                .and_then(|mut session| session.list().ok())
+                .unwrap_or_default()
+        };
+        let retrying = daemon::wait_until(Duration::from_secs(20), || {
+            list(&daemon)
+                .iter()
+                .any(|e| e.name == "gadget" && e.reason.starts_with("retrying: attempt "))
+        });
+        let entries = list(&daemon);
+        let gadget = entries.iter().find(|e| e.name == "gadget");
+        say!(
+            "     gadget while the controller is away: {:?}",
+            gadget.map(|e| (&e.state, &e.health, &e.reason))
+        );
+        check(
+            retrying,
+            "a gadget whose controller is not there yet is retrying, not refused: `retrying: attempt N, last reason: TEXT, next try in M ms`",
+        );
+        check(
+            gadget.is_some_and(|e| {
+                e.reason.contains("last reason: ") && e.reason.contains("next try in ")
+            }),
+            "the retry text names the reason and the time of the next try",
+        );
+        check(
+            entries
+                .iter()
+                .any(|e| e.name == "identity" && e.health == lemnos_client::DeviceHealth::Ok),
+            "the daemon keeps running and serves another device while the gadget retries",
+        );
+        check(
+            !Path::new(GADGET_DIR).join("functions").exists(),
+            "no tree is made while the controller is away",
+        );
+        let status = |comm: &str| processes(comm).into_iter().next();
+        let (helper, parent) = (status("lemnosd-gadget"), status("lemnosd-gsuper"));
+        say!("     helper {helper:?}, parent {parent:?}");
+        check(
+            helper.is_some_and(|(_, uid, caps, ppid)| {
+                uid == 0 && caps == 1u64 << CAP_SYS_ADMIN && Some(ppid) == parent.map(|p| p.0)
+            }),
+            "the helper runs as root with CAP_SYS_ADMIN only, as the child of the root parent",
+        );
+        check(
+            parent.is_some_and(|(_, uid, _, ppid)| uid == 0 && Some(ppid) == daemon.pid()),
+            "the root parent runs as root, as the child of the daemon",
+        );
+        check(
+            fs::write("/sys/bus/platform/drivers/dummy_udc/bind", "dummy_udc.0").is_ok(),
+            "the controller appears (the platform driver takes dummy_udc.0 back)",
+        );
+        check(
+            daemon::wait_until(Duration::from_secs(30), daemon::enabled),
+            "the gadget comes up by retry once the controller is there, with no restart",
+        );
+        // The serial is readable here (the kernel command line), so this shows the gadget that came
+        // up by retry reports `ok` with no serial note and carries the serial; the late-serial case
+        // (unreadable at the daemon's start) is the driver's unit test, which a command line cannot
+        // stage.
+        let up_ok = daemon::wait_until(Duration::from_secs(20), || {
+            list(&daemon)
+                .iter()
+                .any(|e| e.name == "gadget" && e.health == lemnos_client::DeviceHealth::Ok)
+        });
+        say!(
+            "     gadget after the retry: {:?}",
+            list(&daemon)
+                .iter()
+                .find(|e| e.name == "gadget")
+                .map(|e| (&e.state, &e.health, &e.reason))
+        );
+        check(
+            up_ok,
+            "the gadget made by retry reports health ok, with no serial note",
+        );
+    }
 
     // 2. What the tree holds, and what the daemon enabled.
     let read = |path: &str| {
@@ -246,6 +328,18 @@ fn main() -> ExitCode {
         "the guest has a network interface lemnos0",
     );
 
+    // The mount point exists now (the helper made it), and the daemon's user is still refused.
+    let refused = Command::new(&me)
+        .arg("probe")
+        .uid(999)
+        .gid(999)
+        .status()
+        .is_ok_and(|status| status.success());
+    check(
+        refused,
+        "a FunctionFS mount is refused to the daemon's user (EPERM)",
+    );
+
     // 3 and 4. The holder takes the pair and END through the daemon's socket, and echoes the host's
     // bytes; the host side checks them.
     let hold = match holder::Hold::take(&daemon) {
@@ -277,6 +371,44 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// The processes whose name is `comm`: process id, user id, effective capabilities and parent.
+fn processes(comm: &str) -> Vec<(u32, u32, u64, u32)> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let name = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if name.trim() != comm {
+            continue;
+        }
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let field = |key: &str| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .map(|rest| rest.trim().to_string())
+                .unwrap_or_default()
+        };
+        let uid = field("Uid:")
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u32::MAX);
+        let caps = u64::from_str_radix(&field("CapEff:"), 16).unwrap_or(u64::MAX);
+        let ppid = field("PPid:").parse().unwrap_or(0);
+        found.push((pid, uid, caps, ppid));
+    }
+    found
 }
 
 /// The five capability sets of `/proc/PID/status`, as masks: inheritable, permitted, effective,

@@ -11,6 +11,7 @@ mod clock;
 mod conn;
 mod events;
 pub mod gadget;
+pub mod helper;
 mod liveness;
 mod notify;
 pub mod packages;
@@ -19,6 +20,7 @@ mod readers;
 mod requests;
 mod serve;
 mod streams;
+pub mod supervisor;
 
 /// The daemon's `--check` of a board file: the file as the daemon reads it (a device whose own
 /// entry is wrong is kept and refused), each gadget's board serial, then each driver's settings

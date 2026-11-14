@@ -11,15 +11,18 @@ use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use lemnos_host::Options;
 use lemnos_host::board::parse_lenient;
 use lemnos_linux::LinuxBoard;
+use lemnos_linux::SharedHelper;
 use lemnos_linux::hotplug::BoardHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
 use lemnosd::gadget;
+use lemnosd::helper;
 use lemnosd::packages::{PackageConfig, add_packages};
 use lemnosd::privilege;
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
@@ -99,9 +102,18 @@ fn wait_for_signal(signals: &SignalFd) -> std::io::Result<()> {
     }
 }
 
-/// The machine's hardware, through the kernel module where it's loaded.
-fn linux_board() -> LinuxBoard {
+/// The gadget helper's daemon end, shared by the USB gadgets, with each gadget's controller name
+/// and index in the helper.
+type GadgetHelper = (Arc<Mutex<helper::Client>>, Vec<(String, u32)>);
+
+/// The machine's hardware, through the kernel module where it's loaded, and the USB gadgets through
+/// the gadget helper when the root phase started one.
+fn linux_board(gadget_helper: Option<&GadgetHelper>) -> LinuxBoard {
     let mut board = LinuxBoard::new();
+    if let Some((client, gadgets)) = gadget_helper {
+        let shared: SharedHelper = client.clone();
+        board.use_gadget_helper(shared, gadgets.clone());
+    }
     if let Err(error) = board.open_module()
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -187,7 +199,7 @@ fn main() -> ExitCode {
     let mut root = privilege::Started::default();
     match (drop, lemnos_linux_sys::privilege::observe()) {
         (Some(request), Ok(now)) if now.euid == 0 => {
-            match privilege::start(&request, &board_file, Path::new(&socket)) {
+            match privilege::start(&request, &board_file, Path::new(&socket), !sim) {
                 Ok(started) => root = started,
                 Err(error) => return complain(&error),
             }
@@ -211,6 +223,12 @@ fn main() -> ExitCode {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
     }
     privilege::refuse(&mut board_file, &root.refused);
+    // The gadget helper the root phase forked, if the board has a gadget: the daemon's end, with the
+    // gadgets' indexes in it.
+    let gadget_helper: Option<GadgetHelper> = root.helper.take().map(|client| {
+        let gadgets = client.gadgets().to_vec();
+        (Arc::new(Mutex::new(client)), gadgets)
+    });
     // What the board file calls its hardware, for the backend to say which of it comes and goes.
     // An `[[each]]` entry is told of by its pattern.
     let names: Vec<String> = board_file
@@ -237,7 +255,7 @@ fn main() -> ExitCode {
         backend: if sim {
             Box::new(SimBoard::new())
         } else {
-            Box::new(linux_board())
+            Box::new(linux_board(gadget_helper.as_ref()))
         },
         options: Options::default(),
     };
@@ -259,5 +277,12 @@ fn main() -> ExitCode {
         let _ = complain(&format!("waiting for a signal: {error}"));
     }
     service.stop();
+    // Stopping takes the gadgets down: unbound, their trees removed, their mounts unmounted. Then
+    // the helper ends with the daemon's end of its socket.
+    if let Some((client, _)) = &gadget_helper
+        && let Ok(mut client) = client.lock()
+    {
+        client.teardown_all();
+    }
     ExitCode::SUCCESS
 }

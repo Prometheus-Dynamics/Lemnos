@@ -103,7 +103,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -113,11 +112,58 @@ use lemnos_hal::usb_descriptors::{
 };
 use lemnos_hal::{ErrorKind, UsbFunction};
 use lemnos_linux_sys::aio;
+use lemnos_linux_sys::confined::Dir;
 use lemnos_linux_sys::functionfs::{self, CompatEntry, Endpoint, Ep0, Event, ExtProp, Setup};
 
 use crate::Claim;
 
+mod tree;
+pub use tree::{Outcome, Trees};
+
+/// Whether a gadget's tree carries a USB serial string: what a helper's setup tells the daemon,
+/// from the tree it made or adopted, not from the settings it was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialString {
+    /// The tree has a serial string.
+    Set,
+    /// The tree has none.
+    Absent,
+}
+
 pub(crate) const PREFIX: &str = "udc:";
+
+/// A failure that carries the errno a reply reports and the words for the log: what the setup says
+/// when a tree is not the helper's, or is bound and differs.
+#[derive(Debug)]
+struct Fault {
+    errno: i32,
+    text: String,
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for Fault {}
+
+/// A failure with `errno` and `text`, as the helper reports one: [`errno_of`] gives the errno back.
+#[must_use]
+pub fn fault(errno: i32, text: String) -> io::Error {
+    io::Error::other(Fault { errno, text })
+}
+
+/// The errno of a failure: the kernel's, or the one a [`Fault`] carries.
+#[must_use]
+pub fn errno_of(error: &io::Error) -> Option<i32> {
+    error.raw_os_error().or_else(|| {
+        error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<Fault>())
+            .map(|fault| fault.errno)
+    })
+}
 
 /// The longest configfs takes for a function directory's name (`ffs.NAME`).
 const MAX_FUNCTION_NAME: usize = 39;
@@ -127,6 +173,12 @@ const MAX_STRING: usize = 125;
 pub const MAX_ALTERNATE: u8 = 2;
 /// Transfers an isochronous endpoint keeps with the kernel.
 pub const ISO_TRANSFERS: usize = 8;
+
+/// Whether `name` (without `udc:`) is a name a controller can have here: one directory name.
+#[must_use]
+pub fn is_controller_name(name: &str) -> bool {
+    controller(&format!("{PREFIX}{name}")).is_some()
+}
 
 /// The controller a board file's name means, if the name is one of ours and can be a
 /// directory name: no separator, no leading dot, nothing but what a kernel device name has.
@@ -142,9 +194,11 @@ pub(crate) fn controller(need: &str) -> Option<&str> {
 
 /// What a failed step of setting the gadget up amounts to.
 fn setup_kind(error: &io::Error) -> ErrorKind {
-    match error.raw_os_error() {
+    match errno_of(error) {
         Some(libc::ENOENT) => ErrorKind::NotFound,
         Some(libc::EBUSY) => ErrorKind::Busy,
+        // The board serial the gadget derives from is not readable yet (the helper's reply).
+        Some(libc::ENODATA) => ErrorKind::Configuration,
         Some(libc::EINVAL | libc::EOVERFLOW | libc::ERANGE | libc::ENAMETOOLONG) => {
             ErrorKind::InvalidInput
         }
@@ -386,31 +440,6 @@ fn attribute(dir: &Path, file: &str, value: &str) -> io::Result<()> {
     fs::write(dir.join(file), format!("{value}\n"))
 }
 
-/// Removes a directory configfs made for us. Its attribute files go with it there; in a
-/// stand-in tree they are files like any other and are removed first.
-fn remove_dir(dir: &Path) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-    let _ = fs::remove_dir(dir);
-}
-
-/// The directories in `dir`, not following links.
-fn directories(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
-        .collect()
-}
-
 /// The owner the setup gives the FunctionFS mount and the gadget's `UDC` attribute: the
 /// daemon's user and group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +454,12 @@ pub trait Mounts {
     fn functionfs(&mut self, source: &str, target: &Path, options: &str) -> io::Result<()>;
     /// Unmounts `target`. Nothing mounted there is an error.
     fn unmount(&mut self, target: &Path) -> io::Result<()>;
+    /// Whether the mount point `dir` has a FunctionFS mounted on it, with its `ep0`. The default
+    /// looks for `ep0` in it, as a stand-in tree has it; the system's looks at the filesystem the
+    /// directory is on, since the mount point is closed to everyone but the daemon's user.
+    fn mounted(&self, dir: &Dir) -> bool {
+        dir.exists("ep0")
+    }
 }
 
 /// The system's mounts: `mount(2)` and `umount2(2)`, as root.
@@ -437,6 +472,11 @@ impl Mounts for SystemMounts {
 
     fn unmount(&mut self, target: &Path) -> io::Result<()> {
         lemnos_linux_sys::mount::unmount(target)
+    }
+
+    fn mounted(&self, dir: &Dir) -> bool {
+        dir.on_filesystem(lemnos_linux_sys::confined::FUNCTIONFS_MAGIC)
+            .unwrap_or(false)
     }
 }
 
@@ -502,53 +542,6 @@ impl Paths {
             let _ = udc.write(b"\n");
         }
     }
-
-    /// Removes every configuration and strings directory of the gadget, and the links in them.
-    /// Never fails: what isn't there is already gone. Setup only.
-    fn dismantle(&self) {
-        // The configurations the OS descriptors name, which configfs won't remove while linked.
-        if let Ok(entries) = fs::read_dir(self.gadget.join("os_desc")) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-        for configuration in directories(&self.gadget.join("configs")) {
-            // The functions linked in, then the strings, then the configuration.
-            if let Ok(entries) = fs::read_dir(&configuration) {
-                for entry in entries.flatten() {
-                    if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
-            }
-            for strings in directories(&configuration.join("strings")) {
-                remove_dir(&strings);
-            }
-            // In configfs `strings` is part of the configuration; in a stand-in tree it is a
-            // directory to remove.
-            let _ = fs::remove_dir(configuration.join("strings"));
-            remove_dir(&configuration);
-        }
-        for strings in directories(&self.gadget.join("strings")) {
-            remove_dir(&strings);
-        }
-    }
-
-    /// Removes the function directories the setup makes. Setup only, after the configurations
-    /// are gone. With `reuse` the FunctionFS directory stays, with its mount.
-    fn remove_functions(&self, reuse: bool) {
-        let ffs = self.function_name();
-        let names = if reuse {
-            vec![NCM_DIR, ACM_DIR]
-        } else {
-            vec![ffs.as_str(), NCM_DIR, ACM_DIR]
-        };
-        for name in names {
-            remove_dir(&self.gadget.join("functions").join(name));
-        }
-    }
 }
 
 /// Where the setup finds the system's parts: configfs (`/sys/kernel/config`), the directory of
@@ -565,7 +558,9 @@ pub struct Roots<'a> {
 /// [`lemnos_hal::usb_descriptors`] checks, and `functions` the board file's functions in order.
 /// `udc_name` is the `NAME` of `udc:NAME`.
 ///
-/// Nothing is bound. A failure leaves whatever it made, and the next setup removes it.
+/// A tree that is already there is adopted when it is the same, remade when it differs and is
+/// unbound, and left alone when it is not ours (see [`Trees`]). Nothing is bound. A failure leaves
+/// whatever it made, and the next setup removes it.
 pub fn prepare(
     roots: &Roots<'_>,
     udc_name: &str,
@@ -574,137 +569,78 @@ pub fn prepare(
     functions: &[GadgetFunction],
     system: &mut dyn Mounts,
 ) -> io::Result<()> {
-    let Roots {
-        configfs,
-        mounts,
-        udc_class,
-    } = *roots;
-    let need = format!("{PREFIX}{udc_name}");
-    let name = controller(&need).ok_or_else(|| invalid(ErrorKind::InvalidInput))?;
-    let paths = Paths {
-        gadget: configfs.join("usb_gadget").join(format!("lemnos-{name}")),
-        mount: mounts.join(name),
-        udc: udc_class.join(name),
-        name: name.to_string(),
-    };
-    let plan = Plan::of(&UsbDescriptors::parse(descriptors).map_err(invalid)?).map_err(invalid)?;
-    if !paths.udc.exists() {
-        return Err(io::Error::from_raw_os_error(libc::ENOENT));
-    }
-    // A FunctionFS mount that is already there, with its ep0 in it, belongs to a holder that may
-    // still have copies of the endpoints, or to an earlier daemon. It is reused: never unmounted or
-    // remounted under a holder (the kernel refuses that with EBUSY, and it would drop the holder's
-    // descriptors). Holds end on their own when their process goes; see `endpoints_ended`.
-    let reuse = paths.mount.join("ep0").exists();
-    paths.unbind();
-    paths.dismantle();
-    if !reuse {
-        // `unmount` of a point that isn't mounted fails, which is the state a fresh image is in.
-        let _ = system.unmount(&paths.mount);
-    }
-    paths.remove_functions(reuse);
+    Trees::new(roots)
+        .setup(udc_name, owner, descriptors, functions, system, Udc::Owner)
+        .map(drop)
+}
 
-    fs::create_dir_all(&paths.gadget)?;
-    for (file, value) in &plan.identity {
-        attribute(&paths.gadget, file, value)?;
-    }
-    // Kernels before 5.12 have no `max_speed`; they run at what the controller offers.
-    if let Ok(mut speed) = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(paths.gadget.join("max_speed"))
-    {
-        speed.write_all(format!("{}\n", plan.max_speed).as_bytes())?;
-    }
-    if let Some(language) = &plan.language
-        && !plan.strings.is_empty()
-    {
-        let strings = paths.gadget.join("strings").join(language);
-        fs::create_dir_all(&strings)?;
-        for (file, value) in &plan.strings {
-            attribute(&strings, file, value)?;
-        }
-    }
-    let configuration = paths.gadget.join("configs").join(&plan.configuration);
-    fs::create_dir_all(&configuration)?;
-    attribute(&configuration, "MaxPower", &plan.max_power)?;
-    attribute(&configuration, "bmAttributes", &plan.attributes)?;
-    // The OS descriptors belong to the configuration linked under `os_desc` below. Setting
-    // `use` first is what makes the kernel answer string 0xEE for the device.
-    let os_desc = paths.gadget.join("os_desc");
-    fs::create_dir_all(&os_desc)?;
-    for (file, value) in &plan.os_attributes {
-        attribute(&os_desc, file, value)?;
-    }
-    if let (Some(language), Some(name)) = (&plan.language, &plan.configuration_name) {
-        let strings = configuration.join("strings").join(language);
-        fs::create_dir_all(&strings)?;
-        attribute(&strings, "configuration", name)?;
-    }
+/// Who writes the gadget's `UDC` attribute once it is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Udc {
+    /// The daemon's user: `UDC` is handed to the owner at mode 0600 ([`prepare`]).
+    Owner,
+    /// The root process that made the gadget: `UDC` stays root's, and the daemon binds through
+    /// it ([`prepare_for_helper`]).
+    Root,
+}
 
-    // The functions, each made in configfs, FunctionFS last of the three for its mount.
-    let functions_dir = paths.gadget.join("functions");
-    let mut links = Vec::with_capacity(functions.len());
-    for function in functions {
-        match function {
-            GadgetFunction::Ffs => {
-                if !reuse {
-                    fs::create_dir(paths.function())?;
-                    fs::create_dir_all(&paths.mount)?;
-                    let options =
-                        format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
-                    system.functionfs(&paths.name, &paths.mount, &options)?;
-                }
-                links.push(paths.function_name());
-            }
-            GadgetFunction::Ncm {
-                host,
-                device,
-                ifname,
-            } => {
-                let dir = functions_dir.join(NCM_DIR);
-                fs::create_dir(&dir)?;
-                attribute(&dir, "host_addr", &mac_text(host))?;
-                attribute(&dir, "dev_addr", &mac_text(device))?;
-                // The NCM interface's OS descriptor, a group configfs makes for the function.
-                // Written raw: the store takes up to 8 bytes and would keep a newline. Best
-                // effort: the link does not depend on it, and the harness checks it is there.
-                let interface = dir.join("os_desc").join("interface.ncm");
-                let _ = fs::create_dir_all(&interface).and_then(|()| {
-                    fs::write(
-                        interface.join("compatible_id"),
-                        id_text(&ms_os::NCM_COMPATIBLE_ID),
-                    )
-                });
-                if let Some(name) = ifname {
-                    // Only taken while the function is unbound, which it is here.
-                    attribute(&dir, "ifname", name.as_str()).map_err(ifname_refused)?;
-                }
-                links.push(NCM_DIR.to_string());
-            }
-            GadgetFunction::Acm => {
-                fs::create_dir(functions_dir.join(ACM_DIR))?;
-                links.push(ACM_DIR.to_string());
-            }
-        }
-    }
-    for name in &links {
-        std::os::unix::fs::symlink(functions_dir.join(name), configuration.join(name))?;
-    }
-    std::os::unix::fs::symlink(&configuration, os_desc.join(&plan.configuration))?;
+/// [`prepare`] for a helper that keeps root (`lemnosd`'s gadget helper). The tree, the mount and
+/// the owner of the FunctionFS mount are as [`prepare`] makes them, but `UDC` is not handed over:
+/// the daemon never writes it in this mode, it asks the helper to bind and unbind (see
+/// [`GadgetHelper`]). So the helper needs no `CAP_CHOWN`. The helper holds its own [`Trees`], opened
+/// once, and calls [`Trees::setup`] on them; this is the same call on trees opened for it.
+///
+/// # Errors
+///
+/// As [`prepare`].
+pub fn prepare_for_helper(
+    roots: &Roots<'_>,
+    udc_name: &str,
+    owner: Owner,
+    descriptors: &[u8],
+    functions: &[GadgetFunction],
+    system: &mut dyn Mounts,
+) -> io::Result<()> {
+    Trees::new(roots)
+        .setup(udc_name, owner, descriptors, functions, system, Udc::Root)
+        .map(drop)
+}
 
-    // The daemon writes the controller's name here, and nothing else in the gadget.
-    let udc = paths.gadget.join("UDC");
-    std::os::unix::fs::chown(&udc, Some(owner.uid), Some(owner.gid))?;
-    fs::set_permissions(&udc, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+/// Writes the controller's name to the gadget's `UDC`, as root: the helper's bind.
+///
+/// # Errors
+///
+/// The name is not a controller's, or the write fails (`ENOENT` when the gadget is not made).
+pub fn bind(roots: &Roots<'_>, udc_name: &str) -> io::Result<()> {
+    Trees::new(roots).bind(udc_name)
+}
+
+/// Writes an empty line to the gadget's `UDC`, as root: the helper's unbind. Nothing bound is
+/// not an error.
+///
+/// # Errors
+///
+/// The name is not a controller's.
+pub fn unbind(roots: &Roots<'_>, udc_name: &str) -> io::Result<()> {
+    Trees::new(roots).unbind(udc_name)
+}
+
+/// Takes the gadget named `udc_name` down for good: unbinds it, removes its configurations and
+/// functions, and unmounts its FunctionFS. The setup makes it again. A mount that is not there is
+/// not an error.
+///
+/// # Errors
+///
+/// The name is not a controller's, or the mount is there and cannot be unmounted.
+pub fn teardown(roots: &Roots<'_>, udc_name: &str, system: &mut dyn Mounts) -> io::Result<()> {
+    Trees::new(roots).teardown(udc_name, system)
 }
 
 impl Paths {
     /// Steps 3 to 5 of the daemon's [`FunctionFsGadget::enable`]: ep0, the endpoint files and
     /// the bind. On an error the caller unbinds. A piece that went missing since `ready`
     /// looked is `ENOENT` from the step that needs it.
-    fn attach(&self, plan: &Plan) -> io::Result<FfsWire> {
+    fn attach(&self, plan: &Plan, bind: &mut dyn FnMut() -> io::Result<()>) -> io::Result<FfsWire> {
         let ep0 = Ep0::open(&self.mount.join("ep0"))?;
         ep0.describe(&plan.descriptors, &plan.function_strings)?;
         let mut endpoints = Vec::with_capacity(plan.endpoints.len());
@@ -721,7 +657,7 @@ impl Paths {
                 None => Transfers::One(aio::Queue::new(TRANSFER_BYTES)?),
             });
         }
-        attribute(&self.gadget, "UDC", &self.name)?;
+        bind()?;
         Ok(FfsWire {
             ep0,
             endpoints,
@@ -986,11 +922,38 @@ impl<W: Wire> Session<W> {
     }
 }
 
+/// What a gadget needs from the process that keeps root, when there is one (`lemnosd`'s gadget
+/// helper). The helper holds the gadget's description from the board file, fixed at start, and
+/// the daemon names the gadget by its index in that description; nothing else crosses. Each call
+/// is one request and its answer.
+pub trait GadgetHelper: Send {
+    /// Makes the gadget's tree and mount, as [`prepare_for_helper`] does, and says whether the tree
+    /// carries a serial string. Fails with the errno of the step that failed, so the gadget
+    /// reports what was missing.
+    fn setup(&mut self, index: u32) -> io::Result<SerialString>;
+    /// Writes the controller's name to the gadget's `UDC`.
+    fn bind(&mut self, index: u32) -> io::Result<()>;
+    /// Writes an empty line to the gadget's `UDC`.
+    fn unbind(&mut self, index: u32) -> io::Result<()>;
+}
+
+/// A helper shared by the gadgets of one daemon: one request at a time.
+pub type SharedHelper = std::sync::Arc<std::sync::Mutex<dyn GadgetHelper>>;
+
+fn poisoned() -> io::Error {
+    io::Error::other("the gadget helper's lock was poisoned by a panic")
+}
+
 /// This board as a USB device through one controller: see the module docs.
 pub struct FunctionFsGadget {
     paths: Paths,
     session: Option<Session<FfsWire>>,
     _claim: Option<Claim>,
+    /// The helper that makes and binds this gadget, and the gadget's index in it. `None` when the
+    /// daemon writes configfs itself, as a process without a helper does.
+    helper: Option<(SharedHelper, u32)>,
+    /// What the last successful setup left: whether the tree has a serial string.
+    serial: Option<bool>,
 }
 
 impl FunctionFsGadget {
@@ -1011,12 +974,41 @@ impl FunctionFsGadget {
             },
             session: None,
             _claim: None,
+            helper: None,
+            serial: None,
         })
     }
 
     pub(crate) fn holding(mut self, claim: Claim) -> Self {
         self._claim = Some(claim);
         self
+    }
+
+    /// Makes and binds this gadget through `helper`, as its index `index` there.
+    #[must_use]
+    pub fn with_helper(mut self, helper: SharedHelper, index: u32) -> Self {
+        self.helper = Some((helper, index));
+        self
+    }
+
+    /// Takes the gadget off its controller: through the helper, or directly.
+    fn unbind_now(&self) {
+        match &self.helper {
+            Some((helper, index)) => {
+                if let Ok(mut helper) = helper.lock() {
+                    let _ = helper.unbind(*index);
+                }
+            }
+            None => self.paths.unbind(),
+        }
+    }
+
+    /// Writes the controller's name to `UDC`: through the helper, or directly.
+    fn bind_now(&self) -> io::Result<()> {
+        match &self.helper {
+            Some((helper, index)) => helper.lock().map_err(|_| poisoned())?.bind(*index),
+            None => attribute(&self.paths.gadget, "UDC", &self.paths.name),
+        }
     }
 
     fn session(&mut self) -> Result<&mut Session<FfsWire>, ErrorKind> {
@@ -1070,6 +1062,10 @@ impl UsbFunction for FunctionFsGadget {
         Ok(Some(name.len()))
     }
 
+    fn serial_string_set(&mut self) -> Result<Option<bool>, ErrorKind> {
+        Ok(self.serial.filter(|_| self.session.is_some()))
+    }
+
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         let released = match self.session.as_ref() {
             Some(session) if session.released => true,
@@ -1077,6 +1073,29 @@ impl UsbFunction for FunctionFsGadget {
             None => false,
         };
         let plan = Plan::of(&UsbDescriptors::parse(descriptors)?)?;
+        // With a helper, the gadget is made now, by the helper, or adopted if it is already there
+        // as the board file describes it; that is the one thing this call asks of it: the next
+        // attempt is the driver's, on its backoff. A tree that differs and is still bound is not
+        // remade under its binding: the daemon takes it off its controller (what it does before
+        // every attach anyway) and asks again, once.
+        let mut serial = None;
+        if !released && let Some((helper, index)) = &self.helper {
+            let mut asked = helper
+                .lock()
+                .map_err(|_| ErrorKind::Unavailable)?
+                .setup(*index);
+            if asked
+                .as_ref()
+                .is_err_and(|e| errno_of(e) == Some(libc::EBUSY))
+            {
+                self.unbind_now();
+                asked = helper
+                    .lock()
+                    .map_err(|_| ErrorKind::Unavailable)?
+                    .setup(*index);
+            }
+            serial = Some(asked.map_err(|e| setup_kind(&e))? == SerialString::Set);
+        }
         // Checked before anything is written, so a board that is not set up stays as it is.
         if !self.paths.ready(&plan.configuration) {
             return Err(ErrorKind::NotFound);
@@ -1085,22 +1104,35 @@ impl UsbFunction for FunctionFsGadget {
             // The controller let go and the session kept ep0 open (see `disable`). The descriptors
             // are still the kernel's, and a fresh ep0 could not describe them again while a holder
             // keeps the endpoints open, so only the attribute is written.
-            attribute(&self.paths.gadget, "UDC", &self.paths.name).map_err(|e| setup_kind(&e))?;
+            self.bind_now().map_err(|e| setup_kind(&e))?;
             if let Some(session) = self.session.as_mut() {
                 session.released = false;
             }
             return Ok(());
         }
-        self.paths.unbind();
-        match self.paths.attach(&plan) {
+        self.unbind_now();
+        let attached = match &self.helper {
+            Some((helper, index)) => self.paths.attach(&plan, &mut || {
+                helper.lock().map_err(|_| poisoned())?.bind(*index)
+            }),
+            None => self.paths.attach(&plan, &mut || {
+                attribute(&self.paths.gadget, "UDC", &self.paths.name)
+            }),
+        };
+        match attached {
             Ok(wire) => {
+                if !released {
+                    // Through a helper, what its setup reported; otherwise the strings written.
+                    self.serial =
+                        serial.or(Some(plan.strings.iter().any(|(f, _)| *f == "serialnumber")));
+                }
                 let mut session = Session::new(wire, plan.endpoints);
                 session.lend = plan.lend;
                 self.session = Some(session);
                 Ok(())
             }
             Err(error) => {
-                self.paths.unbind();
+                self.unbind_now();
                 Err(setup_kind(&error))
             }
         }
@@ -1114,7 +1146,7 @@ impl UsbFunction for FunctionFsGadget {
             Some(session) if session.released => Ok(()),
             Some(_) => {
                 // Unbind first, then close the files. The gadget stays as the setup made it.
-                self.paths.unbind();
+                self.unbind_now();
                 self.session = None;
                 Ok(())
             }

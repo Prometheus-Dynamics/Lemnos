@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lemnos_core::{MethodId, Status};
+use lemnos_core::{HostClock, MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::ring::fds;
@@ -211,7 +211,7 @@ impl Client {
 
     fn list(&self, id: u32) -> Keep {
         for info in self.core.host.devices() {
-            let (state, health, reason) = wire_state(&info);
+            let (state, health, reason) = wire_state(&info, self.core.clock.now_ns());
             let tags = info
                 .tags
                 .iter()
@@ -310,7 +310,7 @@ impl Client {
         else {
             return self.refuse(id, Status::NOT_FOUND, "no such device");
         };
-        let (state, _, reason) = wire_state(&info);
+        let (state, _, reason) = wire_state(&info, self.core.clock.now_ns());
         let identity = Identity {
             label: &info.label,
             bus: info.bus.as_deref().unwrap_or(""),

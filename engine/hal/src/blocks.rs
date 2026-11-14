@@ -730,6 +730,15 @@ pub trait UsbFunction {
         let _ = into;
         Ok(None)
     }
+    /// Whether the gadget [`enable`](Self::enable) bound carries a USB serial string: `Some(true)`
+    /// when it does, `Some(false)` when it has none, `None` when the backend cannot say (or the
+    /// function is not enabled). Read after the bind, as the function's own setup, not the
+    /// settings it was asked for, decides it. Never waits.
+    ///
+    /// The default says nothing, so a function that has no such string needs no change.
+    fn serial_string_set(&mut self) -> Result<Option<bool>, Self::Error> {
+        Ok(None)
+    }
     /// What happened since the last call, oldest first, or `None`. Never waits.
     ///
     /// A control request still pending when this is called is stalled by it: a function that

@@ -12,7 +12,7 @@ use lemnos_core::{
     Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
     InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
     Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle,
-    Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
+    Resources, Result, Retry, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
     UsbFunctionHandle, Watchdog,
 };
 
@@ -31,6 +31,10 @@ use crate::{Options, guest};
 pub trait Instance: Send {
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health;
+    /// See [`Driver::retrying`].
+    fn retrying(&self) -> Option<Retry> {
+        None
+    }
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
     /// See [`Driver::board`]. Asked only of a driver whose entry says it watches the board.
@@ -68,6 +72,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn health(&self) -> Health {
         Driver::health(self)
+    }
+
+    fn retrying(&self) -> Option<Retry> {
+        Driver::retrying(self)
     }
 
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status {
@@ -444,6 +452,9 @@ pub struct DeviceInfo {
     pub tags: Vec<Tag>,
     pub state: DeviceState,
     pub health: Health,
+    /// Set while a running driver retries a failed step itself (see [`Retry`]). A device the host
+    /// backs off keeps its attempts in [`DeviceState::Backoff`] instead.
+    pub retry: Option<Retry>,
     /// The device this one is wired to, by the id the board file's `link` names. The host
     /// hands it on as written and never reads it: what the wiring means is the devices'.
     pub link: Option<String>,
@@ -2179,6 +2190,19 @@ impl Inner {
                 .any(|child| self.hotplug_of(&child, depth - 1))
     }
 
+    /// The driver's own account of its retries, when it is running and says it is retrying. Read
+    /// with `try_lock`: a driver in a call right now says nothing until the call returns.
+    fn device_retry(&self, slot: &Slot) -> Option<Retry> {
+        if !matches!(*lock(&slot.state), DeviceState::Running) {
+            return None;
+        }
+        let guard = slot.instance.try_lock().ok()?;
+        let instance = guard.as_ref()?;
+        catch_unwind(AssertUnwindSafe(|| instance.retrying()))
+            .ok()
+            .flatten()
+    }
+
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
         self.health_of(slot, depth).0
     }
@@ -2694,6 +2718,7 @@ impl Host {
                 .unwrap_or_default(),
             state,
             health: self.inner.device_health(slot, MAX_DEPTH),
+            retry: self.inner.device_retry(slot),
             link: slot.spec.link.clone(),
         }
     }

@@ -197,6 +197,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::health(self)
             }
 
+            fn retrying(&self) -> ::core::option::Option<::lemnos_core::Retry> {
+                <Self as ::lemnos_core::Lifecycle>::retrying(self)
+            }
+
             const TICKS: bool = <Self as ::lemnos_core::Lifecycle>::TICKS;
 
             fn tick(&mut self, __now_ns: u64) -> ::core::option::Option<u64> {

@@ -465,6 +465,25 @@ fn a_function_that_cannot_be_enabled_is_retried_at_1_2_4_8_8_seconds_for_ever() 
 }
 
 #[test]
+fn a_retrying_gadget_says_how_many_failed_why_and_when_the_next_try_is() {
+    // The host's retry line is built from this: the failed attempts in a row, the last reason
+    // without the driver's `: retrying`, and the next try on the host's clock.
+    let mut rig = Rig::new();
+    assert_eq!(Driver::retrying(&rig.driver), None);
+    rig.host.refuse_enable(Some(ErrorKind::NotFound));
+    for failed in 1..=5u32 {
+        rig.step();
+        let retry = Driver::retrying(&rig.driver).expect("a failed attempt is retried");
+        assert_eq!(retry.attempts, failed);
+        assert_eq!(retry.reason, NOT_THERE.strip_suffix(": retrying").unwrap());
+        assert_eq!(retry.next_ns, rig.now, "the next try is the next tick");
+    }
+    rig.host.refuse_enable(None);
+    rig.step();
+    assert_eq!(Driver::retrying(&rig.driver), None, "up: nothing to retry");
+}
+
+#[test]
 fn an_endpoint_file_busy_at_enable_is_retried_with_its_reason_and_comes_up_when_it_frees() {
     // ep0 busy: an outside process still has the function's file open. Named as in use, retried
     // with the usual backoff, never given up, and up at the first try after it frees.
@@ -820,6 +839,51 @@ fn the_serial_string_is_the_explicit_one_or_else_the_board_serial() {
         .unwrap();
     Driver::tick(&mut driver, 0);
     assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL_READ));
+}
+
+#[test]
+fn the_serial_note_follows_what_the_setup_made_not_what_the_daemon_read_at_start() {
+    // (a) The daemon could not read the serial at start; the helper reads it at its own setup and
+    // the gadget that comes up then carries it: ok, no note.
+    let mut entries: Vec<(&str, ConfigValue<'_>)> = settings_without_serial();
+    entries.push(("board_serial_error", ConfigValue::Str("no serial source")));
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &entries, "alpha")
+        .map_err(|_| ())
+        .unwrap();
+    assert_eq!(
+        Lifecycle::health(&driver),
+        Health::Degraded(crate::STARTING)
+    );
+    function.set_serial_string(Some(true));
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Ok, "the note is gone");
+    // (b) Never readable: the start's own words stay.
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &entries, "alpha")
+        .map_err(|_| ())
+        .unwrap();
+    function.set_serial_string(Some(false));
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL_READ));
+    // No serial named at all: the other existing text stays.
+    let plain: Vec<(&str, ConfigValue<'_>)> = settings_without_serial();
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &plain, "alpha").map_err(|_| ()).unwrap();
+    function.set_serial_string(Some(false));
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL));
+    // A backend that cannot say leaves the start's note as it was.
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &plain, "alpha").map_err(|_| ()).unwrap();
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Degraded(NO_SERIAL));
+    // A tree adopted with the serial: no stale note, though the start named none.
+    let function = MockUsbFunction::new();
+    let mut driver = bind_on(&function, &plain, "alpha").map_err(|_| ()).unwrap();
+    function.set_serial_string(Some(true));
+    Driver::tick(&mut driver, 0);
+    assert_eq!(Lifecycle::health(&driver), Health::Ok);
 }
 
 /// The settings for the board `board`, through the same function the daemon's root phase uses.

@@ -96,21 +96,21 @@ const TABLE: &[Row] = &[
         file: "testing/boards/rk3566.toml",
         validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device",
         ),
     },
     Row {
         file: "testing/boards/rk3576.toml",
         validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device",
         ),
     },
     Row {
         file: "testing/boards/rk3588.toml",
         validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
         daemon: Daemon::Refused(
-            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device; needs a restart of the daemon to retry",
+            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device",
         ),
     },
     Row {

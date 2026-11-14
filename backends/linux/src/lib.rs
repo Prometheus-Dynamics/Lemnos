@@ -36,7 +36,12 @@ use lemnos_core::{
 };
 use lemnos_hal::ErrorKind;
 
-pub use gadget::{FunctionFsGadget, Mounts, Owner, Roots, SystemMounts, prepare as prepare_gadget};
+pub use gadget::{
+    FunctionFsGadget, GadgetHelper, Mounts, Outcome, Owner, Roots, SerialString, SharedHelper,
+    SystemMounts, Trees, bind as bind_gadget, errno_of, fault as gadget_fault, is_controller_name,
+    prepare as prepare_gadget, prepare_for_helper, teardown as teardown_gadget,
+    unbind as unbind_gadget,
+};
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
 pub use module::{ModuleClocks, ModuleDma, ModuleInterrupt, ModuleRegisters, ModuleReset};
@@ -53,6 +58,9 @@ pub struct LinuxBoard {
     claimed: Claims,
     /// The kernel module's control node, once [`Self::open_module`] has it.
     module: Option<module::Node>,
+    /// The helper that makes and binds the USB gadgets, and each gadget's controller name and
+    /// index there. Set by [`Self::use_gadget_helper`]; without it the daemon writes configfs itself.
+    gadget_helper: Option<(SharedHelper, Vec<(String, u32)>)>,
 }
 
 type Claims = Arc<Mutex<BTreeSet<String>>>;
@@ -89,7 +97,15 @@ impl LinuxBoard {
             sys: sys.into(),
             claimed: Claims::default(),
             module: None,
+            gadget_helper: None,
         }
+    }
+
+    /// Makes and binds the USB gadgets through `helper`: `gadgets` names each gadget's controller
+    /// (`fe980000.usb`, not `udc:`) and its index in the helper's description. A gadget not listed
+    /// is made by the daemon itself, as before.
+    pub fn use_gadget_helper(&mut self, helper: SharedHelper, gadgets: Vec<(String, u32)>) {
+        self.gadget_helper = Some((helper, gadgets));
     }
 
     /// Opens the kernel module, so the buses it serves go through it and the rest stay stock. The
@@ -473,6 +489,13 @@ impl LinuxBoard {
         let configfs = self.sys.join("kernel/config");
         let gadget = FunctionFsGadget::new(&configfs, &self.dev.join("usb-ffs"), &class, name)
             .ok_or(Status::NOT_FOUND)?;
+        let gadget = match &self.gadget_helper {
+            Some((helper, gadgets)) => match gadgets.iter().find(|(udc, _)| udc == name) {
+                Some((_, index)) => gadget.with_helper(helper.clone(), *index),
+                None => gadget,
+            },
+            None => gadget,
+        };
         Ok(gadget.holding(claim))
     }
 }

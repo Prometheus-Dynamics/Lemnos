@@ -7,10 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use lemnos_host::Options;
 use lemnos_host::board::{parse, parse_lenient};
-use lemnos_linux::{Mounts, Owner, Roots};
+use lemnos_linux::Owner;
 use lemnos_sim::SimBoard;
 use lemnosd::gadget;
-use lemnosd::privilege;
 use lemnosd::{Config, Service};
 
 const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
@@ -111,68 +110,26 @@ fn a_gadget_whose_identity_device_is_missing_fails_and_the_daemon_starts_without
     );
 }
 
-/// Roots in a directory of the test's own. `usb_gadget` is a file under configfs when `broken`, so
-/// the gadget cannot be made under it; nothing under `/sys` is touched.
-fn roots_in(name: &str, broken: bool) -> (std::path::PathBuf, [std::path::PathBuf; 3]) {
-    let dir =
-        std::env::temp_dir().join(format!("lemnos-start-roots-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let (configfs, mounts, udc) = (dir.join("configfs"), dir.join("mounts"), dir.join("udc"));
-    std::fs::create_dir_all(&configfs).unwrap();
-    std::fs::create_dir_all(&mounts).unwrap();
-    std::fs::create_dir_all(udc.join("udc0")).unwrap();
-    if broken {
-        std::fs::write(configfs.join("usb_gadget"), b"").unwrap();
-    }
-    (dir, [configfs, mounts, udc])
-}
-
-struct NoMounts;
-
-impl Mounts for NoMounts {
-    fn functionfs(&mut self, _: &str, _: &std::path::Path, _: &str) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn unmount(&mut self, _: &std::path::Path) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A gadget that is valid, whose root-phase setup fails (configfs refuses to make it), next to a
-/// device that runs. The root phase returns the gadget refused with its reason; the daemon starts
-/// without it.
+/// The gadget the root phase describes for the helper, whose tree would fail to be made (configfs
+/// is a file). Nothing is set up at start: the description is not refused, so the gadget is not
+/// failed by the root phase, and the helper makes it when the driver asks, on its retry.
 #[test]
-fn a_root_step_that_fails_refuses_its_gadget_and_the_daemon_starts_without_it() {
+fn a_gadget_whose_setup_would_fail_is_described_and_not_refused() {
     let good_identity = format!(
         "{HEAD}[[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\n\
         uses = {{ function = \"udc:udc0\" }}\n\
         [devices.config]\nvendor = 4617\nproduct = 1\ninterfaces = \"interface 0xff 0 0 pipe\\nendpoint in bulk\\nendpoint out bulk\\n\"\n\
         [[devices]]\nid = \"good\"\ndriver = \"gpu-lease\"\n"
     );
-    let mut board = parse_lenient(&good_identity).unwrap();
-    let (dir, [configfs, mounts, udc]) = roots_in("configfs", true);
-    let roots = Roots {
-        configfs: &configfs,
-        mounts: &mounts,
-        udc_class: &udc,
-    };
+    let board = parse_lenient(&good_identity).unwrap();
     let owner = Owner { uid: 987, gid: 987 };
-    let refused = gadget::privileged_start_in(&board, owner, &roots, &mut NoMounts);
-    let _ = std::fs::remove_dir_all(dir);
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    privilege::refuse(&mut board, &refused);
+    let (gadgets, refused) = gadget::describe(&board, owner);
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(gadgets.len(), 1);
+    assert_eq!(gadgets[0].udc, "udc0");
     let daemon = start(board).expect("the daemon starts");
     let list = ctl(&daemon, &["list"]).unwrap();
-    let gadget_row = row(&list, "gadget");
-    assert!(gadget_row.contains("failed"), "{list}");
-    assert!(
-        gadget_row.contains("needs a restart of the daemon to retry"),
-        "{list}"
-    );
-    assert!(
-        row(&list, "good").contains("running"),
-        "good did not run: {list}"
-    );
+    assert!(!row(&list, "gadget").contains("needs a restart"), "{list}");
 }
 
 /// A setting that is a table, not a value a driver can read: the board's own entry is refused, and

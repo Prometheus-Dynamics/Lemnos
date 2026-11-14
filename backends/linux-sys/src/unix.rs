@@ -62,3 +62,71 @@ pub fn connect_nonblocking(path: &Path) -> io::Result<Connect> {
         _ => Err(error),
     }
 }
+
+/// The credentials the kernel recorded for the other end of a connected Unix socket
+/// (`SO_PEERCRED`): for a socket pair, those of the process that made the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCred {
+    /// The process id.
+    pub pid: i32,
+    /// The user id.
+    pub uid: u32,
+    /// The group id.
+    pub gid: u32,
+}
+
+/// The credentials of the peer of the connected Unix socket `fd`.
+///
+/// # Errors
+///
+/// The socket option cannot be read (`fd` is not a connected Unix socket).
+pub fn peer_cred(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<PeerCred> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: all-zero bytes are a valid `ucred` (three integers).
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` is writable for `len` bytes and `len` is writable, both alive for the call;
+    // `fd` is open for the call.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(PeerCred {
+        pid: cred.pid,
+        uid: cred.uid,
+        gid: cred.gid,
+    })
+}
+
+/// Switches `fd` to non-blocking (or back to blocking) with `fcntl`, which a process under a
+/// seccomp allowlist that has `fcntl` can do (std's `set_nonblocking` uses `ioctl`).
+///
+/// # Errors
+///
+/// `fcntl` fails.
+pub fn set_nonblocking(fd: std::os::fd::BorrowedFd<'_>, on: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `F_GETFL` takes only the descriptor, open for the call.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let want = if on {
+        flags | libc::O_NONBLOCK
+    } else {
+        flags & !libc::O_NONBLOCK
+    };
+    // SAFETY: `F_SETFL` takes an integer argument; the descriptor is open for the call.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, want) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}

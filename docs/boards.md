@@ -814,9 +814,9 @@ as it always has. The default composition above gives the board the interface `l
 gadget's `lemnos%d`); `contracts/usb-link.toml` states it in its `[network]` table, so an image's
 files can name it from there. A board file with its own `interfaces` and no `ifname=` gets `usb<N>`
 and its image must name that. The name needs Linux 5.12 or later: before it, `ifname` is read-only (3.17 to
-5.11) or missing (before 3.17), and the privileged setup refuses a board that names an interface
-with `Unsupported` and the reason `this kernel's NCM function can't be given an interface name`.
-Nothing else is set up for that gadget.
+5.11) or missing (before 3.17), and the privileged setup fails with `Unsupported` and the reason `this kernel's NCM function can't be given an
+interface name`. That is a limit of the kernel, so the gadget is retried under the failure rule with that
+reason in the error output; nothing else is set up for it.
 
 Once the gadget is bound the driver reads the name the kernel gave back, and describes it as the
 item `ifname` (text), and the `usb.function` contract's method 11, `ifname`, returns the same text. It is absent while the gadget is down, and absent when the gadget has no NCM function.
@@ -924,7 +924,9 @@ the QEMU harness, which requests the descriptors the way Windows does and compar
 ### Identity-derived addresses and the USB serial
 
 The gadget names the identity device whose serial is the board's serial, and the daemon reads that
-serial once, before anything is set up (`docs/identity.md`):
+serial from the source the identity device names (`docs/identity.md`). The daemon reads it once at start,
+for its health note, and the privileged helper reads the same source again at every setup, so a serial that is not
+readable yet (an nvmem cell that probes late) makes the gadget retry, not stay refused:
 
 ```toml
 [[devices]]
@@ -950,9 +952,11 @@ config = { vendor = 0x1209, product = 0x0001, identity = "identity", interfaces 
 - `serial` (optional string) is the USB serial string the host shows. It defaults to the board
   serial. With neither, the device has no serial string and its health is `Degraded` with the
   reason. Nothing is invented.
-- `function ncm derive` needs the board serial. Without one, the gadget does not set up, and the
-  daemon names the reason (the board serial could not be read, or the board names no identity).
-  There is no fixed fallback address.
+- `function ncm derive` needs the board serial. Without one, the gadget does not set up. A serial that
+  cannot be read yet is retried under the failure rule (the gadget's state reads `the board serial the
+  gadget's addresses come from is not readable yet: retrying`, with the helper's reason on the daemon's
+  error output) until the source can be read, with no restart; a board that names no identity is refused
+  by name. There is no fixed fallback address.
 
 The rule. The input is the ASCII bytes of `<family>:<serial>`: `<family>` is the board file's
 `[board] id`, `<serial>` is the normalised serial (lowercase hex, 8 to 32 digits, leading zeros
@@ -969,11 +973,13 @@ prefixes match `printf 'lemnos-usb-ncm\0%s' 'alpha:00000001' | sha256sum`:
 | `lemnos-test` | `0123456789abcdef` | `aa:22:75:11:2a:72` | `aa:22:75:11:2a:73` |
 | `alpha` | `00000001` | `b2:b5:ba:4c:1e:30` | `b2:b5:ba:4c:1e:31` |
 
-The two addresses differ only in the last bit, and the derived pair is the same in the daemon's
-driver and in its root phase, because both read the same settings.
+The two addresses differ only in the last bit, and the derived pair is the same wherever it is worked out,
+because every reader reads the same settings and the same source.
 
-The gadget's configfs tree and FunctionFS mount are made by the daemon in its root phase, before it
-drops to user `lemnos` (see `packaging/README.md`). The daemon then binds the gadget and serves ep0.
+The gadget's configfs tree and FunctionFS mount are made by the privileged helper, which the daemon's
+root phase forks and which keeps root after the drop to user `lemnos` (see [the privileged helper](daemon.md#privileged-helper)).
+The daemon then asks the helper to bind the gadget, and serves ep0 itself. A gadget whose controller is not
+there yet is retried, not refused.
 
 The simulated board accepts it. Devices whose buses it does not have are listed as retrying:
 
