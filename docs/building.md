@@ -155,6 +155,24 @@ image's.
   nothing. The exit is 0 when every line is `ok`; otherwise it is non-zero and the error is
   `FILE: N finding(s) failed`.
 
+**A slot bundle** is written and verified by the same tool, after `tree` and `boot-partition` (the
+sequence: `tree` writes the overlay, `--manifest-boot` and `--cmdline-slot`; `bundle` makes the slot's bundle and
+the boot files with the root hash filled in; `boot-partition` takes those files as the first slot's payload):
+
+```text
+lemnos-ctl tree --socs <repo>/socs BOARD -o overlay.dts --cmdline-slot cmdline-slot.txt --slot a1
+# payload/ holds kernel, initramfs, device-tree, cmdline (cmdline-slot.txt), board-overlay
+lemnos-ctl bundle --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload --rootfs rootfs.erofs \
+  --verity-table verity.txt --product P --version V --key-file signing.seed --payload-out payload-final --out a1.bundle
+lemnos-ctl bundle --layout-of BOARD --socs <repo>/socs --verify a1.bundle --pubkey signing.pub
+lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload-final --size BYTES --out boot.img
+```
+
+Output of the first `bundle`: `slot ID: product P, version V, board B`, `root hash HEX`, `signed with key id HEX`
+(or `unsigned`), `payload written to DIR` and `wrote FILE: N bytes, SHA-256 HEX`. Output of `--verify`: one line
+per check, `ok `, `BAD` or `n/a ` then `check: text`, then `ok` or `refused: N` (exit 0 or 1). The format and
+every refusal are in [Slots](slots.md#writing-one-with-lemnos-ctl).
+
 A board file that cannot be built is refused naming the file, the device and the key, for example
 `BOARD.toml: system-slots device "slots": uboot_env_size is needed for the "uboot" record (an integer)`.
 

@@ -87,8 +87,8 @@ mod count;
 mod count_tests;
 mod install;
 mod resolve;
+pub use lemnos_slot_store::tar;
 pub use lemnos_slot_store::{json, manifest, store};
-pub mod tar;
 pub mod trial;
 pub mod uboot;
 
@@ -110,7 +110,7 @@ use lemnos_core::{
 };
 
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
-pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys};
+pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
 use lemnos_slot_store::boots;

@@ -96,6 +96,20 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     }
 }
 
+/// A board file read, its SoC map loaded and its overlay generated: what every command that writes
+/// from a board needs. Refusals name the file.
+pub(crate) fn load_board(
+    path: &str,
+    socs: Option<&str>,
+) -> Result<(BoardFile, lemnos_devtree::Output), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let board = lemnos_host::board::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let map = super::load_map(&board, socs)?;
+    let generated = lemnos_devtree::generate(&board, &map, &super::driver_manifests())
+        .map_err(|e| format!("{path}: {e}"))?;
+    Ok((board, generated))
+}
+
 /// The five payloads from `dir`, in [`ROLES`] order: each role's file named exactly as the role,
 /// and nothing else in the directory. A missing role or an extra file is refused by name.
 pub fn read_payloads(dir: &Path) -> Result<[Vec<u8>; 5], String> {

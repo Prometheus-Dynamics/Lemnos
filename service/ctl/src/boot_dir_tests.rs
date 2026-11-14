@@ -492,6 +492,16 @@ mod cmdline_slot {
         let board = board::parse(&text).unwrap();
         assert!(cmdline_slot(&board, "").is_err());
         assert!(cmdline_slot(&board, "os 1").is_err());
+        // The ids install and slot-init refuse are refused here, with boot-partition's own words.
+        for id in ["OS-1", ".hidden", "a/b", "a=b", "é", &"x".repeat(65)] {
+            assert_eq!(
+                cmdline_slot(&board, id).unwrap_err(),
+                format!("{id:?} is not a slot id"),
+                "{id}"
+            );
+        }
+        assert!(cmdline_slot(&board, &"x".repeat(64)).is_ok());
+        assert!(cmdline_slot(&board, "os-1.a_2").is_ok());
     }
 
     #[test]
