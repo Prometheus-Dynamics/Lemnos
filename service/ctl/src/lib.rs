@@ -16,6 +16,7 @@ mod boot_dir;
 #[cfg(test)]
 mod boot_dir_tests;
 mod boot_partition;
+mod bundle;
 mod show;
 
 pub const USAGE: &str = "\
@@ -53,6 +54,15 @@ lemnos-ctl [--socket PATH] COMMAND
                                   write the boot partition image of a board (its payload bays and
                                   the firmware text), print its minimum size, or verify an image
                                   or a dump of a real partition, read-only
+  bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE
+         --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT]
+         [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
+         | --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]
+                                 write a slot bundle (its manifest, the erofs image with its hash tree
+                                 held to the verity table, the signature when --key-file names a raw
+                                 Ed25519 seed) from the same payload directory `boot-partition`
+                                 takes, or verify one with the installer's own checks, read-only:
+                                 one line per check
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
@@ -167,6 +177,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if command == "boot-partition" {
         return boot_partition::run(tail, out);
+    }
+    if command == "bundle" {
+        return bundle::run(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };

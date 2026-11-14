@@ -30,13 +30,17 @@ lemnos-wire = { path = "../../engine/wire" }
 toml = { workspace = true }
 # For `tree --bridge-env`: the gadget's composition parser, which names the link.
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget", features = ["std"] }
+# For `bundle`: the Ed25519 key and signature (both already in the tree through the drivers), the SHA-256, and the
+# slot driver's own signature check and key-file reader, so a bundle is verified as it is installed.
+ed25519-dalek = { version = "2.2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 # For `tree`: the built-in drivers' manifests, which say what each device needs.
 lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
 syn.workspace = true
 lemnos-driver-named-files = { path = "../../drivers/named-files" }
-lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }
 lemnos-contract-camera-frames = { path = "../../contracts/camera-frames" }
 lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }

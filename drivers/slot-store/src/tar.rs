@@ -308,11 +308,23 @@ fn number(field: &[u8]) -> Option<u64> {
     octal(field)
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
+/// Writes a tar: the same framing [`Tar`] reads. Plain files and directories, ustar headers with a GNU
+/// long-name member when a name is over 99 bytes. Nothing in it depends on the clock or the machine
+/// (owner 0, time 0, mode 0644 for a file and 0755 for a directory), so the same members give the
+/// same bytes.
+pub mod write {
+    use super::BLOCK;
 
-    /// A ustar header for `name` (long names go in a GNU long-name member first).
+    /// The end of an archive: two zero blocks.
+    pub const END: [u8; 2 * BLOCK] = [0; 2 * BLOCK];
+
+    /// How many zero bytes follow a member of `size` bytes.
+    pub fn padding(size: u64) -> usize {
+        (BLOCK - (size % BLOCK as u64) as usize) % BLOCK
+    }
+
+    /// The header of `name` (`typeflag` `b'0'` a file, `b'5'` a directory) of `size` bytes, long-name
+    /// member first when the name needs it.
     pub fn header(name: &str, typeflag: u8, size: u64) -> Vec<u8> {
         let mut out = Vec::new();
         let short = if name.len() > 99 {
@@ -327,8 +339,19 @@ pub(crate) mod tests {
         };
         let mut h = [0u8; BLOCK];
         h[..short.len()].copy_from_slice(short.as_bytes());
-        h[100..107].copy_from_slice(b"0000644");
-        h[124..135].copy_from_slice(format!("{size:011o}").as_bytes());
+        let mode: &[u8; 7] = if typeflag == b'5' {
+            b"0000755"
+        } else {
+            b"0000644"
+        };
+        h[100..107].copy_from_slice(mode);
+        if size < 1 << 33 {
+            h[124..135].copy_from_slice(format!("{size:011o}").as_bytes());
+        } else {
+            // Base 256: the top bit of the first byte, then the value, big-endian.
+            h[124] = 0x80;
+            h[128..136].copy_from_slice(&size.to_be_bytes());
+        }
         h[136..147].copy_from_slice(b"00000000000");
         h[156] = typeflag;
         h[257..263].copy_from_slice(b"ustar\0");
@@ -340,7 +363,7 @@ pub(crate) mod tests {
         out
     }
 
-    /// A tar of `files` (a name ending in `/` is a directory), ended as tar ends one.
+    /// A whole archive of `files` (a name ending in `/` is a directory), ended as tar ends one.
     pub fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         for (name, bytes) in files {
@@ -352,9 +375,16 @@ pub(crate) mod tests {
             out.extend(*bytes);
             out.resize(out.len().div_ceil(BLOCK) * BLOCK, 0);
         }
-        out.extend([0; 2 * BLOCK]);
+        out.extend(END);
         out
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub use super::write::{archive, header};
 
     #[derive(Debug, Default)]
     struct Seen(Vec<(String, Kind, Vec<u8>, bool)>);

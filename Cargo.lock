@@ -719,6 +719,7 @@ dependencies = [
 name = "lemnos-ctl"
 version = "2.0.1-dev"
 dependencies = [
+ "ed25519-dalek 2.2.0",
  "lemnos-client",
  "lemnos-contract-accelerometer",
  "lemnos-contract-camera-frames",
@@ -764,6 +765,7 @@ dependencies = [
  "lemnos-slot-store",
  "lemnos-wire",
  "lemnosd",
+ "sha2 0.10.9",
  "syn 3.0.10",
  "toml",
 ]
@@ -1612,6 +1614,7 @@ dependencies = [
  "lemnos-contract-system-reboot",
  "lemnos-contract-system-slots",
  "lemnos-core",
+ "lemnos-ctl",
  "lemnos-driver-rpi-firmware-sys",
  "lemnos-host",
  "lemnos-linux-sys",

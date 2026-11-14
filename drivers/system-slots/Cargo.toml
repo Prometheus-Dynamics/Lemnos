@@ -25,6 +25,8 @@ sha2 = { version = "0.10", default-features = false }
 libc.workspace = true
 
 [dev-dependencies]
+# The command a builder runs: a test installs the file it writes (a dev-dependency cycle: ctl runs the driver).
+lemnos-ctl = { path = "../../service/ctl" }
 lemnos-slot-store = { path = "../slot-store", features = ["linux", "fake", "testing"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }

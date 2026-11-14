@@ -14,8 +14,11 @@
 //! - `image.size`: `rootfs.erofs`'s size in bytes, its hash tree included.
 //! - `image.sha256`: `rootfs.erofs`'s SHA-256, 64 lowercase hex digits.
 //! - `verity.root_hash`: 64 lowercase hex digits.
-//! - `verity.salt`: exactly 64 lowercase hex digits (32 bytes). The builder makes a random one
-//!   for every image. An empty, missing or other-length salt is refused.
+//! - `verity.salt`: exactly 64 lowercase hex digits (32 bytes), unique per image. It may be derived
+//!   from the image's content (a reproducible build then gives the same salt and root hash). It need
+//!   not be secret or unpredictable: the image is public, the salt goes into the device-mapper
+//!   table and every hash, and the root hash is what the signed manifest binds. An empty, missing
+//!   or other-length salt is refused.
 //! - `verity.data_blocks`: how many 4096-byte blocks of data the hash tree covers.
 //! - `verity.hash_offset`: the byte offset in `rootfs.erofs` where the hash tree starts.
 //! - `boot.files`: each boot file's path under `boot/` to its SHA-256.
@@ -33,7 +36,7 @@
 //! level first, down to the level over the data, which is the order the kernel computes for
 //! each level's start from the table's hash start block (`hash_offset / 4096`).
 
-use crate::json::Json;
+use crate::json::{self, Json};
 
 /// The schema this driver reads.
 pub const SCHEMA: u64 = 3;
@@ -121,6 +124,61 @@ pub fn valid_name(text: &str) -> bool {
 }
 
 impl Manifest {
+    /// The manifest's bytes: what the bundle holds as `slot.json` and what its signature covers, so
+    /// they are fixed by this function alone. Compact JSON with no whitespace and no trailing
+    /// newline; the keys in the order of the module's list (`schema`, `id`, `product`, `version`,
+    /// `variant`, `board`, `kernel`, `display_name`, `image`, `verity`, `boot`), each of `variant`,
+    /// `kernel` and `display_name` left out when empty, `boot` holding `overlay` (when there is one)
+    /// and then `files` in the order given; numbers as plain decimal digits; text with only the
+    /// escapes [`json::quoted`] writes. [`Manifest::parse`] reads it back to an equal manifest.
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\"schema\":");
+        out.push_str(&SCHEMA.to_string());
+        let mut text = |key: &str, value: &str| {
+            out.push_str(",\"");
+            out.push_str(key);
+            out.push_str("\":");
+            json::quoted(value, &mut out);
+        };
+        text("id", &self.id);
+        text("product", &self.product);
+        text("version", &self.version);
+        if !self.variant.is_empty() {
+            text("variant", &self.variant);
+        }
+        text("board", &self.board);
+        if !self.kernel.is_empty() {
+            text("kernel", &self.kernel);
+        }
+        if !self.display_name.is_empty() {
+            text("display_name", &self.display_name);
+        }
+        out.push_str(&format!(
+            ",\"image\":{{\"size\":{},\"sha256\":\"{}\"}}",
+            self.image_size, self.image_sha256
+        ));
+        out.push_str(&format!(
+            ",\"verity\":{{\"root_hash\":\"{}\",\"salt\":\"{}\",\"data_blocks\":{},\"hash_offset\":{}}}",
+            self.verity.root_hash, self.verity.salt, self.verity.data_blocks, self.verity.hash_offset
+        ));
+        out.push_str(",\"boot\":{");
+        if let Some(overlay) = &self.overlay {
+            out.push_str("\"overlay\":{\"board\":");
+            json::quoted(&overlay.board, &mut out);
+            out.push_str(&format!(",\"sha256\":\"{}\"}},", overlay.sha256));
+        }
+        out.push_str("\"files\":{");
+        for (at, (name, sha)) in self.boot_files.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            json::quoted(name, &mut out);
+            out.push_str(&format!(":\"{sha}\""));
+        }
+        out.push_str("}}}");
+        out
+    }
+
     /// Reads and checks a manifest. The error is a sentence for the board's state.
     ///
     /// # Errors
@@ -271,6 +329,66 @@ mod tests {
              \"boot\":{{\"files\":{{\"cmdline.txt\":\"{HASH}\"}}}}}}",
             offset + tree_bytes(data_blocks)
         )
+    }
+
+    fn whole() -> Manifest {
+        Manifest {
+            id: "os-2".into(),
+            product: "an-os".into(),
+            version: "2.0 \"rc\"".into(),
+            variant: "lite".into(),
+            board: "board-a".into(),
+            kernel: "6.12".into(),
+            display_name: "An OS".into(),
+            image_size: 300 * BLOCK + tree_bytes(300),
+            image_sha256: HASH.into(),
+            verity: Verity {
+                root_hash: HASH.into(),
+                salt: HASH.into(),
+                data_blocks: 300,
+                hash_offset: 300 * BLOCK,
+            },
+            boot_files: vec![
+                ("kernel8.img".into(), HASH.into()),
+                ("overlays/lemnos-board.dtbo".into(), HASH.into()),
+            ],
+            overlay: Some(Overlay {
+                board: "board-a".into(),
+                sha256: HASH.into(),
+            }),
+        }
+    }
+
+    /// The manifest the writer makes reads back to the same manifest, with and without its optional
+    /// keys, and an escaped text survives.
+    #[test]
+    fn a_serialized_manifest_parses_back_equal() {
+        let full = whole();
+        assert_eq!(Manifest::parse(&full.to_json()).unwrap(), full);
+        let mut bare = whole();
+        bare.variant.clear();
+        bare.kernel.clear();
+        bare.display_name.clear();
+        bare.overlay = None;
+        let text = bare.to_json();
+        assert!(
+            !text.contains("\"variant\"") && !text.contains("\"overlay\""),
+            "{text}"
+        );
+        assert_eq!(Manifest::parse(&text).unwrap(), bare);
+    }
+
+    /// The bytes are what is signed: the key order, the number format and the lack of whitespace are
+    /// fixed. A change of this text is a change of every signature over a manifest, so it is pinned
+    /// literally.
+    #[test]
+    fn the_serialized_bytes_are_fixed() {
+        let want = format!(
+            "{{\"schema\":3,\"id\":\"os-2\",\"product\":\"an-os\",\"version\":\"2.0 \\\"rc\\\"\",\"variant\":\"lite\",\"board\":\"board-a\",\"kernel\":\"6.12\",\"display_name\":\"An OS\",\"image\":{{\"size\":{},\"sha256\":\"{HASH}\"}},\"verity\":{{\"root_hash\":\"{HASH}\",\"salt\":\"{HASH}\",\"data_blocks\":300,\"hash_offset\":1228800}},\"boot\":{{\"overlay\":{{\"board\":\"board-a\",\"sha256\":\"{HASH}\"}},\"files\":{{\"kernel8.img\":\"{HASH}\",\"overlays/lemnos-board.dtbo\":\"{HASH}\"}}}}}}",
+            300 * BLOCK + tree_bytes(300)
+        );
+        assert_eq!(whole().to_json(), want);
+        assert_eq!(whole().to_json(), whole().to_json());
     }
 
     #[test]
