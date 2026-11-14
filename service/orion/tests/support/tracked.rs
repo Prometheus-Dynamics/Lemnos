@@ -22,7 +22,13 @@ pub trait Tracked {
     fn hold_until_cancelled(&mut self) -> Result<JobId>;
     #[method(5, job)]
     fn count_until_cancelled(&mut self) -> Result<JobId>;
+    #[method(6, job)]
+    fn work_for_a_while(&mut self) -> Result<JobId>;
 }
+
+#[allow(dead_code)]
+/// How long `work_for_a_while` runs before it finishes by itself.
+pub const WORK: std::time::Duration = std::time::Duration::from_millis(2500);
 
 #[driver("tracked", provides = [Tracked])]
 pub struct TrackedDevice {
@@ -32,6 +38,8 @@ pub struct TrackedDevice {
     counting: Option<(JobId, bool)>,
     count: u64,
     next: u64,
+    /// When the running `work_for_a_while` job finishes by itself.
+    ends: Option<std::time::Instant>,
 }
 
 impl Lifecycle for TrackedDevice {
@@ -49,6 +57,7 @@ impl Lifecycle for TrackedDevice {
             counting: None,
             count: 0,
             next: 0,
+            ends: None,
         })
     }
 
@@ -87,7 +96,15 @@ impl Lifecycle for TrackedDevice {
             Some((id, cancelled)) if id == job => {
                 if cancelled {
                     self.job = None;
+                    self.ends = None;
                     JobState::Finished(DriverStatus::CANCELLED)
+                } else if self
+                    .ends
+                    .is_some_and(|ends| std::time::Instant::now() >= ends)
+                {
+                    self.job = None;
+                    self.ends = None;
+                    JobState::Finished(DriverStatus::OK)
                 } else {
                     JobState::Running { done: 0, total: 0 }
                 }
@@ -136,6 +153,12 @@ impl Tracked for TrackedDevice {
         self.next += 1;
         let id = JobId(self.next);
         self.job = Some((id, false));
+        Ok(id)
+    }
+
+    fn work_for_a_while(&mut self) -> Result<JobId> {
+        let id = self.hold_until_cancelled()?;
+        self.ends = Some(std::time::Instant::now() + WORK);
         Ok(id)
     }
 

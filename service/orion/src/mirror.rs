@@ -149,6 +149,10 @@ pub struct Mirror {
     lease_seconds: Option<u64>,
     /// How many callers' leases have ended (their connections dropped): `hello.leases.ended`.
     leases_ended: u64,
+    /// How many jobs were cancelled because the session that started their run was lost, and the
+    /// reason given for the last. Not in the hello document.
+    cancels: u64,
+    last_cancel: Option<&'static str>,
 }
 
 /// Whether a change of status changes what `describe` says: its state or its reason. Health is
@@ -316,6 +320,17 @@ impl Mirror {
     pub fn note_lease_end(&mut self) {
         self.leases_ended += 1;
         self.rebuild_hello();
+    }
+
+    /// Counts one job cancelled for `reason`, and keeps the reason.
+    pub fn note_cancel(&mut self, reason: &'static str) {
+        self.cancels += 1;
+        self.last_cancel = Some(reason);
+    }
+
+    /// How many jobs were cancelled for a lost session, and the reason given for the last.
+    pub fn last_cancel(&self) -> (u64, Option<&'static str>) {
+        (self.cancels, self.last_cancel)
     }
 
     /// How many callers' leases have ended.

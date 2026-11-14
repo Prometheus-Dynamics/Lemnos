@@ -140,7 +140,16 @@ pub enum Message {
     },
     /// The Orion session with this token ended, for whatever cause: release what it held.
     CallerGone { token: u64 },
+    /// The bridge's own Orion session, number `session`, was lost: the comm core went, or the node
+    /// logic did. Orion ends every run that session was doing (as failed, "the program that runs it
+    /// went away"), detached or not, and cannot say so to the bridge, so each of those runs' jobs is
+    /// cancelled on lemnosd, with [`LOST_SESSION`] as the reason, and the device is free again.
+    SessionLost { session: u64 },
 }
+
+/// Why a job is cancelled when the session that started its run is lost: said in the bridge's log, in the
+/// run's detail, and kept by the mirror ([`crate::mirror::Mirror::last_cancel`]).
+pub const LOST_SESSION: &str = "cancelled: the session that started this run was lost";
 
 /// The key a caller's lemnosd connection is kept under.
 ///
@@ -313,6 +322,23 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             Some(Message::CallerGone { token }) => {
                 gone(&mut clients, &mut ended, token, shared);
             }
+            Some(Message::SessionLost { session }) => {
+                while let Some(call) = running
+                    .iter()
+                    .find(|r| r.session == session)
+                    .map(|r| r.call)
+                {
+                    cancel(
+                        &mut clients,
+                        &mut running,
+                        &mut ended,
+                        session,
+                        call,
+                        CancelReason::CallerGone,
+                        shared,
+                    );
+                }
+            }
             None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}
         }
@@ -464,7 +490,8 @@ fn release(
 /// The Orion session with `token` ended, for whatever cause. Its connection is closed at once, which
 /// releases the plain holds it made: nothing is renewed, since the session cannot ask again. The runs
 /// are not touched here. A run that is not detached is cancelled by Orion (`CancelReason::CallerGone`),
-/// and a detached run keeps its own connection and its job until they end.
+/// and a detached run keeps its own connection and its job until they end. (When the bridge's own
+/// session is lost, every run of it is cancelled: [`Message::SessionLost`].)
 fn gone(clients: &mut Callers, ended: &mut Vec<CallerKey>, token: u64, shared: &Shared) {
     release(
         clients,
@@ -503,7 +530,19 @@ fn cancel(
     }
     // A job's own connection ends with it: its holds are released now.
     clients.remove(&r.caller);
-    let detail = noted(ended, &r.owner, "cancelled".to_owned());
+    // A cancel for a session that is gone says why in the run's detail and in the log; any other cancel
+    // is the caller's own and needs no reason.
+    let why = if reason == CancelReason::CallerGone {
+        log(&format!(
+            "run {} of session {}, job {}: {LOST_SESSION}",
+            r.call, r.session, r.job
+        ));
+        shared.with(|mirror| mirror.note_cancel(LOST_SESSION));
+        LOST_SESSION
+    } else {
+        "cancelled"
+    };
+    let detail = noted(ended, &r.owner, why.to_owned());
     shared.finished(Done {
         session: r.session,
         call: r.call,

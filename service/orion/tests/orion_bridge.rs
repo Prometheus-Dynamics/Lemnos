@@ -1694,6 +1694,183 @@ fn a_detached_run_ends_at_its_deadline_and_releases_its_holds() {
     assert_eq!(finished.outcome, Outcome::TimedOut, "{finished:?}");
 }
 
+/// The devices the tracked board declares: the imu, the counter and the tracked device. (The bridge's first
+/// session can open before lemnosd has described the board, so its first count is not the number.)
+const TRACKED_DEVICES: usize = 3;
+
+/// The comm core goes and comes back with the bridge's session lost in between: the new board, once the
+/// bridge has a new session with every device declared (it had `sessions` before the loss).
+fn restart_comm_core(dir: &Path, bridge: &Bridge, board: Board, devices: usize) -> (Board, Orion) {
+    let sessions = bridge.shared.connection().sessions;
+    drop(board);
+    let board = Board::start_for_node(dir);
+    wait_for("the bridge's session after the restart", || {
+        Some(bridge.shared.connection()).filter(|c| c.sessions > sessions && c.devices == devices)
+    });
+    let dashboard = dashboard(board.socket());
+    wait_for("the tracked device after the restart", || {
+        resource(&dashboard, "lemnos.tracked")
+            .filter(|found| found.state == ResourceState::Ready)
+            .filter(|found| found.actions.contains(&"lemnos.tracked.call".to_owned()))
+    });
+    (board, dashboard)
+}
+
+/// A run that is not detached ends with the bridge's own Orion session: the comm core goes while the
+/// run's job is going, Orion ends the run with the program that ran it and cannot say so, so the bridge
+/// cancels the job on lemnosd. The reason is the one text, kept in the bridge's log and the mirror
+/// (lemnosd's job has no place for a reason); the device is free again after the reconnect and takes a
+/// new run. Mutation: without the cancel at the session's loss the device stays busy and the wait for it
+/// to be free times out.
+#[test]
+fn a_run_that_is_not_detached_is_cancelled_when_the_bridges_session_is_lost() {
+    let dir = dir("lost-plain");
+    let (board, _logic, _service, bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let devices = TRACKED_DEVICES;
+    let caller = second_session(&board);
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .expect("run");
+    wait_for("the job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    assert_eq!(bridge.shared.with(|m| m.last_cancel()), (0, None));
+    drop(long);
+    drop(caller);
+    drop(dashboard);
+    let (_board, dashboard) = restart_comm_core(&dir, &bridge, board, devices);
+    wait_for("the job is cancelled with the reason", || {
+        (bridge.shared.with(|m| m.last_cancel())
+            == (
+                1,
+                Some("cancelled: the session that started this run was lost"),
+            ))
+            .then_some(())
+    });
+    wait_for("the device is free again", || {
+        long_job_starts(&dashboard).then_some(())
+    });
+    assert_eq!(tracked_call(&dashboard, "take"), "");
+}
+
+/// The same for the other way a session is lost: the caller's own Orion session ends mid-run, and Orion
+/// cancels the run that is not detached (`CallerGone`). The job is cancelled with the reason, and the
+/// device is free.
+#[test]
+fn a_run_that_is_not_detached_is_cancelled_with_the_reason_when_its_caller_is_lost() {
+    let dir = dir("lost-caller");
+    let (board, _logic, _service, bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: false,
+        })
+        .expect("run");
+    wait_for("the job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    drop(long);
+    drop(caller);
+    wait_for("the job is cancelled with the reason", || {
+        (bridge.shared.with(|m| m.last_cancel())
+            == (
+                1,
+                Some("cancelled: the session that started this run was lost"),
+            ))
+            .then_some(())
+    });
+    wait_for("the device is free again", || {
+        long_job_starts(&dashboard).then_some(())
+    });
+}
+
+/// A detached run in the same situation (its caller's session lost) is not touched: the job carries on
+/// to its own end, nothing is cancelled, and a new session reads the run as succeeded.
+#[test]
+fn a_detached_run_carries_on_to_its_end_when_its_caller_is_lost() {
+    let dir = dir("lost-detached");
+    let (board, _logic, _service, bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let caller = second_session(&board);
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"work_for_a_while",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: true,
+        })
+        .expect("run");
+    let call = long.call();
+    wait_for("the job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    drop(long);
+    drop(caller);
+    // Well inside the job's time (2.5 s) the device is still busy and nothing was cancelled.
+    let until = Instant::now() + Duration::from_millis(1000);
+    while Instant::now() < until {
+        assert!(
+            !long_job_starts(&dashboard),
+            "the detached job ended when its caller was lost"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(bridge.shared.with(|m| m.last_cancel()), (0, None));
+    wait_for("the job ended by itself", || {
+        long_job_starts(&dashboard).then_some(())
+    });
+    assert_eq!(bridge.shared.with(|m| m.last_cancel()), (0, None));
+    let next = second_session(&board);
+    let finished = next
+        .attach(call)
+        .expect("attach")
+        .finish(WAIT)
+        .expect("the run's end");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+}
+
+/// The bridge's own session is the one case where a detached run is cancelled too: Orion ends every run
+/// the program was doing when the program's session goes (`the program that runs it went away`), so there
+/// is nothing a caller can attach to, and the job would only keep the device. Orion's run does not say
+/// whether it was detached to the program (`Request::Run` has no such field at this pin), and it does
+/// not need to.
+#[test]
+fn a_detached_run_ends_too_when_the_bridges_own_session_is_lost() {
+    let dir = dir("lost-detached-own");
+    let (board, _logic, _service, bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let devices = TRACKED_DEVICES;
+    let caller = second_session(&board);
+    let long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: lemnos_orion::calls::RUN_DEADLINE_MS,
+            detached: true,
+        })
+        .expect("run");
+    wait_for("the job is running", || {
+        (!long_job_starts(&dashboard)).then_some(())
+    });
+    drop(long);
+    drop(caller);
+    drop(dashboard);
+    let (_board, dashboard) = restart_comm_core(&dir, &bridge, board, devices);
+    wait_for("the device is free again", || {
+        long_job_starts(&dashboard).then_some(())
+    });
+}
+
 /// Two sessions of one identity are two callers: each has its own lemnosd connection, so each holds for
 /// itself, and the end of one releases only its own hold. Before the token keyed the connections, both
 /// shared one connection and one count covered both. Mutation: keyed by identity again, `held` is 1 and

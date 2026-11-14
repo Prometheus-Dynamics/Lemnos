@@ -634,8 +634,8 @@ lemnosd, and the caller's connection and the driver's holds for it stay.
 **A session's end releases its plain holds.** Orion says once, with the session's token, that the session ended,
 for whatever cause (`CallerGone`). The bridge then closes that session's connection at once: lemnosd releases what
 it held on it and tells the drivers the caller is gone (`caller_gone`). A run that is not detached is cancelled by
-Orion at the same time (`Cancel` with reason `CallerGone`): its job is cancelled and its own connection closes, so
-its holds go with it.
+Orion at the same time (`Cancel` with reason `CallerGone`): its job is cancelled with the reason `cancelled: the session
+that started this run was lost`, and its own connection closes, so its holds go with it.
 
 **A detached run outlives its caller.** A run that was started detached goes on after its session ends. Its job and
 its holds are owned by the run: the bridge keeps the run on its own lemnosd connection (`CallerKey::Run`, in
@@ -655,6 +655,14 @@ oldest first. An attach for a run that is not there, or for a different identity
 with it and cannot say so to the bridge. So when the bridge's own session is lost, every caller session it had
 served is released as ended, and its holds go with it. A caller that is still alive asks again to hold
 anything, and its holds are then taken anew.
+
+Orion also ends every run that session was doing, as failed (`the program that runs it went away`), whether it
+was detached or not: a detached run outlives its caller, not the program that runs it. The bridge cannot be told, so it
+cancels the job of every run of the lost session on lemnosd, and the device is free for the new session. The reason is
+`cancelled: the session that started this run was lost`: it is in the bridge's log (one line for each run, with the
+run's call number, session and job), in the run's detail, and in the bridge's record (`Mirror::last_cancel`). lemnosd's
+job has no place for a reason, so it is not in lemnosd. The same text is given when a caller's own Orion session ends
+and Orion cancels its run that is not detached (`CallerGone`).
 
 **Ids across a reconnect.** Nothing the bridge caches from Orion survives the bridge's own session. The publisher's
 session (`Session` in `service/orion/src/publish.rs`) holds the resources, the topic publishers, the actions, the

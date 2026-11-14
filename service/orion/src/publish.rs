@@ -275,6 +275,11 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
                 for token in session.tokens.drain() {
                     let _ = jobs.send(Message::CallerGone { token });
                 }
+                // Orion ended every run of this session with it, and cannot say so: their jobs are
+                // cancelled, so the device is free for the next session.
+                let _ = jobs.send(Message::SessionLost {
+                    session: session.number,
+                });
                 // Dropped first: the next session says the same names, which the old one holds
                 // until it is gone. [`Held`] keeps those names and until when.
                 held = Some(Held::of(&session));
