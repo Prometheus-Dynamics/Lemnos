@@ -70,8 +70,14 @@ clocks, a reset, a frame stream, or another device. The board file says which, b
 name means is the backend's business: `i2c-1` on Linux, a name of the firmware's choosing on a
 microcontroller, anything a test adds on the simulated board.
 
-Most resources have one holder at a time. An I2C bus is shared by every device on it. When a
-driver is dropped, everything it held goes back.
+Most resources have one holder at a time. An I2C bus is shared by every device on it when it goes
+through the stock `i2c-dev` node. With the [kernel module](kernel-module.md) the holder is an address,
+not the bus: the first device to transfer to an address claims it (`i2c-<bus>:0x<addr>`) and keeps it
+for as long as its bus handle lives, and a second device at the same address is refused with BUSY
+until the first lets go. The claim goes back when that device is dropped, and also when the address
+stops answering (the transfer fails with ENXIO or EREMOTEIO), so probing an empty address keeps
+nothing. Devices at other addresses of the same bus are not affected. When a driver is dropped,
+everything it held goes back.
 
 The Linux backend hands out I2C, SPI, GPIO, PWM, UART, USB devices and the USB device port. For a
 block bound to the [kernel module](kernel-module.md) it also hands out the block's DMA memory,

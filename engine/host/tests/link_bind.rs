@@ -446,3 +446,82 @@ fn an_isp_linked_to_a_receiver_is_refused_with_the_reason() {
          to a camera.isp/1 device"
     );
 }
+
+/// The board lists the sensor BEFORE the receiver it links to. The receiver binds first, so the
+/// sensor's first bind finds it running: no tick, no retry, and the sensor is already running.
+#[test]
+fn a_device_listed_before_its_link_target_binds_after_it_and_its_first_bind_succeeds() {
+    let (host, _clock) = camera("ov9782 10-0036");
+    for id in ["cam0-sensor", "cam0-receiver"] {
+        let device = host.device(id).unwrap();
+        assert_eq!(device.state, DeviceState::Running, "{id}: {device:?}");
+    }
+    assert_eq!(host.device("cam0-sensor").unwrap().health, Health::Ok);
+}
+
+/// A chain listed backwards: every hop binds after the device it links to, first time.
+#[test]
+fn a_chain_of_links_listed_backwards_binds_every_hop_the_first_time() {
+    let (host, _clock) = start(
+        "[[devices]]\nid = \"cam0-sensor\"\ndriver = \"link-consumer\"\nlink = \"cam0-receiver\"\n\
+         [[devices]]\nid = \"cam0-receiver\"\ndriver = \"link-provider\"\nlink = \"cam0-fe\"\n\
+         config = { source = \"ov9782 10-0036\" }\n\
+         [[devices]]\nid = \"cam0-fe\"\ndriver = \"link-stage\"\nlink = \"cam0-be\"\n\
+         [[devices]]\nid = \"cam0-be\"\ndriver = \"link-stage\"\n",
+    );
+    for id in ["cam0-sensor", "cam0-receiver", "cam0-fe", "cam0-be"] {
+        assert_eq!(host.device(id).unwrap().state, DeviceState::Running, "{id}");
+    }
+}
+
+/// A link that is slow or fails does not change the failure rule: the dependent retries.
+#[test]
+fn a_dependent_of_a_link_that_fails_still_retries() {
+    let (host, clock) = start(
+        "[[devices]]\nid = \"cam0-sensor\"\ndriver = \"link-consumer\"\nlink = \"cam0-receiver\"\n\
+         [[devices]]\nid = \"cam0-receiver\"\ndriver = \"no-such-driver\"\n",
+    );
+    settle(&host, &clock);
+    assert!(matches!(
+        host.device("cam0-sensor").unwrap().state,
+        DeviceState::Backoff { .. }
+    ));
+}
+
+#[test]
+fn a_loop_through_links_is_refused_by_name_and_the_rest_of_the_board_runs() {
+    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+        [[devices]]\nid = \"a\"\ndriver = \"link-stage\"\nlink = \"b\"\n\
+        [[devices]]\nid = \"b\"\ndriver = \"link-stage\"\nlink = \"a\"\n\
+        [[devices]]\nid = \"c\"\ndriver = \"link-stage\"\nlink = \"d\"\n\
+        [[devices]]\nid = \"d\"\ndriver = \"link-stage\"\nuses = { n = \"c\" }\n";
+    let error = parse(text).unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "device \"a\": its `uses` and `link` lead back to itself: \"a\" -link-> \"b\" -link-> \"a\" \
+         (a `link` binds its device after the one it names, as a `uses` does)"
+    );
+    let mixed = parse(&text.replace("link = \"a\"", "uses = { n = \"a\" }"));
+    assert!(
+        mixed
+            .unwrap_err()
+            .to_string()
+            .contains("\"a\" -link-> \"b\" -uses-> \"a\"")
+    );
+    let board = lemnos_host::board::parse_lenient(text).unwrap();
+    let refused: Vec<&str> = board
+        .devices
+        .iter()
+        .filter(|d| d.refused.is_some())
+        .map(|d| d.id.as_str())
+        .collect();
+    assert_eq!(refused, ["a", "c"]);
+    let c = board.devices.iter().find(|d| d.id == "c").unwrap();
+    assert!(
+        c.refused
+            .as_deref()
+            .unwrap()
+            .contains("\"c\" -link-> \"d\" -uses-> \"c\""),
+        "{c:?}"
+    );
+}

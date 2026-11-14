@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_fake_devices::FakeCounter;
-use lemnos_host::board::parse;
+use lemnos_host::board::{parse, parse_lenient};
 use lemnos_host::{Options, entry};
 use lemnos_sim::SimBoard;
 use lemnosd::packages::{PackageConfig, PackageFile, PackageMode, PackageReport, add_packages};
@@ -41,7 +41,9 @@ fn start_with(packages: PackageReport) -> Running {
     let config = Config {
         socket: socket.clone(),
         name: "t".to_string(),
-        board: parse(text).unwrap(),
+        // Lenient: the two devices that link to each other are a loop, which the strict reader
+        // refuses and the daemon starts without (the device that closes it is refused).
+        board: parse_lenient(text).unwrap(),
         drivers: vec![entry::<FakeCounter>()],
         backend: Box::new(SimBoard::new()),
         options: Options::default(),

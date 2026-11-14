@@ -28,6 +28,12 @@ pub enum BoardError {
     SelfUse(String),
     #[error("device {0:?}: its `uses` lead back to itself through device {1:?}")]
     Loop(String, String),
+    /// A loop that goes through at least one `link`. The text names every device of the loop and
+    /// marks each edge as a `uses` or a `link`.
+    #[error(
+        "device {0:?}: its `uses` and `link` lead back to itself: {1} (a `link` binds its device after the one it names, as a `uses` does)"
+    )]
+    LinkLoop(String, String),
     #[error("device {0:?} config key {1:?}: values are numbers, booleans or strings")]
     Config(String, String),
     /// A setting a driver refuses, by device id, with the driver's own words for it (naming the
@@ -809,7 +815,7 @@ fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError>
             problems.push(error);
         }
     }
-    // Loops among `uses` come after the entries' own problems, in the order the devices bind.
+    // Loops among `uses` and `link` come after the entries' own problems, in the order the devices bind.
     problems.extend(mark_loops(&mut board.devices));
     Ok((board, problems))
 }
@@ -868,24 +874,52 @@ fn each_problem(each: &EachSpec, rules: &mut BTreeSet<String>) -> Option<BoardEr
     check_streams(&each.id, &each.driver, &each.streams).err()
 }
 
-/// Marks the device that closes each loop of `uses`: a device whose `uses` lead back to a device
-/// still on the walk's path. That device is refused, so the loop is broken there and the rest of the
-/// board is ordered. Returns the loops found, as problems, in the order the walk found them.
+/// What a device must bind after: the devices its `uses` name, then the one its `link` names. Each
+/// is a device id (a `uses` may also name a bus or a resource, which no device carries) and whether
+/// the edge is the `link`. The host knows nothing of what either is for: both are only ordering.
+fn edges(device: &DeviceSpec) -> impl Iterator<Item = (&str, bool)> {
+    device
+        .uses
+        .values()
+        .map(|used| (used.as_str(), false))
+        .chain(device.link.as_deref().map(|link| (link, true)))
+}
+
+/// Marks the device that closes each loop of `uses` and `link`: a device whose edges lead back to a
+/// device still on the walk's path. That device is refused, so the loop is broken there and the rest
+/// of the board is ordered. Returns the loops found, as problems, in the order the walk found them.
 fn mark_loops(devices: &mut [DeviceSpec]) -> Vec<BoardError> {
+    /// The walk's path: each device and whether the edge that reached it was a `link`.
+    type Path = Vec<(usize, bool)>;
     fn visit(
         at: usize,
-        from: Option<usize>,
+        by_link: bool,
         devices: &mut [DeviceSpec],
         marks: &mut [u8],
+        path: &mut Path,
         found: &mut Vec<BoardError>,
     ) {
         match marks[at] {
             2 => return,
             1 => {
+                let from = path.last().map(|&(f, _)| f);
                 let through = from.map(|f| devices[f].id.clone()).unwrap_or_default();
                 let id = devices[at].id.clone();
                 if devices[at].refused.is_none() {
-                    let error = BoardError::Loop(id, through);
+                    let start = path.iter().position(|&(d, _)| d == at).unwrap_or(0);
+                    let cycle = &path[start..];
+                    let error = if by_link || cycle.iter().skip(1).any(|&(_, link)| link) {
+                        let mut text = format!("{id:?}");
+                        for &(device, link) in cycle.iter().skip(1) {
+                            let edge = if link { "link" } else { "uses" };
+                            text.push_str(&format!(" -{edge}-> {:?}", devices[device].id));
+                        }
+                        let edge = if by_link { "link" } else { "uses" };
+                        text.push_str(&format!(" -{edge}-> {id:?}"));
+                        BoardError::LinkLoop(id, text)
+                    } else {
+                        BoardError::Loop(id, through)
+                    };
                     devices[at].refused = Some(error.to_string());
                     found.push(error);
                 }
@@ -894,24 +928,34 @@ fn mark_loops(devices: &mut [DeviceSpec]) -> Vec<BoardError> {
             _ => {}
         }
         marks[at] = 1;
-        let uses: Vec<String> = devices[at].uses.values().cloned().collect();
-        for used in uses {
-            if let Some(child) = devices.iter().position(|d| d.id == used) {
-                visit(child, Some(at), devices, marks, found);
+        path.push((at, by_link));
+        let next: Vec<(String, bool)> = edges(&devices[at])
+            .map(|(id, link)| (id.to_string(), link))
+            .collect();
+        for (id, link) in next {
+            // A device linked to itself is not a loop of this walk: `lemnos-ctl validate` refuses it
+            // by its own words.
+            if link && id == devices[at].id {
+                continue;
+            }
+            if let Some(child) = devices.iter().position(|d| d.id == id) {
+                visit(child, link, devices, marks, path, found);
             }
         }
+        path.pop();
         marks[at] = 2;
     }
     let mut marks = vec![0; devices.len()];
     let mut found = Vec::new();
     for at in 0..devices.len() {
-        visit(at, None, devices, &mut marks, &mut found);
+        visit(at, false, devices, &mut marks, &mut Vec::new(), &mut found);
     }
     found
 }
 
-/// The order the devices bind in: each after the devices its `uses` name, with the loops of
-/// [`mark_loops`] broken at the devices it refused. Every device is in the order once.
+/// The order the devices bind in: each after the devices its `uses` name and the device its `link`
+/// names, with the loops of [`mark_loops`] broken at the devices it refused. Every device is in the
+/// order once.
 #[must_use]
 pub(crate) fn bind_order(devices: &[DeviceSpec]) -> Vec<usize> {
     fn visit(at: usize, devices: &[DeviceSpec], marks: &mut [u8], order: &mut Vec<usize>) {
@@ -919,8 +963,8 @@ pub(crate) fn bind_order(devices: &[DeviceSpec]) -> Vec<usize> {
             return;
         }
         marks[at] = 1;
-        for used in devices[at].uses.values() {
-            if let Some(child) = devices.iter().position(|d| d.id == *used) {
+        for (id, _) in edges(&devices[at]) {
+            if let Some(child) = devices.iter().position(|d| d.id == id) {
                 visit(child, devices, marks, order);
             }
         }
