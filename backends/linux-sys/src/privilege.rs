@@ -105,8 +105,9 @@ pub fn observe() -> io::Result<Observed> {
 
 /// Makes the calling process's ids and capability sets the plan's, and sets `no_new_privs`.
 ///
-/// Must run while the process is root, with `CAP_SETUID`, `CAP_SETGID` and `CAP_SETPCAP`. Only
-/// the root phase calls it; a process that is already another user cannot run it.
+/// Must run while the process is root, with `CAP_SETPCAP` (the bounding set), `CAP_SETGID` (the
+/// groups, when they differ) and, only when the ids change, `CAP_SETUID`; a root-to-root caller (the
+/// gadget parent and helper) needs no `CAP_SETUID`. The root phase and those two call it; a process that is already another user cannot run it.
 ///
 /// # Errors
 ///

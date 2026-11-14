@@ -64,10 +64,10 @@ gadget helper under it (`service/lemnosd/src/supervisor.rs`, `helper.rs`, `gadge
 (`lemnosd-gadget`) keeps uid 0 and `CAP_SYS_ADMIN` after the drop, reads the board serial from the source the
 board file names, makes each gadget's configfs tree and FunctionFS mount (or adopts the identical tree that is
 there), and binds and unbinds each `UDC` on the daemon's request, by index, for that daemon only. A gadget that
-cannot be made yet is retried by its driver, not refused. The parent keeps `CAP_SYS_ADMIN`, `CAP_SETPCAP`,
-`CAP_SETUID` and `CAP_SETGID` (the helper drops the last three at start: `CAP_SETPCAP` clears the helper's
-bounding set, `CAP_SETGID` its supplementary groups, `CAP_SETUID` only matters if the ids change, which root to root
-does not; see `docs/daemon.md`); each runs under its own seccomp
+cannot be made yet is retried by its driver, not refused. The parent keeps `CAP_SYS_ADMIN`, `CAP_SETPCAP`
+and `CAP_SETGID` (the helper drops the last two at start: `CAP_SETPCAP` clears the helper's
+bounding set, `CAP_SETGID` its supplementary groups; no `CAP_SETUID`, as no user id changes; see
+`docs/daemon.md`); each runs under its own seccomp
 allowlist (`docs/daemon.md`, "Privileged helper"). Do not
 add an `ExecStartPre=+` for it: that would be a second privileged path.
 The gadget's three unit settings are in an optional drop-in, `packaging/systemd/lemnosd.service.d/gadget.conf`,
@@ -76,7 +76,7 @@ board file has a `usb-gadget` device, and only then (its `when` in `files.txt` i
 source: a `[[devices]]` table with `driver = "usb-gadget"` (see [docs/boards.md](../docs/boards.md)). `lemnos-ctl tree`
 does not write this drop-in, and does not say whether a board has a gadget. Its settings: `CAP_SYS_ADMIN` in
 `CapabilityBoundingSet` (the gadget helper's mount and unmount need it: the helper keeps it after the drop,
-the daemon keeps none of it; the parent's `CAP_SETPCAP`, `CAP_SETUID` and `CAP_SETGID` are in the base unit's
+the daemon keeps none of it; the parent's `CAP_SETPCAP` and `CAP_SETGID` are in the base unit's
 set already), `mount umount2` in `SystemCallFilter` (not in `@system-service`; the helper and its parent
 inherit the filter, and narrow it with their own seccomp allowlists), and `ReadWritePaths=-/sys/kernel/config/usb_gadget`, which keeps the tree writable
 under `ProtectKernelTunables`. The `CapabilityBoundingSet` and `SystemCallFilter` values did not change in
