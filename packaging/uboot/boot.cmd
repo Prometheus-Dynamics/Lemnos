@@ -10,7 +10,7 @@
 # sysboot, fdt, test, setenv, saveenv, sleep, fastboot and (with a board LED) led, which the config
 # fragment from `lemnos-ctl tree --uboot-config` turns on.
 #
-# THE RECORD is these variables of U-Boot's redundant environment: default, previous, trial and
+# THE RECORD is these variables of U-Boot's redundant environment: default, trial and
 # trial_attempts, the boots that may still start the trial, and default_bay, previous_bay and trial_bay,
 # the payload bay (`slots/bayN/` on the boot partition, N from 0) that holds each slot's files. A slot's
 # files are only ever in a bay, so each step below reads `/slots/<bay>/board.dtb` and
@@ -40,9 +40,11 @@
 #
 # THE THREE STEPS, in this order: the trial (when it has an attempt left), the default, and the
 # previous slot, which is started AS A TRIAL: it is not a slot the loader promotes. The third step
-# runs only when a previous slot is named (`previous` and `previous_bay`), is not the default and is
-# not the trial the first step already tried. It saves nothing and changes nothing in the stored
-# environment (no saveenv, and `trial`, `trial_attempts`, `default`, `previous` and the bays are not
+# runs only when a previous bay is named (`previous_bay`), is not the default's bay and is not the
+# trial's bay the first step already tried: the three conditions compare bays, which the writers keep
+# (the environment holds no id for the previous slot; a test evaluates these conditions over the writers'
+# environment, and a real U-Boot has not run them: untested on board). It saves nothing and changes nothing in the stored
+# environment (no saveenv, and `trial`, `trial_attempts`, `default` and the bays are not
 # touched, so a trial still pending keeps its attempts). It starts the previous bay's kernel, with the
 # device tree and extlinux.conf read from that bay, and, when the default had been named and did not
 # start, it adds the property `lemnos,default-failed = "files"` to /chosen of the device tree it hands
@@ -115,7 +117,6 @@ while test "${lemnos_go}" = "1"; do
 		setenv take_default
 		setenv take_trial_bay
 		setenv take_default_bay
-		setenv take_previous
 		setenv take_previous_bay
 
 		if test -n "${trial}"; then
@@ -137,13 +138,10 @@ while test "${lemnos_go}" = "1"; do
 		fi
 		setenv take_default ${default}
 		setenv take_default_bay ${default_bay}
-		if test -n "${previous}"; then
-			if test -n "${previous_bay}"; then
-				if test "${previous}" != "${default}"; then
-					if test "${previous}" != "${take_trial}"; then
-						setenv take_previous ${previous}
-						setenv take_previous_bay ${previous_bay}
-					fi
+		if test -n "${previous_bay}"; then
+			if test "${previous_bay}" != "${default_bay}"; then
+				if test "${previous_bay}" != "${take_trial_bay}"; then
+					setenv take_previous_bay ${previous_bay}
 				fi
 			fi
 		fi
@@ -162,7 +160,7 @@ while test "${lemnos_go}" = "1"; do
 					setenv lemnos_dflt files
 				fi
 			else
-				if test -n "${take_previous}"; then
+				if test -n "${take_previous_bay}"; then
 					setenv lemnos_dtb /slots/${take_previous_bay}/board.dtb
 					setenv lemnos_conf /slots/${take_previous_bay}/extlinux/extlinux.conf
 				fi

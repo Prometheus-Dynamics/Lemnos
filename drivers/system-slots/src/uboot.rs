@@ -29,6 +29,19 @@ use crate::store::{Layout, replace, sync_dir, valid_id};
 pub use lemnos_slot_store::records::MAX_ATTEMPTS;
 pub use lemnos_slot_store::records::uboot::{KEYS, RECORD_FILE, Record};
 
+/// The slot variables of U-Boot's environment, every one the writers ([`BootRecord`] here and
+/// slot-init's fallback) set and `packaging/uboot/boot.cmd` reads, and no others: the default's
+/// slot and bay, the previous slot's bay (the environment holds no id for it), and the trial's slot,
+/// bay and attempts left. A test holds the script's reads, the writers' writes and this list equal.
+pub const VARIABLES: [&str; 6] = [
+    "default",
+    "default_bay",
+    "previous_bay",
+    "trial",
+    "trial_bay",
+    "trial_attempts",
+];
+
 /// Where a slot's loader configuration is, under its boot directory.
 pub const EXTLINUX: &str = "extlinux/extlinux.conf";
 
@@ -462,5 +475,7 @@ impl BootRecord for UbootEnv {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod hush;
 #[cfg(test)]
 mod tests;
