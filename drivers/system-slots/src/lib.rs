@@ -105,8 +105,8 @@ use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
 use lemnos_core::{
-    BoardView, CallerId, Config, ConfigError, Dev, JobId, JobState, Key, Kind, Lifecycle, Reply,
-    Result, Status, driver,
+    BoardView, CallerId, Config, ConfigError, Dev, Health, JobId, JobState, Key, Kind, Lifecycle,
+    Reply, Result, Retry, Status, driver,
 };
 
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
@@ -188,6 +188,9 @@ pub struct SystemSlots {
     firmware: Option<count::Firmware>,
     /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
     demote_after: u8,
+    /// A boot count the firmware refused to clear, retried from the tick until it clears (see
+    /// [`count::Uncleared`]). `health`, `retrying` and `info` say so while it is set.
+    uncleared: Option<count::Uncleared>,
 }
 
 /// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
@@ -495,6 +498,7 @@ impl SystemSlots {
             firmware: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            uncleared: None,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -958,7 +962,18 @@ impl SystemSlots {
             quoted(&key.owner, &mut out);
             out.push('}');
         }
-        out.push_str("]}");
+        // Appended last: the boot count's words while the firmware refuses to clear it (empty
+        // otherwise). The retry's full text, with its wait.
+        out.push_str("],\"boot_count\":");
+        quoted(
+            &self
+                .uncleared
+                .as_ref()
+                .map(count::Uncleared::text)
+                .unwrap_or_default(),
+            &mut out,
+        );
+        out.push('}');
         out
     }
 
@@ -1398,6 +1413,24 @@ impl Lifecycle for SystemSlots {
         self.watch(view);
     }
 
+    /// Down while the firmware refuses to clear the boot count: the words name the wait, and the
+    /// driver keeps retrying (see [`count::Uncleared`]). Degraded, not failed: restarts still work.
+    fn health(&self) -> Health {
+        match &self.uncleared {
+            None => Health::Ok,
+            Some(pending) => Health::Degraded(count::health_text(pending.wait_ns)),
+        }
+    }
+
+    /// The refused clear's attempts so far, when the next one is due, and why it was refused.
+    fn retrying(&self) -> Option<Retry> {
+        self.uncleared.as_ref().map(|pending| Retry {
+            attempts: pending.failed,
+            next_ns: pending.due_ns.unwrap_or(0),
+            reason: count::RETRY_REASON,
+        })
+    }
+
     /// An install from a file reads a piece each tick, at once again while there is more. A trial
     /// that waits is looked at again each second, until it is confirmed or falls back. The
     /// indicator is brought up to date on each tick too.
@@ -1411,7 +1444,8 @@ impl Lifecycle for SystemSlots {
             .map(|_| now_ns);
         let settle = self.settle(now_ns);
         let slow = self.slow_check(now_ns);
-        [install, settle, slow].into_iter().flatten().min()
+        let count = self.count_tick(now_ns);
+        [install, settle, slow, count].into_iter().flatten().min()
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {

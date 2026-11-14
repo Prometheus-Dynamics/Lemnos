@@ -666,6 +666,65 @@ fn a_confirm_on_a_firmware_board_keeps_the_count_when_the_boot_files_cannot_be_r
     assert!(error.contains("the count is kept"), "{error}");
 }
 
+/// M36c: a boot count the firmware refuses is retried by the driver's tick, and while it is owed,
+/// `health`, `retrying` and `info` say so in words. The mailbox here is a plain file, so every clear
+/// is refused: the retries go on for ten minutes, the default and the state are untouched.
+#[test]
+fn a_refused_boot_count_is_retried_from_the_tick_and_said_in_health_and_info() {
+    const SECOND: u64 = 1_000_000_000;
+    let mut board = Board::new("os-1");
+    let plain = board.dir.0.join("not-a-mailbox");
+    fs::write(&plain, b"plain").unwrap();
+    board.slots.firmware = Some(crate::count::Firmware {
+        device_tree: board.dir.0.join("device-tree"),
+        vcio: plain,
+    });
+    board.slots.uncleared = Some(crate::count::Uncleared::refused("injected refusal"));
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.ends_with("retrying every 1s")),
+        "{:?}",
+        board.slots.health()
+    );
+    let before = board.state();
+    let mut next = board.slots.tick(0);
+    let mut ticks = 0;
+    while let Some(at) = next {
+        if at > 600 * SECOND || ticks > 5000 {
+            break;
+        }
+        next = board.slots.tick(at);
+        ticks += 1;
+    }
+    assert!(
+        next.is_some(),
+        "a wait is always owed: the retries never stop"
+    );
+    let owed = board.slots.uncleared.clone().expect("still owed");
+    assert!(owed.failed > 60, "about one try every 8 s: {}", owed.failed);
+    assert_eq!(owed.wait_ns, 8 * SECOND);
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.ends_with("retrying every 8s")),
+        "{:?}",
+        board.slots.health()
+    );
+    let retrying = board.slots.retrying().expect("retrying");
+    assert_eq!(retrying.attempts, owed.failed);
+    assert_eq!(retrying.reason, crate::count::RETRY_REASON);
+    let info = board.slots.info_json();
+    assert!(
+        info.contains("\"boot_count\":\"the boot count is not cleared: the firmware mailbox could not clear it: "),
+        "{info}"
+    );
+    assert!(info.contains("retrying every 8s\"}"), "{info}");
+    let state = board.state();
+    assert!(
+        state.error.contains("the boot count is not cleared"),
+        "{}",
+        state.error
+    );
+    assert_eq!((state.state, state.default), (before.state, before.default));
+}
+
 #[test]
 fn a_confirmed_trial_becomes_the_default_and_old_slots_past_keep_go() {
     let mut board = Board::new("os-1");
