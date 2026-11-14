@@ -33,6 +33,10 @@
 //! is not said again to a session that is gone (see [`Session::tokens`]).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::AsFd;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -42,10 +46,11 @@ use orion::topics::{
     Field, FieldId, FieldType, OnSubscribe, Publisher, SampleTime, TopicDecl, TopicError,
 };
 use orion::types::Error as Refusal;
-use orion::{ClientError, Error, Options, Orion, Roles};
+use orion::{Address, ClientError, Error, Options, Orion, Roles};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 use lemnos_client::{DeviceHealth, DeviceState};
+use lemnos_linux_sys::inotify;
 
 use crate::backoff::Backoff;
 use crate::calls::{Done, Job, Message, Progress, Verb};
@@ -72,6 +77,7 @@ const IDLE: Duration = Duration::from_secs(1);
 const RETRY: Duration = Duration::from_secs(1);
 /// How soon a session is opened again after the comm core went away, before the retry delays of
 /// a session Orion refuses. The comm core is usually back within this.
+/// (Used for the lost session's names only: the first try after a loss is made at once.)
 const RECONNECT: Duration = Duration::from_millis(100);
 
 /// The state a status topic says when its device is withdrawn.
@@ -204,6 +210,9 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut done = Vec::new();
     // What the lost session still holds on the comm core, until it is gone: see [`Held`].
     let mut held: Option<Held> = None;
+    // The comm core's socket directory, watched for its socket to appear: a restarting comm core is
+    // then connected to when its socket is there, not when a delay ends.
+    let watch = SocketWatch::new(&config.orion);
     while !shared.stopping() {
         let (devices, facts, set) = shared.with(|mirror| {
             let (devices, facts) = mirror.snapshot();
@@ -218,6 +227,10 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             continue;
         }
         number += 1;
+        // Before the try, so a socket that appears during it wakes the next wait.
+        if let Some(watch) = &watch {
+            watch.appeared();
+        }
         let mut session = match Session::open(config, number, &devices, &facts, set, held.as_ref())
         {
             Ok(session) => session,
@@ -235,7 +248,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             }
             Err(Opening::Failed(message)) => {
                 log(&message);
-                pause(shared, backoff.next_delay());
+                pause_for_socket(shared, backoff.next_delay(), watch.as_ref());
                 continue;
             }
         };
@@ -262,7 +275,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
                 // until it is gone. [`Held`] keeps those names and until when.
                 held = Some(Held::of(&session));
                 drop(session);
-                wait_bell(shared, RECONNECT);
+                // The first try after a loss is made at once, by the loop.
             }
         }
     }
@@ -1189,6 +1202,74 @@ fn pause(shared: &Shared, wait: Duration) {
             break;
         }
         std::thread::sleep((until - now).min(Duration::from_millis(20)));
+    }
+}
+
+/// The comm core's socket name in its directory, watched with inotify (`lemnos-linux-sys`).
+struct SocketWatch {
+    file: File,
+    name: OsString,
+}
+
+impl SocketWatch {
+    /// Watches the directory of a local comm core's socket; `None` for a network address, or where
+    /// the directory cannot be watched (the backoff alone is then the wait).
+    fn new(address: &Address) -> Option<Self> {
+        let Address::Local(path) = address else {
+            return None;
+        };
+        let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty())?;
+        let fd = inotify::init().ok()?;
+        inotify::add_watch(
+            fd.as_fd(),
+            dir,
+            inotify::mask::CREATE | inotify::mask::MOVED_TO,
+        )
+        .ok()?;
+        Some(Self {
+            file: File::from(fd),
+            name: path.file_name()?.to_owned(),
+        })
+    }
+
+    /// Reads what happened since the last call, and says whether the socket's name was created.
+    fn appeared(&self) -> bool {
+        let mut seen = false;
+        let mut buf = [0u8; 4096];
+        // `WouldBlock` (the descriptor is non-blocking) or any other error ends the reading.
+        while let Ok(n) = (&self.file).read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            inotify::for_each_event(&buf[..n], |_, _, name| {
+                seen |= name == Some(self.name.as_os_str());
+            });
+        }
+        seen
+    }
+}
+
+/// [`pause`], ended early by the comm core's socket appearing (when it can be watched).
+fn pause_for_socket(shared: &Shared, wait: Duration, watch: Option<&SocketWatch>) {
+    let Some(watch) = watch else {
+        return pause(shared, wait);
+    };
+    let until = Instant::now() + wait;
+    while !shared.stopping() {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut fds = [
+            PollFd::from_borrowed_fd(watch.file.as_fd(), PollFlags::IN),
+            PollFd::from_borrowed_fd(shared.bell_fd(), PollFlags::IN),
+        ];
+        let _ = poll(&mut fds, Some(&timespec(left)));
+        // A change in the mirror is no reason to try again (see [`pause`]); a stop is.
+        shared.quiet();
+        if watch.appeared() {
+            break;
+        }
     }
 }
 

@@ -1,9 +1,12 @@
-//! Retry delays for both halves of the service: 1 s, doubling, capped at 8 s.
-//! Nothing gives up; the delay only stops growing.
+//! Retry delays for every reconnect of the service: 20 ms, doubling, capped at 8 s.
+//! Nothing gives up; the delay only stops growing. The first try after a loss is made at once,
+//! by the caller, before any delay: this is the delay after the first failed try. It starts
+//! small because the usual cause is a peer that is restarting and is back within tens of
+//! milliseconds; a long first delay was a measured second of waiting on every comm core restart.
 
 use std::time::Duration;
 
-const FIRST: Duration = Duration::from_secs(1);
+const FIRST: Duration = Duration::from_millis(20);
 const CAP: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
@@ -42,8 +45,15 @@ mod tests {
     #[test]
     fn doubles_to_the_cap_and_stays_there() {
         let mut backoff = Backoff::new();
-        let delays: Vec<u64> = (0..6).map(|_| backoff.next_delay().as_secs()).collect();
-        assert_eq!(delays, [1, 2, 4, 8, 8, 8]);
+        let delays: Vec<u64> = (0..12)
+            .map(|_| backoff.next_delay().as_millis() as u64)
+            .collect();
+        assert_eq!(
+            delays,
+            [
+                20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 8000, 8000, 8000
+            ]
+        );
     }
 
     #[test]

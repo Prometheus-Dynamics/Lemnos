@@ -775,8 +775,10 @@ start carries the run's deadline (`engine/wire`). Neither is in this bridge PR.
 
 **Refusals are named.** Every refusal of the Orion session, and every loss of it, is logged on one path as a named
 state: `orion: refused: <reason>` (the connect failed, the node is not the configured one, or Orion refused a
-resource or topic) and `orion: lost: <reason>; connecting again`. The bridge then waits its backoff and tries again.
-It is never a timeout or a silent retry. Facts (the hello document) are published only inside a session, so a refused
+resource or topic) and `orion: lost: <reason>; connecting again`. The first try after a loss is made at once. Later tries wait a backoff that starts at 20 ms, doubles and stops growing at
+8 s (it never gives up), and a local comm core's socket appearing in its directory (inotify, `lemnos-linux-sys`) ends the
+wait early, so a restarting comm core is connected to as soon as it listens. The same delays serve the lemnosd and file
+connections. It is never a timeout or a silent retry. Facts (the hello document) are published only inside a session, so a refused
 bridge has none to publish: the log line is its state, and the facts are absent, never guessed.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is

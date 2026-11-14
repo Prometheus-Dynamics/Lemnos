@@ -1907,6 +1907,73 @@ fn a_comm_core_restart_is_connected_to_again() {
     }
 }
 
+/// Fifty devices: after the comm core restarts, the bridge declares all of them again in one pass
+/// over the new session. Nothing waits a period per device: at the heartbeat's half (50 ms) a wait
+/// per device would take 2.5 s for fifty, and the bound below is 2 s from the comm core's return
+/// (the two-device test measures well under a quarter of a second). Mutation: a pause of 50 ms
+/// between devices, or the old one-second first retry delay plus any per-device wait, fails it.
+#[test]
+#[allow(clippy::print_stderr)]
+fn fifty_devices_are_declared_again_in_one_pass_after_a_comm_core_restart() {
+    const COUNT: usize = 50;
+    const SAMPLES: usize = 2;
+    let dir = dir("restart-many");
+    let lemnosd = dir.join("lemnosd.sock");
+    let mut text =
+        String::from("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n");
+    for n in 0..COUNT {
+        text.push_str(&format!(
+            "[[devices]]\nid = \"c{n:02}\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = {n}\n"
+        ));
+    }
+    let options = || BoardOptions {
+        for_node: true,
+        heartbeat_ms: 100,
+        idle_ms: 1000,
+        ..BoardOptions::default()
+    };
+    let mut board = Board::start_with(&dir, options());
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_with(&lemnosd, &text, vec![entry::<FakeCounter>()]);
+    let bridge = start_bridge(&lemnosd, board.socket(), None);
+    // The first session can open before lemnosd has described the board, and then publishes the
+    // devices as they come (the record counts only what the session opened with): wait for the last.
+    {
+        let dashboard = dashboard(board.socket());
+        wait_for("the last device of the first session", || {
+            resource(&dashboard, "lemnos.c49").filter(|found| found.state == ResourceState::Ready)
+        });
+    }
+    let mut times = Vec::new();
+    for sessions_before in 0..SAMPLES {
+        let seen = bridge.shared.connection().sessions;
+        drop(board);
+        board = Board::start_with(&dir, options());
+        let back = Instant::now();
+        wait_for("the bridge's session with fifty devices", || {
+            Some(bridge.shared.connection()).filter(|c| c.sessions > seen && c.devices == COUNT)
+        });
+        let took = back.elapsed();
+        if std::env::var_os("LEMNOS_ORION_TIMING").is_some() {
+            eprintln!(
+                "restart-many-timing {sessions_before}: {} ms",
+                took.as_millis()
+            );
+        }
+        times.push(took);
+    }
+    let dashboard = dashboard(board.socket());
+    wait_for("the last device's resource", || {
+        resource(&dashboard, "lemnos.c49").filter(|found| found.state == ResourceState::Ready)
+    });
+    for took in times {
+        assert!(
+            took < Duration::from_secs(2),
+            "{COUNT} devices took {took:?} to be declared again: a wait per device?"
+        );
+    }
+}
+
 /// Node logic restarts while the comm core stays up. At this pin the bridge asks node logic for
 /// nothing during the gap, so its session is not disturbed; the device is Ready again when node
 /// logic is back and a run goes through. The `Unavailable` path itself is pinned by the unit test
