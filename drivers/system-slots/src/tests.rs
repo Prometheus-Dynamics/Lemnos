@@ -143,7 +143,7 @@ impl BootRecord for Told {
     }
 }
 
-fn key() -> SigningKey {
+pub(crate) fn key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
 }
 
@@ -151,7 +151,7 @@ fn sha(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-const ROOT_HASH: &str = "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
+pub(crate) const ROOT_HASH: &str = "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
 
 /// A bundle's parts, to be changed by a test before it is packed.
 struct Bundle {
@@ -174,7 +174,7 @@ struct Bundle {
 }
 
 /// The board the test boards are.
-const BOARD: &str = "slots-test";
+pub(crate) const BOARD: &str = "slots-test";
 
 /// An image of `data_blocks` blocks of data and room for their hash tree after them.
 fn image_of(id: &str, data_blocks: u64) -> Vec<u8> {
@@ -4836,4 +4836,36 @@ fn a_reason_past_the_bound_is_cut_with_the_marker_and_the_state_keeps_it_whole()
     assert_eq!(&seen.reason[..keep], &whole[..keep]);
     // The slot id is bounded the same way.
     assert!(seen.slot.len() <= crate::attempt::SLOT_MAX);
+}
+
+/// Slot `id`'s bundle, and its five boot payloads in the roles' order: what its boot partition bays
+/// hold for it. The bundle's own boot files are those payloads.
+pub(crate) fn bundle_and_payloads(id: &str) -> (Vec<u8>, [Vec<u8>; 5]) {
+    let bundle = Bundle::new(id);
+    let find = |path: &str| {
+        bundle
+            .boot
+            .iter()
+            .find(|(name, _)| name == path)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let payloads = [
+        find("kernel8.img"),
+        find("initramfs.cpio"),
+        find("board.dtb"),
+        find("cmdline.txt"),
+        find("overlays/lemnos-board.dtbo"),
+    ];
+    (bundle.pack(), payloads)
+}
+
+/// Slot `id`'s bundle signed by a key other than the one it names, which is a trusted key: a
+/// known key with a signature that does not verify under it.
+pub(crate) fn bundle_with_bad_signature(id: &str) -> Vec<u8> {
+    let mut bundle = Bundle::new(id);
+    bundle.signer = SigningKey::from_bytes(&[9; 32]);
+    bundle.named = Some(key());
+    bundle.pack()
 }

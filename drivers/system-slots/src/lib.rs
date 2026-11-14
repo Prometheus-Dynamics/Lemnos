@@ -87,12 +87,15 @@ mod count;
 #[cfg(test)]
 mod count_tests;
 mod install;
+pub mod offline;
 mod resolve;
 pub use lemnos_slot_store::tar;
 pub use lemnos_slot_store::{json, manifest, store};
 pub mod trial;
 pub mod uboot;
 
+#[cfg(test)]
+mod offline_tests;
 #[cfg(test)]
 mod tests;
 
@@ -113,6 +116,7 @@ use lemnos_core::{
 use attempt::{Attempt, Ended};
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
 pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check};
+pub use offline::{FirstSlot, OfflineBoard, check_bay, check_layout, open_boot_image, write_first_slot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
 use lemnos_slot_store::boots;
@@ -193,6 +197,8 @@ pub struct SystemSlots {
     firmware: Option<count::Firmware>,
     /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
     demote_after: u8,
+    /// The free bytes the offline writer names in place of the data partition's (see [`offline`]).
+    offline_free: Option<u64>,
 }
 
 /// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
@@ -501,6 +507,7 @@ impl SystemSlots {
             firmware: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            offline_free: None,
         };
         slots.clear_interrupted();
         // The one thing the board's own record keeps of an install is that a restart cut it short.
@@ -720,6 +727,9 @@ impl SystemSlots {
 
     /// The bytes free where images go: the data partition, or the UBI device.
     fn free(&self) -> std::io::Result<u64> {
+        if let Some(free) = self.offline_free {
+            return Ok(free);
+        }
         match &self.layout.ubi {
             Some(device) => device.free(),
             None => lemnos_linux_sys::statfs::free_bytes(&self.layout.images()),
