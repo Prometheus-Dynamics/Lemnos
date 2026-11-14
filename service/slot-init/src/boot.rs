@@ -361,11 +361,33 @@ impl Boot<'_> {
         }
     }
 
+    /// Whether this is a Lemnos disk: the data partition is found, or the boot disk has exactly one
+    /// partition labelled [`DATA_LABEL`]. One read, with no wait. A disk that can't be read, has no
+    /// such label or has two is not a Lemnos disk, and no firmware request is made for it (M36c).
+    fn lemnos_disk(&self) -> bool {
+        if self.data.is_some() {
+            return true;
+        }
+        let Some(disk) = self.disk.get() else {
+            return false;
+        };
+        let (hits, _) = partition::labelled(DATA_LABEL, &self.env.sys, &self.env.dev, disk);
+        hits.len() == 1
+    }
+
+    /// Every refusal that reaches the rescue goes here. The firmware's flashing mode is asked only
+    /// on a Lemnos disk, and only after [`FLASH_AFTER`] restarts without a good boot (see
+    /// [`Boot::flash_mode`]). Any other refusal restarts into the board's own boot order, after the
+    /// rescue wait, as [`Boot::refuse_foreign`] does.
     fn rescue(&self, why: &str) -> String {
         self.log(&format!("no slot can start: {why}"));
         self.save_log();
-        if self.flash_mode(why) {
-            return format!("no slot can start: {why}");
+        if self.lemnos_disk() {
+            if self.flash_mode(why) {
+                return format!("no slot can start: {why}");
+            }
+        } else {
+            self.log("not a Lemnos disk: no flashing mode is asked; restarting to the board's own boot order");
         }
         self.log(&format!(
             "restarting in {} s",
