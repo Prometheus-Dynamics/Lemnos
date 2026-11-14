@@ -50,11 +50,13 @@ lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
 lemnos-contract-image-blend = { path = "../../contracts/image-blend" }
 lemnos-contract-image-convert = { path = "../../contracts/image-convert" }
 lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
+lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-contract-isp-isp600 = { path = "../../contracts/isp-isp600" }
 lemnos-contract-isp-pisp = { path = "../../contracts/isp-pisp" }
 lemnos-contract-lens = { path = "../../contracts/lens" }
 lemnos-contract-light = { path = "../../contracts/light" }
 lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
+lemnos-contract-named-files = { path = "../../contracts/named-files" }
 lemnos-contract-npu = { path = "../../contracts/npu" }
 lemnos-contract-orientation = { path = "../../contracts/orientation" }
 lemnos-contract-pixels = { path = "../../contracts/pixels" }
@@ -63,6 +65,8 @@ lemnos-contract-power-switch = { path = "../../contracts/power-switch" }
 lemnos-contract-raw-bus = { path = "../../contracts/raw-bus" }
 lemnos-contract-security = { path = "../../contracts/security" }
 lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
+lemnos-contract-system-flash = { path = "../../contracts/system-flash" }
 lemnos-contract-system-identity = { path = "../../contracts/system-identity" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
 lemnos-contract-system-slots = { path = "../../contracts/system-slots" }

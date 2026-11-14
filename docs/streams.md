@@ -343,7 +343,9 @@ padding included, and `size` the frame: `stride` times the lines. `stride` is wh
 for the frame or what the block is programmed to write; `sunxi-vin` refuses to start when the kernel
 grants another, and `rkcif` writes its vendor compact lines by rule, which no register reports.
 
-The C API has no frame streams yet, so a C consumer has no buffer length to read.
+A C consumer reads the buffer length from `lemnos_stream_info` (`LemnosStreamInfo.buffer_bytes`, with
+`buffers`, `frame_slots`, `job_slots`, `job_bytes` and `planes`), and the length of one plane of a held
+frame from `lemnos_stream_plane_len`.
 
 ## Jobs
 
@@ -758,6 +760,11 @@ yet the shm ring a consumer reads, and [`TODO.md`](../TODO.md) lists it.
 
 ## What is not proven
 
-No stream has carried a frame from real hardware yet. The dma-buf paths are tested against test
+Frames from real hardware have been recorded on one board, by board runs: a camera receiver writing a
+stream's dma-buf buffers from a CMA heap and a client reading every frame through the dma-buf sync calls
+([`D5.md`](../testing/board-runs/D5.md)), the front end of the image pipeline writing its outputs
+([`D7.md`](../testing/board-runs/D7.md)), and 9000 frames at 114.802 fps with no gap, drop or error, as
+root and as an unprivileged user ([`F2e.md`](../testing/board-runs/F2e.md)). Every other board, and every
+block those runs did not drive, is untested on board: the dma-buf paths there are tested against test
 allocators, and against a real dma-heap when `LEMNOS_TEST_DMA_HEAP` names one
 (`/dev/dma_heap/system`), never against a block. See [Hardware status](hardware-status.md).
