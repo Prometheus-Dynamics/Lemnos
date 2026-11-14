@@ -65,6 +65,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnos-ctl` (`lemnos-ctl`)     | `lemnos-ctl`      | none                                                          | the same three                                                  |
 | `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
 | `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
+| `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none | not built for the musl targets in this change; its sizes are not measured yet (the good-boot deadline's waiter, plain `std`) |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 
