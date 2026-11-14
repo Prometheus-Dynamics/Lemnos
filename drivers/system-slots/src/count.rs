@@ -45,6 +45,11 @@ impl ClearCount for Firmware {
 }
 
 impl Firmware {
+    /// The count as the full 32-bit word (the restart baseline keeps it whole, above 255 too).
+    pub fn count_word(&self) -> io::Result<u32> {
+        self.word("count")
+    }
+
     /// The count this boot started with (`0` to `255`).
     pub fn count(&self) -> io::Result<u8> {
         u8::try_from(self.word("count")?).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
@@ -151,6 +156,18 @@ impl<M: ClearCount> Actions for Fallback<'_, M> {
     }
 }
 
+/// Keeps the restart baseline for a good boot: the firmware's count as it stands, before the clear
+/// (M36b). Returns the count kept. The clear that follows may fail; the baseline stays, so the
+/// restarts since this good boot are counted from it.
+pub(crate) fn keep_baseline(
+    record: &mut dyn BootRecord,
+    firmware: &Firmware,
+) -> Result<u32, String> {
+    let count = firmware.count_word().map_err(|e| e.to_string())?;
+    record.set_baseline(count).map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
 /// The start of the reason a boot count could not be cleared (the firmware mailbox is not
 /// reachable). The restart is not refused: the boot is counted, and the state and the indicator say so.
 pub(crate) const COUNT_UNCLEARED: &str = "the boot count couldn't be cleared";
@@ -239,7 +256,8 @@ impl SystemSlots {
         self.note(text);
     }
 
-    /// Boot good on `slot`: the manifest must match, then the slot's episodes and the boot count go
+    /// Boot good on `slot`: the manifest must match, then the restart baseline is kept (before the
+    /// clear, so it stays when the clear fails), then the slot's episodes and the boot count go
     /// (see [`arrival::on_boot_good`]). A boot whose files don't match keeps its count, and says so.
     pub(crate) fn boot_good(&mut self, slot: &str) {
         let Some(firmware) = self.firmware.clone() else {
@@ -250,6 +268,11 @@ impl SystemSlots {
         {
             return self.note(format!(
                 "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
+            ));
+        }
+        if let Err(why) = keep_baseline(self.record.as_mut(), &firmware) {
+            self.note(format!(
+                "the restart baseline couldn't be kept ({why}); the good boot's restarts are not reset in the record"
             ));
         }
         let mut actions = Fallback {
