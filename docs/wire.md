@@ -141,11 +141,12 @@ hash.
   in the prefix. It is compared at once.
 - **The parts** are the optional wire, each behind its feature bit in Welcome: stream handles
   (StreamOpenHandles and StreamHandles, with their limits), packages (Packages, Package and
-  PackagesDone, with the package modes) and jobs (CallJob, JobStarted, JobProgress, JobDone and
-  JobCancel). A part has its own hash, `PART_HASHES`. Hello and Welcome carry all of them in their
-  tail, `parts`, as three 8-byte little-endian hashes in the order the parts are numbered (stream
-  handles, packages, jobs). They are compared once the core agrees. A peer whose tail is empty has
-  none to compare.
+  PackagesDone, with the package modes), jobs (CallJob, JobStarted, JobProgress, JobDone and
+  JobCancel), shared rings (the shared-memory descriptors of a stream, [Streams](#streams)) and
+  endpoints (EndpointsOpen and its answers, [Endpoints](#endpoints)). A part has its own hash,
+  `PART_HASHES`. Hello and Welcome carry them in their tail, `parts`, as one record for each part the
+  sender knows, keyed by the part's name (below). They are compared once the core agrees. A peer whose
+  tail is empty has none to compare.
 
 A **base** is the part of a unit both sides must agree on. Two things are left out of a base, and
 so cannot move its hash: a frame kind marked `added` in the table, and a field whose type is `Tail`
@@ -617,6 +618,64 @@ A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),
 16 record (a u16 count, then each field's name str and shape). Shapes nest at most 8 deep.
 
+### The base hashes at L1a and at L1
+
+What a consumer built at one point sees at another is a fact of these hashes, so they are written
+here, as `layout::contract_hash` computes them for each contract (`service/ctl/tests/contract_hashes.rs`
+pins the current ones, so a change to any of them is a visible diff). L1a is `d6b9361d`, L1 is
+`bded77a0`; the hashes at L1 are also those of the tree where this table was written, since no
+contract's base moved after L1 until then.
+
+| Contract | Base hash at L1a | Base hash at L1 | |
+|---|---|---|---|
+| `accelerometer/1` | `0xfa7617318969b33f` | `0xfa7617318969b33f` | same |
+| `camera.frames/1` | `0x4ec103655d57e1b6` | `0x4ec103655d57e1b6` | same |
+| `camera.isp/1` | `0x6d0fcd2916131dca` | `0x6d0fcd2916131dca` | same |
+| `camera.receiver/1` | `0x462ed22eba9c5a9d` | `0x462ed22eba9c5a9d` | same |
+| `camera.sensor/1` | `0x33b860b02987233d` | `0x4d6f4b4bddf78636` | **changed**: `Mode.readout_ps` (F2h) and `InForce.clamped` (F2h2) were appended with no `#[added]` |
+| `codec.block/1` | `0x7c1ff4f41c048c36` | `0x7c1ff4f41c048c36` | same |
+| `fan-control/1` | `0xdc53417ac6ad2dff` | `0xdc53417ac6ad2dff` | same |
+| `fan/1` | `0x5dab136ed5227ce1` | `0x5dab136ed5227ce1` | same |
+| `gpu-lease/1` | `0xa3b5a2e7c697adaf` | `0xa3b5a2e7c697adaf` | same |
+| `gyroscope/1` | `0x6af97be3acc54eb3` | `0x6af97be3acc54eb3` | same |
+| `image.blend/1` | `0x765e6bda04750120` | `0x765e6bda04750120` | same |
+| `image.convert/1` | `0x8530d616c9b440f1` | `0x8530d616c9b440f1` | same |
+| `image.scaler/1` | `0xe312a3b1af910972` | `0xe312a3b1af910972` | same |
+| `indicator/1` | `0x5cbf7ddd287da0f4` | `0x5cbf7ddd287da0f4` | same |
+| `isp.isp600/1` | `0x5ac20894f91acb06` | `0x5ac20894f91acb06` | same |
+| `isp.pisp/1` | `0x613d73681c661b8b` | `0x613d73681c661b8b` | same |
+| `lemnos.files/1` | (not there) | `0x4925fdd5bdb57ce8` | new after L1a |
+| `lens/1` | `0xfec59427684e7db9` | `0xfec59427684e7db9` | same |
+| `light/1` | `0x9afc706b53f2c641` | `0x9afc706b53f2c641` | same |
+| `magnetometer/1` | `0x73b25422f7a40397` | `0x73b25422f7a40397` | same |
+| `npu/1` | `0x3a868e40c20599e8` | `0x3a868e40c20599e8` | same |
+| `orientation/1` | `0x46613173c6345352` | `0x46613173c6345352` | same |
+| `pixels/1` | `0xb320c90394119c89` | `0xb320c90394119c89` | same |
+| `power-monitor/1` | `0x0790b8ea27f1ec99` | `0x0790b8ea27f1ec99` | same |
+| `power-switch/1` | `0x690283d9620e96aa` | `0x690283d9620e96aa` | same |
+| `raw-bus/1` | `0xee5acf1cc8c01e10` | `0xee5acf1cc8c01e10` | same |
+| `self-test/1` | (not there) | `0xf5a21f9763c8595b` | new after L1a |
+| `system.flash/1` | `0x2198953afeadaf6c` | `0x2198953afeadaf6c` | same |
+| `system.identity/1` | `0xfca8957d8d3e73b3` | `0xfca8957d8d3e73b3` | same |
+| `system.reboot/1` | `0xface08cdca5b68c0` | `0xface08cdca5b68c0` | same |
+| `system.security-precondition/1` | (not there) | `0x97a0a781dd7267f4` | new after L1a |
+| `system.security/1` | (not there) | `0xabc23d89ae95cd6e` | new after L1a |
+| `system.slots/1` | `0xfded591dd9d79823` | `0x46f18ccbb6ee837d` | **changed**: methods 13 `list_page` (M8b) and 14 `info` (I5g) were appended with no `#[added]` |
+| `temperature/1` | `0xc77f0ded2da1235c` | `0xc77f0ded2da1235c` | same |
+| `usb.function/1` | `0x7c04d728d3f6f4e8` | `0x3ab7a81bc836a499` | **changed**: method 11 `ifname` (R1e) was appended with no `#[added]` |
+
+Three contracts moved their base between L1a and L1: `camera.sensor/1`, `system.slots/1` and
+`usb.function/1`. Each gained something with no `#[added]` mark, so it is base. A typed client built at
+L1a for one of those three is refused at bind by a service at L1 or later, and the reverse; a client of any
+other contract is not. The refusal is
+`Error::ContractMismatch`, status `VERSION_MISMATCH` (C: `LEMNOS_E_VERSION_MISMATCH`, -4097), text
+``contract camera.sensor/1: a base method is laid out differently (the device's base hash 0x4d6f4b4bddf78636, this client's 0x33b860b02987233d)``
+for a client built at L1a against a service at L1; nothing was called. `camera.receiver/1` gained two methods,
+`inputs` and `input` (methods 13 and 14), and kept its base hash because both are marked `#[added]`. Fields
+and methods marked `#[added]` leave the base hash alone (the test `an_added_field_does_not_move_the_base_or_the_method_hash`
+in `engine/core/src/layout.rs`). A tool that learns a device from its description (`lemnos-ctl`, the
+Orion bridge) and the C API's `lemnos_open` run no bind check, and are not refused by a base hash.
+
 ## Events
 
 A host sends an Event to a client that said `events: true` in its Hello, from that Hello onward.
@@ -642,7 +701,7 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the five part records }`
+`Hello { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the five part records }`
 
 <!-- vector: hello -->
 ```hex
@@ -651,7 +710,7 @@ Each vector is one complete frame.
 
 ### welcome
 
-`Welcome { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the five part records }`
+`Welcome { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the five part records }`
 
 <!-- vector: welcome -->
 ```hex

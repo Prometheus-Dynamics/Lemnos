@@ -616,10 +616,11 @@ refused with the layout mismatch, before any of its code runs.
 
 ## Compatibility: what must match, and what need not
 
-> **Status:** T1d has landed. The core and the wire parts are checked at connect (T1c). Each
-> contract's base shape, its additions and `#[breaking]` are checked when a typed client binds it
-> (T1d, below). The ABI tables of a driver package and the package guarantee follow in T1e and T1f.
-> Until T1f lands, a driver package built against another contract or ABI revision is refused.
+> **Status:** T1d and T1e have landed. The core and the wire parts are checked at connect (T1c;
+> T1e made each part one declaration, negotiated by name). Each contract's base shape, its additions
+> and `#[breaking]` are checked when a typed client binds it (T1d, below). The ABI tables of a driver
+> package and the package guarantee follow in T1f, which has not landed. Until it does, a driver
+> package built against another contract or ABI revision is refused.
 
 Nothing unreleased is versioned. Compatibility is structural: each unit of the interface has its own
 hash, and a client, a driver package or the daemon need agree only on the units they actually use.
@@ -634,8 +635,8 @@ The units, and what each hash covers:
   shapes, and whether it fills a buffer or starts a job. Checked once, when a typed client binds that
   contract. A change to one contract never affects a client of another.
 - **Each ABI table** of a driver package: its layout, checked when the package is loaded.
-- **Each optional part** of the wire (stream handles, packages, jobs), negotiated by the feature
-  bits, with its own hash where its layout can change.
+- **Each optional part** of the wire (stream handles, packages, jobs, shared rings, endpoints),
+  negotiated by name and by the feature bits, with its own hash.
 
 ### Base shape and additions
 
@@ -731,6 +732,10 @@ Nothing is versioned while unreleased: a contract's `version` stays 1. An additi
 base hash unchanged; a breaking change moves it.
 
 Doc comments, method bodies and the driver's own state don't move any hash.
+
+Every contract's base hash is pinned in one table, `service/ctl/tests/contract_hashes.rs`: a change
+that moves a base hash shows there as a changed row, and the PR says which consumers must be rebuilt.
+[The wire](wire.md#the-base-hashes-at-l1a-and-at-l1) lists the hashes at L1a and at L1.
 
 ## Checklist
 
