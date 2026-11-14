@@ -45,6 +45,13 @@
 //!   warn_high contract method field reading group`: `min`, `max`, `real_min`, `real_max`,
 //!   `real_step`, `step`, `warn_low` and `warn_high` are absent when the device gives no such bound;
 //!   `field` and `group` are quoted or `none`; `reading` is one of the reading words, or `unknown`.
+//! - `job id state done total percent`: one for each long job open on the device, after the items,
+//!   and none when there is none. It comes from the host's job table, not from the driver, so it is
+//!   there while the driver is in a step. `id` is the host's number for the job, hex; `state` is
+//!   `running` (the only state of a job that is open: a finished one is gone); `done` and `total`
+//!   are the driver's last progress in the contract's unit (bytes, steps), both 0 until it gives one;
+//!   `percent` is the whole percent `done` is of `total`, and absent while `total` is 0. At most 64
+//!   `job` records (the host's limit on open jobs). A reader from before it ignores the record.
 //!
 //! **Bounds.** A reader takes at most 60 KiB of text, 4 KiB per line, 4096 records, 64 keys per
 //! record, 256 `contract` records, 2048 `method` records and 2048 `item` records. [`render`] refuses a
@@ -59,7 +66,9 @@ use std::fmt::Write as _;
 
 use lemnos_core::{ItemKind, Reading, UnitState};
 use lemnos_wire::text::shape_name;
-use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod};
+use lemnos_wire::{
+    DeviceDescription, MAX_RUNNING_JOBS as MAX_JOBS, OwnedItem, OwnedMethod, RunningJob,
+};
 
 /// The first line of every description: the format's version.
 pub const VERSION_LINE: &str = "describe 1";
@@ -123,6 +132,11 @@ pub fn render(
     for item in &description.items {
         lines.push(item_record(item)?);
     }
+    // The long jobs open on the device, from the host's job table: one record each, after the
+    // items, none when there are none.
+    for job in description.jobs.iter().take(MAX_JOBS) {
+        lines.push(job_record(job));
+    }
     if lines.len() > MAX_RECORDS {
         return Err(too_many("records", lines.len(), MAX_RECORDS));
     }
@@ -143,6 +157,18 @@ pub fn render(
         return Err(too_many("bytes of text", out.len(), MAX_TEXT));
     }
     Ok(out)
+}
+
+/// One `job` record: `job id=0x1a2b00000003 state=running done=10 total=25 percent=40`.
+fn job_record(job: &RunningJob) -> String {
+    let mut line = format!(
+        "job id={:#x} state=running done={} total={}",
+        job.id, job.done, job.total
+    );
+    if let Some(percent) = job.percent() {
+        let _ = write!(line, " percent={percent}");
+    }
+    line
 }
 
 fn too_many(what: &str, count: usize, max: usize) -> String {
@@ -571,6 +597,7 @@ mod tests {
             state: Some(1),
             reason: reason.to_owned(),
             live: true,
+            jobs: Vec::new(),
             contracts: vec![OwnedContract {
                 tag: "imu/1".to_owned(),
                 kind: "sensor".to_owned(),
@@ -838,6 +865,39 @@ mod tests {
         let with_record = format!("{text}later a=1 b=\"two\"\n");
         let records = parse(&with_record).expect("an unknown record is ignored");
         assert_eq!(records.last().expect("record").word, "later");
+    }
+
+    #[test]
+    fn a_running_job_is_a_record_after_the_items_and_no_job_changes_nothing() {
+        let plain = described("l", "r");
+        let without = render(&plain, Some(1), Some(60)).expect("renders");
+        assert!(!without.contains("\njob "));
+        let mut busy = plain.clone();
+        busy.jobs = vec![
+            RunningJob {
+                id: 0x6a1b_0000_0001,
+                done: 41_943_040,
+                total: 104_857_600,
+            },
+            RunningJob {
+                id: 0x6a1b_0000_0002,
+                done: 0,
+                total: 0,
+            },
+        ];
+        let with = render(&busy, Some(1), Some(60)).expect("renders");
+        // Everything before the job lines is what it was.
+        assert!(with.starts_with(&without));
+        assert_eq!(
+            &with[without.len()..],
+            "job id=0x6a1b00000001 state=running done=41943040 total=104857600 percent=40\n\
+             job id=0x6a1b00000002 state=running done=0 total=0\n"
+        );
+        let records = parse(&with).expect("parses");
+        let jobs: Vec<_> = records.iter().filter(|r| r.word == "job").collect();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].get("percent"), Some("40"));
+        assert_eq!(jobs[1].get("percent"), None, "no percent without a total");
     }
 
     #[test]

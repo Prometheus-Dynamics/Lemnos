@@ -65,6 +65,7 @@ fn described() -> DeviceDescription {
         state: 0,
         reason: "",
         not_live: false,
+        jobs: "",
     };
     let n = encode_description(&manifest, &Description::new(), &identity, &mut bytes).unwrap();
     decode_description(&bytes[..n]).unwrap()

@@ -88,6 +88,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 health: health::FAILED,
                 reason: "r",
                 link: Tail("d"),
+                jobs: Tail("1a:3/4"),
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
@@ -471,18 +472,40 @@ fn a_device_from_before_its_link_reads_as_having_none() {
         health: health::FAILED,
         reason: "r",
         link: Tail("d"),
+        jobs: Tail("1a:3/4"),
     };
     let mut buf = [0; 64];
     let n = encode(&with, &mut buf).unwrap();
     // What an older host sends: the same frame, ending after `reason`.
-    let older = n - 5;
+    let older = n - 5 - 10;
     buf[..4].copy_from_slice(&((older - 4) as u32).to_le_bytes());
     let (frame, used) = decode(&buf[..older]).unwrap().unwrap();
     assert_eq!(used, older);
-    let Frame::Device { link, reason, .. } = frame else {
+    let Frame::Device {
+        link, jobs, reason, ..
+    } = frame
+    else {
         panic!("{frame:?}");
     };
-    assert_eq!((reason, link), ("r", Tail("")));
+    assert_eq!((reason, link, jobs), ("r", Tail(""), Tail("")));
+    // A host from between the two sends the link and no jobs: none are running as far as the
+    // reader can tell.
+    let between = n - 10;
+    buf[..4].copy_from_slice(&((between - 4) as u32).to_le_bytes());
+    let (frame, _) = decode(&buf[..between]).unwrap().unwrap();
+    let Frame::Device { link, jobs, .. } = frame else {
+        panic!("{frame:?}");
+    };
+    assert_eq!((link, jobs), (Tail("d"), Tail("")));
+    // A reader from before the field gets the whole frame and ignores the trailing bytes: the
+    // current frame, read by taking only the fields up to `link`, is the same up to there.
+    buf[..4].copy_from_slice(&((n - 4) as u32).to_le_bytes());
+    let (frame, used) = decode(&buf[..n]).unwrap().unwrap();
+    assert_eq!(used, n);
+    let Frame::Device { jobs, .. } = frame else {
+        panic!("{frame:?}");
+    };
+    assert_eq!(jobs, Tail("1a:3/4"));
     // A link that is there but cut short is malformed, not empty.
     buf[..4].copy_from_slice(&((older - 4 + 2) as u32).to_le_bytes());
     assert_eq!(decode(&buf[..older + 2]), Err(WireError::Malformed));
@@ -545,7 +568,10 @@ mod description {
         Shape, Tag, Unit,
     };
 
-    use super::{Identity, OwnedShape, decode_description, encode_description};
+    use super::{
+        Identity, MAX_RUNNING_JOBS, OwnedShape, RunningJob, decode_description, encode_description,
+        parse_running_jobs, running_jobs_text,
+    };
 
     const CONTRACT: ContractInfo = ContractInfo {
         tag: Tag::new("example.thing/1"),
@@ -588,6 +614,7 @@ mod description {
             state: crate::state::BACKOFF,
             reason: "bus error",
             not_live: false,
+            jobs: "",
         }
     }
 
@@ -663,6 +690,58 @@ mod description {
             .map(|m| (m.id, m.job))
             .collect();
         assert_eq!(jobs, [(3, false), (5, true)]);
+    }
+
+    /// The running jobs ride in the identity block: they come back, none reads as none, and a
+    /// description from a host that never wrote them (the identity block without the field) reads
+    /// as none too. The text form holds at most `MAX_RUNNING_JOBS`.
+    #[test]
+    fn the_running_jobs_round_trip_and_their_absence_reads_as_none() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[],
+        };
+        let mut buf = [0; 512];
+        let mut at = |jobs: &str| {
+            let identity = Identity { jobs, ..identity() };
+            let n =
+                encode_description(&manifest, &Description::new(), &identity, &mut buf).unwrap();
+            decode_description(&buf[..n]).unwrap().jobs
+        };
+        assert_eq!(at(""), []);
+        let jobs = vec![
+            RunningJob {
+                id: 0x6a1b_0000_0001,
+                done: 40,
+                total: 100,
+            },
+            RunningJob {
+                id: 2,
+                done: 0,
+                total: 0,
+            },
+        ];
+        assert_eq!(at(&running_jobs_text(&jobs)), jobs);
+        assert_eq!(jobs[0].percent(), Some(40));
+        assert_eq!(jobs[1].percent(), None);
+        assert_eq!(jobs[0].words(), "job 0x6a1b00000001 running 40%");
+        assert_eq!(jobs[1].words(), "job 0x2 running");
+        // Over the bound is cut at the bound, never longer.
+        let many = vec![jobs[1]; MAX_RUNNING_JOBS + 5];
+        assert_eq!(
+            parse_running_jobs(&running_jobs_text(&many)).len(),
+            MAX_RUNNING_JOBS
+        );
+        // An entry that is not one is skipped.
+        assert_eq!(
+            parse_running_jobs("zz 1:2/3 :/ 4"),
+            [RunningJob {
+                id: 1,
+                done: 2,
+                total: 3
+            }]
+        );
     }
 
     /// The old-description compatibility: a description encoded in the layout a host from before

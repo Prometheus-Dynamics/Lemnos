@@ -179,6 +179,7 @@ mod tests {
             health: DeviceHealth::Ok,
             reason: String::new(),
             link: link.map(Into::into),
+            jobs: Vec::new(),
         }
     }
 

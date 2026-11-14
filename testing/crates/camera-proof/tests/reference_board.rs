@@ -165,6 +165,7 @@ fn listed(board: &BoardFile) -> Vec<DeviceEntry> {
             health: DeviceHealth::Ok,
             reason: String::new(),
             link: d.link.clone(),
+            jobs: Vec::new(),
         })
         .collect()
 }

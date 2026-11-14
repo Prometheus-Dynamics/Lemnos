@@ -166,9 +166,78 @@ pub struct DeviceDescription {
     /// (off, retrying, failed, never started): its contracts and methods are the manifest's, and
     /// it has no items. True from a host that sends no identity, which only answered running devices.
     pub live: bool,
+    /// The long jobs open on the device right now, from the host's job table. Empty when there is
+    /// none, and from a host from before it.
+    pub jobs: Vec<RunningJob>,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
 }
+
+/// A long job that is open on a device, as the host's job table has it. `done` and `total` are in
+/// the contract's unit (bytes, steps); `total` is 0 until the driver says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunningJob {
+    /// The host's number for the job, as `start_job` returned it.
+    pub id: u64,
+    pub done: u64,
+    pub total: u64,
+}
+
+impl RunningJob {
+    /// Whole percent done, or `None` while the total is not known. Never over 100.
+    #[must_use]
+    pub fn percent(&self) -> Option<u64> {
+        (self.total > 0)
+            .then(|| (u128::from(self.done.min(self.total)) * 100 / u128::from(self.total)) as u64)
+    }
+}
+
+impl RunningJob {
+    /// How a tool says it, in words: `job 0x1a2b00000003 running 40%`, or without the percent while
+    /// the total is not known. The same words in a list row and in a describe.
+    #[must_use]
+    pub fn words(&self) -> String {
+        match self.percent() {
+            Some(percent) => format!("job {:#x} running {percent}%", self.id),
+            None => format!("job {:#x} running", self.id),
+        }
+    }
+}
+
+/// The running jobs as the wire carries them: `ID:DONE/TOTAL`, the id in hex, joined by a space.
+/// At most [`MAX_RUNNING_JOBS`] are written. Allocates only when there is a job.
+#[must_use]
+pub fn running_jobs_text(jobs: &[RunningJob]) -> String {
+    let mut text = String::new();
+    for job in jobs.iter().take(MAX_RUNNING_JOBS) {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&format!("{:x}:{}/{}", job.id, job.done, job.total));
+    }
+    text
+}
+
+/// [`running_jobs_text`] read back. An entry that does not parse is skipped.
+#[must_use]
+pub fn parse_running_jobs(text: &str) -> Vec<RunningJob> {
+    text.split(' ')
+        .take(MAX_RUNNING_JOBS)
+        .filter_map(|entry| {
+            let (id, progress) = entry.split_once(':')?;
+            let (done, total) = progress.split_once('/')?;
+            Some(RunningJob {
+                id: u64::from_str_radix(id, 16).ok()?,
+                done: done.parse().ok()?,
+                total: total.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// The most jobs a description or a list row shows for one device: the host's own limit on open
+/// jobs (`lemnos_host::MAX_JOBS`), which no device can pass.
+pub const MAX_RUNNING_JOBS: usize = 64;
 
 /// What the host knows about a device and tells a reader of its description: the parts of a
 /// device's identity that come from the board file and the host's state, not from the driver.
@@ -186,6 +255,9 @@ pub struct Identity<'a> {
     /// methods, with no items and no address or location. A host from before it sends none, which
     /// reads as a running driver.
     pub not_live: bool,
+    /// The long jobs open on the device, from the host's job table, as [`running_jobs_text`]
+    /// writes them. Empty when there are none, and from a host from before it.
+    pub jobs: &'a str,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -251,6 +323,8 @@ struct DescIdentity<'a> {
     location: &'a str,
     /// Appended after `location`: true when the driver is not running. Absent reads as false.
     not_live: bool,
+    /// Appended after `not_live`: the open jobs, as [`running_jobs_text`]. Absent reads as none.
+    jobs: &'a str,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -590,6 +664,7 @@ pub(crate) fn encode_trailer(
         kind: device_kind(manifest),
         location: description.location(),
         not_live: identity.not_live,
+        jobs: identity.jobs,
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -723,6 +798,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.address = identity.address;
         out.kind = identity.kind.to_string();
         out.location = identity.location.to_string();
+        out.jobs = parse_running_jobs(identity.jobs);
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {

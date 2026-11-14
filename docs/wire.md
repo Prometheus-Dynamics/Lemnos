@@ -33,7 +33,7 @@ closes the connection on a larger length, without reading it.
 | 1 | Hello | core u64, lemnos name (32 bytes), version u16, name str, events bool, parts (tail) | to host |
 | 2 | Welcome | core u64, lemnos name (32 bytes), version u16, features u64, host str, parts (tail) | to client |
 | 3 | List | id u32 | to host |
-| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str | to client |
+| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str, jobs str | to client |
 | 5 | ListDone | id u32 | to client |
 | 6 | Open | id u32, device str, tag str | to host |
 | 7 | Opened | id u32, device u32, contract u8 | to client |
@@ -74,6 +74,14 @@ says, or empty when it names none. The host carries it and never reads it: what 
 is between the two devices' contracts. A camera sensor's `link` names its receiver and the
 receiver's names its ISP, so a client follows a sensor to both through List alone. `link` was
 appended to Device (rule 8): a host from before it sends Device without it, which reads as empty.
+
+`jobs` in Device is the long jobs open on the device, from the host's job table (never from the
+driver): `ID:DONE/TOTAL` each, the id in hex and the two counts decimal, joined by one space, at
+most 64 of them (the host's limit on open jobs); empty when none is open. `DONE` and `TOTAL` are
+the driver's last progress in the contract's unit, both 0 until it gives one. It was appended after
+`link` (rule 8): a host from before it sends Device without it, which reads as no job, and a reader
+from before it ignores the trailing text. The device's description carries the same list, appended
+to its identity block.
 
 `features` in Welcome is a set of bits, each saying the host can do one thing added to version 1
 after its first form. A host leaves the bits it doesn't know clear, and a client ignores the bits
@@ -661,11 +669,11 @@ Each vector is one complete frame.
 
 ### device
 
-`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d" }`
+`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d", jobs: "1a:3/4" }`
 
 <!-- vector: device -->
 ```hex
-27 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64
+31 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64 06 00 00 00 31 61 3a 33 2f 34
 ```
 
 A host from before `link` sends the same frame without its last five bytes (length `22`), and a

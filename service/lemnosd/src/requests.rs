@@ -11,8 +11,8 @@ use lemnos_host::stream::StreamMemory;
 use lemnos_wire::ring::fds;
 use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
-    PLANE_LENGTH_BYTES, REPLY_OVERHEAD, Tail, VERSION, WireError, check_parts, decode,
-    encode_description, feature, handle_descriptors, package_mode,
+    PLANE_LENGTH_BYTES, REPLY_OVERHEAD, RunningJob, Tail, VERSION, WireError, check_parts, decode,
+    encode_description, feature, handle_descriptors, package_mode, running_jobs_text,
 };
 
 use crate::Core;
@@ -228,6 +228,7 @@ impl Client {
                 health,
                 reason: &reason,
                 link: Tail(info.link.as_deref().unwrap_or("")),
+                jobs: Tail(&running_jobs_text(&self.running_jobs(info.index))),
             });
         }
         self.conn.answer(&Frame::ListDone { id });
@@ -287,6 +288,20 @@ impl Client {
         true
     }
 
+    /// The device's open jobs, from the host's table, never from its driver.
+    fn running_jobs(&self, device: u32) -> Vec<RunningJob> {
+        self.core
+            .host
+            .jobs_of(device)
+            .into_iter()
+            .map(|job| RunningJob {
+                id: job.job,
+                done: job.done,
+                total: job.total,
+            })
+            .collect()
+    }
+
     fn describe(&self, id: u32, device: u32) -> Keep {
         let Some(manifest) = self.core.host.manifest(device) else {
             return self.refuse(id, Status::NOT_FOUND, "no such device");
@@ -318,6 +333,7 @@ impl Client {
             state,
             reason: &reason,
             not_live,
+            jobs: &running_jobs_text(&self.running_jobs(device)),
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {

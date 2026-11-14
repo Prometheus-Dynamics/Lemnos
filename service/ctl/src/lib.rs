@@ -653,6 +653,12 @@ impl Tool<'_> {
             if !d.reason.is_empty() {
                 row.push_str(&format!("  ({})", d.reason));
             }
+            // The jobs open on it, from the host's table: `job 0x1a2b00000003 running 40%`, last on
+            // the row, and nothing when there is none.
+            if !d.jobs.is_empty() {
+                let jobs: Vec<String> = d.jobs.iter().map(lemnos_wire::RunningJob::words).collect();
+                row.push_str(&format!("  {}", jobs.join(", ")));
+            }
             line(self.out, format_args!("{row}"))?;
         }
         Ok(())
@@ -771,6 +777,10 @@ impl Tool<'_> {
                 row.push_str(&format!(" {min}..{max}"));
             }
             line(self.out, format_args!("{row}"))?;
+        }
+        // The long jobs open on it, from the host's table.
+        for job in &description.jobs {
+            line(self.out, format_args!("{}", job.words()))?;
         }
         Ok(())
     }

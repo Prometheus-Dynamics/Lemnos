@@ -59,6 +59,7 @@ fn entry(index: u32, name: &str, link: Option<&str>) -> DeviceEntry {
         health: DeviceHealth::Ok,
         reason: String::new(),
         link: link.map(str::to_string),
+        jobs: Vec::new(),
     }
 }
 

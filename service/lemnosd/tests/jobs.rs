@@ -319,3 +319,112 @@ fn a_restart_reports_a_running_job_as_interrupted() {
     let (status, _) = client.wait_job(job.0, LONG, &mut |_, _| {}).unwrap();
     assert_eq!(status, Status::OK);
 }
+
+/// Polls `ask` until it gives `Some`, or fails after `LONG`.
+fn until<T>(what: &str, mut ask: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + LONG;
+    loop {
+        if let Some(found) = ask() {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn another_session_sees_the_running_job_in_describe_and_list() {
+    let running = start();
+    let owner = Client::connect(&running.socket, "owner").unwrap();
+    let other = Client::connect(&running.socket, "other").unwrap();
+    let device = other.list().unwrap().into_iter().next().unwrap().index;
+
+    // No job: nothing is said.
+    assert!(other.describe(device).unwrap().jobs.is_empty());
+    assert!(other.list().unwrap()[0].jobs.is_empty());
+
+    let job = owner
+        .open::<dyn Copying>("c")
+        .unwrap()
+        .copy(1_000_000)
+        .unwrap();
+
+    // The second session, which did not start it, sees it with its number, and its progress moves.
+    let first = until("the job never showed progress", || {
+        let jobs = other.describe(device).unwrap().jobs;
+        assert!(jobs.len() <= 1, "{jobs:?}");
+        jobs.first().copied().filter(|job| job.done > 0)
+    });
+    assert_eq!((first.id, first.total), (job.0, 1_000_000));
+    let later = until("the progress never moved", || {
+        other
+            .describe(device)
+            .unwrap()
+            .jobs
+            .first()
+            .copied()
+            .filter(|job| job.done > first.done)
+    });
+    assert_eq!(later.id, job.0);
+
+    // `list` shows it, from the same table, and says it in words.
+    let listed = other.list().unwrap();
+    let shown = listed[0].jobs.first().copied().expect("list shows the job");
+    assert_eq!(shown.id, job.0);
+    let words = shown.words();
+    assert!(
+        words.starts_with(&format!("job {:#x} running ", job.0)) && words.ends_with('%'),
+        "{words}"
+    );
+
+    // Gone once it ends.
+    owner.cancel_job(job.0).unwrap();
+    owner
+        .wait_job(job.0, LONG, &mut |_, _| {})
+        .expect("the job ended");
+    assert!(other.describe(device).unwrap().jobs.is_empty());
+    assert!(other.list().unwrap()[0].jobs.is_empty());
+}
+
+#[test]
+fn a_session_that_did_not_start_a_job_can_see_it_but_not_wait_for_it_or_cancel_it() {
+    let running = start();
+    let owner = Client::connect(&running.socket, "owner").unwrap();
+    let other = Client::connect(&running.socket, "other").unwrap();
+    let device = other.list().unwrap().into_iter().next().unwrap().index;
+    let job = owner
+        .open::<dyn Copying>("c")
+        .unwrap()
+        .copy(1_000_000)
+        .unwrap();
+    let seen = until("the job never showed", || {
+        other.describe(device).unwrap().jobs.first().copied()
+    });
+    assert_eq!(seen.id, job.0);
+
+    // Wait: the number is not this session's, so it is answered at once as not found, and nothing
+    // of the job's progress or end is sent to it.
+    let started = Instant::now();
+    assert_eq!(
+        other.wait_job(seen.id, LONG, &mut |_, _| panic!(
+            "progress for a job it did not start"
+        )),
+        Some((Status::NOT_FOUND, Vec::new()))
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(other.next_job_event(), None);
+    // Cancel: refused.
+    assert_eq!(
+        other.cancel_job(seen.id).map_err(Status::from),
+        Err(Status::NOT_PERMITTED)
+    );
+    // Neither touched the job: it is still open and still the starter's.
+    assert_eq!(other.describe(device).unwrap().jobs.len(), 1);
+    assert_eq!(owner.wait_job(job.0, Duration::ZERO, &mut |_, _| {}), None);
+
+    // The other session going away does not touch it either.
+    drop(other);
+    owner.cancel_job(job.0).unwrap();
+    let (status, _) = owner.wait_job(job.0, LONG, &mut |_, _| {}).unwrap();
+    assert_eq!(status, Status::CANCELLED);
+}

@@ -82,6 +82,10 @@ pub struct DeviceEntry {
     /// sensor's names its receiver, and the receiver's names its ISP. `None` when the board
     /// names none, and from a service older than this field. See [`follow`].
     pub link: Option<String>,
+    /// The long jobs open on it, from the host's job table (empty when there are none, and from
+    /// a service older than this field). Visible to every session, not only the one that started
+    /// them.
+    pub jobs: Vec<lemnos_wire::RunningJob>,
 }
 
 /// The devices `from` leads to through `link`, in order, starting with `from` itself: a sensor,
@@ -1030,6 +1034,7 @@ impl Session {
                 health,
                 reason,
                 link,
+                jobs,
                 ..
             } => {
                 let (Some(state), Some(health)) = (device_state(state), device_health(health))
@@ -1049,6 +1054,7 @@ impl Session {
                     health,
                     reason: reason.to_string(),
                     link: (!link.0.is_empty()).then(|| link.0.to_string()),
+                    jobs: lemnos_wire::parse_running_jobs(jobs.0),
                 });
                 None
             }

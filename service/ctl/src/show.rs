@@ -29,6 +29,9 @@ pub fn panel(description: &DeviceDescription) -> Vec<String> {
         lines.push(format!("  location {}", description.location));
     }
     lines.push(format!("  state    {}", state_text(description)));
+    for job in &description.jobs {
+        lines.push(format!("  {}", job.words()));
+    }
     if !description.contracts.is_empty() {
         lines.push(format!("  provides {}", contract_list(description)));
     }

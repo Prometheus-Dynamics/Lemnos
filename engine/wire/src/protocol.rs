@@ -4,8 +4,9 @@
 mod description;
 
 pub use description::{
-    DeviceDescription, Identity, OwnedContract, OwnedItem, OwnedMethod, OwnedParam, OwnedShape,
-    decode_description, device_kind, effective_reading, encode_description,
+    DeviceDescription, Identity, MAX_RUNNING_JOBS, OwnedContract, OwnedItem, OwnedMethod,
+    OwnedParam, OwnedShape, RunningJob, decode_description, device_kind, effective_reading,
+    encode_description, parse_running_jobs, running_jobs_text,
 };
 
 use lemnos_core::{Decode, Encode, Reader, Shape, Status, Writer};
@@ -369,6 +370,10 @@ frames! {
             /// The name of the device this one is wired to, from the board file's `link`. Empty
             /// when it names none, and from a host older than this field.
             link: Appended<'a>,
+            /// The long jobs open on the device, `ID:DONE/TOTAL` each, joined by a space (see
+            /// [`description::running_jobs_text`]). Empty when there are none, and from a host older
+            /// than this field.
+            jobs: Appended<'a>,
         }
         5 ListDone { id: u32 }
         /// An empty `device` means any device providing `tag`.

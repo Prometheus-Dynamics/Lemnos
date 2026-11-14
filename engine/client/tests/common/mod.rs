@@ -223,6 +223,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             health: health::OK,
                             reason: "",
                             link: Tail("two"),
+                            jobs: Tail(""),
                         },
                         &mut out,
                     );
@@ -237,6 +238,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             health: health::FAILED,
                             reason: "bad",
                             link: Tail(""),
+                            jobs: Tail(""),
                         },
                         &mut out,
                     );

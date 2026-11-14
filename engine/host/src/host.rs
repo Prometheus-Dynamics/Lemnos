@@ -870,6 +870,16 @@ pub struct JobUpdate {
     pub event: JobEvent,
 }
 
+/// A long job open on a device, as the host's job table has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobInfo {
+    /// The host's number for the job, as [`Host::start_job`] returned it.
+    pub job: u64,
+    /// The last progress the driver gave, in the contract's unit; both 0 until it gives one.
+    pub done: u64,
+    pub total: u64,
+}
+
 struct OpenJob {
     id: u64,
     device: u32,
@@ -2899,6 +2909,33 @@ impl Host {
     /// ([`Host::set_waker`]) is called when there is something to take.
     pub fn take_job_updates(&self, into: &mut Vec<JobUpdate>) {
         into.extend(self.inner.jobs().updates.drain(..));
+    }
+
+    /// The long jobs open on `device`, oldest first, with the progress last told. Read from the
+    /// host's job table alone: the driver is not entered, so this answers while it is in a step.
+    /// Allocates only when the device has a job.
+    #[must_use]
+    pub fn jobs_of(&self, device: u32) -> Vec<JobInfo> {
+        let Some(slot) = self.inner.slot(device) else {
+            return Vec::new();
+        };
+        if slot.open_jobs.load(Ordering::Acquire) == 0 {
+            return Vec::new();
+        }
+        self.inner
+            .jobs()
+            .open
+            .iter()
+            .filter(|job| job.device == device)
+            .map(|job| {
+                let (done, total) = job.told.unwrap_or((0, 0));
+                JobInfo {
+                    job: job.id,
+                    done,
+                    total,
+                }
+            })
+            .collect()
     }
 
     /// How many long jobs are open.
