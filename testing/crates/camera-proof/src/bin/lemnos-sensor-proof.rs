@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lemnos_camera_proof::{Error, Options, SocketBus, assemble};
+use lemnos_camera_proof::{Error, Options, SocketBus, assemble_with};
 use lemnos_client::{Client, FrameStream, HeldFrame};
 use lemnos_contract_camera_sensor::{CameraSensor, Controls, FrameValues};
 use lemnos_core::{Config, ConfigValue, I2c, Lifecycle, Provider};
@@ -277,6 +277,24 @@ fn next(stream: &mut FrameStream) -> Result<Seen, String> {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Runs `call` again while the sensor answers BUSY, for up to two seconds: a sensor that has just
+/// been started powers up for 10 ms before it takes a write, and a post refuses until the receiver
+/// has counted a frame start.
+fn while_busy<T>(mut call: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match call() {
+            Err(Error::Call {
+                status: lemnos_core::Status::BUSY,
+                ..
+            }) if std::time::Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn latch(args: &[String]) -> Result<bool, String> {
     let socket = flag(args, "--socket").unwrap_or_else(|| "/run/lemnos/lemnosd.sock".into());
     let trials: u32 = flag(args, "--trials")
@@ -286,15 +304,25 @@ fn latch(args: &[String]) -> Result<bool, String> {
         Client::connect(&socket, "lemnos-sensor-proof").map_err(|e| format!("{socket}: {e}"))?;
     client.set_timeout(Duration::from_secs(5));
     let bus = SocketBus::new(client);
-    let mut camera = assemble(
+    // The latch runs beside the chain proof, which has the front end in use: the ISP is not opened.
+    let mut camera = assemble_with(
         &bus,
         &Options {
             sensor: flag(args, "--sensor"),
             mode: 0,
         },
+        false,
     )
     .map_err(|e: Error| format!("{e}"))?;
-    let frame_length = camera.mode().frame_length_min.max(1822);
+    // Beside a chain that already runs the mode, the frame length is the chain's: the latch does
+    // not change the rate the chain is measured at. On its own it uses its usual one.
+    let beside = camera.keep_selected().map_err(|e| format!("{e}"))?;
+    let held = if beside {
+        camera.frame_length_in_force().map_err(|e| format!("{e}"))?
+    } else {
+        None
+    };
+    let frame_length = held.unwrap_or_else(|| camera.mode().frame_length_min.max(1822));
     let max_exposure = (frame_length - 25) * 16;
     let (short, middle, long) = (max_exposure / 8, max_exposure / 3, max_exposure);
     let controls = |exposure| Controls {
@@ -303,10 +331,8 @@ fn latch(args: &[String]) -> Result<bool, String> {
         ..Controls::default()
     };
     // The scene: the sensor keeps a test pattern an earlier caller chose.
-    camera.set_test_pattern(0).map_err(|e| format!("{e}"))?;
-    camera
-        .set_controls(controls(short))
-        .map_err(|e| format!("{e}"))?;
+    while_busy(|| camera.set_test_pattern(0)).map_err(|e| format!("{e}"))?;
+    while_busy(|| camera.set_controls(controls(short))).map_err(|e| format!("{e}"))?;
     let receiver = camera.receiver().clone();
     let name = camera.stream().to_string();
     let mut stream = bus
@@ -316,9 +342,11 @@ fn latch(args: &[String]) -> Result<bool, String> {
     let mut identity = 0u64;
     let mut post = |camera: &mut lemnos_camera_proof::Camera<'_, SocketBus>, exposure| {
         identity += 1;
-        camera.post_values(FrameValues {
-            identity,
-            controls: controls(exposure),
+        while_busy(|| {
+            camera.post_values(FrameValues {
+                identity,
+                controls: controls(exposure),
+            })
         })
     };
     // Settle, and the three levels.
@@ -345,7 +373,11 @@ fn latch(args: &[String]) -> Result<bool, String> {
     // A landing is told by brightness: with no light on the sensor the exposures look alike, and
     // every count below would be noise.
     if l_long - l_short < 8.0 {
-        let _ = camera.stop();
+        let _ = if beside {
+            camera.stop_receiver()
+        } else {
+            camera.stop()
+        };
         return Err(format!(
             "the scene does not change with exposure (brightness {l_short:.1} short, {l_long:.1} long): light it and run again"
         ));
@@ -372,6 +404,10 @@ fn latch(args: &[String]) -> Result<bool, String> {
             wire.push(done - posted);
             // Frame sequence numbers count frame starts: the frame the call completed in.
             let completed_in = f.sequence + (done - f.start_ns) / period.max(1);
+            // The launch is the call's last write, somewhere between `posted` and `done`: a call
+            // that straddles a frame start may have launched in either frame, and either landing
+            // is the predicted one.
+            let started_in = f.sequence + (posted - f.start_ns) / period.max(1);
             let mut landed = None;
             for _ in 0..8 {
                 let g = next(&mut stream)?;
@@ -380,8 +416,8 @@ fn latch(args: &[String]) -> Result<bool, String> {
                 }
             }
             match landed {
-                Some(s) if s == completed_in + 2 => predicted += 1,
-                Some(s) if s < completed_in + 2 => early += 1,
+                Some(s) if (started_in + 2..=completed_in + 2).contains(&s) => predicted += 1,
+                Some(s) if s < started_in + 2 => early += 1,
                 Some(_) => late += 1,
                 None => lost += 1,
             }
@@ -439,7 +475,13 @@ fn latch(args: &[String]) -> Result<bool, String> {
     ));
     let counters = camera.counters().map_err(|e| format!("{e}"))?;
     out(format_args!("receiver counters: {counters:?}"));
-    camera.stop().map_err(|e| format!("{e}"))?;
+    // Beside a chain the sensor is the chain's: only the receiver this tool started is stopped.
+    if beside {
+        camera.stop_receiver()
+    } else {
+        camera.stop()
+    }
+    .map_err(|e| format!("{e}"))?;
     Ok(all_ok && second == trials && first_seen == 0)
 }
 

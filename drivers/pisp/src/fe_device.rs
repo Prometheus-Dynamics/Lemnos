@@ -118,9 +118,7 @@ mod relay;
 use relay::{MAX_BUFFERS, Relay};
 
 use crate::fe::FE_OUTPUT_ALIGN;
-use crate::fe_hw::{
-    Finished, Hardware, LinuxHardware, Placed, Plan, Registered, Settings, slot_bytes,
-};
+use crate::fe_hw::{Finished, Hardware, Placed, Plan, Registered, Settings, slot_bytes};
 use crate::fe_job::{self, CONFIG_BYTES, Fixed, STATS_BYTES};
 use crate::format::{compute_stride_align, formats};
 use crate::uapi::{FE_NUM_OUTPUTS, FeConfig, ImageFormatConfig, Wire};
@@ -424,7 +422,7 @@ impl Lifecycle for PispFe {
             handles_only(stream)?;
         }
         Ok(Self::with_hardware(
-            Box::new(LinuxHardware::new(settings)),
+            crate::fe_hw::hardware(settings),
             needs,
             options,
         ))

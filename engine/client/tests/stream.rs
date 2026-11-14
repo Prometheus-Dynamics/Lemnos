@@ -1050,6 +1050,44 @@ fn a_writable_open_of_read_only_buffers_is_refused_by_name_and_a_read_only_open_
     );
 }
 
+/// Descriptors that stand in for a heap's dma-bufs as a PC allows: not a regular file, so not
+/// sealable, and mappable writable when opened read-write. The buffer descriptors of `fds` are
+/// replaced with `count` of them opened as `access` says.
+fn as_dma_bufs(fds: &mut Vec<OwnedFd>, count: usize, write: bool) {
+    fds.truncate(fds::BUFFERS);
+    for _ in 0..count {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open("/dev/zero")
+            .unwrap();
+        fds.push(file.into());
+    }
+}
+
+#[test]
+fn a_stream_of_dma_bufs_opened_read_write_can_be_taken_writable_and_one_opened_read_only_cannot() {
+    // A driver's input stream the caller fills: dma-bufs from a heap, which are never sealed.
+    let (layout, _host, mut fds) = good_handles(3);
+    as_dma_bufs(&mut fds, 3, true);
+    let (_fake, mut session) = handles_host(layout, claimed_for(3, 1), fds);
+    let stream = session
+        .open_stream_writable(7, "input", platform())
+        .unwrap();
+    assert!(stream.has_buffer_handles() && stream.is_writable());
+    drop(stream);
+
+    let (layout, _host, mut fds) = good_handles(3);
+    as_dma_bufs(&mut fds, 3, false);
+    let (_fake, mut session) = handles_host(layout, claimed_for(3, 1), fds);
+    assert_eq!(
+        session
+            .open_stream_writable(7, "input", platform())
+            .unwrap_err(),
+        Error::StreamBuffersReadOnly
+    );
+}
+
 #[test]
 fn a_read_only_open_of_writable_buffers_still_maps_them_read_only() {
     let (_host, fds) = good();

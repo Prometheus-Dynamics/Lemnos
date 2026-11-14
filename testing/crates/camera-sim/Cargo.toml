@@ -1,0 +1,29 @@
+[package]
+name = "lemnos-camera-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The camera chain on a PC: simulated sensor, receiver and PiSP blocks under the real host, service and drivers, for tests and the off-board pass"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
+lemnos-sim = { path = "../../../backends/sim" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnosd = { path = "../../../service/lemnosd" }
+lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
+lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
+lemnos-driver-ov9782 = { path = "../../../drivers/ov9782" }
+lemnos-driver-raw-bus = { path = "../../../drivers/raw-bus" }
+lemnos-driver-gpio-power-switch = { path = "../../../drivers/gpio-power-switch" }
+lemnos-driver-pisp = { path = "../../../drivers/pisp", features = ["sim-hardware"] }
+lemnos-driver-pisp-sys = { path = "../../../drivers/pisp-sys" }
+lemnos-driver-pisp-fe-sys = { path = "../../../drivers/pisp-fe-sys" }
+
+[dev-dependencies]
+lemnos-driver-rp1-csi2 = { path = "../../../drivers/rp1-csi2" }

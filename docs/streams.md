@@ -596,8 +596,8 @@ stride, up to the next buffer, or a dma-buf's whole size, which a heap may round
 board's per-stream `tail_bytes` key for dma-bufs, in I2d), and `writable`. `pool_page()` gives a
 read-only descriptor of the pool page, and `generation()` the pool's generation.
 
-`writable` is what the descriptor allows: whether a writable mapping of it succeeds, probed when the
-stream opens. On a stream taken with `open_stream_unmapped` nothing is mapped, so it is read from the
+`writable` is what the descriptor allows, decided when the stream opens: a sealed memfd (a shared pool) by
+mapping it writable and unmapping it, a dma-buf (which no seal can describe) from its access mode. On a stream taken with `open_stream_unmapped` nothing is mapped, so it is read from the
 descriptor instead, as [Unmapped streams](#unmapped-streams) says. The consumer maps the buffers writable only when it took the stream with
 `open_stream_writable`, and that open fails with `StreamBuffersReadOnly` ("this stream's buffers
 are read-only") when any buffer's descriptor allows only read-only mappings, so the mismatch shows
@@ -683,8 +683,10 @@ detail: a pool view of an unmapped stream is never asked for a byte, which is wh
 - the seals of a memfd (`F_GET_SEALS`): `F_SEAL_WRITE` or `F_SEAL_FUTURE_WRITE` give `false`. A
   dma-buf has no seals, so its access mode decides alone.
 
-The probe a mapped stream makes (a writable mapping, then unmapped) answers the same question for
-these cases: a read-only descriptor and a sealed memfd. What the descriptor check cannot see is
+A mapped stream answers the same question for a sealed memfd by a writable mapping, then unmapped, and
+for a dma-buf by the descriptor check above (a dma-buf can't be sealed, so the memfd probe refuses every
+one: an input stream a caller fills, which is dma-bufs, could not be taken writable until that was
+fixed, M25). Both agree on a read-only descriptor and a sealed memfd. What the descriptor check cannot see is
 everything a mapping is decided by when it is made: the address-space and memory limits, a security
 module's policy on shared writable mappings, and a dma-buf exporter that refuses CPU mappings. The
 probe sees those and the check does not, so `writable: true` from an unmapped stream is a claim

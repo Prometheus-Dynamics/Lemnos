@@ -28,3 +28,7 @@ lemnos-driver-rp1-csi2 = { path = "../../../drivers/rp1-csi2" }
 lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
 lemnos-linux = { path = "../../../backends/linux" }
 
+
+[dev-dependencies]
+lemnos-camera-sim = { path = "../camera-sim" }
+lemnosd = { path = "../../../service/lemnosd" }

@@ -103,6 +103,39 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// The platform device name of the block, as the board file gives it.
+    #[must_use]
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+}
+
+/// The hardware a simulated board stands in, in place of the module's node: built for each
+/// driver the host binds. Compiled only with the `sim-hardware` feature, so a daemon built
+/// without it cannot be given any other block than the real one.
+#[cfg(feature = "sim-hardware")]
+type MakeHardware = fn(&Settings) -> Box<dyn Hardware>;
+
+#[cfg(feature = "sim-hardware")]
+static SIMULATED: std::sync::OnceLock<MakeHardware> = std::sync::OnceLock::new();
+
+/// Makes every driver this crate binds from now on use `make` for its block instead of the
+/// module's node. `false` if something was installed already. For a simulated board only.
+#[cfg(feature = "sim-hardware")]
+pub fn install_simulated(make: MakeHardware) -> bool {
+    SIMULATED.set(make).is_ok()
+}
+
+/// The block the driver bound with `settings` talks to: the module's, or the simulated one.
+pub(crate) fn hardware(settings: Settings) -> Box<dyn Hardware> {
+    #[cfg(feature = "sim-hardware")]
+    if let Some(make) = SIMULATED.get() {
+        return make(&settings);
+    }
+    Box::new(LinuxHardware::new(settings))
+}
+
 fn status(e: &io::Error) -> Status {
     match e.raw_os_error() {
         Some(19) => Status::NO_DEVICE,
