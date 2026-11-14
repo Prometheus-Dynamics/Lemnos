@@ -65,13 +65,25 @@ pub fn privileged_step(context: &Context<'_>) -> std::io::Result<Refusals> {
 
 /// The gadget devices the board file gets wrong about their identity, and the reason for each,
 /// checked with no hardware read: an `identity` that names no device or one that is not a
-/// `system-identity`, and a board file that sets a key only the daemon writes. `lemnos-ctl
+/// `system-identity`, an `identity` put under `uses` instead of `config`, and a board file that
+/// sets a key only the daemon writes. `lemnos-ctl
 /// validate` refuses such a board; the daemon starts without the gadget, which shows failed with
 /// the reason.
 #[must_use]
 pub fn link_refusals(board: &BoardFile) -> Refusals {
     let mut refused = Vec::new();
     for device in board.devices.iter().filter(|d| d.driver == DRIVER) {
+        // `identity` names another device but is a setting: under `uses` it would be read as a
+        // resource the gadget needs, and silently ignored.
+        if device.uses.contains_key(IDENTITY) {
+            refused.push((
+                device.id.clone(),
+                format!(
+                    "`{IDENTITY}` is a setting, not a resource: put it in the device's `config`"
+                ),
+            ));
+            continue;
+        }
         if device.config.contains_key(BOARD_SERIAL)
             || device.config.contains_key(BOARD_SERIAL_ERROR)
         {
@@ -462,6 +474,31 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 .unwrap()
                 .refused
                 .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_identity_under_uses_is_refused_by_name_with_its_right_place() {
+        let path = serial_file("misplaced", b"0123456789abcdef\0");
+        let mut board = board_at(&path.to_string_lossy(), PLAIN);
+        let spec = board.devices.iter_mut().find(|d| d.id == "gadget").unwrap();
+        spec.config.remove("identity");
+        spec.uses.insert("identity".into(), "identity".into());
+        let refusals = link_refusals(&board);
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(
+            refusals[0].1,
+            "`identity` is a setting, not a resource: put it in the device's `config`"
+        );
+        // The daemon's start marks the gadget refused with the same reason.
+        resolve(&mut board);
+        assert!(
+            gadget(&board)
+                .refused
+                .as_deref()
+                .unwrap()
+                .contains("`identity` is a setting, not a resource")
         );
         let _ = std::fs::remove_file(path);
     }

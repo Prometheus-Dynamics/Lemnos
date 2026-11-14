@@ -8,9 +8,9 @@ has run on a board, a real configfs or a real host.
 
 What only a board can show:
 
-- that a board file's `function ncm ... ifname=lemnos%d` gives the host an interface `lemnos0` (the
-  first free number on the host), and that `ip link` on the host lists it once the host configures
-  the gadget;
+- that a board file's `function ncm ... ifname=lemnos%d` gives the board an interface `lemnos0` (the
+  first free number on the board), and that `ip link` on the board lists it once the gadget is set
+  up (the PC on the other end names its own side itself);
 - that the kernel of the board takes the name: 5.12 or later. On an older kernel the setup refuses
   the board by name (`this kernel's NCM function can't be given an interface name`), and the
   gadget does not come up. Check the board's kernel before the first run;

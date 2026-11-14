@@ -638,12 +638,17 @@ must keep the link first: its first `interface` line is the vendor-class (0xff) 
 whose first interface is anything else drops the link or moves it off interface 0, and is refused
 (`LinkNotFirst`). A second `function ffs` is refused as a function listed twice.
 
-`ifname=TEMPLATE` (optional, once per NCM line) names the network interface the host side gets. The
-template is one to 15 bytes of printable ASCII with exactly one `%d`, which the kernel replaces with
+`ifname=TEMPLATE` (optional, once per NCM line) names the network interface the BOARD has: the
+gadget function's own netdev (`functions/ncm.usb0/ifname` in configfs), the one an image's address,
+DHCP and bridge files name. It is not the interface the host (the PC on the other end of the cable)
+sees; the host names that itself. The template is one to 15 bytes of printable ASCII with exactly one `%d`, which the kernel replaces with
 the first free number: `lemnos%d` gives `lemnos0`. A fixed name such as `lemnos0`, a template with
 two numbers, a `/`, a `:` or a space is refused when the board file is read. The kernel's own rule
 is the same (`gether_set_ifname` in `f_ncm`). Without `ifname` the kernel names the interface `usb<N>`,
-as it always has. The name needs Linux 5.12 or later: before it, `ifname` is read-only (3.17 to
+as it always has. The default composition above gives the board the interface `lemnos0` (the first
+gadget's `lemnos%d`); `contracts/usb-link.toml` states it in its `[network]` table, so an image's
+files can name it from there. A board file with its own `interfaces` and no `ifname=` gets `usb<N>`
+and its image must name that. The name needs Linux 5.12 or later: before it, `ifname` is read-only (3.17 to
 5.11) or missing (before 3.17), and the privileged setup refuses a board that names an interface
 with `Unsupported` and the reason `this kernel's NCM function can't be given an interface name`.
 Nothing else is set up for that gadget.
@@ -695,7 +700,7 @@ the QEMU harness, which requests the descriptors the way Windows does and compar
 - **Reservation.** The managed identity is vendor 0x1d6b, product 0x0104, with `bcdDevice` reserved
   to 0x0100 through 0x0aff. The release it presents now is 0x0200, and it only ever rises. Another
   team's bring-up images use 0x1d6b:0103 with `bcdDevice` from 0x0b00. The numbers, the reservation
-  and the link's identity are in `contracts/usb-link.toml` (`version = 1`). The tests of
+  and the link's identity are in `contracts/usb-link.toml` (`version = 3`). The tests of
   `drivers/usb-gadget` read that file and fail if the code's constants differ from it, and a reader
   refuses an unknown version or key. Other teams' tests and device data read the file rather than
   copying the numbers. The vendor and product numbers stay PLACEHOLDERS until the user settles a

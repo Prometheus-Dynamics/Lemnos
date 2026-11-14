@@ -6,9 +6,10 @@
 # Changing an identity value here means changing the constant it matches; the tests say which.
 #
 # Versions: 1 is the identity as published with the link's descriptors (R1h, #307). 2 adds the
-# `[composition]` table (the default `interfaces` text). A reader knows the versions it was built for
-# and refuses any other. Any key added later is a new version, never a key added to an old one.
-version = 2
+# `[composition]` table (the default `interfaces` text). 3 adds the `[network]` table (the board-side
+# interface name of the default composition). A reader knows the versions it was built for and refuses
+# any other. Any key added later is a new version, never a key added to an old one.
+version = 3
 
 [device]
 vendor = 0x1d6b          # PLACEHOLDER until the user settles a product id; see docs/boards.md
@@ -46,6 +47,17 @@ endpoint out bulk
 function ncm derive ifname=lemnos%d
 function acm
 """
+
+# The name of the NETWORK INTERFACE THE BOARD HAS for the default composition's NCM function: the
+# gadget function's own netdev (its configfs `functions/ncm.usb0/ifname`, set from the `ifname=` of the
+# `function ncm` line above), not the interface the host sees. An image's address and DHCP files and its
+# bridge files must name `board_interface`. The kernel replaces the one `%d` of the template with the
+# first free number, so the first gadget gets `lemnos0`. A board file that gives its own `interfaces`
+# without `ifname=` gets the kernel's `usb<N>` instead, and its image must name that. A test in
+# drivers/usb-gadget ties the template to the `ifname=` of the default composition above.
+[network]
+board_interface_template = "lemnos%d"
+board_interface = "lemnos0"
 
 [os]
 vendor_code = 0x51               # bMS_VendorCode for the Microsoft OS 1.0 requests

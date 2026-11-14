@@ -12,6 +12,11 @@ id = "reference"
 soc = "bcm2712-rp1"
 base = "module-io"
 
+# The host's settings. This one is the default, shown so a reader sees where it is set: the
+# dma-heaps the daemon's own drivers allocate from.
+[host]
+dma_heaps = ["linux,cma"]
+
 # The hardware the devices below use. Each entry is the one place its pins are written.
 [[hardware]]
 name = "i2c-1"

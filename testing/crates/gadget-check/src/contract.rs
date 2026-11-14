@@ -34,11 +34,11 @@ pub fn embedded() -> Result<Contract, String> {
     read(FILE)
 }
 
-/// Reads the contract text. Refuses a version other than 1 and any missing key.
+/// Reads the contract text. Refuses a version other than 3 and any missing key.
 pub fn read(text: &str) -> Result<Contract, String> {
     let table: Table = text.parse().map_err(|error| format!("not TOML: {error}"))?;
-    if table.get("version").and_then(Value::as_integer) != Some(2) {
-        return Err("version is not 2".to_string());
+    if table.get("version").and_then(Value::as_integer) != Some(3) {
+        return Err("version is not 3".to_string());
     }
     Ok(Contract {
         vendor: u16_at(&table, &["device", "vendor"])?,

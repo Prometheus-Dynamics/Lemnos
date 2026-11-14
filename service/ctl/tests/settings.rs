@@ -221,3 +221,27 @@ fn a_refused_setting_is_named_in_the_state_of_its_device_only() {
             .contains("must be a whole number")
     );
 }
+
+/// A gadget with an `identity` device, the link named under `place` (`uses` or `config`).
+fn gadget_board(place: &str) -> String {
+    let (uses, config) = match place {
+        "uses" => (", identity = \"ident\"", ""),
+        _ => ("", ", identity = \"ident\""),
+    };
+    format!(
+        "{HEAD}[[devices]]\nid = \"ident\"\ndriver = \"system-identity\"\nconfig = {{ serial = \"device-tree\", serial_path = \"/nonexistent/serial-number\" }}\n\
+         [[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = {{ function = \"udc:udc0\"{uses} }}\nconfig = {{ vendor = 4617, product = 1{config} }}\n"
+    )
+}
+
+#[test]
+fn an_identity_under_uses_is_refused_by_validate_by_name_and_in_config_it_is_accepted() {
+    let error = validate(&gadget_board("uses")).unwrap_err();
+    assert!(
+        error.ends_with(
+            "device \"gadget\": `identity` is a setting, not a resource: put it in the device's `config`"
+        ),
+        "{error}"
+    );
+    validate(&gadget_board("config")).expect("the same board with identity in config validates");
+}

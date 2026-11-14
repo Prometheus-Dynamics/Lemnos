@@ -10,13 +10,13 @@ use toml::{Table, Value};
 
 const FILE: &str = include_str!("../../../contracts/usb-link.toml");
 
-/// Reads the contract, refusing a version other than 1, an unknown key at any level, and a
+/// Reads the contract, refusing a version other than 3, an unknown key at any level, and a
 /// missing one. Returns the table.
 fn read(text: &str) -> Result<Table, String> {
     let table: Table = text.parse().map_err(|error| format!("not TOML: {error}"))?;
     match table.get("version") {
-        Some(Value::Integer(2)) => {}
-        other => return Err(format!("unknown version {other:?}; this reader knows 2")),
+        Some(Value::Integer(3)) => {}
+        other => return Err(format!("unknown version {other:?}; this reader knows 3")),
     }
     let top = [
         "version",
@@ -24,6 +24,7 @@ fn read(text: &str) -> Result<Table, String> {
         "link",
         "functions",
         "composition",
+        "network",
         "os",
         "reservation",
     ];
@@ -55,6 +56,10 @@ fn read(text: &str) -> Result<Table, String> {
         ),
         ("functions", &["ncm", "acm"][..]),
         ("composition", &["default"][..]),
+        (
+            "network",
+            &["board_interface_template", "board_interface"][..],
+        ),
         ("os", &["vendor_code", "qw_sign"][..]),
         ("reservation", &["managed", "other"][..]),
     ];
@@ -126,7 +131,7 @@ fn trimmed(id: &[u8; 8]) -> &str {
 }
 
 #[test]
-fn the_file_reads_at_version_one() {
+fn the_file_reads_at_version_three() {
     read(FILE).expect("the contract reads");
 }
 
@@ -137,6 +142,43 @@ fn the_default_composition_is_the_file_text() {
         text(&file, &["composition", "default"]),
         DEFAULT_INTERFACES,
         "the driver's default `interfaces` text is the file's [composition] default"
+    );
+}
+
+/// The `ifname=` template of the first NCM line of an interfaces text.
+fn ncm_ifname(interfaces: &str) -> &str {
+    interfaces
+        .lines()
+        .filter(|line| line.starts_with("function ncm"))
+        .flat_map(str::split_whitespace)
+        .find_map(|word| word.strip_prefix("ifname="))
+        .expect("the composition's NCM line has an `ifname=`")
+}
+
+#[test]
+fn the_contracts_board_interface_is_what_the_default_composition_names() {
+    let file = read(FILE).unwrap();
+    let template = text(&file, &["network", "board_interface_template"]);
+    let first = text(&file, &["network", "board_interface"]);
+    assert_eq!(
+        ncm_ifname(DEFAULT_INTERFACES),
+        template,
+        "the driver's default composition gives its NCM function the contract's template"
+    );
+    assert_eq!(
+        ncm_ifname(text(&file, &["composition", "default"])),
+        template,
+        "so does the contract's own [composition] default"
+    );
+    assert_eq!(
+        template.matches("%d").count(),
+        1,
+        "the template has the one number the kernel fills in"
+    );
+    assert_eq!(
+        template.replacen("%d", "0", 1),
+        first,
+        "the first instance is the template with 0 for %d"
     );
 }
 
@@ -213,15 +255,15 @@ fn the_reservations_match_the_revision_policy() {
 
 #[test]
 fn a_reader_refuses_a_version_it_does_not_know() {
-    let one = FILE.replacen("version = 2", "version = 1", 1);
-    assert!(read(&one).unwrap_err().contains("unknown version"));
-    let three = FILE.replacen("version = 2", "version = 3", 1);
-    assert!(read(&three).unwrap_err().contains("unknown version"));
+    for other in [1, 2, 4] {
+        let text = FILE.replacen("version = 3", &format!("version = {other}"), 1);
+        assert!(read(&text).unwrap_err().contains("unknown version"));
+    }
 }
 
 #[test]
 fn a_reader_refuses_an_unknown_key_at_any_level() {
-    let top = FILE.replacen("version = 2", "version = 2\nextra = 1", 1);
+    let top = FILE.replacen("version = 3", "version = 3\nextra = 1", 1);
     assert!(
         read(&top)
             .unwrap_err()
