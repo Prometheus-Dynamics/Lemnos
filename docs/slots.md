@@ -357,7 +357,7 @@ are unchanged and the contract's hash does not move):
  "text":"last install: slot os-2 failed: rootfs.erofs doesn't match slot.json's sha256 (41943040 of 104857600 bytes; boot 0123abcd, +1234.5 s)"}
 ```
 
-- `state`: `none` (no attempt known), `running`, `installed`, `refused`, `cancelled`, `interrupted`
+- `state`: `none` (this daemon knows of no attempt since it started: the text is `last install: none since the service started (boot ID8)` and `boot` is set; it does not say no install ever ended before the daemon started), `running`, `installed`, `refused`, `cancelled`, `interrupted`
   or `failed`.
   - `refused`: turned away by what the bundle says or the board requires, before the image was
     trusted: the signature or the policy, the manifest, the order of the members, a slot that is the
@@ -392,7 +392,7 @@ install runs `info` says `running` with the job's own `received` and `total` (th
 **What survives a restart.** The record is kept in memory, for the daemon's life: the slot store
 persists nothing about an install but the board's state record (`state.json`, on the data partition),
 which holds a word and one error text, not the slot, the bytes or the time, and no new file or boot
-partition write was added for this. After a restart `info` says `none`, with one exception: an install the
+partition write was added for this. After a restart `info` says `none` (since the service started, which is all it can know), with one exception: an install the
 restart cut short. Its work directory is found and removed when the driver starts, and the state
 record is set to `error` with the text `an install was interrupted: the service restarted`; the driver
 reads that record when it starts and reports `interrupted` with that reason, an empty `slot`, and

@@ -4072,9 +4072,15 @@ fn attempt_of(board: &mut Board) -> Seen {
 fn with_no_attempt_ever_the_field_says_none() {
     let dir = TempDir::new("none");
     let mut slots = SystemSlots::new(layout(&dir.0), Box::new(Told::default()), Vec::new());
+    slots.boot = "0123abcd-4567-89ab-cdef-000000000000".into();
     let seen = attempt_seen(&mut slots);
     assert_eq!(seen.state, "none");
-    assert_eq!(seen.text, "last install: none");
+    // `none` claims only what the daemon knows: nothing since it started in this boot.
+    assert_eq!(
+        seen.text,
+        "last install: none since the service started (boot 0123abcd)"
+    );
+    assert_eq!(seen.boot, "0123abcd-4567-89ab-cdef-000000000000");
     assert_eq!((seen.slot.as_str(), seen.reason.as_str()), ("", ""));
     assert_eq!((seen.received, seen.total), (None, None));
 }
@@ -4435,7 +4441,11 @@ fn an_install_a_restart_cut_short_is_known_after_it_and_nothing_else_is() {
     board.stream(1, &wrong.pack(), 4096);
     assert_eq!(attempt_of(&mut board).state, "failed");
     let mut fresh = SystemSlots::new(layout, Box::new(Told::default()), Vec::new());
-    assert_eq!(attempt_seen(&mut fresh).state, "none");
+    fresh.boot = "feedbeef-0000-0000-0000-000000000000".into();
+    let seen = attempt_seen(&mut fresh);
+    assert_eq!(seen.state, "none");
+    assert_eq!(seen.boot, "feedbeef-0000-0000-0000-000000000000");
+    assert!(seen.text.ends_with("since the service started (boot feedbeef)"), "{}", seen.text);
 }
 
 #[test]

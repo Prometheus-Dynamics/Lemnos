@@ -174,7 +174,8 @@ impl Attempt {
             }
         }
         out.push_str(",\"boot\":");
-        let boot = if a.started_ns.is_some() { boot } else { "" };
+        // `none` names the boot too: it says only what this daemon, started in that boot, knows.
+        let boot = if a.started_ns.is_some() || !known { boot } else { "" };
         quoted(boot, out);
         for (key, value) in [("started_ms", a.started_ns), ("ended_ms", a.ended_ns)] {
             out.push_str(",\"");
@@ -193,7 +194,9 @@ impl Attempt {
     /// The record as one line, for `lemnos-ctl call slots info` to show and a person to read.
     fn text(&self, known: bool, boot: &str) -> String {
         if !known {
-            return "last install: none".into();
+            let id: String = boot.chars().take(8).collect();
+            let id = if id.is_empty() { "-" } else { id.as_str() };
+            return format!("last install: none since the service started (boot {id})");
         }
         let slot = if self.slot.as_str().is_empty() {
             "-"

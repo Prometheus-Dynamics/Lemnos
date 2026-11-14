@@ -54,7 +54,7 @@
 //! fields before it are unchanged): any session reads how the last install ended, though a job belongs
 //! to its starter's connection. `received` of `total` bytes are the job's own figures; `started_ms` and
 //! `ended_ms` are the host's monotonic clock in milliseconds, counting from the boot `boot` names
-//! (`ended_ms` is `null` while it runs). An attempt a daemon restart cut short is `interrupted`
+//! (`ended_ms` is `null` while it runs). `none` is `none since the service started` and carries `boot` too: it never claims an install did not end before the daemon started. An attempt a daemon restart cut short is `interrupted`
 //! with `null` for the bytes and times. `text` is the same record as one line. It is kept until the
 //! next attempt starts, in memory for the daemon's life (`docs/slots.md`, "The last install attempt").
 //!
