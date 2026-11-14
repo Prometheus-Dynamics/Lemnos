@@ -39,6 +39,12 @@ pub trait Ops {
     /// Into the new root, as PID 1. On a board it returns only when it couldn't.
     fn switch_root(&self, new_root: &Path) -> Result<(), String>;
     fn sleep(&self, time: Duration);
+    /// Arms the hardware watchdog: the first act once devtmpfs is mounted, so that a hang from here on
+    /// resets the board. The default does nothing (the tests' fake).
+    fn arm_watchdog(&self) {}
+    /// Stops feeding the watchdog: from here on nothing feeds it, so it resets the board unless the
+    /// daemon takes it over. The default does nothing.
+    fn stop_feeding(&self) {}
     /// Asks the firmware for its flashing mode at the next boot (the Pi family's RPIBOOT: the board
     /// then waits for a USB host with no timeout). The caller restarts when this returns `Ok`.
     fn request_flash_mode(&self) -> Result<(), String>;

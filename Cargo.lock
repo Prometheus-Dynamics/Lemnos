@@ -2047,6 +2047,7 @@ dependencies = [
 name = "lemnos-slot-init"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-driver-hw-watchdog-sys",
  "lemnos-driver-rpi-firmware-sys",
  "lemnos-driver-system-slots",
  "lemnos-linux-sys",
