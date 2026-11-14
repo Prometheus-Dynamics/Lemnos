@@ -361,9 +361,9 @@ impl Lifecycle for K230IspFrames {
 
     fn health(&self) -> Health {
         match self.state {
-            State::Recovering { .. } => Health::Degraded(
-                "the ISP's session with the kernel module failed: opening it again",
-            ),
+            State::Recovering { .. } => {
+                Health::Failed("the ISP's session with the kernel module failed: opening it again")
+            }
             _ => Health::Ok,
         }
     }

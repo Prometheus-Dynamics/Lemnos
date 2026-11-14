@@ -358,7 +358,7 @@ impl Lifecycle for PispBe {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the back end's stream ended while running: restarting it")
+                Health::Failed("the back end's stream ended while running: restarting it")
             }
             _ => Health::Ok,
         }

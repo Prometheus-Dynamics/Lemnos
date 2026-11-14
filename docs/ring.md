@@ -44,6 +44,21 @@ read orders, why a reader never sees a torn sample, doorbells, buffer topics and
 
 Lemnos's frame streams are this ring. The ring's layout is 2: word 10 of the header is the end code, which
 layout 1 kept reserved and zero, and a layout 1 reader would take a closed or faulted topic for a running one.
+
+The end word's values, which the host writes once, with the doorbell ringing after:
+
+| End word | Name | Meaning |
+|---|---|---|
+| 0 | open | The stream is running. |
+| 1 | closed | The host ended the stream: a stop, a close, or the host going away. Nothing went wrong with the stream. |
+| 2 | consumer fault | The stream ended because this consumer broke the rules (stuck holds, too many jobs). |
+| 3 | device failed | The stream will not continue on this attachment: the device producing it is turned off for good. A failure the host retries does not end the stream (see [streams.md](streams.md#producer-state)). |
+
+An added value in the end word is not a layout change: the ring header's layout number stays 2.
+A reader that does not know a code treats the stream as ended, kind unknown, never as running.
+
+The producer's state (running, or failed and retried) is words 1 to 5 of the job-ack page, which is 64 bytes now (it was 8): [streams.md](streams.md#producer-state). It is not part of the ring header and moves no layout or hash.
+
 Each structure's layout value is in the table at the end of [`shm/README.md`](../shm/README.md#layout-values).
 A stream is a frame ring (`shm-ring`), a buffer pool and
 its page (`shm-ring-buffers`), a hold page per consumer (`shm-ring-holds`), a doorbell

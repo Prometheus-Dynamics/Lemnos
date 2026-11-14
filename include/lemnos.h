@@ -72,6 +72,19 @@ extern "C" {
 #define LEMNOS_STREAM_OPEN (1u << 2)
 #define LEMNOS_STREAM_UNMAPPED (1u << 3)
 
+/* lemnos_stream_end's `*kind`: why a stream ended. A code not listed here is an end of unknown
+ * kind (a newer host wrote it) and is passed through as its number. */
+#define LEMNOS_STREAM_END_NONE 0
+#define LEMNOS_STREAM_END_CLOSED 1
+#define LEMNOS_STREAM_END_CONSUMER_FAULT 2
+#define LEMNOS_STREAM_END_DEVICE_FAILED 3
+
+/* lemnos_stream_producer's `*state`: what the stream's producing device is doing. The stream
+ * stays attached through a failure: frames resume on it when the device is back. A code not listed
+ * is not running, and is passed through as its number. */
+#define LEMNOS_STREAM_PRODUCER_RUNNING 0
+#define LEMNOS_STREAM_PRODUCER_RETRYING 1
+
 /* lemnos_layout_refusal's `which`: the shared structure whose layout a stream open refused. */
 #define LEMNOS_LAYOUT_RING 0
 #define LEMNOS_LAYOUT_MARKS 1
@@ -265,7 +278,7 @@ LemnosStatus lemnos_layout_refusal(LemnosHandle client, uint32_t *which, uint64_
                                    uint64_t *expected);
 LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, LemnosStreamInfo *info);
 /* Returns 1 with a frame, 0 when timeout_ms passed or the host ended the stream
- * (LEMNOS_STREAM_OPEN then clears). 0 ms takes a frame only if one is there.
+ * (LEMNOS_STREAM_OPEN then clears; lemnos_stream_end says which). 0 ms takes a frame only if one is there.
  * *data, when data is not NULL, is the frame's frame->len bytes, read in place
  * and valid until the frame is released or the stream closed. On a stream whose
  * buffers are in planes (info.planes above 1), or an unmapped one, *data is NULL:
@@ -326,6 +339,14 @@ LemnosStatus lemnos_stream_generation(LemnosHandle client, LemnosHandle stream, 
 /* How many frames the stream's reader was too late for, in total: frames overwritten, or whose
  * buffers the producer took back, before a lemnos_stream_next_frame read them. A reader that keeps
  * up never counts one; a lost frame never stops the frame behind it from being returned. */
+/* Why the stream ended, as a LEMNOS_STREAM_END_* code in *kind: LEMNOS_STREAM_END_NONE while it
+ * runs. Frames still in the ring can be read after it ended. Allocates nothing. */
+LemnosStatus lemnos_stream_end(LemnosHandle client, LemnosHandle stream, uint32_t *kind);
+/* What the stream's producing device is doing, as a LEMNOS_STREAM_PRODUCER_* code in *state, and
+ * while it is retrying the CLOCK_MONOTONIC nanoseconds of its failure in *since_ns (else 0). The
+ * stream's doorbell rings at each change, so a reader asleep on it wakes. Allocates nothing. */
+LemnosStatus lemnos_stream_producer(LemnosHandle client, LemnosHandle stream, uint32_t *state,
+                                    uint64_t *since_ns);
 LemnosStatus lemnos_stream_skipped(LemnosHandle client, LemnosHandle stream, uint64_t *skipped);
 /* Releases every frame still held and gives the stream back. */
 LemnosStatus lemnos_stream_close(LemnosHandle client, LemnosHandle stream, LemnosMessageSink sink);

@@ -695,7 +695,7 @@ fn a_block_that_stops_is_restarted_with_capped_backoff() {
     // It failed: recovery starts, with its first delay.
     let at = d.tick(now).unwrap();
     assert_eq!(at, now + 250_000_000);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.start().unwrap_err(), Status::BUSY, "while recovering");
 
     hw.with(|m| m.fail_start = Some(Status::IO));
@@ -720,7 +720,7 @@ fn a_block_that_stops_is_restarted_with_capped_backoff() {
         let at = d.tick(now).unwrap();
         assert_eq!(at - now, 8_000_000_000);
         now = at;
-        assert!(matches!(d.health(), Health::Degraded(_)));
+        assert!(matches!(d.health(), Health::Failed(_)));
     }
 
     // And it clears when an attempt works.
@@ -738,7 +738,7 @@ fn stop_ends_recovery() {
     d.tick(0).unwrap();
     hw.with(|m| m.fail_check = Some(Status::IO));
     let _ = d.tick(1_000_000_000);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(d.tick(u64::MAX), None, "stopped: nothing is due");
     assert_eq!(d.health(), Health::Ok);

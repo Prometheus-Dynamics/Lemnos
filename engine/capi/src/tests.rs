@@ -33,6 +33,37 @@ fn the_flag_defines_match() {
 }
 
 #[test]
+fn the_stream_end_defines_match() {
+    use crate::surface::{
+        STREAM_END_CLOSED, STREAM_END_CONSUMER_FAULT, STREAM_END_DEVICE_FAILED, STREAM_END_NONE,
+    };
+    for (name, value) in [
+        ("LEMNOS_STREAM_END_NONE", STREAM_END_NONE),
+        ("LEMNOS_STREAM_END_CLOSED", STREAM_END_CLOSED),
+        (
+            "LEMNOS_STREAM_END_CONSUMER_FAULT",
+            STREAM_END_CONSUMER_FAULT,
+        ),
+        ("LEMNOS_STREAM_END_DEVICE_FAILED", STREAM_END_DEVICE_FAILED),
+    ] {
+        assert_eq!(define(name), value.to_string(), "{name}");
+    }
+    assert_eq!(define("LEMNOS_STREAM_PRODUCER_RUNNING"), "0");
+    assert_eq!(define("LEMNOS_STREAM_PRODUCER_RETRYING"), "1");
+    assert_eq!(
+        crate::surface::STREAM_PRODUCER_RETRYING,
+        u32::try_from(lemnos_wire::ring::producer::RETRYING).unwrap()
+    );
+    // They are the ring's end codes.
+    assert_eq!(STREAM_END_CLOSED, lemnos_wire::ring::STATE_CLOSED);
+    assert_eq!(STREAM_END_CONSUMER_FAULT, lemnos_wire::ring::STATE_FAULT);
+    assert_eq!(
+        STREAM_END_DEVICE_FAILED,
+        lemnos_wire::ring::STATE_DEVICE_FAILED
+    );
+}
+
+#[test]
 fn the_version_defines_match() {
     assert_eq!(define("LEMNOS_ABI_MAJOR"), VERSION.major.to_string());
     assert_eq!(define("LEMNOS_ABI_MINOR"), VERSION.minor.to_string());

@@ -19,7 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_wire::Planes;
-use lemnos_wire::ring::{Consumer, FrameInfo, Layout, Mapping, RingError, STATE_OPEN};
+use lemnos_wire::ring::{
+    Consumer, FrameInfo, Layout, Mapping, RingError, STATE_CLOSED, STATE_DEVICE_FAILED,
+    STATE_FAULT, STATE_OPEN, producer,
+};
 use shm_ring::WriteMap;
 use shm_ring_buffers::{BufferIndex, Held, NextBatch};
 use shm_ring_holds::Marks;
@@ -168,9 +171,105 @@ impl HeldFrame {
     }
 }
 
+/// Why a stream ended, as its ring's end word says. The host writes the word once, when it ends the
+/// stream, so what is read here is final: the same stream never runs again (open it again for a
+/// new one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// The host ended the stream: a stop, a close, or the host going away.
+    Closed,
+    /// The stream ended because this consumer broke the rules.
+    ConsumerFault,
+    /// The stream ended because the device producing it failed.
+    DeviceFailed,
+    /// The stream ended with a code this build does not know (a newer host wrote it). It is ended,
+    /// kind unknown: never read it as running.
+    Unknown(u32),
+}
+
+impl StreamEnd {
+    /// The end of a stream from its end word, or `None` while the word says it runs.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            STATE_OPEN => return None,
+            STATE_CLOSED => Self::Closed,
+            STATE_FAULT => Self::ConsumerFault,
+            STATE_DEVICE_FAILED => Self::DeviceFailed,
+            other => Self::Unknown(other),
+        })
+    }
+
+    /// The end word's value, as the C API reports it.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Closed => STATE_CLOSED,
+            Self::ConsumerFault => STATE_FAULT,
+            Self::DeviceFailed => STATE_DEVICE_FAILED,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+impl core::fmt::Display for StreamEnd {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Closed => f.write_str("the stream ended: the host closed it"),
+            Self::ConsumerFault => f.write_str("the stream ended: this consumer broke its rules"),
+            Self::DeviceFailed => f.write_str("the stream ended: the device producing it failed"),
+            Self::Unknown(code) => write!(f, "the stream ended (end code {code}, kind unknown)"),
+        }
+    }
+}
+
+/// What the stream's producing device is doing, as the host says it. The stream stays attached
+/// through a stall: frames resume on the same attachment when the device is back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProducerState {
+    /// The device works (or the host says nothing: an older host, or none had a stall to report).
+    Running,
+    /// The device failed and the host is retrying it. `since_ns` is `CLOCK_MONOTONIC` nanoseconds
+    /// of the failure. Why is the device's reason text, which the session's device call gives.
+    Retrying { since_ns: u64 },
+    /// A state this build does not know, passed through as its number: not running.
+    Unknown(u32),
+}
+
+/// Whether what the caller gave the producing device survived its stall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carried {
+    /// The same driver instance recovered by itself: what it was given is still there.
+    Kept,
+    /// The host bound the device again as a new driver instance: select, configure and start again.
+    Lost,
+}
+
+/// What a wait on a stream found: a frame, nothing within the time, a change of the producer, or
+/// the end.
+#[derive(Debug)]
+pub enum Next {
+    /// The producer failed and is being retried. Returned once for each failure the reader sees,
+    /// when no frame is pending (frames from before it come first), then [`Next::TimedOut`]
+    /// continues while it lasts. Never an end.
+    Stalled(ProducerState),
+    /// The producer is back, returned once after a [`Next::Stalled`] and before the first frame
+    /// after it.
+    Resumed { state: Carried },
+    /// A frame, to give back with [`FrameStream::release`] (or by dropping it).
+    Frame(HeldFrame),
+    /// The time passed with the stream still running and no frame.
+    TimedOut,
+    /// The stream ended and every frame it had is read.
+    Ended(StreamEnd),
+}
+
 /// The consumer's end of a stream. A malformed peer is an error here and only here.
 #[derive(Debug)]
 pub struct FrameStream {
+    /// The producer's edges this reader has looked at, and whether it was told of a stall.
+    seen_edges: u64,
+    told_stalled: bool,
     device: u32,
     name: String,
     consumer: Consumer,
@@ -291,6 +390,8 @@ impl FrameStream {
         let consumer =
             Consumer::attach_with(fds, layout, lengths, shared, mapping).map_err(Error::Stream)?;
         Ok(Self {
+            seen_edges: 0,
+            told_stalled: false,
             device,
             name: name.to_string(),
             consumer,
@@ -393,10 +494,51 @@ impl FrameStream {
         self.consumer.layout()
     }
 
-    /// Whether the host has ended this stream.
+    /// Whether the stream is still running: the opposite of [`end`](Self::end) being set.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.consumer.state() == STATE_OPEN
+    }
+
+    /// Why the stream ended, or `None` while it runs. One atomic load, no allocation. Frames the
+    /// ring still holds when the stream ends can be read after this says it ended.
+    #[must_use]
+    pub fn end(&self) -> Option<StreamEnd> {
+        StreamEnd::from_code(self.consumer.state())
+    }
+
+    /// What the stream's producing device is doing now. Atomic loads, no allocation, and always
+    /// readable, including right after the open: a consumer that attaches during a stall reads
+    /// it here before any wait.
+    #[must_use]
+    pub fn producer(&self) -> ProducerState {
+        self.consumer
+            .producer()
+            .map_or(ProducerState::Running, |words| match words.state {
+                producer::RUNNING => ProducerState::Running,
+                producer::RETRYING => ProducerState::Retrying {
+                    since_ns: words.since_ns,
+                },
+                other => ProducerState::Unknown(other as u32),
+            })
+    }
+
+    /// A sentence for a person about the stream's end, or `None` while it runs: for example
+    /// "stream frames of device 3 ended: the device producing it failed". Allocates; call it
+    /// when reporting, not per frame.
+    #[must_use]
+    pub fn end_message(&self) -> Option<String> {
+        let end = self.end()?;
+        let why = match end {
+            StreamEnd::Closed => "the host closed it".to_string(),
+            StreamEnd::ConsumerFault => "this consumer broke its rules".to_string(),
+            StreamEnd::DeviceFailed => "the device producing it failed".to_string(),
+            StreamEnd::Unknown(code) => format!("end code {code}, kind unknown"),
+        };
+        Some(format!(
+            "stream {} of device {} ended: {why}",
+            self.name, self.device
+        ))
     }
 
     /// The pool index of plane `plane` of `buffer`.
@@ -480,7 +622,9 @@ impl FrameStream {
         self.consumer.frames().missed()
     }
 
-    /// The next frame, or `None` after `timeout` passes or the host ends the stream.
+    /// The next frame, or `None` after `timeout` passes or the host ends the stream. `None` does
+    /// not say which: [`next_or_end`](Self::next_or_end) does, and so does [`end`](Self::end)
+    /// afterwards.
     ///
     /// The wait is on the stream's doorbell and lasts at most `timeout` in all: a signal that
     /// interrupts a sleep ends it early, and the ring is looked at again with what is left of the
@@ -488,15 +632,63 @@ impl FrameStream {
     pub fn next_frame(&mut self, timeout: Duration) -> Result<Option<HeldFrame>, Error> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(frame) = self.try_next()? {
-                return Ok(Some(frame));
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.next_or_end(left)? {
+                Next::Frame(frame) => return Ok(Some(frame)),
+                Next::TimedOut | Next::Ended(_) => return Ok(None),
+                // A change of the producer is not a frame: the wait goes on.
+                Next::Stalled(_) | Next::Resumed { .. } => {}
             }
-            if !self.is_open() {
-                return Ok(None);
+        }
+    }
+
+    /// The next frame, or why there is none: [`Next::TimedOut`] after `timeout` with the stream
+    /// running, [`Next::Stalled`] and [`Next::Resumed`] once for each change of the producer's
+    /// state, [`Next::Ended`] once the stream has ended. Frames already in the ring when the stream
+    /// ends are all delivered first; `Ended` comes only when none is left. Waits as
+    /// [`next_frame`](Self::next_frame) does, and allocates nothing.
+    pub fn next_or_end(&mut self, timeout: Duration) -> Result<Next, Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            // The end is read before the ring: a frame published before the end is then in the
+            // ring when the end is seen, so it is not passed over.
+            let end = self.end();
+            // Back, before any frame after the stall: the first one is then known as new.
+            if end.is_none()
+                && self.told_stalled
+                && let Some(words) = self.consumer.producer()
+                && words.edges != self.seen_edges
+                && words.state == producer::RUNNING
+            {
+                self.seen_edges = words.edges;
+                self.told_stalled = false;
+                let state = if words.recovery == producer::KEPT {
+                    Carried::Kept
+                } else {
+                    Carried::Lost
+                };
+                return Ok(Next::Resumed { state });
+            }
+            if let Some(frame) = self.try_next()? {
+                return Ok(Next::Frame(frame));
+            }
+            if let Some(end) = end {
+                return Ok(Next::Ended(end));
+            }
+            if let Some(words) = self.consumer.producer()
+                && words.edges != self.seen_edges
+            {
+                self.seen_edges = words.edges;
+                if words.state != producer::RUNNING {
+                    self.told_stalled = true;
+                    return Ok(Next::Stalled(self.producer()));
+                }
+                // A stall that began and ended unseen: nothing to say.
+                self.told_stalled = false;
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Ok(None);
+                return Ok(Next::TimedOut);
             }
             self.sleep_for_frame(left)?;
         }
@@ -522,7 +714,12 @@ impl FrameStream {
     /// Whether the ring has an entry the reader has not looked at yet, or the stream has ended.
     fn frame_waiting(&self) -> bool {
         let frames = self.consumer.frames();
-        frames.pending() > 0 || frames.end() != 0
+        frames.pending() > 0
+            || frames.end() != 0
+            || self
+                .consumer
+                .producer()
+                .is_some_and(|words| words.edges != self.seen_edges)
     }
 
     /// The bytes of a frame this stream handed out. On a stream whose buffers are several

@@ -397,6 +397,9 @@ struct Slot {
     /// Runs in a row that ended sooner than the retry cap after their bind. A driver that fails
     /// straight after each bind waits longer each time, as a bind that fails does.
     short_runs: AtomicU32,
+    /// The driver's own health last said failed (its streams read retrying for that reason), so a
+    /// tick only tells the streams when it changes.
+    stalled: AtomicBool,
     /// A hint has named this running device and its driver has not been ticked since.
     hinted: AtomicBool,
     /// The driver's wait descriptor, as the watcher reads it. See [`Inner::watch_wait`].
@@ -605,6 +608,7 @@ impl Slot {
             tried_ns: AtomicU64::new(0),
             bound_ns: AtomicU64::new(0),
             short_runs: AtomicU32::new(0),
+            stalled: AtomicBool::new(false),
             hinted: AtomicBool::new(false),
             wait: Mutex::new(None),
             wait_gen: AtomicU64::new(0),
@@ -1377,8 +1381,28 @@ impl Inner {
                 }
             }
         };
-        *state = self.next_state(slot, attempts, reason);
+        let next = self.next_state(slot, attempts, reason);
+        *state = next.clone();
+        drop(state);
         self.moved(slot);
+        self.streams_follow(slot, &next);
+    }
+
+    /// What a device's failure means to the consumers of its streams. Retrying: the stream stays
+    /// attached and its producer reads as retrying, and frames resume on the same attachment when
+    /// the device is back (a bind after a failure is a new driver instance: what the caller gave
+    /// the old one is lost). Off for good (`auto_off_after`): the stream ends, device failed.
+    fn streams_follow(&self, slot: &Slot, next: &DeviceState) {
+        match next {
+            DeviceState::Off(_) => self
+                .streams
+                .end_device(slot.index, lemnos_wire::ring::STATE_DEVICE_FAILED),
+            DeviceState::Backoff { .. } => {
+                self.streams
+                    .producer_failed(slot.index, self.clock.now_ns(), true);
+            }
+            DeviceState::Running => {}
+        }
     }
 
     /// Lets go of a driver that is not in a call, outside its lock, with a panic in its drop
@@ -1976,6 +2000,9 @@ impl Inner {
                 slot.errors.store(0, Ordering::Relaxed);
                 slot.bound_ns.store(self.clock.now_ns(), Ordering::Release);
                 *lock(&slot.state) = DeviceState::Running;
+                // A new instance starts not stalled: its own first failure is an edge.
+                slot.stalled.store(false, Ordering::Release);
+                self.streams.producer_back(slot.index);
                 if slot.ticks() {
                     self.set_next_tick(&slot, Some(0));
                     let wait = lock(&slot.instance)
@@ -2009,8 +2036,11 @@ impl Inner {
             DeviceState::Backoff { attempts, .. } => *attempts,
             DeviceState::Running => 0,
         };
-        *state = self.next_state(slot, attempts, reason);
+        let next = self.next_state(slot, attempts, reason);
+        *state = next.clone();
+        drop(state);
         self.moved(slot);
+        self.streams_follow(slot, &next);
     }
 
     /// Ticks a driver: after giving it the board first when it watches the board.
@@ -2024,6 +2054,17 @@ impl Inner {
         let next = instance.tick(now_ns);
         if instance.endpoints_ended() {
             slot.end_close();
+        }
+        // The same instance's own report: failed or gone is a stall that this driver recovers from
+        // itself (what it was given is kept); anything else, including degraded, is not one.
+        let failed = matches!(instance.health(), Health::Failed(_) | Health::Gone(_));
+        if slot.stalled.swap(failed, Ordering::AcqRel) != failed {
+            if failed {
+                self.streams
+                    .producer_failed(slot.index, self.clock.now_ns(), false);
+            } else {
+                self.streams.producer_back(slot.index);
+            }
         }
         next
     }

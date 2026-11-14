@@ -1100,7 +1100,7 @@ fn a_failed_queue_restarts_the_path_with_capped_backoff_and_never_gives_up() {
     });
     let started = k.with(|k| k.opened.len());
     assert_eq!(d.tick(2), Some(2 + backoff_ns(0)));
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.counters().unwrap().errors, 1, "the waiting job");
     // Attempts keep failing: the delay doubles to 8 s and stays there.
     let mut now = 2 + backoff_ns(0);
@@ -1143,7 +1143,7 @@ fn stop_ends_recovery() {
         k.fail_open = Some(Status::IO);
     });
     d.tick(0);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(d.tick(10_000_000_000), None);
     assert_eq!(d.health(), Health::Ok);

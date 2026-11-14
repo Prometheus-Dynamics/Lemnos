@@ -709,7 +709,7 @@ fn post_values_failure_closes_the_group_and_does_not_launch() {
     assert_eq!(s.applied(), Ok(None));
     assert_eq!(
         Driver::health(&s),
-        Health::Degraded("bus error while streaming: restarting the sensor")
+        Health::Failed("bus error while streaming: restarting the sensor")
     );
 }
 
@@ -756,7 +756,7 @@ fn recovery_retries_with_backoff_capped_at_8s_never_gives_up_and_clears_on_succe
     assert!(matches!(s.state, State::Recovering { .. }));
     assert_eq!(
         Driver::health(&s),
-        Health::Degraded("bus error while streaming: restarting the sensor")
+        Health::Failed("bus error while streaming: restarting the sensor")
     );
 
     // The early tick does nothing and keeps the due time.
@@ -1772,4 +1772,36 @@ fn the_registers_reproduce_the_board_rates_and_the_shortest_frames() {
         "the mean is the midpoint of the two levels"
     );
     assert_eq!(longest - shortest, 14_352);
+}
+
+#[test]
+fn a_bus_error_while_streaming_reads_as_a_failure_the_driver_recovers_from_and_clears_on_success() {
+    // The host reads `Failed` from a live driver as a stall it recovers from by itself (it does not
+    // rebind for it), so a stream fed by this sensor reads retrying until the sensor is back.
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    start_up(&mut s);
+    bus.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        s.set_controls(Controls {
+            analogue_gain: Some(0x20),
+            ..Controls::default()
+        }),
+        Err(Status::IO)
+    );
+    assert!(matches!(s.state, State::Recovering { .. }));
+    assert_eq!(
+        Driver::health(&s),
+        Health::Failed("bus error while streaming: restarting the sensor")
+    );
+    bus.down.store(false, Ordering::SeqCst);
+    let mut now = 1_000_000u64;
+    for _ in 0..4 {
+        if !matches!(s.state, State::Recovering { .. }) {
+            break;
+        }
+        now = Lifecycle::tick(&mut s, now).unwrap_or(now);
+    }
+    assert_eq!(s.state, State::Streaming);
+    assert!(!matches!(Driver::health(&s), Health::Failed(_)));
 }

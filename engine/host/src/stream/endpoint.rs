@@ -13,7 +13,8 @@ use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_wire::Planes;
 use lemnos_wire::ring::{
-    FrameInfo, JOB_ACK_BYTES, JobCollector, Layout, RingError, STATE_CLOSED, STATE_FAULT, fds,
+    FrameInfo, JOB_ACK_BYTES, JobCollector, Layout, ProducerWords, RingError, STATE_CLOSED,
+    STATE_FAULT, fds, producer,
 };
 use shm_ring::{FieldId, ReadMap, Ring, SampleTime, WriteMap, read_only, sealed_memfd};
 use shm_ring_buffers::{BufferIndex, BufferWriter as Publisher, Holders, MAX_PER_FRAME, Pool};
@@ -31,7 +32,7 @@ struct Memory {
     publisher: Publisher<WriteMap>,
     ring: Ring,
     jobs: Ring,
-    /// The job-ack page: one word, how many jobs the host has collected. Writable here.
+    /// The job-ack page: how many jobs the host has collected, and the producer's state. Writable here.
     acks: OwnedFd,
     /// One dma-buf per plane of each buffer, when the buffers are dma-bufs.
     handles: Option<Arc<[OwnedFd]>>,
@@ -101,6 +102,10 @@ pub(crate) struct StreamCore {
     /// Frames published so far on this stream.
     published_count: u64,
     counters: Counters,
+    /// What the stream's producing device is doing, written into each attachment's page.
+    producer: ProducerWords,
+    /// The device was bound again while retrying, so what it recovers to is a new instance.
+    producer_lost: bool,
 }
 
 pub(super) fn lock(core: &Mutex<StreamCore>) -> std::sync::MutexGuard<'_, StreamCore> {
@@ -146,6 +151,57 @@ impl StreamCore {
             published_at: vec![0; layout.buffers as usize].into_boxed_slice(),
             published_count: 0,
             counters: Counters::default(),
+            producer: ProducerWords::default(),
+            producer_lost: false,
+        }
+    }
+
+    /// The producing device failed and is being retried, from `since_ns`. `lost` says the host
+    /// dropped the driver instance. A change from running is an edge: the page says so and the
+    /// consumer's doorbell rings. Already retrying, only learning that the instance was dropped
+    /// changes anything, and that is no edge. Allocates nothing.
+    pub(crate) fn producer_failed(&mut self, since_ns: u64, lost: bool) {
+        if self.producer.state == producer::RETRYING {
+            if lost && !self.producer_lost {
+                self.producer_lost = true;
+            }
+            return;
+        }
+        self.producer_lost = lost;
+        self.producer = ProducerWords {
+            edges: self.producer.edges + 1,
+            state: producer::RETRYING,
+            since_ns,
+            recovery: self.producer.recovery,
+        };
+        self.publish_producer();
+    }
+
+    /// The producing device works again. An edge only if it was retrying.
+    pub(crate) fn producer_back(&mut self) {
+        if self.producer.state != producer::RETRYING {
+            return;
+        }
+        self.producer = ProducerWords {
+            edges: self.producer.edges + 1,
+            state: producer::RUNNING,
+            since_ns: 0,
+            recovery: if self.producer_lost {
+                producer::LOST
+            } else {
+                producer::KEPT
+            },
+        };
+        self.producer_lost = false;
+        self.publish_producer();
+    }
+
+    /// Writes the producer's words into the consumer's page and rings its doorbell.
+    fn publish_producer(&mut self) {
+        let words = self.producer;
+        if let Some(attached) = self.attached.as_mut() {
+            attached.jobs.set_producer(words);
+            attached.bell.ring();
         }
     }
 
@@ -281,6 +337,9 @@ impl StreamCore {
         }
         let handles = memory.handles.clone();
         self.counters.attachments += 1;
+        let mut jobs = jobs;
+        // A consumer that attaches during a stall reads it before any wait.
+        jobs.set_producer(self.producer);
         self.attached = Some(Attached {
             caller,
             memory,
@@ -778,7 +837,9 @@ fn read_plane(parts: Parts<'_>, index: usize, place: usize, out: &mut [u8]) -> b
 
 /// The producer's end of a stream, given to a driver through `StreamHandle` and usable as a
 /// software producer in tests. Dropping it gives back what the producer held, and a consumer
-/// attached carries on.
+/// attached carries on, with the producer's state in its job-ack page while the device is retried
+/// (`StreamCore::producer_failed`), or ended with `STATE_DEVICE_FAILED` once the device is off for
+/// good (`Streams::end_device`).
 pub struct ProducerEndpoint {
     core: Arc<Mutex<StreamCore>>,
     buffers: u32,

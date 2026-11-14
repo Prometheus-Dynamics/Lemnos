@@ -301,7 +301,7 @@ impl Lifecycle for K230Isp {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the ISP's device failed while running: opening it again")
+                Health::Failed("the ISP's device failed while running: opening it again")
             }
             _ => Health::Ok,
         }

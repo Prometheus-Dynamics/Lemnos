@@ -657,7 +657,7 @@ fn a_route_turned_off_is_routed_again_with_capped_backoff() {
     hw.with(|m| m.fail_topology = Some(Status::NO_DEVICE));
     let at = d.tick(now).unwrap();
     assert_eq!(at, now + 250_000_000);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.start().unwrap_err(), Status::BUSY, "while recovering");
 
     let expected = [
@@ -680,7 +680,7 @@ fn a_route_turned_off_is_routed_again_with_capped_backoff() {
         let at = d.tick(now).unwrap();
         assert_eq!(at - now, 8_000_000_000);
         now = at;
-        assert!(matches!(d.health(), Health::Degraded(_)));
+        assert!(matches!(d.health(), Health::Failed(_)));
     }
     assert!(hw.with(|m| m.closed) >= 100, "each attempt opens afresh");
 
@@ -701,7 +701,7 @@ fn stop_ends_recovery_and_leaves_the_route() {
     let t = d.tick(0).unwrap();
     hw.with(|m| m.fail_topology = Some(Status::IO));
     let _ = d.tick(t);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(d.tick(u64::MAX), None, "stopped: nothing is due");
     assert_eq!(d.health(), Health::Ok);

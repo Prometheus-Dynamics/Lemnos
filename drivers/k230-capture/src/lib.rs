@@ -365,7 +365,7 @@ impl Lifecycle for K230Capture {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the frame path failed while streaming: restarting it")
+                Health::Failed("the frame path failed while streaming: restarting it")
             }
             _ => Health::Ok,
         }

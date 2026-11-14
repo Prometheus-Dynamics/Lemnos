@@ -36,4 +36,7 @@ pub use session::{
     PackageList, PackageMode, Session, Subscription, UsbEndpoints, UsbEndpointsEnd, ValueInfo,
     follow,
 };
-pub use stream::{Access, FrameStream, HeldFrame, MemoryKind, Region, StreamPlatform};
+pub use stream::{
+    Access, Carried, FrameStream, HeldFrame, MemoryKind, Next, ProducerState, Region, StreamEnd,
+    StreamPlatform,
+};
