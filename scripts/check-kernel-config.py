@@ -33,7 +33,7 @@ A dependency is one a configuration must state explicitly: a symbol set by a `de
 Kernel tree (CI): the always.all and kind.disk.all symbols are roots too, and each must be `=y` in the
 configuration (`m` is not enough for a slot board).
 
-Firmware groups (contract version 2): `check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`
+Firmware groups (contract version 3): `check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`
 refuses a configuration in which any symbol of that group (and DEVTMPFS) is =m or unset, naming the symbol.
 
 Exits 1 and says what is wrong; 0 when all hold.
@@ -59,7 +59,7 @@ SLOT_SECTION = "## Slot board: built in"
 SLOT_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
 SLOT_CODE = ROOT / "service" / "slot-init" / "src" / "kernel.rs"
 CONTRACT = ROOT / "contracts" / "slot-kernel.toml"
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 # The groups a row of the slot-board table can name (its "When" cell), and the cells that name no group.
 WHEN_GROUPS = ("always.all", "kind.disk.all", "kind.disk.one_of", "kind.mtd.all", "kind.mtd.one_of",
                "firmware.rpi-tryboot.all", "optional.all", "initramfs")

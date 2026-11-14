@@ -11,8 +11,14 @@
 //! the expression filter), `rn2712.md` (the SoC watchdog's 16.8 s maximum). The firmware's own
 //! behaviour with this text is to be run on a board (`testing/board-runs/I5i3.md`).
 
-/// The one-sector size of a pointer file.
+/// The one-sector size of a pointer's line, and of each of a pointer file's two copies.
 pub const POINTER_BYTES: usize = 512;
+
+/// The size of every pointer file on the partition (`default.txt`, `previous.txt`, `trial.txt`): two
+/// sectors holding the same line. The one form for every writer and reader (I5i8): the second sector
+/// is written first, so a cut after it leaves the new line in the file, and a torn sector leaves the
+/// other whole.
+pub const POINTER_FILE_BYTES: usize = 2 * POINTER_BYTES;
 
 /// The watchdog timeout the kernel driver reports on the board, in seconds (the SoC maximum is 16.8).
 pub const WATCHDOG_SECONDS: u8 = 15;
@@ -128,6 +134,26 @@ pub fn pointer_slot(sector: &[u8; POINTER_BYTES]) -> Option<String> {
     let rest = &sector[end + CHECK_BYTES..];
     let (last, body) = rest.split_last()?;
     (*last == b'\n' && body.iter().all(|&b| b == b'#')).then(|| id.to_string())
+}
+
+/// A pointer file's bytes for `id`: [`pointer_sector`] twice, the first sector and then the second.
+/// `None` for an id that is not a valid slot id (or a line that does not fit a sector).
+pub fn pointer_file(id: &str) -> Option<[u8; POINTER_FILE_BYTES]> {
+    let sector = pointer_sector(id)?;
+    let mut out = [0u8; POINTER_FILE_BYTES];
+    out[..POINTER_BYTES].copy_from_slice(&sector);
+    out[POINTER_BYTES..].copy_from_slice(&sector);
+    Some(out)
+}
+
+/// The slot a pointer file names: the last whole line of its two sectors, the second sector first
+/// (the copy written first is the one the firmware reads when both are whole). `None` when neither
+/// sector holds a whole, checksummed line.
+pub fn pointer_file_slot(file: &[u8; POINTER_FILE_BYTES]) -> Option<String> {
+    let (first, second) = file.split_at(POINTER_BYTES);
+    let second: &[u8; POINTER_BYTES] = second.try_into().ok()?;
+    let first: &[u8; POINTER_BYTES] = first.try_into().ok()?;
+    pointer_slot(second).or_else(|| pointer_slot(first))
 }
 
 #[cfg(test)]

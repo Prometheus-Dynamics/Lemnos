@@ -9,12 +9,16 @@
 //!    record), the record picks the slot: its trial, which is cleared before it starts, else its
 //!    default. The root hash is then the one on that slot's own `cmdline.txt`.
 //! 4. Tell a trial: the firmware's tryboot flag, the `file` record's trial, or a slot that isn't
-//!    the board's default. A trial writes `trial-init`.
+//!    the board's default. A trial writes `trial-init`. A slot started by the U-Boot script's third
+//!    step (the previous slot, because the loader could not start the default) arrives with
+//!    the device-tree property `lemnos,default-failed`: it is a trial, and the default is marked
+//!    failed with the loader's reason ([`Boot::loader_fell_back`]).
 //! 5. Read `slots/<id>.json` and refuse it when its id isn't the slot, its root hash isn't the
 //!    command line's, the image isn't `image.size` bytes, or `kernel` names another kernel. Then
-//!    every boot file of the slot (kernel, DTBs, overlays, `cmdline.txt`, initramfs) is read as
-//!    it sits on the boot partition, raw ([`lemnos_slot_store::bootcheck`], no mount), and hashed
-//!    against the manifest. A mismatch goes to [`Boot::fail`].
+//!    every boot file of the slot (kernel, DTBs, overlays, `cmdline.txt`, initramfs) is read from
+//!    its payload bay, the set its record holds (`slots/bayN/`), raw
+//!    ([`lemnos_slot_store::bootcheck`], no mount), each cut to the length its record stores, and
+//!    hashed against the manifest. A mismatch goes to [`Boot::fail`].
 //! 6. Load the device-mapper modules, open the image through dm-verity, mount it read-only.
 //!
 //! The data partition is found by a fixed rule, not from the command line (the command line is
@@ -68,6 +72,14 @@ pub const DATA_LOG: &str = "last-failure.log";
 /// is good, so it counts every restart of a run of failures, and it needs no write here. Absent on
 /// every other board.
 pub const BOOT_COUNT: &str = "proc/device-tree/chosen/bootloader/count";
+/// The property U-Boot's `boot.cmd` sets in `/chosen` when it started the previous slot because it
+/// could not start the default from its files (the script's third step). Its value is
+/// [`LOADER_FILES`]. Nothing else sets it.
+pub const DEFAULT_FAILED: &str = "proc/device-tree/chosen/lemnos,default-failed";
+/// The value of [`DEFAULT_FAILED`] the script writes.
+pub const LOADER_FILES: &str = "files";
+/// What the default's `FAIL_REASON` says when the property is set.
+pub const LOADER_FILES_REASON: &str = "the boot loader could not load the default's files";
 /// Restarts without a good boot after which a refusal no slot can answer goes to the firmware's
 /// flashing mode instead of restarting again. Eight rides out a transient (a slow card, a late
 /// device) and, at the rescue wait (30 s) plus a boot each, is a few minutes. A board sent there
@@ -344,7 +356,13 @@ impl Boot<'_> {
                 Candidate {
                     good: meta.get("GOOD") == "yes",
                     failed: meta.failed(),
-                    resident: self.layout.boot_dir(&id).is_dir(),
+                    // A slot's boot files are resident when a bay holds it (raw NAND still keeps
+                    // them under `slots/<id>`).
+                    resident: if self.layout.ubi.is_some() {
+                        self.layout.boot_dir(&id).is_dir()
+                    } else {
+                        self.slot_bay(&id).is_ok()
+                    },
                     signed: self.may_start(&meta),
                     seq: meta.seq(),
                     id,
@@ -381,6 +399,53 @@ impl Boot<'_> {
                 // A plain restart: the loader takes the trial's attempt, as it does for any trial.
                 self.restart(None);
                 why.to_string()
+            }
+        }
+    }
+
+    /// The boot loader started this slot, the board's previous, because it could not start the
+    /// default from its files (`boot.cmd`'s third step names that in [`DEFAULT_FAILED`]). The loader
+    /// repointed nothing, so this boot is the trial the daemon judges: the state's trial is this slot
+    /// (as a fallback from a running default arms it), and the default is marked failed with the
+    /// loader's reason. A trial the board already holds is left as it is, and the default's failure
+    /// is still recorded. Nothing here writes a boot record.
+    fn loader_fell_back(&self, slot: &str, state: &State) {
+        let named = fs::read(self.env.at(DEFAULT_FAILED))
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .trim_end_matches('\0')
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let default = state.default.as_str();
+        if named != LOADER_FILES || !valid_id(default) || default == slot {
+            return;
+        }
+        self.log(&format!(
+            "{LOADER_FILES_REASON}: slot {default}; this is slot {slot}, on trial"
+        ));
+        if !self.data_writable.get() {
+            return;
+        }
+        if self.layout.installed(default) {
+            let mut meta = Meta::load(&self.layout, default);
+            let failures = meta.get("FAILURES").parse::<u32>().unwrap_or(0) + 1;
+            meta.set("FAILED", "yes");
+            meta.set("FAILURES", &failures.to_string());
+            meta.set("FAIL_REASON", LOADER_FILES_REASON);
+            if let Err(error) = meta.save(&self.layout, default) {
+                self.log(&format!(
+                    "couldn't record the failure of {default}: {error}"
+                ));
+            }
+        }
+        if state.trial.is_empty() {
+            let mut next = state.clone();
+            next.trial = slot.to_string();
+            next.error = format!("slot {default} can't start: {LOADER_FILES_REASON}");
+            let _ = fs::remove_file(self.layout.marker("trial-keeps-default"));
+            if let Err(error) = next.save(&self.layout) {
+                self.log(&format!("couldn't save the state: {error}"));
             }
         }
     }
@@ -472,9 +537,20 @@ impl Boot<'_> {
     }
 
     fn verify_boot_files(&self, slot: &str, manifest: &Manifest) -> Result<(), String> {
+        // The slot's bay: the set its record is in, and each payload's stored length (the bay files
+        // are padded to their fixed size, so only the stored bytes are hashed).
+        // On raw NAND the files are still under `slots/<id>` (NAND/UBI bays are parked: the UBI
+        // volume form is not on the bay layout), and no stored lengths are known there.
+        let (dir, lengths) = if self.layout.ubi.is_some() {
+            (format!("slots/{slot}"), Vec::new())
+        } else {
+            self.slot_bay(slot)
+                .map_err(|e| format!("its boot files have no bay: {e}"))?
+        };
         let (found, uboot) = self.with_boot_files(|read| {
-            let found = bootcheck::check(slot, &manifest.boot_files, |path| read(path));
-            let uboot = bootcheck::uboot_check(slot, &manifest.boot_files, |path| read(path));
+            let found = bootcheck::check(&dir, &manifest.boot_files, &lengths, |path| read(path));
+            let uboot =
+                bootcheck::uboot_check(&dir, &manifest.boot_files, &lengths, |path| read(path));
             (found, uboot)
         })?;
         if found.is_empty() && uboot.is_none() {
@@ -570,6 +646,15 @@ impl Boot<'_> {
         uboot_env::set(&mut *dev, &geometry, updates)
     }
 
+    /// The bay of a slot on the boot partition (see [`Ops::slot_bay`]). Refused by name when the boot
+    /// partition is not known.
+    fn slot_bay(&self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
+        let (_, dev) = self
+            .boot_dev()
+            .ok_or("no partition 1 beside the data partition")?;
+        self.ops.slot_bay(&dev, slot)
+    }
+
     /// The boot partition's raw records and pointers, opened on its block node.
     fn open_raw(&self) -> Result<Box<dyn BootRaw>, String> {
         let (_, dev) = self.boot_dev().ok_or("no partition 1 on the boot disk")?;
@@ -612,7 +697,33 @@ impl Boot<'_> {
         // The default moves by the form's own write: the Pi firmware's pointer sector, or the U-Boot
         // environment's `default` variable (one write of the inactive copy).
         let moved = match form {
-            Record::UbootEnv => self.uboot_env_set(&[("default", Some(previous.as_str()))]),
+            Record::UbootEnv => {
+                // The environment names the default's bay too (`boot.cmd` reads only the environment).
+                // The failed default's bay becomes `previous_bay`, as the Pi form's pointer switch
+                // writes `previous.txt` (the driver's `set_default` does the same): both writers keep
+                // default and previous consistent, and the failed slot's bay is protected only until
+                // the next default switch replaces it.
+                let bay_of = |dir: String| dir.rsplit('/').next().unwrap_or_default().to_string();
+                match (self.slot_bay(&previous), self.slot_bay(slot)) {
+                    (Ok((dir, _)), Ok((failed, _))) => {
+                        let bay = bay_of(dir);
+                        let failed = bay_of(failed);
+                        if failed == bay {
+                            self.uboot_env_set(&[
+                                ("default", Some(previous.as_str())),
+                                ("default_bay", Some(bay.as_str())),
+                            ])
+                        } else {
+                            self.uboot_env_set(&[
+                                ("previous_bay", Some(failed.as_str())),
+                                ("default", Some(previous.as_str())),
+                                ("default_bay", Some(bay.as_str())),
+                            ])
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            }
             _ => match self.open_raw() {
                 Ok(mut raw) => raw.set_pointer(Pointer::Default, &previous),
                 Err(error) => {
@@ -707,7 +818,9 @@ impl Boot<'_> {
             args.roothash.clone()
         } else {
             let cmdline = self
-                .boot_text(&format!("slots/{slot}/cmdline.txt"))
+                .slot_bay(&slot)
+                .ok()
+                .and_then(|(dir, _)| self.boot_text(&format!("{dir}/cmdline.txt")))
                 .unwrap_or_default();
             args.roothash_in(&String::from_utf8_lossy(&cmdline))
         };
@@ -1063,6 +1176,7 @@ impl Boot<'_> {
             || (!state.default.is_empty() && slot != state.default);
         if self.trial {
             self.mark("trial-init", &format!("{slot}\n"));
+            self.loader_fell_back(&slot, &state);
         }
 
         // The switch's policy, as the boot side applies it. An unverified trial is refused (the
@@ -1154,7 +1268,11 @@ impl Boot<'_> {
         };
         let new_root = self.env.at("newroot");
         if let Err(error) = self.ops.mount("erofs", "ro", Path::new(&dm), &new_root) {
-            return self.fail(&format!("can't mount the image ({dm}): {error}"));
+            // The step and the kernel's own answer (`<text> (os error N)`: EINVAL or EOPNOTSUPP when the
+            // kernel lacks the image's decompressor).
+            return self.fail(&format!(
+                "can't mount the root image {dm} as erofs, read-only: {error}"
+            ));
         }
         let moved_data = new_root.join("data");
         if let Err(error) = self.ops.move_mount(&self.layout.data, &moved_data) {

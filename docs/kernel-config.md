@@ -41,6 +41,7 @@ or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were 
 | `CONFIG_CRYPTO` | the crypto API the verity target allocates its hash from | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_CRYPTO_SHA256` | the `sha256` shash dm-verity uses for the image's hashes; slot-init finds it through `/proc/crypto` (`sha256`). `DM_VERITY` does not select it (it selects the SHA-256 library, `CRYPTO_LIB_SHA256`, which registers no shash), so it must be set. On mainline arm64 the only generic `sha256` shash is this symbol; a SoC's hardware crypto driver that registers `sha256` also satisfies the check | always.all | yes | reference (`.config` `=y`); mainline arm64 (no arch SHA-256 shash in `arch/arm64/crypto`) |
 | `CONFIG_EROFS_FS` | the slot's root filesystem, an EROFS image; slot-init finds it through `/proc/filesystems` | always.all | yes | reference; mainline arm64 and riscv |
+| `CONFIG_EROFS_FS_ZIP` | EROFS compression support, which the root image usually uses (it selects the LZ4 decompressor); depends on `EROFS_FS`. Not visible in `/proc`, so slot-init cannot check it: a root it cannot mount fails the slot with the kernel's error | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_EXT4_FS` | the data partition's filesystem of a `disk` slot board (the slot image is a file on it); slot-init finds it through `/proc/filesystems` | kind.disk.all | yes | reference; mainline arm64 and riscv |
 | `CONFIG_VFAT_FS` | the boot partition with the boot records; slot-init carries on without it and logs the absence | optional.all | yes | reference; mainline arm64 and riscv |
 | `CONFIG_BLK_DEV_LOOP` | the loop device the image file is read through on a `disk` slot board; slot-init finds it through `/proc/devices` (`loop`) | kind.disk.all | yes | reference; mainline arm64 and riscv |
@@ -66,6 +67,12 @@ or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were 
 
 ### The requirements file
 
+The root image's compression **algorithm** is the image builder's choice and is not in this contract. The
+builder must check that the kernel has the built-in decompressor for the algorithm its recipe used: LZ4 comes
+with `EROFS_FS_ZIP`; the others need `EROFS_FS_ZIP_LZMA`, `EROFS_FS_ZIP_DEFLATE` or `EROFS_FS_ZIP_ZSTD`, each
+`=y`. A kernel without it cannot mount the root: see
+[a root that cannot be mounted](slots.md#a-root-that-cannot-be-mounted).
+
 `contracts/slot-kernel.toml` is the source of this table. A build reads the file, not the table. The
 gate (`scripts/check-kernel-config.py`) fails when the table, the file or the two harness configurations
 disagree, naming the symbol. To change a requirement, change the file first, then its row here. The
@@ -76,7 +83,7 @@ Symbols in the file are written without the `CONFIG_` prefix. A build for image 
 (`disk` or `mtd`) and initramfs compression `C` checks exactly these keys:
 
 ```text
-version               must be 1. Any other value: refuse the file.
+version               must be 3. Any other value: refuse the file.
 always.all            each symbol =y on every slot board.
 kind.K.all            each symbol =y for the image kind K.
 kind.K.one_of         each inner list: at least one of its symbols =y.
@@ -392,6 +399,7 @@ slot-init names any it finds missing (`docs/slots.md`, "The kernel self-check").
 | `CONFIG_DM_BUFIO` | required | not needed | `y` | `m` | selected by `DM_VERITY` |
 | `CONFIG_DM_VERITY` | required | not needed | `y` | `m` | the verity target |
 | `CONFIG_EROFS_FS` | required | not needed | `y` | `y` | the root image |
+| `CONFIG_EROFS_FS_ZIP` | required | not needed | `y` | `y` | compressed root images |
 | `CONFIG_EXT4_FS` | required | not needed | `y` | `y` | the data partition |
 | `CONFIG_VFAT_FS` | required | not needed | `y` | `y` | the boot partition (selects `FAT_FS`) |
 | `CONFIG_MTD_UBI`, `CONFIG_MTD_UBI_BLOCK`, `CONFIG_UBIFS_FS` | required on raw NAND only | not needed | `y` | `unset` | UBI volumes, the read-only block device over a volume (`ubiblockN_M`), and `ubifs` for the boot and data volumes. The reference SoC has no NAND |
@@ -536,6 +544,7 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_DM_VERITY` | Slot path | `CONFIG_BLOCK` |
 | `CONFIG_DW_WATCHDOG` | The SoC drivers | none |
 | `CONFIG_EROFS_FS` | Slot path | `CONFIG_BLOCK` |
+| `CONFIG_EROFS_FS_ZIP` | Slot path | `CONFIG_EROFS_FS` |
 | `CONFIG_EVENTFD` | Symbols of lemnos.ko | none |
 | `CONFIG_EXT4_FS` | Slot path | none |
 | `CONFIG_FIRMWARE_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |

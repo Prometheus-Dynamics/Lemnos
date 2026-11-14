@@ -82,10 +82,14 @@ fn bundle(id: &str, data_blocks: usize) -> Vec<u8> {
         "console=tty1 rootwait os.slot={id} os.roothash={} os.src.rpi-boot-mode-1=/soc/mmc@7e202000 panic=5\n",
         "ab".repeat(32)
     );
-    let boot: [(&str, &[u8]); 3] = [
+    // Every file of a bay set the contract requires (the installer writes each into its bay).
+    let boot: [(&str, &[u8]); 6] = [
         ("kernel8.img", b"kernel"),
         ("cmdline.txt", cmdline.as_bytes()),
-        ("initramfs", b"initramfs"),
+        ("initramfs.cpio", b"initramfs"),
+        ("board.dtb", b"device tree"),
+        ("overlays/lemnos-board.dtbo", b"overlay"),
+        ("overlays/README", b"readme"),
     ];
     let files: Vec<String> = boot
         .iter()

@@ -230,8 +230,8 @@ invocation, and build the image from that invocation's outputs. The test `the_bo
 
 The Raspberry Pi firmware family (its `config.txt`, `tryboot.txt` and pointer files) is chosen by the
 `system-slots` device's `record = "tryboot"`; a board with no `record` key is `tryboot`. The board file
-has no `firmware` key. `lemnos-ctl tree BOARD --boot-dir DIR` writes the family's files for that record
-only and refuses any other by name.
+has no `firmware` key. `lemnos-ctl boot-partition` builds the family's boot partition for that record
+(`tryboot` or `uboot`) only and refuses any other by name.
 
 The generated overlay (`tree -o`) ends with a marker fragment: `target-path = "/"` and, under `lemnos`,
 the properties `lemnos,board` (the board id) and `lemnos,overlay-sha256` (SHA-256 of the overlay's text
@@ -252,7 +252,7 @@ The `uboot` record keeps the trial and the default in U-Boot's own redundant env
 (`env/mmc.c:187-193`): the image has exactly one such partition, and U-Boot places both copies at the
 top of it (`env/mmc.c:114-148`). The board file states the size only. `lemnos-ctl tree BOARD
 --uboot-config FILE` writes the U-Boot Kconfig fragment the board's U-Boot is built with, so the image
-cannot lack an option; `--boot-dir` writes the locator `uboot-env.txt`, `boot.cmd` and the pre-created
+cannot lack an option; `lemnos-ctl boot-partition` writes the locator `uboot-env.txt`, `boot.cmd` and the pre-created
 `reason.rec`.
 
 | Driver | Key | Default | Range | Meaning |
@@ -262,8 +262,8 @@ cannot lack an option; `--boot-dir` writes the locator `uboot-env.txt`, `boot.cm
 | `system-slots` | `uboot_env_device` | unset | an absolute block device path | The explicit form for an environment outside the GPT (fixed `CONFIG_ENV_OFFSET`s): the device, with `uboot_env_offset` and `uboot_env_offset_redund`, all required together, none allowed without it. `/dev/mtd*` and `/dev/ubi*` are refused by name: their writes need an erase the raw writer does not do |
 | `system-slots` | `uboot_env_offset`, `uboot_env_offset_redund` | with `uboot_env_device` | multiples of 512, 0 up | The two copies' byte offsets on the device (`CONFIG_ENV_OFFSET`, `CONFIG_ENV_OFFSET_REDUND`). The copies must not overlap |
 | `system-slots` | `uboot_env_mmc_index` | `0` | 0 up | The MMC device U-Boot keeps the environment on and flashes in download mode (`CONFIG_ENV_MMC_DEVICE_INDEX`, `CONFIG_FASTBOOT_FLASH_MMC_DEV`; `mmc list`'s number). Read by `--uboot-config` only |
-| `system-slots` | `uboot_fastboot_usb` | `0` | 0 up | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `--boot-dir` |
-| `system-slots` | `uboot_led` | unset | a U-Boot LED label | The LED that is on while the board waits in download mode (`led <label> on`). `--boot-dir` sets it in `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
+| `system-slots` | `uboot_fastboot_usb` | `0` | 0 up | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `lemnos-ctl boot-partition` (it is set before `boot.cmd` in the image) |
+| `system-slots` | `uboot_led` | unset | a U-Boot LED label | The LED that is on while the board waits in download mode (`led <label> on`). `boot-partition` sets it in the image's `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
 | `system-slots` | `uboot_usb_vendor`, `uboot_usb_product` | unset | 0 to 65535, given together | The fastboot gadget's VID and PID (`CONFIG_USB_GADGET_VENDOR_NUM`, `CONFIG_USB_GADGET_PRODUCT_NUM`). Unset, U-Boot's own default for the SoC stays: a placeholder the project replaces with its own |
 | `system-slots` | `uboot_watchdog_ms` | unset | 0 up | `CONFIG_WATCHDOG_TIMEOUT_MSECS`. Unset, U-Boot's default for the SoC stays |
 
@@ -527,6 +527,16 @@ call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
 retry_first_ms = 1000          # the first wait before a failed device is bound again
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
 dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
+
+# `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role
+# in bytes, with no default: the largest stored file of that role plus 10 %, rounded up to a whole MiB
+# (kernel and initramfs) or a whole 4 KiB (the rest). The values here are made up.
+[boot]
+bay_kernel_bytes = 11534336      # the kernel's bay
+bay_initramfs_bytes = 1048576    # the initramfs's bay
+bay_device_tree_bytes = 90112    # the device tree's bay
+bay_cmdline_bytes = 4096         # the command line's bay
+bay_overlay_bytes = 4096         # the board overlay's bay
 
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 # `[security]`: the board's security switch (docs/slots.md, "The security switch"). The record is the

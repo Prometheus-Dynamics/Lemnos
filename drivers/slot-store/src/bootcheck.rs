@@ -38,11 +38,6 @@ pub fn fat_read<D: ReadAt>(dev: &mut D, path: &str) -> Result<Option<Vec<u8>>, S
     }
 }
 
-/// Where a slot's boot files are on the boot partition, relative to its root.
-pub fn slot_dir(id: &str) -> String {
-    format!("slots/{id}")
-}
-
 /// One boot file that does not match its manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mismatch {
@@ -90,26 +85,41 @@ pub fn overlay_mismatch(
     }
 }
 
-/// Checks every listed boot file of slot `id`. `boot_files` is the manifest's list: a path under
-/// the slot's boot directory and its SHA-256 (64 lowercase hex digits). `read` returns a file's
-/// bytes, given its path relative to the boot partition's root, or the reason it can't.
+/// Checks every listed boot file of a bay set. `dir` is the set's directory (`slots/bayN`), `boot_files`
+/// the manifest's list (a path under the set and its SHA-256, 64 lowercase hex digits), and `lengths`
+/// each file's stored length from the set's record (a bay file is padded to its fixed size, so only
+/// the stored bytes are hashed; a file with no entry is hashed whole). `read` returns a file's bytes,
+/// given its path relative to the boot partition's root, or the reason it can't.
 ///
 /// Returns the mismatches in list order; an empty list means every file matches.
-pub fn check<F>(id: &str, boot_files: &[(String, String)], mut read: F) -> Vec<Mismatch>
+pub fn check<F>(
+    dir: &str,
+    boot_files: &[(String, String)],
+    lengths: &[(String, u64)],
+    mut read: F,
+) -> Vec<Mismatch>
 where
     F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 {
-    let dir = slot_dir(id);
     let mut out = Vec::new();
     for (name, want) in boot_files {
         let path = format!("{dir}/{name}");
         match read(&path) {
             Ok(None) => out.push(Mismatch::Missing(name.clone())),
             Err(why) => out.push(Mismatch::Unreadable(name.clone(), why)),
-            Ok(Some(bytes)) if sha256_hex(&bytes) != *want => {
-                out.push(Mismatch::Changed(name.clone()));
+            Ok(Some(mut bytes)) => {
+                if let Some((_, len)) = lengths.iter().find(|(n, _)| n == name) {
+                    let len = *len as usize;
+                    if bytes.len() < len {
+                        out.push(Mismatch::Changed(name.clone()));
+                        continue;
+                    }
+                    bytes.truncate(len);
+                }
+                if sha256_hex(&bytes) != *want {
+                    out.push(Mismatch::Changed(name.clone()));
+                }
             }
-            Ok(Some(_)) => {}
         }
     }
     out
@@ -123,46 +133,47 @@ where
 /// line break the installer trims (`install.rs` passes the trimmed line to `extlinux`). Any other
 /// entry is refused: a loader line this check does not know is not checked, so it is not accepted.
 ///
-/// `conf` is the file's text, `cmdline` its bytes as the manifest hashes them; `Err` names the entry
-/// that does not match.
+/// `conf` is the file's text, `cmdline` its stored bytes as the manifest hashes them; `Err` names the
+/// entry that does not match.
 pub fn extlinux_mismatch(
-    id: &str,
+    dir: &str,
     boot_files: &[(String, String)],
     conf: &str,
     cmdline: &[u8],
 ) -> Result<(), String> {
-    let prefix = format!("/slots/{id}/");
+    let absolute = format!("/{dir}/");
     let listed = |name: &str| boot_files.iter().any(|(n, _)| n == name);
     // A name the manifest lists, named by an entry `key` (`kernel`, `initrd`, `fdt`).
     let file_of = |key: &str, value: &str| -> Result<String, String> {
         let name = value
-            .strip_prefix(&prefix)
+            .strip_prefix("../")
+            .or_else(|| value.strip_prefix(absolute.as_str()))
             .filter(|name| listed(name))
-            .ok_or_else(|| format!("extlinux {key} {value:?} isn't one of the slot's files"))?;
+            .ok_or_else(|| format!("extlinux {key} {value:?} isn't one of the set's files"))?;
         Ok(name.to_string())
     };
     let mut kernel = false;
     let mut initrd = false;
     let mut append = None;
     for line in conf.lines() {
-        let line = line.trim_start_matches(' ');
+        let line = line.trim_start_matches(' ').trim_end_matches(' ');
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let (key, value) = line.split_once(' ').unwrap_or((line, ""));
-        match key {
+        match key.to_ascii_lowercase().as_str() {
             "default" | "timeout" | "label" => {}
             "kernel" => {
                 if std::mem::replace(&mut kernel, true) {
                     return Err("extlinux.conf has a second kernel entry".into());
                 }
-                file_of(key, value)?;
+                file_of("kernel", value)?;
             }
             "initrd" => {
                 if std::mem::replace(&mut initrd, true) {
                     return Err("extlinux.conf has a second initrd entry".into());
                 }
-                file_of(key, value)?;
+                file_of("initrd", value)?;
             }
             "fdt" | "fdtdir" => {
                 return Err(format!(
@@ -175,9 +186,9 @@ pub fn extlinux_mismatch(
                 }
                 append = Some(value.to_string());
             }
-            other => {
+            _ => {
                 return Err(format!(
-                    "extlinux.conf has an entry it doesn't know: {other:?}"
+                    "extlinux.conf has an entry it doesn't know: {key:?}"
                 ));
             }
         }
@@ -199,51 +210,49 @@ pub fn extlinux_mismatch(
     let line = line.trim_end_matches(['\r', '\n']);
     if append != line {
         return Err(format!(
-            "extlinux append {append:?} isn't the slot's cmdline.txt {line:?}"
+            "extlinux append {append:?} isn't the set's cmdline.txt {line:?}"
         ));
     }
     Ok(())
 }
 
-/// The U-Boot form's check for slot `id`, read through `read` as [`check`] reads. The form is
-/// U-Boot when the slot has an `extlinux/extlinux.conf`, the partition has a `boot-record.env`, or
-/// the root `extlinux/extlinux.conf` exists. On that form the slot's own conf must pass
-/// [`extlinux_mismatch`] against its `cmdline.txt`; and when the slot is the default, the root
-/// copy U-Boot reads must equal it byte for byte. `None` when the form is not U-Boot or all matches;
-/// otherwise the first reason.
-pub fn uboot_check<F>(id: &str, boot_files: &[(String, String)], mut read: F) -> Option<String>
+/// The U-Boot form's check for the set at `dir`, read through `read` as [`check`] reads. The form is
+/// U-Boot when the set holds an `extlinux/extlinux.conf` or the boot partition holds the environment
+/// locator (`uboot-env.txt`). On that form the set's own conf must pass [`extlinux_mismatch`] against
+/// its `cmdline.txt`. `None` when the form is not U-Boot or all matches; otherwise the first reason.
+pub fn uboot_check<F>(
+    dir: &str,
+    boot_files: &[(String, String)],
+    lengths: &[(String, u64)],
+    mut read: F,
+) -> Option<String>
 where
     F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 {
-    let slot_conf = format!("{}/extlinux/extlinux.conf", slot_dir(id));
-    let own = match read(&slot_conf) {
+    let own = match read(&format!("{dir}/extlinux/extlinux.conf")) {
         Ok(bytes) => bytes,
         Err(why) => return Some(format!("its extlinux.conf can't be read: {why}")),
     };
-    let record = read("boot-record.env");
-    let root = read("extlinux/extlinux.conf");
-    let uboot = own.is_some() || matches!(record, Ok(Some(_))) || matches!(root, Ok(Some(_)));
-    if !uboot {
+    let locator = matches!(read(crate::uboot_env::LOCATOR), Ok(Some(_)));
+    if own.is_none() && !locator {
         return None;
     }
     let Some(own) = own else {
         return Some("its extlinux.conf is missing".into());
     };
-    let cmdline = match read(&format!("{}/cmdline.txt", slot_dir(id))) {
+    let mut cmdline = match read(&format!("{dir}/cmdline.txt")) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Some("its cmdline.txt is missing".into()),
         Err(why) => return Some(format!("its cmdline.txt can't be read: {why}")),
     };
+    if let Some((_, len)) = lengths.iter().find(|(n, _)| n == "cmdline.txt") {
+        cmdline.truncate(*len as usize);
+    }
     let text = match std::str::from_utf8(&own) {
         Ok(text) => text,
         Err(_) => return Some("its extlinux.conf isn't UTF-8".into()),
     };
-    if let Err(why) = extlinux_mismatch(id, boot_files, text, &cmdline) {
-        return Some(why);
-    }
-    // The root copy is the install-time fallback for an unreadable environment: the default is
-    // named by the environment, so the root copy need not equal the default's (it is not checked).
-    None
+    extlinux_mismatch(dir, boot_files, text, &cmdline).err()
 }
 
 #[cfg(test)]

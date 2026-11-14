@@ -1,13 +1,11 @@
 //! `tree --boot-dir`: the firmware files for a board whose record is `tryboot`, golden text, and
 //! the check that the fixed text and the slots' own reading of it are one constant.
 
-use super::boot_dir::{HEADER, PLACEHOLDER, files};
+use super::boot_dir::{HEADER, OVERLAY_README_TEXT};
+use super::boot_partition::board_parts;
 use lemnos_host::board::{self, BoardFile};
-use lemnos_slot_store::bootfat::{self, ReadAt};
-use lemnos_slot_store::fatimage;
+use lemnos_slot_store::bootimage::Family;
 use lemnos_slot_store::firmware::{self, CONFIG_TXT, Pick, TRYBOOT_TXT};
-use lemnos_slot_store::twocopy::Kind;
-use std::io;
 
 fn reference() -> BoardFile {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -15,33 +13,41 @@ fn reference() -> BoardFile {
     board::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn text(files: &[(String, Vec<u8>)], name: &str) -> String {
-    let bytes = &files.iter().find(|(file, _)| file == name).unwrap().1;
+/// A root file of the parts `boot-partition` builds, as text.
+fn root_text(parts: &lemnos_slot_store::bootimage::Parts, name: &str) -> String {
+    let bytes = &parts.root.iter().find(|(file, _)| *file == name).unwrap().1;
     String::from_utf8(bytes.clone()).unwrap()
 }
 
-/// The config files are the header, the fixed text, then the board's lines; the pointers and the
-/// records are as the slots read them.
+/// The config files are the header, the fixed text, then the board's lines.
 #[test]
 fn the_config_files_are_the_fixed_text_then_the_board_lines() {
-    let board = reference();
-    let out = files(&board, "gpio=5=op,dh\n", "a1").unwrap();
+    let parts = board_parts(&reference(), "gpio=5=op,dh\n").unwrap();
+    assert_eq!(parts.family, Family::Tryboot);
     assert_eq!(
-        text(&out, "config.txt"),
+        root_text(&parts, "config.txt"),
         format!("{HEADER}{CONFIG_TXT}gpio=5=op,dh\n")
     );
     assert_eq!(
-        text(&out, "tryboot.txt"),
+        root_text(&parts, "tryboot.txt"),
         format!("{HEADER}{TRYBOOT_TXT}gpio=5=op,dh\n")
     );
+    assert_eq!(parts.fixed.len(), 1);
+    assert_eq!(parts.fixed[0].bytes, OVERLAY_README_TEXT.as_bytes());
 }
 
 /// Without board lines the files are the fixed text exactly.
 #[test]
 fn with_no_board_lines_the_files_are_the_fixed_text() {
-    let out = files(&reference(), "", "a1").unwrap();
-    assert_eq!(text(&out, "config.txt"), format!("{HEADER}{CONFIG_TXT}"));
-    assert_eq!(text(&out, "tryboot.txt"), format!("{HEADER}{TRYBOOT_TXT}"));
+    let parts = board_parts(&reference(), "").unwrap();
+    assert_eq!(
+        root_text(&parts, "config.txt"),
+        format!("{HEADER}{CONFIG_TXT}")
+    );
+    assert_eq!(
+        root_text(&parts, "tryboot.txt"),
+        format!("{HEADER}{TRYBOOT_TXT}")
+    );
 }
 
 /// The one constant: the `[boot_count&4]` filter the generated config.txt carries selects the
@@ -69,44 +75,6 @@ fn the_fixed_text_and_the_slots_reading_of_it_are_one_constant() {
     assert!(TRYBOOT_TXT.contains("include trial.txt"));
 }
 
-/// Each pointer file is one sector that names the slot, and a placeholder names no slot yet.
-#[test]
-fn the_pointers_name_the_slot_in_one_sector_each() {
-    let out = files(&reference(), "", "a1").unwrap();
-    for name in ["default.txt", "previous.txt", "trial.txt"] {
-        let bytes = &out.iter().find(|(file, _)| file == name).unwrap().1;
-        assert_eq!(bytes.len(), firmware::POINTER_BYTES, "{name}");
-        let sector: [u8; firmware::POINTER_BYTES] = bytes.as_slice().try_into().unwrap();
-        assert_eq!(
-            firmware::pointer_slot(&sector).as_deref(),
-            Some("a1"),
-            "{name}"
-        );
-    }
-    let placeholder = files(&reference(), "", "").unwrap();
-    let bytes = &placeholder
-        .iter()
-        .find(|(file, _)| file == "default.txt")
-        .unwrap()
-        .1;
-    let sector: [u8; firmware::POINTER_BYTES] = bytes.as_slice().try_into().unwrap();
-    assert_eq!(
-        firmware::pointer_slot(&sector).as_deref(),
-        Some(PLACEHOLDER)
-    );
-}
-
-/// The record files are the three pre-created names, under their visible names, at one record's size.
-#[test]
-fn the_record_files_are_pre_created_under_visible_names() {
-    let out = files(&reference(), "", "a1").unwrap();
-    for name in ["trial.rec", "reason.rec", "episodes.rec"] {
-        assert!(!name.contains(' '), "{name} has a space");
-        let bytes = &out.iter().find(|(file, _)| file == name).unwrap().1;
-        assert_eq!(bytes.len(), 1024, "{name}");
-    }
-}
-
 /// The FAT directory name (eleven bytes, space padded, upper case) an 8.3 visible name stands for:
 /// what the image builder writes into the directory, and what the locator matches.
 fn directory_entry(visible: &str) -> [u8; 11] {
@@ -119,51 +87,6 @@ fn directory_entry(visible: &str) -> [u8; 11] {
         out[8 + i] = b.to_ascii_uppercase();
     }
     out
-}
-
-/// A volume image read through the locator's interface.
-struct Image(Vec<u8>);
-
-impl ReadAt for Image {
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        let start = usize::try_from(offset).unwrap();
-        buf.copy_from_slice(&self.0[start..start + buf.len()]);
-        Ok(())
-    }
-}
-
-/// The records the generator writes are found by the locator through the directory entries the
-/// image builder makes from their visible names: the same eleven bytes the slot-store constants name.
-#[test]
-fn the_record_files_are_found_by_their_directory_entries() {
-    let out = files(&reference(), "", "a1").unwrap();
-    let mut entries = Vec::new();
-    for (kind, visible) in [
-        (Kind::TRIAL, "trial.rec"),
-        (Kind::REASON, "reason.rec"),
-        (Kind::EPISODES, "episodes.rec"),
-    ] {
-        let bytes = out
-            .iter()
-            .find(|(file, _)| file == visible)
-            .unwrap()
-            .1
-            .clone();
-        let entry = directory_entry(visible);
-        assert_eq!(&entry, kind.file_name().unwrap(), "{visible}");
-        entries.push((entry, bytes));
-    }
-    let refs: Vec<(&[u8; 11], Vec<u8>)> = entries.iter().map(|(e, b)| (e, b.clone())).collect();
-    let mut image = Image(fatimage::fat16(&refs));
-    for (kind, visible) in [
-        (Kind::TRIAL, "trial.rec"),
-        (Kind::REASON, "reason.rec"),
-        (Kind::EPISODES, "episodes.rec"),
-    ] {
-        let found = bootfat::locate(&mut image, kind.file_name().unwrap(), 1024)
-            .unwrap_or_else(|e| panic!("{visible}: {e:?}"));
-        assert!(found.first_lba > 0, "{visible} is placed");
-    }
 }
 
 /// The contract's `[[record]]` table reads, and each visible name is the slot-store kind's.
@@ -184,14 +107,7 @@ fn the_contract_record_table_names_the_visible_names() {
     }
 }
 
-/// A slot id that is not one is refused before anything is written.
-#[test]
-fn a_bad_slot_id_is_refused() {
-    let err = files(&reference(), "", "A B").unwrap_err();
-    assert!(err.contains("isn't a slot id"), "{err}");
-}
-
-/// A record other than `tryboot` has no firmware files here, and the refusal says so.
+/// A record other than `tryboot` or `uboot` has no boot partition here, and the refusal says so.
 #[test]
 fn a_board_with_another_record_is_refused_by_name() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -202,7 +118,7 @@ fn a_board_with_another_record_is_refused_by_name() {
         "the reference board names its record"
     );
     let board = board::parse(&text.replace("record = \"tryboot\"", "record = \"file\"")).unwrap();
-    let err = files(&board, "", "a1").unwrap_err();
+    let err = board_parts(&board, "").unwrap_err();
     assert!(
         err.contains("\"file\"") && err.contains("\"uboot\""),
         "{err}"
@@ -216,15 +132,15 @@ fn a_board_without_slots_has_no_boot_files() {
     board
         .devices
         .retain(|device| device.driver != "system-slots");
-    let err = files(&board, "", "a1").unwrap_err();
+    let err = board_parts(&board, "").unwrap_err();
     assert!(err.contains("no system-slots device"), "{err}");
 }
 
-/// The command writes the files into the named directory, and the golden config.txt of the
-/// reference board carries the same fixed text.
+/// `tree --boot-dir` is removed (I5i8): the boot partition is `boot-partition`'s. The flag is refused
+/// and nothing is written.
 #[test]
-fn the_tree_command_writes_the_files_into_the_directory() {
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-boot-dir-{}", std::process::id()));
+fn tree_refuses_boot_dir_and_writes_nothing() {
+    let dir = std::env::temp_dir().join(format!("lemnos-ctl-boot-dir-gone-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let args: Vec<String> = [
@@ -234,18 +150,41 @@ fn the_tree_command_writes_the_files_into_the_directory() {
         repo.join("testing/boards/reference.toml").to_str().unwrap(),
         "--boot-dir",
         dir.to_str().unwrap(),
-        "--slot",
-        "a1",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
     let mut out = Vec::new();
-    crate::run(&args, &mut out).unwrap();
-    let config = std::fs::read_to_string(dir.join("config.txt")).unwrap();
-    assert!(config.starts_with(HEADER) && config.contains(CONFIG_TXT));
-    assert!(dir.join("trial.txt").exists() && dir.join("episodes.rec").exists());
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(crate::run(&args, &mut out).is_err());
+    assert!(!dir.exists());
+}
+
+/// The reader takes version 5 only, and refuses 4 and 6 by version.
+#[test]
+fn the_layout_reader_reads_version_5_and_refuses_4_and_6() {
+    use super::boot_dir::{LAYOUT, read_layout};
+    assert!(LAYOUT.contains("\nversion = 5\n"));
+    assert!(read_layout(LAYOUT).is_ok());
+    for v in ["version = 4", "version = 6"] {
+        let bad = LAYOUT.replacen("version = 5", v, 1);
+        let why = read_layout(&bad).unwrap_err();
+        assert!(why.contains("reads 5"), "{v}: {why}");
+    }
+}
+
+/// The contract this tool embeds is the one the code writes (checked before every image build).
+#[test]
+fn the_embedded_contract_is_the_one_the_code_writes() {
+    super::boot_dir::check_contract().unwrap();
+}
+
+/// A `[bay]` or `[volume]` value that disagrees with the code is refused by name.
+#[test]
+fn a_bay_table_that_disagrees_with_the_code_is_refused_by_name() {
+    use super::boot_dir::{LAYOUT, check_bay_and_volume};
+    let bad = LAYOUT.replacen("sets = 3", "sets = 4", 1);
+    let err = check_bay_and_volume(&bad).unwrap_err();
+    assert!(err.contains("[bay] sets"), "{err}");
 }
 
 /// The layout contract reads, names every file the firmware text names, and is the one list the
@@ -265,7 +204,7 @@ mod layout {
     #[test]
     fn the_contract_reads_and_its_rpi_list_is_the_slot_store_constants() {
         let files = read_layout(LAYOUT).unwrap();
-        assert_eq!(files.len(), 7);
+        assert_eq!(files.len(), 8);
         assert_eq!(
             required_for(&files, "rpi-tryboot"),
             names::RPI_TRYBOOT_REQUIRED
@@ -276,17 +215,27 @@ mod layout {
     }
 
     #[test]
-    fn a_version_other_than_two_is_refused() {
-        for other in ["version = 1", "version = 2", "version = 3", "version = 5"] {
-            let text = LAYOUT.replace("version = 4", other);
+    fn a_version_other_than_five_is_refused() {
+        for other in [
+            "version = 1",
+            "version = 2",
+            "version = 3",
+            "version = 4",
+            "version = 6",
+        ] {
+            let text = LAYOUT.replace("version = 5", other);
             let why = read_layout(&text).unwrap_err();
-            assert!(why.contains("reads 4"), "{why}");
+            assert!(why.contains("reads 5"), "{why}");
         }
     }
 
     #[test]
     fn a_source_other_than_build_or_generated_is_refused() {
-        let text = LAYOUT.replacen("source = \"build\"", "source = \"made\"", 1);
+        let text = LAYOUT.replacen(
+            "scope = \"set\"\nsource = \"build\"",
+            "scope = \"set\"\nsource = \"made\"",
+            1,
+        );
         let why = read_layout(&text).unwrap_err();
         assert!(why.contains("\"made\""), "{why}");
     }
@@ -299,24 +248,18 @@ mod layout {
             .filter(|f| f.source == "generated")
             .map(|f| f.name.as_str())
             .collect();
-        assert_eq!(generated, [names::OVERLAY_README, "uboot-env.txt"]);
+        assert_eq!(
+            generated,
+            [
+                names::OVERLAY_README,
+                "extlinux/extlinux.conf",
+                "uboot-env.txt"
+            ]
+        );
         assert!(
             files
                 .iter()
                 .all(|f| f.source == "build" || f.source == "generated")
-        );
-    }
-
-    #[test]
-    fn the_boot_directory_writes_the_generated_readme_under_the_slot_directory() {
-        use super::super::boot_dir::{OVERLAY_README_TEXT, SLOT_DIR, files};
-        let out = files(&super::reference(), "", "a1").unwrap();
-        let path = format!("{SLOT_DIR}/{}", names::OVERLAY_README);
-        let readme = out.iter().find(|(n, _)| *n == path).unwrap();
-        assert_eq!(readme.1, OVERLAY_README_TEXT.as_bytes());
-        assert_eq!(
-            out.iter().filter(|(n, _)| n.starts_with("slot/")).count(),
-            1
         );
     }
 
@@ -343,11 +286,13 @@ mod layout {
     }
 
     #[test]
-    fn the_boot_directory_carries_the_contract() {
-        use super::super::boot_dir::files;
-        let board = super::reference();
-        let out = files(&board, "", "a1").unwrap();
-        let copy = out.iter().find(|(n, _)| n == "slot-layout.toml").unwrap();
+    fn the_image_carries_the_contract() {
+        let parts = super::board_parts(&super::reference(), "").unwrap();
+        let copy = parts
+            .root
+            .iter()
+            .find(|(n, _)| *n == "slot-layout.toml")
+            .unwrap();
         assert_eq!(copy.1, LAYOUT.as_bytes());
     }
 }
@@ -577,10 +522,6 @@ mod cmdline_slot {
 
 const UBOOT_KEYS: &str = "record = \"uboot\", uboot_env_size = 8192, uboot_env_mmc_index = 0";
 
-fn text_bytes(out: &[(String, Vec<u8>)], name: &str) -> Vec<u8> {
-    out.iter().find(|(n, _)| n == name).unwrap().1.clone()
-}
-
 fn uboot_board_with(keys: &str) -> BoardFile {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testing/boards/reference.toml");
@@ -592,31 +533,23 @@ fn uboot_board() -> BoardFile {
     uboot_board_with(UBOOT_KEYS)
 }
 
-/// The `uboot` record writes the locator slot-init reads, the boot script, and the contract copy;
-/// the locator parses with the slot-store reader to the board file's place (the GPT form: only the
-/// size), and the script has the board's USB controller and LED set before the static text.
+/// The `uboot` record's root holds the contract copy, the locator slot-init reads and the boot
+/// script; the locator parses with the slot-store reader to the board file's place (the GPT form:
+/// only the size), and the script has the board's USB controller and LED set before the static text.
 #[test]
 fn the_uboot_board_writes_the_locator_and_the_boot_script() {
     use lemnos_slot_store::uboot_env::Place;
-    let out = files(&uboot_board(), "", "").unwrap();
-    let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "slot-layout.toml",
-            "uboot-env.txt",
-            "boot.cmd",
-            "reason.rec"
-        ]
-    );
-    assert_eq!(text_bytes(&out, "reason.rec").len(), 1024);
-    let locator = text(&out, lemnos_slot_store::uboot_env::LOCATOR);
+    let parts = board_parts(&uboot_board(), "").unwrap();
+    assert_eq!(parts.family, Family::UbootBlock);
+    let names: Vec<&str> = parts.root.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, ["slot-layout.toml", "uboot-env.txt", "boot.cmd"]);
+    let locator = root_text(&parts, lemnos_slot_store::uboot_env::LOCATOR);
     assert_eq!(
         Place::parse(&locator).unwrap(),
         Place::Gpt { size: 8192 },
         "{locator}"
     );
-    let script = text(&out, "boot.cmd");
+    let script = root_text(&parts, "boot.cmd");
     assert!(
         script.ends_with(super::boot_dir::BOOT_CMD),
         "the static script follows"
@@ -629,7 +562,7 @@ fn the_uboot_board_writes_the_locator_and_the_boot_script() {
     let led = uboot_board_with(&format!(
         "{UBOOT_KEYS}, uboot_fastboot_usb = 2, uboot_led = \"red:status\""
     ));
-    let script = text(&files(&led, "", "").unwrap(), "boot.cmd");
+    let script = root_text(&board_parts(&led, "").unwrap(), "boot.cmd");
     assert!(
         script.contains("\nsetenv lemnos_usb 2\nsetenv lemnos_led red:status\n"),
         "{script}"
@@ -638,8 +571,8 @@ fn the_uboot_board_writes_the_locator_and_the_boot_script() {
     let device = uboot_board_with(
         "record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mmcblk0\", uboot_env_offset = 4194304, uboot_env_offset_redund = 4202496",
     );
-    let out = files(&device, "", "").unwrap();
-    let locator = text(&out, lemnos_slot_store::uboot_env::LOCATOR);
+    let parts = board_parts(&device, "").unwrap();
+    let locator = root_text(&parts, lemnos_slot_store::uboot_env::LOCATOR);
     assert_eq!(
         Place::parse(&locator).unwrap(),
         Place::device("/dev/mmcblk0", 8192, 4194304, 4202496).unwrap()
@@ -660,8 +593,11 @@ fn the_boot_script_reads_the_variables_the_record_writes() {
 /// Every refusal is by name, and nothing is written.
 #[test]
 fn a_uboot_board_with_a_wrong_environment_description_is_refused_by_name() {
-    let refuse = |keys: &str| files(&uboot_board_with(keys), "", "").unwrap_err();
-    assert!(refuse("record = \"uboot\"").contains("uboot_env_size"));
+    let refuse = |keys: &str| board_parts(&uboot_board_with(keys), "").unwrap_err();
+    assert_eq!(
+        refuse("record = \"uboot\""),
+        "system-slots device \"slots\": uboot_env_size is needed for the \"uboot\" record (an integer)"
+    );
     let err = refuse(
         "record = \"uboot\", uboot_env_size = 8192, uboot_env_partuuid = \"0a1b2c3d-0000-4000-8000-000000000042\"",
     );
@@ -696,7 +632,13 @@ fn the_contract_names_the_locator_for_the_uboot_kind() {
         .filter(|f| f.firmware.iter().any(|k| k == "uboot"))
         .map(|f| f.name.as_str())
         .collect();
-    assert_eq!(uboot, [lemnos_slot_store::uboot_env::LOCATOR]);
+    assert_eq!(
+        uboot,
+        [
+            "extlinux/extlinux.conf",
+            lemnos_slot_store::uboot_env::LOCATOR
+        ]
+    );
 }
 
 /// `--uboot-config`: the Kconfig fragment. The GPT form names the type-GUID lookup and no offsets;
@@ -847,4 +789,29 @@ fn tree_writes_the_uboot_config_to_its_file() {
     );
     assert!(!dir.join("none").exists());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `tree --boot-dir` is refused by name, with the command that replaces it, whatever else is given;
+/// the flags that remain are not refused.
+#[test]
+fn tree_boot_dir_is_refused_and_names_boot_partition() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let board = repo.join("testing/boards/reference.toml");
+    let args: Vec<String> = [
+        "tree",
+        "--socs",
+        repo.join("socs").to_str().unwrap(),
+        board.to_str().unwrap(),
+        "--boot-dir",
+        "/nonexistent/dir",
+        "--slot",
+        "a",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let error = crate::run(&args, &mut Vec::new()).unwrap_err();
+    assert_eq!(error, crate::BOOT_DIR_REMOVED);
+    assert!(error.contains("boot-partition") && error.contains("--manifest-boot"));
+    assert!(!std::path::Path::new("/nonexistent/dir").exists());
 }

@@ -74,6 +74,8 @@
 //! again. Nothing is kept across a restart of the service but the board's own files: an install
 //! the restart cut short is cleared when the driver starts and reported as interrupted.
 
+#[cfg(test)]
+mod bay_fixture;
 pub mod boot;
 mod boot_guard;
 #[cfg(test)]
@@ -343,6 +345,7 @@ fn record_for(
             disk: boot_disk_of(cfg),
             place: uboot_env_place(cfg).map_err(|_| Status::INVALID_ARGUMENT)?,
             restarter,
+            boot_node: boot_node_of(cfg),
         }),
         "ubi" => match (&layout.ubi, ubi_write) {
             (Some(device), Some(writer)) => Box::new(Uboot {
@@ -526,23 +529,10 @@ impl SystemSlots {
     }
 
     /// The slots that keep their directory on the boot partition, and `also`.
-    fn resident(&self, state: &State, also: &str) -> Vec<String> {
-        [
-            self.running(),
-            state.default.clone(),
-            state.previous.clone(),
-            state.trial.clone(),
-            also.to_string(),
-        ]
-        .into_iter()
-        .filter(|id| !id.is_empty())
-        .collect()
-    }
-
-    fn evict(&self, state: &State, also: &str) -> Result<()> {
-        let resident = self.resident(state, also);
-        let names: Vec<&str> = resident.iter().map(String::as_str).collect();
-        boot::evict(&self.layout, &names).map_err(|_| Status::IO)
+    /// Nothing is evicted from the boot partition any more: its bays are fixed and a bay is freed by
+    /// its record alone ([`remove_slot`]). Kept as the one place a switch would prune, for callers.
+    fn evict(&self, _state: &State, _also: &str) -> Result<()> {
+        Ok(())
     }
 
     fn installed(&self, id: &str) -> Result<()> {
@@ -814,13 +804,10 @@ impl SystemSlots {
         if state.staged == id {
             state.staged.clear();
         }
+        // The bay first, by its record: a bay a pointer names is refused, and then nothing has changed.
+        self.record.free(id).map_err(|_| Status::IO)?;
         self.save(state)?;
         let io = |_| Status::IO;
-        let dir = self.layout.boot_dir(id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(io)?;
-            store::sync_dir(&self.layout.boot.join("slots")).map_err(io)?;
-        }
         if let (Some(device), Some(writer)) = (&self.layout.ubi, &self.ubi_write) {
             let volume = ubi::image_volume(id);
             if device.volume(&volume).is_some() {
@@ -1702,8 +1689,6 @@ impl Slots for SystemSlots {
             return Err(Status::NOT_PERMITTED);
         }
         let mut state = self.state();
-        self.evict(&state, id)?;
-        boot::stage(&self.layout, id, false).map_err(|_| Status::IO)?;
         self.record.set_default(id).map_err(|_| Status::IO)?;
         self.record
             .fallback_copy(&self.layout, id)
@@ -1730,8 +1715,6 @@ impl Slots for SystemSlots {
         }
         let mut state = self.state();
         // Room for its boot files first: only the resident slots' stay.
-        self.evict(&state, id)?;
-        boot::stage(&self.layout, id, false).map_err(|_| Status::IO)?;
         self.mark_keep_old(id, keep_old)?;
         boot::clear_reason(&self.boot_node);
         self.record

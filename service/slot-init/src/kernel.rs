@@ -309,6 +309,27 @@ mod tests {
         assert_eq!(named, listed);
     }
 
+    /// slot-init mounts the slot's root as an EROFS image (usually compressed), so the contract carries
+    /// both symbols built in; removing either, or the mount, breaks this.
+    #[test]
+    fn slot_inits_use_of_erofs_is_tied_to_the_contracts_two_symbols() {
+        let file: toml::Table = include_str!("../../../contracts/slot-kernel.toml")
+            .parse()
+            .unwrap();
+        let always: Vec<&str> = file["always"]["all"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let boot = std::fs::read_to_string(repo().join("service/slot-init/src/boot.rs")).unwrap();
+        let mounts_erofs = boot.contains("mount(\"erofs\"");
+        assert!(mounts_erofs, "slot-init no longer mounts the root as erofs");
+        for symbol in ["EROFS_FS", "EROFS_FS_ZIP"] {
+            assert!(always.contains(&symbol), "{symbol} is not in always.all");
+        }
+    }
+
     fn repo() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
@@ -331,7 +352,7 @@ mod tests {
         let file: toml::Table = include_str!("../../../contracts/slot-kernel.toml")
             .parse()
             .unwrap();
-        assert_eq!(file["version"].as_integer(), Some(2));
+        assert_eq!(file["version"].as_integer(), Some(3));
         let cargo = std::fs::read_to_string(repo().join("service/slot-init/Cargo.toml")).unwrap();
         let sys = std::fs::read_to_string(repo().join("service/slot-init/src/sys.rs")).unwrap();
         let uses = cargo.contains("lemnos-driver-rpi-firmware-sys")

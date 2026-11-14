@@ -7,6 +7,7 @@
 //! empty payload is no trial, which is what a cleared record holds. The reason's payload is the
 //! reason's text, empty for none.
 
+use crate::bays;
 use crate::bootfat::{self, ReadAt, Refusal};
 use crate::firmware;
 use crate::records::MAX_ATTEMPTS;
@@ -185,7 +186,7 @@ fn invalid(why: &'static str) -> Error {
     Error::Io(io::Error::new(io::ErrorKind::InvalidInput, why))
 }
 
-/// The FAT directory names of the three pointer files: one sector each, read by the Pi firmware as
+/// The FAT directory names of the three pointer files: two sectors each (one form, I5i8), read by the Pi firmware as
 /// `default.txt`, `previous.txt` and `trial.txt` (see [`crate::firmware`]).
 pub const DEFAULT_POINTER: &[u8; 11] = b"DEFAULT TXT";
 /// See [`DEFAULT_POINTER`].
@@ -236,8 +237,9 @@ impl Pointers {
     pub fn place<D: ReadAt>(dev: &mut D) -> Result<Self, (&'static str, Refusal)> {
         let mut lbas = [0; 3];
         for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
-            let found = bootfat::locate(dev, which.file_name(), SECTOR as u64)
-                .map_err(|why| (which.name(), why))?;
+            let found =
+                bootfat::locate(dev, which.file_name(), firmware::POINTER_FILE_BYTES as u64)
+                    .map_err(|why| (which.name(), why))?;
             lbas[which as usize] = found.first_lba;
         }
         Ok(Self { lbas })
@@ -248,18 +250,31 @@ impl Pointers {
         self.lbas[which as usize]
     }
 
-    /// The slot the file names, `None` when the sector is torn or is not a pointer.
+    /// The slot the file names: the last whole line of its two sectors, `None` when neither is one.
     pub fn read<D: Sectors>(&self, dev: &mut D, which: Pointer) -> io::Result<Option<String>> {
-        let mut sector = [0u8; SECTOR];
-        dev.read(self.lba(which), &mut sector)?;
-        Ok(firmware::pointer_slot(&sector))
+        let mut file = [0u8; firmware::POINTER_FILE_BYTES];
+        let lba = self.lba(which);
+        for (k, chunk) in file.chunks_mut(SECTOR).enumerate() {
+            dev.read(lba + k as u64, chunk.try_into().expect("a whole sector"))?;
+        }
+        Ok(firmware::pointer_file_slot(&file))
     }
 
-    /// Points `which` at slot `id`: one sector write, durable when it returns.
+    /// Points `which` at slot `id`: the second sector, then the first; each one a durable write. A cut
+    /// after the second leaves the new line in the file, so the commit is that write.
     pub fn write<D: Sectors>(&self, dev: &mut D, which: Pointer, id: &str) -> Result<(), Error> {
-        let sector =
-            firmware::pointer_sector(id).ok_or_else(|| invalid("pointer slot id is not valid"))?;
-        dev.write(self.lba(which), &sector).map_err(Error::Io)
+        let file =
+            firmware::pointer_file(id).ok_or_else(|| invalid("pointer slot id is not valid"))?;
+        let lba = self.lba(which);
+        for k in [1usize, 0] {
+            let at = k * SECTOR;
+            dev.write(
+                lba + k as u64,
+                file[at..at + SECTOR].try_into().expect("a whole sector"),
+            )
+            .map_err(Error::Io)?;
+        }
+        Ok(())
     }
 }
 
@@ -287,6 +302,9 @@ pub trait BootRaw {
     fn set_episodes(&mut self, slot: &str, episodes: u8) -> Result<(), String>;
     /// Clears the episodes record.
     fn clear_episodes(&mut self) -> Result<(), String>;
+    /// The bay a slot's files are in: the set's directory (`slots/bayN`) and each payload's stored
+    /// length from the set's record. Refused by name when no set holds the slot.
+    fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String>;
 
     /// Arms a trial: the trial pointer first, then the record. A cut after the pointer leaves no
     /// record, so no tryboot restart happens and the old pointer is never read; the record is written
@@ -312,13 +330,15 @@ pub fn arm_trial_raw<D: Sectors>(
 }
 
 /// The boot partition's block node, opened for the raw records and pointers. Nothing mounts it.
-pub struct Boot {
-    dev: FileSectors,
+pub struct Boot<D = FileSectors> {
+    dev: D,
     records: Records,
     pointers: Pointers,
+    /// The bay layout the image was built with; `Err` names why it could not be read.
+    layout: Result<bays::Layout, String>,
 }
 
-impl Boot {
+impl Boot<FileSectors> {
     /// Opens the node read-write and finds every record and pointer file on it. A file that is
     /// missing or not placeable is refused by name.
     pub fn open(node: &Path) -> Result<Self, String> {
@@ -327,30 +347,231 @@ impl Boot {
             .write(true)
             .open(node)
             .map_err(|e| format!("{}: {e}", node.display()))?;
-        let mut dev = FileSectors::new(file, 0);
-        let records = Records::place_named(&mut dev)
-            .map_err(|(name, why)| format!("{}: {name} {why}", node.display()))?;
-        let pointers = Pointers::place(&mut dev)
-            .map_err(|(name, why)| format!("{}: {name} {why}", node.display()))?;
+        Boot::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
+    }
+}
+
+impl<D> Boot<D> {
+    /// The device the boot partition is read and written through.
+    pub fn into_device(self) -> D {
+        self.dev
+    }
+}
+
+impl<D: Sectors + ReadAt> Boot<D> {
+    /// The boot partition on `dev` (a node, or an image in a test): every record and pointer file is
+    /// found, and the bay layout read. A file that is missing or not placeable is refused by name.
+    pub fn on(mut dev: D) -> Result<Self, String> {
+        let records =
+            Records::place_named(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
+        let pointers = Pointers::place(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
+        let layout = bays::discover(&mut dev);
         Ok(Self {
             dev,
             records,
             pointers,
+            layout,
         })
+    }
+
+    /// The bay set a slot's committed record is in, refused by name when none is.
+    fn set_for(&mut self, slot: &str) -> Result<u8, String> {
+        let layout = self.layout.clone()?;
+        bays::set_of_slot(&mut self.dev, &layout, slot)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!("slot {slot} has no bay on the boot partition: nothing names it")
+            })
+    }
+
+    /// The slot a pointer's set holds, from that set's record.
+    fn slot_of_pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
+        let Some(name) = self
+            .pointers
+            .read(&mut self.dev, which)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let layout = self.layout.clone()?;
+        let Some(set) = bays::set_of(&name) else {
+            return Ok(None);
+        };
+        let placed = bays::place(&mut self.dev, &layout)?;
+        let info =
+            bays::read_info(&mut self.dev, placed.info[set as usize]).map_err(|e| e.to_string())?;
+        Ok(info.map(|i| i.slot))
+    }
+
+    /// The bay set a slot's files are in: what the boot chain reads. Refused by name when none is.
+    pub fn bay_of(&mut self, slot: &str) -> Result<u8, String> {
+        self.set_for(slot)
+    }
+
+    /// Installs a slot's five payloads into its bay (see [`bays::stage`]): the set that already holds
+    /// the slot, else a set no pointer names. No pointer moves.
+    pub fn install_slot(
+        &mut self,
+        slot: &str,
+        payloads: &[&[u8]; 5],
+    ) -> Result<bays::Done, String> {
+        self.install_slot_with(slot, payloads, None)
+    }
+
+    /// [`Boot::install_slot`] for a set that carries the U-Boot form's composed `extlinux.conf`
+    /// (`extlinux`, written with the payloads).
+    pub fn install_slot_with(
+        &mut self,
+        slot: &str,
+        payloads: &[&[u8]; 5],
+        extlinux: Option<&[u8]>,
+    ) -> Result<bays::Done, String> {
+        let layout = self.layout.clone()?;
+        let protected =
+            bays::Protected::from_volume(&mut self.dev, &layout).map_err(|e| e.to_string())?;
+        let set = bays::choose_set(&mut self.dev, &layout, slot, &protected)
+            .map_err(|e| e.to_string())?;
+        bays::stage_with(
+            &mut self.dev,
+            &layout,
+            set,
+            slot,
+            payloads,
+            extlinux,
+            &protected,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Frees the bay of `slot` by its record alone (see [`bays::free_set`]); nothing else is written.
+    pub fn free_slot(&mut self, slot: &str) -> Result<(), String> {
+        let layout = self.layout.clone()?;
+        let Some(set) =
+            bays::set_of_slot(&mut self.dev, &layout, slot).map_err(|e| e.to_string())?
+        else {
+            return Ok(());
+        };
+        let protected =
+            bays::Protected::from_volume(&mut self.dev, &layout).map_err(|e| e.to_string())?;
+        bays::free_set(&mut self.dev, &layout, set, &protected).map_err(|e| e.to_string())
     }
 }
 
-impl BootRaw for Boot {
+/// A boot partition's payload bays with no pointers, and no record but the reason's: the U-Boot form's volume, whose
+/// default is the environment's. It reads a slot's bay and installs and frees a slot the same way
+/// [`Boot`] does; it never names a pointer.
+pub struct BayVolume<D = FileSectors> {
+    dev: D,
+    layout: bays::Layout,
+    /// The volume's one record, `reason.rec` (the contract lists it for the U-Boot form), when the
+    /// image has it.
+    reason: Option<Pair>,
+}
+
+impl BayVolume<FileSectors> {
+    /// Opens the node read-write and reads its bay layout. Nothing is mounted.
+    pub fn open(node: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(node)
+            .map_err(|e| format!("{}: {e}", node.display()))?;
+        BayVolume::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
+    }
+}
+
+impl<D: Sectors + ReadAt> BayVolume<D> {
+    /// The volume on `dev` (a node, or an image in a test): its bay layout, read from the sizes of
+    /// the first set's files.
+    pub fn on(mut dev: D) -> Result<Self, String> {
+        let layout = bays::discover(&mut dev)?;
+        let reason = bootfat::locate(&mut dev, REASON_FILE, RECORD_BYTES)
+            .ok()
+            .map(|file| Pair::at(file.first_lba));
+        Ok(Self {
+            dev,
+            layout,
+            reason,
+        })
+    }
+
+    /// The device the volume is read and written through.
+    pub fn into_device(self) -> D {
+        self.dev
+    }
+
+    /// The bay a slot's files are in (see [`bays::slot_bay_on`]).
+    pub fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
+        bays::slot_bay_on(&mut self.dev, &self.layout, slot)
+    }
+
+    /// Installs a slot's five payloads into its bay (see [`bays::stage_with`]), with the U-Boot form's
+    /// composed `extlinux` when given. `protected` is the environment's default, previous and trial
+    /// (the caller reads them); no pointer or environment variable moves.
+    pub fn install_slot_with(
+        &mut self,
+        slot: &str,
+        payloads: &[&[u8]; 5],
+        extlinux: Option<&[u8]>,
+        protected: &bays::Protected,
+    ) -> Result<bays::Done, String> {
+        let set = bays::choose_set(&mut self.dev, &self.layout, slot, protected)
+            .map_err(|e| e.to_string())?;
+        bays::stage_with(
+            &mut self.dev,
+            &self.layout,
+            set,
+            slot,
+            payloads,
+            extlinux,
+            protected,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Frees the bay of `slot` by its record alone (see [`bays::free_set`]). `protected` as for
+    /// [`BayVolume::install_slot_with`].
+    pub fn free_slot(&mut self, slot: &str, protected: &bays::Protected) -> Result<(), String> {
+        let Some(set) =
+            bays::set_of_slot(&mut self.dev, &self.layout, slot).map_err(|e| e.to_string())?
+        else {
+            return Ok(());
+        };
+        bays::free_set(&mut self.dev, &self.layout, set, protected).map_err(|e| e.to_string())
+    }
+}
+
+impl<D: Sectors + ReadAt> BootRaw for Boot<D> {
     fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
+        self.slot_of_pointer(which)
+    }
+
+    /// Points `which` at the slot's bay. The default pointer switch writes the previous pointer first
+    /// (the old default's bay, when the default changes), then the default: a cut between the two
+    /// leaves the old default and an old previous, both of which hold their records.
+    fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String> {
+        let set = self.set_for(slot)?;
+        if which == Pointer::Default {
+            let old = self
+                .pointers
+                .read(&mut self.dev, Pointer::Default)
+                .map_err(|e| e.to_string())?;
+            if let Some(old) = old.as_deref().and_then(bays::set_of)
+                && old != set
+            {
+                self.pointers
+                    .write(&mut self.dev, Pointer::Previous, &bays::set_name(old))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         self.pointers
-            .read(&mut self.dev, which)
+            .write(&mut self.dev, which, &bays::set_name(set))
             .map_err(|e| e.to_string())
     }
 
-    fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String> {
-        self.pointers
-            .write(&mut self.dev, which, slot)
-            .map_err(|e| e.to_string())
+    fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
+        let layout = self.layout.clone()?;
+        bays::slot_bay_on(&mut self.dev, &layout, slot)
     }
 
     fn trial(&mut self) -> Result<Option<Trial>, String> {
@@ -364,7 +585,12 @@ impl BootRaw for Boot {
     }
 
     fn arm_trial(&mut self, slot: &str, attempts: u8) -> Result<(), String> {
-        arm_trial_raw(&self.records, &self.pointers, &mut self.dev, slot, attempts)
+        let set = self.set_for(slot)?;
+        self.pointers
+            .write(&mut self.dev, Pointer::Trial, &bays::set_name(set))
+            .map_err(|e| e.to_string())?;
+        self.records
+            .set_trial(&mut self.dev, slot, attempts)
             .map_err(|e| e.to_string())
     }
 
@@ -403,6 +629,95 @@ impl BootRaw for Boot {
             .clear_episodes(&mut self.dev)
             .map_err(|e| e.to_string())
     }
+}
+
+/// What the U-Boot form's volume answers for the records it does not have: its trial and default are
+/// in U-Boot's environment.
+fn in_the_environment(what: &str) -> String {
+    format!(
+        "the {what} is in U-Boot's environment on this boot form: the boot partition has no record of it"
+    )
+}
+
+impl<D: Sectors + ReadAt> BootRaw for BayVolume<D> {
+    fn pointer(&mut self, _which: Pointer) -> Result<Option<String>, String> {
+        Err(in_the_environment("default"))
+    }
+
+    fn set_pointer(&mut self, _which: Pointer, _slot: &str) -> Result<(), String> {
+        Err(in_the_environment("default"))
+    }
+
+    fn trial(&mut self) -> Result<Option<Trial>, String> {
+        Err(in_the_environment("trial"))
+    }
+
+    fn set_trial(&mut self, _slot: &str, _attempts: u8) -> Result<(), String> {
+        Err(in_the_environment("trial"))
+    }
+
+    fn clear_trial(&mut self) -> Result<(), String> {
+        Err(in_the_environment("trial"))
+    }
+
+    fn reason(&mut self) -> Result<Option<String>, String> {
+        let pair = self
+            .reason
+            .ok_or("reason.rec is missing from this volume")?;
+        let Some(cur) = pair
+            .read(&mut self.dev, Kind::REASON)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        Ok((!cur.payload.is_empty()).then(|| String::from_utf8_lossy(&cur.payload).into_owned()))
+    }
+
+    fn set_reason(&mut self, reason: &str) -> Result<(), String> {
+        let pair = self
+            .reason
+            .ok_or("reason.rec is missing from this volume")?;
+        let text = reason.replace(['\n', '\r'], " ");
+        pair.write(&mut self.dev, Kind::REASON, text.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn episodes(&mut self) -> Result<Option<(String, u8)>, String> {
+        Err(no_episodes_here())
+    }
+
+    fn set_episodes(&mut self, _slot: &str, _episodes: u8) -> Result<(), String> {
+        Err(no_episodes_here())
+    }
+
+    fn clear_episodes(&mut self) -> Result<(), String> {
+        Err(no_episodes_here())
+    }
+
+    fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
+        bays::slot_bay_on(&mut self.dev, &self.layout, slot)
+    }
+}
+
+fn no_episodes_here() -> String {
+    "the episodes are kept on the Pi firmware form's records, which this boot form doesn't have"
+        .into()
+}
+
+/// The boot partition's records, opened on its node for either form: the Pi firmware form (a trial
+/// record is there) strictly, with every record and pointer; the U-Boot form with its reason record
+/// alone. Refused by name when the volume is neither.
+pub fn open_records(node: &Path) -> Result<Box<dyn BootRaw>, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(node)
+        .map_err(|e| format!("{}: {e}", node.display()))?;
+    let mut probe = FileSectors::new(file, 0);
+    if bootfat::locate(&mut probe, TRIAL_FILE, RECORD_BYTES).is_ok() {
+        return Boot::open(node).map(|boot| Box::new(boot) as Box<dyn BootRaw>);
+    }
+    BayVolume::open(node).map(|volume| Box::new(volume) as Box<dyn BootRaw>)
 }
 
 #[cfg(test)]

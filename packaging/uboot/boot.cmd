@@ -2,15 +2,20 @@
 # (record = "uboot"), and never ends at a prompt. Build: mkimage -A <arch> -O linux -T script -C none
 # -d boot.cmd boot.scr. Install as BOOT/boot.scr: the built script at the root of the boot partition
 # (BOOT is that partition's root; packaging/files.txt). A board that boots from raw NAND takes
-# boot-ubi.cmd instead. `lemnos-ctl tree --boot-dir` writes this script with two lines before it that
-# set lemnos_usb and lemnos_led from the board file; the lines below give them defaults.
+# boot-ubi.cmd instead. `lemnos-ctl boot-partition` writes this script (read from packaging/uboot) into the
+# image, and `lemnos-ctl tree --uboot-config` and the board file give lemnos_usb and lemnos_led; the lines
+# below give them defaults.
 #
 # The script takes devtype, devnum and distro_bootpart from U-Boot's standard boot flow. It needs
 # sysboot, fdt, test, setenv, saveenv, sleep, fastboot and (with a board LED) led, which the config
 # fragment from `lemnos-ctl tree --uboot-config` turns on.
 #
-# THE RECORD is three variables of U-Boot's redundant environment: default, trial and
-# trial_attempts, the boots that may still start the trial. U-Boot loads them with the rest of its
+# THE RECORD is these variables of U-Boot's redundant environment: default, previous, trial and
+# trial_attempts, the boots that may still start the trial, and default_bay, previous_bay and trial_bay,
+# the payload bay (`slots/bayN/` on the boot partition, N from 0) that holds each slot's files. A slot's
+# files are only ever in a bay, so each step below reads `/slots/<bay>/board.dtb` and
+# `/slots/<bay>/extlinux/extlinux.conf`; the bays are written by the slot driver, raw, and only read here.
+# U-Boot loads them with the rest of its
 # environment (env/mmc.c, the one GPT partition of type 3de21764-95bd-54bd-a5c3-4abe786f38a8, or the
 # board's fixed offsets); the driver and slot-init write them raw, as U-Boot does (see
 # drivers/slot-store/src/uboot_env.rs). Nothing here reads or writes a FAT file for the record. Before
@@ -33,9 +38,21 @@
 # from that path through the board file's boot_sources. A non-mmc boot device is refused by name: the
 # path form cannot name it.
 #
+# THE THREE STEPS, in this order: the trial (when it has an attempt left), the default, and the
+# previous slot, which is started AS A TRIAL: it is not a slot the loader promotes. The third step
+# runs only when a previous slot is named (`previous` and `previous_bay`), is not the default and is
+# not the trial the first step already tried. It saves nothing and changes nothing in the stored
+# environment (no saveenv, and `trial`, `trial_attempts`, `default`, `previous` and the bays are not
+# touched, so a trial still pending keeps its attempts). It starts the previous bay's kernel, with the
+# device tree and extlinux.conf read from that bay, and, when the default had been named and did not
+# start, it adds the property `lemnos,default-failed = "files"` to /chosen of the device tree it hands
+# on. slot-init reads that property: it finds a slot that is not the default (which is what marks a
+# trial boot), records the default's failure as "the boot loader could not load the default's files",
+# and leaves it to the daemon to confirm the previous slot as it confirms any trial.
+#
 # NEVER AT A PROMPT. A label that cannot start (its board.dtb will not load, the tree will not take
-# the boot source, sysboot returns) is reported by name and the script goes on: trial, then default,
-# then the root copy. When none starts, or the boot source cannot be named at all, the script offers
+# the boot source, sysboot returns) is reported by name and the script goes on: trial, default, then
+# previous, and nothing else (no copy of a kernel is kept at the partition's root). When none starts, or the boot source cannot be named at all, the script offers
 # the board for flashing and then tries again, for ever: it is one `while` whose body ends in
 # `fastboot usb`, a sleep, and the next pass. The only ways out are a slot starting (sysboot does not
 # return) or a reset. The first two passes that start nothing only pause and try again, the third
@@ -78,6 +95,7 @@ setenv lemnos_go 1
 while test "${lemnos_go}" = "1"; do
 	setenv lemnos_src
 	setenv lemnos_why
+	setenv lemnos_dflt
 	if test "${devtype}" != "mmc"; then
 		setenv lemnos_why "boot device ${devtype} is unsupported: only mmc boot sources are named"
 	else
@@ -95,6 +113,10 @@ while test "${lemnos_go}" = "1"; do
 		setenv left
 		setenv take_trial
 		setenv take_default
+		setenv take_trial_bay
+		setenv take_default_bay
+		setenv take_previous
+		setenv take_previous_bay
 
 		if test -n "${trial}"; then
 			if test "${trial_attempts}" = "3"; then
@@ -109,32 +131,52 @@ while test "${lemnos_go}" = "1"; do
 				setenv left
 				if saveenv; then
 					setenv take_trial ${trial}
+					setenv take_trial_bay ${trial_bay}
 				fi
 			fi
 		fi
 		setenv take_default ${default}
+		setenv take_default_bay ${default_bay}
+		if test -n "${previous}"; then
+			if test -n "${previous_bay}"; then
+				if test "${previous}" != "${default}"; then
+					if test "${previous}" != "${take_trial}"; then
+						setenv take_previous ${previous}
+						setenv take_previous_bay ${previous_bay}
+					fi
+				fi
+			fi
+		fi
 
-		for step in trial default root; do
+		for step in trial default previous; do
 			setenv lemnos_dtb
 			if test "${step}" = "trial"; then
 				if test -n "${take_trial}"; then
-					setenv lemnos_dtb /slots/${take_trial}/board.dtb
-					setenv lemnos_conf /slots/${take_trial}/extlinux/extlinux.conf
+					setenv lemnos_dtb /slots/${take_trial_bay}/board.dtb
+					setenv lemnos_conf /slots/${take_trial_bay}/extlinux/extlinux.conf
 				fi
 			elif test "${step}" = "default"; then
 				if test -n "${take_default}"; then
-					setenv lemnos_dtb /slots/${take_default}/board.dtb
-					setenv lemnos_conf /slots/${take_default}/extlinux/extlinux.conf
+					setenv lemnos_dtb /slots/${take_default_bay}/board.dtb
+					setenv lemnos_conf /slots/${take_default_bay}/extlinux/extlinux.conf
+					setenv lemnos_dflt files
 				fi
 			else
-				setenv lemnos_dtb /extlinux/board.dtb
-				setenv lemnos_conf /extlinux/extlinux.conf
+				if test -n "${take_previous}"; then
+					setenv lemnos_dtb /slots/${take_previous_bay}/board.dtb
+					setenv lemnos_conf /slots/${take_previous_bay}/extlinux/extlinux.conf
+				fi
 			fi
 			if test -n "${lemnos_dtb}"; then
 				if load ${devtype} ${slot_part} ${fdt_addr_r} ${lemnos_dtb}; then
 					fdt addr ${fdt_addr_r}
 					fdt resize 400
 					if fdt set /chosen lemnos,boot-source "${lemnos_src}"; then
+						if test "${step}" = "previous"; then
+							if test -n "${lemnos_dflt}"; then
+								fdt set /chosen lemnos,default-failed "${lemnos_dflt}"
+							fi
+						fi
 						setenv fdt_addr ${fdt_addr_r}
 						sysboot ${devtype} ${slot_part} any ${pxefile_addr_r} ${lemnos_conf}
 						echo "lemnos: ${step}: ${lemnos_conf} did not start, going on"

@@ -15,6 +15,16 @@ retry_first_ms = 1000          # the first wait before a failed device is bound 
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
 dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
+# `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role
+# in bytes, with no default: the largest stored file of that role plus 10 %, rounded up to a whole MiB
+# (kernel and initramfs) or a whole 4 KiB (the rest). The values here are made up.
+[boot]
+bay_kernel_bytes = 11534336      # the kernel's bay
+bay_initramfs_bytes = 1048576    # the initramfs's bay
+bay_device_tree_bytes = 90112    # the device tree's bay
+bay_cmdline_bytes = 4096         # the command line's bay
+bay_overlay_bytes = 4096         # the board overlay's bay
+
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 # `[security]`: the board's security switch (docs/slots.md, "The security switch"). The record is the
 # switch's truth (an absolute path; on a board with slots it is the boot partition's record), `keys` is the

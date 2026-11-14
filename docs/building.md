@@ -108,19 +108,55 @@ or mdev permission fragments from a board file. What follows was run on this PC 
 (`testing/board-runs/I5i6.md`, "The one invocation"); each claim names its run.
 
 **One invocation with every output.** The reference board (`testing/boards/reference.toml`, `record =
-"tryboot"`, `soc = "bcm2712-rp1"`):
+"tryboot"`, `soc = "bcm2712-rp1"`), run at the I5i8 head:
 
 ```text
-lemnos-ctl tree --socs <repo>/socs testing/boards/reference.toml -o overlay.dts --boot-dir boot \
-  --slot a1 --modprobe modprobe.conf --cmdline cmdline.txt --udev udev.rules --mdev mdev.conf
+lemnos-ctl tree --socs <repo>/socs testing/boards/reference.toml -o overlay.dts \
+  --modprobe modprobe.conf --cmdline cmdline.txt --udev udev.rules --mdev mdev.conf \
+  --manifest-boot manifest-boot.json --cmdline-slot cmdline-slot.txt --slot a1
 ```
 
-Exit 0; nothing refused. Files written: `overlay.dts` 2976 bytes (`-o`), `modprobe.conf` 949, `cmdline.txt` 86,
-`udev.rules` 1124, `mdev.conf` 1141. `boot/`: `config.txt` 1318, `tryboot.txt` 1274, `default.txt` 512,
-`previous.txt` 512, `trial.txt` 512, `trial.rec` 1024, `reason.rec` 1024, `episodes.rec` 1024,
-`slot-layout.toml` 4769, and `slot/overlays/README` 162. For a `record = "uboot"` board the `boot/` files are
-`slot-layout.toml`, `uboot-env.txt`, `boot.cmd` and `reason.rec`; `--uboot-config FILE` writes the U-Boot Kconfig
-fragment the board's U-Boot is built with ([Boards](boards.md#u-boot-environment-system-slots-record--uboot)).
+Exit 0; nothing refused. Files written: `overlay.dts` 2964 bytes, `modprobe.conf` 949, `cmdline.txt` 86,
+`udev.rules` 1124, `mdev.conf` 1326, `manifest-boot.json` 110 and `cmdline-slot.txt` 92. `--uboot-config FILE`
+writes the U-Boot Kconfig fragment the board's U-Boot is built with for a `record = "uboot"` board
+([Boards](boards.md#u-boot-environment-system-slots-record--uboot)).
+
+**The boot partition is one image.** `tree --boot-dir` is removed and the flag is refused (the message names
+`boot-partition`). `lemnos-ctl boot-partition` writes everything it wrote, in the image, and the payload bays
+besides (see [Slots](slots.md#the-boot-partition-payload-bays)):
+
+```text
+lemnos-ctl boot-partition --layout-of testing/boards/reference.toml --socs <repo>/socs --min-size
+lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload DIR --size BYTES --out boot.img
+lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
+```
+
+The reference board's `--min-size` is 38242816 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
+`--payload DIR` (five files named for the roles: `kernel`, `initramfs`, `device-tree`, `cmdline`,
+`board-overlay`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds
+`config.txt`, `tryboot.txt`, `default.txt`, `previous.txt`, `trial.txt` (two sectors each), `trial.rec`,
+`reason.rec`, `episodes.rec`, `slot-layout.toml` and the three bay sets; a `record = "uboot"` image holds
+`slot-layout.toml`, `uboot-env.txt`, `boot.cmd` (with the board's `lemnos_usb` and `lemnos_led` lines before
+the script), `reason.rec` and the bay sets. The U-Boot environment partition is the disk image's, not this
+image's.
+
+**Output formats** (the three modes a build script reads):
+
+- `--min-size` prints ONE line: the smallest `--size` in bytes, decimal digits and a newline, nothing
+  else (`38242816`). Read it with `read n` or `int(line)`.
+- `--min-size --payload DIR` prints that same line FIRST, then five lines `role stored_bytes bay_bytes`
+  (three fields separated by one space; roles in the order `kernel`, `initramfs`, `device-tree`,
+  `cmdline`, `board-overlay`; `stored_bytes` is the payload file's size, `bay_bytes` the board's bay).
+  When a payload is larger than its bay the lines are printed and the exit is non-zero, with the error
+  `the payload of <roles> is bigger than its bay: rebuild with a larger bay or a smaller payload`.
+- `--out FILE` prints one line, `wrote FILE: N bytes, slot ID, minimum M bytes`.
+- `--verify FILE` prints one line per finding, `ok  <what was checked>` or `BAD <what failed>` (the status
+  word padded to three characters, then a space), reads the image or a dump of a partition and writes
+  nothing. The exit is 0 when every line is `ok`; otherwise it is non-zero and the error is
+  `FILE: N finding(s) failed`.
+
+A board file that cannot be built is refused naming the file, the device and the key, for example
+`BOARD.toml: system-slots device "slots": uboot_env_size is needed for the "uboot" record (an integer)`.
 
 `--bridge-env FILE` writes the bridge's USB link setting, the one line `LEMNOS_ORION_LINKS=<gadget device
 id>=<link name>` (a comment only for a board with no gadget; [Boards](boards.md#serving-the-link-at-boot)). It was

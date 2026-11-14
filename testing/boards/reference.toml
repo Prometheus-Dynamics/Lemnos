@@ -74,6 +74,18 @@ record = "/var/lib/lemnos/security.rec"
 keys = "/etc/lemnos/slot-keys"
 
 # The system: who the board is, what it can install and boot, and reboot.
+# The boot partition's payload bays (`lemnos-ctl boot-partition`): one fixed size per role, no default.
+# The kernel is the next build's gzip (10,168,581 bytes, consumer, 2026-11-13) with 10 % headroom,
+# rounded up to a whole MiB. The dtb (79,751 bytes stored) and the 4 KiB files are the same rule,
+# rounded to 4 KiB. The initramfs size is NOT measured: 1 MiB is an estimate, to be replaced when the
+# board's initramfs is built (requirements section 8.3).
+[boot]
+bay_kernel_bytes = 11534336
+bay_initramfs_bytes = 1048576
+bay_device_tree_bytes = 90112
+bay_cmdline_bytes = 4096
+bay_overlay_bytes = 4096
+
 [[devices]]
 id = "identity"
 driver = "system-identity"

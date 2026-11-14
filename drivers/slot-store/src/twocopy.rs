@@ -56,6 +56,8 @@ impl Kind {
     pub const SECURITY: Kind = Kind(4);
     /// The episodes a slot has had against it: `"<slot> <episodes>"` (the count-based fallback).
     pub const EPISODES: Kind = Kind(5);
+    /// A payload bay set's record: the slot installed in it and the hashes of its payload files (I5i8).
+    pub const BAY_INFO: Kind = Kind(6);
 
     /// The pre-created file's FAT directory name for this kind (eleven bytes: 8.3, space padded,
     /// upper case). `None` for a kind this build does not know.

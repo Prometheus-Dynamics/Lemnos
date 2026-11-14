@@ -136,13 +136,23 @@ fn the_script_mirrors_the_decision() {
     };
     let save = after(take, "if saveenv; then");
     let taken = after(save, "setenv take_trial ${trial}");
-    let trial = at("/slots/${take_trial}/");
-    let default = at("/slots/${take_default}/");
-    let root = SCRIPT.rfind("/extlinux/extlinux.conf").unwrap();
+    let trial = at("/slots/${take_trial_bay}/");
+    let default = at("/slots/${take_default_bay}/");
+    let previous = at("/slots/${take_previous_bay}/");
     assert!(ladder < take && take < save && save < taken && taken < trial);
-    assert!(trial < default && default < root);
-    // One loop over the choices, in this order, with one sysboot.
-    assert!(SCRIPT.contains("for step in trial default root; do"));
+    assert!(trial < default && default < previous);
+    // One loop over the choices, in this order, with one sysboot. The block script has no root copy
+    // since I5i8: the bays hold every slot's files.
+    assert!(SCRIPT.contains("for step in trial default previous; do"));
+    // Each step reads the device tree and the loader file from the bay the record names, never from a
+    // directory named for the slot (the slot's files are in a bay, not under its id).
+    for who in ["trial", "default", "previous"] {
+        for file in ["board.dtb", "extlinux/extlinux.conf"] {
+            let line = format!("/slots/${{take_{who}_bay}}/{file}");
+            assert!(SCRIPT.contains(&format!("{line}\n")), "{line}");
+            assert!(!SCRIPT.contains(&format!("/slots/${{take_{who}}}/")));
+        }
+    }
     assert_eq!(sysboots(SCRIPT), 1);
     assert!(SCRIPT.contains("any ${pxefile_addr_r} ${lemnos_conf}"));
     // The device comes from the standard boot flow, never a number written in.
@@ -184,6 +194,107 @@ fn the_script_mirrors_the_decision() {
         code.iter().filter(|l| l.contains("saveenv")).count(),
         2,
         "the first environment and the trial's attempt"
+    );
+}
+
+/// The previous slot's step: third after the trial and the default, started as a trial, and writing
+/// nothing to the stored environment. The script is structural only (no U-Boot is run here).
+#[test]
+fn the_previous_step_is_the_third_and_writes_nothing_to_the_environment() {
+    let code: Vec<&str> = SCRIPT
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    let at = |needle: &str| {
+        code.iter()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("the script has no `{needle}`"))
+    };
+    // Three steps, in order: a trial with an attempt, the default, the previous.
+    assert_eq!(
+        code.iter()
+            .filter(|l| l.starts_with("for step in "))
+            .count(),
+        1
+    );
+    assert!(code.contains(&"for step in trial default previous; do"));
+    let trial = at("if test \"${step}\" = \"trial\"; then");
+    let default = at("elif test \"${step}\" = \"default\"; then");
+    let previous = at("setenv lemnos_dtb /slots/${take_previous_bay}/board.dtb");
+    assert!(trial < default && default < previous);
+    // Named only when there is a previous slot, it has a bay, it is not the default, and it is not the
+    // trial the first step already tried; otherwise the step is skipped (take_previous stays empty).
+    let guards = [
+        r#"if test -n "${previous}"; then"#,
+        r#"if test -n "${previous_bay}"; then"#,
+        r#"if test "${previous}" != "${default}"; then"#,
+        r#"if test "${previous}" != "${take_trial}"; then"#,
+        "setenv take_previous ${previous}",
+        "setenv take_previous_bay ${previous_bay}",
+    ];
+    let mut last = 0;
+    for guard in guards {
+        let line = at(guard);
+        assert!(line > last, "{guard}");
+        last = line;
+    }
+    assert!(last < at("for step in"));
+    // It starts the previous bay's own files through the same one sysboot as the others.
+    assert!(
+        code.contains(&"setenv lemnos_conf /slots/${take_previous_bay}/extlinux/extlinux.conf")
+    );
+    assert_eq!(sysboots(SCRIPT), 1);
+    // It writes nothing to the stored environment: both saveenv are before the steps (the first
+    // environment and the trial's attempt), and no step sets a stored key. The previous step's only
+    // marking is a property of the device tree it hands on, set when the default had failed.
+    let steps = at("for step in");
+    for (i, line) in code.iter().enumerate() {
+        if line.contains("saveenv") {
+            assert!(i < steps, "saveenv inside the steps: {line}");
+        }
+        if i > steps {
+            for key in [
+                "default",
+                "default_bay",
+                "previous",
+                "previous_bay",
+                "trial",
+                "trial_bay",
+                "trial_attempts",
+            ] {
+                assert!(
+                    !line.starts_with(&format!("setenv {key} "))
+                        && *line != format!("setenv {key}"),
+                    "a step sets the stored key {key}: {line}"
+                );
+            }
+        }
+    }
+    let marked = at("fdt set /chosen lemnos,default-failed");
+    assert!(previous < marked);
+    assert_eq!(
+        code[marked],
+        r#"fdt set /chosen lemnos,default-failed "${lemnos_dflt}""#
+    );
+    // The reason is for the previous step only, and only when the default step had a slot to start.
+    assert!(
+        code[..marked]
+            .iter()
+            .rev()
+            .take(4)
+            .any(|l| *l == r#"if test "${step}" = "previous"; then"#)
+    );
+    assert!(code.contains(&"setenv lemnos_dflt files"));
+    assert!(at("setenv lemnos_dflt files") < previous);
+    // Each pass starts with the reason cleared, before the trial's saveenv could store it.
+    let clear = at("setenv lemnos_dflt");
+    assert_eq!(code[clear], "setenv lemnos_dflt");
+    assert!(
+        code[clear..]
+            .iter()
+            .any(|l| l.starts_with("if saveenv; then")),
+        "the trial's saveenv follows the clear"
     );
 }
 
@@ -401,10 +512,14 @@ fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
     let at = geometry.offset as usize;
     image[at..at + 1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
     fs::write(&node, &image).unwrap();
+    // The boot partition, built by the image builder: os-1 in bay 0.
+    let boot_node = dir.0.join("boot.img");
+    fs::write(&boot_node, crate::bay_fixture::uboot_image("os-1")).unwrap();
     let mut env = UbootEnv {
         disk: Ok(node.clone()),
         place: place.clone(),
         restarter: restarter(),
+        boot_node: Ok(boot_node),
     };
     let current = || {
         let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
@@ -414,12 +529,37 @@ fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
             .1
     };
     assert_eq!(env.pending().unwrap(), None);
+    // The environment names os-1's bay as the default, then os-2's, and the bay the default had is
+    // kept as the previous: the installs take the bays nothing names.
+    let install = |env: &UbootEnv, id: &str| {
+        let p = crate::bay_fixture::payloads(id);
+        env.install(id, &crate::bay_fixture::refs(&p)).unwrap();
+    };
+    env.set_default("os-1").unwrap();
+    install(&env, "os-2");
     env.set_default("os-2").unwrap();
+    install(&env, "os-3");
+    // The previous (os-1, bay 0) was not taken by the third install.
+    assert_eq!(env.slot_bay("os-1").unwrap().0, "slots/bay0");
+    assert_eq!(env.slot_bay("os-2").unwrap().0, "slots/bay1");
     assert!(current().contains(&("default".to_string(), "os-2".to_string())));
     env.set_trial("os-3", 3).unwrap();
     assert_eq!(env.pending().unwrap(), Some(("os-3".to_string(), 3)));
     env.set_attempts(2).unwrap();
     assert_eq!(env.pending().unwrap(), Some(("os-3".to_string(), 2)));
+    // A trial with no attempts left is not pending, but its bay (`trial_bay`) is still named: a fourth
+    // install finds every bay named (default bay 1, previous bay 0, trial bay 2) and writes nothing.
+    env.set_attempts(0).unwrap();
+    assert_eq!(env.pending().unwrap(), Some(("os-3".to_string(), 0)));
+    let before = fs::read(env.boot_node.as_ref().unwrap()).unwrap();
+    let p = crate::bay_fixture::payloads("os-4");
+    let why = env
+        .install("os-4", &crate::bay_fixture::refs(&p))
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("every bay set is named"), "{why}");
+    assert_eq!(fs::read(env.boot_node.as_ref().unwrap()).unwrap(), before);
+    assert_eq!(env.slot_bay("os-3").unwrap().0, "slots/bay2");
     env.clear_trial().unwrap();
     assert_eq!(env.pending().unwrap(), None);
     // The root copy is install-time only: nothing is written to the boot partition here.
@@ -502,6 +642,7 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
         disk,
         place: Place::gpt(size).unwrap(),
         restarter: restarter(),
+        boot_node: Err("not needed: the environment only".into()),
     };
     // No boot disk is known.
     let mut record = env(
@@ -543,6 +684,12 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
         .unwrap_err()
         .to_string();
     assert!(err.contains("is erased"), "{err}");
+    // A trial is refused by the environment's state too, before the unknown boot partition is mentioned.
+    let err = env(Ok(node.clone()), 1024)
+        .set_trial("a", 3)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("is erased"), "{err}");
     bytes[100 * 512..228 * 512].fill(0x5A);
     fs::write(&node, &bytes).unwrap();
     let err = env(Ok(node), 8192)
@@ -562,10 +709,14 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
     .unwrap();
     image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 3));
     fs::write(&plain, &image).unwrap();
+    // The trial names a slot's bay, so the boot partition holds slot `b`.
+    let boot = dir.0.join("boot.img");
+    fs::write(&boot, crate::bay_fixture::uboot_image("b")).unwrap();
     let mut record = UbootEnv {
         disk: Err("not needed: the device is named".into()),
         place,
         restarter: restarter(),
+        boot_node: Ok(boot),
     };
     record.set_trial("b", 3).unwrap();
     assert_eq!(record.pending().unwrap(), Some(("b".to_string(), 3)));

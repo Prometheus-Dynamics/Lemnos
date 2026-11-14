@@ -689,9 +689,11 @@ The `record` setting chooses how the boot loader is told which slot to start.
 This uses the board firmware's one-shot boot:
 
 - `config.txt` includes `default.txt`, and `tryboot.txt` includes `trial.txt`. Each of those is
-  one sector (512 bytes) at a fixed place on the boot partition, pre-created at image build. Its
-  first line is `os_prefix=slots/<id>/`, then a `#lemnos-crc32=` checksum line over that first line,
-  then `#` padding. The checksum is what refuses a torn sector (see "Pointer files", below).
+  two sectors (1024 bytes) at a fixed place on the boot partition, pre-created at image build. Each
+  sector's first line is `os_prefix=slots/bayN/` (the bay set the pointer names, see
+  [The boot partition: payload bays](#the-boot-partition-payload-bays)), then a `#lemnos-crc32=` checksum
+  line over that first line, then `#` padding. The checksum is what refuses a torn sector (see
+  "Pointer files", below).
 - A restart with the argument `0 tryboot` reads `tryboot.txt` once. A trial's attempts are in the
   trial record `trial.rec` (FAT name `TRIAL   REC`, `lemnos_slot_store::boot_raw`), `0` to `3`. The firmware's own boot
   count is used only by the count-based fallback, below.
@@ -704,7 +706,9 @@ This uses the board firmware's one-shot boot:
 ### The `uboot` record
 
 U-Boot's standard boot flow starts the slot. The record is U-Boot's own redundant environment, written
-raw: `default`, `trial` and `trial_attempts` are variables of it. Where it is, and the Kconfig
+raw: `default`, `trial` and `trial_attempts` are variables of it, and so are `default_bay`, `trial_bay`
+and `previous_bay`, the payload bays those slots are in (see
+[The boot partition: payload bays](#the-boot-partition-payload-bays)). Where it is, and the Kconfig
 fragment the board's U-Boot is built with, are in [Boards](boards.md#u-boot-environment-system-slots-record--uboot).
 The format is U-Boot's, from its sources at tag `v2026.10` (commit 5508406): `include/env_internal.h`,
 `env/common.c`, `env/mmc.c`. Each copy is a CRC-32 over the whole data area, a one-byte serial and the
@@ -749,7 +753,7 @@ is newer), and copy one on a tie (`env/common.c:484-551`, `env_check_redund`).
 - The serial byte is not covered by the CRC. Its order makes that harmless: the new serial is the
   active one plus one, so a torn copy whose serial still reads old loses to the active copy.
 - slot-init reaches the environment through `uboot-env.txt`, the locator at the boot partition's root,
-  which `lemnos-ctl tree --boot-dir` writes at image build from the board file (`form = "gpt"` with the
+  which `lemnos-ctl boot-partition` writes at image build from the board file (`form = "gpt"` with the
   size, or `form = "device"` with the device, size and offsets; unknown keys, a wrong version or
   sector and keys of the other form are refused by name). It is read raw (no mount). The fallback's
   trial, the withdrawal of a held trial, and the repoint of `default` when the default's boot files
@@ -758,7 +762,7 @@ is newer), and copy one on a tie (`env/common.c:484-551`, `env_check_redund`).
   device, not the every-boot hash (an open gap: the every-boot check cannot see this file; see
   `testing/board-runs/I5i7.md`).
 - The kernel-gap reason goes to the pre-created `reason.rec` (raw), as on the other forms
-  (`--boot-dir` writes it for this record).
+  (`boot-partition` pre-creates it on the image for this record).
 - **Stated limits.** MMC only (`CONFIG_ENV_IS_IN_MMC`; the copies in one user area, not the two eMMC
   boot partitions, `env/mmc.c:216-231`). Little-endian CRC word. A primary GPT that is damaged is
   refused rather than read from the backup. 512-byte blocks. Not run on a board:
@@ -779,7 +783,7 @@ it too. The verdicts of the listed lines:
 
 | Lines | Verdict |
 |---|---|
-| `boot.rs`: the renames of a slot's files and of `overlays` into `layout.boot`, the removal of the old `overlays`, `sync_dir(&layout.boot)`, `fs::copy` of a kept boot file; `lib.rs`: `sync_dir` of `slots` | **Install.** An install stages the slot's boot files on the boot partition, mounted for the install. This is the install-time write the design allows; the payload bays (I5i8) move it off the mounted partition. Not a run-time write of the record |
+| (none) | **Install.** The install-time file writes of the first design (the renames of a slot's files into `slots/<id>`, the root copy of the default) are gone: an install is raw sector writes inside pre-created bay files (see [The boot partition: payload bays](#the-boot-partition-payload-bays)), which the scan does not take for a file write |
 | `uboot.rs`: `sync_dir(&self.boot)`, `replace(extlinux.conf)` | **UBI form only.** The raw-NAND form keeps a root copy of the default's `extlinux.conf` current on its UBIFS boot volume; the boot-partition form (`UbootEnv`) writes nothing here |
 
 The run-time record writes (trial, default, reason) are not on this list: they are raw sector or raw
@@ -810,13 +814,128 @@ promoting a trial to default is a single-sector write with no second copy. Its s
 storage device completing or not starting a single-sector write, and it is what the pull-the-plug
 procedure in `testing/board-runs/I5i.md` measures.
 
+### The boot partition: payload bays
+
+A slot's boot files (kernel, initramfs, device tree, command line, board overlay) are not written under
+the slot's name. The boot partition holds **three bay sets**, `slots/bay0/` to `slots/bay2/`, each a
+pre-created directory of fixed-size, contiguous files (the layout contract, `contracts/slot-layout.toml`
+version 5): `kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`,
+`overlays/README`, `bayinfo.rec` (the set's record: the slot in the set and each file's stored length and
+SHA-256), and for the U-Boot form `extlinux/extlinux.conf`. Three sets are the default, the previous, and
+the one being installed or on trial; no other slot has boot files on the partition, so the partition does
+not grow with the keep count. Each file's size is the board's: `[boot] bay_kernel_bytes`,
+`bay_initramfs_bytes`, `bay_device_tree_bytes`, `bay_cmdline_bytes` and `bay_overlay_bytes`
+([Boards](boards.md)), with no default. **Each is the size of the STORED file**: the bytes of the file as
+the slot bundle carries it, written into the bay as they are, then padded with zeros to the bay's size.
+Nothing is decompressed or recompressed on the way in. So on the Pi firmware form `kernel8.img` is what
+the firmware loads: a gzip-compressed kernel as the bundle ships it (the firmware decompresses it), and
+`bay_kernel_bytes` is that compressed size, not the size of the raw `Image`. On the U-Boot form the
+kernel is stored raw (a compressed one is refused by name: `booti` needs per-slot decompression
+addresses), so there `bay_kernel_bytes` is the raw size. The rule for choosing a size: a bay must hold the
+largest file a future slot may bring for that role, so take the largest file of the role over every slot
+you expect to install, add margin (the board file's comment says 10 %), and round up. A bay cannot grow
+after the image is built. A bundle whose file exceeds its bay is refused by name at install, before
+anything is written and with the default still booting: `<slot>: the kernel payload is <n> bytes but its
+bay holds <m>: nothing was written, the default keeps booting; rebuild the image with a larger kernel bay
+or a smaller payload` (and `lemnos-ctl boot-partition --payload DIR` names the role at build, `the payload
+of kernel is bigger than its bay: rebuild with a larger bay or a smaller payload`). The image builder. The image builder writes the whole volume (`lemnos-ctl
+boot-partition`): FAT16 with two FAT copies and the smallest power-of-two cluster of at least 512 bytes
+that gives fewer than 65,525 clusters, the firmware text, the pointers, the records, and the first slot in
+`bay0`. `--min-size` prints the smallest `--size` for the board's bays, one line of digits (with `--payload DIR`,
+that line first, then one line per role, `role stored_bytes bay_bytes`, and a non-zero exit naming a role
+whose payload is bigger than its bay; the formats of every mode are in [Building](building.md)). `--verify FILE` reads an image or a dump of a real partition and prints one `ok`/`BAD` line per
+finding. A payload that does not fit its bay is refused by name at build and at install; nothing is
+written.
+
+**Install.** Nothing here creates, renames or deletes a file: every write is a sector inside a file that
+already exists. The caller says which bays must not be touched (`bays::Protected`: the default's, the
+previous's, the trial's, and a pending trial with attempts left); the Pi form takes them from the pointers
+and the trial record, the U-Boot form from the environment (`default_bay`, `previous_bay`, `trial_bay`,
+`trial`, `trial_attempts`). The order is: refuse a slot that is on trial, a set a pointer names and a
+payload bigger than its bay, all before any write; clear the set's old record if it holds one; write each
+file padded to its fixed size; read each back and compare its hash; commit `bayinfo.rec`; read it back.
+Switching the default or the trial is a separate step that moves a pointer (Pi) or environment variables
+(U-Boot) and no payload. A power cut at any moment, including during an install, leaves the default
+bootable and the boot partition booting: the bay being written is never one a pointer names, and a set
+whose record is not committed is not a slot. A removal clears a set's record and nothing else.
+
+**The U-Boot form.** The environment is U-Boot's own, written raw as before; the variables are `default`,
+`default_bay`, `previous_bay`, `trial`, `trial_bay` and `trial_attempts`, and `lemnos_env`, which the first
+start sets. The default switch writes `previous_bay`, `default` and `default_bay` in one write of the
+inactive environment copy, so a cut leaves the old three or the new three. Nothing that was true of the
+environment changed: both copies are checked at their size before the first write, an environment U-Boot
+has not saved is refused, and `packaging/uboot/boot.cmd` reads `slots/${trial_bay}/`,
+`slots/${default_bay}/` and `slots/${previous_bay}/` (it has no copy of a kernel at the partition's root; the
+third is the step in "Previous before flashing mode" below). The bay's
+`extlinux/extlinux.conf` is composed from the slot's command line and names the bay's own files by
+relative path (`../kernel8.img`, `../initramfs.cpio`), with no `fdt` line: the script loads
+`board.dtb` and names the boot source in it. The install rewrites that one fixed-size file before the set's
+record. A compressed kernel is refused by name on this form (`booti` needs `kernel_comp_addr_r` and
+`kernel_comp_size` set per slot); the Pi firmware form takes a gzip kernel.
+
+**Records on the volume.** The Pi form has `trial.rec`, `reason.rec` and `episodes.rec`; the U-Boot form
+has `reason.rec` only (its trial and default are in the environment, and
+`lemnos_slot_store::boot_raw::open_records` opens whichever the image has).
+
+**The every-boot check** (lemnosd's `boot_guard` and slot-init's) finds a slot's bay through the set
+records and hashes only the stored bytes of each file, not its padding.
+
+**Not built: raw NAND.** Payload bays on NAND (UBI volumes) are parked. The `ubi` record keeps its files
+under `slots/<id>` on its UBIFS boot volume as before, and its install is refused by name (the message
+says UBI bays are parked); a board that asks for bays on NAND gets that refusal, not a partial install.
+The `file` record has no bay path either: its install writes nothing to the boot partition (its loader reads one fixed kernel).
+
+Board checks that cannot be made on this PC (how the firmware reads a pointer file with a torn sector,
+whether `os_prefix=slots/bayN/` applies to every file it reads, U-Boot reading `slots/<bay>/` through
+`sysboot`) are in `testing/board-runs/I5i8.md`, each marked untested on board.
+
+### Previous before flashing mode
+
+When the board's loader cannot start the default, the previous slot is tried before the board offers
+itself for flashing. The two boot forms do this differently, and only the U-Boot form decides it at the
+moment the default's files fail to load.
+
+| | U-Boot form (`packaging/uboot/boot.cmd`) | Pi firmware form (generated `config.txt`) |
+|---|---|---|
+| Order | in each pass: the trial (while it has an attempt), the default, the previous slot; three passes with a 2 s pause, then download mode (`fastboot usb`), and after each return the slots are tried once more before it is offered again | `config.txt`: `include default.txt`, then `[boot_count&4]` / `include previous.txt`, then `[all]` and the slot lines; `tryboot.txt` includes `trial.txt` and has no count filter |
+| What picks the previous | the script, in the same pass, when the default's files did not load or did not start | the firmware's boot count: bit 2 set (counts 4 to 7, 12 to 15, and so on) reads `previous.txt` |
+| What the previous is started as | a trial (see below) | the previous slot, without any trial marking; a boot that lands on it by the count is reported by lemnosd as described under "Boot count" |
+| Flashing mode | download mode, after three passes that started nothing | RPIBOOT, requested by slot-init after 8 restarts without a good boot, and only from a refusal slot-init itself reaches (see "Boot count"); a firmware that cannot read the default's files never runs slot-init, so Lemnos asks for nothing there and the firmware's own `BOOT_ORDER` applies |
+| Exists in generated files today | yes: `boot.cmd` (written into the image by `lemnos-ctl boot-partition`) | yes, the count filter is in `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`); there is no Pi step that detects an unreadable default |
+| Tested | structurally on this PC (`drivers/system-slots/src/uboot/tests.rs`); the script is not run by any U-Boot here; slot-init's side is run on image files | on this PC the text is only compared; the firmware's behaviour is **untested on board** (`testing/board-runs/I5i6.md`, rows 3 and 15, and `I5i8.md`) |
+
+**The U-Boot form's third step, exactly.** The previous slot is named by the environment's `previous`
+and `previous_bay`; its bay is protected from installs as the default's is. The step runs only when both
+are set, `previous` is not the default, and it is not the trial the first step just tried; otherwise it
+is skipped and the passes go on as before. The script sets and saves nothing for it: no `saveenv` runs in
+a step, and `trial`, `trial_attempts`, `default`, `previous` and the bays are not touched, so a real
+pending trial keeps its attempts and its record. It loads `board.dtb` and `extlinux/extlinux.conf` from the
+previous bay, names the boot source in the tree as for the other steps, and, if the default had been named
+and did not start, adds the property `lemnos,default-failed = "files"` to `/chosen` of the tree it hands to
+the kernel. `previous` is never repointed by the loader.
+
+What slot-init then sees. The command line is the previous slot's own, which is not the board's default,
+and that is what marks a trial boot: slot-init writes `trial-init` and, when the boot comes up,
+`trial-started`. It reads the property: the default's `.meta` gets `FAILED=yes`, one more in `FAILURES`
+and `FAIL_REASON=the boot loader could not load the default's files`, and, when the state holds no trial,
+the state's trial becomes the previous slot with the error `slot <default> can't start: the boot loader
+could not load the default's files`, as a fallback from a running default arms it. A trial the board
+already holds is left as it is, and the default's failure is recorded anyway. Nothing is written to the
+boot record or the environment by slot-init in this case. The previous becomes the default when lemnosd
+confirms it, the same judgement as for every trial (the daemon ran for the uptime, no device regressed):
+then the default switch writes `previous_bay`, `default` and `default_bay` as usual and the failed slot is
+the previous one. If it does not come up, the board restarts and the passes run again; the failure of
+the default is counted on each such start. The property is absent on every other start, which is then
+unmarked.
+
 ### Pointer files, and the run-time rule for the boot partition
 
-The Pi firmware's pointer files (`DEFAULT TXT`, `PREVIOUS TXT`, `TRIAL   TXT`, each one sector) and
-the trial record are changed only by one raw sector write on the partition's block node
-(`lemnos_slot_store::boot_raw::Boot`), found read-only through the FAT. A pointer that is torn by a
-cut is refused by its checksum, never read as another slot: slot ids have different lengths, so an
-unchecked sector could be cut into a whole, valid, different line.
+The Pi firmware's pointer files (`DEFAULT TXT`, `PREVIOUS TXT`, `TRIAL   TXT`, each two sectors holding
+the same line) and the trial record are changed only by raw sector writes on the partition's block node
+(`lemnos_slot_store::boot_raw::Boot`), found read-only through the FAT. A pointer file is written second
+sector first, so at every cut at least one sector holds a whole line. A sector torn by a cut is refused
+by its checksum, never read as another bay: an unchecked sector could be cut into a whole, valid,
+different line.
 
 No run-time code mounts the boot partition for writing. slot-init's only boot mount is a read-only
 one for raw NAND's UBIFS volume, which has no raw reader. lemnosd finds the node from the boot
@@ -833,8 +952,8 @@ files) are created when the image is built, and nothing creates them at run time
 Arming a trial writes the trial pointer first and the record second. A cut after the pointer leaves
 no record, so no tryboot restart happens; the record is written only once the pointer names its slot.
 
-Promoting the default (`DEFAULT TXT`) is a single-sector write with no second copy, as stated
-above. A default whose boot files don't match its manifest is moved to the previous slot by that
+Promoting the default (`DEFAULT TXT`) is the two-sector write above, after `PREVIOUS TXT` names the old
+default's bay. A default whose boot files don't match its manifest is moved to the previous slot by that
 write; the next boot starts the previous.
 
 ### Boot count: the fallback on the Pi firmware
@@ -888,7 +1007,7 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
   `/dev` first of all, before any path that can need the mailbox (a test pins the order), and
   devtmpfs makes `/dev/vcio` when the driver is built in. The kernel must therefore have `BCM_VCIO`,
   `BCM2835_MBOX` and `RASPBERRYPI_FIRMWARE` (with the menus `BRCM_CHAR_DRIVERS` and `MAILBOX`) built in, not
-  modules: they are the `firmware.rpi-tryboot` group of `contracts/slot-kernel.toml` (version 2),
+  modules: they are the `firmware.rpi-tryboot` group of `contracts/slot-kernel.toml` (version 2 added it; the file is version 3),
   checked by `scripts/check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`, which
   names a symbol that is `=m` or unset. A test ties slot-init's use of the mailbox to that group.
   Still to confirm on a board: `testing/board-runs/I5i6.md`. A failed request restarts the old way.
@@ -896,29 +1015,27 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
   default for ever and nothing reports it (the fixed boot stage is the answer to that case); a
   power cut clears the count, so a cut in the middle of an arrival counts once at most; a plain
   `reboot` outside Lemnos counts one boot, which a good boot clears.
-- `lemnos-ctl tree BOARD --boot-dir DIR [--slot ID]` writes the boot files for a board whose record
-  is `tryboot`: `config.txt` and `tryboot.txt` (the fixed text, a header that says it is generated,
-  and the board's `gpio=` lines after it), the three pointer sectors (naming `--slot`, or the
-  placeholder `none` when no slot is installed), and the three record files under their visible
-  names (`trial.rec`, `reason.rec`, `episodes.rec`, listed as `[[record]]` in the contract; their FAT
-  directory names are `TRIAL   REC`, `REASON  REC`, `EPISODESREC`). The image builder copies them
-  under those FAT names and places them contiguously. Other records have no firmware files here and are refused
+- `lemnos-ctl boot-partition --layout-of BOARD ...` writes the whole boot partition for a board whose
+  record is `tryboot` or `uboot`: the firmware's
+  text (`config.txt` and `tryboot.txt`: the fixed text, a header that says it is generated, and the
+  board's `gpio=` lines after it), the pointers and the record files, and the bay sets. `lemnos-ctl tree
+  --boot-dir` is removed (the flag is refused). Other records have no boot partition here and are refused
   by name.
 
 ### The slot layout (Pi firmware form)
 
-`contracts/slot-layout.toml` (version 4) lists every file of a slot's directory `slots/<id>/` on the
+`contracts/slot-layout.toml` (version 5) lists every file of a slot's bay set (`slots/bayN/`) on the
 boot partition for the `rpi-tryboot` form, with its role, whether it is required, and its `source`:
 the kernel (`kernel8.img`), the initramfs (`initramfs.cpio`), the device tree the slot's kernel built
 (`board.dtb`) and `cmdline.txt` are `build` (the image builder supplies them), and `overlays/lemnos-board.dtbo`
 is `build` too (the compiled board overlay, see [the board overlay file](boards.md#the-board-overlay-file)).
-`overlays/README` is `generated`: it makes `os_prefix` apply to overlays, and `lemnos-ctl tree BOARD
---boot-dir DIR` writes it under `DIR/slot/overlays/README`, one fixed line. The image builder copies
-`DIR/slot/` into `slots/<id>/` and types no name.
+`overlays/README` is `generated`: it makes `os_prefix` apply to overlays, and `lemnos-ctl boot-partition`
+writes it into every bay set, one fixed line.
 The generated `config.txt` and `tryboot.txt` name these with the same spelling, and the constants in
-`drivers/slot-store/src/layout.rs` are tested against the file. `tree --boot-dir` writes a copy as
-`slot-layout.toml`. The reader refuses any version but 2, any unknown key, and a `source` other than
-`build` or `generated`.
+`drivers/slot-store/src/layout.rs` are tested against the file. `boot-partition` writes a copy as
+`slot-layout.toml` and checks it against the code before it builds an image. The reader refuses any
+version but 5 (4 and 6 included), any unknown key, and a `source` other than `build` or `generated`. What
+version 5 changed from 4 is stated in the file's header.
 
 A slot's manifest may carry `boot.overlay` (`{"board": ..., "sha256": ...}`): the board's overlay
 digest, which the live marker must equal (`docs/boards.md`). `lemnos-ctl tree BOARD --manifest-boot FILE`
@@ -1016,6 +1133,17 @@ Then, per boot:
     reason.
   - A U-Boot or UBI record's trial is withdrawn (its trial cleared), because the loader takes an
     attempt on every trial start and can't be told to wait.
+
+### A root that cannot be mounted
+
+When dm-verity accepts the image but the kernel cannot mount it as EROFS (the usual cause is a kernel
+without the decompressor for the algorithm the image was built with, `contracts/slot-kernel.toml`), slot-init
+treats it as a slot failure like any other unreadable root: `FAILED=yes`, `FAILURES` one higher, and
+`FAIL_REASON` set to `can't mount the root image <device> as erofs, read-only: <the kernel's error>`, where
+the error is the kernel's own text with its number, for example `Invalid argument (os error 22)` or
+`Operation not supported (os error 95)`. The normal fallback follows (the previous slot, or a plain restart
+into the default for a trial). A test pins the text and the fallback
+(`an_image_that_wont_mount_falls_back`).
 
 ### When the slot can't come up
 
@@ -1268,7 +1396,7 @@ The only ways out are a slot starting (`sysboot` does not return) and a reset.
 
 ### Download mode (the end of every pass)
 
-The offer (the third pass in a row that starts nothing) is `fastboot usb <n>` on the OTG port, `n` from `uboot_fastboot_usb` (`--boot-dir` writes `boot.cmd` with
+The offer (the third pass in a row that starts nothing) is `fastboot usb <n>` on the OTG port, `n` from `uboot_fastboot_usb` (`lemnos-ctl boot-partition` writes `boot.cmd` into the image with
 `setenv lemnos_usb <n>` and, when the board names an LED, `setenv lemnos_led <label>` before the
 static script; the image builder compiles that file into `boot.scr`, not `packaging/uboot/boot.cmd`
 itself, unless the defaults, USB controller 0 and no LED, are the board's). What U-Boot v2026.10 does, from its sources:

@@ -41,32 +41,11 @@ const BOOT_PATHS: [&str; 6] = [
 /// The audited lines (trimmed), each `file: line` with its verdict. Verdicts: `install` is an
 /// install-time write that needs a ruling (see docs/slots.md); `read` is a read path (not a write, a
 /// file-level read the audit keeps on the list); `nand` is the UBI form's root copy.
-const AUDITED: [(&str, &str); 8] = [
-    (
-        "drivers/system-slots/src/boot.rs",
-        "fs::rename(&beside, layout.boot.join(&name))?;",
-    ),
-    (
-        "drivers/system-slots/src/boot.rs",
-        "fs::rename(&fresh, layout.boot.join(\"overlays\"))?;",
-    ),
-    (
-        "drivers/system-slots/src/boot.rs",
-        "let _ = fs::remove_dir_all(layout.boot.join(\"overlays\"));",
-    ),
-    ("drivers/system-slots/src/boot.rs", "sync_dir(&layout.boot)"),
-    (
-        "drivers/system-slots/src/lib.rs",
-        "store::sync_dir(&self.layout.boot.join(\"slots\")).map_err(io)?;",
-    ),
+const AUDITED: [(&str, &str); 2] = [
     ("drivers/system-slots/src/uboot.rs", "sync_dir(&self.boot)"),
     (
         "drivers/system-slots/src/uboot.rs",
         "replace(&dir.join(\"extlinux.conf\"), &text)?;",
-    ),
-    (
-        "drivers/system-slots/src/boot.rs",
-        "fs::copy(layout.bootfiles().join(sha), &to).map_err(io)?;",
     ),
 ];
 

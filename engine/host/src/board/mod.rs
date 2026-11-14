@@ -648,6 +648,28 @@ pub struct BoardFile {
     /// The GPIO lines the board gives to Lemnos, for the device tree generator.
     #[serde(default)]
     pub lines: Vec<LineSpec>,
+    /// The boot partition's payload bays, for `lemnos-ctl boot-partition`. Each size is required
+    /// there; none has a default.
+    #[serde(default)]
+    pub boot: BootSpec,
+}
+
+/// `[boot]`: the size of each payload bay on the boot partition, in bytes. A bay is one role's
+/// pre-created file in each bay set, so its size is fixed by the board, not by the build. No key has
+/// a default: `lemnos-ctl boot-partition` refuses a missing one by name.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootSpec {
+    /// The kernel's bay (`kernel`).
+    pub bay_kernel_bytes: Option<u64>,
+    /// The initramfs's bay (`initramfs`).
+    pub bay_initramfs_bytes: Option<u64>,
+    /// The device tree's bay (`device-tree`).
+    pub bay_device_tree_bytes: Option<u64>,
+    /// The board overlay's bay (`board-overlay`).
+    pub bay_overlay_bytes: Option<u64>,
+    /// The command line's bay (`cmdline`).
+    pub bay_cmdline_bytes: Option<u64>,
 }
 
 /// `[security]`: where the board's security record lives, its trust root, and whether Orion ships.

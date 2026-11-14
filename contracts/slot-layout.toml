@@ -1,7 +1,7 @@
-# The files of one slot's boot directory, for the Raspberry Pi firmware (`rpi-tryboot`), and the
-# names that the generated config.txt and tryboot.txt, the installer, the bundle manifest check and
-# the every-boot check all use. Version 4. A reader refuses any other version and any key it does
-# not know. The Rust constants in drivers/slot-store/src/layout.rs are tested against this file.
+# The files of one slot's boot files on the boot partition, and the names that the image builder
+# (`lemnos-ctl boot-partition`), the installer, the bundle manifest check and the every-boot check all
+# use. Version 5. A reader refuses any other version and any key it does not know. The Rust constants
+# in drivers/slot-store/src/layout.rs are tested against this file.
 #
 # What changed from version 2 (unreleased): a new top-level table `[[record]]` (the boot partition's
 # pre-created record files), with the keys name (the visible name: lower case, 8.3 with a dot, no
@@ -10,42 +10,87 @@
 # by key: this is not an additive change. No other key, file or meaning changed.
 #
 # What changed from version 3 (I5i7): one new [[file]] entry, `uboot-env.txt` (firmware = ["uboot"],
-# required, source = "generated"): the U-Boot form's environment locator, which `lemnos-ctl tree
-# --boot-dir` writes at the boot partition's root for record = "uboot"; and the `reason.rec` record's
+# required, source = "generated"): the U-Boot form's environment locator, which the image builder
+# (`lemnos-ctl boot-partition`) writes at the boot partition's root for record = "uboot"; and the `reason.rec` record's
 # firmware list gains "uboot" (the U-Boot form keeps a kernel-gap reason in the same pre-created
 # record; its trial and default are in U-Boot's environment, so it has no trial.rec or episodes.rec).
 # It is a new file and a longer list in the contract, so the version moves; no key, table or key
-# meaning is new. Version 3 readers refuse it, by version. The reader accepts version 4 only.
+# meaning is new. Version 3 readers refuse it, by version. (Version 4 readers accepted version 4 only.)
+#
+# What changed from version 4 (I5i8, this version, 5). Version 4 readers refuse it, by version (and by
+# the new keys and tables):
+#   1. Bay directories and files. A slot's files are no longer written under `slots/<id>/` by the
+#      installer. Each set is a pre-created directory `slots/bay0/` to `slots/bay2/` (the new [bay]
+#      table), holding the [[file]] entries as fixed-size contiguous files (a name below is a path under
+#      the set directory). The pointers name a set (`os_prefix=slots/bayN/`) and are two sectors, one
+#      form for every writer and reader. The image builder writes the whole volume; the installer
+#      writes only a set's build files and its record. The FAT rule is the new [volume] table. The new
+#      [[file]] and [[record]] key is `scope` ("set" or "volume"); it is the only new entry key. The five
+#      build role names and the file names of the five build files are unchanged, and so are the record
+#      names and the record roles trial, reason and episodes.
+#   2. The bay-info record: a new [[record]], `bayinfo.rec` (role = "bay-info", scope = "set",
+#      firmware = ["rpi-tryboot", "uboot"], source = "build"): one per set, which names the slot in the
+#      set and each build file's stored length and sha256.
+#   3. The composed extlinux.conf: a new [[file]], `extlinux/extlinux.conf` (firmware = ["uboot"],
+#      required, scope = "set", source = "generated"), composed from the set's command line: the
+#      image builder writes it for the first slot, and the U-Boot form's install rewrites the same
+#      fixed-size file with the text composed from the new slot's command line, before the set's record.
+# `lemnos-ctl tree --boot-dir` is removed with this version: its files are the image builder's
+# (`lemnos-ctl boot-partition`). The reader (service/ctl/src/boot_dir.rs `read_layout`) accepts
+# version 5 only.
 #
 # Rule for every contracts/*.toml file: any new key, table or key meaning is a new version of that
 # file, and its reader refuses the old version and any key it does not know. Nothing is added to a
 # version in place.
 #
-# The record files are the boot partition's root files that the image builder pre-creates for the
-# rpi-tryboot form: `[[record]]` below. Each has a visible name (lower case, 8.3 with a dot, no
-# space: what the generator writes and what a script sees) and the FAT directory name that name
-# stands for (eight base bytes and three extension bytes, space padded, upper case: the 11 bytes the
-# raw locator matches; `Kind::visible_name` and `Kind::file_name` in drivers/slot-store/src/twocopy.rs).
-#
-# Each file is a path under the slot's directory (slots/<id>/ on the boot partition). The firmware
-# finds every one of them through `os_prefix` (config_txt_boot.adoc, `os_prefix`: kernels,
-# initramfs, cmdline.txt, dtbs and overlays), and overlays only through `overlays/README` (see the
-# same section).
-#
 # `source` says who makes the file:
-#   build      the image builder supplies it (the slot's kernel, initramfs, device tree, command
-#              line and board overlay: see docs/boards.md, "The board overlay file").
-#   generated  `lemnos-ctl tree BOARD --boot-dir DIR` writes it: under DIR/slot/ with the same path
-#              below it for the rpi-tryboot files (the image builder copies DIR/slot/ into
-#              slots/<id>/ and types no name), and at the boot partition's root for the uboot
-#              file (drivers/slot-store/src/uboot_env.rs, LOCATOR).
-version = 4
+#   build      the bundle supplies it (the slot's kernel, initramfs, device tree, command line and
+#              board overlay: see docs/boards.md, "The board overlay file"). The installer writes it
+#              into its set's file, padded to the bay's size, and reads it back by hash before the set
+#              is committed (drivers/slot-store/src/bays.rs).
+#   generated  `lemnos-ctl boot-partition` writes it at image build; an install writes none of them
+#              but the U-Boot form's extlinux.conf (item 3 above).
+#
+# [bay]: `dir` is the set directory, `{n}` the set number; `sets` is the number of sets (default, previous,
+# and the one being installed or on trial); `info` is the set's record; `info_bytes` its size;
+# `pointer_bytes` the size of each pointer file (two sectors); `pointers` the pointer files at the root.
+#
+# [volume]: the FAT form of the boot partition: `fat` = 16, `fats` = 2 (both copies written), and the
+# cluster rule: the smallest power-of-two cluster of at least 512 bytes that gives at least
+# `min_clusters` and at most `max_clusters` clusters (drivers/slot-store/src/fatimage.rs `try_cluster_sectors`).
+#
+# Each file is a path under the slot's directory. The firmware finds every one of them through
+# `os_prefix` (config_txt_boot.adoc, `os_prefix`: kernels, initramfs, cmdline.txt, dtbs and overlays),
+# and overlays only through `overlays/README` (see the same section).
+#
+# The record files are the boot partition's root files that the image builder pre-creates for the
+# rpi-tryboot form: `[[record]]` below. Each has a visible name (lower case, 8.3 with a dot, no space:
+# what the generator writes and what a script sees) and the FAT directory name that name stands for
+# (drivers/slot-store/src/twocopy.rs, `Kind::visible_name` and `Kind::file_name`). `scope` = "volume"
+# is the boot partition's root; `scope` = "set" is each bay set's directory.
+version = 5
+
+[bay]
+dir = "slots/bay{n}"
+sets = 3
+info = "bayinfo.rec"
+info_bytes = 1024
+pointer_bytes = 1024
+pointers = ["default.txt", "previous.txt", "trial.txt"]
+
+[volume]
+fat = 16
+fats = 2
+min_clusters = 4085
+max_clusters = 65524
+
 
 [[file]]
 name = "kernel8.img"
 role = "kernel"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "build"
 
 [[file]]
@@ -53,6 +98,7 @@ name = "initramfs.cpio"
 role = "initramfs"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "build"
 
 [[file]]
@@ -60,6 +106,7 @@ name = "board.dtb"
 role = "device-tree"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "build"
 
 [[file]]
@@ -67,6 +114,7 @@ name = "cmdline.txt"
 role = "cmdline"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "build"
 
 [[file]]
@@ -74,6 +122,7 @@ name = "overlays/README"
 role = "overlay-readme"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "generated"
 
 [[file]]
@@ -81,26 +130,38 @@ name = "overlays/lemnos-board.dtbo"
 role = "board-overlay"
 firmware = ["rpi-tryboot"]
 required = true
+scope = "set"
 source = "build"
+
+[[file]]
+name = "extlinux/extlinux.conf"
+role = "extlinux"
+firmware = ["uboot"]
+required = true
+scope = "set"
+source = "generated"
 
 [[file]]
 name = "uboot-env.txt"
 role = "uboot-env"
 firmware = ["uboot"]
 required = true
+scope = "volume"
 source = "generated"
 
+# The record files (scope = "volume") and the bay record (scope = "set") are below.
 # The pre-created record files, at the boot partition's root (not under the slot directory). `role`
 # names the record (trial: the slot id and its attempts left; reason: why a trial fell back; episodes:
 # the episodes a slot has had against it, the count-based fallback). Each is two sectors of the
 # two-copy record layout (drivers/slot-store/src/twocopy.rs), `bytes` = 1024. `source` is
-# `generated`: `lemnos-ctl tree BOARD --boot-dir DIR` writes it.
+# `generated`: `lemnos-ctl boot-partition` writes it.
 
 [[record]]
 name = "trial.rec"
 role = "trial"
 firmware = ["rpi-tryboot"]
 bytes = 1024
+scope = "volume"
 source = "generated"
 
 [[record]]
@@ -108,6 +169,7 @@ name = "reason.rec"
 role = "reason"
 firmware = ["rpi-tryboot", "uboot"]
 bytes = 1024
+scope = "volume"
 source = "generated"
 
 [[record]]
@@ -115,4 +177,16 @@ name = "episodes.rec"
 role = "episodes"
 firmware = ["rpi-tryboot"]
 bytes = 1024
+scope = "volume"
 source = "generated"
+
+# The bay record: one per set, at `slots/bayN/bayinfo.rec` (scope = "set"). It names the slot in the set
+# and each build file's stored length and sha256 (drivers/slot-store/src/bays.rs `Info`). Its two-copy
+# record layout is the same as the root records'. Written by the installer, last, after the payloads.
+[[record]]
+name = "bayinfo.rec"
+role = "bay-info"
+firmware = ["rpi-tryboot", "uboot"]
+bytes = 1024
+scope = "set"
+source = "build"

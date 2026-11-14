@@ -184,8 +184,13 @@ impl SystemSlots {
             Ok(rsts) => rsts,
             Err(e) => return self.note(format!("the reset status can't be read: {e}")),
         };
-        let files_match =
-            boot_guard::verified(&self.layout, &self.boot_node, &state.default).is_ok();
+        let files_match = boot_guard::verified(
+            &self.layout,
+            &self.boot_node,
+            self.record.as_ref(),
+            &state.default,
+        )
+        .is_ok();
         let episodes_before = match self.record.episodes() {
             Ok(Some((slot, episodes))) if slot == state.default => episodes,
             Ok(_) => 0,
@@ -240,7 +245,9 @@ impl SystemSlots {
         let Some(firmware) = self.firmware.clone() else {
             return;
         };
-        if let Err(why) = boot_guard::verified(&self.layout, &self.boot_node, slot) {
+        if let Err(why) =
+            boot_guard::verified(&self.layout, &self.boot_node, self.record.as_ref(), slot)
+        {
             return self.note(format!(
                 "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
             ));

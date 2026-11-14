@@ -355,8 +355,8 @@ fn an_episodes_count_of_zero_or_a_bad_slot_is_refused() {
     assert_eq!(decode_episodes(b"os-1 2"), Some(("os-1".into(), 2)));
 }
 
-/// The partition of [`partition`] with the three pointer files added, each one sector at its own
-/// cluster, all pointing at `os-1`.
+/// The partition of [`partition`] with the three pointer files added, each two sectors (the one form),
+/// all pointing at `os-1`.
 fn partition_with_pointers() -> (Vec<u8>, Records, Pointers) {
     let mut vol = build(
         false,
@@ -380,18 +380,18 @@ fn partition_with_pointers() -> (Vec<u8>, Records, Pointers) {
             },
             Entry {
                 name: DEFAULT_POINTER,
-                size: 512,
-                chain: vec![9],
+                size: 2 * SECTOR as u32,
+                chain: vec![9, 10],
             },
             Entry {
                 name: PREVIOUS_POINTER,
-                size: 512,
-                chain: vec![10],
+                size: 2 * SECTOR as u32,
+                chain: vec![11, 12],
             },
             Entry {
                 name: TRIAL_POINTER,
-                size: 512,
-                chain: vec![11],
+                size: 2 * SECTOR as u32,
+                chain: vec![13, 14],
             },
         ],
     );
@@ -412,9 +412,9 @@ fn partition_with_pointers() -> (Vec<u8>, Records, Pointers) {
         vol.0[at..at + bytes.len()].copy_from_slice(bytes);
     }
     for which in [Pointer::Default, Pointer::Previous, Pointer::Trial] {
-        let sector = firmware::pointer_sector("os-1").unwrap();
+        let file = firmware::pointer_file("os-1").unwrap();
         let at = pointers.lba(which) as usize * SECTOR;
-        vol.0[at..at + SECTOR].copy_from_slice(&sector);
+        vol.0[at..at + file.len()].copy_from_slice(&file);
     }
     (vol.0, records, pointers)
 }
@@ -436,21 +436,18 @@ fn the_pointer_files_are_placed_at_their_sectors_and_read_back() {
 }
 
 #[test]
-fn a_pointer_write_changes_only_its_own_sector() {
+fn a_pointer_write_changes_only_its_own_two_sectors() {
     let (image, _, pointers) = partition_with_pointers();
     let mut dev = Cut::new(image.clone());
     pointers.write(&mut dev, Pointer::Default, "os-22").unwrap();
     let lba = pointers.lba(Pointer::Default) as usize * SECTOR;
+    let end = lba + firmware::POINTER_FILE_BYTES;
     assert_eq!(
         dev.image[..lba],
         image[..lba],
         "bytes before the pointer changed"
     );
-    assert_eq!(
-        dev.image[lba + SECTOR..],
-        image[lba + SECTOR..],
-        "bytes after changed"
-    );
+    assert_eq!(dev.image[end..], image[end..], "bytes after changed");
     assert_eq!(
         pointers
             .read(&mut dev, Pointer::Default)
@@ -482,50 +479,95 @@ fn a_pointer_cut_at_every_byte_is_the_old_slot_the_new_slot_or_refused() {
         pointers.write(&mut seed, Pointer::Default, old).unwrap();
         let before = seed.image.clone();
         let mut refused = 0;
-        for tear in 0..=SECTOR {
-            let mut dev = Cut::new(before.clone());
-            if tear < SECTOR {
-                dev.cut = Some((0, tear));
+        // The two writes of a pointer: write 0 is the second sector (the commit), write 1 the first.
+        for write in 0..2usize {
+            for tear in 0..=SECTOR {
+                let mut dev = Cut::new(before.clone());
+                if tear < SECTOR {
+                    dev.cut = Some((write, tear));
+                }
+                let lba = pointers.lba(Pointer::Default);
+                let wrote = pointers.write(&mut dev, Pointer::Default, new);
+                assert_eq!(
+                    wrote.is_err(),
+                    tear < SECTOR,
+                    "{old}->{new} write {write} tear {tear}"
+                );
+                let read = pointers.read(&mut dev, Pointer::Default).unwrap();
+                match read.as_deref() {
+                    None => refused += 1,
+                    Some(id) => assert!(
+                        id == old || id == new,
+                        "{old}->{new} write {write} tear {tear} read {id}"
+                    ),
+                }
+                // Nothing but the pointer's two sectors changed.
+                let at = lba as usize * SECTOR;
+                let end = at + firmware::POINTER_FILE_BYTES;
+                assert_eq!(
+                    dev.image[..at],
+                    before[..at],
+                    "{old}->{new} write {write} tear {tear}"
+                );
+                assert_eq!(
+                    dev.image[end..],
+                    before[end..],
+                    "{old}->{new} write {write} tear {tear}"
+                );
             }
-            let lba = pointers.lba(Pointer::Default);
-            let wrote = pointers.write(&mut dev, Pointer::Default, new);
-            assert_eq!(wrote.is_err(), tear < SECTOR, "{old}->{new} tear {tear}");
-            let read = pointers.read(&mut dev, Pointer::Default).unwrap();
-            match read.as_deref() {
-                None => refused += 1,
-                Some(id) => assert!(id == old || id == new, "{old}->{new} tear {tear} read {id}"),
-            }
-            // Nothing but this sector changed.
-            let at = lba as usize * SECTOR;
-            assert_eq!(dev.image[..at], before[..at], "{old}->{new} tear {tear}");
-            assert_eq!(
-                dev.image[at + SECTOR..],
-                before[at + SECTOR..],
-                "{old}->{new} tear {tear}"
-            );
         }
-        assert!(
-            refused > 0,
-            "{old}->{new}: a torn pointer was never refused"
-        );
+        // Two copies: one cut tears one sector, and the other still holds a whole line, so no single
+        // cut leaves the pointer refused.
+        assert_eq!(refused, 0, "{old}->{new}: one cut left no whole line");
     }
+}
+
+/// The Pi firmware's image from the image builder with `os-1` in bay 0 and every pointer naming it.
+fn bay_image() -> Vec<u8> {
+    use crate::bootimage::{self, Family, Parts};
+    let parts = Parts {
+        family: Family::Tryboot,
+        layout: bays::Layout::new([2048, 1024, 512, 512, 512]).unwrap(),
+        root: vec![("slot-layout.toml", b"version = 5\n".to_vec())],
+        fixed: Vec::new(),
+    };
+    let payloads = bay_payloads("os-1");
+    let refs: [&[u8]; 5] = std::array::from_fn(|i| payloads[i].as_slice());
+    let size = bootimage::min_size(&parts).unwrap();
+    bootimage::build(&parts, size, "os-1", &refs).unwrap()
+}
+
+fn bay_payloads(id: &str) -> [Vec<u8>; 5] {
+    [
+        format!("kernel {id}").into_bytes(),
+        format!("initramfs {id}").into_bytes(),
+        format!("device tree {id}").into_bytes(),
+        format!("console=tty1 os.slot={id}").into_bytes(),
+        format!("overlay {id}").into_bytes(),
+    ]
 }
 
 #[test]
 fn a_boot_on_a_real_file_places_every_file_and_round_trips_the_pointers_and_trial() {
     let dir = crate::tests::TempDir::new("boot-raw");
     let node = dir.0.join("boot.img");
-    let (image, _, _) = partition_with_pointers();
-    std::fs::write(&node, &image).unwrap();
+    std::fs::write(&node, bay_image()).unwrap();
     let mut boot = Boot::open(&node).unwrap();
     assert_eq!(
         boot.pointer(Pointer::Default).unwrap().as_deref(),
         Some("os-1")
     );
+    let two = bay_payloads("os-2");
+    let refs: [&[u8]; 5] = std::array::from_fn(|i| two[i].as_slice());
+    boot.install_slot("os-2", &refs).unwrap();
     boot.set_pointer(Pointer::Default, "os-2").unwrap();
     assert_eq!(
         boot.pointer(Pointer::Default).unwrap().as_deref(),
         Some("os-2")
+    );
+    assert_eq!(
+        boot.pointer(Pointer::Previous).unwrap().as_deref(),
+        Some("os-1")
     );
     boot.arm_trial("os-1", 2).unwrap();
     assert_eq!(

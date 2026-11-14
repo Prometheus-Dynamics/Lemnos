@@ -5,7 +5,8 @@
 # Names are written without the CONFIG_ prefix: BLOCK is CONFIG_BLOCK.
 #
 # Reading rules, for any build that reads this file:
-#   - version must be 2 (version 1 had no [firmware] table). Any other value: refuse the file.
+#   - version must be 3 (version 1 had no [firmware] table; version 2 had no EROFS_FS_ZIP). Any other value:
+#     refuse the file.
 #   - A key this reader does not know, at any level, is refused too: it means a newer version.
 #     Every key below is required at its level.
 #   - A build for image kind K checks exactly these, from this file:
@@ -36,7 +37,16 @@
 #   - Per-SoC storage hosts (for example MMC_SDHCI_BRCMSTB) are not here: they are board data.
 #     MODULES is not required and is not listed: slot-init loads no modules.
 
-version = 2
+# What changed from version 2: always.all gains EROFS_FS_ZIP. slot-init mounts the slot's root as an EROFS
+# image, usually compressed (EROFS_FS was already listed). From the kernel tree (linux 7.3.3, fs/erofs/
+# Kconfig): EROFS_FS depends on BLOCK (listed) and selects LZ4_DECOMPRESS when EROFS_FS_ZIP is set;
+# EROFS_FS_ZIP (bool, default y) depends on EROFS_FS. The image's compression ALGORITHM is the image
+# builder's choice and is NOT in this contract: the builder must check that the kernel has the built-in
+# decompressor for the algorithm its recipe used (LZ4 comes with EROFS_FS_ZIP; EROFS_FS_ZIP_LZMA,
+# EROFS_FS_ZIP_DEFLATE or EROFS_FS_ZIP_ZSTD for the others, each =y). The dm-verity chain the root needs
+# (BLK_DEV_DM, DM_BUFIO, DM_VERITY, CRYPTO, CRYPTO_SHA256) was already listed. A root that cannot be mounted
+# (the kernel lacks the decompressor) is a slot failure like any unreadable root: see docs/slots.md.
+version = 3
 
 [always]
 all = [
@@ -47,6 +57,7 @@ all = [
   "CRYPTO",
   "CRYPTO_SHA256",
   "EROFS_FS",
+  "EROFS_FS_ZIP",
   "DEVTMPFS",
   "PROC_FS",
   "SYSFS",

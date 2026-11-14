@@ -17,6 +17,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use lemnos_slot_store::bays::{self, Protected};
+use lemnos_slot_store::boot_raw::{BayVolume, Trial};
+use lemnos_slot_store::bootimage;
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::{self, FileEnv, Geometry, Place};
 
@@ -225,6 +228,18 @@ impl BootRecord for Uboot {
         self.write(&record)
     }
 
+    fn install(&self, slot: &str, _payloads: &[&[u8]; 5]) -> io::Result<()> {
+        Err(io::Error::other(format!(
+            "{slot} isn't installed: payload bays on raw NAND (UBI) are parked, so this boot form installs no slot (docs/slots.md, \"The boot partition: payload bays\")"
+        )))
+    }
+
+    fn free(&self, _slot: &str) -> io::Result<()> {
+        Err(io::Error::other(
+            "payload bays on raw NAND (UBI) are parked, so this boot form frees no bay (docs/slots.md, \"The boot partition: payload bays\")",
+        ))
+    }
+
     fn restart(&mut self) -> io::Result<()> {
         // The script starts a trial that has attempts left on any restart.
         self.restarter.run(None)
@@ -255,15 +270,6 @@ impl BootRecord for Uboot {
     }
 }
 
-/// The loader configuration the install writes for slot `id` (see [`extlinux`]), into the slot's
-/// boot directory `dir`, which holds the slot's files.
-fn write_extlinux(dir: &Path, id: &str, cmdline: &str) -> io::Result<()> {
-    let files = files_under(dir)?;
-    let text = extlinux(id, &files, cmdline).map_err(io::Error::other)?;
-    fs::create_dir_all(dir.join("extlinux"))?;
-    fs::write(dir.join(EXTLINUX), text)
-}
-
 /// The `uboot` record: `default`, `trial` and `trial_attempts` are variables of U-Boot's own
 /// redundant environment, at `place` (a raw, two-copy record, `lemnos_slot_store::uboot_env`).
 /// `packaging/uboot/boot.cmd` reads them and saves the environment with `saveenv` before it starts a
@@ -273,6 +279,9 @@ pub struct UbootEnv {
     pub disk: Result<PathBuf, String>,
     pub place: Place,
     pub restarter: Restarter,
+    /// The boot partition's block node: the payload bays and their records are written there, raw.
+    /// The reason it is not known is kept: an install is then refused by it.
+    pub boot_node: Result<PathBuf, String>,
 }
 
 impl UbootEnv {
@@ -304,6 +313,49 @@ impl UbootEnv {
         uboot_env::set(&mut dev, &geometry, updates).map_err(io::Error::other)
     }
 
+    /// The boot partition's bays, opened raw on its node (this form has no pointer or record files
+    /// on the volume).
+    fn raw(&self) -> io::Result<BayVolume> {
+        let node = self.boot_node.as_ref().map_err(|why| {
+            io::Error::other(format!(
+                "the boot partition's device isn't known ({why}): its payload bays can't be written"
+            ))
+        })?;
+        BayVolume::open(node).map_err(io::Error::other)
+    }
+
+    /// The bays the environment protects: the default's (`default_bay`), the trial's (`trial_bay`),
+    /// the previous's (`previous_bay`, written by [`BootRecord::set_default`]) and a trial with attempts left.
+    fn protected(&self) -> io::Result<Protected> {
+        let (mut dev, geometry) = self.open()?;
+        let (_, list) = uboot_env::load_checked(&mut dev, &geometry).map_err(io::Error::other)?;
+        let get = |name: &str| {
+            list.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .filter(|value| !value.is_empty())
+        };
+        let attempts = get("trial_attempts")
+            .and_then(|a| a.parse::<u8>().ok())
+            .unwrap_or(0)
+            .min(MAX_ATTEMPTS);
+        Ok(Protected {
+            default: get("default_bay").and_then(|b| bays::set_of(&b)),
+            previous: get("previous_bay").and_then(|b| bays::set_of(&b)),
+            trial: get("trial_bay").and_then(|b| bays::set_of(&b)),
+            pending: get("trial")
+                .filter(|_| attempts > 0)
+                .map(|slot| Trial { slot, attempts }),
+        })
+    }
+
+    /// The bay (`bayN`) a slot's files are in: the environment's `default_bay` and `trial_bay`
+    /// name it, so `boot.cmd` reads the bay's extlinux without a lookup of its own.
+    fn bay_name(&self, id: &str) -> io::Result<String> {
+        let (dir, _) = self.raw()?.slot_bay(id).map_err(io::Error::other)?;
+        Ok(dir.rsplit('/').next().unwrap_or_default().to_string())
+    }
+
     /// The variables as they stand: `(default, trial, attempts)`, empty and 0 when unset.
     fn read(&self) -> io::Result<(String, String, u8)> {
         let (mut dev, geometry) = self.open()?;
@@ -323,13 +375,31 @@ impl UbootEnv {
 }
 
 impl BootRecord for UbootEnv {
+    /// Points the default at the slot's bay. The bay the default had becomes `previous_bay` (as the Pi
+    /// form's switch writes its previous pointer): the environment has no other record of it, and an
+    /// install must not take it.
     fn set_default(&mut self, id: &str) -> io::Result<()> {
-        self.set(&[("default", Some(id))])
+        // The environment first: one U-Boot has not saved, or at another size, is refused by that.
+        let old = self.protected()?.default.map(bays::set_name);
+        let bay = self.bay_name(id)?;
+        let previous = old.filter(|old| *old != bay);
+        match previous {
+            Some(old) => self.set(&[
+                ("previous_bay", Some(&old)),
+                ("default", Some(id)),
+                ("default_bay", Some(&bay)),
+            ]),
+            None => self.set(&[("default", Some(id)), ("default_bay", Some(&bay))]),
+        }
     }
 
     fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
+        // The environment first, as for the default: one U-Boot has not saved is refused by that.
+        self.read()?;
+        let bay = self.bay_name(id)?;
         self.set(&[
             ("trial", Some(id)),
+            ("trial_bay", Some(&bay)),
             ("trial_attempts", Some(&attempts.to_string())),
         ])
     }
@@ -348,7 +418,28 @@ impl BootRecord for UbootEnv {
     }
 
     fn clear_trial(&mut self) -> io::Result<()> {
-        self.set(&[("trial", None), ("trial_attempts", None)])
+        self.set(&[
+            ("trial", None),
+            ("trial_bay", None),
+            ("trial_attempts", None),
+        ])
+    }
+
+    /// The slot's five payloads and its composed extlinux (from its command line) into a free bay.
+    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()> {
+        let text = bootimage::extlinux_text(payloads[3]).map_err(io::Error::other)?;
+        let protected = self.protected()?;
+        self.raw()?
+            .install_slot_with(slot, payloads, Some(&text), &protected)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }
+
+    fn free(&self, slot: &str) -> io::Result<()> {
+        let protected = self.protected()?;
+        self.raw()?
+            .free_slot(slot, &protected)
+            .map_err(io::Error::other)
     }
 
     fn restart(&mut self) -> io::Result<()> {
@@ -356,8 +447,13 @@ impl BootRecord for UbootEnv {
         self.restarter.run(None)
     }
 
-    fn prepare(&self, dir: &Path, id: &str, cmdline: &str) -> io::Result<()> {
-        write_extlinux(dir, id, cmdline)
+    /// Nothing is written to the slot's directory: the extlinux is in the bay (see [`Self::install`]).
+    fn prepare(&self, _dir: &Path, _id: &str, _cmdline: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn slot_bay(&self, id: &str) -> io::Result<(String, Vec<(String, u64)>)> {
+        self.raw()?.slot_bay(id).map_err(io::Error::other)
     }
 
     /// The root copy is the install-time fallback (see [`Uboot`]): nothing is rewritten here.

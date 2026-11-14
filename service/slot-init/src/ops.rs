@@ -48,8 +48,7 @@ pub trait Ops {
         &self,
         dev: &Path,
     ) -> Result<Box<dyn lemnos_slot_store::boot_raw::BootRaw>, String> {
-        lemnos_slot_store::boot_raw::Boot::open(dev)
-            .map(|boot| Box::new(boot) as Box<dyn lemnos_slot_store::boot_raw::BootRaw>)
+        lemnos_slot_store::boot_raw::open_records(dev)
     }
     /// The U-Boot environment's node, opened read-write (nothing is mounted), and its length in
     /// bytes. The tests use an in-memory device, with a cut at a chosen byte.
@@ -65,6 +64,12 @@ pub trait Ops {
                 )
             })
             .map_err(|error| format!("{}: {error}", node.display()))
+    }
+    /// The bay a slot's boot files are in on the boot partition at `dev`: the set's directory and each
+    /// payload's stored length. Read raw, through [`lemnos_slot_store::bays::slot_bay_on`]; both the
+    /// Pi firmware form and the U-Boot form carry the same bay records.
+    fn slot_bay(&self, dev: &Path, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
+        lemnos_slot_store::boot_raw::BayVolume::open(dev)?.slot_bay(slot)
     }
     /// A file on the boot partition, `path` relative to its root, read without a mount: the FAT
     /// volume at `dev` is read raw ([`lemnos_slot_store::bootcheck::fat_read`]). `None` when the file

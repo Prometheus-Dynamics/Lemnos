@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use lemnos_slot_store::boot_raw::{BootRaw, Pointer};
+use lemnos_slot_store::boot_raw::{Boot, BootRaw, Pointer};
 use lemnos_slot_store::records;
 
-use crate::store::{Layout, replace, sync_dir, valid_id};
+use crate::store::{Layout, replace, sync_dir};
 
 /// Tells the boot loader which slot to start.
 ///
@@ -45,6 +45,12 @@ pub trait BootRecord: Send {
     fn clear_trial(&mut self) -> io::Result<()>;
     /// Restarts the board, into whatever the loader starts first.
     fn restart(&mut self) -> io::Result<()>;
+    /// Writes a slot's five payloads (`ROLES` order) into a free bay set and commits its record. No
+    /// pointer moves: the default and trial switches are separate calls. Nothing on the boot partition
+    /// is written at file level.
+    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()>;
+    /// Frees the slot's bay by its record alone. A bay a pointer names is refused.
+    fn free(&self, slot: &str) -> io::Result<()>;
     /// The episodes recorded against a slot: kept on the raw boot records, so only the `tryboot`
     /// form has them. The other forms refuse by name.
     fn episodes(&self) -> io::Result<Option<(String, u8)>> {
@@ -65,8 +71,14 @@ pub trait BootRecord: Send {
     }
     /// Keeps the default slot's boot files where the boot loader looks when it can't read the
     /// record: at the boot partition's root.
-    fn fallback_copy(&self, layout: &Layout, id: &str) -> io::Result<()> {
-        root_copy(layout, id)
+    fn fallback_copy(&self, _layout: &Layout, _id: &str) -> io::Result<()> {
+        Ok(())
+    }
+    /// The bay of a slot's boot files: the set's directory and each payload's stored length, from
+    /// the set's record (the every-boot check). A form with no bays yet (the NAND volume and the file
+    /// form: NAND/UBI bays are parked) reads the files under `slots/<id>`, with no stored lengths.
+    fn slot_bay(&self, id: &str) -> io::Result<(String, Vec<(String, u64)>)> {
+        Ok((format!("slots/{id}"), Vec::new()))
     }
 }
 
@@ -84,7 +96,7 @@ fn no_episodes() -> io::Error {
 pub fn write_reason(node: &Result<PathBuf, String>, reason: &str) -> io::Result<()> {
     let node = node.as_ref().map_err(|why| io::Error::other(why.clone()))?;
     let text = reason.replace(['\n', '\r'], " ");
-    lemnos_slot_store::boot_raw::Boot::open(node)
+    lemnos_slot_store::boot_raw::open_records(node)
         .and_then(|mut raw| raw.set_reason(&text))
         .map_err(io::Error::other)
 }
@@ -92,7 +104,7 @@ pub fn write_reason(node: &Result<PathBuf, String>, reason: &str) -> io::Result<
 /// The reason kept on the boot partition, if there is one.
 pub fn read_reason(node: &Result<PathBuf, String>) -> Option<String> {
     let node = node.as_ref().ok()?;
-    let mut raw = lemnos_slot_store::boot_raw::Boot::open(node).ok()?;
+    let mut raw = lemnos_slot_store::boot_raw::open_records(node).ok()?;
     raw.reason()
         .ok()
         .flatten()
@@ -167,15 +179,13 @@ pub struct Tryboot {
 impl Tryboot {
     /// The boot partition's raw records and pointers, opened on its node. Refused by name when the
     /// node is not known.
-    fn raw(&self) -> io::Result<Box<dyn BootRaw>> {
+    fn raw(&self) -> io::Result<Boot> {
         let node = self.node.as_ref().map_err(|why| {
             io::Error::other(format!(
                 "the boot partition's device isn't known ({why}): its pointers can't be written"
             ))
         })?;
-        lemnos_slot_store::boot_raw::Boot::open(node)
-            .map(|boot| Box::new(boot) as Box<dyn BootRaw>)
-            .map_err(io::Error::other)
+        Boot::open(node).map_err(io::Error::other)
     }
 }
 
@@ -227,6 +237,21 @@ impl BootRecord for Tryboot {
 
     fn restart(&mut self) -> io::Result<()> {
         self.restarter.run(None)
+    }
+
+    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()> {
+        self.raw()?
+            .install_slot(slot, payloads)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }
+
+    fn free(&self, slot: &str) -> io::Result<()> {
+        self.raw()?.free_slot(slot).map_err(io::Error::other)
+    }
+
+    fn slot_bay(&self, id: &str) -> io::Result<(String, Vec<(String, u64)>)> {
+        self.raw()?.slot_bay(id).map_err(io::Error::other)
     }
 
     /// The Pi firmware reads its slot from the pointer files; the boot partition's root holds no
@@ -294,6 +319,17 @@ impl BootRecord for FileRecord {
 
     fn restart(&mut self) -> io::Result<()> {
         self.restarter.run(None)
+    }
+
+    /// The file form keeps no boot files of its own: its loader reads one fixed kernel, and Lemnos
+    /// writes only the `boot-record` file. Nothing is written to the boot partition for an install, so
+    /// nothing is claimed about the slot's files there (no bay, so the every-boot check finds none).
+    fn install(&self, _slot: &str, _payloads: &[&[u8]; 5]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn free(&self, _slot: &str) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -372,90 +408,6 @@ pub fn put(layout: &Layout, id: &str, dir: &Path) -> io::Result<()> {
     replace(&layout.boot_list(id), list.as_bytes())
 }
 
-/// Puts a slot's directory on the boot partition from its kept files, checked as read back.
-/// Leaves one that is there alone unless `replace_it`.
-pub fn stage(layout: &Layout, id: &str, replace_it: bool) -> Result<(), String> {
-    let target = layout.boot_dir(id);
-    if target.is_dir() && !replace_it {
-        return Ok(());
-    }
-    let files = kept(layout, id).ok_or_else(|| format!("slot {id} has no boot files"))?;
-    let slots = layout.boot.join("slots");
-    let fresh = slots.join(format!(".{id}.new"));
-    let _ = fs::remove_dir_all(&fresh);
-    let io = |error: io::Error| format!("slot {id}'s boot files: {error}");
-    let mut need = 1u64 << 20;
-    for (sha, name) in &files {
-        let from = layout.bootfiles().join(sha);
-        let size = fs::metadata(&from)
-            .map_err(|_| format!("slot {id}'s boot file {name} is missing on the data partition"))?
-            .len();
-        need += size.div_ceil(1024) * 1024;
-    }
-    fs::create_dir_all(&slots).map_err(io)?;
-    let free = lemnos_linux_sys::statfs::free_bytes(&slots).map_err(io)?;
-    if free < need {
-        return Err(format!(
-            "no room on the boot partition for slot {id}'s boot files: they need {} MiB, it has {} MiB free",
-            need >> 20,
-            free >> 20
-        ));
-    }
-    for (sha, name) in &files {
-        let to = fresh.join(name);
-        if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent).map_err(io)?;
-        }
-        fs::copy(layout.bootfiles().join(sha), &to).map_err(io)?;
-        fs::File::open(&to).and_then(|f| f.sync_all()).map_err(io)?;
-    }
-    for (sha, name) in &files {
-        if sha256_file(&fresh.join(name)).map_err(io)? != *sha {
-            let _ = fs::remove_dir_all(&fresh);
-            return Err(format!(
-                "slot {id}'s boot files didn't read back as written"
-            ));
-        }
-    }
-    let _ = fs::remove_dir_all(&target);
-    fs::rename(&fresh, &target).map_err(io)?;
-    sync_dir(&slots).map_err(io)
-}
-
-/// Takes off the boot partition every slot directory that isn't `resident`, half-written ones
-/// too. An installed slot's directory goes only once its files are kept on the data partition
-/// (a slot put there before this driver, or by a first image, is kept first).
-pub fn evict(layout: &Layout, resident: &[&str]) -> io::Result<()> {
-    let slots = layout.boot.join("slots");
-    let Ok(entries) = fs::read_dir(&slots) else {
-        return Ok(());
-    };
-    let mut gone = false;
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        if resident.contains(&name.as_str()) {
-            if layout.installed(&name) && kept(layout, &name).is_none() {
-                put(layout, &name, &entry.path())?;
-            }
-            continue;
-        }
-        if valid_id(&name) && layout.installed(&name) && kept(layout, &name).is_none() {
-            put(layout, &name, &entry.path())?;
-        }
-        fs::remove_dir_all(entry.path())?;
-        gone = true;
-    }
-    if gone {
-        sync_dir(&slots)?;
-    }
-    Ok(())
-}
-
 /// A removed slot's kept files, and then the files no slot lists any more.
 pub fn drop_kept(layout: &Layout, id: &str) -> io::Result<()> {
     let _ = fs::remove_file(layout.boot_list(id));
@@ -478,41 +430,6 @@ pub fn drop_kept(layout: &Layout, id: &str) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// The default slot's boot files at the boot partition's root too: what the firmware starts when
-/// it can't read the pointer.
-pub fn root_copy(layout: &Layout, id: &str) -> io::Result<()> {
-    let from = layout.boot_dir(id);
-    if !from.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(&from)?.flatten() {
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let beside = layout.boot.join(format!(".{name}.new"));
-        fs::copy(entry.path(), &beside)?;
-        fs::File::open(&beside)?.sync_all()?;
-        fs::rename(&beside, layout.boot.join(&name))?;
-    }
-    let overlays = from.join("overlays");
-    if overlays.is_dir() {
-        let fresh = layout.boot.join(".overlays.new");
-        let _ = fs::remove_dir_all(&fresh);
-        fs::create_dir_all(&fresh)?;
-        for name in files_under(&overlays)? {
-            let to = fresh.join(&name);
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(overlays.join(&name), &to)?;
-        }
-        let _ = fs::remove_dir_all(layout.boot.join("overlays"));
-        fs::rename(&fresh, layout.boot.join("overlays"))?;
-    }
-    sync_dir(&layout.boot)
 }
 
 /// The reboot request `system.reboot` leaves in the state directory before it restarts, for the
@@ -572,26 +489,19 @@ mod tests {
     use super::*;
     use crate::tests::TempDir;
     use lemnos_slot_store::boot_raw::{Boot as RawBoot, BootRaw, Pointer, Trial};
-    use lemnos_slot_store::fatimage;
-    use lemnos_slot_store::firmware;
-    use lemnos_slot_store::twocopy::{Kind, precreate};
 
-    /// A boot partition image in `dir`: the record files pre-created, and the three pointer files
-    /// each naming `os-1`. Returns its node.
+    /// A boot partition image in `dir`, built by the image builder: slot `a-1` in bay 0, the three
+    /// pointers naming it, the records pre-created. Returns its node.
     fn fat_boot(dir: &TempDir) -> std::path::PathBuf {
-        let mut files = precreate(&[
-            (Kind::TRIAL, b""),
-            (Kind::REASON, b""),
-            (Kind::EPISODES, b""),
-        ])
-        .unwrap();
-        let pointer = firmware::pointer_sector("os-1").unwrap().to_vec();
-        for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
-            files.push((name, pointer.clone()));
-        }
         let node = dir.0.join("boot.img");
-        fs::write(&node, fatimage::fat16(&files)).unwrap();
+        fs::write(&node, crate::bay_fixture::tryboot_image("a-1")).unwrap();
         node
+    }
+
+    /// Installs `id` into a free bay of the image, as the driver's install does.
+    fn install(record: &Tryboot, id: &str) {
+        let p = crate::bay_fixture::payloads(id);
+        record.install(id, &crate::bay_fixture::refs(&p)).unwrap();
     }
 
     fn tryboot(dir: &TempDir, node: Result<std::path::PathBuf, String>) -> Tryboot {
@@ -610,6 +520,7 @@ mod tests {
         let dir = TempDir::new("tryboot");
         let node = fat_boot(&dir);
         let mut record = tryboot(&dir, Ok(node.clone()));
+        install(&record, "b-2");
         record.set_default("a-1").unwrap();
         record.set_trial("b-2", 3).unwrap();
         let mut raw = RawBoot::open(&node).unwrap();
@@ -635,6 +546,7 @@ mod tests {
         let dir = TempDir::new("tryboot-attempts");
         let node = fat_boot(&dir);
         let mut record = tryboot(&dir, Ok(node.clone()));
+        install(&record, "b-2");
         assert_eq!(record.pending().unwrap(), None);
         record.set_trial("b-2", 2).unwrap();
         assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
@@ -658,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tryboot_record_with_no_known_device_or_no_pointer_file_refuses_by_name() {
+    fn a_tryboot_record_with_no_known_device_or_no_boot_volume_refuses() {
         let dir = TempDir::new("tryboot-refused");
         let mut record = tryboot(
             &dir,
@@ -666,37 +578,12 @@ mod tests {
         );
         let why = record.set_default("a-1").unwrap_err().to_string();
         assert!(why.contains("device isn't known"), "{why}");
-        // A partition without its pointer files is refused by the first file it lacks.
-        let files = precreate(&[
-            (Kind::TRIAL, b""),
-            (Kind::REASON, b""),
-            (Kind::EPISODES, b""),
-        ])
-        .unwrap();
+        // A partition that is not a boot volume of bays is refused too, and nothing is written to it.
         let node = dir.0.join("bare.img");
-        fs::write(&node, fatimage::fat16(&files)).unwrap();
-        let mut record = tryboot(&dir, Ok(node));
-        let why = record.set_default("a-1").unwrap_err().to_string();
-        assert!(why.contains("default.txt"), "{why}");
-    }
-
-    fn layout(dir: &TempDir) -> Layout {
-        let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
-        fs::create_dir_all(layout.images()).unwrap();
-        fs::create_dir_all(layout.boot.join("slots")).unwrap();
-        layout
-    }
-
-    fn slot_dir(dir: &Path, kernel: &[u8]) {
-        fs::create_dir_all(dir.join("overlays")).unwrap();
-        fs::write(dir.join("kernel8.img"), kernel).unwrap();
-        fs::write(dir.join("cmdline.txt"), b"console=tty1\n").unwrap();
-        fs::write(dir.join("overlays/README"), b"r").unwrap();
-    }
-
-    fn install(layout: &Layout, id: &str) {
-        fs::write(layout.manifest(id), "{}").unwrap();
-        fs::write(layout.image(id), "img").unwrap();
+        fs::write(&node, vec![0u8; 1 << 20]).unwrap();
+        let mut record = tryboot(&dir, Ok(node.clone()));
+        assert!(record.set_default("a-1").is_err());
+        assert!(fs::read(&node).unwrap().iter().all(|b| *b == 0));
     }
 
     #[test]
@@ -724,76 +611,5 @@ mod tests {
             "default=a\n"
         );
         assert_eq!(record.pending().unwrap(), None);
-    }
-
-    #[test]
-    fn boot_files_are_kept_once_by_content_and_staged_back_checked() {
-        let dir = TempDir::new("kept");
-        let layout = layout(&dir);
-        let source = dir.0.join("src");
-        slot_dir(&source, b"kernel");
-        install(&layout, "a");
-        install(&layout, "b");
-        put(&layout, "a", &source).unwrap();
-        put(&layout, "b", &source).unwrap();
-        // Two slots with the same files keep one copy of each.
-        assert_eq!(fs::read_dir(layout.bootfiles()).unwrap().count(), 3);
-        stage(&layout, "a", false).unwrap();
-        assert_eq!(
-            fs::read(layout.boot_dir("a").join("kernel8.img")).unwrap(),
-            b"kernel"
-        );
-        assert_eq!(
-            fs::read(layout.boot_dir("a").join("overlays/README")).unwrap(),
-            b"r"
-        );
-        // A kept file that went bad is never put in place.
-        let list = kept(&layout, "b").unwrap();
-        let kernel = list.iter().find(|(_, n)| n == "kernel8.img").unwrap();
-        fs::write(layout.bootfiles().join(&kernel.0), b"rotten").unwrap();
-        let error = stage(&layout, "b", false).unwrap_err();
-        assert!(error.contains("didn't read back"), "{error}");
-        assert!(!layout.boot_dir("b").exists());
-        assert!(!layout.boot.join("slots/.b.new").exists());
-    }
-
-    #[test]
-    fn eviction_keeps_resident_slots_and_keeps_a_copy_before_it_removes() {
-        let dir = TempDir::new("evict");
-        let layout = layout(&dir);
-        install(&layout, "a");
-        install(&layout, "old");
-        // Slots put on the boot partition by a first image, with no copy on the data partition.
-        slot_dir(&layout.boot_dir("a"), b"ka");
-        slot_dir(&layout.boot_dir("old"), b"ko");
-        slot_dir(&layout.boot_dir("gone"), b"kg");
-        fs::create_dir_all(layout.boot.join("slots/.x.new")).unwrap();
-        evict(&layout, &["a"]).unwrap();
-        assert!(layout.boot_dir("a").is_dir());
-        assert!(!layout.boot_dir("old").exists());
-        assert!(!layout.boot_dir("gone").exists());
-        assert!(!layout.boot.join("slots/.x.new").exists());
-        // Both installed slots' files were kept first, and come back.
-        assert!(kept(&layout, "a").is_some());
-        stage(&layout, "old", false).unwrap();
-        assert_eq!(
-            fs::read(layout.boot_dir("old").join("kernel8.img")).unwrap(),
-            b"ko"
-        );
-        drop_kept(&layout, "old").unwrap();
-        assert_eq!(fs::read_dir(layout.bootfiles()).unwrap().count(), 3);
-    }
-
-    #[test]
-    fn the_default_goes_to_the_root_too() {
-        let dir = TempDir::new("root");
-        let layout = layout(&dir);
-        slot_dir(&layout.boot_dir("a"), b"ka");
-        fs::create_dir_all(layout.boot.join("overlays")).unwrap();
-        fs::write(layout.boot.join("overlays/stale.dtbo"), b"s").unwrap();
-        root_copy(&layout, "a").unwrap();
-        assert_eq!(fs::read(layout.boot.join("kernel8.img")).unwrap(), b"ka");
-        assert!(layout.boot.join("overlays/README").is_file());
-        assert!(!layout.boot.join("overlays/stale.dtbo").exists());
     }
 }

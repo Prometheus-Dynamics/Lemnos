@@ -15,9 +15,11 @@
 //! Plain `std`, so the initramfs program stays small; the `linux` feature adds the UBI ioctls.
 
 pub mod arrival;
+pub mod bays;
 pub mod boot_raw;
 pub mod bootcheck;
 pub mod bootfat;
+pub mod bootimage;
 pub mod boots;
 pub mod disk;
 pub mod fallback;

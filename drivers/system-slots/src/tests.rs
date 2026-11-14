@@ -54,6 +54,10 @@ struct Told(Arc<Mutex<Loader>>);
 #[derive(Default)]
 struct Loader {
     told: Vec<String>,
+    /// The slots whose payloads were installed into a bay, in order.
+    installed: Vec<String>,
+    /// The slots whose bay was freed, in order.
+    freed: Vec<String>,
     default: String,
     trial: String,
     attempts: u8,
@@ -72,6 +76,16 @@ impl Told {
             return loader.trial.clone();
         }
         loader.default.clone()
+    }
+
+    /// The slots whose bay was freed so far.
+    fn freed(&self) -> Vec<String> {
+        self.0.lock().unwrap().freed.clone()
+    }
+
+    /// The slots installed into a bay so far.
+    fn installed(&self) -> Vec<String> {
+        self.0.lock().unwrap().installed.clone()
     }
 
     /// The loader's trial and its attempts left.
@@ -113,6 +127,16 @@ impl BootRecord for Told {
         loader.told.push("clear trial".into());
         Ok(())
     }
+    fn install(&self, slot: &str, _payloads: &[&[u8]; 5]) -> std::io::Result<()> {
+        self.0.lock().unwrap().installed.push(slot.to_string());
+        Ok(())
+    }
+
+    fn free(&self, slot: &str) -> std::io::Result<()> {
+        self.0.lock().unwrap().freed.push(slot.to_string());
+        Ok(())
+    }
+
     fn restart(&mut self) -> std::io::Result<()> {
         self.0.lock().unwrap().told.push("restart".into());
         Ok(())
@@ -175,9 +199,10 @@ impl Bundle {
                     )
                     .into_bytes(),
                 ),
-                ("initramfs".into(), b"initramfs".to_vec()),
-                ("overlays/README".into(), b"readme".to_vec()),
+                ("initramfs.cpio".into(), b"initramfs".to_vec()),
                 ("board.dtb".into(), b"device tree".to_vec()),
+                ("overlays/lemnos-board.dtbo".into(), b"overlay".to_vec()),
+                ("overlays/README".into(), b"readme".to_vec()),
             ],
             extra: Vec::new(),
             manifest_image_sha: None,
@@ -653,8 +678,9 @@ fn a_confirmed_trial_becomes_the_default_and_old_slots_past_keep_go() {
             board.told.take(),
             [format!("trial {id} 3"), "restart".to_string()]
         );
-        // Its directory went onto the boot partition before the trial pointer named it.
-        assert!(board.layout().boot_dir(id).join("kernel8.img").is_file());
+        // Its payloads went into a bay before the trial pointer named it (the install, before the
+        // `trial` call that the record was told about).
+        assert!(board.told.installed().contains(&id.to_string()));
         assert_eq!(board.state().trial, id);
         board.boot_into(id);
         board.slots.confirm().unwrap();
@@ -678,11 +704,8 @@ fn a_confirmed_trial_becomes_the_default_and_old_slots_past_keep_go() {
     assert!(!board.layout().installed("os-1"));
     assert!(!board.layout().boot_dir("os-1").exists());
     assert!(board.layout().installed("os-2"));
-    // The default's files are at the boot partition's root too.
-    assert_eq!(
-        fs::read(board.layout().boot.join("kernel8.img")).unwrap(),
-        b"kernel of os-3"
-    );
+    // Its bay was freed by the record (the install stages into bays, nothing is a file on the volume).
+    assert_eq!(board.told.freed(), ["os-1"]);
 }
 
 #[test]
@@ -1235,7 +1258,6 @@ fn keys_are_read_as_the_package_keys_are() {
 
 /// The same through a host, as the service runs it: the install as a long job, the trial's and
 /// the reboot's restarts through the program the board file names.
-/// A FAT boot partition image with the records pre-created and the three pointers naming `default`.
 /// A fake board tree under `dir` for the boot disk: the SD controller's device-tree node, one whole
 /// disk under it with its partition 1 (the boot partition, holding `image`), and the boot chain's
 /// source. Returns the partition's device node.
@@ -1283,23 +1305,6 @@ impl Drop for TestRoots {
     }
 }
 
-fn fat_boot_image(default: &str) -> Vec<u8> {
-    use lemnos_slot_store::twocopy::{Kind, precreate};
-    let mut files = precreate(&[
-        (Kind::TRIAL, b""),
-        (Kind::REASON, b""),
-        (Kind::EPISODES, b""),
-    ])
-    .unwrap();
-    let pointer = lemnos_slot_store::firmware::pointer_sector(default)
-        .unwrap()
-        .to_vec();
-    for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
-        files.push((name, pointer.clone()));
-    }
-    lemnos_slot_store::fatimage::fat16(&files)
-}
-
 #[test]
 fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     use lemnos_core::{Encode, MethodId, Writer};
@@ -1312,7 +1317,7 @@ fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     fs::create_dir_all(layout.state_dir()).unwrap();
     fs::create_dir_all(layout.boot.join("slots")).unwrap();
     fs::write(layout.marker("booted"), "os-1\n").unwrap();
-    let node = boot_tree(&dir.0, &fat_boot_image("os-1"));
+    let node = boot_tree(&dir.0, &crate::bay_fixture::tryboot_image("os-1"));
     let _roots = TestRoots::set(&dir.0);
     let keys = dir.0.join("keys");
     fs::write(
@@ -1440,16 +1445,23 @@ config = {{ systemctl = "{ctl}" }}
     assert_eq!(fs::read_to_string(&calls).unwrap(), "reboot\nreboot\n");
 }
 
-/// With the `uboot` record, an install writes the slot's loader configuration from its own
-/// files and command line, and a trial arms the record.
+/// With the `uboot` record, an install writes the slot's payloads and its composed loader
+/// configuration into a bay (raw, on the boot partition's image), and a trial arms the environment.
 #[test]
 fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_it() {
     let mut board = Board::new("os-1");
     let boot = board.layout().boot.clone();
-    // The environment: a valid copy on a node of its own (the partition U-Boot keeps it on).
+    // The boot partition, built by the image builder: os-1 in bay 0, no pointers or records.
+    let boot_node = board.dir.0.join("boot.img");
+    fs::write(&boot_node, crate::bay_fixture::uboot_image("os-1")).unwrap();
+    // The environment: a valid copy on a node of its own (the partition U-Boot keeps it on), whose
+    // default is os-1 in bay 0.
     let node = board.layout().boot.join("uboot-env.img");
     let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
-    let list = vec![("default".to_string(), String::new())];
+    let list = vec![
+        ("default".to_string(), "os-1".to_string()),
+        ("default_bay".to_string(), "bay0".to_string()),
+    ];
     let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
     let mut image = vec![0u8; 8192];
     image[..1024].copy_from_slice(&lemnos_slot_store::uboot_env::encode_copy(&data, 1));
@@ -1462,21 +1474,29 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
             check: None,
             systemctl: "/bin/true".into(),
         },
+        boot_node: Ok(boot_node.clone()),
     });
     board.install_ok("os-2");
-    let kept = fs::read_to_string(board.layout().boot_list("os-2")).unwrap();
-    assert!(kept.contains("  extlinux/extlinux.conf\n"), "{kept}");
+    // os-2 took the bay the environment names nothing for, and os-1's was not touched.
+    let (dir, lengths) = board.slots.record.slot_bay("os-2").unwrap();
+    assert_eq!(dir, "slots/bay1");
+    assert_eq!(lengths.len(), 5, "{lengths:?}");
+    assert_eq!(board.slots.record.slot_bay("os-1").unwrap().0, "slots/bay0");
     board.slots.trial("os-2", false, false, false).unwrap();
+    // The bay's composed extlinux file, read raw from the image: paths relative to the bay, and the
+    // slot's own command line.
+    let mut file = fs::File::open(&boot_node).unwrap();
     let conf =
-        fs::read_to_string(board.layout().boot_dir("os-2").join(crate::uboot::EXTLINUX)).unwrap();
-    assert!(
-        conf.contains("  kernel /slots/os-2/kernel8.img\n"),
-        "{conf}"
-    );
-    assert!(conf.contains("  initrd /slots/os-2/initramfs\n"), "{conf}");
+        lemnos_slot_store::bootcheck::fat_read(&mut file, "slots/bay1/extlinux/extlinux.conf")
+            .unwrap()
+            .expect("the bay's extlinux file");
+    let conf = String::from_utf8_lossy(&conf);
+    let conf = conf.trim_end_matches('\0').trim_end_matches(' ');
+    assert!(conf.contains("    KERNEL ../kernel8.img\n"), "{conf}");
+    assert!(conf.contains("    INITRD ../initramfs.cpio\n"), "{conf}");
     assert!(
         conf.contains(&format!(
-            "  append console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
+            "    APPEND console=tty1 rootwait board.slot=os-2 board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
         )),
         "{conf}"
     );
@@ -1484,14 +1504,16 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     let (_, vars) = lemnos_slot_store::uboot_env::load(&mut dev, &geometry)
         .unwrap()
         .unwrap();
-    assert!(
-        vars.contains(&("trial".to_string(), "os-2".to_string())),
-        "{vars:?}"
-    );
-    assert!(
-        vars.contains(&("trial_attempts".to_string(), "3".to_string())),
-        "{vars:?}"
-    );
+    for want in [
+        ("trial", "os-2"),
+        ("trial_bay", "bay1"),
+        ("trial_attempts", "3"),
+    ] {
+        assert!(
+            vars.contains(&(want.0.to_string(), want.1.to_string())),
+            "{want:?} in {vars:?}"
+        );
+    }
     assert!(
         !boot.join(crate::uboot::RECORD_FILE).exists(),
         "no record file on the boot partition"
@@ -1502,13 +1524,18 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     let (_, vars) = lemnos_slot_store::uboot_env::load(&mut dev, &geometry)
         .unwrap()
         .unwrap();
-    assert!(
-        vars.contains(&("default".to_string(), "os-2".to_string())),
-        "{vars:?}"
-    );
-    // The root copy is the install-time fallback: a confirm rewrites nothing on the boot partition.
+    for want in [
+        ("default", "os-2"),
+        ("default_bay", "bay1"),
+        ("previous_bay", "bay0"),
+    ] {
+        assert!(
+            vars.contains(&(want.0.to_string(), want.1.to_string())),
+            "{want:?} in {vars:?}"
+        );
+    }
+    // A confirm rewrites nothing on the boot partition's files.
     assert!(!boot.join("extlinux/extlinux.conf").exists());
-    assert!(conf.contains("  kernel /slots/os-2/kernel8.img\n"));
 }
 
 impl Board {
@@ -2488,7 +2515,7 @@ fn a_cancelled_install_shows_failed() {
 /// pointers pre-created, beside the board's boot directory.
 fn reason_node(board: &Board) -> PathBuf {
     let node = board.layout().boot.with_file_name("reason.img");
-    fs::write(&node, fat_boot_image("os-1")).unwrap();
+    fs::write(&node, crate::bay_fixture::tryboot_image("os-1")).unwrap();
     node
 }
 
@@ -3496,7 +3523,7 @@ fn an_unlisted_boot_file_is_refused_before_it_is_written() {
 fn a_listed_member_that_is_missing_is_refused() {
     for (skip, text) in [
         ("rootfs.erofs", "no rootfs.erofs"),
-        ("initramfs", "no boot file initramfs"),
+        ("initramfs.cpio", "no boot file initramfs.cpio"),
     ] {
         let mut board = Board::new("os-1");
         let b = Bundle::new("os-2");

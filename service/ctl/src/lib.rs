@@ -15,6 +15,7 @@ use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 mod boot_dir;
 #[cfg(test)]
 mod boot_dir_tests;
+mod boot_partition;
 mod show;
 
 pub const USAGE: &str = "\
@@ -47,7 +48,12 @@ lemnos-ctl [--socket PATH] COMMAND
   validate [--socs DIR] [--no-live] BOARD
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
-  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]] [--uboot FILE]
+  boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR --size BYTES --out FILE]
+                 | --min-size [--payload DIR] | --verify FILE
+                                  write the boot partition image of a board (its payload bays and
+                                  the firmware text), print its minimum size, or verify an image
+                                  or a dump of a real partition, read-only
+  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
                                  [--bridge-env FILE]
@@ -158,6 +164,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if command == "security" && tail.first().is_some_and(|word| word == "render") {
         return security_render(&tail[1..], out);
+    }
+    if command == "boot-partition" {
+        return boot_partition::run(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };
@@ -332,15 +341,16 @@ fn load_map(
     lemnos_devtree::SocMap::parse(&text).map_err(|e| format!("{path}: {e}"))
 }
 
-/// `tree BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]]`: the overlay, the boot fragment,
-/// and the Raspberry Pi firmware's boot files for a board.
+/// `tree BOARD [-o FILE] [--boot FILE] [--uboot FILE]`: the overlay, the boot fragment and the U-Boot
+/// environment locator for a board. The boot partition is `boot-partition`'s (I5i8).
+/// What `tree --boot-dir` says now: the directory it wrote is the image builder's (I5i8).
+pub const BOOT_DIR_REMOVED: &str = "tree --boot-dir was removed: the boot partition is written as one image by `lemnos-ctl boot-partition --layout-of BOARD --slot ID --payload DIR --size BYTES --out FILE`, which holds its files, pointers and payload bays (docs/slots.md, \"The boot partition: payload bays\"); `tree --manifest-boot`, `--cmdline-slot` and `--uboot-config` remain";
+
 fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut socs = None;
     let mut map_file = None;
     let mut overlay_out = None;
     let mut boot_out = None;
-    let mut boot_dir_out = None;
-    let mut slot = None;
     let mut uboot_out = None;
     let mut uboot_config_out = None;
     let mut modprobe_out = None;
@@ -351,6 +361,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut security_out = None;
     let mut manifest_boot_out = None;
     let mut cmdline_slot_out = None;
+    let mut slot = None;
     let mut board_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -360,8 +371,6 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--map", Some(file)) => map_file = Some(file),
             ("-o", Some(file)) => overlay_out = Some(file),
             ("--boot", Some(file)) => boot_out = Some(file),
-            ("--boot-dir", Some(dir)) => boot_dir_out = Some(dir),
-            ("--slot", Some(id)) => slot = Some(id),
             ("--uboot", Some(file)) => uboot_out = Some(file),
             ("--uboot-config", Some(file)) => uboot_config_out = Some(file),
             ("--modprobe", Some(file)) => modprobe_out = Some(file),
@@ -372,6 +381,8 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--security-unit", Some(file)) => security_out = Some(file),
             ("--manifest-boot", Some(file)) => manifest_boot_out = Some(file),
             ("--cmdline-slot", Some(file)) => cmdline_slot_out = Some(file),
+            ("--slot", Some(id)) => slot = Some(id),
+            ("--boot-dir", _) => return Err(BOOT_DIR_REMOVED.to_string()),
             (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
                 board_path = Some(flag.to_string());
                 i += 1;
@@ -401,19 +412,6 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     }
     if let Some(file) = boot_out {
         std::fs::write(&file, &generated.boot).map_err(|e| format!("{file}: {e}"))?;
-    }
-    if let Some(dir) = boot_dir_out {
-        let files = boot_dir::files(&board, &generated.boot, slot.as_deref().unwrap_or(""))
-            .map_err(|e| format!("{path}: --boot-dir: {e}"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
-        for (name, bytes) in files {
-            let target = std::path::Path::new(&dir).join(&name);
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
-            std::fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
-        }
     }
     if let Some(file) = uboot_out {
         let text = generated

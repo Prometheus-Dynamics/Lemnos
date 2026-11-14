@@ -10,7 +10,7 @@ use lemnos_slot_store::bootcheck::sha256_hex;
 use lemnos_slot_store::manifest::{BLOCK, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
 
-use crate::boot::{Check, Restarter, Tryboot};
+use crate::boot::{BootRecord, Check, Restarter, Tryboot};
 use crate::boot_guard;
 
 struct Dir(PathBuf);
@@ -35,57 +35,19 @@ impl Drop for Dir {
     }
 }
 
-/// The slot's boot files: a kernel, a DTB, an overlay, the command line and an initramfs.
-fn boot_files(id: &str) -> Vec<(&'static str, Vec<u8>)> {
-    vec![
-        ("kernel8.img", format!("kernel of {id}").into_bytes()),
-        ("bcm2712-rpi-5-b.dtb", format!("dtb of {id}").into_bytes()),
-        (
-            "overlays/vc4-kms.dtbo",
-            format!("overlay of {id}").into_bytes(),
-        ),
-        ("initramfs", format!("initramfs of {id}").into_bytes()),
-        (
-            "cmdline.txt",
-            format!(
-                "console=tty1 os.slot={id} os.roothash={} panic=5\n",
-                hash(id)
-            )
-            .into_bytes(),
-        ),
-    ]
-}
-
-/// A FAT boot partition image: the record files pre-created, and the three pointer files naming `default`.
-fn boot_image(default: &str) -> Vec<u8> {
-    use lemnos_slot_store::twocopy::{Kind, precreate};
-    let mut files = precreate(&[
-        (Kind::TRIAL, b""),
-        (Kind::REASON, b""),
-        (Kind::EPISODES, b""),
-    ])
-    .unwrap();
-    let pointer = lemnos_slot_store::firmware::pointer_sector(default)
-        .unwrap()
-        .to_vec();
-    for name in [b"DEFAULT TXT", b"PREVIOUSTXT", b"TRIAL   TXT"] {
-        files.push((name, pointer.clone()));
-    }
-    lemnos_slot_store::fatimage::fat16(&files)
-}
-
 fn hash(id: &str) -> String {
     let digit = id.chars().last().unwrap();
     std::iter::repeat_n(digit, 64).collect()
 }
 
-/// A slot installed on the board: its manifest (listing its boot files by hash) and its boot
-/// directory.
+/// A slot installed on the board: its manifest, which lists its bay files (the roles' paths) by the
+/// hash of their payloads. The payloads go into a bay through the record ([`Board::new`]).
 fn install(layout: &Layout, id: &str) {
-    let files = boot_files(id);
-    let listed: Vec<String> = files
+    let payloads = crate::bay_fixture::payloads(id);
+    let listed: Vec<String> = lemnos_slot_store::bays::ROLES
         .iter()
-        .map(|(name, bytes)| format!("\"{name}\":\"{}\"", sha256_hex(bytes)))
+        .zip(payloads.iter())
+        .map(|(role, bytes)| format!("\"{}\":\"{}\"", role.path, sha256_hex(bytes)))
         .collect();
     let text = format!(
         "{{\"schema\":3,\"id\":\"{id}\",\"product\":\"an-os\",\"version\":\"1.0\",\"board\":\"b\",\
@@ -100,11 +62,6 @@ fn install(layout: &Layout, id: &str) {
     );
     fs::create_dir_all(layout.images()).unwrap();
     fs::write(layout.manifest(id), text).unwrap();
-    for (name, bytes) in files {
-        let path = layout.boot_dir(id).join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, bytes).unwrap();
-    }
 }
 
 /// Two installed slots, `os-2` the default and `os-1` the previous, and the record over them.
@@ -131,8 +88,10 @@ impl Board {
         state.save(&layout).unwrap();
         fs::create_dir_all(&layout.boot).unwrap();
         let node = layout.boot.join("boot.img");
-        fs::write(&node, boot_image("os-2")).unwrap();
-        let record = Tryboot {
+        // The image builder's image with os-1 in bay 0; os-2 goes into the next bay and becomes the
+        // default, so os-1 is the previous (the pointers say so).
+        fs::write(&node, crate::bay_fixture::tryboot_image("os-1")).unwrap();
+        let mut record = Tryboot {
             boot: layout.boot.clone(),
             node: Ok(node.clone()),
             restarter: Restarter {
@@ -140,6 +99,11 @@ impl Board {
                 check: None,
             },
         };
+        let p = crate::bay_fixture::payloads("os-2");
+        record
+            .install("os-2", &crate::bay_fixture::refs(&p))
+            .unwrap();
+        record.set_default("os-2").unwrap();
         Self {
             _dir: dir,
             layout,
@@ -148,11 +112,27 @@ impl Board {
         }
     }
 
-    /// Appends one argument to `id`'s command line on the boot partition, as an in-place edit did.
+    /// Appends one argument to `id`'s command line in its bay, in place (one sector written over the
+    /// start of the file). The bay's record keeps the stored length and hash, so the file no longer
+    /// matches what was installed.
     fn edit(&self, id: &str) {
-        let path = self.layout.boot_dir(id).join("cmdline.txt");
-        let text = fs::read_to_string(&path).unwrap();
-        fs::write(path, text.replace("panic=5", "panic=5 mem=128M")).unwrap();
+        use lemnos_slot_store::twocopy::{FileSectors, Sectors};
+        let mut raw = lemnos_slot_store::boot_raw::Boot::open(&self.node).unwrap();
+        let (dir, _) = lemnos_slot_store::boot_raw::BootRaw::slot_bay(&mut raw, id).unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.node)
+            .unwrap();
+        let mut dev = FileSectors::new(handle, 0);
+        let found =
+            lemnos_slot_store::bootfat::locate_path(&mut dev, &format!("{dir}/cmdline.txt"), 4096)
+                .unwrap();
+        let text = String::from_utf8(crate::bay_fixture::payloads(id)[3].clone()).unwrap();
+        let mut sector = [0u8; 512];
+        let edited = text.replace("panic=5", "panic=5 mem=128M");
+        sector[..edited.len()].copy_from_slice(edited.as_bytes());
+        dev.write(found.first_lba, &sector).unwrap();
     }
 
     fn state(&self) -> State {
@@ -169,8 +149,10 @@ impl Board {
     }
 
     fn check(&mut self, restart: bool) -> Result<Option<String>, String> {
+        // The files are read raw from the image, as lemnosd reads the boot partition's node.
+        let node = self.node.clone();
         boot_guard::check_with(&self.layout, &mut self.record, restart, &mut |path| {
-            boot_guard::read_mounted(&self.layout.boot, path)
+            boot_guard::read_raw(&Ok(node.clone()), path)
         })
     }
 }

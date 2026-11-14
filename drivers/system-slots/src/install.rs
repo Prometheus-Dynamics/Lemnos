@@ -747,11 +747,22 @@ impl Install {
             .record
             .prepare(&boot_dir, &id, &cmdline)
             .map_err(|error| bad(format!("the boot loader's files for this slot: {error}")))?;
+        // The payloads go into a free bay of the boot partition, refusals first (a payload missing or
+        // larger than its bay is refused by name before any write); no pointer moves. Then the copy
+        // kept on the data partition, by content.
+        let mut stored = Vec::with_capacity(lemnos_slot_store::bays::ROLES.len());
+        for role in lemnos_slot_store::bays::ROLES.iter() {
+            let bytes = fs::read(boot_dir.join(role.path))
+                .map_err(|_| bad(format!("the bundle has no boot/{}", role.path)))?;
+            stored.push(bytes);
+        }
+        let payloads: [&[u8]; 5] = std::array::from_fn(|i| stored[i].as_slice());
+        board
+            .record
+            .install(&id, &payloads)
+            .map_err(|error| bad(format!("slot {id}'s boot files: {error}")))?;
         let layout = board.layout;
         boot::put(layout, &id, &boot_dir).map_err(&io)?;
-        if layout.boot_dir(&id).is_dir() {
-            boot::stage(layout, &id, true).map_err(|text| (Status::IO, text))?;
-        }
         // The data side: the image, then the manifest, each by rename.
         let images = layout.images();
         let manifest_tmp = images.join(format!(".{id}.json.tmp"));

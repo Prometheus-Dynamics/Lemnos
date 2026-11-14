@@ -86,6 +86,14 @@ impl BootRecord for Rec<'_> {
         Ok(())
     }
 
+    fn install(&self, _slot: &str, _payloads: &[&[u8]; 5]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn free(&self, _slot: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
     fn restart(&mut self) -> io::Result<()> {
         Ok(())
     }

@@ -25,3 +25,6 @@ lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }
 # The test reads the kernel requirements file; a dev-dependency, so the initramfs binary has no toml.
 toml.workspace = true
+# The end-to-end tests drive the daemon's own install path (`BootRecord` on the raw boot partition)
+# against slot-init's boot check; test code only, never in the initramfs program.
+lemnos-driver-system-slots = { path = "../../drivers/system-slots" }

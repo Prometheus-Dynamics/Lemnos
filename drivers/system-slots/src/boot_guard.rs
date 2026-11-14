@@ -33,25 +33,19 @@ pub fn read_raw(node: &Node, path: &str) -> Result<Option<Vec<u8>>, String> {
     lemnos_slot_store::bootcheck::fat_read(&mut file, path)
 }
 
-/// Reads a boot file of a mounted boot partition (the tests' view of a boot partition). `None`
-/// when it is not there.
-#[cfg(test)]
-pub fn read_mounted(root: &std::path::Path, path: &str) -> Result<Option<Vec<u8>>, String> {
-    match fs::read(root.join(path)) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Whether slot `id`'s boot files match its manifest, read raw from `node`. The error names what
 /// does not.
 ///
 /// # Errors
 ///
 /// The manifest is missing or not readable, or a boot file does not match.
-pub fn verified(layout: &Layout, node: &Node, id: &str) -> Result<(), String> {
-    verified_with(layout, id, &mut |path| read_raw(node, path))
+pub fn verified(
+    layout: &Layout,
+    node: &Node,
+    record: &dyn BootRecord,
+    id: &str,
+) -> Result<(), String> {
+    verified_with(layout, record, id, &mut |path| read_raw(node, path))
 }
 
 /// [`verified`] through `read`.
@@ -59,15 +53,24 @@ pub fn verified(layout: &Layout, node: &Node, id: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// As [`verified`].
-pub fn verified_with(layout: &Layout, id: &str, read: Read<'_>) -> Result<(), String> {
+pub fn verified_with(
+    layout: &Layout,
+    record: &dyn BootRecord,
+    id: &str,
+    read: Read<'_>,
+) -> Result<(), String> {
     if !valid_id(id) {
         return Err(format!("{id:?} isn't a slot id"));
     }
     let text = fs::read_to_string(layout.manifest(id))
         .map_err(|e| format!("{id}'s manifest can't be read: {e}"))?;
     let manifest = Manifest::parse(&text).map_err(|e| format!("{id}'s manifest: {e}"))?;
-    let found = bootcheck::check(id, &manifest.boot_files, |path| read(path));
-    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, |path| read(path));
+    // The slot's bay: the set its record is in, and the stored length of each payload.
+    let (dir, lengths) = record
+        .slot_bay(id)
+        .map_err(|e| format!("{id}'s boot files have no bay: {e}"))?;
+    let found = bootcheck::check(&dir, &manifest.boot_files, &lengths, |path| read(path));
+    let uboot = bootcheck::uboot_check(&dir, &manifest.boot_files, &lengths, |path| read(path));
     if found.is_empty() && uboot.is_none() {
         return Ok(());
     }
@@ -107,11 +110,11 @@ pub fn check_with(
     if !valid_id(&state.default) {
         return Ok(None);
     }
-    let why = match verified_with(layout, &state.default, read) {
+    let why = match verified_with(layout, record, &state.default, read) {
         Ok(()) => return Ok(None),
         Err(why) => why,
     };
-    if valid_id(&state.previous) && verified_with(layout, &state.previous, read).is_ok() {
+    if valid_id(&state.previous) && verified_with(layout, record, &state.previous, read).is_ok() {
         repoint(layout, record, &state, &why)?;
         return Ok(Some(format!(
             "{} doesn't match its manifest ({why}): {} is the default now",

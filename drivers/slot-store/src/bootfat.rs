@@ -264,6 +264,64 @@ fn scan(dir: &[u8], name: &[u8; 11]) -> Option<(u64, u32)> {
 pub fn locate<D: ReadAt>(dev: &mut D, name: &[u8; 11], want: u64) -> Result<Found, Refusal> {
     let v = volume(dev)?;
     let (first, size) = find(dev, &v, name)?.ok_or(Refusal::Missing)?;
+    place(dev, &v, first, size, want)
+}
+
+/// Places a file of `want` bytes at `path` (`/`-separated, from the root; each component a long or
+/// short name, as [`read_file`] reads them). The file must be exactly `want` bytes and one
+/// contiguous run of clusters that the FAT ends where its size says. Reads the volume only.
+pub fn locate_path<D: ReadAt>(dev: &mut D, path: &str, want: u64) -> Result<Found, Refusal> {
+    let v = volume(dev)?;
+    let (first, size) = find_path(dev, &v, path)?;
+    place(dev, &v, first, size, want)
+}
+
+/// The size a file at `path` has in its directory entry, read from the volume only. Its clusters are
+/// not checked: this is how the driver learns the bay layout the image was built with, and
+/// [`locate_path`] then checks every file against that layout.
+pub fn size_of_path<D: ReadAt>(dev: &mut D, path: &str) -> Result<u64, Refusal> {
+    let v = volume(dev)?;
+    Ok(u64::from(find_path(dev, &v, path)?.1))
+}
+
+/// The first cluster and the size of the file at `path`, from its directory entries.
+fn find_path<D: ReadAt>(dev: &mut D, v: &Volume, path: &str) -> Result<(u64, u32), Refusal> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(Refusal::Corrupt("a path has an empty component"));
+    }
+    let last = parts.len() - 1;
+    let mut dir = Dir::Root;
+    for (i, part) in parts.iter().enumerate() {
+        let bytes = dir_bytes(dev, v, dir)?;
+        let hit = find_entry(&bytes, part).ok_or(Refusal::Missing)?;
+        if i < last {
+            if hit.attr & ATTR_DIR == 0 {
+                return Err(Refusal::Corrupt("a path component is not a directory"));
+            }
+            if hit.first < 2 {
+                return Err(Refusal::Corrupt("a directory entry names no cluster"));
+            }
+            dir = Dir::Cluster(hit.first);
+            continue;
+        }
+        if hit.attr & ATTR_DIR != 0 {
+            return Err(Refusal::Corrupt("the path names a directory, not a file"));
+        }
+        return Ok((hit.first, hit.size));
+    }
+    Err(Refusal::Missing)
+}
+
+/// The placement of a found file: its size is `want`, its clusters one run ending where the FAT says.
+fn place<D: ReadAt>(
+    dev: &mut D,
+    v: &Volume,
+    first: u64,
+    size: u32,
+    want: u64,
+) -> Result<Found, Refusal> {
+    let v = *v;
     if u64::from(size) != want {
         return Err(Refusal::WrongSize { found: size, want });
     }
