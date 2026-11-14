@@ -150,3 +150,31 @@ fn the_slot_lines_follow_the_include() {
     assert!(at(CONFIG_TXT, "[all]") < at(CONFIG_TXT, "kernel="));
     assert!(at(TRYBOOT_TXT, "include trial.txt") < at(TRYBOOT_TXT, "kernel="));
 }
+
+#[test]
+fn a_first_boot_takes_the_count_as_the_baseline_and_counts_nothing() {
+    let since = since_good(50, None);
+    assert_eq!(since, Since::First(50));
+    assert_eq!(since.restarts(), 0);
+    assert_eq!(since.baseline(), 50);
+}
+
+#[test]
+fn restarts_are_the_count_above_a_kept_baseline() {
+    let since = since_good(58, Some(50));
+    assert_eq!(since.restarts(), 8);
+    assert_eq!(since.baseline(), 50);
+}
+
+#[test]
+fn a_count_below_the_baseline_is_a_power_loss_and_the_baseline_goes_to_zero() {
+    let since = since_good(3, Some(50));
+    assert_eq!(since, Since::PowerLoss(3));
+    assert_eq!(since.restarts(), 3);
+    assert_eq!(since.baseline(), 0);
+}
+
+#[test]
+fn a_baseline_of_zero_is_a_kept_baseline_not_an_unknown_one() {
+    assert_eq!(since_good(8, Some(0)).restarts(), 8);
+}

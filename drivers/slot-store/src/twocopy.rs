@@ -58,6 +58,9 @@ impl Kind {
     pub const EPISODES: Kind = Kind(5);
     /// A payload bay set's record: the slot installed in it and the hashes of its payload files (I5i8).
     pub const BAY_INFO: Kind = Kind(6);
+    /// The restart count the last good boot (or the first boot) started from, as decimal text: the
+    /// base the restarts since then are counted from (M36b). Empty is no baseline yet.
+    pub const BASELINE: Kind = Kind(7);
 
     /// The pre-created file's FAT directory name for this kind (eleven bytes: 8.3, space padded,
     /// upper case). `None` for a kind this build does not know.
@@ -68,6 +71,7 @@ impl Kind {
             Kind::BOOT_HISTORY => Some(b"BOOTHISTREC"),
             Kind::SECURITY => Some(b"SECURE  REC"),
             Kind::EPISODES => Some(b"EPISODESREC"),
+            Kind::BASELINE => Some(b"COUNT   REC"),
             _ => None,
         }
     }
@@ -83,6 +87,7 @@ impl Kind {
             Kind::BOOT_HISTORY => Some("boothist.rec"),
             Kind::SECURITY => Some("secure.rec"),
             Kind::EPISODES => Some("episodes.rec"),
+            Kind::BASELINE => Some("count.rec"),
             _ => None,
         }
     }

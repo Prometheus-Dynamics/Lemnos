@@ -631,3 +631,93 @@ fn an_arm_cut_at_every_byte_never_leaves_a_trial_record_without_its_pointer() {
         }
     }
 }
+
+#[test]
+fn a_baseline_payload_is_decimal_and_empty_is_unknown() {
+    assert_eq!(decode_baseline(b""), None, "empty is unknown");
+    assert_eq!(
+        decode_baseline(b"0"),
+        Some(0),
+        "zero is a baseline, not unknown"
+    );
+    assert_eq!(decode_baseline(b"50"), Some(50));
+    assert_eq!(decode_baseline(b"5x"), None, "malformed is unknown");
+    assert_eq!(decode_baseline(b"-1"), None);
+    assert_eq!(encode_baseline(0), "0");
+    assert_eq!(encode_baseline(50), "50");
+    assert_eq!(
+        decode_baseline(encode_baseline(4_000_000_000).as_bytes()),
+        Some(4_000_000_000)
+    );
+}
+
+/// M36b item 7: on a fresh image `previous.txt` names the default's bay, so a count whose bit 2 selects
+/// previous (4, 5, 6, 7 and so on) starts the default's own files, not an empty bay.
+#[test]
+fn a_fresh_image_at_count_4_boots_the_default_because_previous_names_the_default_bay() {
+    let dir = crate::tests::TempDir::new("boot-raw-fresh");
+    let node = dir.0.join("boot.img");
+    std::fs::write(&node, bay_image()).unwrap();
+    let mut boot = Boot::open(&node).unwrap();
+    assert_eq!(firmware::pick(4), firmware::Pick::Previous);
+    assert_eq!(
+        boot.pointer(Pointer::Previous).unwrap().as_deref(),
+        boot.pointer(Pointer::Default).unwrap().as_deref(),
+        "the fresh image's previous is the default"
+    );
+    assert_eq!(
+        boot.pointer(Pointer::Previous).unwrap().as_deref(),
+        Some("os-1")
+    );
+}
+
+/// After a default switch, `previous.txt` names the old default's bay (a real previous).
+#[test]
+fn after_a_default_switch_previous_names_the_old_default() {
+    let dir = crate::tests::TempDir::new("boot-raw-switch");
+    let node = dir.0.join("boot.img");
+    std::fs::write(&node, bay_image()).unwrap();
+    let mut boot = Boot::open(&node).unwrap();
+    let two = bay_payloads("os-2");
+    let refs: [&[u8]; 5] = std::array::from_fn(|i| two[i].as_slice());
+    boot.install_slot("os-2", &refs).unwrap();
+    boot.set_pointer(Pointer::Default, "os-2").unwrap();
+    assert_eq!(
+        boot.pointer(Pointer::Previous).unwrap().as_deref(),
+        Some("os-1")
+    );
+}
+
+/// Removing the previous slot (its bay is named by `previous.txt`) points `previous.txt` back at the
+/// default's bay first, then frees the old bay. The default's bay is never freed.
+#[test]
+fn removing_the_previous_slot_falls_previous_back_to_the_default_bay() {
+    let dir = crate::tests::TempDir::new("boot-raw-remove");
+    let node = dir.0.join("boot.img");
+    std::fs::write(&node, bay_image()).unwrap();
+    let mut boot = Boot::open(&node).unwrap();
+    let two = bay_payloads("os-2");
+    let refs: [&[u8]; 5] = std::array::from_fn(|i| two[i].as_slice());
+    boot.install_slot("os-2", &refs).unwrap();
+    boot.set_pointer(Pointer::Default, "os-2").unwrap();
+    assert!(
+        boot.free_slot("os-2").is_err(),
+        "the default's bay is never freed"
+    );
+    boot.free_slot("os-1").unwrap();
+    assert_eq!(
+        boot.pointer(Pointer::Previous).unwrap().as_deref(),
+        Some("os-2"),
+        "previous falls back to the default's bay"
+    );
+    assert_eq!(
+        boot.pointer(Pointer::Default).unwrap().as_deref(),
+        Some("os-2")
+    );
+    drop(boot);
+    let mut again = Boot::open(&node).unwrap();
+    assert_eq!(
+        again.pointer(Pointer::Previous).unwrap().as_deref(),
+        Some("os-2")
+    );
+}
