@@ -217,6 +217,17 @@ pub struct LentFrame<'a> {
     pub bytes: u32,
 }
 
+/// What a lend answers: the frame lent, or why it could not be (the reasons the job's end names).
+#[derive(Debug, Clone)]
+pub enum Lend<'a> {
+    /// The buffer holds the frame, and is lent until it is unlent.
+    Lent(LentFrame<'a>),
+    /// The buffer is not published, or is already lent: busy, a reason the job's end names `busy`.
+    Busy,
+    /// The buffer holds a frame, but not the identity asked for: `identity-mismatch`.
+    IdentityMismatch,
+}
+
 /// A stream's buffers lent to a block that only reads them: a front end's output0, read by the back
 /// end as its input. The block never names a descriptor. The holder of the stream answers with the
 /// buffer's handle for the frame it is publishing as `identity`, and the block gives the buffer back
@@ -229,7 +240,7 @@ pub trait LendSource {
     /// Lends `buffer` for the frame `identity`: its handle and length, when the buffer holds that
     /// frame and is not already lent. `Ok(None)` when it can't be lent now: not published, another
     /// frame, or lent already. Allocates nothing.
-    fn lend(&mut self, buffer: u32, identity: u64) -> Result<Option<LentFrame<'static>>, Self::Error>;
+    fn lend(&mut self, buffer: u32, identity: u64) -> Result<Lend<'static>, Self::Error>;
 
     /// Gives `buffer` back, lent for `identity`. Refused (`InvalidInput`) for a buffer not lent.
     fn unlend(&mut self, buffer: u32, identity: u64) -> Result<(), Self::Error>;

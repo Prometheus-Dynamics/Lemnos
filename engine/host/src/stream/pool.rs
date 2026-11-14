@@ -116,6 +116,19 @@ impl BufferPool {
         self.reclaim(|state| matches!(state, BufferState::Consumer { .. }))
     }
 
+    /// Takes back every published buffer that `keep` does not hold back. A buffer lent to a block is
+    /// held back, so the memory the block reads is never reused under it.
+    pub(super) fn reclaim_published_where(&mut self, keep: impl Fn(u32) -> bool) -> u32 {
+        let mut count = 0;
+        for buffer in 0..self.states.len() as u32 {
+            if matches!(self.state(buffer), Some(BufferState::Consumer { .. })) && !keep(buffer) {
+                self.make_free(buffer);
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Takes back every buffer the producer held. The producer has gone.
     pub(super) fn reclaim_producer(&mut self) -> u32 {
         self.reclaim(|state| matches!(state, BufferState::Producer { .. }))

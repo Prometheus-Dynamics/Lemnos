@@ -2518,6 +2518,23 @@ impl Provider for Binding<'_> {
         watchdog -> Watchdog;
     }
 
+    fn lend(&mut self, _need: &str) -> Result<lemnos_core::LendHandle> {
+        // The upstream is the device whose `link` names this one: its output0 is what this block reads.
+        // The consumer never names it.
+        let me = self.slot.spec.id.as_str();
+        let upstream = self
+            .inner
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|slot| slot.spec.link.as_deref() == Some(me))
+            .map(|slot| slot.index)
+            .ok_or(Status::NOT_FOUND)?;
+        let view = self.inner.streams.lend_view(upstream, "output0")?;
+        Ok(lemnos_core::Held::boxed(Box::new(view)))
+    }
+
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {
         let endpoint: StreamHandle = if self.slot.spec.streams.contains_key(need) {
             lemnos_core::Held::boxed(Box::new(

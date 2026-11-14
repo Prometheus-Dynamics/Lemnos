@@ -40,7 +40,7 @@ pub mod usb_descriptors;
 pub mod usb_match;
 
 pub use blocks::{
-    Clocks, DmaBuffers, Interrupt, LendSource, LentFrame, Parity, Registers, Reset, StopBits,
+    Clocks, DmaBuffers, Interrupt, Lend, LendSource, LentFrame, Parity, Registers, Reset, StopBits,
     StreamEndpoint, Uart, UartFormat, UsbDevice, UsbFunction, UsbHost,
 };
 pub use embedded_hal;
