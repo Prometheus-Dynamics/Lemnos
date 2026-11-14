@@ -80,7 +80,7 @@ use lemnos_core::{
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
 
-use crate::be_hw::{Finished, Hardware, LinuxHardware, Placed, Plan, Registered, Settings};
+use crate::be_hw::{Finished, Hardware, Placed, Plan, Registered, Settings};
 use crate::be_job::{self, JobMemory, KernelJob};
 use crate::format::{compute_stride_align, formats};
 use crate::uapi::{
@@ -344,7 +344,7 @@ impl Lifecycle for PispBe {
             handles_only(output1)?;
         }
         Ok(Self::with_hardware(
-            Box::new(LinuxHardware::new(settings)),
+            crate::be_hw::hardware(settings),
             needs,
             options,
         ))

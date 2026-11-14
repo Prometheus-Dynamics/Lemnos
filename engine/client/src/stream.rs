@@ -334,8 +334,9 @@ fn probe(
     Ok(out.into_boxed_slice())
 }
 
-/// Whether `fd` allows a writable shared mapping, by mapping it writable and unmapping it again:
-/// the probe a mapped stream makes, so nothing is kept.
+/// Whether `fd`, a sealed memfd, allows a writable shared mapping, by mapping it writable and
+/// unmapping it again, so nothing is kept. A descriptor that is not a sealed memfd (a dma-buf)
+/// is never writable by this probe: the platform's reading of its access mode decides for those.
 fn writable_fd(fd: BorrowedFd<'_>) -> bool {
     fd.try_clone_to_owned()
         .ok()
@@ -380,7 +381,11 @@ impl FrameStream {
                 probe(&fds, layout, lengths, shared, &by_platform)?
             }
             Mapping::ReadOnly | Mapping::Writable => {
-                probe(&fds, layout, lengths, shared, &writable_fd)?
+                // A sealed memfd (a shared pool) is probed by mapping it. A dma-buf can't be
+                // sealed, so that probe always refuses it; the platform reads its access mode.
+                let either =
+                    |fd: BorrowedFd<'_>| writable_fd(fd) || platform.writable_descriptor(fd);
+                probe(&fds, layout, lengths, shared, &either)?
             }
         };
         let writable = mapping == Mapping::Writable;

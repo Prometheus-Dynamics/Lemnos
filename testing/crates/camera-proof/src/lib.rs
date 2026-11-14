@@ -119,6 +119,13 @@ pub enum Error {
         device: String,
         contract: &'static str,
     },
+    /// The daemon refused to open the contract on the device, for the reason given: the device is
+    /// there and may well provide it.
+    OpenRefused {
+        device: String,
+        contract: &'static str,
+        reason: String,
+    },
     /// A contract call failed.
     Call {
         step: &'static str,
@@ -159,6 +166,14 @@ impl std::fmt::Display for Error {
             Self::WrongContract { device, contract } => {
                 write!(f, "device {device:?} does not provide {contract}")
             }
+            Self::OpenRefused {
+                device,
+                contract,
+                reason,
+            } => write!(
+                f,
+                "device {device:?}: opening {contract} was refused: {reason}"
+            ),
             Self::Call { step, status } => write!(f, "{step} failed: {status:?}"),
             Self::Stream { stream, status } => write!(f, "frame stream {stream:?}: {status:?}"),
             Self::NotStarted => write!(f, "the camera is not started"),
@@ -216,6 +231,20 @@ pub struct Camera<'a, B: Bus> {
 /// Finds the sensor, follows its link to the receiver and the receiver's link to the ISP. Nothing
 /// is started.
 pub fn assemble<'a, B: Bus>(bus: &'a B, options: &Options) -> Result<Camera<'a, B>, Error> {
+    assemble_with(bus, options, true)
+}
+
+/// [`assemble`], with `open_isp` saying whether the ISP the receiver links to is opened. A tool
+/// that runs beside a streaming chain and has no use for the ISP leaves it alone: opening a
+/// device describes it, which is refused (`BUSY`) while the device's driver is in a call.
+///
+/// # Errors
+/// As [`assemble`].
+pub fn assemble_with<'a, B: Bus>(
+    bus: &'a B,
+    options: &Options,
+    open_isp: bool,
+) -> Result<Camera<'a, B>, Error> {
     let found = bus.devices(<dyn CameraSensor as Contract>::TAG.as_str());
     let sensor = match options.sensor.as_deref() {
         Some(id) => found
@@ -236,8 +265,8 @@ pub fn assemble<'a, B: Bus>(bus: &'a B, options: &Options) -> Result<Camera<'a, 
     let mut receiver_api = bus.open::<dyn CameraReceiver>(&receiver)?;
     let isp = bus.link(&receiver)?;
     let isp_api = match &isp {
-        Some(device) => Some(bus.open::<dyn CameraIsp>(device)?),
-        None => None,
+        Some(device) if open_isp => Some(bus.open::<dyn CameraIsp>(device)?),
+        _ => None,
     };
     let mode = step("sensor.mode", sensor_api.mode(options.mode))?;
     let mut name = [0u8; MAX_STREAM_NAME];
@@ -327,12 +356,46 @@ impl<B: Bus> Camera<'_, B> {
         Ok(())
     }
 
+    /// Stops the receiver only, leaving the sensor and the ISP running: for a tool that runs beside
+    /// a chain someone else started, and so has no right to stop what that chain streams from.
+    ///
+    /// # Errors
+    /// The receiver's `stop` failed.
+    pub fn stop_receiver(&mut self) -> Result<(), Error> {
+        step("receiver.stop", self.receiver_api.stop())?;
+        self.layout = None;
+        Ok(())
+    }
+
     /// Asks the sensor for one of its test patterns; 0 is the scene.
     pub fn set_test_pattern(&mut self, code: u16) -> Result<(), Error> {
         step(
             "sensor.set_test_pattern",
             self.sensor_api.set_test_pattern(code),
         )
+    }
+
+    /// Takes the mode the sensor already has as this camera's, when it is the one asked for, so
+    /// that nothing selects it again: a sensor that streams refuses a selection (`BUSY`), and a
+    /// selection would reset its controls. For a tool that runs beside a chain someone else
+    /// started. `true` if the sensor had the mode.
+    ///
+    /// # Errors
+    /// The sensor's `selected` failed.
+    pub fn keep_selected(&mut self) -> Result<bool, Error> {
+        let have = step("sensor.selected", self.sensor_api.selected())?;
+        if have == Some(self.mode_index) {
+            self.selected = true;
+        }
+        Ok(self.selected)
+    }
+
+    /// The frame length (lines) the sensor holds now, if it holds one.
+    ///
+    /// # Errors
+    /// The sensor's `in_force` failed.
+    pub fn frame_length_in_force(&mut self) -> Result<Option<u32>, Error> {
+        step("sensor.in_force", self.sensor_api.in_force()).map(|f| f.frame_length)
     }
 
     /// Selects the mode on the sensor, once.

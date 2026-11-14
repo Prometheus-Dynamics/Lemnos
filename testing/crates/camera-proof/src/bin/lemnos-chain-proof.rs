@@ -298,6 +298,31 @@ fn matched_lines(raw: &[u8], image: &[u8], stride: usize) -> usize {
         .count()
 }
 
+/// A stream as the daemon declared it, in one line.
+fn declared(stream: &FrameStream) -> String {
+    let layout = stream.layout();
+    format!(
+        "{} buffers of {} bytes, {}, {}, {}",
+        layout.buffers,
+        layout.buffer_bytes,
+        if stream.job_driven() {
+            "job-driven"
+        } else {
+            "free-running"
+        },
+        if stream.has_buffer_handles() {
+            "dma-buf per buffer"
+        } else {
+            "shared memory"
+        },
+        if stream.is_writable() {
+            "taken writable"
+        } else {
+            "taken read-only"
+        }
+    )
+}
+
 /// A job on the front end's buffer `buffer` (config, statistics and output 0), as
 /// `lemnos-fe-proof` posts it.
 fn post_front(cfg: &mut FrameStream, identity: u64, buffer: u32) -> Result<(), String> {
@@ -722,6 +747,44 @@ fn run(args: &Args) -> Result<bool, String> {
         luma_total: 0,
         luma_pixels: 0,
     };
+    // What the board run must show before it can claim the path: each stage bound, and each
+    // stream as the daemon declared it (buffers, real buffer size, who makes its frames, what its
+    // memory is, whether this program may fill it).
+    for (label, name, streams) in [
+        (
+            "front end",
+            front_name,
+            [
+                ("config", &front.cfg),
+                ("statistics", &front.stats),
+                ("output0", &front.out),
+            ]
+            .as_slice(),
+        ),
+        (
+            "back end",
+            back_name,
+            [
+                ("config", &back.cfg),
+                ("input", &back.input),
+                ("output0", &back.out),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        if let Some(d) = list.iter().find(|d| d.name == *name) {
+            out(format_args!(
+                "stage {label}: {name} ({}) {:?} {:?}, provides {}",
+                d.driver,
+                d.state,
+                d.health,
+                d.tags.join(", ")
+            ));
+        }
+        for (stream, handle) in streams {
+            out(format_args!("  {name} {stream}: {}", declared(handle)));
+        }
+    }
     // Every buffer of each configuration stream holds the configuration: a job names one of them.
     for buffer in 0..front.out.layout().buffers {
         front

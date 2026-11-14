@@ -372,6 +372,7 @@ dependencies = [
 name = "lemnos-camera-proof"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-camera-sim",
  "lemnos-client",
  "lemnos-contract-camera-isp",
  "lemnos-contract-camera-receiver",
@@ -389,6 +390,28 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-wire",
+ "lemnosd",
+]
+
+[[package]]
+name = "lemnos-camera-sim"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-camera-isp",
+ "lemnos-contract-camera-receiver",
+ "lemnos-core",
+ "lemnos-driver-gpio-power-switch",
+ "lemnos-driver-ov9782",
+ "lemnos-driver-pisp",
+ "lemnos-driver-pisp-fe-sys",
+ "lemnos-driver-pisp-sys",
+ "lemnos-driver-raw-bus",
+ "lemnos-driver-rp1-csi2",
+ "lemnos-hal",
+ "lemnos-host",
+ "lemnos-linux-sys",
+ "lemnos-sim",
+ "lemnosd",
 ]
 
 [[package]]

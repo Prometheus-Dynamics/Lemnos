@@ -108,9 +108,10 @@ impl Bus for SocketBus {
     ) -> Result<Bound<C, Self::Caller<'a>>, Error> {
         self.client
             .open::<C>(&device.id)
-            .map_err(|_| Error::WrongContract {
+            .map_err(|e| Error::OpenRefused {
                 device: device.id.clone(),
                 contract: C::TAG.as_str(),
+                reason: e.to_string(),
             })
     }
 
