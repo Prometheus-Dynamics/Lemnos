@@ -1,7 +1,7 @@
 use lemnos_contract_camera_sensor::{
     AppliedLanding, BayerOrder, CameraSensor, Controls, EmbeddedData, FrameStarts, FrameValues,
-    GainLaw, GainRange, InForce, Landing, LinkConfig, MAX_IDENTITY_NAME, Mode, Rect, SensorInfo,
-    landing_of, launch_frame,
+    GainLaw, GainRange, InForce, Landing, LinkCheck, LinkConfig, MAX_IDENTITY_NAME, Mode, Rect,
+    SensorInfo, check_link, landing_of, launch_frame,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -599,4 +599,65 @@ fn controls_flips_and_patterns_reach_the_driver() {
     assert_eq!(sensor.set_flips(true, true), Ok(BayerOrder::Rggb));
     assert_eq!(sensor.set_test_pattern(1), Ok(()));
     assert_eq!(sensor.set_test_pattern(3), Err(Status::INVALID_ARGUMENT));
+}
+
+// The link check at bind. A receiver whose kernel does not describe its input answers
+// NOT_SUPPORTED (rp1-csi2 on the reference camera board, run c1): the board's `link` states the wiring and
+// nothing contradicts it, so the link stands. Each real fault below still degrades or fails.
+
+#[test]
+fn a_receiver_that_cannot_say_leaves_the_stated_link_standing() {
+    // c1's case: the sensor ov9782 with its board link to rp1-csi2, which answers NOT_SUPPORTED.
+    assert_eq!(
+        check_link(Err(Status::NOT_SUPPORTED), Some(b"ov9782 10-0036")),
+        Ok(LinkCheck::Confirmed)
+    );
+    assert_eq!(
+        check_link(Err(Status::NOT_SUPPORTED), None),
+        Ok(LinkCheck::Confirmed)
+    );
+}
+
+#[test]
+fn a_receiver_that_names_the_sensor_confirms_it() {
+    assert_eq!(
+        check_link(Ok(b"ov9782 10-0036"), Some(b"ov9782 10-0036")),
+        Ok(LinkCheck::Confirmed)
+    );
+}
+
+#[test]
+fn a_receiver_that_names_another_sensor_contradicts_the_link() {
+    assert_eq!(
+        check_link(Ok(b"imx219 4-0010"), Some(b"ov9782 10-0036")),
+        Ok(LinkCheck::Mismatch(
+            "the linked receiver is fed by another sensor"
+        ))
+    );
+}
+
+#[test]
+fn a_receiver_with_nothing_wired_contradicts_the_link() {
+    assert_eq!(
+        check_link(Ok(b""), Some(b"ov9782 10-0036")),
+        Ok(LinkCheck::Mismatch(
+            "the linked receiver has nothing wired to its input"
+        ))
+    );
+}
+
+#[test]
+fn a_name_the_kernel_does_not_give_the_sensor_is_unknown() {
+    assert_eq!(
+        check_link(Ok(b"ov9782 10-0036"), None),
+        Ok(LinkCheck::Unknown("the kernel does not name this sensor"))
+    );
+}
+
+#[test]
+fn a_read_that_fails_now_concludes_nothing() {
+    assert_eq!(
+        check_link(Err(Status::BUSY), Some(b"ov9782 10-0036")),
+        Err(Status::BUSY)
+    );
 }

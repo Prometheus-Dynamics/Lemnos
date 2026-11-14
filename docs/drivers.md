@@ -320,10 +320,13 @@ Confirming a link. `camera.receiver/1` `source` says which sensor its input is w
 kernel names it; `camera.sensor/1` `identity` says what the kernel calls that sensor. The sensor
 driver asks the receiver its `source` at bind (its board `link` is the receiver) and compares the
 answer with its `identity`: a receiver with nothing wired to its input fails the sensor (`Failed`),
-and an answer the sensor can't match, or none, leaves it `Degraded` with the reason. Only a match is
-a pass. Receivers answer `source` from the media graph (`sunxi-vin`, `rkcif`) and answer unknown
-where no kernel describes the input (`rp1-csi2`, `k230-capture`). The `ov9782` sensor has no
-kernel name, so its link is always `Degraded` on today's boards.
+and an answer the sensor can't match, or none, leaves it `Degraded` with the reason. A receiver that
+answers unknown (`NOT_SUPPORTED`) cannot contradict the link the board states, so the stated link
+stands and the sensor is `ok`: that is the case where the receiver's kernel does not describe its
+input (`rp1-csi2`, `k230-capture`). Receivers answer `source` from the media graph (`sunxi-vin`,
+`rkcif`). The `ov9782` sensor has no kernel name, so where a receiver names the input's sensor its
+link is `Degraded` (it cannot match); where the receiver cannot say, its link is `ok` on the board's
+stated wiring.
 
 Exposure, white balance, tuning and the rest of a camera pipeline are the caller's. So is every
 codec's bitstream work and every model: the contracts carry the caller's bytes to the block.

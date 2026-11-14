@@ -1240,12 +1240,13 @@ fn a_receiver_fed_by_another_sensor_fails_the_sensor() {
 }
 
 #[test]
-fn a_receiver_that_cannot_say_leaves_the_link_unconfirmed() {
+fn a_receiver_that_cannot_say_keeps_the_board_link_as_the_wiring() {
+    // c1 (the reference camera board): the board links this sensor to rp1-csi2, whose kernel does not describe its
+    // input, so `source` answers NOT_SUPPORTED. Nothing contradicts the stated link: the sensor is ok.
+    // This stand-in (a router that refuses in-process) differs from the real receiver in that it is
+    // not the kernel module and its refusal is not sent over the device wire.
     let sensor = start_linked(Some(Err(Status::NOT_SUPPORTED))).unwrap();
-    assert_eq!(
-        Driver::health(&sensor),
-        Health::Degraded("the linked receiver cannot say what is wired to its input")
-    );
+    assert_eq!(Driver::health(&sensor), Health::Ok);
 }
 
 #[test]

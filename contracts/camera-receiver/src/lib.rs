@@ -267,8 +267,10 @@ pub trait CameraReceiver {
     ///
     /// Three answers, which a consumer must keep apart. A name is the sensor on the input.
     /// Length 0 is nothing wired to the input. `NOT_SUPPORTED` is unknown: the receiver's kernel
-    /// does not describe its input, so it cannot say what is wired to it, and a consumer must not
-    /// take that for a match. Any other error is a read that failed now.
+    /// does not describe its input, so it cannot say what is wired to it. A consumer must not take
+    /// that for the receiver's own confirmation of a match; where the board's `link` states the
+    /// wiring, the sensor keeps that link, since the receiver cannot contradict it
+    /// (`camera.sensor/1` `check_link`). Any other error is a read that failed now.
     #[added]
     #[method(10)]
     fn source(&mut self, #[out] into: &mut [u8]) -> Result<usize>;

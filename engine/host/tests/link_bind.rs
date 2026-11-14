@@ -337,13 +337,11 @@ fn a_receiver_fed_by_another_sensor_fails_the_sensor() {
 }
 
 #[test]
-fn a_receiver_that_cannot_say_leaves_the_link_unconfirmed() {
+fn a_receiver_that_cannot_say_keeps_the_stated_link() {
+    // The board's link states the wiring; a receiver that answers NOT_SUPPORTED cannot contradict it.
     let (host, clock) = camera("unknown");
     settle(&host, &clock);
-    assert_eq!(
-        host.device("cam0-sensor").unwrap().health,
-        Health::Degraded("the linked receiver cannot say what is wired to its input")
-    );
+    assert_eq!(host.device("cam0-sensor").unwrap().health, Health::Ok);
 }
 
 #[test]

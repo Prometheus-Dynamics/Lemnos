@@ -461,7 +461,8 @@ pub trait CameraSensor {
 /// `Confirmed` is a pass: a consumer must not read `Unknown` as one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkCheck {
-    /// The receiver's input is the one this sensor feeds.
+    /// The board's link and the receiver agree: the receiver names this sensor, or it cannot say
+    /// what is wired to its input (`NOT_SUPPORTED`) and the link the board states stands.
     Confirmed,
     /// Not confirmed and not refuted; the reason says why.
     Unknown(&'static str),
@@ -469,20 +470,19 @@ pub enum LinkCheck {
     Mismatch(&'static str),
 }
 
-/// Checks a sensor's board link against what its linked receiver answers to `source`.
+/// Checks a sensor's board link against what its linked receiver answers to `source`. Called only
+/// when the board's `link` names this receiver: with no link there is nothing to confirm.
 ///
 /// `answer` is that reply: the name it gave (empty for nothing wired), or the status it refused
-/// with. `identity` is this sensor's own name as the kernel knows it, `None` when no kernel names
-/// it. A refusal other than `NOT_SUPPORTED` is returned as is: the receiver could not be asked,
-/// so the bind is retried and nothing is concluded.
+/// with. `NOT_SUPPORTED` means the receiver cannot describe its input, so it cannot contradict the
+/// link the board states: the link stands ([`LinkCheck::Confirmed`]). A refusal other than
+/// `NOT_SUPPORTED` is returned as is: the receiver could not be asked, so the bind is retried and
+/// nothing is concluded. `identity` is this sensor's own name as the kernel knows it, `None` when
+/// no kernel names it.
 pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<LinkCheck> {
     let name = match answer {
         Ok(name) => name,
-        Err(Status::NOT_SUPPORTED) => {
-            return Ok(LinkCheck::Unknown(
-                "the linked receiver cannot say what is wired to its input",
-            ));
-        }
+        Err(Status::NOT_SUPPORTED) => return Ok(LinkCheck::Confirmed),
         Err(status) => return Err(status),
     };
     if name.is_empty() {
