@@ -1808,6 +1808,28 @@ fn only_a_plain_file_named_by_one_component_installs() {
 }
 
 #[test]
+fn a_refused_install_names_the_ungrown_partition_while_the_grow_is_failing() {
+    let mut board = Board::new("os-1");
+    board.slots.reserve = u64::MAX / 2;
+    let data = board.layout().data.clone();
+    let mut task = crate::grow::Task::new(Err("the boot disk is not known".into()), data);
+    task.retry.failed(0, "the boot disk is not known");
+    board.slots.grow = Some(task);
+    assert_eq!(board.slots.accept(1 << 20), Err(crate::install::NO_SPACE));
+    let error = board.state().error;
+    assert!(
+        error
+            .contains("has not grown (the boot disk is not known; partition 2 is of unknown size)"),
+        "{error}"
+    );
+    assert!(
+        error.contains("installs need the slot plus the board's reserve of "),
+        "{error}"
+    );
+    assert!(!error.contains("remove a slot first"), "{error}");
+}
+
+#[test]
 fn accept_says_whether_a_bundle_fits_with_the_reserve() {
     let mut board = Board::new("os-1");
     let free = lemnos_linux_sys::statfs::free_bytes(&board.layout().images()).unwrap();
