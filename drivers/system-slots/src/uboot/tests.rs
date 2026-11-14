@@ -223,14 +223,14 @@ fn the_previous_step_is_the_third_and_writes_nothing_to_the_environment() {
     let default = at("elif test \"${step}\" = \"default\"; then");
     let previous = at("setenv lemnos_dtb /slots/${take_previous_bay}/board.dtb");
     assert!(trial < default && default < previous);
-    // Named only when there is a previous slot, it has a bay, it is not the default, and it is not the
-    // trial the first step already tried; otherwise the step is skipped (take_previous stays empty).
+    // Named only when there is a previous bay, it is not the default's bay, and it is not the trial's
+    // bay the first step already tried; otherwise the step is skipped (take_previous_bay stays empty).
+    // The conditions compare bays, the only previous the environment holds: no variable is read that
+    // nothing writes.
     let guards = [
-        r#"if test -n "${previous}"; then"#,
         r#"if test -n "${previous_bay}"; then"#,
-        r#"if test "${previous}" != "${default}"; then"#,
-        r#"if test "${previous}" != "${take_trial}"; then"#,
-        "setenv take_previous ${previous}",
+        r#"if test "${previous_bay}" != "${default_bay}"; then"#,
+        r#"if test "${previous_bay}" != "${take_trial_bay}"; then"#,
         "setenv take_previous_bay ${previous_bay}",
     ];
     let mut last = 0;
@@ -257,7 +257,6 @@ fn the_previous_step_is_the_third_and_writes_nothing_to_the_environment() {
             for key in [
                 "default",
                 "default_bay",
-                "previous",
                 "previous_bay",
                 "trial",
                 "trial_bay",
@@ -720,4 +719,85 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
     };
     record.set_trial("b", 3).unwrap();
     assert_eq!(record.pending().unwrap(), Some(("b".to_string(), 3)));
+}
+
+use super::hush::{Env, choose};
+
+fn env(pairs: &[(&str, &str)]) -> Env {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// The previous step's conditions over environments of every shape the record can have. Only bays
+/// are compared: the same bay as the default's or the trial's is skipped, a different one is started.
+#[test]
+fn the_previous_step_runs_on_a_different_bay_and_only_then() {
+    let previous = |pairs: &[(&str, &str)]| choose(SCRIPT, env(pairs)).0[2].clone();
+    let default = [("default", "b"), ("default_bay", "bay1")];
+    fn plus<'a>(
+        base: &[(&'a str, &'a str)],
+        more: &[(&'a str, &'a str)],
+    ) -> Vec<(&'a str, &'a str)> {
+        [base, more].concat()
+    }
+    let with = |more: &[(&'static str, &'static str)]| plus(&default, more);
+    // A previous bay that differs from the default's.
+    assert_eq!(
+        previous(&with(&[("previous_bay", "bay0")])),
+        "/slots/bay0/board.dtb"
+    );
+    // None named, or the default's own bay (a switch to the slot already default writes none).
+    assert_eq!(previous(&default), "");
+    assert_eq!(previous(&with(&[("previous_bay", "bay1")])), "");
+    // No default at all: a previous bay is still started.
+    assert_eq!(
+        previous(&[("previous_bay", "bay0")]),
+        "/slots/bay0/board.dtb"
+    );
+    // A trial with an attempt left in the previous's bay is the first step's, not the third's.
+    let trial = [
+        ("trial", "a"),
+        ("trial_bay", "bay0"),
+        ("trial_attempts", "2"),
+    ];
+    assert_eq!(
+        previous(&with(&[
+            ("previous_bay", "bay0"),
+            trial[0],
+            trial[1],
+            trial[2]
+        ])),
+        ""
+    );
+    // A trial in another bay leaves the previous step in place; one with no attempt left is no trial.
+    let other = [
+        ("trial", "c"),
+        ("trial_bay", "bay2"),
+        ("trial_attempts", "1"),
+    ];
+    assert_eq!(
+        previous(&with(&[
+            ("previous_bay", "bay0"),
+            other[0],
+            other[1],
+            other[2]
+        ])),
+        "/slots/bay0/board.dtb"
+    );
+    let spent = [
+        ("trial", "a"),
+        ("trial_bay", "bay0"),
+        ("trial_attempts", "0"),
+    ];
+    assert_eq!(
+        previous(&with(&[
+            ("previous_bay", "bay0"),
+            spent[0],
+            spent[1],
+            spent[2]
+        ])),
+        "/slots/bay0/board.dtb"
+    );
 }

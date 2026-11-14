@@ -1444,15 +1444,29 @@ config = {{ systemctl = "{ctl}" }}
     assert_eq!(fs::read_to_string(&calls).unwrap(), "reboot\nreboot\n");
 }
 
+/// A board whose record is the U-Boot environment, as the image builder leaves it: os-1 in bay 0 on the
+/// boot partition (`boot.img`), and an environment (on a node of its own, the partition U-Boot keeps
+/// it on) whose default is os-1 in bay 0. Returns the board, the boot partition's node, the
+/// environment's node and its geometry.
+fn uboot_board() -> (
+    Board,
+    PathBuf,
+    PathBuf,
+    lemnos_slot_store::uboot_env::Geometry,
+) {
+    let mut board = Board::new("os-1");
+    let boot_node = use_uboot(&mut board);
+    let node = board.layout().boot.join("uboot-env.img");
+    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    (board, boot_node, node, geometry)
+}
+
 /// With the `uboot` record, an install writes the slot's payloads and its composed loader
 /// configuration into a bay (raw, on the boot partition's image), and a trial arms the environment.
 #[test]
 fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_it() {
-    let mut board = Board::new("os-1");
+    let (mut board, boot_node, node, geometry) = uboot_board();
     let boot = board.layout().boot.clone();
-    let boot_node = use_uboot(&mut board);
-    let node = board.layout().boot.join("uboot-env.img");
-    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
     board.install_ok("os-2");
     // os-2 took the bay the environment names nothing for, and os-1's was not touched.
     let (dir, lengths) = board.slots.record.slot_bay("os-2").unwrap();
@@ -3865,4 +3879,76 @@ fn a_role_file_the_manifest_leaves_out_is_refused_by_name() {
     );
     assert!(!board.layout().installed("os-2"));
     assert!(!board.work_left());
+}
+
+/// What the loader script chooses over the environment the writers left in `node`: the three
+/// `lemnos_dtb` values (trial, default, previous), and every variable the script read from it.
+fn choice_over(
+    node: &Path,
+    geometry: &lemnos_slot_store::uboot_env::Geometry,
+) -> ([String; 3], std::collections::BTreeSet<String>, Vec<String>) {
+    let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(node).unwrap();
+    let (_, vars) = lemnos_slot_store::uboot_env::load(&mut dev, geometry)
+        .unwrap()
+        .unwrap();
+    let names = vars.iter().map(|(k, _)| k.clone()).collect();
+    let (dtbs, run) = crate::uboot::hush::choose(
+        include_str!("../../../packaging/uboot/boot.cmd"),
+        vars.into_iter().collect(),
+    );
+    (dtbs, run.reads, names)
+}
+
+/// THE ENVIRONMENT OUR WRITERS PRODUCE, run through the loader script's choice: image built, install
+/// os-2, trial, confirm (the default switches, the old default becomes the previous), install os-3.
+/// The previous step must be able to run on what the driver wrote, every variable the script reads must
+/// be one the writers wrote, and every variable the writers wrote must be one the script reads (the
+/// documented list, `uboot::VARIABLES`). The stand-in here is a file-backed environment and an
+/// evaluator for the script's conditions: it shares no U-Boot code, but it does read the real
+/// environment bytes the real writers made, so a variable nothing writes reads as empty here as it
+/// does in U-Boot.
+#[test]
+fn the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can_run() {
+    use std::collections::BTreeSet;
+    let (mut board, _boot_node, node, geometry) = uboot_board();
+    let mut written = BTreeSet::new();
+    let mut reads = BTreeSet::new();
+    let mut take = || {
+        let (dtbs, read, names) = choice_over(&node, &geometry);
+        written.extend(names);
+        reads.extend(read);
+        dtbs
+    };
+    // Image built: the default only.
+    let dtbs = take();
+    assert_eq!(dtbs, ["", "/slots/bay0/board.dtb", ""]);
+    // Install os-2 (a free bay), then trial it: the trial starts first, the default is os-1, and
+    // there is no previous yet.
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+    let dtbs = take();
+    assert_eq!(dtbs, ["/slots/bay1/board.dtb", "/slots/bay0/board.dtb", ""]);
+    // The trial boots and is confirmed: os-2 is the default, os-1 the previous.
+    board.boot_into("os-2");
+    board.slots.confirm().unwrap();
+    let dtbs = take();
+    assert_eq!(
+        dtbs,
+        ["", "/slots/bay1/board.dtb", "/slots/bay0/board.dtb"],
+        "default failed to load, previous exists and differs: the previous step starts its bay"
+    );
+    // A third install takes the one free bay, and changes no choice.
+    board.install_ok("os-3");
+    let dtbs = take();
+    assert_eq!(dtbs, ["", "/slots/bay1/board.dtb", "/slots/bay0/board.dtb"]);
+    assert_eq!(board.slots.record.slot_bay("os-3").unwrap().0, "slots/bay2");
+    let listed: BTreeSet<String> = crate::uboot::VARIABLES.map(String::from).into();
+    assert_eq!(
+        reads, listed,
+        "what the script reads is the documented list"
+    );
+    assert_eq!(
+        written, listed,
+        "what the writers wrote is the documented list"
+    );
 }

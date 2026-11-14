@@ -877,7 +877,9 @@ whose record is not committed is not a slot. A removal clears a set's record and
 
 **The U-Boot form.** The environment is U-Boot's own, written raw as before; the variables are `default`,
 `default_bay`, `previous_bay`, `trial`, `trial_bay` and `trial_attempts`, and `lemnos_env`, which the first
-start sets. The default switch writes `previous_bay`, `default` and `default_bay` in one write of the
+start sets (the loader's own marker, not part of the record). Those six are the whole record: the script
+reads exactly these six and the writers write exactly these six (`uboot::VARIABLES`); there is no variable
+`previous`. The default switch writes `previous_bay`, `default` and `default_bay` in one write of the
 inactive environment copy, so a cut leaves the old three or the new three. Nothing that was true of the
 environment changed: both copies are checked at their size before the first write, an environment U-Boot
 has not saved is refused, and `packaging/uboot/boot.cmd` reads `slots/${trial_bay}/`,
@@ -920,15 +922,21 @@ moment the default's files fail to load.
 | Exists in generated files today | yes: `boot.cmd` (written into the image by `lemnos-ctl boot-partition`) | yes, the count filter is in `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`); there is no Pi step that detects an unreadable default |
 | Tested | structurally on this PC (`drivers/system-slots/src/uboot/tests.rs`); the script is not run by any U-Boot here; slot-init's side is run on image files | on this PC the text is only compared; the firmware's behaviour is **untested on board** (`testing/board-runs/I5i6.md`, rows 3 and 15, and `I5i8.md`) |
 
-**The U-Boot form's third step, exactly.** The previous slot is named by the environment's `previous`
-and `previous_bay`; its bay is protected from installs as the default's is. The step runs only when both
-are set, `previous` is not the default, and it is not the trial the first step just tried; otherwise it
-is skipped and the passes go on as before. The script sets and saves nothing for it: no `saveenv` runs in
-a step, and `trial`, `trial_attempts`, `default`, `previous` and the bays are not touched, so a real
-pending trial keeps its attempts and its record. It loads `board.dtb` and `extlinux/extlinux.conf` from the
-previous bay, names the boot source in the tree as for the other steps, and, if the default had been named
+**The U-Boot form's third step, exactly.** The previous slot is named by the environment's `previous_bay`
+alone: the environment holds no variable `previous` and no id for the previous slot (the loader needs
+only the bay, which is what its files are read from). Its bay is protected from installs as the default's
+is. The step runs only when `previous_bay` is set, is not `default_bay`, and is not the `trial_bay` the
+first step just tried; otherwise it is skipped and the passes go on as before. The script sets and saves
+nothing for it: no `saveenv` runs in a step, and `trial`, `trial_attempts`, `default` and the bays are not
+touched, so a real pending trial keeps its attempts and its record. A test runs the script's choice over
+the environment the real writers produce (`drivers/system-slots/src/tests.rs`,
+`the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can_run`) and holds the
+variables the script reads, the variables the writers write and the list in this section equal. That test
+evaluates the script's conditions with a small evaluator, not U-Boot: the script's evaluation by a real U-Boot
+is **untested on board** (`testing/board-runs/I5i8.md`, row U6). The step
+loads `board.dtb` and `extlinux/extlinux.conf` from the previous bay, names the boot source in the tree as for the other steps, and, if the default had been named
 and did not start, adds the property `lemnos,default-failed = "files"` to `/chosen` of the tree it hands to
-the kernel. `previous` is never repointed by the loader.
+the kernel. `previous_bay` is never repointed by the loader.
 
 What slot-init then sees. The command line is the previous slot's own, which is not the board's default,
 and that is what marks a trial boot: slot-init writes `trial-init` and, when the boot comes up,
