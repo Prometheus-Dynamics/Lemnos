@@ -137,7 +137,29 @@ pub fn view_path() -> PathBuf {
 /// Whether the switch is on. The one reader every gate uses: slot installs and first flash.
 #[must_use]
 pub fn enforced() -> bool {
+    if let Some(on) = ENFORCED.with(std::cell::Cell::get) {
+        return on;
+    }
     enforced_at(&view_path())
+}
+
+thread_local! {
+    static ENFORCED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with [`enforced`] answering `on` on this thread, and puts the reader back after, even
+/// when `f` panics. The offline writer (`lemnos-ctl data-partition`) names the switch it writes
+/// with, rather than reading the build host's view. The daemon never calls this.
+pub fn with_enforced<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ENFORCED.with(|enforced| enforced.set(self.0));
+        }
+    }
+    let previous = ENFORCED.with(|enforced| enforced.replace(Some(on)));
+    let _restore = Restore(previous);
+    f()
 }
 
 /// Render the view into `dir` (normally [`RUN_DIR`]): a new file next to it, renamed over

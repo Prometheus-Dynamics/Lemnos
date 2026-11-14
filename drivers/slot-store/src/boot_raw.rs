@@ -356,6 +356,12 @@ impl<D> Boot<D> {
     pub fn into_device(self) -> D {
         self.dev
     }
+
+    /// The bay sizes the image was built with, read when the image was opened; `Err` names why
+    /// they could not be read.
+    pub fn bay_layout(&self) -> Result<bays::Layout, String> {
+        self.layout.clone()
+    }
 }
 
 impl<D: Sectors + ReadAt> Boot<D> {

@@ -21,8 +21,13 @@ use crate::twocopy::{SECTOR, Sectors};
 
 /// The pointers and records at the root of the Pi firmware's volume.
 pub const POINTERS: [&str; 3] = ["default.txt", "previous.txt", "trial.txt"];
+/// The bay set the first slot is installed into. The three pointers name it from the start (until a
+/// real previous or trial exists), and [`build`] refuses an image where the slot is elsewhere.
+pub const FIRST_SET: u8 = 0;
 /// The three record files at the root of the Pi firmware's volume, empty.
 pub const RECORDS: [&str; 3] = ["trial.rec", "reason.rec", "episodes.rec"];
+/// The restart count's baseline record at the boot partition's root (`twocopy::Kind::BASELINE`).
+pub const BASELINE_FILE: &str = "count.rec";
 /// The U-Boot form's composed extlinux file, its path under each set and its bay size.
 pub const EXTLINUX: &str = "extlinux/extlinux.conf";
 /// The bay size of the composed extlinux file.
@@ -162,7 +167,9 @@ fn tree(parts: &Parts) -> Vec<Node> {
         for name in POINTERS {
             root.push(Node::File {
                 name,
-                data: firmware::pointer_file("bay0").unwrap().to_vec(),
+                data: firmware::pointer_file(&bays::set_name(FIRST_SET))
+                    .unwrap()
+                    .to_vec(),
             });
         }
         for name in RECORDS {
@@ -171,6 +178,12 @@ fn tree(parts: &Parts) -> Vec<Node> {
                 data: vec![0; INFO_BYTES as usize],
             });
         }
+        // The restart count's baseline, empty (unknown) until one is written. Not in `RECORDS`: an
+        // image without it still places and boots (`Records::place` does not require it).
+        root.push(Node::File {
+            name: BASELINE_FILE,
+            data: vec![0; INFO_BYTES as usize],
+        });
     }
     if parts.family == Family::UbootBlock {
         // The U-Boot form's one record: a kernel gap's reason (its trial and default are in U-Boot's
@@ -329,6 +342,15 @@ pub fn build(
     let root = tree(parts);
     let mut mem = Mem(fatimage::volume(&root, size / SECTOR as u64));
     install_first(&mut mem, parts, slot, payloads)?;
+    // The pointers name the bay the slot was installed in: a first install that put it elsewhere
+    // would leave previous.txt and trial.txt naming a bay with no slot in it.
+    let installed = bays::set_of_slot(&mut mem, &parts.layout, slot).map_err(|e| e.to_string())?;
+    if installed != Some(FIRST_SET) {
+        return Err(format!(
+            "the first slot {slot} is in {installed:?}, not the bay the pointers name ({})",
+            bays::set_name(FIRST_SET)
+        ));
+    }
     let findings = verify(&mut mem, parts);
     if let Some(bad) = findings.iter().find(|f| !f.ok) {
         return Err(format!("the built image does not verify: {}", bad.text));
@@ -345,7 +367,7 @@ pub fn install_first<D: Sectors + ReadAt>(
     payloads: &[&[u8]; 5],
 ) -> Result<(), String> {
     match parts.family {
-        Family::Tryboot => match bays::install(dev, &parts.layout, 0, slot, payloads) {
+        Family::Tryboot => match bays::install(dev, &parts.layout, FIRST_SET, slot, payloads) {
             Ok(Done::Installed) => Ok(()),
             Ok(Done::AlreadyInstalled) => {
                 Err("the first install found the slot already there".into())
@@ -354,9 +376,13 @@ pub fn install_first<D: Sectors + ReadAt>(
         },
         Family::UbootBlock => {
             let sets = bays::place_sets(dev, &parts.layout)?;
-            let (files, info) = sets[0];
+            let (files, info) = sets[FIRST_SET as usize];
             let text = extlinux_text(payloads[3])?;
-            let lba = bootfat::locate_path(dev, &format!("slots/bay0/{EXTLINUX}"), EXTLINUX_BYTES)
+            let lba = bootfat::locate_path(
+                dev,
+                &format!("{}/{EXTLINUX}", bays::set_dir(FIRST_SET)),
+                EXTLINUX_BYTES,
+            )
                 .map_err(|e| e.to_string())?
                 .first_lba;
             bays::commit_set_with(

@@ -247,3 +247,41 @@ fn a_command_line_on_two_lines_is_refused_for_the_extlinux_file() {
     assert!(extlinux_text(b"a\nb").is_err());
     assert!(extlinux_text(b"a b\n").is_ok());
 }
+
+#[test]
+fn the_built_image_pre_creates_the_restart_count_baseline_empty() {
+    // The count's baseline is a two-copy record at the root, as trial.rec and episodes.rec are: both
+    // copies all zero (no valid copy), so it reads as unknown until a baseline is written.
+    let parts = tryboot_parts();
+    let total = 161_792u64 * 512;
+    let image = build(&parts, total, "a", &refs(&payloads())).unwrap();
+    let mut mem = Mem(image.clone());
+    let found = bootfat::locate_path(&mut mem, BASELINE_FILE, crate::boot_raw::RECORD_BYTES).unwrap();
+    let at = found.first_lba as usize * 512;
+    let len = crate::boot_raw::RECORD_BYTES as usize;
+    assert_eq!(BASELINE_FILE, "count.rec");
+    assert!(image[at..at + len].iter().all(|&b| b == 0), "the baseline record is empty");
+}
+
+#[test]
+fn the_three_pointers_name_the_bay_the_first_slot_is_installed_in() {
+    let parts = tryboot_parts();
+    let total = 161_792u64 * 512;
+    let image = build(&parts, total, "a", &refs(&payloads())).unwrap();
+    let mut mem = Mem(image.clone());
+    let installed = bays::set_of_slot(&mut mem, &parts.layout, "a").unwrap();
+    assert_eq!(installed, Some(FIRST_SET));
+    for name in POINTERS {
+        let found = bootfat::locate_path(&mut Mem(image.clone()), name, firmware::POINTER_FILE_BYTES as u64).unwrap();
+        let mut file = vec![0u8; firmware::POINTER_FILE_BYTES];
+        let at = found.first_lba as usize * 512;
+        file.copy_from_slice(&image[at..at + firmware::POINTER_FILE_BYTES]);
+        let mut bytes = [0u8; firmware::POINTER_FILE_BYTES];
+        bytes.copy_from_slice(&file);
+        assert_eq!(
+            firmware::pointer_file_slot(&bytes).as_deref(),
+            Some(bays::set_name(FIRST_SET).as_str()),
+            "{name} names the installed bay"
+        );
+    }
+}
