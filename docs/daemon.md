@@ -657,11 +657,12 @@ served is released as ended, and its holds go with it. A caller that is still al
 anything, and its holds are then taken anew.
 
 Orion also ends every run that session was doing, as failed (`the program that runs it went away`), whether it
-was detached or not: a detached run outlives its caller, not the program that runs it. The bridge cannot be told, so it
+was detached or not: a detached run outlives its caller, not the program that runs it. **A comm-core restart ends
+every run, detached or not, until Orion carries `detached` on the claim and re-claims runs.** The bridge cannot be told, so it
 cancels the job of every run of the lost session on lemnosd, and the device is free for the new session. The reason is
 `cancelled: the session that started this run was lost`: it is in the bridge's log (one line for each run, with the
-run's call number, session and job), in the run's detail, and in the bridge's record (`Mirror::last_cancel`). lemnosd's
-job has no place for a reason, so it is not in lemnosd. The same text is given when a caller's own Orion session ends
+run's call number, session and job), in the run's detail, and in the bridge's record (`Mirror::last_cancel`). The lemnosd
+job has no reason field: the run's finish and the bridge's log line are where the reason is. The same text is given when a caller's own Orion session ends
 and Orion cancels its run that is not detached (`CallerGone`).
 
 **Ids across a reconnect.** Nothing the bridge caches from Orion survives the bridge's own session. The publisher's

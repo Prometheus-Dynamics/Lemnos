@@ -206,9 +206,21 @@ impl Progress {
     }
 }
 
+/// Whether a run was started detached. Orion's claim carries no `detached` at this pin, so the bridge
+/// starts every run as [`RunKind::NotDetached`] (until Orion's G4 puts it on the claim). The kind matters
+/// in one place, [`own_session_lost`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunKind {
+    /// Goes on after its caller's session ends.
+    #[allow(dead_code)]
+    Detached,
+    NotDetached,
+}
+
 /// A long job a run started, until it ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Running {
+    kind: RunKind,
     session: u64,
     call: u64,
     job: u64,
@@ -323,21 +335,7 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
                 gone(&mut clients, &mut ended, token, shared);
             }
             Some(Message::SessionLost { session }) => {
-                while let Some(call) = running
-                    .iter()
-                    .find(|r| r.session == session)
-                    .map(|r| r.call)
-                {
-                    cancel(
-                        &mut clients,
-                        &mut running,
-                        &mut ended,
-                        session,
-                        call,
-                        CancelReason::CallerGone,
-                        shared,
-                    );
-                }
+                own_session_lost(&mut clients, &mut running, &mut ended, session, shared);
             }
             None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}
@@ -502,6 +500,38 @@ fn gone(clients: &mut Callers, ended: &mut Vec<CallerKey>, token: u64, shared: &
     );
 }
 
+/// The bridge's own Orion session `session` was lost: every run of it has its job cancelled on lemnosd.
+///
+/// This is the one place the run's kind decides. Today both kinds are cancelled: Orion ends every run of
+/// a lost program, detached or not, and the claim carries no `detached`, so a run is never known to be
+/// detached. A comm-core restart ends every run, detached or not, until Orion carries `detached` on the
+/// claim and re-claims runs; then `Detached` keeps its job here and is offered again after the reconnect.
+fn own_session_lost(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
+    session: u64,
+    shared: &Shared,
+) {
+    while let Some((call, kind)) = running
+        .iter()
+        .find(|r| r.session == session)
+        .map(|r| (r.call, r.kind))
+    {
+        match kind {
+            RunKind::Detached | RunKind::NotDetached => cancel(
+                clients,
+                running,
+                ended,
+                session,
+                call,
+                CancelReason::CallerGone,
+                shared,
+            ),
+        }
+    }
+}
+
 /// Stops run `call` of `session`, for `reason`. A long job is cancelled on lemnosd, and the run ends
 /// as cancelled at once: nothing else would answer it. The caller's connection is kept, and a cancel
 /// that renews ([`renews`]) starts the lease of a session 0 caller from now.
@@ -613,6 +643,8 @@ fn run_one(
                 clients.insert(run.clone(), Lemnosd::new(client, class));
             }
             running.push(Running {
+                // The claim carries no `detached` at this pin: see [`RunKind`].
+                kind: RunKind::NotDetached,
                 session: job.session,
                 call: job.call,
                 job: started,
@@ -1006,6 +1038,7 @@ mod tests {
         // with a run going must be shielded from its lease, whatever connection the run is on.
         let asker = CallerKey::Unsaid("local:1000".to_owned());
         let run = Running {
+            kind: RunKind::NotDetached,
             session: 1,
             call: 2,
             job: 3,
