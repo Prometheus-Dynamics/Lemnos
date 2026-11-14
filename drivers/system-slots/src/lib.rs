@@ -85,6 +85,7 @@ mod boot_writes_audit;
 mod count;
 #[cfg(test)]
 mod count_tests;
+pub mod grow;
 mod install;
 mod resolve;
 pub use lemnos_slot_store::tar;
@@ -188,6 +189,9 @@ pub struct SystemSlots {
     firmware: Option<count::Firmware>,
     /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
     demote_after: u8,
+    /// The data partition's grow to the disk's end, while it has not finished (see [`grow`]).
+    /// `None` when the board's `grow_data` is `false`, or the grow is done.
+    grow: Option<grow::Task>,
 }
 
 /// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
@@ -495,6 +499,7 @@ impl SystemSlots {
             firmware: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            grow: None,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -684,11 +689,27 @@ impl SystemSlots {
         let free = self.free().map_err(|_| Status::IO)?;
         if free < size.saturating_add(self.reserve) {
             let mut state = self.state();
-            state.error = format!(
-                "no room for this slot: it needs {} MiB with the reserve, the data partition has {} MiB free; remove a slot first",
-                size.saturating_add(self.reserve) >> 20,
-                free >> 20
-            );
+            state.error = match self
+                .grow
+                .as_ref()
+                .filter(|grow| !grow.retry.last.is_empty())
+            {
+                // The grow has failed on record: the partition has not grown, so the room is the
+                // partition's own, and the install needs the slot plus the board's reserve.
+                Some(grow) => format!(
+                    "the data partition has {} MiB free and has not grown ({}; partition 2 is {}); installs need the slot plus the board's reserve of {} MiB",
+                    free >> 20,
+                    grow.retry.last,
+                    grow.partition_mib()
+                        .map_or_else(|| "of unknown size".to_string(), |mib| format!("{mib} MiB")),
+                    self.reserve >> 20
+                ),
+                None => format!(
+                    "no room for this slot: it needs {} MiB with the reserve, the data partition has {} MiB free; remove a slot first",
+                    size.saturating_add(self.reserve) >> 20,
+                    free >> 20
+                ),
+            };
             let _ = self.save(&state);
             return Err(NO_SPACE);
         }
@@ -1241,6 +1262,8 @@ const KEYS: &[Key] = &[
     // The good-boot deadline in seconds: read by `lemnos-ctl tree --good-boot-unit` (the unit's drop-in) and
     // checked here, so a bad value is refused at the driver too (see `lemnos_slot_store::goodboot`).
     Key::optional("good_boot_s", Kind::Int),
+    // Grow the data partition to the disk's end at each start until it is done, on unless `false` (see [`grow`]).
+    Key::optional("grow_data", Kind::Bool),
 ];
 
 /// The settings `SystemReboot` reads. The boot-file check before its restart reads the boot files
@@ -1414,7 +1437,8 @@ impl Lifecycle for SystemSlots {
             .map(|_| now_ns);
         let settle = self.settle(now_ns);
         let slow = self.slow_check(now_ns);
-        [install, settle, slow].into_iter().flatten().min()
+        let grow = self.grow_tick(now_ns);
+        [install, settle, slow, grow].into_iter().flatten().min()
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
@@ -1435,7 +1459,12 @@ impl Lifecycle for SystemSlots {
         }
         boot_table(cfg)?;
         lemnos_slot_store::goodboot::deadline_from_board(cfg.int(lemnos_slot_store::goodboot::KEY))
-            .map_err(|_| ConfigError::new(lemnos_slot_store::goodboot::KEY, lemnos_slot_store::goodboot::REASON))?;
+            .map_err(|_| {
+                ConfigError::new(
+                    lemnos_slot_store::goodboot::KEY,
+                    lemnos_slot_store::goodboot::REASON,
+                )
+            })?;
         if cfg.str("record") == Some("uboot") {
             uboot_env_place(cfg)?;
         }
@@ -1518,6 +1547,12 @@ impl Lifecycle for SystemSlots {
             slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
         slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
+        if grow::enabled(cfg.bool("grow_data")) {
+            slots.grow = Some(grow::Task::new(
+                boot_disk_of(cfg),
+                slots.layout.data.clone(),
+            ));
+        }
         slots.record_boot();
         slots.arrive_at_start();
         Ok(slots)
@@ -1825,6 +1860,34 @@ impl Reboot for SystemReboot {
         let state_dir = self.data.join("board/slots");
         boot::note_request(&state_dir, self.calling.0);
         self.restarter.run(None).map_err(|_| Status::IO)
+    }
+}
+
+impl SystemSlots {
+    /// One try of the data partition's grow, when it is due (see [`grow`]). A failed pass is noted
+    /// in words once per reason and tried again after its backoff, never given up; a finished one
+    /// is dropped. It never holds up the driver.
+    fn grow_tick(&mut self, now_ns: u64) -> Option<u64> {
+        let task = self.grow.as_mut()?;
+        if now_ns < task.retry.next_ns {
+            return Some(task.retry.next_ns);
+        }
+        match task.attempt() {
+            Ok(()) => {
+                self.grow = None;
+                None
+            }
+            Err(why) => {
+                let fresh = task.retry.last != why;
+                let next = task.retry.failed(now_ns, &why);
+                if fresh {
+                    self.note(format!(
+                        "the data partition is not grown yet: {why}; it is tried again"
+                    ));
+                }
+                Some(next)
+            }
+        }
     }
 }
 

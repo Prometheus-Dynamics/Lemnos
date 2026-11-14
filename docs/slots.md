@@ -1124,6 +1124,109 @@ rotation above still reads the raw count.
   --boot-dir` is removed (the flag is refused). Other records have no boot partition here and are refused
   by name.
 
+### The good-boot deadline
+
+Every boot of a slot board is judged, by systemd and not by lemnosd. The unit
+`packaging/systemd/lemnos-good-boot.service` runs at boot as a oneshot with no dependency on lemnosd, so it
+still decides when lemnosd is wedged or never starts. It polls once a second (`lemnos-good-boot`,
+`service/good-boot`) and exits 0 as soon as the boot is good, or 1 when the deadline passes.
+
+**What good means, and only that.** Two facts: lemnosd has reached ready (its unit is `active`, which for
+`Type=notify` means it sent `READY=1`), and the booted marker `board/slots/booted` on the data partition
+names a valid slot. The marker is the one slot-init writes before `switch_root`; nothing else is written
+for it. Device health is not a fact here: a failing device does not make a boot bad, and it does not make
+it good. The rule is `lemnos_slot_store::goodboot::good`.
+
+**The deadline** is the board file's `good_boot_s` on the `system-slots` device (seconds, default `300`,
+from 30 to 3600; see [Boards](boards.md#good-boot-and-the-data-partition-system-slots)). A value outside
+that range, or one that is not an integer, is refused by name at the daemon's start and by
+`lemnos-ctl tree --good-boot-unit`. The image gets the deadline through a drop-in that
+`lemnos-ctl tree --good-boot-unit FILE` writes, to `/etc/systemd/system/lemnos-good-boot.service.d/deadline.conf`:
+its `ExecStart` carries `--deadline-s N` and its `TimeoutStartSec` is `N`, so the waiter and systemd agree.
+The unit's condition is that drop-in, so a board with no system-slots device never runs it.
+
+**Not good by the deadline means a restart.** The unit has `FailureAction=reboot-force`. On a trial boot
+the restart falls back through tryboot, as any boot that does not reach the daemon does. On a confirmed
+default each restart raises the firmware's boot count, so the count chain (previous at counts 4 to 7, RPIBOOT
+at count minus the baseline of 8 or more) is what drives recovery when a default never boots good.
+
+**Why `reboot-force`.** `reboot` stops every unit first, and lemnosd's stop can take its `TimeoutStopSec`
+(30 s) or hang on a wedged driver, which holds the reboot. `reboot-force` has systemd call the reboot at
+once. It is the choice for a failure of the boot, where nothing else is to be stopped cleanly. The state
+files are each replaced whole and synced (see the store's module), so a reboot at this point cuts nothing
+half-written.
+
+**lemnosd is not changed for this.** `lemnosd.service` keeps `Restart=always`, `StartLimitIntervalSec=0`
+and no failure action: lemnosd is never down by design, and its own failure never surfaces, which is why
+this separate unit exists.
+
+**Tests.** `lemnos-good-boot`'s tests run the waiter against a scripted probe and a fake clock: the
+marker appearing late is good at that time; a boot never good fails at the deadline exactly; the last sleep
+is cut to the deadline; a marker without readiness, or one naming no slot, is not good; the waiter asks
+only the two facts; the real probe reads the marker from a directory. The drop-in, the board-file key and its
+refusals are tested in `lemnos-ctl` and in `lemnos_slot_store::goodboot`. Not tested here: a QEMU guest that
+reboots when good never comes (the harness does not yet boot systemd with this unit), and `systemctl` against
+a running lemnosd. `systemd-analyze verify` runs on the unit offline where it is installed (see the
+gate's packaging check).
+
+### Growing the data partition at first start
+
+The data partition is entry 2 of the MBR: the last entry, type `0x83`, labelled `lemnos-data`. An image
+writes it at a size its content needs, and a disk larger than that image leaves the rest unused. When the
+board file's `grow_data` on the `system-slots` device is on by default (`false` opts a board out), the
+driver grows it to the disk's end at each start until it is done. It acts only on a disk that validates as
+the Lemnos layout, so any other table is refused with words and nothing is written. The pass is in
+`drivers/system-slots/src/grow.rs`; the arithmetic is `lemnos_slot_store::mbr`.
+
+The steps, in order. Each reads the state it finds, so the pass is the same whether it runs once, is cut, or
+runs again:
+
+1. **The table.** The MBR is validated (its signature; entry 2 is `0x83`; no entry follows it; the kernel's
+   start of partition 2 equals the table's; the partition's superblock is ext4 with the label `lemnos-data`;
+   the table's end is at or before the disk's end). The new length is the start to the last whole MiB
+   before the disk's end. The only write is the four bytes of entry 2's sector count (474 to 477 of sector
+   0), then a flush, then a read back that must differ from the old sector in those four bytes only.
+2. **The kernel's partition.** `BLKPG_RESIZE_PARTITION` on partition 2 to the table's length
+   (`lemnos-linux-sys`, `blockdev.rs`), then `/sys/class/block/<p2>/size` must say that length.
+3. **The filesystem.** `EXT4_IOC_RESIZE_FS` on `/data` to the table's length in blocks
+   (`lemnos-linux-sys`, `ext4.rs`), then the superblock's block count must say that count.
+
+Nothing else is written. Partition 1 is never touched; sector 0 changes in four bytes; the kernel's view
+and the filesystem only grow.
+
+**A refusal writes nothing.** A table that is not the expected layout is refused by name at step 1 with the
+reason, and the disk is left as it was: `data partition is not the last one: nothing grown`, the entry's
+type, a label other than `lemnos-data`, a disk smaller than its table, a sector without the signature, and a
+partition that is not ext4. A filesystem larger than its partition is refused at step 3 and not shrunk.
+
+**A failed step is retried, never given up.** The driver runs a pass at its start tick and does not hold up
+its start. A failed pass is noted in the state's error in words, once per reason, and tried again after a
+backoff that starts at 1 s, doubles, and is capped at 8 s. A pass that finishes is dropped. The boot disk's
+node comes from the same resolver the boot chain uses; when it is not known the reason is noted and the
+pass is retried.
+
+**Cut points.** Power cut or daemon restart before or after each write (table, kernel, filesystem). The next
+pass after a power cut sees the kernel read the table, and after a daemon restart the kernel keeps its view;
+either way it ends in exactly the state of an uninterrupted pass. Tested on a file standing for the disk, with the fake kernel
+seam, for all six cases in `drivers/system-slots/src/grow/tests.rs`:
+
+| Cut | Table | Kernel | Filesystem | The next pass |
+|---|---|---|---|---|
+| before 1 | old | old | old | writes the table, the kernel and the filesystem |
+| after 1 | new | old | old | after a restart: resizes the kernel, then the filesystem. After a power cut the kernel already has the new length: the filesystem only |
+| before 2 | new | old | old | after a restart: resizes the kernel, then the filesystem. After a power cut: the filesystem only |
+| after 2 | new | new | old | grows the filesystem only |
+| before 3 | new | new | old | grows the filesystem only |
+| after 3 | new | new | new | nothing: the pass is a no-op and writes nothing |
+
+A torn table write (the count's top byte lands wrong) is caught by the read back: the pass fails with only
+the four bytes changed, and the next start refuses the value as past the disk.
+
+**Not proved here.** That the kernel accepts `BLKPG_RESIZE_PARTITION` on a partition that is mounted, that
+the filesystem grows past its reserved group descriptors, and that the card or eMMC writes one sector whole
+on a power cut. These are the board check in `testing/board-runs/` (not yet written), and the QEMU guest
+case (not yet written); the test seam shares none of them with the kernel.
+
 ### The slot layout (Pi firmware form)
 
 `contracts/slot-layout.toml` (version 5) lists every file of a slot's bay set (`slots/bayN/`) on the

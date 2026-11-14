@@ -179,6 +179,15 @@ count does. They apply only to the `tryboot` record.
 | `system-slots` | `device_tree` | `/proc/device-tree` | an absolute path | The device tree directory the count (`chosen/bootloader/count`) and the reset status (`rsts`) are read from |
 | `system-slots` | `vcio` | `/dev/vcio` | an absolute path | The firmware mailbox device the boot count is cleared through |
 
+## Good boot and the data partition (`system-slots`)
+
+These keys are optional. [Slots](slots.md#the-good-boot-deadline) says what they do.
+
+| Driver | Key | Default | Range | Meaning |
+|---|---|---|---|---|
+| `system-slots` | `good_boot_s` | `300` | integer, 30 up to 3600 | The seconds a boot has to be good (lemnosd ready and the booted marker set) before the unit restarts the board. The image's drop-in is written by `lemnos-ctl tree --good-boot-unit FILE` from this value. A value that is not an integer, or outside the range, is refused by name |
+| `system-slots` | `grow_data` | `true` | `true`, `false` | Grow the data partition (partition 2) to the end of the boot disk at each start until it is done. On by default: it acts only on a disk that validates as the Lemnos layout (partition 2 last, type `0x83`, labelled `lemnos-data`), and writes four bytes of the table. `false` opts out. [Slots](slots.md#growing-the-data-partition-at-first-start) lists the steps and what each refusal leaves |
+
 ## The board overlay file
 
 `lemnos-ctl tree BOARD -o FILE` writes device-tree **source**, not a compiled blob. Its first line is a
