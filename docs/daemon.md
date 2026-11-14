@@ -522,6 +522,8 @@ lemnos-ctl validate docs/examples/full-board.toml
 
 ### When a command is refused
 
+**When a client gets `BUSY`, and when it cannot.** Every call to one device, and its tick, runs on the device's lane one at a time. A client that finds the driver in a tick or in another call waits its turn, for at most the call deadline, and is not refused for it. That holds for `describe` (and so for opening a device, which describes it), for a method call, a value read, and starting a job. `BUSY` is never the answer to "the driver is busy right now". It is the answer only to a deliberate rule: a second consumer or producer of a stream (one at a time), a second caller's hold on a USB function's endpoints, an intrusive test while another caller uses the device (see [Drivers](drivers.md)), and a job started while the daemon's job table is full. A driver that does not come back within the call deadline gives `TIMED_OUT` and is contained (dropped and bound again); a device with no running driver gives `NO_DEVICE`, and its description is then made from its manifest.
+
 A refusal carries a status and a few words: `refused (-16): ...`. The numbers are negative Linux
 error numbers, and Lemnos's own codes below -4095:
 
@@ -531,7 +533,7 @@ error numbers, and Lemnos's own codes below -4095:
 | -2 | `NOT_FOUND` | No such device, method, stream or resource name |
 | -5 | `IO` | The hardware did not answer |
 | -11 | `AGAIN` | Not ready yet: a chip still powering up |
-| -16 | `BUSY` | Someone else holds it, or the driver is in a call right now. Ask again |
+| -16 | `BUSY` | Someone else holds the thing asked for (see "When a client gets BUSY"). Ask again |
 | -19 | `NO_DEVICE` | The device is not running |
 | -22 | `INVALID_ARGUMENT` | A bad setting or argument |
 | -95 | `NOT_SUPPORTED` | The driver or the hardware does not do this |
@@ -693,7 +695,7 @@ whole. A method whose reply can exceed 60 KiB needs a paged form to be called th
 - `method contract id name params returns out_buffer job`. `params` is each `name:shape`, joined by a space, as one quoted text. `out_buffer` and `job` are `true` or `false`.
 - `item kind name unit unit_state exponent min max real_min real_max real_step step warn_low warn_high contract method field reading group`. `min`, `max`, `real_min`, `real_max`, `real_step`, `step`, `warn_low` and `warn_high` are absent when the device gives no such bound. `field` and `group` are quoted or `none`. `reading` is one of the reading words, or `unknown`.
 
-**Devices that are not running.** lemnosd answers a description for every device in the board file, whatever its state. A device whose driver is not running (off by the operator, retrying a bind that keeps failing, failed, or never started because the board file disables it) has no driver to describe it. Its device record still comes, with its `state` and `reason` and `live=false`. Its contracts and methods come from the driver's manifest, which lemnosd has for every device, and it has no `item` records, no address and no location: those are what a running driver reports. The generation moves when the state or the reason changes, as it does for a running device. Those are the only answers that differ: a call in flight answers `BUSY`, and the bridge asks again.
+**Devices that are not running.** lemnosd answers a description for every device in the board file, whatever its state. A device whose driver is not running (off by the operator, retrying a bind that keeps failing, failed, or never started because the board file disables it) has no driver to describe it. Its device record still comes, with its `state` and `reason` and `live=false`. Its contracts and methods come from the driver's manifest, which lemnosd has for every device, and it has no `item` records, no address and no location: those are what a running driver reports. The generation moves when the state or the reason changes, as it does for a running device. Those are the only answers that differ.
 
 **Which records each state carries.** The description has the same records for every device; the state decides what is in them.
 

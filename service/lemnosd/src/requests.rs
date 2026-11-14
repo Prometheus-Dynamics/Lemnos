@@ -293,7 +293,8 @@ impl Client {
         };
         // A device whose driver is not running (off, retrying, failed, never started) has no
         // driver to describe it: it is described from its manifest alone, and says so (`not_live`).
-        // Only a call in flight (BUSY) or a panic refuses.
+        // The host waits for a tick or a call in flight (up to its call deadline); only a driver that does
+        // not come back (`TIMED_OUT`) or a panic refuses.
         let (description, not_live) = match self.core.host.describe(device) {
             Ok(description) => (description, false),
             Err(status) if status == Status::NO_DEVICE => (lemnos_core::Description::new(), true),
