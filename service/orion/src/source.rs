@@ -306,8 +306,9 @@ fn discover(
     Ok((specs, routes, undescribed, identity))
 }
 
-/// A device's description. lemnosd answers `BUSY` while a call or a value read holds the device,
-/// which is a moment, not a failure; the answer is asked again (see [`describe_when_free`]).
+/// A device's description. lemnosd waits for a call or a tick in flight and does not answer
+/// `BUSY` for it; a `BUSY` from an older daemon is a moment, not a failure, and is asked again
+/// (see [`describe_when_free`]).
 pub fn describe(client: &Client, device: u32) -> Result<DeviceDescription, Error> {
     describe_when_free(|| client.describe(device))
 }

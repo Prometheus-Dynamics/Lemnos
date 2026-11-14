@@ -237,7 +237,7 @@ pub fn assemble<'a, B: Bus>(bus: &'a B, options: &Options) -> Result<Camera<'a, 
 
 /// [`assemble`], with `open_isp` saying whether the ISP the receiver links to is opened. A tool
 /// that runs beside a streaming chain and has no use for the ISP leaves it alone: opening a
-/// device describes it, which is refused (`BUSY`) while the device's driver is in a call.
+/// device describes it, which waits its turn behind the device's driver while it is in a call.
 ///
 /// # Errors
 /// As [`assemble`].

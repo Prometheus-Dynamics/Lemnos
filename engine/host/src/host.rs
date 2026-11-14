@@ -2750,17 +2750,26 @@ impl Host {
         Some(self.inner.slot(device)?.entry?.manifest)
     }
 
-    /// Asks a running device to describe itself.
+    /// Asks a running device to describe itself. The ask takes its turn on the device's lane like
+    /// a call does: while the driver is in a tick or another call it waits, up to the call
+    /// deadline, and is never answered `BUSY` for that. A driver that doesn't come back in time
+    /// is `TIMED_OUT` (and contained, as a call's would be); a device that is off, failed, or
+    /// whose driver is gone is `NO_DEVICE`.
     pub fn describe(&self, device: u32) -> Result<Description> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        let mut guard = slot.instance.try_lock().map_err(|_| Status::BUSY)?;
+        if slot.hung.load(Ordering::Acquire) || is_off(&slot) {
+            return Err(Status::NO_DEVICE);
+        }
+        let mut out =
+            self.inner
+                .on_lane_answer(Arc::clone(&slot), CallerId::LOCAL, |instance| {
+                    let mut out = Description::new();
+                    instance.describe(&mut out);
+                    Ok(out)
+                })?;
         if is_off(&slot) {
             return Err(Status::NO_DEVICE);
         }
-        let instance = guard.as_mut().ok_or(Status::NO_DEVICE)?;
-        let mut out = Description::new();
-        catch_unwind(AssertUnwindSafe(|| instance.describe(&mut out)))
-            .map_err(|_| Status::PANIC)?;
         // A device whose driver names no location gets the board's own words for what it uses
         // (`line gpio7`, `accel imu`): the host knows them, the driver need not.
         if out.location().is_empty() && !slot.spec.uses.is_empty() {

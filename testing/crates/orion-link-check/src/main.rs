@@ -213,8 +213,12 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         bare.count(NO_LINK) == 1 && bare.count(OFFERED) == 0,
         "it says so once and offers nothing",
     );
-    // A read can meet the daemon still busy with the bridge's own first reads, so the negative waits
-    // for a definite "not lent" and says what it last saw when there is none.
+    // `pair_lent` gives `None` when the describe or the open is refused. Until M28 a describe was
+    // answered `BUSY` while the driver was in a tick or a call, and `.ok()?` turned that into "no
+    // value": the early read that failed once in CI fits that, though no run that failed was kept
+    // to prove it. The daemon now waits instead of refusing, so a read right after start is
+    // definite. The bound stays as a ceiling a passing run does not pay (it ends at the first
+    // definite answer) and says what it last saw when there is none.
     let mut seen = None;
     if !check(
         wait_until(Duration::from_secs(10), || {
