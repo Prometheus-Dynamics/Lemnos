@@ -14,8 +14,9 @@
 //! - it ends when the helper ends with status 0, which is what the helper does when the daemon's end
 //!   of the socket closes, and when the daemon dies (`PR_SET_PDEATHSIG`);
 //! - it reads no request and acts on none: its only input is the child's exit status;
-//! - it drops to `CAP_SYS_ADMIN` and the three capabilities the helper needs to drop the rest
-//!   (`CAP_SETPCAP`, `CAP_SETUID`, `CAP_SETGID`) and runs under a seccomp allowlist
+//! - it drops to `CAP_SYS_ADMIN` and the two capabilities the helper needs to drop the rest
+//!   (`CAP_SETPCAP` for the bounding set, `CAP_SETGID` for the supplementary groups; no
+//!   `CAP_SETUID`: the helper is root like its parent, so no user id changes) and runs under a seccomp allowlist
 //!   ([`PARENT_CALLS`]: the helper's calls, which it passes on, and the calls that fork, wait and
 //!   sleep).
 
@@ -25,9 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use crate::helper::{self, Daemon, Gadget};
-use lemnos_linux_sys::privilege::{
-    self, CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_ADMIN, ChildEnd, Plan,
-};
+use lemnos_linux_sys::privilege::{self, CAP_SETGID, CAP_SETPCAP, CAP_SYS_ADMIN, ChildEnd, Plan};
 use lemnos_linux_sys::seccomp::{self, nr};
 use lemnos_linux_sys::unix::set_nonblocking;
 
@@ -40,9 +39,10 @@ pub const CAP_WAIT_MS: u64 = 8_000;
 /// How long a helper must run for the wait to start over.
 pub const HEALTHY_MS: u64 = 30_000;
 
-/// The capabilities the parent keeps: the helper's own (`CAP_SYS_ADMIN`) and the three it needs to
-/// drop everything else. The helper drops the last three the moment it starts.
-pub const KEEP: &[u32] = &[CAP_SYS_ADMIN, CAP_SETPCAP, CAP_SETUID, CAP_SETGID];
+/// The capabilities the parent keeps: the helper's own (`CAP_SYS_ADMIN`) and the two it needs to
+/// drop everything else (`CAP_SETPCAP`, `CAP_SETGID`). The helper drops the last two the moment it
+/// starts. No `CAP_SETUID`: neither process changes its user id.
+pub const KEEP: &[u32] = &[CAP_SYS_ADMIN, CAP_SETPCAP, CAP_SETGID];
 
 /// The system calls the parent may make: everything the helper makes (the filter stacks, so the
 /// parent's must allow what the helper's start-up and verbs call), the calls that make and wait for
@@ -72,10 +72,6 @@ pub fn calls() -> Vec<i64> {
         nr::GETEGID,
         nr::GETGROUPS,
         nr::SETGROUPS,
-        nr::SETUID,
-        nr::SETGID,
-        nr::SETRESUID,
-        nr::SETRESGID,
         nr::FUTEX,
         nr::SCHED_YIELD,
         nr::SECCOMP,
@@ -277,6 +273,17 @@ pub fn run(stream: UnixStream, gadgets: &[Gadget]) -> ! {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn the_parent_keeps_no_capability_and_allows_no_call_that_changes_a_user_or_group_id() {
+        assert_eq!(KEEP, [CAP_SYS_ADMIN, CAP_SETPCAP, CAP_SETGID]);
+        let calls = calls();
+        for call in [nr::SETUID, nr::SETRESUID, nr::SETGID, nr::SETRESGID] {
+            assert!(!calls.contains(&call), "{call}");
+        }
+        // The groups are cleared with `setgroups` (only when they are not empty already), which stays.
+        assert!(calls.contains(&nr::SETGROUPS));
+    }
 
     /// A parent with a script: each start gives the next pid, each wait the next ending and the
     /// time the helper ran for. Everything it does is written down.

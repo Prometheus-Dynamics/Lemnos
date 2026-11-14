@@ -28,8 +28,8 @@ The board's gadget is the one `R1` checks. Its board file has a `usb-gadget` dev
 4. **The two processes.** While the gadget is up, `ps -o pid,ppid,user,comm -C lemnosd-gadget,lemnosd-gsuper` shows
    `lemnosd-gsuper` (the root parent, the daemon's child) and `lemnosd-gadget` (the helper, the parent's child),
    both uid 0. In `/proc/<pid>/status`: the helper's `CapEff` and `CapPrm` are only bit 21 (`CAP_SYS_ADMIN`),
-   `NoNewPrivs: 1`, `Seccomp: 2`; the parent's are bits 6, 7, 8 and 21 (`CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`,
-   `CAP_SYS_ADMIN`: `supervisor::KEEP`), `Seccomp: 2`. The daemon's own `CapEff` shows only bit 17 (`CAP_SYS_RAWIO`).
+   `NoNewPrivs: 1`, `Seccomp: 2`; the parent's are bits 6, 8 and 21 (`CAP_SETGID`, `CAP_SETPCAP`,
+   `CAP_SYS_ADMIN`: `supervisor::KEEP`, `CapEff` 0x200140), `Seccomp: 2`. The daemon's own `CapEff` shows only bit 17 (`CAP_SYS_RAWIO`).
    Record the values.
 5. **The helper dies, and is forked again.** This was not run in the QEMU guest (the re-fork is proven there with a
    fake process, and the filter stack with forked children), so it is a board-only check. The operator reads

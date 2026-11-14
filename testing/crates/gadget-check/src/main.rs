@@ -262,6 +262,12 @@ fn main() -> ExitCode {
             parent.is_some_and(|(_, uid, _, ppid)| uid == 0 && Some(ppid) == daemon.pid()),
             "the root parent runs as root, as the child of the daemon",
         );
+        // CAP_SYS_ADMIN, CAP_SETPCAP and CAP_SETGID (0x200140): no CAP_SETUID, which nothing in
+        // either process uses.
+        check(
+            parent.is_some_and(|(_, _, caps, _)| caps == 0x20_0140),
+            "the root parent holds CAP_SYS_ADMIN, CAP_SETPCAP and CAP_SETGID only (CapEff 0x200140)",
+        );
         check(
             fs::write("/sys/bus/platform/drivers/dummy_udc/bind", "dummy_udc.0").is_ok(),
             "the controller appears (the platform driver takes dummy_udc.0 back)",

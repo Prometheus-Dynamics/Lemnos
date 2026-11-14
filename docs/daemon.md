@@ -142,14 +142,16 @@ file, fixed when the parent is forked: each gadget's controller name, the owner 
 uid and gid), the gadget's settings, and the board's serial source (the identity device's settings).
 
 **What they can do.** The helper keeps uid 0 and the single capability `CAP_SYS_ADMIN`, which the
-FunctionFS mount and its unmount need. The parent keeps uid 0 and four: `CAP_SYS_ADMIN`, and
-`CAP_SETPCAP`, `CAP_SETUID` and `CAP_SETGID`, which the helper needs to drop everything else when it
+FunctionFS mount and its unmount need. The parent keeps uid 0 and three: `CAP_SYS_ADMIN`, and
+`CAP_SETPCAP` and `CAP_SETGID`, which the helper needs to drop everything else when it
 starts and drops itself at once. The parent holds them because each helper it forks inherits its sets
 and `privilege::drop_to` runs in that child: `CAP_SETPCAP` is what removes every other capability from
 the helper's bounding set (`PR_CAPBSET_DROP`) and sets its permitted and effective sets to
-`CAP_SYS_ADMIN` alone; `CAP_SETGID` is what clears the supplementary groups the child inherited
-(`setgroups`); `CAP_SETUID` is there for `drop_to`'s change of user id, which the helper does not make
-(root to root, so no `setuid` is called and its seccomp allowlist does not need one for it). Under systemd both also run under the unit's bounding set,
+`CAP_SYS_ADMIN` alone; `CAP_SETGID` is what clears the supplementary groups (`setgroups`, made only when
+they are not already empty: the parent clears the groups it got from the root phase as it starts, and
+the helper it forks inherits none). Neither process changes its user or group id (root to root, so
+`drop_to` makes no `setuid` or `setgid`), so neither holds `CAP_SETUID`, and the parent's allowlist has
+no `setuid`, `setresuid`, `setgid` or `setresgid`; it keeps `setgroups`. Under systemd both also run under the unit's bounding set,
 `NoNewPrivileges`, `ProtectSystem=strict` and the unit's `SystemCallFilter` (which the gadget drop-in
 widens by `mount` and `umount2`). Each also runs under a seccomp allowlist of its own (below). The helper
 writes only under the configfs gadget tree it makes (`/sys/kernel/config/usb_gadget/lemnos-NAME`), the
