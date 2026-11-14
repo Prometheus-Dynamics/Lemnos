@@ -1238,6 +1238,9 @@ const KEYS: &[Key] = &[
     Key::optional("uboot_watchdog_ms", Kind::Int),
     // Listed only so that giving it is refused by name (see `uboot_env_place`).
     Key::optional("uboot_env_partuuid", Kind::Str),
+    // The good-boot deadline in seconds: read by `lemnos-ctl tree --good-boot-unit` (the unit's drop-in) and
+    // checked here, so a bad value is refused at the driver too (see `lemnos_slot_store::goodboot`).
+    Key::optional("good_boot_s", Kind::Int),
 ];
 
 /// The settings `SystemReboot` reads. The boot-file check before its restart reads the boot files
@@ -1431,6 +1434,8 @@ impl Lifecycle for SystemSlots {
                 .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
         }
         boot_table(cfg)?;
+        lemnos_slot_store::goodboot::deadline_from_board(cfg.int(lemnos_slot_store::goodboot::KEY))
+            .map_err(|_| ConfigError::new(lemnos_slot_store::goodboot::KEY, lemnos_slot_store::goodboot::REASON))?;
         if cfg.str("record") == Some("uboot") {
             uboot_env_place(cfg)?;
         }
