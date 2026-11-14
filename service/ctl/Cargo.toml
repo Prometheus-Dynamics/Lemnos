@@ -22,10 +22,12 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 # For `tree` and the live check of `validate`: the overlay generator and the SoC map.
 lemnos-devtree = { path = "../devtree" }
+# For `security render` and `tree --boot-dir`: the switch record and its view, the Pi firmware's fixed files and the slot records.
+lemnos-slot-store = { path = "../../drivers/slot-store" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
-# For `security render`: the switch record and its view.
-lemnos-slot-store = { path = "../../drivers/slot-store" }
+# For the slot layout contract (`contracts/slot-layout.toml`), read by `tree --boot-dir`.
+toml = { workspace = true }
 # For `tree`: the built-in drivers' manifests, which say what each device needs.
 lemnosd = { path = "../lemnosd" }
 

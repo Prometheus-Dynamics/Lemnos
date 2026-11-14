@@ -12,6 +12,8 @@ description = "Makes a device-tree overlay from a Lemnos board file and a SoC ma
 workspace = true
 
 [dependencies]
+# The overlay marker's digest (the same SHA-256 the slot manifest uses).
+sha2 = { version = "0.10", default-features = false }
 lemnos-core = { path = "../../engine/core" }
 lemnos-host = { path = "../../engine/host" }
 serde = { workspace = true, features = ["derive", "std"] }

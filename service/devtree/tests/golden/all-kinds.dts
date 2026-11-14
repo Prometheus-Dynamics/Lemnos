@@ -15,9 +15,9 @@
 	};
 	// the runtime name comes out of alias i2c0
 	fragment@1 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c0 = "/bus/i2c@1000"; };
+			i2c0 = "/bus/i2c@1000";
 		};
 	};
 	// spi: an SPI controller (alias spi0, the name "spidev0.0")
@@ -29,9 +29,9 @@
 	};
 	// the runtime name comes out of alias spi0
 	fragment@3 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { spi0 = "/bus/spi@2000"; };
+			spi0 = "/bus/spi@2000";
 		};
 	};
 	// uart: a serial port (alias serial0) on GPIO14, GPIO15
@@ -45,9 +45,9 @@
 	};
 	// the runtime name comes out of alias serial0
 	fragment@5 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { serial0 = "/bus/uart@3000"; };
+			serial0 = "/bus/uart@3000";
 		};
 	};
 	// pwm: a PWM block on GPIO18
@@ -100,6 +100,16 @@
 		target-path = "/bus/gpio@9000";
 		__overlay__ {
 			lemnos-hog-9 { gpio-hog; gpios = <9 0>; output-high; line-name = "held high from power-on until the fan driver takes it"; };
+		};
+	};
+	fragment@13 {
+		// The marker: the live tree names this board and this overlay's text.
+		target-path = "/";
+		__overlay__ {
+			lemnos {
+				lemnos,board = "all-kinds";
+				lemnos,overlay-sha256 = "b0a1b5f4ae3fc45d20f0f7095d28c319ddcbc75f88c48a4e1dda05a74b10bc16";
+			};
 		};
 	};
 };

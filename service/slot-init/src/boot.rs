@@ -62,6 +62,17 @@ pub const UBI_DEVICE: &str = "ubi0";
 /// The kernel log kept on the data partition after a failure.
 pub const DATA_LOG: &str = "last-failure.log";
 
+/// Where the Pi firmware states its boot count, in the device tree (a big-endian word). The count
+/// is the number of restarts since the last power loss or clear: the daemon clears it when a boot
+/// is good, so it counts every restart of a run of failures, and it needs no write here. Absent on
+/// every other board.
+pub const BOOT_COUNT: &str = "proc/device-tree/chosen/bootloader/count";
+/// Restarts without a good boot after which a refusal no slot can answer goes to the firmware's
+/// flashing mode instead of restarting again. Eight rides out a transient (a slow card, a late
+/// device) and, at the rescue wait (30 s) plus a boot each, is a few minutes. A board sent there
+/// waits until it is flashed or power-cycled: RPIBOOT has no timeout.
+pub const FLASH_AFTER: u32 = 8;
+
 /// Where things are: `/` and its usual places on a board, a temporary directory in the tests.
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -252,9 +263,43 @@ impl Boot<'_> {
         self.ops.restart(argument);
     }
 
+    /// The firmware's boot count, when this board has one.
+    fn boot_count(&self) -> Option<u32> {
+        let bytes = fs::read(self.env.at(BOOT_COUNT)).ok()?;
+        Some(u32::from_be_bytes(<[u8; 4]>::try_from(bytes).ok()?))
+    }
+
+    /// The restarts have run out: when the count says [`FLASH_AFTER`] restarts went by without a
+    /// good boot, asks the firmware for its flashing mode and restarts into it. Writes nothing to
+    /// the boot partition and changes no slot's record; the reason is in the kernel log and the
+    /// saved log. Returns whether the request was made (the restart was then issued).
+    fn flash_mode(&self, why: &str) -> bool {
+        let Some(count) = self.boot_count().filter(|count| *count >= FLASH_AFTER) else {
+            return false;
+        };
+        self.log(&format!(
+            "{count} restarts without a good boot, the last refused with: {why}; asking the firmware for its flashing mode (RPIBOOT): this board waits until it is flashed or power-cycled"
+        ));
+        match self.ops.request_flash_mode() {
+            Ok(()) => {
+                self.restart(None);
+                true
+            }
+            Err(error) => {
+                self.log(&format!(
+                    "the firmware's flashing mode was not taken: {error}"
+                ));
+                false
+            }
+        }
+    }
+
     fn rescue(&self, why: &str) -> String {
         self.log(&format!("no slot can start: {why}"));
         self.save_log();
+        if self.flash_mode(why) {
+            return format!("no slot can start: {why}");
+        }
         self.log(&format!(
             "restarting in {} s",
             self.env.rescue_wait.as_secs()
@@ -402,6 +447,21 @@ impl Boot<'_> {
             self.ops.sleep(Duration::from_millis(100));
         }
         Err(last)
+    }
+
+    /// The board overlay's marker in the live device tree: `(board, digest)`, or `None` when either
+    /// property is missing. The tree is under `/proc`, which the boot mounted before this.
+    fn live_overlay(&self) -> Option<(String, String)> {
+        let read = |name: &str| {
+            fs::read(self.env.at(&format!("proc/device-tree/lemnos/{name}")))
+                .ok()
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .trim_end_matches('\0')
+                        .to_string()
+                })
+        };
+        Some((read("lemnos,board")?, read("lemnos,overlay-sha256")?))
     }
 
     fn verify_boot_files(
@@ -992,6 +1052,16 @@ impl Boot<'_> {
         }
         if let Err(why) = self.verify_boot_files(&slot, &manifest, slot == state.default) {
             return self.boot_files_mismatch(&slot, &why);
+        }
+        // The board overlay the firmware should have loaded: its marker is in the live tree. The
+        // firmware drops a missing overlay without a word, so an absent or foreign marker is a
+        // named failure of this boot, not a silent boot of the base tree.
+        if let Some(overlay) = &manifest.overlay {
+            let live = self.live_overlay();
+            let live = live.as_ref().map(|(b, d)| (b.as_str(), d.as_str()));
+            if let Some(why) = bootcheck::overlay_mismatch(overlay, live) {
+                return self.fail(&why);
+            }
         }
         let release = self.release();
         if !manifest.kernel.is_empty() && manifest.kernel != release {

@@ -1055,3 +1055,36 @@ fn a_watchdog_name_is_found_or_missed_by_the_start_check() {
         "{problems:?}"
     );
 }
+
+/// The overlay's marker names the board and carries the digest of the overlay's text before it:
+/// the start check compares that digest with the slot's manifest.
+#[test]
+fn the_overlay_marker_names_the_board_and_its_own_text() {
+    use sha2::{Digest, Sha256};
+    let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
+    let digest = out.overlay_sha256.clone().expect("an overlay has a marker");
+    // The marker is the last fragment: the body is everything before it.
+    let marker_at = out.overlay.rfind("\tfragment@").unwrap();
+    let body = &out.overlay[..marker_at];
+    let want: String = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest, want,
+        "the marker is the digest of the text before it"
+    );
+    assert!(
+        out.overlay
+            .contains(&format!("lemnos,overlay-sha256 = \"{digest}\";"))
+    );
+    assert!(out.overlay.contains("lemnos,board = \"reference\";"));
+}
+
+/// A fragment is merged into a board's own file, which has no root to carry the marker: none is
+/// made for it.
+#[test]
+fn a_fragment_has_no_marker() {
+    let out = generated(REFERENCE_BOARD, REFERENCE_MAP).unwrap();
+    assert!(out.overlay_sha256.is_some());
+}

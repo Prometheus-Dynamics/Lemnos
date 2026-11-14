@@ -15,9 +15,9 @@
 	};
 	// the runtime name comes out of alias i2c1
 	fragment@1 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c1 = "/axi/pcie@1000120000/rp1/i2c@74000"; };
+			i2c1 = "/axi/pcie@1000120000/rp1/i2c@74000";
 		};
 	};
 	// i2c: an I2C bus on RP1 (designware): the camera and display connector's bus, the board's i2c-10 (alias i2c10, the name "i2c-10") on GPIO38, GPIO39
@@ -31,9 +31,9 @@
 	};
 	// the runtime name comes out of alias i2c10
 	fragment@3 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c10 = "/axi/pcie@1000120000/rp1/i2c@88000"; };
+			i2c10 = "/axi/pcie@1000120000/rp1/i2c@88000";
 		};
 	};
 	// pwm: a PWM channel on RP1; the fan's pulse output (a `pwm:NODE:CHANNEL` name's NODE is this path) on GPIO45
@@ -86,6 +86,16 @@
 		target-path = "/cam0_reg";
 		__overlay__ {
 			status = "disabled";
+		};
+	};
+	fragment@11 {
+		// The marker: the live tree names this board and this overlay's text.
+		target-path = "/";
+		__overlay__ {
+			lemnos {
+				lemnos,board = "reference";
+				lemnos,overlay-sha256 = "40316b91d529526b1aa073a4ad4746ce17ce56b8ee95278773a2b937fe366b51";
+			};
 		};
 	};
 };

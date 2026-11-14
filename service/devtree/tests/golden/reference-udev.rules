@@ -8,5 +8,8 @@
 SUBSYSTEM=="misc", KERNEL=="lemnos", GROUP="lemnos", MODE="0660"
 SUBSYSTEM=="misc", KERNEL=="lemnos-*", GROUP="lemnos", MODE="0660"
 
+# The firmware mailbox the boot count is cleared through (/dev/vcio, a misc device): the slot driver's tryboot record.
+SUBSYSTEM=="misc", KERNEL=="vcio", GROUP="lemnos", MODE="0660"
+
 # The dma-heaps the board's drivers allocate from: the board file's [host] dma_heaps (default linux,cma), and every dma-buf stream's heap. Each is /dev/dma_heap/<name>.
 SUBSYSTEM=="dma_heap", KERNEL=="linux,cma", GROUP="lemnos", MODE="0660"

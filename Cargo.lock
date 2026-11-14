@@ -741,6 +741,7 @@ dependencies = [
  "lemnos-wire",
  "lemnosd",
  "syn 3.0.10",
+ "toml",
 ]
 
 [[package]]
@@ -751,6 +752,7 @@ dependencies = [
  "lemnos-host",
  "lemnosd",
  "serde",
+ "sha2 0.10.9",
  "toml",
 ]
 
@@ -1497,6 +1499,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-rpi-firmware-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-driver-status-light"
 version = "2.0.1-dev"
 dependencies = [
@@ -1576,6 +1586,7 @@ dependencies = [
  "lemnos-contract-system-reboot",
  "lemnos-contract-system-slots",
  "lemnos-core",
+ "lemnos-driver-rpi-firmware-sys",
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-sim",
@@ -1981,6 +1992,7 @@ dependencies = [
 name = "lemnos-slot-init"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-driver-rpi-firmware-sys",
  "lemnos-linux-sys",
  "lemnos-slot-store",
  "toml",

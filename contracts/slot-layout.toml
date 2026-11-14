@@ -1,0 +1,101 @@
+# The files of one slot's boot directory, for the Raspberry Pi firmware (`rpi-tryboot`), and the
+# names that the generated config.txt and tryboot.txt, the installer, the bundle manifest check and
+# the every-boot check all use. Version 3. A reader refuses any other version and any key it does
+# not know. The Rust constants in drivers/slot-store/src/layout.rs are tested against this file.
+#
+# What changed from version 2 (unreleased): a new top-level table `[[record]]` (the boot partition's
+# pre-created record files), with the keys name (the visible name: lower case, 8.3 with a dot, no
+# space), role (trial, reason or episodes), firmware (the firmware kinds that use it), bytes (1024,
+# the two-copy record's size) and source (generated). Version 2 readers refuse it, by version and
+# by key: this is not an additive change. No other key, file or meaning changed.
+#
+# Rule for every contracts/*.toml file: any new key, table or key meaning is a new version of that
+# file, and its reader refuses the old version and any key it does not know. Nothing is added to a
+# version in place.
+#
+# The record files are the boot partition's root files that the image builder pre-creates for the
+# rpi-tryboot form: `[[record]]` below. Each has a visible name (lower case, 8.3 with a dot, no
+# space: what the generator writes and what a script sees) and the FAT directory name that name
+# stands for (eight base bytes and three extension bytes, space padded, upper case: the 11 bytes the
+# raw locator matches; `Kind::visible_name` and `Kind::file_name` in drivers/slot-store/src/twocopy.rs).
+#
+# Each file is a path under the slot's directory (slots/<id>/ on the boot partition). The firmware
+# finds every one of them through `os_prefix` (config_txt_boot.adoc, `os_prefix`: kernels,
+# initramfs, cmdline.txt, dtbs and overlays), and overlays only through `overlays/README` (see the
+# same section).
+#
+# `source` says who makes the file:
+#   build      the image builder supplies it (the slot's kernel, initramfs, device tree, command
+#              line and board overlay: see docs/boards.md, "The board overlay file").
+#   generated  `lemnos-ctl tree BOARD --boot-dir DIR` writes it, under DIR/slot/ with the same path
+#              below it (the image builder copies DIR/slot/ into slots/<id>/ and types no name).
+version = 3
+
+[[file]]
+name = "kernel8.img"
+role = "kernel"
+firmware = ["rpi-tryboot"]
+required = true
+source = "build"
+
+[[file]]
+name = "initramfs.cpio"
+role = "initramfs"
+firmware = ["rpi-tryboot"]
+required = true
+source = "build"
+
+[[file]]
+name = "board.dtb"
+role = "device-tree"
+firmware = ["rpi-tryboot"]
+required = true
+source = "build"
+
+[[file]]
+name = "cmdline.txt"
+role = "cmdline"
+firmware = ["rpi-tryboot"]
+required = true
+source = "build"
+
+[[file]]
+name = "overlays/README"
+role = "overlay-readme"
+firmware = ["rpi-tryboot"]
+required = true
+source = "generated"
+
+[[file]]
+name = "overlays/lemnos-board.dtbo"
+role = "board-overlay"
+firmware = ["rpi-tryboot"]
+required = true
+source = "build"
+
+# The pre-created record files, at the boot partition's root (not under the slot directory). `role`
+# names the record (trial: the slot id and its attempts left; reason: why a trial fell back; episodes:
+# the episodes a slot has had against it, the count-based fallback). Each is two sectors of the
+# two-copy record layout (drivers/slot-store/src/twocopy.rs), `bytes` = 1024. `source` is
+# `generated`: `lemnos-ctl tree BOARD --boot-dir DIR` writes it.
+
+[[record]]
+name = "trial.rec"
+role = "trial"
+firmware = ["rpi-tryboot"]
+bytes = 1024
+source = "generated"
+
+[[record]]
+name = "reason.rec"
+role = "reason"
+firmware = ["rpi-tryboot"]
+bytes = 1024
+source = "generated"
+
+[[record]]
+name = "episodes.rec"
+role = "episodes"
+firmware = ["rpi-tryboot"]
+bytes = 1024
+source = "generated"

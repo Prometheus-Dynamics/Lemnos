@@ -6,16 +6,16 @@
 	status = "okay";
 };
 // the runtime name comes out of alias i2c0
-/ {
-	aliases { i2c0 = "/soc/i2c@91405000"; };
+&{/aliases} {
+	i2c0 = "/soc/i2c@91405000";
 };
 // spi: an SPI controller on the K230 (snps,dwc-ssi-1.01a) (alias spi0, the name "spidev0.0")
 &{/soc/spi@91584000} {
 	status = "okay";
 };
 // the runtime name comes out of alias spi0
-/ {
-	aliases { spi0 = "/soc/spi@91584000"; };
+&{/aliases} {
+	spi0 = "/soc/spi@91584000";
 };
 // watchdog: the hardware watchdog on the K230 (snps,dw-wdt)
 &{/soc/wdt0@91106000} {

@@ -24,6 +24,7 @@ pub mod fallback;
 pub mod fatimage;
 pub mod firmware;
 pub mod json;
+pub mod layout;
 pub mod manifest;
 pub mod records;
 pub mod security;

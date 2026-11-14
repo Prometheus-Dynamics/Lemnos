@@ -619,6 +619,29 @@ fn an_install_the_service_restart_cut_short_is_cleared_and_reported() {
     assert!(again.install.is_none());
 }
 
+/// A boot is good only when the slot's boot files match its manifest, read raw from the boot disk.
+/// With a firmware and no boot disk the confirm still happens (the trial worked), the boot count is
+/// kept, and the state says why: nothing clears a count for a boot that was not verified.
+#[test]
+fn a_confirm_on_a_firmware_board_keeps_the_count_when_the_boot_files_cannot_be_read() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+    board.told.take();
+    board.boot_into("os-2");
+    let plain = board.dir.0.join("not-a-mailbox");
+    fs::write(&plain, b"plain").unwrap();
+    board.slots.firmware = Some(crate::count::Firmware {
+        device_tree: board.dir.0.join("device-tree"),
+        vcio: plain,
+    });
+    board.slots.confirm().unwrap();
+    assert_eq!(board.meta("os-2").get("GOOD"), "yes");
+    let error = board.state().error;
+    assert!(error.contains("os-2 is not good yet"), "{error}");
+    assert!(error.contains("the count is kept"), "{error}");
+}
+
 #[test]
 fn a_confirmed_trial_becomes_the_default_and_old_slots_past_keep_go() {
     let mut board = Board::new("os-1");
@@ -3047,13 +3070,10 @@ fn check_config_names_the_bad_setting() {
     )]));
     assert!(reboot.is_ok());
     assert_eq!(
-        <SystemReboot as Lifecycle>::check_config(&Config::new(&[(
-            "record",
-            ConfigValue::Str("x")
-        )]))
-        .unwrap_err()
-        .key,
-        "record"
+        <SystemReboot as Lifecycle>::check_config(&Config::new(&[("keys", ConfigValue::Str("x"))]))
+            .unwrap_err()
+            .key,
+        "keys"
     );
 }
 

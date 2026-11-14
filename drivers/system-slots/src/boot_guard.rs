@@ -9,8 +9,6 @@
 //! refused and the board stays up; on a slow period the same check only reports.
 
 use std::fs;
-use std::io;
-use std::path::Path;
 
 use lemnos_slot_store::bootcheck;
 use lemnos_slot_store::manifest::Manifest;
@@ -18,33 +16,63 @@ use lemnos_slot_store::store::{Layout, Meta, State, valid_id};
 
 use crate::boot::BootRecord;
 
-/// Reads a boot file of the mounted boot partition: `None` when it is not there.
-fn read_mounted(root: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
+/// The boot partition's block node as the board's `boot_sources` resolve it, or why it can't.
+pub type Node = Result<std::path::PathBuf, String>;
+
+/// A boot file's bytes, read through the caller's reader: `None` when the file is not there.
+pub type Read<'a> = &'a mut dyn FnMut(&str) -> Result<Option<Vec<u8>>, String>;
+
+/// Reads a boot file raw from the boot partition's block node (`fat_read`: read-only, nothing
+/// mounted). The node is an error when the partition's device is not known: the read is then refused
+/// by name, and the check says so.
+pub fn read_raw(node: &Node, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let node = node.as_ref().map_err(|why| {
+        format!("the boot partition's device isn't known, so its files can't be read: {why}")
+    })?;
+    let mut file = fs::File::open(node).map_err(|e| format!("{}: {e}", node.display()))?;
+    lemnos_slot_store::bootcheck::fat_read(&mut file, path)
+}
+
+/// Reads a boot file of a mounted boot partition (the tests' view of a boot partition). `None`
+/// when it is not there.
+#[cfg(test)]
+pub fn read_mounted(root: &std::path::Path, path: &str) -> Result<Option<Vec<u8>>, String> {
     match fs::read(root.join(path)) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// Whether slot `id`'s boot files match its manifest. The error names what does not.
+/// Whether slot `id`'s boot files match its manifest, read raw from `node`. The error names what
+/// does not.
 ///
 /// # Errors
 ///
 /// The manifest is missing or not readable, or a boot file does not match.
-pub fn verified(layout: &Layout, id: &str, is_default: bool) -> Result<(), String> {
+pub fn verified(layout: &Layout, node: &Node, id: &str, is_default: bool) -> Result<(), String> {
+    verified_with(layout, id, is_default, &mut |path| read_raw(node, path))
+}
+
+/// [`verified`] through `read`.
+///
+/// # Errors
+///
+/// As [`verified`].
+pub fn verified_with(
+    layout: &Layout,
+    id: &str,
+    is_default: bool,
+    read: Read<'_>,
+) -> Result<(), String> {
     if !valid_id(id) {
         return Err(format!("{id:?} isn't a slot id"));
     }
     let text = fs::read_to_string(layout.manifest(id))
         .map_err(|e| format!("{id}'s manifest can't be read: {e}"))?;
     let manifest = Manifest::parse(&text).map_err(|e| format!("{id}'s manifest: {e}"))?;
-    let found = bootcheck::check(id, &manifest.boot_files, |path| {
-        read_mounted(&layout.boot, path)
-    });
-    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, is_default, |path| {
-        read_mounted(&layout.boot, path)
-    });
+    let found = bootcheck::check(id, &manifest.boot_files, |path| read(path));
+    let uboot = bootcheck::uboot_check(id, &manifest.boot_files, is_default, |path| read(path));
     if found.is_empty() && uboot.is_none() {
         return Ok(());
     }
@@ -53,7 +81,8 @@ pub fn verified(layout: &Layout, id: &str, is_default: bool) -> Result<(), Strin
     Err(list.join("; "))
 }
 
-/// The check. Returns a note when it changed the default, `None` when there was nothing to do.
+/// The check, reading the boot files raw from `node`. Returns a note when it changed the default,
+/// `None` when there was nothing to do.
 ///
 /// # Errors
 ///
@@ -61,18 +90,33 @@ pub fn verified(layout: &Layout, id: &str, is_default: bool) -> Result<(), Strin
 /// error refuses the restart; without it (a slow period) it is only reported.
 pub fn check(
     layout: &Layout,
+    node: &Node,
     record: &mut dyn BootRecord,
     restart: bool,
+) -> Result<Option<String>, String> {
+    check_with(layout, record, restart, &mut |path| read_raw(node, path))
+}
+
+/// [`check`] through `read`.
+///
+/// # Errors
+///
+/// As [`check`].
+pub fn check_with(
+    layout: &Layout,
+    record: &mut dyn BootRecord,
+    restart: bool,
+    read: Read<'_>,
 ) -> Result<Option<String>, String> {
     let state = State::load(layout);
     if !valid_id(&state.default) {
         return Ok(None);
     }
-    let why = match verified(layout, &state.default, true) {
+    let why = match verified_with(layout, &state.default, true, read) {
         Ok(()) => return Ok(None),
         Err(why) => why,
     };
-    if valid_id(&state.previous) && verified(layout, &state.previous, false).is_ok() {
+    if valid_id(&state.previous) && verified_with(layout, &state.previous, false, read).is_ok() {
         repoint(layout, record, &state, &why)?;
         return Ok(Some(format!(
             "{} doesn't match its manifest ({why}): {} is the default now",

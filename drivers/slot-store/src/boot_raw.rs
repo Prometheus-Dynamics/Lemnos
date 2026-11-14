@@ -281,6 +281,12 @@ pub trait BootRaw {
     fn reason(&mut self) -> Result<Option<String>, String>;
     /// Keeps `reason` in the reason record (the record only; empty text clears it).
     fn set_reason(&mut self, reason: &str) -> Result<(), String>;
+    /// The episodes recorded against a slot, `None` when none are.
+    fn episodes(&mut self) -> Result<Option<(String, u8)>, String>;
+    /// Records `episodes` against `slot` (zero clears the record).
+    fn set_episodes(&mut self, slot: &str, episodes: u8) -> Result<(), String>;
+    /// Clears the episodes record.
+    fn clear_episodes(&mut self) -> Result<(), String>;
 
     /// Arms a trial: the trial pointer first, then the record. A cut after the pointer leaves no
     /// record, so no tryboot restart happens and the old pointer is never read; the record is written
@@ -377,6 +383,24 @@ impl BootRaw for Boot {
     fn set_reason(&mut self, reason: &str) -> Result<(), String> {
         self.records
             .set_reason(&mut self.dev, reason)
+            .map_err(|e| e.to_string())
+    }
+
+    fn episodes(&mut self) -> Result<Option<(String, u8)>, String> {
+        self.records
+            .episodes(&mut self.dev)
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_episodes(&mut self, slot: &str, episodes: u8) -> Result<(), String> {
+        self.records
+            .set_episodes(&mut self.dev, slot, episodes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn clear_episodes(&mut self) -> Result<(), String> {
+        self.records
+            .clear_episodes(&mut self.dev)
             .map_err(|e| e.to_string())
     }
 }

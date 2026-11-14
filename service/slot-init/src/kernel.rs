@@ -308,4 +308,114 @@ mod tests {
         }
         assert_eq!(named, listed);
     }
+
+    fn repo() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// The mailbox symbols the contract names for the Pi firmware family.
+    const MAILBOX_GROUP: [&str; 5] = [
+        "BRCM_CHAR_DRIVERS",
+        "MAILBOX",
+        "BCM2835_MBOX",
+        "BCM_VCIO",
+        "RASPBERRYPI_FIRMWARE",
+    ];
+
+    /// slot-init's Pi form can ask the firmware for its flashing mode through the mailbox, so the
+    /// contract must carry the built-in group for it, and the group is there only because slot-init
+    /// uses the mailbox: take either away and this fails. (The version is the contract's: the group
+    /// is a new meaning, version 2.)
+    #[test]
+    fn slot_inits_use_of_the_mailbox_is_tied_to_the_contracts_firmware_group() {
+        let file: toml::Table = include_str!("../../../contracts/slot-kernel.toml")
+            .parse()
+            .unwrap();
+        assert_eq!(file["version"].as_integer(), Some(2));
+        let cargo = std::fs::read_to_string(repo().join("service/slot-init/Cargo.toml")).unwrap();
+        let sys = std::fs::read_to_string(repo().join("service/slot-init/src/sys.rs")).unwrap();
+        let uses = cargo.contains("lemnos-driver-rpi-firmware-sys")
+            && sys.contains("lemnos_driver_rpi_firmware_sys::Mailbox");
+        let group: Vec<String> = file["firmware"]["rpi-tryboot"]["all"]
+            .as_array()
+            .expect("the contract has the rpi-tryboot group")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            uses,
+            "slot-init no longer uses the mailbox: drop the group from the contract too"
+        );
+        assert_eq!(
+            group, MAILBOX_GROUP,
+            "the group names exactly what the mailbox needs"
+        );
+        // /dev/vcio exists only through devtmpfs: it is required of every slot board.
+        let always = file["always"]["all"].as_array().unwrap();
+        assert!(always.iter().any(|v| v.as_str() == Some("DEVTMPFS")));
+    }
+
+    /// No static device node: slot-init never makes one, so `/dev/vcio` is whatever devtmpfs gives.
+    #[test]
+    fn slot_init_makes_no_device_node_of_its_own() {
+        for file in ["boot.rs", "sys.rs", "partition.rs", "kernel.rs", "ops.rs"] {
+            let text =
+                std::fs::read_to_string(repo().join("service/slot-init/src").join(file)).unwrap();
+            let code: String = text.split("#[cfg(test)]").next().unwrap().to_string();
+            for banned in ["mknod", "makedev", "CharDevice"] {
+                assert!(!code.contains(banned), "{file} has {banned}");
+            }
+        }
+    }
+
+    /// The checker the contract's firmware group is read by refuses a configuration in which a
+    /// symbol of the group is `=m` or unset, naming the symbol, and accepts one with all built in.
+    #[test]
+    fn the_checker_refuses_a_mailbox_symbol_that_is_a_module_or_unset() {
+        let dir = std::env::temp_dir().join(format!("slot-init-kconfig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = repo().join("scripts/check-kernel-config.py");
+        let run = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::process::Command::new("python3")
+                .arg("-I")
+                .arg(&script)
+                .arg("--check-config")
+                .arg(&path)
+                .args(["--firmware", "rpi-tryboot"])
+                .output()
+                .unwrap()
+        };
+        let mut good = String::from("CONFIG_DEVTMPFS=y\n");
+        for name in MAILBOX_GROUP {
+            good.push_str(&format!("CONFIG_{name}=y\n"));
+        }
+        let out = run("good.config", &good);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for symbol in MAILBOX_GROUP.iter().copied().chain(["DEVTMPFS"]) {
+            let as_module =
+                good.replace(&format!("CONFIG_{symbol}=y"), &format!("CONFIG_{symbol}=m"));
+            let out = run("module.config", &as_module);
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(!out.status.success(), "{symbol} =m was accepted");
+            assert!(
+                err.contains(&format!("CONFIG_{symbol} must be built in")) && err.contains("=m"),
+                "{err}"
+            );
+            let unset = good.replace(&format!("CONFIG_{symbol}=y\n"), "");
+            let out = run("unset.config", &unset);
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(!out.status.success(), "{symbol} unset was accepted");
+            assert!(
+                err.contains(&format!("CONFIG_{symbol} must be built in")) && err.contains("unset"),
+                "{err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

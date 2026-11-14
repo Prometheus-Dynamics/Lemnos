@@ -15,7 +15,8 @@ boots a slot (`docs/slots.md`). The requirements themselves are the machine-read
 [contracts/slot-kernel.toml](../contracts/slot-kernel.toml); this table is checked against it, and
 the gate fails on a difference, naming the symbol. The **When** column names the group of the file
 that holds the symbol: `always.all` (every slot board), `kind.disk.all` and `kind.disk.one_of` (an image of
-kind `disk`), `kind.mtd.all` and `kind.mtd.one_of` (an image of kind `mtd`, raw NAND), `optional.all`
+kind `disk`), `kind.mtd.all` and `kind.mtd.one_of` (an image of kind `mtd`, raw NAND), `firmware.rpi-tryboot.all` (a board of the Raspberry Pi firmware family, whose slot-init
+asks the firmware for its flashing mode through `/dev/vcio`), `optional.all`
 (named, not enforced), `initramfs` (the decompressor of the image's initramfs), `board` (a per-SoC storage
 host, board data, not in the file) or `none` (not needed). **Checked at boot** is `yes` exactly for the
 symbols slot-init checks when it boots (`boot_check.checked` in the file); slot-init names one it finds
@@ -54,6 +55,11 @@ or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were 
 | `CONFIG_DEVTMPFS` | `/dev`, where the partitions and UBI nodes appear without udev | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_PROC_FS` | `/proc`, mounted by slot-init, where the kernel command line and the kernel's filesystem and device lists are | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_SYSFS` | `/sys`, mounted by slot-init, where the block devices and partitions are found | always.all | no | reference; mainline arm64 and riscv |
+| `CONFIG_BRCM_CHAR_DRIVERS` | the Broadcom char-driver menu (a bool), which holds `BCM_VCIO`; the Pi firmware family's mailbox node `/dev/vcio` | firmware.rpi-tryboot.all | no | reference (`bcm2712_defconfig` `=y`) |
+| `CONFIG_MAILBOX` | the mailbox framework (a bool) under `BCM2835_MBOX` and `RASPBERRYPI_FIRMWARE` | firmware.rpi-tryboot.all | no | reference (`bcm2712_defconfig` `=y`) |
+| `CONFIG_BCM2835_MBOX` | the VideoCore mailbox, which `BCM_VCIO` depends on; built in (a module is not loaded by slot-init) | firmware.rpi-tryboot.all | no | reference (`bcm2712_defconfig` `=y`) |
+| `CONFIG_BCM_VCIO` | `/dev/vcio`, the property mailbox from user space (a misc device devtmpfs makes), through which slot-init asks the firmware for RPIBOOT and lemnosd clears the boot count; built in, never a baked device node | firmware.rpi-tryboot.all | no | reference (`bcm2712_defconfig` `=y`; `drivers/char/broadcom/Kconfig`) |
+| `CONFIG_RASPBERRYPI_FIRMWARE` | the firmware driver `vcio.c` calls (`rpi_firmware_property_list`); `default ARCH_BCM2835`, so a full build has it, a fragment must state it | firmware.rpi-tryboot.all | no | reference (`drivers/firmware/Kconfig`: `depends on MAILBOX`) |
 | `CONFIG_BLK_DEV_INITRD` | the slot initramfs | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_RD_GZIP` | the decompressor of the slot initramfs when it is gzip-compressed (the harness's). An image whose initramfs uses another compression sets that decompressor instead: `RD_XZ`, `RD_ZSTD` or `RD_LZ4` (the file's `[initramfs]` table names each one) | initramfs | no | reference (harness `=y`); mainline arm64 |
 | `CONFIG_MODULES` | not needed: slot-init loads no modules | none | no | reference; mainline arm64 |
@@ -504,12 +510,15 @@ harness kernel's own `.config`, after the build.
 | Symbol | Section | Depends on (not stated in bcm2712_defconfig) |
 |---|---|---|
 | `CONFIG_ARCH_SUNXI` | Cross-check against the reference SoC's configuration | none |
+| `CONFIG_BCM2835_MBOX` | Slot board | none |
 | `CONFIG_BCM2835_WDT` | The SoC drivers | none |
+| `CONFIG_BCM_VCIO` | Slot board | none |
 | `CONFIG_BLK_DEV_DM` | Slot path | `CONFIG_BLOCK` |
 | `CONFIG_BLK_DEV_INITRD` | Slot board | none |
 | `CONFIG_BLK_DEV_LOOP` | Slot path | `CONFIG_BLK_DEV` `CONFIG_BLOCK` |
 | `CONFIG_BLK_DEV_NVME` | Slot board | `CONFIG_BLOCK` |
 | `CONFIG_BLOCK` | Slot board | none |
+| `CONFIG_BRCM_CHAR_DRIVERS` | Slot board | none |
 | `CONFIG_CMA` | Symbols of lemnos.ko | none |
 | `CONFIG_CMA_SIZE_MBYTES` | dma-heaps and CMA | none |
 | `CONFIG_COMMON_CLK` | Symbols of lemnos.ko | none |
@@ -547,6 +556,7 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_MEDIA_SUPPORT` | V4L2 capture and media controller | none |
 | `CONFIG_MEMFD_CREATE` | eventfd and memfd (streams) | none |
 | `CONFIG_MFD_RP1` | PIO (RP1 PIO state machines) | `CONFIG_PCI_MSI` |
+| `CONFIG_MAILBOX` | Slot board | none |
 | `CONFIG_MMC_BLOCK` | Slot board | `CONFIG_BLOCK` |
 | `CONFIG_MMC_DW_ROCKCHIP` | Slot board | `CONFIG_MMC_DW` |
 | `CONFIG_MMC_SDHCI_BRCMSTB` | Slot board | none |
@@ -566,6 +576,7 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_PWM_ROCKCHIP` | The SoC drivers | none |
 | `CONFIG_PWM_RP1` | The SoC drivers | none |
 | `CONFIG_PWM_SUN20I` | The SoC drivers | (not in this tree) |
+| `CONFIG_RASPBERRYPI_FIRMWARE` | Slot board | none |
 | `CONFIG_RD_GZIP` | Slot board | none |
 | `CONFIG_REGULATOR` | Symbols of lemnos.ko | none |
 | `CONFIG_RESET_CONTROLLER` | Symbols of lemnos.ko | none |

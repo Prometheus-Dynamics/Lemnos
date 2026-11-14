@@ -15,9 +15,9 @@
 	};
 	// the runtime name comes out of alias i2c0
 	fragment@1 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c0 = "/i2c@fd880000"; };
+			i2c0 = "/i2c@fd880000";
 		};
 	};
 	// i2c: an I2C bus on the RK3588 (alias i2c3, the name "i2c-3") on GPIO48, GPIO49
@@ -31,9 +31,9 @@
 	};
 	// the runtime name comes out of alias i2c3
 	fragment@3 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c3 = "/i2c@feab0000"; };
+			i2c3 = "/i2c@feab0000";
 		};
 	};
 	// spi: an SPI controller on the RK3588 (alias spi0, the name "spidev0.0")
@@ -45,9 +45,9 @@
 	};
 	// the runtime name comes out of alias spi0
 	fragment@5 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { spi0 = "/spi@feb00000"; };
+			spi0 = "/spi@feb00000";
 		};
 	};
 	// pwm: a PWM block on the RK3588 (PWM 1) on GPIO16
@@ -117,6 +117,16 @@
 		target-path = "/pinctrl/gpio@fec50000";
 		__overlay__ {
 			lemnos-hog-11 { gpio-hog; gpios = <11 0>; output-low; line-name = "VBUS of usb-otg0, off low"; };
+		};
+	};
+	fragment@15 {
+		// The marker: the live tree names this board and this overlay's text.
+		target-path = "/";
+		__overlay__ {
+			lemnos {
+				lemnos,board = "rk3588";
+				lemnos,overlay-sha256 = "e0b78bc64856d041196f9ef0f8e85ed4dab15d327942b5cc2e8117101d7d45fa";
+			};
 		};
 	};
 };

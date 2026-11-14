@@ -106,3 +106,37 @@ mod tests {
         assert_eq!(args.slot, "a");
     }
 }
+
+/// The line `lemnos-ctl tree --cmdline-slot` writes, with the installer's root hash in place of
+/// `@roothash@`: the parser reads it, in any word order, with other words beside it.
+#[cfg(test)]
+mod generated_line {
+    use super::Args;
+
+    const HASH: &str = "ab00000000000000000000000000000000000000000000000000000000000cd1";
+
+    #[test]
+    fn the_generated_line_with_the_hole_filled_is_read() {
+        let line = format!("os.slot=os-1 os.roothash={HASH} panic=5\n");
+        let args = Args::parse(&line).unwrap();
+        assert_eq!(args.prefix, "os");
+        assert_eq!(args.slot, "os-1");
+        assert_eq!(args.roothash, HASH);
+    }
+
+    #[test]
+    fn extra_words_in_any_order_and_unknown_words_are_ignored() {
+        let line =
+            format!("console=tty1 quiet panic=5 os.roothash={HASH} vendor.flag=1 os.slot=os-1\n");
+        let args = Args::parse(&line).unwrap();
+        assert_eq!(args.prefix, "os");
+        assert_eq!(args.slot, "os-1");
+        assert_eq!(args.roothash, HASH);
+    }
+
+    #[test]
+    fn a_key_given_twice_takes_the_last() {
+        let args = Args::parse(&format!("os.slot=os-1 os.slot=os-2 os.roothash={HASH}")).unwrap();
+        assert_eq!(args.slot, "os-2");
+    }
+}

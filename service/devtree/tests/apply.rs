@@ -45,6 +45,79 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// `contracts/overlay-dtc.toml` (version 1): the flags and the error classes an overlay is compiled
+/// with. The consumer's overlay step reads the same file, so both use one set.
+const OVERLAY_DTC: &str = include_str!("../../../contracts/overlay-dtc.toml");
+
+/// The compiler the overlay tests run, or `None` when they must skip. `LEMNOS_DTC` names the release
+/// the contract is for (testing/devtree/check.sh builds it and sets the variable, and the gate runs
+/// that script). Without it, the `dtc` on PATH is used only if it knows every class the contract
+/// lists: dtc 1.8 has no `graph_child_address`, and a skip there is said out loud, not silent.
+fn overlay_dtc() -> Option<String> {
+    if let Ok(program) = std::env::var("LEMNOS_DTC") {
+        return Some(program);
+    }
+    let probe = Command::new("dtc")
+        .args(overlay_flags())
+        .args(["-o", "/dev/null", "/dev/null"])
+        .output()
+        .ok()?;
+    if String::from_utf8_lossy(&probe.stderr).contains("Unrecognized check name") {
+        eprintln!(
+            "skipped: the dtc on PATH is not the release contracts/overlay-dtc.toml names; run testing/devtree/check.sh"
+        );
+        return None;
+    }
+    Some("dtc".into())
+}
+
+/// The flags of the contract, then `-E <class>` for each error class, as the contract lists them.
+fn overlay_flags() -> Vec<String> {
+    let table: toml::Table = OVERLAY_DTC
+        .parse()
+        .expect("contracts/overlay-dtc.toml parses");
+    assert_eq!(table["version"].as_integer(), Some(1));
+    let strings = |key: &str| -> Vec<String> {
+        table[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is an array"))
+            .iter()
+            .map(|v| v.as_str().expect("a string").to_string())
+            .collect()
+    };
+    let mut flags = strings("flags");
+    for class in strings("error_classes") {
+        flags.push("-E".into());
+        flags.push(class);
+    }
+    flags
+}
+
+/// Compiles a generated overlay's source to `output` with the contract's flags. The compile must
+/// print nothing: every warning class is an error, so a warning is a defect in the overlay text.
+/// (The base trees the tests build from the SoC maps are fixtures, and dtc may warn about them.)
+fn compile_overlay(source: &Path, output: &Path) {
+    let mut args = overlay_flags();
+    args.push("-o".into());
+    args.push(output.to_str().unwrap().into());
+    args.push(source.to_str().unwrap().into());
+    let program = overlay_dtc().expect("compile_overlay runs only where overlay_dtc() is set");
+    let out = Command::new(&program)
+        .args(&args)
+        .output()
+        .unwrap_or_else(|e| panic!("{program}: {e}"));
+    assert!(
+        out.status.success(),
+        "dtc {args:?} failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "dtc {args:?} printed diagnostics on the generated overlay, which are errors here:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn run(program: &str, args: &[&str]) -> String {
     let out = Command::new(program)
         .args(args)
@@ -79,7 +152,8 @@ fn overlay_text() -> String {
 
 #[test]
 fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
-    if !tool("dtc") || !tool("fdtoverlay") || !tool("fdtget") {
+    let Some(dtc) = overlay_dtc() else { return };
+    if !tool(&dtc) || !tool("fdtoverlay") || !tool("fdtget") {
         return;
     }
     let dir = scratch("fdtoverlay");
@@ -90,7 +164,6 @@ fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
         "dtc",
         &[
             "-@",
-            "-q",
             "-I",
             "dts",
             "-O",
@@ -115,20 +188,7 @@ fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
     let overlay = dir.join("overlay.dts");
     let overlay_dtbo = dir.join("overlay.dtbo");
     fs::write(&overlay, overlay_text()).unwrap();
-    run(
-        "dtc",
-        &[
-            "-@",
-            "-q",
-            "-I",
-            "dts",
-            "-O",
-            "dtb",
-            "-o",
-            overlay_dtbo.to_str().unwrap(),
-            overlay.to_str().unwrap(),
-        ],
-    );
+    compile_overlay(&overlay, &overlay_dtbo);
 
     let applied = dir.join("applied.dtb");
     run(
@@ -197,7 +257,8 @@ fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
 
 #[test]
 fn the_fragment_form_leaves_the_port_with_the_stand_in_when_compiled_with_the_base() {
-    if !tool("dtc") || !tool("fdtget") {
+    let Some(dtc) = overlay_dtc() else { return };
+    if !tool(&dtc) || !tool("fdtget") {
         return;
     }
     let dir = scratch("fragment");
@@ -215,7 +276,6 @@ fn the_fragment_form_leaves_the_port_with_the_stand_in_when_compiled_with_the_ba
         "dtc",
         &[
             "-@",
-            "-q",
             "-I",
             "dts",
             "-O",
@@ -303,6 +363,8 @@ fn write_node(node: &Node, name: &str, depth: usize, out: &mut String) {
 /// The base tree a map relies on: its nodes at the map's paths, labelled as the map names them.
 fn base_from_map(map: &SocMap) -> String {
     let mut root = Node::default();
+    // Every base tree has `/aliases`: the overlay's runtime names are written into it.
+    insert(&mut root, "/aliases", None);
     for controller in map.controllers.values() {
         insert(&mut root, &controller.path, None);
         for need in &controller.needs {
@@ -391,9 +453,110 @@ fn board_fixtures() -> Vec<(String, String)> {
     boards
 }
 
+/// The gate's flags are the contract's: the compile flags first, then every class as an error.
+#[test]
+fn the_gate_compiles_with_the_contracts_flags_and_every_class_an_error() {
+    let flags = overlay_flags();
+    assert_eq!(&flags[..5], ["-@", "-I", "dts", "-O", "dtb"], "{flags:?}");
+    let table: toml::Table = OVERLAY_DTC.parse().unwrap();
+    let classes = table["error_classes"].as_array().unwrap();
+    assert!(classes.len() >= 50, "dtc 1.7.2 has 56 warning classes");
+    assert!(
+        flags.windows(2).any(|w| w == ["-E", "alias_paths"]),
+        "{flags:?}"
+    );
+    assert_eq!(flags.len(), 5 + 2 * classes.len());
+}
+
+/// The defect the alias form fixes: an `aliases` node inside a fragment whose target is the root
+/// is a warning (alias_paths) under the contract's flags, so the gate refuses it. Compiled here
+/// with the same flags the gate uses, so a dtc that stops reporting it fails this test.
+#[test]
+fn the_gate_refuses_the_pre_fix_alias_form() {
+    let Some(dtc) = overlay_dtc() else { return };
+    if !tool(&dtc) {
+        return;
+    }
+    let dir = scratch("pre-fix-alias");
+    let source = dir.join("pre-fix.dts");
+    fs::write(
+        &source,
+        "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/\";\n\t\t__overlay__ {\n\t\t\taliases { i2c1 = \"/soc/i2c@1000\"; };\n\t\t};\n\t};\n};\n",
+    )
+    .unwrap();
+    let mut args = overlay_flags();
+    args.push("-o".into());
+    args.push(dir.join("pre-fix.dtbo").to_str().unwrap().into());
+    args.push(source.to_str().unwrap().into());
+    let out = Command::new(dtc).args(&args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("alias_paths"),
+        "the pre-fix form must be refused by alias_paths: exit {:?}\n{stderr}",
+        out.status.code()
+    );
+}
+
+/// The reference board's overlay sets its two I2C aliases under `/aliases`: the form that compiles
+/// with no alias_paths warning. After fdtoverlay onto a base built from the RP1 map, the aliases
+/// read back as the controllers' paths (a warning-free form that set no alias would fail here).
+#[test]
+fn the_fixed_alias_form_sets_the_board_aliases_after_fdtoverlay() {
+    let Some(dtc) = overlay_dtc() else { return };
+    if !tool(&dtc) || !tool("fdtoverlay") || !tool("fdtget") {
+        return;
+    }
+    let board = board::parse(include_str!("../../../testing/boards/reference.toml")).unwrap();
+    let map = SocMap::parse(include_str!("../../../socs/bcm2712-rp1.toml")).unwrap();
+    let out = generate(&board, &map, &manifests()).unwrap();
+    let dir = scratch("aliases");
+    let base_dts = dir.join("base.dts");
+    let base_dtb = dir.join("base.dtb");
+    fs::write(&base_dts, base_from_map(&map)).unwrap();
+    run(
+        &dtc,
+        &[
+            "-@",
+            "-I",
+            "dts",
+            "-O",
+            "dtb",
+            "-o",
+            base_dtb.to_str().unwrap(),
+            base_dts.to_str().unwrap(),
+        ],
+    );
+    let overlay = dir.join("overlay.dts");
+    let overlay_dtbo = dir.join("overlay.dtbo");
+    fs::write(&overlay, &out.overlay).unwrap();
+    compile_overlay(&overlay, &overlay_dtbo);
+    let result = dir.join("result.dtb");
+    run(
+        "fdtoverlay",
+        &[
+            "-i",
+            base_dtb.to_str().unwrap(),
+            "-o",
+            result.to_str().unwrap(),
+            overlay_dtbo.to_str().unwrap(),
+        ],
+    );
+    for (alias, path) in [
+        ("i2c1", "/axi/pcie@1000120000/rp1/i2c@74000"),
+        ("i2c10", "/axi/pcie@1000120000/rp1/i2c@88000"),
+    ] {
+        let read = run(
+            "fdtget",
+            &["-t", "s", result.to_str().unwrap(), "/aliases", alias],
+        );
+        assert_eq!(read.trim(), path, "the /aliases/{alias} read-back");
+    }
+}
+
 #[test]
 fn every_fixture_overlay_applies_to_a_base_built_from_its_map() {
-    if !tool("dtc") || !tool("fdtoverlay") || !tool("fdtget") {
+    let Some(dtc) = overlay_dtc() else { return };
+    if !tool(&dtc) || !tool("fdtoverlay") || !tool("fdtget") {
         return;
     }
     let socs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../socs");
@@ -420,7 +583,6 @@ fn every_fixture_overlay_applies_to_a_base_built_from_its_map() {
             "dtc",
             &[
                 "-@",
-                "-q",
                 "-I",
                 "dts",
                 "-O",
@@ -436,20 +598,7 @@ fn every_fixture_overlay_applies_to_a_base_built_from_its_map() {
             let overlay = dir.join("overlay.dts");
             let overlay_dtbo = dir.join("overlay.dtbo");
             fs::write(&overlay, &out.overlay).unwrap();
-            run(
-                "dtc",
-                &[
-                    "-@",
-                    "-q",
-                    "-I",
-                    "dts",
-                    "-O",
-                    "dtb",
-                    "-o",
-                    overlay_dtbo.to_str().unwrap(),
-                    overlay.to_str().unwrap(),
-                ],
-            );
+            compile_overlay(&overlay, &overlay_dtbo);
             run(
                 "fdtoverlay",
                 &[
@@ -468,7 +617,6 @@ fn every_fixture_overlay_applies_to_a_base_built_from_its_map() {
                 "dtc",
                 &[
                     "-@",
-                    "-q",
                     "-I",
                     "dts",
                     "-O",

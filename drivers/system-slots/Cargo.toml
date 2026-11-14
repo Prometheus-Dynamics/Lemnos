@@ -17,6 +17,8 @@ lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 # The slot files, shared with lemnos-slot-init.
 lemnos-slot-store = { path = "../slot-store", features = ["linux"] }
+# The firmware mailbox that clears the boot count; the only unsafe code it reaches is there.
+lemnos-driver-rpi-firmware-sys = { path = "../rpi-firmware-sys" }
 # Both already in the tree through lemnos-package: the signature check and the hashes.
 ed25519-dalek = { version = "2.2", default-features = false }
 sha2 = { version = "0.10", default-features = false }

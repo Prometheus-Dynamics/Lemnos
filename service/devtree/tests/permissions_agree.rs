@@ -165,3 +165,29 @@ fn every_board_file_gives_the_same_nodes_and_modes_in_both_renderings() {
     }
     assert!(compared.len() >= 8, "only {compared:?} were compared");
 }
+
+/// The board's record decides the mailbox node: a `tryboot` board (the default too) gives the daemon's
+/// group `/dev/vcio` in both renderings; a board with another record does not.
+#[test]
+fn the_mailbox_node_is_in_both_renderings_only_for_a_tryboot_record() {
+    let text = std::fs::read_to_string(repo().join("testing/boards/reference.toml")).unwrap();
+    assert!(text.contains("record = \"tryboot\""));
+    let vcio: Node = (
+        "misc".into(),
+        "vcio".into(),
+        "root".into(),
+        "lemnos".into(),
+        "0660".into(),
+    );
+    let tryboot = board::parse(&text).unwrap();
+    assert!(udev_nodes(&tryboot).contains(&vcio), "udev lacks vcio");
+    assert!(mdev_nodes(&tryboot).contains(&vcio), "mdev lacks vcio");
+    let other = board::parse(&text.replace("record = \"tryboot\"", "record = \"file\"")).unwrap();
+    assert!(!udev_nodes(&other).contains(&vcio));
+    assert!(!mdev_nodes(&other).contains(&vcio));
+    let defaulted = board::parse(&text.replace("record = \"tryboot\", ", "")).unwrap();
+    assert!(
+        udev_nodes(&defaulted).contains(&vcio),
+        "the default record is tryboot"
+    );
+}

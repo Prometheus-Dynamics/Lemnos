@@ -4,11 +4,14 @@ use super::*;
 fn pi_firmware_text_is_the_fixed_fallback_text() {
     assert_eq!(
         CONFIG_TXT,
-        "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count&4]\ninclude previous.txt\n[all]\n"
+        "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count&4]\ninclude previous.txt\n[all]\n\
+            kernel=kernel8.img\ncmdline=cmdline.txt\ninitramfs initramfs.cpio followkernel\n\
+            device_tree=board.dtb\ndtoverlay=lemnos-board\n"
     );
     assert_eq!(
         TRYBOOT_TXT,
-        "kernel_watchdog_timeout=15\ninclude trial.txt\n"
+        "kernel_watchdog_timeout=15\ninclude trial.txt\nkernel=kernel8.img\ncmdline=cmdline.txt\n\
+            initramfs initramfs.cpio followkernel\ndevice_tree=board.dtb\ndtoverlay=lemnos-board\n"
     );
     assert!(
         !TRYBOOT_TXT.contains("boot_count"),
@@ -114,4 +117,36 @@ fn a_board_with_rpi_tryboot_gets_the_fixed_text_and_no_other_firmware_does() {
     assert_eq!(files[1], ("tryboot.txt", TRYBOOT_TXT));
     assert!(generated_for("u-boot").is_none());
     assert!(generated_for("").is_none());
+}
+
+/// Each slot line of both files names the layout's file, spelled as the layout spells it.
+#[test]
+fn the_slot_lines_name_the_layout_files() {
+    use crate::layout::{BOARD_OVERLAY_NAME, CMDLINE, DEVICE_TREE, INITRAMFS, KERNEL};
+    for text in [CONFIG_TXT, TRYBOOT_TXT] {
+        assert!(text.contains(&format!("kernel={KERNEL}\n")), "{text}");
+        assert!(text.contains(&format!("cmdline={CMDLINE}\n")), "{text}");
+        assert!(
+            text.contains(&format!("initramfs {INITRAMFS} followkernel\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("device_tree={DEVICE_TREE}\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("dtoverlay={BOARD_OVERLAY_NAME}\n")),
+            "{text}"
+        );
+    }
+}
+
+/// The slot lines come after the include that sets `os_prefix`, in both files, so the firmware
+/// applies them to the slot the pointer names.
+#[test]
+fn the_slot_lines_follow_the_include() {
+    let at = |text: &str, needle: &str| text.find(needle).unwrap();
+    assert!(at(CONFIG_TXT, "include previous.txt") < at(CONFIG_TXT, "kernel="));
+    assert!(at(CONFIG_TXT, "[all]") < at(CONFIG_TXT, "kernel="));
+    assert!(at(TRYBOOT_TXT, "include trial.txt") < at(TRYBOOT_TXT, "kernel="));
 }

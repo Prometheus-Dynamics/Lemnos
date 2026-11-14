@@ -12,6 +12,9 @@ use lemnos_wire::text::{
 };
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
+mod boot_dir;
+#[cfg(test)]
+mod boot_dir_tests;
 mod show;
 
 pub const USAGE: &str = "\
@@ -44,9 +47,10 @@ lemnos-ctl [--socket PATH] COMMAND
   validate [--socs DIR] [--no-live] BOARD
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
-  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
+  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]] [--uboot FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
                                  [--security-unit FILE]
+                                 [--manifest-boot FILE] [--cmdline-slot FILE --slot ID]
                                  write the device-tree overlay for a board (stdout by default),
                                  its firmware boot fragment, its U-Boot fragment (`gpio set`
                                  and `gpio clear` for a boot script), the kernel module's
@@ -320,18 +324,23 @@ fn load_map(
     lemnos_devtree::SocMap::parse(&text).map_err(|e| format!("{path}: {e}"))
 }
 
-/// `tree BOARD [-o FILE] [--boot FILE]`: the overlay and the boot fragment for a board.
+/// `tree BOARD [-o FILE] [--boot FILE] [--boot-dir DIR [--slot ID]]`: the overlay, the boot fragment,
+/// and the Raspberry Pi firmware's boot files for a board.
 fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut socs = None;
     let mut map_file = None;
     let mut overlay_out = None;
     let mut boot_out = None;
+    let mut boot_dir_out = None;
+    let mut slot = None;
     let mut uboot_out = None;
     let mut modprobe_out = None;
     let mut cmdline_out = None;
     let mut udev_out = None;
     let mut mdev_out = None;
     let mut security_out = None;
+    let mut manifest_boot_out = None;
+    let mut cmdline_slot_out = None;
     let mut board_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -341,12 +350,16 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--map", Some(file)) => map_file = Some(file),
             ("-o", Some(file)) => overlay_out = Some(file),
             ("--boot", Some(file)) => boot_out = Some(file),
+            ("--boot-dir", Some(dir)) => boot_dir_out = Some(dir),
+            ("--slot", Some(id)) => slot = Some(id),
             ("--uboot", Some(file)) => uboot_out = Some(file),
             ("--modprobe", Some(file)) => modprobe_out = Some(file),
             ("--cmdline", Some(file)) => cmdline_out = Some(file),
             ("--udev", Some(file)) => udev_out = Some(file),
             ("--mdev", Some(file)) => mdev_out = Some(file),
             ("--security-unit", Some(file)) => security_out = Some(file),
+            ("--manifest-boot", Some(file)) => manifest_boot_out = Some(file),
+            ("--cmdline-slot", Some(file)) => cmdline_slot_out = Some(file),
             (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
                 board_path = Some(flag.to_string());
                 i += 1;
@@ -377,6 +390,19 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     if let Some(file) = boot_out {
         std::fs::write(&file, &generated.boot).map_err(|e| format!("{file}: {e}"))?;
     }
+    if let Some(dir) = boot_dir_out {
+        let files = boot_dir::files(&board, &generated.boot, slot.as_deref().unwrap_or(""))
+            .map_err(|e| format!("{path}: --boot-dir: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
+        for (name, bytes) in files {
+            let target = std::path::Path::new(&dir).join(&name);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("{}: {e}", parent.display()))?;
+            }
+            std::fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+    }
     if let Some(file) = uboot_out {
         let text = generated
             .uboot
@@ -405,6 +431,19 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             .ok_or_else(|| format!("{path}: --security-unit: the board has no [security] table"))?;
         std::fs::write(&file, security_unit(&security.record))
             .map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = cmdline_slot_out {
+        let id = slot.as_deref().ok_or_else(|| {
+            format!("{path}: --cmdline-slot needs --slot: the line names the slot it is for")
+        })?;
+        let text = boot_dir::cmdline_slot(&board, id)
+            .map_err(|e| format!("{path}: --cmdline-slot: {e}"))?;
+        std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = manifest_boot_out {
+        let text = boot_dir::manifest_boot(&board.board.id, generated.overlay_sha256.as_deref())
+            .map_err(|e| format!("{path}: --manifest-boot: {e}"))?;
+        std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
     Ok(())
 }

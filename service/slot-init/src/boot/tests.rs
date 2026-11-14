@@ -16,6 +16,7 @@ use lemnos_slot_store::store::{Layout, Meta, State};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 
 use super::{DATA_LOG, Env, boot};
+use crate::boot::{BOOT_COUNT, FLASH_AFTER};
 use crate::decide::MAX_FALLBACKS;
 use crate::ops::Ops;
 
@@ -41,6 +42,18 @@ struct RawFake {
 }
 
 impl BootRaw for RawFake {
+    fn episodes(&mut self) -> Result<Option<(String, u8)>, String> {
+        Err("slot-init keeps no episodes".into())
+    }
+
+    fn set_episodes(&mut self, _slot: &str, _episodes: u8) -> Result<(), String> {
+        Err("slot-init keeps no episodes".into())
+    }
+
+    fn clear_episodes(&mut self) -> Result<(), String> {
+        Err("slot-init keeps no episodes".into())
+    }
+
     fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
         let bytes = fs::read(self.boot.join(pointer_name(which))).map_err(|e| e.to_string())?;
         let Ok(sector) = <[u8; 512]>::try_from(bytes) else {
@@ -211,6 +224,10 @@ impl Ops for Fake {
         if time >= Duration::from_secs(1) {
             let _ = self.call(format!("sleep {}", time.as_secs()));
         }
+    }
+
+    fn request_flash_mode(&self) -> Result<(), String> {
+        self.call("flash mode".into())
     }
 
     fn open_boot(&self, _dev: &Path) -> Result<Box<dyn BootRaw>, String> {
@@ -700,6 +717,57 @@ fn a_cut_short_image_is_refused() {
     let (fake, _) = board.boot(&[]);
     assert!(!fake.called("verity "));
     assert_fell_back(&board, &fake, "cut short");
+}
+
+/// A slot built with a board overlay: its manifest names the board and the digest.
+fn with_overlay(board: &Board, id: &str, sha: &str) {
+    board.manifest(id, id, "");
+    let path = board.env.at(&format!("data/slots/{id}.json"));
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "\"boot\":{\"files\"",
+        &format!("\"boot\":{{\"overlay\":{{\"board\":\"board-a\",\"sha256\":\"{sha}\"}},\"files\""),
+    );
+    fs::write(&path, text).unwrap();
+}
+
+/// The live marker the generated overlay leaves in the device tree.
+fn live_marker(board: &Board, board_id: &str, sha: &str) {
+    board.write(
+        "proc/device-tree/lemnos/lemnos,board",
+        format!("{board_id}\0").as_bytes(),
+    );
+    board.write(
+        "proc/device-tree/lemnos/lemnos,overlay-sha256",
+        format!("{sha}\0").as_bytes(),
+    );
+}
+
+const OVERLAY_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn a_slot_whose_overlay_marker_is_live_boots() {
+    let board = Board::new();
+    with_overlay(&board, "os-2", OVERLAY_SHA);
+    live_marker(&board, "board-a", OVERLAY_SHA);
+    let (_, why) = board.boot(&[]);
+    assert_eq!(why, "");
+}
+
+#[test]
+fn an_absent_overlay_marker_is_a_named_failure() {
+    let board = Board::new();
+    with_overlay(&board, "os-2", OVERLAY_SHA);
+    let (fake, _) = board.boot(&[]);
+    assert_fell_back(&board, &fake, "no board overlay marker");
+}
+
+#[test]
+fn a_stale_overlay_digest_is_a_named_failure() {
+    let board = Board::new();
+    with_overlay(&board, "os-2", OVERLAY_SHA);
+    live_marker(&board, "board-a", &"f".repeat(64));
+    let (fake, _) = board.boot(&[]);
+    assert_fell_back(&board, &fake, "overlay digest");
 }
 
 #[test]
@@ -1520,4 +1588,151 @@ fn a_foreign_disk_with_the_same_label_on_another_controller_is_ignored() {
         fake.calls()
     );
     assert!(!fake.called("mount ext4 noatime,errors=remount-ro dev/sda1"));
+}
+
+/// A slot the old installer made: its manifest hashes the bundle's base command line, and the old
+/// installer then appended the slot's words (`.slot=`, `.roothash=`, `.data=PARTUUID=`, `panic=5`)
+/// to the `cmdline.txt` on the boot partition. The boot-file check refuses the default by name, the
+/// default is repointed to the previous slot, and that slot boots (the board is not left without one).
+#[test]
+fn a_slot_the_old_installer_made_is_refused_by_name_and_the_default_is_repointed() {
+    let board = Board::new();
+    board.write(
+        "boot/slots/os-2/cmdline.txt",
+        format!(
+            "console=tty1 os.slot=os-2 os.roothash={} panic=5 os.slot=os-2 os.roothash={} os.data=PARTUUID=1234abcd-02 panic=5\n",
+            hash("os-2"),
+            hash("os-2"),
+        )
+        .as_bytes(),
+    );
+    let (fake, why) = board.boot(&[]);
+    assert!(
+        why.contains("its boot files don't match its manifest") && why.contains("cmdline.txt"),
+        "{why}"
+    );
+    assert!(!fake.called("verity data/slots/os-2"), "{:?}", fake.calls());
+    // The default is marked and repointed to the previous slot (its boot files are not read).
+    assert_eq!(board.meta("os-2").get("FAILED"), "yes");
+    assert_eq!(
+        board.pointer(Pointer::Default).as_deref(),
+        Some("os-1"),
+        "the default is repointed to the previous slot"
+    );
+    // The board restarts; the repointed default (the previous slot) boots on that restart.
+    assert_eq!(fake.last(), "restart", "{:?}", fake.calls());
+}
+
+/// The firmware's boot count as the device tree states it: one big-endian word.
+fn boot_count(board: &Board, count: u32) {
+    board.write(BOOT_COUNT, &count.to_be_bytes());
+}
+
+/// The boot partition's raw records, to compare before and after.
+fn boot_files(board: &Board) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = fs::read_dir(board.env.at("boot"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn refusals_below_the_limit_restart_as_before() {
+    for count in [None, Some(0), Some(FLASH_AFTER - 1)] {
+        let board = kernel_without("EXT4_FS");
+        if let Some(count) = count {
+            boot_count(&board, count);
+        }
+        let (fake, _) = board.boot(&[]);
+        assert!(fake.called("sleep 30"), "{count:?}: {:?}", fake.calls());
+        assert_eq!(fake.last(), "restart", "{count:?}");
+        assert!(!fake.called("flash mode"), "{count:?}");
+    }
+}
+
+#[test]
+fn refusals_at_the_limit_go_to_the_flashing_mode_and_change_no_record() {
+    let board = kernel_without("EXT4_FS");
+    boot_count(&board, FLASH_AFTER);
+    let before = boot_files(&board);
+    let (fake, why) = board.boot(&[]);
+    assert!(why.starts_with("no slot can start: "), "{why}");
+    let calls = fake.calls();
+    let flash = calls.iter().position(|c| c == "flash mode").expect("asked");
+    assert_eq!(
+        calls[flash + 1..]
+            .iter()
+            .filter(|c| *c == "restart")
+            .count(),
+        1
+    );
+    assert_eq!(fake.last(), "restart");
+    // It does not wait the rescue time first, and no slot or record is touched.
+    assert!(!fake.called("sleep 30"), "{calls:?}");
+    assert!(!board.meta("os-2").failed());
+    assert_eq!(boot_files(&board), before);
+    // The reason and the count are in the log.
+    let logs = fake.logs.borrow().join("\n");
+    assert!(logs.contains("8 restarts without a good boot"), "{logs}");
+    assert!(logs.contains("the kernel lacks CONFIG_EXT4_FS"), "{logs}");
+    assert!(logs.contains("RPIBOOT"), "{logs}");
+}
+
+#[test]
+fn a_flashing_mode_the_firmware_refuses_still_restarts_the_old_way() {
+    let board = kernel_without("EXT4_FS");
+    boot_count(&board, FLASH_AFTER + 3);
+    let (fake, _) = board.boot(&["flash mode"]);
+    assert!(fake.called("sleep 30"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart");
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("the firmware's flashing mode was not taken"))
+    );
+}
+
+#[test]
+fn a_slot_failure_deep_into_the_count_falls_back_and_never_asks_for_the_flashing_mode() {
+    // A slot that can't open is the slot's failure: the fallback answers it, whatever the count.
+    let board = Board::new();
+    boot_count(&board, FLASH_AFTER + 5);
+    let (fake, _) = board.boot(&["verity "]);
+    assert!(!fake.called("flash mode"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart");
+}
+
+/// `/dev/vcio` is only ever what devtmpfs makes, so devtmpfs is mounted on `/dev` before any path
+/// that can reach the mailbox: it is the third of the first three mounts, before the boot disk is
+/// looked for, and the flashing-mode request comes after it.
+#[test]
+fn devtmpfs_is_mounted_before_anything_that_can_need_the_mailbox() {
+    let board = kernel_without("EXT4_FS");
+    boot_count(&board, FLASH_AFTER);
+    let (fake, _) = board.boot(&[]);
+    let calls = fake.calls();
+    let devtmpfs = calls
+        .iter()
+        .position(|c| c.starts_with("mount devtmpfs"))
+        .expect("devtmpfs is mounted");
+    let first_other = calls.iter().position(|c| {
+        c.starts_with("mount")
+            && !["mount proc", "mount sysfs", "mount devtmpfs"]
+                .iter()
+                .any(|p| c.starts_with(p))
+    });
+    assert!(devtmpfs < 3, "{calls:?}");
+    assert!(first_other.is_none_or(|i| devtmpfs < i), "{calls:?}");
+    let flash = calls.iter().position(|c| c == "flash mode").expect("asked");
+    assert!(devtmpfs < flash, "{calls:?}");
 }

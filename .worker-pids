@@ -1,0 +1,2 @@
+2629187	/mnt/nvme-wd/lemnos-wI5i6	bash /mnt/nvme-wd/lemnos-gates/tmp/I5i6/run.sh
+2765489	/mnt/nvme-wd/lemnos-wI5i6	/bin/bash /mnt/nvme-wd/lemnos-gates/b-ci.sh I5i6 I5i6: the Pi firmware's boot count: mailbox, production count actions, tree --boot-dir /mnt/nvme-wd/lemnos-gates/tmp/I5i6/body.md

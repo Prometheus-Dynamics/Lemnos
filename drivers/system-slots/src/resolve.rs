@@ -202,6 +202,8 @@ impl SystemSlots {
             }
             if self.write_baseline(&running).is_ok() {
                 self.snapshot_written = true;
+                // A default boot that has run its uptime with its files matching is a good boot.
+                self.boot_good(&running);
             }
             return None;
         }
@@ -441,6 +443,10 @@ impl SystemSlots {
         }
         self.save(&state)?;
         if resolved_here {
+            // A confirmed trial is a good boot: its episodes and the boot count go (see `count`).
+            // After the state is saved: the default is the running slot now, and a note about a count
+            // that was kept or could not be cleared must not be overwritten by this save.
+            self.boot_good(&running);
             Log::remove(&self.layout);
             boot::clear_reason(&self.boot_node);
             let _ = Resolved {

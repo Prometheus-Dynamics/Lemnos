@@ -45,6 +45,19 @@ pub trait BootRecord: Send {
     fn clear_trial(&mut self) -> io::Result<()>;
     /// Restarts the board, into whatever the loader starts first.
     fn restart(&mut self) -> io::Result<()>;
+    /// The episodes recorded against a slot: kept on the raw boot records, so only the `tryboot`
+    /// form has them. The other forms refuse by name.
+    fn episodes(&self) -> io::Result<Option<(String, u8)>> {
+        Err(no_episodes())
+    }
+    /// Records `episodes` against `slot`.
+    fn set_episodes(&mut self, _slot: &str, _episodes: u8) -> io::Result<()> {
+        Err(no_episodes())
+    }
+    /// Clears the episodes record.
+    fn clear_episodes(&mut self) -> io::Result<()> {
+        Err(no_episodes())
+    }
     /// Adds what this boot loader needs to a slot's boot directory `dir` at install, before it
     /// is kept: `cmdline` is the slot's kernel command line.
     fn prepare(&self, _dir: &Path, _id: &str, _cmdline: &str) -> io::Result<()> {
@@ -55,6 +68,12 @@ pub trait BootRecord: Send {
     fn fallback_copy(&self, layout: &Layout, id: &str) -> io::Result<()> {
         root_copy(layout, id)
     }
+}
+
+fn no_episodes() -> io::Error {
+    io::Error::other(
+        "the episodes are kept on the boot partition's raw records, which this boot record form doesn't have",
+    )
 }
 
 /// The boot partition's copy of a trial's reason: the pre-created reason record (`reason.rec`),
@@ -190,6 +209,20 @@ impl BootRecord for Tryboot {
 
     fn clear_trial(&mut self) -> io::Result<()> {
         self.raw()?.clear_trial().map_err(io::Error::other)
+    }
+
+    fn episodes(&self) -> io::Result<Option<(String, u8)>> {
+        self.raw()?.episodes().map_err(io::Error::other)
+    }
+
+    fn set_episodes(&mut self, slot: &str, episodes: u8) -> io::Result<()> {
+        self.raw()?
+            .set_episodes(slot, episodes)
+            .map_err(io::Error::other)
+    }
+
+    fn clear_episodes(&mut self) -> io::Result<()> {
+        self.raw()?.clear_episodes().map_err(io::Error::other)
     }
 
     fn restart(&mut self) -> io::Result<()> {

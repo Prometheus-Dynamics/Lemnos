@@ -39,6 +39,9 @@ pub trait Ops {
     /// Into the new root, as PID 1. On a board it returns only when it couldn't.
     fn switch_root(&self, new_root: &Path) -> Result<(), String>;
     fn sleep(&self, time: Duration);
+    /// Asks the firmware for its flashing mode at the next boot (the Pi family's RPIBOOT: the board
+    /// then waits for a USB host with no timeout). The caller restarts when this returns `Ok`.
+    fn request_flash_mode(&self) -> Result<(), String>;
     /// The boot partition's raw records and pointers, opened on its block node `dev` (nothing is
     /// mounted). The tests use an in-memory fake.
     fn open_boot(

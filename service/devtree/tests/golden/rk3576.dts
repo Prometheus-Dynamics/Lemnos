@@ -15,9 +15,9 @@
 	};
 	// the runtime name comes out of alias i2c1
 	fragment@1 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { i2c1 = "/soc/i2c@2ac40000"; };
+			i2c1 = "/soc/i2c@2ac40000";
 		};
 	};
 	// spi: an SPI controller on the RK3576 (alias spi0, the name "spidev0.0")
@@ -29,9 +29,9 @@
 	};
 	// the runtime name comes out of alias spi0
 	fragment@3 {
-		target-path = "/";
+		target-path = "/aliases";
 		__overlay__ {
-			aliases { spi0 = "/soc/spi@2acf0000"; };
+			spi0 = "/soc/spi@2acf0000";
 		};
 	};
 	// usb-peripheral: the USB DRD (OTG) controller 0 on the RK3576 (rockchip,rk3576-dwc3); device mode
@@ -78,6 +78,16 @@
 		target-path = "/soc/watchdog@2ace0000";
 		__overlay__ {
 			status = "okay";
+		};
+	};
+	fragment@10 {
+		// The marker: the live tree names this board and this overlay's text.
+		target-path = "/";
+		__overlay__ {
+			lemnos {
+				lemnos,board = "rk3576";
+				lemnos,overlay-sha256 = "8e28515422345d5eaed7ea1105c90560b3769a27cde8e14083aa7725cb2c7d44";
+			};
 		};
 	};
 };

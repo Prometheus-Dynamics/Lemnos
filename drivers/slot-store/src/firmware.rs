@@ -17,16 +17,34 @@ pub const POINTER_BYTES: usize = 512;
 /// The watchdog timeout the kernel driver reports on the board, in seconds (the SoC maximum is 16.8).
 pub const WATCHDOG_SECONDS: u8 = 15;
 
-/// `config.txt`: the default, unless the count's bit 2 is set; then the previous.
+/// The slot lines name the slot's files with fixed names (`layout.rs`): the only per-slot difference
+/// is the directory `os_prefix` selects, which the include before them sets. They are the same in
+/// both files. Their behaviour is from the documentation only until the board run in
+/// `testing/board-runs/I5i6.md`. Sources: `boot.adoc` in `raspberrypi/documentation` (`os_prefix`
+/// covers kernels, initramfs, cmdline.txt, .dtbs and overlays); `computers/configuration/reference.adoc`
+/// part 5.3 "Force a specific Device Tree" (`device_tree=<file>` loads that DTB). That part does not
+/// say whether `os_prefix` applies to `device_tree=`: that is an inference from the `.dtbs` line, unverified.
+/// `config.txt`: the default, unless the count's bit 2 is set; then the previous. The slot lines
+/// come after `[all]`, so they apply to both pointers.
 pub const CONFIG_TXT: &str = "kernel_watchdog_timeout=15\n\
 include default.txt\n\
 [boot_count&4]\n\
 include previous.txt\n\
-[all]\n";
+[all]\n\
+kernel=kernel8.img\n\
+cmdline=cmdline.txt\n\
+initramfs initramfs.cpio followkernel\n\
+device_tree=board.dtb\n\
+dtoverlay=lemnos-board\n";
 
 /// `tryboot.txt`: the trial, once, with no count filter.
 pub const TRYBOOT_TXT: &str = "kernel_watchdog_timeout=15\n\
-include trial.txt\n";
+include trial.txt\n\
+kernel=kernel8.img\n\
+cmdline=cmdline.txt\n\
+initramfs initramfs.cpio followkernel\n\
+device_tree=board.dtb\n\
+dtoverlay=lemnos-board\n";
 
 /// The fixed files a board gets at image build for its firmware, `(file, text)`. Only `rpi-tryboot`
 /// has them: the Raspberry Pi firmware family's fallback. `None` for any other firmware (its

@@ -150,6 +150,21 @@ impl Ops for System {
     fn sleep(&self, time: Duration) {
         std::thread::sleep(time);
     }
+
+    fn request_flash_mode(&self) -> Result<(), String> {
+        // To confirm on a board: devtmpfs makes /dev/vcio when the firmware driver is built in or
+        // loaded; wait for it as the UBI block node's wait does.
+        let node = self.dev.join("vcio");
+        for _ in 0..50 {
+            if node.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        lemnos_driver_rpi_firmware_sys::Mailbox::open(&node)
+            .and_then(|mailbox| mailbox.request_rpiboot())
+            .map_err(|e| format!("{}: {e}", node.display()))
+    }
 }
 
 #[cfg(test)]

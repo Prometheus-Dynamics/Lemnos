@@ -19,6 +19,7 @@
 //! - `verity.data_blocks`: how many 4096-byte blocks of data the hash tree covers.
 //! - `verity.hash_offset`: the byte offset in `rootfs.erofs` where the hash tree starts.
 //! - `boot.files`: each boot file's path under `boot/` to its SHA-256.
+//! - `boot.overlay` (optional): `{"board": ..., "sha256": ...}`, the board overlay's marker (see `Overlay`).
 //!
 //! Fixed by convention, so not in the manifest: dm-verity format version 1, SHA-256, 4096-byte
 //! data and hash blocks, no verity superblock. The hash tree is appended to the data:
@@ -66,6 +67,15 @@ impl Verity {
 }
 
 /// What a schema 3 manifest says.
+/// The board overlay a slot was built with (`boot.overlay`): the marker the live device tree carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlay {
+    /// The board id the overlay names.
+    pub board: String,
+    /// SHA-256 of the overlay's text before its marker, 64 lowercase hex digits.
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub id: String,
@@ -80,6 +90,9 @@ pub struct Manifest {
     pub verity: Verity,
     /// Path under `boot/` to SHA-256.
     pub boot_files: Vec<(String, String)>,
+    /// The board overlay the boot files carry, for a board whose firmware loads one (`boot.overlay`):
+    /// the board id and the digest the overlay's live marker must equal. `None` when the slot has none.
+    pub overlay: Option<Overlay>,
 }
 
 /// The size of the hash tree over `data_blocks` blocks: a level of `ceil(n / 128)` blocks while
@@ -202,6 +215,25 @@ impl Manifest {
         if boot_files.is_empty() {
             return Err("slot.json lists no boot files".into());
         }
+        let overlay = match json.path("boot.overlay") {
+            None => None,
+            Some(o) => {
+                let board = o
+                    .get("board")
+                    .and_then(|v| v.text())
+                    .filter(|b| !b.is_empty())
+                    .ok_or("slot.json's boot.overlay has no board")?;
+                let sha = o
+                    .get("sha256")
+                    .and_then(|v| v.text())
+                    .filter(|h| is_hex(h, 64))
+                    .ok_or("slot.json's boot.overlay sha256 isn't 64 hex digits")?;
+                Some(Overlay {
+                    board: board.to_string(),
+                    sha256: sha.to_string(),
+                })
+            }
+        };
         Ok(Self {
             id,
             product,
@@ -219,6 +251,7 @@ impl Manifest {
                 hash_offset,
             },
             boot_files,
+            overlay,
         })
     }
 }
@@ -238,6 +271,35 @@ mod tests {
              \"boot\":{{\"files\":{{\"cmdline.txt\":\"{HASH}\"}}}}}}",
             offset + tree_bytes(data_blocks)
         )
+    }
+
+    #[test]
+    fn a_board_overlay_is_read_when_it_is_listed() {
+        let text = manifest("", 3).replace(
+            "\"boot\":{\"files\"",
+            &format!(
+                "\"boot\":{{\"overlay\":{{\"board\":\"board-a\",\"sha256\":\"{HASH}\"}},\"files\""
+            ),
+        );
+        let m = Manifest::parse(&text).unwrap();
+        assert_eq!(
+            m.overlay,
+            Some(Overlay {
+                board: "board-a".into(),
+                sha256: HASH.into()
+            })
+        );
+        assert_eq!(Manifest::parse(&manifest("", 3)).unwrap().overlay, None);
+    }
+
+    #[test]
+    fn a_board_overlay_digest_must_be_64_hex_digits() {
+        let text = manifest("", 3).replace(
+            "\"boot\":{\"files\"",
+            "\"boot\":{\"overlay\":{\"board\":\"board-a\",\"sha256\":\"xyz\"},\"files\"",
+        );
+        let why = Manifest::parse(&text).unwrap_err();
+        assert!(why.contains("boot.overlay sha256"), "{why}");
     }
 
     #[test]

@@ -169,7 +169,9 @@ impl Board {
     }
 
     fn check(&mut self, restart: bool) -> Result<Option<String>, String> {
-        boot_guard::check(&self.layout, &mut self.record, restart)
+        boot_guard::check_with(&self.layout, &mut self.record, restart, &mut |path| {
+            boot_guard::read_mounted(&self.layout.boot, path)
+        })
     }
 }
 
@@ -255,4 +257,110 @@ fn a_refused_check_stops_the_restart_before_systemctl_runs() {
     let err = restarter.run(None).unwrap_err();
     assert!(err.to_string().contains("doesn't match"), "{err}");
     assert!(ran.load(Ordering::SeqCst));
+}
+
+/// One subdirectory of a test image: its name, its cluster, and its files.
+type TestDir<'a> = (&'a [u8; 11], u16, Vec<(&'a [u8; 11], Vec<u8>, Vec<u16>)>);
+
+/// A FAT16 boot partition image with fragmented files: each file's clusters are given in order and
+/// need not be contiguous, and the chain runs through them. The boot sector, the FAT's reserved
+/// entries and the root directory's layout come from `fatimage::fat16`, so only the chains and the
+/// data are this function's. `dirs` are subdirectories (name, its cluster, its entries).
+fn fragmented_image(files: &[(&[u8; 11], Vec<u8>, Vec<u16>)], dirs: &[TestDir<'_>]) -> Vec<u8> {
+    const DATA_START: usize = 1 + 64 + 32;
+    let mut image = lemnos_slot_store::fatimage::fat16(&[]);
+    let fat = 512;
+    let root = (1 + 64) * 512;
+    let mut root_at = root;
+    // Chain entries and data for one file (at `root_at` or in a directory's `at`).
+    let put = |image: &mut Vec<u8>, bytes: &[u8], clusters: &[u16]| {
+        for (i, &c) in clusters.iter().enumerate() {
+            let value = clusters.get(i + 1).copied().unwrap_or(0xFFFF);
+            let at = fat + c as usize * 2;
+            image[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            let chunk = &bytes[(i * 512).min(bytes.len())..((i + 1) * 512).min(bytes.len())];
+            let data = (DATA_START + c as usize - 2) * 512;
+            image[data..data + chunk.len()].copy_from_slice(chunk);
+        }
+    };
+    let entry =
+        |image: &mut Vec<u8>, at: usize, name: &[u8; 11], attr: u8, first: u16, len: usize| {
+            image[at..at + 11].copy_from_slice(name);
+            image[at + 11] = attr;
+            image[at + 26..at + 28].copy_from_slice(&first.to_le_bytes());
+            image[at + 28..at + 32].copy_from_slice(&(len as u32).to_le_bytes());
+        };
+    for (name, bytes, clusters) in files {
+        put(&mut image, bytes, clusters);
+        entry(&mut image, root_at, name, 0x20, clusters[0], bytes.len());
+        root_at += 32;
+    }
+    for (name, dir_cluster, entries) in dirs {
+        // The directory's own chain holds its entries, one per 32 bytes from its cluster's start.
+        let dir_at = (DATA_START + *dir_cluster as usize - 2) * 512;
+        let mut at = dir_at;
+        for (ename, bytes, clusters) in entries {
+            put(&mut image, bytes, clusters);
+            entry(&mut image, at, ename, 0x20, clusters[0], bytes.len());
+            at += 32;
+        }
+        put(&mut image, &[], &[*dir_cluster]);
+        entry(&mut image, root_at, name, 0x10, *dir_cluster, 0);
+        root_at += 32;
+    }
+    image
+}
+
+/// The bytes a file of `len` has: distinct per file, so a read from the wrong place differs.
+fn bytes_of(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+        .collect()
+}
+
+/// Every boot file the slot's directory has, split across clusters, reads back exactly through the
+/// raw reader (`read_raw`): the kernel, the initramfs, the device tree, the command line, and the
+/// overlay directory's README and board overlay (a subdirectory's fragmented file).
+#[test]
+fn every_boot_file_kind_reads_raw_through_a_fragmented_fat_image() {
+    let dir = crate::tests::TempDir::new("read-raw");
+    let kernel = bytes_of(1300, 1);
+    let cmdline = bytes_of(40, 2);
+    let initramfs = bytes_of(900, 3);
+    let dtb = bytes_of(600, 4);
+    let readme = bytes_of(10, 5);
+    let overlay = bytes_of(1100, 6);
+    let image = fragmented_image(
+        &[
+            (b"KERNEL8 IMG", kernel.clone(), vec![2, 4, 6]),
+            (b"CMDLINE TXT", cmdline.clone(), vec![3]),
+            (b"INITRAMFCPI", initramfs.clone(), vec![5, 7]),
+            (b"BOARD   DTB", dtb.clone(), vec![8, 15]),
+        ],
+        &[(
+            b"OVERLAYS   ",
+            9,
+            vec![
+                (b"README     ", readme.clone(), vec![11]),
+                (b"LBOARD  DTB", overlay.clone(), vec![12, 14, 16]),
+            ],
+        )],
+    );
+    let node = dir.0.join("boot.img");
+    fs::write(&node, image).unwrap();
+    let read = |path: &str| boot_guard::read_raw(&Ok(node.clone()), path);
+    assert_eq!(read("KERNEL8.IMG").unwrap(), Some(kernel));
+    assert_eq!(read("CMDLINE.TXT").unwrap(), Some(cmdline));
+    assert_eq!(read("INITRAMF.CPI").unwrap(), Some(initramfs));
+    assert_eq!(read("BOARD.DTB").unwrap(), Some(dtb));
+    assert_eq!(read("OVERLAYS/README").unwrap(), Some(readme));
+    assert_eq!(read("OVERLAYS/LBOARD.DTB").unwrap(), Some(overlay));
+    assert_eq!(read("MISSING.TXT").unwrap(), None);
+}
+
+/// A boot partition whose device is not known is refused by name, not read as empty.
+#[test]
+fn no_device_is_refused_by_name() {
+    let why = boot_guard::read_raw(&Err("no source".into()), "CMDLINE.TXT").unwrap_err();
+    assert!(why.contains("device isn't known"), "{why}");
 }

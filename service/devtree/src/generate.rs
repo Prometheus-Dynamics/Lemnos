@@ -40,6 +40,10 @@ pub enum VbusPlan {
 pub struct Output {
     /// Device-tree source: an overlay (`/plugin/;`), fragments by `target-path`.
     pub overlay: String,
+    /// The SHA-256 (lowercase hex) of the overlay's text before its marker fragment, for an overlay
+    /// (`None` for a fragment). The marker carries the same digest: the start check compares it with
+    /// the slot's manifest (`docs/boards.md`, "The overlay marker").
+    pub overlay_sha256: Option<String>,
     /// Firmware configuration lines, one `gpio=N=op,dhN` per line the board gives a boot state.
     pub boot: String,
     /// The U-Boot fragment: `gpio set`/`gpio clear` per held line, the same lines and levels as
@@ -89,12 +93,14 @@ pub fn generate(board: &BoardFile, map: &SocMap, drivers: &[Manifest]) -> Result
     check_devices(board, map, &chosen, base.map(|(_, b)| b), drivers)?;
     let holds = holds(board, &chosen)?;
     let hogs = hogs(board, map, &chosen, &holds)?;
-    let overlay = overlay(board, &chosen, base, &board.lines, &holds, &hogs, map.form)?;
+    let (overlay, overlay_sha256) =
+        overlay(board, &chosen, base, &board.lines, &holds, &hogs, map.form)?;
     let boot = boot(board, &holds, map)?;
     let uboot = uboot(board, &holds, map);
     let modprobe = modprobe(board, &chosen);
     Ok(Output {
         overlay,
+        overlay_sha256,
         boot,
         uboot,
         modprobe,
@@ -832,7 +838,7 @@ fn overlay(
     holds: &[Hold],
     hogs: &[Hog<'_>],
     form: Form,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -922,12 +928,16 @@ fn overlay(
             &body,
         );
         if let Some(alias) = &controller.alias {
-            let alias_body = format!("aliases {{ {alias} = \"{}\"; }};", controller.path);
+            // The alias is a property of the base's own `/aliases` node, not an `aliases` node
+            // written in the overlay: dtc checks an `aliases` node against the overlay's own tree,
+            // where the controller's path does not exist (the alias_paths warning), and that check
+            // does not see a property of `/aliases`. Every base tree has `/aliases`.
+            let alias_body = format!("{alias} = \"{}\";", controller.path);
             push_fragment(
                 form,
                 &mut fragments,
                 &mut fragment,
-                "/",
+                "/aliases",
                 &format!("the runtime name comes out of alias {alias}"),
                 std::slice::from_ref(&alias_body),
             );
@@ -1021,9 +1031,35 @@ fn overlay(
     }
     out.push_str(&fragments);
     if form == Form::Overlay {
+        // The marker: the start check reads these two properties from the live tree, so a board
+        // whose overlay did not load is refused by name rather than running with the base tree.
+        let digest = sha256_hex(out.as_bytes());
+        let _ = writeln!(out, "\tfragment@{fragment} {{");
+        let _ = writeln!(
+            out,
+            "\t\t// The marker: the live tree names this board and this overlay's text."
+        );
+        let _ = writeln!(out, "\t\ttarget-path = \"/\";");
+        let _ = writeln!(out, "\t\t__overlay__ {{");
+        let _ = writeln!(out, "\t\t\tlemnos {{");
+        let _ = writeln!(out, "\t\t\t\tlemnos,board = \"{}\";", board.board.id);
+        let _ = writeln!(out, "\t\t\t\tlemnos,overlay-sha256 = \"{digest}\";");
+        let _ = writeln!(out, "\t\t\t}};");
+        let _ = writeln!(out, "\t\t}};");
+        let _ = writeln!(out, "\t}};");
         let _ = writeln!(out, "}};");
+        return Ok((out, Some(digest)));
     }
-    Ok(out)
+    Ok((out, None))
+}
+
+/// SHA-256 of `bytes` as 64 lowercase hex digits (the same digest the manifest's files carry).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn push_fragment(

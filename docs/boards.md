@@ -145,6 +145,82 @@ These keys are optional. [Slots](slots.md#boot-history) says what the history ho
 | `system-slots` | `reset_reason` | unset | an absolute path | A file the board writes its reset reason to. Read at each boot for the history; unset, the first watchdog's `bootstatus` is read |
 | `system-reboot` | `data` | `/data` | an absolute path | The data partition: where a restart through `system.reboot` leaves the request the next boot's history names as `requested` |
 
+## Boot count (`system-slots`, `record = "tryboot"`)
+
+These keys are optional. [Slots](slots.md#boot-count-the-fallback-on-the-pi-firmware) says what the
+count does. They apply only to the `tryboot` record.
+
+| Driver | Key | Default | Range | Meaning |
+|---|---|---|---|---|
+| `system-slots` | `demote_after_episodes` | `2` | at least 1, at most 255 | The episodes against a default that demote it: an arrival on the previous slot by the boot count, with the boot files matching and a warm reset (`rsts` `0x20` or `0x1020`), counts one. A power-on reset (`0x1000`) and any other `rsts` value count none; an unknown value is recorded in the boot history with its raw value. A value below 1 is refused by name |
+| `system-slots` | `device_tree` | `/proc/device-tree` | an absolute path | The device tree directory the count (`chosen/bootloader/count`) and the reset status (`rsts`) are read from |
+| `system-slots` | `vcio` | `/dev/vcio` | an absolute path | The firmware mailbox device the boot count is cleared through |
+
+## The board overlay file
+
+`lemnos-ctl tree BOARD -o FILE` writes device-tree **source**, not a compiled blob. Its first line is a
+`//` comment, then `/dts-v1/;` and `/plugin/;`, and its fragments refer to the base tree by `&label`
+and by `target-path`. The image builder compiles it into the slot's `overlays/lemnos-board.dtbo` with
+`-@`, because the `&label` references need the base's symbols:
+
+```text
+dtc -@ -I dts -O dtb -o slots/<id>/overlays/lemnos-board.dtbo FILE
+```
+
+(`FILE` is the `-o` output; the `dtc` of `docs/device-tree.md`, "Built with symbols".) The overlay
+marker's digest covers the text of `FILE` before the marker, so the digest in the manifest's
+`boot.overlay` is the SHA-256 of that text, not of the `.dtbo`.
+
+The runtime names (`i2c1`, `i2c10`, ...) are written as properties of the base's own `/aliases` node
+(`target-path = "/aliases"`), not as an `aliases` node in the overlay. An `aliases` node in an overlay is
+checked by dtc against the overlay's own tree, where the controller's path does not exist (dtc's
+`alias_paths` warning, reported for the generated overlay by a dtc other than the 1.8.1 on the build PC,
+which does not reproduce it). The property form is applied the same way by `fdtoverlay`, and every base
+tree has `/aliases`. The apply tests (`service/devtree/tests/apply.rs`) fail on any text dtc prints.
+
+`lemnos-ctl tree BOARD --manifest-boot FILE` writes the `boot` table that the slot's manifest takes for
+this board, from the same run as the overlay, as one JSON object with a newline: for a board with the
+marker, `{"overlay":{"board":ID,"sha256":DIGEST}}`, where ID and DIGEST are the marker's `lemnos,board` and
+`lemnos,overlay-sha256` byte for byte. A board whose overlay has no marker gets `{}`, since `boot.overlay`
+is optional. The image builder copies the file verbatim as the manifest's `boot` object, with the build's
+`files` beside it; it never parses the overlay source.
+
+`lemnos-ctl tree BOARD --slot ID --cmdline-slot FILE` writes the slot's kernel command-line words as one
+line with one trailing LF: `<prefix>.slot=ID <prefix>.roothash=@roothash@ <prefix>.src.<source>=<path> ... panic=5`.
+`<prefix>` is the system-slots `boot_args` of this board file (`os` in the reference board, which writes
+`os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 panic=5`). There is one
+`.src.` word per `boot_sources` entry, in the table's order, with the entry itself after `.src.` (its source keeps
+its `/` and `@`); there is no `.disk=` word. The install refuses a bundle whose command line lacks one. The words: slot-init takes the prefix from the line, as
+whatever stands before `.slot=`; `@roothash@` is the one hole the installer fills with the manifest's root
+hash; `panic=5` is required and fixed, because the fallback depends on a panic restarting the board. Word
+order is free, unknown words are ignored, and a key given twice takes its last value. The file is refused by
+name without `--slot`, for a board with no system-slots device, for a board whose `boot_args` is unset, and for a board whose `boot_sources` is missing (except on raw NAND) or malformed.
+The manifest's `cmdline` hash is taken over the bytes of the line as the installer writes it.
+
+The table and the overlay must come from the same run: the marker digest changes whenever the overlay
+text does, so a table made by one `tree` run beside an overlay from another (a different tool revision,
+or another board file) names a digest the overlay does not carry. Pass `-o` and `--manifest-boot` to one
+invocation, and build the image from that invocation's outputs. The test `the_boot_table_is_the_overlay_marker_byte_for_byte`
+(`service/ctl/src/boot_dir_tests.rs`) checks that one run's two outputs agree.
+
+## The firmware family and the overlay marker
+
+The Raspberry Pi firmware family (its `config.txt`, `tryboot.txt` and pointer files) is chosen by the
+`system-slots` device's `record = "tryboot"`; a board with no `record` key is `tryboot`. The board file
+has no `firmware` key. `lemnos-ctl tree BOARD --boot-dir DIR` writes the family's files for that record
+only and refuses any other by name.
+
+The generated overlay (`tree -o`) ends with a marker fragment: `target-path = "/"` and, under `lemnos`,
+the properties `lemnos,board` (the board id) and `lemnos,overlay-sha256` (SHA-256 of the overlay's text
+before the marker). The firmware drops a missing overlay without a word, so slot-init reads the two
+properties from the live device tree after it boots a slot and compares them with the slot's manifest
+(`boot.overlay`, see `docs/slots.md`). An absent marker, another board's, or a stale digest fails that
+boot by name (`no board overlay marker`, `overlay digest`), and the boot counts as not good.
+
+The Pi firmware's behaviour behind this (`os_prefix` covers kernels, initramfs, cmdline and overlays;
+overlays need `overlays/README`; a missing kernel or dtb makes the firmware ignore the prefix) is from the
+documentation only until `testing/board-runs/I5i6.md` records a run.
+
 ## `[board]` identity
 
 `[board] id` is the board's family, and the driver `system-identity` reads the rest of the

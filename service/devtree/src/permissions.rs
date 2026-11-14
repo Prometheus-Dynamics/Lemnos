@@ -74,8 +74,29 @@ pub struct Section {
 #[must_use]
 pub fn sections(board: &BoardFile) -> Vec<Section> {
     let mut out = vec![module_nodes()];
+    out.extend(firmware_mailbox(board));
     out.extend(dma_heaps(board));
     out
+}
+
+/// The firmware mailbox the daemon clears the boot count through, on a board whose slot record is
+/// `tryboot` (the default, as the slot driver reads it): the daemon's group gets `/dev/vcio`, the
+/// misc device the firmware's property mailbox is on. A board with another record has no such node.
+fn firmware_mailbox(board: &BoardFile) -> Option<Section> {
+    let slots = board.devices.iter().find(|d| d.driver == "system-slots")?;
+    let record = slots
+        .config
+        .get("record")
+        .and_then(|value| value.as_str())
+        .unwrap_or("tryboot");
+    if record != "tryboot" {
+        return None;
+    }
+    Some(Section {
+        title: "The firmware mailbox the boot count is cleared through (/dev/vcio, a misc device): the slot driver's tryboot record."
+            .to_owned(),
+        facts: vec![Fact::daemon("misc", "", Name::Exact("vcio".to_owned()))],
+    })
 }
 
 /// The kernel module's control node and the receiver nodes it makes: `/dev/lemnos` and

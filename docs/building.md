@@ -100,3 +100,47 @@ is not on its allow list. The one allowed foreign `-sys` crate is `linux-raw-sys
 bindings to the Linux uapi, with no build script. It also fails if `docs/building.md` does not list a
 shipped program. `engine/capi/build.rs` runs a C compiler, but it is the C library, not a shipped
 program.
+
+## Building `lemnos-ctl` as a host tool
+
+`lemnos-ctl tree` runs on a build host and writes an image's device-tree overlay, boot files and udev
+or mdev permission fragments from a board file. What follows was run on this PC at the I5i6 head
+(`testing/board-runs/I5i6.md`, "The one invocation"); each claim names its run.
+
+**One invocation with every output.** The reference board (`testing/boards/reference.toml`, `record =
+"tryboot"`, `soc = "bcm2712-rp1"`):
+
+```text
+lemnos-ctl tree --socs <repo>/socs testing/boards/reference.toml -o overlay.dts --boot-dir boot \
+  --slot a1 --modprobe modprobe.conf --cmdline cmdline.txt --udev udev.rules --mdev mdev.conf
+```
+
+Exit 0; nothing refused. Files written: `overlay.dts` 2976 bytes (`-o`), `modprobe.conf` 949, `cmdline.txt` 86,
+`udev.rules` 1124, `mdev.conf` 1141. `boot/`: `config.txt` 1318, `tryboot.txt` 1274, `default.txt` 512,
+`previous.txt` 512, `trial.txt` 512, `trial.rec` 1024, `reason.rec` 1024, `episodes.rec` 1024,
+`slot-layout.toml` 1820, and `slot/overlays/README` 162. For a `record = "uboot"` board the `boot/` files are
+`slot-layout.toml`, `uboot-env.txt` and `boot.cmd` (I5i7).
+
+**The SoC map.** A board with `soc = NAME` reads `DIR/NAME.toml`, where `DIR` is `--socs DIR`, or the relative
+directory `socs` in the working directory when `--socs` is absent (`load_map` in `service/ctl/src/lib.rs`).
+Nothing is compiled in. `--map FILE` names one map file instead. For the reference board the map is
+`socs/bcm2712-rp1.toml`; the run above used `--socs <repo>/socs`.
+
+**The board overlay.** `-o` writes DTS source (not a blob); compile it with `dtc -@` (see
+[boards.md](boards.md#the-board-overlay-file)). The run compiled it with `dtc -@ -I dts -O dtb` (exit 0).
+
+**What building needs.** Checked with a fresh `CARGO_HOME` for each case:
+
+- `cargo build -p lemnos-ctl --locked` online: exit 0. Cargo fetched the crates.io crates in `Cargo.lock` **and**
+  the git checkout of `https://github.com/Prometheus-Dynamics/Orion.git` at rev `455a956e`, although `lemnos-ctl`
+  does not use Orion (`cargo tree -p lemnos-ctl` shows no git package). `service/orion` declares those git
+  dependencies, and the workspace member is part of the resolution.
+- The same build offline with only the crates.io cache (no Orion checkout): fails with `can't checkout from
+  'https://github.com/Prometheus-Dynamics/Orion.git': you are in the offline mode`. So the git source must be
+  present, from the network or from a vendor directory.
+- `cargo vendor --locked DIR` (run online) vendors the Orion sources too (`DIR/orion`, and the other Orion crates).
+  Then `cargo build -p lemnos-ctl --locked --offline --config <the vendor config>` from an **empty** `CARGO_HOME`:
+  exit 0. The vendor config is the output of `cargo vendor` (its `[source.*]` entries).
+- At run time `lemnos-ctl tree` reads nothing but its arguments: the board file, the SoC map, and the outputs.
+  The layout contract is embedded (`include_str!("../../../contracts/slot-layout.toml")` in `boot_dir.rs`), so
+  the built binary needs no file from the repository.

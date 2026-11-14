@@ -682,9 +682,9 @@ This uses the board firmware's one-shot boot:
   one sector (512 bytes) at a fixed place on the boot partition, pre-created at image build. Its
   first line is `os_prefix=slots/<id>/`, then a `#lemnos-crc32=` checksum line over that first line,
   then `#` padding. The checksum is what refuses a torn sector (see "Pointer files", below).
-- A restart with the argument `0 tryboot` reads `tryboot.txt` once. The firmware keeps no
-  count, so a trial's attempts are in the trial record `TRIAL   REC` (`lemnos_slot_store::boot_raw`),
-  `0` to `3`.
+- A restart with the argument `0 tryboot` reads `tryboot.txt` once. A trial's attempts are in the
+  trial record `trial.rec` (FAT name `TRIAL   REC`, `lemnos_slot_store::boot_raw`), `0` to `3`. The firmware's own boot
+  count is used only by the count-based fallback, below.
 - The initramfs knows a trial boot from `/proc/device-tree/chosen/bootloader/tryboot`.
 - The default slot's `lemnos-slot-init` takes the attempt. When the trial record names a slot, the
   firmware didn't boot the trial, and its attempts are above 0, it writes one fewer and restarts
@@ -743,6 +743,95 @@ Promoting the default (`DEFAULT TXT`) is a single-sector write with no second co
 above. A default whose boot files don't match its manifest is moved to the previous slot by that
 write; the next boot starts the previous.
 
+### Boot count: the fallback on the Pi firmware
+
+The fixed `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`) reads `default.txt` unless the
+firmware's `boot_count` has bit 2 set (`[boot_count&4]`), when it reads `previous.txt`. Boots 0 to 3
+run the default, 4 to 7 the previous, and so on: the count wraps at 256, a multiple of 8, so the
+pattern never breaks. `tryboot.txt` has no count filter. The filter, the `kernel_watchdog_timeout`
+keys and the count's read and clear are verified from the Raspberry Pi documentation
+(`conditional.adoc`, `config_txt_boot.adoc`), not yet on a board: `testing/board-runs/I5i6.md`.
+
+- The count is read from `/proc/device-tree/chosen/bootloader/count` and the reset status from
+  `rsts` (four big-endian bytes each; `device_tree` names the directory). It is cleared through the
+  property mailbox on `/dev/vcio` (`vcio`), tag `0x0003808d` with the value zero
+  (`lemnos_driver_rpi_firmware_sys`). Both settings are the `system-slots` device's; the defaults
+  are the paths above.
+- The count is cleared by lemnosd, never by slot-init, in two places: at a boot that is good (a
+  confirmed trial, or a default boot that has run its uptime with its boot files matching the
+  manifest) and before each restart Lemnos makes. The restart check runs first: a refused check
+  makes no restart. A count that can't be cleared does not refuse the restart the board was asked for:
+  the state names it ("this boot is counted") and the indicator shows failed.
+- A boot that arrives on the previous slot because of the count (the reading picks previous, and
+  the board runs the previous) is reported first: the state's error and the boot history's entry
+  for this boot name the count, `rsts`, and whether the default's files match. Then:
+  - the default's files don't match its manifest: the default is marked failed, `default.txt` is
+    pointed at the previous slot, and the count is cleared.
+  - the files match and the last reset was a warm reset (`rsts` = `0x20` or `0x1020`): one episode is
+    recorded against the default in the two-copy record `episodes.rec` (FAT name `EPISODESREC`, kind `EPISODES`), and the
+    default is demoted when the episodes reach `demote_after_episodes` (the board file's key, default
+    2, minimum 1). The episode is written before the count is cleared.
+  - the files match and the last reset was a power-on reset (`rsts` = `0x1000`), or the full `rsts`
+    value is one no rule names (`unknown`, reported with its raw value): no episode. The count is cleared.
+  - Where the default stays, the next restart tries it again. A boot that is good clears the
+    episodes of the slot it runs.
+- **Refusals that repeat go to the firmware's flashing mode.** A refusal no slot can answer (the
+  boot disk or table is wrong, the data volume is missing, a kernel piece is absent) goes to the
+  rescue: slot-init keeps the reason in the kernel log, waits 30 s and restarts. The same refusal
+  repeats on every restart, so slot-init also reads the firmware's count at the rescue: when `FLASH_AFTER`
+  (8) restarts have gone by without a good boot (the daemon clears the count at a good boot, so the
+  count is the run of restarts since the last one), it asks the firmware for RPIBOOT at the next boot
+  instead (mailbox tag `0x0003808b`, value 3, the reply word `0x80000000` checked:
+  `Mailbox::request_rpiboot`) and restarts. Nothing is written to the boot partition and no slot record
+  changes. The count is the firmware's, so it also counts restarts for other causes: eight
+  restarts without a good boot, whatever the cause, is the bound. Eight rides out a transient (a slow
+  card, a late device) and, at 30 s plus a boot each, is a few minutes; it is not smaller because RPIBOOT
+  has no timeout. The request applies to the next boot only and the stored `BOOT_ORDER` is never
+  changed; a board sent there sits waiting for a USB host until it is flashed or power-cycled
+  (BCM2712 boards, the Pi 5 class). The reason is in the kernel log and the saved log; the Pi keeps
+  nothing across the restart without a boot-partition write. Not verified on a board: the request
+  from the initramfs: `/dev/vcio` is never a node baked into the image. slot-init mounts devtmpfs on
+  `/dev` first of all, before any path that can need the mailbox (a test pins the order), and
+  devtmpfs makes `/dev/vcio` when the driver is built in. The kernel must therefore have `BCM_VCIO`,
+  `BCM2835_MBOX` and `RASPBERRYPI_FIRMWARE` (with the menus `BRCM_CHAR_DRIVERS` and `MAILBOX`) built in, not
+  modules: they are the `firmware.rpi-tryboot` group of `contracts/slot-kernel.toml` (version 2),
+  checked by `scripts/check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`, which
+  names a symbol that is `=m` or unset. A test ties slot-init's use of the mailbox to that group.
+  Still to confirm on a board: `testing/board-runs/I5i6.md`. A failed request restarts the old way.
+- Limits, stated: only the last reset's cause is visible; a broken previous alternates with the
+  default for ever and nothing reports it (the fixed boot stage is the answer to that case); a
+  power cut clears the count, so a cut in the middle of an arrival counts once at most; a plain
+  `reboot` outside Lemnos counts one boot, which a good boot clears.
+- `lemnos-ctl tree BOARD --boot-dir DIR [--slot ID]` writes the boot files for a board whose record
+  is `tryboot`: `config.txt` and `tryboot.txt` (the fixed text, a header that says it is generated,
+  and the board's `gpio=` lines after it), the three pointer sectors (naming `--slot`, or the
+  placeholder `none` when no slot is installed), and the three record files under their visible
+  names (`trial.rec`, `reason.rec`, `episodes.rec`, listed as `[[record]]` in the contract; their FAT
+  directory names are `TRIAL   REC`, `REASON  REC`, `EPISODESREC`). The image builder copies them
+  under those FAT names and places them contiguously. Other records have no firmware files here and are refused
+  by name.
+
+### The slot layout (Pi firmware form)
+
+`contracts/slot-layout.toml` (version 3) lists every file of a slot's directory `slots/<id>/` on the
+boot partition for the `rpi-tryboot` form, with its role, whether it is required, and its `source`:
+the kernel (`kernel8.img`), the initramfs (`initramfs.cpio`), the device tree the slot's kernel built
+(`board.dtb`) and `cmdline.txt` are `build` (the image builder supplies them), and `overlays/lemnos-board.dtbo`
+is `build` too (the compiled board overlay, see [the board overlay file](boards.md#the-board-overlay-file)).
+`overlays/README` is `generated`: it makes `os_prefix` apply to overlays, and `lemnos-ctl tree BOARD
+--boot-dir DIR` writes it under `DIR/slot/overlays/README`, one fixed line. The image builder copies
+`DIR/slot/` into `slots/<id>/` and types no name.
+The generated `config.txt` and `tryboot.txt` name these with the same spelling, and the constants in
+`drivers/slot-store/src/layout.rs` are tested against the file. `tree --boot-dir` writes a copy as
+`slot-layout.toml`. The reader refuses any version but 2, any unknown key, and a `source` other than
+`build` or `generated`.
+
+A slot's manifest may carry `boot.overlay` (`{"board": ..., "sha256": ...}`): the board's overlay
+digest, which the live marker must equal (`docs/boards.md`). `lemnos-ctl tree BOARD --manifest-boot FILE`
+writes that object for the board, as the whole `boot` object the generator is the authority for
+(`docs/boards.md`, "The board overlay file"). The installer and the image builder
+check that a `rpi-tryboot` slot has every required file (`layout::rpi_tryboot_missing`).
+
 ## Booting a slot: `lemnos-slot-init`
 
 `service/slot-init` builds `lemnos-slot-init`, the `/init` of a slot's initramfs. It is a static
@@ -772,6 +861,7 @@ Nothing in the initramfs makes up for it.
 
 1. It mounts `/proc`, `/sys` and `/dev`, and reads the slot arguments from the kernel command
    line. The prefix is whatever stands before `.slot=` (the driver's `boot_args`).
+   The line is written by `lemnos-ctl tree BOARD --slot ID --cmdline-slot FILE` (`docs/boards.md`).
 2. It finds the data partition by a fixed rule, not from the command line. On raw NAND, when the
    UBI device `ubi0` is attached, it is the UBI volume `data` (below). Otherwise it is the ext4
    partition labelled `lemnos-data` (`/sys/class/block` and the superblocks). The image builder sets

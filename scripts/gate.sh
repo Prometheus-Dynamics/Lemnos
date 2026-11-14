@@ -71,6 +71,9 @@ step packaging-files scripts/check-packaging-files.py
 step shipped scripts/check-shipped.sh
 # The module's CONFIG_ symbols are all in docs/kernel-config.md, and the QEMU harness enables the required ones.
 step kernel-config scripts/check-kernel-config.py
+# The generated overlays compile with the dtc the contract names (built from its pinned release) with
+# every warning class an error, and apply to a base built from their SoC map (testing/devtree/check.sh).
+step devtree testing/devtree/check.sh
 # Every command in the documents runs against the simulated board, and every link leads somewhere.
 step documents scripts/check-docs.py
 # The mdev.conf that `lemnos-ctl tree --mdev` writes is run by BusyBox 1.37.0 and 1.38.0 (their

@@ -76,6 +76,9 @@ pub mod boot;
 mod boot_guard;
 #[cfg(test)]
 mod boot_guard_tests;
+mod count;
+#[cfg(test)]
+mod count_tests;
 mod install;
 mod resolve;
 pub use lemnos_slot_store::{json, manifest, store};
@@ -174,6 +177,10 @@ pub struct SystemSlots {
     /// [`boot_guard`]), and when the next slow-period check is due.
     check: Option<Check>,
     next_check_ns: u64,
+    /// The firmware's boot count and mailbox, for the `tryboot` form (see [`count`]).
+    firmware: Option<count::Firmware>,
+    /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
+    demote_after: u8,
 }
 
 /// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
@@ -192,6 +199,27 @@ fn layout_of(cfg: &Config<'_>) -> (Layout, Option<Arc<dyn UbiWrite>>) {
         .clone()
         .map(|ubi| Arc::new(ubi::System { ubi }) as Arc<dyn UbiWrite>);
     (layout, ubi_write)
+}
+
+/// The boot partition's block node, found from the boot chain's source and the board's
+/// `boot_sources`; refused by name when it can't be.
+fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
+    match boot_table(cfg) {
+        Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
+        Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The firmware's count and mailbox, for the `tryboot` form only: the other forms have no count.
+fn firmware_of(cfg: &Config<'_>) -> Option<count::Firmware> {
+    (cfg.str("record").unwrap_or("tryboot") == "tryboot").then(|| count::Firmware {
+        device_tree: PathBuf::from(cfg.str("device_tree").unwrap_or("/proc/device-tree")),
+        vcio: PathBuf::from(
+            cfg.str("vcio")
+                .unwrap_or(lemnos_driver_rpi_firmware_sys::DEFAULT_DEVICE),
+        ),
+    })
 }
 
 fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
@@ -278,10 +306,7 @@ fn record_for(
     Ok(match cfg.str("record").unwrap_or("tryboot") {
         "tryboot" => Box::new(Tryboot {
             boot: layout.boot.clone(),
-            node: match boot_table(cfg) {
-                Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
-                _ => Err("the board file's boot_sources is not set".into()),
-            },
+            node: boot_node_of(cfg),
             restarter,
         }),
         "file" => Box::new(FileRecord {
@@ -306,14 +331,32 @@ fn record_for(
 }
 
 /// The check over a record of its own: [`boot_guard::check`], which may point the record at the
-/// previous slot.
-fn guard_check(layout: Layout, record: Box<dyn BootRecord>) -> Check {
+/// previous slot. Before a restart (`restart`) it also clears the firmware's boot count, after the
+/// check has passed: an intended restart never counts.
+fn guard_check(
+    layout: Layout,
+    node: core::result::Result<PathBuf, String>,
+    record: Box<dyn BootRecord>,
+    firmware: Option<count::Firmware>,
+) -> Check {
     let record = Mutex::new(record);
     Check(Arc::new(move |restart| {
         let mut record = record
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        boot_guard::check(&layout, record.as_mut(), restart)
+        let note = boot_guard::check(&layout, &node, record.as_mut(), restart)?;
+        if restart && let Some(firmware) = &firmware {
+            // A count that can't be cleared does not stop the restart the board was asked for: the
+            // restart then counts one boot, and the state says so.
+            if let Err(e) = count::ClearCount::clear_count(firmware) {
+                let mut state = State::load(&layout);
+                state.error = format!(
+                    "the boot count couldn't be cleared before this restart ({e}): this boot is counted"
+                );
+                let _ = state.save(&layout);
+            }
+        }
+        Ok(note)
     }))
 }
 
@@ -366,6 +409,8 @@ impl SystemSlots {
             reset_reason: None,
             last_signed: None,
             check: None,
+            firmware: None,
+            demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
         };
         slots.clear_interrupted();
@@ -1108,12 +1153,23 @@ const KEYS: &[Key] = &[
     Key::optional("trial_attempts", Kind::Int),
     Key::optional("health", Kind::List),
     Key::optional("boot_sources", Kind::List),
+    Key::optional("device_tree", Kind::Str),
+    Key::optional("vcio", Kind::Str),
+    Key::optional("demote_after_episodes", Kind::Int),
 ];
 
-/// The settings `SystemReboot` reads.
+/// The settings `SystemReboot` reads. The boot-file check before its restart reads the boot files
+/// raw from the boot disk, so it takes the same boot facts as the slot driver, and clears the Pi
+/// firmware's boot count through the same mailbox.
 const REBOOT_KEYS: &[Key] = &[
     Key::optional("systemctl", Kind::Str),
     Key::optional("data", Kind::Str),
+    Key::optional("boot", Kind::Str),
+    Key::optional("ubi", Kind::Str),
+    Key::optional("record", Kind::Str),
+    Key::optional("boot_sources", Kind::List),
+    Key::optional("device_tree", Kind::Str),
+    Key::optional("vcio", Kind::Str),
 ];
 
 /// The `record` setting: which boot record the board uses. `ubi` needs a `ubi` device.
@@ -1300,8 +1356,10 @@ impl Lifecycle for SystemSlots {
         let (layout, ubi_write) = layout_of(cfg);
         // Two records: the check holds one (to point the default at the previous slot), and the
         // driver's own is built with the check in its restarter, so every restart is checked.
+        let node = boot_node_of(cfg);
+        let firmware = firmware_of(cfg);
         let base = record_for(cfg, &layout, &ubi_write, None)?;
-        let check = guard_check(layout.clone(), base);
+        let check = guard_check(layout.clone(), node.clone(), base, firmware.clone());
         let record = record_for(cfg, &layout, &ubi_write, Some(check.clone()))?;
         // A key file that can't be read leaves the board trusting no bundle, which every
         // install then says; it is read again when the driver is bound again.
@@ -1312,6 +1370,11 @@ impl Lifecycle for SystemSlots {
             .unwrap_or_default();
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
         slots.check = Some(check);
+        slots.boot_node = node;
+        slots.firmware = firmware;
+        slots.demote_after =
+            lemnos_slot_store::fallback::threshold_from_board(cfg.int("demote_after_episodes"))
+                .map_err(|_| Status::INVALID_ARGUMENT)?;
         slots.policy = trial_policy(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         slots.sources =
             health_sources(&slots.policy.health).map_err(|_| Status::INVALID_ARGUMENT)?;
@@ -1331,11 +1394,6 @@ impl Lifecycle for SystemSlots {
             .iter()
             .map(|entry| entry.to_string())
             .collect();
-        slots.boot_node = match boot_table(cfg) {
-            Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
-            Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
-            Err(error) => Err(error.to_string()),
-        };
         slots.board_id = cfg.board().to_string();
         if cfg.get("require_signed").is_some() || cfg.get("security_view").is_some() {
             return Err(Status::INVALID_ARGUMENT);
@@ -1360,6 +1418,7 @@ impl Lifecycle for SystemSlots {
         }
         slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
         slots.record_boot();
+        slots.arrive_at_start();
         Ok(slots)
     }
 
@@ -1648,8 +1707,9 @@ impl Lifecycle for SystemReboot {
 
     fn start(_: SystemRebootNeeds, cfg: &Config<'_>) -> Result<Self> {
         let (layout, ubi_write) = layout_of(cfg);
+        let node = boot_node_of(cfg);
         let base = record_for(cfg, &layout, &ubi_write, None)?;
-        let check = guard_check(layout, base);
+        let check = guard_check(layout, node, base, firmware_of(cfg));
         Ok(Self {
             restarter: restarter(cfg, Some(check)),
             data: PathBuf::from(cfg.str("data").unwrap_or("/data")),

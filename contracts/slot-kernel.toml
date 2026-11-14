@@ -5,7 +5,7 @@
 # Names are written without the CONFIG_ prefix: BLOCK is CONFIG_BLOCK.
 #
 # Reading rules, for any build that reads this file:
-#   - version must be 1. Any other value: refuse the file.
+#   - version must be 2 (version 1 had no [firmware] table). Any other value: refuse the file.
 #   - A key this reader does not know, at any level, is refused too: it means a newer version.
 #     Every key below is required at its level.
 #   - A build for image kind K checks exactly these, from this file:
@@ -14,6 +14,18 @@
 #       kind.K.one_of                    each inner list: at least one of its symbols =y
 #       initramfs.<compression>          the decompressor symbol =y for the image's initramfs compression
 #                                        ("" means none: the initramfs is not compressed, no symbol)
+#   - firmware.F.all                 each symbol =y (built in: =m or unset is refused, naming the symbol) for a
+#                                    board whose firmware family is F. The one family is "rpi-tryboot": the
+#                                    Raspberry Pi firmware family, whose slot-init asks the firmware for its
+#                                    flashing mode through /dev/vcio (the property mailbox), which devtmpfs
+#                                    makes (DEVTMPFS is in always.all; no static node is ever in the image).
+#                                    From the Pi kernel tree (rpi-7.2.y): BCM_VCIO (drivers/char/broadcom/
+#                                    Kconfig, tristate, depends on BCM2835_MBOX, inside the bool menuconfig
+#                                    BRCM_CHAR_DRIVERS), BCM2835_MBOX (drivers/mailbox/Kconfig, depends on
+#                                    ARCH_BCM2835, inside the bool menuconfig MAILBOX) and RASPBERRYPI_FIRMWARE
+#                                    (drivers/firmware/Kconfig, depends on MAILBOX; vcio.c calls its
+#                                    rpi_firmware_property_list). The checker: scripts/check-kernel-config.py
+#                                    --check-config <.config> --firmware rpi-tryboot.
 #   - optional.all is named, not enforced: a missing one is logged and the boot carries on.
 #   - boot_check.checked is the set of symbols slot-init checks when it boots and names when one is
 #     absent. It must equal the names slot-init's self-check gives.
@@ -24,7 +36,7 @@
 #   - Per-SoC storage hosts (for example MMC_SDHCI_BRCMSTB) are not here: they are board data.
 #     MODULES is not required and is not listed: slot-init loads no modules.
 
-version = 1
+version = 2
 
 [always]
 all = [
@@ -57,6 +69,15 @@ all = [
   "MTD_UBI_BLOCK",
 ]
 one_of = []
+
+[firmware.rpi-tryboot]
+all = [
+  "BRCM_CHAR_DRIVERS",
+  "MAILBOX",
+  "BCM2835_MBOX",
+  "BCM_VCIO",
+  "RASPBERRYPI_FIRMWARE",
+]
 
 [optional]
 all = [

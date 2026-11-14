@@ -321,3 +321,41 @@ fn the_uboot_check_reads_the_slot_its_cmdline_and_the_root_copy_when_default() {
     gone.insert("boot-record.env".into(), b"x".to_vec());
     assert!(uboot_check("s1", &slot_files(), true, read(&gone)).is_some());
 }
+
+mod overlay_marker {
+    use super::*;
+    use crate::manifest::Overlay;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OLD: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    fn want() -> Overlay {
+        Overlay {
+            board: "board-a".into(),
+            sha256: SHA.into(),
+        }
+    }
+
+    #[test]
+    fn the_slots_own_marker_matches() {
+        assert_eq!(overlay_mismatch(&want(), Some(("board-a", SHA))), None);
+    }
+
+    #[test]
+    fn an_absent_marker_is_named() {
+        let why = overlay_mismatch(&want(), None).unwrap();
+        assert!(why.contains("no board overlay marker"), "{why}");
+    }
+
+    #[test]
+    fn a_stale_digest_is_named() {
+        let why = overlay_mismatch(&want(), Some(("board-a", OLD))).unwrap();
+        assert!(why.contains("digest") && why.contains(OLD), "{why}");
+    }
+
+    #[test]
+    fn another_boards_overlay_is_named() {
+        let why = overlay_mismatch(&want(), Some(("board-b", SHA))).unwrap();
+        assert!(why.contains("board-b"), "{why}");
+    }
+}

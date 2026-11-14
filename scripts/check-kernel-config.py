@@ -33,6 +33,9 @@ A dependency is one a configuration must state explicitly: a symbol set by a `de
 Kernel tree (CI): the always.all and kind.disk.all symbols are roots too, and each must be `=y` in the
 configuration (`m` is not enough for a slot board).
 
+Firmware groups (contract version 2): `check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`
+refuses a configuration in which any symbol of that group (and DEVTMPFS) is =m or unset, naming the symbol.
+
 Exits 1 and says what is wrong; 0 when all hold.
 """
 import os
@@ -56,10 +59,11 @@ SLOT_SECTION = "## Slot board: built in"
 SLOT_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
 SLOT_CODE = ROOT / "service" / "slot-init" / "src" / "kernel.rs"
 CONTRACT = ROOT / "contracts" / "slot-kernel.toml"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 # The groups a row of the slot-board table can name (its "When" cell), and the cells that name no group.
 WHEN_GROUPS = ("always.all", "kind.disk.all", "kind.disk.one_of", "kind.mtd.all", "kind.mtd.one_of",
-               "optional.all", "initramfs")
+               "firmware.rpi-tryboot.all", "optional.all", "initramfs")
+FIRMWARES = ("rpi-tryboot",)
 WHEN_BOARD = ("board", "none")
 
 
@@ -360,11 +364,14 @@ def contract():
         sys.exit(f"{where}: cannot be read: {err}")
     if data.get("version") != CONTRACT_VERSION:
         sys.exit(f"{where}: version {data.get('version')!r} is not one this reader knows (it reads {CONTRACT_VERSION}); refusing the file")
-    _keys(data, ("version", "always", "kind", "optional", "initramfs", "boot_check"), where, "")
+    _keys(data, ("version", "always", "kind", "firmware", "optional", "initramfs", "boot_check"), where, "")
     _keys(data["always"], ("all",), where, "always.")
     _keys(data["kind"], ("disk", "mtd"), where, "kind.")
     for kind in ("disk", "mtd"):
         _keys(data["kind"][kind], ("all", "one_of"), where, f"kind.{kind}.")
+    _keys(data["firmware"], FIRMWARES, where, "firmware.")
+    for name in FIRMWARES:
+        _keys(data["firmware"][name], ("all",), where, f"firmware.{name}.")
     _keys(data["optional"], ("all",), where, "optional.")
     _keys(data["initramfs"], ("gzip", "xz", "zstd", "lz4", "none"), where, "initramfs.")
     _keys(data["boot_check"], ("checked",), where, "boot_check.")
@@ -394,6 +401,9 @@ def contract_groups(data):
         for alternatives in data["kind"][kind]["one_of"]:
             for name in _strings(alternatives, where, f"kind.{kind}.one_of"):
                 add(name, f"kind.{kind}.one_of")
+    for fw in FIRMWARES:
+        for name in _strings(data["firmware"][fw]["all"], where, f"firmware.{fw}.all"):
+            add(name, f"firmware.{fw}.all")
     for name in _strings(data["optional"]["all"], where, "optional.all"):
         add(name, "optional.all")
     for value in data["initramfs"].values():
@@ -456,6 +466,24 @@ def harness_checks(data, problems):
                 problems.append(
                     f"{path.relative_to(ROOT)} sets none of {', '.join('CONFIG_' + n for n in alternatives)} to y: "
                     f"a disk slot board needs one storage driver ({where}, kind.disk.one_of)")
+
+
+def firmware_config_problems(values, firmware):
+    """A kernel configuration (`fragment` form: CONFIG_X -> y, m, unset) against the contract's
+    firmware group for `firmware`: every symbol must be built in. =m and unset are both refused, and
+    each is named. DEVTMPFS (always.all) is part of it: /dev/vcio exists only through devtmpfs."""
+    data = contract()
+    where = CONTRACT.relative_to(ROOT)
+    if firmware not in data["firmware"]:
+        return [f"{firmware!r} is not a firmware family in {where} (it has: {', '.join(data['firmware'])})"]
+    problems = []
+    for name in data["firmware"][firmware]["all"] + ["DEVTMPFS"]:
+        have = values.get(f"CONFIG_{name}", "unset")
+        if have != "y":
+            problems.append(
+                f"CONFIG_{name} must be built in (=y) for firmware {firmware} ({where}) but is "
+                f"{'=m' if have == 'm' else 'unset' if have == 'unset' else '=' + have}")
+    return problems
 
 
 def slot_code_names():
@@ -577,6 +605,20 @@ def print_table(tree, defconfig, arch):
 
 
 def main(argv):
+    if argv[:1] == ["--check-config"]:
+        config = pathlib.Path(argv[1])
+        firmware = argv[argv.index("--firmware") + 1] if "--firmware" in argv else ""
+        try:
+            values = fragment(config)
+        except OSError as err:
+            print(f"kernel-config: {config}: cannot be read: {err}", file=sys.stderr)
+            return 1
+        problems = firmware_config_problems(values, firmware)
+        for problem in problems:
+            print(f"kernel-config: {problem}", file=sys.stderr)
+        if not problems:
+            print(f"kernel-config: {config} carries the {firmware} group")
+        return 1 if problems else 0
     if argv[:1] == ["--print-table"]:
         tree, defconfig = argv[1], argv[2]
         arch = argv[argv.index("--arch") + 1] if "--arch" in argv else "arm64"

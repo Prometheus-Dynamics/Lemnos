@@ -95,40 +95,25 @@ fn data_path(layout: &Layout) -> PathBuf {
     layout.marker(FILE)
 }
 
-fn boot_path(layout: &Layout) -> PathBuf {
-    layout.boot.join(BOOT_FILE)
-}
-
 fn last_n(entries: &[Entry]) -> u64 {
     entries.last().map_or(0, |entry| entry.n)
 }
 
-/// The history: the copy holding the later boot, the data partition's on a tie. Empty when
-/// neither copy can be read.
+/// The history, from the data partition only. Empty when it can't be read. (A boot-partition copy
+/// of an earlier design is never read: nothing writes or reads one at run time.)
 pub fn load(layout: &Layout) -> Vec<Entry> {
-    let data = fs::read_to_string(data_path(layout))
+    fs::read_to_string(data_path(layout))
         .map(|text| parse(&text))
-        .unwrap_or_default();
-    let boot = fs::read_to_string(boot_path(layout))
-        .map(|text| parse(&text))
-        .unwrap_or_default();
-    if last_n(&boot) > last_n(&data) {
-        boot
-    } else {
-        data
-    }
+        .unwrap_or_default()
 }
 
-/// Writes `entries` to both copies, each as far as it can be: the data partition's, and the boot
-/// partition's when the data one fails. Fails only when neither was written.
+/// Writes `entries` to the data partition's copy. The boot partition is not written at run time
+/// (a rewrite of a FAT file there is not cut-safe, and nothing else on it changes at run time): when
+/// the data partition refuses, the error is returned and the history keeps its previous state.
 pub fn save(layout: &Layout, entries: &[Entry]) -> io::Result<()> {
     let text = render(entries);
-    let data = fs::create_dir_all(layout.state_dir())
-        .and_then(|()| replace(&data_path(layout), text.as_bytes()));
-    match data {
-        Ok(()) => Ok(()),
-        Err(data_error) => replace(&boot_path(layout), text.as_bytes()).map_err(|_| data_error),
-    }
+    fs::create_dir_all(layout.state_dir())
+        .and_then(|()| replace(&data_path(layout), text.as_bytes()))
 }
 
 /// Records boot `boot` (the kernel's id) with its slot, outcome, reset reason and request, keeping
@@ -164,6 +149,22 @@ pub fn append(
         let drop = entries.len() - keep;
         entries.drain(..drop);
     }
+    save(layout, &entries)?;
+    Ok(true)
+}
+
+/// Sets the outcome of the newest entry for `boot` (this boot's entry), so the history says what the
+/// boot found. A boot with no entry is left alone. Returns whether an entry changed.
+pub fn annotate(layout: &Layout, boot: &str, outcome: &str) -> io::Result<bool> {
+    let mut entries = load(layout);
+    let Some(entry) = entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.boot == field(boot))
+    else {
+        return Ok(false);
+    };
+    entry.outcome = field(outcome);
     save(layout, &entries)?;
     Ok(true)
 }
@@ -234,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unwritable_state_directory_keeps_the_history_on_the_boot_partition() {
+    fn an_unwritable_state_directory_refuses_the_history_and_writes_no_boot_file() {
         let dir = TempDir::new("boots-fallback");
         let layout = layout(&dir);
         fs::create_dir_all(&layout.boot).unwrap();
@@ -242,25 +243,12 @@ mod tests {
         fs::create_dir_all(&layout.data).unwrap();
         fs::create_dir_all(layout.data.join("board")).unwrap();
         fs::write(layout.data.join("board/slots"), b"blocked").unwrap();
-        assert!(append(&layout, "boot-1", "a", "unknown", "none", "-", 4).unwrap());
-        assert_eq!(
-            fs::read_to_string(layout.boot.join(BOOT_FILE))
-                .unwrap()
-                .lines()
-                .count(),
-            1
+        assert!(append(&layout, "boot-1", "a", "unknown", "none", "-", 4).is_err());
+        assert!(
+            !layout.boot.join(BOOT_FILE).exists(),
+            "no run-time write to the boot partition"
         );
-        assert_eq!(
-            load(&layout)[0].boot,
-            "boot-1",
-            "the reader finds the boot copy"
-        );
-        assert!(append(&layout, "boot-2", "b", "unknown", "none", "-", 4).unwrap());
-        assert_eq!(
-            load(&layout).len(),
-            2,
-            "the next boot builds on the boot copy"
-        );
+        assert!(load(&layout).is_empty());
     }
 
     #[test]

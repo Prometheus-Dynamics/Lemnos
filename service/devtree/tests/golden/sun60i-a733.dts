@@ -6,16 +6,16 @@
 	status = "okay";
 };
 // the runtime name comes out of alias i2c0
-/ {
-	aliases { i2c0 = "/soc/i2c@2510000"; };
+&{/aliases} {
+	i2c0 = "/soc/i2c@2510000";
 };
 // i2c: an I2C (TWI) controller on the A733 (allwinner,sun60i-a733-i2c) (alias i2c2, the name "i2c-2")
 &{/soc/i2c@2512000} {
 	status = "okay";
 };
 // the runtime name comes out of alias i2c2
-/ {
-	aliases { i2c2 = "/soc/i2c@2512000"; };
+&{/aliases} {
+	i2c2 = "/soc/i2c@2512000";
 };
 // uart: a serial port on the A733 (snps,dw-apb-uart) (alias serial0) on GPIO41, GPIO42
 &{/soc/serial@2500000} {
@@ -24,16 +24,16 @@
 	pinctrl-0 = <&uart0_pb_pins>;
 };
 // the runtime name comes out of alias serial0
-/ {
-	aliases { serial0 = "/soc/serial@2500000"; };
+&{/aliases} {
+	serial0 = "/soc/serial@2500000";
 };
 // spi: an SPI controller on the A733 (allwinner,sun60i-a733-spi-dbi) (alias spi1, the name "spidev1.0")
 &{/soc/spi@2541000} {
 	status = "okay";
 };
 // the runtime name comes out of alias spi1
-/ {
-	aliases { spi1 = "/soc/spi@2541000"; };
+&{/aliases} {
+	spi1 = "/soc/spi@2541000";
 };
 // block: the image signal processor on the A733 (allwinner,sun60i-a733-isp)
 &{/soc/isp@5900000} {

@@ -1,0 +1,70 @@
+# The device-tree compiler an overlay is compiled with: the flags, and every warning class that
+# is an error. The overlay gate (service/devtree/tests/apply.rs) and the consumer that compiles a
+# generated overlay read this one file, so both use one set.
+#
+# `version`: a change to a key or a flag is a new version (everything unreleased is version 1).
+# `minimum_dtc`: the oldest release the generated source is checked with; the gate builds it from
+# the pinned tarball (testing/devtree/build-dtc.sh). `flags` are the exact arguments, in order.
+# `error_classes`: dtc has no "all" class, so each class of dtc 1.7.2 (checks.c) is listed; the gate
+# passes each as `-E <class>`. Errors (not warnings) need no entry: dtc always fails on them.
+version = 1
+minimum_dtc = "1.7.2"
+flags = ["-@", "-I", "dts", "-O", "dtb"]
+error_classes = [
+  "addr_size_cells",
+  "address_cells_is_cell",
+  "alias_paths",
+  "avoid_default_addr_size",
+  "avoid_unnecessary_addr_size",
+  "chosen_node_bootargs",
+  "chosen_node_is_root",
+  "chosen_node_stdout_path",
+  "clocks_property",
+  "compatible_is_string_list",
+  "cooling_device_property",
+  "device_type_is_string",
+  "dma_ranges_format",
+  "dmas_property",
+  "gpios_property",
+  "graph_child_address",
+  "graph_endpoint",
+  "graph_nodes",
+  "graph_port",
+  "hwlocks_property",
+  "i2c_bus_bridge",
+  "i2c_bus_reg",
+  "interrupt_map",
+  "interrupt_provider",
+  "interrupts_extended_property",
+  "interrupts_property",
+  "io_channels_property",
+  "iommus_property",
+  "label_is_string",
+  "mboxes_property",
+  "model_is_string",
+  "msi_parent_property",
+  "mux_controls_property",
+  "names_is_string_list",
+  "node_name_vs_property_name",
+  "obsolete_chosen_interrupt_controller",
+  "pci_bridge",
+  "pci_device_bus_num",
+  "pci_device_reg",
+  "phys_property",
+  "power_domains_property",
+  "pwms_property",
+  "ranges_format",
+  "reg_format",
+  "resets_property",
+  "simple_bus_bridge",
+  "simple_bus_reg",
+  "size_cells_is_cell",
+  "sound_dai_property",
+  "spi_bus_bridge",
+  "spi_bus_reg",
+  "status_is_string",
+  "thermal_sensors_property",
+  "unique_unit_address",
+  "unit_address_format",
+  "unit_address_vs_reg",
+]

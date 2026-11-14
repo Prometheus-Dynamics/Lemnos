@@ -64,6 +64,32 @@ impl fmt::Display for Mismatch {
     }
 }
 
+/// The start check of the board overlay: the live device tree's marker (`lemnos,board` and
+/// `lemnos,overlay-sha256` under `/lemnos`, `live`) against the slot's `boot.overlay`. The firmware
+/// drops an overlay whose file is missing without a word, so a missing, stale or foreign marker is
+/// a named mismatch and the boot does not count as good. `None` when the marker is the slot's.
+pub fn overlay_mismatch(
+    want: &crate::manifest::Overlay,
+    live: Option<(&str, &str)>,
+) -> Option<String> {
+    match live {
+        None => Some(
+            "the live device tree has no board overlay marker: the slot's overlay did not load, \
+             and the firmware runs the base tree without a word"
+                .into(),
+        ),
+        Some((board, _)) if board != want.board => Some(format!(
+            "the live device tree's overlay is for board {board:?}; the slot was built for {:?}",
+            want.board
+        )),
+        Some((_, sha)) if sha != want.sha256 => Some(format!(
+            "the live device tree's overlay digest is {sha}; the slot's manifest says {}",
+            want.sha256
+        )),
+        Some(_) => None,
+    }
+}
+
 /// Checks every listed boot file of slot `id`. `boot_files` is the manifest's list: a path under
 /// the slot's boot directory and its SHA-256 (64 lowercase hex digits). `read` returns a file's
 /// bytes, given its path relative to the boot partition's root, or the reason it can't.
