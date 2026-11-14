@@ -983,7 +983,7 @@ fn a_failing_node_recovers_with_backoff_and_ends_the_waiting_job() {
     let mut now = 1_000;
     let due = d.tick(now).unwrap();
     assert_eq!(due, now + backoff_ns(0));
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.counters().unwrap().errors, 1, "the waiting job");
     assert_eq!(d.start().unwrap_err(), Status::BUSY);
     // Each failed attempt doubles the wait, to 8 s.
@@ -1022,7 +1022,7 @@ fn a_failing_load_starts_recovery() {
     streams.config.fill(0, &image(1));
     post(&streams.config, &job(1, 0, NO_BUFFER));
     d.tick(1);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
 }
 
 #[test]

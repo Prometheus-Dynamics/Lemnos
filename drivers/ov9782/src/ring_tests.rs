@@ -523,7 +523,7 @@ fn an_i2c_failure_inside_the_group_closes_it_and_launches_nothing() {
     assert_eq!(rig.applied_identity(), None);
     assert_eq!(
         Driver::health(&rig.sensor),
-        Health::Degraded("bus error while streaming: restarting the sensor")
+        Health::Failed("bus error while streaming: restarting the sensor")
     );
 }
 

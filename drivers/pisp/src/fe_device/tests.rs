@@ -644,7 +644,7 @@ fn a_refused_job_ends_the_stream_and_everything_is_made_again() {
     r.hw.with(|m| m.fail_post = Some(Status::INVALID_ARGUMENT));
     r.post(&job(1, 0, 0, NO_BUFFER));
     assert_eq!(r.fe.tick(10), Some(10 + backoff_ns(0)));
-    assert!(matches!(r.fe.health(), Health::Degraded(_)));
+    assert!(matches!(r.fe.health(), Health::Failed(_)));
     assert_eq!(
         r.hw.with(|m| m.stopped),
         2,
@@ -722,7 +722,7 @@ fn stop_ends_recovery_and_only_the_front_ends_outputs_exist() {
     r.hw.with(|m| m.fail_check = Some(Status::IO));
     fe.tick(1);
     fe.tick(1 + 1_000_000_000);
-    assert!(matches!(fe.health(), Health::Degraded(_)));
+    assert!(matches!(fe.health(), Health::Failed(_)));
     CameraIsp::stop(fe).unwrap();
     assert_eq!(fe.tick(1 << 40), None);
     assert!(matches!(fe.health(), Health::Ok));

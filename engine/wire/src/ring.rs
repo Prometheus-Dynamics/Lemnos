@@ -46,11 +46,20 @@ pub const MAX_PLANES: usize = shm_ring_buffers::MAX_PER_FRAME;
 /// The stream's end codes, stored in the frame ring's end word. Zero while the stream runs.
 /// The host ends a stream the consumer may still be reading.
 pub const STATE_OPEN: u32 = 0;
-/// The stream ended normally.
+/// The stream ended because the host ended it: a stop, a close, or the host going away.
 pub const STATE_CLOSED: u32 = 1;
 /// The stream ended because the consumer broke the rules.
 pub const STATE_FAULT: u32 = 2;
 }
+
+/// The stream ended because the device producing it failed. A new value in the existing end word,
+/// not a new ring layout: a reader that does not know the code reads the stream as ended, kind
+/// unknown.
+///
+/// Declared outside the `constants!` block above on purpose: that block's constants are folded into
+/// the core hash, and a peer built before this code must still connect. It is an added value, which
+/// the handshake does not check, as a field appended at the end is not.
+pub const STATE_DEVICE_FAILED: u32 = 3;
 
 /// Where each descriptor of a stream is in the order the host passes them: the frame ring, the
 /// pool page, the job ring, the job acks, the doorbell's eventfd, its page, the holds page, and then
@@ -366,8 +375,44 @@ impl FrameInfo {
     }
 }
 
-/// The page that says how many jobs the host has collected: one word, written by the host.
-pub const JOB_ACK_BYTES: usize = 8;
+/// The job-ack page, written by the host: word 0 is how many jobs it has collected, and words 1 to 5
+/// say the state of the stream's producer ([`producer`]). A reader that knows only word 0 ignores
+/// the rest. The page's size is not in any hash: it is not a layout the handshake checks.
+pub const JOB_ACK_BYTES: usize = 64;
+
+/// The producer's state, as words 1 to 5 of the job-ack page. The host writes them under a
+/// sequence lock (word 1 is odd while it writes), so a reader never sees half an edge.
+pub mod producer {
+    /// Word of the sequence lock.
+    pub const SEQ: usize = 1;
+    /// Word counting the producer's state changes on this page.
+    pub const EDGES: usize = 2;
+    /// Word of the state: [`RUNNING`] or [`RETRYING`]; any other value is passed through.
+    pub const STATE: usize = 3;
+    /// Word of `CLOCK_MONOTONIC` nanoseconds of the change to retrying, 0 while running.
+    pub const SINCE: usize = 4;
+    /// Word of the last change back to running: [`KEPT`] or [`LOST`].
+    pub const RECOVERY: usize = 5;
+    /// Words a page needs to carry the state.
+    pub const WORDS: usize = 6;
+    /// The device is working.
+    pub const RUNNING: u64 = 0;
+    /// The device failed and the host is retrying it.
+    pub const RETRYING: u64 = 1;
+    /// The same driver instance recovered: what the caller gave it is still there.
+    pub const KEPT: u64 = 0;
+    /// The host bound the device again, as a new driver instance: what the caller gave it is gone.
+    pub const LOST: u64 = 1;
+}
+
+/// The producer's state as the job-ack page says it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProducerWords {
+    pub edges: u64,
+    pub state: u64,
+    pub since_ns: u64,
+    pub recovery: u64,
+}
 
 /// The consumer's end of the job ring: posts a job, or says the ring is full. Never waits.
 pub struct JobPoster {
@@ -402,6 +447,33 @@ impl JobPoster {
         })
     }
 
+    /// The producer's state, read as one consistent set; `None` from a host whose page has no room
+    /// for it (it is then not saying anything, which reads as running).
+    #[must_use]
+    pub fn producer(&self) -> Option<ProducerWords> {
+        use std::sync::atomic::{Ordering, fence};
+        if self.acks.words() < producer::WORDS {
+            return None;
+        }
+        loop {
+            let first = self.acks.load(producer::SEQ, Ordering::Acquire);
+            if first & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let words = ProducerWords {
+                edges: self.acks.load(producer::EDGES, Ordering::Relaxed),
+                state: self.acks.load(producer::STATE, Ordering::Relaxed),
+                since_ns: self.acks.load(producer::SINCE, Ordering::Relaxed),
+                recovery: self.acks.load(producer::RECOVERY, Ordering::Relaxed),
+            };
+            fence(Ordering::Acquire);
+            if self.acks.load(producer::SEQ, Ordering::Relaxed) == first {
+                return Some(words);
+            }
+        }
+    }
+
     /// Posts `job`. `false`, and nothing posted, when `job_slots` jobs are waiting, because the
     /// host has not collected them yet. A job longer than the layout allows is an error.
     pub fn post(&mut self, job: &[u8]) -> Result<bool, RingError> {
@@ -426,6 +498,8 @@ pub struct JobCollector {
     reader: shm_ring::Reader<ReadMap>,
     acks: WriteMap,
     collected: u64,
+    /// The producer words' sequence lock, as this end last wrote it.
+    seq: u64,
     job_bytes: u32,
 }
 
@@ -449,8 +523,31 @@ impl JobCollector {
             reader,
             acks,
             collected: 0,
+            seq: 0,
             job_bytes: layout.job_bytes,
         })
+    }
+
+    /// Writes the producer's state into the page, under the sequence lock. A page with no room for
+    /// it is left as it is.
+    pub fn set_producer(&mut self, words: ProducerWords) {
+        use std::sync::atomic::{Ordering, fence};
+        if self.acks.words() < producer::WORDS {
+            return;
+        }
+        self.seq += 2;
+        self.acks
+            .store(producer::SEQ, self.seq - 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.acks
+            .store(producer::EDGES, words.edges, Ordering::Relaxed);
+        self.acks
+            .store(producer::STATE, words.state, Ordering::Relaxed);
+        self.acks
+            .store(producer::SINCE, words.since_ns, Ordering::Relaxed);
+        self.acks
+            .store(producer::RECOVERY, words.recovery, Ordering::Relaxed);
+        self.acks.store(producer::SEQ, self.seq, Ordering::Release);
     }
 
     /// The next job in `out`, its length; `None` if there is none. A job the reader lost (the
@@ -501,6 +598,8 @@ pub struct Consumer {
     fills: Option<shm_ring_buffers::PoolView>,
     jobs: JobPoster,
     bell: shm_ring_doorbell::Doorbell,
+    /// The producer's state changes this consumer's [`wait`](Self::wait) has already woken for.
+    seen_edges: u64,
 }
 
 impl core::fmt::Debug for Consumer {
@@ -642,6 +741,7 @@ impl Consumer {
             fills,
             jobs,
             bell,
+            seen_edges: 0,
         })
     }
 
@@ -780,7 +880,7 @@ impl Consumer {
         self.fills.as_mut()
     }
 
-    /// Sleeps until a frame may be ready, the stream ends, or `timeout` passes. `Ok(false)` only
+    /// Sleeps until a frame may be ready, the stream ends, the producer's state changes, or `timeout` passes. `Ok(false)` only
     /// for the timeout: a frame may still be there after `true`, and a caller reads again.
     ///
     /// # Errors
@@ -788,10 +888,23 @@ impl Consumer {
     /// If the poll on the doorbell fails.
     pub fn wait(&mut self, timeout: std::time::Duration) -> std::io::Result<bool> {
         let frames = &self.frames;
-        let woke = self
-            .bell
-            .wait(Some(timeout), || frames.pending() > 0 || frames.end() != 0)?;
+        let jobs = &self.jobs;
+        let seen = self.seen_edges;
+        let changed = || jobs.producer().is_some_and(|words| words.edges != seen);
+        let woke = self.bell.wait(Some(timeout), || {
+            frames.pending() > 0 || frames.end() != 0 || changed()
+        })?;
+        // The change that woke it is looked at once: the next wait sleeps again.
+        if let Some(words) = self.jobs.producer() {
+            self.seen_edges = words.edges;
+        }
         Ok(!matches!(woke, shm_ring_doorbell::Wake::TimedOut))
+    }
+
+    /// The producer's state words (see [`producer`]); `None` when the host's page has none.
+    #[must_use]
+    pub fn producer(&self) -> Option<ProducerWords> {
+        self.jobs.producer()
     }
 
     /// Posts jobs. See [`JobPoster::post`].

@@ -7,10 +7,11 @@ pub(crate) use crate::surface::{
     lemnos_call, lemnos_check_version, lemnos_client_close, lemnos_client_open,
     lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_package_info,
     lemnos_package_list, lemnos_package_text, lemnos_stream_buffer_handle, lemnos_stream_close,
-    lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame, lemnos_stream_open,
-    lemnos_stream_plane, lemnos_stream_plane_handle, lemnos_stream_plane_len,
-    lemnos_stream_pool_page, lemnos_stream_post_job, lemnos_stream_read, lemnos_stream_region,
-    lemnos_stream_release, lemnos_stream_skipped, lemnos_stream_write, lemnos_subscribe,
+    lemnos_stream_end, lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame,
+    lemnos_stream_open, lemnos_stream_plane, lemnos_stream_plane_handle, lemnos_stream_plane_len,
+    lemnos_stream_pool_page, lemnos_stream_post_job, lemnos_stream_producer, lemnos_stream_read,
+    lemnos_stream_region, lemnos_stream_release, lemnos_stream_skipped, lemnos_stream_write,
+    lemnos_subscribe,
 };
 
 #[cfg(feature = "shared")]
@@ -198,6 +199,17 @@ mod shared {
             client: Handle,
             stream: Handle,
             generation: *mut u32,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_end(
+            client: Handle,
+            stream: Handle,
+            kind: *mut u32,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_producer(
+            client: Handle,
+            stream: Handle,
+            state: *mut u32,
+            since_ns: *mut u64,
         ) -> Status;
         pub(crate) unsafe fn lemnos_stream_skipped(
             client: Handle,

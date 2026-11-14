@@ -85,6 +85,19 @@ static int frames(LemnosHandle client) {
         uint64_t skipped = 0;
         status = lemnos_stream_skipped(client, stream, &skipped);
         if (status != LEMNOS_OK) return fail("skipped", status);
+        /* The stream runs: no end. The out pointer is required. */
+        uint32_t kind = 99;
+        status = lemnos_stream_end(client, stream, &kind);
+        if (status != LEMNOS_OK || kind != LEMNOS_STREAM_END_NONE) return fail("end of a running stream", status);
+        uint32_t pstate = 99;
+        uint64_t psince = 99;
+        status = lemnos_stream_producer(client, stream, &pstate, &psince);
+        if (status != LEMNOS_OK || pstate != LEMNOS_STREAM_PRODUCER_RUNNING || psince != 0)
+            return fail("producer of a running stream", status);
+        status = lemnos_stream_producer(client, stream, NULL, &psince);
+        if (status != -EINVAL) return fail("producer with no out pointer", status);
+        status = lemnos_stream_end(client, stream, NULL);
+        if (status != -EINVAL) return fail("end with no out pointer", status);
     }
 
     /* A buffer's region: its own memory at its offset holds the frame's bytes, and the pool page and

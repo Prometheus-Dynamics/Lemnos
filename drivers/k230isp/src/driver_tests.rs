@@ -760,7 +760,7 @@ fn a_failed_request_reopens_the_device_with_capped_backoff_and_never_gives_up() 
         b.fail_open = Some(Status::IO);
     });
     assert_eq!(d.tick(2), Some(2 + backoff_ns(0)));
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.counters().unwrap().errors, 1, "the job with the block");
     let mut now = 2 + backoff_ns(0);
     let mut delays = Vec::new();
@@ -802,7 +802,7 @@ fn stop_ends_recovery() {
         b.fail_open = Some(Status::IO);
     });
     d.tick(1);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(d.tick(10_000_000_000), None);
     assert_eq!(d.health(), Health::Ok);

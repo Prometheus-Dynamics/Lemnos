@@ -728,7 +728,7 @@ fn a_device_error_is_retried_with_capped_backoff() {
     block.with(|b| b.fail_event = Some(Status::IO));
     let at = d.tick(now).unwrap();
     assert_eq!(at, now + 250_000_000);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.start().unwrap_err(), Status::BUSY, "while recovering");
     assert_eq!(
         d.configure(raw10(), Packing::Unpacked16).unwrap_err(),
@@ -754,7 +754,7 @@ fn a_device_error_is_retried_with_capped_backoff() {
         let at = d.tick(now).unwrap();
         assert_eq!(at - now, 8_000_000_000);
         now = at;
-        assert!(matches!(d.health(), Health::Degraded(_)));
+        assert!(matches!(d.health(), Health::Failed(_)));
     }
 
     // It clears when an attempt works: opened, set up and started again, frames flowing.
@@ -787,7 +787,7 @@ fn stop_ends_streaming_and_recovery() {
         b.calls.clear();
     });
     let _ = d.tick(0);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(block.calls(), [Call::Write(0x400, 0x400), Call::Stop]);
     assert_eq!(d.tick(u64::MAX), None, "stopped: nothing is due");

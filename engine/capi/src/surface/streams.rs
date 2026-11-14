@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use lemnos_abi::{Handle, MessageSink, Status, guard};
-use lemnos_client::{Error, FrameStream, HeldFrame, StreamPlatform};
+use lemnos_client::{Error, FrameStream, HeldFrame, ProducerState, StreamEnd, StreamPlatform};
 use lemnos_wire::ring::{RingError, SharedLayout};
 
 use super::{checked, count, entry, fail, out_bytes, text, with_entry};
@@ -193,6 +193,20 @@ pub unsafe extern "C" fn lemnos_stream_open(
         })
     })
 }
+
+/// `LEMNOS_STREAM_END_NONE`: the stream is running.
+pub const STREAM_END_NONE: u32 = 0;
+/// `LEMNOS_STREAM_END_CLOSED`: the host ended the stream (a stop, a close, the host going away).
+pub const STREAM_END_CLOSED: u32 = 1;
+/// `LEMNOS_STREAM_END_CONSUMER_FAULT`: the stream ended because this consumer broke the rules.
+pub const STREAM_END_CONSUMER_FAULT: u32 = 2;
+/// `LEMNOS_STREAM_END_DEVICE_FAILED`: the stream ended because the device producing it failed.
+pub const STREAM_END_DEVICE_FAILED: u32 = 3;
+
+/// `LEMNOS_STREAM_PRODUCER_RUNNING`: the producing device works.
+pub const STREAM_PRODUCER_RUNNING: u32 = 0;
+/// `LEMNOS_STREAM_PRODUCER_RETRYING`: the producing device failed and is being retried.
+pub const STREAM_PRODUCER_RETRYING: u32 = 1;
 
 /// `LEMNOS_LAYOUT_RING`: the frame ring's header, which `lemnos_layout_refusal` reports.
 pub const LAYOUT_RING: u32 = 0;
@@ -703,6 +717,62 @@ pub unsafe extern "C" fn lemnos_stream_generation(
         with_stream(client, stream, |s| {
             // SAFETY: not null, and valid for a write by the contract.
             unsafe { generation.write(s.stream.generation()) };
+            Status::OK
+        })
+    })
+}
+
+/// Why the stream ended, as a `LEMNOS_STREAM_END_*` code in `*kind`: 0 while it runs. A code this
+/// build does not know is passed through as its number, and is an end of unknown kind.
+///
+/// # Safety
+/// `kind` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_end(
+    client: Handle,
+    stream: Handle,
+    kind: *mut u32,
+) -> Status {
+    guard(|| {
+        if kind.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            let code = s.stream.end().map_or(STREAM_END_NONE, StreamEnd::code);
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { kind.write(code) };
+            Status::OK
+        })
+    })
+}
+
+/// What the stream's producing device is doing: `*state` is a `LEMNOS_STREAM_PRODUCER_*` code (a
+/// code this build does not know is passed through, and is not running), and `*since_ns` the
+/// `CLOCK_MONOTONIC` nanoseconds of the failure while it is retrying, else 0.
+///
+/// # Safety
+/// `state` and `since_ns` are each null, or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_producer(
+    client: Handle,
+    stream: Handle,
+    state: *mut u32,
+    since_ns: *mut u64,
+) -> Status {
+    guard(|| {
+        if state.is_null() || since_ns.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            let (code, since) = match s.stream.producer() {
+                ProducerState::Running => (STREAM_PRODUCER_RUNNING, 0),
+                ProducerState::Retrying { since_ns } => (STREAM_PRODUCER_RETRYING, since_ns),
+                ProducerState::Unknown(code) => (code, 0),
+            };
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { state.write(code) };
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { since_ns.write(since) };
             Status::OK
         })
     })

@@ -422,7 +422,7 @@ impl Lifecycle for Isp600 {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the ISP's nodes failed while running: opening them again")
+                Health::Failed("the ISP's nodes failed while running: opening them again")
             }
             _ => Health::Ok,
         }

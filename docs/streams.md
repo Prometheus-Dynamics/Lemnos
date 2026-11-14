@@ -391,6 +391,127 @@ Neither side trusts the ring. Each value is read once and checked.
   job ring.
 - A consumer that closes its connection gives up every stream it held.
 
+## Why a stream ended
+
+The host writes one end code into the frame ring's end word when it ends a stream, and rings the
+doorbell, so a reader asleep on the stream wakes. The word is 0 while the stream runs.
+
+| End word | Name | Meaning |
+|---|---|---|
+| 0 | open | The stream is running. |
+| 1 | closed | The host ended the stream: a stop, a close, or the host going away. Nothing went wrong with the stream. |
+| 2 | consumer fault | The stream ended because this consumer broke the rules (stuck holds, too many jobs). |
+| 3 | device failed | The stream ended because the device producing it failed. Open the stream again to take it when the device is back. |
+
+An added value in the end word is not a layout change: the ring header's layout number stays 2.
+A reader that does not know a code treats the stream as ended, kind unknown, never as running.
+
+Which host event writes which code:
+
+| Event | Code |
+|---|---|
+| The consumer gives the stream back (`close_stream`, a drop, its connection going) | closed |
+| The host shuts down | closed |
+| A consumer's rule break (stuck holds, too many jobs) | consumer fault |
+| The device is turned off for good by its board entry's `auto_off_after` | device failed |
+| A device switched off by `off` | no end: the consumer stays attached and nothing is published until the device is on again |
+| Any failure that is retried (the driver panics, reports itself dead and is rebound, stops answering, a call never returns, a bind or retry fails, the driver's own health says failed) | no end: see [Producer state](#producer-state) |
+
+Code 3 means the stream will not continue on this attachment. No path removes a device from a
+board (devices are only ever added), and no rebind changes a stream's buffers or pool: the memory
+(and its generation, `lemnos_stream_generation`) is made when a consumer attaches or on standby
+and is never replaced under an attached consumer. So a stream whose device is retried keeps its
+descriptors and its buffers, and a consumer's own readers of them stay valid.
+
+The frames the ring still holds when the stream ends stay readable: a reader gets them first, and
+the end after. `FrameStream::end()` is `None` while the stream runs and `Some(StreamEnd)` after
+(`Closed`, `ConsumerFault`, `DeviceFailed`, `Unknown(code)`), one atomic load. `next_frame` gives
+`None` for a timeout and for an end alike; `next_or_end(timeout)` says which. `end_message()` is a
+sentence for a person (`stream frames of device 3 ended: the device producing it failed`). In C,
+`lemnos_stream_end(client, stream, &kind)` sets `kind` to `LEMNOS_STREAM_END_NONE` (0), `_CLOSED`
+(1), `_CONSUMER_FAULT` (2), `_DEVICE_FAILED` (3), or the number of a code it does not know, an end of
+unknown kind. A stream that ended does not run again: opening it again starts a new one.
+
+### Producer state
+
+A failure the host retries (the failure rule: it never gives up) does not end the stream. The
+consumer stays attached, and frames resume on the same attachment, the same memory and the same
+descriptors, when the device is back. What the consumer could not tell was silence from a slow
+camera. The host now says, in the job-ack page, what the producing device is doing:
+
+| Word of the job-ack page | Meaning |
+|---|---|
+| 0 | jobs the host has collected (as before) |
+| 1 | sequence lock: odd while the host writes words 2 to 5 |
+| 2 | edges: how many times the state changed on this attachment |
+| 3 | state: 0 running, 1 retrying (another value is passed through, and is not running) |
+| 4 | `CLOCK_MONOTONIC` nanoseconds of the failure, 0 while running |
+| 5 | recovery at the last edge back: 0 kept, 1 lost |
+
+The host writes the words, rings the stream's doorbell, and each edge wakes a reader asleep on it
+though no frame comes. A consumer that attaches during a stall reads it at once.
+
+Why this is not a layout change. The page is the job-ack page, which was 8 bytes (word 0) and is now
+64. A reader built before reads word 0 only, checks the page holds at least that, and sees what it
+saw: silence, then frames. A new reader on an old host finds a one-word page and reads `Running`,
+never a stall. The ring header (layout 2), the marks layout, the order of the descriptors and so the
+shared-rings part hash and the core hash do not mention the page's size and did not move; no
+`shm/` crate changed and no wire message or feature bit was added.
+
+Which devices it covers. The state is the stream's, and it covers what feeds the stream: the
+stream's own producing device and every device that links to it, directly or through others (a
+sensor whose board `link` names the receiver that has the stream; a lens whose `link` names that
+sensor). The host reads only the board's `link` edges (the same relation that orders binding,
+`link` of a device, followed upstream) and knows nothing of what any device is. A covered device is
+failing when the host is retrying it (a failed bind, or it dropped the driver), or its own driver
+instance reports `Health::Failed` or `Health::Gone`. The rule:
+
+- The stream reads `Retrying` while any covered device is failing. `since_ns` is when the stall
+  began: the earliest failure of it, fixed at the edge.
+- There is one edge per transition. A second covered device failing during a stall is not a new
+  edge, and one device coming back while another is still failing is not an edge either.
+- It reads `Running` again only when every covered device is back. The recovery is `Kept` only if
+  each came back as the same driver instance, and `Lost` if the host bound any of them again during
+  the stall.
+- A device that links to nothing, and is linked to by nothing, covers only itself, as before. A
+  stream is never affected by a device that is not upstream of it (a sensor's recovery says nothing
+  to a stream of another device).
+
+The set of covered devices is read from the board's links when a device is added and the host
+allocates nothing on an edge or in steady state.
+
+The health value. A driver that recovers by itself (a sensor restarting after a bus error, a
+receiver reopening its node) reports `Health::Failed` with its reason while it does: `Failed` is
+"not working now, still trying", and the host never rebinds a driver for it. The rebind signal is
+`Health::Gone` (a driver whose handle is dead for good), and only a rebind makes a recovery `Lost`.
+`Degraded` is working but impaired, and also what a driver reports while powering up or with a link
+still unconfirmed, so it is not a stall; a driver does not report `Degraded` while it is retrying
+something that stops its frames. `lemnos-ctl list` shows such a device with health `failed` and its
+reason, state `running`, until it is back.
+
+Which recovery. `Lost` when the host bound the device again: a new driver instance, so what the
+caller gave the old one (mode, controls, started) is gone and the consumer selects, configures and
+starts again. `Kept` when the same instance's health went back to ok.
+
+Sequence across a stall (from `drivers/rp1-csi2`, not changed here): the frame's `sequence` is the
+receiver driver's count of the block's frame starts since its own `start`. While the sensor recovers
+by itself with the receiver still running, the receiver's count goes on, so the sequence continues
+with a gap for the frames lost. When the receiver driver is rebound (a new instance, `start` again)
+the count begins at zero: a sequence lower than the one before means a restart. A frame after a
+stall is identified by `Next::Resumed`, which comes before it.
+
+In Rust: `FrameStream::producer()` is `ProducerState::Running`, `Retrying { since_ns }` or
+`Unknown(n)` (atomic loads). `next_or_end` returns `Next::Stalled(state)` once for each failure the
+reader sees, when no frame is pending (frames from before it come first), and then `Next::TimedOut`
+while it lasts; `Next::Resumed { state: Carried::Kept | Carried::Lost }` once after it and before
+the first frame after the stall. A stall that begins and ends between two calls of a reader that
+never saw it is not reported. `next_frame` and `is_open` are unchanged: a stall is no frame and
+`next_frame` waits on. The reason text is not in shared memory: the session's device call gives the
+device's state and reason (`Session::list`; `stream.device()` is its index). In C,
+`lemnos_stream_producer(client, stream, &state, &since_ns)`, `LEMNOS_STREAM_PRODUCER_RUNNING` (0) and
+`_RETRYING` (1), others passed through. A reader that never looks at any of this sees exactly what
+it saw before: silence, then frames.
+
 ## Giving a stream back
 
 A consumer gives a stream back with `close_stream`, or by dropping it. Dropping a stream the
@@ -401,8 +522,9 @@ sends the close first, so it is never refused for a stream the client already le
 When the service ends a stream it does the following, however the consumer went:
 
 - the buffers the consumer still held go back to the free pool, and nothing it held is kept;
-- the ring's end word is set (closed, or faulted), so a consumer that is still reading it sees the
-  stream has ended and why;
+- the ring's end word is set (closed, consumer fault or device failed: see
+  [Why a stream ended](#why-a-stream-ended)), so a consumer that is still reading it sees the stream
+  has ended and why;
 - until a consumer attaches again, each frame the producer publishes is counted as dropped, and
   `stream_stats` reports `attached` as false. A driver learns the consumer is gone from those
   counts and from its own `publish` results, not from a callback.
@@ -595,7 +717,9 @@ Then `shm_ring_buffers::BufferReader::new(reader, FieldId(0), pool_view, marks)`
 `next()` returns a batch whose `held` keeps its buffers until dropped, and whose `meta` is the
 frame's metadata (sequence, identity and length, 20 little-endian bytes: see
 `lemnos_wire::ring::FrameInfo`). The frame's time is the batch's time (`CLOCK_MONOTONIC`). The
-ring's end word (`Reader::end`) is 0 while the stream runs, 1 once it closed, 2 once it faulted.
+ring's end word (`Reader::end`) is 0 while the stream runs, 1 once it closed, 2 once it faulted, 3 once the
+device producing it failed (see [Why a stream ended](#why-a-stream-ended)). Any other nonzero value is an
+end of unknown kind.
 
 The descriptors of a stream of planes name each plane as its own pool buffer: buffer `b`'s plane `p`
 is pool buffer `b × planes + p`, and a frame names all of them in its entry. `FrameInfo` and the

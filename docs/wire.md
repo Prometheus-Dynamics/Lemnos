@@ -289,14 +289,14 @@ crosses the socket.
 | frame ring | a sealed memfd holding a `shm-ring` ring of one field. Map it read-only, with `Reader::attach_from_start` |
 | pool page | a sealed page of `shm-ring-buffers`: the buffers' tickets and the reader cut-offs. Read-only |
 | job ring | a `shm-ring` ring the consumer writes, one field, a job per sample. Write end |
-| job acks | one word the host writes: how many jobs it has collected. Read-only |
+| job acks | a 64-byte page the host writes: word 0 is how many jobs it has collected; words 1 to 5 are the producer's state ([`streams.md`](streams.md#producer-state)). A reader that knows only word 0 ignores the rest. Read-only |
 | doorbell eventfd | rung by the host after each frame. Waiting on it is optional |
 | doorbell page | the consumer's own `shm-ring-doorbell` page, writable |
 | holds page | the consumer's own `shm-ring-holds` page of marks, writable |
 | buffers | the pool's buffers, one descriptor for shared memory, one per plane of each buffer for dma-bufs. Map read-only, or writable for a stream the consumer fills (below) |
 
 The frame ring, the pool and the holds are the [shm family's](ring.md) layout, word for word; the
-protocol does not restate it. Its end word says whether the stream closed (1) or faulted (2).
+protocol does not restate it. Its end word says whether the stream closed (1), faulted (2) or ended because the device producing it failed (3). A value not listed is an end of unknown kind, not a running stream (an added value is not a layout change; [`streams.md`](streams.md#why-a-stream-ended)). Code 3 is declared outside the constants the core hash folds, so adding it moved no hash and a peer built before it still connects. The job-ack page also carries the producer's state (words 1 to 5, [`streams.md`](streams.md#producer-state)); its size is in no hash.
 
 ### Streams whose buffers are dma-bufs
 

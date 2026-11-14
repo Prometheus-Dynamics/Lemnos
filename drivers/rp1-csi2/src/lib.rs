@@ -323,7 +323,7 @@ impl Lifecycle for Rp1Csi2 {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the receiver stopped while streaming: restarting it")
+                Health::Failed("the receiver stopped while streaming: restarting it")
             }
             State::Streaming { .. } if self.relay.refused() => Health::Degraded(
                 "the frames stream's buffers are not memory the block can take \

@@ -649,7 +649,7 @@ fn a_post_the_module_refuses_ends_in_recovery_and_recovery_never_gives_up() {
     streams.post(&job(1, 0, 0));
     let next = run_once(&mut be, 1000).unwrap();
     assert_eq!(next, 1000 + 250_000_000);
-    assert!(matches!(be.health(), Health::Degraded(_)));
+    assert!(matches!(be.health(), Health::Failed(_)));
     assert_eq!(CameraIsp::counters(&mut be).unwrap().errors, 1);
     let before = hw.with(|m| m.stopped);
     assert!(before >= 1, "the stream was ended");
@@ -669,7 +669,7 @@ fn a_post_the_module_refuses_ends_in_recovery_and_recovery_never_gives_up() {
     assert_eq!(delays[3], 4_000_000_000);
     assert_eq!(delays[4], 8_000_000_000);
     assert!(delays[5..].iter().all(|&d| d == 8_000_000_000));
-    assert!(matches!(be.health(), Health::Degraded(_)));
+    assert!(matches!(be.health(), Health::Failed(_)));
 
     // It comes back, and the buffers the failed job had are the driver's to name again.
     hw.with(|m| {
@@ -694,7 +694,7 @@ fn a_stream_that_ended_is_found_at_the_next_check() {
     assert!(matches!(be.health(), Health::Ok));
     hw.with(|m| m.fail_check = Some(Status::IO));
     now = run_once(&mut be, 1_000_000_001 + now).unwrap();
-    assert!(matches!(be.health(), Health::Degraded(_)));
+    assert!(matches!(be.health(), Health::Failed(_)));
     assert!(now > 1_000_000_001);
 }
 
@@ -705,7 +705,7 @@ fn stop_ends_recovery() {
     hw.with(|m| m.fail_check = Some(Status::IO));
     run_once(&mut be, 1);
     run_once(&mut be, 2_000_000_000);
-    assert!(matches!(be.health(), Health::Degraded(_)));
+    assert!(matches!(be.health(), Health::Failed(_)));
     CameraIsp::stop(&mut be).unwrap();
     assert!(matches!(be.health(), Health::Ok));
     assert_eq!(run_once(&mut be, 3_000_000_000), None);

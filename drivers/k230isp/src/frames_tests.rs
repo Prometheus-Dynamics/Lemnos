@@ -601,7 +601,7 @@ fn a_configuration_the_module_refuses_drops_the_job_before_its_frame() {
     rig.played.log().configure_answer = Some(libc::ENODEV);
     rig.post(2, 1, &[(AE_H_SIZE, 1)], 1);
     rig.tick();
-    assert!(matches!(rig.d.health(), Health::Degraded(_)));
+    assert!(matches!(rig.d.health(), Health::Failed(_)));
 }
 
 #[test]
@@ -992,7 +992,7 @@ fn a_block_that_did_not_take_the_buffers_is_reset_and_opened_again() {
     rig.played.end(Ok(FRAME_END | STATUS_UNLATCHED));
     let at = rig.now + STRIDE;
     assert_eq!(rig.tick(), Some(at + backoff_ns(0)));
-    assert!(matches!(rig.d.health(), Health::Degraded(_)));
+    assert!(matches!(rig.d.health(), Health::Failed(_)));
     assert_eq!(rig.counters(), (0, 0, 2));
     assert_eq!(rig.played.log().closes, 2);
     assert!(
@@ -1033,7 +1033,7 @@ fn a_session_the_module_ends_is_opened_again() {
     rig.played
         .end(Err(io::Error::from_raw_os_error(libc::ENODEV)));
     rig.tick();
-    assert!(matches!(rig.d.health(), Health::Degraded(_)));
+    assert!(matches!(rig.d.health(), Health::Failed(_)));
     assert_eq!(rig.counters(), (0, 0, 1));
     // A start the module fails without refusing it does the same.
     rig.now += backoff_ns(0);
@@ -1042,7 +1042,7 @@ fn a_session_the_module_ends_is_opened_again() {
     rig.played.log().start_answer = Some(libc::EIO);
     rig.post(2, 1, &[], 1);
     rig.tick();
-    assert!(matches!(rig.d.health(), Health::Degraded(_)));
+    assert!(matches!(rig.d.health(), Health::Failed(_)));
 }
 
 #[test]

@@ -257,7 +257,7 @@ impl Lifecycle for SunxiVin {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the capture node failed while streaming: restarting it")
+                Health::Failed("the capture node failed while streaming: restarting it")
             }
             _ => Health::Ok,
         }

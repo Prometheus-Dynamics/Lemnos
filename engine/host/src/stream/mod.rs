@@ -201,6 +201,75 @@ impl Lease {
 pub(crate) struct Streams {
     allocator: Arc<dyn StreamAllocator>,
     table: RwLock<Table>,
+    /// Which devices are failing, and what each links to: what a stream's producer state covers.
+    /// Held across a whole update, so two devices' edges are told to the streams one at a time.
+    causes: Mutex<Causes>,
+}
+
+/// What feeds a stream, as the host knows it without knowing what any device is: each device's
+/// `link` (the device it is wired to), and since when it has been failed or retrying, if it is.
+/// One entry per device, in the host's order, made when the device is added: an edge allocates
+/// nothing.
+#[derive(Default)]
+struct Causes {
+    /// The device each one's `link` names, by id, and by index once that device is added.
+    link_id: Vec<Option<String>>,
+    link: Vec<Option<u32>>,
+    id: Vec<String>,
+    /// Since when the device is failed or retrying (its own driver, or the host's retry).
+    since: Vec<Option<u64>>,
+}
+
+impl Causes {
+    fn add(&mut self, index: u32, device: &DeviceSpec) {
+        let at = index as usize;
+        if self.id.len() <= at {
+            self.id.resize(at + 1, String::new());
+            self.link_id.resize(at + 1, None);
+            self.link.resize(at + 1, None);
+            self.since.resize(at + 1, None);
+        }
+        self.id[at].clone_from(&device.id);
+        self.link_id[at].clone_from(&device.link);
+        self.link[at] = None;
+        self.since[at] = None;
+        // This device's link, and every device already added whose link names this one.
+        for to in 0..self.id.len() {
+            if self.link[to].is_none()
+                && let Some(named) = self.link_id[to].as_deref()
+            {
+                self.link[to] = self
+                    .id
+                    .iter()
+                    .position(|id| id == named)
+                    .map(|found| found as u32);
+            }
+        }
+    }
+
+    /// Whether `from`'s chain of links reaches `to` (or is `to`). Bounded, so a loop ends it.
+    fn reaches(&self, from: usize, to: usize) -> bool {
+        let mut at = from;
+        for _ in 0..=self.link.len() {
+            if at == to {
+                return true;
+            }
+            match self.link.get(at).copied().flatten() {
+                Some(next) => at = next as usize,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The earliest failure still standing among `device` and every device whose chain of links
+    /// reaches it.
+    fn standing(&self, device: usize) -> Option<u64> {
+        (0..self.since.len())
+            .filter(|&other| self.reaches(other, device))
+            .filter_map(|other| self.since[other])
+            .min()
+    }
 }
 
 /// Each stream, by its device's index and its name.
@@ -211,6 +280,7 @@ impl Streams {
         let streams = Self {
             allocator,
             table: RwLock::new(BTreeMap::new()),
+            causes: Mutex::new(Causes::default()),
         };
         for (index, device) in devices.iter().enumerate() {
             streams.add(index as u32, device);
@@ -220,6 +290,10 @@ impl Streams {
 
     /// Adds the streams of the device at `index`.
     pub(crate) fn add(&self, index: u32, device: &DeviceSpec) {
+        {
+            let mut causes = self.causes.lock().unwrap_or_else(PoisonError::into_inner);
+            causes.add(index, device);
+        }
         let mut table = self.table.write().unwrap_or_else(PoisonError::into_inner);
         for (name, spec) in &device.streams {
             let core = StreamCore::new(spec, name, Arc::clone(&self.allocator));
@@ -283,6 +357,67 @@ impl Streams {
     pub(crate) fn stats(&self, device: u32, name: &str) -> Option<StreamStats> {
         self.core(device, name)
             .map(|core| endpoint::lock(&core).stats())
+    }
+
+    /// Ends the consumer's attachment to each stream of `device`, with the end code `state`: the
+    /// device is gone for good. A stream with no consumer is left as it is, and every stream can be
+    /// attached again. Allocates nothing.
+    pub(crate) fn end_device(&self, device: u32, state: u32) {
+        self.each_of(device, |core| core.detach(state));
+    }
+
+    /// Runs `f` on each stream of `device`. Allocates nothing.
+    fn each_of(&self, device: u32, mut f: impl FnMut(&mut StreamCore)) {
+        let table = self.table.read().unwrap_or_else(PoisonError::into_inner);
+        for core in table
+            .range((device, String::new())..)
+            .take_while(|((index, _), _)| *index == device)
+            .map(|(_, core)| core)
+        {
+            f(&mut endpoint::lock(core));
+        }
+    }
+
+    /// `device` failed (its driver says so, or the host is retrying it) from `since_ns`. A stream's
+    /// producer state covers the stream's own device and every device that links to it, directly or
+    /// through others (`docs/streams.md`): each such stream reads retrying, and `lost` says the host
+    /// dropped the driver instance, so what comes back is a new one. Allocates nothing.
+    pub(crate) fn producer_failed(&self, device: u32, since_ns: u64, lost: bool) {
+        let mut causes = self.causes.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = device as usize;
+        if at >= causes.since.len() {
+            return;
+        }
+        causes.since[at].get_or_insert(since_ns);
+        self.follow(&causes, at, lost);
+    }
+
+    /// `device` works again: each stream it was holding back reads running once nothing it covers is
+    /// failed any more.
+    pub(crate) fn producer_back(&self, device: u32) {
+        let mut causes = self.causes.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = device as usize;
+        if at >= causes.since.len() || causes.since[at].take().is_none() {
+            return;
+        }
+        self.follow(&causes, at, false);
+    }
+
+    /// Updates the streams of `device` and of each device it links to, then those they link to:
+    /// the streams whose covered set holds `device`.
+    fn follow(&self, causes: &Causes, device: usize, lost: bool) {
+        let mut at = device;
+        for _ in 0..=causes.link.len() {
+            let standing = causes.standing(at);
+            self.each_of(at as u32, |core| match standing {
+                Some(since) => core.producer_failed(since, lost),
+                None => core.producer_back(),
+            });
+            match causes.link[at] {
+                Some(next) => at = next as usize,
+                None => break,
+            }
+        }
     }
 
     /// Tells every consumer the host is going, and makes no more memory.

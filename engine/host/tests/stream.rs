@@ -13,9 +13,11 @@ use lemnos_hal::blocks::StreamFrame;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Host, Options, entry};
-use lemnos_sim::{SimBoard, SimFrameSource};
-use lemnos_wire::ring::{Consumer, STATE_CLOSED, STATE_FAULT, STATE_OPEN, fds};
+use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_sim::{SimBoard, SimClock, SimFrameSource};
+use lemnos_wire::ring::{
+    Consumer, STATE_CLOSED, STATE_DEVICE_FAILED, STATE_FAULT, STATE_OPEN, fds,
+};
 use shm_ring::{FieldId, Flags, MemMut, SampleTime, WriteMap};
 
 const CONSUMER: CallerId = CallerId(7);
@@ -25,6 +27,9 @@ const FRAME_BYTES: usize = 64;
 pub trait Emitting {
     #[method(1)]
     fn emit(&mut self) -> Result<u32>;
+    /// Fails the way a driver does when it breaks: it panics, and the host binds it again.
+    #[method(2)]
+    fn explode(&mut self) -> Result<u32>;
 }
 
 #[driver("emitter", provides = [Emitting])]
@@ -62,6 +67,10 @@ impl Emitting for Emitter {
             .map_err(|_| Status::IO)?;
         Ok(buffer)
     }
+
+    fn explode(&mut self) -> Result<u32> {
+        panic!("the device broke");
+    }
 }
 
 const BOARD: &str = "
@@ -82,21 +91,34 @@ driver = \"emitter\"
 [devices.streams.frames]
 buffers = 2
 buffer_bytes = 16
+[[devices]]
+id = \"x\"
+driver = \"emitter\"
+auto_off_after = 1
+[devices.streams.frames]
+buffers = 2
+buffer_bytes = 16
 ";
 
 fn start() -> Host {
+    start_with_clock().0
+}
+
+fn start_with_clock() -> (Host, SimClock) {
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n{BOARD}");
     let sim = SimBoard::new();
     let clock = sim.clock();
-    Host::start(
+    let handle = clock.clone();
+    let host = Host::start(
         &parse(&text).unwrap(),
         &[entry::<FakeCounter>(), entry::<Emitter>()],
         Box::new(sim),
         Arc::new(clock),
         Options::default(),
     )
-    .unwrap()
+    .unwrap();
+    (host, handle)
 }
 
 /// The descriptors of a stream that a test keeps to play the consumer's raw side with: the job
@@ -720,4 +742,199 @@ fn shutting_the_host_down_closes_the_ring() {
         .unwrap();
     host.shutdown();
     assert_eq!(consumer.state(), STATE_CLOSED);
+}
+
+/// Runs `trigger` while a reader sleeps on the stream's doorbell, and checks that the reader woke
+/// from the end and not from its own timeout. Returns the end code it read.
+fn wakes_on_end(mut consumer: Consumer, trigger: impl FnOnce()) -> u32 {
+    let reader = std::thread::spawn(move || {
+        let started = Instant::now();
+        let woke = consumer.wait(Duration::from_secs(5)).unwrap();
+        (woke, started.elapsed(), consumer.state())
+    });
+    // The reader has a long time to fall asleep; the end wakes it whenever it does.
+    std::thread::sleep(Duration::from_millis(100));
+    trigger();
+    let (woke, took, state) = reader.join().unwrap();
+    assert!(woke, "the wait ended by its timeout, not by the end");
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    state
+}
+
+fn explode(host: &Host) {
+    explode_device(host, 1);
+}
+
+fn explode_device(host: &Host, device: u32) {
+    let method = MethodId {
+        contract: 0,
+        method: 2,
+    };
+    let mut reply = [0u8; 8];
+    assert!(host.call(device, method, &[], &mut reply).is_err());
+}
+
+/// Runs `trigger` while a reader sleeps in `Consumer::wait` with the stream open and no frame
+/// coming, and returns whether the wait ended by a change (not its timeout) and what the producer
+/// then reads.
+fn wakes_on_edge(
+    consumer: &mut Consumer,
+    trigger: impl FnOnce(),
+) -> (bool, Option<lemnos_wire::ring::ProducerWords>) {
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let woke = consumer.wait(Duration::from_secs(5)).unwrap();
+            (woke, consumer.producer())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        trigger();
+        reader.join().unwrap()
+    })
+}
+
+fn attach_emitter(host: &Host) -> Consumer {
+    host.stream_attach(1, "frames", CONSUMER)
+        .unwrap()
+        .consumer()
+        .unwrap()
+}
+
+#[test]
+fn an_ordinary_stop_ends_closed_and_wakes_a_sleeping_reader() {
+    // The consumer gives the stream back.
+    let host = start();
+    let (consumer, _raw) = attach_raw(&host, CONSUMER);
+    let state = wakes_on_end(consumer, || {
+        host.stream_detach(0, "frames", CONSUMER).unwrap();
+    });
+    assert_eq!(state, STATE_CLOSED);
+    // The consumer's connection goes.
+    let (consumer, _raw) = attach_raw(&host, CONSUMER);
+    let state = wakes_on_end(consumer, || host.caller_gone(CONSUMER));
+    assert_eq!(state, STATE_CLOSED);
+    // The host goes.
+    let (consumer, _raw) = attach_raw(&host, CONSUMER);
+    let state = wakes_on_end(consumer, || host.shutdown());
+    assert_eq!(state, STATE_CLOSED);
+}
+
+#[test]
+fn a_consumer_that_breaks_a_rule_ends_faulted_and_wakes_a_sleeping_reader() {
+    let host = start();
+    let (consumer, _raw) = attach_raw(&host, CONSUMER);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let state = wakes_on_end(consumer, || producer.fault_consumer().unwrap());
+    assert_eq!(state, STATE_FAULT);
+}
+
+/// Brings the failed emitter back: the sim clock goes past its backoff and the host retries.
+fn bring_back(host: &Host, clock: &SimClock) {
+    for _ in 0..20 {
+        clock.advance(Duration::from_secs(10));
+        host.tick();
+        if host.device("e").unwrap().state == DeviceState::Running {
+            return;
+        }
+    }
+    panic!("the emitter did not come back");
+}
+
+fn emit(host: &Host) {
+    let method = MethodId {
+        contract: 0,
+        method: 1,
+    };
+    host.call(1, method, &[], &mut [0u8; 8]).unwrap();
+}
+
+#[test]
+fn a_failing_device_keeps_the_stream_attached_and_frames_resume_on_the_same_attachment() {
+    use lemnos_wire::ring::producer;
+    let (host, clock) = start_with_clock();
+    let mut consumer = attach_emitter(&host);
+    emit(&host);
+    assert!(consumer.pop_frame().unwrap().is_some(), "a frame before");
+    // The device fails: the consumer is woken once, sees it retrying with a since-time, and the
+    // stream is still open and still attached.
+    let (woke, words) = wakes_on_edge(&mut consumer, || explode(&host));
+    assert!(woke, "woken by the failure");
+    let words = words.unwrap();
+    assert_eq!((words.state, words.edges), (producer::RETRYING, 1));
+    assert_eq!(consumer.state(), STATE_OPEN);
+    let stats = host.stream_stats(1, "frames").unwrap();
+    assert!(stats.attached, "{stats:?}");
+    assert_eq!((stats.faults, stats.attachments), (0, 1));
+    // Silence while it is retried.
+    assert!(consumer.pop_frame().unwrap().is_none());
+    // Back: woken once more, running, rebound by the host so what it was given is lost.
+    let (woke, words) = wakes_on_edge(&mut consumer, || bring_back(&host, &clock));
+    assert!(woke, "woken by the return");
+    let words = words.unwrap();
+    assert_eq!(
+        (words.state, words.edges, words.recovery),
+        (producer::RUNNING, 2, producer::LOST)
+    );
+    // The same attachment, the same memory: one attachment still, and the frame arrives.
+    emit(&host);
+    let after = consumer.pop_frame().unwrap().expect("a frame after");
+    assert_eq!((after.sequence, after.identity), (41, 0xABCD));
+    let stats = host.stream_stats(1, "frames").unwrap();
+    assert!(stats.attached);
+    assert_eq!(stats.attachments, 1, "never re-attached: {stats:?}");
+    assert_eq!(consumer.state(), STATE_OPEN);
+}
+
+#[test]
+fn a_device_turned_off_for_good_by_its_policy_ends_its_stream_as_the_device_failing() {
+    let host = start();
+    let mut consumer = host
+        .stream_attach(2, "frames", CONSUMER)
+        .unwrap()
+        .consumer()
+        .unwrap();
+    let (woke, _) = wakes_on_edge(&mut consumer, || explode_device(&host, 2));
+    assert!(woke);
+    assert_eq!(consumer.state(), STATE_DEVICE_FAILED);
+    assert!(!host.stream_stats(2, "frames").unwrap().attached);
+    assert!(matches!(
+        host.device("x").unwrap().state,
+        DeviceState::Off(_)
+    ));
+}
+
+#[test]
+fn a_device_failing_with_no_consumer_attached_changes_nothing() {
+    let (host, clock) = start_with_clock();
+    explode(&host);
+    bring_back(&host, &clock);
+    let consumer = attach_emitter(&host);
+    assert_eq!(consumer.state(), STATE_OPEN);
+    assert_eq!(
+        consumer.producer().unwrap().state,
+        lemnos_wire::ring::producer::RUNNING
+    );
+}
+
+#[test]
+fn a_consumer_attaching_during_the_stall_reads_it_with_its_since_time() {
+    use lemnos_wire::ring::producer;
+    let (host, clock) = start_with_clock();
+    clock.advance(Duration::from_secs(3));
+    explode(&host);
+    let mut consumer = attach_emitter(&host);
+    assert_eq!(
+        consumer.state(),
+        STATE_OPEN,
+        "the open is answered while the device is failed"
+    );
+    let words = consumer.producer().unwrap();
+    assert_eq!((words.state, words.edges), (producer::RETRYING, 1));
+    assert!(words.since_ns >= 3_000_000_000, "{words:?}");
+    assert!(consumer.pop_frame().unwrap().is_none());
+    bring_back(&host, &clock);
+    emit(&host);
+    assert!(
+        consumer.pop_frame().unwrap().is_some(),
+        "frames on that attachment once it is back"
+    );
 }

@@ -474,6 +474,25 @@ impl Stream<'_> {
         Ok(generation)
     }
 
+    /// Why the stream ended: a `STREAM_END_*` code, 0 while it runs (see `lemnos_stream_end`).
+    pub fn end(&self) -> Result<u32, Status> {
+        let mut kind = 0;
+        // SAFETY: `kind` is valid for a write.
+        checked(unsafe { ffi::lemnos_stream_end(self.client.handle, self.handle, &mut kind) })?;
+        Ok(kind)
+    }
+
+    /// The producing device's state, a `STREAM_PRODUCER_*` code, and the failure's
+    /// `CLOCK_MONOTONIC` nanoseconds while retrying (see `lemnos_stream_producer`).
+    pub fn producer(&self) -> Result<(u32, u64), Status> {
+        let (mut state, mut since) = (0, 0);
+        // SAFETY: both are valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_producer(self.client.handle, self.handle, &mut state, &mut since)
+        })?;
+        Ok((state, since))
+    }
+
     /// The frames the reader was too late for (see `lemnos_stream_skipped`).
     pub fn skipped(&self) -> Result<u64, Status> {
         let mut skipped = 0;

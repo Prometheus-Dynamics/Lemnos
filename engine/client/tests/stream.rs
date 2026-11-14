@@ -10,14 +10,19 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::{FakeHost, StreamHost, StreamScript};
-use lemnos_client::{Access, Error, FrameStream, MemoryKind, Session, StreamPlatform};
+use lemnos_client::{
+    Access, Carried, Error, FrameStream, MemoryKind, Next, ProducerState, Session, StreamEnd,
+    StreamPlatform,
+};
 use lemnos_core::Status;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::descriptor::{SEAL_FUTURE_WRITE, add_seals, sealable_memfd};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGUSR1, catch_without_restart, interrupt_this_thread_after};
-use lemnos_wire::ring::{Layout, RingError, STATE_CLOSED, SharedLayout, fds};
+use lemnos_wire::ring::{
+    Layout, RingError, STATE_CLOSED, STATE_DEVICE_FAILED, STATE_FAULT, SharedLayout, fds,
+};
 use lemnos_wire::{MAX_HANDLE_BUFFERS, feature};
 use shm_ring::read_only;
 use shm_ring_doorbell::Doorbell;
@@ -1485,4 +1490,250 @@ fn an_unmapped_streams_writable_comes_from_the_descriptor_and_its_seals_not_a_ma
     let (_fake, mut session) = host_with(layout(), 8, fds);
     let stream = session.open_stream_unmapped(7, "s", platform()).unwrap();
     assert!(!stream.region(0, 0).unwrap().writable);
+}
+
+#[test]
+fn each_end_kind_is_read_typed_and_a_running_stream_has_none() {
+    for (code, kind) in [
+        (STATE_CLOSED, StreamEnd::Closed),
+        (STATE_FAULT, StreamEnd::ConsumerFault),
+        (STATE_DEVICE_FAILED, StreamEnd::DeviceFailed),
+    ] {
+        let (mut host, fds) = good();
+        let (_fake, mut session) = host_with(layout(), 8, fds);
+        let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+        assert_eq!(stream.end(), None);
+        assert!(stream.is_open());
+        host.end(code);
+        assert_eq!(stream.end(), Some(kind));
+        assert_eq!(kind.code(), code);
+        assert!(!stream.is_open());
+        assert!(matches!(
+            stream.next_or_end(Duration::from_secs(30)).unwrap(),
+            Next::Ended(end) if end == kind
+        ));
+    }
+}
+
+#[test]
+fn an_unknown_end_code_reads_as_ended_with_its_number_and_never_as_running() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    host.end(77);
+    assert_eq!(stream.end(), Some(StreamEnd::Unknown(77)));
+    assert_eq!(StreamEnd::Unknown(77).code(), 77);
+    assert!(!stream.is_open());
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(30)).unwrap(),
+        Next::Ended(StreamEnd::Unknown(77))
+    ));
+    assert!(
+        stream
+            .next_frame(Duration::from_secs(30))
+            .unwrap()
+            .is_none()
+    );
+    assert!(stream.end_message().unwrap().contains("kind unknown"));
+}
+
+#[test]
+fn a_timeout_is_not_an_end() {
+    let (_host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    let started = Instant::now();
+    assert!(matches!(
+        stream.next_or_end(Duration::from_millis(50)).unwrap(),
+        Next::TimedOut
+    ));
+    assert!(started.elapsed() >= Duration::from_millis(40));
+    assert_eq!(stream.end(), None);
+    assert!(stream.end_message().is_none());
+}
+
+#[test]
+fn frames_already_in_the_ring_are_delivered_before_the_end_is_reported() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    assert!(host.push(0, 1, 1, 0, 0));
+    assert!(host.push(1, 1, 2, 0, 0));
+    host.end(STATE_DEVICE_FAILED);
+    for sequence in [1, 2] {
+        match stream.next_or_end(Duration::from_secs(30)).unwrap() {
+            Next::Frame(frame) => assert_eq!(frame.sequence(), sequence),
+            other => panic!("a frame was still pending: {other:?}"),
+        }
+    }
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(30)).unwrap(),
+        Next::Ended(StreamEnd::DeviceFailed)
+    ));
+    // The same through next_frame: frames, then none.
+    let (mut host, fds) = good();
+    let (_fake2, mut session2) = host_with(layout(), 8, fds);
+    let mut stream = session2.open_stream(4, "cam", platform()).unwrap();
+    assert!(host.push(0, 1, 9, 0, 0));
+    host.end(STATE_CLOSED);
+    assert_eq!(
+        stream
+            .next_frame(Duration::from_secs(30))
+            .unwrap()
+            .unwrap()
+            .sequence(),
+        9
+    );
+    assert!(
+        stream
+            .next_frame(Duration::from_secs(30))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn the_end_reads_as_a_sentence_naming_the_stream() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let stream = session.open_stream(4, "cam", platform()).unwrap();
+    host.end(STATE_DEVICE_FAILED);
+    assert_eq!(
+        stream.end_message().unwrap(),
+        "stream cam of device 4 ended: the device producing it failed"
+    );
+    assert_eq!(
+        StreamEnd::DeviceFailed.to_string(),
+        "the stream ended: the device producing it failed"
+    );
+}
+
+#[test]
+fn a_stall_is_told_once_then_timeouts_then_resumed_before_the_first_frame() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    assert_eq!(stream.producer(), ProducerState::Running);
+    assert!(host.push(0, 1, 1, 0, 0));
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(5)).unwrap(),
+        Next::Frame(_)
+    ));
+    host.producer(1, 1234, 0);
+    assert_eq!(
+        stream.producer(),
+        ProducerState::Retrying { since_ns: 1234 }
+    );
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(5)).unwrap(),
+        Next::Stalled(ProducerState::Retrying { since_ns: 1234 })
+    ));
+    // Not again on each timeout while it lasts, and never an end; the stream is open.
+    for _ in 0..3 {
+        assert!(matches!(
+            stream.next_or_end(Duration::from_millis(10)).unwrap(),
+            Next::TimedOut
+        ));
+    }
+    assert!(stream.is_open() && stream.end().is_none());
+    // Back as a new instance, and a frame right behind it: the edge comes first.
+    host.producer(0, 0, 1);
+    assert!(host.push(1, 1, 2, 0, 0));
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(5)).unwrap(),
+        Next::Resumed {
+            state: Carried::Lost
+        }
+    ));
+    assert_eq!(stream.producer(), ProducerState::Running);
+    match stream.next_or_end(Duration::from_secs(5)).unwrap() {
+        Next::Frame(frame) => assert_eq!(frame.sequence(), 2),
+        other => panic!("{other:?}"),
+    }
+    // The same instance recovered by itself: kept.
+    host.producer(1, 99, 0);
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(5)).unwrap(),
+        Next::Stalled(_)
+    ));
+    host.producer(0, 0, 0);
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(5)).unwrap(),
+        Next::Resumed {
+            state: Carried::Kept
+        }
+    ));
+}
+
+#[test]
+fn a_sleeping_reader_wakes_on_each_edge_though_no_frame_comes() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    let ringer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        host.producer(1, 5, 0);
+        host
+    });
+    let started = Instant::now();
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(20)).unwrap(),
+        Next::Stalled(_)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let mut host = ringer.join().unwrap();
+    let ringer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        host.producer(0, 0, 1);
+        host
+    });
+    let started = Instant::now();
+    assert!(matches!(
+        stream.next_or_end(Duration::from_secs(20)).unwrap(),
+        Next::Resumed { .. }
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    drop(ringer.join().unwrap());
+}
+
+#[test]
+fn a_stall_is_read_at_attach_before_any_wait() {
+    let (mut host, fds) = good();
+    // The host had already marked the stall when the consumer attached.
+    host.producer(1, 777, 0);
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    assert_eq!(stream.producer(), ProducerState::Retrying { since_ns: 777 });
+    assert!(matches!(
+        stream.next_or_end(Duration::from_millis(10)).unwrap(),
+        Next::Stalled(ProducerState::Retrying { since_ns: 777 })
+    ));
+}
+
+#[test]
+fn next_frame_ignores_a_stall_and_an_unknown_producer_state_is_not_running() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(4, "cam", platform()).unwrap();
+    host.producer(1, 5, 0);
+    assert!(
+        stream
+            .next_frame(Duration::from_millis(30))
+            .unwrap()
+            .is_none(),
+        "a stall is no frame: next_frame waits out its time as it always did"
+    );
+    assert!(stream.is_open());
+    host.producer(7, 0, 0);
+    assert_eq!(stream.producer(), ProducerState::Unknown(7));
+    host.producer(0, 0, 0);
+    assert!(host.push(0, 1, 7, 0, 0));
+    assert_eq!(
+        stream
+            .next_frame(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .sequence(),
+        7
+    );
 }

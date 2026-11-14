@@ -494,7 +494,7 @@ impl Lifecycle for Rkisp {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the ISP's path failed while running: setting it up again")
+                Health::Failed("the ISP's path failed while running: setting it up again")
             }
             _ => Health::Ok,
         }

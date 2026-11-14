@@ -243,6 +243,39 @@ fn a_stream_dropped_without_a_close_is_closed_for_the_next_open() {
     producing.stop();
 }
 
+/// A stream's end goes through the C export: 0 while it runs, and the host going away is a close.
+#[test]
+fn a_streams_end_is_read_through_the_surface() {
+    let mut streams = stream_service();
+    let client = Client::connect(
+        streams.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let stream = client.open_stream(0, "frames", false).unwrap();
+    assert_eq!(stream.end().unwrap(), surface::STREAM_END_NONE);
+    assert_eq!(
+        stream.producer().unwrap(),
+        (surface::STREAM_PRODUCER_RUNNING, 0)
+    );
+    assert!(
+        stream
+            .next_frame(Duration::from_millis(20))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        stream.end().unwrap(),
+        surface::STREAM_END_NONE,
+        "a timeout is not an end"
+    );
+    streams.service.take().unwrap().stop();
+    assert_eq!(stream.end().unwrap(), surface::STREAM_END_CLOSED);
+    assert!(stream.next_frame(Duration::from_secs(5)).unwrap().is_none());
+    assert_eq!(stream.info().unwrap().flags & surface::STREAM_OPEN, 0);
+}
+
 #[test]
 fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
     let streams = stream_service();

@@ -468,7 +468,7 @@ impl Lifecycle for Ov9782 {
         }
         match (self.state, self.link_check) {
             (State::Recovering { .. }, _) => {
-                Health::Degraded("bus error while streaming: restarting the sensor")
+                Health::Failed("bus error while streaming: restarting the sensor")
             }
             (State::PowerUp { .. }, _) => Health::Degraded("powering up"),
             (_, LinkCheck::Unknown(reason)) => Health::Degraded(reason),

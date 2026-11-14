@@ -173,7 +173,10 @@ One failure a driver can't get past by trying again: what it was bound with is d
 handle of a USB device that was unplugged. Its `health` then returns `Health::Gone(reason)`. The
 host looks after every method and every tick, drops the driver and binds it again under the same
 rule, which opens whatever is there now by its board name. Use `Health::Failed` for everything the
-driver can recover from itself. A driver that holds something that can be unplugged should set
+driver can recover from itself. That includes a driver in its own
+recovery or backoff state (a sensor restarting after a bus error): it reports `Failed` with its
+reason until it is back, so a stream it feeds reads as stalled (`docs/streams.md`, "Producer state").
+`Degraded` is for working with something missing, and for powering up: it is never read as a stall. A driver that holds something that can be unplugged should set
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 

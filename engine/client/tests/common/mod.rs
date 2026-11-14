@@ -519,6 +519,7 @@ pub struct StreamHost {
     jobs: JobCollector,
     holds: HoldTable<ReadMap>,
     bell: Bell,
+    edges: u64,
 }
 
 impl StreamHost {
@@ -587,6 +588,7 @@ impl StreamHost {
             jobs,
             holds,
             bell,
+            edges: 0,
         };
         (host, out)
     }
@@ -660,6 +662,19 @@ impl StreamHost {
     /// Rings the consumer's bell, as the host does after each frame it publishes: a sleeping
     /// consumer wakes. `publish` does not ring, so a test that wants a sleeper woken rings after it.
     pub fn ring(&mut self) {
+        self.bell.ring();
+    }
+
+    /// Says the producer is in `state` (1 retrying since `since_ns`, 0 back (`recovery`: 0 kept, 1 lost),
+    /// as the host does: one more edge, and the consumer's bell rings.
+    pub fn producer(&mut self, state: u64, since_ns: u64, recovery: u64) {
+        self.edges += 1;
+        self.jobs.set_producer(lemnos_wire::ring::ProducerWords {
+            edges: self.edges,
+            state,
+            since_ns,
+            recovery,
+        });
         self.bell.ring();
     }
 

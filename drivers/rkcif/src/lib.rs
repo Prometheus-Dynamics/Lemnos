@@ -386,7 +386,7 @@ impl Lifecycle for Rkcif {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the channel's route was lost while routed: routing it again")
+                Health::Failed("the channel's route was lost while routed: routing it again")
             }
             _ => Health::Ok,
         }

@@ -438,7 +438,7 @@ impl Lifecycle for PispFe {
     fn health(&self) -> Health {
         match self.state {
             State::Recovering { .. } => {
-                Health::Degraded("the front end's stream ended while running: restarting it")
+                Health::Failed("the front end's stream ended while running: restarting it")
             }
             State::Running { .. } if self.relay.refused() => Health::Degraded(
                 "the output0 stream's buffers are not memory the block can take \

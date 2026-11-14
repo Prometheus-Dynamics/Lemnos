@@ -700,7 +700,7 @@ fn a_node_error_is_retried_with_capped_backoff() {
     // It failed: recovery starts, with its first delay.
     let at = d.tick(now).unwrap();
     assert_eq!(at, now + 250_000_000);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     assert_eq!(d.start().unwrap_err(), Status::BUSY, "while recovering");
 
     node.with(|n| n.fail_open = Some(Status::NO_DEVICE));
@@ -724,7 +724,7 @@ fn a_node_error_is_retried_with_capped_backoff() {
         let at = d.tick(now).unwrap();
         assert_eq!(at - now, 8_000_000_000);
         now = at;
-        assert!(matches!(d.health(), Health::Degraded(_)));
+        assert!(matches!(d.health(), Health::Failed(_)));
     }
 
     // And it clears when an attempt works: the node opened and streaming again, frames flowing.
@@ -747,7 +747,7 @@ fn stop_ends_recovery() {
     let (mut d, node) = streaming(&stream);
     node.with(|n| n.fail_dequeue = Some(Status::IO));
     let _ = d.tick(0);
-    assert!(matches!(d.health(), Health::Degraded(_)));
+    assert!(matches!(d.health(), Health::Failed(_)));
     d.stop().unwrap();
     assert_eq!(d.tick(u64::MAX), None, "stopped: nothing is due");
     assert_eq!(d.health(), Health::Ok);
