@@ -181,6 +181,15 @@ driver runs without it, whatever `bus` says.
 A device that uses another is bound after it, wherever it is in the file, and waits for it to be
 running. A device may not use itself.
 
+A device whose `link` names another device is bound after that device too, wherever either is in the
+file, so the first bind finds the linked device already running instead of failing once and waiting
+for the one-second retry. This is only order: the `link` is still handed over and checked at bind,
+and a linked device that is slow or fails leaves the dependent retrying, with the backoff capped at
+8 s, as any failed bind does. A loop through `uses` and `link` edges, in any mix, is refused at the
+device that closes it, and the refusal names every device of the loop and marks each edge as a `uses`
+or a `link`, for example `"a" -link-> "b" -uses-> "a"`. Devices that neither use nor link to one
+another keep the order of the file.
+
 ## Resource names
 
 A name means what the backend says it means.
@@ -189,7 +198,7 @@ On Linux (`lemnosd` with no `--sim`):
 
 | Name | What it is |
 |---|---|
-| `i2c-N` | The I2C adapter `/dev/i2c-N`. Every device on a bus opens it; the kernel serialises them |
+| `i2c-N` | The I2C adapter `/dev/i2c-N`. Every device on a bus opens it; the kernel serialises them. With the kernel module, an address has one holder at a time instead (see [Resource](concepts.md#resource)) |
 | `pio-i2c:sda=N,scl=N` | An I2C bus made from two GPIO lines by the RP1 PIO block. `,hz=N` sets the clock |
 | `pio-out:gpio=N` | One state machine of the RP1 PIO block driving GPIO N, running the program its driver gives (a `ws2812` strip takes this as its `bus`) |
 | `spidevB.C` | The SPI device `/dev/spidevB.C` |
