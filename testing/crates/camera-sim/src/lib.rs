@@ -14,6 +14,7 @@ pub mod pisp;
 pub mod scene;
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use lemnos_contract_camera_isp::CameraIsp;
@@ -70,6 +71,36 @@ pub struct World {
 
 pub static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
+/// The module's exclusion, as `kernel/lemnos_rp1_csi2.c` and `kernel/lemnos_pisp_fe.c` make it: the
+/// receiver's raw `frames` stream and the front end are never running together (the receiver's
+/// `START` is refused with `EBUSY` while the front end streams, the front end's while a raw stream
+/// runs), because in front-end mode the CSI-2 channel feeds the front end instead of memory. The
+/// module takes the decision under one lock; here it is one compare-and-swap, so the later of two
+/// starts always sees the earlier. A process holds one simulated chain, so this is process-wide;
+/// [`new_world`] clears it.
+pub static EXCLUSIVE: AtomicU8 = AtomicU8::new(NOBODY);
+/// [`EXCLUSIVE`]: nothing streams.
+pub const NOBODY: u8 = 0;
+/// [`EXCLUSIVE`]: the receiver's raw stream runs.
+pub const RAW: u8 = 1;
+/// [`EXCLUSIVE`]: the front end has been started with a job.
+pub const FRONT_END: u8 = 2;
+
+/// Takes the block for `who`, `Err` (`EBUSY`) if the other one has it. Taking it again is fine for
+/// the front end (a restart); for the raw stream the receiver's own `running` check refuses it.
+pub fn take(who: u8) -> Result<()> {
+    match EXCLUSIVE.compare_exchange(NOBODY, who, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => Ok(()),
+        Err(held) if held == who && who == FRONT_END => Ok(()),
+        Err(_) => Err(Status::BUSY),
+    }
+}
+
+/// Lets go of the block if `who` holds it.
+pub fn release(who: u8) {
+    let _ = EXCLUSIVE.compare_exchange(who, NOBODY, Ordering::SeqCst, Ordering::SeqCst);
+}
+
 pub fn world<R>(f: impl FnOnce(&mut World) -> R) -> R {
     let mut guard = WORLD.lock().unwrap_or_else(PoisonError::into_inner);
     f(guard.as_mut().expect("world"))
@@ -82,6 +113,7 @@ fn put(regs: &mut BTreeMap<u16, u8>, at: u16, bytes: &[u8]) {
 }
 
 pub fn new_world(claims_on: bool, model: Model) -> World {
+    EXCLUSIVE.store(NOBODY, Ordering::SeqCst);
     let mut buses = BTreeMap::new();
     // i2c-10, 0x60: the OV9782 as the board's records show it at rest (BR1 2026-11-13, raze2-p2).
     let mut regs = BTreeMap::new();
@@ -366,6 +398,8 @@ pub struct SimReceiver {
     next_ps: Option<u128>,
     emitted: u64,
     latest_ns: u64,
+    /// The shared scene as packed RAW10, made once, for a test pattern.
+    scene: Option<Vec<u8>>,
 }
 
 impl Lifecycle for SimReceiver {
@@ -386,6 +420,7 @@ impl Lifecycle for SimReceiver {
             next_ps: None,
             emitted: 0,
             latest_ns: 0,
+            scene: None,
         })
     }
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
@@ -398,6 +433,19 @@ impl Lifecycle for SimReceiver {
         }
         let now_ps = u128::from(now_ns) * 1000;
         let size = self.layout.map_or(0, |l| l.size);
+        // A test pattern is a static picture the sensor makes itself: with the pattern on
+        // (`0x5e00` bit 7) the frames are the shared scene as packed RAW10, the same picture the
+        // simulated front end writes, so a frame saved from the receiver is a reference for the
+        // front end's. With the pattern off the picture is the exposure's level, as before.
+        let pattern = world(|w| {
+            w.buses["i2c-10"].targets[&0x60]
+                .regs
+                .get(&lemnos_driver_ov9782::chip::TEST_PATTERN)
+                .is_some_and(|v| v & 0x80 != 0)
+        });
+        let scene_frame = (pattern
+            && size as usize == scene::RAW10_STRIDE * scene::HEIGHT as usize)
+            .then(|| &*self.scene.get_or_insert_with(scene::reference_raw10));
         let mut next = *self.next_ps.get_or_insert(now_ps + period_ps());
         while next <= now_ps {
             let at_ns = (next / 1000) as u64;
@@ -410,10 +458,11 @@ impl Lifecycle for SimReceiver {
                     // The picture's brightness is the sensor's exposure as it latched (`World::level_for_frame_at`).
                     let period_ns = (period_ps() / 1000) as u64;
                     let level = world(|w| w.level_for_frame_at(at_ns, period_ns));
-                    if frames
-                        .write(buffer, 0, &vec![level; size as usize])
-                        .is_err()
-                    {
+                    let wrote = match scene_frame {
+                        Some(picture) => frames.write(buffer, 0, picture),
+                        None => frames.write(buffer, 0, &vec![level; size as usize]),
+                    };
+                    if wrote.is_err() {
                         self.counters.errors += 1;
                     }
                     let frame = StreamFrame {
@@ -487,6 +536,8 @@ impl CameraReceiver for SimReceiver {
         if self.running {
             return Err(Status::BUSY);
         }
+        // The module's rule (see `EXCLUSIVE`): no raw stream while the front end streams.
+        take(RAW)?;
         self.counters = Counters::default();
         self.emitted = 0;
         self.next_ps = None;
@@ -495,6 +546,7 @@ impl CameraReceiver for SimReceiver {
     }
     fn stop(&mut self) -> Result<()> {
         self.running = false;
+        release(RAW);
         Ok(())
     }
     fn counters(&mut self) -> Result<Counters> {

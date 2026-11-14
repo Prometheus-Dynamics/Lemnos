@@ -4,14 +4,22 @@
 //! lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME]
 //!                    [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE]
 //!                    [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N]
-//!                    [--min-mean-luma N] [--allow-skip lit-scene]
+//!                    [--min-mean-luma N] [--allow-skip lit-scene|latch|reference]...
 //! ```
 //!
 //! A check that is not made is a failure, named in the output: `--fps` (the sensor mode's frame
 //! rate, within 2 %), `--reference` (the first frame's lines), `--latch-trials` (the sensor's latch,
-//! run as `lemnos-sensor-proof latch` beside the chain, on the same socket). `--allow-skip lit-scene`
-//! is the only skip: it lets the lit-scene checks (the back end's mean luma reaching
-//! `--min-mean-luma`, and the latch) be skipped on a dark scene; the others are never skipped.
+//! run as `lemnos-sensor-proof latch` beside the chain, on the same socket). A check is skipped
+//! only by a named `--allow-skip` (repeatable), and the output says it was skipped: `lit-scene`
+//! lets the checks that need light (the back end's mean luma reaching `--min-mean-luma`, and the
+//! latch) be skipped on a dark scene; `latch` skips only the latch; `reference` skips only the
+//! reference lines. The others are never skipped.
+//!
+//! The latch cannot run beside the chain on a board: the receiver's raw `frames` stream and the
+//! front end are exclusive in the kernel module (`kernel/lemnos_rp1_csi2.c`, `lrc_start`: `EBUSY`
+//! while the front end streams), and the latch takes that stream. So a board run starts the latch
+//! on its own first (`lemnos-sensor-proof latch`) and gives this tool `--allow-skip latch`;
+//! `--latch-trials` is for a chain whose receiver can share its stream.
 //!
 //! Timestamps: every front-end and back-end frame's `CLOCK_MONOTONIC` timestamp must be no later
 //! than the moment the frame is taken, and no older than one second (a frame start of this run).
@@ -94,7 +102,7 @@ const CSC: BeCcmConfig = BeCcmConfig {
     pad: [0; 2],
     offsets: [0, 33_554_432, 33_554_432],
 };
-const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME] [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene]";
+const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME] [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene|latch|reference]...";
 /// A timestamp older than this, at the moment the frame is taken, is not a frame start of this run.
 const MAX_AGE_NS: u64 = 1_000_000_000;
 /// The dark scene's back-end mean luma was about 20 on the board (black level 16); a lit scene is
@@ -133,9 +141,17 @@ struct Args {
     min_mean_luma: u64,
     /// `--allow-skip lit-scene`: the checks that need a lit scene are skipped, not failed.
     allow_skip_lit: bool,
+    /// `--allow-skip latch`: the sensor latch is not checked (it was run on its own, or cannot be).
+    allow_skip_latch: bool,
+    /// `--allow-skip reference`: no reference frame was available, so its lines are not checked.
+    allow_skip_reference: bool,
 }
 
 fn parse() -> Option<Args> {
+    parse_from(std::env::args().collect())
+}
+
+fn parse_from(argv: Vec<String>) -> Option<Args> {
     let mut args = Args {
         socket: "/run/lemnos/lemnosd.sock".into(),
         sensor: None,
@@ -151,8 +167,10 @@ fn parse() -> Option<Args> {
         latch_trials: None,
         min_mean_luma: DEFAULT_MIN_MEAN_LUMA,
         allow_skip_lit: false,
+        allow_skip_latch: false,
+        allow_skip_reference: false,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.into_iter().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next()?;
         match flag.as_str() {
@@ -169,7 +187,12 @@ fn parse() -> Option<Args> {
             "--fps" => args.fps = Some(value.parse().ok()?),
             "--latch-trials" => args.latch_trials = Some(value.parse().ok()?),
             "--min-mean-luma" => args.min_mean_luma = value.parse().ok()?,
-            "--allow-skip" if value == "lit-scene" => args.allow_skip_lit = true,
+            "--allow-skip" => match value.as_str() {
+                "lit-scene" => args.allow_skip_lit = true,
+                "latch" => args.allow_skip_latch = true,
+                "reference" => args.allow_skip_reference = true,
+                _ => return None,
+            },
             _ => return None,
         }
     }
@@ -1014,8 +1037,13 @@ fn run(args: &Args) -> Result<bool, String> {
     );
     // A check that is not made fails the run. Only the checks that need a lit scene may be skipped
     // (`--allow-skip lit-scene`).
+    if matched.is_none() && args.allow_skip_reference {
+        out(format_args!(
+            "first front-end frame: reference lines not checked (--allow-skip reference)"
+        ));
+    }
     check(
-        matched == Some(HEIGHT as usize),
+        matched == Some(HEIGHT as usize) || (matched.is_none() && args.allow_skip_reference),
         match matched {
             None => "reference lines not checked: give --reference".into(),
             Some(n) => {
@@ -1050,19 +1078,22 @@ fn run(args: &Args) -> Result<bool, String> {
             ),
         );
     }
+    let skip_latch = args.allow_skip_lit || args.allow_skip_latch;
+    let why = if args.allow_skip_latch {
+        "--allow-skip latch"
+    } else {
+        "lit-scene check skipped"
+    };
     match latch {
-        None if args.allow_skip_lit => out(format_args!(
-            "sensor latch: not run (lit-scene check skipped)"
-        )),
+        None if skip_latch => out(format_args!("sensor latch: not run ({why})")),
         None => check(
             false,
             "sensor latch not checked: give --latch-trials".into(),
         ),
         Some(Ok(done)) if done.status.success() => {}
-        Some(Ok(done)) if args.allow_skip_lit => out(format_args!(
-            "sensor latch: exit {} (lit-scene check skipped)",
-            done.status
-        )),
+        Some(Ok(done)) if skip_latch => {
+            out(format_args!("sensor latch: exit {} ({why})", done.status))
+        }
         Some(Ok(done)) => check(false, format!("sensor latch failed: exit {}", done.status)),
         Some(Err(e)) => check(false, format!("sensor latch did not finish: {e}")),
     }
@@ -1125,6 +1156,38 @@ mod tests {
         assert!(rate_ok(114.8, 115.0));
         assert!(!rate_ok(100.0, 115.0));
         assert!(!rate_ok(114.8, 0.0));
+    }
+
+    #[test]
+    fn a_skip_is_named_and_only_the_three_exist() {
+        for (flag, value, ok) in [
+            ("--allow-skip", "lit-scene", true),
+            ("--allow-skip", "latch", true),
+            ("--allow-skip", "reference", true),
+            ("--allow-skip", "fps", false),
+            ("--allow-skip", "", false),
+        ] {
+            let mut args = vec!["lemnos-chain-proof".to_string()];
+            args.extend([flag.into(), value.into()]);
+            assert_eq!(parse_from(args).is_some(), ok, "{value}");
+        }
+        let all = parse_from(
+            [
+                "x",
+                "--allow-skip",
+                "latch",
+                "--allow-skip",
+                "reference",
+                "--allow-skip",
+                "lit-scene",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        assert!(all.allow_skip_latch && all.allow_skip_reference && all.allow_skip_lit);
+        let none = parse_from(vec!["x".to_string()]).unwrap();
+        assert!(!none.allow_skip_latch && !none.allow_skip_reference && !none.allow_skip_lit);
     }
 
     #[test]

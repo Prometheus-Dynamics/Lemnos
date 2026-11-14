@@ -279,6 +279,8 @@ impl fe::Hardware for FeBlock {
     }
 
     fn go(&mut self, start: &fe::Start) -> Result<()> {
+        // The module's rule (`crate::EXCLUSIVE`): no front end while a raw stream runs.
+        crate::take(crate::FRONT_END)?;
         self.with(|b| {
             let narrow = |v: u32| u16::try_from(v).map_err(|_| Status::INVALID_ARGUMENT);
             b.fixed = Some(Fixed {
@@ -299,6 +301,7 @@ impl fe::Hardware for FeBlock {
     }
 
     fn stop(&mut self) {
+        crate::release(crate::FRONT_END);
         self.with(|b| {
             b.started = false;
             b.pending.clear();

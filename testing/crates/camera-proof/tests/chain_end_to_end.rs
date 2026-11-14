@@ -56,6 +56,19 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     } else {
         ("3664", "30")
     };
+    // The latch runs on its own, first, as a board run does it: the receiver's raw stream and the
+    // front end are exclusive in the module, so the latch cannot run beside the chain (the
+    // simulated receiver refuses it too, `chain_latch_beside.rs`).
+    let latch = Command::new(env!("CARGO_BIN_EXE_lemnos-sensor-proof"))
+        .args(["latch", "--socket", socket.to_str().unwrap()])
+        .args(["--sensor", "cam0-sensor", "--trials", "2"])
+        .output()
+        .unwrap();
+    let latch_text = String::from_utf8_lossy(&latch.stdout).into_owned();
+    assert!(
+        latch.status.success(),
+        "the latch on its own failed:\n{latch_text}"
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_lemnos-chain-proof"))
         .args([
             "--socket",
@@ -64,14 +77,17 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
             "cam0-sensor",
         ])
         .args(["--frames", &frames, "--frame-length", length, "--fps", fps])
-        .args(["--pattern", "1", "--latch-trials", "2", "--reference"])
+        .args(["--pattern", "1", "--allow-skip", "latch", "--reference"])
         .arg(&reference)
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     // `CHAIN_SHOW=1 cargo test ... --nocapture` prints the proof's whole output.
     if std::env::var_os("CHAIN_SHOW").is_some() {
-        let _ = writeln!(std::io::stdout(), "stream buffers: {kind}\n{text}");
+        let _ = writeln!(
+            std::io::stdout(),
+            "stream buffers: {kind}\nlatch on its own:\n{latch_text}\nchain proof:\n{text}"
+        );
     }
     service.stop();
     let _ = std::fs::remove_dir_all(&dir);
@@ -88,6 +104,7 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         "cam0-fe config: 8 buffers of 632 bytes, job-driven, shared memory, taken writable",
         "cam0-fe statistics: 8 buffers of 23200 bytes, job-driven, dma-buf per buffer",
         "cam0-isp input: 2 buffers of 2048000 bytes, job-driven, dma-buf per buffer, taken writable",
+        "sensor latch: not run (--allow-skip latch)",
         &format!("frames delivered end to end: {frames}"),
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
