@@ -762,7 +762,7 @@ the job cuts it mid-write. A client sizes the deadline of an install from the by
 - The result is rounded up to a whole millisecond and must not exceed the node's `actions.max_detached_ms` for a
   detached run (see above).
 
-The bundle sizes (the CM5 board, the current build): the root image is `rootfs.erofs`, 42,319,872 bytes (`K2-bundle.md`,
+The bundle sizes (one reference board, the current build): the root image is `rootfs.erofs`, 42,319,872 bytes (`K2-bundle.md`,
 the 993 image); the kernel is 25,430,528 bytes raw or 10,168,581 gzip (`L2-partition-requirements.md` section 8.2); the
 dtb 79,792, the overlay 1,839, the cmdline about 300 bytes, and the initramfs 1,048,576 bytes **as an estimate** (its
 size is unmeasured). With tar headers: 68,890,907 bytes raw, or 53,628,960 gzip.
