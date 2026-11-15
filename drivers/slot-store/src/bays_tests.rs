@@ -62,6 +62,7 @@ fn record(slot: &str, p: &[Vec<u8>; 5], layout: &Layout) -> Vec<u8> {
     let payload = Info {
         slot: slot.to_string(),
         files,
+        firmware: Vec::new(),
     }
     .encode();
     let mut sector = [0u8; SECTOR];
@@ -633,7 +634,7 @@ fn payloads_b() -> [Vec<u8>; 5] {
 fn boot_parts(layout: &Layout) -> Parts {
     Parts {
         family: Family::Tryboot,
-        layout: *layout,
+        layout: layout.clone(),
         root: vec![
             (
                 "config.txt",
@@ -817,25 +818,36 @@ fn listing(names: &[&str]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The declared set of a board with no firmware overlay: the five role files.
+fn declared() -> Vec<String> {
+    stored_files().iter().map(|s| s.to_string()).collect()
+}
+
 #[test]
 fn a_manifest_lists_exactly_the_role_files() {
     let five = stored_files();
-    assert_eq!(refuse_unstored("os-2", &listing(&five)), Ok(()));
+    assert_eq!(
+        refuse_unstored("os-2", &listing(&five), &declared()),
+        Ok(())
+    );
     // The order of the list does not matter.
     let mut reversed = five;
     reversed.reverse();
-    assert_eq!(refuse_unstored("os-2", &listing(&reversed)), Ok(()));
+    assert_eq!(
+        refuse_unstored("os-2", &listing(&reversed), &declared()),
+        Ok(())
+    );
     // An extra entry, by name.
     let mut extra = five.to_vec();
     extra.push("overlays/extra.dtbo");
     assert_eq!(
-        refuse_unstored("os-2", &listing(&extra)).unwrap_err(),
+        refuse_unstored("os-2", &listing(&extra), &declared()).unwrap_err(),
         "os-2: boot.files lists \"overlays/extra.dtbo\", which this board's boot partition does not store (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo): nothing was written, the default keeps booting"
     );
     // A role file left out, by name.
     let short = &five[1..];
     assert!(
-        refuse_unstored("os-2", &listing(short))
+        refuse_unstored("os-2", &listing(short), &declared())
             .unwrap_err()
             .contains("does not list \"kernel8.img\"")
     );
@@ -843,7 +855,7 @@ fn a_manifest_lists_exactly_the_role_files() {
     let mut readme = five.to_vec();
     readme.push("overlays/README");
     assert!(
-        refuse_unstored("os-2", &listing(&readme))
+        refuse_unstored("os-2", &listing(&readme), &declared())
             .unwrap_err()
             .contains("\"overlays/README\"")
     );

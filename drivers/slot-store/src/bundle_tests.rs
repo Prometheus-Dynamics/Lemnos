@@ -4,6 +4,7 @@
 //! which shares nothing with a real signature but its length and its place in the record.
 
 use super::*;
+use crate::bays::ROLES;
 use crate::tar::write::archive;
 
 const ID: &str = "os-2";
@@ -103,7 +104,7 @@ fn make_with(
             rules,
             signer: sign.then_some(signer),
         },
-        payloads,
+        payloads.to_vec(),
         &mut &image[..],
     )
 }
@@ -374,7 +375,7 @@ fn the_writer_refuses_each_mistake_by_name() {
                 rules: &tryboot,
                 signer: None,
             },
-            payloads(),
+            payloads().to_vec(),
             &mut &image.whole[..],
         )
         .unwrap_err()

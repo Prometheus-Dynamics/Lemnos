@@ -101,6 +101,10 @@ pub struct Manifest {
     /// The board overlay the boot files carry, for a board whose firmware loads one (`boot.overlay`):
     /// the board id and the digest the overlay's live marker must equal. `None` when the slot has none.
     pub overlay: Option<Overlay>,
+    /// SHA-256 (lowercase hex) of the firmware config lines the board declares (`[boot] config_lines`),
+    /// `None` for a board that declares none. The boot partition's lines must be the same (see
+    /// [`crate::bundle::check_declared`]).
+    pub boot_config: Option<String>,
 }
 
 /// The size of the hash tree over `data_blocks` blocks: a level of `ceil(n / 128)` blocks while
@@ -193,6 +197,9 @@ impl Manifest {
             out.push_str("\"overlay\":{\"board\":");
             json::quoted(&overlay.board, &mut out);
             out.push_str(&format!(",\"sha256\":\"{}\"}},", overlay.sha256));
+        }
+        if let Some(config) = &self.boot_config {
+            out.push_str(&format!("\"config\":\"{config}\","));
         }
         out.push_str("\"files\":{");
         for (at, (name, sha)) in self.boot_files.iter().enumerate() {
@@ -317,6 +324,15 @@ impl Manifest {
                 })
             }
         };
+        let boot_config = match json.path("boot.config") {
+            None => None,
+            Some(c) => Some(
+                c.text()
+                    .filter(|h| is_hex(h, 64))
+                    .ok_or("slot.json's boot.config isn't 64 hex digits")?
+                    .to_string(),
+            ),
+        };
         Ok(Self {
             id,
             product,
@@ -335,6 +351,7 @@ impl Manifest {
             },
             boot_files,
             overlay,
+            boot_config,
         })
     }
 }
@@ -381,6 +398,7 @@ mod tests {
                 board: "board-a".into(),
                 sha256: HASH.into(),
             }),
+            boot_config: None,
         }
     }
 

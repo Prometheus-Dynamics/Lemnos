@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use lemnos_core::Status;
-use lemnos_slot_store::security::{self, PlainFile, Store, Switch, View};
+use lemnos_slot_store::security::{self, BootSwitch, PlainFile, Store, Switch, View};
 use lemnos_slot_store::signing::{self, Record, security_switch_message};
 
 /// One stakeholder's answer: its name and its lines (`missing: ...` or `busy: ...`). No lines is
@@ -197,9 +197,37 @@ pub fn authorize_off(
     )
 }
 
+/// Where the switch's record is: a file (boards without slots), the boot partition's `SECURE.REC`
+/// (slot boards), or neither, when the boot partition could not be found. Neither reads as an error,
+/// which the device reads as on.
+#[derive(Debug, Clone)]
+pub enum SwitchRecord {
+    File(PlainFile),
+    Boot(BootSwitch),
+    Unreachable(String),
+}
+
+impl Store for SwitchRecord {
+    fn read(&self) -> std::io::Result<Option<Switch>> {
+        match self {
+            Self::File(file) => file.read(),
+            Self::Boot(boot) => boot.read(),
+            Self::Unreachable(why) => Err(std::io::Error::other(why.clone())),
+        }
+    }
+
+    fn write(&self, on: bool) -> std::io::Result<u64> {
+        match self {
+            Self::File(file) => file.write(on),
+            Self::Boot(boot) => boot.write(on),
+            Self::Unreachable(why) => Err(std::io::Error::other(why.clone())),
+        }
+    }
+}
+
 /// The switch's state on this device: the record, the view, and the last check.
 pub struct Flow {
-    record: PlainFile,
+    record: SwitchRecord,
     render_dir: PathBuf,
     orion: bool,
     switch: Switch,
@@ -233,7 +261,16 @@ impl Flow {
     /// on, reported.
     #[must_use]
     pub fn open(record: impl Into<PathBuf>, render_dir: impl Into<PathBuf>, orion: bool) -> Self {
-        let record = PlainFile::new(record);
+        Self::open_record(
+            SwitchRecord::File(PlainFile::new(record)),
+            render_dir,
+            orion,
+        )
+    }
+
+    /// As [`Flow::open`], over any record: the boot partition's `SECURE.REC` on a slot board.
+    #[must_use]
+    pub fn open_record(record: SwitchRecord, render_dir: impl Into<PathBuf>, orion: bool) -> Self {
         let (switch, corrupt) = match record.read() {
             Ok(Some(switch)) => (switch, false),
             Ok(None) => (

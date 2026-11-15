@@ -88,3 +88,9 @@ jobs:
       - run: testing/qemu/run-builtin.sh
         env:
           KERNEL: ${{ runner.temp }}/kernel-modules-off/build/arch/x86/boot/bzImage
+      # The watchdog hand-over (M36c): the same kernel, with CONFIG_I6300ESB_WDT=y. Built with gcc, as the others.
+      # It builds lemnos-slot-init for musl, as run.sh's job does; rust-toolchain.toml selects the toolchain.
+      - run: rustup target add x86_64-unknown-linux-musl
+      - run: testing/qemu/run-watchdog.sh
+        env:
+          KERNEL: ${{ runner.temp }}/kernel-modules-off/build/arch/x86/boot/bzImage

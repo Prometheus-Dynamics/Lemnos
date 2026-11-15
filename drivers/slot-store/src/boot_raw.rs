@@ -22,6 +22,24 @@ pub const TRIAL_FILE: &[u8; 11] = b"TRIAL   REC";
 pub const REASON_FILE: &[u8; 11] = b"REASON  REC";
 /// The FAT directory name of the episodes record's file.
 pub const EPISODES_FILE: &[u8; 11] = b"EPISODESREC";
+
+/// The FAT directory name of the restart baseline record (`count.rec`, M36b). Optional: an image
+/// without it boots, and its flash decision refuses by name (see [`crate::firmware::since_good`]).
+pub const COUNT_FILE: &[u8; 11] = b"COUNT   REC";
+
+/// The baseline record's payload: the count as decimal text. Zero is `0`, so empty is only "unknown".
+pub fn encode_baseline(count: u32) -> String {
+    count.to_string()
+}
+
+/// A baseline payload: `None` for an empty (unknown) or malformed one.
+pub fn decode_baseline(payload: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(payload).ok()?;
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
 /// The size of each record file: two sectors, one per copy.
 pub const RECORD_BYTES: u64 = 1024;
 
@@ -305,6 +323,15 @@ pub trait BootRaw {
     /// The bay a slot's files are in: the set's directory (`slots/bayN`) and each payload's stored
     /// length from the set's record. Refused by name when no set holds the slot.
     fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String>;
+    /// The restart count the last good boot (or the first boot) started from: `None` when unknown,
+    /// or when the image has no baseline record. The default refuses by name.
+    fn baseline(&mut self) -> Result<Option<u32>, String> {
+        Err("this boot partition has no restart baseline record".into())
+    }
+    /// Keeps `count` as the restart baseline (the record only).
+    fn set_baseline(&mut self, _count: u32) -> Result<(), String> {
+        Err("this boot partition has no restart baseline record".into())
+    }
 
     /// Arms a trial: the trial pointer first, then the record. A cut after the pointer leaves no
     /// record, so no tryboot restart happens and the old pointer is never read; the record is written
@@ -334,6 +361,8 @@ pub struct Boot<D = FileSectors> {
     dev: D,
     records: Records,
     pointers: Pointers,
+    /// The restart baseline record's first copy, when the image has the file (`count.rec`).
+    baseline: Option<Pair>,
     /// The bay layout the image was built with; `Err` names why it could not be read.
     layout: Result<bays::Layout, String>,
 }
@@ -356,6 +385,12 @@ impl<D> Boot<D> {
     pub fn into_device(self) -> D {
         self.dev
     }
+
+    /// The bay sizes the image was built with, read when the image was opened; `Err` names why
+    /// they could not be read.
+    pub fn bay_layout(&self) -> Result<bays::Layout, String> {
+        self.layout.clone()
+    }
 }
 
 impl<D: Sectors + ReadAt> Boot<D> {
@@ -365,11 +400,16 @@ impl<D: Sectors + ReadAt> Boot<D> {
         let records =
             Records::place_named(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
         let pointers = Pointers::place(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
+        // Optional: an older image without the file boots, and its flash decision refuses by name.
+        let baseline = bootfat::locate(&mut dev, COUNT_FILE, RECORD_BYTES)
+            .ok()
+            .map(|found| Pair::at(found.first_lba));
         let layout = bays::discover(&mut dev);
         Ok(Self {
             dev,
             records,
             pointers,
+            baseline,
             layout,
         })
     }
@@ -408,13 +448,21 @@ impl<D: Sectors + ReadAt> Boot<D> {
         self.set_for(slot)
     }
 
+    /// The bay set a slot is in, and the record that set holds: each boot file's stored length and
+    /// hash. Refused by name when the slot has no bay or the bay holds no record.
+    pub fn bay_record(&mut self, slot: &str) -> Result<(u8, bays::Info), String> {
+        let set = self.set_for(slot)?;
+        let layout = self.layout.clone()?;
+        let placed = bays::place(&mut self.dev, &layout)?;
+        let info = bays::read_info(&mut self.dev, placed.info[set as usize])
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("bay{set} holds no record for {slot}"))?;
+        Ok((set, info))
+    }
+
     /// Installs a slot's five payloads into its bay (see [`bays::stage`]): the set that already holds
     /// the slot, else a set no pointer names. No pointer moves.
-    pub fn install_slot(
-        &mut self,
-        slot: &str,
-        payloads: &[&[u8]; 5],
-    ) -> Result<bays::Done, String> {
+    pub fn install_slot(&mut self, slot: &str, payloads: &[&[u8]]) -> Result<bays::Done, String> {
         self.install_slot_with(slot, payloads, None)
     }
 
@@ -423,7 +471,7 @@ impl<D: Sectors + ReadAt> Boot<D> {
     pub fn install_slot_with(
         &mut self,
         slot: &str,
-        payloads: &[&[u8]; 5],
+        payloads: &[&[u8]],
         extlinux: Option<&[u8]>,
     ) -> Result<bays::Done, String> {
         let layout = self.layout.clone()?;
@@ -451,9 +499,40 @@ impl<D: Sectors + ReadAt> Boot<D> {
         else {
             return Ok(());
         };
+        // The rule (M36b): `previous.txt` names the default's bay until a real previous exists, and
+        // never an empty one. Removing the previous slot's bay therefore points `previous.txt` at the
+        // default's bay first (one sector pair), then frees the old bay. A cut between the two leaves
+        // the old previous, which still holds its record. Removing the default's bay is refused below.
+        let default_set = self.pointer_set(Pointer::Default)?;
+        let previous_set = self.pointer_set(Pointer::Previous)?;
+        if previous_set == Some(set) && default_set != Some(set) {
+            let Some(fallback) = default_set else {
+                return Err(format!(
+                    "{slot} is the previous slot and the default names no bay: previous.txt has nowhere to fall back to, so {slot} is kept"
+                ));
+            };
+            self.pointers
+                .write(&mut self.dev, Pointer::Previous, &bays::set_name(fallback))
+                .map_err(|e| e.to_string())?;
+        }
         let protected =
             bays::Protected::from_volume(&mut self.dev, &layout).map_err(|e| e.to_string())?;
-        bays::free_set(&mut self.dev, &layout, set, &protected).map_err(|e| e.to_string())
+        bays::free_set(&mut self.dev, &layout, set, &protected).map_err(|e| e.to_string())?;
+        debug_assert!(
+            self.pointer_set(Pointer::Previous)?.is_some(),
+            "previous.txt names no bay after a removal"
+        );
+        Ok(())
+    }
+
+    /// The bay set a pointer names, `None` when it is torn or names no set.
+    fn pointer_set(&mut self, which: Pointer) -> Result<Option<u8>, String> {
+        Ok(self
+            .pointers
+            .read(&mut self.dev, which)
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            .and_then(bays::set_of))
     }
 }
 
@@ -500,6 +579,12 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
         self.dev
     }
 
+    /// The bay layout the volume was read with: the role sizes, the firmware overlays and the config
+    /// digest.
+    pub fn bay_layout(&self) -> bays::Layout {
+        self.layout.clone()
+    }
+
     /// The bay a slot's files are in (see [`bays::slot_bay_on`]).
     pub fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
         bays::slot_bay_on(&mut self.dev, &self.layout, slot)
@@ -511,7 +596,7 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
     pub fn install_slot_with(
         &mut self,
         slot: &str,
-        payloads: &[&[u8]; 5],
+        payloads: &[&[u8]],
         extlinux: Option<&[u8]>,
         protected: &bays::Protected,
     ) -> Result<bays::Done, String> {
@@ -610,6 +695,29 @@ impl<D: Sectors + ReadAt> BootRaw for Boot<D> {
         self.records
             .set_reason(&mut self.dev, reason)
             .map_err(|e| e.to_string())
+    }
+
+    fn baseline(&mut self) -> Result<Option<u32>, String> {
+        let Some(pair) = self.baseline else {
+            return Err("this boot partition has no restart baseline record (count.rec)".into());
+        };
+        let current = pair
+            .read(&mut self.dev, Kind::BASELINE)
+            .map_err(|e| e.to_string())?;
+        Ok(current.and_then(|cur| decode_baseline(&cur.payload)))
+    }
+
+    fn set_baseline(&mut self, count: u32) -> Result<(), String> {
+        let Some(pair) = self.baseline else {
+            return Err("this boot partition has no restart baseline record (count.rec)".into());
+        };
+        pair.write(
+            &mut self.dev,
+            Kind::BASELINE,
+            encode_baseline(count).as_bytes(),
+        )
+        .map(drop)
+        .map_err(|e| e.to_string())
     }
 
     fn episodes(&mut self) -> Result<Option<(String, u8)>, String> {

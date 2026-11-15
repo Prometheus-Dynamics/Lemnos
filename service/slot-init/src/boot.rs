@@ -43,6 +43,7 @@ use std::time::Duration;
 use lemnos_slot_store::boot_raw::{BootRaw, Pointer};
 use lemnos_slot_store::bootcheck;
 use lemnos_slot_store::disk::{self, Table};
+use lemnos_slot_store::firmware::{Since, since_good};
 use lemnos_slot_store::manifest::Manifest;
 use lemnos_slot_store::records::{KERNEL_GAP, MAX_ATTEMPTS, attempts, file, tryboot, uboot};
 use lemnos_slot_store::signing::{self, BOOT_UNVERIFIED};
@@ -85,6 +86,14 @@ pub const LOADER_FILES_REASON: &str = "the boot loader could not load the defaul
 /// device) and, at the rescue wait (30 s) plus a boot each, is a few minutes. A board sent there
 /// waits until it is flashed or power-cycled: RPIBOOT has no timeout.
 pub const FLASH_AFTER: u32 = 8;
+
+/// Why the data partition was not found.
+enum DataRefusal {
+    /// The disk has partitions and none is labelled `lemnos-data`: a foreign disk.
+    Foreign(String),
+    /// Any other reason: no disk, or two partitions with the label.
+    Other(String),
+}
 
 /// Where things are: `/` and its usual places on a board, a temporary directory in the tests.
 #[derive(Debug, Clone)]
@@ -173,6 +182,8 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
             ops.log(&format!("{fstype} at {}: {error}", target.display()));
         }
     }
+    // Armed as soon as /dev exists: from here on a hang in this program resets the board.
+    ops.arm_watchdog();
     let mut boot = Boot {
         ops,
         env,
@@ -278,6 +289,35 @@ impl Boot<'_> {
         self.ops.restart(argument);
     }
 
+    /// The restarts since the last good boot (M36b). The raw count is the restarts since power loss,
+    /// which no Lemnos boot clears; the baseline record (`count.rec`) is the count the last good boot,
+    /// or the first boot, started from. A first boot keeps the count as its baseline; a count below
+    /// the baseline is a power loss and the baseline goes to zero. Each change is written and said in
+    /// the log. `Ok(None)`: no firmware count on this board. `Err`: the restarts can't be known, so
+    /// the caller takes no flashing decision.
+    fn since_good(&self) -> Result<Option<Since>, String> {
+        let Some(count) = self.boot_count() else {
+            return Ok(None);
+        };
+        let mut raw = self.open_raw()?;
+        let baseline = raw.baseline()?;
+        let since = since_good(count, baseline);
+        match since {
+            Since::First(count) => self.log(&format!(
+                "first boot after a flash, or the baseline is unknown: the firmware's count {count} is the baseline; the restarts are counted from here"
+            )),
+            Since::PowerLoss(count) => self.log(&format!(
+                "the firmware's count {count} is below the baseline {}: a power loss reset it; the baseline is 0",
+                baseline.unwrap_or(0)
+            )),
+            Since::Counted { .. } => {}
+        }
+        if baseline != Some(since.baseline()) {
+            raw.set_baseline(since.baseline())?;
+        }
+        Ok(Some(since))
+    }
+
     /// The firmware's boot count, when this board has one.
     fn boot_count(&self) -> Option<u32> {
         let bytes = fs::read(self.env.at(BOOT_COUNT)).ok()?;
@@ -289,11 +329,23 @@ impl Boot<'_> {
     /// the boot partition and changes no slot's record; the reason is in the kernel log and the
     /// saved log. Returns whether the request was made (the restart was then issued).
     fn flash_mode(&self, why: &str) -> bool {
-        let Some(count) = self.boot_count().filter(|count| *count >= FLASH_AFTER) else {
-            return false;
+        let since = match self.since_good() {
+            Ok(Some(since)) => since,
+            Ok(None) => return false,
+            Err(error) => {
+                self.log(&format!(
+                    "the restarts since the last good boot can't be read ({error}): no flashing mode is asked"
+                ));
+                return false;
+            }
         };
+        if since.restarts() < FLASH_AFTER {
+            return false;
+        }
         self.log(&format!(
-            "{count} restarts without a good boot, the last refused with: {why}; asking the firmware for its flashing mode (RPIBOOT): this board waits until it is flashed or power-cycled"
+            "{} restarts without a good boot (the firmware's count less the baseline {}), the last refused with: {why}; asking the firmware for its flashing mode (RPIBOOT): this board waits until it is flashed or power-cycled",
+            since.restarts(),
+            since.baseline()
         ));
         match self.ops.request_flash_mode() {
             Ok(()) => {
@@ -309,11 +361,33 @@ impl Boot<'_> {
         }
     }
 
+    /// Whether this is a Lemnos disk: the data partition is found, or the boot disk has exactly one
+    /// partition labelled [`DATA_LABEL`]. One read, with no wait. A disk that can't be read, has no
+    /// such label or has two is not a Lemnos disk, and no firmware request is made for it (M36c).
+    fn lemnos_disk(&self) -> bool {
+        if self.data.is_some() {
+            return true;
+        }
+        let Some(disk) = self.disk.get() else {
+            return false;
+        };
+        let (hits, _) = partition::labelled(DATA_LABEL, &self.env.sys, &self.env.dev, disk);
+        hits.len() == 1
+    }
+
+    /// Every refusal that reaches the rescue goes here. The firmware's flashing mode is asked only
+    /// on a Lemnos disk, and only after [`FLASH_AFTER`] restarts without a good boot (see
+    /// [`Boot::flash_mode`]). Any other refusal restarts into the board's own boot order, after the
+    /// rescue wait, as [`Boot::refuse_foreign`] does.
     fn rescue(&self, why: &str) -> String {
         self.log(&format!("no slot can start: {why}"));
         self.save_log();
-        if self.flash_mode(why) {
-            return format!("no slot can start: {why}");
+        if self.lemnos_disk() {
+            if self.flash_mode(why) {
+                return format!("no slot can start: {why}");
+            }
+        } else {
+            self.log("not a Lemnos disk: no flashing mode is asked; restarting to the board's own boot order");
         }
         self.log(&format!(
             "restarting in {} s",
@@ -322,6 +396,20 @@ impl Boot<'_> {
         self.ops.sleep(self.env.rescue_wait);
         self.restart(None);
         format!("no slot can start: {why}")
+    }
+
+    /// A disk that is not a Lemnos disk: its partitions are there, and none is labelled
+    /// `lemnos-data`. It is never written to and never the subject of a firmware request. The boot
+    /// restarts into the board's own boot order (a plain restart: the firmware's `BOOT_ORDER`
+    /// decides, and Lemnos never writes it), after the same wait a rescue takes.
+    fn refuse_foreign(&self, disk: &str) -> String {
+        let why = format!(
+            "no partition labelled {DATA_LABEL} on {disk}: this is not a Lemnos disk; nothing written; restarting to the board's own boot order"
+        );
+        self.log(&why);
+        self.ops.sleep(self.env.rescue_wait);
+        self.restart(None);
+        why
     }
 
     /// The slot didn't come up: keep the log, record it, and fall back as [`after_failure`]
@@ -490,18 +578,22 @@ impl Boot<'_> {
 
     /// The data partition, by `spec`, else the one labelled `data`, for up to `wait`: the card
     /// or eMMC can take a moment to show up.
-    fn find_data(&self) -> Result<Part, String> {
+    fn find_data(&self) -> Result<Part, DataRefusal> {
         let tries = (self.env.wait.as_millis() / 100).max(1);
         let mut last = String::new();
+        // A disk with partitions on it and none labelled `lemnos-data` is a foreign disk: nothing
+        // is written to it, and no firmware request is made for it (see `refuse_foreign`).
+        let mut foreign = false;
         for _ in 0..tries {
             let Some(disk) = self.disk.get() else {
-                return Err("no boot disk is known".into());
+                return Err(DataRefusal::Other("no boot disk is known".into()));
             };
             let (mut hits, seen) =
                 partition::labelled(DATA_LABEL, &self.env.sys, &self.env.dev, disk);
             match hits.len() {
                 1 => return Ok(hits.remove(0)),
                 0 => {
+                    foreign = !seen.is_empty();
                     last = format!(
                         "no partition on {disk} is labelled {DATA_LABEL}; saw {}",
                         seen.join("; ")
@@ -510,15 +602,19 @@ impl Boot<'_> {
                 n => {
                     // Two of them is a board that can't say which is its data: refused now, not waited on.
                     let names: Vec<&str> = hits.iter().map(|p| p.name.as_str()).collect();
-                    return Err(format!(
+                    return Err(DataRefusal::Other(format!(
                         "{n} partitions on {disk} are labelled {DATA_LABEL} ({}): refusing to guess",
                         names.join(", ")
-                    ));
+                    )));
                 }
             }
             self.ops.sleep(Duration::from_millis(100));
         }
-        Err(last)
+        Err(if foreign {
+            DataRefusal::Foreign(last)
+        } else {
+            DataRefusal::Other(last)
+        })
     }
 
     /// The board overlay's marker in the live device tree: `(board, digest)`, or `None` when either
@@ -1125,8 +1221,18 @@ impl Boot<'_> {
             };
             self.log(&format!("the boot disk is {disk}"));
             let data = match self.find_data() {
-                Ok(part) => part,
-                Err(seen) => {
+                Ok(part) => {
+                    // The baseline is set here, on the first boot of a Lemnos disk, before anything can fail.
+                    if let Err(error) = self.since_good() {
+                        self.log(&format!("the restart baseline can't be kept: {error}"));
+                    }
+                    part
+                }
+                Err(DataRefusal::Foreign(seen)) => {
+                    self.log(&seen);
+                    return self.refuse_foreign(&disk);
+                }
+                Err(DataRefusal::Other(seen)) => {
                     let seen = if self.storage_present() {
                         seen
                     } else {

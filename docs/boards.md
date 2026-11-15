@@ -179,6 +179,15 @@ count does. They apply only to the `tryboot` record.
 | `system-slots` | `device_tree` | `/proc/device-tree` | an absolute path | The device tree directory the count (`chosen/bootloader/count`) and the reset status (`rsts`) are read from |
 | `system-slots` | `vcio` | `/dev/vcio` | an absolute path | The firmware mailbox device the boot count is cleared through |
 
+## Good boot and the data partition (`system-slots`)
+
+These keys are optional. [Slots](slots.md#the-good-boot-deadline) says what they do.
+
+| Driver | Key | Default | Range | Meaning |
+|---|---|---|---|---|
+| `system-slots` | `good_boot_s` | `300` | integer, 30 up to 3600 | The seconds a boot has to be good (lemnosd ready and the booted marker set) before the unit restarts the board. The image's drop-in is written by `lemnos-ctl tree --good-boot-unit FILE` from this value. A value that is not an integer, or outside the range, is refused by name |
+| `system-slots` | `grow_data` | `true` | `true`, `false` | Grow the data partition (partition 2) to the end of the boot disk at each start until it is done. On by default: it acts only on a disk that validates as the Lemnos layout (partition 2 last, type `0x83`, labelled `lemnos-data`), and writes four bytes of the table. `false` opts out. [Slots](slots.md#growing-the-data-partition-at-first-start) lists the steps and what each refusal leaves |
+
 ## The board overlay file
 
 `lemnos-ctl tree BOARD -o FILE` writes device-tree **source**, not a compiled blob. Its first line is a
@@ -531,6 +540,22 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 # `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role
 # in bytes, with no default: the largest stored file of that role plus 10 %, rounded up to a whole MiB
 # (kernel and initramfs) or a whole 4 KiB (the rest). The values here are made up.
+#
+# Two optional keys give the firmware what a board needs beyond the image's own text. Neither is in
+# this example, and a board with neither is written exactly as before:
+# - `config_lines`: verbatim config.txt lines, one per entry, written inside `[all]` of the boot
+#   partition's config.txt and tryboot.txt (after the GPIO lines). They are fixed at flash: the
+#   bundle carries their digest (`boot.config`) and an install whose lines differ from the boot
+#   partition's is refused with both digests named. Changing them needs a new boot partition.
+# - `firmware_overlays`: overlay names, without `.dtbo`. Each is a bay member in every bay set
+#   (`overlays/<name>.dtbo`, the board overlay's size), copied from `lemnos-ctl boot-partition
+#   --firmware DIR` and `lemnos-ctl bundle --firmware DIR`; a missing `<name>.dtbo` is refused by name.
+#   Each overlay is hashed in the bay record, compared on reinstall, and must be loaded by a
+#   `dtoverlay=<name>` line in `config_lines`; a `dtoverlay=` line naming another overlay, or an
+#   overlay no line loads, is refused by both names.
+#
+# [boot] config_lines = ["dtoverlay=test-gpu"]
+# [boot] firmware_overlays = ["test-gpu"]
 [boot]
 bay_kernel_bytes = 11534336      # the kernel's bay
 bay_initramfs_bytes = 1048576    # the initramfs's bay
@@ -540,7 +565,7 @@ bay_overlay_bytes = 4096         # the board overlay's bay
 
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 # `[security]`: the board's security switch (docs/slots.md, "The security switch"). The record is the
-# switch's truth (an absolute path; on a board with slots it is the boot partition's record), `keys` is the
+# switch's truth (an absolute path, or `"boot"` on a slot board: the boot partition's SECURE.REC), `keys` is the
 # board's one trust root (the host gives it to the slots, flash and security devices; they name no keys
 # of their own), and `orion = true` means Orion ships here and answers before a switch
 # goes on. The device below gets these facts as its config; no other device does.

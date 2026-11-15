@@ -247,3 +247,138 @@ fn a_command_line_on_two_lines_is_refused_for_the_extlinux_file() {
     assert!(extlinux_text(b"a\nb").is_err());
     assert!(extlinux_text(b"a b\n").is_ok());
 }
+
+#[test]
+fn the_built_image_pre_creates_the_restart_count_baseline_empty() {
+    // The count's baseline is a two-copy record at the root, as trial.rec and episodes.rec are: both
+    // copies all zero (no valid copy), so it reads as unknown until a baseline is written.
+    let parts = tryboot_parts();
+    let total = 161_792u64 * 512;
+    let image = build(&parts, total, "a", &refs(&payloads())).unwrap();
+    let mut mem = Mem(image.clone());
+    let found =
+        bootfat::locate_path(&mut mem, BASELINE_FILE, crate::boot_raw::RECORD_BYTES).unwrap();
+    let at = found.first_lba as usize * 512;
+    let len = crate::boot_raw::RECORD_BYTES as usize;
+    assert_eq!(BASELINE_FILE, "count.rec");
+    assert!(
+        image[at..at + len].iter().all(|&b| b == 0),
+        "the baseline record is empty"
+    );
+}
+
+#[test]
+fn the_three_pointers_name_the_bay_the_first_slot_is_installed_in() {
+    let parts = tryboot_parts();
+    let total = 161_792u64 * 512;
+    let image = build(&parts, total, "a", &refs(&payloads())).unwrap();
+    let mut mem = Mem(image.clone());
+    let installed = bays::set_of_slot(&mut mem, &parts.layout, "a").unwrap();
+    assert_eq!(installed, Some(FIRST_SET));
+    for name in POINTERS {
+        let found = bootfat::locate_path(
+            &mut Mem(image.clone()),
+            name,
+            firmware::POINTER_FILE_BYTES as u64,
+        )
+        .unwrap();
+        let mut file = vec![0u8; firmware::POINTER_FILE_BYTES];
+        let at = found.first_lba as usize * 512;
+        file.copy_from_slice(&image[at..at + firmware::POINTER_FILE_BYTES]);
+        let mut bytes = [0u8; firmware::POINTER_FILE_BYTES];
+        bytes.copy_from_slice(&file);
+        assert_eq!(
+            firmware::pointer_file_slot(&bytes).as_deref(),
+            Some(bays::set_name(FIRST_SET).as_str()),
+            "{name} names the installed bay"
+        );
+    }
+}
+
+/// A new image on a file, as the device's node would be: the record's first sector and the switch's
+/// view through [`crate::security::BootSwitch`].
+fn switch_image(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("lemnos-switch-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let parts = tryboot_parts();
+    let owned = payloads();
+    let image = build(&parts, min_size(&parts).unwrap(), "a", &refs(&owned)).unwrap();
+    let node = dir.join("boot.img");
+    std::fs::write(&node, image).unwrap();
+    (dir, node)
+}
+
+#[test]
+fn a_new_image_reads_the_switch_off_at_generation_zero_and_round_trips_on_and_off() {
+    use crate::security::{BootSwitch, Store};
+    let (dir, node) = switch_image("round-trip");
+    let switch = BootSwitch::new(&node);
+    let first = switch.read().unwrap().unwrap();
+    assert!(!first.on, "a new image reads off");
+    let on = switch.write(true).unwrap();
+    assert!(switch.read().unwrap().unwrap().on, "set on reads on");
+    assert_eq!(switch.read().unwrap().unwrap().generation, on);
+    let off = switch.write(false).unwrap();
+    assert!(!switch.read().unwrap().unwrap().on, "set off reads off");
+    assert!(
+        off > on && on > first.generation,
+        "each change is a newer generation"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_torn_copy_of_the_switch_record_is_recovered_from_the_other_copy() {
+    use crate::security::{BootSwitch, Store};
+    let (dir, node) = switch_image("torn");
+    let switch = BootSwitch::new(&node);
+    switch.write(true).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&node)
+        .unwrap();
+    let name = crate::twocopy::Kind::SECURITY.file_name().unwrap();
+    let first = crate::bootfat::locate(&mut file, name, crate::boot_raw::RECORD_BYTES)
+        .unwrap()
+        .first_lba;
+    // Each copy is one sector; tear either one, and the switch still reads, from the other.
+    for copy in 0..2u64 {
+        let at = (first + copy) * 512;
+        let saved = {
+            use std::os::unix::fs::FileExt;
+            let mut bytes = [0u8; 512];
+            file.read_exact_at(&mut bytes, at).unwrap();
+            bytes
+        };
+        {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&[0u8; 512], at).unwrap();
+        }
+        assert!(
+            switch.read().is_ok(),
+            "copy {copy} torn: the other copy still reads"
+        );
+        {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&saved, at).unwrap();
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_node_without_the_switch_record_is_an_error_not_off() {
+    use crate::security::{BootSwitch, Store};
+    let dir = std::env::temp_dir().join(format!("lemnos-switch-{}-bare", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let node = dir.join("bare.img");
+    std::fs::write(&node, vec![0u8; 1024 * 1024]).unwrap();
+    assert!(
+        BootSwitch::new(&node).read().is_err(),
+        "a node with no SECURE.REC reads as an error, which the device reads as on"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

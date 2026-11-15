@@ -17,6 +17,8 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
+use crate::boot_raw::RECORD_BYTES;
+use crate::bootfat;
 use crate::twocopy::{self, Kind, Pair, SECTOR, Sector, Sectors};
 use std::path::{Path, PathBuf};
 
@@ -137,7 +139,29 @@ pub fn view_path() -> PathBuf {
 /// Whether the switch is on. The one reader every gate uses: slot installs and first flash.
 #[must_use]
 pub fn enforced() -> bool {
+    if let Some(on) = ENFORCED.with(std::cell::Cell::get) {
+        return on;
+    }
     enforced_at(&view_path())
+}
+
+thread_local! {
+    static ENFORCED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with [`enforced`] answering `on` on this thread, and puts the reader back after, even
+/// when `f` panics. The offline writer (`lemnos-ctl data-partition`) names the switch it writes
+/// with, rather than reading the build host's view. The daemon never calls this.
+pub fn with_enforced<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ENFORCED.with(|enforced| enforced.set(self.0));
+        }
+    }
+    let previous = ENFORCED.with(|enforced| enforced.replace(Some(on)));
+    let _restore = Restore(previous);
+    f()
 }
 
 /// Render the view into `dir` (normally [`RUN_DIR`]): a new file next to it, renamed over
@@ -274,30 +298,95 @@ impl Store for PlainFile {
             limit: SECTOR,
         };
         let current = PAIR.read(&mut device, KIND).map_err(to_io)?;
-        match current {
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "security record is corrupt: neither copy is valid",
-            )),
-            Some(current) => match current.payload.as_slice() {
-                b"on" => Ok(Some(Switch {
-                    on: true,
-                    generation: current.seq,
-                })),
-                b"off" => Ok(Some(Switch {
-                    on: false,
-                    generation: current.seq,
-                })),
-                _ => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "security record holds no switch value",
-                )),
-            },
-        }
+        switch_of(current).map(Some)
     }
 
     fn write(&self, on: bool) -> io::Result<u64> {
         self.write_limited(on, 2 * SECTOR)
+    }
+}
+
+/// The switch a record's current copy holds. Neither copy valid is corrupt, and so is a copy that
+/// holds no switch value; both read as on at the device.
+fn switch_of(current: Option<twocopy::Current>) -> io::Result<Switch> {
+    let Some(current) = current else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "security record is corrupt: neither copy is valid",
+        ));
+    };
+    match current.payload.as_slice() {
+        b"on" => Ok(Switch {
+            on: true,
+            generation: current.seq,
+        }),
+        b"off" => Ok(Switch {
+            on: false,
+            generation: current.seq,
+        }),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "security record holds no switch value",
+        )),
+    }
+}
+
+/// The name the switch's record has on a slot board's boot partition: `SECURE.REC`, which the image
+/// builder pre-creates as off (`twocopy`'s kind 4).
+pub const BOOT_RECORD: &str = "secure.rec";
+
+/// The switch on a slot board: the two-copy record in `SECURE.REC` on the boot partition's node,
+/// found by its FAT name (`bootfat::locate`). An image without the file, or one whose record cannot be
+/// read, is an error: the device reads it as on, so the switch is never off by accident.
+#[derive(Debug, Clone)]
+pub struct BootSwitch {
+    node: PathBuf,
+}
+
+impl BootSwitch {
+    #[must_use]
+    pub fn new(node: impl Into<PathBuf>) -> Self {
+        Self { node: node.into() }
+    }
+
+    /// The record's device and its first sector, opened for reading, or for writing too.
+    fn open(&self, write: bool) -> io::Result<(Device, Pair)> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open(&self.node)?;
+        let name = Kind::SECURITY
+            .file_name()
+            .expect("the switch's record kind has a FAT name");
+        let found = bootfat::locate(&mut file, name, RECORD_BYTES).map_err(|why| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: no readable {BOOT_RECORD} on the boot partition ({why:?}): the switch reads as on until it is written",
+                    self.node.display()
+                ),
+            )
+        })?;
+        Ok((
+            Device {
+                file,
+                limit: SECTOR,
+            },
+            Pair::at(found.first_lba),
+        ))
+    }
+}
+
+impl Store for BootSwitch {
+    fn read(&self) -> io::Result<Option<Switch>> {
+        let (mut device, pair) = self.open(false)?;
+        let current = pair.read(&mut device, KIND).map_err(to_io)?;
+        switch_of(current).map(Some)
+    }
+
+    fn write(&self, on: bool) -> io::Result<u64> {
+        let (mut device, pair) = self.open(true)?;
+        pair.write(&mut device, KIND, payload(on)).map_err(to_io)
     }
 }
 

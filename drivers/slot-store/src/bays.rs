@@ -95,50 +95,142 @@ pub fn stored_files() -> [&'static str; 5] {
     std::array::from_fn(|i| ROLES[i].path)
 }
 
-/// The `boot.files` entries of a manifest that no bay stores, in the manifest's order.
-pub fn unstored(boot_files: &[(String, String)]) -> Vec<&str> {
+/// The root file that names a board's declared firmware overlays and config lines. It is written only
+/// when the board declares one of them; a board with neither has no such file.
+pub const FIRMWARE_LIST: &str = "firmware-overlays.txt";
+
+/// The path under a bay set of a firmware overlay named `name`: `overlays/<name>.dtbo`.
+pub fn firmware_path(name: &str) -> String {
+    format!("overlays/{name}.dtbo")
+}
+
+/// A firmware overlay's name: 1 to 40 letters, digits, `-` or `_`. It is the file's name without
+/// `.dtbo`, and the name a `dtoverlay=` line gives.
+pub fn valid_firmware_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The digest of a board's firmware config lines: SHA-256 of each line followed by a newline. The
+/// bundle carries it, and the boot partition's [`FIRMWARE_LIST`] holds it. `None` for no lines.
+pub fn config_digest(lines: &[String]) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    Some(crate::bundle::hex(&sha(text.as_bytes())))
+}
+
+/// The [`FIRMWARE_LIST`] text for a board: a `config <sha256>` line when it declares config lines, then
+/// one `overlay <name>` line per firmware overlay in the board's order. `None` when it declares neither.
+pub fn firmware_list_text(names: &[String], config: Option<&str>) -> Option<String> {
+    if names.is_empty() && config.is_none() {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(digest) = config {
+        out.push_str(&format!("config {digest}\n"));
+    }
+    for name in names {
+        out.push_str(&format!("overlay {name}\n"));
+    }
+    Some(out)
+}
+
+/// Reads [`FIRMWARE_LIST`]'s text: the overlay names in order and the config digest. A line that is
+/// neither form, a repeated `config`, a bad name or a repeated overlay is refused by name.
+pub fn parse_firmware_list(text: &str) -> Result<(Vec<String>, Option<String>), String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut config = None;
+    for line in text.lines() {
+        if let Some(digest) = line.strip_prefix("config ") {
+            if config.is_some() || !crate::manifest::is_hex(digest, 64) {
+                return Err(format!(
+                    "{FIRMWARE_LIST}: the config line {line:?} is not one digest"
+                ));
+            }
+            config = Some(digest.to_string());
+        } else if let Some(name) = line.strip_prefix("overlay ") {
+            if !valid_firmware_name(name) || names.iter().any(|n| n == name) {
+                return Err(format!(
+                    "{FIRMWARE_LIST}: the overlay line {line:?} is not a new firmware overlay name"
+                ));
+            }
+            names.push(name.to_string());
+        } else {
+            return Err(format!(
+                "{FIRMWARE_LIST}: the line {line:?} is neither a config nor an overlay line"
+            ));
+        }
+    }
+    Ok((names, config))
+}
+
+/// The `boot.files` entries that the declared set `declared` (member paths) does not name, in the
+/// manifest's order.
+pub fn unstored<'a>(boot_files: &'a [(String, String)], declared: &[String]) -> Vec<&'a str> {
     boot_files
         .iter()
         .map(|(name, _)| name.as_str())
-        .filter(|name| !ROLES.iter().any(|r| r.path == *name))
+        .filter(|name| !declared.iter().any(|d| d == name))
         .collect()
 }
 
-/// The refusal for a manifest whose `boot.files` lists a file no bay stores, or leaves a role file
-/// out; `Ok` when the list is exactly the role files. The install makes it before any write: a slot that lists such a file would install
-/// and then fail its own boot check, which finds the file missing.
-pub fn refuse_unstored(slot: &str, boot_files: &[(String, String)]) -> Result<(), String> {
-    let extra = unstored(boot_files);
+/// The refusal for a manifest whose `boot.files` is not exactly the declared set `declared` (the
+/// member paths: the five role files and the board's firmware overlays). A file the set does not name
+/// and a named file the list lacks are each refused by name; `Ok` when the two are the same set. The
+/// install makes it before any write: a slot that lists another file would install and then fail its
+/// own boot check, which finds the file missing.
+pub fn refuse_unstored(
+    slot: &str,
+    boot_files: &[(String, String)],
+    declared: &[String],
+) -> Result<(), String> {
+    let stores = declared.join(", ");
+    let extra = unstored(boot_files, declared);
     if extra.is_empty() {
-        // The reverse: a role file the manifest does not list is never hashed, so it is refused too.
-        if let Some(unlisted) = stored_files()
-            .into_iter()
-            .find(|path| !boot_files.iter().any(|(name, _)| name == path))
+        // The reverse: a declared file the manifest does not list is never hashed, so it is refused too.
+        if let Some(unlisted) = declared
+            .iter()
+            .find(|path| !boot_files.iter().any(|(name, _)| name == *path))
         {
             return Err(format!(
-                "{slot}: boot.files does not list {unlisted:?}, which this board's boot partition stores (it stores: {}): nothing was written, the default keeps booting",
-                stored_files().join(", ")
+                "{slot}: boot.files does not list {unlisted:?}, which this board's boot partition stores (it stores: {stores}): nothing was written, the default keeps booting"
             ));
         }
         return Ok(());
     }
     let listed: Vec<String> = extra.iter().map(|name| format!("{name:?}")).collect();
     Err(format!(
-        "{slot}: boot.files lists {}, which this board's boot partition does not store (it stores: {}): nothing was written, the default keeps booting",
+        "{slot}: boot.files lists {}, which this board's boot partition does not store (it stores: {stores}): nothing was written, the default keeps booting",
         listed.join(", "),
-        stored_files().join(", ")
     ))
 }
 
-/// The fixed size of each role's file, in roles order. A multiple of the sector size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The bay layout of a board: the fixed size of each role's file (in roles order, a multiple of the
+/// sector size), then the firmware overlays the board declares, each with its own bay. A bay set's
+/// members are the five role files and then the firmware overlays, in this order.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// Bytes per role.
     pub bytes: [u64; 5],
+    /// Each firmware overlay: its path under the set (`overlays/<name>.dtbo`) and its bay's bytes. The
+    /// bay is the board overlay's size (`bay_overlay_bytes`).
+    pub firmware: Vec<(String, u64)>,
+    /// The digest of the firmware config lines the boot partition's text carries (see
+    /// [`config_digest`]), `None` for a board that declares none.
+    pub config: Option<String>,
 }
 
 impl Layout {
-    /// A layout, refused by name when a size is zero or not a whole number of sectors.
+    /// A layout of the five roles, refused by name when a size is zero or not a whole number of sectors.
     pub fn new(bytes: [u64; 5]) -> Result<Self, String> {
         for (r, &b) in ROLES.iter().zip(bytes.iter()) {
             if b == 0 || b % SECTOR as u64 != 0 {
@@ -148,7 +240,53 @@ impl Layout {
                 ));
             }
         }
-        Ok(Self { bytes })
+        Ok(Self {
+            bytes,
+            firmware: Vec::new(),
+            config: None,
+        })
+    }
+
+    /// The layout with the board's firmware overlays `names` (each bay the board overlay's size) and
+    /// its config digest.
+    pub fn with_firmware(mut self, names: &[String], config: Option<String>) -> Self {
+        let size = self.bytes[4];
+        self.firmware = names.iter().map(|n| (firmware_path(n), size)).collect();
+        self.config = config;
+        self
+    }
+
+    /// The number of members of a bay set: the five roles and the firmware overlays.
+    pub fn count(&self) -> usize {
+        5 + self.firmware.len()
+    }
+
+    /// The members' paths under a set, in member order.
+    pub fn paths(&self) -> Vec<String> {
+        (0..self.count()).map(|i| self.member_path(i)).collect()
+    }
+
+    /// Member `i`'s path under a set.
+    pub fn member_path(&self, i: usize) -> String {
+        if i < 5 {
+            ROLES[i].path.to_string()
+        } else {
+            self.firmware[i - 5].0.clone()
+        }
+    }
+
+    /// Member `i`'s bay size in bytes.
+    pub fn member_bytes(&self, i: usize) -> u64 {
+        if i < 5 {
+            self.bytes[i]
+        } else {
+            self.firmware[i - 5].1
+        }
+    }
+
+    /// The byte that pads member `i` to its bay (firmware overlays are padded with zeros).
+    pub fn member_pad(&self, i: usize) -> u8 {
+        if i < 5 { ROLES[i].pad } else { 0 }
     }
 }
 
@@ -206,26 +344,34 @@ fn sha(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// A set's record: the slot installed in it, and each payload file's length and hash.
+/// A set's record: the slot installed in it, and each member's length and hash. The five roles are
+/// [`Info::files`]; each firmware overlay follows in the layout's order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
     /// The slot id.
     pub slot: String,
     /// Each role's stored length and hash, in [`ROLES`] order.
     pub files: [(u64, [u8; 32]); 5],
+    /// Each firmware overlay the set holds: its path under the set, stored length and hash.
+    pub firmware: Vec<(String, u64, [u8; 32])>,
 }
 
 impl Info {
-    /// Each payload's path under its set (the name the manifest lists) and its stored length.
+    /// Each member's path under its set (the name the manifest lists) and its stored length: the roles
+    /// and then the firmware overlays.
     pub fn lengths(&self) -> Vec<(String, u64)> {
-        ROLES
+        let mut out: Vec<(String, u64)> = ROLES
             .iter()
             .zip(self.files.iter())
             .map(|(r, (len, _))| (r.path.to_string(), *len))
-            .collect()
+            .collect();
+        out.extend(self.firmware.iter().map(|(p, len, _)| (p.clone(), *len)));
+        out
     }
 
-    /// The record's payload bytes.
+    /// The record's bytes. A record with no firmware overlay is the five-role record, byte for byte as
+    /// it was before firmware overlays existed. With overlays, a count byte and then each overlay's
+    /// path (one length byte, then the path), stored length and hash follow the five.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![self.slot.len() as u8];
         out.extend_from_slice(self.slot.as_bytes());
@@ -233,10 +379,20 @@ impl Info {
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(hash);
         }
+        if !self.firmware.is_empty() {
+            out.push(self.firmware.len() as u8);
+            for (path, len, hash) in &self.firmware {
+                out.push(path.len() as u8);
+                out.extend_from_slice(path.as_bytes());
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(hash);
+            }
+        }
         out
     }
 
-    /// The record from its payload bytes; `None` for any other shape.
+    /// The record from its bytes; `None` for any other shape. A five-role record (the form before
+    /// firmware overlays) reads with no firmware overlay.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&n, rest) = bytes.split_first()?;
         let n = n as usize;
@@ -252,22 +408,63 @@ impl Info {
             *f = (len, hash);
             at += 40;
         }
-        (at == bytes.len()).then_some(Self { slot, files })
+        let mut firmware = Vec::new();
+        if at < bytes.len() {
+            let count = *bytes.get(at)? as usize;
+            at += 1;
+            if count == 0 {
+                return None;
+            }
+            for _ in 0..count {
+                let pn = *bytes.get(at)? as usize;
+                at += 1;
+                let path = std::str::from_utf8(bytes.get(at..at + pn)?)
+                    .ok()?
+                    .to_string();
+                at += pn;
+                if !path.starts_with("overlays/") {
+                    return None;
+                }
+                let len = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
+                let hash: [u8; 32] = bytes.get(at + 8..at + 40)?.try_into().ok()?;
+                at += 40;
+                firmware.push((path, len, hash));
+            }
+        }
+        (at == bytes.len()).then_some(Self {
+            slot,
+            files,
+            firmware,
+        })
     }
 }
 
-/// Compares a set's stored hashes with the payloads' SHA-256 values, in [`ROLES`] order. The payloads
-/// are the bundle's boot files, which the bundle check has already matched to `slot.json`, so each
-/// payload hash is the manifest's entry. Writes nothing. The first file that differs is named, in the
-/// words `bay<N> holds boot file <path> with a different hash than slot.json says`. What a difference
-/// means is the caller's: the install refuses the default's bay, and a data-partition writer can reuse
-/// the same check.
-pub fn compare_hashes(set: u8, info: &Info, payloads: &[&[u8]; 5]) -> Result<(), String> {
+/// Compares a set's stored hashes with the payloads' SHA-256 values, in member order (the five roles,
+/// then the firmware overlays). The payloads are the bundle's boot files, which the bundle check has
+/// already matched to `slot.json`, so each payload hash is the manifest's entry. Writes nothing. The
+/// first file that differs is named, in the words `bay<N> holds boot file <path> with a different hash
+/// than slot.json says`. What a difference means is the caller's: the install refuses the default's
+/// bay, and a data-partition writer can reuse the same check.
+pub fn compare_hashes(set: u8, info: &Info, payloads: &[&[u8]]) -> Result<(), String> {
+    if payloads.len() != 5 + info.firmware.len() {
+        return Err(format!(
+            "bay{set} holds {} boot files and the bundle has {}: build the image from this bundle",
+            5 + info.firmware.len(),
+            payloads.len()
+        ));
+    }
     for (i, r) in ROLES.iter().enumerate() {
         if info.files[i].1 != sha(payloads[i]) {
             return Err(format!(
                 "bay{set} holds boot file {} with a different hash than slot.json says",
                 r.path
+            ));
+        }
+    }
+    for (j, (path, _, hash)) in info.firmware.iter().enumerate() {
+        if *hash != sha(payloads[5 + j]) {
+            return Err(format!(
+                "bay{set} holds boot file {path} with a different hash than slot.json says"
             ));
         }
     }
@@ -301,8 +498,8 @@ pub fn write_pointer<D: Sectors>(dev: &mut D, lba: u64, set: u8) -> Result<(), E
 
 /// The partition's placed files the install and the boot check need.
 pub struct Placed {
-    /// Each role's first sector, per set.
-    pub files: Vec<[u64; 5]>,
+    /// Each member's first sector, per set (the roles, then the firmware overlays).
+    pub files: Vec<Vec<u64>>,
     /// Each set's record, first sector.
     pub info: Vec<u64>,
     /// The default pointer's first sector.
@@ -361,7 +558,7 @@ impl Protected {
 /// fragmented or the wrong size is refused by name, and nothing is written.
 pub fn place<D: ReadAt>(dev: &mut D, layout: &Layout) -> Result<Placed, String> {
     let sets = place_sets(dev, layout)?;
-    let files = sets.iter().map(|(f, _)| *f).collect();
+    let files = sets.iter().map(|(f, _)| f.clone()).collect();
     let info = sets.iter().map(|(_, i)| *i).collect();
     let mut at = |path: String, want: u64| -> Result<u64, String> {
         bootfat::locate_path(dev, &path, want)
@@ -422,16 +619,19 @@ pub fn pending_trial<D: Sectors>(dev: &mut D, lba: u64) -> Result<Option<Trial>,
 }
 
 /// The sets' files and records, placed on the volume without the pointers: the U-Boot form keeps
-/// its pointer in the environment, so it places only these. Each set's roles, then its record.
-pub fn place_sets<D: ReadAt>(dev: &mut D, layout: &Layout) -> Result<Vec<([u64; 5], u64)>, String> {
+/// its pointer in the environment, so it places only these. Each set's members (the roles, then the
+/// firmware overlays), then its record.
+pub fn place_sets<D: ReadAt>(dev: &mut D, layout: &Layout) -> Result<Vec<(Vec<u64>, u64)>, String> {
     let mut out = Vec::new();
     for set in 0..SETS {
-        let mut lbas = [0u64; 5];
-        for (i, (r, want)) in ROLES.iter().zip(layout.bytes).enumerate() {
-            let path = format!("{}/{}", set_dir(set), r.path);
-            lbas[i] = bootfat::locate_path(dev, &path, want)
-                .map_err(|e: Refusal| format!("{path}: {e}"))?
-                .first_lba;
+        let mut lbas = Vec::with_capacity(layout.count());
+        for i in 0..layout.count() {
+            let path = format!("{}/{}", set_dir(set), layout.member_path(i));
+            lbas.push(
+                bootfat::locate_path(dev, &path, layout.member_bytes(i))
+                    .map_err(|e: Refusal| format!("{path}: {e}"))?
+                    .first_lba,
+            );
         }
         let path = format!("{}/{INFO_NAME}", set_dir(set));
         let info = bootfat::locate_path(dev, &path, INFO_BYTES)
@@ -442,13 +642,13 @@ pub fn place_sets<D: ReadAt>(dev: &mut D, layout: &Layout) -> Result<Vec<([u64; 
     Ok(out)
 }
 
-/// The argument checks of an install, before any read or write: the set, the slot id, and each
-/// payload against its bay. A refusal names the reason and writes nothing.
+/// The argument checks of an install, before any read or write: the set, the slot id, the number of
+/// payloads, and each payload against its bay. A refusal names the reason and writes nothing.
 pub fn check_install(
     layout: &Layout,
     set: u8,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<(), Error> {
     if set >= SETS {
         return Err(Error::Refused(format!(
@@ -458,15 +658,30 @@ pub fn check_install(
     if !crate::store::valid_id(slot) {
         return Err(Error::Refused(format!("{slot:?} is not a slot id")));
     }
-    for (i, r) in ROLES.iter().enumerate() {
-        if payloads[i].len() as u64 > layout.bytes[i] {
+    if payloads.len() != layout.count() {
+        return Err(Error::Refused(format!(
+            "{slot}: {} boot files are given and this board's boot partition stores {}: nothing was written",
+            payloads.len(),
+            layout.count()
+        )));
+    }
+    for i in 0..layout.count() {
+        if payloads[i].len() as u64 > layout.member_bytes(i) {
+            let what = if i < 5 {
+                ROLES[i].role.to_string()
+            } else {
+                layout.member_path(i)
+            };
+            let bay = if i < 5 {
+                ROLES[i].role.to_string()
+            } else {
+                "board's firmware overlay".to_string()
+            };
             return Err(Error::Refused(format!(
-                "{slot}: the {} payload is {} bytes but its bay holds {}: nothing was written, \
-                 the default keeps booting; rebuild the image with a larger {} bay or a smaller payload",
-                r.role,
+                "{slot}: the {what} payload is {} bytes but its bay holds {}: nothing was written, \
+                 the default keeps booting; rebuild the image with a larger {bay} bay or a smaller payload",
                 payloads[i].len(),
-                layout.bytes[i],
-                r.role
+                layout.member_bytes(i),
             )));
         }
     }
@@ -478,10 +693,10 @@ pub fn check_install(
 pub fn commit_set<D: Sectors>(
     dev: &mut D,
     layout: &Layout,
-    files: &[u64; 5],
+    files: &[u64],
     info: u64,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<(), Error> {
     commit_set_with(dev, layout, files, info, slot, payloads, None)
 }
@@ -492,33 +707,56 @@ pub fn commit_set<D: Sectors>(
 pub fn commit_set_with<D: Sectors>(
     dev: &mut D,
     layout: &Layout,
-    files: &[u64; 5],
+    files: &[u64],
     info: u64,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
     extra: Option<(u64, &[u8], u64)>,
 ) -> Result<(), Error> {
-    for (i, r) in ROLES.iter().enumerate() {
-        write_file(dev, files[i], payloads[i], layout.bytes[i], r.pad)?;
+    if payloads.len() != layout.count() || files.len() != layout.count() {
+        return Err(Error::Refused(format!(
+            "{slot}: {} payloads for a set of {} members: nothing was written",
+            payloads.len(),
+            layout.count()
+        )));
+    }
+    for i in 0..layout.count() {
+        write_file(
+            dev,
+            files[i],
+            payloads[i],
+            layout.member_bytes(i),
+            layout.member_pad(i),
+        )?;
     }
     if let Some((lba, text, bytes)) = extra {
         write_file(dev, lba, text, bytes, b' ')?;
     }
-    let mut stored = [(0u64, [0u8; 32]); 5];
+    let mut stored: Vec<(u64, [u8; 32])> = Vec::with_capacity(layout.count());
     for (i, p) in payloads.iter().enumerate() {
         let back = read_file(dev, files[i], p.len() as u64)?;
         let want = sha(p);
         if back.len() != p.len() || sha(&back) != want {
             return Err(Error::Device(format!(
                 "{slot}: the {} read-back does not match what was written: nothing was committed",
-                ROLES[i].role
+                if i < 5 {
+                    ROLES[i].role.to_string()
+                } else {
+                    layout.member_path(i)
+                }
             )));
         }
-        stored[i] = (p.len() as u64, want);
+        stored.push((p.len() as u64, want));
     }
     let record = Info {
         slot: slot.to_string(),
-        files: stored,
+        files: std::array::from_fn(|i| stored[i]),
+        firmware: layout
+            .firmware
+            .iter()
+            .enumerate()
+            .map(|(j, (path, _))| (path.clone(), stored[5 + j].0, stored[5 + j].1))
+            .collect(),
     };
     Pair::at(info)
         .write(dev, Kind::BAY_INFO, &record.encode())
@@ -539,7 +777,7 @@ pub fn install<D: Sectors + ReadAt>(
     layout: &Layout,
     set: u8,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<Done, Error> {
     let protected = Protected::from_volume(dev, layout)?;
     let done = stage_with(dev, layout, set, slot, payloads, None, &protected)?;
@@ -558,7 +796,7 @@ pub fn stage<D: Sectors + ReadAt>(
     layout: &Layout,
     set: u8,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<Done, Error> {
     let protected = Protected::from_volume(dev, layout)?;
     stage_with(dev, layout, set, slot, payloads, None, &protected)
@@ -573,7 +811,7 @@ pub fn stage_with<D: Sectors + ReadAt>(
     layout: &Layout,
     set: u8,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
     text: Option<&[u8]>,
     protected: &Protected,
 ) -> Result<Done, Error> {
@@ -586,10 +824,17 @@ pub fn stage_with<D: Sectors + ReadAt>(
         )));
     }
     let sets = place_sets(dev, layout).map_err(Error::Refused)?;
-    let (files, info) = sets[set as usize];
+    let (files, info) = sets[set as usize].clone();
     if protected.default == Some(set) {
         match read_info(dev, info)? {
             Some(i) if i.slot == slot => {
+                let held: Vec<&str> = i.firmware.iter().map(|(p, _, _)| p.as_str()).collect();
+                let declared: Vec<&str> = layout.firmware.iter().map(|(p, _)| p.as_str()).collect();
+                if held != declared {
+                    return Err(Error::Refused(format!(
+                        "bay{set} holds {slot} with other firmware overlays than this board declares: nothing was written, the default keeps booting"
+                    )));
+                }
                 compare_hashes(set, &i, payloads).map_err(|why| {
                     Error::Refused(format!(
                         "{why}: nothing was written, the default keeps booting"
@@ -729,7 +974,38 @@ pub fn discover<D: ReadAt>(dev: &mut D) -> Result<Layout, String> {
         let path = format!("{}/{}", set_dir(0), r.path);
         bytes[i] = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
     }
-    for set in 1..SETS {
+    // The firmware overlays the board declares: the root list, when there is one. Each has a bay in
+    // every set, the same size in each.
+    let (names, config) = match bootfat::read_file(dev, FIRMWARE_LIST, 4096) {
+        Ok(text) => {
+            let text =
+                String::from_utf8(text).map_err(|_| format!("{FIRMWARE_LIST} is not text"))?;
+            parse_firmware_list(&text)?
+        }
+        Err(bootfat::Refusal::Missing) => (Vec::new(), None),
+        Err(e) => return Err(format!("{FIRMWARE_LIST}: {e}")),
+    };
+    let mut layout = Layout::new(bytes)?;
+    for name in &names {
+        let path = format!("{}/{}", set_dir(0), firmware_path(name));
+        let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
+        layout.firmware.push((firmware_path(name), size));
+    }
+    for set in 0..SETS {
+        for i in 5..layout.count() {
+            let path = format!("{}/{}", set_dir(set), layout.member_path(i));
+            let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
+            if size != layout.member_bytes(i) {
+                return Err(format!(
+                    "{path}: {size} bytes, but bay0's {} is {} bytes: the sets differ",
+                    layout.member_path(i),
+                    layout.member_bytes(i)
+                ));
+            }
+        }
+        if set == 0 {
+            continue;
+        }
         for (i, r) in ROLES.iter().enumerate() {
             let path = format!("{}/{}", set_dir(set), r.path);
             let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
@@ -741,7 +1017,8 @@ pub fn discover<D: ReadAt>(dev: &mut D) -> Result<Layout, String> {
             }
         }
     }
-    Layout::new(bytes)
+    layout.config = config;
+    Ok(layout)
 }
 
 /// The set's record, `None` when neither copy is one.
@@ -767,13 +1044,23 @@ pub fn boot_view<D: Sectors + ReadAt>(
     let info = read_info(dev, placed.info[set as usize])
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("bay{set} holds no committed record"))?;
-    for (i, (len, hash)) in info.files.iter().enumerate() {
+    let members: Vec<(String, u64, [u8; 32])> = ROLES
+        .iter()
+        .zip(info.files.iter())
+        .map(|(r, (len, hash))| (r.role.to_string(), *len, *hash))
+        .chain(
+            info.firmware
+                .iter()
+                .map(|(path, len, hash)| (path.clone(), *len, *hash)),
+        )
+        .collect();
+    for (i, (what, len, hash)) in members.iter().enumerate() {
         let bytes =
             read_file(dev, placed.files[set as usize][i], *len).map_err(|e| e.to_string())?;
         if sha(&bytes) != *hash {
             return Err(format!(
-                "bay{set} ({}): the {} file does not match its record",
-                info.slot, ROLES[i].role
+                "bay{set} ({}): the {what} file does not match its record",
+                info.slot
             ));
         }
     }

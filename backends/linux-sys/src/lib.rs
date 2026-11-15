@@ -9,11 +9,13 @@
 #![cfg(target_os = "linux")]
 
 pub mod aio;
+pub mod blockdev;
 pub mod confined;
 pub mod descriptor;
 pub mod dma_buf;
 pub mod dma_heap;
 pub mod eventfd;
+pub mod ext4;
 pub mod functionfs;
 pub mod gpio;
 pub mod i2c;

@@ -45,6 +45,11 @@ impl ClearCount for Firmware {
 }
 
 impl Firmware {
+    /// The count as the full 32-bit word (the restart baseline keeps it whole, above 255 too).
+    pub fn count_word(&self) -> io::Result<u32> {
+        self.word("count")
+    }
+
     /// The count this boot started with (`0` to `255`).
     pub fn count(&self) -> io::Result<u8> {
         u8::try_from(self.word("count")?).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
@@ -151,11 +156,157 @@ impl<M: ClearCount> Actions for Fallback<'_, M> {
     }
 }
 
+/// Keeps the restart baseline for a good boot: the firmware's count as it stands, before the clear
+/// (M36b). Returns the count kept. The clear that follows may fail; the baseline stays, so the
+/// restarts since this good boot are counted from it.
+pub(crate) fn keep_baseline(
+    record: &mut dyn BootRecord,
+    firmware: &Firmware,
+) -> Result<u32, String> {
+    let count = firmware.count_word().map_err(|e| e.to_string())?;
+    record.set_baseline(count).map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
 /// The start of the reason a boot count could not be cleared (the firmware mailbox is not
 /// reachable). The restart is not refused: the boot is counted, and the state and the indicator say so.
 pub(crate) const COUNT_UNCLEARED: &str = "the boot count couldn't be cleared";
-/// The start of the state's reason while the boot is counted and not cleared.
-pub(crate) const COUNTED_NOT_CLEARED: &str = "the boot is counted, not cleared";
+/// The start of the state's and `info`'s words while the count is not cleared (M36c).
+pub(crate) const UNCLEARED: &str = "the boot count is not cleared";
+/// The first wait before a clear the firmware refused is tried again. Each later wait doubles.
+pub(crate) const RETRY_FIRST_NS: u64 = 1_000_000_000;
+/// The longest wait between two tries of a refused clear: the failure rule's cap (8 s).
+pub(crate) const RETRY_CAP_NS: u64 = 8_000_000_000;
+/// What `retrying` and `health` say the failure is, in words. The exact error is in `info`.
+pub(crate) const RETRY_REASON: &str = "the firmware mailbox could not clear the boot count";
+
+const NS_PER_S: u64 = 1_000_000_000;
+
+/// A boot count the firmware refused to clear, and the retries still owed (M36c). The clear is
+/// retried from the driver's tick until it succeeds: the wait starts at [`RETRY_FIRST_NS`],
+/// doubles after each refusal and stops at [`RETRY_CAP_NS`]. Nothing gives up and nothing turns off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Uncleared {
+    /// Clear attempts that were refused in a row, the first (the good boot's) included.
+    pub failed: u32,
+    /// The wait before the next attempt. The text names it.
+    pub wait_ns: u64,
+    /// When the next attempt is due, on the host's clock. `None` until a tick times the first wait.
+    pub due_ns: Option<u64>,
+    /// The mailbox's error, as the last attempt gave it.
+    pub why: String,
+}
+
+impl Uncleared {
+    /// The first refusal, with its first wait still to be timed by a tick.
+    pub(crate) fn refused(why: &str) -> Self {
+        Self {
+            failed: 1,
+            wait_ns: RETRY_FIRST_NS,
+            due_ns: None,
+            why: why.to_string(),
+        }
+    }
+
+    /// The state's and `info`'s words: `the boot count is not cleared: <why>; retrying every Ns`.
+    pub(crate) fn text(&self) -> String {
+        format!(
+            "{UNCLEARED}: the firmware mailbox could not clear it: {}; retrying every {}s",
+            self.why,
+            self.wait_ns / NS_PER_S
+        )
+    }
+}
+
+/// What a tick did about a refused clear.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Advance {
+    /// Nothing is owed.
+    Nothing,
+    /// Not due yet: look again at this time.
+    Later(u64),
+    /// Tried and refused again: look again at this time.
+    Failed(u64),
+    /// Cleared, after this many tries (the first included).
+    Cleared(u32),
+}
+
+/// Tries the clear when its wait is over. One attempt at most per call; the caller's tick asks again.
+pub(crate) fn advance(
+    pending: &mut Option<Uncleared>,
+    now_ns: u64,
+    mailbox: &dyn ClearCount,
+) -> Advance {
+    let Some(p) = pending.as_mut() else {
+        return Advance::Nothing;
+    };
+    let due = *p.due_ns.get_or_insert(now_ns.saturating_add(p.wait_ns));
+    if now_ns < due {
+        return Advance::Later(due);
+    }
+    match mailbox.clear_count() {
+        Ok(()) => {
+            let tries = p.failed + 1;
+            *pending = None;
+            Advance::Cleared(tries)
+        }
+        Err(e) => {
+            p.failed += 1;
+            p.wait_ns = p.wait_ns.saturating_mul(2).min(RETRY_CAP_NS);
+            p.why = e.to_string();
+            let at = now_ns.saturating_add(p.wait_ns);
+            p.due_ns = Some(at);
+            Advance::Failed(at)
+        }
+    }
+}
+
+/// Advances a refused clear at `now_ns` and writes the state's words: the failure with its next
+/// wait, or the cleared line. Returns when to look again, `None` when nothing is owed.
+pub(crate) fn tick_pending(
+    layout: &Layout,
+    pending: &mut Option<Uncleared>,
+    now_ns: u64,
+    mailbox: &dyn ClearCount,
+) -> Option<u64> {
+    let (at, text) = match advance(pending, now_ns, mailbox) {
+        Advance::Nothing => return None,
+        Advance::Later(at) => return Some(at),
+        Advance::Failed(at) => (
+            Some(at),
+            pending.as_ref().map(Uncleared::text).unwrap_or_default(),
+        ),
+        Advance::Cleared(tries) => (None, cleared_text(tries)),
+    };
+    let mut state = State::load(layout);
+    state.error = text;
+    let _ = state.save(layout);
+    at
+}
+
+/// The line written once when a refused clear finally succeeds.
+pub(crate) fn cleared_text(tries: u32) -> String {
+    let word = if tries == 1 { "try" } else { "tries" };
+    format!("the boot count is cleared after {tries} {word}")
+}
+
+/// `health` for a count that is not cleared: the wait is named in words (1, 2, 4 or 8 seconds).
+pub(crate) fn health_text(wait_ns: u64) -> &'static str {
+    match wait_ns / NS_PER_S {
+        1 => {
+            "the boot count is not cleared: the firmware mailbox could not clear it; retrying every 1s"
+        }
+        2 => {
+            "the boot count is not cleared: the firmware mailbox could not clear it; retrying every 2s"
+        }
+        4 => {
+            "the boot count is not cleared: the firmware mailbox could not clear it; retrying every 4s"
+        }
+        _ => {
+            "the boot count is not cleared: the firmware mailbox could not clear it; retrying every 8s"
+        }
+    }
+}
 
 impl SystemSlots {
     /// The count-based fallback at start (see [`arrival`]): when this boot is the previous slot
@@ -211,6 +362,11 @@ impl SystemSlots {
             boot: &self.boot,
         };
         let outcome = arrival::on_arrival(&mut actions, &seen);
+        if let Err(why) = &outcome
+            && why.starts_with(COUNT_UNCLEARED)
+        {
+            return self.count_refused(why);
+        }
         let text = match outcome {
             Ok(arrival::Outcome::DemotedAtOnce) => format!(
                 "{running} booted by the count; {} doesn't match its manifest, so it is demoted and {running} is the default",
@@ -239,7 +395,8 @@ impl SystemSlots {
         self.note(text);
     }
 
-    /// Boot good on `slot`: the manifest must match, then the slot's episodes and the boot count go
+    /// Boot good on `slot`: the manifest must match, then the restart baseline is kept (before the
+    /// clear, so it stays when the clear fails), then the slot's episodes and the boot count go
     /// (see [`arrival::on_boot_good`]). A boot whose files don't match keeps its count, and says so.
     pub(crate) fn boot_good(&mut self, slot: &str) {
         let Some(firmware) = self.firmware.clone() else {
@@ -252,6 +409,11 @@ impl SystemSlots {
                 "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
             ));
         }
+        if let Err(why) = keep_baseline(self.record.as_mut(), &firmware) {
+            self.note(format!(
+                "the restart baseline couldn't be kept ({why}); the good boot's restarts are not reset in the record"
+            ));
+        }
         let mut actions = Fallback {
             layout: &self.layout,
             record: self.record.as_mut(),
@@ -259,21 +421,48 @@ impl SystemSlots {
             boot: &self.boot,
         };
         match arrival::on_boot_good(&mut actions, slot) {
-            Ok(()) => {
-                // A count cleared again ends the loud state; the indicator returns to idle.
-                if self.state().error.starts_with(COUNTED_NOT_CLEARED) {
-                    self.note(String::new());
-                    self.show("idle", NO_PROGRESS);
-                }
-            }
-            Err(why) if why.starts_with(COUNT_UNCLEARED) => {
-                // Loud, and not refused: the reason names the mailbox, and the indicator shows failed.
-                self.note(format!(
-                    "{COUNTED_NOT_CLEARED}: {why}; the restart is not refused"
-                ));
-                self.show("failed", NO_PROGRESS);
-            }
+            Ok(()) => self.count_cleared(),
+            Err(why) if why.starts_with(COUNT_UNCLEARED) => self.count_refused(&why),
             Err(why) => self.note(why),
         }
+    }
+
+    /// The clear went through. A refused clear that was owed ends here, with its tries named once;
+    /// a count an earlier boot left unnamed is named as cleared too. The indicator returns to idle.
+    fn count_cleared(&mut self) {
+        let tries = match self.uncleared.take() {
+            Some(pending) => pending.failed + 1,
+            None if self.state().error.starts_with(UNCLEARED) => 1,
+            None => return,
+        };
+        self.note(cleared_text(tries));
+        self.show("idle", NO_PROGRESS);
+    }
+
+    /// The clear was refused: the count is not cleared and a retry is owed. The restart is not
+    /// refused. The state's words (and `info`, `health`) say so, and the indicator shows failed.
+    fn count_refused(&mut self, why: &str) {
+        let err = why
+            .strip_prefix(COUNT_UNCLEARED)
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(why);
+        let pending = self
+            .uncleared
+            .get_or_insert_with(|| Uncleared::refused(err));
+        pending.why = err.to_string();
+        let text = pending.text();
+        self.note(text);
+        self.show("failed", NO_PROGRESS);
+    }
+
+    /// Tries a refused clear when it is due (see [`advance`]). Returns when to look again.
+    pub(crate) fn count_tick(&mut self, now_ns: u64) -> Option<u64> {
+        self.uncleared.as_ref()?;
+        let firmware = self.firmware.clone()?;
+        let at = tick_pending(&self.layout, &mut self.uncleared, now_ns, &firmware);
+        if self.uncleared.is_none() {
+            self.show("idle", NO_PROGRESS);
+        }
+        at
     }
 }

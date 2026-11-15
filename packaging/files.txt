@@ -32,6 +32,7 @@ packaging/shipped.txt                            -                              
 packaging/files.txt                              -                                              -     never
 packaging/systemd/lemnosd.service                /usr/lib/systemd/system/lemnosd.service        0644  systemd
 packaging/systemd/lemnos-orion.service           /usr/lib/systemd/system/lemnos-orion.service   0644  systemd,orion
+packaging/systemd/lemnos-good-boot.service        /usr/lib/systemd/system/lemnos-good-boot.service 0644 systemd
 packaging/systemd/lemnos.conf                    /usr/lib/sysusers.d/lemnos.conf                0644  systemd
 packaging/systemd/lemnosd.env.example            /etc/lemnos/lemnosd.env                        0644  always
 packaging/systemd/lemnos-orion.env.example       /etc/lemnos/lemnos-orion.env                   0644  orion

@@ -933,7 +933,7 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
                 sign: &sign,
             }),
         },
-        payloads,
+        payloads.to_vec(),
         &mut &whole[..],
     )
     .unwrap();
