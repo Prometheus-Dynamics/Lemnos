@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-k230-usbboot-stage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 USB-boot stage's logic: the wire format, the watchdog's registers and their model, the medium trait and the stage's state machine. no_std, no unsafe"
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = { version = "0.11", default-features = false }
