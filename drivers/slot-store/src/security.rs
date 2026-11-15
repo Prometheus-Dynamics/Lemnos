@@ -312,7 +312,7 @@ fn switch_of(current: Option<twocopy::Current>) -> io::Result<Switch> {
     let Some(current) = current else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "security record is corrupt: neither copy is valid",
+            "security record is corrupt: neither copy is valid (magic, version, length or CRC)",
         ));
     };
     match current.payload.as_slice() {
@@ -335,9 +335,40 @@ fn switch_of(current: Option<twocopy::Current>) -> io::Result<Switch> {
 /// builder pre-creates as off (`twocopy`'s kind 4).
 pub const BOOT_RECORD: &str = "secure.rec";
 
+/// Why the switch's record cannot be read from a boot partition image: the file is not there, or it
+/// is there and no switch value can be read from its copies (`Damaged` names the check that failed).
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecordFault {
+    /// The image has no `SECURE.REC`: the image builder did not pre-create it.
+    Missing,
+    /// The file is there and the value cannot be read. The text names the check that failed.
+    Damaged(String),
+}
+
+impl RecordFault {
+    /// The fault as the message the runtime and the tools print. Both readers say it reads as on.
+    fn io(self, node: &Path) -> io::Error {
+        let text = match self {
+            RecordFault::Missing => format!(
+                "{}: no {BOOT_RECORD} on the boot partition: the switch reads as on until it is written",
+                node.display()
+            ),
+            RecordFault::Damaged(why) => format!(
+                "{}: {BOOT_RECORD} is damaged ({why}): the switch reads as on until it is written",
+                node.display()
+            ),
+        };
+        io::Error::new(io::ErrorKind::InvalidData, text)
+    }
+}
+
 /// The switch on a slot board: the two-copy record in `SECURE.REC` on the boot partition's node,
 /// found by its FAT name (`bootfat::locate`). An image without the file, or one whose record cannot be
 /// read, is an error: the device reads it as on, so the switch is never off by accident.
+///
+/// One valid copy is enough: a copy that fails its magic, version, length or CRC is ignored, as
+/// [`Store::read`] ignores it, so [`BootSwitch::check`] passes a record with one good copy and one
+/// damaged one.
 #[derive(Debug, Clone)]
 pub struct BootSwitch {
     node: PathBuf,
@@ -350,22 +381,18 @@ impl BootSwitch {
     }
 
     /// The record's device and its first sector, opened for reading, or for writing too.
-    fn open(&self, write: bool) -> io::Result<(Device, Pair)> {
+    fn open(&self, write: bool) -> Result<(Device, Pair), RecordFault> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(write)
-            .open(&self.node)?;
+            .open(&self.node)
+            .map_err(|error| RecordFault::Damaged(format!("the image can't be opened: {error}")))?;
         let name = Kind::SECURITY
             .file_name()
             .expect("the switch's record kind has a FAT name");
-        let found = bootfat::locate(&mut file, name, RECORD_BYTES).map_err(|why| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}: no readable {BOOT_RECORD} on the boot partition ({why:?}): the switch reads as on until it is written",
-                    self.node.display()
-                ),
-            )
+        let found = bootfat::locate(&mut file, name, RECORD_BYTES).map_err(|why| match why {
+            bootfat::Refusal::Missing => RecordFault::Missing,
+            other => RecordFault::Damaged(other.to_string()),
         })?;
         Ok((
             Device {
@@ -375,17 +402,53 @@ impl BootSwitch {
             Pair::at(found.first_lba),
         ))
     }
+
+    /// The switch the record holds, or why it cannot be read. Reads only: the image is not written.
+    /// Missing and damaged are told apart, so a tool can name which one it found.
+    pub fn check(&self) -> Result<Switch, RecordFault> {
+        let (mut device, pair) = self.open(false)?;
+        let current = pair
+            .read(&mut device, KIND)
+            .map_err(|error| RecordFault::Damaged(error.to_string()))?;
+        switch_of(current).map_err(|error| RecordFault::Damaged(error.to_string()))
+    }
+}
+
+impl BootSwitch {
+    /// Each copy of the record, checked alone, for the image check: `Ok` when the copy is a valid
+    /// copy of the switch's kind holding `on` or `off`, else the check that failed. Unlike
+    /// [`BootSwitch::check`], one bad copy is reported here, and the caller decides.
+    pub fn copies(&self) -> Result<[Result<(), String>; 2], RecordFault> {
+        let (mut device, pair) = self.open(false)?;
+        let mut out = [Ok(()), Ok(())];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let mut sector = [0u8; SECTOR];
+            Sectors::read(&mut device, pair.lba() + i as u64, &mut sector).map_err(|error| {
+                RecordFault::Damaged(format!("the copy can't be read: {error}"))
+            })?;
+            *slot = match twocopy::check(&sector) {
+                Err(why) => Err(why.to_string()),
+                Ok(copy) if copy.kind != KIND => Err(format!(
+                    "it holds the record kind {}, not the switch's",
+                    copy.kind.0
+                )),
+                Ok(copy) if copy.payload != b"on" && copy.payload != b"off" => {
+                    Err("its value is neither on nor off".to_string())
+                }
+                Ok(_) => Ok(()),
+            };
+        }
+        Ok(out)
+    }
 }
 
 impl Store for BootSwitch {
     fn read(&self) -> io::Result<Option<Switch>> {
-        let (mut device, pair) = self.open(false)?;
-        let current = pair.read(&mut device, KIND).map_err(to_io)?;
-        switch_of(current).map(Some)
+        self.check().map(Some).map_err(|fault| fault.io(&self.node))
     }
 
     fn write(&self, on: bool) -> io::Result<u64> {
-        let (mut device, pair) = self.open(true)?;
+        let (mut device, pair) = self.open(true).map_err(|fault| fault.io(&self.node))?;
         pair.write(&mut device, KIND, payload(on)).map_err(to_io)
     }
 }
