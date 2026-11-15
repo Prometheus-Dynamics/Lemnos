@@ -176,7 +176,8 @@ bound through it. Nothing else is trusted:
 | dm-verity | `verity.root_hash`, `salt`, `data_blocks`, `hash_offset` | the image size is the data plus its tree; the root hash goes in the command line |
 | each boot file | `boot.files`: path to SHA-256 | the file's SHA-256 (so its length too) at `finish`; a file the manifest does not list is refused at its header, before its bytes are written |
 | a listed member | `boot.files`, `image` | a listed member the bundle lacks is refused at `finish`, before the slot is put in place |
-| the set of boot files | `boot.files` | exactly the five role files the boot partition stores (`kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`), on every form: an entry that is not one of them, or a role file the list leaves out, is refused by name at the decision, before the first payload byte (see "Manifest and members") |
+| the set of boot files | `boot.files` | exactly the board's declared set: the five role files the boot partition stores (`kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`) and each firmware overlay the board's `[boot] firmware_overlays` names, on every form; an entry outside that set, or a declared file the list leaves out, is refused by name at the decision, before the first payload byte (see "Manifest and members") |
+| the firmware config lines | `boot.config` (SHA-256 of the board's `[boot] config_lines`, absent for a board with none) | equal to the boot partition's digest, or refused by name with both digests, before the first payload byte (see "Firmware overlays and config lines") |
 | the kernel command line | `boot/cmdline.txt` (a listed file, so digested), `verity.root_hash`, `id`, the board's `boot_args` and PARTUUID | built only from those; no member outside the list reaches it |
 
 No member is installed unsigned: with the security switch off, an unsigned bundle installs as
@@ -204,6 +205,37 @@ written, the default keeps booting`. A role file the list leaves out is refused 
 `overlays/README` itself; a bundle does not carry it. One function, `lemnos_slot_store::bays::refuse_unstored`,
 holds the rule; the check at boot names a listed file no bay stores as `not stored` when it meets one
 (a slot installed before the rule).
+
+### Firmware overlays and config lines
+
+A board may declare two more things the firmware needs ([Boards](boards.md), `[boot]`): `firmware_overlays`,
+overlay names each of which is a **bay member** in every bay set (`overlays/<name>.dtbo`, the size of the
+board overlay's bay), and `config_lines`, verbatim config.txt lines written inside `[all]`. A board with
+neither is written exactly as before: no firmware list file, no `boot.config`, five members.
+
+- **Members.** The boot partition's declared set is the five roles, then the overlays in the board's order.
+  Each overlay is hashed in the set's record (`bayinfo.rec` holds the names, lengths and hashes after the
+  roles, behind a count byte; a five-role record is read as before). `bays::compare_hashes` checks them on a
+  reinstall, a bundle's overlay is refused by name when its bay holds another build, and the every-boot
+  check and `boot_view` read each overlay from the bay. A record member the manifest does not list is a
+  mismatch (`is stored in the bay but not listed in boot.files`).
+- **The list at the root.** A board that declares either key has a root file `firmware-overlays.txt`: a
+  `config <sha256>` line when it declares config lines, then one `overlay <name>` line per overlay. The
+  boot partition's own code (`bays::discover`) reads it, so the U-Boot form and the Pi form, and every
+  reader of the bays, see the same declared set and digest. The image's `--verify` checks it as a root file.
+- **Config lines are fixed at flash.** The lines are in the root `config.txt` and `tryboot.txt`, so every
+  slot on the partition boots with the same lines. The bundle records their digest in `boot.config`, and
+  the install compares it with the partition's: a bundle whose lines differ is refused with both digests
+  named (`the bundle's firmware config lines are sha256 … and the boot partition's are … : the boot
+  partition's lines are fixed at flash`), before the first payload byte. A slot that needs other lines needs
+  a new boot partition. (A pointer-file design, with the lines in each pointer, was checked and not used:
+  the firmware's documentation says bootloader-read settings take effect only in `config.txt` itself, not in
+  an included file, and the pointer sector's parser refuses any line but `os_prefix` and its checksum.)
+- **Checked at build, by name.** A `dtoverlay=NAME[,params]` line in `config_lines` whose NAME is not in
+  `firmware_overlays` is refused, and so is a listed overlay that no `dtoverlay=` line loads. A config line
+  that is not one line is refused. A missing `<name>.dtbo` in the `--firmware DIR` is refused by name.
+- **Where the files come from.** `lemnos-ctl boot-partition --firmware DIR` and `lemnos-ctl bundle --firmware
+  DIR` read `DIR/<name>.dtbo` for each declared overlay, so the bay and the bundle hold the same bytes.
 
 ### The manifest, schema 3
 
@@ -478,7 +510,7 @@ device takes them as its config (the host gives them to the one device that serv
 
 ```toml
 [security]
-record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth
+record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth; "boot" on a slot board (below)
 keys = "/etc/lemnos/slot-keys"            # absolute, optional: the board's trust root (see "Turning it off")
 orion = false                             # true: Orion ships here, and answers before a switch goes on
 
@@ -521,6 +553,17 @@ renamed into place, so a cut before the rename leaves no record (absent, off). A
 present but has no valid copy reads as corrupt (on). The record is written before the view is
 rendered; if the render fails the view is `pending`, the record stands, and each later call retries
 the render. The daemon renders the view from the record again at start.
+
+**On a slot board the truth is the boot partition's `SECURE.REC`**: the same two-copy record, in the
+boot partition's file of that name, which the image builder pre-creates as off, at generation 0. The
+security device takes it when its own `record` is `"boot"` (the board's `[security] record` is
+`"boot"` too, which the host gives it). The device finds the boot partition's node the way the slots
+device does, from its own `boot_sources` config. A node that cannot be found, or an image without
+`SECURE.REC`, reads as corrupt (on), reported; the switch is never off by accident.
+`lemnos-ctl security render` takes exactly one of `--record FILE` (a file) and `--boot-image FILE` (the
+`SECURE.REC` of a boot partition image). `lemnos-ctl security set --boot-image FILE on|off` writes that
+image's record offline. On a board the switch is set through the daemon, as before. A missing or
+unreadable record reads as on, and the render line says so.
 
 **A change** (`set`, `lemnos-ctl security DEVICE on|off`) runs: the stakeholders' prechecks; Orion's
 answer when Orion is on the board; for an off on a board with a trust root, the authorization (below);
@@ -799,6 +842,31 @@ Orion frames are at most 64 KiB, so a bundle doesn't travel as an action argumen
 
 Tested against a real Orion node and comm core on a PC, in-process
 (`service/orion/tests/files.rs`). There, pushes of up to 258 MiB were committed.
+
+## The first slot, written offline
+
+`lemnos-ctl data-partition --layout-of BOARD --install BUNDLE --boot-image FILE --keys FILE --time UTC
+--data-size BYTES --out DIR` writes a data partition's tree for one slot, with no daemon running. It
+runs the daemon's own install, trial and confirm over `DIR`, and keeps the boot image's record in a
+copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree back, read-only.
+
+- **Room.** `--data-size` is the bytes the data partition has for the tree. The writer applies no
+  reserve. The slot and its records (the sum of their file bytes) must fit in it, and a write that
+  does not fit is refused, with both sizes named: `no room for this slot: the slot and its records
+  need N bytes, --data-size gives M bytes: give the data partition more room`. A refused write
+  leaves no directory.
+  The sum counts file contents only; the filesystem's own block and metadata overhead is not in it,
+  so give the partition some headroom.
+- **Live installs keep their reserve.** A live install needs free space of the slot plus `reserve_mb`
+  from the board file's system-slots device (2048 MiB when it is not given). That rule is unchanged.
+- **The boot image's bay is compared by hash.** The slot's bay in the boot image must hold this
+  bundle's build: each of its five boot files hashes the same as the bundle's payload for that role
+  (`bays::compare_hashes`). A bay of another build of the same slot id is refused by name, and
+  nothing is left. `--verify` with `--boot-image` checks the bay's stored hashes against the tree's
+  `slot.json`.
+- **`--verify` shows it.** With `--layout-of`, `--verify` prints the reserve the board will keep for
+  live installs: `the board keeps N MiB free for live installs (its reserve_mb); the offline writer
+  applies none`.
 
 ## Actions
 
@@ -1121,6 +1189,16 @@ pattern never breaks. `tryboot.txt` has no count filter. The filter, the `kernel
 keys and the count's read and clear are verified from the Raspberry Pi documentation
 (`conditional.adoc`, `config_txt_boot.adoc`), not yet on a board: `testing/board-runs/I5i6.md`.
 
+**The rule for `previous.txt` (M36b).** `previous.txt` names the default's bay until a real previous
+slot exists, and never an empty bay. On a fresh image all three pointers name `bay0`, where the first
+slot is installed, so a count with bit 2 set (4 to 7, 12 to 15, ...) starts the default's own files: a
+fresh board does not start from an empty bay. A default switch points `previous.txt` at the old
+default's bay (`Boot::set_pointer`). Removing the previous slot's bay points `previous.txt` back at the
+default's bay before the old bay is freed (`Boot::free_slot`); removing the default's bay is refused.
+The restart count that slot-init and lemnosd act on is not the raw count but the restarts since the
+last good boot (`COUNT   REC`, see `lemnos_slot_store::firmware::since_good`); the firmware's own
+rotation above still reads the raw count.
+
 - The count is read from `/proc/device-tree/chosen/bootloader/count` and the reset status from
   `rsts` (four big-endian bytes each; `device_tree` names the directory). It is cleared through the
   property mailbox on `/dev/vcio` (`vcio`), tag `0x0003808d` with the value zero
@@ -1131,6 +1209,13 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
   manifest) and before each restart Lemnos makes. The restart check runs first: a refused check
   makes no restart. A count that can't be cleared does not refuse the restart the board was asked for:
   the state names it ("this boot is counted") and the indicator shows failed.
+- **A refused clear is retried (M36c).** A clear the mailbox refuses after a good boot, or on an arrival
+  from the count, is owed: the driver's tick tries it again, the wait starting at 1 s, doubling after
+  each refusal and stopping at 8 s, and it never gives up or turns off. While it is owed, `health` is
+  degraded, `retrying` shows the attempts and the next try, `info` carries `"boot_count"`, and the state
+  says `the boot count is not cleared: <why>; retrying every Ns`. When the clear goes through, the state
+  says `the boot count is cleared after N tries` once. A clear refused on the way to a restart is not
+  retried: the board restarts, and the next good boot clears the count.
 - A boot that arrives on the previous slot because of the count (the reading picks previous, and
   the board runs the previous) is reported first: the state's error and the boot history's entry
   for this boot name the count, `rsts`, and whether the default's files match. Then:
@@ -1144,9 +1229,12 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
     value is one no rule names (`unknown`, reported with its raw value): no episode. The count is cleared.
   - Where the default stays, the next restart tries it again. A boot that is good clears the
     episodes of the slot it runs.
-- **Refusals that repeat go to the firmware's flashing mode.** A refusal no slot can answer (the
-  boot disk or table is wrong, the data volume is missing, a kernel piece is absent) goes to the
-  rescue: slot-init keeps the reason in the kernel log, waits 30 s and restarts. The same refusal
+- **Refusals that repeat go to the firmware's flashing mode, on a Lemnos disk only (M36c).** A refusal no
+  slot can answer (the boot disk or table is wrong, the data volume is missing, a kernel piece is absent)
+  goes to the rescue: slot-init keeps the reason in the kernel log, waits 30 s and restarts. The flashing
+  mode is asked only when the boot disk has exactly one partition labelled `lemnos-data` (or the data
+  partition is already found); any other refusal, including an unreadable or absent disk and raw NAND,
+  logs that it is not a Lemnos disk and restarts into the board's own boot order. The same refusal
   repeats on every restart, so slot-init also reads the firmware's count at the rescue: when `FLASH_AFTER`
   (8) restarts have gone by without a good boot (the daemon clears the count at a good boot, so the
   count is the run of restarts since the last one), it asks the firmware for RPIBOOT at the next boot
@@ -1177,6 +1265,109 @@ keys and the count's read and clear are verified from the Raspberry Pi documenta
   board's `gpio=` lines after it), the pointers and the record files, and the bay sets. `lemnos-ctl tree
   --boot-dir` is removed (the flag is refused). Other records have no boot partition here and are refused
   by name.
+
+### The good-boot deadline
+
+Every boot of a slot board is judged, by systemd and not by lemnosd. The unit
+`packaging/systemd/lemnos-good-boot.service` runs at boot as a oneshot with no dependency on lemnosd, so it
+still decides when lemnosd is wedged or never starts. It polls once a second (`lemnos-good-boot`,
+`service/good-boot`) and exits 0 as soon as the boot is good, or 1 when the deadline passes.
+
+**What good means, and only that.** Two facts: lemnosd has reached ready (its unit is `active`, which for
+`Type=notify` means it sent `READY=1`), and the booted marker `board/slots/booted` on the data partition
+names a valid slot. The marker is the one slot-init writes before `switch_root`; nothing else is written
+for it. Device health is not a fact here: a failing device does not make a boot bad, and it does not make
+it good. The rule is `lemnos_slot_store::goodboot::good`.
+
+**The deadline** is the board file's `good_boot_s` on the `system-slots` device (seconds, default `300`,
+from 30 to 3600; see [Boards](boards.md#good-boot-and-the-data-partition-system-slots)). A value outside
+that range, or one that is not an integer, is refused by name at the daemon's start and by
+`lemnos-ctl tree --good-boot-unit`. The image gets the deadline through a drop-in that
+`lemnos-ctl tree --good-boot-unit FILE` writes, to `/etc/systemd/system/lemnos-good-boot.service.d/deadline.conf`:
+its `ExecStart` carries `--deadline-s N` and its `TimeoutStartSec` is `N`, so the waiter and systemd agree.
+The unit's condition is that drop-in, so a board with no system-slots device never runs it.
+
+**Not good by the deadline means a restart.** The unit has `FailureAction=reboot-force`. On a trial boot
+the restart falls back through tryboot, as any boot that does not reach the daemon does. On a confirmed
+default each restart raises the firmware's boot count, so the count chain (previous at counts 4 to 7, RPIBOOT
+at count minus the baseline of 8 or more) is what drives recovery when a default never boots good.
+
+**Why `reboot-force`.** `reboot` stops every unit first, and lemnosd's stop can take its `TimeoutStopSec`
+(30 s) or hang on a wedged driver, which holds the reboot. `reboot-force` has systemd call the reboot at
+once. It is the choice for a failure of the boot, where nothing else is to be stopped cleanly. The state
+files are each replaced whole and synced (see the store's module), so a reboot at this point cuts nothing
+half-written.
+
+**lemnosd is not changed for this.** `lemnosd.service` keeps `Restart=always`, `StartLimitIntervalSec=0`
+and no failure action: lemnosd is never down by design, and its own failure never surfaces, which is why
+this separate unit exists.
+
+**Tests.** `lemnos-good-boot`'s tests run the waiter against a scripted probe and a fake clock: the
+marker appearing late is good at that time; a boot never good fails at the deadline exactly; the last sleep
+is cut to the deadline; a marker without readiness, or one naming no slot, is not good; the waiter asks
+only the two facts; the real probe reads the marker from a directory. The drop-in, the board-file key and its
+refusals are tested in `lemnos-ctl` and in `lemnos_slot_store::goodboot`. Not tested here: a QEMU guest that
+reboots when good never comes (the harness does not yet boot systemd with this unit), and `systemctl` against
+a running lemnosd. `systemd-analyze verify` runs on the unit offline where it is installed (see the
+gate's packaging check).
+
+### Growing the data partition at first start
+
+The data partition is entry 2 of the MBR: the last entry, type `0x83`, labelled `lemnos-data`. An image
+writes it at a size its content needs, and a disk larger than that image leaves the rest unused. When the
+board file's `grow_data` on the `system-slots` device is on by default (`false` opts a board out), the
+driver grows it to the disk's end at each start until it is done. It acts only on a disk that validates as
+the Lemnos layout, so any other table is refused with words and nothing is written. The pass is in
+`drivers/system-slots/src/grow.rs`; the arithmetic is `lemnos_slot_store::mbr`.
+
+The steps, in order. Each reads the state it finds, so the pass is the same whether it runs once, is cut, or
+runs again:
+
+1. **The table.** The MBR is validated (its signature; entry 2 is `0x83`; no entry follows it; the kernel's
+   start of partition 2 equals the table's; the partition's superblock is ext4 with the label `lemnos-data`;
+   the table's end is at or before the disk's end). The new length is the start to the last whole MiB
+   before the disk's end. The only write is the four bytes of entry 2's sector count (474 to 477 of sector
+   0), then a flush, then a read back that must differ from the old sector in those four bytes only.
+2. **The kernel's partition.** `BLKPG_RESIZE_PARTITION` on partition 2 to the table's length
+   (`lemnos-linux-sys`, `blockdev.rs`), then `/sys/class/block/<p2>/size` must say that length.
+3. **The filesystem.** `EXT4_IOC_RESIZE_FS` on `/data` to the table's length in blocks
+   (`lemnos-linux-sys`, `ext4.rs`), then the superblock's block count must say that count.
+
+Nothing else is written. Partition 1 is never touched; sector 0 changes in four bytes; the kernel's view
+and the filesystem only grow.
+
+**A refusal writes nothing.** A table that is not the expected layout is refused by name at step 1 with the
+reason, and the disk is left as it was: `data partition is not the last one: nothing grown`, the entry's
+type, a label other than `lemnos-data`, a disk smaller than its table, a sector without the signature, and a
+partition that is not ext4. A filesystem larger than its partition is refused at step 3 and not shrunk.
+
+**A failed step is retried, never given up.** The driver runs a pass at its start tick and does not hold up
+its start. A failed pass is noted in the state's error in words, once per reason, and tried again after a
+backoff that starts at 1 s, doubles, and is capped at 8 s. A pass that finishes is dropped. The boot disk's
+node comes from the same resolver the boot chain uses; when it is not known the reason is noted and the
+pass is retried.
+
+**Cut points.** Power cut or daemon restart before or after each write (table, kernel, filesystem). The next
+pass after a power cut sees the kernel read the table, and after a daemon restart the kernel keeps its view;
+either way it ends in exactly the state of an uninterrupted pass. Tested on a file standing for the disk, with the fake kernel
+seam, for all six cases in `drivers/system-slots/src/grow/tests.rs`:
+
+| Cut | Table | Kernel | Filesystem | The next pass |
+|---|---|---|---|---|
+| before 1 | old | old | old | writes the table, the kernel and the filesystem |
+| after 1 | new | old | old | after a restart: resizes the kernel, then the filesystem. After a power cut the kernel already has the new length: the filesystem only |
+| before 2 | new | old | old | after a restart: resizes the kernel, then the filesystem. After a power cut: the filesystem only |
+| after 2 | new | new | old | grows the filesystem only |
+| before 3 | new | new | old | grows the filesystem only |
+| after 3 | new | new | new | nothing: the pass is a no-op and writes nothing |
+
+A torn table write (the count's top byte lands wrong) is caught by the read back: the pass fails with only
+the four bytes changed, and the next start refuses the value as past the disk.
+
+**Not proved here.** That the kernel accepts `BLKPG_RESIZE_PARTITION` on a partition that is mounted, that
+the filesystem grows past its reserved group descriptors, and that the card or eMMC writes one sector whole
+on a power cut. These are the board check in `testing/board-runs/` (not yet written), and the QEMU guest
+case (not yet written); the test seam shares none of them with the kernel.
 
 ### The slot layout (Pi firmware form)
 

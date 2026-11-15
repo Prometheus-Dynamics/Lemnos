@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::{ItemKind, Status};
+use lemnos_slot_store::goodboot;
 use lemnos_wire::text::{
     Call, encode_call, find_item, find_method, method_of, render, render_reply, shape_name,
     too_small, watchable,
@@ -17,6 +18,7 @@ mod boot_dir;
 mod boot_dir_tests;
 mod boot_partition;
 mod bundle;
+mod data_partition;
 mod show;
 
 pub const USAGE: &str = "\
@@ -40,9 +42,13 @@ lemnos-ctl [--socket PATH] COMMAND
                                  authorization signed for the generation `request-off` names
   security DEVICE request-off    what an authorization to turn the switch off must sign, from the board
   security DEVICE precheck on|off  what would stop the change, with no change made
-  security render --record FILE [--dir DIR]
+  security render (--record FILE | --boot-image FILE) [--dir DIR]
                                  render the switch's view from its record, with no daemon (the
-                                 image runs it before the daemon starts; DIR is /run/board)
+                                 image runs it before the daemon starts; DIR is /run/board).
+                                 --boot-image reads SECURE.REC in a boot partition image instead
+  security set --boot-image FILE on|off
+                                 set the switch in a boot partition image, offline (a new image or
+                                 a board's copy); a board's switch is set through the daemon
   packages                       driver packages: which loaded, which were refused and why
   files DEVICE [NAME [FILE]]     the named files a node serves (`lemnos/`): its index, or one
                                  file to stdout, or to FILE, which must not exist yet
@@ -63,11 +69,17 @@ lemnos-ctl [--socket PATH] COMMAND
                                  Ed25519 seed) from the same payload directory `boot-partition`
                                  takes, or verify one with the installer's own checks, read-only:
                                  one line per check
+  data-partition --layout-of BOARD [--socs DIR] --install BUNDLE --boot-image FILE --keys FILE
+                 --time UTC --data-size BYTES --out DIR [--switch off]
+                 | --verify DIR [--layout-of BOARD [--socs DIR]] [--boot-image FILE] [--deep]
+                                 write the data partition's tree for a board's first slot, as the
+                                 daemon's install, trial and confirm leave it, with nothing written
+                                 outside DIR (which must not exist), or verify one, read-only
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
                                  [--bridge-env FILE]
-                                 [--security-unit FILE]
+                                 [--security-unit FILE] [--good-boot-unit FILE]
                                  [--manifest-boot FILE] [--cmdline-slot FILE --slot ID]
                                  write the device-tree overlay for a board (stdout by default),
                                  its firmware boot fragment, its U-Boot fragment (`gpio set`
@@ -175,11 +187,20 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     if command == "security" && tail.first().is_some_and(|word| word == "render") {
         return security_render(&tail[1..], out);
     }
+    if command == "security"
+        && tail.first().is_some_and(|word| word == "set")
+        && tail.get(1).is_some_and(|word| word == "--boot-image")
+    {
+        return security_set_image(&tail[1..], out);
+    }
     if command == "boot-partition" {
         return boot_partition::run(tail, out);
     }
     if command == "bundle" {
         return bundle::run(tail, out);
+    }
+    if command == "data-partition" {
+        return data_partition::run(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };
@@ -372,6 +393,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut mdev_out = None;
     let mut bridge_env_out = None;
     let mut security_out = None;
+    let mut good_boot_out = None;
     let mut manifest_boot_out = None;
     let mut cmdline_slot_out = None;
     let mut slot = None;
@@ -392,6 +414,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--mdev", Some(file)) => mdev_out = Some(file),
             ("--bridge-env", Some(file)) => bridge_env_out = Some(file),
             ("--security-unit", Some(file)) => security_out = Some(file),
+            ("--good-boot-unit", Some(file)) => good_boot_out = Some(file),
             ("--manifest-boot", Some(file)) => manifest_boot_out = Some(file),
             ("--cmdline-slot", Some(file)) => cmdline_slot_out = Some(file),
             ("--slot", Some(id)) => slot = Some(id),
@@ -456,6 +479,32 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         let text = bridge_env::text(&board).map_err(|e| format!("{path}: --bridge-env: {e}"))?;
         std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
+    if let Some(file) = good_boot_out {
+        let device = board
+            .devices
+            .iter()
+            .find(|device| device.driver == "system-slots")
+            .ok_or_else(|| {
+                format!("{path}: --good-boot-unit: this board has no system-slots device, so there is no boot to judge")
+            })?;
+        let value = match device.config.get(goodboot::KEY) {
+            None => None,
+            Some(value) => Some(value.as_integer().ok_or_else(|| {
+                format!(
+                    "{path}: --good-boot-unit: system-slots device \"{}\": {} must be an integer",
+                    device.id,
+                    goodboot::KEY
+                )
+            })?),
+        };
+        let deadline = goodboot::deadline_from_board(value).map_err(|why| {
+            format!(
+                "{path}: --good-boot-unit: system-slots device \"{}\": {why}",
+                device.id
+            )
+        })?;
+        std::fs::write(&file, good_boot_dropin(deadline)).map_err(|e| format!("{file}: {e}"))?;
+    }
     if let Some(file) = security_out {
         let security = board
             .security
@@ -478,6 +527,21 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
     Ok(())
+}
+
+/// The drop-in that gives the good-boot unit (`lemnos-good-boot.service`) this board's deadline:
+/// the command's `--deadline-s` and the unit's start timeout, which are the same by construction.
+fn good_boot_dropin(deadline: u32) -> String {
+    format!(
+        "# Generated by `lemnos-ctl tree --good-boot-unit` from the system-slots device's {key}.\n\
+         # The good-boot deadline of this board: a boot that is not good within it is restarted.\n\
+         # Change the board file, not this drop-in.\n\
+         [Service]\n\
+         ExecStart=\n\
+         ExecStart=/usr/bin/lemnos-good-boot --deadline-s {deadline}\n\
+         TimeoutStartSec={deadline}\n",
+        key = goodboot::KEY,
+    )
 }
 
 /// The unit that renders the security switch's view before the daemon and the comm core start. It
@@ -525,23 +589,64 @@ fn kernel_cmdline(modprobe: &str) -> String {
     line
 }
 
+/// The switch's record, named by exactly one of `--record FILE` (a file) and `--boot-image FILE` (the
+/// `SECURE.REC` of a boot partition image): its name for the messages, and the store.
+fn switch_store(
+    record: Option<String>,
+    boot_image: Option<String>,
+) -> Result<(String, Box<dyn lemnos_slot_store::security::Store>), String> {
+    use lemnos_slot_store::security::{BootSwitch, PlainFile};
+    match (record, boot_image) {
+        (Some(path), None) => Ok((path.clone(), Box::new(PlainFile::new(path)))),
+        (None, Some(image)) => Ok((image.clone(), Box::new(BootSwitch::new(image)))),
+        _ => Err("security needs exactly one of --record FILE and --boot-image FILE".into()),
+    }
+}
+
+/// `security set --boot-image FILE on|off`: the switch in a boot partition image, written offline.
+/// A board's switch is set through the daemon; this writes only the image it is given.
+fn security_set_image(args: &[String], out: &mut dyn Write) -> Outcome {
+    let [flag, image, value] = args else {
+        return Err(USAGE.to_string());
+    };
+    if flag != "--boot-image" {
+        return Err(USAGE.to_string());
+    }
+    let on = match value.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return Err(USAGE.to_string()),
+    };
+    let store = lemnos_slot_store::security::BootSwitch::new(image.as_str());
+    let generation = lemnos_slot_store::security::Store::write(&store, on)
+        .map_err(|error| format!("{image}: the switch can't be set: {error}"))?;
+    line(
+        out,
+        format_args!(
+            "switch {} in {image}: generation {generation}",
+            if on { "on" } else { "off" }
+        ),
+    )
+}
+
 /// `security render`: the view from the record, written with no daemon. An absent record is off;
 /// an unreadable one renders on, as the switch reads it.
 fn security_render(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut record = None;
+    let mut boot_image = None;
     let mut dir = lemnos_slot_store::security::RUN_DIR.to_string();
     let mut i = 0;
     while i < args.len() {
         match (args[i].as_str(), args.get(i + 1)) {
             ("--record", Some(path)) if record.is_none() => record = Some(path.clone()),
+            ("--boot-image", Some(path)) if boot_image.is_none() => boot_image = Some(path.clone()),
             ("--dir", Some(path)) => dir.clone_from(path),
             _ => return Err(USAGE.to_string()),
         }
         i += 2;
     }
-    let record = record.ok_or_else(|| USAGE.to_string())?;
-    let store = lemnos_slot_store::security::PlainFile::new(record.as_str());
-    let switch = match lemnos_slot_store::security::Store::read(&store) {
+    let (record, store) = switch_store(record, boot_image)?;
+    let switch = match store.read() {
         Ok(Some(switch)) => switch,
         Ok(None) => lemnos_slot_store::security::Switch {
             on: false,
@@ -1000,5 +1105,24 @@ mod security_unit_tests {
             "{unit}"
         );
         assert!(unit.contains("Type=oneshot"), "{unit}");
+    }
+}
+
+#[cfg(test)]
+mod good_boot_unit_tests {
+    use super::good_boot_dropin;
+
+    #[test]
+    fn the_drop_in_gives_the_waiter_and_its_timeout_the_same_deadline() {
+        let text = good_boot_dropin(420);
+        assert!(
+            text.contains("ExecStart=/usr/bin/lemnos-good-boot --deadline-s 420\n"),
+            "{text}"
+        );
+        assert!(text.contains("TimeoutStartSec=420\n"), "{text}");
+        assert!(
+            text.contains("ExecStart=\n"),
+            "the base unit's command is cleared first: {text}"
+        );
     }
 }

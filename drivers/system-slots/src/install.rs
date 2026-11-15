@@ -215,7 +215,12 @@ impl Unpack {
         // The boot partition stores the role files and nothing else, on every form: a slot that
         // lists another would install and then fail its own boot check. Refused here, before the
         // first payload byte, so nothing is written.
-        lemnos_slot_store::bays::refuse_unstored(&parsed.id, &parsed.boot_files).map_err(bad)?;
+        lemnos_slot_store::bundle::check_declared(
+            parsed,
+            &self.admit.firmware,
+            self.admit.config.as_deref(),
+        )
+        .map_err(bad)?;
         Ok(outcome)
     }
 }
@@ -390,6 +395,12 @@ pub struct Admit {
     pub require_signed: bool,
     /// The board file's `[board] id`: a slot built for another board is refused.
     pub board_id: String,
+    /// The firmware overlay paths the boot partition declares (`overlays/<name>.dtbo`), in the layout's
+    /// order: a bundle's boot files must be the five roles and exactly these.
+    pub firmware: Vec<String>,
+    /// The boot partition's firmware config digest, `None` when it declares no lines: a bundle's
+    /// `boot.config` must be the same.
+    pub config: Option<String>,
 }
 
 /// What finishing needs from the board.
@@ -686,13 +697,20 @@ impl Install {
         // The payloads go into a free bay of the boot partition, refusals first (a payload missing or
         // larger than its bay is refused by name before any write); no pointer moves. Then the copy
         // kept on the data partition, by content.
-        let mut stored = Vec::with_capacity(lemnos_slot_store::bays::ROLES.len());
-        for role in lemnos_slot_store::bays::ROLES.iter() {
-            let bytes = fs::read(boot_dir.join(role.path))
-                .map_err(|_| bad(format!("the bundle has no boot/{}", role.path)))?;
+        // The members in the boot partition's order: the five roles, then the firmware overlays the
+        // boot partition declares (the admission made the bundle's set exactly these).
+        let mut members: Vec<String> = lemnos_slot_store::bays::stored_files()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        members.extend(unpack.admit.firmware.iter().cloned());
+        let mut stored = Vec::with_capacity(members.len());
+        for path in &members {
+            let bytes = fs::read(boot_dir.join(path))
+                .map_err(|_| bad(format!("the bundle has no boot/{path}")))?;
             stored.push(bytes);
         }
-        let payloads: [&[u8]; 5] = std::array::from_fn(|i| stored[i].as_slice());
+        let payloads: Vec<&[u8]> = stored.iter().map(Vec::as_slice).collect();
         board
             .record
             .install(&id, &payloads)

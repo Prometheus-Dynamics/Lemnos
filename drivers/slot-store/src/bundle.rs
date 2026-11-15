@@ -13,7 +13,7 @@
 //! - [`Reader`] is a [`Sink`] that takes a bundle as the installer does and keeps what the installer
 //!   checks; [`verify`] runs it and reports each check, short of installing anything.
 
-use crate::bays::{self, Layout, ROLES};
+use crate::bays::{self, Layout};
 use crate::bootimage::{self, Family};
 use crate::manifest::{BLOCK, Manifest, Overlay, Verity, is_hex, tree_bytes, valid_name};
 use crate::signing;
@@ -206,14 +206,76 @@ pub fn role_files() -> [&'static str; 5] {
     bays::stored_files()
 }
 
-/// `boot.files` is exactly the five role files, by the installer's own check
-/// ([`bays::refuse_unstored`]): nothing missing, nothing more.
+/// `boot.files` is exactly the board's declared set, by the installer's own check
+/// ([`bays::refuse_unstored`]): the five role files and each firmware overlay the board declares,
+/// nothing missing, nothing more. `declared` is the set's member paths ([`bays::Layout::paths`]).
 ///
 /// # Errors
 ///
 /// The sentence naming the file.
-pub fn check_roles(manifest: &Manifest) -> Result<(), String> {
-    bays::refuse_unstored(&manifest.id, &manifest.boot_files)
+pub fn check_roles(manifest: &Manifest, declared: &[String]) -> Result<(), String> {
+    bays::refuse_unstored(&manifest.id, &manifest.boot_files, declared)
+}
+
+/// The set's form when the board is not given: the five roles, and beyond them only firmware overlay
+/// names (`overlays/<name>.dtbo`). Which overlays the board declares is checked with the board.
+///
+/// # Errors
+///
+/// The sentence naming a missing role or a name that is not a role or an overlay.
+pub fn check_roles_form(manifest: &Manifest) -> Result<(), String> {
+    let mut declared: Vec<String> = role_files().iter().map(|p| p.to_string()).collect();
+    for (name, _) in &manifest.boot_files {
+        if let Some(stem) = name
+            .strip_prefix("overlays/")
+            .and_then(|rest| rest.strip_suffix(".dtbo"))
+            && bays::valid_firmware_name(stem)
+            && !declared.contains(name)
+        {
+            declared.push(name.clone());
+        }
+    }
+    bays::refuse_unstored(&manifest.id, &manifest.boot_files, &declared)
+}
+
+/// The firmware config lines against the boot partition's: the bundle's digest (`boot.config`, absent
+/// for a board with none) must be the partition's. The partition's lines are fixed at flash, so a
+/// slot that needs other lines is refused with both digests named, not booted with the wrong ones.
+///
+/// # Errors
+///
+/// The sentence naming both digests, or that one side has none.
+pub fn check_config(slot: &str, bundle: Option<&str>, volume: Option<&str>) -> Result<(), String> {
+    if bundle == volume {
+        return Ok(());
+    }
+    let show = |d: Option<&str>| d.map_or("none".to_string(), |d| format!("sha256 {d}"));
+    Err(format!(
+        "{slot}: the bundle's firmware config lines are {} and the boot partition's are {}: the boot partition's lines are fixed at flash; flash a boot partition built from this board's [boot] config_lines, or build the bundle with the lines it holds: nothing was written, the default keeps booting",
+        show(bundle),
+        show(volume)
+    ))
+}
+
+/// What a bundle must check against the boot partition it installs into: its boot files are exactly
+/// the declared set (the five roles and `firmware`, the partition's overlay paths), and its firmware
+/// config lines are the partition's ([`check_config`]).
+///
+/// # Errors
+///
+/// The first sentence that refuses.
+pub fn check_declared(
+    manifest: &Manifest,
+    firmware: &[String],
+    volume_config: Option<&str>,
+) -> Result<(), String> {
+    let mut declared = role_files()
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>();
+    declared.extend(firmware.iter().cloned());
+    check_roles(manifest, &declared)?;
+    check_config(&manifest.id, manifest.boot_config.as_deref(), volume_config)
 }
 
 /// The command line's words as the installer reads them: the bundle's line without its line ending.
@@ -270,12 +332,13 @@ pub fn check_kernel(family: Family, kernel: &[u8]) -> Result<(), String> {
     }
 }
 
-/// The five payloads against the board's bays, as the installer checks them before a write.
+/// The payloads (the five roles, then the firmware overlays) against the board's bays, as the installer
+/// checks them before a write.
 ///
 /// # Errors
 ///
-/// The sentence naming the role whose payload is bigger than its bay.
-pub fn check_bays(layout: &Layout, id: &str, payloads: &[&[u8]; 5]) -> Result<(), String> {
+/// The sentence naming the member whose payload is bigger than its bay.
+pub fn check_bays(layout: &Layout, id: &str, payloads: &[&[u8]]) -> Result<(), String> {
     bays::check_install(layout, 0, id, payloads).map_err(|e| e.to_string())
 }
 
@@ -340,9 +403,9 @@ pub struct Built {
     pub manifest_bytes: Vec<u8>,
     /// `slot.sig`'s bytes when signed.
     pub signature: Option<Vec<u8>>,
-    /// The five boot files as the bundle holds them (the command line with its root hash), in role
-    /// order.
-    pub payloads: [Vec<u8>; 5],
+    /// The boot files as the bundle holds them, in member order (the five roles, the command line with
+    /// its root hash, then the firmware overlays).
+    pub payloads: Vec<Vec<u8>>,
     /// The whole image's length, tree included.
     pub image_len: u64,
     /// The image's length before the tree.
@@ -477,7 +540,7 @@ fn hash_image<R: Read>(rootfs: &mut R, table: &verity::Table) -> Result<[u8; 32]
 /// The sentence naming the first thing that is wrong; nothing has been written.
 pub fn build<R: Read>(
     b: &Build<'_>,
-    payloads: [Vec<u8>; 5],
+    payloads: Vec<Vec<u8>>,
     rootfs: &mut R,
 ) -> Result<Built, String> {
     let rules = b.rules;
@@ -501,8 +564,15 @@ pub fn build<R: Read>(
         ));
     }
     let family = rules.family;
+    if payloads.len() != rules.layout.count() {
+        return Err(format!(
+            "{} boot files are given and the board's boot partition stores {}: rebuild with the board's firmware overlays (--firmware)",
+            payloads.len(),
+            rules.layout.count()
+        ));
+    }
     check_kernel(family, &payloads[0])?;
-    let refs: [&[u8]; 5] = std::array::from_fn(|i| payloads[i].as_slice());
+    let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
     check_bays(&rules.layout, b.id, &refs)?;
     b.table.check()?;
     let image_sha = hash_image(rootfs, b.table)?;
@@ -518,12 +588,14 @@ pub fn build<R: Read>(
         cmdline_line(line),
     )?;
     check_loader_line(family, &payloads[3])?;
-    let refs: [&[u8]; 5] = std::array::from_fn(|i| payloads[i].as_slice());
+    let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
     check_bays(&rules.layout, b.id, &refs)?;
-    let boot_files: Vec<(String, String)> = ROLES
-        .iter()
+    let boot_files: Vec<(String, String)> = rules
+        .layout
+        .paths()
+        .into_iter()
         .zip(&payloads)
-        .map(|(role, bytes)| (role.path.to_string(), hex(&Sha256::digest(bytes))))
+        .map(|(path, bytes)| (path, hex(&Sha256::digest(bytes))))
         .collect();
     let manifest = Manifest {
         id: b.id.to_string(),
@@ -543,6 +615,7 @@ pub fn build<R: Read>(
         },
         boot_files,
         overlay: rules.overlay.clone(),
+        boot_config: rules.layout.config.clone(),
     };
     let manifest_bytes = manifest.to_json().into_bytes();
     // What is written is what is read: the manifest parses back to itself, or nothing is written.
@@ -613,8 +686,8 @@ pub fn write_to<R: Read + Seek, W: Write>(
     }
     out.write_all(&vec![0u8; write::padding(total)])?;
     out.write_all(&write::header("boot/", b'5', 0))?;
-    for (role, bytes) in ROLES.iter().zip(&built.payloads) {
-        member(out, &format!("boot/{}", role.path), bytes)?;
+    for ((name, _), bytes) in built.manifest.boot_files.iter().zip(&built.payloads) {
+        member(out, &format!("boot/{name}"), bytes)?;
     }
     out.write_all(&write::END)
 }
@@ -927,11 +1000,23 @@ pub fn verify<R: Read>(bundle: &mut R, ctx: &Context<'_>) -> Vec<Finding> {
         )),
         Err(why) => out.push(found(State::Bad, "boot files", why)),
     }
-    match check_roles(&manifest) {
-        Ok(()) => out.push(found(
+    let checked = match ctx.rules {
+        None => check_roles_form(&manifest),
+        Some(rules) => check_roles(&manifest, &rules.layout.paths()),
+    };
+    match checked {
+        Ok(()) if manifest.boot_files.len() == 5 => out.push(found(
             State::Ok,
             "roles",
             "boot.files is exactly the five boot files",
+        )),
+        Ok(()) => out.push(found(
+            State::Ok,
+            "roles",
+            format!(
+                "boot.files is exactly the five boot files and {} firmware overlay(s)",
+                manifest.boot_files.len() - 5
+            ),
         )),
         Err(why) => out.push(found(State::Bad, "roles", why)),
     }
@@ -1034,7 +1119,8 @@ fn board_findings(out: &mut Vec<Finding>, manifest: &Manifest, reader: &Reader, 
             .map(|(_, bytes)| bytes.as_slice())
     };
     let roles = role_files();
-    let payloads: Vec<Option<&[u8]>> = roles.iter().map(|p| file(p)).collect();
+    let declared = rules.layout.paths();
+    let payloads: Vec<Option<&[u8]>> = declared.iter().map(|p| file(p)).collect();
     let missing = |check: &str, what: &str| {
         found(
             State::Skipped,
@@ -1057,7 +1143,7 @@ fn board_findings(out: &mut Vec<Finding>, manifest: &Manifest, reader: &Reader, 
         },
     }
     if payloads.iter().all(Option::is_some) {
-        let refs: [&[u8]; 5] = std::array::from_fn(|i| payloads[i].unwrap_or_default());
+        let refs: Vec<&[u8]> = payloads.iter().map(|p| p.unwrap_or_default()).collect();
         match check_bays(&rules.layout, &manifest.id, &refs) {
             Ok(()) => out.push(found(
                 State::Ok,
@@ -1104,6 +1190,28 @@ fn board_findings(out: &mut Vec<Finding>, manifest: &Manifest, reader: &Reader, 
                 Err(why) => out.push(found(State::Bad, "cmdline", why)),
             }
         }
+    }
+    // A board and a bundle with no config lines have nothing to compare: no finding.
+    let config = match (
+        manifest.boot_config.as_deref(),
+        rules.layout.config.as_deref(),
+    ) {
+        (None, None) => Ok(()),
+        (bundle, board) => check_config(&manifest.id, bundle, board),
+    };
+    match config {
+        Ok(()) if rules.layout.config.is_none() && manifest.boot_config.is_none() => {}
+        Ok(()) => out.push(found(
+            State::Ok,
+            "config",
+            match &rules.layout.config {
+                Some(d) => format!("the firmware config lines are the board's ({d})"),
+                None => {
+                    "the board declares no firmware config lines, and neither has the bundle".into()
+                }
+            },
+        )),
+        Err(why) => out.push(found(State::Bad, "config", why)),
     }
     if manifest.overlay == rules.overlay {
         out.push(found(

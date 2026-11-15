@@ -241,7 +241,7 @@ impl BootRecord for Uboot {
         self.write(&record)
     }
 
-    fn install(&self, slot: &str, _payloads: &[&[u8]; 5]) -> io::Result<()> {
+    fn install(&self, slot: &str, _payloads: &[&[u8]]) -> io::Result<()> {
         Err(io::Error::other(format!(
             "{slot} isn't installed: payload bays on raw NAND (UBI) are parked, so this boot form installs no slot (docs/slots.md, \"The boot partition: payload bays\")"
         )))
@@ -438,8 +438,12 @@ impl BootRecord for UbootEnv {
         ])
     }
 
-    /// The slot's five payloads and its composed extlinux (from its command line) into a free bay.
-    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()> {
+    fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
+        Ok(crate::boot::declared_of(&self.raw()?.bay_layout()))
+    }
+
+    /// The slot's payloads and its composed extlinux (from its command line) into a free bay.
+    fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()> {
         let text = bootimage::extlinux_text(payloads[3]).map_err(io::Error::other)?;
         let protected = self.protected()?;
         self.raw()?

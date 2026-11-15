@@ -16,6 +16,7 @@
 
 pub mod arrival;
 pub mod bays;
+pub mod boot_node;
 pub mod boot_raw;
 pub mod bootcheck;
 pub mod bootfat;
@@ -26,10 +27,12 @@ pub mod disk;
 pub mod fallback;
 pub mod fatimage;
 pub mod firmware;
+pub mod goodboot;
 pub mod gpt;
 pub mod json;
 pub mod layout;
 pub mod manifest;
+pub mod mbr;
 pub mod records;
 pub mod security;
 pub mod signing;

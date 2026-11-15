@@ -19,7 +19,7 @@
 //! is unsigned, and the output says so.
 
 use crate::boot_dir;
-use crate::boot_partition::{board_parts, load_board, read_payloads};
+use crate::boot_partition::{board_parts, load_board, overlay_names, read_firmware, read_payloads};
 use ed25519_dalek::{Signer as _, SigningKey};
 use lemnos_driver_system_slots::{TrustedKey, parse_keys, signature_check};
 use lemnos_slot_store::bays::ROLES;
@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 
-const USAGE: &str = "usage: lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE | --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]";
+const USAGE: &str = "usage: lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR [--firmware DIR] --rootfs FILE --verity-table FILE --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE | --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]";
 
 #[derive(Default)]
 struct Options {
@@ -38,6 +38,7 @@ struct Options {
     socs: Option<String>,
     slot: Option<String>,
     payload: Option<String>,
+    firmware: Option<String>,
     rootfs: Option<String>,
     product: Option<String>,
     version: Option<String>,
@@ -64,6 +65,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--socs" => &mut o.socs,
             "--slot" => &mut o.slot,
             "--payload" => &mut o.payload,
+            "--firmware" => &mut o.firmware,
             "--rootfs" => &mut o.rootfs,
             "--product" => &mut o.product,
             "--version" => &mut o.version,
@@ -90,7 +92,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
 
 /// The board's rules for a slot, from its board file: the record's form and bays, the command
 /// line's prefix and sources, the board id and the overlay marker.
-fn rules_of(
+pub(crate) fn rules_of(
     path: &str,
     socs: Option<&str>,
 ) -> Result<(Rules, lemnos_host::board::BoardFile), String> {
@@ -176,7 +178,11 @@ fn write_bundle(o: &Options, out: &mut dyn Write) -> Result<(), String> {
         std::fs::read_to_string(table_path).map_err(|e| format!("{table_path}: {e}"))?;
     let table = lemnos_slot_store::verity::Table::parse(&table_text)
         .map_err(|e| format!("{table_path}: {e}"))?;
-    let payloads = read_payloads(Path::new(payload_dir))?;
+    // The boot files in the boot partition's order: the five roles, then the board's firmware overlays
+    // from `--firmware DIR`, so the installed slot holds exactly the files the bay holds.
+    let roles = read_payloads(Path::new(payload_dir))?;
+    let overlays = read_firmware(o.firmware.as_deref(), &overlay_names(&rules.layout))?;
+    let payloads: Vec<Vec<u8>> = roles.into_iter().chain(overlays).collect();
     let mut rootfs = std::fs::File::open(rootfs_path).map_err(|e| format!("{rootfs_path}: {e}"))?;
     let key_id = key
         .as_ref()
@@ -245,7 +251,7 @@ fn write_bundle(o: &Options, out: &mut dyn Write) -> Result<(), String> {
 }
 
 /// The five boot files as the bundle holds them, in the role layout `boot-partition --payload` takes.
-fn write_payload_out(dir: &str, payloads: &[Vec<u8>; 5]) -> Result<(), String> {
+fn write_payload_out(dir: &str, payloads: &[Vec<u8>]) -> Result<(), String> {
     std::fs::create_dir(dir).map_err(|e| format!("{dir}: {e}"))?;
     for (role, bytes) in ROLES.iter().zip(payloads) {
         let path = Path::new(dir).join(role.role);

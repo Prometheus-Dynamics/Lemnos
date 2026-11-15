@@ -75,6 +75,9 @@
 //! the restart cut short is cleared when the driver starts and reported as interrupted.
 
 mod attempt;
+/// The free space a live install keeps back when the board file names no `reserve_mb`.
+pub const DEFAULT_RESERVE: u64 = 2048 << 20;
+
 #[cfg(test)]
 mod bay_fixture;
 pub mod boot;
@@ -86,13 +89,17 @@ mod boot_writes_audit;
 mod count;
 #[cfg(test)]
 mod count_tests;
+pub mod grow;
 mod install;
+pub mod offline;
 mod resolve;
 pub use lemnos_slot_store::tar;
 pub use lemnos_slot_store::{json, manifest, store};
 pub mod trial;
 pub mod uboot;
 
+#[cfg(test)]
+mod offline_tests;
 #[cfg(test)]
 mod tests;
 
@@ -106,8 +113,8 @@ use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
 use lemnos_core::{
-    BoardView, CallerId, Config, ConfigError, Dev, JobId, JobState, Key, Kind, Lifecycle, Reply,
-    Result, Status, driver,
+    BoardView, CallerId, Config, ConfigError, Dev, Health, JobId, JobState, Key, Kind, Lifecycle,
+    Reply, Result, Retry, Status, driver,
 };
 
 use attempt::{Attempt, Ended};
@@ -115,12 +122,17 @@ use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
 pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
+use lemnos_slot_store::boot_node;
 use lemnos_slot_store::boots;
-use lemnos_slot_store::disk::{self, Table};
+use lemnos_slot_store::disk::Table;
 use lemnos_slot_store::security;
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::Place;
+pub use offline::{
+    FirstSlot, OfflineBoard, check_bay, check_bay_manifest, check_layout, open_boot_image,
+    write_first_slot,
+};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
 use uboot::{Uboot, UbootEnv};
@@ -193,6 +205,14 @@ pub struct SystemSlots {
     firmware: Option<count::Firmware>,
     /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
     demote_after: u8,
+    /// The free bytes the offline writer names in place of the data partition's (see [`offline`]).
+    offline_free: Option<u64>,
+    /// A boot count the firmware refused to clear, retried from the tick until it clears (see
+    /// [`count::Uncleared`]). `health`, `retrying` and `info` say so while it is set.
+    uncleared: Option<count::Uncleared>,
+    /// The data partition's grow to the disk's end, while it has not finished (see [`grow`]).
+    /// `None` when the board's `grow_data` is `false`, or the grow is done.
+    grow: Option<grow::Task>,
 }
 
 /// The slot layout the settings name, and the UBI writer when the layout is on raw NAND.
@@ -217,7 +237,7 @@ fn layout_of(cfg: &Config<'_>) -> (Layout, Option<Arc<dyn UbiWrite>>) {
 /// `boot_sources`; refused by name when it can't be.
 fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
     match boot_table(cfg) {
-        Ok(Some(table)) => resolve_boot_node(&BootRoots::current(), &table),
+        Ok(Some(table)) => boot_node::node_for_table(&table),
         Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
         Err(error) => Err(error.to_string()),
     }
@@ -228,7 +248,7 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
 /// (the GPT form finds its partition there); refused by name when the disk can't be found.
 fn boot_disk_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
     match boot_table(cfg) {
-        Ok(Some(table)) => resolve_boot_disk(&BootRoots::current(), &table),
+        Ok(Some(table)) => boot_node::disk_for_table(&table),
         Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
         Err(error) => Err(error.to_string()),
     }
@@ -250,62 +270,6 @@ fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
         systemctl: PathBuf::from(cfg.str("systemctl").unwrap_or("systemctl")),
         check,
     }
-}
-
-/// Where the boot chain's source and the boot disk are read from: the device tree's `chosen`
-/// node, sysfs and the device nodes. The real paths on the board; a test may stand a tree in.
-#[derive(Debug, Clone)]
-pub struct BootRoots {
-    pub chosen: PathBuf,
-    pub sys: PathBuf,
-    pub dev: PathBuf,
-}
-
-impl BootRoots {
-    /// The board's own paths.
-    pub fn system() -> Self {
-        Self {
-            chosen: PathBuf::from("/proc/device-tree/chosen"),
-            sys: PathBuf::from("/sys"),
-            dev: PathBuf::from("/dev"),
-        }
-    }
-
-    /// The paths the driver reads: the board's, or a test's tree while a test holds one.
-    fn current() -> Self {
-        #[cfg(test)]
-        if let Some(roots) = TEST_ROOTS.lock().ok().and_then(|g| g.clone()) {
-            return roots;
-        }
-        Self::system()
-    }
-}
-
-/// A test's boot roots, held by the test that stands a board tree in (see the tests module).
-#[cfg(test)]
-pub(crate) static TEST_ROOTS: Mutex<Option<BootRoots>> = Mutex::new(None);
-
-/// The boot partition's block node for the boot chain's source: the source is looked up in the
-/// board's table, its one whole disk found under the controller, and that disk's partition 1
-/// returned. Every refusal is named.
-pub fn resolve_boot_node(
-    roots: &BootRoots,
-    table: &Table,
-) -> core::result::Result<PathBuf, String> {
-    let source = disk::boot_source(&roots.chosen)?;
-    let whole = disk::boot_disk(&roots.sys, table, &source)?;
-    disk::boot_partition(&roots.sys, &roots.dev, &whole)
-        .ok_or_else(|| format!("{whole} has no partition 1 (the boot partition)"))
-}
-
-/// The boot disk's whole-disk node for the boot chain's source (see [`resolve_boot_node`]).
-pub fn resolve_boot_disk(
-    roots: &BootRoots,
-    table: &Table,
-) -> core::result::Result<PathBuf, String> {
-    let source = disk::boot_source(&roots.chosen)?;
-    let whole = disk::boot_disk(&roots.sys, table, &source)?;
-    Ok(roots.dev.join(whole))
 }
 
 /// The board's `boot_sources` table, parsed. Required on every board that boots from a disk (every
@@ -473,7 +437,7 @@ impl SystemSlots {
             boot_node: core::result::Result::Err("the board file's boot_sources is not set".into()),
             board_id: String::new(),
             running: None,
-            reserve: 2048 << 20,
+            reserve: DEFAULT_RESERVE,
             keep: DEFAULT_KEEP,
             calling: CallerId::LOCAL,
             install: None,
@@ -501,6 +465,9 @@ impl SystemSlots {
             firmware: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            offline_free: None,
+            uncleared: None,
+            grow: None,
         };
         slots.clear_interrupted();
         // The one thing the board's own record keeps of an install is that a restart cut it short.
@@ -720,6 +687,9 @@ impl SystemSlots {
 
     /// The bytes free where images go: the data partition, or the UBI device.
     fn free(&self) -> std::io::Result<u64> {
+        if let Some(free) = self.offline_free {
+            return Ok(free);
+        }
         match &self.layout.ubi {
             Some(device) => device.free(),
             None => lemnos_linux_sys::statfs::free_bytes(&self.layout.images()),
@@ -731,11 +701,27 @@ impl SystemSlots {
         let free = self.free().map_err(|_| Status::IO)?;
         if free < size.saturating_add(self.reserve) {
             let mut state = self.state();
-            state.error = format!(
-                "no room for this slot: it needs {} MiB with the reserve, the data partition has {} MiB free; remove a slot first",
-                size.saturating_add(self.reserve) >> 20,
-                free >> 20
-            );
+            state.error = match self
+                .grow
+                .as_ref()
+                .filter(|grow| !grow.retry.last.is_empty())
+            {
+                // The grow has failed on record: the partition has not grown, so the room is the
+                // partition's own, and the install needs the slot plus the board's reserve.
+                Some(grow) => format!(
+                    "the data partition has {} MiB free and has not grown ({}; partition 2 is {}); installs need the slot plus the board's reserve of {} MiB",
+                    free >> 20,
+                    grow.retry.last,
+                    grow.partition_mib()
+                        .map_or_else(|| "of unknown size".to_string(), |mib| format!("{mib} MiB")),
+                    self.reserve >> 20
+                ),
+                None => format!(
+                    "no room for this slot: it needs {} MiB with the reserve, the data partition has {} MiB free; remove a slot first",
+                    size.saturating_add(self.reserve) >> 20,
+                    free >> 20
+                ),
+            };
             let _ = self.save(&state);
             return Err(NO_SPACE);
         }
@@ -801,10 +787,17 @@ impl SystemSlots {
         };
         self.next_job += 1;
         let job = JobId(self.next_job);
+        // The boot partition's declared firmware overlays and config digest, read before the bundle
+        // comes: its boot files are checked against them as it is admitted. When they can't be read
+        // (no boot partition there), the admission keeps the role-only set; the write then fails at
+        // the boot partition with the boot partition's own reason.
+        let (firmware, config) = self.record.declared().unwrap_or_default();
         let admit = Admit {
             keys: self.keys.clone(),
             require_signed: security::enforced(),
             board_id: self.board_id.clone(),
+            firmware,
+            config,
         };
         let mut install = Install::start(
             &self.layout,
@@ -1031,6 +1024,17 @@ impl SystemSlots {
             attempt.slot.set(install.slot_id().unwrap_or(""));
         }
         Attempt::json(shown.as_ref(), &self.boot, &mut out);
+        // Appended last: the boot count's words while the firmware refuses to clear it (empty
+        // otherwise). The retry's full text, with its wait.
+        out.push_str(",\"boot_count\":");
+        quoted(
+            &self
+                .uncleared
+                .as_ref()
+                .map(count::Uncleared::text)
+                .unwrap_or_default(),
+            &mut out,
+        );
         out.push('}');
         out
     }
@@ -1282,6 +1286,8 @@ const KEYS: &[Key] = &[
     Key::optional("running", Kind::Str),
     Key::optional("boot_args", Kind::Str),
     Key::optional("require_signed", Kind::Bool),
+    // The offline writer's policy (`lemnos-ctl data-partition`): "required" (the default) or "not-required".
+    Key::optional("signature", Kind::Str),
     Key::optional("reserve_mb", Kind::Int),
     Key::optional("keep", Kind::Int),
     Key::optional("boots_keep", Kind::Int),
@@ -1311,6 +1317,11 @@ const KEYS: &[Key] = &[
     Key::optional("uboot_watchdog_ms", Kind::Int),
     // Listed only so that giving it is refused by name (see `uboot_env_place`).
     Key::optional("uboot_env_partuuid", Kind::Str),
+    // The good-boot deadline in seconds: read by `lemnos-ctl tree --good-boot-unit` (the unit's drop-in) and
+    // checked here, so a bad value is refused at the driver too (see `lemnos_slot_store::goodboot`).
+    Key::optional("good_boot_s", Kind::Int),
+    // Grow the data partition to the disk's end at each start until it is done, on unless `false` (see [`grow`]).
+    Key::optional("grow_data", Kind::Bool),
 ];
 
 /// The settings `SystemReboot` reads. The boot-file check before its restart reads the boot files
@@ -1471,6 +1482,24 @@ impl Lifecycle for SystemSlots {
         self.watch(view);
     }
 
+    /// Down while the firmware refuses to clear the boot count: the words name the wait, and the
+    /// driver keeps retrying (see [`count::Uncleared`]). Degraded, not failed: restarts still work.
+    fn health(&self) -> Health {
+        match &self.uncleared {
+            None => Health::Ok,
+            Some(pending) => Health::Degraded(count::health_text(pending.wait_ns)),
+        }
+    }
+
+    /// The refused clear's attempts so far, when the next one is due, and why it was refused.
+    fn retrying(&self) -> Option<Retry> {
+        self.uncleared.as_ref().map(|pending| Retry {
+            attempts: pending.failed,
+            next_ns: pending.due_ns.unwrap_or(0),
+            reason: count::RETRY_REASON,
+        })
+    }
+
     /// An install from a file reads a piece each tick, at once again while there is more. A trial
     /// that waits is looked at again each second, until it is confirmed or falls back. The
     /// indicator is brought up to date on each tick too.
@@ -1484,7 +1513,12 @@ impl Lifecycle for SystemSlots {
             .map(|_| now_ns);
         let settle = self.settle(now_ns);
         let slow = self.slow_check(now_ns);
-        [install, settle, slow].into_iter().flatten().min()
+        let count = self.count_tick(now_ns);
+        let grow = self.grow_tick(now_ns);
+        [install, settle, slow, count, grow]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
@@ -1504,6 +1538,13 @@ impl Lifecycle for SystemSlots {
                 .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
         }
         boot_table(cfg)?;
+        lemnos_slot_store::goodboot::deadline_from_board(cfg.int(lemnos_slot_store::goodboot::KEY))
+            .map_err(|_| {
+                ConfigError::new(
+                    lemnos_slot_store::goodboot::KEY,
+                    lemnos_slot_store::goodboot::REASON,
+                )
+            })?;
         if cfg.str("record") == Some("uboot") {
             uboot_env_place(cfg)?;
         }
@@ -1586,6 +1627,12 @@ impl Lifecycle for SystemSlots {
             slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
         slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
+        if grow::enabled(cfg.bool("grow_data")) {
+            slots.grow = Some(grow::Task::new(
+                boot_disk_of(cfg),
+                slots.layout.data.clone(),
+            ));
+        }
         slots.record_boot();
         slots.arrive_at_start();
         Ok(slots)
@@ -1903,6 +1950,34 @@ impl Reboot for SystemReboot {
         let state_dir = self.data.join("board/slots");
         boot::note_request(&state_dir, self.calling.0);
         self.restarter.run(None).map_err(|_| Status::IO)
+    }
+}
+
+impl SystemSlots {
+    /// One try of the data partition's grow, when it is due (see [`grow`]). A failed pass is noted
+    /// in words once per reason and tried again after its backoff, never given up; a finished one
+    /// is dropped. It never holds up the driver.
+    fn grow_tick(&mut self, now_ns: u64) -> Option<u64> {
+        let task = self.grow.as_mut()?;
+        if now_ns < task.retry.next_ns {
+            return Some(task.retry.next_ns);
+        }
+        match task.attempt() {
+            Ok(()) => {
+                self.grow = None;
+                None
+            }
+            Err(why) => {
+                let fresh = task.retry.last != why;
+                let next = task.retry.failed(now_ns, &why);
+                if fresh {
+                    self.note(format!(
+                        "the data partition is not grown yet: {why}; it is tried again"
+                    ));
+                }
+                Some(next)
+            }
+        }
     }
 }
 

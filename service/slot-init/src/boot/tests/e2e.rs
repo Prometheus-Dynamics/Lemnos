@@ -82,7 +82,7 @@ fn changed(before: &[u8], after: &[u8]) -> Vec<u64> {
 fn set_lbas(image: &[u8], set: usize) -> (Vec<u64>, [u64; 2]) {
     let layout = test_bays();
     let sets = bay::place_sets(&mut Mem(image.to_vec()), &layout).unwrap();
-    let (files, info) = sets[set];
+    let (files, info) = sets[set].clone();
     let mut out = Vec::new();
     for (i, lba) in files.iter().enumerate() {
         for k in 0..layout.bytes[i] / 512 {
@@ -225,8 +225,8 @@ fn end_to_end_pi_firmware_form_install_trial_confirm_keep_previous_free() {
         !diff.is_empty() && diff.iter().all(|l| info.contains(l)),
         "the removal wrote {diff:?}, not only bay2's record {info:?}"
     );
-    // A, the previous, and B, the default, are refused and untouched.
-    assert!(record.free("os-1").is_err());
+    // B, the default, is refused and untouched. (A, the previous, now falls back to B's bay when it
+    // is removed: M36b, covered by `removing_the_previous_slot_falls_previous_back_to_the_default_bay`.)
     assert!(record.free("os-2").is_err());
     boots(&board, "os-2", "C removed");
     verify(&board, &parts, "C removed");

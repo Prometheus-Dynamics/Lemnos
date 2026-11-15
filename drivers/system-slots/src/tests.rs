@@ -127,7 +127,7 @@ impl BootRecord for Told {
         loader.told.push("clear trial".into());
         Ok(())
     }
-    fn install(&self, slot: &str, _payloads: &[&[u8]; 5]) -> std::io::Result<()> {
+    fn install(&self, slot: &str, _payloads: &[&[u8]]) -> std::io::Result<()> {
         self.0.lock().unwrap().installed.push(slot.to_string());
         Ok(())
     }
@@ -143,7 +143,7 @@ impl BootRecord for Told {
     }
 }
 
-fn key() -> SigningKey {
+pub(crate) fn key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
 }
 
@@ -151,7 +151,8 @@ fn sha(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-const ROOT_HASH: &str = "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
+pub(crate) const ROOT_HASH: &str =
+    "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817";
 
 /// A bundle's parts, to be changed by a test before it is packed.
 struct Bundle {
@@ -174,7 +175,7 @@ struct Bundle {
 }
 
 /// The board the test boards are.
-const BOARD: &str = "slots-test";
+pub(crate) const BOARD: &str = "slots-test";
 
 /// An image of `data_blocks` blocks of data and room for their hash tree after them.
 fn image_of(id: &str, data_blocks: u64) -> Vec<u8> {
@@ -664,6 +665,65 @@ fn a_confirm_on_a_firmware_board_keeps_the_count_when_the_boot_files_cannot_be_r
     let error = board.state().error;
     assert!(error.contains("os-2 is not good yet"), "{error}");
     assert!(error.contains("the count is kept"), "{error}");
+}
+
+/// M36c: a boot count the firmware refuses is retried by the driver's tick, and while it is owed,
+/// `health`, `retrying` and `info` say so in words. The mailbox here is a plain file, so every clear
+/// is refused: the retries go on for ten minutes, the default and the state are untouched.
+#[test]
+fn a_refused_boot_count_is_retried_from_the_tick_and_said_in_health_and_info() {
+    const SECOND: u64 = 1_000_000_000;
+    let mut board = Board::new("os-1");
+    let plain = board.dir.0.join("not-a-mailbox");
+    fs::write(&plain, b"plain").unwrap();
+    board.slots.firmware = Some(crate::count::Firmware {
+        device_tree: board.dir.0.join("device-tree"),
+        vcio: plain,
+    });
+    board.slots.uncleared = Some(crate::count::Uncleared::refused("injected refusal"));
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.ends_with("retrying every 1s")),
+        "{:?}",
+        board.slots.health()
+    );
+    let before = board.state();
+    let mut next = board.slots.tick(0);
+    let mut ticks = 0;
+    while let Some(at) = next {
+        if at > 600 * SECOND || ticks > 5000 {
+            break;
+        }
+        next = board.slots.tick(at);
+        ticks += 1;
+    }
+    assert!(
+        next.is_some(),
+        "a wait is always owed: the retries never stop"
+    );
+    let owed = board.slots.uncleared.clone().expect("still owed");
+    assert!(owed.failed > 60, "about one try every 8 s: {}", owed.failed);
+    assert_eq!(owed.wait_ns, 8 * SECOND);
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.ends_with("retrying every 8s")),
+        "{:?}",
+        board.slots.health()
+    );
+    let retrying = board.slots.retrying().expect("retrying");
+    assert_eq!(retrying.attempts, owed.failed);
+    assert_eq!(retrying.reason, crate::count::RETRY_REASON);
+    let info = board.slots.info_json();
+    assert!(
+        info.contains("\"boot_count\":\"the boot count is not cleared: the firmware mailbox could not clear it: "),
+        "{info}"
+    );
+    assert!(info.contains("retrying every 8s\"}"), "{info}");
+    let state = board.state();
+    assert!(
+        state.error.contains("the boot count is not cleared"),
+        "{}",
+        state.error
+    );
+    assert_eq!((state.state, state.default), (before.state, before.default));
 }
 
 #[test]
@@ -1289,18 +1349,19 @@ struct TestRoots;
 
 impl TestRoots {
     fn set(dir: &Path) -> Self {
-        *crate::TEST_ROOTS.lock().unwrap() = Some(crate::BootRoots {
-            chosen: dir.join("chosen"),
-            sys: dir.join("sys"),
-            dev: dir.join("dev"),
-        });
+        *lemnos_slot_store::boot_node::TEST_ROOTS.lock().unwrap() =
+            Some(lemnos_slot_store::boot_node::BootRoots {
+                chosen: dir.join("chosen"),
+                sys: dir.join("sys"),
+                dev: dir.join("dev"),
+            });
         Self
     }
 }
 
 impl Drop for TestRoots {
     fn drop(&mut self) {
-        *crate::TEST_ROOTS.lock().unwrap() = None;
+        *lemnos_slot_store::boot_node::TEST_ROOTS.lock().unwrap() = None;
     }
 }
 
@@ -1744,6 +1805,28 @@ fn only_a_plain_file_named_by_one_component_installs() {
     );
     assert!(outside.exists());
     assert!(!board.layout().installed("os-2"));
+}
+
+#[test]
+fn a_refused_install_names_the_ungrown_partition_while_the_grow_is_failing() {
+    let mut board = Board::new("os-1");
+    board.slots.reserve = u64::MAX / 2;
+    let data = board.layout().data.clone();
+    let mut task = crate::grow::Task::new(Err("the boot disk is not known".into()), data);
+    task.retry.failed(0, "the boot disk is not known");
+    board.slots.grow = Some(task);
+    assert_eq!(board.slots.accept(1 << 20), Err(crate::install::NO_SPACE));
+    let error = board.state().error;
+    assert!(
+        error
+            .contains("has not grown (the boot disk is not known; partition 2 is of unknown size)"),
+        "{error}"
+    );
+    assert!(
+        error.contains("installs need the slot plus the board's reserve of "),
+        "{error}"
+    );
+    assert!(!error.contains("remove a slot first"), "{error}");
 }
 
 #[test]
@@ -3328,6 +3411,8 @@ fn feed_raw(board: &Board, bytes: &[u8], require: bool) -> (Result<(), (Status, 
         }],
         require_signed: require,
         board_id: BOARD.into(),
+        firmware: Vec::new(),
+        config: None,
     };
     let job = JobId(77);
     let mut install = crate::install::Install::start(
@@ -4080,7 +4165,7 @@ fn a_bundle_made_by_the_writer_installs_on_both_record_forms() {
                     sign: &sign,
                 }),
             },
-            payloads,
+            payloads.to_vec(),
             &mut &whole[..],
         )
         .unwrap();
@@ -4402,7 +4487,7 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
     let mut out = vec![0u8; 4096];
     let len = slots.info(&mut out).unwrap();
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
-    // Appended after `key_ids`, which is after everything `info` said before.
+    // Appended after `key_ids`, which is after everything `info` said before; `boot_count` is last.
     let keys: Vec<&str> = json.members().iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         keys,
@@ -4412,7 +4497,8 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "default_signature",
             "boot_unverified",
             "key_ids",
-            "last_attempt"
+            "last_attempt",
+            "boot_count"
         ]
     );
     let a = json.get("last_attempt").unwrap();
@@ -4836,4 +4922,36 @@ fn a_reason_past_the_bound_is_cut_with_the_marker_and_the_state_keeps_it_whole()
     assert_eq!(&seen.reason[..keep], &whole[..keep]);
     // The slot id is bounded the same way.
     assert!(seen.slot.len() <= crate::attempt::SLOT_MAX);
+}
+
+/// Slot `id`'s bundle, and its five boot payloads in the roles' order: what its boot partition bays
+/// hold for it. The bundle's own boot files are those payloads.
+pub(crate) fn bundle_and_payloads(id: &str) -> (Vec<u8>, [Vec<u8>; 5]) {
+    let bundle = Bundle::new(id);
+    let find = |path: &str| {
+        bundle
+            .boot
+            .iter()
+            .find(|(name, _)| name == path)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let payloads = [
+        find("kernel8.img"),
+        find("initramfs.cpio"),
+        find("board.dtb"),
+        find("cmdline.txt"),
+        find("overlays/lemnos-board.dtbo"),
+    ];
+    (bundle.pack(), payloads)
+}
+
+/// Slot `id`'s bundle signed by a key other than the one it names, which is a trusted key: a
+/// known key with a signature that does not verify under it.
+pub(crate) fn bundle_with_bad_signature(id: &str) -> Vec<u8> {
+    let mut bundle = Bundle::new(id);
+    bundle.signer = SigningKey::from_bytes(&[9; 32]);
+    bundle.named = Some(key());
+    bundle.pack()
 }

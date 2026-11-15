@@ -385,10 +385,34 @@ pub fn next_seq(layout: &Layout) -> io::Result<u64> {
 
 /// Now as `YYYY-MM-DDTHH:MM:SSZ`.
 pub fn now_utc() -> String {
+    if let Some(time) = CLOCK.with(|clock| clock.borrow().clone()) {
+        return time;
+    }
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     utc(secs)
+}
+
+thread_local! {
+    static CLOCK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with [`now_utc`] answering `time` on this thread, and puts the clock back after, even
+/// when `f` panics. The offline writer (`lemnos-ctl data-partition`) runs the daemon's own install,
+/// trial and confirm under one fixed time, so its output does not depend on the host's clock. The
+/// daemon never calls this.
+pub fn with_clock<T>(time: &str, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CLOCK.with(|clock| *clock.borrow_mut() = previous);
+        }
+    }
+    let previous = CLOCK.with(|clock| clock.replace(Some(time.to_string())));
+    let _restore = Restore(previous);
+    f()
 }
 
 /// Seconds since 1970 as `YYYY-MM-DDTHH:MM:SSZ`.

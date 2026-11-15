@@ -65,6 +65,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnos-ctl` (`lemnos-ctl`)     | `lemnos-ctl`      | none                                                          | the same three                                                  |
 | `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
 | `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
+| `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none (the good-boot deadline's waiter, plain `std`) | the same three |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 
@@ -74,6 +75,9 @@ Stripped sizes, from the vendored builds of this table (bytes):
 | `lemnos-ctl`    | 732632       | 714820           | 728928       |
 | `lemnos-orion`  | 775368       | 768908           | 772048       |
 | `lemnos-slot-init` | 491768   | 466144           | 483896       |
+| `lemnos-good-boot` | 391800   | 368780           | 386056       |
+
+`lemnos-good-boot` was measured from a worktree build of this change (`cargo build --locked --profile service --target <triple> -p lemnos-good-boot`), not the vendored tree; it is stripped and statically linked, and `file` reports the right word size and machine for each triple.
 
 `lemnos-slot-init` was measured from a worktree build (`cargo build -p lemnos-slot-init --profile
 service --target <triple>`, the repo's rust-lld config) on the I5c branch, which added the UBI
@@ -131,7 +135,7 @@ lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --paylo
 lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
 ```
 
-The reference board's `--min-size` is 38242816 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
+The reference board's `--min-size` is 38244864 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
 `--payload DIR` (five files named for the roles: `kernel`, `initramfs`, `device-tree`, `cmdline`,
 `board-overlay`, and nothing else: a file of any other name is refused by name, `<dir>: the payload directory holds "x", which this board's boot partition does not store (it stores: kernel, initramfs, device-tree, cmdline, board-overlay): nothing was written`, in `--min-size` and in the image build alike, the same rule the install applies to a slot bundle's `boot.files`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds
 `config.txt`, `tryboot.txt`, `default.txt`, `previous.txt`, `trial.txt` (two sectors each), `trial.rec`,
@@ -143,7 +147,7 @@ image's.
 **Output formats** (the three modes a build script reads):
 
 - `--min-size` prints ONE line: the smallest `--size` in bytes, decimal digits and a newline, nothing
-  else (`38242816`). Read it with `read n` or `int(line)`.
+  else (`38244864`). Read it with `read n` or `int(line)`.
 - `--min-size --payload DIR` prints that same line FIRST, then five lines `role stored_bytes bay_bytes`
   (three fields separated by one space; roles in the order `kernel`, `initramfs`, `device-tree`,
   `cmdline`, `board-overlay`; `stored_bytes` is the payload file's size, `bay_bytes` the board's bay).

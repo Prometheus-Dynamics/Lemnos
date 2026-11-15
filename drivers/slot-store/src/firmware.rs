@@ -81,6 +81,58 @@ pub const fn pick(count: u8) -> Pick {
     }
 }
 
+/// The restarts since the last good boot, from the firmware's count (`chosen/bootloader/count`, the
+/// restarts since power loss, which no Lemnos boot clears) and the baseline record (M36b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Since {
+    /// No baseline is kept (a first flash, or a first boot): this count is the baseline, and no
+    /// restart has been counted yet.
+    First(u32),
+    /// The count is below the baseline: a power loss reset it. The baseline is zero and the count
+    /// is the restarts since the loss.
+    PowerLoss(u32),
+    /// The restarts since the kept baseline.
+    Counted {
+        /// The restarts: the count less the baseline.
+        restarts: u32,
+        /// The baseline the restarts are counted from.
+        baseline: u32,
+    },
+}
+
+impl Since {
+    /// The restarts counted since the last good boot (zero for a first boot).
+    pub const fn restarts(self) -> u32 {
+        match self {
+            Since::First(_) => 0,
+            Since::PowerLoss(count) => count,
+            Since::Counted { restarts, .. } => restarts,
+        }
+    }
+
+    /// The baseline the record must hold after this boot.
+    pub const fn baseline(self) -> u32 {
+        match self {
+            Since::First(count) => count,
+            Since::PowerLoss(_) => 0,
+            Since::Counted { baseline, .. } => baseline,
+        }
+    }
+}
+
+/// The restarts since the last good boot. Acts only on the baseline, never on the raw count alone:
+/// a count of 50 on a board flashed today with no baseline is a first boot, not 50 restarts.
+pub const fn since_good(count: u32, baseline: Option<u32>) -> Since {
+    match baseline {
+        None => Since::First(count),
+        Some(base) if count < base => Since::PowerLoss(count),
+        Some(base) => Since::Counted {
+            restarts: count - base,
+            baseline: base,
+        },
+    }
+}
+
 /// The line that carries the checksum of the pointer line above it: `#lemnos-crc32=` and eight hex
 /// digits, then a newline. It is a comment to the firmware.
 const CHECK_PREFIX: &str = "#lemnos-crc32=";
