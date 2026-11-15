@@ -176,7 +176,8 @@ bound through it. Nothing else is trusted:
 | dm-verity | `verity.root_hash`, `salt`, `data_blocks`, `hash_offset` | the image size is the data plus its tree; the root hash goes in the command line |
 | each boot file | `boot.files`: path to SHA-256 | the file's SHA-256 (so its length too) at `finish`; a file the manifest does not list is refused at its header, before its bytes are written |
 | a listed member | `boot.files`, `image` | a listed member the bundle lacks is refused at `finish`, before the slot is put in place |
-| the set of boot files | `boot.files` | exactly the five role files the boot partition stores (`kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`), on every form: an entry that is not one of them, or a role file the list leaves out, is refused by name at the decision, before the first payload byte (see "Manifest and members") |
+| the set of boot files | `boot.files` | exactly the board's declared set: the five role files the boot partition stores (`kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`) and each firmware overlay the board's `[boot] firmware_overlays` names, on every form; an entry outside that set, or a declared file the list leaves out, is refused by name at the decision, before the first payload byte (see "Manifest and members") |
+| the firmware config lines | `boot.config` (SHA-256 of the board's `[boot] config_lines`, absent for a board with none) | equal to the boot partition's digest, or refused by name with both digests, before the first payload byte (see "Firmware overlays and config lines") |
 | the kernel command line | `boot/cmdline.txt` (a listed file, so digested), `verity.root_hash`, `id`, the board's `boot_args` and PARTUUID | built only from those; no member outside the list reaches it |
 
 No member is installed unsigned: with the security switch off, an unsigned bundle installs as
@@ -204,6 +205,37 @@ written, the default keeps booting`. A role file the list leaves out is refused 
 `overlays/README` itself; a bundle does not carry it. One function, `lemnos_slot_store::bays::refuse_unstored`,
 holds the rule; the check at boot names a listed file no bay stores as `not stored` when it meets one
 (a slot installed before the rule).
+
+### Firmware overlays and config lines
+
+A board may declare two more things the firmware needs ([Boards](boards.md), `[boot]`): `firmware_overlays`,
+overlay names each of which is a **bay member** in every bay set (`overlays/<name>.dtbo`, the size of the
+board overlay's bay), and `config_lines`, verbatim config.txt lines written inside `[all]`. A board with
+neither is written exactly as before: no firmware list file, no `boot.config`, five members.
+
+- **Members.** The boot partition's declared set is the five roles, then the overlays in the board's order.
+  Each overlay is hashed in the set's record (`bayinfo.rec` holds the names, lengths and hashes after the
+  roles, behind a count byte; a five-role record is read as before). `bays::compare_hashes` checks them on a
+  reinstall, a bundle's overlay is refused by name when its bay holds another build, and the every-boot
+  check and `boot_view` read each overlay from the bay. A record member the manifest does not list is a
+  mismatch (`is stored in the bay but not listed in boot.files`).
+- **The list at the root.** A board that declares either key has a root file `firmware-overlays.txt`: a
+  `config <sha256>` line when it declares config lines, then one `overlay <name>` line per overlay. The
+  boot partition's own code (`bays::discover`) reads it, so the U-Boot form and the Pi form, and every
+  reader of the bays, see the same declared set and digest. The image's `--verify` checks it as a root file.
+- **Config lines are fixed at flash.** The lines are in the root `config.txt` and `tryboot.txt`, so every
+  slot on the partition boots with the same lines. The bundle records their digest in `boot.config`, and
+  the install compares it with the partition's: a bundle whose lines differ is refused with both digests
+  named (`the bundle's firmware config lines are sha256 … and the boot partition's are … : the boot
+  partition's lines are fixed at flash`), before the first payload byte. A slot that needs other lines needs
+  a new boot partition. (A pointer-file design, with the lines in each pointer, was checked and not used:
+  the firmware's documentation says bootloader-read settings take effect only in `config.txt` itself, not in
+  an included file, and the pointer sector's parser refuses any line but `os_prefix` and its checksum.)
+- **Checked at build, by name.** A `dtoverlay=NAME[,params]` line in `config_lines` whose NAME is not in
+  `firmware_overlays` is refused, and so is a listed overlay that no `dtoverlay=` line loads. A config line
+  that is not one line is refused. A missing `<name>.dtbo` in the `--firmware DIR` is refused by name.
+- **Where the files come from.** `lemnos-ctl boot-partition --firmware DIR` and `lemnos-ctl bundle --firmware
+  DIR` read `DIR/<name>.dtbo` for each declared overlay, so the bay and the bundle hold the same bytes.
 
 ### The manifest, schema 3
 
