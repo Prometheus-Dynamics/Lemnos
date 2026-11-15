@@ -947,3 +947,167 @@ fn security_takes_exactly_one_of_record_and_boot_image_and_a_missing_record_read
         .unwrap_or_default();
     assert!(rendered.contains("on"), "the view renders on: {rendered}");
 }
+
+/// The first sector of the switch record's two copies in the boot image `image`.
+fn secure_copies(image: &str) -> u64 {
+    let mut file = std::fs::File::open(image).unwrap();
+    let name = lemnos_slot_store::twocopy::Kind::SECURITY
+        .file_name()
+        .unwrap();
+    lemnos_slot_store::bootfat::locate(&mut file, name, lemnos_slot_store::boot_raw::RECORD_BYTES)
+        .unwrap()
+        .first_lba
+}
+
+/// Flips byte `at` of sector `lba` in `image`: a damage that breaks that copy's CRC.
+fn damage(image: &str, lba: u64, at: usize) {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .unwrap();
+    let offset = lba * 512 + at as u64;
+    let mut one = [0u8; 1];
+    file.read_exact_at(&mut one, offset).unwrap();
+    file.write_all_at(&[one[0] ^ 0xFF], offset).unwrap();
+}
+
+/// `data-partition --verify` of the tree `out`, against the boot image `image`.
+fn verify_against(slot: &Slot, out: &Path, image: &str) -> (Result<(), String>, String) {
+    let socs = socs();
+    run(&[
+        "data-partition",
+        "--verify",
+        out.to_str().unwrap(),
+        "--layout-of",
+        &slot.board,
+        "--socs",
+        &socs,
+        "--boot-image",
+        image,
+    ])
+}
+
+#[test]
+fn verify_refuses_a_boot_image_without_secure_rec_and_names_the_builder_fix() {
+    let slot = slot_in("secure-missing");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+
+    // The same image with its SECURE.REC directory entry renamed: the volume is valid, the record is gone.
+    let bare = slot.dir.join("no-secure.img").display().to_string();
+    std::fs::copy(&slot.image, &bare).unwrap();
+    let name = lemnos_slot_store::twocopy::Kind::SECURITY
+        .file_name()
+        .unwrap();
+    let mut bytes = std::fs::read(&bare).unwrap();
+    let hits: Vec<usize> = bytes
+        .windows(name.len())
+        .enumerate()
+        .filter(|(_, w)| *w == name)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(hits.len(), 1, "one directory entry names SECURE.REC");
+    bytes[hits[0]] = b'X';
+    std::fs::write(&bare, &bytes).unwrap();
+
+    let (r, report) = verify_against(&slot, &out, &bare);
+    let why = r.unwrap_err();
+    assert!(why.contains("check(s) failed"), "{why}");
+    assert!(
+        report.contains(
+            "BAD the boot image has no SECURE.REC: the image builder must pre-create it, off, as a new image has it \
+             (`security set --boot-image` only rewrites an existing SECURE.REC and cannot create one); \
+             without it the switch reads as on"
+        ),
+        "{report}"
+    );
+    assert!(report.contains("refused: 1"), "{report}");
+
+    // `security set` does not create the record: it is refused, as the sentence above says.
+    let (r, _) = run(&["security", "set", "--boot-image", &bare, "off"]);
+    assert!(
+        r.is_err(),
+        "security set cannot create a missing SECURE.REC"
+    );
+}
+
+#[test]
+fn verify_accepts_a_good_off_and_a_good_on_record_with_both_copies_good() {
+    let slot = slot_in("secure-good");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+
+    let (r, report) = verify_against(&slot, &out, &slot.image);
+    r.unwrap_or_else(|e| panic!("{e}\n{report}"));
+    assert!(
+        report.contains(
+            "the boot image's SECURE.REC has both copies good and reads off at generation 1"
+        ),
+        "{report}"
+    );
+    assert_eq!(report.lines().last(), Some("ok"), "{report}");
+
+    let (r, out_set) = run(&["security", "set", "--boot-image", &slot.image, "on"]);
+    r.unwrap_or_else(|e| panic!("{e}\n{out_set}"));
+    let (r, report) = verify_against(&slot, &out, &slot.image);
+    r.unwrap_or_else(|e| panic!("{e}\n{report}"));
+    assert!(
+        report.contains(
+            "the boot image's SECURE.REC has both copies good and reads on at generation 2"
+        ),
+        "{report}"
+    );
+    assert_eq!(report.lines().last(), Some("ok"), "{report}");
+}
+
+/// A fresh image with its record damaged at byte 9 of the copies named by `which` (`0` first, `1` second,
+/// `2` both), verified: the refusal text, and the report.
+fn verify_with_copies_damaged(name: &str, which: &[u64]) -> (Result<(), String>, String) {
+    let slot = slot_in(name);
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let copies = secure_copies(&slot.image);
+    for copy in which {
+        damage(&slot.image, copies + copy, 9);
+    }
+    let (r, report) = verify_against(&slot, &out, &slot.image);
+    (r, report)
+}
+
+const FIRST_DAMAGED: &str = "BAD the boot image's SECURE.REC first copy is damaged: the CRC does not match the copy; the image check needs both copies good: rebuild the boot image";
+const SECOND_DAMAGED: &str = "BAD the boot image's SECURE.REC second copy is damaged: the CRC does not match the copy; the image check needs both copies good: rebuild the boot image";
+
+#[test]
+fn verify_refuses_a_first_copy_damaged_and_names_it() {
+    let (r, report) = verify_with_copies_damaged("secure-first", &[0]);
+    let why = r.unwrap_err();
+    assert!(why.contains("check(s) failed"), "{why}");
+    assert!(report.contains(FIRST_DAMAGED), "{report}");
+    assert!(!report.contains("second copy is damaged"), "{report}");
+    assert!(report.contains("refused: 1"), "{report}");
+}
+
+#[test]
+fn verify_refuses_a_second_copy_damaged_and_names_it() {
+    let (r, report) = verify_with_copies_damaged("secure-second", &[1]);
+    let why = r.unwrap_err();
+    assert!(why.contains("check(s) failed"), "{why}");
+    assert!(report.contains(SECOND_DAMAGED), "{report}");
+    assert!(!report.contains("first copy is damaged"), "{report}");
+    assert!(report.contains("refused: 1"), "{report}");
+}
+
+#[test]
+fn verify_refuses_both_copies_damaged_and_names_each() {
+    let (r, report) = verify_with_copies_damaged("secure-both", &[0, 1]);
+    let why = r.unwrap_err();
+    assert!(why.contains("check(s) failed"), "{why}");
+    assert!(report.contains(FIRST_DAMAGED), "{report}");
+    assert!(report.contains(SECOND_DAMAGED), "{report}");
+    assert!(report.contains("refused: 2"), "{report}");
+}

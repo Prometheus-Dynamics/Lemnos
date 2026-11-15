@@ -175,12 +175,24 @@ pub fn encode(kind: Kind, seq: u64, payload: &[u8], out: &mut Sector) -> Result<
 /// Decodes a sector as a copy. `None` when it is not a copy: wrong magic or version, a length past
 /// the payload's room, non-zero reserved bytes, or a CRC that does not match.
 pub fn decode(sector: &Sector) -> Option<Copy<'_>> {
-    if &sector[0..4] != MAGIC || sector[4] != VERSION || sector[6] != 0 || sector[7] != 0 {
-        return None;
+    check(sector).ok()
+}
+
+/// As [`decode`], but a sector that is not a valid copy says which check it failed: the magic, the
+/// version, the reserved bytes, the length, or the CRC.
+pub fn check(sector: &Sector) -> Result<Copy<'_>, &'static str> {
+    if &sector[0..4] != MAGIC {
+        return Err("the magic is not the record's");
+    }
+    if sector[4] != VERSION {
+        return Err("the version is not this record's");
+    }
+    if sector[6] != 0 || sector[7] != 0 {
+        return Err("the reserved bytes are not zero");
     }
     let len = usize::from(u16::from_le_bytes([sector[16], sector[17]]));
     if len > MAX_PAYLOAD {
-        return None;
+        return Err("the payload length is past the copy's room");
     }
     let crc = u32::from_le_bytes([
         sector[CRC_AT],
@@ -189,11 +201,11 @@ pub fn decode(sector: &Sector) -> Option<Copy<'_>> {
         sector[CRC_AT + 3],
     ]);
     if crc32(&sector[..CRC_AT]) != crc {
-        return None;
+        return Err("the CRC does not match the copy");
     }
     let mut seq = [0u8; 8];
     seq.copy_from_slice(&sector[8..16]);
-    Some(Copy {
+    Ok(Copy {
         kind: Kind(sector[5]),
         seq: u64::from_le_bytes(seq),
         payload: &sector[HEADER..HEADER + len],

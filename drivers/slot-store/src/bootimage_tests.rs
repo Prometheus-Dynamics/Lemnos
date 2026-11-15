@@ -368,6 +368,146 @@ fn a_torn_copy_of_the_switch_record_is_recovered_from_the_other_copy() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The first sector of the switch record's two copies on the node `node`.
+fn switch_copies(node: &std::path::Path) -> u64 {
+    let mut file = std::fs::File::open(node).unwrap();
+    let name = crate::twocopy::Kind::SECURITY.file_name().unwrap();
+    crate::bootfat::locate(&mut file, name, crate::boot_raw::RECORD_BYTES)
+        .unwrap()
+        .first_lba
+}
+
+/// Byte `at` of sector `lba` on `node`, and its value after `set`.
+fn byte(node: &std::path::Path, lba: u64, at: usize) -> u8 {
+    use std::os::unix::fs::FileExt;
+    let mut one = [0u8; 1];
+    std::fs::File::open(node)
+        .unwrap()
+        .read_exact_at(&mut one, lba * 512 + at as u64)
+        .unwrap();
+    one[0]
+}
+
+fn set(node: &std::path::Path, lba: u64, at: usize, value: u8) {
+    use std::os::unix::fs::FileExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(node)
+        .unwrap()
+        .write_all_at(&[value], lba * 512 + at as u64)
+        .unwrap();
+}
+
+#[test]
+fn a_good_switch_record_checks_off_then_on() {
+    use crate::security::{BootSwitch, Store};
+    let (dir, node) = switch_image("check-good");
+    let switch = BootSwitch::new(&node);
+    let fresh = switch.check().expect("a fresh image's record reads");
+    // The builder pre-creates both copies as off, at sequences 0 and 1: the newer one is read.
+    assert!(!fresh.on && fresh.generation == 1, "good off: {fresh:?}");
+    switch.write(true).unwrap();
+    let on = switch.check().expect("a set record reads");
+    assert!(on.on, "good on: {on:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_missing_switch_record_is_missing_on_a_valid_volume() {
+    use crate::security::{BootSwitch, RecordFault};
+    let (dir, node) = switch_image("check-missing");
+    // Rename the record's directory entry: the volume is still a valid FAT, with no SECURE.REC.
+    let name = crate::twocopy::Kind::SECURITY.file_name().unwrap();
+    let mut image = std::fs::read(&node).unwrap();
+    let hits: Vec<usize> = image
+        .windows(name.len())
+        .enumerate()
+        .filter(|(_, w)| *w == name)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(hits.len(), 1, "one directory entry names the record");
+    image[hits[0]] = b'X';
+    std::fs::write(&node, &image).unwrap();
+    assert_eq!(BootSwitch::new(&node).check(), Err(RecordFault::Missing));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn each_switch_record_copy_is_checked_alone_and_names_its_fault() {
+    use crate::security::{BootSwitch, Store};
+    let (dir, node) = switch_image("check-copies");
+    let switch = BootSwitch::new(&node);
+    switch.write(true).unwrap();
+    let lba = switch_copies(&node);
+    let copies = switch.copies().unwrap();
+    assert_eq!(copies, [Ok(()), Ok(())], "both copies good on a new image");
+    let before = byte(&node, lba, 9);
+    set(&node, lba, 9, before ^ 0xFF);
+    let copies = switch.copies().unwrap();
+    assert!(
+        copies[0].as_ref().unwrap_err().contains("CRC"),
+        "the first copy names the CRC: {copies:?}"
+    );
+    assert_eq!(copies[1], Ok(()), "the second copy is still good");
+    assert!(
+        switch.check().is_ok(),
+        "the device still reads one good copy"
+    );
+    set(&node, lba, 9, before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn one_damaged_switch_record_copy_reads_from_the_other() {
+    use crate::security::{BootSwitch, Store};
+    let (dir, node) = switch_image("check-one");
+    let switch = BootSwitch::new(&node);
+    switch.write(true).unwrap();
+    switch.write(false).unwrap();
+    let lba = switch_copies(&node);
+    // Both copies are valid now. Every byte of each copy is tried: a change anywhere breaks that
+    // copy's magic, length or CRC, and the other copy reads.
+    for copy in 0..2u64 {
+        for at in 0..512 {
+            let before = byte(&node, lba + copy, at);
+            set(&node, lba + copy, at, before ^ 0xFF);
+            assert!(
+                switch.check().is_ok(),
+                "copy {copy} byte {at} damaged: the other copy still reads"
+            );
+            set(&node, lba + copy, at, before);
+        }
+    }
+    assert!(switch.check().is_ok());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn both_damaged_switch_record_copies_are_refused_naming_the_check() {
+    use crate::security::{BootSwitch, RecordFault, Store};
+    let (dir, node) = switch_image("check-both");
+    let switch = BootSwitch::new(&node);
+    switch.write(true).unwrap();
+    switch.write(false).unwrap();
+    let lba = switch_copies(&node);
+    for at in 0..512 {
+        let (before0, before1) = (byte(&node, lba, at), byte(&node, lba + 1, at));
+        set(&node, lba, at, before0 ^ 0xFF);
+        set(&node, lba + 1, at, before1 ^ 0xFF);
+        match switch.check() {
+            Err(RecordFault::Damaged(why)) => assert!(
+                why.contains("neither copy is valid"),
+                "byte {at}: the check that failed is named: {why}"
+            ),
+            other => panic!("byte {at}: both copies damaged must be refused, got {other:?}"),
+        }
+        set(&node, lba, at, before0);
+        set(&node, lba + 1, at, before1);
+    }
+    assert!(switch.check().is_ok(), "restored copies read again");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_node_without_the_switch_record_is_an_error_not_off() {
     use crate::security::{BootSwitch, Store};

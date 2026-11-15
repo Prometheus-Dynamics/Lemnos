@@ -555,7 +555,8 @@ rendered; if the render fails the view is `pending`, the record stands, and each
 the render. The daemon renders the view from the record again at start.
 
 **On a slot board the truth is the boot partition's `SECURE.REC`**: the same two-copy record, in the
-boot partition's file of that name, which the image builder pre-creates as off, at generation 0. The
+boot partition's file of that name, which the image builder pre-creates as off (two copies, at sequences 0 and 1, so a new image reads off at
+generation 1). The
 security device takes it when its own `record` is `"boot"` (the board's `[security] record` is
 `"boot"` too, which the host gives it). The device finds the boot partition's node the way the slots
 device does, from its own `boot_sources` config. A node that cannot be found, or an image without
@@ -867,6 +868,21 @@ copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree
 - **`--verify` shows it.** With `--layout-of`, `--verify` prints the reserve the board will keep for
   live installs: `the board keeps N MiB free for live installs (its reserve_mb); the offline writer
   applies none`.
+- **`--verify --boot-image` checks `SECURE.REC` (M36f).** A freshly built image must have both copies of its
+  switch record good. The check is stricter than the device on purpose: the device reads one surviving copy,
+  the image check refuses a copy that is damaged. It prints `ok the boot image's SECURE.REC has both copies
+  good and reads off at generation N` (or `on`) and refuses by name:
+  - **Missing:** `BAD the boot image has no SECURE.REC: the image builder must pre-create it, off, as a new
+    image has it (`security set --boot-image` only rewrites an existing SECURE.REC and cannot create one);
+    without it the switch reads as on`. The image builder pre-creates it; `security set` does not.
+  - **A copy damaged:** one line per bad copy, naming it `first` or `second` and the check that failed, e.g.
+    `BAD the boot image's SECURE.REC first copy is damaged: the CRC does not match the copy; the image check
+    needs both copies good: rebuild the boot image`. The checks are the magic, the version, the reserved
+    bytes, the payload length, the CRC, the record kind, and the value (`on` or `off`).
+  - **Both damaged:** both lines appear and the verify refuses with `refused: 2`.
+  - **Runtime, unchanged:** the device reads a record with one valid copy (`security render`, the daemon).
+    Two valid copies that disagree at one sequence are refused as `record copies disagree at the same sequence`.
+  Without `--boot-image` the verify does not look at the record.
 
 ## Actions
 

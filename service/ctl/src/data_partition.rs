@@ -404,6 +404,7 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
             offline::check_bay_manifest(&mut boot, &id, &manifest.boot_files)
         })();
         r.check(check, &format!("the boot image's bay holds slot {id}"));
+        verify_switch_record(image, &mut r);
     }
     for line in &r.lines {
         writeln!(out, "{line}").map_err(|e| e.to_string())?;
@@ -413,6 +414,61 @@ fn verify(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     } else {
         writeln!(out, "refused: {}", r.bad).map_err(|e| e.to_string())?;
         Err(format!("{}: {} check(s) failed", dir.display(), r.bad))
+    }
+}
+
+/// The boot image's `SECURE.REC`, for a freshly built image: both copies must be good. A missing record
+/// is refused, and so is a copy that is damaged, each named by its copy (first or second) and the check
+/// that failed. The device's own reading (one surviving copy is enough) is unchanged: this check is
+/// stricter on purpose.
+fn verify_switch_record(image: &str, r: &mut Report) {
+    use lemnos_slot_store::security::{BootSwitch, RecordFault};
+    let switch = BootSwitch::new(image);
+    let copies = match switch.copies() {
+        Ok(copies) => copies,
+        Err(RecordFault::Missing) => {
+            r.bad(
+                "the boot image has no SECURE.REC: the image builder must pre-create it, off, as a new image has it \
+                 (`security set --boot-image` only rewrites an existing SECURE.REC and cannot create one); \
+                 without it the switch reads as on"
+                    .to_string(),
+            );
+            return;
+        }
+        Err(RecordFault::Damaged(why)) => {
+            r.bad(format!(
+                "the boot image's SECURE.REC is damaged: {why}; the switch would read as on: rebuild the boot image"
+            ));
+            return;
+        }
+    };
+    let mut good = true;
+    for (copy, which) in copies.iter().zip(["first", "second"]) {
+        if let Err(why) = copy {
+            good = false;
+            r.bad(format!(
+                "the boot image's SECURE.REC {which} copy is damaged: {why}; the image check needs both copies good: rebuild the boot image"
+            ));
+        }
+    }
+    if !good {
+        return;
+    }
+    match switch.check() {
+        Ok(switch) => r.ok(format!(
+            "the boot image's SECURE.REC has both copies good and reads {} at generation {}",
+            if switch.on { "on" } else { "off" },
+            switch.generation
+        )),
+        Err(RecordFault::Missing) => r.bad(
+            "the boot image has no SECURE.REC: the image builder must pre-create it, off, as a new image has it \
+             (`security set --boot-image` only rewrites an existing SECURE.REC and cannot create one); \
+             without it the switch reads as on"
+                .to_string(),
+        ),
+        Err(RecordFault::Damaged(why)) => r.bad(format!(
+            "the boot image's SECURE.REC is damaged: {why}; the switch would read as on: rebuild the boot image"
+        )),
     }
 }
 
