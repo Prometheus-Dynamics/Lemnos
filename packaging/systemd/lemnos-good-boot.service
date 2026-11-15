@@ -27,7 +27,6 @@ TimeoutStartSec=300
 DynamicUser=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
-AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
