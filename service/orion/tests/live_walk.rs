@@ -36,6 +36,9 @@ use orion_stubs::Board;
 use tokio::sync::oneshot;
 
 const WAIT: Duration = Duration::from_secs(20);
+/// lemnosd's NO_DEVICE status: the device is not running. The bridge answers a run it refuses with it as
+/// `Rejected`, with this as the code (`ending_of_status`).
+const NO_DEVICE_CODE: u32 = 19;
 /// How long a power-on's changes must stay quiet, and the device must hold its state, before the
 /// test reads the generation: longer than a missed bind's first retry (one second).
 const SETTLE: Duration = Duration::from_millis(2500);
@@ -191,15 +194,18 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
             })
             .expect("run");
         match run.finish(WAIT) {
-            Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
+            Err(ClientError::Refused {
+                error: Refusal::NotFound,
+                ..
+            }) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
             // The device is not running (-19): it was refused before the call ran, so it is asked
             // again once it runs, within the same bound. A bind that misses its deadline under
             // load leaves it retrying for a moment.
             Ok(done)
-                if done.outcome == Outcome::Failed
-                    && done.detail.contains("refused (-19)")
+                if done.outcome == Outcome::Rejected
+                    && done.code == NO_DEVICE_CODE
                     && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(20));

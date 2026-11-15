@@ -435,8 +435,10 @@ fn a_name_the_bridge_refuses_makes_no_file_and_a_missing_file_fails_the_run() {
     let sent = s.push(".hidden", b"x");
     assert_eq!(sent.state, FileState::Rejected);
     assert!(entries(&s.incoming()).is_empty());
-    // A run for a file that isn't there ends as the driver says.
+    // A run for a file that isn't there is refused by the driver with NOT_FOUND (-2): refused without
+    // a run, so it ends `Rejected`, with lemnosd's status as the code.
     let mut run = s.start("install_file nothing.tar false false");
     let finished = run.finish(WAIT).expect("finished");
-    assert_eq!(finished.outcome, Outcome::Failed, "{}", finished.detail);
+    assert_eq!(finished.outcome, Outcome::Rejected, "{}", finished.detail);
+    assert_eq!(finished.code, 2, "{finished:?}");
 }

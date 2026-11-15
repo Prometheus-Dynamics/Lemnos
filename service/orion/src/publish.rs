@@ -35,9 +35,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use orion::actions::{ActionDecl, Admits, Outcome, Policy, Registration, Request, Target};
+use orion::actions::{ActionDecl, Admits, Policy, Registration, Request, Target};
 use orion::provider::{Provider, Resource, ResourceState};
-use orion::topics::{Field, FieldId, FieldType, Publisher, SampleTime, TopicDecl, TopicError};
+use orion::topics::{
+    Field, FieldId, FieldType, OnSubscribe, Publisher, SampleTime, TopicDecl, TopicError,
+};
 use orion::types::Error as Refusal;
 use orion::{ClientError, Error, Options, Orion, Roles};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -45,7 +47,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use lemnos_client::{DeviceHealth, DeviceState};
 
 use crate::backoff::Backoff;
-use crate::calls::{Done, Job, Message, Progress, Verb};
+use crate::calls::{Done, Ending, Job, Message, Progress, Verb};
 use crate::config::Config;
 use crate::hello;
 use crate::mirror::{Changes, DeviceSpec, Status, health_name, state_name};
@@ -140,6 +142,24 @@ pub const FACT: Class = Class {
 };
 /// Every topic the bridge publishes, and how it is classified.
 pub const CLASSES: [Class; 5] = [VALUES, STATUS, DESCRIPTION, DEVICE_SET, FACT];
+
+/// What a late subscriber gets, by the kind of topic: a state topic (a device's current state,
+/// config, presence) gives its last value, so a subscriber that arrives later is correct at once;
+/// an event or stream topic does not replay, and a subscriber gets what is published from then on.
+/// This is the one rule; every declaration takes its mode from it.
+pub const fn on_subscribe_for(kind: Kind) -> OnSubscribe {
+    match kind {
+        Kind::State => OnSubscribe::Latest,
+        Kind::Event => OnSubscribe::FromNow,
+    }
+}
+
+impl Class {
+    /// The mode this class's topics are declared with ([`on_subscribe_for`]).
+    pub const fn on_subscribe(&self) -> OnSubscribe {
+        on_subscribe_for(self.kind)
+    }
+}
 
 /// A generation counter's one field.
 const GENERATION_FIELDS: [Field<'static>; 1] = [Field {
@@ -400,6 +420,7 @@ impl Session {
                 history: DEVICE_SET.history,
                 expiry_ms: DEVICE_SET.expiry_ms,
                 max_payload: 8,
+                on_subscribe: DEVICE_SET.on_subscribe(),
             })
             .map_err(|error| {
                 opening(
@@ -540,9 +561,10 @@ impl Session {
                 continue;
             }
             if let Some(requests) = self.requests() {
-                requests.finish(
+                finish_run(
+                    requests,
                     finished.call,
-                    finished.outcome,
+                    finished.ending,
                     finished.output.as_bytes(),
                     &finished.detail,
                 )?;
@@ -555,39 +577,49 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args, caller) = match request {
+            let (call, name, target, args, caller, token) = match request {
                 Request::Run {
                     call,
                     name,
                     target,
                     args,
                     caller,
+                    session,
                     ..
-                } => (call, name, target, args, caller),
+                } => (call, name, target, args, caller, session),
+                // The session with this token ended: whatever its callers hold is released
+                // (see `calls::caller_gone`).
+                Request::CallerGone { session } => {
+                    let _ = jobs.send(Message::CallerGone { token: session });
+                    continue;
+                }
                 // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
                 // the call does.
-                // ORION-R2: `Request::Cancel` gains the reason Orion's Cancel carries; it is passed
-                // into `Message::Cancel` (calls.rs), which closes a caller's connection only for
-                // reason 2 (the caller's session ended).
-                Request::Cancel { call } => {
+                // The cancel's reason is passed on to calls.rs, which logs it. It releases nothing: a
+                // session's end comes as `CallerGone`.
+                Request::Cancel { call, reason } => {
                     if self.pending.contains(&call) {
                         let _ = jobs.send(Message::Cancel {
                             session: self.number,
                             call,
+                            reason: reason.code(),
                         });
                     }
                     continue;
                 }
             };
-            let job = self.job(call, &name, &target, args, caller);
+            let job = self
+                .job(call, &name, &target, args, caller)
+                .map(|job| Job { token, ..job });
             match job {
                 Ok(job) => {
                     if jobs.send(Message::Run(job)).is_ok() {
                         self.pending.insert(call);
                     } else if let Some(requests) = self.requests() {
-                        requests.finish(
+                        finish_run(
+                            requests,
                             call,
-                            Outcome::Failed,
+                            Ending::FAILED,
                             &[],
                             "the call thread has stopped",
                         )?;
@@ -595,7 +627,7 @@ impl Session {
                 }
                 Err(why) => {
                     if let Some(requests) = self.requests() {
-                        requests.finish(call, Outcome::Rejected, &[], &why)?;
+                        finish_run(requests, call, Ending::REJECTED, &[], &why)?;
                     }
                 }
             }
@@ -635,6 +667,7 @@ impl Session {
         let args = String::from_utf8(args).map_err(|_| "the arguments are not text".to_owned())?;
         Ok(Job {
             session: self.number,
+            token: 0,
             call,
             device: device_name(device),
             verb,
@@ -883,6 +916,7 @@ fn declare_fact(
         history: FACT.history,
         expiry_ms: FACT.expiry_ms,
         max_payload: hello::MAX_VALUE_BYTES as u32,
+        on_subscribe: FACT.on_subscribe(),
     };
     match orion.declare(&decl) {
         Ok(mut publisher) => {
@@ -989,13 +1023,27 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
 }
 
 /// Whether Orion refused a session's declaration or registration because the name is held.
+/// Ends a run with the bridge's ending: Orion's outcome, and the status code a caller branches on.
+fn finish_run(
+    requests: &mut Registration,
+    call: u64,
+    ending: Ending,
+    output: &[u8],
+    detail: &str,
+) -> Result<(), ClientError> {
+    requests.finish_with_code(call, ending.outcome, ending.code, output, detail)
+}
+
 fn is_taken(error: &Error) -> bool {
     matches!(
         error,
-        Error::Client(ClientError::Refused(Refusal::AlreadyExists))
-            | Error::Topic(TopicError::Client(ClientError::Refused(
-                Refusal::AlreadyExists
-            )))
+        Error::Client(ClientError::Refused {
+            error: Refusal::AlreadyExists,
+            ..
+        }) | Error::Topic(TopicError::Client(ClientError::Refused {
+            error: Refusal::AlreadyExists,
+            ..
+        }))
     )
 }
 
@@ -1023,12 +1071,14 @@ fn topic_refused(error: TopicError) -> Refused {
 /// ends the session.
 fn client_refused(error: ClientError) -> Refused {
     match error {
-        ClientError::Refused(why @ Refusal::AlreadyExists) => {
-            Refused::Taken(why.as_str().to_owned())
-        }
-        ClientError::Refused(
-            why @ (Refusal::InvalidName | Refusal::NameTooLong | Refusal::EmptyName),
-        ) => Refused::Device(why.as_str().to_owned()),
+        ClientError::Refused {
+            error: why @ Refusal::AlreadyExists,
+            ..
+        } => Refused::Taken(why.as_str().to_owned()),
+        ClientError::Refused {
+            error: why @ (Refusal::InvalidName | Refusal::NameTooLong | Refusal::EmptyName),
+            ..
+        } => Refused::Device(why.as_str().to_owned()),
         ClientError::Protocol(why) => Refused::Device(why.to_owned()),
         other => Refused::Session(Error::Client(other)),
     }
@@ -1138,6 +1188,15 @@ mod tests {
 
     /// Every topic the bridge publishes is classified, by name, and each is a state with an
     /// expiry of zero (current until changed or withdrawn), as the docs say.
+    /// State topics replay their last value to a late subscriber; event topics do not.
+    #[test]
+    fn state_replays_its_last_value_and_an_event_does_not() {
+        for class in CLASSES {
+            assert_eq!(class.on_subscribe(), OnSubscribe::Latest, "{}", class.name);
+        }
+        assert_eq!(on_subscribe_for(Kind::Event), OnSubscribe::FromNow);
+    }
+
     #[test]
     fn every_topic_is_classified_as_a_state_valid_until_changed() {
         let names: Vec<&str> = CLASSES.iter().map(|class| class.name).collect();

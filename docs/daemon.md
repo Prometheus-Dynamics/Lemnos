@@ -626,16 +626,23 @@ state is a latest-value topic (history 2). The table is in code as `publish::CLA
 | `lemnos.devices` | state, a generation | zero | 2 | the device set's generation (an `int`): it moves when a device comes or goes |
 | `hello.<fact>` | state | zero | 2 | a board fact: published when it changes; withdrawn when it goes or the session ends |
 
+The hello document also carries Orion's own facts, `state`, `recovery_why`, `security` and
+`security_generation` (at the pinned revision, Orion's `OWN_FACTS`). The bridge does not publish them and
+does not name them; a client reads them from the node, as Orion gives them.
+
 **Expiry.** Every state is declared with an expiry of zero, which is "valid until changed". The
 device topics are declared through Orion's resource `topic()`, which sets zero whatever is asked, so
 zero is the only expiry a device topic can have at this rev. That is deliberate: the bridge publishes
 each change and withdraws the topic when the device goes, so a sample is never served as current
 after it went stale. The facts are declared directly and get zero for the same reason.
 
-**Late subscribers.** A subscriber that arrives after a state's last sample may miss it until Orion
-sends the last value on subscribe (a later Orion rev, `on_subscribe`). Until then the bridge does not
-republish on a timer. Once Orion has it, the move is setting `on_subscribe = 1` on the state rows
-above and nothing else.
+**Late subscribers.** The mode is chosen per kind of topic by one rule, `on_subscribe_for` in
+`service/orion/src/publish.rs`, and every declaration takes it from there. A state topic (a device's
+values, status and description, the device set's generation, a board fact) is declared with
+`OnSubscribe::Latest`: a subscriber that arrives after its last sample gets that sample at once, then
+what is published from then on. An event or stream topic is declared with `OnSubscribe::FromNow`: it
+does not replay, and a subscriber gets what is published from then on. The bridge does not republish
+on a timer.
 
 **Description generations.** The generation counts from 1 when a device comes. It moves once for each
 change of the device's state or reason, and not for a change of health alone (the description does not
@@ -773,25 +780,49 @@ unchanged; a status change, or a fact, is stamped when the bridge sees it. The b
 nothing. Orion's `orion.time` says how far each board's wall clock is from its monotonic one, for
 whoever wants a wall time.
 
-**Callers.** Each Orion caller has a lemnosd connection of its own, one per Orion caller identity
-(`local:<uid>` and the others), not per session: Orion names every local session of one user the same
-caller. A driver that tracks callers (`TRACKS_CALLERS`) sees each caller as its own `CallerId`. A cancel
+**Callers.** Each Orion session has a lemnosd connection of its own, kept under the session's token
+(`caller_key`), not under its identity (`local:<uid>` and the others). Two sessions of one user are two
+callers to a driver that tracks callers (`TRACKS_CALLERS`), each with its own `CallerId`, and ending one
+releases only its own holds. A token of zero (a node that does not say) is one shared key. A cancel
 cancels its run and nothing else: the job is cancelled on lemnosd, and the caller's connection and the
 driver's holds for it stay.
 
-**Leases.** At Orion's pinned revision the bridge learns of a session's end only as a cancel of a run in
-progress, and that cancel does not say why it was sent. A silent live session cannot be told from a dead
-one, so the bridge bounds the holds of a caller by a lease instead. When a caller has been silent for the
-lease, the bridge drops that caller's lemnosd connection, its jobs end with it, and lemnosd tells the
-drivers the caller is gone (`caller_gone`), which releases what it held. The lease is `LEMNOS_ORION_LEASE`
+**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision 671d29d). Orion cancels
+the session's attached runs first (a `Cancel` with reason 2), so a run of the session still in flight when
+`CallerGone` comes is a detached one. A session with nothing in flight is released as a dropped connection is:
+its connection closes, its runs end, and lemnosd tells the drivers the caller is gone (`caller_gone`). A
+session with a detached run in flight keeps its connection open, because lemnosd ends a job with the
+connection it was started on; the connection is released when the last of those runs ends. The attached runs
+of the ended session are cancelled on lemnosd at once. A session with no connection here is a no-op.
+
+Orion's program API at this revision does not carry the `detached` flag (`Request::Run` has no `detached`),
+so the bridge reads a run as detached by that order, not by the flag. A detached run goes on past its
+caller (E12): its end goes to whoever attached, and `Actions::attach` finds it by its number and its
+starter's identity. The bridge needs nothing for an attach. A detached run needs a deadline at this revision.
+
+The inference, and what it rests on. For an attached run, Orion sends `Cancel` with reason 2 before
+`CallerGone` (Orion's `gone()` in `crates/node/action-list/src/lib.rs`). `orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel`
+(`service/orion/tests/orion_bridge.rs`) drives Orion's real node logic and fails if that order changes. The
+ambiguous case is a run still in flight at `CallerGone` with no reason-2 cancel for it. The bridge keeps it:
+`calls::departure` answers `Keep` for any run in flight, so a run that might be detached is never ended. The
+cost of the safe error is that a connection can outlive its session until a detached run ends. The inference is
+removed in the same change that takes Orion's `detached` flag, which is planned on Orion's side: then the bridge
+reads the flag, ends attached runs on `CallerGone` directly, and keeps detached ones.
+
+**Leases.** The bridge also bounds the holds of a caller by a lease, for the case no session end reaches it
+(a caller that holds and then says nothing). When a caller has been silent for the lease, the bridge drops
+that caller's lemnosd connection, its jobs end with it, and lemnosd tells the drivers the caller is gone
+(`caller_gone`), which releases what it held. The lease is `LEMNOS_ORION_LEASE`
 seconds, default 60. `LEMNOS_ORION_LEASE=0` turns the lease off: no caller is dropped for silence, and the
 bridge says nothing of a lease (see below).
 
 **Only silence expires a lease.** A caller's lease is renewed by each of these, and by nothing else:
 
 - every request of the caller: a `call`, `set` or `power` run, a `cancel` of its run, and a request
-  refused for its arguments. At Orion's pinned revision a cancel does not say who sent it, so a session's
-  end that arrives as a cancel renews too;
+  refused for its arguments. A cancel carries Orion's reason (not said, its caller asked, its caller's
+  session ended, its deadline passed, or the node is stopping). The bridge logs who cancelled, as words,
+  and does not pass the reason to lemnosd or the drivers: they have no use for it, and the lemnosd cancel
+  carries none. A session's end (`CallerGone`) is not a renewal: it releases the holds at once;
 - the end or cancel of one of its runs, which starts the lease from that moment;
 - every progress report of a long job the caller started (the job's progress is news of its run);
 - every file or stream chunk the bridge accepts, that is, one it answers as still receiving. Pinned Orion
@@ -801,12 +832,8 @@ bridge says nothing of a lease (see below).
 
 **A caller with a run in flight is alive.** A caller with any run in flight (started by it, not yet
 finished and not cancelled) is not dropped for silence, whether or not the run reports progress, so a
-healthy silent job (a verify, a self-test) keeps its caller's holds. The comm core cancels the runs of a
-session that ends (a reason-less Cancel for a non-detached run), and a cancelled run no longer counts, so
-a dead caller's run stops shielding it. The one residual case: a DETACHED run from a dead caller is not
-cancelled by the comm core, and the bridge cannot see the detached flag, so it shields that caller's holds
-until the run itself ends. The later protocol revision closes that (`ORION-R2 (C33)` in
-`service/orion/src/calls.rs`).
+healthy silent job (a verify, a self-test) keeps its caller's holds. A cancelled run no longer counts. A
+session that ends is not waited for: its `CallerGone` releases its callers at once (see "Session ends").
 
 Not renewed: the bridge's own housekeeping (its publishing of the hello document, its ticks), and Orion's
 own traffic to the caller (its topic subscriptions and its pings), which the bridge does not see.
@@ -818,6 +845,17 @@ and reads the remainder as it reads any detail. A reply carries the note when th
 (its end or cancel included), so a run that began after the drop carries it on its reply. The bridge
 remembers at most 64 callers whose note is still due; the oldest is forgotten first. A caller that comes
 back after that sees no note, and `leases.ended` still counts the drop.
+
+**A quiet link is not a gone one.** At the pinned revision a local link, the board's own comm core socket
+(`Address::Local`), has no silence timeout in Orion's client (C37, `crates/client/connect/src/alive.rs`): a
+closed peer shows up at once as a lost session, and silence means a comm core that is busy or stopped. Both
+sides keep the session while it is quiet (the comm core marks it quiet), so a stalled but open link keeps its
+session: nothing is torn down or published again, and publishing goes on on the same session when the stall
+ends. Each request still times out on its own deadline. The bridge adds no probe of its own. A network link
+(`orion+tcp://`) keeps the silence rule: its session is lost after the idle time. **The TCP silence case is
+untested.** Nothing in this repository exercises a stalled TCP link. The TCP relay harness and its test are the
+next bridge item, not part of this change. Orion may add a `silent_for()` accessor later (it needs the
+consumer's OK); nothing here waits on it.
 
 **The lease is readable.** While the lease is on, the hello document carries `lease.seconds` (the lease
 in whole seconds, so no client hard-codes it) and `leases.ended` (how many callers' leases have ended
@@ -833,11 +871,42 @@ otherwise silent sends it at least every lease divided by three, or keeps a run 
 push that keeps sending. A silent holder, one that renews nothing for the lease and has no run in flight, loses its holds when the
 lease runs out, whether it is alive or not. The bridge cannot tell the two apart at this revision.
 
-A caller that is detached from its run cannot be told apart from a live one at this revision (the bridge
-does not see the detached flag), so its holds last as long as its run's progress does. When Orion's cancel
-says why it was sent, the connection will be closed at once on a session's end and the lease will not be
-needed for it (`ORION-R2 (C33)` in `service/orion/src/calls.rs`). Power and the boot holds of VBUS are not
-caller holds and are not released by a lease.
+A caller that is detached from its run is not told apart from a live one by the lease (the bridge does not
+read the detached flag): its holds last while its run's progress does, and a session's end releases them at
+once, detached or not. Power and the boot holds of VBUS are not caller holds and are not released by a lease.
+
+**How a run ends.** A run ends with an Orion outcome and an action status code (`finish_with_code`, Orion
+C44). A status code the bridge names is the magnitude of the lemnosd status (the Linux error number), so a
+caller branches on the code and reads the words in `detail` for people. Zero is none given. The table is the
+one in `ending_of_status` (`service/orion/src/calls.rs`); each row has a test.
+
+| lemnosd status | number | Orion outcome | code |
+|---|---|---|---|
+| `CANCELLED` | -125 | `Cancelled` | 125 |
+| `TIMED_OUT` | -110 | `TimedOut` | 110 |
+| `NOT_PERMITTED` | -1 | `Rejected` | 1 |
+| `NOT_FOUND` | -2 | `Rejected` | 2 |
+| `AGAIN` | -11 | `Rejected` | 11 |
+| `BUSY` | -16 | `Rejected` | 16 |
+| `NO_DEVICE` | -19 | `Rejected` | 19 |
+| `INVALID_ARGUMENT` | -22 | `Rejected` | 22 |
+| `NOT_SUPPORTED` | -95 | `Rejected` | 95 |
+| `BUFFER_TOO_SMALL` | -4098 | `Rejected` | 4098 |
+| every other status: `IO`, `INTERRUPTED`, `NO_MEMORY`, `ACCESS`, `STALE_HANDLE`, `VERSION_MISMATCH`, `PANIC`, `LAYOUT_MISMATCH`, and any other | | `Failed` | 0 |
+
+The rows above are the statuses lemnosd answers a call or a job with. The bridge's own endings have no
+status and so code zero:
+
+| The bridge's ending | Orion outcome | Code | When |
+|---|---|---|---|
+| succeeded | `Succeeded` | 0 | a call's reply, or a job's result |
+| failed | `Failed` | 0 | lemnosd is not there, a job ran and ended with a status that is not in the table (a job's `Rejected` reading does not apply: it ran), the lease ran out or the session ended while the run was in flight |
+| refused | `Rejected` | 0 | the bridge refused the arguments before any call: not what the device takes, no such item, a read-only item |
+| cancelled | `Cancelled` | 0 | the caller cancelled the run, or its session ended (Orion's reason 2) |
+
+A long job that ends takes the table's endings for `CANCELLED` and `TIMED_OUT` (its job was cancelled or timed
+out on lemnosd), and `Failed` with code zero for any other status: it ran, so a refusal does not apply.
+
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:
