@@ -592,6 +592,54 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
     out
 }
 
+/// A committed bay set read back from the image: its slot, and its members by name, the five payload
+/// roles first (in [`ROLES`] order), then each firmware overlay as its record names it. Read only:
+/// the hashes are not checked here (that is [`verify`]'s job).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    /// The bay set's number.
+    pub set: usize,
+    /// The slot the set's record names.
+    pub slot: String,
+    /// The members, in order: `(name, bytes)`.
+    pub members: Vec<(String, Vec<u8>)>,
+}
+
+/// The committed bay sets of an image, read as [`verify`] reads them. A set with no committed record
+/// is left out. A member that cannot be read is an error: the caller says which set it was in.
+pub fn committed<D: Sectors + ReadAt>(
+    dev: &mut D,
+    parts: &Parts,
+) -> Result<Vec<Committed>, String> {
+    let sets = bays::place_sets(dev, &parts.layout)?;
+    let mut out = Vec::new();
+    for (set, (files, info)) in sets.iter().enumerate() {
+        let Some(rec) =
+            bays::read_info(dev, *info).map_err(|e| format!("bay{set}: record: {e}"))?
+        else {
+            continue;
+        };
+        let sizes: Vec<(String, u64)> = ROLES
+            .iter()
+            .zip(rec.files.iter())
+            .map(|(r, (len, _))| (r.role.to_string(), *len))
+            .chain(rec.firmware.iter().map(|(p, len, _)| (p.clone(), *len)))
+            .collect();
+        let mut members = Vec::with_capacity(sizes.len());
+        for (i, (name, len)) in sizes.into_iter().enumerate() {
+            let bytes = bays::read_file(dev, files[i], len)
+                .map_err(|e| format!("bay{set} ({}): {name}: {e}", rec.slot))?;
+            members.push((name, bytes));
+        }
+        out.push(Committed {
+            set,
+            slot: rec.slot.clone(),
+            members,
+        });
+    }
+    Ok(out)
+}
+
 /// One finding for a file that must hold exactly `want`, at exactly `size` bytes.
 fn exact<D: Sectors + ReadAt>(dev: &mut D, path: &str, want: &[u8], size: u64) -> Finding {
     let found = match bootfat::locate_path(dev, path, size) {

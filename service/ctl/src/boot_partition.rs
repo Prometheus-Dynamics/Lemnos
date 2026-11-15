@@ -17,7 +17,7 @@
 use crate::boot_dir::{self, with_fragment};
 use lemnos_host::board::{BoardFile, BootSpec};
 use lemnos_slot_store::bays::{self, Layout, ROLES};
-use lemnos_slot_store::bootimage::{self, Family, Finding, Fixed, Parts};
+use lemnos_slot_store::bootimage::{self, Committed, Family, Finding, Fixed, Parts};
 use lemnos_slot_store::firmware::{CONFIG_TXT, TRYBOOT_TXT};
 use lemnos_slot_store::layout::OVERLAY_README;
 use std::io::Write;
@@ -70,6 +70,11 @@ pub(crate) fn check_boot_keys(boot: &BootSpec) -> Result<(), String> {
                 line.trim()
             ));
         }
+        if loaded.contains(&name) {
+            return Err(format!(
+                "[boot] config_lines loads the overlay {name:?} on more than one line: its parameters come from one line"
+            ));
+        }
         loaded.push(name);
     }
     for name in &boot.firmware_overlays {
@@ -79,7 +84,7 @@ pub(crate) fn check_boot_keys(boot: &BootSpec) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    crate::boot_merge::check_expect(boot)
 }
 
 /// The firmware overlay files a board declares, read from `dir` (`<name>.dtbo`, in the layout's
@@ -273,6 +278,7 @@ struct Options {
     slot: Option<String>,
     payload: Option<String>,
     firmware: Option<String>,
+    dtmerge: Option<String>,
     size: Option<String>,
     out: Option<String>,
     min_size: bool,
@@ -280,7 +286,7 @@ struct Options {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR [--firmware DIR] --size BYTES --out FILE] | --min-size [--payload DIR [--firmware DIR]] | --verify FILE";
+    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR [--firmware DIR] --size BYTES --out FILE] | --min-size [--payload DIR [--firmware DIR]] | --verify FILE [--layout-of BOARD [--socs DIR]] [--dtmerge TOOL]";
     let mut o = Options::default();
     let mut i = 0;
     while i < args.len() {
@@ -297,6 +303,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--slot" => o.slot = Some(value),
             "--payload" => o.payload = Some(value),
             "--firmware" => o.firmware = Some(value),
+            "--dtmerge" => o.dtmerge = Some(value),
             "--size" => o.size = Some(value),
             "--out" => o.out = Some(value),
             "--verify" => o.verify = Some(value),
@@ -310,6 +317,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
 /// Runs `boot-partition` with `args` (after the subcommand's name), printing to `out`.
 pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let o = parse(args)?;
+    if o.dtmerge.is_some() && o.verify.is_none() {
+        return Err(
+            "--dtmerge goes with --verify: it checks the host merge of an image".to_string(),
+        );
+    }
     if let Some(file) = &o.verify {
         return verify_file(&o, file, out);
     }
@@ -401,6 +413,19 @@ fn min_size(
     }
 }
 
+/// The host merge of committed bays with `tool`, in a scratch directory this run makes and removes.
+fn host_merge(boot: &BootSpec, tool: &str, sets: &[Committed]) -> Result<Vec<Finding>, String> {
+    // One directory per call: runs in one process (the tests) must not share files.
+    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("lemnos-host-merge-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let findings = crate::boot_merge::merge_findings(boot, tool, sets, &work);
+    // Only the files this call wrote: its own directory, removed as a whole.
+    let _ = std::fs::remove_dir_all(&work);
+    Ok(findings)
+}
+
 /// `--verify FILE`: the image or dump is read, never written; one line per finding.
 fn verify_file(o: &Options, file: &str, out: &mut dyn Write) -> Result<(), String> {
     let board_path = o
@@ -414,7 +439,16 @@ fn verify_file(o: &Options, file: &str, out: &mut dyn Write) -> Result<(), Strin
         .map_err(|e| format!("{board_path}: {e}"))?;
     let parts = board_parts(&board, &generated.boot).map_err(|e| format!("{board_path}: {e}"))?;
     let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
-    let findings: Vec<Finding> = bootimage::verify(&mut bootimage::Mem(bytes), &parts);
+    let mut mem = bootimage::Mem(bytes);
+    let mut findings: Vec<Finding> = bootimage::verify(&mut mem, &parts);
+    // The host merge needs overlays to merge; a board with none is verified exactly as before.
+    let merging = !board.boot.firmware_overlays.is_empty();
+    if let Some(tool) = o.dtmerge.as_ref().filter(|_| merging) {
+        match bootimage::committed(&mut mem, &parts) {
+            Ok(sets) => findings.extend(host_merge(&board.boot, tool, &sets)?),
+            Err(e) => findings.push(Finding { ok: false, text: e }),
+        }
+    }
     let mut bad = 0;
     for f in &findings {
         if !f.ok {

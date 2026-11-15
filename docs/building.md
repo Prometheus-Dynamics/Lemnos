@@ -158,6 +158,11 @@ image's.
   word padded to three characters, then a space), reads the image or a dump of a partition and writes
   nothing. The exit is 0 when every line is `ok`; otherwise it is non-zero and the error is
   `FILE: N finding(s) failed`.
+- `--verify FILE --layout-of BOARD --dtmerge TOOL` also applies each declared firmware overlay on this host to
+  each committed bay's `board.dtb`, with `TOOL` (the dtmerge command line: `TOOL BASE MERGED OVERLAY name=value ...`,
+  the parameters from the board's `dtoverlay=` line), one overlay after another, then checks the board's
+  `expect_nodes` in the merged tree. Each line says `applies on host, not loaded by firmware`. Lemnos does not
+  build or ship `TOOL`: it is passed in by path. A board with no overlays is verified exactly as without the flag.
 
 **A slot bundle** is written and verified by the same tool, after `tree` and `boot-partition` (the
 sequence: `tree` writes the overlay, `--manifest-boot` and `--cmdline-slot`; `bundle` makes the slot's bundle and

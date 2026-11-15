@@ -16,6 +16,7 @@ use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 mod boot_dir;
 #[cfg(test)]
 mod boot_dir_tests;
+mod boot_merge;
 mod boot_partition;
 mod bundle;
 mod data_partition;
@@ -56,10 +57,11 @@ lemnos-ctl [--socket PATH] COMMAND
                                  check a board file and show the host settings it gives, with no
                                  daemon; with a `soc`, also check the live device tree against it
   boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR --size BYTES --out FILE]
-                 | --min-size [--payload DIR] | --verify FILE
+                 | --min-size [--payload DIR] | --verify FILE [--dtmerge TOOL]
                                   write the boot partition image of a board (its payload bays and
                                   the firmware text), print its minimum size, or verify an image
-                                  or a dump of a real partition, read-only
+                                  or a dump of a real partition, read-only; --dtmerge TOOL also
+                                  applies the declared overlays on this host, not loaded by firmware
   bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE
          --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT]
          [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE

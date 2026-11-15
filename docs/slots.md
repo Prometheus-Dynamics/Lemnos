@@ -236,6 +236,11 @@ neither is written exactly as before: no firmware list file, no `boot.config`, f
   that is not one line is refused. A missing `<name>.dtbo` in the `--firmware DIR` is refused by name.
 - **Where the files come from.** `lemnos-ctl boot-partition --firmware DIR` and `lemnos-ctl bundle --firmware
   DIR` read `DIR/<name>.dtbo` for each declared overlay, so the bay and the bundle hold the same bytes.
+- **Checked on the host, not by firmware.** `lemnos-ctl boot-partition --verify FILE --layout-of BOARD --dtmerge TOOL`
+  applies the declared overlays to each committed bay's `board.dtb` with `TOOL` (dtmerge's command line, the
+  parameters from the `dtoverlay=` line), then checks the board's `[boot] expect_nodes` in the merged tree. A
+  failed overlay is named with the tool's status. Nothing here is loaded by firmware: the lines say so. The
+  firmware itself applies the overlays at boot and is not checked by this.
 
 ### The manifest, schema 3
 

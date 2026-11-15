@@ -38,6 +38,11 @@ const DATA_SIZE: &str = "8589934592";
 
 /// The reference board with `[boot]` keys added: the lines, and the overlays they name.
 fn board_text(lines: &[&str], overlays: &[&str]) -> String {
+    board_with(lines, overlays, "")
+}
+
+/// The reference board with `[boot]` keys added: `extra` is written as given, after the others.
+fn board_with(lines: &[&str], overlays: &[&str], extra: &str) -> String {
     let mut text = std::fs::read_to_string(repo().join("testing/boards/reference.toml")).unwrap();
     let quote = |items: &[&str]| {
         items
@@ -53,6 +58,7 @@ fn board_text(lines: &[&str], overlays: &[&str]) -> String {
     if !overlays.is_empty() {
         keys.push_str(&format!("firmware_overlays = [{}]\n", quote(overlays)));
     }
+    keys.push_str(extra);
     assert!(text.matches("[boot]\n").count() == 1);
     text = text.replacen("[boot]\n", &format!("[boot]\n{keys}"), 1);
     text
@@ -516,4 +522,352 @@ fn a_board_with_neither_key_writes_no_firmware_list_and_its_bundle_has_no_config
         "the bundle carries no config digest"
     );
     assert!(bundle_text.contains("slot.json"));
+}
+
+// ---- The host merge: `boot-partition --verify --dtmerge TOOL` ----
+//
+// The base tree and the overlays are real device-tree blobs, compiled by dtc. The tool is a stand-in
+// for raspberrypi/utils' dtmerge (see `stand_in`), so these tests show the Lemnos side: the overlays
+// are applied in order with their config-line parameters, a failure is named, and `expect_nodes` is
+// checked in the merged tree. The real dtmerge is not on this host, so these tests did not run it.
+
+const BASE_DTS: &str = "/dts-v1/;\n/ {\n\tsoc {\n\t\tgpu {\n\t\t\tstatus = \"disabled\";\n\t\t};\n\t};\n\treserved-memory {\n\t};\n};\n";
+/// `ram_size` is the test parameter: `__overrides__` maps it to the cell, as dtmerge reads it.
+const RAM_DTS: &str = "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/reserved-memory\";\n\t\t__overlay__ {\n\t\t\ttest_ram: test-ram {\n\t\t\t\trecord-size = <0x4000>;\n\t\t\t};\n\t\t};\n\t};\n\t__overrides__ {\n\t\tram_size = <&test_ram>, \"record-size:0\";\n\t};\n};\n";
+const GPU_DTS: &str = "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/soc/gpu\";\n\t\t__overlay__ {\n\t\t\tstatus = \"okay\";\n\t\t};\n\t};\n};\n";
+/// Its target is not in the base tree: it does not apply.
+const MISSING_DTS: &str = "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/no/such/node\";\n\t\t__overlay__ {\n\t\t\tstatus = \"okay\";\n\t\t};\n\t};\n};\n";
+
+/// dtc must be installed: these tests compile real blobs with it. Refused by name when it is not.
+fn compile(dir: &Path, name: &str, text: &str) -> Vec<u8> {
+    let src = dir.join(format!("{name}.dts"));
+    std::fs::write(&src, text).unwrap();
+    let out = dir.join(format!("{name}.blob"));
+    let status = std::process::Command::new("dtc")
+        .args(["-@", "-I", "dts", "-O", "dtb", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .expect("dtc is needed for the host-merge tests (device-tree-compiler)");
+    assert!(status.success(), "dtc failed on {name}");
+    std::fs::read(&out).unwrap()
+}
+
+/// A stand-in for dtmerge, used when LEMNOS_DTMERGE is not set: the real tool's command line
+/// (`BASE MERGED OVERLAY [name=value]...`) and its failure statuses (255 when a file does not load,
+/// 1 when the merge fails, as the real tool exits), with libfdt's `fdtoverlay` applying the overlay.
+/// NOT shared with the real tool: `__overrides__` is not read, so parameters are accepted and not
+/// applied (a test overlay's literal value must already match); the real tool's messages are not
+/// reproduced; and only the first four bytes of each file are checked before applying. CI sets
+/// LEMNOS_DTMERGE to the real tool (built from raspberrypi/utils at a pinned commit), so every test
+/// here runs against it there, and the parameter test below runs only there.
+const STAND_IN: &str = r#"#!/bin/sh
+if [ "$#" -lt 3 ]; then echo "usage: dtmerge [<options] <base dtb> <merged dtb> <overlay dtb> [param=value] ..." >&2; exit 1; fi
+base=$1; merged=$2; overlay=$3
+if [ "$overlay" = "-" ]; then echo "* stand-in: parameters-only mode is not implemented" >&2; exit 255; fi
+if [ "$(od -A n -t x1 -N 4 "$base" 2>/dev/null | tr -d ' \n')" != "d00dfeed" ]; then echo "* failed to load '$base'" >&2; exit 255; fi
+if [ "$(od -A n -t x1 -N 4 "$overlay" 2>/dev/null | tr -d ' \n')" != "d00dfeed" ]; then echo "* failed to load '$overlay'" >&2; exit 255; fi
+if ! fdtoverlay -i "$base" -o "$merged" "$overlay"; then echo "* merge failed" >&2; exit 1; fi
+exit 0
+"#;
+
+/// The merge tool the host-merge tests use: the real dtmerge named by LEMNOS_DTMERGE, else the stand-in.
+fn merge_tool(dir: &Path) -> String {
+    match std::env::var("LEMNOS_DTMERGE") {
+        Ok(path) if !path.is_empty() => {
+            assert!(
+                Path::new(&path).is_file(),
+                "LEMNOS_DTMERGE={path} is not a file"
+            );
+            path
+        }
+        _ => stand_in(dir),
+    }
+}
+
+/// The real dtmerge, when LEMNOS_DTMERGE names one. Under CI (CI is set) it must be named, so a
+/// missing tool fails there instead of skipping.
+fn real_tool() -> Option<String> {
+    let named = std::env::var("LEMNOS_DTMERGE")
+        .ok()
+        .filter(|p| !p.is_empty());
+    if named.is_none() && std::env::var_os("CI").is_some() {
+        panic!("CI runs the real dtmerge: LEMNOS_DTMERGE must name it");
+    }
+    named
+}
+
+fn stand_in(dir: &Path) -> String {
+    let path = dir.join("dtmerge-stand-in");
+    std::fs::write(&path, STAND_IN).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
+/// A board with the host-merge keys, its firmware directory of compiled overlays, and the base tree.
+struct HostCase {
+    dir: PathBuf,
+    board: String,
+    firmware: String,
+    base: Vec<u8>,
+}
+
+/// `dtbos` names each overlay to compile (its source text); the directory holds only those.
+fn host_case(
+    name: &str,
+    lines: &[&str],
+    overlays: &[&str],
+    expect: &str,
+    dtbos: &[(&str, &str)],
+) -> HostCase {
+    let dir = scratch(name);
+    let board = write_board(&dir, &board_with(lines, overlays, expect));
+    let fw = dir.join("firmware");
+    std::fs::create_dir_all(&fw).unwrap();
+    for (overlay, text) in dtbos {
+        std::fs::write(
+            fw.join(format!("{overlay}.dtbo")),
+            compile(&dir, overlay, text),
+        )
+        .unwrap();
+    }
+    let base = compile(&dir, "base", BASE_DTS);
+    HostCase {
+        dir,
+        board,
+        firmware: fw.display().to_string(),
+        base,
+    }
+}
+
+/// The image of the case's board, its device-tree payload the compiled base tree.
+fn host_image(case: &HostCase, slot: &str) -> Result<String, String> {
+    let payloads = payload(&case.dir, &case.board, slot);
+    std::fs::write(Path::new(&payloads).join("device-tree"), &case.base).unwrap();
+    let (r, out) = boot_image(
+        &case.dir,
+        &case.board,
+        slot,
+        &payloads,
+        Some(&case.firmware),
+    );
+    r.map_err(|e| format!("boot-partition: {e}\n{out}"))
+}
+
+fn verify_host(case: &HostCase, image: &str, tool: &str) -> (Result<(), String>, String) {
+    let socs = socs();
+    run(&[
+        "boot-partition",
+        "--verify",
+        image,
+        "--layout-of",
+        &case.board,
+        "--socs",
+        &socs,
+        "--dtmerge",
+        tool,
+    ])
+}
+
+const RAM_LINE: &str = "dtoverlay=test-ram,ram_size=16384";
+const GPU_LINE: &str = "dtoverlay=test-gpu";
+/// The merged tree must hold the ram size the line gives, and the GPU node's status.
+const EXPECT_OK: &str = "expect_nodes = [{ path = \"/reserved-memory/test-ram\", properties = { record-size = \"$ram_size\" } }, { path = \"/soc/gpu\", properties = { status = \"okay\" } }]\n";
+
+#[test]
+fn the_declared_overlays_are_applied_on_the_host_in_order_and_the_expected_nodes_hold() {
+    let case = host_case(
+        "host-merge-ok",
+        &[RAM_LINE, GPU_LINE],
+        &["test-ram", "test-gpu"],
+        EXPECT_OK,
+        &[("test-ram", RAM_DTS), ("test-gpu", GPU_DTS)],
+    );
+    let tool = merge_tool(&case.dir);
+    let image = host_image(&case, "a1").unwrap_or_else(|e| panic!("{e}"));
+    let (r, out) = verify_host(&case, &image, &tool);
+    r.unwrap_or_else(|e| panic!("verify: {e}\n{out}"));
+    assert!(
+        out.contains("ok  bay0 (a1): test-ram applies on host, not loaded by firmware"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok  bay0 (a1): test-gpu applies on host, not loaded by firmware"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "/reserved-memory/test-ram record-size is 16384 (0x4000) after the host merge"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("/soc/gpu status is \"okay\" after the host merge"),
+        "{out}"
+    );
+    assert!(!out.contains("BAD"), "{out}");
+}
+
+#[test]
+fn an_expected_node_value_the_merge_does_not_give_is_refused_with_both_values() {
+    // The overlay gives 16384; the board expects 8192 literally.
+    let expect = "expect_nodes = [{ path = \"/reserved-memory/test-ram\", properties = { record-size = 8192 } }]\n";
+    let case = host_case(
+        "host-merge-mismatch",
+        &[RAM_LINE, GPU_LINE],
+        &["test-ram", "test-gpu"],
+        expect,
+        &[("test-ram", RAM_DTS), ("test-gpu", GPU_DTS)],
+    );
+    let tool = merge_tool(&case.dir);
+    let image = host_image(&case, "a1").unwrap_or_else(|e| panic!("{e}"));
+    let (r, out) = verify_host(&case, &image, &tool);
+    assert!(r.is_err(), "{out}");
+    assert!(
+        out.contains("BAD bay0 (a1): /reserved-memory/test-ram record-size is 16384 (0x4000), expected 8192 (0x2000), after the host merge"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_overlay_that_does_not_apply_is_refused_by_name_and_the_bay_is_not_checked_further() {
+    let expect = "expect_nodes = [{ path = \"/soc/gpu\", properties = { status = \"okay\" } }]\n";
+    let case = host_case(
+        "host-merge-missing",
+        &[
+            "dtoverlay=test-ram,ram_size=16384",
+            "dtoverlay=test-missing",
+        ],
+        &["test-ram", "test-missing"],
+        expect,
+        &[("test-ram", RAM_DTS), ("test-missing", MISSING_DTS)],
+    );
+    let tool = merge_tool(&case.dir);
+    let image = host_image(&case, "a1").unwrap_or_else(|e| panic!("{e}"));
+    let (r, out) = verify_host(&case, &image, &tool);
+    assert!(r.is_err(), "{out}");
+    assert!(
+        out.contains("ok  bay0 (a1): test-ram applies on host, not loaded by firmware"),
+        "{out}"
+    );
+    assert!(
+        out.contains("BAD bay0 (a1): test-missing does not apply on host, not loaded by firmware: dtmerge exited with 1"),
+        "{out}"
+    );
+    // The expected node is not checked once a merge has failed.
+    assert!(!out.contains("/soc/gpu status"), "{out}");
+}
+
+#[test]
+fn a_base_tree_that_is_not_a_device_tree_is_refused_by_name() {
+    let case = host_case(
+        "host-merge-base",
+        &[GPU_LINE],
+        &["test-gpu"],
+        "",
+        &[("test-gpu", GPU_DTS)],
+    );
+    let tool = merge_tool(&case.dir);
+    let payloads = payload(&case.dir, &case.board, "a1");
+    std::fs::write(Path::new(&payloads).join("device-tree"), b"not a tree").unwrap();
+    let (r, out) = boot_image(
+        &case.dir,
+        &case.board,
+        "a1",
+        &payloads,
+        Some(&case.firmware),
+    );
+    r.unwrap_or_else(|e| panic!("boot-partition: {e}\n{out}"));
+    let image = case.dir.join("boot-a1.img").display().to_string();
+    let (r, out) = verify_host(&case, &image, &tool);
+    assert!(r.is_err(), "{out}");
+    assert!(
+        out.contains("BAD bay0 (a1): test-gpu does not apply on host, not loaded by firmware"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_board_with_no_overlays_is_verified_unchanged_even_when_a_tool_is_given() {
+    let dir = scratch("host-merge-none-image");
+    let board = write_board(&dir, &board_text(&[], &[]));
+    let payloads = payload(&dir, &board, "a1");
+    let (r, out) = boot_image(&dir, &board, "a1", &payloads, None);
+    let image = r.unwrap_or_else(|e| panic!("{e}\n{out}"));
+    let (r, out) = run(&[
+        "boot-partition",
+        "--verify",
+        &image,
+        "--layout-of",
+        &board,
+        "--socs",
+        &socs(),
+        "--dtmerge",
+        "/nonexistent/dtmerge",
+    ]);
+    r.unwrap_or_else(|e| panic!("verify: {e}\n{out}"));
+    assert!(!out.contains("applies on host"), "{out}");
+    assert!(!out.contains("BAD"), "{out}");
+}
+
+#[test]
+fn dtmerge_without_verify_is_refused_and_expected_nodes_without_overlays_are_refused_by_name() {
+    let dir = scratch("host-merge-refusals");
+    let board = write_board(&dir, &board_with(&[], &[], EXPECT_OK));
+    let (r, _) = run(&[
+        "boot-partition",
+        "--layout-of",
+        &board,
+        "--socs",
+        &socs(),
+        "--min-size",
+        "--dtmerge",
+        "x",
+    ]);
+    let why = r.unwrap_err();
+    assert!(why.contains("--dtmerge goes with --verify"), "{why}");
+    let (r, _) = run(&[
+        "boot-partition",
+        "--layout-of",
+        &board,
+        "--socs",
+        &socs(),
+        "--min-size",
+    ]);
+    let why = r.unwrap_err();
+    assert!(
+        why.contains("expect_nodes") && why.contains("declares none"),
+        "{why}"
+    );
+}
+
+/// The real dtmerge applies `__overrides__`: the parameter moves the node's cell from the overlay's
+/// literal value to the line's value, which the stand-in cannot do. Skipped where LEMNOS_DTMERGE is
+/// not set (locally); CI names the real tool and runs it.
+#[test]
+// The skip line is the test's own output (it is shown with `cargo test -- --nocapture`).
+#[allow(clippy::print_stderr)]
+fn the_real_dtmerge_applies_an_overrides_parameter_and_the_expected_node_holds() {
+    let Some(tool) = real_tool() else {
+        eprintln!(
+            "skipped: LEMNOS_DTMERGE is not set, so the real dtmerge __overrides__ check did not run (CI runs it)"
+        );
+        return;
+    };
+    let expect = "expect_nodes = [{ path = \"/reserved-memory/test-ram\", properties = { record-size = \"$ram_size\" } }]\n";
+    let case = host_case(
+        "host-merge-real-override",
+        &["dtoverlay=test-ram,ram_size=8192"],
+        &["test-ram"],
+        expect,
+        &[("test-ram", RAM_DTS)],
+    );
+    let image = host_image(&case, "a1").unwrap_or_else(|e| panic!("{e}"));
+    let (r, out) = verify_host(&case, &image, &tool);
+    r.unwrap_or_else(|e| panic!("verify with the real dtmerge: {e}\n{out}"));
+    assert!(
+        out.contains("/reserved-memory/test-ram record-size is 8192 (0x2000) after the host merge"),
+        "{out}"
+    );
+    assert!(!out.contains("BAD"), "{out}");
 }

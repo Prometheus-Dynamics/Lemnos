@@ -31,6 +31,12 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 #   Each overlay is hashed in the bay record, compared on reinstall, and must be loaded by a
 #   `dtoverlay=<name>` line in `config_lines`; a `dtoverlay=` line naming another overlay, or an
 #   overlay no line loads, is refused by both names.
+# - `expect_nodes`: device-tree facts the merged tree must hold once the overlays are applied on the host
+#   (`lemnos-ctl boot-partition --verify FILE --layout-of BOARD --dtmerge TOOL`). Each entry gives a node's
+#   absolute `path` and its `properties`: an integer is one 32-bit cell, a string is a string property, and
+#   `"$NAME"` takes the value of parameter NAME on a `dtoverlay=` line (decimal or `0x` hex). Needs
+#   `firmware_overlays`. The merge is a host check: it runs on the machine that verifies the image, and
+#   nothing it shows is loaded by firmware.
 #
 # [boot] config_lines = ["dtoverlay=test-gpu"]
 # [boot] firmware_overlays = ["test-gpu"]

@@ -678,6 +678,33 @@ pub struct BootSpec {
     /// each is copied from `--firmware DIR`. Default none.
     #[serde(default)]
     pub firmware_overlays: Vec<String>,
+    /// Device-tree facts the merged tree must hold once the firmware overlays are applied on the
+    /// host (`boot-partition --verify --dtmerge`). Each names a node by its absolute path and the
+    /// properties it must hold. Needs `firmware_overlays`. Default none.
+    #[serde(default)]
+    pub expect_nodes: Vec<ExpectNode>,
+}
+
+/// One node the merged device tree must hold ([`BootSpec::expect_nodes`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectNode {
+    /// The node's absolute path, such as `/soc/gpu`.
+    pub path: String,
+    /// Each property the node must hold, by name, with its value.
+    pub properties: BTreeMap<String, ExpectValue>,
+}
+
+/// The value a property must hold: an integer is one 32-bit cell; a string is a string property
+/// (`"okay"`). A string of the form `$NAME` takes the value of the parameter `NAME` on a
+/// `dtoverlay=` config line, an integer when the parameter reads as one (decimal or `0x` hex).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ExpectValue {
+    /// One 32-bit cell, big-endian. Must be in 0 to 4294967295.
+    Int(i64),
+    /// A string property, or `$NAME` for a config-line parameter.
+    Str(String),
 }
 
 /// `[security]`: where the board's security record lives, its trust root, and whether Orion ships.
