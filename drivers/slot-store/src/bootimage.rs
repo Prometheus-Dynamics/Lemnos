@@ -219,6 +219,12 @@ fn tree(parts: &Parts) -> Vec<Node> {
             let node = pad_file(base_name(r.path), size, r.pad);
             children.push(split_dir(node, r.path));
         }
+        // The board's firmware overlays, each a zero-padded bay of its own.
+        for i in 5..parts.layout.count() {
+            let path: &'static str = leak(parts.layout.member_path(i));
+            let node = pad_file(base_name(path), parts.layout.member_bytes(i), 0);
+            children.push(split_dir(node, path));
+        }
         for f in &parts.fixed {
             let data = if f.bytes.len() as u64 == f.size {
                 f.bytes.clone()
@@ -249,6 +255,12 @@ fn tree(parts: &Parts) -> Vec<Node> {
         children: sets,
     });
     root
+}
+
+/// A name the volume's tree holds for the life of the build (the tree's names are `'static`). The
+/// names are a board's few overlay paths, leaked once per build of an image.
+fn leak(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
 }
 
 /// The last component of a path: the name the file has in its directory.
@@ -329,7 +341,7 @@ pub fn build(
     parts: &Parts,
     size: u64,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<Vec<u8>, String> {
     if !size.is_multiple_of(SECTOR as u64) {
         return Err(format!(
@@ -382,7 +394,7 @@ pub fn install_first<D: Sectors + ReadAt>(
     dev: &mut D,
     parts: &Parts,
     slot: &str,
-    payloads: &[&[u8]; 5],
+    payloads: &[&[u8]],
 ) -> Result<(), String> {
     match parts.family {
         Family::Tryboot => match bays::install(dev, &parts.layout, FIRST_SET, slot, payloads) {
@@ -394,7 +406,7 @@ pub fn install_first<D: Sectors + ReadAt>(
         },
         Family::UbootBlock => {
             let sets = bays::place_sets(dev, &parts.layout)?;
-            let (files, info) = sets[FIRST_SET as usize];
+            let (files, info) = sets[FIRST_SET as usize].clone();
             let text = extlinux_text(payloads[3])?;
             let lba = bootfat::locate_path(
                 dev,
@@ -441,11 +453,31 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
             Ok(None) => push(true, format!("bay{set}: empty (no committed record)")),
             Ok(Some(rec)) => {
                 let mut ok = true;
-                for (i, (len, hash)) in rec.files.iter().enumerate() {
+                let held: Vec<&str> = rec.firmware.iter().map(|(p, _, _)| p.as_str()).collect();
+                let declared: Vec<String> = parts.layout.firmware.iter().map(|(p, _)| p.clone()).collect();
+                if held.iter().copied().ne(declared.iter().map(String::as_str)) {
+                    push(
+                        false,
+                        format!(
+                            "bay{set} ({}): holds the firmware overlays {} and the board declares {}",
+                            rec.slot,
+                            if held.is_empty() { "none".to_string() } else { held.join(", ") },
+                            if declared.is_empty() { "none".to_string() } else { declared.join(", ") }
+                        ),
+                    );
+                    ok = false;
+                }
+                let members: Vec<(String, u64, [u8; 32])> = ROLES
+                    .iter()
+                    .zip(rec.files.iter())
+                    .map(|(r, (len, hash))| (r.role.to_string(), *len, *hash))
+                    .chain(rec.firmware.iter().map(|(p, len, hash)| (p.clone(), *len, *hash)))
+                    .collect();
+                for (i, (what, len, hash)) in members.iter().enumerate() {
                     let bytes = match bays::read_file(dev, files[i], *len) {
                         Ok(b) => b,
                         Err(e) => {
-                            push(false, format!("bay{set}: {}: {e}", ROLES[i].role));
+                            push(false, format!("bay{set}: {what}: {e}"));
                             ok = false;
                             continue;
                         }
@@ -457,21 +489,24 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
                         push(
                             false,
                             format!(
-                                "bay{set} ({}): the {} file does not match its record",
-                                rec.slot, ROLES[i].role
+                                "bay{set} ({}): the {what} file does not match its record",
+                                rec.slot
                             ),
                         );
                         ok = false;
                     }
                 }
                 if ok {
-                    push(
-                        true,
+                    let text = if rec.firmware.is_empty() {
+                        format!("bay{set} ({}): the five payloads match their record", rec.slot)
+                    } else {
                         format!(
-                            "bay{set} ({}): the five payloads match their record",
-                            rec.slot
-                        ),
-                    );
+                            "bay{set} ({}): the five payloads and {} firmware overlay(s) match their record",
+                            rec.slot,
+                            rec.firmware.len()
+                        )
+                    };
+                    push(true, text);
                 }
                 if parts.family == Family::UbootBlock {
                     let cmd = bays::read_file(dev, files[3], rec.files[3].0).unwrap_or_default();

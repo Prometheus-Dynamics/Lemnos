@@ -46,8 +46,10 @@ pub enum Mismatch {
     /// The file could not be read: the reader's reason.
     Unreadable(String, String),
     /// The manifest lists a file that no bay stores (the install refuses such a manifest, so this
-    /// is a slot installed before that rule).
-    NotStored(String),
+    /// is a slot installed before that rule). Carries the name and the set's stored members.
+    NotStored(String, String),
+    /// The bay stores a member that the manifest does not list.
+    Unlisted(String),
     /// The file is there and its hash differs from the manifest's.
     Changed(String),
 }
@@ -57,11 +59,13 @@ impl fmt::Display for Mismatch {
         match self {
             Mismatch::Missing(name) => write!(f, "{name} is missing from the boot partition"),
             Mismatch::Unreadable(name, why) => write!(f, "{name} can't be read: {why}"),
-            Mismatch::NotStored(name) => write!(
+            Mismatch::NotStored(name, stores) => write!(
                 f,
-                "{name} is listed in boot.files, which this board's boot partition does not store (it stores: {})",
-                crate::bays::stored_files().join(", ")
+                "{name} is listed in boot.files, which this board's boot partition does not store (it stores: {stores})"
             ),
+            Mismatch::Unlisted(name) => {
+                write!(f, "{name} is stored in the bay but not listed in boot.files")
+            }
             Mismatch::Changed(name) => write!(f, "{name} doesn't match its manifest hash"),
         }
     }
@@ -112,10 +116,12 @@ where
     let mut out = Vec::new();
     // A bay form (the set's record gives lengths) stores the role files and nothing else.
     let stored_only = !lengths.is_empty();
-    let unstored = crate::bays::unstored(boot_files);
+    let declared: Vec<String> = lengths.iter().map(|(n, _)| n.clone()).collect();
+    let stores = declared.join(", ");
+    let unstored = crate::bays::unstored(boot_files, &declared);
     for (name, want) in boot_files {
         if stored_only && unstored.contains(&name.as_str()) {
-            out.push(Mismatch::NotStored(name.clone()));
+            out.push(Mismatch::NotStored(name.clone(), stores.clone()));
             continue;
         }
         let path = format!("{dir}/{name}");
@@ -134,6 +140,13 @@ where
                 if sha256_hex(&bytes) != *want {
                     out.push(Mismatch::Changed(name.clone()));
                 }
+            }
+        }
+    }
+    if stored_only {
+        for (name, _) in lengths {
+            if !boot_files.iter().any(|(listed, _)| listed == name) {
+                out.push(Mismatch::Unlisted(name.clone()));
             }
         }
     }
