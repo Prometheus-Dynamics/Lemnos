@@ -88,3 +88,7 @@ jobs:
       - run: testing/qemu/run-builtin.sh
         env:
           KERNEL: ${{ runner.temp }}/kernel-modules-off/build/arch/x86/boot/bzImage
+      # The watchdog hand-over (M36c): the same kernel, with CONFIG_I6300ESB_WDT=y. Built with gcc, as the others.
+      - run: testing/qemu/run-watchdog.sh
+        env:
+          KERNEL: ${{ runner.temp }}/kernel-modules-off/build/arch/x86/boot/bzImage
