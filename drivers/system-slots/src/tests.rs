@@ -4485,7 +4485,7 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
     let mut out = vec![0u8; 4096];
     let len = slots.info(&mut out).unwrap();
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
-    // Appended after `key_ids`, which is after everything `info` said before.
+    // Appended after `key_ids`, which is after everything `info` said before; `boot_count` is last.
     let keys: Vec<&str> = json.members().iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         keys,
@@ -4495,7 +4495,8 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "default_signature",
             "boot_unverified",
             "key_ids",
-            "last_attempt"
+            "last_attempt",
+            "boot_count"
         ]
     );
     let a = json.get("last_attempt").unwrap();
