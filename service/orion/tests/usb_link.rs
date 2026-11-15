@@ -245,6 +245,7 @@ fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_gadget_goes
         roles: Roles::DEVICE,
         max_frame: 512,
         revision: 1,
+        level: 0,
     });
     assert_eq!(host.next().0, kind::WELCOME);
     for round in 0..20u64 {
@@ -323,6 +324,7 @@ fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
         roles: Roles::DEVICE,
         max_frame: 512,
         revision: 1,
+        level: 0,
     });
     assert_eq!(host.next().0, kind::WELCOME);
 

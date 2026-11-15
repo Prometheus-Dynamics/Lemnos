@@ -40,21 +40,6 @@ const HEARTBEAT_MS: u32 = 200;
 /// The comm core's idle time for these runs: `comm.idle_ms` is zero, so it is three heartbeats. A
 /// session the comm core has not heard from for this long is closed, and its names freed.
 const IDLE: Duration = Duration::from_millis(3 * HEARTBEAT_MS as u64);
-/// What the bound adds to idle once the link is back: one heartbeat, for the bridge's retry cadence
-/// and the test's polls. A bridge that backs off instead (1 s, then longer) misses it.
-const MARGIN: Duration = Duration::from_millis(HEARTBEAT_MS as u64);
-/// How long the comm core still hears the bridge after the bridge stops hearing the comm core: two
-/// heartbeats. The comm core closes the session `IDLE` after its own last word from the bridge, so
-/// the bridge gives up and reconnects while the comm core still holds the old session for about
-/// this long. That is the window in which a new session is refused, as it is on a loaded machine.
-const LAG: Duration = Duration::from_millis(2 * HEARTBEAT_MS as u64);
-/// After the link returns (the bridge's connection is accepted), the topic, describe and a call
-/// answer within this: the old session is gone within `IDLE` of the bridge's last word from it,
-/// and the bridge's retry comes on a short interval until then.
-/// How long past the bound the test keeps asking before it fails, so a late answer is measured.
-const SLACK: Duration = Duration::from_secs(2);
-const BOUND: Duration = Duration::from_millis(IDLE.as_millis() as u64 + MARGIN.as_millis() as u64);
-
 /// The comm core's options for every start: a short heartbeat, and the same place each time.
 fn board_options() -> BoardOptions {
     BoardOptions {
@@ -144,6 +129,8 @@ impl Drop for Logic {
 struct Relay {
     stop: Arc<AtomicBool>,
     stall: Arc<Mutex<Arc<Stall>>>,
+    /// The stalled connections, until [`Relay::resume`].
+    held: Mutex<Vec<Arc<Stall>>>,
     /// When each connection was accepted, in order.
     accepted: Arc<Mutex<Vec<Instant>>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -180,33 +167,34 @@ impl Relay {
         Self {
             stop,
             stall,
+            held: Mutex::new(Vec::new()),
             accepted,
             thread: Some(thread),
         }
     }
 
-    /// Stalls every connection accepted so far, and makes the next one a normal relay. The comm
-    /// core's words to the bridge stop at once; the bridge's words to the comm core stop `lag` later.
-    fn stall(&self, lag: Duration) {
+    /// Stalls every connection accepted so far, in both directions, and makes the next one a normal
+    /// relay. Nothing is read in either direction until [`Relay::resume`]: the socket stays open.
+    fn stall(&self) {
         let mut current = lock(&self.stall);
         let old = Arc::clone(&current);
         old.down.store(true, Ordering::Release);
+        old.up.store(true, Ordering::Release);
+        lock(&self.held).push(old);
         *current = Arc::new(Stall::default());
-        drop(current);
-        std::thread::spawn(move || {
-            std::thread::sleep(lag);
-            old.up.store(true, Ordering::Release);
-        });
+    }
+
+    /// Lets the stalled connections carry on from where they stopped.
+    fn resume(&self) {
+        for stalled in lock(&self.held).drain(..) {
+            stalled.down.store(false, Ordering::Release);
+            stalled.up.store(false, Ordering::Release);
+        }
     }
 
     /// How many connections have been accepted: a new one is a session connecting again.
     fn accepted(&self) -> u32 {
         u32::try_from(lock(&self.accepted).len()).unwrap_or(u32::MAX)
-    }
-
-    /// When connection number `index` (from zero) was accepted, if it has been.
-    fn accepted_at(&self, index: u32) -> Option<Instant> {
-        lock(&self.accepted).get(index as usize).copied()
     }
 }
 
@@ -441,70 +429,80 @@ fn generation_of(output: &[u8]) -> Option<i64> {
     device.get("generation")?.parse().ok()
 }
 
-/// One run of `action` on `resource`, if it finishes within `wait`; a refusal or a run that does not
-/// finish is `None`.
-fn try_run(
-    dashboard: &Orion,
-    action: &str,
-    resource: &str,
-    args: &str,
-    wait: Duration,
-) -> Option<Finished> {
-    let mut run = dashboard
-        .run(&ActionCall {
-            name: action,
-            target: Target::Resource(resource.parse().ok()?),
-            args: args.as_bytes(),
-            deadline_ms: 0,
-            detached: false,
-        })
-        .ok()?;
-    run.finish(wait).ok()
-}
-
-/// Whether the imu answers at `first` now, through a session of its own: its topic carries that
-/// generation, `describe` gives it, and a call succeeds. A topic or resource the lost session still
-/// holds answers as well, but a run of its actions goes nowhere, so the calls are what count.
-fn answering(board: &Path, first: i64) -> bool {
-    let Ok(dash) = Orion::connect(&Address::Local(board.to_path_buf()), "dashboard") else {
-        return false;
-    };
-    let Ok(mut topic) = dash.subscribe("lemnos.imu.description") else {
-        return false;
-    };
-    if topic_generation(&mut topic) != Some(first) {
-        return false;
-    }
-    let one_call = Duration::from_secs(1);
-    let described = try_run(&dash, "lemnos.imu.call", "lemnos.imu", "describe", one_call);
-    let Some(described) = described.filter(|done| done.outcome == Outcome::Succeeded) else {
-        return false;
-    };
-    if generation_of(&described.output) != Some(first) {
-        return false;
-    }
-    try_run(&dash, "lemnos.imu.call", "lemnos.imu", "describe", one_call)
-        .is_some_and(|done| done.outcome == Outcome::Succeeded)
-}
-
 /// A session the bridge loses while the comm core still holds it (the link is stalled, not closed):
 /// the bridge connects again, and its topics, its resources and `describe` answer again without any
 /// change in the device. Each step waits on the event it depends on: the relay accepting the new
 /// connection, and then the topic, describe and a call.
-#[test]
-fn a_session_lost_while_the_comm_core_holds_it_is_published_again() {
-    eprintln!("reconnect: test a_session_lost... starts");
-    let dir = dir("reconnect");
+/// The counter's value, from its topic's latest sample.
+fn counter(subscriber: &mut Subscriber) -> Option<f64> {
+    let bytes = latest(subscriber, 0)?;
+    Some(f64::from_le_bytes(bytes.as_slice().try_into().ok()?))
+}
+
+/// The board, its comm core, lemnosd, and a relay the bridge reaches Orion through.
+fn start_relayed(dir: &Path) -> (Board, Logic, Service, PathBuf) {
     let lemnosd = dir.join("lemnosd.sock");
-    let board = Board::start_with(&dir, board_options());
-    let _logic = Logic::start(&dir);
-    let _service = start_lemnosd(&lemnosd);
+    let board = Board::start_with(dir, board_options());
+    let logic = Logic::start(dir);
+    let service = start_lemnosd(&lemnosd);
+    (board, logic, service, lemnosd)
+}
+
+/// A stalled link that stays open keeps its session. Nothing is torn down or published again while
+/// the comm core and the bridge hear each other no more: the session is quiet, not gone, and the
+/// bridge does not connect again. When the stall ends, publishing continues on the same session.
+#[test]
+fn a_stalled_open_link_keeps_its_session_and_publishing_resumes_on_it() {
+    let dir = dir("stalled");
+    let (board, _logic, _service, lemnosd) = start_relayed(&dir);
     let board_socket = board.socket().to_path_buf();
     let relay = Relay::start(&dir.join("relay.sock"), board_socket.clone());
     let _bridge = start_bridge(&lemnosd, &dir.join("relay.sock"));
     let dash = dashboard(&board_socket);
-    // Subscribed as soon as the topic is there, as the live walk does: a topic's samples are said
-    // once, and a subscriber that comes later may miss the first.
+    let mut count = wait_for("the counter's first value", || {
+        dash.subscribe("lemnos.thing.values").ok()
+    });
+    let before = wait_for("the counter has a value", || counter(&mut count));
+    wait_for("the imu's resource", || {
+        resource(&dash, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    });
+    assert_eq!(relay.accepted(), 1, "the first session");
+
+    // The link stalls, open. Three times the comm core's idle time: a session that was closed by its
+    // silence would be closed by now. The session is kept, so the resource is still there.
+    relay.stall();
+    std::thread::sleep(IDLE * 3);
+    assert_eq!(
+        relay.accepted(),
+        1,
+        "a stalled link made the bridge connect again"
+    );
+    assert!(
+        resource(&dash, "lemnos.imu").is_some(),
+        "a stalled link withdrew the bridge's resources"
+    );
+
+    // The stall ends: the same session carries on, and the counter moves on it.
+    relay.resume();
+    wait_for("publishing resumes after the stall", || {
+        counter(&mut count).filter(|value| *value > before)
+    });
+    assert_eq!(relay.accepted(), 1, "publishing resumed on a new session");
+}
+
+/// A closed link is lost at once: the bridge's connection closes, and the bridge takes the session as
+/// lost and connects again. The session it had is published again on the new connection. The test
+/// waits for events, not for a time: the bridge connects again, then the resource and the description
+/// are back; the outer deadline only catches a hang.
+#[test]
+fn a_closed_link_is_lost_and_the_session_is_published_again() {
+    let dir = dir("closed");
+    let (board, _logic, _service, lemnosd) = start_relayed(&dir);
+    let board_socket = board.socket().to_path_buf();
+    let relay_socket = dir.join("relay.sock");
+    let relay = Relay::start(&relay_socket, board_socket.clone());
+    let _bridge = start_bridge(&lemnosd, &relay_socket);
+    let dash = dashboard(&board_socket);
     let mut topic = wait_for("the imu's description topic", || {
         dash.subscribe("lemnos.imu.description").ok()
     });
@@ -514,47 +512,21 @@ fn a_session_lost_while_the_comm_core_holds_it_is_published_again() {
     wait_for("the imu's resource", || {
         resource(&dash, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
     });
+    assert_eq!(relay.accepted(), 1, "the first session");
+
+    // The link closes: both of its connections, and the relay with them.
+    drop(relay);
+    // The link is back. The bridge connects again, and that is its new session.
+    let relay = Relay::start(&relay_socket, board_socket.clone());
+    wait_for("the bridge connects again after the link closed", || {
+        (relay.accepted() >= 1).then_some(())
+    });
+    wait_for("the imu's resource is published again", || {
+        resource(&dash, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    });
     assert_eq!(
         described_generation(&dash),
         first,
-        "describe before the stall"
+        "the description after the link came back"
     );
-    eprintln!("reconnect: first session: generation {first}, describe agrees");
-
-    for cycle in 1..=3 {
-        let next = relay.accepted();
-        eprintln!("reconnect: cycle {cycle}: the link stalls; the comm core keeps the session");
-        relay.stall(LAG);
-        eprintln!("reconnect: cycle {cycle}: waiting for the bridge to connect again");
-        // The test's own session is used while it waits, so the comm core does not take it for idle.
-        // The link is back when the bridge's next connection is accepted: the bound runs from that
-        // moment, not from when the test happens to look.
-        let returned = wait_for("the bridge connecting again", || {
-            let _ = resource(&dash, "lemnos.imu");
-            relay.accepted_at(next)
-        });
-        eprintln!("reconnect: cycle {cycle}: the bridge connected again; waiting on the answer");
-        let deadline = returned + BOUND + SLACK;
-        let back = loop {
-            if answering(&board_socket, first) {
-                break returned.elapsed();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "cycle {cycle}: the topic, describe and a call did not answer within {BOUND:?} of \
-                 the link returning (idle {IDLE:?} + margin {MARGIN:?}); still not at {:?}",
-                returned.elapsed()
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        eprintln!(
-            "reconnect: cycle {cycle}: topic, describe and a call answer at generation {first}, \
-             {back:?} after the link returned (bound {BOUND:?})"
-        );
-        assert!(
-            back <= BOUND,
-            "cycle {cycle}: the topic, describe and a call came back {back:?} after the link \
-             returned, over the bound {BOUND:?} (idle {IDLE:?} + margin {MARGIN:?})"
-        );
-    }
 }

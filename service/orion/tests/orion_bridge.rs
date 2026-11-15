@@ -25,7 +25,7 @@ use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, publish, source};
 use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
-use orion::actions::{ActionCall, Finished, Outcome, Target, Update};
+use orion::actions::{ActionCall, ActionDecl, Admits, Finished, Outcome, Policy, Target, Update};
 use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, SampleTime, Status, Subscriber};
 use orion::types::Error as Refusal;
@@ -40,6 +40,9 @@ const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid 
     [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n";
 
 const WAIT: Duration = Duration::from_secs(20);
+/// lemnosd's NO_DEVICE status: the device is not running. The bridge answers a run it refuses with it as
+/// `Rejected`, with this as the code (`ending_of_status`).
+const NO_DEVICE_CODE: u32 = 19;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -265,14 +268,17 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
             })
             .expect("run");
         match run.finish(WAIT) {
-            Err(ClientError::Refused(Refusal::NotFound)) if Instant::now() < deadline => {
+            Err(ClientError::Refused {
+                error: Refusal::NotFound,
+                ..
+            }) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            // The device is not running (-19): refused before the call ran, so it is asked again
+            // The device is not running (lemnosd's NO_DEVICE, code 19): refused before the call ran, so it is asked again
             // once it runs, within the same bound. A bind that misses under load leaves it retrying.
             Ok(done)
-                if done.outcome == Outcome::Failed
-                    && done.detail.contains("refused (-19)")
+                if done.outcome == Outcome::Rejected
+                    && done.code == NO_DEVICE_CODE
                     && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(20));
@@ -345,6 +351,15 @@ fn devices_are_resources_their_values_and_status_are_topics() {
     wait_for("the imu's status", || {
         (latest(&mut status, 0).as_deref() == Some(b"running".as_slice())
             && latest(&mut status, 1).as_deref() == Some(b"ok".as_slice()))
+        .then_some(())
+    });
+
+    // A state topic is declared `OnSubscribe::Latest`: a subscriber that arrives after its last
+    // value gets that value without any new publish (see `publish::on_subscribe_for`).
+    let mut late = dashboard.subscribe("lemnos.imu.status").expect("subscribe");
+    wait_for("a late subscriber gets the imu's status", || {
+        (latest(&mut late, 0).as_deref() == Some(b"running".as_slice())
+            && latest(&mut late, 1).as_deref() == Some(b"ok".as_slice()))
         .then_some(())
     });
 
@@ -696,12 +711,16 @@ fn start_lemnosd_board(socket: &Path, board: &str) -> Service {
     .expect("lemnosd")
 }
 
-/// The facts the node's hello document carries now, by name. `None` until a session has them.
+/// The facts the node's hello document carries now, by name, without Orion's own: at the pinned
+/// revision Orion's hello carries `state`, `recovery_why`, `security` and `security_generation`
+/// (its `OWN_FACTS`), which are not the bridge's facts. `None` until a session has them.
 fn hello(dashboard: &Orion) -> Option<BTreeMap<String, String>> {
+    const ORION_OWN: [&str; 4] = ["state", "recovery_why", "security", "security_generation"];
     let node = dashboard.node().ok()?;
     Some(
         node.facts
             .into_iter()
+            .filter(|fact| !ORION_OWN.contains(&fact.name.as_str()))
             .map(|fact| (fact.name, String::from_utf8_lossy(&fact.value).into_owned()))
             .collect(),
     )
@@ -1393,9 +1412,10 @@ fn a_dead_callers_idle_holds_are_released_within_its_lease() {
     );
 }
 
-/// A dropped caller is told once: its first reply after the lease ended is served normally, on a fresh
-/// connection, with its holds gone, and its `detail` begins with the note `lease-ended:`. The reply
-/// after it carries no note. The hello document's `leases.ended` counts the drop for everyone.
+/// A caller whose lease ran out (it held, then went silent while its session lived) is told once: its
+/// first reply after the lease carries the note, on a fresh connection with its holds gone, and the next
+/// reply carries none. The note is for the session that was dropped, the one that asks again. The hello
+/// document's `leases.ended` counts the drop for everyone.
 #[test]
 fn a_dropped_caller_is_told_once_by_the_note_on_its_next_reply() {
     let dir = dir("lease-dropped-reply");
@@ -1403,9 +1423,8 @@ fn a_dropped_caller_is_told_once_by_the_note_on_its_next_reply() {
     let caller = second_session(&board);
     let finished = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
-    drop(caller);
     std::thread::sleep(TEST_LEASE * 3);
-    let first = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    let first = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "held");
     assert_eq!(first.outcome, Outcome::Succeeded, "{first:?}");
     assert_eq!(String::from_utf8(first.output).expect("text"), "0");
     assert_eq!(
@@ -1413,7 +1432,7 @@ fn a_dropped_caller_is_told_once_by_the_note_on_its_next_reply() {
         lemnos_orion::calls::LEASE_ENDED_NOTE,
         "the first reply after the drop carries the note"
     );
-    let second = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    let second = run(&caller, "lemnos.tracked.call", "lemnos.tracked", "held");
     assert_eq!(second.outcome, Outcome::Succeeded, "{second:?}");
     assert_eq!(second.detail, "", "the note is given once");
     let facts = hello(&dashboard).expect("the hello document");
@@ -1595,28 +1614,19 @@ fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
 }
 
 #[test]
-fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
+fn a_caller_that_goes_away_ends_its_run_and_releases_its_holds_at_once() {
     let dir = dir("callers");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
-    tracked_call(&dashboard, "take");
-    let who = tracked_call(&dashboard, "who");
-    assert_ne!(who, "0", "the caller is not the local caller");
-    assert_eq!(
-        tracked_call(&dashboard, "who"),
-        who,
-        "one caller, one number"
-    );
+    let caller = second_session(&board);
+    run(&caller, "lemnos.tracked.call", "lemnos.tracked", "take");
     assert_eq!(
         tracked_call(&dashboard, "held"),
         "1",
         "the driver holds for the caller"
     );
 
-    // The caller starts a long job, then goes away while it runs. Orion cancels its run with the
-    // same cancel a caller's explicit cancel is sent with, so the bridge cannot tell them apart.
-    let caller = wait_for("a second Orion session", || {
-        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
-    });
+    // The caller starts a long job, then goes away while it runs. Orion cancels its run with reason 2
+    // (its session ended), and then says the session ended (`CallerGone`).
     let long = caller
         .run(&ActionCall {
             name: "lemnos.tracked.call",
@@ -1652,14 +1662,113 @@ fn a_caller_that_goes_away_ends_its_run_and_its_holds_wait_for_orion() {
             Err(_) => None,
         }
     });
-    // ORION-R2: at R2 the bridge reads a session end as `caller_gone` (reason 2), and the driver
-    // drops the caller's holds: `held` is then "0". At this revision the same cancel says no more
-    // than a plain one, so the holds stay.
+    // The caller's session ended, so its holds are released at once, well within the lease (60 s,
+    // which this test does not wait for): `held` goes to "0".
+    wait_for(
+        "the caller's holds are released when its session ends",
+        || (tracked_call(&dashboard, "held") == "0").then_some(()),
+    );
+}
+
+/// Two sessions of one identity each hold. Each session has its own lemnosd connection, so when one
+/// session ends only its hold goes: the sibling's stays, and nothing later releases it. Mutation: with
+/// the connections kept per identity, the one `CallerGone` releases both holds and this fails.
+#[test]
+fn two_sessions_of_one_identity_keep_their_own_holds() {
+    let dir = dir("two-sessions");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let sibling = second_session(&board);
+    let finished = run(&sibling, "lemnos.tracked.call", "lemnos.tracked", "take");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    tracked_call(&dashboard, "take");
+    assert_eq!(tracked_call(&dashboard, "held"), "2", "each session holds");
+    drop(sibling);
+    wait_for("the ended session's hold is released", || {
+        (tracked_call(&dashboard, "held") == "1").then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(2));
     assert_eq!(
         tracked_call(&dashboard, "held"),
         "1",
-        "the holds stay until Orion says why a run was cancelled"
+        "ending one session released the other's hold"
     );
+}
+
+/// A detached run goes on past its session (E12: it outlives its caller). When its session ends, the
+/// attached runs of that session are released (the driver is free for the next caller), and the
+/// detached run keeps going: a session of the same identity attaches to it and sees its progress, then
+/// cancels it. Mutation: a `CallerGone` that ends every run of the session fails the attach.
+#[test]
+fn a_detached_run_outlives_its_session_and_attach_finds_it() {
+    let dir = dir("detached");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let session = second_session(&board);
+    let mut detached = session
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"count_until_cancelled",
+            // A detached run needs a deadline at this revision (`NoDeadline` otherwise): a minute.
+            deadline_ms: 60_000,
+            detached: true,
+        })
+        .expect("run");
+    let call = detached.call();
+    wait_for("the detached run reports progress", || {
+        match detached.wait(Duration::from_millis(100)) {
+            Ok(Some(Update::Doing(_))) => Some(()),
+            _ => None,
+        }
+    });
+    drop(detached);
+    drop(session);
+    // Its session has ended; the detached run is still going, so it is found by attach and is news.
+    std::thread::sleep(Duration::from_millis(500));
+    let mut attached = dashboard.attach(call).expect("attach");
+    wait_for(
+        "attach finds the detached run and its progress",
+        || match attached.wait(Duration::from_millis(100)) {
+            Ok(Some(Update::Doing(_))) => Some(()),
+            _ => None,
+        },
+    );
+    attached.cancel().expect("cancel");
+    let finished = attached.finish(WAIT).expect("the cancelled run ends");
+    assert_eq!(finished.outcome, Outcome::Cancelled, "{finished:?}");
+
+    // An attached run of a session that ends is released: the driver is free for the next caller.
+    let ender = second_session(&board);
+    let long = ender
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    std::thread::sleep(Duration::from_millis(300));
+    drop(long);
+    drop(ender);
+    wait_for("the attached run was released with its session", || {
+        let mut run = dashboard
+            .run(&ActionCall {
+                name: "lemnos.tracked.call",
+                target: Target::Resource("lemnos.tracked".parse().expect("name")),
+                args: b"hold_until_cancelled",
+                deadline_ms: 0,
+                detached: false,
+            })
+            .ok()?;
+        match run.finish(Duration::from_millis(200)) {
+            Ok(_) => None,
+            Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                let _ = run.cancel();
+                Some(())
+            }
+            Err(_) => None,
+        }
+    });
 }
 
 #[test]
@@ -1917,5 +2026,111 @@ fn a_device_that_cannot_come_up_is_described_with_its_state_and_reason() {
     assert!(
         records.iter().any(|r| r.word == "method"),
         "its methods come from the manifest: {text}"
+    );
+}
+
+/// What a program that registered an action is sent, in order, until `CallerGone` (or `wait` runs out).
+fn requests_until_caller_gone(
+    program: &mut orion::actions::Registration,
+    wait: Duration,
+) -> Vec<orion::actions::Request> {
+    let deadline = Instant::now() + wait;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match program.wait(Duration::from_millis(50)) {
+            Ok(Some(request)) => {
+                let gone = matches!(request, orion::actions::Request::CallerGone { .. });
+                seen.push(request);
+                if gone {
+                    break;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => panic!("the program's requests: {error:?}"),
+        }
+    }
+    seen
+}
+
+/// The order Orion sends a program at this revision, through its real node logic: for an attached run
+/// of a session that ends, `Cancel` with reason `CallerGone` comes first, then `CallerGone`. The bridge's
+/// detached inference (`calls::departure`) relies on this order. An Orion change that reverses it fails
+/// here, not in a silent release. Also pinned: a detached run gets no cancel, only `CallerGone`.
+#[test]
+fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel() {
+    let dir = dir("order");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let node: orion::types::NodeName = dashboard.node().expect("node").name.parse().expect("name");
+    let policy = Policy::new(Admits::LOCAL);
+    let mut program = second_session(&board)
+        .register_action(
+            &ActionDecl {
+                name: "test.order.call",
+                target: Target::Node(node.clone()),
+                description: "order probe: nothing runs here but the test",
+            },
+            policy,
+        )
+        .expect("register");
+    let attached_caller = second_session(&board);
+    let attached = attached_caller
+        .run(&ActionCall {
+            name: "test.order.call",
+            target: Target::Node(node.clone()),
+            args: b"",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    let attached_call = attached.call();
+    drop(attached);
+    drop(attached_caller);
+    let seen = requests_until_caller_gone(&mut program, WAIT);
+    let names: Vec<String> = seen
+        .iter()
+        .map(|r| match r {
+            orion::actions::Request::Run { call, .. } => format!("run {call}"),
+            orion::actions::Request::Cancel { call, reason } => {
+                format!("cancel {call} {}", reason.code())
+            }
+            orion::actions::Request::CallerGone { .. } => "caller-gone".to_owned(),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            format!("run {attached_call}"),
+            format!("cancel {attached_call} 2"),
+            "caller-gone".to_owned(),
+        ],
+        "Orion's order at the pinned revision"
+    );
+
+    // A detached run: no cancel for it when its session ends; only `CallerGone` comes.
+    let detached_caller = second_session(&board);
+    let detached = detached_caller
+        .run(&ActionCall {
+            name: "test.order.call",
+            target: Target::Node(node.clone()),
+            args: b"",
+            deadline_ms: 60_000,
+            detached: true,
+        })
+        .expect("run");
+    let detached_call = detached.call();
+    drop(detached);
+    drop(detached_caller);
+    let seen = requests_until_caller_gone(&mut program, WAIT);
+    assert!(
+        seen.iter().all(|r| !matches!(
+            r,
+            orion::actions::Request::Cancel { call, .. } if *call == detached_call
+        )),
+        "a detached run was cancelled: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|r| matches!(r, orion::actions::Request::CallerGone { .. })),
+        "CallerGone for the detached run's session: {seen:?}"
     );
 }

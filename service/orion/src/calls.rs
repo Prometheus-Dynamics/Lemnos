@@ -22,14 +22,13 @@
 //! apart by connection, so a driver that tracks callers sees each Orion caller as its own.
 //!
 //! A cancel stops the run and nothing else: the job is cancelled on lemnosd, and the caller's
-//! connection stays for now, so the drivers keep what the caller holds. At Orion's pinned revision a
-//! cancel does not say why it was sent. Orion sends the same `Cancel` when the caller stops the run,
-//! when the caller's session ends, when the run's deadline passes and when the node stops, and a caller
-//! that is still there cannot be told from one that is gone. So the connection is closed when the
-//! caller's lease runs out (see [`expire`]): a caller silent for the lease is gone, and lemnosd then
-//! tells the drivers so. Only silence expires a lease: a request, a transfer chunk or a run's progress
-//! renews it (see [`expire`] for the list). The `ORION-R2 (C33)` notes mark where Orion's
-//! reason replaces the lease.
+//! connection stays, so the drivers keep what the caller holds. Orion's cancel says why it was sent,
+//! and the bridge logs that reason as words; it is not passed on. A session's end is a different
+//! message (`CallerGone`): the holds of the callers of that session are released at once, by closing
+//! their lemnosd connections (see [`caller_gone`]). A silent caller's holds are bounded by a lease
+//! (see [`expire`]): a caller silent for the lease is dropped, and lemnosd then tells the drivers so.
+//! Only silence expires a lease: a request, a transfer chunk or a run's progress renews it (see
+//! [`expire`] for the list).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -95,6 +94,10 @@ impl Verb {
 pub struct Job {
     /// The Orion session the run came on. An answer for a session that has ended is dropped.
     pub session: u64,
+    /// The token of the Orion session that asked for the run (`Request::Run`'s `session`): Orion
+    /// says it again when that session ends (`Request::CallerGone`). Zero from a node that does not
+    /// say.
+    pub token: u64,
     /// The run, as Orion numbered it.
     pub call: u64,
     pub device: String,
@@ -110,8 +113,11 @@ pub struct Job {
 pub enum Message {
     /// Run this.
     Run(Job),
-    /// Stop run `call` of session `session`, if it is a long job still going.
-    Cancel { session: u64, call: u64 },
+    /// Stop run `call` of session `session`, if it is a long job still going. `reason` is Orion's
+    /// cancel reason by its wire value (see [`cancel_words`]).
+    Cancel { session: u64, call: u64, reason: u8 },
+    /// The Orion session with token `token` ended: its callers' holds are released.
+    CallerGone { token: u64 },
 }
 
 /// How far a run that is a long job has got.
@@ -146,24 +152,29 @@ impl Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Running {
     session: u64,
+    /// The Orion session token the run came from ([`Job::token`]).
+    token: u64,
     call: u64,
     job: u64,
     /// The caller the run came from: the key of its lemnosd connection.
     caller: String,
 }
 
-/// A caller's lemnosd connection, and when the caller last had a request: a run, a run's end or a
-/// cancel. Its holds last for the lease after that, while no run of the caller is in progress.
+/// A session's lemnosd connection, and when its session last had a request: a run, a run's end or a
+/// cancel. Its holds last for the lease after that, while no run of the session is in progress.
 struct Lemnosd {
     client: Client,
     seen: Instant,
+    /// The class of the session's identity (`local`, `operator`, ...), the only thing a log names.
+    class: &'static str,
 }
 
 impl Lemnosd {
-    fn new(client: Client) -> Self {
+    fn new(client: Client, class: &'static str) -> Self {
         Self {
             client,
             seen: Instant::now(),
+            class,
         }
     }
 }
@@ -176,12 +187,74 @@ const JOB_WAIT: Duration = Duration::from_millis(50);
 /// How often the call thread looks for a caller whose lease has run out, when no run is going.
 const LEASE_TICK: Duration = Duration::from_millis(200);
 
+/// How a run ended, as the bridge says it to Orion: Orion's outcome, and the action's status code a
+/// caller branches on. The code is the magnitude of the lemnosd status the ending names (the Linux
+/// error number: 16 for `BUSY`, 110 for `TIMED_OUT`); zero where no status is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ending {
+    pub outcome: Outcome,
+    pub code: u32,
+}
+
+impl Ending {
+    /// It worked.
+    pub const SUCCEEDED: Self = Self {
+        outcome: Outcome::Succeeded,
+        code: 0,
+    };
+    /// It ran, or tried to, and failed; no status is named.
+    pub const FAILED: Self = Self {
+        outcome: Outcome::Failed,
+        code: 0,
+    };
+    /// Refused without running; no status is named (arguments that are not what the device takes).
+    pub const REJECTED: Self = Self {
+        outcome: Outcome::Rejected,
+        code: 0,
+    };
+    /// Cancelled by the bridge, for a caller's own cancel or a session's end; no status is named.
+    pub const CANCELLED: Self = Self {
+        outcome: Outcome::Cancelled,
+        code: 0,
+    };
+}
+
+/// The lemnosd statuses that end a run as `Rejected`: refused before anything ran, so asking again or
+/// asking differently may succeed.
+const REFUSED: [Status; 8] = [
+    Status::NOT_PERMITTED,
+    Status::NOT_FOUND,
+    Status::AGAIN,
+    Status::BUSY,
+    Status::NO_DEVICE,
+    Status::INVALID_ARGUMENT,
+    Status::NOT_SUPPORTED,
+    Status::BUFFER_TOO_SMALL,
+];
+
+/// The ending a lemnosd status names, with the status as its code. `CANCELLED` is `Cancelled` and
+/// `TIMED_OUT` is `TimedOut`; the statuses in [`REFUSED`] are `Rejected`; every other status ran and
+/// failed, and is `Failed` with code zero. The table is in docs/daemon.md.
+pub fn ending_of_status(status: Status) -> Ending {
+    let code = status.0.unsigned_abs();
+    let outcome = if status == Status::CANCELLED {
+        Outcome::Cancelled
+    } else if status == Status::TIMED_OUT {
+        Outcome::TimedOut
+    } else if REFUSED.contains(&status) {
+        Outcome::Rejected
+    } else {
+        return Ending::FAILED;
+    };
+    Ending { outcome, code }
+}
+
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Done {
     pub session: u64,
     pub call: u64,
-    pub outcome: Outcome,
+    pub ending: Ending,
     /// The reply as text, for `call`.
     pub output: String,
     /// Why, when it did not succeed.
@@ -197,6 +270,8 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
     let mut clients: Callers = HashMap::new();
     let mut running: Vec<Running> = Vec::new();
     let mut ended: Vec<CallerKey> = Vec::new();
+    // Sessions that ended while a detached run of theirs was still going (see `caller_gone`).
+    let mut departed: Vec<CallerKey> = Vec::new();
     loop {
         expire(
             &mut clients,
@@ -206,6 +281,7 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             Instant::now(),
             shared,
         );
+        release_departed(&mut clients, &running, &mut ended, &mut departed, shared);
         let message = if !running.is_empty() {
             match messages.try_recv() {
                 Ok(message) => Some(message),
@@ -228,13 +304,28 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             Some(Message::Run(job)) => {
                 run_one(socket, &mut clients, &job, &mut running, &mut ended, shared);
             }
-            Some(Message::Cancel { session, call }) => {
+            Some(Message::CallerGone { token }) => {
+                caller_gone(
+                    &mut clients,
+                    &running,
+                    &mut ended,
+                    &mut departed,
+                    token,
+                    shared,
+                );
+            }
+            Some(Message::Cancel {
+                session,
+                call,
+                reason,
+            }) => {
                 cancel(
                     &mut clients,
                     &mut running,
                     &mut ended,
                     session,
                     call,
+                    reason,
                     shared,
                 );
             }
@@ -244,11 +335,15 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
     }
 }
 
-/// The key a caller's lemnosd connection is kept under: the Orion caller's identity.
-// ORION-R2 (C33): the key becomes the session token Orion gives each Claim (`Claim.session`), so a
-// session's connection is kept apart from another session of the same identity. This alias is the
-// one place the key type is named.
+/// The key a session's lemnosd connection is kept under (see [`caller_key`]).
 pub type CallerKey = String;
+
+/// The key a session's lemnosd connection, and its holds, are kept under: the Orion session's token,
+/// so two sessions of one identity have connections of their own and ending one never releases the
+/// other's holds. A token of zero (a node that does not say) is one shared key.
+pub fn caller_key(token: u64) -> CallerKey {
+    format!("session:{token}")
+}
 
 /// The class of a caller, as its identity names it: `local`, `operator`, `peer`, `device` or
 /// `anonymous`. The class is all a log line or the hello document says of a caller; never its key.
@@ -279,9 +374,8 @@ pub fn caller_class(caller: &str) -> &'static str {
 ///
 /// A holder keeps its holds by renewing them: `<resource>.call describe` is the renewal with nothing
 /// else to do.
-// ORION-R2 (C33): the lease is removed at R2. Orion's CALLER_GONE, sent once for each session that
-// ends, releases that session's connection at once, idle or busy; this function is then not called.
-// The lease is kept only as the documented behaviour against an Orion older than R2.
+// A session's end is released by `CallerGone` (see `caller_gone`) at once. The lease is the backstop
+// for a caller that holds and says nothing: it is the only release for a silent holder.
 fn expire(
     clients: &mut Callers,
     running: &mut Vec<Running>,
@@ -297,11 +391,9 @@ fn expire(
     let gone: Vec<CallerKey> = clients
         .iter()
         .filter(|(caller, held)| {
-            // ORION-R2 (C33): a caller with any run in flight is alive, whether or not the run reports
-            // progress. The comm core cancels the runs of a session that ends (a reason-less Cancel for
-            // a non-detached run), and a cancelled run no longer counts; a DETACHED run from a dead
-            // caller is not cancelled and the bridge cannot see the flag, so it holds that caller's
-            // holds until the run itself ends. The later protocol revision closes that.
+            // A caller with any run in flight is alive, whether or not the run reports progress. A session
+            // that ends is released by CallerGone, not by its lease; a detached run keeps its session's
+            // connection until it ends (see `caller_gone`).
             if running.iter().any(|r| r.caller == **caller) {
                 return false;
             }
@@ -354,9 +446,8 @@ fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> String {
     }
 }
 
-// ORION-R2 (C33): the one trigger that releases a caller's holds. Dropping the connection closes it
-// on lemnosd, which calls `caller_gone` on the drivers. At R2 the trigger is CALLER_GONE for the
-// session token; the drop, the log and the count below stay.
+// Dropping the connection closes it on lemnosd, which tells the drivers the caller is gone. This is the
+// one release of a session's holds: a session's end (`caller_gone`), its lease, or a dropped link.
 fn release(
     clients: &mut Callers,
     ended: &mut Vec<CallerKey>,
@@ -364,29 +455,41 @@ fn release(
     why: &str,
     shared: &Shared,
 ) {
-    if clients.remove(caller).is_some() {
+    if let Some(held) = clients.remove(caller) {
         remember(ended, caller);
         log(&format!(
             "caller of class {} dropped: {why}; its connection to lemnosd closed, and lemnosd released what it held (1 connection)",
-            caller_class(caller)
+            held.class
         ));
         shared.with(|mirror| mirror.note_lease_end());
     }
 }
 
+/// Orion's cancel reasons by their wire value (Orion's `CancelReason`): 0 not said, 1 its caller
+/// asked, 2 its caller's session ended, 3 its deadline passed, 4 node logic is stopping. A value
+/// this bridge does not know is said as such.
+pub(crate) fn cancel_words(reason: u8) -> &'static str {
+    match reason {
+        0 => "not said",
+        1 => "its caller asked",
+        2 => "its caller's session ended",
+        3 => "its deadline passed",
+        4 => "node logic is stopping",
+        _ => "a reason this bridge does not know",
+    }
+}
+
 /// Stops run `call` of `session`. A long job is cancelled on lemnosd, and the run ends as cancelled
-/// at once: nothing else would answer it. The caller's connection is kept, and its lease starts
-/// from now: a caller whose session ended is gone within a lease of its cancel.
-// ORION-R2 (C33): Orion's Cancel gains `reason` (0 not said, 1 caller asked, 2 caller's session ended,
-// 3 deadline, 4 node stopping). With reason 2 only, the caller's lemnosd connection is closed here
-// after its job is cancelled (`clients.remove`), which is what tells lemnosd's drivers the caller
-// is gone. Every other reason keeps the connection, as this does now.
+/// at once: nothing else would answer it. The caller's connection is kept, and its lease starts from
+/// now. The reason (Orion's `CancelReason`) is logged and does not change the run: the session's end
+/// comes as `CallerGone`, which releases the holds (see [`caller_gone`]).
 fn cancel(
     clients: &mut Callers,
     running: &mut Vec<Running>,
     ended: &mut Vec<CallerKey>,
     session: u64,
     call: u64,
+    reason: u8,
     shared: &Shared,
 ) {
     let Some(at) = running
@@ -396,6 +499,7 @@ fn cancel(
         return;
     };
     let r = running.remove(at);
+    log(&format!("run {call} cancelled: {}", cancel_words(reason)));
     if let Some(lemnosd) = clients.get_mut(&r.caller) {
         // Its end, cancelled or not, comes as the job's news, which finds no run and is dropped.
         let _ = lemnosd.client.cancel_job(r.job);
@@ -405,16 +509,16 @@ fn cancel(
     shared.finished(Done {
         session: r.session,
         call: r.call,
-        outcome: Outcome::Cancelled,
+        ending: Ending::CANCELLED,
         output: String::new(),
         detail,
     });
 }
 
 /// Connects the caller's connection to lemnosd, when it can be made.
-fn connect(socket: &Path, clients: &mut Callers, caller: &str) {
+fn connect(socket: &Path, clients: &mut Callers, caller: &str, class: &'static str) {
     if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
-        clients.insert(caller.to_owned(), Lemnosd::new(client));
+        clients.insert(caller.to_owned(), Lemnosd::new(client, class));
     }
 }
 
@@ -427,7 +531,9 @@ fn run_one(
     ended: &mut Vec<CallerKey>,
     shared: &Shared,
 ) {
-    let caller = job.caller.as_str();
+    let key = caller_key(job.token);
+    let caller = key.as_str();
+    let class = caller_class(&job.caller);
     if let Some(lemnosd) = clients.get_mut(caller) {
         lemnosd.seen = Instant::now();
     }
@@ -435,7 +541,7 @@ fn run_one(
         // Jobs on the connection that went are over: lemnosd ended them with it.
         lost(caller, running, shared);
         clients.remove(caller);
-        connect(socket, clients, caller);
+        connect(socket, clients, caller, class);
     }
     let mut served = match clients.get(caller) {
         Some(lemnosd) => serve(&lemnosd.client, job, shared),
@@ -452,12 +558,13 @@ fn run_one(
         clients.remove(caller);
         if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
             served = serve(&client, job, shared);
-            clients.insert(caller.to_owned(), Lemnosd::new(client));
+            clients.insert(caller.to_owned(), Lemnosd::new(client, class));
         }
     }
-    let (outcome, output, detail) = match served {
+    let (ending, output, detail) = match served {
         Ok(Served::Started(started)) => {
             running.push(Running {
+                token: job.token,
                 session: job.session,
                 call: job.call,
                 job: started,
@@ -465,15 +572,16 @@ fn run_one(
             });
             return;
         }
-        Ok(Served::Output(output)) => (Outcome::Succeeded, output, String::new()),
-        Err(Failure::Refused(why)) => (Outcome::Rejected, String::new(), why),
-        Err(Failure::Failed(why)) => (Outcome::Failed, String::new(), why),
+        Ok(Served::Output(output)) => (Ending::SUCCEEDED, output, String::new()),
+        Err(Failure::Refused(why)) => (Ending::REJECTED, String::new(), why),
+        Err(Failure::Status(status, why)) => (ending_of_status(status), String::new(), why),
+        Err(Failure::Failed(why)) => (Ending::FAILED, String::new(), why),
     };
     let detail = noted(ended, caller, detail);
     shared.finished(Done {
         session: job.session,
         call: job.call,
-        outcome,
+        ending,
         output,
         detail,
     });
@@ -545,21 +653,27 @@ fn follow(
 
 /// How a run that was a long job ended.
 fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
-    let (outcome, output, detail) = if status.is_ok() {
-        (Outcome::Succeeded, result_text(result), String::new())
-    } else if status == Status::CANCELLED {
-        (Outcome::Cancelled, String::new(), "cancelled".to_owned())
+    let (ending, output, detail) = if status.is_ok() {
+        (Ending::SUCCEEDED, result_text(result), String::new())
     } else {
-        (
-            Outcome::Failed,
-            String::new(),
-            format!("the job ended with status {}", status.0),
-        )
+        // The job ran, so a refusal's ending does not apply to it: only a cancel and a timeout keep theirs.
+        let named = ending_of_status(status);
+        let ending = if named.outcome == Outcome::Cancelled || named.outcome == Outcome::TimedOut {
+            named
+        } else {
+            Ending::FAILED
+        };
+        let detail = if status == Status::CANCELLED {
+            "cancelled".to_owned()
+        } else {
+            format!("the job ended with status {}", status.0)
+        };
+        (ending, String::new(), detail)
     };
     Done {
         session: run.session,
         call: run.call,
-        outcome,
+        ending,
         output,
         detail,
     }
@@ -584,6 +698,77 @@ fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
     );
 }
 
+/// Orion's session `token` ended (`Request::CallerGone`). Orion cancels the session's attached runs
+/// before it says so (`Cancel`, reason 2), so a run of the session still in flight is a detached one,
+/// which goes on past its caller. Its connection stays: lemnosd ends a job with the connection it was
+/// started on. The connection is let go when its last run ends ([`release_departed`]). With nothing in
+/// flight, the session's connection is released now, as a dropped one is: its holds go, and lemnosd's
+/// drivers hear the caller is gone. A session with no connection here is a no-op.
+fn caller_gone(
+    clients: &mut Callers,
+    running: &[Running],
+    ended: &mut Vec<CallerKey>,
+    departed: &mut Vec<CallerKey>,
+    token: u64,
+    shared: &Shared,
+) {
+    let caller = caller_key(token);
+    match departure(running, &caller) {
+        Departure::Keep => {
+            if !departed.contains(&caller) {
+                departed.push(caller);
+            }
+        }
+        Departure::Release => release(clients, ended, &caller, "its session ended", shared),
+    }
+}
+
+/// What a session's end does to its connection (see [`caller_gone`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Departure {
+    /// Nothing of the session is in flight: its connection is released now.
+    Release,
+    /// A run of the session is still in flight. Its connection is kept until that run ends.
+    Keep,
+}
+
+/// The decision at `CallerGone`. Orion has already cancelled the session's attached runs, with reason 2,
+/// and [`cancel`] removes each one it cancels from `running`. So a run still in `running` at `CallerGone`
+/// is one that never got its reason-2 cancel: a detached run, or an ambiguous one. It is always kept
+/// (`Keep`), because ending a run that might be detached is the unsafe error. Only the order Orion sends
+/// the two messages in makes the rest of this safe; `live_orion_order_*` in `orion_bridge.rs` pins it at
+/// the pinned revision.
+fn departure(running: &[Running], caller: &str) -> Departure {
+    if running.iter().any(|r| r.caller == caller) {
+        Departure::Keep
+    } else {
+        Departure::Release
+    }
+}
+
+/// Releases each departed session whose last detached run has ended (see [`caller_gone`]).
+fn release_departed(
+    clients: &mut Callers,
+    running: &[Running],
+    ended: &mut Vec<CallerKey>,
+    departed: &mut Vec<CallerKey>,
+    shared: &Shared,
+) {
+    departed.retain(|caller| {
+        if running.iter().any(|r| r.caller == *caller) {
+            return true;
+        }
+        release(
+            clients,
+            ended,
+            caller,
+            "its session ended, and its detached run ended",
+            shared,
+        );
+        false
+    });
+}
+
 /// Ends the followed jobs of one caller as failed, with `detail` as the reason.
 fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail: &str) {
     let mut kept = Vec::with_capacity(running.len());
@@ -595,7 +780,7 @@ fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail:
         shared.finished(Done {
             session: r.session,
             call: r.call,
-            outcome: Outcome::Failed,
+            ending: Ending::FAILED,
             output: String::new(),
             detail: detail.to_owned(),
         });
@@ -625,21 +810,27 @@ pub enum Served {
 pub enum Failure {
     /// It was not run: arguments that are not what the device takes, or no such item.
     Refused(String),
-    /// It ran, or tried to, and failed: the device said no, or lemnosd is not there.
+    /// lemnosd answered with this status: its ending is [`ending_of_status`].
+    Status(Status, String),
+    /// It ran, or tried to, and failed: lemnosd is not there, or the bridge could not do it.
     Failed(String),
 }
 
 fn failed(error: Error) -> Failure {
-    Failure::Failed(error.to_string())
+    match &error {
+        Error::Refused { status, .. } => Failure::Status(*status, error.to_string()),
+        _ => Failure::Failed(error.to_string()),
+    }
 }
 
 /// A call's failure. A reply that did not fit the out buffer is named as such, with how to ask
 /// for more; the bridge never sends a partial reply.
 fn refused_reply(error: Error, call: &Call) -> Failure {
     match &error {
-        Error::Refused { status, .. } if *status == Status::BUFFER_TOO_SMALL => {
-            Failure::Failed(format!("{error}: {}", too_small(call)))
-        }
+        Error::Refused { status, .. } if *status == Status::BUFFER_TOO_SMALL => Failure::Status(
+            Status::BUFFER_TOO_SMALL,
+            format!("{error}: {}", too_small(call)),
+        ),
         _ => failed(error),
     }
 }
@@ -777,5 +968,203 @@ mod tests {
         assert_eq!(result_text(b"os-2"), "os-2");
         assert_eq!(result_text(&[0xff, 0x01]), "ff01");
         assert_eq!(result_text(b""), "");
+    }
+}
+
+#[cfg(test)]
+mod cancel_reason_tests {
+    use super::*;
+
+    /// Both reasons the coordinator named are said in words, and each one differs.
+    #[test]
+    fn each_reason_says_who_cancelled() {
+        assert_eq!(cancel_words(1), "its caller asked");
+        assert_eq!(cancel_words(2), "its caller's session ended");
+        assert_ne!(cancel_words(1), cancel_words(2));
+        assert_eq!(cancel_words(9), "a reason this bridge does not know");
+    }
+}
+
+#[cfg(test)]
+mod departure_tests {
+    use super::*;
+
+    fn run(caller: &str, call: u64) -> Running {
+        Running {
+            session: 1,
+            token: 2,
+            call,
+            job: call,
+            caller: caller.to_owned(),
+        }
+    }
+
+    /// Attached: Orion's reason-2 cancel comes first and removes the run, so `CallerGone` finds nothing
+    /// in flight and the session is released. Order recorded from Orion's `gone()` at 671d29d
+    /// (`crates/node/action-list/src/lib.rs`), pinned live by `orion_order_pins_*`.
+    #[test]
+    fn a_session_whose_attached_runs_were_cancelled_is_released() {
+        let running: Vec<Running> = Vec::new();
+        assert_eq!(departure(&running, &caller_key(2)), Departure::Release);
+    }
+
+    /// Detached: no cancel is sent, the run stays in flight at `CallerGone`, so the connection is kept
+    /// until the run ends.
+    #[test]
+    fn a_session_with_a_run_in_flight_is_kept() {
+        let running = vec![run(&caller_key(2), 7)];
+        assert_eq!(departure(&running, &caller_key(2)), Departure::Keep);
+    }
+
+    /// The ambiguous case: a run in flight at `CallerGone` with no reason-2 cancel for it. Whether it is
+    /// detached cannot be told from here, so it is kept. A run of another session does not keep this one.
+    #[test]
+    fn an_ambiguous_run_is_kept_and_another_sessions_run_does_not_keep_it() {
+        let running = vec![run(&caller_key(9), 3)];
+        assert_eq!(departure(&running, &caller_key(2)), Departure::Release);
+        let running = vec![run(&caller_key(2), 3), run(&caller_key(9), 4)];
+        assert_eq!(departure(&running, &caller_key(2)), Departure::Keep);
+    }
+}
+
+#[cfg(test)]
+mod ending_tests {
+    use super::*;
+
+    fn run() -> Running {
+        Running {
+            session: 1,
+            token: 2,
+            call: 3,
+            job: 4,
+            caller: caller_key(2),
+        }
+    }
+
+    /// The table: each lemnosd status that has a better-fitting ending maps to it, with its magnitude
+    /// as the code. This is the table in docs/daemon.md.
+    #[test]
+    fn each_named_status_has_its_ending_and_its_code() {
+        let rows = [
+            (Status::CANCELLED, Outcome::Cancelled, 125),
+            (Status::TIMED_OUT, Outcome::TimedOut, 110),
+            (Status::NOT_PERMITTED, Outcome::Rejected, 1),
+            (Status::NOT_FOUND, Outcome::Rejected, 2),
+            (Status::AGAIN, Outcome::Rejected, 11),
+            (Status::BUSY, Outcome::Rejected, 16),
+            (Status::NO_DEVICE, Outcome::Rejected, 19),
+            (Status::INVALID_ARGUMENT, Outcome::Rejected, 22),
+            (Status::NOT_SUPPORTED, Outcome::Rejected, 95),
+            (Status::BUFFER_TOO_SMALL, Outcome::Rejected, 4098),
+        ];
+        for (status, outcome, code) in rows {
+            assert_eq!(
+                ending_of_status(status),
+                Ending { outcome, code },
+                "{status:?}"
+            );
+        }
+    }
+
+    /// Every other status ran and failed: `Failed`, with no code (zero).
+    #[test]
+    fn the_other_statuses_are_failed_with_no_code() {
+        for status in [
+            Status::IO,
+            Status::INTERRUPTED,
+            Status::NO_MEMORY,
+            Status::ACCESS,
+            Status::STALE_HANDLE,
+            Status::VERSION_MISMATCH,
+            Status::PANIC,
+            Status::LAYOUT_MISMATCH,
+            Status(-999),
+        ] {
+            assert_eq!(ending_of_status(status), Ending::FAILED, "{status:?}");
+        }
+    }
+
+    /// The plain endings carry their outcome and no code.
+    #[test]
+    fn the_plain_endings_carry_no_code() {
+        assert_eq!(Ending::SUCCEEDED.outcome, Outcome::Succeeded);
+        assert_eq!(Ending::FAILED.outcome, Outcome::Failed);
+        assert_eq!(Ending::REJECTED.outcome, Outcome::Rejected);
+        assert_eq!(Ending::CANCELLED.outcome, Outcome::Cancelled);
+        for ending in [
+            Ending::SUCCEEDED,
+            Ending::FAILED,
+            Ending::REJECTED,
+            Ending::CANCELLED,
+        ] {
+            assert_eq!(ending.code, 0, "{ending:?}");
+        }
+    }
+
+    /// A lemnosd refusal is kept with its status, so its ending is the table's.
+    #[test]
+    fn a_lemnosd_refusal_keeps_its_status() {
+        let error = Error::Refused {
+            status: Status::BUSY,
+            text: "held by another caller".to_owned(),
+        };
+        assert!(matches!(
+            failed(error),
+            Failure::Status(Status::BUSY, why) if why.contains("held by another caller")
+        ));
+        assert!(matches!(
+            failed(Error::Refused {
+                status: Status::IO,
+                text: String::new()
+            }),
+            Failure::Status(Status::IO, _)
+        ));
+    }
+
+    /// A job that ran and succeeds is `Succeeded`, with its result as the output.
+    #[test]
+    fn a_job_that_succeeds_is_succeeded() {
+        let done = job_done(&run(), Status::OK, b"done");
+        assert_eq!(done.ending, Ending::SUCCEEDED);
+        assert_eq!(done.output, "done");
+    }
+
+    /// A job cancelled on lemnosd is `Cancelled`, with lemnosd's CANCELLED code.
+    #[test]
+    fn a_job_that_is_cancelled_is_cancelled() {
+        let done = job_done(&run(), Status::CANCELLED, b"");
+        assert_eq!(
+            done.ending,
+            Ending {
+                outcome: Outcome::Cancelled,
+                code: 125
+            }
+        );
+        assert_eq!(done.detail, "cancelled");
+    }
+
+    /// A job that ends `TIMED_OUT` is `TimedOut`, with its code.
+    #[test]
+    fn a_job_that_times_out_is_timed_out() {
+        let done = job_done(&run(), Status::TIMED_OUT, b"");
+        assert_eq!(
+            done.ending,
+            Ending {
+                outcome: Outcome::TimedOut,
+                code: 110
+            }
+        );
+    }
+
+    /// A job ran, so a refusal's status does not make it `Rejected`: it is `Failed`, with no code.
+    #[test]
+    fn a_job_that_fails_is_failed_whatever_the_status() {
+        for status in [Status::IO, Status::BUSY, Status::NOT_FOUND] {
+            assert_eq!(
+                job_done(&run(), status, b"").ending,
+                Ending::FAILED,
+                "{status:?}"
+            );
+        }
     }
 }
