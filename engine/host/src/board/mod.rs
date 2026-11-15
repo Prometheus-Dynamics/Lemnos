@@ -670,6 +670,14 @@ pub struct BootSpec {
     pub bay_overlay_bytes: Option<u64>,
     /// The command line's bay (`cmdline`).
     pub bay_cmdline_bytes: Option<u64>,
+    /// Verbatim firmware config lines (config.txt, inside `[all]`). Each is one line; `dtoverlay=NAME`
+    /// lines are checked against `firmware_overlays`. Default none.
+    #[serde(default)]
+    pub config_lines: Vec<String>,
+    /// Firmware overlay names (without `.dtbo`) the boot partition carries in each bay's `overlays/`:
+    /// each is copied from `--firmware DIR`. Default none.
+    #[serde(default)]
+    pub firmware_overlays: Vec<String>,
 }
 
 /// `[security]`: where the board's security record lives, its trust root, and whether Orion ships.
