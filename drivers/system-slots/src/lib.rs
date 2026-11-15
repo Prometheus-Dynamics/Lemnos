@@ -54,6 +54,10 @@
 //!   default.
 //! - `running`: the running slot, for a test; read from `board/slots/booted` otherwise.
 //! - `boots_keep`: how many boots the boot history keeps (`lemnos/boots`), 16 by default.
+//! - `crash_log`: the pstore mount (`/sys/fs/pstore`) a board declares a crash-log region in. Unset,
+//!   there is no crash log. Set, the previous boot's record is stored in the boot history's crash
+//!   index and pstore is cleared (see [`crash`], `docs/slots.md`, "The crash log"). `crash_bytes`
+//!   bounds the stored tail (8192 by default, at most 65536).
 //! - `reset_reason`: a file holding the board's reset reason, read at each boot for the history;
 //!   unset, the first watchdog's `bootstatus` is read.
 //!   The `system-reboot` driver's `data` (`/data` by default) is where it leaves the request
@@ -95,6 +99,7 @@ pub mod offline;
 mod resolve;
 pub use lemnos_slot_store::tar;
 pub use lemnos_slot_store::{json, manifest, store};
+pub mod crash;
 pub mod trial;
 pub mod uboot;
 
@@ -189,6 +194,11 @@ pub struct SystemSlots {
     snapshot_written: bool,
     /// How many boots the history keeps (`boots_keep`).
     boots_keep: usize,
+    /// The declared crash log (`crash_log`) and its tail size (`crash_bytes`), and what the last
+    /// boot's record step said, for `info`.
+    crash: Option<Box<dyn crash::Pstore>>,
+    crash_bytes: usize,
+    crash_note: String,
     /// Where the board's reset reason is read from, when the board file names a file for it.
     reset_reason: Option<PathBuf>,
     /// The last install's signature result, and the slot it made (`""` when it was refused):
@@ -458,6 +468,9 @@ impl SystemSlots {
             looked: false,
             snapshot_written: false,
             boots_keep: boots::DEFAULT_KEEP,
+            crash: None,
+            crash_bytes: crash::DEFAULT_BYTES,
+            crash_note: String::new(),
             reset_reason: None,
             last_signed: None,
             attempt: None,
@@ -1035,6 +1048,11 @@ impl SystemSlots {
                 .unwrap_or_default(),
             &mut out,
         );
+        // Appended last, and only for a board that declares a crash log: what the boot's record step said.
+        if self.crash.is_some() {
+            out.push_str(",\"crash_log\":");
+            quoted(&self.crash_note, &mut out);
+        }
         out.push('}');
         out
     }
@@ -1291,6 +1309,8 @@ const KEYS: &[Key] = &[
     Key::optional("reserve_mb", Kind::Int),
     Key::optional("keep", Kind::Int),
     Key::optional("boots_keep", Kind::Int),
+    Key::optional("crash_log", Kind::Str),
+    Key::optional("crash_bytes", Kind::Int),
     Key::optional("reset_reason", Kind::Str),
     Key::optional("auto_confirm", Kind::Bool),
     Key::optional("reboot_at_deadline", Kind::Bool),
@@ -1537,6 +1557,16 @@ impl Lifecycle for SystemSlots {
             usize::try_from(keep)
                 .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
         }
+        if let Some(dir) = cfg.str("crash_log")
+            && !dir.starts_with('/')
+        {
+            return Err(ConfigError::new("crash_log", "must be an absolute path"));
+        }
+        if let Some(bytes) = cfg.int("crash_bytes")
+            && !usize::try_from(bytes).is_ok_and(|bytes| (1..=crash::MAX_BYTES).contains(&bytes))
+        {
+            return Err(ConfigError::new("crash_bytes", "must be from 1 to 65536"));
+        }
         boot_table(cfg)?;
         lemnos_slot_store::goodboot::deadline_from_board(cfg.int(lemnos_slot_store::goodboot::KEY))
             .map_err(|_| {
@@ -1627,6 +1657,12 @@ impl Lifecycle for SystemSlots {
             slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
         slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
+        if let Some(dir) = cfg.str("crash_log") {
+            slots.crash = Some(Box::new(crash::FsPstore::new(dir)));
+        }
+        if let Some(bytes) = cfg.int("crash_bytes") {
+            slots.crash_bytes = usize::try_from(bytes).map_err(|_| Status::INVALID_ARGUMENT)?;
+        }
         if grow::enabled(cfg.bool("grow_data")) {
             slots.grow = Some(grow::Task::new(
                 boot_disk_of(cfg),
@@ -2000,17 +2036,21 @@ impl SystemSlots {
         };
         let requested = boot::read_request(&self.layout.state_dir());
         let reset = boot::reset_reason(self.reset_reason.as_deref());
-        if boots::append(
-            &self.layout,
-            &self.boot,
-            &slot,
+        let start = crash::Start {
+            boot: &self.boot,
+            slot: &slot,
             outcome,
-            &reset,
-            &requested,
-            self.boots_keep,
-        )
-        .is_ok()
-        {
+            reset: &reset,
+            requested: &requested,
+            keep: self.boots_keep,
+        };
+        let pstore = self
+            .crash
+            .as_deref()
+            .map(|source| (source, self.crash_bytes));
+        let recorded = crash::record(&self.layout, start, pstore);
+        self.crash_note = recorded.note;
+        if recorded.appended {
             let _ = fs::remove_file(self.layout.marker(boot::REQUEST_FILE));
         }
     }

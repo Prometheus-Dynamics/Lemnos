@@ -1693,6 +1693,39 @@ The history keeps the newest `boots_keep` boots (16 by default). It is written a
 start, once per boot, after the trial's accounting. It is a record like the slot records: the
 rule that drivers keep no state across restarts is about run-time state, not this.
 
+## The crash log
+
+A board that declares `crash_log` (the pstore mount, `/sys/fs/pstore`, [Boards](boards.md#boot-history-system-slots-system-reboot))
+keeps the previous boot's crash record. The kernel writes it to pstore while it panics, into a region of memory
+the board reserves (ramoops, [Boards: crash-log regions](boards.md#crash-log-regions)). The record survives the
+reset that follows, so the next boot can read it.
+
+Each boot, once, at its start, `system-slots` does this in order:
+
+1. It reads the records in the pstore directory before anything is written. The record it stores is the newest
+   `dmesg-*` record (else the newest `console-*`).
+2. It appends the boot's history entry (`lemnos/boots`, unchanged: seven fields).
+3. It writes the record's text to `lemnos/crash/<n>`, where `<n>` is the boot's number, and its index row to
+   `lemnos/crashes`. Both are written by replacing the file and fsyncing it. The text is the record's tail, at
+   most `crash_bytes` bytes (8192 by default, at most 65536). When bytes were cut, the text's first line says so:
+   `cut: N bytes before this not kept`.
+4. Only then it removes the records it read. A failure before this step keeps every record on pstore.
+
+The index row is `<n> <boot> <record> <size> <mtime> <kept> stored`: the boot number and the boot id of the boot
+that follows the crash, the record's name, size and modification time (its key), the bytes of tail kept, and the
+word `stored`. The crash is linked to its boot by both the number and the id. A record already in the index (an
+earlier run stored it and could not clear pstore) is cleared without a second copy. The index and the texts keep
+the boots the history keeps (`boots_keep`); the rest are removed.
+
+The driver never mounts pstore. Where the mount is missing, the boot goes on and `info` says so in words:
+`crash log: /sys/fs/pstore is not mounted`. `info` carries a `crash_log` field for a board that declares the log,
+with what the record step did (stored, kept, not cleared, no record). A board with no `crash_log` is not changed
+at all: no file, no index row, and no field in `info`.
+
+The kernel must build `CONFIG_PSTORE`, `CONFIG_PSTORE_RAM` and `CONFIG_PSTORE_CONSOLE` in (`docs/kernel-config.md`,
+"Crash log: built in"). The QEMU proof is `testing/qemu/run-crash.sh`: a guest panics with sysrq-c, reboots,
+and the next boot stores the record for its own boot number and clears pstore. Untested on board.
+
 ## The boot source
 
 Everything the boot chain reads or writes on a board is on the boot disk, the one whole disk the

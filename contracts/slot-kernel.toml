@@ -6,15 +6,21 @@
 #
 # Reading rules, for any build that reads this file:
 #   - version must be 3 (version 1 had no [firmware] table; version 2 had no EROFS_FS_ZIP). Any other value:
-#     refuse the file.
+#     refuse the file. [crash_log] is an additive, optional group at version 3 (see below): no version bump.
 #   - A key this reader does not know, at any level, is refused too: it means a newer version.
-#     Every key below is required at its level.
+#     Every key below is required at its level, except the groups named as optional below.
+#     The one optional group is [crash_log]: a reader that knows it must accept it, and a board that does
+#     not declare a crash-log region does not need its symbols.
 #   - A build for image kind K checks exactly these, from this file:
 #       always.all                       each symbol =y on every slot board
 #       kind.K.all                       each symbol =y for the kind K
 #       kind.K.one_of                    each inner list: at least one of its symbols =y
 #       initramfs.<compression>          the decompressor symbol =y for the image's initramfs compression
 #                                        ("" means none: the initramfs is not compressed, no symbol)
+#   - crash_log.all                  each symbol =y (built in: =m or unset is refused) for a board that declares a
+#                                    crash-log region (`crash_log` in its slot device's config, docs/slots.md, "The
+#                                    crash log"). ramoops in a reserved region, its console and dmesg records. Named
+#                                    here, not required of every board: a board with no region does not need them.
 #   - firmware.F.all                 each symbol =y (built in: =m or unset is refused, naming the symbol) for a
 #                                    board whose firmware family is F. The one family is "rpi-tryboot": the
 #                                    Raspberry Pi firmware family, whose slot-init asks the firmware for its
@@ -46,6 +52,12 @@
 # EROFS_FS_ZIP_DEFLATE or EROFS_FS_ZIP_ZSTD for the others, each =y). The dm-verity chain the root needs
 # (BLK_DEV_DM, DM_BUFIO, DM_VERITY, CRYPTO, CRYPTO_SHA256) was already listed. A root that cannot be mounted
 # (the kernel lacks the decompressor) is a slot failure like any unreadable root: see docs/slots.md.
+# The [crash_log] table is additive at version 3: it adds a group a board that declares a crash-log region
+# requires, and changes no existing group. From the kernel tree (linux 7.3.3, fs/pstore/Kconfig): PSTORE
+# (tristate, default n) is the pstore file system; PSTORE_RAM (tristate, depends on PSTORE) is ramoops, the
+# region reserved in RAM across a warm reset; PSTORE_CONSOLE (bool) keeps the console in it. All three are =y
+# where a board declares a region: a slot board runs no modules (slot-init loads none), so a module would never
+# be read.
 version = 3
 
 [always]
@@ -80,6 +92,14 @@ all = [
   "MTD_UBI_BLOCK",
 ]
 one_of = []
+
+[crash_log]
+# Optional and additive (version 3): required only of a board that declares a crash-log region.
+all = [
+  "PSTORE",
+  "PSTORE_RAM",
+  "PSTORE_CONSOLE",
+]
 
 [firmware.rpi-tryboot]
 all = [

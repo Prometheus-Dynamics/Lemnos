@@ -167,6 +167,28 @@ These keys are optional. [Slots](slots.md#boot-history) says what the history ho
 | `system-slots` | `boots_keep` | `16` | at least 1 | How many boots the boot history keeps (`lemnos/boots`), newest kept |
 | `system-slots` | `reset_reason` | unset | an absolute path | A file the board writes its reset reason to. Read at each boot for the history; unset, the first watchdog's `bootstatus` is read |
 | `system-reboot` | `data` | `/data` | an absolute path | The data partition: where a restart through `system.reboot` leaves the request the next boot's history names as `requested` |
+| `system-slots` | `crash_log` | unset | an absolute path | The pstore mount the board's crash-log region is read from (`/sys/fs/pstore`). Set, the previous boot's crash record is stored in the crash index and pstore is cleared ([Slots: the crash log](slots.md#the-crash-log)). Unset, there is no crash log. Requires the board's kernel to build `CONFIG_PSTORE`, `CONFIG_PSTORE_RAM` and `CONFIG_PSTORE_CONSOLE` in (`docs/kernel-config.md`, "Crash log: built in") |
+| `system-slots` | `crash_bytes` | `8192` | 1 to 65536 | The tail of the crash record kept per boot, in bytes. The text's first line says how many bytes before it were cut |
+
+## Crash-log regions
+
+A board with a crash-log region declares it with `crash_log` (above). The region itself is board data, not
+driver data: the driver reads only the pstore mount, and the kernel maps the records once the region is
+reserved. Where the region is set depends on the boot chain:
+
+- U-Boot boards: a `ramoops` node under `/reserved-memory` in the board's base device tree, with `reg` (the
+  region), `console-size`, `record-size` and `ecc-size` (`ecc-size = <16>` on the boards that have it).
+- Raspberry Pi firmware boards: a firmware overlay that carries the same node, named in the boot partition's
+  `config.txt` (`dtoverlay`) with its parameters. the image builder's tests name a `ramoops-pi5.dtbo` overlay; its
+  parameter names are not read here and are not written in this table.
+
+The region must be memory the board does not use, and it must survive a warm reset, which is what the crash
+log reads it for.
+
+| Board | Region (`reg`) | `console-size` | `record-size` | `ecc-size` | Source | Status |
+|---|---|---|---|---|---|---|
+| The A733 boards (sun60i) | `<0x0 0x60000000 0x0 0x100000>` (1 MiB at 0x60000000) | `0x40000` | `0x20000` | 16 | the A733 board's own kernel patch that adds the ramoops node, lines 36 to 42 (checked against the patch) | untested on board |
+| The RK boards (RK35xx, RK3588S, RK3576) | `<0x0 0x110000 0x0 0xf0000>` | `0x20000` | `0x10000` | not given | the image builder's board device tree (2026-11-14), to confirm on board; UNVERIFIED: untested on board, not checked against any board tree on disk |
 
 ## Boot count (`system-slots`, `record = "tryboot"`)
 

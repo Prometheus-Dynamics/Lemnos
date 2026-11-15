@@ -4955,3 +4955,274 @@ pub(crate) fn bundle_with_bad_signature(id: &str) -> Vec<u8> {
     bundle.named = Some(key());
     bundle.pack()
 }
+
+// ---- The crash log (`crash_log`, docs/slots.md, "The crash log") ----
+
+use crate::crash::{Pstore, Record};
+
+/// What the fake pstore has and what the record step did to it, in order.
+#[derive(Default)]
+struct Pmem {
+    mounted: bool,
+    records: Vec<(String, Vec<u8>, u64)>,
+    log: Vec<String>,
+    fail_remove: bool,
+    /// The history the record step must have written before a record is removed.
+    history: Option<Layout>,
+}
+
+#[derive(Clone)]
+struct FakePstore(Arc<Mutex<Pmem>>);
+
+impl Pstore for FakePstore {
+    fn dir(&self) -> PathBuf {
+        PathBuf::from("/fake/pstore")
+    }
+
+    fn mounted(&self) -> bool {
+        self.0.lock().unwrap().mounted
+    }
+
+    fn records(&self) -> std::io::Result<Vec<Record>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .records
+            .iter()
+            .map(|(name, body, mtime)| Record {
+                name: name.clone(),
+                size: body.len() as u64,
+                mtime: *mtime,
+            })
+            .collect())
+    }
+
+    fn tail(&self, record: &Record, bytes: usize) -> std::io::Result<Vec<u8>> {
+        let mut pmem = self.0.lock().unwrap();
+        pmem.log.push(format!("tail:{}", record.name));
+        let body = &pmem
+            .records
+            .iter()
+            .find(|(name, _, _)| name == &record.name)
+            .unwrap()
+            .1;
+        Ok(body[body.len().saturating_sub(bytes)..].to_vec())
+    }
+
+    fn remove(&self, record: &Record) -> std::io::Result<()> {
+        let mut pmem = self.0.lock().unwrap();
+        if let Some(layout) = pmem.history.clone() {
+            let last = lemnos_slot_store::boots::load(&layout).last().map(|e| e.n);
+            pmem.log.push(format!("history:{}", last.unwrap_or(0)));
+        }
+        pmem.log.push(format!("remove:{}", record.name));
+        if pmem.fail_remove {
+            return Err(std::io::Error::other("refused"));
+        }
+        pmem.records.retain(|(name, _, _)| name != &record.name);
+        Ok(())
+    }
+}
+
+fn pmem_with(record: &str, body: &[u8], layout: &Layout) -> (Arc<Mutex<Pmem>>, Box<dyn Pstore>) {
+    let pmem = Arc::new(Mutex::new(Pmem {
+        mounted: true,
+        records: vec![(record.to_string(), body.to_vec(), 1_700_000_000)],
+        history: Some(layout.clone()),
+        ..Pmem::default()
+    }));
+    (pmem.clone(), Box::new(FakePstore(pmem)))
+}
+
+fn crash_index(board: &Board) -> Vec<String> {
+    fs::read_to_string(board.layout().marker("crashes"))
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn with_no_crash_log_declared_the_history_is_what_it_was() {
+    let mut board = Board::new("a");
+    board.next_boot(1);
+    assert!(!board.layout().marker("crashes").exists());
+    assert!(!board.layout().marker("crash").exists());
+    assert_eq!(history(&board).len(), 1, "the boot still gets its entry");
+    assert!(board.slots.crash_note.is_empty());
+}
+
+#[test]
+fn a_record_is_stored_for_the_boot_after_the_crash_and_only_then_cleared() {
+    let mut board = Board::new("a");
+    let (pmem, source) = pmem_with("dmesg-ramoops-0", &[b'x'; 10_000], board.layout());
+    pmem.lock().unwrap().mounted = true;
+    board.slots.crash = Some(source);
+    board.slots.crash_bytes = 4096;
+    board.next_boot(1);
+    let n = history(&board).last().unwrap().n;
+    let pmem = pmem.lock().unwrap();
+    assert_eq!(
+        pmem.log,
+        vec![
+            "tail:dmesg-ramoops-0".to_string(),
+            format!("history:{n}"),
+            "remove:dmesg-ramoops-0".to_string(),
+        ],
+        "the tail is read, the history entry is written, and only then is the record removed"
+    );
+    assert!(pmem.records.is_empty(), "pstore is cleared");
+    let index = crash_index(&board);
+    assert_eq!(index.len(), 1, "one index row for the boot");
+    let row: Vec<&str> = index[0].split(' ').collect();
+    assert_eq!(
+        row[0],
+        n.to_string(),
+        "the row names the boot after the crash"
+    );
+    assert_eq!(row[1], "boot-1", "and that boot's id");
+    assert_eq!(row[2], "dmesg-ramoops-0");
+    assert_eq!(row[3], "10000", "the record's size");
+    assert_eq!(row[5], "4096", "what was kept");
+    let text = fs::read_to_string(board.layout().marker("crash").join(n.to_string())).unwrap();
+    assert!(
+        text.starts_with("cut: 5904 bytes before this not kept\n"),
+        "the cut is said first: {text:?}"
+    );
+    assert_eq!(
+        text.len(),
+        "cut: 5904 bytes before this not kept\n".len() + 4096
+    );
+    assert!(
+        board.slots.crash_note.contains("stored dmesg-ramoops-0")
+            && board.slots.crash_note.contains("pstore cleared"),
+        "{}",
+        board.slots.crash_note
+    );
+}
+
+#[test]
+fn a_record_that_fits_the_bound_is_kept_whole_with_no_cut_line() {
+    let mut board = Board::new("a");
+    let (_pmem, source) = pmem_with(
+        "dmesg-ramoops-0",
+        b"Kernel panic - not syncing\n",
+        board.layout(),
+    );
+    board.slots.crash = Some(source);
+    board.next_boot(1);
+    let n = history(&board).last().unwrap().n;
+    let text = fs::read_to_string(board.layout().marker("crash").join(n.to_string())).unwrap();
+    assert_eq!(text, "Kernel panic - not syncing\n");
+}
+
+#[test]
+fn a_store_that_fails_keeps_the_record_on_pstore() {
+    let mut board = Board::new("a");
+    // The text directory cannot be made: a file stands where it goes.
+    fs::write(board.layout().marker("crash"), b"not a directory").unwrap();
+    let (pmem, source) = pmem_with("dmesg-ramoops-0", b"panic\n", board.layout());
+    board.slots.crash = Some(source);
+    board.next_boot(1);
+    let pmem = pmem.lock().unwrap();
+    assert!(
+        !pmem.log.iter().any(|line| line.starts_with("remove:")),
+        "nothing is removed when the record was not stored: {:?}",
+        pmem.log
+    );
+    assert_eq!(pmem.records.len(), 1, "the record is still on pstore");
+    assert!(
+        board.slots.crash_note.contains("kept on pstore"),
+        "{}",
+        board.slots.crash_note
+    );
+    assert_eq!(
+        history(&board).len(),
+        1,
+        "the boot's history entry is still written"
+    );
+}
+
+#[test]
+fn a_refused_removal_is_stored_once_and_not_twice_on_the_next_boot() {
+    let mut board = Board::new("a");
+    let (pmem, source) = pmem_with("dmesg-ramoops-0", b"panic\n", board.layout());
+    pmem.lock().unwrap().fail_remove = true;
+    board.slots.crash = Some(source);
+    board.next_boot(1);
+    assert_eq!(crash_index(&board).len(), 1);
+    assert!(
+        board.slots.crash_note.contains("not cleared"),
+        "{}",
+        board.slots.crash_note
+    );
+
+    pmem.lock().unwrap().fail_remove = false;
+    board.next_boot(2);
+    let index = crash_index(&board);
+    assert_eq!(
+        index.len(),
+        1,
+        "the record is not stored a second time: {index:?}"
+    );
+    assert!(
+        board.slots.crash_note.contains("stored by an earlier run"),
+        "{}",
+        board.slots.crash_note
+    );
+    assert!(
+        pmem.lock().unwrap().records.is_empty(),
+        "the second boot clears it"
+    );
+}
+
+#[test]
+fn a_missing_mount_is_said_in_words_and_the_boot_goes_on() {
+    let mut board = Board::new("a");
+    let (pmem, source) = pmem_with("dmesg-ramoops-0", b"panic\n", board.layout());
+    pmem.lock().unwrap().mounted = false;
+    board.slots.crash = Some(source);
+    board.next_boot(1);
+    assert_eq!(
+        board.slots.crash_note,
+        "crash log: /fake/pstore is not mounted"
+    );
+    assert!(
+        pmem.lock().unwrap().log.is_empty(),
+        "nothing is read or removed"
+    );
+    assert_eq!(history(&board).len(), 1);
+}
+
+#[test]
+fn an_empty_pstore_is_recorded_as_no_record() {
+    let mut board = Board::new("a");
+    let pmem = Arc::new(Mutex::new(Pmem {
+        mounted: true,
+        ..Pmem::default()
+    }));
+    board.slots.crash = Some(Box::new(FakePstore(pmem.clone())));
+    board.next_boot(1);
+    assert_eq!(
+        board.slots.crash_note,
+        "crash log: no record from the last boot"
+    );
+    assert!(pmem.lock().unwrap().log.is_empty());
+}
+
+#[test]
+fn the_info_text_carries_the_crash_note_only_for_a_declared_log() {
+    let mut board = Board::new("a");
+    board.next_boot(1);
+    assert!(!board.slots.info_json().contains("crash_log"));
+    board.slots.crash = Some(Box::new(FakePstore(Arc::new(Mutex::new(Pmem {
+        mounted: true,
+        ..Pmem::default()
+    })))));
+    board.next_boot(2);
+    assert!(
+        board
+            .slots
+            .info_json()
+            .contains("\"crash_log\":\"crash log: no record")
+    );
+}
