@@ -783,6 +783,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-host",
+ "lemnos-slot-store",
  "lemnosd",
  "serde",
  "sha2 0.10.9",

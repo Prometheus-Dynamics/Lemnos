@@ -15,6 +15,23 @@
 #
 # The SDK's post-build loads the device tree as a plain blob (`bootm $kernel_addr - $dtb_addr`, no
 # `fdt apply`), so the output is a fragment for a board `.dts`.
+#
+# The MMC hosts are not map entries, as the SD and eMMC of the RK3566 and RK3588 are not. Each host has two names,
+# one per device tree, and a `boot_sources` entry uses both (`<U-Boot path>=<kernel path>`, docs/slots.md):
+#   - the SD slot: U-Boot `/soc/mmc1@91581000` (`mmc1`, `snps,dwcmshc-sdhci`, 4-bit), from the SDK's U-Boot
+#     `src/little/uboot/arch/riscv/dts/k230.dtsi` lines 161-170 (`mmc1: mmc1@91581000`, under the root `soc` at line 60);
+#     kernel `/soc/sdhci1@91581000` (`sdhci1`, `kendryte,k230-dw-mshc`, interrupt 144, 4-bit), from the SDK's kernel
+#     `src/little/linux/arch/riscv/boot/dts/kendryte/k230.dtsi` lines 166-176.
+#   - the eMMC: U-Boot `/soc/mmc0@91580000` (`mmc0`, `snps,dwcmshc-sdhci-k230`, 8-bit, `have-emmc-phy`), from the
+#     U-Boot dtsi lines 149-159; kernel `/soc/sdhci0@91580000` (`sdhci0`, `kendryte,k230-dw-mshc`, interrupt 142, 8-bit),
+#     from the kernel dtsi lines 154-164.
+# The entry for the SD slot is `/soc/mmc1@91581000=/soc/sdhci1@91581000`; for the eMMC `/soc/mmc0@91580000=/soc/sdhci0@91580000`.
+# The U-Boot paths are read from the source, not checked on a board: UNVERIFIED on board.
+# `k230d.dts` (kernel) enables both hosts: `&mmc_sd0` (`is_emmc`, HS200) and `&mmc_sd1` (`cap-sd-highspeed`, no 1.8 V).
+# Neither the K230D board file nor the SDK's boot configuration read for this map says which host the board boots
+# from (`k230d.dts`'s `/chosen` sets only `bootargs = ""` and `stdout-path`); to confirm on board. No driver of the
+# kernel MSHC compatible was found in the SDK's `drivers/mmc/host/dw_mmc.c` or `dw_mmc-pltfm.c` (they match
+# `snps,dw-mshc` and other vendors' strings), so the stock binding of these hosts is not known here; to confirm on board.
 soc = "k230"
 form = "fragment"
 
@@ -85,3 +102,17 @@ reason = "the PWM block on the K230 (canaan,k230-pwm); its pins are the board's 
 kind = "watchdog"
 path = "/soc/wdt0@91106000"
 reason = "the hardware watchdog on the K230 (snps,dw-wdt)"
+
+# The USB 2 OTG controller 0 (`usbotg0`, `kendryte,k230-otg`, `dr_mode = "otg"`, interrupt 173), which the K230D
+# board file (`k230d.dts`: `&usbotg0 { status = "okay"; }`) enables. The SDK's dwc2 driver binds the compatible
+# (`drivers/usb/dwc2/params.c`, `dwc2_of_match_table`). The UDC name is the platform device's name: the SDK's
+# `drivers/of/platform.c` names it `%llx.%pOFn` (address, then the node name without its unit address), so
+# `usb-otg@91500000` is `91500000.usb-otg`, and the driver's `k230_otg_phy_init` compares that same name
+# (`params.c`). `drivers/usb/gadget/udc/core.c` names the UDC by the parent's kobject name. Not checked on a board:
+# to confirm on board. `usbotg1` (`/soc/usb-otg@91540000`, interrupt 174) is `disabled` in the K230D board file,
+# so it is not in the map. The SDK tree has no PHY node for it, so it has no `needs` entry.
+[controllers.usb-otg0]
+kind = "usb-peripheral"
+path = "/soc/usb-otg@91500000"
+sysfs = "91500000.usb-otg"
+reason = "the USB 2 OTG controller 0 on the K230 (kendryte,k230-otg, dwc2); device mode"
