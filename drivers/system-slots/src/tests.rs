@@ -127,7 +127,7 @@ impl BootRecord for Told {
         loader.told.push("clear trial".into());
         Ok(())
     }
-    fn install(&self, slot: &str, _payloads: &[&[u8]; 5]) -> std::io::Result<()> {
+    fn install(&self, slot: &str, _payloads: &[&[u8]]) -> std::io::Result<()> {
         self.0.lock().unwrap().installed.push(slot.to_string());
         Ok(())
     }
@@ -3330,6 +3330,8 @@ fn feed_raw(board: &Board, bytes: &[u8], require: bool) -> (Result<(), (Status, 
         }],
         require_signed: require,
         board_id: BOARD.into(),
+        firmware: Vec::new(),
+        config: None,
     };
     let job = JobId(77);
     let mut install = crate::install::Install::start(
@@ -4082,7 +4084,7 @@ fn a_bundle_made_by_the_writer_installs_on_both_record_forms() {
                     sign: &sign,
                 }),
             },
-            payloads,
+            payloads.to_vec(),
             &mut &whole[..],
         )
         .unwrap();

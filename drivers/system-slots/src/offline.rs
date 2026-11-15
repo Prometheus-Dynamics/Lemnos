@@ -70,7 +70,7 @@ pub struct FirstSlot<'a> {
 }
 
 /// The slot and the five payloads its install wrote, shared between the record and the writer.
-type Installed = Arc<Mutex<Option<(String, [Vec<u8>; 5])>>>;
+type Installed = Arc<Mutex<Option<(String, Vec<Vec<u8>>)>>>;
 
 /// The boot record of the offline writer: the daemon's raw boot-partition writers, run over an
 /// in-memory copy of the image. A write changes the copy and nothing else; the copy is never
@@ -116,8 +116,13 @@ impl BootRecord for OfflineRecord {
         Ok(())
     }
 
-    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> std::io::Result<()> {
-        let kept: [Vec<u8>; 5] = std::array::from_fn(|i| payloads[i].to_vec());
+    fn declared(&self) -> std::io::Result<(Vec<String>, Option<String>)> {
+        let layout = self.lock().bay_layout().map_err(std::io::Error::other)?;
+        Ok(crate::boot::declared_of(&layout))
+    }
+
+    fn install(&self, slot: &str, payloads: &[&[u8]]) -> std::io::Result<()> {
+        let kept: Vec<Vec<u8>> = payloads.iter().map(|p| p.to_vec()).collect();
         *self.installed.lock().unwrap_or_else(|p| p.into_inner()) = Some((slot.to_string(), kept));
         self.lock()
             .install_slot(slot, payloads)
@@ -384,7 +389,7 @@ fn write_into(
         .unwrap_or_else(|p| p.into_inner())
         .take()
         .ok_or_else(|| "the install wrote no boot files".to_string())?;
-    let payloads: [&[u8]; 5] = std::array::from_fn(|i| files[i].as_slice());
+    let payloads: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
     check_bay(&mut pair.reference, &id, &payloads)?;
     let mut copy = pair
         .copy
@@ -420,7 +425,7 @@ fn write_into(
 /// # Errors
 ///
 /// The reason the bay does not hold this build of `id`.
-pub fn check_bay(boot: &mut Boot<Mem>, id: &str, payloads: &[&[u8]; 5]) -> Result<(), String> {
+pub fn check_bay(boot: &mut Boot<Mem>, id: &str, payloads: &[&[u8]]) -> Result<(), String> {
     let (set, info) = boot.bay_record(id).map_err(|_| {
         format!("the boot image holds no bay for slot {id}: build the image from this bundle")
     })?;
@@ -442,16 +447,28 @@ pub fn check_bay_manifest(
     let (set, info) = boot.bay_record(id).map_err(|_| {
         format!("the boot image holds no bay for slot {id}: build the image from this bundle")
     })?;
-    for (i, role) in bays::ROLES.iter().enumerate() {
+    let layout = boot.bay_layout()?;
+    if info.firmware.len() != layout.firmware.len() {
+        return Err(format!(
+            "bay{set} holds {} firmware overlays and the board declares {}: build the image from this tree",
+            info.firmware.len(),
+            layout.firmware.len()
+        ));
+    }
+    for (i, path) in layout.paths().iter().enumerate() {
         let want = boot_files
             .iter()
-            .find(|(path, _)| path == role.path)
+            .find(|(listed, _)| listed == path)
             .map(|(_, sha)| sha.as_str())
-            .ok_or_else(|| format!("slot.json lists no hash for boot file {}", role.path))?;
-        if !bundle::hex(&info.files[i].1).eq_ignore_ascii_case(want) {
+            .ok_or_else(|| format!("slot.json lists no hash for boot file {path}"))?;
+        let held = if i < 5 {
+            info.files[i].1
+        } else {
+            info.firmware[i - 5].2
+        };
+        if !bundle::hex(&held).eq_ignore_ascii_case(want) {
             return Err(format!(
-                "bay{set} holds boot file {} with a different hash than slot.json says: build the image from this tree",
-                role.path
+                "bay{set} holds boot file {path} with a different hash than slot.json says: build the image from this tree"
             ));
         }
     }
@@ -467,7 +484,8 @@ pub fn open_boot_image(image: &[u8]) -> Result<Boot<Mem>, String> {
     Boot::on(Mem(image.to_vec())).map_err(|e| format!("the boot image: {e}"))
 }
 
-/// The boot image's bays are the board file's: the same five roles, the same sizes.
+/// The boot image's bays are the board file's: the same five roles and the same sizes, the same
+/// firmware overlays at the same sizes, and the same firmware config digest.
 pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), String> {
     for (i, role) in ROLES.iter().enumerate() {
         if image.bytes[i] != board.bytes[i] {
@@ -476,6 +494,19 @@ pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), St
                 role.role, image.bytes[i], board.bytes[i]
             ));
         }
+    }
+    if image.firmware != board.firmware {
+        return Err(format!(
+            "the boot image's firmware overlays are {:?}; the board file's [boot] says {:?}: the image was built for another layout",
+            image.firmware, board.firmware
+        ));
+    }
+    if image.config != board.config {
+        return Err(format!(
+            "the boot image's firmware config lines are {}; the board file's [boot] config_lines are {}: the image was built for other lines",
+            image.config.as_deref().unwrap_or("none"),
+            board.config.as_deref().unwrap_or("none")
+        ));
     }
     Ok(())
 }
