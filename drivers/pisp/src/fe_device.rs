@@ -108,7 +108,7 @@ use lemnos_contract_isp_pisp::{
 };
 use lemnos_core::{
     CallerId, Config, ConfigError, Decode, Description, Dev, Health, Item, Key, Kind, Lifecycle,
-    MethodId, Reader, Result, Status, StreamHandle, driver,
+    MethodId, Reader, RefusalKind, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
@@ -419,13 +419,15 @@ impl Lifecycle for PispFe {
             .into_iter()
             .flatten()
         {
-            handles_only(stream)?;
+            handles_only(stream).map_err(|status| plain_memory(cfg, status))?;
         }
-        Ok(Self::with_hardware(
-            crate::fe_hw::hardware(settings),
-            needs,
-            options,
-        ))
+        // The block must be there and answer now (see `Hardware::present`): refused, the bind is
+        // retried, and nothing reports running with nothing behind it.
+        let label = settings.label();
+        let mut hw = crate::fe_hw::hardware(settings);
+        hw.present()
+            .map_err(|status| refuse_missing(cfg, status, &label))?;
+        Ok(Self::with_hardware(hw, needs, options))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -1254,6 +1256,29 @@ impl IspPisp for PispFe {
 
     fn set_line_event(&mut self, _line: u32) -> Result<()> {
         Err(Status::NOT_SUPPORTED)
+    }
+}
+
+/// The refusal for a frame stream whose memory is not a dma-buf: the block writes only into one.
+fn plain_memory(cfg: &Config<'_>, status: Status) -> Status {
+    cfg.refuse(
+        status,
+        RefusalKind::Failed,
+        format_args!("a frame stream is plain memory, and the block writes only into a dma-buf"),
+    )
+}
+
+/// The refusal for a block that `present` refused: absent when it is not there, failed when it is
+/// there and does not answer.
+fn refuse_missing(cfg: &Config<'_>, status: Status, what: &str) -> Status {
+    if status == Status::NO_DEVICE {
+        cfg.refuse(status, RefusalKind::Absent, format_args!("no {what}"))
+    } else {
+        cfg.refuse(
+            status,
+            RefusalKind::Failed,
+            format_args!("{what} does not answer"),
+        )
     }
 }
 

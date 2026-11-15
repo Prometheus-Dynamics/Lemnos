@@ -8,7 +8,10 @@ use lemnos_contract_camera_sensor::{
     AppliedLanding, BayerOrder, CLAMP_ANALOGUE_GAIN, CLAMP_EXPOSURE, CLAMP_FRAME_LENGTH,
     EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
 };
-use lemnos_core::{Config, Contract, Dev, Driver, Health, I2c, Lifecycle, Result, Status};
+use lemnos_core::{
+    Config, ConfigValue, Contract, Dev, Driver, Health, I2c, Lifecycle, RefusalKind, RefusalSink,
+    Result, Status,
+};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
 use lemnos_hal::mock::{MockI2c, MockOp};
@@ -17,6 +20,7 @@ use lemnos_hal::register::AddressWidth;
 extern crate alloc;
 extern crate std;
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use std::sync::Arc;
@@ -433,21 +437,59 @@ fn every_raw8_mode_programs_pll_0x60_and_every_raw10_mode_0x50() {
     }
 }
 
+/// Binds a sensor on `bus` as the host does, and says what the driver gave as its refusal reason,
+/// with its kind.
+fn bind_saying(bus: &Bus) -> (Result<Ov9782>, Vec<(RefusalKind, String)>) {
+    let reasons = std::sync::Mutex::new(Vec::new());
+    let sink = |kind: RefusalKind, args: core::fmt::Arguments<'_>| {
+        reasons.lock().unwrap().push((kind, args.to_string()));
+    };
+    let entries: &[(&str, ConfigValue)] = &[];
+    let config = Config::new(entries).with_refusals(RefusalSink::new(&sink));
+    let needs = Ov9782Needs {
+        bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
+        values: None,
+        _receiver: None,
+    };
+    let bound = <Ov9782 as Lifecycle>::start(needs, &config);
+    (bound, reasons.into_inner().unwrap())
+}
+
 #[test]
-fn start_refuses_a_wrong_chip_and_writes_nothing() {
+fn start_refuses_a_wrong_chip_at_bind_and_writes_nothing() {
     let bus = bus_with_id(0x1234);
-    let mut s = sensor_on(&bus, &[]);
-    s.select_mode(0).unwrap();
-    // The start answers; the chip is read at the first tick after the power-up time.
-    assert_eq!(s.start(), Ok(()));
-    assert_eq!(writes(&bus), vec![]);
-    assert_eq!(Lifecycle::tick(&mut s, 0), Some(POWER_UP_NS));
+    let (bound, reasons) = bind_saying(&bus);
+    assert_eq!(bound.err(), Some(Status::NOT_SUPPORTED));
     assert_eq!(
-        Lifecycle::tick(&mut s, POWER_UP_NS),
-        Some(POWER_UP_NS + 250_000_000)
+        reasons,
+        [(
+            RefusalKind::Failed,
+            "the sensor at 0x60 answers ID 0x1234, expected 0x9782 or 0x9281".to_string()
+        )]
     );
-    assert!(matches!(s.state, State::Recovering { .. }));
     assert_eq!(writes(&bus), vec![]);
+}
+
+#[test]
+fn a_sensor_that_does_not_acknowledge_is_absent_at_bind_then_bound_when_it_appears() {
+    // No sensor at the address: the bus NACKs, as the real bus does for a missing device.
+    let mut bus = bus_with_id(0x9782);
+    bus.mock = MockI2c::new();
+    let (bound, reasons) = bind_saying(&bus);
+    assert_eq!(bound.err(), Some(Status::NO_DEVICE));
+    assert_eq!(
+        reasons,
+        [(
+            RefusalKind::Absent,
+            "no device at 0x60: nothing answers at its address".to_string()
+        )]
+    );
+
+    // Its supply comes up later: the next bind, a retry, finds it.
+    bus.mock = MockI2c::new()
+        .with_target(ADDR, AddressWidth::Bits16)
+        .with_registers(ADDR, CHIP_ID, &0x9782u16.to_be_bytes());
+    assert!(bind_saying(&bus).0.is_ok());
 }
 
 #[test]
@@ -1594,10 +1636,12 @@ fn a_setter_while_stopped_is_refused_and_writes_nothing() {
 #[test]
 fn the_first_attempt_after_power_up_succeeds_when_the_chip_answers_within_the_settle() {
     let power = 1_000_000_000u64;
+    // The bind's ID read sees the chip (its supply is up); the power-up window opens after it.
     let bus = bus_with_id(0x9782);
-    bus.answers_from.store(power + 6_000_000, Ordering::SeqCst);
     let mut s = sensor_on(&bus, &[]);
     s.select_mode(0).unwrap();
+    bus.answers_from.store(power + 6_000_000, Ordering::SeqCst);
+    clear(&bus);
     bus.clock.store(power, Ordering::SeqCst);
 
     assert_eq!(s.start(), Ok(()));
@@ -1622,10 +1666,11 @@ fn the_first_attempt_after_power_up_succeeds_when_the_chip_answers_within_the_se
 #[test]
 fn a_chip_that_answers_after_the_first_attempt_is_retried_from_the_bottom_of_the_backoff() {
     let power = 1_000_000_000u64;
+    // The bind's ID read sees the chip; the power-up window opens after it.
     let bus = bus_with_id(0x9782);
-    bus.answers_from.store(power + 50_000_000, Ordering::SeqCst);
     let mut s = sensor_on(&bus, &[]);
     s.select_mode(0).unwrap();
+    bus.answers_from.store(power + 50_000_000, Ordering::SeqCst);
     bus.clock.store(power, Ordering::SeqCst);
     assert_eq!(s.start(), Ok(()));
 

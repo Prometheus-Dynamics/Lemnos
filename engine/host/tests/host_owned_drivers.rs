@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lemnos_core::{Config, Lifecycle, MethodId, Result, Status, StreamHandle, contract, driver};
+use lemnos_core::{Config, Lifecycle, MethodId, Result, StreamHandle, contract, driver};
 use lemnos_driver_fan_control::FanController;
 use lemnos_driver_gpio_power_switch::GpioPowerSwitch;
 use lemnos_driver_hw_watchdog::HwWatchdog;
@@ -179,7 +179,7 @@ fn a_host_owned_switch_never_drives_its_line_and_stays_unbound() {
     // Binding it means driving the line, which the line refused: the driver could not start.
     let reason = waiting(&host, "sw").expect("not running");
     assert!(
-        reason.contains(&format!("{:?}", Status::ACCESS)),
+        reason.contains("cannot be driven as an output"),
         "refused, and not for any other reason: {reason}"
     );
     assert!(line.configs().is_empty(), "the line was never configured");

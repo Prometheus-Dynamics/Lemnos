@@ -11,9 +11,9 @@ use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigError, ConfigValue,
     Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
     InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
-    Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle,
-    Resources, Result, Retry, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
-    UsbFunctionHandle, Watchdog,
+    Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink, RegistersHandle,
+    Reply, ResetHandle, Resources, Result, Retry, Router, Spi, Status, StreamHandle, Tag, Uart,
+    UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 
 use crate::board::{
@@ -430,11 +430,14 @@ pub enum OffReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceState {
     Running,
-    /// Waiting to retry. Clears itself when a retry works.
+    /// Waiting to retry. Clears itself when a retry works. `reason` is the sentence; `kind` says
+    /// whether the device is absent or failing, and is `None` where no refusal is behind the wait
+    /// (a device just switched on).
     Backoff {
         attempts: u32,
         next_retry_ns: u64,
         reason: String,
+        kind: Option<RefusalKind>,
     },
     Off(OffReason),
 }
@@ -485,6 +488,8 @@ struct Slot {
     /// Why the last bind was refused for its link: the linked device does not serve the contract
     /// the driver links to. Set by the link's resolution, and reported as the failed bind's reason.
     link_refusal: Mutex<Option<String>>,
+    /// The reason a driver gave for refusing its last bind, with its kind (see [`Config::refuse`]).
+    bind_refusal: Mutex<Option<(RefusalKind, String)>>,
     /// When the driver next wants a tick. [`NO_TICK`] when it doesn't.
     next_tick_ns: AtomicU64,
     /// When a bind was last tried. A hint never brings on another sooner than
@@ -676,6 +681,7 @@ impl Slot {
                 attempts: 0,
                 next_retry_ns: 0,
                 reason: "starting".to_string(),
+                kind: None,
             }
         };
         let tags: Vec<&str> = entry
@@ -702,6 +708,7 @@ impl Slot {
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
             link_refusal: Mutex::new(None),
+            bind_refusal: Mutex::new(None),
             next_tick_ns: AtomicU64::new(NO_TICK),
             tried_ns: AtomicU64::new(0),
             bound_ns: AtomicU64::new(0),
@@ -1489,7 +1496,8 @@ impl Inner {
                 }
             }
         };
-        let next = self.next_state(slot, attempts, reason);
+        // A driver that was running and failed: no refusal behind the wait, so no kind.
+        let next = self.next_state(slot, attempts, reason, None);
         *state = next.clone();
         drop(state);
         self.moved(slot);
@@ -1637,7 +1645,13 @@ impl Inner {
     /// Where a device goes after failed attempt number `attempts + 1` in a row: back to waiting,
     /// or off when its board entry opted in to that (`auto_off_after`) and this was the last
     /// attempt it allows. No host-wide setting turns a device off.
-    fn next_state(&self, slot: &Slot, attempts: u32, reason: &str) -> DeviceState {
+    fn next_state(
+        &self,
+        slot: &Slot,
+        attempts: u32,
+        reason: &str,
+        kind: Option<RefusalKind>,
+    ) -> DeviceState {
         if let Some(after) = slot.spec.auto_off_after
             && attempts.saturating_add(1) >= after
         {
@@ -1648,6 +1662,7 @@ impl Inner {
             attempts: attempts.saturating_add(1),
             next_retry_ns: self.clock.now_ns() + wait,
             reason: reason.to_string(),
+            kind,
         }
     }
 
@@ -2073,10 +2088,19 @@ impl Inner {
                 .iter()
                 .map(|(key, items)| (*key, items.as_slice()))
                 .collect();
+            // The reason a driver gives for a refusal, or a bus it could not open, is kept here.
+            let refused: std::sync::Mutex<Option<(RefusalKind, String)>> =
+                std::sync::Mutex::new(None);
+            let sink = |kind: RefusalKind, reason: core::fmt::Arguments<'_>| {
+                let mut text = String::new();
+                let _ = core::fmt::Write::write_fmt(&mut text, reason);
+                *refused.lock().unwrap_or_else(|e| e.into_inner()) = Some((kind, text));
+            };
             let config = Config::new(&entries)
                 .with_lists(&borrowed)
                 .on_board(&self.board)
-                .on_host_version(self.daemon_version);
+                .on_host_version(self.daemon_version)
+                .with_refusals(RefusalSink::new(&sink));
             let config = if guest {
                 config.for_host_owned()
             } else {
@@ -2086,6 +2110,7 @@ impl Inner {
                 inner: self,
                 slot: &target,
                 missing: RefCell::new(Vec::new()),
+                refused: &refused,
             };
             let link = target.spec.link.as_deref();
             let built = catch_unwind(AssertUnwindSafe(|| {
@@ -2093,6 +2118,7 @@ impl Inner {
                 entry.factory.bind(&mut res, &config)
             }));
             let missing = binding.missing.take();
+            *lock(&target.bind_refusal) = refused.lock().unwrap_or_else(|e| e.into_inner()).take();
             match built {
                 Ok(Ok(instance)) => {
                     *lock(&target.missing) = missing;
@@ -2124,9 +2150,17 @@ impl Inner {
                 self.bring_users_forward(&slot.spec.id);
             }
             Ok(Err(status)) => {
-                let refusal = lock(&slot.link_refusal).take();
-                let reason = refusal.unwrap_or_else(|| format!("bind failed: {status:?}"));
-                self.record_failed_bind(&slot, &reason);
+                // The driver's own reason, then a bus it could not open, then the link, then the
+                // status named in words: the first one there says why the bind was refused.
+                let (kind, reason) = lock(&slot.bind_refusal)
+                    .take()
+                    .or_else(|| {
+                        lock(&slot.link_refusal)
+                            .take()
+                            .map(|text| (RefusalKind::Failed, text))
+                    })
+                    .unwrap_or_else(|| (status_kind(status), status_words(status).to_string()));
+                self.record_refusal(&slot, &format!("bind failed: {reason}"), Some(kind));
             }
             Err(LaneError::Deadline) => {
                 self.abandon_lane(&slot);
@@ -2137,14 +2171,20 @@ impl Inner {
         }
     }
 
+    /// A bind refused for a reason the host itself has (no driver named, a stuck call): a failure.
     fn record_failed_bind(&self, slot: &Slot, reason: &str) {
+        self.record_refusal(slot, reason, Some(RefusalKind::Failed));
+    }
+
+    /// A bind refused with `reason`, of `kind`: the device waits and is retried under the failure rule.
+    fn record_refusal(&self, slot: &Slot, reason: &str, kind: Option<RefusalKind>) {
         let mut state = lock(&slot.state);
         let attempts = match &*state {
             DeviceState::Off(_) => return,
             DeviceState::Backoff { attempts, .. } => *attempts,
             DeviceState::Running => 0,
         };
-        let next = self.next_state(slot, attempts, reason);
+        let next = self.next_state(slot, attempts, reason, kind);
         *state = next.clone();
         drop(state);
         self.moved(slot);
@@ -2351,9 +2391,34 @@ struct Binding<'a> {
     inner: &'static Inner,
     slot: &'a Slot,
     missing: RefCell<Vec<String>>,
+    /// The first reason a bus this bind needs is absent, or a driver's own (see `Slot::bind_refusal`).
+    refused: &'a std::sync::Mutex<Option<(RefusalKind, String)>>,
 }
 
 impl Binding<'_> {
+    /// A bus the board names that the backend cannot open: absent when there is no such bus here.
+    /// The first such reason is kept, unless the driver gives its own, which replaces it.
+    fn absent_bus(&self, status: Status, words: &str, bus: &str) -> Status {
+        if matches!(status, Status::NO_DEVICE | Status::NOT_FOUND) {
+            let mut refused = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+            if refused.is_none() {
+                *refused = Some((RefusalKind::Absent, format!("no {words} {bus}")));
+            }
+        }
+        status
+    }
+
+    /// A device this one needs that is not running: absent for now, and this bind says so.
+    fn not_running(&self, status: Status, id: &str) -> Status {
+        if status == Status::NO_DEVICE {
+            let mut refused = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+            if refused.is_none() {
+                *refused = Some((RefusalKind::Absent, format!("device {id} is not running")));
+            }
+        }
+        status
+    }
+
     /// Whether the device being bound is the operating system's, to be read and not changed.
     fn guest(&self) -> bool {
         self.slot.spec.owner == Owner::Host
@@ -2416,11 +2481,47 @@ impl Binding<'_> {
     }
 }
 
+/// A status a bind was refused with, said in words: the name of the errno or code, as a person
+/// reads it. A driver that gives its own reason never reaches this.
+fn status_words(status: Status) -> &'static str {
+    match status {
+        Status::NOT_PERMITTED => "not permitted",
+        Status::NOT_FOUND => "not found",
+        Status::INTERRUPTED => "interrupted",
+        Status::IO => "an I/O error",
+        Status::AGAIN => "try again later",
+        Status::NO_MEMORY => "out of memory",
+        Status::ACCESS => "permission denied",
+        Status::BUSY => "busy",
+        Status::NO_DEVICE => "no such device",
+        Status::INVALID_ARGUMENT => "invalid argument",
+        Status::NOT_SUPPORTED => "not supported",
+        Status::TIMED_OUT => "timed out",
+        Status::CANCELLED => "cancelled",
+        Status::STALE_HANDLE => "stale handle",
+        Status::VERSION_MISMATCH => "version mismatch",
+        Status::BUFFER_TOO_SMALL => "buffer too small",
+        Status::PANIC => "the driver panicked",
+        Status::LAYOUT_MISMATCH => "layout mismatch",
+        _ => "failed with an unnamed error",
+    }
+}
+
+/// Absent for a device that is not here (no such device, not found); failed for any other status.
+fn status_kind(status: Status) -> RefusalKind {
+    match status {
+        Status::NO_DEVICE | Status::NOT_FOUND => RefusalKind::Absent,
+        _ => RefusalKind::Failed,
+    }
+}
+
 macro_rules! buses {
-    ($($method:ident -> $handle:ty;)*) => {$(
+    ($($method:ident -> $handle:ty, $words:literal;)*) => {$(
         fn $method(&mut self, need: &str) -> Result<$handle> {
             let bus = self.bus_name(need)?;
-            let handle = lock(&self.inner.backend).$method(&bus)?;
+            let handle = lock(&self.inner.backend)
+                .$method(&bus)
+                .map_err(|status| self.absent_bus(status, $words, &bus))?;
             // A host-owned device gets it with every change refused.
             Ok(if self.guest() {
                 guest::$method(handle)
@@ -2452,6 +2553,7 @@ impl Provider for Binding<'_> {
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller> {
         let target = self.target(need).ok_or(Status::NOT_FOUND)?;
         self.caller_of(&target, tag)
+            .map_err(|status| self.not_running(status, &target.spec.id))
     }
 
     fn member(&mut self, id: &str, tag: Tag) -> Result<LocalCaller> {
@@ -2479,7 +2581,9 @@ impl Provider for Binding<'_> {
     fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
         let id = self.slot.spec.link.as_deref().ok_or(Status::NOT_FOUND)?;
         let target = self.inner.slot_by_id(id).ok_or(Status::NOT_FOUND)?;
-        let caller = self.caller_of(&target, tag);
+        let caller = self
+            .caller_of(&target, tag)
+            .map_err(|status| self.not_running(status, id));
         // A linked device that does not serve the contract can never be bound to this link: say which
         // contract is wanted and which the device serves, rather than leave a bare status.
         *lock(&self.slot.link_refusal) = match &caller {
@@ -2491,7 +2595,9 @@ impl Provider for Binding<'_> {
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {
         let bus = self.bus_name(need)?;
-        let handle = lock(&self.inner.backend).i2c(&bus)?;
+        let handle = lock(&self.inner.backend)
+            .i2c(&bus)
+            .map_err(|status| self.absent_bus(status, "I2C bus", &bus))?;
         // A host-owned device's driver reads registers of the width it declares, and writes
         // nothing else.
         Ok(if self.guest() {
@@ -2503,19 +2609,19 @@ impl Provider for Binding<'_> {
     }
 
     buses! {
-        spi -> Spi;
-        raw_spi -> RawSpiBus;
-        line -> Line;
-        pwm -> Pwm;
-        uart -> Uart;
-        usb_device -> UsbDeviceHandle;
-        usb_function -> UsbFunctionHandle;
-        registers -> RegistersHandle;
-        interrupt -> InterruptHandle;
-        dma -> DmaHandle;
-        clocks -> ClocksHandle;
-        reset -> ResetHandle;
-        watchdog -> Watchdog;
+        spi -> Spi, "SPI bus";
+        raw_spi -> RawSpiBus, "SPI bus";
+        line -> Line, "GPIO line";
+        pwm -> Pwm, "PWM channel";
+        uart -> Uart, "UART";
+        usb_device -> UsbDeviceHandle, "USB device";
+        usb_function -> UsbFunctionHandle, "USB function";
+        registers -> RegistersHandle, "register block";
+        interrupt -> InterruptHandle, "interrupt line";
+        dma -> DmaHandle, "DMA channel";
+        clocks -> ClocksHandle, "clock";
+        reset -> ResetHandle, "reset line";
+        watchdog -> Watchdog, "watchdog";
     }
 
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {
@@ -3240,6 +3346,7 @@ impl Host {
             attempts: 0,
             next_retry_ns: 0,
             reason: "switched on".to_string(),
+            kind: None,
         };
         self.inner.bind(slot);
         Ok(())

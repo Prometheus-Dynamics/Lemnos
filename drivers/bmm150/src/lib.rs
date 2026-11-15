@@ -34,8 +34,9 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    AddressWidth, CallerId, Config, ConfigError, ConfigValue, Description, Health, I2c, Item,
-    JobId, JobState, Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, Vector3, driver,
+    AddressWidth, CallerId, Config, ConfigError, ConfigValue, Description, ErrorKind, Health, I2c,
+    Item, JobId, JobState, Key, Kind, Lifecycle, MethodId, RefusalKind, Reply, Result, Status,
+    Unit, Vector3, driver,
 };
 
 /// The 7-bit address with SDO and CSB2 low; 0x11-0x13 are the alternatives.
@@ -135,9 +136,12 @@ impl Lifecycle for Bmm150 {
     }
 
     fn start(needs: Bmm150Needs, cfg: &Config<'_>) -> Result<Self> {
+        let address = address(cfg)?;
+        let mut bus = needs.bus;
+        identify_at_bind(&mut bus, address, cfg)?;
         Ok(Self {
-            bus: needs.bus,
-            address: address(cfg)?,
+            bus,
+            address,
             settings: settings(cfg)?,
             phase: Phase::Off,
             last: None,
@@ -300,14 +304,50 @@ impl Magnetometer for Bmm150 {
     }
 }
 
+/// The bind's one ID read. A chip that does not acknowledge its address (or does not answer) is
+/// absent; one that answers another ID is failed, and the sentence names both IDs; any other bus
+/// fault is failed. A refused bind is retried under the failure rule, so a chip whose supply comes
+/// up later binds on a later retry.
+fn identify_at_bind(bus: &mut I2c, address: u8, cfg: &Config<'_>) -> Result<()> {
+    match chip::chip_id(bus, address) {
+        Ok(chip::CHIP_ID) => Ok(()),
+        Ok(found) => Err(cfg.refuse(
+            Status::NOT_SUPPORTED,
+            RefusalKind::Failed,
+            format_args!(
+                "the chip at {address:#04x} answers ID {found:#04x}, expected {:#04x}",
+                chip::CHIP_ID
+            ),
+        )),
+        Err(Fault::Bus(ErrorKind::Nack | ErrorKind::Timeout)) => Err(cfg.refuse(
+            Status::NO_DEVICE,
+            RefusalKind::Absent,
+            format_args!("no device at {address:#04x}: nothing answers at its address"),
+        )),
+        Err(fault) => Err(cfg.refuse(
+            fault.status(),
+            RefusalKind::Failed,
+            format_args!("the chip at {address:#04x} did not answer its ID read"),
+        )),
+    }
+}
+
 /// The `address` config: a 7-bit address. Its range is checked by `check_config`.
 fn address(cfg: &Config<'_>) -> Result<u8> {
     match cfg.get("address") {
         None => Ok(DEFAULT_ADDRESS),
-        Some(ConfigValue::Int(address)) => {
-            u8::try_from(address).map_err(|_| Status::INVALID_ARGUMENT)
-        }
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(ConfigValue::Int(address)) => u8::try_from(address).map_err(|_| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting address must be a 7-bit address"),
+            )
+        }),
+        Some(_) => Err(cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting address must be a whole number"),
+        )),
     }
 }
 
@@ -316,13 +356,37 @@ fn address(cfg: &Config<'_>) -> Result<u8> {
 fn settings(cfg: &Config<'_>) -> Result<Settings> {
     let preset = match cfg.get("preset") {
         None => Preset::default(),
-        Some(ConfigValue::Str(name)) => Preset::from_name(name).ok_or(Status::INVALID_ARGUMENT)?,
-        Some(_) => return Err(Status::INVALID_ARGUMENT),
+        Some(ConfigValue::Str(name)) => Preset::from_name(name).ok_or_else(|| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting preset must name a preset the chip has"),
+            )
+        })?,
+        Some(_) => {
+            return Err(cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting preset must be a name"),
+            ));
+        }
     };
     let data_rate = match cfg.get("data_rate") {
         None => DataRate::default(),
-        Some(ConfigValue::Int(hz)) => DataRate::from_hz(hz).ok_or(Status::INVALID_ARGUMENT)?,
-        Some(_) => return Err(Status::INVALID_ARGUMENT),
+        Some(ConfigValue::Int(hz)) => DataRate::from_hz(hz).ok_or_else(|| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting data_rate must be a rate the chip has"),
+            )
+        })?,
+        Some(_) => {
+            return Err(cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting data_rate must be a whole number"),
+            ));
+        }
     };
     Ok(Settings { preset, data_rate })
 }

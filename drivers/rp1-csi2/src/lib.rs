@@ -98,7 +98,7 @@ use lemnos_contract_camera_receiver::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind,
-    Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+    Lifecycle, MethodId, RefusalKind, Result, Status, StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -252,6 +252,33 @@ fn layout(link: &LinkConfig, packing: Packing) -> Result<FrameLayout> {
 
 /// `NOT_SUPPORTED` for a stream whose buffers have no handles: there is nothing to give the
 /// block. The stream knows from the board file, with or without a consumer.
+/// The refusal for a frame stream whose memory is not a dma-buf: the block writes only into one.
+fn plain_memory(cfg: &Config<'_>, status: Status) -> Status {
+    cfg.refuse(
+        status,
+        RefusalKind::Failed,
+        format_args!("a frame stream is plain memory, and the block writes only into a dma-buf"),
+    )
+}
+
+/// The refusal for a block that `present` refused: absent when its node is not there, failed when
+/// the node is there and does not answer.
+fn refuse_missing(cfg: &Config<'_>, status: Status, what: &str) -> Status {
+    if matches!(status, Status::NO_DEVICE | Status::NOT_FOUND) {
+        cfg.refuse(
+            status,
+            RefusalKind::Absent,
+            format_args!("no receiver node {what}"),
+        )
+    } else {
+        cfg.refuse(
+            status,
+            RefusalKind::Failed,
+            format_args!("receiver node {what} does not answer"),
+        )
+    }
+}
+
 fn handles_only(frames: &relay::Frames) -> Result<()> {
     if frames.buffer_kind() == BufferKind::Handles {
         Ok(())
@@ -299,12 +326,12 @@ impl Lifecycle for Rp1Csi2 {
         let settings = hw::Settings::new(cfg.str("device"))?;
         // The block writes a frame only into a dma-buf: known now, before any consumer comes.
         if let Some(frames) = needs.frames.as_ref() {
-            handles_only(&**frames)?;
+            handles_only(&**frames).map_err(|status| plain_memory(cfg, status))?;
         }
         let embedded_bytes = match needs.embedded.is_some() {
             true => {
                 if let Some(frames) = needs.embedded.as_ref() {
-                    handles_only(&**frames)?;
+                    handles_only(&**frames).map_err(|status| plain_memory(cfg, status))?;
                 }
                 cfg.int("embedded_bytes")
                     .and_then(|bytes| u32::try_from(bytes).ok())
@@ -312,7 +339,14 @@ impl Lifecycle for Rp1Csi2 {
             }
             false => 0,
         };
-        let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
+        // The block must be there and answer now: a bind that starts without it would report
+        // running with nothing behind it. Refused, it is retried like any bind that fails.
+        let label = settings.label();
+        let mut linux = LinuxHardware::new(settings);
+        linux
+            .present()
+            .map_err(|status| refuse_missing(cfg, status, &label))?;
+        let hw: Box<dyn Hardware> = Box::new(linux);
         let mut driver = Self::with_hardware(hw, needs.frames);
         driver._isp = needs._isp;
         Ok(match needs.embedded {

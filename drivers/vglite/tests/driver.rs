@@ -277,19 +277,13 @@ fn bind_refuses_plain_streams_no_streams_and_a_bad_device_setting() {
     // `MemfdAllocator` makes plain shared memory, with no handles.
     let rig = Rig::start(&board("vglite", false), Arc::new(MemfdAllocator));
     let reason = rig.refusal();
-    assert!(
-        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
-        "{reason}"
-    );
+    assert!(reason.contains("bind failed: not supported"), "{reason}");
     let stats = rig.host.stream_stats(0, "scale").unwrap();
     assert_eq!((stats.attachments, stats.claimed), (0, false));
 
     let rig = Rig::start(&board_with("vglite", &[], true), Arc::new(PerBuffer));
     let reason = rig.refusal();
-    assert!(
-        reason.contains(&format!("{:?}", Status::NOT_FOUND)),
-        "{reason}"
-    );
+    assert!(reason.contains("bind failed: not found"), "{reason}");
 
     // The host checks the setting when it starts: the board starts, and the device is listed
     // failed with the key and the reason. The device is never made.

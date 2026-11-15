@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 
 use lemnos_contract_system_identity::SystemIdentity;
 use lemnos_core::{
-    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
-    driver,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, RefusalKind,
+    Result, Status, driver,
 };
 use lemnos_identity::{ByteOrder, Facts, SerialError, SerialSource};
 use lemnos_slot_store::manifest::Manifest;
@@ -103,11 +103,35 @@ impl Lifecycle for Identity {
         if !cfg.board().is_empty() {
             set(&mut facts, "family", cfg.board());
         }
-        match serial_source(cfg).map_err(|_| Status::INVALID_ARGUMENT)? {
+        let source = serial_source(cfg).map_err(|error| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("{error}"),
+            )
+        })?;
+        match source {
             None => missing_serial = true,
             Some(source) => match source.read() {
                 Ok(serial) => set(&mut facts, "serial", &serial),
-                Err(SerialError::Read { source, .. }) => return Err(io_status(&source)),
+                Err(SerialError::Read {
+                    path,
+                    source: error,
+                }) => {
+                    let status = io_status(&error);
+                    return Err(match error.kind() {
+                        io::ErrorKind::NotFound => cfg.refuse(
+                            status,
+                            RefusalKind::Absent,
+                            format_args!("no serial source at {}", path.display()),
+                        ),
+                        _ => cfg.refuse(
+                            status,
+                            RefusalKind::Failed,
+                            format_args!("cannot read the serial source at {}", path.display()),
+                        ),
+                    });
+                }
                 Err(SerialError::Refused(_)) => missing_serial = true,
             },
         }
@@ -120,7 +144,13 @@ impl Lifecycle for Identity {
             set(&mut facts, "model", &model);
         }
         let data = PathBuf::from(cfg.str("data").unwrap_or("/data"));
-        slot_facts(&data, &mut facts)?;
+        slot_facts(&data, &mut facts).map_err(|status| {
+            cfg.refuse(
+                status,
+                RefusalKind::Failed,
+                format_args!("cannot read the running slot under {}", data.display()),
+            )
+        })?;
         // The daemon's own version: the host gives it to every driver it binds.
         if !cfg.host_version().is_empty() {
             set(&mut facts, "version.lemnos", cfg.host_version());

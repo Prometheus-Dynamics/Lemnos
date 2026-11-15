@@ -7,8 +7,11 @@
 //!   is gated, which needs a longer line).
 //!
 //! The driver only speaks to the sensor's registers. Power, the 24 MHz input clock and the reset
-//! line are the board's. Binding does not touch the bus. Nothing is kept across a restart: each
-//! `start` writes the whole configuration from the sensor's reset defaults upward.
+//! line are the board's. Binding reads the chip ID once and writes nothing: a sensor that does not
+//! acknowledge its address is absent, and one that answers another ID is failed. Either refuses
+//! the bind, which the host retries under the failure rule, so a sensor whose supply comes up later
+//! binds on a later retry. Nothing is kept across a restart: each `start` writes the whole
+//! configuration from the sensor's reset defaults upward.
 //!
 //! Power-up. The first `start` after the driver is created does not touch the bus. It answers at
 //! once, in `PowerUp`, and the first chip-ID read is made by the first tick at least
@@ -140,8 +143,9 @@ use lemnos_contract_camera_sensor::{
     landing_of, launch_frame,
 };
 use lemnos_core::{
-    CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Key,
-    Kind, Lifecycle, MethodId, Reader, Result, Status, StreamHandle, Unit, driver,
+    CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, ErrorKind, Health, I2c,
+    Item, Key, Kind, Lifecycle, MethodId, Reader, RefusalKind, Result, Status, StreamHandle, Unit,
+    driver, status_of,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
@@ -549,6 +553,8 @@ impl Lifecycle for Ov9782 {
 
     fn start(needs: Ov9782Needs, cfg: &Config<'_>) -> Result<Self> {
         let mut needs = needs;
+        let address = address_from_config(cfg)?;
+        identify_at_bind(&mut needs.bus, address, cfg)?;
         let link_check = link_check(needs._receiver.as_mut())?;
         Ok(Self {
             bus: needs.bus,
@@ -1360,6 +1366,31 @@ fn decode_job(job: &[u8]) -> Option<FrameValues> {
 }
 
 /// The `address` config, default the chip's. Its range is checked by `check_config`.
+/// The bind's one ID read (see the crate notes): absent when the sensor does not acknowledge its
+/// address, failed when it answers another ID, and failed on any other bus fault.
+fn identify_at_bind(bus: &mut I2c, address: u8, cfg: &Config<'_>) -> Result<()> {
+    match chip::read_id(bus, address) {
+        Ok(id) if CHIP_IDS.contains(&id) => Ok(()),
+        Ok(found) => Err(cfg.refuse(
+            Status::NOT_SUPPORTED,
+            RefusalKind::Failed,
+            format_args!(
+                "the sensor at {address:#04x} answers ID {found:#06x}, expected 0x9782 or 0x9281"
+            ),
+        )),
+        Err(ErrorKind::Nack | ErrorKind::Timeout) => Err(cfg.refuse(
+            Status::NO_DEVICE,
+            RefusalKind::Absent,
+            format_args!("no device at {address:#04x}: nothing answers at its address"),
+        )),
+        Err(kind) => Err(cfg.refuse(
+            status_of(kind),
+            RefusalKind::Failed,
+            format_args!("the sensor at {address:#04x} did not answer its ID read"),
+        )),
+    }
+}
+
 fn address_from_config(cfg: &Config<'_>) -> Result<u8> {
     match cfg.get("address") {
         None => Ok(DEFAULT_ADDRESS),

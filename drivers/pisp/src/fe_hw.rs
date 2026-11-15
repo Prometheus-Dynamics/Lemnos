@@ -72,6 +72,11 @@ pub struct Finished {
 
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
+    /// Whether the block is there and answers, without claiming or changing it. The driver asks at
+    /// bind: a block that is not there refuses the bind rather than starting without it.
+    fn present(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// The block's version register; 0 before the node has been opened.
     fn hw_version(&self) -> u32;
     /// Makes the stream and the configuration slots, starting nothing. No buffer of the stream
@@ -135,6 +140,12 @@ impl Settings {
 }
 
 impl Settings {
+    /// The node this block is at, as a person reads it.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("receiver node /dev/lemnos-rp1-csi2-{}", self.device)
+    }
+
     /// The platform device name of the block, as the board file gives it.
     #[must_use]
     pub fn device(&self) -> &str {
@@ -174,6 +185,15 @@ fn status(e: &io::Error) -> Status {
         Some(12) => Status::NO_MEMORY,
         Some(22) => Status::INVALID_ARGUMENT,
         _ => Status::IO,
+    }
+}
+
+/// A node that is not there is `NO_DEVICE`; anything else is as `status` says.
+fn missing(e: &io::Error) -> Status {
+    if e.kind() == io::ErrorKind::NotFound {
+        Status::NO_DEVICE
+    } else {
+        status(e)
     }
 }
 
@@ -256,6 +276,13 @@ impl LinuxHardware {
 }
 
 impl Hardware for LinuxHardware {
+    fn present(&mut self) -> Result<()> {
+        // The node opened to see it answers: nothing is claimed and nothing is changed.
+        let node = Node::open(self.settings.label()).map_err(|e| missing(&e))?;
+        node.info().map_err(|e| missing(&e))?;
+        Ok(())
+    }
+
     fn hw_version(&self) -> u32 {
         self.hw_version
     }
@@ -389,5 +416,19 @@ impl Hardware for LinuxHardware {
             .ok()
             .and_then(|r| r.node.info().ok())
             .map_or(0, |info| info.stalled)
+    }
+}
+
+#[cfg(test)]
+mod present_tests {
+    use super::*;
+
+    #[test]
+    fn a_front_end_with_no_node_is_not_present() {
+        // A block name no board has: its node is not in /dev, so the real block is absent. Nothing
+        // is opened for writing and nothing is claimed.
+        let settings = Settings::new("lemnos-test-absent-node", "linux,cma").unwrap();
+        let mut hw = LinuxHardware::new(settings);
+        assert_eq!(hw.present(), Err(Status::NO_DEVICE));
     }
 }

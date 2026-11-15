@@ -132,6 +132,7 @@ fn waiting(host: &Host, clock: &SimClock) -> (u64, u32, String) {
             attempts,
             next_retry_ns,
             reason,
+            ..
         } => (
             Duration::from_nanos(next_retry_ns - clock.now_ns()).as_secs(),
             attempts,

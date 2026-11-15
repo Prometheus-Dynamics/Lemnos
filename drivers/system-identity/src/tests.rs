@@ -1,6 +1,6 @@
 use super::*;
 use lemnos_contract_system_identity::MAX_FACTS_TEXT;
-use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle, RefusalKind, RefusalSink};
 use std::fs;
 
 /// A fake data partition and boot files, in its own directory, removed on drop.
@@ -357,4 +357,51 @@ fn the_manifests_version_bound_is_the_fact_s_limit() {
         assert!(lemnos_slot_store::manifest::check_version(&bad, "v").is_err());
         assert!(facts.set("version.os", &bad).is_err());
     }
+}
+
+/// The bind's result, and the refusal the host would record for it (its kind and reason).
+fn refused_bind(
+    entries: &[(&str, ConfigValue<'_>)],
+) -> (Result<()>, Option<(RefusalKind, String)>) {
+    let seen = std::sync::Mutex::new(None);
+    let sink = |kind: RefusalKind, reason: core::fmt::Arguments<'_>| {
+        *seen.lock().unwrap() = Some((kind, reason.to_string()));
+    };
+    let config = Config::new(entries)
+        .on_board("alpha-1")
+        .with_refusals(RefusalSink::new(&sink));
+    let result = Identity::start(IdentityNeeds {}, &config).map(|_| ());
+    (result, seen.into_inner().unwrap())
+}
+
+#[test]
+fn a_missing_serial_source_is_refused_as_absent_and_names_its_path() {
+    let tree = Tree::new("refused-missing");
+    let missing = tree.path("no-such-device-tree/serial-number");
+    let (result, refusal) = refused_bind(&[
+        ("serial", ConfigValue::Str("device-tree")),
+        ("serial_path", ConfigValue::Str(&missing)),
+    ]);
+    assert_eq!(result, Err(Status::NOT_FOUND));
+    let (kind, reason) = refusal.expect("a refused bind gives its reason");
+    assert_eq!(kind, RefusalKind::Absent);
+    assert!(reason.contains(&missing), "{reason}");
+    assert!(reason.starts_with("no serial source"), "{reason}");
+}
+
+#[test]
+fn a_serial_source_that_cannot_be_read_is_refused_as_failed_and_names_its_path() {
+    let tree = Tree::new("refused-unreadable");
+    // A directory where the serial file should be: it exists, and cannot be read as a file.
+    let dir = tree.0.join("serial-is-a-directory");
+    fs::create_dir_all(&dir).unwrap();
+    let dir_text = dir.display().to_string();
+    let (result, refusal) = refused_bind(&[
+        ("serial", ConfigValue::Str("device-tree")),
+        ("serial_path", ConfigValue::Str(&dir_text)),
+    ]);
+    assert_eq!(result, Err(Status::IO));
+    let (kind, reason) = refusal.expect("a refused bind gives its reason");
+    assert_eq!(kind, RefusalKind::Failed);
+    assert!(reason.contains(&dir_text), "{reason}");
 }

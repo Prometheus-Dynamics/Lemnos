@@ -89,6 +89,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 reason: "r",
                 link: Tail("d"),
                 jobs: Tail("1a:3/4"),
+                refusal: Tail(0),
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
@@ -257,6 +258,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 state: state::RUNNING,
                 health: health::OK,
                 reason: "",
+                refusal: Tail(0),
             },
         ),
         (
@@ -473,11 +475,12 @@ fn a_device_from_before_its_link_reads_as_having_none() {
         reason: "r",
         link: Tail("d"),
         jobs: Tail("1a:3/4"),
+        refusal: Tail(0),
     };
     let mut buf = [0; 64];
     let n = encode(&with, &mut buf).unwrap();
-    // What an older host sends: the same frame, ending after `reason`.
-    let older = n - 5 - 10;
+    // What an older host sends: the same frame, ending after `reason` (the refusal byte is last).
+    let older = n - 1 - 5 - 10;
     buf[..4].copy_from_slice(&((older - 4) as u32).to_le_bytes());
     let (frame, used) = decode(&buf[..older]).unwrap().unwrap();
     assert_eq!(used, older);
@@ -490,7 +493,7 @@ fn a_device_from_before_its_link_reads_as_having_none() {
     assert_eq!((reason, link, jobs), ("r", Tail(""), Tail("")));
     // A host from between the two sends the link and no jobs: none are running as far as the
     // reader can tell.
-    let between = n - 10;
+    let between = n - 1 - 10;
     buf[..4].copy_from_slice(&((between - 4) as u32).to_le_bytes());
     let (frame, _) = decode(&buf[..between]).unwrap().unwrap();
     let Frame::Device { link, jobs, .. } = frame else {

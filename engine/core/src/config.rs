@@ -1,3 +1,5 @@
+use crate::Status;
+
 /// One setting from a device's `config` table in the board file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConfigValue<'a> {
@@ -5,6 +7,34 @@ pub enum ConfigValue<'a> {
     Float(f64),
     Bool(bool),
     Str(&'a str),
+}
+
+/// Whether a refused bind's device is missing from this machine, or is there and failing. Both
+/// are retried under the failure rule; a UI shows them apart, so the host carries the kind next to
+/// the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// No such device here: no bus, no node, nothing answering at the address.
+    Absent,
+    /// Present, but not working: it answers wrongly, or its setup fails.
+    Failed,
+}
+
+/// Where a refused bind's reason goes. The host makes one per bind and gives it with the settings
+/// (see [`Config::refuse`]); a driver never sees how it is kept.
+#[derive(Clone, Copy)]
+pub struct RefusalSink<'a>(&'a (dyn Fn(RefusalKind, core::fmt::Arguments<'_>) + Sync));
+
+impl<'a> RefusalSink<'a> {
+    pub const fn new(sink: &'a (dyn Fn(RefusalKind, core::fmt::Arguments<'_>) + Sync)) -> Self {
+        Self(sink)
+    }
+}
+
+impl core::fmt::Debug for RefusalSink<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RefusalSink")
+    }
 }
 
 /// A device's settings, lent to it while it binds.
@@ -15,6 +45,7 @@ pub struct Config<'a> {
     host_owned: bool,
     board: &'a str,
     host_version: &'a str,
+    refusals: Option<RefusalSink<'a>>,
 }
 
 impl<'a> Config<'a> {
@@ -25,7 +56,32 @@ impl<'a> Config<'a> {
             host_owned: false,
             board: "",
             host_version: "",
+            refusals: None,
         }
+    }
+
+    /// The same settings, with the sink a refused bind's reason goes to (see [`Config::refuse`]).
+    #[must_use]
+    pub const fn with_refusals(mut self, sink: RefusalSink<'a>) -> Self {
+        self.refusals = Some(sink);
+        self
+    }
+
+    /// Refuses the bind with `status`, and says why in words a person can read. Returns `status`,
+    /// so a driver writes `return Err(cfg.refuse(Status::NO_DEVICE, RefusalKind::Absent,
+    /// format_args!("no such device: {path}")))`. The reason is formatted by the host, at bind
+    /// time: the driver allocates nothing. Without a sink (a driver built alone, in a test) the
+    /// reason is dropped and only the status is kept.
+    pub fn refuse(
+        &self,
+        status: Status,
+        kind: RefusalKind,
+        reason: core::fmt::Arguments<'_>,
+    ) -> Status {
+        if let Some(sink) = self.refusals {
+            (sink.0)(kind, reason);
+        }
+        status
     }
 
     /// The same settings, with the lists the board file gives this device: a key whose value

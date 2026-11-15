@@ -61,6 +61,11 @@ pub struct Finished {
 
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
+    /// Whether the block is there and answers, without claiming or changing it. The driver asks at
+    /// bind: a block that is not there refuses the bind rather than starting without it.
+    fn present(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// Data lanes wired.
     fn max_lanes(&mut self) -> Result<u8>;
     /// Ends whatever ran and makes the module's stream, with no buffer having memory yet.
@@ -101,6 +106,16 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// The node this block is at, as a person reads it: the named one, or the pattern when the
+    /// board names none.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.device {
+            Some(device) => format!("/dev/lemnos-rp1-csi2-{device}"),
+            None => "/dev/lemnos-rp1-csi2-*".to_owned(),
+        }
+    }
+
     /// `INVALID_ARGUMENT` for a device name that could name a path elsewhere.
     pub fn new(device: Option<&str>) -> Result<Self> {
         let ok = |name: &str| !name.is_empty() && !name.contains('/') && !name.contains('\0');
@@ -225,6 +240,12 @@ fn status(error: io::Error) -> Status {
 }
 
 impl Hardware for LinuxHardware {
+    fn present(&mut self) -> Result<()> {
+        // Opens the node if it is not open (no claim): NotFound when the block is not in /dev.
+        self.node()?.info().map_err(status)?;
+        Ok(())
+    }
+
     fn max_lanes(&mut self) -> Result<u8> {
         let info = self.node()?.info().map_err(status)?;
         u8::try_from(info.max_lanes).map_err(|_| Status::IO)

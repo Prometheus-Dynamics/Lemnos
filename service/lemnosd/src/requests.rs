@@ -18,7 +18,7 @@ use lemnos_wire::{
 
 use crate::Core;
 use crate::conn::Conn;
-use crate::events::wire_state;
+use crate::events::{wire_refusal, wire_state};
 use crate::packages::PackageMode;
 use crate::readers::Point;
 
@@ -230,6 +230,7 @@ impl Client {
                 reason: &reason,
                 link: Tail(info.link.as_deref().unwrap_or("")),
                 jobs: Tail(&running_jobs_text(&self.running_jobs(info.index))),
+                refusal: Tail(wire_refusal(&info.state)),
             });
         }
         self.conn.answer(&Frame::ListDone { id });

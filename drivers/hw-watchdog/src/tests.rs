@@ -4,7 +4,9 @@
 
 use super::*;
 use lemnos_contract_self_test::SelfTest;
+use lemnos_core::{RefusalKind, RefusalSink};
 use lemnos_measure::test_alloc::{Counting, allocations};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
@@ -453,4 +455,31 @@ fn check_config_keeps_the_timeout_to_one_second_or_more() {
         None
     );
     assert!(refusal(&[("timeout_s", ConfigValue::Int(i64::from(u32::MAX) + 1))]).is_some());
+}
+
+#[test]
+fn a_watchdog_node_that_cannot_be_opened_is_refused_as_absent_and_names_its_path() {
+    // Nothing under this directory exists, so the node cannot be opened. No real device is touched.
+    let root = std::env::temp_dir().join(format!("hw-watchdog-absent-{}", std::process::id()));
+    let dev_root = root.join("dev").display().to_string();
+    let sys_root = root.join("sys").display().to_string();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("dev_root", ConfigValue::Str(&dev_root)),
+        ("sys_root", ConfigValue::Str(&sys_root)),
+    ];
+    let seen = std::sync::Mutex::new(None);
+    let sink = |kind: RefusalKind, reason: core::fmt::Arguments<'_>| {
+        *seen.lock().unwrap() = Some((kind, reason.to_string()));
+    };
+    let config = Config::new(&entries).with_refusals(RefusalSink::new(&sink));
+    let result = HwWatchdog::start(HwWatchdogNeeds { watchdog: None }, &config);
+    assert_eq!(result.err(), Some(Status::NOT_FOUND));
+    let (kind, reason) = seen
+        .into_inner()
+        .unwrap()
+        .expect("a refused bind gives its reason");
+    assert_eq!(kind, RefusalKind::Absent);
+    let node = Path::new(&dev_root).join("watchdog0").display().to_string();
+    assert!(reason.contains(&node), "{reason}");
 }
