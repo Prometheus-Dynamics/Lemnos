@@ -82,7 +82,7 @@ fn changed(before: &[u8], after: &[u8]) -> Vec<u64> {
 fn set_lbas(image: &[u8], set: usize) -> (Vec<u64>, [u64; 2]) {
     let layout = test_bays();
     let sets = bay::place_sets(&mut Mem(image.to_vec()), &layout).unwrap();
-    let (files, info) = sets[set];
+    let (files, info) = sets[set].clone();
     let mut out = Vec::new();
     for (i, lba) in files.iter().enumerate() {
         for k in 0..layout.bytes[i] / 512 {
