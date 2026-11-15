@@ -64,6 +64,17 @@ or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were 
 | `CONFIG_BLK_DEV_INITRD` | the slot initramfs | always.all | no | reference; mainline arm64 and riscv |
 | `CONFIG_RD_GZIP` | the decompressor of the slot initramfs when it is gzip-compressed (the harness's). An image whose initramfs uses another compression sets that decompressor instead: `RD_XZ`, `RD_ZSTD` or `RD_LZ4` (the file's `[initramfs]` table names each one) | initramfs | no | reference (harness `=y`); mainline arm64 |
 | `CONFIG_MODULES` | not needed: slot-init loads no modules | none | no | reference; mainline arm64 |
+| `CONFIG_PSTORE` | the pstore file system, where the kernel keeps the crash records (`/sys/fs/pstore`); built in for a board that declares a crash-log region (`crash_log`, `docs/slots.md`, "The crash log") | crash_log.all | no | mainline `fs/pstore/Kconfig` (tristate, default n) |
+| `CONFIG_PSTORE_RAM` | ramoops: the crash records in a region of RAM the board reserves, kept across a warm reset; the region's node is board data (`docs/boards.md`, "Crash-log regions"). Built in (`=y`), not `=m`: a slot board loads no modules | crash_log.all | no | mainline `fs/pstore/ram.c` (`depends on PSTORE`) |
+| `CONFIG_PSTORE_CONSOLE` | the console's last lines in the crash records (`console-ramoops-0`), beside the dmesg record the crash log stores | crash_log.all | no | mainline `fs/pstore/platform.c` (`depends on PSTORE`) |
+
+### Crash log: built in
+
+A board that declares a crash-log region (`crash_log` in its slot device's config) must build the three
+`crash_log.all` symbols in (`=y`): `scripts/check-kernel-config.py --check-config <.config> --crash-log`
+refuses a configuration that leaves one `=m` or unset, naming it. Both harness configurations carry them, so
+the QEMU crash-log proof (`testing/qemu/run-crash.sh`) runs on a kernel built from them. A board without a
+region needs none of them, and boots as it did.
 
 ### The requirements file
 
@@ -581,6 +592,9 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_PINCTRL_SUNXI` | The SoC drivers | `CONFIG_ARCH_SUNXI` |
 | `CONFIG_PM` | Symbols of lemnos.ko | none |
 | `CONFIG_PROC_FS` | Slot board | none |
+| `CONFIG_PSTORE` | Slot board | none |
+| `CONFIG_PSTORE_CONSOLE` | Slot board | `CONFIG_PSTORE` |
+| `CONFIG_PSTORE_RAM` | Slot board | `CONFIG_PSTORE` |
 | `CONFIG_PWM` | Symbols of lemnos.ko | none |
 | `CONFIG_PWM_ROCKCHIP` | The SoC drivers | none |
 | `CONFIG_PWM_RP1` | The SoC drivers | none |

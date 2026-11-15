@@ -36,6 +36,11 @@ configuration (`m` is not enough for a slot board).
 Firmware groups (contract version 3): `check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`
 refuses a configuration in which any symbol of that group (and DEVTMPFS) is =m or unset, naming the symbol.
 
+Crash-log group (an additive, optional group at contract version 3): a board that declares a crash-log region (`crash_log` in its slot
+device's config, `docs/slots.md`, "The crash log") requires `crash_log.all` built in:
+`check-kernel-config.py --check-config <.config> --crash-log` refuses a configuration that leaves any of
+those symbols =m or unset. Both harness configurations carry them.
+
 Exits 1 and says what is wrong; 0 when all hold.
 """
 import os
@@ -62,7 +67,7 @@ CONTRACT = ROOT / "contracts" / "slot-kernel.toml"
 CONTRACT_VERSION = 3
 # The groups a row of the slot-board table can name (its "When" cell), and the cells that name no group.
 WHEN_GROUPS = ("always.all", "kind.disk.all", "kind.disk.one_of", "kind.mtd.all", "kind.mtd.one_of",
-               "firmware.rpi-tryboot.all", "optional.all", "initramfs")
+               "firmware.rpi-tryboot.all", "crash_log.all", "optional.all", "initramfs")
 FIRMWARES = ("rpi-tryboot",)
 WHEN_BOARD = ("board", "none")
 
@@ -364,7 +369,7 @@ def contract():
         sys.exit(f"{where}: cannot be read: {err}")
     if data.get("version") != CONTRACT_VERSION:
         sys.exit(f"{where}: version {data.get('version')!r} is not one this reader knows (it reads {CONTRACT_VERSION}); refusing the file")
-    _keys(data, ("version", "always", "kind", "firmware", "optional", "initramfs", "boot_check"), where, "")
+    _keys(data, ("version", "always", "kind", "firmware", "crash_log", "optional", "initramfs", "boot_check"), where, "")
     _keys(data["always"], ("all",), where, "always.")
     _keys(data["kind"], ("disk", "mtd"), where, "kind.")
     for kind in ("disk", "mtd"):
@@ -372,6 +377,7 @@ def contract():
     _keys(data["firmware"], FIRMWARES, where, "firmware.")
     for name in FIRMWARES:
         _keys(data["firmware"][name], ("all",), where, f"firmware.{name}.")
+    _keys(data["crash_log"], ("all",), where, "crash_log.")
     _keys(data["optional"], ("all",), where, "optional.")
     _keys(data["initramfs"], ("gzip", "xz", "zstd", "lz4", "none"), where, "initramfs.")
     _keys(data["boot_check"], ("checked",), where, "boot_check.")
@@ -404,6 +410,8 @@ def contract_groups(data):
     for fw in FIRMWARES:
         for name in _strings(data["firmware"][fw]["all"], where, f"firmware.{fw}.all"):
             add(name, f"firmware.{fw}.all")
+    for name in _strings(data["crash_log"]["all"], where, "crash_log.all"):
+        add(name, "crash_log.all")
     for name in _strings(data["optional"]["all"], where, "optional.all"):
         add(name, "optional.all")
     for value in data["initramfs"].values():
@@ -452,11 +460,11 @@ def slot_contract_checks(problems):
 
 
 def harness_checks(data, problems):
-    """Each harness configuration: always.all and kind.disk.all =y, and one symbol =y from each kind.disk.one_of list."""
+    """Each harness configuration: always.all, kind.disk.all and crash_log.all =y, and one symbol =y from each kind.disk.one_of list."""
     where = CONTRACT.relative_to(ROOT)
     for path in (HARNESS, MODULES_OFF):
         values = fragment(path)
-        for name in data["always"]["all"] + data["kind"]["disk"]["all"]:
+        for name in data["always"]["all"] + data["kind"]["disk"]["all"] + data["crash_log"]["all"]:
             if values.get(f"CONFIG_{name}") != "y":
                 problems.append(
                     f"CONFIG_{name} must be built in for a slot board ({where}) "
@@ -482,6 +490,21 @@ def firmware_config_problems(values, firmware):
         if have != "y":
             problems.append(
                 f"CONFIG_{name} must be built in (=y) for firmware {firmware} ({where}) but is "
+                f"{'=m' if have == 'm' else 'unset' if have == 'unset' else '=' + have}")
+    return problems
+
+
+def crash_log_config_problems(values):
+    """A kernel configuration against the crash-log group (an additive group at contract version 3): every symbol built in
+    (=y). =m and unset are both refused, and each is named."""
+    data = contract()
+    where = CONTRACT.relative_to(ROOT)
+    problems = []
+    for name in data["crash_log"]["all"]:
+        have = values.get(f"CONFIG_{name}", "unset")
+        if have != "y":
+            problems.append(
+                f"CONFIG_{name} must be built in (=y) for a board with a crash-log region ({where}) but is "
                 f"{'=m' if have == 'm' else 'unset' if have == 'unset' else '=' + have}")
     return problems
 
@@ -608,16 +631,19 @@ def main(argv):
     if argv[:1] == ["--check-config"]:
         config = pathlib.Path(argv[1])
         firmware = argv[argv.index("--firmware") + 1] if "--firmware" in argv else ""
+        crash_log = "--crash-log" in argv
         try:
             values = fragment(config)
         except OSError as err:
             print(f"kernel-config: {config}: cannot be read: {err}", file=sys.stderr)
             return 1
-        problems = firmware_config_problems(values, firmware)
+        problems = firmware_config_problems(values, firmware) if firmware else []
+        if crash_log:
+            problems += crash_log_config_problems(values)
         for problem in problems:
             print(f"kernel-config: {problem}", file=sys.stderr)
         if not problems:
-            print(f"kernel-config: {config} carries the {firmware} group")
+            print(f"kernel-config: {config} carries the {' and '.join(g for g in (firmware, 'crash-log' if crash_log else '') if g)} group(s)")
         return 1 if problems else 0
     if argv[:1] == ["--print-table"]:
         tree, defconfig = argv[1], argv[2]
