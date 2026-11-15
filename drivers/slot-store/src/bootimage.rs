@@ -337,12 +337,7 @@ pub fn min_size(parts: &Parts) -> Result<u64, String> {
 /// `payloads` (the five roles in [`ROLES`] order). Refused by name, with nothing built, when the
 /// size is not whole sectors, is below [`min_size`], a payload is larger than its bay, the kernel is
 /// compressed on the U-Boot form, or the composed image does not verify.
-pub fn build(
-    parts: &Parts,
-    size: u64,
-    slot: &str,
-    payloads: &[&[u8]],
-) -> Result<Vec<u8>, String> {
+pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result<Vec<u8>, String> {
     if !size.is_multiple_of(SECTOR as u64) {
         return Err(format!(
             "--size {size} is not a whole number of {SECTOR}-byte sectors"
@@ -454,15 +449,28 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
             Ok(Some(rec)) => {
                 let mut ok = true;
                 let held: Vec<&str> = rec.firmware.iter().map(|(p, _, _)| p.as_str()).collect();
-                let declared: Vec<String> = parts.layout.firmware.iter().map(|(p, _)| p.clone()).collect();
+                let declared: Vec<String> = parts
+                    .layout
+                    .firmware
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .collect();
                 if held.iter().copied().ne(declared.iter().map(String::as_str)) {
                     push(
                         false,
                         format!(
                             "bay{set} ({}): holds the firmware overlays {} and the board declares {}",
                             rec.slot,
-                            if held.is_empty() { "none".to_string() } else { held.join(", ") },
-                            if declared.is_empty() { "none".to_string() } else { declared.join(", ") }
+                            if held.is_empty() {
+                                "none".to_string()
+                            } else {
+                                held.join(", ")
+                            },
+                            if declared.is_empty() {
+                                "none".to_string()
+                            } else {
+                                declared.join(", ")
+                            }
                         ),
                     );
                     ok = false;
@@ -471,7 +479,11 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
                     .iter()
                     .zip(rec.files.iter())
                     .map(|(r, (len, hash))| (r.role.to_string(), *len, *hash))
-                    .chain(rec.firmware.iter().map(|(p, len, hash)| (p.clone(), *len, *hash)))
+                    .chain(
+                        rec.firmware
+                            .iter()
+                            .map(|(p, len, hash)| (p.clone(), *len, *hash)),
+                    )
                     .collect();
                 for (i, (what, len, hash)) in members.iter().enumerate() {
                     let bytes = match bays::read_file(dev, files[i], *len) {
@@ -498,7 +510,10 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
                 }
                 if ok {
                     let text = if rec.firmware.is_empty() {
-                        format!("bay{set} ({}): the five payloads match their record", rec.slot)
+                        format!(
+                            "bay{set} ({}): the five payloads match their record",
+                            rec.slot
+                        )
                     } else {
                         format!(
                             "bay{set} ({}): the five payloads and {} firmware overlay(s) match their record",

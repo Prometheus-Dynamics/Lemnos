@@ -296,9 +296,15 @@ impl BootRecord for Tryboot {
 }
 
 /// The firmware overlay paths and the config digest of a bay layout, as [`BootRecord::declared`] gives them.
-pub(crate) fn declared_of(layout: &lemnos_slot_store::bays::Layout) -> (Vec<String>, Option<String>) {
+pub(crate) fn declared_of(
+    layout: &lemnos_slot_store::bays::Layout,
+) -> (Vec<String>, Option<String>) {
     (
-        layout.firmware.iter().map(|(path, _)| path.clone()).collect(),
+        layout
+            .firmware
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect(),
         layout.config.clone(),
     )
 }

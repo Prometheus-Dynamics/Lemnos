@@ -152,7 +152,9 @@ pub fn parse_firmware_list(text: &str) -> Result<(Vec<String>, Option<String>), 
     for line in text.lines() {
         if let Some(digest) = line.strip_prefix("config ") {
             if config.is_some() || !crate::manifest::is_hex(digest, 64) {
-                return Err(format!("{FIRMWARE_LIST}: the config line {line:?} is not one digest"));
+                return Err(format!(
+                    "{FIRMWARE_LIST}: the config line {line:?} is not one digest"
+                ));
             }
             config = Some(digest.to_string());
         } else if let Some(name) = line.strip_prefix("overlay ") {
@@ -416,7 +418,9 @@ impl Info {
             for _ in 0..count {
                 let pn = *bytes.get(at)? as usize;
                 at += 1;
-                let path = std::str::from_utf8(bytes.get(at..at + pn)?).ok()?.to_string();
+                let path = std::str::from_utf8(bytes.get(at..at + pn)?)
+                    .ok()?
+                    .to_string();
                 at += pn;
                 if !path.starts_with("overlays/") {
                     return None;
@@ -974,7 +978,8 @@ pub fn discover<D: ReadAt>(dev: &mut D) -> Result<Layout, String> {
     // every set, the same size in each.
     let (names, config) = match bootfat::read_file(dev, FIRMWARE_LIST, 4096) {
         Ok(text) => {
-            let text = String::from_utf8(text).map_err(|_| format!("{FIRMWARE_LIST} is not text"))?;
+            let text =
+                String::from_utf8(text).map_err(|_| format!("{FIRMWARE_LIST} is not text"))?;
             parse_firmware_list(&text)?
         }
         Err(bootfat::Refusal::Missing) => (Vec::new(), None),

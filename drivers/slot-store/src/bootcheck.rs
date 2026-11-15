@@ -64,7 +64,10 @@ impl fmt::Display for Mismatch {
                 "{name} is listed in boot.files, which this board's boot partition does not store (it stores: {stores})"
             ),
             Mismatch::Unlisted(name) => {
-                write!(f, "{name} is stored in the bay but not listed in boot.files")
+                write!(
+                    f,
+                    "{name} is stored in the bay but not listed in boot.files"
+                )
             }
             Mismatch::Changed(name) => write!(f, "{name} doesn't match its manifest hash"),
         }

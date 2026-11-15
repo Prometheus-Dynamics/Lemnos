@@ -826,11 +826,17 @@ fn declared() -> Vec<String> {
 #[test]
 fn a_manifest_lists_exactly_the_role_files() {
     let five = stored_files();
-    assert_eq!(refuse_unstored("os-2", &listing(&five), &declared()), Ok(()));
+    assert_eq!(
+        refuse_unstored("os-2", &listing(&five), &declared()),
+        Ok(())
+    );
     // The order of the list does not matter.
     let mut reversed = five;
     reversed.reverse();
-    assert_eq!(refuse_unstored("os-2", &listing(&reversed), &declared()), Ok(()));
+    assert_eq!(
+        refuse_unstored("os-2", &listing(&reversed), &declared()),
+        Ok(())
+    );
     // An extra entry, by name.
     let mut extra = five.to_vec();
     extra.push("overlays/extra.dtbo");

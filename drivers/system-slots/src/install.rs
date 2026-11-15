@@ -215,8 +215,12 @@ impl Unpack {
         // The boot partition stores the role files and nothing else, on every form: a slot that
         // lists another would install and then fail its own boot check. Refused here, before the
         // first payload byte, so nothing is written.
-        lemnos_slot_store::bundle::check_declared(parsed, &self.admit.firmware, self.admit.config.as_deref())
-            .map_err(bad)?;
+        lemnos_slot_store::bundle::check_declared(
+            parsed,
+            &self.admit.firmware,
+            self.admit.config.as_deref(),
+        )
+        .map_err(bad)?;
         Ok(outcome)
     }
 }

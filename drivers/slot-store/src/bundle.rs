@@ -269,7 +269,10 @@ pub fn check_declared(
     firmware: &[String],
     volume_config: Option<&str>,
 ) -> Result<(), String> {
-    let mut declared = role_files().iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    let mut declared = role_files()
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>();
     declared.extend(firmware.iter().cloned());
     check_roles(manifest, &declared)?;
     check_config(&manifest.id, manifest.boot_config.as_deref(), volume_config)
@@ -1189,7 +1192,10 @@ fn board_findings(out: &mut Vec<Finding>, manifest: &Manifest, reader: &Reader, 
         }
     }
     // A board and a bundle with no config lines have nothing to compare: no finding.
-    let config = match (manifest.boot_config.as_deref(), rules.layout.config.as_deref()) {
+    let config = match (
+        manifest.boot_config.as_deref(),
+        rules.layout.config.as_deref(),
+    ) {
         (None, None) => Ok(()),
         (bundle, board) => check_config(&manifest.id, bundle, board),
     };
@@ -1200,7 +1206,9 @@ fn board_findings(out: &mut Vec<Finding>, manifest: &Manifest, reader: &Reader, 
             "config",
             match &rules.layout.config {
                 Some(d) => format!("the firmware config lines are the board's ({d})"),
-                None => "the board declares no firmware config lines, and neither has the bundle".into(),
+                None => {
+                    "the board declares no firmware config lines, and neither has the bundle".into()
+                }
             },
         )),
         Err(why) => out.push(found(State::Bad, "config", why)),

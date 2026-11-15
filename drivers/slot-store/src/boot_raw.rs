@@ -462,11 +462,7 @@ impl<D: Sectors + ReadAt> Boot<D> {
 
     /// Installs a slot's five payloads into its bay (see [`bays::stage`]): the set that already holds
     /// the slot, else a set no pointer names. No pointer moves.
-    pub fn install_slot(
-        &mut self,
-        slot: &str,
-        payloads: &[&[u8]],
-    ) -> Result<bays::Done, String> {
+    pub fn install_slot(&mut self, slot: &str, payloads: &[&[u8]]) -> Result<bays::Done, String> {
         self.install_slot_with(slot, payloads, None)
     }
 
