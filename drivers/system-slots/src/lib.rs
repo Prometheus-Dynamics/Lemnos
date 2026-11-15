@@ -1508,7 +1508,10 @@ impl Lifecycle for SystemSlots {
         let slow = self.slow_check(now_ns);
         let count = self.count_tick(now_ns);
         let grow = self.grow_tick(now_ns);
-        [install, settle, slow, count, grow].into_iter().flatten().min()
+        [install, settle, slow, count, grow]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
