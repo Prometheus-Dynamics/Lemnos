@@ -54,6 +54,16 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# The slot-store unit tests run power-cut sweeps: thousands of full installs, each hashing the
+# images, which take half an hour in debug. Optimise this crate only; debug-assertions and
+# overflow-checks stay on (they are inherited from dev and test), and every sweep cut stays.
+[profile.dev.package.lemnos-slot-store]
+opt-level = 3
+
+# The sweeps hash every image at every cut: sha2 is the hot loop, so it is optimised too.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # The shipped programs (lemnosd, lemnos-ctl, lemnos-orion; packaging/shipped.txt), as OS images
 # build them: `cargo build --locked --profile service --target <triple>`. The smallest reasonable
 # footprint: size-optimised, one codegen unit and fat LTO (about 1 to 2 percent smaller than the
