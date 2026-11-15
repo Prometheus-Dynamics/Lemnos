@@ -18,6 +18,22 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 # `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role
 # in bytes, with no default: the largest stored file of that role plus 10 %, rounded up to a whole MiB
 # (kernel and initramfs) or a whole 4 KiB (the rest). The values here are made up.
+#
+# Two optional keys give the firmware what a board needs beyond the image's own text. Neither is in
+# this example, and a board with neither is written exactly as before:
+# - `config_lines`: verbatim config.txt lines, one per entry, written inside `[all]` of the boot
+#   partition's config.txt and tryboot.txt (after the GPIO lines). They are fixed at flash: the
+#   bundle carries their digest (`boot.config`) and an install whose lines differ from the boot
+#   partition's is refused with both digests named. Changing them needs a new boot partition.
+# - `firmware_overlays`: overlay names, without `.dtbo`. Each is a bay member in every bay set
+#   (`overlays/<name>.dtbo`, the board overlay's size), copied from `lemnos-ctl boot-partition
+#   --firmware DIR` and `lemnos-ctl bundle --firmware DIR`; a missing `<name>.dtbo` is refused by name.
+#   Each overlay is hashed in the bay record, compared on reinstall, and must be loaded by a
+#   `dtoverlay=<name>` line in `config_lines`; a `dtoverlay=` line naming another overlay, or an
+#   overlay no line loads, is refused by both names.
+#
+# [boot] config_lines = ["dtoverlay=test-gpu"]
+# [boot] firmware_overlays = ["test-gpu"]
 [boot]
 bay_kernel_bytes = 11534336      # the kernel's bay
 bay_initramfs_bytes = 1048576    # the initramfs's bay
