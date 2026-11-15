@@ -17,7 +17,7 @@
 #
 #   KERNEL  the bootable image of a kernel with CONFIG_I6300ESB_WDT=y (required), e.g. the pinned
 #           modules-off bzImage (tmp/pinned-2026-11-14-d/k-modules-off/build/arch/x86/boot/bzImage)
-#   CC      a compiler that can link static binaries (default: zig cc for musl, the harness's setting)
+#   CC      a compiler that can link static binaries (default: gcc, as run.sh and run-builtin.sh use)
 #   CARGO   the cargo to build lemnos-slot-init for musl with (default: cargo; the group's e-cargo.sh)
 #   MODES   the modes to run (default: "slot-init normal stall")
 #   LOGS    where the console logs are kept (default: a qemu-watchdog directory under the gates tmp directory)
@@ -26,7 +26,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_I6300ESB_WDT=y}"
-CC="${CC:-zig cc -target x86_64-linux-musl}"
+CC="${CC:-gcc}"
 CARGO="${CARGO:-cargo}"
 MODES="${MODES:-slot-init normal stall}"
 LOGS="${LOGS:-/mnt/nvme-wd/lemnos-gates/tmp/qemu-watchdog}"
@@ -38,13 +38,9 @@ read -r -a compiler <<<"$CC"
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
 
-# The real slot-init, static for the initramfs, and the two stand-ins for the hook modes.
-# Static musl, linked by zig cc (the harness's own musl C compiler, as its CC setting names it): this
-# machine has no musl C toolchain for the system cc, which cargo would otherwise use to link.
-printf '#!/bin/sh\nexec zig cc -target x86_64-linux-musl "$@"\n' >"$work/musl-cc"
-chmod +x "$work/musl-cc"
-(cd "$repo" && env CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker=$work/musl-cc -C target-feature=+crt-static -C link-self-contained=no" \
-  "$CARGO" build -q -p lemnos-slot-init --target "$target")
+# The real slot-init, static musl for the initramfs, built the way run.sh builds its musl binaries (the
+# rustup target's own linking, with the system cc), and the two stand-ins, static with CC.
+(cd "$repo" && "$CARGO" build -q -p lemnos-slot-init --target "$target")
 slot_init="${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-slot-init"
 flags=(-static -O2 -Wall -Wextra)
 "${compiler[@]}" "${flags[@]}" -o "$work/watchdog-init" "$here/watchdog-init.c"
