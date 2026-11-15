@@ -23,3 +23,6 @@ toml.workspace = true
 # The built-in drivers' manifests, for the tests of the generator against the real drivers. The
 # daemon depends on this crate, so this is a dev-dependency only.
 lemnosd = { path = "../lemnosd" }
+# The `boot_sources` a board gives a system-slots device is parsed by the slot store; the K230 test checks its entries
+# with that parser.
+lemnos-slot-store = { path = "../../drivers/slot-store" }
