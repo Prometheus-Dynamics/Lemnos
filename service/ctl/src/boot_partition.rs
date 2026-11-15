@@ -15,13 +15,99 @@
 //! one line per finding, and a non-zero exit when any finding fails.
 
 use crate::boot_dir::{self, with_fragment};
-use lemnos_host::board::BoardFile;
-use lemnos_slot_store::bays::{Layout, ROLES};
+use lemnos_host::board::{BoardFile, BootSpec};
+use lemnos_slot_store::bays::{self, Layout, ROLES};
 use lemnos_slot_store::bootimage::{self, Family, Finding, Fixed, Parts};
 use lemnos_slot_store::firmware::{CONFIG_TXT, TRYBOOT_TXT};
 use lemnos_slot_store::layout::OVERLAY_README;
 use std::io::Write;
 use std::path::Path;
+
+/// The firmware overlay names of a layout (`overlays/<name>.dtbo` to `<name>`), in the layout's order.
+pub(crate) fn overlay_names(layout: &Layout) -> Vec<String> {
+    layout
+        .firmware
+        .iter()
+        .map(|(path, _)| {
+            path.trim_start_matches("overlays/")
+                .trim_end_matches(".dtbo")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The board's `[boot] config_lines` and `firmware_overlays`, checked by name before any image is
+/// made: each line is one line; each name is a firmware overlay name and listed once; a `dtoverlay=`
+/// line names an overlay the list gives; and each listed overlay is loaded by a `dtoverlay=` line.
+pub(crate) fn check_boot_keys(boot: &BootSpec) -> Result<(), String> {
+    for (i, line) in boot.config_lines.iter().enumerate() {
+        if line.is_empty() || line.contains(['\n', '\r']) {
+            return Err(format!(
+                "[boot] config_lines entry {} is not one firmware line: {line:?}",
+                i + 1
+            ));
+        }
+    }
+    for (i, name) in boot.firmware_overlays.iter().enumerate() {
+        if !bays::valid_firmware_name(name) {
+            return Err(format!(
+                "[boot] firmware_overlays {name:?} is not an overlay name (letters, digits, '-' and '_', at most 40)"
+            ));
+        }
+        if boot.firmware_overlays[..i].contains(name) {
+            return Err(format!("[boot] firmware_overlays lists {name:?} twice"));
+        }
+    }
+    let mut loaded: Vec<&str> = Vec::new();
+    for line in &boot.config_lines {
+        let Some(rest) = line.trim_start().strip_prefix("dtoverlay=") else {
+            continue;
+        };
+        let name = rest.split(',').next().unwrap_or("").trim();
+        if !boot.firmware_overlays.iter().any(|n| n == name) {
+            return Err(format!(
+                "[boot] config_lines has {:?}, which loads the overlay {name:?}, and firmware_overlays does not list {name:?}",
+                line.trim()
+            ));
+        }
+        loaded.push(name);
+    }
+    for name in &boot.firmware_overlays {
+        if !loaded.contains(&name.as_str()) {
+            return Err(format!(
+                "[boot] firmware_overlays lists {name:?}, and no config_lines entry loads it (dtoverlay={name})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The firmware overlay files a board declares, read from `dir` (`<name>.dtbo`, in the layout's
+/// order). Refused by name when a declared overlay is missing, or when the board declares some and no
+/// directory is given.
+pub(crate) fn read_firmware(dir: Option<&str>, names: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = dir.ok_or_else(|| {
+        format!(
+            "this board declares the firmware overlays {}: give --firmware DIR, the directory holding their .dtbo files",
+            names.join(", ")
+        )
+    })?;
+    names
+        .iter()
+        .map(|name| {
+            let path = Path::new(dir).join(format!("{name}.dtbo"));
+            std::fs::read(&path).map_err(|e| {
+                format!(
+                    "{}: the firmware overlay {name} is missing from {dir} ({e}): it needs {name}.dtbo there",
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
 
 /// The board's family and its payload bays, each refused by name when a key is missing.
 pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, String> {
@@ -38,6 +124,21 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
         }
     };
     let boot = &board.boot;
+    check_boot_keys(boot)?;
+    if family == Family::UbootBlock && !boot.config_lines.is_empty() {
+        return Err(
+            "[boot] config_lines are firmware lines in config.txt: this board's record is \"uboot\", which has no config.txt"
+                .to_string(),
+        );
+    }
+    // The firmware config digest and the firmware text: the board's lines follow the fixed text of
+    // both config files, inside `[all]`, so they apply to every boot of either pointer.
+    let config = bays::config_digest(&boot.config_lines);
+    let mut lines = fragment.to_string();
+    for line in &boot.config_lines {
+        lines.push_str(line);
+        lines.push('\n');
+    }
     let bay = |key: &str, value: Option<u64>| {
         value.ok_or_else(|| {
             format!(
@@ -53,23 +154,34 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
         bay("bay_overlay_bytes", boot.bay_overlay_bytes)?,
     ];
     // The bay order of ROLES is kernel, initramfs, device-tree, cmdline, board-overlay.
-    let layout = Layout::new([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]])?;
+    let names: Vec<String> = boot.firmware_overlays.clone();
+    let layout = Layout::new([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]])?
+        .with_firmware(&names, config.clone());
     let layout_file = boot_dir::LAYOUT.as_bytes().to_vec();
+    // The root list of the declared set: written only when the board declares overlays or lines.
+    let mut list_file = Vec::new();
+    if let Some(text) = bays::firmware_list_text(&names, config.as_deref()) {
+        list_file.push((bays::FIRMWARE_LIST, text.into_bytes()));
+    }
     match family {
         Family::Tryboot => Ok(Parts {
             family,
             layout,
-            root: vec![
-                ("slot-layout.toml", layout_file),
-                (
-                    "config.txt",
-                    with_fragment(boot_dir::HEADER, CONFIG_TXT, fragment),
-                ),
-                (
-                    "tryboot.txt",
-                    with_fragment(boot_dir::HEADER, TRYBOOT_TXT, fragment),
-                ),
-            ],
+            root: [
+                vec![
+                    ("slot-layout.toml", layout_file),
+                    (
+                        "config.txt",
+                        with_fragment(boot_dir::HEADER, CONFIG_TXT, &lines),
+                    ),
+                    (
+                        "tryboot.txt",
+                        with_fragment(boot_dir::HEADER, TRYBOOT_TXT, &lines),
+                    ),
+                ],
+                list_file,
+            ]
+            .concat(),
             fixed: vec![Fixed {
                 path: OVERLAY_README,
                 bytes: boot_dir::OVERLAY_README_TEXT.as_bytes().to_vec(),
@@ -79,14 +191,18 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
         Family::UbootBlock => Ok(Parts {
             family,
             layout,
-            root: vec![
-                ("slot-layout.toml", layout_file),
-                (
-                    lemnos_slot_store::uboot_env::LOCATOR,
-                    boot_dir::uboot_place(board)?.encode().into_bytes(),
-                ),
-                ("boot.cmd", boot_dir::uboot_script(board)?.into_bytes()),
-            ],
+            root: [
+                vec![
+                    ("slot-layout.toml", layout_file),
+                    (
+                        lemnos_slot_store::uboot_env::LOCATOR,
+                        boot_dir::uboot_place(board)?.encode().into_bytes(),
+                    ),
+                    ("boot.cmd", boot_dir::uboot_script(board)?.into_bytes()),
+                ],
+                list_file,
+            ]
+            .concat(),
             fixed: vec![Fixed {
                 path: bootimage::EXTLINUX,
                 bytes: Vec::new(),
@@ -156,6 +272,7 @@ struct Options {
     socs: Option<String>,
     slot: Option<String>,
     payload: Option<String>,
+    firmware: Option<String>,
     size: Option<String>,
     out: Option<String>,
     min_size: bool,
@@ -163,7 +280,7 @@ struct Options {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR --size BYTES --out FILE] | --min-size [--payload DIR] | --verify FILE";
+    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR [--firmware DIR] --size BYTES --out FILE] | --min-size [--payload DIR [--firmware DIR]] | --verify FILE";
     let mut o = Options::default();
     let mut i = 0;
     while i < args.len() {
@@ -179,6 +296,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--socs" => o.socs = Some(value),
             "--slot" => o.slot = Some(value),
             "--payload" => o.payload = Some(value),
+            "--firmware" => o.firmware = Some(value),
             "--size" => o.size = Some(value),
             "--out" => o.out = Some(value),
             "--verify" => o.verify = Some(value),
@@ -206,7 +324,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         .map_err(|e| format!("{board_path}: {e}"))?;
     let parts = board_parts(&board, &generated.boot).map_err(|e| format!("{board_path}: {e}"))?;
     if o.min_size {
-        return min_size(&parts, o.payload.as_deref(), out);
+        return min_size(&parts, o.payload.as_deref(), o.firmware.as_deref(), out);
     }
     let slot = o.slot.as_deref().ok_or("--out needs --slot ID")?;
     let payload_dir = o.payload.as_deref().ok_or("--out needs --payload DIR")?;
@@ -223,7 +341,12 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         ));
     }
     let payloads = read_payloads(Path::new(payload_dir))?;
-    let refs: [&[u8]; 5] = std::array::from_fn(|i| payloads[i].as_slice());
+    let firmware = read_firmware(o.firmware.as_deref(), &overlay_names(&parts.layout))?;
+    let refs: Vec<&[u8]> = payloads
+        .iter()
+        .chain(firmware.iter())
+        .map(Vec::as_slice)
+        .collect();
     let image = bootimage::build(&parts, size, slot, &refs)?;
     std::fs::write(file, &image).map_err(|e| format!("{file}: {e}"))?;
     writeln!(
@@ -237,22 +360,35 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
 
 /// `--min-size`: the minimum in bytes, one line (decimal digits only); with `--payload`, that line
 /// first, then `role stored_bytes bay_bytes` per role.
-fn min_size(parts: &Parts, payload: Option<&str>, out: &mut dyn Write) -> Result<(), String> {
+fn min_size(
+    parts: &Parts,
+    payload: Option<&str>,
+    firmware: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let Some(dir) = payload else {
         writeln!(out, "{}", bootimage::min_size(parts)?).map_err(|e| e.to_string())?;
         return Ok(());
     };
     // The minimum first, on a line of its own (the same line as without `--payload`), then one line
-    // per role.
+    // per role and one per firmware overlay.
     writeln!(out, "{}", bootimage::min_size(parts)?).map_err(|e| e.to_string())?;
     let payloads = read_payloads(Path::new(dir))?;
+    let overlays = read_firmware(firmware, &overlay_names(&parts.layout))?;
     let mut over = Vec::new();
     for (i, r) in ROLES.iter().enumerate() {
         let stored = payloads[i].len() as u64;
         let bay = parts.layout.bytes[i];
         writeln!(out, "{} {stored} {bay}", r.role).map_err(|e| e.to_string())?;
         if stored > bay {
-            over.push(r.role);
+            over.push(r.role.to_string());
+        }
+    }
+    for (j, (path, bay)) in parts.layout.firmware.iter().enumerate() {
+        let stored = overlays[j].len() as u64;
+        writeln!(out, "{path} {stored} {bay}").map_err(|e| e.to_string())?;
+        if stored > *bay {
+            over.push(path.clone());
         }
     }
     if over.is_empty() {
