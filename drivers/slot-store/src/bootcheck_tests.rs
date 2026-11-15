@@ -132,10 +132,16 @@ fn a_listed_file_no_bay_stores_is_named_as_not_stored_on_a_bay_form() {
     let got = check(DIR, &listed(&files), &lengths, |path| {
         Ok(path.ends_with("kernel8.img").then(|| b"kernel".to_vec()))
     });
-    assert_eq!(got, vec![Mismatch::NotStored("overlays/extra.dtbo".into())]);
+    assert_eq!(
+        got,
+        vec![Mismatch::NotStored(
+            "overlays/extra.dtbo".into(),
+            "kernel8.img".into()
+        )]
+    );
     assert_eq!(
         got[0].to_string(),
-        "overlays/extra.dtbo is listed in boot.files, which this board's boot partition does not store (it stores: kernel8.img, initramfs.cpio, board.dtb, cmdline.txt, overlays/lemnos-board.dtbo)"
+        "overlays/extra.dtbo is listed in boot.files, which this board's boot partition does not store (it stores: kernel8.img)"
     );
 }
 

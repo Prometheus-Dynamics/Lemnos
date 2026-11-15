@@ -509,7 +509,7 @@ fn uboot_bay(dev: &mut Dev, set: u8, slot: &str) -> Result<(), String> {
     let layout = test_layout();
     let placed_sets = place_sets(dev, &layout)?;
     let placed = Placed {
-        files: placed_sets.iter().map(|s| s.0).collect(),
+        files: placed_sets.iter().map(|s| s.0.clone()).collect(),
         info: placed_sets.iter().map(|s| s.1).collect(),
         default: 0,
         previous: 0,
@@ -581,7 +581,7 @@ fn uboot_set_sectors(img: &[u8], set: u8, with_extlinux: bool) -> HashSet<u64> {
     let mut dev = Dev::new(img.to_vec());
     let sets = place_sets(&mut dev, &layout).unwrap();
     let placed = Placed {
-        files: sets.iter().map(|s| s.0).collect(),
+        files: sets.iter().map(|s| s.0.clone()).collect(),
         info: sets.iter().map(|s| s.1).collect(),
         default: 0,
         previous: 0,

@@ -431,7 +431,7 @@ impl<D: Sectors + ReadAt> Boot<D> {
     pub fn install_slot(
         &mut self,
         slot: &str,
-        payloads: &[&[u8]; 5],
+        payloads: &[&[u8]],
     ) -> Result<bays::Done, String> {
         self.install_slot_with(slot, payloads, None)
     }
@@ -441,7 +441,7 @@ impl<D: Sectors + ReadAt> Boot<D> {
     pub fn install_slot_with(
         &mut self,
         slot: &str,
-        payloads: &[&[u8]; 5],
+        payloads: &[&[u8]],
         extlinux: Option<&[u8]>,
     ) -> Result<bays::Done, String> {
         let layout = self.layout.clone()?;
@@ -518,6 +518,12 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
         self.dev
     }
 
+    /// The bay layout the volume was read with: the role sizes, the firmware overlays and the config
+    /// digest.
+    pub fn bay_layout(&self) -> bays::Layout {
+        self.layout.clone()
+    }
+
     /// The bay a slot's files are in (see [`bays::slot_bay_on`]).
     pub fn slot_bay(&mut self, slot: &str) -> Result<(String, Vec<(String, u64)>), String> {
         bays::slot_bay_on(&mut self.dev, &self.layout, slot)
@@ -529,7 +535,7 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
     pub fn install_slot_with(
         &mut self,
         slot: &str,
-        payloads: &[&[u8]; 5],
+        payloads: &[&[u8]],
         extlinux: Option<&[u8]>,
         protected: &bays::Protected,
     ) -> Result<bays::Done, String> {
