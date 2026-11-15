@@ -787,10 +787,17 @@ impl SystemSlots {
         };
         self.next_job += 1;
         let job = JobId(self.next_job);
+        // The boot partition's declared firmware overlays and config digest, read before the bundle
+        // comes: its boot files are checked against them as it is admitted. When they can't be read
+        // (no boot partition there), the admission keeps the role-only set; the write then fails at
+        // the boot partition with the boot partition's own reason.
+        let (firmware, config) = self.record.declared().unwrap_or_default();
         let admit = Admit {
             keys: self.keys.clone(),
             require_signed: security::enforced(),
             board_id: self.board_id.clone(),
+            firmware,
+            config,
         };
         let mut install = Install::start(
             &self.layout,

@@ -48,7 +48,13 @@ pub trait BootRecord: Send {
     /// Writes a slot's five payloads (`ROLES` order) into a free bay set and commits its record. No
     /// pointer moves: the default and trial switches are separate calls. Nothing on the boot partition
     /// is written at file level.
-    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()>;
+    /// The firmware overlays the boot partition declares (their paths under a set, in the layout's
+    /// order) and its firmware config digest: what a bundle's boot files and `boot.config` must match.
+    /// A form with no bays declares none.
+    fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
+        Ok((Vec::new(), None))
+    }
+    fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()>;
     /// Frees the slot's bay by its record alone. A bay a pointer names is refused.
     fn free(&self, slot: &str) -> io::Result<()>;
     /// The episodes recorded against a slot: kept on the raw boot records, so only the `tryboot`
@@ -261,7 +267,12 @@ impl BootRecord for Tryboot {
         self.restarter.run(None)
     }
 
-    fn install(&self, slot: &str, payloads: &[&[u8]; 5]) -> io::Result<()> {
+    fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
+        let layout = self.raw()?.bay_layout().map_err(io::Error::other)?;
+        Ok(declared_of(&layout))
+    }
+
+    fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()> {
         self.raw()?
             .install_slot(slot, payloads)
             .map(|_| ())
@@ -282,6 +293,14 @@ impl BootRecord for Tryboot {
     fn fallback_copy(&self, _layout: &Layout, _id: &str) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// The firmware overlay paths and the config digest of a bay layout, as [`BootRecord::declared`] gives them.
+pub(crate) fn declared_of(layout: &lemnos_slot_store::bays::Layout) -> (Vec<String>, Option<String>) {
+    (
+        layout.firmware.iter().map(|(path, _)| path.clone()).collect(),
+        layout.config.clone(),
+    )
 }
 
 /// One `boot-record` file on the boot partition: `default=<id>` and `trial=<id>` lines. The boot
@@ -346,7 +365,7 @@ impl BootRecord for FileRecord {
     /// The file form keeps no boot files of its own: its loader reads one fixed kernel, and Lemnos
     /// writes only the `boot-record` file. Nothing is written to the boot partition for an install, so
     /// nothing is claimed about the slot's files there (no bay, so the every-boot check finds none).
-    fn install(&self, _slot: &str, _payloads: &[&[u8]; 5]) -> io::Result<()> {
+    fn install(&self, _slot: &str, _payloads: &[&[u8]]) -> io::Result<()> {
         Ok(())
     }
 
