@@ -65,7 +65,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnos-ctl` (`lemnos-ctl`)     | `lemnos-ctl`      | none                                                          | the same three                                                  |
 | `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
 | `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
-| `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none | not built for the musl targets in this change; its sizes are not measured yet (the good-boot deadline's waiter, plain `std`) |
+| `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none (the good-boot deadline's waiter, plain `std`) | the same three |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 
@@ -75,6 +75,9 @@ Stripped sizes, from the vendored builds of this table (bytes):
 | `lemnos-ctl`    | 732632       | 714820           | 728928       |
 | `lemnos-orion`  | 775368       | 768908           | 772048       |
 | `lemnos-slot-init` | 491768   | 466144           | 483896       |
+| `lemnos-good-boot` | 391800   | 368780           | 386056       |
+
+`lemnos-good-boot` was measured from a worktree build of this change (`cargo build --locked --profile service --target <triple> -p lemnos-good-boot`), not the vendored tree; it is stripped and statically linked, and `file` reports the right word size and machine for each triple.
 
 `lemnos-slot-init` was measured from a worktree build (`cargo build -p lemnos-slot-init --profile
 service --target <triple>`, the repo's rust-lld config) on the I5c branch, which added the UBI
