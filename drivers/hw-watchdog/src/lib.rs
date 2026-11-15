@@ -79,7 +79,7 @@ use lemnos_contract_self_test::{
 };
 use lemnos_core::{
     CallerId, Config, ConfigError, ConfigValue, Description, Health, Held, Item, JobId, JobState,
-    Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, Watchdog, driver,
+    Key, Kind, Lifecycle, MethodId, RefusalKind, Reply, Result, Status, Unit, Watchdog, driver,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::raw::RawWatchdog;
@@ -147,14 +147,32 @@ const TIMEOUT_UNKNOWN: &str = "timeout unknown: fed every 1 s";
 /// file that names it by `device`.
 fn open_device(cfg: &Config<'_>) -> Result<Watchdog> {
     // The name's form is checked by check_config.
-    let name = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
+    let name = cfg.str("device").ok_or_else(|| {
+        cfg.refuse(
+            Status::NO_DEVICE,
+            RefusalKind::Absent,
+            format_args!(
+                "no watchdog on this machine: the board gives none, and no device is named"
+            ),
+        )
+    })?;
     let dev_root = cfg.str("dev_root").unwrap_or(DEFAULT_DEV_ROOT);
     let sys_root = cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT);
     // Write-only, no create, no truncate: this opens the device and nothing else.
-    let file = OpenOptions::new()
-        .write(true)
-        .open(Path::new(dev_root).join(name))
-        .map_err(|e| io_status(&e))?;
+    let node = Path::new(dev_root).join(name);
+    let file = OpenOptions::new().write(true).open(&node).map_err(|e| {
+        let status = io_status(&e);
+        // Absent when the node is not there; failed when it is there and refuses us.
+        let kind = match status {
+            Status::NO_DEVICE | Status::NOT_FOUND => RefusalKind::Absent,
+            _ => RefusalKind::Failed,
+        };
+        cfg.refuse(
+            status,
+            kind,
+            format_args!("cannot open the watchdog node {}", node.display()),
+        )
+    })?;
     let sys_dir = Path::new(sys_root).join("class/watchdog").join(name);
     Ok(Held::boxed(Box::new(OpenNode { file, sys_dir })))
 }
@@ -338,8 +356,20 @@ impl Lifecycle for HwWatchdog {
         // The range of timeout_s is checked by check_config; this is the conversion only.
         let requested = match cfg.get("timeout_s") {
             None => DEFAULT_TIMEOUT_S,
-            Some(ConfigValue::Int(s)) => u32::try_from(s).map_err(|_| Status::INVALID_ARGUMENT)?,
-            Some(_) => return Err(Status::INVALID_ARGUMENT),
+            Some(ConfigValue::Int(s)) => u32::try_from(s).map_err(|_| {
+                cfg.refuse(
+                    Status::INVALID_ARGUMENT,
+                    RefusalKind::Failed,
+                    format_args!("the setting timeout_s must be a whole number of seconds"),
+                )
+            })?,
+            Some(_) => {
+                return Err(cfg.refuse(
+                    Status::INVALID_ARGUMENT,
+                    RefusalKind::Failed,
+                    format_args!("the setting timeout_s must be a whole number of seconds"),
+                ));
+            }
         };
         let mut node = match needs.watchdog {
             Some(node) => node,

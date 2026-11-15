@@ -21,7 +21,7 @@ mod tests;
 use lemnos_contract_power_switch::PowerSwitch;
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Item, Key, Kind, Lifecycle, Line, MethodId,
-    Result, Status, driver, status_of,
+    RefusalKind, Result, Status, driver, status_of,
 };
 use lemnos_hal::raw::LineConfig;
 
@@ -65,11 +65,25 @@ impl Lifecycle for GpioPowerSwitch {
         let default_on = flag(cfg, "default_on", true)?;
         let mut output = LineConfig::output(default_on);
         output.active_low = flag(cfg, "active_low", false)?;
-        needs.line.configure(&output).map_err(status_of)?;
+        needs.line.configure(&output).map_err(|error| {
+            let status = status_of(error);
+            cfg.refuse(
+                status,
+                kind_of(status),
+                format_args!("the power output line cannot be driven as an output"),
+            )
+        })?;
         let mut input = LineConfig::input();
         input.active_low = flag(cfg, "fault_active_low", true)?;
         if let Some(fault) = needs.fault.as_mut() {
-            fault.configure(&input).map_err(status_of)?;
+            fault.configure(&input).map_err(|error| {
+                let status = status_of(error);
+                cfg.refuse(
+                    status,
+                    kind_of(status),
+                    format_args!("the fault input line cannot be read as an input"),
+                )
+            })?;
         }
         Ok(Self {
             line: needs.line,
@@ -110,6 +124,18 @@ fn flag(cfg: &Config<'_>, key: &str, default: bool) -> Result<bool> {
     match cfg.get(key) {
         None => Ok(default),
         Some(ConfigValue::Bool(value)) => Ok(value),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(_) => Err(cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting {key} must be true or false"),
+        )),
+    }
+}
+
+/// Absent when the line is not there; failed when it is there and refuses the setup.
+fn kind_of(status: Status) -> RefusalKind {
+    match status {
+        Status::NO_DEVICE | Status::NOT_FOUND => RefusalKind::Absent,
+        _ => RefusalKind::Failed,
     }
 }

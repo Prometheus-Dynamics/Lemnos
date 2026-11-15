@@ -75,7 +75,7 @@ use lemnos_contract_isp_pisp::{
 };
 use lemnos_core::{
     Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
-    Result, Status, StreamHandle, driver,
+    RefusalKind, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
@@ -338,16 +338,18 @@ impl Lifecycle for PispBe {
         };
         let options = Options::new(int("buffers", 4)?, int("job_slots", 4)?)?;
         // The block reads and writes images only as dma-bufs: known now, before any client.
-        handles_only(&needs.input)?;
-        handles_only(&needs.output0)?;
+        handles_only(&needs.input).map_err(|status| plain_memory(cfg, status))?;
+        handles_only(&needs.output0).map_err(|status| plain_memory(cfg, status))?;
         if let Some(output1) = needs.output1.as_ref() {
-            handles_only(output1)?;
+            handles_only(output1).map_err(|status| plain_memory(cfg, status))?;
         }
-        Ok(Self::with_hardware(
-            crate::be_hw::hardware(settings),
-            needs,
-            options,
-        ))
+        // The block must be there and answer now (see `Hardware::present`): refused, the bind is
+        // retried, and nothing reports running with nothing behind it.
+        let label = settings.label();
+        let mut hw = crate::be_hw::hardware(settings);
+        hw.present()
+            .map_err(|status| refuse_missing(cfg, status, &label))?;
+        Ok(Self::with_hardware(hw, needs, options))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -1074,6 +1076,29 @@ impl IspPisp for PispBe {
 
     fn set_line_event(&mut self, _line: u32) -> Result<()> {
         Err(Status::NOT_SUPPORTED)
+    }
+}
+
+/// The refusal for a frame stream whose memory is not a dma-buf: the block writes only into one.
+fn plain_memory(cfg: &Config<'_>, status: Status) -> Status {
+    cfg.refuse(
+        status,
+        RefusalKind::Failed,
+        format_args!("a frame stream is plain memory, and the block writes only into a dma-buf"),
+    )
+}
+
+/// The refusal for a block that `present` refused: absent when it is not there, failed when it is
+/// there and does not answer.
+fn refuse_missing(cfg: &Config<'_>, status: Status, what: &str) -> Status {
+    if status == Status::NO_DEVICE {
+        cfg.refuse(status, RefusalKind::Absent, format_args!("no {what}"))
+    } else {
+        cfg.refuse(
+            status,
+            RefusalKind::Failed,
+            format_args!("{what} does not answer"),
+        )
     }
 }
 

@@ -243,6 +243,41 @@ nothing reads is refused by name and never silently accepted. The host also chec
 against the driver's manifest (a need name the driver does not declare, a device the board lacks, a
 device of the wrong contract): see [the board file](boards.md).
 
+### Refusing a bind, and why
+
+A bind that is refused gives its reason to the host, in words a person can read, with a kind:
+`Absent` when the device is not on this machine (no bus, no node, nothing answering at the address),
+and `Failed` when it is there and not working (it answers with the wrong ID, or its setup fails). Both
+are retried under the failure rule, and the host shows the reason as `bind failed: <your sentence>`.
+The kind is carried next to the sentence on the wire (`refusal`), so a UI can show them apart without
+reading the text.
+
+A driver with a refusal point of its own gives its reason with the status it returns:
+
+```rust
+fn start(needs: MyNeeds, cfg: &Config<'_>) -> Result<Self> {
+    let chip_id = read_id(&mut needs.bus, ADDRESS).map_err(|_| {
+        cfg.refuse(
+            Status::NO_DEVICE,
+            RefusalKind::Absent,
+            format_args!("no device at {ADDRESS:#04x}: nothing answers at its address"),
+        )
+    })?;
+    // ...
+}
+```
+
+`Config::refuse` returns the status it is given, so the call goes where `Err(status)` would. The sentence
+is formatted by the host at bind time: the driver allocates nothing. A bus the board names that the
+backend cannot open is reported by the host itself (`no I2C bus i2c-1`), and a device the driver needs
+that is not running is `device <id> is not running`, so a driver needs its own reason only for what
+it checks itself. A refusal with no reason falls back on the status name in words (`no such device`).
+
+A driver that talks to hardware checks that the hardware is there at bind, with one read that changes
+nothing (a chip ID, a node's `info`). A device that is not there is refused, and the bind is retried
+until it is: a supply that comes up later binds on a later retry. Binding does not start the device, so
+a device the bind found present still answers nothing new until `start` runs.
+
 ### Long jobs
 
 A method that runs longer than a call is marked `#[method(N, job)]` in its contract and returns

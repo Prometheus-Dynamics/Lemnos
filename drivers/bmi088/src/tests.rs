@@ -7,8 +7,11 @@ use super::*;
 use chip::{Frame, scan_accel};
 use lemnos_contract_accelerometer::{RECORD_LEN as ACCEL_RECORD, Sample as AccelSample};
 use lemnos_contract_gyroscope::{RECORD_LEN as GYRO_RECORD, Sample as GyroSample};
-use lemnos_core::{Decode, Description, Driver, Reader, Resources, Writer};
+use lemnos_core::{
+    Config, Decode, Description, Driver, Reader, RefusalKind, RefusalSink, Resources, Writer,
+};
 use lemnos_sim::{FifoLevel, Layout, SimBoard, SimI2c};
+use std::string::ToString;
 use std::time::Duration;
 use std::vec::Vec;
 
@@ -167,23 +170,63 @@ fn gyroscope_powers_up_in_two_steps_and_reads_in_rad_per_s() {
     close(sample.z, 0.0, 1e-6);
 }
 
+/// Binds as [`bind`] does, and says what the driver gave as its refusal reason, with its kind.
+fn bind_saying(board: &mut SimBoard) -> (Result<Bmi088>, Vec<(RefusalKind, std::string::String)>) {
+    let reasons = std::sync::Mutex::new(Vec::new());
+    let sink = |kind: RefusalKind, args: core::fmt::Arguments<'_>| {
+        reasons
+            .lock()
+            .unwrap()
+            .push((kind, std::string::ToString::to_string(&args)));
+    };
+    let entries: &[(&str, ConfigValue)] = &[];
+    let config = Config::new(entries).with_refusals(RefusalSink::new(&sink));
+    let mut res = Resources::new(board, None);
+    let bound = Bmi088::bind(&mut res, &config);
+    (bound, reasons.into_inner().unwrap())
+}
+
 #[test]
-fn wrong_chip_is_refused_and_nothing_is_written() {
+fn wrong_chip_is_refused_at_bind_and_nothing_is_written() {
     let (mut board, sim) = chip();
     sim.set_bytes(ACCEL, ACC_ID, &[0x00]);
-    let mut dev = bind(&mut board, &[]).unwrap();
-
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::NOT_SUPPORTED));
-    assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), None);
+    let (bound, reasons) = bind_saying(&mut board);
+    assert_eq!(bound.err(), Some(Status::NOT_SUPPORTED));
     assert_eq!(
-        Driver::health(&dev),
-        Health::Degraded("accelerometer: wrong chip id")
+        reasons,
+        [(
+            RefusalKind::Failed,
+            "the accelerometer at 0x18 answers ID 0x00, expected 0x1e".to_string()
+        )]
     );
+    assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), None);
 
-    // Once the right chip is there, the next read powers it up.
+    // Once the right chip is there, the retry binds and the next read powers it up.
     sim.set_bytes(ACCEL, ACC_ID, &[0x1e]);
+    let mut dev = bind(&mut board, &[]).unwrap();
     assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
     assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), Some(0xb6));
+}
+
+#[test]
+fn an_accelerometer_that_does_not_acknowledge_is_absent_at_bind_then_bound_when_it_appears() {
+    // No die at the address: the bus NACKs, as the real bus does for a missing device.
+    let mut board = SimBoard::new();
+    let sim = board.add_i2c("bus");
+    let (bound, reasons) = bind_saying(&mut board);
+    assert_eq!(bound.err(), Some(Status::NO_DEVICE));
+    assert_eq!(
+        reasons,
+        [(
+            RefusalKind::Absent,
+            "no device at 0x18: nothing answers at its address".to_string()
+        )]
+    );
+
+    // The die appears later: the next bind, a retry, finds it.
+    sim.attach(ACCEL, Layout::Bytes);
+    sim.set_bytes(ACCEL, ACC_ID, &[0x1e]);
+    assert!(bind_saying(&mut board).0.is_ok());
 }
 
 #[test]

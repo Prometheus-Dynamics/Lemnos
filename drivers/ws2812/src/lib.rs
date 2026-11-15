@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use lemnos_contract_pixels::Pixels as PixelsContract;
 use lemnos_core::{
     BusKind, Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId,
-    NeedKind, Pio, Resource, Resources, Result, Spi, Status, Unit, driver, status_of,
+    NeedKind, Pio, RefusalKind, Resource, Resources, Result, Spi, Status, Unit, driver, status_of,
 };
 use lemnos_hal::pio::{PioJob, PioOperation};
 use lemnos_hal::spi::{Operation, SpiDevice};
@@ -131,7 +131,13 @@ impl Ws2812 {
         let count = cfg
             .int("count")
             .and_then(|count| u16::try_from(count).ok())
-            .ok_or(Status::INVALID_ARGUMENT)?;
+            .ok_or_else(|| {
+                cfg.refuse(
+                    Status::INVALID_ARGUMENT,
+                    RefusalKind::Failed,
+                    format_args!("the setting count must be the number of LEDs on the strip"),
+                )
+            })?;
         let wire = cfg
             .str("wire")
             .and_then(Wire::from_name)
@@ -251,7 +257,13 @@ impl Lifecycle for Ws2812 {
                 clock_hz: PIO_CLOCK_HZ,
                 out_bits: config.wire.bits(),
             };
-            lemnos_hal::pio::PioMachine::load(&mut **machine, &program).map_err(status_of)?;
+            lemnos_hal::pio::PioMachine::load(&mut **machine, &program).map_err(|error| {
+                cfg.refuse(
+                    status_of(error),
+                    RefusalKind::Failed,
+                    format_args!("the PIO state machine cannot take the LED program"),
+                )
+            })?;
         }
         // Start with the strip off. A failed write here does not fail the bind: health reports it
         // and the next show tries again.

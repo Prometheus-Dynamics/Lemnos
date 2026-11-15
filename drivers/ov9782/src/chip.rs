@@ -527,6 +527,16 @@ pub fn write<B: I2c<Error = ErrorKind>>(
 }
 
 /// Reads two consecutive registers, most significant first.
+/// The bind's one ID read: the chip ID register, or the bus fault's kind. Nothing is written.
+pub fn read_id<B: I2c<Error = ErrorKind>>(
+    bus: &mut B,
+    address: u8,
+) -> core::result::Result<u16, ErrorKind> {
+    let mut value = [0; 2];
+    bus.write_read(address, &CHIP_ID.to_be_bytes(), &mut value)?;
+    Ok(u16::from_be_bytes(value))
+}
+
 pub fn read_u16<B: I2c<Error = ErrorKind>>(bus: &mut B, address: u8, register: u16) -> Result<u16> {
     let mut value = [0; 2];
     bus.write_read(address, &register.to_be_bytes(), &mut value)

@@ -194,10 +194,7 @@ fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes(
     let DeviceState::Backoff { reason, .. } = rig.host.device("g").unwrap().state else {
         panic!("the driver bound to a stream it cannot use");
     };
-    assert!(
-        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
-        "{reason}"
-    );
+    assert!(reason.contains("bind failed: not supported"), "{reason}");
     assert!(matches!(rig.health(), Health::Failed(_)));
     // Nobody had to attach for the driver to know, and nothing holds the stream's other end.
     let stats = rig.host.stream_stats(0, "jobs").unwrap();

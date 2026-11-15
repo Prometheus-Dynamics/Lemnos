@@ -224,6 +224,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             reason: "",
                             link: Tail("two"),
                             jobs: Tail(""),
+                            refusal: Tail(0),
                         },
                         &mut out,
                     );
@@ -239,6 +240,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             reason: "bad",
                             link: Tail(""),
                             jobs: Tail(""),
+                            refusal: Tail(0),
                         },
                         &mut out,
                     );

@@ -511,6 +511,13 @@ impl Ina {
         self.owned.is_some()
     }
 
+    /// The bind's one ID read: the manufacturer ID, which every supported chip reports. Nothing is
+    /// written.
+    pub fn manufacturer<B: I2c>(&self, bus: &mut B) -> Result<u16, Error<B::Error>> {
+        let mut regs = I2cRegisters::new(bus, self.address, AddressWidth::Bits8);
+        Ok(regs.read(u16::from(self.model.manufacturer_register()), 2)? as u16)
+    }
+
     pub fn ids<B: I2c>(&self, bus: &mut B) -> Result<(u16, u16), Error<B::Error>> {
         let mut regs = I2cRegisters::new(bus, self.address, AddressWidth::Bits8);
         let manufacturer = regs.read(u16::from(self.model.manufacturer_register()), 2)?;

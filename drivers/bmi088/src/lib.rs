@@ -86,7 +86,7 @@ use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample};
 use lemnos_contract_gyroscope::{Gyroscope, Sample as GyroSample};
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Encode, Health, I2c, Item, Key, Lifecycle,
-    MethodId, Result, Status, Unit, Vector3, Writer, driver,
+    MethodId, RefusalKind, Result, Status, Unit, Vector3, Writer, driver, status_of,
 };
 
 /// The accelerometer's 7-bit address with SDO1 low.
@@ -566,6 +566,32 @@ pub struct Bmi088 {
     gyro: Die<GYRO_RING>,
 }
 
+/// The bind's one ID read, of the accelerometer die (see the crate notes): absent when the die does
+/// not acknowledge its address, failed when it answers another ID (named with the one expected),
+/// and failed on any other bus fault.
+fn identify_at_bind(bus: &mut I2c, address: u8, cfg: &Config<'_>) -> Result<()> {
+    match chip::probe(bus, address, Kind::Accel) {
+        chip::Probe::Found => Ok(()),
+        chip::Probe::Wrong { found, expected } => Err(cfg.refuse(
+            Status::NOT_SUPPORTED,
+            RefusalKind::Failed,
+            format_args!(
+                "the accelerometer at {address:#04x} answers ID {found:#04x}, expected {expected:#04x}"
+            ),
+        )),
+        chip::Probe::Absent => Err(cfg.refuse(
+            Status::NO_DEVICE,
+            RefusalKind::Absent,
+            format_args!("no device at {address:#04x}: nothing answers at its address"),
+        )),
+        chip::Probe::Fault(kind) => Err(cfg.refuse(
+            status_of(kind),
+            RefusalKind::Failed,
+            format_args!("the accelerometer at {address:#04x} did not answer its ID read"),
+        )),
+    }
+}
+
 impl Lifecycle for Bmi088 {
     type Needs = Bmi088Needs;
     // Everything this driver does to hardware goes through its needs.
@@ -627,20 +653,40 @@ impl Lifecycle for Bmi088 {
         let fifo = match cfg.get("fifo") {
             None => false,
             Some(ConfigValue::Bool(on)) => on,
-            Some(_) => return Err(Status::INVALID_ARGUMENT),
+            Some(_) => {
+                return Err(cfg.refuse(
+                    Status::INVALID_ARGUMENT,
+                    RefusalKind::Failed,
+                    format_args!("the setting fifo must be true or false"),
+                ));
+            }
         };
         let accel = chip::accel_setting(
             int(cfg, "accel_range", 6)?,
             number(cfg, "accel_rate", 100.0)?,
         )
-        .ok_or(Status::INVALID_ARGUMENT)?;
+        .ok_or_else(|| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the accelerometer range and rate cannot be used together"),
+            )
+        })?;
         let gyro = chip::gyro_setting(int(cfg, "gyro_range", 2000)?, int(cfg, "gyro_rate", 2000)?)
-            .ok_or(Status::INVALID_ARGUMENT)?;
+            .ok_or_else(|| {
+                cfg.refuse(
+                    Status::INVALID_ARGUMENT,
+                    RefusalKind::Failed,
+                    format_args!("the gyroscope range and rate cannot be used together"),
+                )
+            })?;
         let accel_address = address(cfg, "accel_address", DEFAULT_ACCEL_ADDRESS)?;
         let gyro_address = address(cfg, "gyro_address", DEFAULT_GYRO_ADDRESS)?;
+        let mut bus = needs.bus;
+        identify_at_bind(&mut bus, accel_address, cfg)?;
         // Nothing fallible is left, and nothing large has been made yet.
         *place = Some(Self {
-            bus: needs.bus,
+            bus,
             accel: Die::new(Kind::Accel, accel_address, fifo, accel),
             gyro: Die::new(Kind::Gyro, gyro_address, fifo, gyro),
         });
@@ -722,7 +768,11 @@ fn int(cfg: &Config<'_>, key: &str, default: i64) -> Result<i64> {
     match cfg.get(key) {
         None => Ok(default),
         Some(ConfigValue::Int(value)) => Ok(value),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(_) => Err(cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting {key} must be a whole number"),
+        )),
     }
 }
 
@@ -732,12 +782,22 @@ fn number(cfg: &Config<'_>, key: &str, default: f64) -> Result<f64> {
         None => Ok(default),
         Some(ConfigValue::Int(value)) => Ok(value as f64),
         Some(ConfigValue::Float(value)) => Ok(value),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(_) => Err(cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting {key} must be a number"),
+        )),
     }
 }
 
 /// A 7-bit address, or `default` when absent.
 fn address(cfg: &Config<'_>, key: &str, default: u8) -> Result<u8> {
     // The range is checked by the driver's `check_config`, so this only narrows the type.
-    u8::try_from(int(cfg, key, i64::from(default))?).map_err(|_| Status::INVALID_ARGUMENT)
+    u8::try_from(int(cfg, key, i64::from(default))?).map_err(|_| {
+        cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting {key} must be a 7-bit address"),
+        )
+    })
 }

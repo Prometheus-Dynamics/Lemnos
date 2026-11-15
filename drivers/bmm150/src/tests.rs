@@ -1,5 +1,6 @@
 //! The driver on a simulated bus: the chip's registers are the sim's bytes.
 
+extern crate std;
 use super::*;
 use crate::chip::{
     CHIP_ID, REG_CHIP_ID, REG_DATA, REG_OP_MODE, REG_POWER, REG_REP_XY, REG_REP_Z, REG_TRIM_X1,
@@ -7,9 +8,12 @@ use crate::chip::{
 };
 use lemnos_contract_self_test::{Outcome, Record, SelfTest, read_tests, reason};
 use lemnos_core::{
-    Description, Driver, ItemKind, JobState, Lifecycle, Reader, Resources, Status, Writer,
+    Description, Driver, ItemKind, JobState, Lifecycle, Reader, RefusalKind, RefusalSink,
+    Resources, Status, Writer,
 };
 use lemnos_sim::{Layout, SimBoard, SimI2c};
+use std::string::{String, ToString};
+use std::vec::Vec;
 
 const ADDRESS: u8 = DEFAULT_ADDRESS;
 const XYZ1: u16 = 6600;
@@ -38,12 +42,30 @@ fn trim() -> Trim {
 fn chip() -> (SimBoard, SimI2c) {
     let board = SimBoard::new();
     let sim = board.add_i2c("bus");
+    place(&sim);
+    (board, sim)
+}
+
+/// Puts a chip with the right ID and trim at the default address (its supply is up).
+fn place(sim: &SimI2c) {
     sim.attach(ADDRESS, Layout::Bytes);
     sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[CHIP_ID]);
     sim.set_bytes(ADDRESS, reg(REG_TRIM_X1), &[0, 0]);
     sim.set_bytes(ADDRESS, reg(REG_TRIM_Z4), &[0, 0, 0, 0]);
     sim.set_bytes(ADDRESS, reg(REG_TRIM_Z2), &trim_rest());
-    (board, sim)
+}
+
+/// Binds as [`bind`] does, and says what the driver gave as its refusal reason, with its kind.
+fn bind_saying(board: &mut SimBoard) -> (Result<Bmm150>, Vec<(RefusalKind, String)>) {
+    let reasons = std::sync::Mutex::new(Vec::new());
+    let sink = |kind: RefusalKind, args: core::fmt::Arguments<'_>| {
+        reasons.lock().unwrap().push((kind, args.to_string()));
+    };
+    let entries: &[(&str, ConfigValue)] = &[];
+    let config = Config::new(entries).with_refusals(RefusalSink::new(&sink));
+    let mut res = Resources::new(board, None);
+    let bound = Bmm150::bind(&mut res, &config);
+    (bound, reasons.into_inner().unwrap())
 }
 
 /// Binds the driver to `board` with the given config entries.
@@ -180,19 +202,58 @@ fn overflowed_axes_read_as_nan() {
 }
 
 #[test]
-fn wrong_chip_is_refused_then_retried() {
+fn a_chip_with_another_id_is_refused_at_bind_as_failed_and_bound_once_it_reads_right() {
     let (mut board, sim) = chip();
     sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[0x00]);
+    let (bound, reasons) = bind_saying(&mut board);
+    assert_eq!(bound.err(), Some(Status::NOT_SUPPORTED));
+    assert_eq!(
+        reasons,
+        [(
+            RefusalKind::Failed,
+            "the chip at 0x10 answers ID 0x00, expected 0x32".to_string()
+        )]
+    );
+
+    // The retry finds the right chip: the bind goes through and the driver reads normally.
+    sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[CHIP_ID]);
     sim.set_bytes(ADDRESS, reg(REG_DATA), &data(0, 0, 0, XYZ1));
     let mut mag = bind(&mut board, &[]).unwrap();
     assert_eq!(mag.read(), Err(Status::AGAIN));
-    assert_eq!(mag.read(), Err(Status::NOT_SUPPORTED));
-    assert_eq!(Driver::health(&mag), Health::Failed("chip ID mismatch"));
-
-    sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[CHIP_ID]);
-    assert_eq!(mag.read(), Err(Status::AGAIN));
     assert!(mag.read().is_ok());
     assert_eq!(Driver::health(&mag), Health::Ok);
+}
+
+#[test]
+fn a_chip_that_does_not_acknowledge_is_refused_at_bind_as_absent_then_bound_when_it_appears() {
+    // No chip at the address: the bus NACKs it, as the real bus does for a missing device.
+    let mut board = SimBoard::new();
+    let sim = board.add_i2c("bus");
+    let (bound, reasons) = bind_saying(&mut board);
+    assert_eq!(bound.err(), Some(Status::NO_DEVICE));
+    assert_eq!(
+        reasons,
+        [(
+            RefusalKind::Absent,
+            "no device at 0x10: nothing answers at its address".to_string()
+        )]
+    );
+
+    // Its supply comes up later: the next bind, a retry, finds it.
+    place(&sim);
+    assert!(bind_saying(&mut board).0.is_ok());
+}
+
+#[test]
+fn a_chip_that_goes_dead_is_absent_at_bind_and_is_not_a_failure_of_a_running_driver() {
+    let (mut board, sim) = chip();
+    sim.set_dead(ADDRESS, true);
+    let (bound, reasons) = bind_saying(&mut board);
+    assert_eq!(bound.err(), Some(Status::NO_DEVICE));
+    assert_eq!(
+        reasons.first().map(|(kind, _)| *kind),
+        Some(RefusalKind::Absent)
+    );
 }
 
 #[test]

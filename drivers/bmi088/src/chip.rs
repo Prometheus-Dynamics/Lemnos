@@ -235,6 +235,35 @@ pub(crate) fn check_id(bus: &mut I2c, address: u8, kind: Kind) -> Step<()> {
     }
 }
 
+/// What the bind's one ID read found (see [`probe`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// The die answers with its own ID.
+    Found,
+    /// The die answers with another ID: the one it read, and the one expected.
+    Wrong { found: u8, expected: u8 },
+    /// The die did not acknowledge its address (or did not answer): nothing is there.
+    Absent,
+    /// Another bus fault.
+    Fault(ErrorKind),
+}
+
+/// Reads the chip ID of `kind` at `address` once, and writes nothing. A die that does not
+/// acknowledge its address is absent; one that answers another ID is wrong.
+pub(crate) fn probe(bus: &mut I2c, address: u8, kind: Kind) -> Probe {
+    match bus_regs(bus, address).read8(kind.id_register()) {
+        Ok(found) if found == kind.expected_id() => Probe::Found,
+        Ok(found) => Probe::Wrong {
+            found,
+            expected: kind.expected_id(),
+        },
+        Err(error) => match error.kind() {
+            ErrorKind::Nack | ErrorKind::Timeout => Probe::Absent,
+            kind => Probe::Fault(kind),
+        },
+    }
+}
+
 /// Soft-resets a die. The die resets as it takes the byte, so it may not
 /// acknowledge it: the result is ignored, and the chip ID is checked after.
 pub(crate) fn soft_reset(bus: &mut I2c, address: u8, kind: Kind) {

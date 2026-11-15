@@ -1,5 +1,5 @@
 use super::*;
-use lemnos_core::{ConfigError, ConfigValue, Reply};
+use lemnos_core::{ConfigError, ConfigValue, RefusalKind, RefusalSink, Reply};
 use std::fs;
 
 /// A fake zone directory under the system temporary directory (`TMPDIR`),
@@ -40,6 +40,7 @@ fn zone(dir: &str) -> ThermalZone {
 fn reads_millidegrees_as_celsius() {
     // The values the frozen branch's board tests read from a fake zone: 51000 and 67750 m°C.
     let tree = Tree::new("celsius");
+    tree.set_temp("0");
     let mut dev = zone(&tree.path());
     tree.set_temp("51000\n");
     assert_eq!(dev.read().unwrap(), 51.0);
@@ -70,21 +71,31 @@ fn missing_path_is_invalid_argument() {
 }
 
 #[test]
-fn bind_does_not_touch_sysfs() {
-    // A zone that does not exist yet still starts; the read reports it.
+fn bind_refuses_a_zone_that_is_not_there_as_absent() {
+    // A zone that is not on this machine is refused at bind, with its reason and kind, rather than
+    // running with nothing behind it. The host retries the bind under the failure rule.
     let tree = Tree::new("absent-at-start");
     let dir = tree.0.join("thermal_zone9").display().to_string();
-    let mut dev = zone(&dir);
-    assert_eq!(dev.health(), Health::Ok);
-    assert_eq!(dev.read(), Err(Status::NOT_FOUND));
+    let reasons = std::sync::Mutex::new(Vec::new());
+    let sink = |kind: RefusalKind, args: core::fmt::Arguments<'_>| {
+        reasons.lock().unwrap().push((kind, args.to_string()));
+    };
+    let entries = [("path", ConfigValue::Str(&dir))];
+    let cfg = Config::new(&entries).with_refusals(RefusalSink::new(&sink));
+    assert!(ThermalZone::start(ThermalZoneNeeds {}, &cfg).is_err());
+    assert_eq!(
+        reasons.lock().unwrap().as_slice(),
+        [(RefusalKind::Absent, format!("no thermal zone at {dir}"))]
+    );
 }
 
 #[test]
 fn missing_zone_fails_each_read_and_recovers() {
     let tree = Tree::new("recover");
+    tree.set_temp("0");
     let mut dev = zone(&tree.path());
-    // The zone directory has no `temp` yet, as when a zone is removed.
-    fs::remove_file(tree.0.join("temp")).ok();
+    // The zone directory is there at bind, and its `temp` is removed after: as when a zone goes.
+    fs::remove_file(tree.0.join("temp")).unwrap();
     for _ in 0..3 {
         assert_eq!(dev.read(), Err(Status::NOT_FOUND));
         assert!(matches!(dev.health(), Health::Degraded(_)));
@@ -112,6 +123,7 @@ fn zone_directory_removed_and_returned() {
 #[test]
 fn garbage_is_an_io_error_and_recovers() {
     let tree = Tree::new("garbage");
+    tree.set_temp("0");
     let mut dev = zone(&tree.path());
     tree.set_temp("not a number");
     assert_eq!(dev.read(), Err(Status::IO));
@@ -124,6 +136,7 @@ fn garbage_is_an_io_error_and_recovers() {
 #[test]
 fn oversized_or_non_utf8_contents_are_refused() {
     let tree = Tree::new("oversized");
+    tree.set_temp("0");
     let mut dev = zone(&tree.path());
     tree.set_temp(&"1".repeat(SMALL));
     assert_eq!(dev.read(), Err(Status::IO));
@@ -134,6 +147,7 @@ fn oversized_or_non_utf8_contents_are_refused() {
 #[test]
 fn describes_one_temperature_value() {
     let tree = Tree::new("describe");
+    tree.set_temp("0");
     let dev = zone(&tree.path());
     let mut out = Description::default();
     dev.describe(&mut out);
@@ -144,6 +158,7 @@ fn describes_one_temperature_value() {
 #[test]
 fn the_board_gives_the_zones_range_and_warning_limits() {
     let tree = Tree::new("limits");
+    tree.set_temp("0");
     let path = tree.path();
     let entries = [
         ("path", ConfigValue::Str(&path)),
@@ -172,6 +187,7 @@ fn the_board_gives_the_zones_range_and_warning_limits() {
 #[test]
 fn the_zone_names_its_directory_as_its_location() {
     let tree = Tree::new("location");
+    tree.set_temp("0");
     let dev = zone(&tree.path());
     let mut out = Description::default();
     dev.describe(&mut out);

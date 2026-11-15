@@ -33,7 +33,7 @@ closes the connection on a larger length, without reading it.
 | 1 | Hello | core u64, lemnos name (32 bytes), version u16, name str, events bool, parts (tail) | to host |
 | 2 | Welcome | core u64, lemnos name (32 bytes), version u16, features u64, host str, parts (tail) | to client |
 | 3 | List | id u32 | to host |
-| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str, jobs str | to client |
+| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str, jobs str, refusal u8 | to client |
 | 5 | ListDone | id u32 | to client |
 | 6 | Open | id u32, device str, tag str | to host |
 | 7 | Opened | id u32, device u32, contract u8 | to client |
@@ -48,7 +48,7 @@ closes the connection on a larger length, without reading it.
 | 16 | SetPower | id u32, device u32, on bool | to host |
 | 17 | StreamOpen | id u32, device u32, name str | to host |
 | 18 | StreamRings | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, working Tail u32, kind Tail u32 | to client |
-| 19 | Event | device u32, state u8, health u8, reason str | to client |
+| 19 | Event | device u32, state u8, health u8, reason str, refusal u8 | to client |
 | 20 | Refusal | id u32, status i32, text str | to client |
 | 21 | StreamClose | id u32, device u32, name str | to host |
 | 22 | StreamOpenHandles | id u32, device u32, name str | to host |
@@ -74,6 +74,8 @@ says, or empty when it names none. The host carries it and never reads it: what 
 is between the two devices' contracts. A camera sensor's `link` names its receiver and the
 receiver's names its ISP, so a client follows a sensor to both through List alone. `link` was
 appended to Device (rule 8): a host from before it sends Device without it, which reads as empty.
+
+`refusal` in Device, and in Event, is why a device waits to retry: `0` none (running, or switched on), `1` absent (no such device here), `2` failed (present and not working). It is appended after `jobs`, so a host from before it sends none and a reader takes `0`; it moves no hash.
 
 `jobs` in Device is the long jobs open on the device, from the host's job table (never from the
 driver): `ID:DONE/TOTAL` each, the id in hex and the two counts decimal, joined by one space, at
@@ -728,15 +730,16 @@ Each vector is one complete frame.
 
 ### device
 
-`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d", jobs: "1a:3/4" }`
+`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d", jobs: "1a:3/4", refusal: 0 }`
 
 <!-- vector: device -->
 ```hex
-31 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64 06 00 00 00 31 61 3a 33 2f 34
+32 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64 06 00 00 00 31 61 3a 33 2f 34 00
 ```
 
 A host from before `link` sends the same frame without its last five bytes (length `22`), and a
-client reads that as `link: ""`.
+client reads that as `link: ""`. A host from before `refusal` sends it without its last byte, and
+a reader takes that as `refusal` `0` (none).
 
 ### list-done
 
@@ -929,12 +932,15 @@ client reads that as `link: ""`.
 
 ### event
 
-`Event { device: 3, state: 0, health: 0, reason: "" }`
+`Event { device: 3, state: 0, health: 0, reason: "", refusal: 0 }`
 
 <!-- vector: event -->
 ```hex
-0c 00 00 00 13 00 03 00 00 00 00 00 00 00 00 00
+0d 00 00 00 13 00 03 00 00 00 00 00 00 00 00 00 00
 ```
+
+The `refusal` byte is the last of the frame: a host from before it sends the frame without it, and a
+reader takes that as `refusal` `0` (none).
 
 ### call-job
 

@@ -19,8 +19,8 @@ mod tests;
 
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
-    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
-    Unit, driver,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, RefusalKind,
+    Result, Status, Unit, driver,
 };
 use std::fs::File;
 use std::io::{self, Read};
@@ -83,8 +83,26 @@ impl Lifecycle for ThermalZone {
             warn_below: cfg.int("warn_below_c"),
             warn_above: cfg.int("warn_above_c"),
         };
+        let temp = Path::new(dir).join("temp");
+        // The zone must be there to be read: a zone with no temperature file is absent, and one
+        // whose file cannot be opened is failed. Nothing is read here, so nothing changes.
+        if let Err(error) = File::open(&temp) {
+            return Err(if error.kind() == io::ErrorKind::NotFound {
+                cfg.refuse(
+                    Status::NO_DEVICE,
+                    RefusalKind::Absent,
+                    format_args!("no thermal zone at {dir}"),
+                )
+            } else {
+                cfg.refuse(
+                    Status::IO,
+                    RefusalKind::Failed,
+                    format_args!("the thermal zone at {dir} cannot be read"),
+                )
+            });
+        }
         Ok(Self {
-            temp: Path::new(dir).join("temp"),
+            temp,
             faulted: false,
             limits,
         })

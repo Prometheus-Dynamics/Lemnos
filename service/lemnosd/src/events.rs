@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Health, HostClock, Retry};
+use lemnos_core::{Health, HostClock, RefusalKind, Retry, Tail};
 use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
-use lemnos_wire::{Frame, health, state};
+use lemnos_wire::{Frame, health, refusal, state};
 
 use crate::Core;
 use crate::notify::Notifier;
@@ -19,6 +19,22 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 /// A device's state as the wire carries it: its state, and its health and reason with it.
 pub(crate) fn wire_state(info: &DeviceInfo, now_ns: u64) -> (u8, u8, String) {
     wire_of(&info.state, info.retry, &info.health, now_ns)
+}
+
+/// Why a device waits, as the wire numbers it (`refusal::ABSENT` or `refusal::FAILED`), and
+/// `refusal::NONE` for a device that is running or was just switched on.
+pub(crate) fn wire_refusal(device: &DeviceState) -> u8 {
+    match device {
+        DeviceState::Backoff {
+            kind: Some(RefusalKind::Absent),
+            ..
+        } => refusal::ABSENT,
+        DeviceState::Backoff {
+            kind: Some(RefusalKind::Failed),
+            ..
+        } => refusal::FAILED,
+        _ => refusal::NONE,
+    }
 }
 
 /// The most of a reason's text the wire carries: a longer one is cut and marked with `...`.
@@ -58,6 +74,7 @@ fn wire_of(
             attempts,
             next_retry_ns,
             reason,
+            ..
         } => (
             state::BACKOFF,
             retry_text(*attempts, reason, *next_retry_ns, now_ns),
@@ -119,6 +136,7 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>) {
             state,
             health,
             reason: &reason,
+            refusal: Tail(wire_refusal(&info.state)),
         };
         for client in crate::lock(&core.clients).iter() {
             if client.wants_events() {

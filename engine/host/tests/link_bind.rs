@@ -359,7 +359,7 @@ fn a_link_to_a_device_that_does_not_serve_the_contract_says_what_it_needs() {
     };
     assert_eq!(
         reason,
-        "the link to `cam0-peer` needs a camera.receiver/1 device, but `cam0-peer` serves \
+        "bind failed: the link to `cam0-peer` needs a camera.receiver/1 device, but `cam0-peer` serves \
          camera.sensor/1: a sensor links to a camera.receiver/1 device, and a receiver and each ISP \
          to a camera.isp/1 device"
     );
@@ -407,7 +407,7 @@ fn a_receiver_linked_to_a_sensor_is_refused_with_the_reason() {
     };
     assert_eq!(
         reason,
-        "the link to `cam0-sensor` needs a camera.isp/1 device, but `cam0-sensor` serves \
+        "bind failed: the link to `cam0-sensor` needs a camera.isp/1 device, but `cam0-sensor` serves \
          camera.sensor/1: a sensor links to a camera.receiver/1 device, and a receiver and each ISP \
          to a camera.isp/1 device"
     );
@@ -425,7 +425,7 @@ fn a_sensor_linked_straight_to_an_isp_is_refused_with_the_reason() {
     };
     assert_eq!(
         reason,
-        "the link to `cam0-fe` needs a camera.receiver/1 device, but `cam0-fe` serves \
+        "bind failed: the link to `cam0-fe` needs a camera.receiver/1 device, but `cam0-fe` serves \
          camera.isp/1: a sensor links to a camera.receiver/1 device, and a receiver and each ISP to \
          a camera.isp/1 device"
     );
@@ -443,7 +443,7 @@ fn an_isp_linked_to_a_receiver_is_refused_with_the_reason() {
     };
     assert_eq!(
         reason,
-        "the link to `cam0-receiver` needs a camera.isp/1 device, but `cam0-receiver` serves \
+        "bind failed: the link to `cam0-receiver` needs a camera.isp/1 device, but `cam0-receiver` serves \
          camera.receiver/1: a sensor links to a camera.receiver/1 device, and a receiver and each ISP \
          to a camera.isp/1 device"
     );

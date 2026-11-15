@@ -995,3 +995,30 @@ fn check_config_names_the_bad_setting() {
         "embedded_bytes"
     );
 }
+
+#[test]
+fn a_receiver_with_no_node_is_refused_at_bind_as_absent_and_names_the_node() {
+    // The real block, not a stand-in: a device name no board has, so no node exists to open. The
+    // bind is refused with its reason and kind, before it could report running with nothing behind it.
+    let reasons = std::sync::Mutex::new(Vec::new());
+    let sink = |kind: lemnos_core::RefusalKind, args: core::fmt::Arguments<'_>| {
+        reasons.lock().unwrap().push((kind, args.to_string()));
+    };
+    let entries: &[(&str, ConfigValue)] =
+        &[("device", ConfigValue::Str("lemnos-test-absent-node"))];
+    let cfg = Config::new(entries).with_refusals(lemnos_core::RefusalSink::new(&sink));
+    let needs = crate::Rp1Csi2Needs {
+        frames: None,
+        embedded: None,
+        _isp: None,
+    };
+    let bound = <crate::Rp1Csi2 as Lifecycle>::start(needs, &cfg);
+    assert!(bound.is_err(), "a bind with no node must be refused");
+    assert_eq!(
+        reasons.lock().unwrap().as_slice(),
+        [(
+            lemnos_core::RefusalKind::Absent,
+            "no receiver node /dev/lemnos-rp1-csi2-lemnos-test-absent-node".to_string()
+        )]
+    );
+}

@@ -635,16 +635,17 @@ fn a_board_whose_frames_stream_is_plain_memory_is_refused_at_bind() {
     let DeviceState::Backoff { reason, .. } = host.device("csi0").unwrap().state else {
         panic!("the driver bound to a stream it cannot use");
     };
-    assert!(
-        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
-        "{reason}"
-    );
+    assert!(reason.contains("plain memory"), "{reason}");
     // Nobody had to attach for the driver to know.
     assert_eq!(host.stream_stats(0, "frames").unwrap().attachments, 0);
-    // The same board with the stream as dma-bufs binds; nothing is opened until `start`.
+    // The same board with the stream as dma-bufs is accepted; then the receiver's node is looked
+    // for, and this board's is not there, so the bind is refused as absent.
     let host = bound("memory = \"dma-buf\"\n");
     host.tick();
-    assert_eq!(host.device("csi0").unwrap().state, DeviceState::Running);
+    let DeviceState::Backoff { reason, .. } = host.device("csi0").unwrap().state else {
+        panic!("a board with no receiver bound");
+    };
+    assert!(reason.contains("no receiver node"), "{reason}");
 }
 
 #[test]

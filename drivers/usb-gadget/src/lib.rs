@@ -129,7 +129,8 @@ use lemnos_contract_usb_function::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Health, Item, Key, Kind as KeyKind,
-    Lifecycle, MethodId, Result, Retry, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
+    Lifecycle, MethodId, RefusalKind, Result, Retry, Status, StreamHandle, UsbFunctionHandle,
+    driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -593,7 +594,7 @@ impl Lifecycle for UsbGadget {
     }
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let set = descriptor_set(cfg)?;
+        let set = descriptor_set(cfg).map_err(|status| refused_settings(cfg, status))?;
         let note = if cfg.str("serial").is_some() || cfg.str("board_serial").is_some() {
             None
         } else if cfg.str("board_serial_error").is_some() {
@@ -604,7 +605,11 @@ impl Lifecycle for UsbGadget {
         let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))
             .map_err(|_| Status::INVALID_ARGUMENT)?;
         if control_timeout_ms == 0 {
-            return Err(Status::INVALID_ARGUMENT);
+            return Err(cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting control_timeout_ms must be at least 1 millisecond"),
+            ));
         }
         // The set was built here, so it parses; one that didn't would name no endpoints.
         let serve = {
@@ -864,6 +869,19 @@ pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> 
 /// # Errors
 ///
 /// The settings [`check`] refuses.
+/// The refusal for settings the descriptor set cannot be built from: the first one [`check`] names,
+/// or the status alone when only the descriptors fail.
+fn refused_settings(cfg: &Config<'_>, status: Status) -> Status {
+    match check(cfg) {
+        Err(error) => cfg.refuse(status, RefusalKind::Failed, format_args!("{error}")),
+        Ok(()) => cfg.refuse(
+            status,
+            RefusalKind::Failed,
+            format_args!("the USB descriptors cannot be built from the gadget's settings"),
+        ),
+    }
+}
+
 pub fn descriptor_set(cfg: &Config<'_>) -> Result<Set> {
     check(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
     let identity = identity(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;

@@ -130,6 +130,17 @@ pub mod state {
     }
 }
 
+/// Why a device waits to retry, as the wire carries it: an absent device, one that is there and
+/// failing, or no refusal at all (a device switched on, or running). Carried after the reason in
+/// the device and event frames: a peer from before it sends none, which reads as [`NONE`](none).
+pub mod refusal {
+    // Plain constants, not `constants!`: this field is added after the core frames, so its values
+    // are left out of the core hash (see docs/wire.md, "added").
+    pub const NONE: u8 = 0;
+    pub const ABSENT: u8 = 1;
+    pub const FAILED: u8 = 2;
+}
+
 /// How a device's health is carried on the wire.
 pub mod health {
     constants! {
@@ -375,6 +386,9 @@ frames! {
             /// [`description::running_jobs_text`]). Empty when there are none, and from a host older
             /// than this field.
             jobs: Appended<'a>,
+            /// Why the device waits, as [`refusal`] numbers it. Trailing: a host from before it sends
+            /// none, which reads as [`refusal::NONE`].
+            refusal: Tail<u8>,
         }
         5 ListDone { id: u32 }
         /// An empty `device` means any device providing `tag`.
@@ -422,7 +436,8 @@ frames! {
             /// from before it sends none, which reads as 0, the only kind it has.
             kind: Tail<u32>,
         }
-        19 Event { device: u32, state: u8, health: u8, reason: &'a str }
+        /// `refusal` is as the device frame's: trailing, and [`refusal::NONE`] from a host before it.
+        19 Event { device: u32, state: u8, health: u8, reason: &'a str, refusal: Tail<u8> }
         /// The answer to any request that could not be done.
         20 Refusal { id: u32, status: i32, text: &'a str }
         /// Answered with an empty Reply.

@@ -56,6 +56,11 @@ pub struct Registered {
 
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
+    /// Whether the block is there and answers, without claiming or changing it. The driver asks at
+    /// bind: a block that is not there refuses the bind rather than starting without it.
+    fn present(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// The block's version register, once a stream has run; 0 before.
     fn hw_version(&self) -> u32;
     /// Makes the memory and the stream.
@@ -109,6 +114,12 @@ impl Settings {
     pub fn device(&self) -> &str {
         &self.device
     }
+
+    /// The block, as a person reads it: its name on the module's control node.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("PiSP block {} on /dev/lemnos", self.device)
+    }
 }
 
 /// The hardware a simulated board stands in, in place of the module's node: built for each
@@ -134,6 +145,15 @@ pub(crate) fn hardware(settings: Settings) -> Box<dyn Hardware> {
         return make(&settings);
     }
     Box::new(LinuxHardware::new(settings))
+}
+
+/// A node or block that is not there is `NO_DEVICE`; anything else is as `status` says.
+fn missing(e: &io::Error) -> Status {
+    if e.kind() == io::ErrorKind::NotFound {
+        Status::NO_DEVICE
+    } else {
+        status(e)
+    }
 }
 
 fn status(e: &io::Error) -> Status {
@@ -226,6 +246,15 @@ impl LinuxHardware {
 }
 
 impl Hardware for LinuxHardware {
+    fn present(&mut self) -> Result<()> {
+        // The module's control node, and the block on it: nothing is claimed or changed.
+        let control = Control::open("/dev/lemnos").map_err(|e| missing(&e))?;
+        control
+            .find_block(&self.settings.device)
+            .map(|_| ())
+            .map_err(|e| missing(&e))
+    }
+
     fn hw_version(&self) -> u32 {
         self.hw_version
     }
@@ -318,5 +347,19 @@ impl Hardware for LinuxHardware {
         } else {
             Err(Status::IO)
         }
+    }
+}
+
+#[cfg(test)]
+mod present_tests {
+    use super::*;
+
+    #[test]
+    fn a_back_end_with_no_block_is_not_present() {
+        // A block name no board has: either the module's control node is not there or the block is
+        // not on it. Both are absent, and nothing is claimed or changed.
+        let settings = Settings::new("lemnos-test-absent-block", "linux,cma").unwrap();
+        let mut hw = LinuxHardware::new(settings);
+        assert_eq!(hw.present(), Err(Status::NO_DEVICE));
     }
 }

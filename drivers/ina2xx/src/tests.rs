@@ -323,11 +323,12 @@ fn negative_current_keeps_its_sign() {
 }
 
 #[test]
-fn wrong_chip_is_refused_and_not_written() {
+fn wrong_chip_is_refused_at_bind_and_not_written() {
+    // An INA238 is configured, and the INA238's manufacturer register (0x3e) does not answer TI:
+    // the bind's ID read refuses it, and nothing is written.
     let (mut board, sim) = board_with_bus();
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
-    let mut driver = bind(&mut board, &INA238).unwrap();
-    assert_eq!(PowerMonitor::read(&mut driver), Err(Status::NOT_SUPPORTED));
+    assert_eq!(bind(&mut board, &INA238).err(), Some(Status::NOT_SUPPORTED));
     assert_eq!(sim.word(chip::DEFAULT_ADDRESS, 0x02), None);
 }
 
@@ -368,15 +369,18 @@ fn bad_config_is_invalid_argument() {
 }
 
 #[test]
-fn absent_chip_is_retried_on_each_read_until_it_appears() {
+fn absent_chip_is_refused_at_bind_and_bound_when_it_appears() {
+    // Nothing answers at the address: the bus NACKs, as the real bus does, so the bind is refused
+    // as absent, and the next bind (a retry) goes through once the chip is there.
     let (mut board, sim) = board_with_bus();
-    let mut driver = bind(&mut board, &INA226).unwrap();
-    assert!(matches!(Driver::health(&driver), Health::Degraded(_)));
-    assert!(PowerMonitor::read(&mut driver).is_err());
+    let refused = bind(&mut board, &INA226).err();
+    assert_eq!(refused, Some(Status::NO_DEVICE));
 
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
     set16(&sim, 0x02, 9600);
     set16(&sim, 0x04, 16000);
+    let mut driver = bind(&mut board, &INA226).unwrap();
+    assert!(matches!(Driver::health(&driver), Health::Degraded(_)));
     let reading = PowerMonitor::read(&mut driver).unwrap();
     close(reading.bus_v, 12.0);
     assert_eq!(register(&sim, chip::DEFAULT_ADDRESS, 0x05), 2048);
@@ -404,7 +408,8 @@ fn a_failed_read_is_calibrated_again_on_the_next() {
 
 #[test]
 fn describe_names_the_four_power_channels() {
-    let (mut board, _sim) = board_with_bus();
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let driver = bind(&mut board, &INA226).unwrap();
     let mut out = Description::new();
     Driver::describe(&driver, &mut out);
@@ -511,7 +516,8 @@ fn a_host_owned_ina260_reads_as_it_stands() {
 
 #[test]
 fn the_board_gives_the_rails_warning_limits_in_nano_units() {
-    let (mut board, _sim) = board_with_bus();
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let driver = bind(
         &mut board,
         &[
@@ -537,7 +543,8 @@ fn the_board_gives_the_rails_warning_limits_in_nano_units() {
         (None, Some(1_500_000_000))
     );
     // Without them, no limit.
-    let (mut board, _sim) = board_with_bus();
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let bare = bind(&mut board, &INA226).unwrap();
     let mut out = Description::new();
     Driver::describe(&bare, &mut out);
@@ -581,6 +588,7 @@ fn run_test(driver: &mut Ina2xx, name: &str) -> (JobState, Option<Record>) {
 #[test]
 fn the_bus_voltage_test_passes_inside_the_board_files_range() {
     let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let mut driver = bind(&mut board, &RANGED).unwrap();
     answering_chip(&sim);
     set16(&sim, 0x02, 9600); // 12.000 V at 1.25 mV a count
@@ -601,6 +609,7 @@ fn the_bus_voltage_test_passes_inside_the_board_files_range() {
 #[test]
 fn the_bus_voltage_test_fails_outside_the_range_with_the_value_it_read() {
     let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let mut driver = bind(&mut board, &RANGED).unwrap();
     answering_chip(&sim);
     set16(&sim, 0x02, 4800); // 6.000 V
@@ -614,6 +623,7 @@ fn the_bus_voltage_test_fails_outside_the_range_with_the_value_it_read() {
 #[test]
 fn without_a_range_the_test_is_skipped_and_the_bus_is_not_touched() {
     let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let mut driver = bind(&mut board, &INA226).unwrap();
     let before = sim.transactions();
     let (_, record) = run_test(&mut driver, "bus_voltage");
@@ -626,6 +636,7 @@ fn without_a_range_the_test_is_skipped_and_the_bus_is_not_touched() {
 #[test]
 fn a_chip_that_does_not_answer_is_no_response() {
     let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let mut driver = bind(&mut board, &RANGED).unwrap();
     answering_chip(&sim);
     sim.set_dead(chip::DEFAULT_ADDRESS, true);
@@ -653,7 +664,8 @@ fn a_range_with_its_bounds_reversed_is_refused_at_bind() {
 
 #[test]
 fn describe_offers_the_self_test_action() {
-    let (mut board, _sim) = board_with_bus();
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let driver = bind(&mut board, &INA226).unwrap();
     let mut out = Description::new();
     Driver::describe(&driver, &mut out);

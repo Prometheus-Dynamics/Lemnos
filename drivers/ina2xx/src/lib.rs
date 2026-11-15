@@ -14,9 +14,12 @@
 //! The INA260 has an integrated 2 mΩ shunt, so its shunt and current settings are
 //! ignored.
 //!
-//! Binding does not touch the bus. The chip is verified and calibrated on the
-//! first read, and again after any read fails, so a chip that is absent at bind,
-//! or that resets, is picked up by a later read. Until then health reports
+//! Binding reads the chip's manufacturer ID, once, and nothing else. A chip that
+//! does not acknowledge its address is absent, and one that answers another
+//! manufacturer is failed: either refuses the bind, which the host retries under
+//! the failure rule, so a chip that appears later binds on a later retry. The chip
+//! is verified and calibrated on the first read, and again after any read fails,
+//! so a chip that resets is picked up by a later read. Until then health reports
 //! `Degraded`. The driver never gives up and never switches itself off. It makes
 //! no retries of its own, so pacing between attempts (capped at 8 s) is the
 //! host's job, done by how often it reads.
@@ -44,7 +47,7 @@ use lemnos_contract_self_test::{
 };
 use lemnos_core::{
     AddressWidth, CallerId, Config, ConfigError, Description, Health, I2c, Item, JobId, JobState,
-    Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, driver, status_of,
+    Key, Kind, Lifecycle, MethodId, RefusalKind, Reply, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::HalError;
 
@@ -189,9 +192,12 @@ impl Lifecycle for Ina2xx {
     }
 
     fn start(needs: Ina2xxNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let chip = chip_from_config(cfg)?;
+        let mut bus = needs.bus;
+        identify_at_bind(&chip, &mut bus, cfg)?;
         Ok(Self {
-            bus: needs.bus,
-            chip: chip_from_config(cfg)?,
+            bus,
+            chip,
             verified: false,
             host_owned: cfg.host_owned(),
             warn: warnings(cfg)?,
@@ -380,15 +386,62 @@ fn power_reading(raw: chip::ReadingFixed) -> PowerReading {
     }
 }
 
+/// The bind's one ID read (see the crate notes): absent when the chip does not acknowledge its
+/// address, failed when it answers another manufacturer, and the bus fault's status otherwise.
+fn identify_at_bind(chip: &chip::Ina, bus: &mut I2c, cfg: &Config<'_>) -> Result<()> {
+    let address = chip.address();
+    match chip.manufacturer(bus) {
+        Ok(chip::MANUFACTURER_TI) => Ok(()),
+        Ok(found) => Err(cfg.refuse(
+            Status::NOT_SUPPORTED,
+            RefusalKind::Failed,
+            format_args!(
+                "the chip at {address:#04x} answers manufacturer ID {found:#06x}, expected {:#06x}",
+                chip::MANUFACTURER_TI
+            ),
+        )),
+        Err(error) => match error.kind() {
+            lemnos_core::ErrorKind::Nack | lemnos_core::ErrorKind::Timeout => Err(cfg.refuse(
+                Status::NO_DEVICE,
+                RefusalKind::Absent,
+                format_args!("no device at {address:#04x}: nothing answers at its address"),
+            )),
+            kind => Err(cfg.refuse(
+                status_of(kind),
+                RefusalKind::Failed,
+                format_args!("the chip at {address:#04x} did not answer its ID read"),
+            )),
+        },
+    }
+}
+
 /// Builds the chip from the board file's settings. Anything missing or out of
 /// range is `INVALID_ARGUMENT`.
 fn chip_from_config(cfg: &Config<'_>) -> Result<chip::Ina> {
-    let model = model_of(cfg).ok_or(Status::INVALID_ARGUMENT)?;
+    let model = model_of(cfg).ok_or_else(|| {
+        cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the setting chip must name an INA226, INA238 or INA260"),
+        )
+    })?;
     let address = match cfg.int("address") {
         None => DEFAULT_ADDRESS,
-        Some(address) => u8::try_from(address).map_err(|_| Status::INVALID_ARGUMENT)?,
+        Some(address) => u8::try_from(address).map_err(|_| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("the setting address must be a 7-bit address"),
+            )
+        })?,
     };
-    chip::Ina::new(model, address, calibration_of(cfg)).map_err(|_| Status::INVALID_ARGUMENT)
+    chip::Ina::new(model, address, calibration_of(cfg)).map_err(|_| {
+        cfg.refuse(
+            Status::INVALID_ARGUMENT,
+            RefusalKind::Failed,
+            format_args!("the calibration settings cannot be used for this chip"),
+        )
+    })
 }
 
 /// The chip the board file names, in any case, or `None` when it names none of the three.

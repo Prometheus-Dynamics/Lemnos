@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Contract, Status, Tail};
+use lemnos_core::{Contract, RefusalKind, Status, Tail};
 use lemnos_wire::ring::{Layout, Mapping};
 use lemnos_wire::{
     CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BITS,
@@ -50,6 +50,16 @@ pub enum DeviceHealth {
     Failed,
 }
 
+/// The refusal kind the wire carries as a number. `None` for none, and for a number this client
+/// does not name (a service from after it).
+const fn refusal_kind(code: u8) -> Option<RefusalKind> {
+    match code {
+        lemnos_wire::refusal::ABSENT => Some(RefusalKind::Absent),
+        lemnos_wire::refusal::FAILED => Some(RefusalKind::Failed),
+        _ => None,
+    }
+}
+
 const fn device_state(code: u8) -> Option<DeviceState> {
     match code {
         state::RUNNING => Some(DeviceState::Running),
@@ -86,6 +96,10 @@ pub struct DeviceEntry {
     /// a service older than this field). Visible to every session, not only the one that started
     /// them.
     pub jobs: Vec<lemnos_wire::RunningJob>,
+    /// Whether the device is absent or failing, when it waits to retry with a refusal. `None` when
+    /// it is running, or when it waits with no refusal behind it, and from a service older than
+    /// this field.
+    pub refusal: Option<RefusalKind>,
 }
 
 /// The devices `from` leads to through `link`, in order, starting with `from` itself: a sensor,
@@ -182,6 +196,8 @@ pub struct Event {
     pub state: DeviceState,
     pub health: DeviceHealth,
     pub reason: String,
+    /// Whether the device is absent or failing, as [`DeviceEntry::refusal`] says.
+    pub refusal: Option<RefusalKind>,
 }
 
 /// What happened to a long job this session started ([`Session::start_job`]).
@@ -507,6 +523,7 @@ impl Shared {
                 state,
                 health,
                 reason,
+                refusal,
             } => {
                 let (Some(state), Some(health)) = (device_state(state), device_health(health))
                 else {
@@ -521,6 +538,7 @@ impl Shared {
                     state,
                     health,
                     reason: reason.to_string(),
+                    refusal: refusal_kind(refusal.0),
                 });
                 false
             }
@@ -1035,6 +1053,7 @@ impl Session {
                 reason,
                 link,
                 jobs,
+                refusal,
                 ..
             } => {
                 let (Some(state), Some(health)) = (device_state(state), device_health(health))
@@ -1055,6 +1074,7 @@ impl Session {
                     reason: reason.to_string(),
                     link: (!link.0.is_empty()).then(|| link.0.to_string()),
                     jobs: lemnos_wire::parse_running_jobs(jobs.0),
+                    refusal: refusal_kind(refusal.0),
                 });
                 None
             }

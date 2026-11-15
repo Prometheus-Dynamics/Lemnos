@@ -305,12 +305,13 @@ driver = "package-fixture"
         attempts: 1,
         next_retry_ns,
         reason,
+        ..
     } = host.device("bad").unwrap().state
     else {
         panic!("{:?}", host.device("bad").unwrap().state);
     };
     assert_eq!(next_retry_ns, second.as_nanos() as u64);
-    assert_eq!(reason, format!("bind failed: {:?}", Status::PANIC));
+    assert_eq!(reason, "bind failed: the driver panicked");
     assert_eq!(host.device("good").unwrap().state, DeviceState::Running);
     assert_eq!(count(&host, good), Ok(1));
     assert_eq!(count(&host, bad), Err(Status::NO_DEVICE));

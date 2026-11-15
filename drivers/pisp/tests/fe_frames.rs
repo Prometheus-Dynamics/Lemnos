@@ -948,17 +948,18 @@ fn a_board_with_an_image_or_statistics_stream_of_plain_memory_is_refused_at_bind
         let DeviceState::Backoff { reason, .. } = host.device("isp").unwrap().state else {
             panic!("the driver bound to a stream it cannot use");
         };
-        assert!(
-            reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
-            "{reason}"
-        );
+        assert!(reason.contains("plain memory"), "{reason}");
         // Nobody had to attach for the driver to know.
         assert_eq!(host.stream_stats(0, "output0").unwrap().attachments, 0);
     }
-    // With all three as dma-bufs it binds; nothing is opened until `start`.
+    // With all three as dma-bufs the streams are accepted; then the block is looked for, and this
+    // board's node is not there, so the bind is refused as absent.
     let host = bound(dma, dma, dma);
     host.tick();
-    assert_eq!(host.device("isp").unwrap().state, DeviceState::Running);
+    let DeviceState::Backoff { reason, .. } = host.device("isp").unwrap().state else {
+        panic!("a board with no block bound");
+    };
+    assert!(reason.contains("no receiver node"), "{reason}");
 }
 
 #[test]

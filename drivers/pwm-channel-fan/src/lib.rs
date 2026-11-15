@@ -70,7 +70,7 @@ pub mod math;
 use lemnos_contract_fan::Fan;
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle, Line,
-    MethodId, Pwm, Result, Status, Unit, driver, status_of,
+    MethodId, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::raw::{EdgeDetect, LineConfig, Polarity, PwmConfig};
 use math::{FULL, Tach, backoff_ns, duty_ns, hardware_duty, period_ns};
@@ -175,7 +175,18 @@ impl Lifecycle for PwmChannelFan {
         let mut tach = needs.tach;
         if let Some(line) = tach.as_mut() {
             let config = LineConfig::input().with_edge(EdgeDetect::Rising);
-            line.configure(&config).map_err(status_of)?;
+            line.configure(&config).map_err(|error| {
+                let status = status_of(error);
+                let kind = match status {
+                    Status::NO_DEVICE | Status::NOT_FOUND => RefusalKind::Absent,
+                    _ => RefusalKind::Failed,
+                };
+                cfg.refuse(
+                    status,
+                    kind,
+                    format_args!("the tach line cannot be set as an input"),
+                )
+            })?;
         }
         Ok(Self {
             pwm: needs.pwm,
