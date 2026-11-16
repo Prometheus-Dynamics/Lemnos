@@ -15,9 +15,6 @@ use crate::regs::{dw_mmc, dwc3};
 use crate::wdt::LONGEST_PERIOD_US;
 use lemnos_flash_stage::wait::{Clock, WaitError, wait_for};
 
-/// Budget of one bounded hardware wait, in microseconds (as bind.rs).
-pub const IO_WAIT_US: u64 = 1_000_000;
-
 /// Why a bulk or block transfer failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoFault {
@@ -102,40 +99,35 @@ fn wait_depcmd_until<C: Clock>(
     Ok(())
 }
 
-/// Waits for a command outside any transfer phase (bring-up and endpoint configuration), bounded by `IO_WAIT_US`.
-fn wait_depcmd<C: Clock>(
-    regs: &mut dyn RegAccess,
-    clock: &mut C,
-    base: usize,
-    ep: usize,
-) -> Result<(), IoFault> {
-    let deadline_us = clock.now_us().saturating_add(IO_WAIT_US);
-    wait_depcmd_until(regs, clock, base, ep, deadline_us)
-}
-
 /// The endpoint type field of DEPCFG (gadget.c:596-597): control is 0, bulk is 2.
 pub const EP_TYPE_CONTROL: u32 = 0;
 pub const EP_TYPE_BULK: u32 = 2;
 
 /// Starts the control endpoints (DEPSTARTCFG, resource index 0): the first step of the device, before any
 /// endpoint is configured (gadget.c:2965-2971, gadget.c:555-570).
+///
+/// Bring-up: `deadline_us` is the init deadline (see `timing::INIT_BUDGET_US`).
 pub fn start_control_endpoints<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
     regs.write32(base + dwc3::depcmdpar0(0), 0);
     regs.write32(
         base + dwc3::depcmd(0),
         dwc3::DEPCMD_DEPSTARTCFG | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, 0)
+    wait_depcmd_until(regs, clock, base, 0, deadline_us)
 }
 
 /// Configures endpoint `ep` of type `ep_type` (control or bulk) with `max_packet` bytes on FIFO `fifo`: the
 /// configuration (SETEPCONFIG), then one transfer resource (SETTRANSFRESOURCE), then the endpoint is enabled in
 /// DALEPENA. The order is the one mainline keeps (gadget.c:925-948, 520-535); a transfer started
-/// before the resource is allocated is not accepted.
+/// before the resource is allocated is not accepted. Each of its two commands is bounded by `deadline_us`: the caller's
+/// phase deadline in a session (R4-B1), the init deadline during bring-up.
+// The register sequence needs each of these: the endpoint, its type, packet size, FIFO and the deadline.
+#[allow(clippy::too_many_arguments)]
 pub fn configure_endpoint<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
@@ -144,6 +136,7 @@ pub fn configure_endpoint<C: Clock>(
     ep_type: u32,
     max_packet: u16,
     fifo: u8,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
     // DWC3_DEPCFG_EP_TYPE (gadget.c:596-597, 639; gadget.h:36-38).
     let par0 = (ep_type << 1) | (u32::from(max_packet) << 3) | (u32::from(fifo) << 17);
@@ -155,14 +148,14 @@ pub fn configure_endpoint<C: Clock>(
         base + dwc3::depcmd(ep),
         dwc3::DEPCMD_SETEPCONFIG | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, ep)?;
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)?;
     // NUM_XFER_RES(1): one transfer resource (gadget.c:520-535).
     regs.write32(base + dwc3::depcmdpar0(ep), 1);
     regs.write32(
         base + dwc3::depcmd(ep),
         dwc3::DEPCMD_SETTRANSFRESOURCE | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, ep)?;
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)?;
     let enabled = regs.read32(base + dwc3::DALEPENA) | (1 << ep);
     regs.write32(base + dwc3::DALEPENA, enabled);
     Ok(())
@@ -176,8 +169,18 @@ pub fn configure_bulk_endpoint<C: Clock>(
     ep: usize,
     max_packet: u16,
     fifo: u8,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
-    configure_endpoint(regs, clock, base, ep, EP_TYPE_BULK, max_packet, fifo)
+    configure_endpoint(
+        regs,
+        clock,
+        base,
+        ep,
+        EP_TYPE_BULK,
+        max_packet,
+        fifo,
+        deadline_us,
+    )
 }
 
 /// Ends the transfer in flight on endpoint `ep` (DEPCMD ENDTRANSFER), as a bus reset requires: the controller drops
@@ -197,18 +200,20 @@ pub fn end_transfer<C: Clock>(
     wait_depcmd_until(regs, clock, base, ep, deadline_us)
 }
 
-/// Stalls endpoint `ep` (DEPCMD SETSTALL; ep0.c:224 restarts the control endpoint after it).
+/// Stalls endpoint `ep` (DEPCMD SETSTALL; ep0.c:224 restarts the control endpoint after it). The command is bounded by
+/// `deadline_us`, the caller's phase deadline.
 pub fn set_stall<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
     ep: usize,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
     regs.write32(
         base + dwc3::depcmd(ep),
         dwc3::DEPCMD_SETSTALL | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, ep)
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)
 }
 
 /// Starts a transfer on endpoint `ep` with the TRB at `trb_addr` (gadget.c:985-990: param0 is the
@@ -228,14 +233,6 @@ pub fn start_transfer<C: Clock>(
         dwc3::DEPCMD_STARTTRANSFER | dwc3::DEPCMD_CMDACT,
     );
     wait_depcmd_until(regs, clock, base, ep, deadline_us)
-}
-
-/// Waits for the controller to hand the TRB back (HWO clear). `owned` reads the TRB's HWO bit.
-pub fn wait_trb<C: Clock>(clock: &mut C, mut owned: impl FnMut() -> bool) -> Result<(), IoFault> {
-    wait_for(clock, IO_WAIT_US, LONGEST_PERIOD_US, || {
-        (!owned()).then_some(())
-    })?;
-    Ok(())
 }
 
 /// The SD card block size.
@@ -395,6 +392,8 @@ pub fn sd_write_block<C: Clock>(
 /// One SD command: writes the argument and the command (opcode, the response and CRC flags, and any
 /// `extra` bits such as the clock update), waits for it to finish, and returns the four response
 /// registers. A clock update (opcode 0, no response) is finished when the start bit clears.
+// The command's opcode, argument, flags, extra bits and the deadline: each is a register field of one command.
+#[allow(clippy::too_many_arguments)]
 pub fn sd_command_response<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
@@ -403,9 +402,8 @@ pub fn sd_command_response<C: Clock>(
     arg: u32,
     flags: u32,
     extra: u32,
+    deadline_us: u64,
 ) -> Result<[u32; 4], IoFault> {
-    // A command has its own one-second bound: the card's setup commands are not the data path's budget.
-    let deadline_us = clock.now_us().saturating_add(IO_WAIT_US);
     regs.write32(base + dw_mmc::CMDARG, arg);
     regs.write32(
         base + dw_mmc::CMD,

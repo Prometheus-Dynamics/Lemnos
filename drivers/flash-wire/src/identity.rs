@@ -34,6 +34,9 @@ pub const REGION_LEN: usize = 9;
 /// The length of this build's record.
 pub const IDENTITY_LEN: usize =
     HEAD_LEN + FAMILY_COUNT * ENTRY_LEN + BUILD_LEN + 1 + MAX_REGIONS * REGION_LEN;
+/// The identify reply is this record, all of it (the stage sends `IDENTITY_LEN` bytes, unused region slots zero): 104 bytes at
+/// this build's six families and four region slots. Pinned at compile time, so a change to any of them is a visible change.
+const _: () = assert!(IDENTITY_LEN == 104);
 
 /// The most family entries a peer's record may carry, which bounds how far a reader looks. Part of the wire: it is
 /// folded into the identity family's hash.

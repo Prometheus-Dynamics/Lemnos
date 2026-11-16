@@ -77,17 +77,27 @@ pub fn sd_init<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
+    deadline_us: u64,
 ) -> Result<Card, InitError> {
-    dw_mmc_reset(regs, clock, base).map_err(|_| InitError::Timeout)?;
+    dw_mmc_reset(regs, clock, base, deadline_us).map_err(|_| InitError::Timeout)?;
     // 1-bit bus and the clock on, then the clock update (dw_mmc.h:366-367, 282, 393).
     regs.write32(base + dw_mmc::CTYPE, 0);
     regs.write32(base + dw_mmc::CLKENA, 1);
-    sd_command_response(regs, clock, base, 0, 0, 0, dw_mmc::CMD_UPD_CLK)?;
+    sd_command_response(regs, clock, base, 0, 0, 0, dw_mmc::CMD_UPD_CLK, deadline_us)?;
 
     // CMD0: go idle (no response).
-    sd_command_response(regs, clock, base, 0, 0, 0, 0)?;
+    sd_command_response(regs, clock, base, 0, 0, 0, 0, deadline_us)?;
     // CMD8: the voltage and the pattern; the card echoes both (R7).
-    let r7 = sd_command_response(regs, clock, base, 8, CMD8_ARG, RESP_EXP | RESP_CRC, 0)?;
+    let r7 = sd_command_response(
+        regs,
+        clock,
+        base,
+        8,
+        CMD8_ARG,
+        RESP_EXP | RESP_CRC,
+        0,
+        deadline_us,
+    )?;
     if r7[0] & 0xFF != 0xAA || (r7[0] >> 8) & 0xF != 1 {
         return Err(InitError::WrongVoltage);
     }
@@ -95,8 +105,26 @@ pub fn sd_init<C: Clock>(
     let mut ocr = 0;
     let mut ready = false;
     for _ in 0..ACMD41_POLLS {
-        sd_command_response(regs, clock, base, 55, 0, RESP_EXP | RESP_CRC, 0)?;
-        ocr = sd_command_response(regs, clock, base, 41, ACMD41_ARG | (1 << 30), RESP_EXP, 0)?[0];
+        sd_command_response(
+            regs,
+            clock,
+            base,
+            55,
+            0,
+            RESP_EXP | RESP_CRC,
+            0,
+            deadline_us,
+        )?;
+        ocr = sd_command_response(
+            regs,
+            clock,
+            base,
+            41,
+            ACMD41_ARG | (1 << 30),
+            RESP_EXP,
+            0,
+            deadline_us,
+        )?[0];
         if ocr & (1 << 31) != 0 {
             ready = true;
             break;
@@ -107,9 +135,18 @@ pub fn sd_init<C: Clock>(
     }
     let high_capacity = ocr & (1 << 30) != 0;
     // CMD2: the CID (R2, long, with CRC).
-    sd_command_response(regs, clock, base, 2, 0, RESP_EXP | RESP_LONG | RESP_CRC, 0)?;
+    sd_command_response(
+        regs,
+        clock,
+        base,
+        2,
+        0,
+        RESP_EXP | RESP_LONG | RESP_CRC,
+        0,
+        deadline_us,
+    )?;
     // CMD3: the relative card address (R6).
-    let r6 = sd_command_response(regs, clock, base, 3, 0, RESP_EXP | RESP_CRC, 0)?;
+    let r6 = sd_command_response(regs, clock, base, 3, 0, RESP_EXP | RESP_CRC, 0, deadline_us)?;
     let rca = (r6[0] >> 16) as u16;
     if rca == 0 {
         return Err(InitError::Protocol);
@@ -123,6 +160,7 @@ pub fn sd_init<C: Clock>(
         u32::from(rca) << 16,
         RESP_EXP | RESP_CRC,
         0,
+        deadline_us,
     )?;
     // ACMD6 with argument 2: 4-bit bus; then the host's width follows (dw_mmc.h:367, dw_mmc.c:1338).
     sd_command_response(
@@ -133,8 +171,9 @@ pub fn sd_init<C: Clock>(
         u32::from(rca) << 16,
         RESP_EXP | RESP_CRC,
         0,
+        deadline_us,
     )?;
-    sd_command_response(regs, clock, base, 6, 2, RESP_EXP | RESP_CRC, 0)?;
+    sd_command_response(regs, clock, base, 6, 2, RESP_EXP | RESP_CRC, 0, deadline_us)?;
     regs.write32(base + dw_mmc::CTYPE, 1);
     Ok(Card { rca, high_capacity })
 }

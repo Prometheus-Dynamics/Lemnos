@@ -22,7 +22,7 @@ use lemnos_flash_stage::usb::{EnumError, Ep0, UsbError};
 use lemnos_flash_stage::wait::{Clock, WaitError};
 use lemnos_flash_wire::frame::ResetKind;
 use lemnos_flash_wire::identity::{IDENTITY_LEN, identity_record};
-use lemnos_flash_wire::timing::SESSION_BUDGET_US;
+use lemnos_flash_wire::timing::{INIT_BUDGET_US, SESSION_BUDGET_US};
 
 /// The stage's build id: the decimal value of `LEMNOS_ROCKCHIP_STAGE_BUILD_ID` when the build sets it, zero
 /// when it does not (zero means unset). The bench builder sets it from the image's inputs.
@@ -114,10 +114,14 @@ pub fn session<C: Clock, M: DmaMem + EventMem>(
     let armed_at_us = clock.now_us();
     // The entry contract's first step: arm, read the arming back, lower the period. Nothing else runs first.
     start(&mut Dog { regs }, SESSION_BUDGET_US).map_err(Stop::Start)?;
-    dwc3_start_device(regs, clock, DWC3).map_err(|e| Stop::Dwc3(wait_error(e)))?;
-    let card = sd_init(regs, clock, SDMMC0).map_err(Stop::SdHost)?;
+    // Every bring-up wait takes the init deadline: the device is visible no later than `INIT_BUDGET_US` after the arm
+    // (timing.rs, "The stage's init budget").
+    let init_deadline_us = armed_at_us.saturating_add(INIT_BUDGET_US);
+    dwc3_start_device(regs, clock, DWC3, init_deadline_us)
+        .map_err(|e| Stop::Dwc3(wait_error(e)))?;
+    let card = sd_init(regs, clock, SDMMC0, init_deadline_us).map_err(Stop::SdHost)?;
     let bus = Bus::new(regs, clock);
-    let mut dev = Dwc3Dev::start(&bus, dma, DWC3).map_err(Stop::Dwc3)?;
+    let mut dev = Dwc3Dev::start(&bus, dma, DWC3, init_deadline_us).map_err(Stop::Dwc3)?;
     Dwc3Dev::<C, M>::run(&bus, DWC3);
     let mut storage = SdStorage::new(&bus, SDMMC0, card);
     let mut wdt = WdtFeed::new(&bus);

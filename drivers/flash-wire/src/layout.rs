@@ -24,8 +24,9 @@ use crate::hash::{OFFSET, bytes, text, word};
 use crate::identity::{IDENTITY_MAGIC, MAX_PEER_ENTRIES};
 use crate::region::MAX_REGIONS;
 use crate::timing::{
-    FEED_TO_FEED_US, HOST_BULK_TIMEOUT_US, IDLE_LIMIT_US, REFERENCE_WATCHDOG_PERIOD_US,
-    REPLY_READ_BOUND_US, ROUND_BUDGET_US, ROUND_PHASES, TRANSFER_BUDGET_US, WRITE_TO_FEED_PHASES,
+    FEED_TO_FEED_US, FIRST_REQUEST_WINDOW_US, HOST_BULK_TIMEOUT_US, IDLE_LIMIT_US, INIT_BUDGET_US,
+    REFERENCE_WATCHDOG_PERIOD_US, REPLY_MARGIN_US, REPLY_PICKUP_US, REPLY_READ_BOUND_US,
+    ROUND_BUDGET_US, ROUND_PHASES, TRANSFER_BUDGET_US, WRITE_TO_FEED_PHASES,
 };
 use crate::usb::{
     BULK_IN, BULK_MAX_PACKET, BULK_OUT, CONFIGURATION_VALUE, EP0_MAX_PACKET, INTERFACE_CLASS,
@@ -128,6 +129,10 @@ const fn frame_hash() -> u64 {
     );
     h = word(text(h, "host_bulk_timeout_us"), HOST_BULK_TIMEOUT_US);
     h = word(text(h, "reply_read_bound_us"), REPLY_READ_BOUND_US);
+    h = word(text(h, "init_budget_us"), INIT_BUDGET_US);
+    h = word(text(h, "first_request_window_us"), FIRST_REQUEST_WINDOW_US);
+    h = word(text(h, "reply_pickup_us"), REPLY_PICKUP_US);
+    h = word(text(h, "reply_margin_us"), REPLY_MARGIN_US);
     h
 }
 
@@ -239,10 +244,10 @@ mod tests {
     // The values this build computes. A layout change moves them: change them in the same commit as the
     // layout, and say so in the README's table of hashes. Each was recomputed outside this crate by an
     // independent FNV walk over the same bytes (see the README).
-    const PINNED_WIRE_HASH: u64 = 0x7FEB_E907_98A3_0EBD;
-    const PINNED_WIRE_SHORT: u16 = 242;
+    const PINNED_WIRE_HASH: u64 = 0x388C_046F_D3C1_8ACC;
+    const PINNED_WIRE_SHORT: u16 = 26094;
     const PINNED_FAMILY_HASHES: [u64; FAMILY_COUNT] = [
-        0x7897_7FF4_E1FE_C3CF,
+        0xA356_9A85_460E_5672,
         0xC170_D815_DF17_757F,
         0xE2B5_4BEB_21DA_BF76,
         0x40FE_F3FE_A154_445F,

@@ -130,7 +130,7 @@ mod tests {
     use crate::region::Class;
     use crate::serve::BUFFER_LEN;
     use crate::sim::Card;
-    use crate::sim::model::{Action, Model, SimClock};
+    use crate::sim::model::{Action, Costs, Model, SimClock};
     use crate::usb::Event;
     use lemnos_flash_wire::frame::{MAX_CHUNK, Request, ResetKind, SECTOR, payload_crc};
     use lemnos_flash_wire::identity::identity_record;
@@ -612,7 +612,7 @@ mod tests {
         let mut script = Model::new();
         script
             .enumeration(7)
-            .gap(29_993)
+            .gap(29_990)
             .event(Model::setup(0x80, 0, 0, 0, 2))
             .frame(identify());
         let r = session(script);
@@ -666,6 +666,121 @@ mod tests {
             r.host.bulk_in.len(),
             1,
             "the identify inside the window is answered"
+        );
+        assert_eq!(r.result, Err(SessionStop::Serve(ServeError::Idle)));
+        assert_eq!(r.at, 30 * SECOND);
+    }
+
+    /// A control operation that costs two seconds, against a deadline at 30 s.
+    fn slow_control() -> Costs {
+        Costs {
+            control_us: 2 * SECOND,
+            configure_us: 2 * SECOND,
+            stall_us: 2 * SECOND,
+            address_us: 2 * SECOND,
+        }
+    }
+
+    #[test]
+    fn a_control_request_started_before_the_deadline_that_runs_past_it_is_a_timeout_and_the_frame_behind_it_is_not_accepted()
+     {
+        // R4-B1: the GET_STATUS starts at about 29.906 s, and its first packet costs 2 s. It cannot finish by 30 s, so it
+        // is a timeout at 30 s; the identify behind it is never taken, and the session ends idle.
+        let mut script = Model::new();
+        script
+            .enumeration(7)
+            .costs(slow_control())
+            .gap(29_900)
+            .event(Model::setup(0x80, 0, 0, 0, 2))
+            .frame(identify());
+        let r = session(script);
+        assert_eq!(
+            r.result,
+            Err(SessionStop::Serve(ServeError::Idle)),
+            "the session ends idle"
+        );
+        assert_eq!(
+            r.at,
+            30 * SECOND,
+            "the control request is charged to the deadline and no further"
+        );
+        assert!(
+            r.host.bulk_in.is_empty(),
+            "no frame is accepted after the deadline"
+        );
+        assert!(
+            r.host.frame_pending(),
+            "the identify was never taken from the controller"
+        );
+        assert_eq!(r.feeds, 0);
+    }
+
+    #[test]
+    fn a_set_configuration_that_runs_past_the_deadline_is_not_completed_and_the_session_ends_idle()
+    {
+        // R4-B1: the configuration command costs 2 s and starts at about 29.906 s. It is not completed (no Configured
+        // entry after the enumeration's), and the session ends idle at 30 s.
+        let mut script = Model::new();
+        script
+            .enumeration(7)
+            .costs(slow_control())
+            .gap(29_900)
+            .event(Model::setup(0x00, 9, 1, 0, 0))
+            .frame(identify());
+        let r = session(script);
+        assert_eq!(r.result, Err(SessionStop::Serve(ServeError::Idle)));
+        assert_eq!(r.at, 30 * SECOND);
+        assert_eq!(
+            configurations(&r.host),
+            1,
+            "only the enumeration's configuration was made"
+        );
+        assert!(r.host.bulk_in.is_empty());
+        assert!(r.host.frame_pending());
+    }
+
+    #[test]
+    fn an_unsupported_request_whose_stall_runs_past_the_deadline_ends_the_session_idle() {
+        // R4-B1: the stall costs 2 s. It starts at about 29.906 s, cannot finish by 30 s, and the identify behind it is
+        // not taken.
+        let mut script = Model::new();
+        script
+            .enumeration(7)
+            .costs(slow_control())
+            .gap(29_900)
+            .event(Model::setup(0xC0, 1, 0, 0, 16))
+            .frame(identify());
+        let r = session(script);
+        assert_eq!(r.result, Err(SessionStop::Serve(ServeError::Idle)));
+        assert_eq!(r.at, 30 * SECOND);
+        assert!(
+            !r.host.log.contains(&Action::Stall),
+            "the stall did not complete"
+        );
+        assert!(r.host.bulk_in.is_empty());
+        assert!(r.host.frame_pending());
+    }
+
+    #[test]
+    fn a_slow_control_request_that_finishes_before_the_deadline_does_not_reject_the_frame_behind_it()
+     {
+        // Each control operation costs 100 ms. The GET_STATUS starts at 29.006 s and finishes by about 29.21 s, so the
+        // identify behind it completed before the deadline and is accepted.
+        let mut script = Model::new();
+        script
+            .enumeration(7)
+            .costs(Costs {
+                control_us: SECOND / 10,
+                ..Costs::default()
+            })
+            .gap(29_000)
+            .event(Model::setup(0x80, 0, 0, 0, 2))
+            .frame(identify());
+        let r = session(script);
+        assert_eq!(
+            r.host.bulk_in.len(),
+            1,
+            "the identify behind a control request that finished in time is served"
         );
         assert_eq!(r.result, Err(SessionStop::Serve(ServeError::Idle)));
         assert_eq!(r.at, 30 * SECOND);

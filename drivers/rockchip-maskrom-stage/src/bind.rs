@@ -83,17 +83,17 @@ pub trait RegAccess {
     fn write32(&mut self, addr: usize, value: u32);
 }
 
-/// The budget of one bounded register wait, in microseconds. Well below the watchdog's period.
-pub const REG_WAIT_US: u64 = 1_000_000;
-
 /// Waits until the bits in `mask` at `addr` are clear, or the budget runs out.
 fn wait_clear<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     addr: usize,
     mask: u32,
+    deadline_us: u64,
 ) -> Result<(), WaitError> {
-    wait_for(clock, REG_WAIT_US, LONGEST_PERIOD_US, || {
+    let budget =
+        crate::io::until(clock, deadline_us).map_err(|_| WaitError::Timeout { budget_us: 0 })?;
+    wait_for(clock, budget, LONGEST_PERIOD_US, || {
         (regs.read32(addr) & mask == 0).then_some(())
     })
 }
@@ -105,16 +105,17 @@ pub fn dwc3_start_device<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
+    deadline_us: u64,
 ) -> Result<(), WaitError> {
     let gctl = base + dwc3::GCTL;
     let dctl = base + dwc3::DCTL;
     let value = regs.read32(gctl);
     regs.write32(gctl, value | dwc3::GCTL_CORESOFTRESET);
-    wait_clear(regs, clock, gctl, dwc3::GCTL_CORESOFTRESET)?;
+    wait_clear(regs, clock, gctl, dwc3::GCTL_CORESOFTRESET, deadline_us)?;
 
     let value = regs.read32(dctl);
     regs.write32(dctl, value | dwc3::DCTL_CSFTRST);
-    wait_clear(regs, clock, dctl, dwc3::DCTL_CSFTRST)?;
+    wait_clear(regs, clock, dctl, dwc3::DCTL_CSFTRST, deadline_us)?;
 
     Ok(())
 }
@@ -125,15 +126,16 @@ pub fn dw_mmc_reset<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
+    deadline_us: u64,
 ) -> Result<(), WaitError> {
     let ctrl = base + dw_mmc::CTRL;
     let value = regs.read32(ctrl);
     regs.write32(ctrl, value | dw_mmc::CTRL_RESET);
-    wait_clear(regs, clock, ctrl, dw_mmc::CTRL_RESET)?;
+    wait_clear(regs, clock, ctrl, dw_mmc::CTRL_RESET, deadline_us)?;
 
     let value = regs.read32(ctrl);
     regs.write32(ctrl, value | dw_mmc::CTRL_FIFO_RESET);
-    wait_clear(regs, clock, ctrl, dw_mmc::CTRL_FIFO_RESET)
+    wait_clear(regs, clock, ctrl, dw_mmc::CTRL_FIFO_RESET, deadline_us)
 }
 
 #[cfg(test)]
@@ -222,7 +224,7 @@ mod tests {
             ..Regs::default()
         };
         let mut clock = Ticking(0);
-        dwc3_start_device(&mut regs, &mut clock, BASE).unwrap();
+        dwc3_start_device(&mut regs, &mut clock, BASE, 1_000_000).unwrap();
         // The core and device resets only: the run bit is set by the device side, last, not here.
         assert_eq!(regs.values[&(BASE + dwc3::DCTL)] & dwc3::DCTL_RUN_STOP, 0);
         let order: Vec<usize> = regs.writes.iter().map(|(addr, _)| *addr).collect();
@@ -236,7 +238,7 @@ mod tests {
             ..Regs::default()
         };
         let mut clock = Ticking(0);
-        let result = dwc3_start_device(&mut regs, &mut clock, BASE);
+        let result = dwc3_start_device(&mut regs, &mut clock, BASE, 1_000_000);
         assert!(
             matches!(result, Err(WaitError::Timeout { .. })),
             "{result:?}"
@@ -259,7 +261,7 @@ mod tests {
             ..Regs::default()
         };
         let mut clock = Ticking(0);
-        dw_mmc_reset(&mut regs, &mut clock, BASE).unwrap();
+        dw_mmc_reset(&mut regs, &mut clock, BASE, 1_000_000).unwrap();
         let writes: Vec<u32> = regs.writes.iter().map(|(_, value)| *value).collect();
         assert_eq!(writes[0] & dw_mmc::CTRL_RESET, dw_mmc::CTRL_RESET);
         assert_eq!(writes[1] & dw_mmc::CTRL_FIFO_RESET, dw_mmc::CTRL_FIFO_RESET);
@@ -273,7 +275,7 @@ mod tests {
         };
         let mut clock = Ticking(0);
         assert!(matches!(
-            dw_mmc_reset(&mut regs, &mut clock, BASE),
+            dw_mmc_reset(&mut regs, &mut clock, BASE, 1_000_000),
             Err(WaitError::Timeout { .. })
         ));
     }

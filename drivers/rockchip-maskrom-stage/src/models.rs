@@ -348,15 +348,15 @@ impl RegAccess for DwcEndpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::IO_WAIT_US;
     use crate::io::{
-        IoFault, Trb, configure_bulk_endpoint, sd_read_block, sd_write_block, start_transfer,
-        wait_trb,
+        IoFault, configure_bulk_endpoint, sd_read_block, sd_write_block, start_transfer,
     };
     use crate::sd::{Card, InitError, sd_init};
     use lemnos_flash_stage::wait::IterClock;
 
     const SD: usize = 0xfe2b_0000;
+    /// One second: the bound the tests give a single wait.
+    const IO_WAIT_US: u64 = 1_000_000;
 
     /// A block's deadline: one bounded wait from now, the same bound the block had before storage budgets existed.
     fn until_in(clock: &mut IterClock) -> u64 {
@@ -475,11 +475,12 @@ mod tests {
         dwc.stuck = vec![2];
         let mut clock = IterClock::new();
         assert_eq!(
-            configure_bulk_endpoint(&mut dwc, &mut clock, DWC, 2, 512, 1),
+            configure_bulk_endpoint(&mut dwc, &mut clock, DWC, 2, 512, 1, 1_000_000),
             Err(IoFault::Timeout)
         );
         assert_eq!(
-            configure_bulk_endpoint(&mut dwc, &mut clock, DWC, 3, 512, 1),
+            // The stuck command used the first second, so the clean one has its own second after it.
+            configure_bulk_endpoint(&mut dwc, &mut clock, DWC, 3, 512, 1, 2_000_000),
             Ok(())
         );
         assert_eq!(dwc.dalepena & (1 << 3), 1 << 3, "endpoint 3 enabled");
@@ -505,19 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn a_trb_the_controller_never_releases_times_out() {
-        let mut clock = IterClock::new();
-        let trb = Trb::normal(0x8000_0000, 512);
-        assert!(trb.owned_by_controller());
-        assert_eq!(wait_trb(&mut clock, || true), Err(IoFault::Timeout));
-        assert_eq!(wait_trb(&mut clock, || false), Ok(()));
-    }
-
-    #[test]
     fn the_identification_sequence_brings_a_card_to_transfer_state_in_4_bit() {
         let mut card = card_with(8);
         let mut clock = IterClock::new();
-        let got = sd_init(&mut card, &mut clock, SD).unwrap();
+        let got = sd_init(&mut card, &mut clock, SD, 1_000_000).unwrap();
         assert_eq!(
             got,
             Card {
@@ -539,7 +531,7 @@ mod tests {
         card.absent = true;
         let mut clock = IterClock::new();
         assert_eq!(
-            sd_init(&mut card, &mut clock, SD),
+            sd_init(&mut card, &mut clock, SD, 1_000_000),
             Err(InitError::NoResponse)
         );
     }
@@ -550,7 +542,7 @@ mod tests {
         card.wrong_voltage = true;
         let mut clock = IterClock::new();
         assert_eq!(
-            sd_init(&mut card, &mut clock, SD),
+            sd_init(&mut card, &mut clock, SD, 1_000_000),
             Err(InitError::WrongVoltage)
         );
     }
@@ -561,7 +553,7 @@ mod tests {
         card.never_ready = true;
         let mut clock = IterClock::new();
         assert_eq!(
-            sd_init(&mut card, &mut clock, SD),
+            sd_init(&mut card, &mut clock, SD, 1_000_000),
             Err(InitError::NeverReady)
         );
         let polls = card.opcodes.iter().filter(|op| **op == 41).count();
@@ -578,7 +570,7 @@ mod tests {
         card.crc_on = Some(8);
         let mut clock = IterClock::new();
         assert_eq!(
-            sd_init(&mut card, &mut clock, SD),
+            sd_init(&mut card, &mut clock, SD, 1_000_000),
             Err(InitError::ResponseCrc)
         );
     }
@@ -593,6 +585,9 @@ mod tests {
             fn write32(&mut self, _addr: usize, _value: u32) {}
         }
         let mut clock = IterClock::new();
-        assert_eq!(sd_init(&mut Stuck, &mut clock, SD), Err(InitError::Timeout));
+        assert_eq!(
+            sd_init(&mut Stuck, &mut clock, SD, 1_000_000),
+            Err(InitError::Timeout)
+        );
     }
 }

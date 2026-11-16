@@ -70,7 +70,9 @@ A write may leave part of its range written, and nothing outside the range is to
 
 - **Status 2 (storage)**: the storage call failed, or ran past its budget, or the read-back of the write failed in storage.
   Sectors that were written before the failure stay written; the rest are not. A write cut off by its deadline is the
-  same case: the sectors that fit the budget are written, the others are not (sim test
+  same case: the sectors that fit the budget are written, the others are not. The simulated card decides whether each
+  sector fits before it writes it, so a sector torn in the middle cannot appear in the simulation; a real card can tear
+  one, and the read-back is what shows it (sim test
   `a_write_cut_off_by_its_deadline_is_status_two_with_part_of_the_range_written_and_nothing_outside_it`).
 - **Status 3 (verify)**: the read-back succeeded and differs from the payload. The range may be partly written.
 
@@ -129,6 +131,11 @@ same enumeration over its own USB stack. The frame-level `sim::Transport` is wha
   deadline (the frame behind it is still served), a request armed one second before the deadline whose command takes one
   second (not accepted) and half a second (accepted), a slow card (status 2), and a write cut off by its budget (status 2,
   part written).
+  Rev 5 (R4-B1): a GET_STATUS, a SET_CONFIGURATION and an unsupported request (a stall) that start before the deadline and run
+  past it with slow controller commands (`Costs`) are timeouts at the deadline, with nothing completed and no frame taken
+  behind them (`a_control_request_started_before_the_deadline_that_runs_past_it_...`,
+  `a_set_configuration_that_runs_past_the_deadline_...`, `an_unsupported_request_whose_stall_runs_past_the_deadline_...`);
+  a slow control request that finishes in time does not reject the frame behind it.
 
 ## What a chip's stage must still show on its own
 
@@ -147,22 +154,77 @@ same enumeration over its own USB stack. The frame-level `sim::Transport` is wha
 - Its `Report` (or the no-op, with the reason).
 - Board runs. Nothing in this crate has run on a board.
 
+## Waits and deadlines
+
+Every wait in the stage, with the deadline it takes. Rule R4-B1: nothing a session phase calls may wait past the phase's
+deadline, and no fixed wait is reachable under a session phase. The table is the audit; a new wait must be added to it.
+
+| Wait (where) | Deadline it takes | Phase |
+|---|---|---|
+| `session::run`, idle limit | `last feed + IDLE_LIMIT_US`, or the arm for the first | session |
+| `usb::BulkLink::recv` (receive) | `now + budget` at entry, the chunk's `TRANSFER_BUDGET_US` | receive |
+| `usb::BulkLink::recv` → `Controller::bulk_arm`, `bulk_poll`, `poll` | that receive deadline | receive |
+| `usb::Ep0::handle` (every control reply, stall, SET_ADDRESS, SET_CONFIGURATION) | the receive deadline of the phase that got the SETUP | receive |
+| `usb::enumerate` (the enumeration's own wait and its controller commands) | the session's idle deadline | enumeration |
+| `chunk::write_round` storage write and read-back, `chunk::read_round` storage read | `TRANSFER_BUDGET_US` at the call (`Storage` budget) | storage |
+| `chunk::write_round`, `chunk::read_round`, `serve` status sends (`link.send`) | `TRANSFER_BUDGET_US` at the call | send |
+| `wait::wait_for` (every bounded poll) | the budget or deadline its caller passes; a budget at or above the longest period is refused | any |
+| Rockchip `Dwc3Dev::poll` → `arm_setup` (SETUP re-arm) | the poll's deadline | receive |
+| Rockchip `Dwc3Dev::poll` → USBRST `end_transfer` (BULK_OUT, BULK_IN) | the poll's deadline | bus reset |
+| Rockchip `Dwc3Dev::bulk_arm` → `issue` → `start_transfer` | the arm's deadline (the receive's) | receive |
+| Rockchip `Dwc3Dev::await_trb` (control data, control status, bulk IN) | the caller's deadline (control) or the send's phase deadline (bulk IN) | control / send |
+| Rockchip `Dwc3Dev::control_in`, `status` (`ep0_in`, `ep0_in_status`, `ep0_out_status`) | the deadline the caller passes (the receive's) | control |
+| Rockchip `Dwc3Dev::ep0_stall` → `set_stall` ×2 | the deadline the caller passes | control |
+| Rockchip `Dwc3Dev::set_configured(true)` → `configure_endpoint` ×2 (BULK_OUT, BULK_IN) | the deadline the caller passes | control |
+| Rockchip `Dwc3Dev::bulk_send` (`phase_deadline(budget)`) | the send's own budget, from the call | send |
+| Rockchip `SdStorage::write` / `read` → `sd_write_block` / `sd_read_block` → `wait_not_busy`, `wait_int` | the storage budget, from the call (`dwc3link.rs`) | storage |
+| Rockchip `end_transfer` (USBRST) and `wait_depcmd_until` | as their callers pass | bus reset |
+| **Init, pre-visibility (after the arm, before the device runs):** `dwc3_start_device` (`wait_clear` ×2) | `arm + INIT_BUDGET_US` (`entry472::session`) | init |
+| Init: `sd_init` → `dw_mmc_reset` (`wait_clear` ×2) and every `sd_command_response` | the same init deadline | init |
+| Init: `Dwc3Dev::start` → `start_control_endpoints`, `configure_endpoint` ×2 (EP0) | the same init deadline | init |
+| `guard::start` (arm, read-back, period) | no wait: it is an instant read and a register write | pre-arm |
+
+**Constants that bound a wait and are not timeouts:** `LONGEST_PERIOD_US` (`wdt.rs`) is the longest period the
+`wait_for` poll accepts, not a deadline. `HOST_BULK_TIMEOUT_US` is the host's bound, not a stage wait.
+
+**Removed in this revision:** `io::IO_WAIT_US` (the fixed 1 s command wait), `io::wait_trb` (no caller outside its test),
+`bind::REG_WAIT_US` (the fixed 1 s register wait), and the endpoint helper's own 1 s wait. Each is now the caller's deadline.
+
+**The fixed-wait check.** `grep -n "IO_WAIT\|REG_WAIT\|wait_trb\|now_us().saturating_add\|phase_deadline(" drivers/*/src/*.rs`
+shows only the init deadline, the phase budgets at a call (`phase_deadline` in `bulk_send` and `SdStorage`), and the
+`wait_for` period bound. No control transfer or endpoint command takes a fresh deadline.
+
+**Sim costs.** `sim::model::Costs` charges time to each controller operation against the deadline it is given: control
+data and status (`control_us`), endpoint configuration (`configure_us`), stall (`stall_us`), SET_ADDRESS (`address_us`) and
+the bulk arm (`command_us`). A cost past the deadline advances the clock to it and is a timeout. The trait has no
+end-transfer operation: the Rockchip controller ends its bulk transfers inside its own bus-reset handling, so the simulation
+has no equivalent cost. `Step::Costs` changes the costs part-way through a script.
+
 ## API changes in this revision
 
-Every change a caller of the stage sees, so a chip's stage and the host's code can be checked against it:
+Every change a caller of the stage sees, rev 4 and rev 5 together, so a chip's stage and the host's code can be checked
+against it:
 
-- `session::Setup` gains `armed_at_us`: the instant the watchdog was armed, on the session's clock. The first idle deadline
-  counts from it.
-- `guard::Watchdog::feed_at(now_us)` is new (default: `feed`). The session records the instant of each feed through it.
-- `usb::Controller::poll(deadline_us)` and `Controller::bulk_arm(len, deadline_us)` take a deadline. Every controller
-  command runs inside it.
-- `Controller::speed()` and `Controller::address_before_status()` are required: the speed decides high speed, and the
-  address order is the controller's bench check.
-- `usb::enumerate(ctrl, clock, ep0, deadline_us)` takes the deadline; `enumerate_from_now` is the helper that starts it at
-  the clock's reading. `EnumError::NotHighSpeed` is new.
-- `serve::ServeError::Idle` is new: the distinct idle outcome, separate from a link timeout.
-- `region::decide(regions, lba, count, card, image)` returns `Result<Decision, DecideError>`. `DecideError::Length` and
-  `DecideError::Straddle` are checked in every build; a caller that gets either must stop, not write.
-- `lemnos-rockchip-maskrom-stage` (the chip's own stage, not this crate): `io::start_transfer`, `io::end_transfer`,
-  `io::sd_read_block` and `io::sd_write_block` take a deadline, and `io::until` is public.
-
+- `session::Setup` gains `armed_at_us` (rev 4): the instant the watchdog was armed, on the session's clock.
+- `guard::Watchdog::feed_at(now_us)` (rev 4): new, with a default of `feed`. The session records each feed through it.
+- `usb::Controller` (rev 5): every waiting method takes the caller's `deadline_us` and returns `UsbError::Timeout` if it cannot
+  finish by it. Changed: `set_address(address, deadline_us)`, `set_configured(on, deadline_us)`, `ep0_in(data, deadline_us)`,
+  `ep0_in_status(deadline_us)`, `ep0_out_status(deadline_us)`, `ep0_stall(deadline_us)` (now returns `Result`).
+  `poll(deadline_us)` and `bulk_arm(len, deadline_us)` (rev 4) take the deadline too.
+- `usb::Ep0::handle(ctrl, bytes, deadline_us)` (rev 5): takes the phase deadline; `data_in` takes it too.
+- `usb::BulkLink::recv` (rev 5): a frame is accepted only if its observed completion is at or before the deadline; the
+  completion is observed at the take, and that instant is compared.
+- `usb::enumerate(ctrl, clock, ep0, deadline_us)` (rev 4) takes the deadline; a control command that times out there is
+  `EnumError::NotConfigured`. `enumerate_from_now` starts one at the clock's reading (sim and tests only).
+- `serve::ServeError::Idle` (rev 4): the distinct idle outcome, separate from a link timeout.
+- `region::decide(regions, lba, count, card, image)` (rev 4) returns `Result<Decision, DecideError>`; `Length` and
+  `Straddle` are checked in every build.
+- Storage budget (rev 3, stated here): each storage call takes `TRANSFER_BUDGET_US` for the whole call, not per block.
+- Status 5 for a boundary (rev 3): a chunk that crosses a region boundary is refused with status 5, not 4.
+- Wire constants (rev 4 and 5): `REPLY_READ_BOUND_US` (18.5 s, derived from the request's send), `INIT_BUDGET_US` (10 s),
+  `FIRST_REQUEST_WINDOW_US` (20 s), `REPLY_PICKUP_US`, `REPLY_MARGIN_US`. All are in the frame hash.
+- Rockchip stage (`lemnos-rockchip-maskrom-stage`, not a consumer crate): `io::configure_endpoint`, `io::configure_bulk_endpoint`,
+  `io::set_stall`, `io::start_control_endpoints` take a deadline; `io::start_transfer`, `io::end_transfer`,
+  `io::sd_read_block`, `io::sd_write_block`, `io::sd_command_response` take a deadline; `io::until` is public.
+  `bind::dwc3_start_device`, `bind::dw_mmc_reset`, `sd::sd_init` and `usb::Dwc3Dev::start` take the init deadline.
+  Removed: `io::IO_WAIT_US`, `io::wait_trb`, `bind::REG_WAIT_US`.

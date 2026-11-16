@@ -53,6 +53,8 @@ pub enum Step {
     Frame(Vec<u8>),
     /// A pause: the next `n` receive polls find nothing. Each poll is a turn of the wait, so the clock moves on.
     Gap(u64),
+    /// Changes what the controller operations cost, from this point of the script on.
+    Costs(Costs),
 }
 
 /// What the device side did to the controller, in order.
@@ -64,6 +66,21 @@ pub enum Action {
     Stall,
     Address(u8),
     Configured(bool),
+}
+
+/// What each controller operation costs on the simulated clock, in microseconds. Every operation charges its cost against
+/// the deadline it is given: a cost that runs past the deadline advances the clock to the deadline and is a timeout, and
+/// the operation does not complete. The default is free, so a test sets the costs it means to exercise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Costs {
+    /// One control data packet or status stage on EP0.
+    pub control_us: u64,
+    /// Enabling or disabling the bulk pair (the endpoint configuration commands).
+    pub configure_us: u64,
+    /// Stalling the control endpoint.
+    pub stall_us: u64,
+    /// Setting the device address.
+    pub address_us: u64,
 }
 
 /// The scripted controller.
@@ -81,6 +98,8 @@ pub struct Model {
     clock: Option<SimClock>,
     /// How long a bulk arm takes. A command that would not finish by its deadline times out at the deadline.
     command_us: u64,
+    /// What the other controller operations cost.
+    costs: Costs,
     armed: Option<usize>,
 }
 
@@ -102,6 +121,32 @@ impl Model {
         self
     }
 
+    /// Sets what the control operations cost (see [`Costs`]).
+    pub fn with_costs(mut self, costs: Costs) -> Self {
+        self.costs = costs;
+        self
+    }
+
+    /// Charges `us` against `deadline_us` on the attached clock. An operation that cannot finish by the deadline advances
+    /// the clock to it and is a timeout; one that can finish advances the clock by its cost. Without a clock nothing is
+    /// charged and the operation completes.
+    fn charge(&mut self, us: u64, deadline_us: u64) -> Result<(), UsbError> {
+        let Some(clock) = self.clock.clone() else {
+            return Ok(());
+        };
+        let now = clock.now();
+        if now >= deadline_us {
+            return Err(UsbError::Timeout);
+        }
+        let remaining = deadline_us - now;
+        if us > remaining {
+            clock.advance(remaining);
+            return Err(UsbError::Timeout);
+        }
+        clock.advance(us);
+        Ok(())
+    }
+
     /// Queues a control event.
     pub fn event(&mut self, event: Event) -> &mut Self {
         self.script.push_back(Step::Event(event));
@@ -112,6 +157,20 @@ impl Model {
     pub fn frame(&mut self, frame: Vec<u8>) -> &mut Self {
         self.script.push_back(Step::Frame(frame));
         self
+    }
+
+    /// Queues a change of the operation costs, taking effect when the script reaches it.
+    pub fn costs(&mut self, costs: Costs) -> &mut Self {
+        self.script.push_back(Step::Costs(costs));
+        self
+    }
+
+    /// Applies any cost changes at the front of the script.
+    fn apply_costs(&mut self) {
+        while let Some(Step::Costs(costs)) = self.script.front() {
+            self.costs = *costs;
+            self.script.pop_front();
+        }
     }
 
     /// Queues a pause of `polls` receive turns.
@@ -162,6 +221,7 @@ const SET: u8 = 0x00;
 
 impl Controller for Model {
     fn poll(&mut self, _deadline_us: u64) -> Event {
+        self.apply_costs();
         if let Some(clock) = &self.clock {
             clock.advance(PASS_US);
         }
@@ -174,7 +234,8 @@ impl Controller for Model {
         }
     }
 
-    fn set_address(&mut self, address: u8) -> Result<(), UsbError> {
+    fn set_address(&mut self, address: u8, deadline_us: u64) -> Result<(), UsbError> {
+        self.charge(self.costs.address_us, deadline_us)?;
         self.log.push(Action::Address(address));
         Ok(())
     }
@@ -188,53 +249,49 @@ impl Controller for Model {
         true
     }
 
-    fn set_configured(&mut self, on: bool) -> Result<(), UsbError> {
+    fn set_configured(&mut self, on: bool, deadline_us: u64) -> Result<(), UsbError> {
+        self.charge(self.costs.configure_us, deadline_us)?;
         self.log.push(Action::Configured(on));
         Ok(())
     }
 
-    fn ep0_in(&mut self, data: &[u8]) -> Result<(), UsbError> {
+    fn ep0_in(&mut self, data: &[u8], deadline_us: u64) -> Result<(), UsbError> {
         assert!(
             data.len() <= usize::from(EP0_MAX_PACKET),
             "a control packet is at most one max packet"
         );
+        self.charge(self.costs.control_us, deadline_us)?;
         self.log.push(Action::Data(data.to_vec()));
         Ok(())
     }
 
-    fn ep0_in_status(&mut self) -> Result<(), UsbError> {
+    fn ep0_in_status(&mut self, deadline_us: u64) -> Result<(), UsbError> {
+        self.charge(self.costs.control_us, deadline_us)?;
         self.log.push(Action::StatusIn);
         Ok(())
     }
 
-    fn ep0_out_status(&mut self) -> Result<(), UsbError> {
+    fn ep0_out_status(&mut self, deadline_us: u64) -> Result<(), UsbError> {
+        self.charge(self.costs.control_us, deadline_us)?;
         self.log.push(Action::StatusOut);
         Ok(())
     }
 
-    fn ep0_stall(&mut self) {
+    fn ep0_stall(&mut self, deadline_us: u64) -> Result<(), UsbError> {
+        self.charge(self.costs.stall_us, deadline_us)?;
         self.log.push(Action::Stall);
+        Ok(())
     }
 
     fn bulk_arm(&mut self, len: usize, deadline_us: u64) -> Result<(), UsbError> {
-        if let Some(clock) = &self.clock {
-            let now = clock.now();
-            if now >= deadline_us {
-                return Err(UsbError::Timeout);
-            }
-            let remaining = deadline_us - now;
-            if self.command_us > remaining {
-                // The command runs into the deadline: the phase ends there, and the arm did not complete.
-                clock.advance(remaining);
-                return Err(UsbError::Timeout);
-            }
-            clock.advance(self.command_us);
-        }
+        self.apply_costs();
+        self.charge(self.command_us, deadline_us)?;
         self.armed = Some(len);
         Ok(())
     }
 
     fn bulk_poll(&mut self, out: &mut [u8]) -> Result<Option<usize>, UsbError> {
+        self.apply_costs();
         let Some(len) = self.armed else {
             return Err(UsbError::Failed);
         };

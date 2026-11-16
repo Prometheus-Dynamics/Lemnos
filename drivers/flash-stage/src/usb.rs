@@ -55,24 +55,26 @@ pub enum UsbError {
     Reset,
 }
 
-/// The device controller, as the device side uses it. Every method that waits is bounded (the controller
-/// uses its own clock); none of them spins without a deadline.
+/// The device controller, as the device side uses it. Every method that waits takes the deadline of the phase that
+/// calls it, and returns [`UsbError::Timeout`] if it cannot finish by that deadline. None of them takes a deadline of
+/// its own, and none waits on a fixed budget (ruling R4-B1: nothing a phase calls may wait past the phase's deadline).
 pub trait Controller {
     /// The next event, without waiting for one. `deadline_us` bounds any command the controller issues to produce the
     /// event (the setup arm): a command that cannot finish by it is not issued to completion, and the event is `None`.
     fn poll(&mut self, deadline_us: u64) -> Event;
     /// Sets the device's address. Called before the status stage of SET_ADDRESS, as the host expects.
-    fn set_address(&mut self, address: u8) -> Result<(), UsbError>;
-    /// Enables the bulk pair when `on` (the configuration is set), or disables it.
-    fn set_configured(&mut self, on: bool) -> Result<(), UsbError>;
+    fn set_address(&mut self, address: u8, deadline_us: u64) -> Result<(), UsbError>;
+    /// Enables the bulk pair when `on` (the configuration is set), or disables it. Configuring an endpoint is a
+    /// controller command: it finishes by `deadline_us` or it is a timeout.
+    fn set_configured(&mut self, on: bool, deadline_us: u64) -> Result<(), UsbError>;
     /// One control IN data packet, at most [`EP0_MAX_PACKET`] bytes. An empty packet is a zero-length packet.
-    fn ep0_in(&mut self, data: &[u8]) -> Result<(), UsbError>;
+    fn ep0_in(&mut self, data: &[u8], deadline_us: u64) -> Result<(), UsbError>;
     /// The status stage of a request with no data stage: a zero-length IN packet.
-    fn ep0_in_status(&mut self) -> Result<(), UsbError>;
+    fn ep0_in_status(&mut self, deadline_us: u64) -> Result<(), UsbError>;
     /// The status stage of a control IN request: a zero-length OUT packet from the host.
-    fn ep0_out_status(&mut self) -> Result<(), UsbError>;
+    fn ep0_out_status(&mut self, deadline_us: u64) -> Result<(), UsbError>;
     /// Stalls the control endpoint for the request in flight.
-    fn ep0_stall(&mut self);
+    fn ep0_stall(&mut self, deadline_us: u64) -> Result<(), UsbError>;
     /// The speed negotiated on the bus, read after the host has enumerated the device. The stage requires high speed: a
     /// full-speed or slower link fails enumeration (the device does not configure). Bench check: the encoding is the
     /// controller's.
@@ -253,21 +255,25 @@ impl Ep0 {
     }
 
     /// Answers one control request, or stalls it. Returns the controller's failure if it has one.
-    pub fn handle<C: Controller>(&mut self, ctrl: &mut C, bytes: [u8; 8]) -> Result<(), UsbError> {
+    /// Answers one control request. Every controller command it issues takes `deadline_us`, the deadline of the phase
+    /// that received the SETUP, so the request cannot run past that phase (R4-B1).
+    pub fn handle<C: Controller>(
+        &mut self,
+        ctrl: &mut C,
+        bytes: [u8; 8],
+        deadline_us: u64,
+    ) -> Result<(), UsbError> {
         let setup = Setup::parse(bytes);
         let standard = setup.request_type & 0x60 == 0;
         let to_host = setup.request_type & 0x80 != 0;
         let device = setup.request_type & 0x1F == 0;
         match (standard, device, to_host, setup.request) {
             // GET_STATUS (device): two zero bytes (self powered: no, remote wake: no).
-            (true, true, true, 0) => self.data_in(ctrl, &[0, 0], setup.length),
+            (true, true, true, 0) => self.data_in(ctrl, &[0, 0], setup.length, deadline_us),
             // GET_DESCRIPTOR (device).
             (true, true, true, 6) => match descriptor(setup.value, setup.index) {
-                Some(data) => self.data_in(ctrl, data, setup.length),
-                None => {
-                    ctrl.ep0_stall();
-                    Ok(())
-                }
+                Some(data) => self.data_in(ctrl, data, setup.length, deadline_us),
+                None => ctrl.ep0_stall(deadline_us),
             },
             // GET_CONFIGURATION (device).
             (true, true, true, 8) => {
@@ -276,18 +282,18 @@ impl Ep0 {
                 } else {
                     0
                 }];
-                self.data_in(ctrl, &value, setup.length)
+                self.data_in(ctrl, &value, setup.length, deadline_us)
             }
             // SET_ADDRESS (device): a seven-bit address. When the address takes effect is the controller's
             // (`address_before_status`); the status stage is the same either way.
             (true, true, false, 5) if setup.value < 128 => {
                 self.address = setup.value as u8;
                 if ctrl.address_before_status() {
-                    ctrl.set_address(self.address)?;
-                    ctrl.ep0_in_status()
+                    ctrl.set_address(self.address, deadline_us)?;
+                    ctrl.ep0_in_status(deadline_us)
                 } else {
-                    ctrl.ep0_in_status()?;
-                    ctrl.set_address(self.address)
+                    ctrl.ep0_in_status(deadline_us)?;
+                    ctrl.set_address(self.address, deadline_us)
                 }
             }
             // GET_STATUS to an interface (index 0) or an endpoint the device has (0x00, 0x01, 0x81): both zero.
@@ -296,20 +302,17 @@ impl Ep0 {
                     || (setup.request_type & 0x1F == 2
                         && matches!(setup.index as u8, 0x00 | 0x01 | 0x81)) =>
             {
-                self.data_in(ctrl, &[0, 0], setup.length)
+                self.data_in(ctrl, &[0, 0], setup.length, deadline_us)
             }
             // SET_CONFIGURATION (device): 0 unconfigures, CONFIGURATION_VALUE configures; anything else stalls.
             (true, true, false, 9)
                 if setup.value == 0 || setup.value == u16::from(CONFIGURATION_VALUE) =>
             {
                 self.configured = setup.value != 0;
-                ctrl.set_configured(self.configured)?;
-                ctrl.ep0_in_status()
+                ctrl.set_configured(self.configured, deadline_us)?;
+                ctrl.ep0_in_status(deadline_us)
             }
-            _ => {
-                ctrl.ep0_stall();
-                Ok(())
-            }
+            _ => ctrl.ep0_stall(deadline_us),
         }
     }
 
@@ -321,16 +324,17 @@ impl Ep0 {
         ctrl: &mut C,
         data: &[u8],
         wanted: u16,
+        deadline_us: u64,
     ) -> Result<(), UsbError> {
         let data = &data[..data.len().min(usize::from(wanted))];
         let mps = usize::from(EP0_MAX_PACKET);
         for packet in data.chunks(mps) {
-            ctrl.ep0_in(packet)?;
+            ctrl.ep0_in(packet, deadline_us)?;
         }
         if data.len() < usize::from(wanted) && data.len().is_multiple_of(mps) {
-            ctrl.ep0_in(&[])?;
+            ctrl.ep0_in(&[], deadline_us)?;
         }
-        ctrl.ep0_out_status()
+        ctrl.ep0_out_status(deadline_us)
     }
 }
 
@@ -376,7 +380,8 @@ pub fn enumerate<C: Controller, K: Clock>(
             // The host configured the device. A link slower than high speed is a failed enumeration: the configuration is
             // undone, so the bulk pair is not left enabled on a link the stage cannot serve.
             if ctrl.speed() != Speed::High {
-                ctrl.set_configured(false).map_err(EnumError::Controller)?;
+                ctrl.set_configured(false, deadline_us)
+                    .map_err(EnumError::Controller)?;
                 ep0.reset();
                 return Err(EnumError::NotHighSpeed);
             }
@@ -388,7 +393,11 @@ pub fn enumerate<C: Controller, K: Clock>(
         match ctrl.poll(deadline_us) {
             Event::None => {}
             Event::BusReset => ep0.reset(),
-            Event::Setup(bytes) => ep0.handle(ctrl, bytes).map_err(EnumError::Controller)?,
+            // A control command that cannot finish by the deadline is the enumeration's deadline, not a controller fault.
+            Event::Setup(bytes) => ep0.handle(ctrl, bytes, deadline_us).map_err(|e| match e {
+                UsbError::Timeout => EnumError::NotConfigured,
+                other => EnumError::Controller(other),
+            })?,
             Event::Disconnect => return Err(EnumError::Disconnected),
         }
     }
@@ -418,11 +427,20 @@ impl<C: Controller, K: Clock> Link for BulkLink<'_, C, K> {
         let deadline = self.clock.now_us().saturating_add(budget_us);
         // The arm is part of the phase: it is bounded by the same deadline as the wait.
         self.ctrl.bulk_arm(buf.len(), deadline).map_err(map_error)?;
-        // Each pass, in this order: a completed frame is taken (even one that completed after the deadline was
-        // computed); then the deadline is checked; then one control event is serviced. So a frame completed before the
-        // deadline is never dropped as a timeout because a control request came first.
+        // Each pass, in this order: a completed frame is taken; then the deadline is checked; then one control event is
+        // serviced, every command of which takes this phase's deadline (R4-B1).
+        //
+        // A frame is accepted only if it completed at or before the deadline. The completion is observed at the
+        // `bulk_poll` that takes it, and that observation instant is what is compared. This is exact because every
+        // controller operation returns by the deadline: a control request that runs on past it is a timeout before its
+        // frame is taken, so no observation can come after the deadline for a frame that completed before it, and none
+        // can come before it for one that completed after.
         loop {
             if let Some(n) = self.ctrl.bulk_poll(buf).map_err(map_error)? {
+                let completed_at = self.clock.now_us();
+                if completed_at > deadline {
+                    return Err(IoError::Timeout);
+                }
                 return Ok(n);
             }
             if self.clock.now_us() >= deadline {
@@ -436,7 +454,9 @@ impl<C: Controller, K: Clock> Link for BulkLink<'_, C, K> {
                 }
                 Event::Disconnect => return Err(IoError::Reset),
                 Event::Setup(bytes) => {
-                    self.ep0.handle(self.ctrl, bytes).map_err(map_error)?;
+                    self.ep0
+                        .handle(self.ctrl, bytes, deadline)
+                        .map_err(map_error)?;
                     if !self.ep0.configured() {
                         return Err(IoError::Reset);
                     }

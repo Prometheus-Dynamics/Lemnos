@@ -55,19 +55,47 @@ pub const REFERENCE_WATCHDOG_PERIOD_US: u64 = 44_739_242;
 /// The host's default bulk timeout this contract is sized against, in microseconds.
 pub const HOST_BULK_TIMEOUT_US: u64 = 5_000_000;
 
-/// The longest a host may take to read one reply after the stage has it posted, in microseconds. This is separate from
-/// the 5 s bulk-OUT bound: a reply is read after the stage's own phases (a read of up to 128 sectors, then the send),
-/// so the host waits through the stage's whole round, one bulk timeout per phase, not one OUT transfer. Derived as
-/// [`ROUND_PHASES`] times [`HOST_BULK_TIMEOUT_US`] and asserted below to be at least 16 s.
-pub const REPLY_READ_BOUND_US: u64 = ROUND_PHASES * HOST_BULK_TIMEOUT_US;
+/// The stage's init budget, in microseconds: from the instant the watchdog is armed to the instant the device is visible
+/// to the host (the controller's run bit). Every wait of the bring-up (the DWC3 soft resets, the endpoint configuration,
+/// the SD host and card init) takes the init deadline, `arm + INIT_BUDGET_US`, so the device cannot become visible later
+/// than this. Once it is visible, the session's own deadlines apply.
+pub const INIT_BUDGET_US: u64 = 10_000_000;
+
+/// The host's first window, in microseconds: the longest a host may take from first seeing the device to its first fed
+/// request. The device is visible no later than `INIT_BUDGET_US` after the arm, and the first idle deadline is `IDLE_LIMIT_US`
+/// after the arm, so the window is their difference. It is asserted below to be positive.
+pub const FIRST_REQUEST_WINDOW_US: u64 = IDLE_LIMIT_US - INIT_BUDGET_US;
+
+/// The pickup allowance, in microseconds: from the host's sending a request until the stage has it in hand. The request's
+/// own receive is one transfer, bounded by [`TRANSFER_BUDGET_US`].
+pub const REPLY_PICKUP_US: u64 = TRANSFER_BUDGET_US;
+
+/// The margin a host adds to the stage's worst case, in microseconds: its own scheduling of the read after the reply is
+/// due. A stated allowance, not a measured one.
+pub const REPLY_MARGIN_US: u64 = 1_000_000;
+
+/// The longest a host may take to read one reply, in microseconds, counted from the instant the host SENT its request.
+///
+/// Worst case, from that instant: the stage picks the request up within [`REPLY_PICKUP_US`]; then its round runs its
+/// [`ROUND_PHASES`] phases, each at most [`TRANSFER_BUDGET_US`]; then the reply is posted. Control requests cannot extend a
+/// phase (every controller command takes its phase deadline), so no other time is in the worst case. The host adds
+/// [`REPLY_MARGIN_US`]. The value is derived from those constants, and asserted below to be at least the worst case and at
+/// least 16 s. It is separate from the 5 s bulk-OUT bound ([`HOST_BULK_TIMEOUT_US`]), which is one transfer.
+pub const REPLY_READ_BOUND_US: u64 =
+    REPLY_PICKUP_US + ROUND_PHASES * TRANSFER_BUDGET_US + REPLY_MARGIN_US;
 
 // The watchdog must cover the worst feed-to-feed gap, and the phase count must be the write round's: checked at build.
 const _: () = assert!(
     FEED_TO_FEED_US < REFERENCE_WATCHDOG_PERIOD_US,
     "the feed-to-feed bound must be under the reference watchdog period"
 );
-// The reply-read bound covers the stage's phases at the host's bulk timeout, and is longer than one OUT bound.
+// The reply-read bound is at least the stage's worst case from the request's send, computed from the same constants, and
+// at least 16 s, and longer than one OUT bound.
+const _: () = assert!(REPLY_READ_BOUND_US >= REPLY_PICKUP_US + ROUND_PHASES * TRANSFER_BUDGET_US);
 const _: () = assert!(REPLY_READ_BOUND_US >= 16_000_000);
 const _: () = assert!(REPLY_READ_BOUND_US > HOST_BULK_TIMEOUT_US);
+// The init budget leaves the host a positive window, and the window is the one the first deadline gives.
+const _: () = assert!(INIT_BUDGET_US < IDLE_LIMIT_US);
+const _: () = assert!(FIRST_REQUEST_WINDOW_US == IDLE_LIMIT_US - INIT_BUDGET_US);
 // The idle limit must expire before the watchdog would fire, so the distinct idle outcome comes first.
 const _: () = assert!(IDLE_LIMIT_US < REFERENCE_WATCHDOG_PERIOD_US);

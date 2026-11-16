@@ -12,7 +12,6 @@
 
 use lemnos_flash_stage::usb::{Controller, Event, Speed, UsbError};
 use lemnos_flash_stage::wait::{Clock, wait_for};
-use lemnos_flash_wire::timing::TRANSFER_BUDGET_US;
 use lemnos_flash_wire::usb::{BULK_MAX_PACKET, EP0_MAX_PACKET};
 
 use crate::dwc3link::{Bus, DmaMem, IN_SLOT, OUT_SLOT};
@@ -77,12 +76,20 @@ pub struct Dwc3Dev<'b, 'a, C: Clock, M: DmaMem + EventMem> {
     event_at: usize,
     setup_armed: bool,
     bulk_len: Option<usize>,
+    /// Whether a reply transfer is armed on BULK_IN and has not been taken: a bus reset ends it (F5).
+    in_armed: bool,
 }
 
 impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
     /// Brings the device side up, after the core and device soft resets: the event buffer, the device events,
     /// high speed at address 0, and the control endpoints. The run bit is set by [`Dwc3Dev::run`], last.
-    pub fn start(bus: &'b Bus<'a, C>, dma: M, base: usize) -> Result<Self, UsbError> {
+    /// `init_deadline_us` bounds every command of the bring-up (see `timing::INIT_BUDGET_US`).
+    pub fn start(
+        bus: &'b Bus<'a, C>,
+        dma: M,
+        base: usize,
+        init_deadline_us: u64,
+    ) -> Result<Self, UsbError> {
         let event_addr = dma.event_addr();
         bus.with(|regs, clock| -> Result<(), UsbError> {
             regs.write32(base + dwc3::GEVNTADRLO, event_addr as u32);
@@ -94,7 +101,7 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
                 dwc3::DEVTEN_DISCONNEVTEN | dwc3::DEVTEN_USBRSTEN | dwc3::DEVTEN_CONNECTDONEEN,
             );
             regs.write32(base + dwc3::DCFG, dwc3::DCFG_HIGHSPEED);
-            start_control_endpoints(regs, clock, base).map_err(map)?;
+            start_control_endpoints(regs, clock, base, init_deadline_us).map_err(map)?;
             configure_endpoint(
                 regs,
                 clock,
@@ -103,6 +110,7 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
                 EP_TYPE_CONTROL,
                 u16::from(EP0_MAX_PACKET),
                 0,
+                init_deadline_us,
             )
             .map_err(map)?;
             configure_endpoint(
@@ -113,6 +121,7 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
                 EP_TYPE_CONTROL,
                 u16::from(EP0_MAX_PACKET),
                 0,
+                init_deadline_us,
             )
             .map_err(map)?;
             Ok(())
@@ -124,6 +133,7 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
             event_at: 0,
             setup_armed: false,
             bulk_len: None,
+            in_armed: false,
         })
     }
 
@@ -181,7 +191,7 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
     }
 
     /// One control data packet or zero-length packet on EP0 IN, then its status.
-    fn control_in(&mut self, data: &[u8]) -> Result<(), UsbError> {
+    fn control_in(&mut self, data: &[u8], deadline: u64) -> Result<(), UsbError> {
         if data.len() > usize::from(EP0_MAX_PACKET) {
             return Err(UsbError::Failed);
         }
@@ -193,19 +203,17 @@ impl<'b, 'a, C: Clock, M: DmaMem + EventMem> Dwc3Dev<'b, 'a, C, M> {
             Trb::control(addr, data.len() as u32, TRBCTL_DATA),
         );
         self.dma.clean_for_device();
-        let deadline = self.phase_deadline(TRANSFER_BUDGET_US);
         self.issue(EP0_IN, EP0_DATA_SLOT, deadline)?;
         self.await_trb(EP0_DATA_SLOT, deadline).map(|_| ())
     }
 
     /// One zero-length status transfer on `ep`.
-    fn status(&mut self, ep: usize) -> Result<(), UsbError> {
+    fn status(&mut self, ep: usize, deadline: u64) -> Result<(), UsbError> {
         self.dma.write_trb(
             EP0_STATUS_SLOT,
             Trb::control(self.dma.ep0_addr(), 0, TRBCTL_STATUS2),
         );
         self.dma.clean_for_device();
-        let deadline = self.phase_deadline(TRANSFER_BUDGET_US);
         self.issue(ep, EP0_STATUS_SLOT, deadline)?;
         self.await_trb(EP0_STATUS_SLOT, deadline).map(|_| ())
     }
@@ -240,14 +248,21 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
                 t if t == dwc3::DEVT_USBRST => {
                     // A bus reset ends whatever is armed on the bulk pair (its TRB is abandoned), and the setup TRB
                     // is armed again afterwards. Bench check: the end-transfer command's resource id (zero here).
+                    // Both bulk transfers are ended, each bounded by the caller's deadline (R4-B1, F5). A transfer that is not
+                    // armed is not ended.
                     if self.bulk_len.is_some() {
-                        let deadline = self.phase_deadline(TRANSFER_BUDGET_US);
                         self.bus.with(|regs, clock| {
-                            let _ = end_transfer(regs, clock, base, BULK_OUT, deadline);
+                            let _ = end_transfer(regs, clock, base, BULK_OUT, deadline_us);
+                        });
+                    }
+                    if self.in_armed {
+                        self.bus.with(|regs, clock| {
+                            let _ = end_transfer(regs, clock, base, BULK_IN, deadline_us);
                         });
                     }
                     self.setup_armed = false;
                     self.bulk_len = None;
+                    self.in_armed = false;
                     self.bus.with(|regs, _| {
                         let dalepena = regs.read32(base + dwc3::DALEPENA);
                         regs.write32(base + dwc3::DALEPENA, dalepena & !0b1100);
@@ -292,7 +307,7 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
         true
     }
 
-    fn set_address(&mut self, address: u8) -> Result<(), UsbError> {
+    fn set_address(&mut self, address: u8, _deadline_us: u64) -> Result<(), UsbError> {
         let base = self.base;
         self.bus.with(|regs, _| {
             let dcfg = regs.read32(base + dwc3::DCFG) & !dwc3::DCFG_DEVADDR_MASK;
@@ -304,15 +319,33 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
         Ok(())
     }
 
-    fn set_configured(&mut self, on: bool) -> Result<(), UsbError> {
+    fn set_configured(&mut self, on: bool, deadline_us: u64) -> Result<(), UsbError> {
         let base = self.base;
         let packet = BULK_MAX_PACKET;
         self.bus.with(|regs, clock| -> Result<(), UsbError> {
             if on {
-                configure_endpoint(regs, clock, base, BULK_OUT, EP_TYPE_BULK, packet, 0)
-                    .map_err(map)?;
-                configure_endpoint(regs, clock, base, BULK_IN, EP_TYPE_BULK, packet, 0)
-                    .map_err(map)?;
+                configure_endpoint(
+                    regs,
+                    clock,
+                    base,
+                    BULK_OUT,
+                    EP_TYPE_BULK,
+                    packet,
+                    0,
+                    deadline_us,
+                )
+                .map_err(map)?;
+                configure_endpoint(
+                    regs,
+                    clock,
+                    base,
+                    BULK_IN,
+                    EP_TYPE_BULK,
+                    packet,
+                    0,
+                    deadline_us,
+                )
+                .map_err(map)?;
             } else {
                 let dalepena = regs.read32(base + dwc3::DALEPENA);
                 regs.write32(base + dwc3::DALEPENA, dalepena & !0b1100);
@@ -323,24 +356,24 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
         Ok(())
     }
 
-    fn ep0_in(&mut self, data: &[u8]) -> Result<(), UsbError> {
-        self.control_in(data)
+    fn ep0_in(&mut self, data: &[u8], deadline_us: u64) -> Result<(), UsbError> {
+        self.control_in(data, deadline_us)
     }
 
-    fn ep0_in_status(&mut self) -> Result<(), UsbError> {
-        self.status(EP0_IN)
+    fn ep0_in_status(&mut self, deadline_us: u64) -> Result<(), UsbError> {
+        self.status(EP0_IN, deadline_us)
     }
 
-    fn ep0_out_status(&mut self) -> Result<(), UsbError> {
-        self.status(EP0_OUT)
+    fn ep0_out_status(&mut self, deadline_us: u64) -> Result<(), UsbError> {
+        self.status(EP0_OUT, deadline_us)
     }
 
-    fn ep0_stall(&mut self) {
+    fn ep0_stall(&mut self, deadline_us: u64) -> Result<(), UsbError> {
         let base = self.base;
         self.bus.with(|regs, clock| {
-            let _ = set_stall(regs, clock, base, EP0_OUT);
-            let _ = set_stall(regs, clock, base, EP0_IN);
-        });
+            set_stall(regs, clock, base, EP0_OUT, deadline_us).map_err(map)?;
+            set_stall(regs, clock, base, EP0_IN, deadline_us).map_err(map)
+        })
     }
 
     fn bulk_arm(&mut self, len: usize, deadline_us: u64) -> Result<(), UsbError> {
@@ -382,10 +415,12 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
         self.dma
             .write_trb(IN_SLOT, Trb::normal(addr, data.len() as u32));
         self.dma.clean_for_device();
+        self.in_armed = true;
         self.issue(BULK_IN, IN_SLOT, deadline)?;
         if self.await_trb(IN_SLOT, deadline)? != 0 {
             return Err(UsbError::Failed);
         }
+        self.in_armed = false;
         Ok(())
     }
 }
@@ -521,7 +556,7 @@ mod tests {
         let mut regs = Regs::default();
         let (mut clock, mem) = started(&mut regs);
         let bus = Bus::new(&mut regs, &mut clock);
-        let dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
+        let dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
         drop(dev);
         let log = &regs.log;
         let events = first(log, |a, _| a == reg(dwc3::GEVNTADRLO)).unwrap();
@@ -538,8 +573,8 @@ mod tests {
         let mut regs = Regs::default();
         let (mut clock, mem) = started(&mut regs);
         let bus = Bus::new(&mut regs, &mut clock);
-        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
-        dev.set_configured(true).unwrap();
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        dev.set_configured(true, 1_000_000).unwrap();
         drop(dev);
         let log = &regs.log;
         for ep in [BULK_OUT, BULK_IN] {
@@ -570,8 +605,8 @@ mod tests {
         let mut regs = Regs::default();
         let (mut clock, mem) = started(&mut regs);
         let bus = Bus::new(&mut regs, &mut clock);
-        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
-        dev.set_configured(true).unwrap();
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        dev.set_configured(true, 1_000_000).unwrap();
         dev.bulk_arm(12, TEST_DEADLINE).unwrap();
         drop(dev);
         let log = &regs.log;
@@ -587,7 +622,7 @@ mod tests {
         // A device event: bit 0 set, type USB reset (1) in bits 8 to 11.
         mem.events[0] = 1 | (dwc3::DEVT_USBRST << 8);
         let bus = Bus::new(&mut regs, &mut clock);
-        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
         // The count the controller reports: one event, four bytes.
         bus.with(|regs, _| regs.write32(DWC3_BASE_FOR_TESTS + dwc3::GEVNTCOUNT, 4));
         assert_eq!(dev.poll(TEST_DEADLINE), Event::BusReset);
@@ -606,8 +641,8 @@ mod tests {
         let (mut clock, mut mem) = started(&mut regs);
         mem.events[0] = 1 | (dwc3::DEVT_USBRST << 8);
         let bus = Bus::new(&mut regs, &mut clock);
-        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
-        dev.set_configured(true).unwrap();
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        dev.set_configured(true, 1_000_000).unwrap();
         dev.bulk_arm(12, TEST_DEADLINE).unwrap();
         bus.with(|regs, _| regs.write32(reg(dwc3::GEVNTCOUNT), 4));
         assert_eq!(dev.poll(TEST_DEADLINE), Event::BusReset);
@@ -622,6 +657,53 @@ mod tests {
     }
 
     #[test]
+    fn a_bus_reset_with_a_reply_in_flight_ends_the_bulk_in_transfer_too() {
+        // F5: a reply TRB armed on BULK_IN at reset is ended, so the next session's first reply is not this one.
+        let mut regs = Regs::default();
+        let (mut clock, mut mem) = started(&mut regs);
+        mem.events[0] = 1 | (dwc3::DEVT_USBRST << 8);
+        let bus = Bus::new(&mut regs, &mut clock);
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        dev.set_configured(true, TEST_DEADLINE).unwrap();
+        dev.in_armed = true;
+        bus.with(|regs, _| regs.write32(reg(dwc3::GEVNTCOUNT), 4));
+        assert_eq!(dev.poll(TEST_DEADLINE), Event::BusReset);
+        drop(dev);
+        assert!(
+            first(&regs.log, depcmd_write(BULK_IN, dwc3::DEPCMD_ENDTRANSFER)).is_some(),
+            "the reply armed on BULK_IN was ended by the reset"
+        );
+    }
+
+    #[test]
+    fn a_bus_reset_with_no_reply_in_flight_does_not_end_the_bulk_in_endpoint() {
+        let mut regs = Regs::default();
+        let (mut clock, mut mem) = started(&mut regs);
+        mem.events[0] = 1 | (dwc3::DEVT_USBRST << 8);
+        let bus = Bus::new(&mut regs, &mut clock);
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        dev.set_configured(true, TEST_DEADLINE).unwrap();
+        bus.with(|regs, _| regs.write32(reg(dwc3::GEVNTCOUNT), 4));
+        assert_eq!(dev.poll(TEST_DEADLINE), Event::BusReset);
+        drop(dev);
+        assert!(
+            first(&regs.log, depcmd_write(BULK_IN, dwc3::DEPCMD_ENDTRANSFER)).is_none(),
+            "nothing was armed on BULK_IN, so nothing is ended"
+        );
+    }
+
+    #[test]
+    fn a_control_packet_whose_phase_deadline_has_passed_is_a_timeout_not_a_wait() {
+        // R4-B1: a control command takes the caller's deadline. A deadline already passed is a timeout at once.
+        let mut regs = Regs::default();
+        let (mut clock, mem) = started(&mut regs);
+        let bus = Bus::new(&mut regs, &mut clock);
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
+        let now = bus.with(|_, clock| clock.now_us());
+        assert_eq!(dev.ep0_in(&[0, 0], now), Err(UsbError::Timeout));
+    }
+
+    #[test]
     fn a_setup_completion_on_control_out_is_read_as_the_setup_packet() {
         let mut regs = Regs::default();
         let (mut clock, mut mem) = started(&mut regs);
@@ -629,7 +711,7 @@ mod tests {
         mem.events[0] = 1 << 6;
         mem.setup = [0x80, 6, 0, 1, 0, 0, 18, 0];
         let bus = Bus::new(&mut regs, &mut clock);
-        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS, 1_000_000).unwrap();
         bus.with(|regs, _| regs.write32(DWC3_BASE_FOR_TESTS + dwc3::GEVNTCOUNT, 4));
         assert_eq!(
             dev.poll(TEST_DEADLINE),
