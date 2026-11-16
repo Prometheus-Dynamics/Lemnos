@@ -758,3 +758,69 @@ fn a_tie_in_the_serial_selects_the_primary_copy_at_offset_in_both_forms() {
     );
     check(&gpt, Mem::new((16 * 1024 * 1024 + 128 * 1024) as usize));
 }
+
+/// BB2: the restart count's clear is one write of the inactive copy, cut at every byte. Whatever the
+/// cut, the environment is the old one (count 5) or the new one (count 0), never neither, and the
+/// count, the episode and the default the other variables hold are the same in both.
+#[test]
+fn a_restart_count_clear_cut_at_every_byte_leaves_the_old_or_the_new_environment() {
+    let g = geometry();
+    let padded = g.padded();
+    for active_first in [true, false] {
+        for cut in 0..=padded {
+            let mut dev = Mem::new(8192);
+            if active_first {
+                put(
+                    &mut dev,
+                    0,
+                    &[
+                        ("default", "a"),
+                        ("lemnos_restarts", "5"),
+                        ("lemnos_episodes", "1"),
+                    ],
+                    6,
+                );
+                put(&mut dev, 4096, &[("default", "zz")], 5);
+            } else {
+                put(&mut dev, 0, &[("default", "zz")], 5);
+                put(
+                    &mut dev,
+                    4096,
+                    &[
+                        ("default", "a"),
+                        ("lemnos_restarts", "5"),
+                        ("lemnos_episodes", "1"),
+                    ],
+                    6,
+                );
+            }
+            let old = pairs(&[
+                ("default", "a"),
+                ("lemnos_restarts", "5"),
+                ("lemnos_episodes", "1"),
+            ]);
+            let new = pairs(&[
+                ("default", "a"),
+                ("lemnos_restarts", "0"),
+                ("lemnos_episodes", "1"),
+            ]);
+            dev.budget = cut;
+            let result = set(&mut dev, &g, &[("lemnos_restarts", Some("0"))]);
+            assert_eq!(result.is_err(), cut < padded, "cut {cut}");
+            dev.budget = usize::MAX;
+            let (_, got) = load(&mut dev, &g)
+                .unwrap()
+                .unwrap_or_else(|| panic!("no environment after a cut at {cut}"));
+            // The writer re-encodes the list in its own order, so the comparison is on the sorted pairs.
+            let sorted = |mut v: Vec<(String, String)>| {
+                v.sort();
+                v
+            };
+            let got = sorted(got);
+            assert!(
+                got == sorted(old.clone()) || got == sorted(new.clone()),
+                "cut {cut} (active first: {active_first}) left {got:?}"
+            );
+        }
+    }
+}

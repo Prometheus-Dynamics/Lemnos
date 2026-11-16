@@ -78,6 +78,18 @@ pub struct Fallback<'a, M: ClearCount> {
     pub mailbox: &'a M,
     /// This boot's id: the history entry it annotates.
     pub boot: &'a str,
+    /// The count is the U-Boot form's restart count, cleared through the record (not the mailbox).
+    pub restarts: bool,
+}
+
+/// The mailbox of a form with no firmware count. The U-Boot form clears its restart count through
+/// the record instead ([`Fallback::restarts`]).
+pub struct NoMailbox;
+
+impl ClearCount for NoMailbox {
+    fn clear_count(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<M: ClearCount> Actions for Fallback<'_, M> {
@@ -150,6 +162,16 @@ impl<M: ClearCount> Actions for Fallback<'_, M> {
     }
 
     fn clear_count(&mut self) -> Result<(), String> {
+        if self.restarts {
+            // A write only when the count is not already 0: a healthy boot writes nothing here.
+            return match self.record.restarts().map_err(|e| e.to_string())? {
+                None | Some(0) => Ok(()),
+                Some(_) => self
+                    .record
+                    .set_restarts(0)
+                    .map_err(|e| format!("{COUNT_UNCLEARED}: {e}")),
+            };
+        }
         self.mailbox
             .clear_count()
             .map_err(|e| format!("{COUNT_UNCLEARED}: {e}"))
@@ -314,7 +336,7 @@ impl SystemSlots {
     /// state's error, which `list` shows. Nothing runs when the count picks the default.
     pub(crate) fn arrive_at_start(&mut self) {
         let Some(firmware) = self.firmware.clone() else {
-            return;
+            return self.arrive_uboot();
         };
         let state = self.state();
         let running = self.running();
@@ -360,6 +382,7 @@ impl SystemSlots {
             record: self.record.as_mut(),
             mailbox: &firmware,
             boot: &self.boot,
+            restarts: false,
         };
         let outcome = arrival::on_arrival(&mut actions, &seen);
         if let Err(why) = &outcome
@@ -400,7 +423,7 @@ impl SystemSlots {
     /// (see [`arrival::on_boot_good`]). A boot whose files don't match keeps its count, and says so.
     pub(crate) fn boot_good(&mut self, slot: &str) {
         let Some(firmware) = self.firmware.clone() else {
-            return;
+            return self.boot_good_uboot(slot);
         };
         if let Err(why) =
             boot_guard::verified(&self.layout, &self.boot_node, self.record.as_ref(), slot)
@@ -419,6 +442,7 @@ impl SystemSlots {
             record: self.record.as_mut(),
             mailbox: &firmware,
             boot: &self.boot,
+            restarts: false,
         };
         match arrival::on_boot_good(&mut actions, slot) {
             Ok(()) => self.count_cleared(),
@@ -464,5 +488,103 @@ impl SystemSlots {
             self.show("idle", NO_PROGRESS);
         }
         at
+    }
+}
+
+impl SystemSlots {
+    /// The count-based fallback on the U-Boot form (BB2): the Pi's sequence, with the restart count read
+    /// from the U-Boot environment (`lemnos_restarts`). The script raises the count on every boot that is
+    /// not power-on (with the reset word named), so an arrival on the previous slot by the count is a
+    /// warm restart by construction: it is classified as one, with [`fallback::WARM_RESET`].
+    fn arrive_uboot(&mut self) {
+        let state = self.state();
+        let running = self.running();
+        if !valid_id(&running) || !valid_id(&state.default) || !valid_id(&state.previous) {
+            return;
+        }
+        if running != state.previous || running == state.default {
+            return;
+        }
+        // Not the U-Boot form: the record has no count, and nothing runs.
+        let Ok(Some(restarts)) = self.record.restarts() else {
+            return;
+        };
+        if lemnos_slot_store::firmware::pick(restarts)
+            != lemnos_slot_store::firmware::Pick::Previous
+        {
+            return;
+        }
+        let files_match = boot_guard::verified(
+            &self.layout,
+            &self.boot_node,
+            self.record.as_ref(),
+            &state.default,
+        )
+        .is_ok();
+        let episodes_before = match self.record.episodes() {
+            Ok(Some((slot, episodes))) if slot == state.default => episodes,
+            Ok(_) => 0,
+            Err(e) => return self.note(format!("the episodes can't be read: {e}")),
+        };
+        let seen = arrival::Arrival {
+            default: state.default.clone(),
+            previous: running.clone(),
+            files_match,
+            rsts: lemnos_slot_store::fallback::WARM_RESET,
+            episodes_before,
+            threshold: self.demote_after,
+        };
+        let mut actions = Fallback {
+            layout: &self.layout,
+            record: self.record.as_mut(),
+            mailbox: &NoMailbox,
+            boot: &self.boot,
+            restarts: true,
+        };
+        let text = match arrival::on_arrival(&mut actions, &seen) {
+            Ok(arrival::Outcome::DemotedAtOnce) => format!(
+                "{running} booted by the count; {} doesn't match its manifest, so it is demoted and {running} is the default",
+                state.default
+            ),
+            Ok(arrival::Outcome::Demoted { episodes }) => format!(
+                "{running} booted by the count; {} had {episodes} episodes and is demoted",
+                state.default
+            ),
+            Ok(arrival::Outcome::EpisodeRecorded { episodes }) => format!(
+                "{running} booted by the count; episode {episodes} for {} recorded; the default is kept",
+                state.default
+            ),
+            Ok(arrival::Outcome::NoEpisode) => {
+                format!("{running} booted by the count; no episode is recorded")
+            }
+            Err(why) => why,
+        };
+        self.note(text);
+    }
+
+    /// Boot good on the U-Boot form: the manifest must match, then the episodes and the restart count go
+    /// (the count only when it is not already 0).
+    fn boot_good_uboot(&mut self, slot: &str) {
+        // Not the U-Boot form: nothing to clear.
+        if !matches!(self.record.restarts(), Ok(Some(_))) {
+            return;
+        }
+        if let Err(why) =
+            boot_guard::verified(&self.layout, &self.boot_node, self.record.as_ref(), slot)
+        {
+            return self.note(format!(
+                "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
+            ));
+        }
+        let mut actions = Fallback {
+            layout: &self.layout,
+            record: self.record.as_mut(),
+            mailbox: &NoMailbox,
+            boot: &self.boot,
+            restarts: true,
+        };
+        if let Err(why) = arrival::on_boot_good(&mut actions, slot) {
+            self.note(why);
+        }
     }
 }

@@ -668,6 +668,7 @@ fn the_uboot_config_fragment_names_what_the_boot_path_needs() {
             "CONFIG_ENV_REDUNDANT=y",
             "CONFIG_ENV_SIZE=0x2000",
             "CONFIG_CMD_SAVEENV=y",
+            "CONFIG_CMD_SETEXPR=y",
             "CONFIG_EFI_PARTITION=y",
             "CONFIG_PARTITION_TYPE_GUID=y",
             "CONFIG_OF_CONTROL=y",

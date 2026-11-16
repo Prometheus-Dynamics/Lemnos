@@ -338,6 +338,7 @@ fn run(
         record: rec,
         mailbox,
         boot: "boot-1",
+        restarts: false,
     };
     arrival::on_arrival(&mut actions, seen)
 }
@@ -501,6 +502,7 @@ fn a_boot_good_clears_only_the_episodes_the_record_names() {
             record: &mut named,
             mailbox: &m,
             boot: "boot-1",
+            restarts: false,
         };
         arrival::on_boot_good(&mut actions, "a").unwrap();
     }
@@ -514,6 +516,7 @@ fn a_boot_good_clears_only_the_episodes_the_record_names() {
             record: &mut other,
             mailbox: &m,
             boot: "boot-1",
+            restarts: false,
         };
         arrival::on_boot_good(&mut actions, "a").unwrap();
     }
@@ -531,6 +534,7 @@ fn a_boot_good_clears_only_the_episodes_the_record_names() {
             record: &mut none,
             mailbox: &m,
             boot: "boot-1",
+            restarts: false,
         };
         arrival::on_boot_good(&mut actions, "a").unwrap();
     }
@@ -651,6 +655,7 @@ fn a_count_the_mailbox_cannot_clear_is_named_not_refused() {
         record: &mut none,
         mailbox: &m,
         boot: "boot-1",
+        restarts: false,
     };
     let why = arrival::on_boot_good(&mut actions, "a").unwrap_err();
     assert!(

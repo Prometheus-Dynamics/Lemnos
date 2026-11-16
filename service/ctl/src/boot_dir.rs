@@ -553,10 +553,29 @@ fn uboot_script_inner(board: &BoardFile) -> Result<String, String> {
     // The device U-Boot keeps its environment on (CONFIG_ENV_MMC_DEVICE_INDEX): the script's save guard
     // looks for the environment's partition there, so the save never goes to a device without one.
     let env_device = setting(config, "uboot_env_mmc_index", Some(0))?;
+    let reset = match config.get("uboot_reset_word") {
+        None => String::new(),
+        Some(value) => {
+            let word = value
+                .as_str()
+                .ok_or("system-slots: uboot_reset_word must be a string")?;
+            let digits = word.strip_prefix("0x").unwrap_or("");
+            if digits.is_empty()
+                || digits.len() > 8
+                || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(format!(
+                    "system-slots: uboot_reset_word {word:?} is not a 32-bit register address (0x and up to eight hex digits)"
+                ));
+            }
+            format!("setenv lemnos_rst {word}\n")
+        }
+    };
     Ok(format!(
         "# Written by lemnos-ctl boot-partition from the board file: the USB controller the download\n\
-         # mode uses, the LED it lights, and the MMC device the environment is kept on. The script follows.\n\
-         setenv lemnos_usb {usb}\n{led}setenv lemnos_envdev {env_device}\n{BOOT_CMD}"
+         # mode uses, the LED it lights, the MMC device the environment is kept on, and the reset-status word\n\
+         # the restart count reads (when the board names one). The script follows.\n\
+         setenv lemnos_usb {usb}\n{led}setenv lemnos_envdev {env_device}\n{reset}{BOOT_CMD}"
     ))
 }
 
@@ -605,6 +624,7 @@ fn uboot_config_inner(board: &BoardFile) -> Result<String, String> {
             "CONFIG_ENV_REDUNDANT=y".into(),
             format!("CONFIG_ENV_SIZE=0x{:x}", place.size()),
             "CONFIG_CMD_SAVEENV=y".into(),
+            "CONFIG_CMD_SETEXPR=y".into(),
         ],
     );
     match &place {

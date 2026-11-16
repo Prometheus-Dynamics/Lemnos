@@ -41,6 +41,10 @@ pub const VARIABLES: [&str; 6] = [
     "trial_bay",
     "trial_attempts",
 ];
+/// The restart count (BB2): `lemnos_restarts`, the boots attempted since the last good boot. The script
+/// reads it and raises it (one `saveenv` for each write), and lemnosd clears it, so it is listed apart from
+/// the record's variables, which the record writers own.
+pub const COUNT_VARIABLES: [&str; 1] = ["lemnos_restarts"];
 
 /// Where a slot's loader configuration is, under its boot directory.
 pub const EXTLINUX: &str = "extlinux/extlinux.conf";
@@ -380,6 +384,22 @@ impl UbootEnv {
         Ok(dir.rsplit('/').next().unwrap_or_default().to_string())
     }
 
+    /// Every variable the environment holds, as the writer reads it.
+    fn vars(&self) -> io::Result<Vec<(String, String)>> {
+        let (mut dev, geometry) = self.open()?;
+        let (_, list) = uboot_env::load_checked(&mut dev, &geometry).map_err(io::Error::other)?;
+        Ok(list)
+    }
+
+    /// One variable's value, `None` when it is not set.
+    fn var(&self, name: &str) -> io::Result<Option<String>> {
+        Ok(self
+            .vars()?
+            .into_iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value))
+    }
+
     /// The variables as they stand: `(default, trial, attempts)`, empty and 0 when unset.
     fn read(&self) -> io::Result<(String, String, u8)> {
         let (mut dev, geometry) = self.open()?;
@@ -399,6 +419,44 @@ impl UbootEnv {
 }
 
 impl BootRecord for UbootEnv {
+    fn restarts(&self) -> io::Result<Option<u8>> {
+        // Unset is no restarts: the script sets the count at the first boot it runs.
+        let n = match self.var("lemnos_restarts")? {
+            None => 0,
+            Some(text) => text.parse::<u8>().map_err(|_| {
+                io::Error::other(format!("lemnos_restarts {text:?} is not a count"))
+            })?,
+        };
+        Ok(Some(n))
+    }
+
+    fn set_restarts(&mut self, restarts: u8) -> io::Result<()> {
+        self.set(&[("lemnos_restarts", Some(restarts.to_string().as_str()))])
+    }
+
+    fn episodes(&self) -> io::Result<Option<(String, u8)>> {
+        let Some(slot) = self.var("lemnos_episodes_bay")? else {
+            return Ok(None);
+        };
+        let n = self
+            .var("lemnos_episodes")?
+            .unwrap_or_default()
+            .parse::<u8>()
+            .unwrap_or(0);
+        Ok(Some((slot, n)))
+    }
+
+    fn set_episodes(&mut self, slot: &str, episodes: u8) -> io::Result<()> {
+        self.set(&[
+            ("lemnos_episodes_bay", Some(slot)),
+            ("lemnos_episodes", Some(episodes.to_string().as_str())),
+        ])
+    }
+
+    fn clear_episodes(&mut self) -> io::Result<()> {
+        self.set(&[("lemnos_episodes_bay", None), ("lemnos_episodes", None)])
+    }
+
     /// Points the default at the slot's bay. The bay the default had becomes `previous_bay` (as the Pi
     /// form's switch writes its previous pointer): the environment has no other record of it, and an
     /// install must not take it.

@@ -111,12 +111,49 @@ if test -z "${lemnos_env}"; then
 	fi
 fi
 
+# THE RESTART COUNT (BB2, the Pi firmware's boot_count in this form). lemnos_restarts is the boots
+# attempted since the last good boot, this one included, saturating at 8. It is raised here, once per
+# script run, with one saveenv. When the image names the reset-status word (lemnos_rst, a SoC register:
+# see docs/slots.md, "The U-Boot restart count"), a power-on reset sets the count to 0 instead of
+# raising it, as the Pi firmware's count is lost at power loss. Without lemnos_rst every boot raises it.
+# lemnosd clears it at a good boot and before its own restart; slot-init never writes it.
+if test -z "${lemnos_restarts}"; then
+	setenv lemnos_restarts 0
+fi
+if test -n "${lemnos_rst}"; then
+	setexpr.l lemnos_rst_now *${lemnos_rst}
+	if test "${lemnos_rst_now}" = "0"; then
+		if test "${lemnos_restarts}" != "0"; then
+			setenv lemnos_restarts 0
+			if test -n "${lemnos_saveable}"; then
+				saveenv
+			fi
+		fi
+	elif test "${lemnos_restarts}" != "8"; then
+		setexpr lemnos_restarts "${lemnos_restarts}" + 1
+		if test -n "${lemnos_saveable}"; then
+			saveenv
+		fi
+	fi
+elif test "${lemnos_restarts}" != "8"; then
+	setexpr lemnos_restarts "${lemnos_restarts}" + 1
+	if test -n "${lemnos_saveable}"; then
+		saveenv
+	fi
+fi
+
 setenv lemnos_pass
 setenv lemnos_go 1
 while test "${lemnos_go}" = "1"; do
 	setenv lemnos_src
 	setenv lemnos_why
 	setenv lemnos_dflt
+	# At 8 the board is rescued: no slot starts, and download mode is offered at once (the host
+	# flasher is the exit). At 4 to 7 (the Pi's [boot_count&4]) the previous starts before the default.
+	setenv lemnos_rescue
+	if test "${lemnos_restarts}" = "8"; then
+		setenv lemnos_rescue 1
+	fi
 	if test "${devtype}" != "mmc"; then
 		setenv lemnos_why "boot device ${devtype} is unsupported: only mmc boot sources are named"
 	else
@@ -127,7 +164,10 @@ while test "${lemnos_go}" = "1"; do
 		fi
 	fi
 
-	if test -n "${lemnos_why}"; then
+	if test -n "${lemnos_rescue}"; then
+		echo "lemnos: rescue after ${lemnos_restarts} boots without a good boot: starting no slot, download mode on USB ${lemnos_usb}"
+		setenv lemnos_pass "xx"
+	elif test -n "${lemnos_why}"; then
 		echo "lemnos: ${lemnos_why}, starting no slot"
 	else
 		setenv slot_part ${devnum}:${distro_bootpart}
@@ -167,6 +207,21 @@ while test "${lemnos_go}" = "1"; do
 			fi
 		fi
 
+		# The rung at 4 to 7: the previous starts first. The default is skipped in the first pass only when
+		# a previous is named; when that previous does not start, the next pass starts the default.
+		setenv lemnos_window
+		setexpr lemnos_bit "${lemnos_restarts}" "&" 4
+		if test "${lemnos_bit}" = "4"; then
+			setenv lemnos_window 1
+		fi
+		if test -n "${lemnos_window}"; then
+			if test -n "${take_previous_bay}"; then
+				if test -z "${lemnos_pass}"; then
+					setenv take_default
+				fi
+			fi
+		fi
+
 		for step in trial default previous; do
 			setenv lemnos_dtb
 			if test "${step}" = "trial"; then
@@ -184,6 +239,9 @@ while test "${lemnos_go}" = "1"; do
 				if test -n "${take_previous_bay}"; then
 					setenv lemnos_dtb /slots/${take_previous_bay}/board.dtb
 					setenv lemnos_conf /slots/${take_previous_bay}/extlinux/extlinux.conf
+					if test -n "${lemnos_window}"; then
+						setenv lemnos_dflt restarts
+					fi
 				fi
 			fi
 			if test -n "${lemnos_dtb}"; then
