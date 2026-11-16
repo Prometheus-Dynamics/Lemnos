@@ -181,7 +181,11 @@ fn post(consumer: &mut Consumer, run: RunJob) {
 
 /// The next completion's identity and status; its buffer goes back.
 fn completion(consumer: &mut Consumer) -> (u64, RunStatus) {
-    let frame = consumer.pop_frame().unwrap().expect("a completion");
+    let frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a completion");
     assert_eq!(frame.bytes, RESULT_BYTES as u32);
     let status = RunResult::decode(&mut Reader::new(&read(
         consumer,
@@ -427,7 +431,11 @@ fn ticks_with_a_claim_held_allocate_nothing() {
         assert!(consumer.jobs().post(&encoded[..used]).unwrap());
         let (_, allocated) = allocations(|| Driver::tick(&mut driver, now));
         now += POLL_NS;
-        let frame = consumer.pop_frame().unwrap().expect("a completion");
+        let frame = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a completion");
         assert!(consumer.release(frame.buffer));
         if n >= 10 {
             count += allocated;

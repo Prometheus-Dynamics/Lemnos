@@ -76,6 +76,7 @@ impl SimFrameSource {
             sequence,
             identity,
             timestamp_ns: sequence * 1000,
+            end_ns: 0,
         })?;
         Ok(true)
     }

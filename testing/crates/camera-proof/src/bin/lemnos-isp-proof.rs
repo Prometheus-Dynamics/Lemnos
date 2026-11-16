@@ -193,6 +193,8 @@ fn job(identity: u64, config: u32, input: u32, output: u32) -> ([u8; 128], usize
         config_buffer: config,
         input_buffer: input,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     };
     let mut buf = [0u8; 128];
     let mut w = Writer::new(&mut buf);

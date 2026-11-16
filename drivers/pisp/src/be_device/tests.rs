@@ -45,6 +45,10 @@ struct Mock {
     given_back: Vec<u32>,
     /// Registered and not let go of: size, by region.
     regions: Vec<Option<u64>>,
+    /// What `stop` reports: the block could not be seen to stop.
+    wedged_on_stop: bool,
+    /// Set: `register_lent` refuses with this status, as the kernel refuses a file that is not a dma-buf.
+    refuse_lent: Option<Status>,
 }
 
 impl Default for Mock {
@@ -59,6 +63,8 @@ impl Default for Mock {
             finished: Vec::with_capacity(64),
             given_back: Vec::with_capacity(64),
             regions: Vec::with_capacity(64),
+            wedged_on_stop: false,
+            refuse_lent: None,
         }
     }
 }
@@ -89,6 +95,7 @@ impl Hw {
                 sequence: identity,
                 identity,
                 timestamp_ns: 13,
+                end_ns: 0,
             });
         });
     }
@@ -112,11 +119,21 @@ impl Hardware for Hw {
         })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|m| {
             m.stopped += 1;
             m.regions.clear();
-        });
+            m.wedged_on_stop
+        })
+    }
+
+    /// Stand-in: the block reads a lent dma-buf the same way it reads any region here. The real
+    /// `DMA_TO_DEVICE` mapping is the module's, checked on the QEMU harness (3b).
+    fn register_lent(&mut self, memory: BorrowedFd<'_>, _generation: u32) -> Result<Registered> {
+        if let Some(status) = self.with(|m| m.refuse_lent) {
+            return Err(status);
+        }
+        self.register(memory)
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
@@ -237,9 +254,10 @@ impl Streams {
             |s: &MockStream| -> StreamHandle { lemnos_core::Held::boxed(Box::new(s.clone())) };
         PispBeNeeds {
             config: hold(&self.config),
-            input: hold(&self.input),
+            input: Some(hold(&self.input)),
             output0: hold(&self.output0),
             output1: self.output1.as_ref().map(hold),
+            lend: None,
         }
     }
 
@@ -258,8 +276,12 @@ impl Streams {
 }
 
 fn setup_with(streams: &Streams, options: Options) -> (PispBe, Hw) {
+    setup_needs(streams.needs(), options)
+}
+
+fn setup_needs(needs: PispBeNeeds, options: Options) -> (PispBe, Hw) {
     let hw = Hw::default();
-    let mut be = PispBe::with_hardware(Box::new(hw.clone()), streams.needs(), options);
+    let mut be = PispBe::with_hardware(Box::new(hw.clone()), needs, options);
     CameraIsp::set_input(
         &mut be,
         IspInput {
@@ -301,6 +323,8 @@ fn job_on(identity: u64, config: u32, input: u32, output: u32) -> IspJob {
         config_buffer: config,
         input_buffer: input,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 
@@ -1063,4 +1087,404 @@ fn stop_gives_every_config_buffer_back_and_each_one_runs_its_rewrite_after_resta
         assert_eq!(&sent[..], &bytes_of(&second)[..]);
     }
     assert_eq!(dropped(&mut be), 0);
+}
+
+/// A job that names a lent input (no buffer of its own) is refused with `not-lent`, and its
+/// consumer is told by the job's end, on the output it posted for.
+#[test]
+fn a_lent_job_is_refused_not_lent_and_its_consumer_is_told() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&IspJob {
+        input_lent: true,
+        lent_buffer: 2,
+        ..job_on(9, 1, NO_BUFFER, 0)
+    });
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((9, lemnos_wire::ring::reason::NOT_LENT, 0))
+    );
+    assert_eq!(dropped(&mut be), 1);
+    assert_eq!(
+        hw.with(|m| m.posted.len()),
+        0,
+        "a refused job is never posted"
+    );
+}
+
+/// A wedged block keeps the buffers its jobs held, and its health says that only a board restart
+/// frees them, with the front-end buffers it holds.
+#[test]
+fn a_wedged_block_keeps_its_buffers_and_its_health_says_so() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    match be.health() {
+        Health::Failed(text) => assert_eq!(
+            text,
+            "the back end is wedged; 0 front-end buffers stay with it until the board restarts"
+        ),
+        other => panic!("a wedged block is failed, not {other:?}"),
+    }
+}
+
+/// A job in flight that holds a front-end buffer as its lent input, with no image of its own.
+fn lent_flight(config: u32) -> super::InFlight {
+    super::InFlight {
+        input: super::Lent {
+            buffer: 0,
+            region: 0,
+            bytes: 0,
+        },
+        outputs: [None; super::BE_NUM_OUTPUTS],
+        config,
+        lent: Some(super::LentJob {
+            buffer: 0,
+            identity: 0,
+        }),
+    }
+}
+
+fn wedged_health(be: &PispBe) -> &'static str {
+    match be.health() {
+        Health::Failed(text) => text,
+        other => panic!("a wedged block is failed, not {other:?}"),
+    }
+}
+
+/// The wedge text counts the front-end buffers in flight when the block wedged: two lent jobs in
+/// flight give 2, and a job that holds no front-end buffer is not counted.
+#[test]
+fn a_wedge_with_jobs_in_flight_counts_the_front_end_buffers_they_hold() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    be.jobs[0] = Some(lent_flight(1));
+    be.jobs[1] = Some(lent_flight(1));
+    be.jobs[2] = Some(super::InFlight {
+        lent: None,
+        ..lent_flight(1)
+    });
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    assert_eq!(
+        wedged_health(&be),
+        "the back end is wedged; 2 front-end buffers stay with it until the board restarts"
+    );
+}
+
+/// The table covers 0 to 8 exactly. From 9 the text says `9 or more`, and never a count it does
+/// not know.
+#[test]
+fn a_wedge_past_the_table_says_nine_or_more_not_a_wrong_number() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    for at in 0..12 {
+        be.jobs[at] = Some(lent_flight(1));
+    }
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    assert_eq!(
+        wedged_health(&be),
+        "the back end is wedged; 9 or more front-end buffers stay with it until the board restarts"
+    );
+}
+
+/// A job whose input is no buffer at all, and not lent, is refused for its configuration:
+/// `bad-config`, told to its consumer.
+#[test]
+fn a_job_with_no_input_buffer_is_refused_bad_config_and_its_consumer_is_told() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    streams.configure(&config());
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job_on(5, 1, NO_BUFFER, 0));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((5, lemnos_wire::ring::reason::BAD_CONFIG, 0))
+    );
+    assert_eq!(hw.with(|m| m.posted.len()), 0);
+}
+
+/// A stand-in lend source with the host's rules: a published frame is lent by its identity, a second
+/// lend of a lent buffer is busy, and an unlend of a buffer not lent is refused. It is a stand-in: the
+/// host's `LendView` is tested in `engine/host/tests/stream_lend.rs`, and the real dma-buf mapping in the
+/// QEMU check (3b).
+#[derive(Clone)]
+struct LendMock(Arc<Mutex<LendState>>);
+
+struct LendState {
+    set: Arc<[std::os::fd::OwnedFd]>,
+    published: Vec<Option<(u64, u32)>>,
+    lent: Vec<Option<u64>>,
+    unlends: u32,
+}
+
+impl LendMock {
+    fn new(buffers: usize) -> Self {
+        let set: Arc<[std::os::fd::OwnedFd]> = (0..buffers)
+            .map(|_| sealed_memfd(c"lend-stand-in", INPUT_BYTES).unwrap())
+            .collect::<Vec<_>>()
+            .into();
+        Self(Arc::new(Mutex::new(LendState {
+            set,
+            published: vec![None; buffers],
+            lent: vec![None; buffers],
+            unlends: 0,
+        })))
+    }
+
+    fn publish(&self, buffer: usize, identity: u64, bytes: u32) {
+        self.0.lock().unwrap().published[buffer] = Some((identity, bytes));
+    }
+
+    fn lent(&self, buffer: usize) -> Option<u64> {
+        self.0.lock().unwrap().lent[buffer]
+    }
+
+    fn unlends(&self) -> u32 {
+        self.0.lock().unwrap().unlends
+    }
+}
+
+impl lemnos_hal::LendSource for LendMock {
+    type Error = lemnos_hal::ErrorKind;
+
+    fn lend(
+        &mut self,
+        buffer: u32,
+        identity: u64,
+    ) -> core::result::Result<lemnos_hal::Lend<'static>, lemnos_hal::ErrorKind> {
+        let mut s = self.0.lock().unwrap();
+        let at = buffer as usize;
+        let Some((published, bytes)) = s.published.get(at).copied().flatten() else {
+            return Ok(lemnos_hal::Lend::Busy);
+        };
+        if s.lent[at].is_some() {
+            return Ok(lemnos_hal::Lend::Busy);
+        }
+        if published != identity {
+            return Ok(lemnos_hal::Lend::IdentityMismatch);
+        }
+        let handle = lemnos_hal::blocks::BufferHandle::shared(s.set.clone(), at)
+            .ok_or(lemnos_hal::ErrorKind::InvalidInput)?;
+        s.lent[at] = Some(identity);
+        Ok(lemnos_hal::Lend::Lent(lemnos_hal::LentBuffer {
+            handle,
+            bytes,
+            generation: 1,
+        }))
+    }
+
+    fn unlend(
+        &mut self,
+        buffer: u32,
+        identity: u64,
+    ) -> core::result::Result<(), lemnos_hal::ErrorKind> {
+        let mut s = self.0.lock().unwrap();
+        let at = buffer as usize;
+        if s.lent.get(at).copied().flatten() != Some(identity) {
+            return Err(lemnos_hal::ErrorKind::InvalidInput);
+        }
+        s.lent[at] = None;
+        s.unlends += 1;
+        Ok(())
+    }
+}
+
+/// A driver with `lend` as its lend source, started, and the streams it reads.
+fn setup_lent(lend: &LendMock) -> (PispBe, Hw, Streams) {
+    let streams = Streams::new();
+    streams.configure(&config());
+    let mut needs = streams.needs();
+    needs.lend = Some(lemnos_core::Held::boxed(Box::new(lend.clone())));
+    let (mut be, hw) = setup_needs(needs, Options::new(4, 4).unwrap());
+    CameraIsp::start(&mut be).unwrap();
+    (be, hw, streams)
+}
+
+/// A job whose input is the front-end buffer `buffer` lent for `identity`.
+fn lent_job(identity: u64, buffer: u32) -> IspJob {
+    IspJob {
+        input_lent: true,
+        lent_buffer: buffer,
+        ..job_on(identity, 1, NO_BUFFER, 0)
+    }
+}
+
+/// A lent input is read in place, and given back when its job finishes: the output is published and
+/// the front end's buffer is its own again.
+#[test]
+fn a_lent_input_is_read_in_place_and_given_back_when_its_job_finishes() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    streams.post(&lent_job(9, 2));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(hw.posted().len(), 1, "the lent job is posted");
+    assert_eq!(
+        lend.lent(2),
+        Some(9),
+        "the buffer is lent while the job runs"
+    );
+    hw.finish(0, 9, 4096);
+    run_once(&mut be, 2);
+    assert_eq!(lend.lent(2), None, "finished: given back");
+    assert_eq!(lend.unlends(), 1);
+    assert_eq!(hw.with(Mock::live), 0, "its region is let go");
+    let frame = streams
+        .output0
+        .take_frame()
+        .expect("the output is published");
+    assert_eq!((frame.identity, u64::from(frame.bytes)), (9, OUTPUT_BYTES));
+}
+
+/// A lent buffer holding another frame is refused `identity-mismatch`, and nothing stays lent.
+#[test]
+fn a_lent_buffer_of_another_identity_is_refused_identity_mismatch() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    streams.post(&lent_job(8, 2));
+    run_once(&mut be, 1);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((8, lemnos_wire::ring::reason::IDENTITY_MISMATCH, 0))
+    );
+    assert_eq!(hw.posted().len(), 0, "a refused job is never posted");
+    assert_eq!(lend.lent(2), None);
+}
+
+/// A buffer already lent to another block is `busy`, and the job is not posted.
+#[test]
+fn a_lent_buffer_already_lent_is_refused_busy() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    let mut other = lend.clone();
+    lemnos_hal::LendSource::lend(&mut other, 2, 9).unwrap();
+    streams.post(&lent_job(9, 2));
+    run_once(&mut be, 1);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((9, lemnos_wire::ring::reason::BUSY, 0))
+    );
+    assert_eq!(hw.posted().len(), 0);
+}
+
+/// A frame too small for the image the configuration reads is `size-or-stride`, and the lend is given
+/// back at once.
+#[test]
+fn a_lent_frame_too_small_for_its_image_is_refused_size_or_stride_and_given_back() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, 1);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    streams.post(&lent_job(9, 2));
+    run_once(&mut be, 1);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((9, lemnos_wire::ring::reason::SIZE_OR_STRIDE, 0))
+    );
+    assert_eq!(hw.posted().len(), 0);
+    assert_eq!(lend.lent(2), None);
+    assert_eq!(lend.unlends(), 1);
+}
+
+/// A stop of a block that is not wedged gives back the lends of the jobs in flight.
+#[test]
+fn a_stop_gives_back_the_lends_of_the_jobs_in_flight() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, _hw, streams) = setup_lent(&lend);
+    streams.post(&lent_job(9, 2));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(lend.lent(2), Some(9));
+    be.stop_block();
+    assert_eq!(lend.lent(2), None, "stopped: given back");
+    assert_eq!(lend.unlends(), 1);
+}
+
+/// A wedged block keeps the lends of its jobs: the front-end buffers stay with it.
+#[test]
+fn a_wedged_stop_keeps_the_lends_of_its_jobs_in_flight() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    streams.post(&lent_job(9, 2));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    hw.with(|m| m.wedged_on_stop = true);
+    be.stop_block();
+    assert_eq!(
+        lend.lent(2),
+        Some(9),
+        "wedged: the buffer stays with the block"
+    );
+    assert_eq!(lend.unlends(), 0);
+    assert!(wedged_health(&be).contains("1 front-end buffer"));
+}
+
+/// A board with no `input` stream: the block reads a lent front-end buffer for every job, and has no
+/// input stream to read a buffer of its own from.
+#[test]
+fn a_block_with_no_input_stream_runs_lent_jobs_and_refuses_one_that_names_its_own_input() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let streams = Streams::new();
+    streams.configure(&config());
+    let mut needs = streams.needs();
+    needs.input = None;
+    needs.lend = Some(lemnos_core::Held::boxed(Box::new(lend.clone())));
+    let (mut be, hw) = setup_needs(needs, Options::new(4, 4).unwrap());
+    CameraIsp::start(&mut be).unwrap();
+
+    // Its own input buffer 0 is refused: there is no input stream to hold it.
+    streams.post(&job(7, 0, 0));
+    let now = run_once(&mut be, 1).unwrap();
+    run_once(&mut be, now);
+    assert!(
+        hw.posted().is_empty(),
+        "a job naming an input buffer is not posted"
+    );
+
+    streams.post(&lent_job(9, 2));
+    let now = run_once(&mut be, 3).unwrap();
+    run_once(&mut be, now);
+    assert_eq!(hw.posted().len(), 1, "the lent job is posted");
+    assert_eq!(lend.lent(2), Some(9));
+}
+
+/// A lent buffer the block cannot register (the kernel's EINVAL for a file that is not a dma-buf) is
+/// a job refused `bad-config`, as its consumer is told: nothing stays registered or lent, and the
+/// block goes on to the next job.
+#[test]
+fn a_lent_buffer_the_block_cannot_register_is_refused_bad_config_and_nothing_stays_lent() {
+    let lend = LendMock::new(4);
+    lend.publish(2, 9, INPUT_BYTES as u32);
+    let (mut be, hw, streams) = setup_lent(&lend);
+    hw.with(|m| m.refuse_lent = Some(Status::INVALID_ARGUMENT));
+    streams.post(&lent_job(9, 2));
+    run_once(&mut be, 1);
+    assert_eq!(
+        streams.output0.take_job_end(),
+        Some((9, lemnos_wire::ring::reason::BAD_CONFIG, 0))
+    );
+    assert_eq!(hw.posted().len(), 0);
+    assert_eq!(lend.lent(2), None);
+    assert_eq!(lend.unlends(), 1);
+    assert!(hw.with(|m| m.regions.iter().all(|r| r.is_none())));
 }

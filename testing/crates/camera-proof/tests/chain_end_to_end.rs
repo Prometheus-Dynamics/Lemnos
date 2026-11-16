@@ -106,15 +106,47 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         assert!(text.contains(&line), "missing {line:?} in:\n{text}");
     }
     // What a board run must show before it claims the path: both stages bound, the streams as
-    // declared (the back end's input is dma-bufs its caller fills), and frames end to end.
+    // the host made them, and frames end to end. Which path ran depends on the host's buffers, and
+    // the proof says which: a dma-buf host lends each frame; a host without a dma-heap copies them
+    // through the back end's input, and proves the lend refused on a memfd.
+    let dma = kind.starts_with("dma-bufs");
+    let (stats, input, path) = if dma {
+        (
+            "dma-buf per buffer",
+            "dma-buf per buffer, taken writable (not written: the front end's output0 is lent to each job)",
+            "front end output0: dma-bufs: the lent path",
+        )
+    } else {
+        (
+            "memfd per buffer",
+            "memfd per buffer, taken writable (written: the front end's frames are copied in, not lent)",
+            "front end output0: memfds: the copy path",
+        )
+    };
     for line in [
-        "stage front end: cam0-fe (pisp-fe) Running Ok",
-        "stage back end: cam0-isp (pisp-be) Running Ok",
-        "cam0-fe config: 8 buffers of 632 bytes, job-driven, shared memory, taken writable",
-        "cam0-fe statistics: 8 buffers of 23200 bytes, job-driven, dma-buf per buffer",
-        "cam0-isp input: 2 buffers of 2048000 bytes, job-driven, dma-buf per buffer, taken writable",
-        &format!("frames delivered end to end: {frames}"),
+        "stage front end: cam0-fe (pisp-fe) Running Ok, provides camera.isp/1, isp.pisp/1"
+            .to_string(),
+        "stage back end: cam0-isp (pisp-be) Running Ok, provides camera.isp/1, isp.pisp/1"
+            .to_string(),
+        "cam0-fe config: 8 buffers of 632 bytes, job-driven, shared memory, taken writable"
+            .to_string(),
+        format!("cam0-fe statistics: 8 buffers of 23200 bytes, job-driven, {stats}"),
+        format!("cam0-isp input: 2 buffers of 2048000 bytes, job-driven, {input}"),
+        path.to_string(),
+        format!("frames delivered end to end: {frames}"),
     ] {
-        assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        assert!(text.contains(&line), "missing {line:?} in:\n{text}");
+    }
+    if dma {
+        assert!(text.contains("chain proof: pass (lent path"), "{text}");
+    } else {
+        // The refusal is asserted for real: the one lent job on a memfd was refused bad-config, and
+        // the run went on over the copy path.
+        assert!(
+            text.contains("lend probe: a lent job on a memfd frame (identity")
+                && text.contains("was refused: job end bad-config"),
+            "the memfd lend was not refused as bad-config:\n{text}"
+        );
+        assert!(text.contains("chain proof: pass (copy path"), "{text}");
     }
 }

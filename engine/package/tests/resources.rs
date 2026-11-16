@@ -332,6 +332,7 @@ fn a_stream_carries_buffers_jobs_bytes_and_buffer_handles() {
             sequence: 3,
             identity: 0xfeed,
             timestamp_ns: 99,
+            end_ns: 0,
         })
     );
     // Published, the buffer is no longer the driver's: no handle, no bytes.

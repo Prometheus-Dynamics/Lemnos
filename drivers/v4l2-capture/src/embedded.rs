@@ -90,6 +90,7 @@ fn publish_line(
             sequence: u64::from(frame.sequence),
             identity: 0,
             timestamp_ns: frame.timestamp_ns,
+            end_ns: 0,
         })
         .map_err(|_| Status::IO)?;
     Ok(written)

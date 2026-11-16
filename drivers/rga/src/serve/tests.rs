@@ -263,7 +263,11 @@ impl Client {
     }
 
     fn done(&mut self) -> FrameSlot {
-        self.ring.pop_frame().unwrap().expect("a completion")
+        self.ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a completion")
     }
 
     fn release(&mut self, frame: FrameSlot) {
@@ -469,7 +473,7 @@ fn bytes_that_are_no_job_fault_that_consumers_stream_and_no_other() {
     rga.tick(1);
     // The scaler's consumer is cut off, and the job it posted behind the bad bytes ran nowhere.
     assert_eq!(scale.ring.state(), STATE_FAULT);
-    assert_eq!(scale.ring.pop_frame().unwrap(), None);
+    assert_eq!(scale.ring.pop_entry().unwrap(), None);
     assert_eq!(
         rga.health(),
         Health::Ok,
@@ -591,7 +595,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
     assert_eq!((second.buffer, second.identity, second.bytes), (3, 8, 16));
     let third = blend.done();
     assert_eq!((third.buffer, third.identity, third.bytes), (2, 9, 16));
-    assert_eq!(blend.ring.pop_frame().unwrap(), None);
+    assert_eq!(blend.ring.pop_entry().unwrap(), None);
 }
 
 #[test]

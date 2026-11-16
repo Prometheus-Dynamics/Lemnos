@@ -484,6 +484,7 @@ impl K230IspFrames {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })
             .map_err(|_| Status::IO)?;
         self.held_output = with(self.held_output, buffer, false);
@@ -577,6 +578,7 @@ impl K230IspFrames {
             sequence,
             identity: frame.identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         };
         self.output0.publish(image).map_err(|_| Status::IO)?;
         self.held_output = with(self.held_output, frame.buffer, false);
@@ -605,6 +607,7 @@ impl K230IspFrames {
             sequence,
             identity: frame.identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         };
         self.statistics.publish(stats).map_err(|_| Status::IO)?;
         self.held_statistics = with(self.held_statistics, buffer, false);
@@ -868,6 +871,7 @@ impl CameraIsp for K230IspFrames {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATISTICS_BYTES as u32,
+            input_lend: false,
         })
     }
 

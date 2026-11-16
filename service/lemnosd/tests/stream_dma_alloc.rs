@@ -53,6 +53,7 @@ fn frames_through_a_stream_of_dma_bufs_allocate_nothing_anywhere_in_the_process(
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })
             .unwrap();
         let empty = stream.next_frame(Duration::from_secs(5)).unwrap().unwrap();

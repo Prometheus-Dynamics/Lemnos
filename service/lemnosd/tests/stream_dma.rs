@@ -80,6 +80,7 @@ fn frame(buffer: u32, sequence: u64) -> StreamFrame {
         sequence,
         identity: sequence + 100,
         timestamp_ns: 0,
+        end_ns: 0,
     }
 }
 

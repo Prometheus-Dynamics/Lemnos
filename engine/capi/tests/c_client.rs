@@ -395,6 +395,7 @@ fn a_stream_in_planes_gives_each_plane_and_its_descriptor_through_the_surface() 
             sequence: 1,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         })
         .unwrap();
     let frame = stream

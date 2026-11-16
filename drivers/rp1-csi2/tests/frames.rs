@@ -444,7 +444,12 @@ fn the_consumer_reads_what_the_block_wrote() {
     for sequence in 0..7u64 {
         let filled = hw.with(Block::frame).expect("a buffer for the frame");
         now = receiver.tick(now).unwrap();
-        let frame = frames.ring.pop_frame().unwrap().expect("a frame");
+        let frame = frames
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!(
             (frame.buffer, frame.bytes, frame.sequence),
             (filled, FRAME_BYTES, sequence)
@@ -479,14 +484,19 @@ fn a_buffer_the_consumer_holds_is_not_filled_again() {
     for sequence in 0..u64::from(BUFFERS) {
         hw.with(Block::frame).expect("a buffer");
         now = receiver.tick(now).unwrap();
-        let frame = frames.ring.pop_frame().unwrap().expect("a frame");
+        let frame = frames
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!(frame.sequence, sequence);
         held.push(frame);
     }
     // The consumer has all four: the block has nowhere to write, and that start is dropped.
     assert_eq!(hw.with(Block::frame), None);
     now = receiver.tick(now).unwrap();
-    assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert!(frames.ring.pop_entry().unwrap().is_none());
     assert_eq!(
         receiver.frame_starts().unwrap().map(|fs| fs.count),
         Some(5),
@@ -504,7 +514,12 @@ fn a_buffer_the_consumer_holds_is_not_filled_again() {
     now = receiver.tick(now).unwrap();
     assert_eq!(hw.with(Block::frame), Some(back.buffer));
     receiver.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().expect("a frame");
+    let frame = frames
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     // Five starts so far, the dropped one among them: this frame's start is the sixth.
     assert_eq!((frame.buffer, frame.sequence), (back.buffer, 5));
     assert!(frames.read(frame.buffer) == image(5));
@@ -521,7 +536,12 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
     let mut now = 1;
     hw.with(Block::frame).expect("a buffer");
     now = receiver.tick(now).unwrap();
-    let frame = first.ring.pop_frame().unwrap().expect("a frame");
+    let frame = first
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert!(first.read(frame.buffer) == image(0));
 
     // The first consumer leaves holding that frame, with the block in the middle of the next.
@@ -542,7 +562,7 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
     // module still holds. The second consumer is told nothing and its memory is untouched.
     assert_eq!(hw.with(Block::end_frame), Some(in_flight));
     now = receiver.tick(now).unwrap();
-    assert!(second.ring.pop_frame().unwrap().is_none());
+    assert!(second.ring.pop_entry().unwrap().is_none());
     assert!(read(&old[in_flight as usize]) == image(1));
     assert!(second.read(in_flight).iter().all(|&byte| byte == 0));
     assert_eq!(receiver.counters().unwrap().dropped, 1);
@@ -554,7 +574,12 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
     for sequence in 2..10u64 {
         let filled = hw.with(Block::frame).expect("a buffer");
         now = receiver.tick(now).unwrap();
-        let frame = second.ring.pop_frame().unwrap().expect("a frame");
+        let frame = second
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!((frame.buffer, frame.sequence), (filled, sequence));
         assert!(
             second.read(frame.buffer) == image(sequence),
@@ -590,7 +615,12 @@ fn with_no_consumer_the_block_has_no_memory_and_gets_it_when_one_comes() {
     assert_eq!(hw.with(|b| b.with_memory()), BUFFERS as usize);
     hw.with(Block::frame).expect("a buffer");
     receiver.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().expect("a frame");
+    let frame = frames
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert!(frames.read(frame.buffer) == image(0));
 }
 
@@ -605,7 +635,7 @@ fn a_stream_without_handles_is_refused_with_or_without_a_consumer() {
     assert_eq!(receiver.start().unwrap_err(), Status::NOT_SUPPORTED);
     assert_eq!(hw.with(|b| (b.going, b.given)), (false, 0));
     assert_eq!(receiver.tick(1), None, "not streaming");
-    assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert!(frames.ring.pop_entry().unwrap().is_none());
 }
 
 /// A board whose device `csi0` is this driver, with `frames` as `memory` says.
@@ -665,5 +695,5 @@ fn buffers_smaller_than_a_frame_are_refused() {
     assert!(receiver.configure(big, Packing::Packed).unwrap().size > 4096);
     assert_eq!(receiver.start().unwrap_err(), Status::INVALID_ARGUMENT);
     assert_eq!(hw.with(|b| (b.going, b.given)), (false, 0));
-    assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert!(frames.ring.pop_entry().unwrap().is_none());
 }

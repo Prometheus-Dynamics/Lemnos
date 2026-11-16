@@ -84,7 +84,11 @@ fn run(buffers: u32, working: u32, lag: u64) -> Run {
     let read = |consumer: &mut lemnos_wire::ring::Consumer, out: &mut Run| {
         // A replaced frame reads as a skip, so the first pop may come back empty.
         for _ in 0..3 {
-            if let Some(slot) = consumer.pop_frame().unwrap() {
+            if let Some(slot) = consumer
+                .pop_entry()
+                .unwrap()
+                .and_then(|entry| entry.frame())
+            {
                 let mut got = [0u8; FRAME];
                 assert!(consumer.read(slot.buffer, 0, &mut got[..slot.bytes as usize]));
                 if got[..slot.bytes as usize] != pattern(slot.sequence)[..slot.bytes as usize] {
@@ -110,6 +114,7 @@ fn run(buffers: u32, working: u32, lag: u64) -> Run {
                         sequence: p,
                         identity: 0,
                         timestamp_ns: p + 1,
+                        end_ns: 0,
                     })
                     .unwrap();
             }

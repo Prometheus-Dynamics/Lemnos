@@ -99,6 +99,12 @@ pub(crate) struct StreamCore {
     generation: u32,
     /// Publish order of each buffer's newest frame, so the oldest unheld one is taken back first.
     published_at: Box<[u64]>,
+    /// Each buffer's newest frame's identity and length, for a block that reads it lent.
+    published_identity: Box<[u64]>,
+    published_bytes: Box<[u32]>,
+    /// Lent to a block that reads the buffer (`LendSource`): the identity of the frame lent. A lent
+    /// buffer is never taken back until it is unlent.
+    lent: Box<[Option<u64>]>,
     /// Frames published so far on this stream.
     published_count: u64,
     counters: Counters,
@@ -156,6 +162,9 @@ impl StreamCore {
             epoch: 0,
             generation: 0,
             published_at: vec![0; layout.buffers as usize].into_boxed_slice(),
+            published_identity: vec![0; layout.buffers as usize].into_boxed_slice(),
+            published_bytes: vec![0; layout.buffers as usize].into_boxed_slice(),
+            lent: vec![None; layout.buffers as usize].into_boxed_slice(),
             published_count: 0,
             counters: Counters::default(),
             producer: ProducerWords::default(),
@@ -430,7 +439,7 @@ impl StreamCore {
             self.note_released(set);
         }
         self.epoch += 1;
-        self.pool.reclaim_published();
+        self.reclaim_unlent_published();
         // Fresh memory for the next consumer, if on standby, when the producer next asks.
         self.standby_failed = false;
     }
@@ -554,6 +563,10 @@ impl StreamCore {
                 if !matches!(self.pool.state(buffer), Some(BufferState::Consumer { .. })) {
                     continue;
                 }
+                // Lent to a block: it still reads this frame.
+                if self.lent[buffer as usize].is_some() {
+                    continue;
+                }
                 let at = self.published_at[buffer as usize];
                 if at <= after {
                     continue;
@@ -620,6 +633,93 @@ impl StreamCore {
         Ok(())
     }
 
+    /// Takes back every published buffer no block is reading lent. Lock held.
+    fn reclaim_unlent_published(&mut self) {
+        let lent = &self.lent;
+        self.pool
+            .reclaim_published_where(|buffer| lent[buffer as usize].is_some());
+    }
+
+    /// Lends `buffer` to a block for the frame `identity`: its memory, shared, and the frame's length.
+    /// Only a published frame can be lent, and one not already lent. Lock held.
+    pub(crate) fn lend(
+        &mut self,
+        buffer: u32,
+        identity: u64,
+    ) -> Result<lemnos_hal::Lend<'static>, ErrorKind> {
+        let at = buffer as usize;
+        if at >= self.lent.len() {
+            return Err(ErrorKind::InvalidInput);
+        }
+        if !matches!(self.pool.state(buffer), Some(BufferState::Consumer { .. }))
+            || self.lent[at].is_some()
+        {
+            return Ok(lemnos_hal::Lend::Busy);
+        }
+        if self.published_identity[at] != identity {
+            return Ok(lemnos_hal::Lend::IdentityMismatch);
+        }
+        let Some(set) = self.in_place().and_then(|memory| memory.handles.clone()) else {
+            return Ok(lemnos_hal::Lend::Busy);
+        };
+        let Some(handle) = lemnos_hal::blocks::BufferHandle::shared(set, at) else {
+            return Ok(lemnos_hal::Lend::Busy);
+        };
+        self.lent[at] = Some(identity);
+        Ok(lemnos_hal::Lend::Lent(lemnos_hal::LentBuffer {
+            handle,
+            bytes: self.published_bytes[at],
+            generation: self.generation,
+        }))
+    }
+
+    /// Gives back a buffer lent for `identity`. Refused for a buffer not lent to it. Lock held.
+    pub(crate) fn unlend(&mut self, buffer: u32, identity: u64) -> Result<(), ErrorKind> {
+        match self.lent.get_mut(buffer as usize) {
+            Some(lent) if *lent == Some(identity) => {
+                *lent = None;
+                Ok(())
+            }
+            _ => Err(ErrorKind::InvalidInput),
+        }
+    }
+
+    /// Puts a job's end on the ring: no buffer, only the metadata, so the consumer learns the job
+    /// ended and why. Lock held; bounded. Refused for a reason of 0, which is a result.
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), ErrorKind> {
+        if reason == lemnos_wire::ring::reason::NONE {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let meta = FrameInfo {
+            sequence: 0,
+            identity,
+            bytes: 0,
+            reason,
+            end_ns,
+        }
+        .encode();
+        let published = match self.attached.as_mut() {
+            Some(attached) => {
+                let time = SampleTime::from_nanos(end_ns);
+                let result = attached.memory.publisher.publish_empty(time, &meta);
+                if result.is_ok() {
+                    attached.bell.ring();
+                }
+                result.is_ok()
+            }
+            None => false,
+        };
+        if !published {
+            self.counters.dropped += 1;
+        }
+        Ok(())
+    }
+
     /// Puts a frame the consumer attached now is due on its ring: the frame's buffer's planes, and
     /// its metadata.
     fn deliver(&mut self, frame: StreamFrame) {
@@ -631,10 +731,20 @@ impl StreamCore {
         for plane in 0..planes {
             names[plane as usize] = BufferIndex(frame.buffer * planes + plane);
         }
+        // A frame of no bytes is a result the block flagged bad: its reason says so.
+        let reason = if frame.bytes == 0 {
+            lemnos_wire::ring::reason::FAILED
+        } else {
+            lemnos_wire::ring::reason::NONE
+        };
+        self.published_identity[frame.buffer as usize] = frame.identity;
+        self.published_bytes[frame.buffer as usize] = frame.bytes;
         let meta = FrameInfo {
             sequence: frame.sequence,
             identity: frame.identity,
             bytes: frame.bytes,
+            reason,
+            end_ns: frame.end_ns,
         }
         .encode();
         let time = SampleTime::from_nanos(frame.timestamp_ns);
@@ -963,6 +1073,32 @@ impl BufferWriter {
     }
 }
 
+/// A stream's buffers lent to a block, from the stream's own core and without claiming the stream: the
+/// producer keeps it. Lends and unlends run under the core's lock, so a buffer is never lent while
+/// the stream reuses it.
+#[derive(Clone)]
+pub struct LendView {
+    core: Arc<Mutex<StreamCore>>,
+}
+
+impl LendView {
+    pub(crate) const fn new(core: Arc<Mutex<StreamCore>>) -> Self {
+        Self { core }
+    }
+}
+
+impl lemnos_hal::LendSource for LendView {
+    type Error = ErrorKind;
+
+    fn lend(&mut self, buffer: u32, identity: u64) -> Result<lemnos_hal::Lend<'static>, ErrorKind> {
+        lock(&self.core).lend(buffer, identity)
+    }
+
+    fn unlend(&mut self, buffer: u32, identity: u64) -> Result<(), ErrorKind> {
+        lock(&self.core).unlend(buffer, identity)
+    }
+}
+
 impl StreamEndpoint for ProducerEndpoint {
     type Error = ErrorKind;
 
@@ -976,6 +1112,15 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {
         lock(&self.core).publish(frame)
+    }
+
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), ErrorKind> {
+        lock(&self.core).publish_job_end(identity, reason, end_ns)
     }
 
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {

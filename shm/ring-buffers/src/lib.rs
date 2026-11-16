@@ -38,7 +38,7 @@ mod writer;
 use core::fmt;
 
 pub use pool::{BufferDesc, BytesError, Pool, PoolView};
-pub use reader::{Batch, BufferReader, Held, NextBatch};
+pub use reader::{Batch, BufferReader, Held, NextBatch, NoBuffers};
 pub use writer::BufferWriter;
 
 /// A buffer of a pool: its position in the pool's list.

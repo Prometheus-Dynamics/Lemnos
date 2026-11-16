@@ -299,7 +299,13 @@ static void lpb_schedule(struct lem_pb *l, struct lpb_stream *ps)
 /* A job the block has finished: its frame, and what it held. l->lock held. */
 static void lpb_finish(struct lem_pb *l, struct lpb_stream *ps, struct lpb_job *job)
 {
-	lem_stream_complete(ps->s, &job->slot, job->slot.bytes, ps->sequence++, ktime_get_ns());
+	{
+		/* The block has no start stamp: the finish is both the frame's time and its end. */
+		u64 done = ktime_get_ns();
+
+		lem_stream_complete_at(ps->s, &job->slot, job->slot.bytes, ps->sequence++, done,
+				       done);
+	}
 	list_add(&job->node, &ps->free);
 	l->finished++;
 }

@@ -279,6 +279,7 @@ impl Server {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })?;
             self.set_held(buffer, false);
         }
@@ -358,6 +359,7 @@ impl Server {
             sequence: self.sequence,
             identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         })?;
         self.set_held(result, false);
         self.sequence = self.sequence.wrapping_add(1);

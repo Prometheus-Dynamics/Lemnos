@@ -331,7 +331,11 @@ impl Rig {
         };
         assert!(self.consumer.jobs().post(&bytes[..used]).unwrap());
         assert!(self.run_one());
-        self.consumer.pop_frame().unwrap().expect("a completion")
+        self.consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a completion")
     }
 }
 

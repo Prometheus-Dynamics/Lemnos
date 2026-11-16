@@ -37,7 +37,7 @@ pub const REFLECT_X: u32 = 1 << 4;
 /// `LEMNOS_GSDMA_REFLECT_Y`.
 pub const REFLECT_Y: u32 = 1 << 5;
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_JOB_SLOTS: usize = 5;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;

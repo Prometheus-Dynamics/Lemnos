@@ -133,6 +133,8 @@ fn job() -> IspJob {
         config_buffer: 1,
         input_buffer: NO_BUFFER,
         outputs: [2, NO_BUFFER, 3, 4],
+        input_lent: false,
+        lent_buffer: 0,
     }
 }
 
@@ -146,6 +148,7 @@ fn every_type_round_trips() {
         config_layouts: 2,
         statistics_layout: 9,
         statistics_bytes: 16_000,
+        input_lend: false,
     });
     round_trip(ConfigLayout {
         layout: 4,
@@ -171,14 +174,16 @@ fn every_type_round_trips() {
         jobs: 1,
         dropped: 2,
         errors: u64::MAX,
+        lent: 0,
     });
 }
 
 #[test]
 fn a_job_is_a_fixed_small_record() {
+    // The base record, then the two added fields: `input_lent` (a bool) and `lent_buffer`.
     assert_eq!(
         max_len(&IspJob::SHAPE),
-        Some(4 + 8 + 4 + 4 + 4 + 4 * MAX_OUTPUTS)
+        Some(4 + 8 + 4 + 4 + 4 + 4 * MAX_OUTPUTS + 1 + 4)
     );
 }
 

@@ -13,6 +13,10 @@ use std::collections::VecDeque;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::{Arc, Mutex, PoisonError};
 
+/// The simulated front end's readout, from a frame's start to its end of frame: the figure the
+/// c1 board run measured (about 7.3 ms, BR1 12.13). A stand-in for the sensor's timing.
+const SIM_READOUT_NS: u64 = 7_300_000;
+
 use lemnos_contract_camera_isp::Counters;
 use lemnos_core::{Result, Status};
 use lemnos_driver_pisp::be_hw as be;
@@ -104,9 +108,15 @@ struct Region {
 impl Region {
     /// A region at `addr` over `memory`, which is mapped writable. `NO_MEMORY` if it can't be.
     fn over(memory: BorrowedFd<'_>, addr: u64) -> Result<Self> {
+        Self::over_with(memory, addr, true)
+    }
+
+    /// A region at `addr` over `memory`, mapped writable or read-only. A write into a read-only
+    /// region is refused, as the real block's read-only mapping of a lent buffer refuses it.
+    fn over_with(memory: BorrowedFd<'_>, addr: u64, writable: bool) -> Result<Self> {
         let size = lemnos_linux_sys::dma_buf::size(memory).map_err(|_| Status::IO)?;
         let len = usize::try_from(size).map_err(|_| Status::IO)?;
-        let map = Mapping::new(memory, len, 0, true).map_err(|_| Status::NO_MEMORY)?;
+        let map = Mapping::new(memory, len, 0, writable).map_err(|_| Status::NO_MEMORY)?;
         Ok(Self {
             addr,
             map,
@@ -289,6 +299,8 @@ impl FeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: due.saturating_sub(STALE_NS.load(Ordering::SeqCst)),
+            // The simulated readout takes SIM_READOUT_NS after the frame starts; its EOF is that.
+            end_ns: due + SIM_READOUT_NS,
         });
         self.sequence += 1;
     }
@@ -529,6 +541,8 @@ impl BeState {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: self.last_ns,
+            // The block's finish is both the frame's time and its end.
+            end_ns: self.last_ns,
         });
         self.sequence += 1;
     }
@@ -537,6 +551,28 @@ impl BeState {
 impl BeBlock {
     fn with<R>(&self, f: impl FnOnce(&mut BeState) -> R) -> R {
         f(&mut lock(&self.0))
+    }
+
+    /// Takes a region for `memory`, writable or read-only, and gives its address and size.
+    fn add_region(&self, memory: BorrowedFd<'_>, writable: bool) -> Result<be::Registered> {
+        let mapped = Region::over_with(memory, 0, writable)?;
+        self.with(|b| {
+            let region = match b.regions.iter().skip(1).position(Option::is_none) {
+                Some(at) => at + 1,
+                None => {
+                    b.regions.push(None);
+                    b.regions.len() - 1
+                }
+            };
+            let addr = BE_REGIONS + region as u64 * REGION_SPAN;
+            let size = mapped.size;
+            b.regions[region] = Some(Region { addr, ..mapped });
+            Ok(be::Registered {
+                region: region as u32,
+                addr,
+                size,
+            })
+        })
     }
 }
 
@@ -562,32 +598,31 @@ impl be::Hardware for BeBlock {
         })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|b| {
             b.regions.clear();
             b.pending.clear();
         });
+        false
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<be::Registered> {
-        let mapped = Region::over(memory, 0)?;
-        self.with(|b| {
-            let region = match b.regions.iter().skip(1).position(Option::is_none) {
-                Some(at) => at + 1,
-                None => {
-                    b.regions.push(None);
-                    b.regions.len() - 1
-                }
-            };
-            let addr = BE_REGIONS + region as u64 * REGION_SPAN;
-            let size = mapped.size;
-            b.regions[region] = Some(Region { addr, ..mapped });
-            Ok(be::Registered {
-                region: region as u32,
-                addr,
-                size,
-            })
-        })
+        self.add_region(memory, true)
+    }
+
+    /// A front-end buffer lent to the block: a region mapped read-only, so a job that writes into it
+    /// fails as the real block's does. A file that is not a dma-buf is refused as the kernel refuses
+    /// it (EINVAL, which the driver reports as `INVALID_ARGUMENT`, nothing registered; the QEMU lend
+    /// check reproduces the kernel's refusal). The sim has no pin cache, so the generation keys nothing.
+    fn register_lent(
+        &mut self,
+        memory: BorrowedFd<'_>,
+        _generation: u32,
+    ) -> Result<be::Registered> {
+        if !lemnos_linux_sys::dma_buf::is_dma_buf(memory).map_err(|_| Status::IO)? {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        self.add_region(memory, false)
     }
 
     fn unregister(&mut self, region: u32) -> Result<()> {
@@ -623,5 +658,44 @@ impl be::Hardware for BeBlock {
 
     fn check(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lent_tests {
+    use super::*;
+    use std::os::fd::AsFd;
+
+    /// A lent region refuses a write, and a writable one takes it. The stand-in is a sealed memfd,
+    /// which is not a dma-buf (no DMA attachment), so only the mapping's write refusal is shared
+    /// with the real path: that refusal is what fails a job that writes into a lent buffer.
+    #[test]
+    fn a_write_into_a_lent_region_is_refused_and_a_writable_one_takes_it() {
+        let memfd = lemnos_linux_sys::dma_buf::sealed_memfd(c"lent-stand-in", 4096).unwrap();
+        let lent = Region::over_with(memfd.as_fd(), 0, false).unwrap();
+        assert!(
+            lent.map.write_bytes(0, &[1, 2, 3]).is_none(),
+            "a write into a lent region is refused"
+        );
+        let writable = Region::over_with(memfd.as_fd(), 0, true).unwrap();
+        assert!(
+            writable.map.write_bytes(0, &[1, 2, 3]).is_some(),
+            "the control: a writable region takes the write"
+        );
+    }
+
+    /// The kernel refuses a lent file that is not a dma-buf with EINVAL and registers nothing; the
+    /// stand-in refuses it the same way (`INVALID_ARGUMENT`, as the driver maps EINVAL), so the
+    /// driver's refusal path runs here as it does on a board.
+    #[test]
+    fn a_lent_file_that_is_not_a_dma_buf_is_refused_and_nothing_is_registered() {
+        let memfd = lemnos_linux_sys::dma_buf::sealed_memfd(c"lent-refused", 4096).unwrap();
+        let mut block = BeBlock::default();
+        let refused = be::Hardware::register_lent(&mut block, memfd.as_fd(), 1);
+        assert_eq!(refused.err(), Some(Status::INVALID_ARGUMENT));
+        assert!(
+            block.with(|b| b.regions.iter().all(|r| r.is_none())),
+            "nothing is registered for a refused lend"
+        );
     }
 }

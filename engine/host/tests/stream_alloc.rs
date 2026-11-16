@@ -38,7 +38,11 @@ fn a_thousand_frames_through_the_host_allocate_nothing() {
     let mut frame = |sequence: u64| {
         let mut write = |buffer, bytes: &[u8]| writer.write(buffer, 0, bytes);
         assert!(source.produce(&mut producer, &mut write).unwrap());
-        let got = consumer.pop_frame().unwrap().unwrap();
+        let got = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap();
         assert_eq!(got.sequence, sequence);
         assert_eq!(got.identity, 0);
         assert!(consumer.release(got.buffer));

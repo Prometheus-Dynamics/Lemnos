@@ -237,8 +237,9 @@ shared-memory file that is not sealed against shrinking.
 | Word | Holds |
 | --- | --- |
 | 0 | Magic: `SHMPOOL1` |
-| 1 | Generation (low 32 bits), buffers (high 32) |
-| 2 to 7 | Reserved, zero |
+| 1 | Layout: 2. A reader of another value refuses the page with a layout error that names both values |
+| 2 | Generation (low 32 bits), buffers (high 32) |
+| 3 to 7 | Reserved, zero |
 | 8 | Tickets: one word per buffer, `uses << 1 | taken back` |
 | 8 + buffers | Cut-off: one word per reader slot (64), nonzero once that reader is cut off |
 
@@ -247,13 +248,16 @@ shared-memory file that is not sealed against shrinking.
 | Bytes | Holds |
 | --- | --- |
 | 0 to 3 | The pool's generation |
-| 4 | How many buffers, 1 to 8 |
+| 4 | How many buffers, 0 to 8 (0: an entry that names no buffer, see below) |
 | 5 to 7 | Reserved, zero |
 | 8 on | For each buffer: its index (4 bytes), its ticket when published (4 bytes) |
 | then | Metadata, opaque, to the end |
 
 One entry can name several buffers, so an image and its pyramid levels travel and come back
-together. The generation goes up when the publisher replaces its pool (a camera changing mode); a
+together. An entry that names no buffer (a job's end, with its metadata only) is a different thing:
+the reader returns it as its own arm, `NextBatch::NoBuffers` (`Read::NoBuffers` from `entry::read`),
+and a frame arm, `NextBatch::Frame`, always holds at least one buffer. A reader that matched the old
+`NextBatch::Batch` name no longer compiles, and must say which arm it wants. The generation goes up when the publisher replaces its pool (a camera changing mode); a
 reader that sees a newer generation is told to fetch the new pool, and frames of the old pool it
 still holds stay mapped until it lets go.
 
@@ -359,13 +363,13 @@ value; an additive change that an older side ignores does not, and says so here.
 | --- | --- | --- | --- | --- |
 | Ring header | word 1 | 2 | 1: the first publish, word 10 reserved zero. 2: word 10 is the end code, read by a reader | Yes: 1 to 2. Layout 1 readers read a closed or faulted ring as running |
 | Marks page | top byte of word 0 | 2 | 1 (no byte, zero): `1 + b` words, marks only. 2: `1 + 2b` words, marks and taken stamps | Yes: 1 to 2. Taken stamps were added without a value |
-| Pool page | word 0, magic `SHMPOOL1` | `SHMPOOL1` | The magic is its layout: the words in [`ring-buffers`](ring-buffers/src/page.rs) | No |
+| Pool page | word 1 | 2 | 2: the words in [`ring-buffers`](ring-buffers/src/page.rs). Before 2 the page had no layout word: the shape was in word 1, which a layout 2 reader refuses | Yes: the layout word was added at word 1 and the shape moved to word 2. Unreleased, so no older page is in use |
 | Entry (in a ring's payload) | the payload of the topic's field | none of its own | Carried under the ring's layout | No |
 | Doorbell page | word 0, `sleeps << 1 \| asleep` | none of its own | Unnumbered; the same since the first publish | No |
 | Sample time | the 8 bytes of a sample's time | none of its own | `CLOCK_MONOTONIC` nanoseconds on Linux and macOS. Windows reads `QueryPerformanceCounter`, which is a different clock, so Linux and Windows rings do not compare | No change on Linux |
 | Descriptor messages (`shm-fdpass`) | the message's ancillary data | none of its own | Unnumbered; the same since the first publish | No |
 | Kernel module's copies | `kernel/lemnos_stream.c`: `LEM_SHM_LAYOUT`, `LEM_MARKS_LAYOUT` | 2, 2 | The same values as the rows above | Carried, and checked: a reader's marks page of another layout is refused with a log line naming both |
-| Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x8b6a280430008fea` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before |
+| Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x81a5753a1c9576e6` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before. Moved again by M34 (`0x8b6a280430008fea` to `0x81a5753a1c9576e6`): the ring's frame metadata and job end |
 
 A reader refuses a value it does not implement, with `RingError::Layout`. Readers built from 0aa30510 do not
 check the value at all, so they read a layout 2 ring as layout 1: that is the one direction this layout cannot

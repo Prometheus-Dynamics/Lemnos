@@ -72,7 +72,30 @@ impl<M: MemMut> BufferWriter<M> {
         time: SampleTime,
         meta: &[u8],
     ) -> Result<u64, BufferError> {
-        if buffers.is_empty() || buffers.len() > MAX_PER_FRAME {
+        if buffers.is_empty() {
+            return Err(BufferError::Count);
+        }
+        self.publish_named(buffers, time, meta)
+    }
+
+    /// Publishes an entry that names no buffer: only its metadata, for a job that ended with
+    /// nothing to show (a refusal or a timeout). Nothing is taken from the pool, so this can't
+    /// fail for want of a buffer.
+    ///
+    /// # Errors
+    ///
+    /// [`BufferError::TooLarge`] if the entry doesn't fit the ring's payload.
+    pub fn publish_empty(&mut self, time: SampleTime, meta: &[u8]) -> Result<u64, BufferError> {
+        self.publish_named(&[], time, meta)
+    }
+
+    fn publish_named(
+        &mut self,
+        buffers: &[BufferIndex],
+        time: SampleTime,
+        meta: &[u8],
+    ) -> Result<u64, BufferError> {
+        if buffers.len() > MAX_PER_FRAME {
             return Err(BufferError::Count);
         }
         let mut named = [(BufferIndex(0), 0); MAX_PER_FRAME];

@@ -231,6 +231,8 @@ fn post_on(
             buffer,
             if output1 { buffer } else { NO_BUFFER },
         ],
+        input_lent: false,
+        lent_buffer: 0,
     };
     let mut buf = [0u8; 128];
     let mut w = Writer::new(&mut buf);
@@ -492,6 +494,8 @@ fn post_spoiled(cfg: &mut FrameStream, good: &[u8], identity: &mut u64) -> Resul
             config_buffer: buffer,
             input_buffer: NO_BUFFER,
             outputs: [NO_BUFFER, NO_BUFFER, 0, NO_BUFFER],
+            input_lent: false,
+            lent_buffer: 0,
         };
         *identity += 1;
         let mut buf = [0u8; 128];

@@ -20,6 +20,7 @@ device = [
   "dep:lemnos-driver-pisp-sys",
   "dep:lemnos-driver-pisp-fe-sys",
   "dep:lemnos-linux-sys",
+  "dep:lemnos-wire",
 ]
 
 # A simulated board gives the drivers a block of its own in place of the module's node (`be_hw::install_simulated`, `fe_hw::install_simulated`).
@@ -33,6 +34,7 @@ lemnos-contract-isp-pisp = { path = "../../contracts/isp-pisp", optional = true 
 lemnos-driver-pisp-sys = { path = "../pisp-sys", optional = true }
 lemnos-driver-pisp-fe-sys = { path = "../pisp-fe-sys", optional = true }
 lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
+lemnos-wire = { path = "../../engine/wire", optional = true }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }

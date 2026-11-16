@@ -545,6 +545,7 @@ impl K230Capture {
             sequence: self.sequence,
             identity: 0,
             timestamp_ns,
+            end_ns: 0,
         };
         if self.hw.take(slot).is_err() {
             let _ = self.frames.publish(frame);

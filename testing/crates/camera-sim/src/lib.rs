@@ -616,6 +616,7 @@ impl SimReceiver {
             sequence: self.emitted,
             identity: 0,
             timestamp_ns: at_ns,
+            end_ns: 0,
         };
         match frames.publish(frame) {
             Ok(()) => self.counters.frames += 1,
@@ -747,9 +748,14 @@ pub struct SimBuffers {
 }
 
 impl SimBuffers {
-    /// Probes the host's heap once: one buffer is made and dropped.
+    /// Probes the host's heap once: one buffer is made and dropped. With `LEMNOS_TEST_NO_DMA_HEAP`
+    /// set (test only) the heap is treated as absent, so the buffers are sealed memfds whatever the
+    /// host has: the kind a CI runner without a dma-heap gets. Nothing else is changed by it.
     #[must_use]
     pub fn probe() -> Self {
+        if std::env::var_os("LEMNOS_TEST_NO_DMA_HEAP").is_some() {
+            return Self { heaps: None };
+        }
         let heaps = lemnosd::DmaHeaps::at("/dev/dma_heap");
         let usable = lemnosd::BufferSource::allocate(&heaps, "system", 4096, 1).is_ok();
         Self {

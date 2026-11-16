@@ -667,6 +667,7 @@ impl PispFe {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             Buffers::set(&mut self.configs.held, buffer, false);
@@ -1039,6 +1040,7 @@ fn give_up(stream: &mut StreamHandle, buffer: u32) {
         sequence: 0,
         identity: 0,
         timestamp_ns: 0,
+        end_ns: 0,
     });
 }
 
@@ -1069,6 +1071,7 @@ fn publish(
         sequence: done.sequence,
         identity: done.identity,
         timestamp_ns: done.timestamp_ns,
+        end_ns: done.end_ns,
     };
     let published = stream.publish(frame).is_ok();
     if published {
@@ -1110,6 +1113,7 @@ impl CameraIsp for PispFe {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATS_BYTES as u32,
+            input_lend: false,
         })
     }
 

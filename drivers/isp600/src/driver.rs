@@ -584,6 +584,7 @@ impl Isp600 {
                                 sequence,
                                 identity: p.identity,
                                 timestamp_ns: 0,
+                                end_ns: 0,
                             };
                             write_and_publish(
                                 &mut self.statistics,
@@ -655,6 +656,7 @@ impl Isp600 {
             sequence,
             identity: p.identity,
             timestamp_ns: frame.timestamp_ns,
+            end_ns: 0,
         };
         let delivered = write_and_publish(
             &mut self.output0,
@@ -731,6 +733,7 @@ impl Isp600 {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             self.held.config = with(self.held.config, buffer, false);
@@ -838,6 +841,7 @@ impl CameraIsp for Isp600 {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATISTICS_BYTES as u32,
+            input_lend: false,
         })
     }
 

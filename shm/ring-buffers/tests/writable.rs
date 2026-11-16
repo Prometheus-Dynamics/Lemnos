@@ -52,7 +52,7 @@ fn a_publisher_writes_its_own_mapped_pool_and_a_reader_sees_the_bytes() {
         .expect("publish");
 
     match reader.next() {
-        NextBatch::Batch(batch) => {
+        NextBatch::Frame(batch) => {
             assert_eq!(batch.held.bytes(0).expect("bytes")[..4], [0x5a; 4]);
         }
         other => panic!("{other:?}"),

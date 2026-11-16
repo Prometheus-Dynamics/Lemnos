@@ -88,6 +88,10 @@ impl lemnos_client::StreamPlatform for LinuxStreams {
         LinuxStreams::writable_descriptor(self, fd)
     }
 
+    fn is_dma_buf(&self, fd: BorrowedFd<'_>) -> bool {
+        lemnos_linux_sys::dma_buf::is_dma_buf(fd).unwrap_or(false)
+    }
+
     fn dma_sync(
         &self,
         fd: BorrowedFd<'_>,

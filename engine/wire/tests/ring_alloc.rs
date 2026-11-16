@@ -23,7 +23,11 @@ fn a_thousand_frames_and_jobs_through_a_stream_allocate_nothing() {
             for sequence in 0..frames {
                 let buffer = host.take().expect("a free buffer");
                 assert!(host.publish(buffer, 16, sequence, 7, 9));
-                let frame = consumer.pop_frame().expect("no error").expect("a frame");
+                let frame = consumer
+                    .pop_entry()
+                    .expect("no error")
+                    .and_then(|entry| entry.frame())
+                    .expect("a frame");
                 assert_eq!(frame.buffer, buffer);
                 assert!(consumer.release(frame.buffer));
                 host.reclaim();

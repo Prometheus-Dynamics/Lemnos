@@ -168,7 +168,7 @@ impl Serving {
     /// The next completion: its frame, its record and the bytes after the record's part. The
     /// buffer goes back to the stream.
     fn completion(&mut self) -> Option<(FrameSlot, Completion, Vec<u8>)> {
-        let frame = self.ring.pop_frame().unwrap()?;
+        let frame = self.ring.pop_entry().unwrap()?.frame()?;
         let mut record = [0u8; COMPLETION_BYTES];
         assert!(self.ring.read(frame.buffer, 0, &mut record));
         let record = Completion::decode(&mut Reader::new(&record)).unwrap();

@@ -151,7 +151,11 @@ fn consumer(lease: Lease) -> Consumer {
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
-    consumer.pop_frame().unwrap().expect("a completion")
+    consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a completion")
 }
 
 #[test]

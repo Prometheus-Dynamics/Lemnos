@@ -202,7 +202,7 @@ fn take(ring: &Shared) -> Option<(u64, JobStatus)> {
 }
 
 fn take_on(ring: &mut Consumer) -> Option<(u64, JobStatus)> {
-    let frame = ring.pop_frame().unwrap()?;
+    let frame = ring.pop_entry().unwrap()?.frame()?;
     let mut record = [0u8; COMPLETION_BYTES];
     assert!(ring.read(frame.buffer, 0, &mut record));
     let record = Completion::decode(&mut Reader::new(&record)).unwrap();

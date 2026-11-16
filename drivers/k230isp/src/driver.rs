@@ -457,6 +457,7 @@ impl K230Isp {
             sequence: p.frame,
             identity: p.identity,
             timestamp_ns: self.frames.last_ns,
+            end_ns: 0,
         };
         let reached = match self.statistics.write(buffer, 0, &self.stats) {
             Ok(true) => true,
@@ -572,6 +573,7 @@ impl CameraIsp for K230Isp {
             config_layouts: 1,
             statistics_layout: LAYOUT_STATISTICS,
             statistics_bytes: STATISTICS_BYTES as u32,
+            input_lend: false,
         })
     }
 

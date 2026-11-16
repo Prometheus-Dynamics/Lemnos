@@ -521,6 +521,10 @@ pub struct DeviceSpec {
     /// Another device this one is wired to. The host only hands it over.
     #[serde(default)]
     pub link: Option<String>,
+    /// The stream of the device whose `link` names this one, that this device reads as a lend: its
+    /// buffers, lent to each job that names one. Left out, this device is given no lend.
+    #[serde(default)]
+    pub lend: Option<String>,
     #[serde(default)]
     pub config: toml::Table,
     #[serde(default)]
@@ -613,6 +617,7 @@ impl EachSpec {
             bus,
             uses,
             link: None,
+            lend: None,
             config: self.config.clone(),
             disabled: false,
             owner: self.owner,

@@ -120,6 +120,7 @@ fn frame(buffer: u32) -> StreamFrame {
         sequence: 1,
         identity: 9,
         timestamp_ns: 0,
+        end_ns: 0,
     }
 }
 
@@ -162,7 +163,11 @@ fn a_driver_borrows_the_handles_of_buffers_it_holds_and_the_consumer_sees_what_h
         .unwrap();
     assert_eq!(out, [40, 30, 7, 7]);
     stream.publish(frame(output)).unwrap();
-    let got = consumer.pop_frame().unwrap().unwrap();
+    let got = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!((got.buffer, got.identity), (output, 9));
     assert_eq!(seen(&consumer, output), [40, 30, 7, 7]);
 }
@@ -206,7 +211,7 @@ fn nothing_is_behind_a_buffer_with_no_consumer_or_from_before_this_one() {
     );
     // Publishing it reaches no one and frees it.
     producer.publish(frame(early)).unwrap();
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
     let stats = host.stream_stats(0, "frames").unwrap();
     assert_eq!((stats.dropped, stats.free), (1, BUFFERS));
     // Taken now, each one has a handle.
@@ -243,7 +248,7 @@ fn a_producer_can_tell_a_buffer_taken_under_a_consumer_that_has_gone() {
     assert_eq!(producer.buffer_current(current), Ok(false));
     // Publishing it reaches no one and frees it, to be taken again under the one there now.
     producer.publish(frame(current)).unwrap();
-    assert_eq!(second.pop_frame().unwrap(), None);
+    assert_eq!(second.pop_entry().unwrap(), None);
     producer.publish(frame(early)).unwrap();
     for _ in 0..2 {
         let buffer = producer.next_buffer().unwrap().unwrap();
@@ -284,7 +289,7 @@ fn a_consumer_that_goes_keeps_its_memory_to_itself_and_the_next_gets_its_own() {
     assert_eq!(seen(&second, kept), [0; 4]);
     // Its frame reaches no one.
     producer.publish(frame(kept)).unwrap();
-    assert_eq!(second.pop_frame().unwrap(), None);
+    assert_eq!(second.pop_entry().unwrap(), None);
     // The same buffer number, taken again, is the second consumer's memory.
     // Taking buffers until the producer offers `kept` again: a bounded number of takes, since the
     // producer reclaims unread frames and never runs out.
@@ -302,7 +307,15 @@ fn a_consumer_that_goes_keeps_its_memory_to_itself_and_the_next_gets_its_own() {
     assert_eq!(seen(&second, again), [0x22; 4]);
     assert_eq!(seen(&first, again), [0xEE; 4], "the first sees none of it");
     producer.publish(frame(again)).unwrap();
-    assert_eq!(second.pop_frame().unwrap().unwrap().buffer, again);
+    assert_eq!(
+        second
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap()
+            .buffer,
+        again
+    );
 }
 
 #[test]
@@ -422,7 +435,11 @@ fn a_thousand_frames_filled_through_their_handles_allocate_nothing() {
                 ..frame(buffer)
             })
             .unwrap();
-        let got = consumer.pop_frame().unwrap().unwrap();
+        let got = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap();
         assert_eq!((got.buffer, got.sequence), (buffer, sequence));
         let mut read = [0; 8];
         assert!(consumer.read(buffer, 0, &mut read));
@@ -582,7 +599,15 @@ fn a_buffer_of_planes_lends_each_plane_and_write_reaches_them_end_to_end() {
         .unwrap();
     assert_eq!(out, [2; 4]);
     producer.publish(frame(buffer)).unwrap();
-    assert_eq!(consumer.pop_frame().unwrap().unwrap().buffer, buffer);
+    assert_eq!(
+        consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap()
+            .buffer,
+        buffer
+    );
     // Lending a plane allocates nothing.
     let held = producer.next_buffer().unwrap().unwrap();
     let ((), count) = allocations(|| {
@@ -646,8 +671,9 @@ fn on_standby_hardware_fills_buffers_with_nobody_attached_and_the_next_consumer_
     let given = lease.handles.clone().unwrap();
     let mut consumer = lease.consumer().unwrap();
     let got = consumer
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("the newest frame, at once");
     assert_eq!((got.buffer, got.sequence), (newer, 2));
     assert_eq!(seen(&consumer, newer), [2; 4]);
@@ -665,7 +691,15 @@ fn on_standby_hardware_fills_buffers_with_nobody_attached_and_the_next_consumer_
             ..frame(filling)
         })
         .unwrap();
-    assert_eq!(consumer.pop_frame().unwrap().unwrap().buffer, filling);
+    assert_eq!(
+        consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap()
+            .buffer,
+        filling
+    );
     assert_eq!(seen(&consumer, filling), [3; 4]);
     let stats = host.stream_stats(0, "frames").unwrap();
     assert_eq!((stats.kept, stats.standby, stats.delivered), (0, false, 2));
@@ -703,7 +737,11 @@ fn on_standby_the_memory_a_consumer_leaves_goes_with_it_and_fresh_memory_waits()
         .unwrap()
         .consumer()
         .unwrap();
-    let got = second.pop_frame().unwrap().unwrap();
+    let got = second
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!(seen(&second, got.buffer), [5; 4]);
     assert_eq!(
         seen(&first, buffer),
@@ -745,7 +783,11 @@ fn on_standby_plain_memory_takes_writes_with_nobody_attached() {
         .unwrap()
         .consumer()
         .unwrap();
-    let got = consumer.pop_frame().unwrap().unwrap();
+    let got = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!(got.buffer, buffer);
     assert_eq!(seen(&consumer, buffer), [9; 4]);
 }
@@ -776,7 +818,15 @@ fn on_standby_a_thousand_frames_with_nobody_attached_allocate_nothing() {
         .unwrap()
         .consumer()
         .unwrap();
-    assert_eq!(consumer.pop_frame().unwrap().unwrap().sequence, 1000);
+    assert_eq!(
+        consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap()
+            .sequence,
+        1000
+    );
 }
 
 #[test]

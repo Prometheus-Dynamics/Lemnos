@@ -204,7 +204,11 @@ fn consumer(lease: Lease) -> Consumer {
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
-    consumer.pop_frame().unwrap().expect("a completion")
+    consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a completion")
 }
 
 #[test]
@@ -321,7 +325,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
     );
     let third = completion(&mut consumer);
     assert_eq!((third.buffer, third.identity, third.bytes), (1, 3, BYTES));
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
 }
 
 #[test]
@@ -373,7 +377,7 @@ fn a_new_consumers_first_job_runs_on_its_own_memory() {
     assert_eq!(converter.counters(), Counters { jobs: 1, errors: 0 });
     let done = completion(&mut consumer);
     assert_eq!((done.buffer, done.identity, done.bytes), (3, 7, BYTES));
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
     // The two buffers given up reached no one, and the handles lent are the second's.
     assert_eq!(host.stream_stats(0, "jobs").unwrap().dropped, 2);
     let lent = producer.buffer_handle(2).unwrap().unwrap();

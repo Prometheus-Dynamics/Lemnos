@@ -55,7 +55,7 @@ fn reader_process() {
 
     // Hold the first frame and never let go. The publisher kills this process here.
     let held = loop {
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             break frame.held;
         }
         std::thread::sleep(Duration::from_millis(1));

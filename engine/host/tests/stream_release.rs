@@ -122,6 +122,7 @@ fn frame(buffer: u32, sequence: u64) -> StreamFrame {
         sequence,
         identity: 9,
         timestamp_ns: 0,
+        end_ns: 0,
     }
 }
 
@@ -220,8 +221,9 @@ fn a_reattach_after_release_makes_fresh_memory_and_the_frames_flow() {
     into.write_all_at(&[0x5A; 4], 0).unwrap();
     producer.publish(frame(buffer, 42)).unwrap();
     let got = second
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("the frame, after the reattach");
     assert_eq!((got.buffer, got.sequence), (buffer, 42));
     let mut out = [0; 4];
@@ -300,8 +302,9 @@ fn with_standby_the_memory_is_kept_while_nobody_is_attached_and_the_kept_frame_c
         .consumer()
         .unwrap();
     let got = consumer
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("the kept frame, at once");
     assert_eq!((got.buffer, got.sequence), (buffer, 5));
     let mut out = [0; 4];

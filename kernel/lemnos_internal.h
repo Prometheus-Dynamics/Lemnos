@@ -182,6 +182,9 @@ int lem_stream_next(struct lem_stream *s, struct lem_stream_slot *slot);
 /* Done with a slot: publish `bytes` of it, or 0 to say the frame went wrong. */
 void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
 			 u64 sequence, u64 timestamp_ns);
+/* As lem_stream_complete(), with the frame's end time (0 when the block stamps none). */
+void lem_stream_complete_at(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
+			    u64 sequence, u64 timestamp_ns, u64 end_ns);
 /* Done with a slot that was never written. */
 void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot);
 /* The block's DMA can't be shown to have stopped: keep everything pinned for good. */

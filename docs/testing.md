@@ -60,6 +60,14 @@ Two tests run on a real dma-heap when told where one is, and are skipped otherwi
 LEMNOS_TEST_DMA_HEAP=/dev/dma_heap/system cargo test -p lemnosd --test stream_dma --test stream_fill
 ```
 
+The camera chain tests (`lemnos-camera-proof`) take the stream buffers the host gives: dma-bufs from
+its `system` dma-heap when it has a usable one, sealed memfds when it doesn't. The two hosts run
+different paths, and each run says which in its output. With dma-bufs the front end's frames are
+lent to the back end. With memfds the kernel refuses to lend them, so the proof copies each frame
+through the back end's `input` stream instead, and checks the refusal of one lent job on a memfd
+(`bad-config`). `LEMNOS_TEST_NO_DMA_HEAP=1` makes the host look as if it has no usable heap, so a
+dma-heap machine runs the memfd path, as a CI runner without a heap does. Nothing else changes.
+
 ### The boundary rules
 
 `scripts/check-boundaries.sh` fails when:

@@ -332,6 +332,13 @@ impl Streams {
         ProducerEndpoint::claim(core)
     }
 
+    /// The lend view of `device`'s stream `name`: its buffers, lent to a block that reads them. The
+    /// producer keeps the stream; nothing is claimed.
+    pub(crate) fn lend_view(&self, device: u32, name: &str) -> Result<endpoint::LendView, Status> {
+        let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
+        Ok(endpoint::LendView::new(core))
+    }
+
     /// Takes the consumer's end, for `caller`, on memory no earlier consumer has seen: the
     /// memory kept on standby for it, or memory made now.
     pub(crate) fn attach(

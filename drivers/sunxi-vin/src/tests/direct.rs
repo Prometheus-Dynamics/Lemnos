@@ -279,7 +279,12 @@ fn the_node_fills_the_streams_own_buffers_and_the_driver_copies_nothing() {
         let byte = 0xa0 + sequence as u8;
         rig.node_fills(slot, sequence as u32, byte);
         rig.tick();
-        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        let frame = client
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         // The stream buffer is the node's slot, and holds what the node wrote there.
         assert_eq!((frame.buffer, frame.bytes), (slot, FRAME as u32));
         assert_eq!(frame.sequence, sequence as u64);
@@ -337,7 +342,7 @@ fn a_consumer_that_goes_and_another_that_comes_each_keep_their_own_memory() {
     rig.tick();
     assert!(rig.node.with(|n| n.handles) > before);
     assert!(
-        second.ring.pop_frame().unwrap().is_none(),
+        second.ring.pop_entry().unwrap().is_none(),
         "nothing of the first's reaches it"
     );
     // Slots still queued from the first consumer's time fill its memory, and are dropped.
@@ -347,7 +352,12 @@ fn a_consumer_that_goes_and_another_that_comes_each_keep_their_own_memory() {
         .unwrap();
     rig.node_fills(slot, 1, 0x22);
     rig.tick();
-    let frame = second.ring.pop_frame().unwrap().expect("a frame");
+    let frame = second
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!((frame.buffer, frame.bytes), (slot, FRAME as u32));
     assert_eq!(second.bytes(slot, FRAME), vec![0x22; FRAME]);
     assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
@@ -375,7 +385,7 @@ fn a_stream_whose_buffers_cannot_hold_a_frame_is_never_handed_to_the_node() {
         u64::from(BUFFERS),
         "each buffer counted once"
     );
-    assert!(client.ring.pop_frame().unwrap().is_none());
+    assert!(client.ring.pop_entry().unwrap().is_none());
 }
 
 #[test]
@@ -443,7 +453,12 @@ fn frames_through_the_streams_own_buffers_allocate_nothing() {
         rig.node_fills(slot, round, round as u8);
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
-        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        let frame = client
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!(frame.buffer, slot);
         assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
@@ -488,7 +503,12 @@ fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
     };
     rig.node_fills_planes(2, 0, 0x40, &sizes);
     rig.tick();
-    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    let frame = client
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!((frame.buffer, frame.bytes), (2, FRAME as u32));
     // Each plane is its own pool buffer, the second one after the first.
     assert_eq!(at(&client.ring, 2, 0, sizes[0]), vec![0x40; sizes[0]]);
@@ -510,7 +530,12 @@ fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
         rig.node_fills_planes(slot, round + 1, round as u8, &sizes);
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
-        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        let frame = client
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
@@ -531,7 +556,12 @@ fn a_frame_in_two_planes_goes_by_copy_when_the_stream_is_one_plane() {
             .push_back((0, 0, false, vec![vec![1; sizes[0]], vec![2; sizes[1]]]))
     });
     rig.tick();
-    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    let frame = client
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.bytes, FRAME as u32);
     let mut whole = vec![1; sizes[0]];
     whole.extend(vec![2; sizes[1]]);
@@ -556,7 +586,12 @@ fn a_node_that_takes_no_dma_bufs_copies_each_plane_into_its_plane_of_the_stream(
             .push_back((0, 0, false, vec![vec![7; 16], vec![8; 32]]))
     });
     rig.tick();
-    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    let frame = client
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.bytes, PLANES[0] + 32);
     let mut out = vec![0u8; 32];
     assert!(client.ring.read(

@@ -40,11 +40,12 @@
 //! the sensor feeds the receiver, which feeds the front end, which feeds the back end (the board
 //! files `testing/boards/reference.toml` and `pisp-camera-chain.toml` declare such a chain, with
 //! different names). `--receiver`, `--front-end` and `--back-end` name a stage instead. A stage it
-//! cannot resolve is an error naming what it looked for and what the board has. The front end's `output0` (16-bit Bayer, 2560 bytes a line) is copied, frame by
-//! frame, into the back end's `input` buffers, and one back-end job per frame carries the front
-//! end frame's identity, so the back end's frame names the same job. Each front-end frame is
-//! released once its bytes are copied. Two front-end jobs are kept queued (`--jobs-queued`,
-//! 1 to 3), and the back end takes two input buffers in turn.
+//! cannot resolve is an error naming what it looked for and what the board has. The front end's
+//! `output0` (16-bit Bayer, 2560 bytes a line) is LENT to the back end, frame by frame: one
+//! back-end job per frame names the front-end buffer it is in (`input_lent`), with no copy. The
+//! front-end frame is held until the back end's output for its identity has arrived, and then it
+//! is released. Two front-end jobs are kept queued (`--jobs-queued`, 1 to 3), and the back end's
+//! configuration buffers bound how many frames it holds at once.
 //!
 //! It takes `--frames` frames at the back end and checks, and prints:
 //!
@@ -81,8 +82,8 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use lemnos_camera_proof::chain::{Stage, resolve};
-use lemnos_camera_proof::setup::{self, post_back, post_front};
-use lemnos_client::{Client, FrameStream};
+use lemnos_camera_proof::setup::{self, post_back, post_back_copied, post_front};
+use lemnos_client::{Client, FrameStream, HeldFrame, JobReason, Next};
 use lemnos_contract_camera_isp::CameraIsp;
 use lemnos_contract_camera_receiver::CameraReceiver;
 
@@ -293,8 +294,10 @@ fn declared(stream: &FrameStream) -> String {
         } else {
             "free-running"
         },
-        if stream.has_buffer_handles() {
+        if stream.buffers_are_dma_bufs() {
             "dma-buf per buffer"
+        } else if stream.has_buffer_handles() {
+            "memfd per buffer"
         } else {
             "shared memory"
         },
@@ -358,19 +361,55 @@ struct FrontStage {
     placeholders: u64,
 }
 
+/// One back-end job in flight, with the stamps the spans need. Every time is `CLOCK_MONOTONIC`
+/// nanoseconds: the front-end frame's end (its EOF, as the module stamped it; 0 when not stamped)
+/// and this client's time of kicking the job.
+struct Pending {
+    identity: u64,
+    eof_ns: u64,
+    kick_ns: u64,
+    /// The front-end frame the job lent, held until the back end's output for it has arrived. `None`
+    /// on the copy path: the frame was copied into the back end's input and given back at once.
+    frame: Option<HeldFrame>,
+}
+
+/// Per-frame spans, in nanoseconds, and how many frames had no stamp to measure from. No queue depth
+/// is reported: each span is one frame's own stamps.
+#[derive(Default)]
+struct Spans {
+    /// Front-end EOF to this client's kick of the back-end job.
+    eof_to_kick: Vec<u64>,
+    /// The kick to the back end's finish (the block's job time, plus any wait in its ring).
+    kick_to_finish: Vec<u64>,
+    /// The back end's finish to this client taking the frame.
+    finish_to_client: Vec<u64>,
+    /// Front-end EOF to this client taking the frame: the product span.
+    eof_to_client: Vec<u64>,
+    /// Front-end frames the module did not stamp (never guessed from their start).
+    eof_unstamped: u64,
+    /// Back-end frames without a finish stamp.
+    finish_unstamped: u64,
+}
+
 /// The back end's streams, the jobs in flight and what the frames show.
 struct BackStage {
     cfg: FrameStream,
-    input: FrameStream,
+    /// The back end's `input` stream, when the board declares one. On the lent path this program never
+    /// writes it (the front end's output 0 is lent to each job); on the copy path it is written.
+    input: Option<FrameStream>,
+    /// Whether the front end's buffers can be lent (dma-bufs): the lent path. Otherwise the copy path.
+    lent: bool,
     out: FrameStream,
     /// Bytes of luma in one output 0 frame.
     luma_bytes: usize,
     track: Track,
-    /// The identities of the jobs posted and not yet answered, oldest first.
-    pending: VecDeque<u64>,
+    /// The jobs posted and not yet answered, oldest first.
+    pending: VecDeque<Pending>,
     latency: Vec<u64>,
+    spans: Spans,
     identity_bad: u64,
     zero_luma: u64,
+    /// Frames whose timestamp is not a recent `CLOCK_MONOTONIC` frame start (see `age_bad`).
     age_bad: u64,
     placeholders: u64,
     /// Luma summed over every frame, and the bytes it is summed over: the mean.
@@ -381,10 +420,12 @@ struct BackStage {
 impl BackStage {
     /// Takes the oldest back-end frame, checks its identity against its job, and releases it.
     /// `Ok(false)` when no frame came for 2 s, after which the jobs in flight are given up.
-    fn take(&mut self) -> Result<bool, String> {
-        let Some(expected) = self.pending.pop_front() else {
+    fn take(&mut self, front_out: &mut FrameStream) -> Result<bool, String> {
+        let Some(job) = self.pending.pop_front() else {
             return Ok(true);
         };
+        let expected = job.identity;
+        let lent = job.frame;
         let Some(frame) = self
             .out
             .next_frame(Duration::from_secs(2))
@@ -404,6 +445,20 @@ impl BackStage {
             return Ok(true);
         }
         let now = now_ns();
+        let finish = frame.end_ns();
+        if finish == 0 {
+            self.spans.finish_unstamped += 1;
+        } else {
+            self.spans
+                .kick_to_finish
+                .push(finish.saturating_sub(job.kick_ns));
+            self.spans.finish_to_client.push(now.saturating_sub(finish));
+            if job.eof_ns != 0 {
+                self.spans
+                    .eof_to_client
+                    .push(now.saturating_sub(job.eof_ns));
+            }
+        }
         self.track.see(frame.sequence(), frame.timestamp_ns());
         self.latency.push(now.saturating_sub(frame.timestamp_ns()));
         self.age_bad += u64::from(age_bad(frame.timestamp_ns(), now));
@@ -415,6 +470,12 @@ impl BackStage {
         self.out
             .release(frame)
             .map_err(|e| format!("release: {e:?}"))?;
+        // The front-end buffer the job lent is free again once its output has come back.
+        if let Some(lent) = lent {
+            front_out
+                .release(lent)
+                .map_err(|e| format!("front end release: {e:?}"))?;
+        }
         Ok(true)
     }
 }
@@ -430,9 +491,15 @@ fn pump(
     reference: Option<&[u8]>,
 ) -> Result<Option<usize>, String> {
     let fe_slots = u64::from(front.out.layout().buffers);
-    let be_slots = u64::from(back.input.layout().buffers.min(back.cfg.layout().buffers));
-    let be_out_slots = u64::from(back.out.layout().buffers);
+    // The back end's buffers that hold a job: its configurations, and on the copy path its input too.
+    let be_slots = if back.lent {
+        u64::from(back.cfg.layout().buffers)
+    } else {
+        let input = back.input.as_ref().map_or(0, |i| i.layout().buffers);
+        u64::from(input.min(back.cfg.layout().buffers))
+    };
     let in_bytes = front.stride * HEIGHT as usize;
+    let be_out_slots = u64::from(back.out.layout().buffers);
     let queued = args.jobs_queued;
     let mut matched = None;
     let mut posted = 0u64;
@@ -482,7 +549,7 @@ fn pump(
         // The back end's buffer `slot` is free once the job that held it has been answered.
         let mut stalled = false;
         while back.pending.len() as u64 >= be_slots {
-            if !back.take()? {
+            if !back.take(&mut front.out)? {
                 stalled = true;
                 break;
             }
@@ -492,23 +559,98 @@ fn pump(
         }
         let slot = (k % be_slots) as u32;
         let identity = frame.identity();
-        let bytes = front.out.bytes(&frame);
-        back.input
-            .write(slot, 0, &bytes[..bytes.len().min(in_bytes)])
-            .map_err(|e| format!("back end input write: {e:?}"))?;
-        front
-            .out
-            .release(frame)
-            .map_err(|e| format!("release: {e:?}"))?;
-        post_back(&mut back.cfg, identity, slot, (k % be_out_slots) as u32)?;
-        back.pending.push_back(identity);
+        let eof_ns = frame.end_ns();
+        let lent_buffer = frame.buffer();
+        let kick_ns = now_ns();
+        if eof_ns == 0 {
+            back.spans.eof_unstamped += 1;
+        } else {
+            back.spans.eof_to_kick.push(kick_ns.saturating_sub(eof_ns));
+        }
+        let output = (k % be_out_slots) as u32;
+        let held = if back.lent {
+            post_back(&mut back.cfg, identity, slot, lent_buffer, output)?;
+            Some(frame)
+        } else {
+            // The copy path: the frame's bytes go into the back end's input buffer `slot`, and the
+            // front-end frame is given back at once, as the job reads the copy.
+            let input = back
+                .input
+                .as_mut()
+                .ok_or("the copy path needs the back end's input stream")?;
+            let bytes = front.out.bytes(&frame);
+            input
+                .write(slot, 0, &bytes[..bytes.len().min(in_bytes)])
+                .map_err(|e| format!("back end input write: {e:?}"))?;
+            front
+                .out
+                .release(frame)
+                .map_err(|e| format!("release: {e:?}"))?;
+            post_back_copied(&mut back.cfg, identity, slot, output)?;
+            None
+        };
+        back.pending.push_back(Pending {
+            identity,
+            eof_ns,
+            kick_ns,
+            frame: held,
+        });
     }
     while !back.pending.is_empty() {
-        if !back.take()? {
+        if !back.take(&mut front.out)? {
             break;
         }
     }
     Ok(matched)
+}
+
+/// The refusal of a lent job on a memfd, asserted for real: one front-end frame is lent to one back-end
+/// job, and the back end must end that job with `bad-config` (the kernel refused the lend of a file
+/// that is not a dma-buf, and the block refuses the job as its consumer is told). No frame is made
+/// from it. `Ok` is the line that says so.
+fn probe_refusal(front: &mut FrontStage, back: &mut BackStage) -> Result<String, String> {
+    // The front end makes a frame only for a job, so the probe queues one of its own, and lends its frame.
+    const PROBE: u64 = 1 << 40;
+    post_front(&mut front.cfg, PROBE, 0).map_err(|e| format!("lend probe: {e}"))?;
+    let Some(frame) = front
+        .out
+        .next_frame(Duration::from_secs(2))
+        .map_err(|e| format!("lend probe: front end output0: {e:?}"))?
+    else {
+        return Err("lend probe: the front end made no frame for the probe job".into());
+    };
+    let identity = frame.identity();
+    if identity != PROBE {
+        return Err(format!(
+            "lend probe: the frame is identity {identity}, not the probe's"
+        ));
+    }
+    let buffer = frame.buffer();
+    let posted = post_back(&mut back.cfg, identity, 0, buffer, 0);
+    let answer = match posted {
+        Err(e) => Err(e),
+        Ok(()) => (0..8)
+            .find_map(|_| match back.out.next_or_end(Duration::from_secs(2)) {
+                Ok(Next::JobEnded {
+                    identity: got,
+                    reason,
+                }) if got == identity => Some(Ok(reason)),
+                Ok(Next::Frame(_)) => None,
+                Ok(_) => None,
+                Err(e) => Some(Err(format!("lend probe: back end output0: {e:?}"))),
+            })
+            .unwrap_or_else(|| Err("lend probe: the back end did not end the job".into())),
+    };
+    front
+        .out
+        .release(frame)
+        .map_err(|e| format!("lend probe: release: {e:?}"))?;
+    match answer? {
+        JobReason::BadConfig => Ok(format!(
+            "lend probe: a lent job on a memfd frame (identity {identity}) was refused: job end bad-config, the kernel's refusal of a file that is not a dma-buf; no frame came from it"
+        )),
+        other => Err(format!("lend probe: refused as {other:?}, not bad-config")),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -614,14 +756,31 @@ fn run(args: &Args) -> Result<bool, String> {
         age_bad: 0,
         placeholders: 0,
     };
+    // The path is the host's, by its buffers: the front end's output 0 is lent when it is a stream of
+    // dma-bufs, and copied through the back end's input when it is memfds (a memfd is not a dma-buf,
+    // and the kernel refuses to lend it). The proof says which ran.
+    let lent = front.out.buffers_are_dma_bufs();
+    if !lent && chain.back.input.is_none() {
+        return Err("the front end's buffers are memfds, so the copy path needs the back end's input stream, and the board declares none".into());
+    }
+    out(format_args!(
+        "front end output0: {}",
+        if lent {
+            "dma-bufs: the lent path (each frame is lent to its back-end job)"
+        } else {
+            "memfds: the copy path (the frame is copied into the back end's input; a memfd cannot be lent)"
+        }
+    ));
     let mut back = BackStage {
         cfg: chain.back.cfg,
         input: chain.back.input,
+        lent,
         out: chain.back.out,
         luma_bytes: be_stride as usize * HEIGHT as usize,
         track: Track::default(),
         pending: VecDeque::new(),
         latency: Vec::new(),
+        spans: Spans::default(),
         identity_bad: 0,
         zero_luma: 0,
         age_bad: 0,
@@ -646,12 +805,7 @@ fn run(args: &Args) -> Result<bool, String> {
         (
             "back end",
             back_name,
-            [
-                ("config", &back.cfg),
-                ("input", &back.input),
-                ("output0", &back.out),
-            ]
-            .as_slice(),
+            [("config", &back.cfg), ("output0", &back.out)].as_slice(),
         ),
     ] {
         if let Some(d) = list.iter().find(|d| d.name == *name) {
@@ -665,6 +819,21 @@ fn run(args: &Args) -> Result<bool, String> {
         }
         for (stream, handle) in streams {
             out(format_args!("  {name} {stream}: {}", declared(handle)));
+        }
+        if label == "back end" {
+            match (&back.input, lent) {
+                (Some(input), true) => out(format_args!(
+                    "  {name} input: {} (not written: the front end's output0 is lent to each job)",
+                    declared(input)
+                )),
+                (Some(input), false) => out(format_args!(
+                    "  {name} input: {} (written: the front end's frames are copied in, not lent)",
+                    declared(input)
+                )),
+                (None, _) => out(format_args!(
+                    "  {name} input: none declared; the front end's output0 is lent to each job"
+                )),
+            }
         }
     }
     let reference = match &args.reference {
@@ -689,6 +858,13 @@ fn run(args: &Args) -> Result<bool, String> {
         .counters()
         .map_err(|s| format!("back end counters: {s:?}"));
     let rx = receiver.counters();
+    // On the copy path, the refusal of a lent job on a memfd is asserted for real: one lent job, which the
+    // back end must refuse. It is read after the counters, so it cannot change them.
+    let probe = if lent {
+        None
+    } else {
+        Some(probe_refusal(&mut front, &mut back))
+    };
     // Back end first, then the front end. The sensor and the receiver are left running.
     let mut stop_errors = Vec::new();
     if let Err(s) = be.stop() {
@@ -698,6 +874,14 @@ fn run(args: &Args) -> Result<bool, String> {
         stop_errors.push(format!("front end stop: {s:?}"));
     }
     let mut failed = Vec::new();
+    match probe {
+        None => {}
+        Some(Ok(line)) => out(format_args!("{line}")),
+        Some(Err(e)) => {
+            out(format_args!("{e}"));
+            failed.push(e);
+        }
+    }
     let matched = match pumped {
         Ok(m) => m,
         Err(e) => {
@@ -818,6 +1002,27 @@ fn run(args: &Args) -> Result<bool, String> {
         "back-end frame timestamp to client: median {} us, max {} us",
         percentile(&latency, 50) / 1000,
         latency.last().copied().unwrap_or(0) / 1000
+    ));
+    let span = |name: &str, values: &[u64]| {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        out(format_args!(
+            "span {name}: median {} us, max {} us over {} frames",
+            percentile(&sorted, 50) / 1000,
+            sorted.last().copied().unwrap_or(0) / 1000,
+            sorted.len()
+        ));
+    };
+    span("EOF to kick", &back.spans.eof_to_kick);
+    span("kick to back-end finish", &back.spans.kick_to_finish);
+    span("back-end finish to client", &back.spans.finish_to_client);
+    span(
+        "EOF to client (the product span)",
+        &back.spans.eof_to_client,
+    );
+    out(format_args!(
+        "stamps missing, not guessed: front-end EOF {} frames, back-end finish {} frames",
+        back.spans.eof_unstamped, back.spans.finish_unstamped
     ));
     if let Some(equal) = matched {
         out(format_args!(
@@ -970,7 +1175,14 @@ fn run(args: &Args) -> Result<bool, String> {
         }
     }
     if failed.is_empty() {
-        out(format_args!("chain proof: pass"));
+        out(format_args!(
+            "{}",
+            if lent {
+                "chain proof: pass (lent path: the front end's frames are lent to the back end)"
+            } else {
+                "chain proof: pass (copy path: memfds, the lend refused; frames copied through the back end's input)"
+            }
+        ));
         Ok(true)
     } else {
         out(format_args!("chain proof: FAILED: {}", failed.join("; ")));

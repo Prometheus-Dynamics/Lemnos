@@ -631,6 +631,8 @@ impl StreamHost {
             sequence,
             identity,
             bytes,
+            reason: 0,
+            end_ns: 0,
         }
         .encode();
         let count = self.planes as usize;
@@ -640,6 +642,22 @@ impl StreamHost {
         }
         self.publisher
             .publish(&names[..count], SampleTime::from_nanos(timestamp_ns), &meta)
+            .is_ok()
+    }
+
+    /// Puts a job's end on the ring, as the host does: no buffer, the job's identity and why it
+    /// ended. `false` if the ring refused it.
+    pub fn push_job_end(&mut self, identity: u64, reason: u32, end_ns: u64) -> bool {
+        let meta = FrameInfo {
+            sequence: 0,
+            identity,
+            bytes: 0,
+            reason,
+            end_ns,
+        }
+        .encode();
+        self.publisher
+            .publish_empty(SampleTime::from_nanos(end_ns), &meta)
             .is_ok()
     }
 

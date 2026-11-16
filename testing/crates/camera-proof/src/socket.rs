@@ -156,6 +156,8 @@ impl Frames for SocketFrames {
             sequence: frame.sequence(),
             identity: frame.identity(),
             timestamp_ns: frame.timestamp_ns(),
+            end_ns: 0,
+            reason: 0,
         };
         let place = self
             .held

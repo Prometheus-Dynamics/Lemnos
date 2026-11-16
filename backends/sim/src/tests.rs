@@ -267,6 +267,7 @@ fn every_resource_round_trips_through_the_provider() {
         sequence: 1,
         identity: 2,
         timestamp_ns: 3,
+        end_ns: 0,
     };
     endpoint.publish(frame).unwrap();
     assert_eq!(stream.take_frame(), Some(frame));

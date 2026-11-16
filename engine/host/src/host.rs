@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigError, ConfigValue,
-    Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
-    InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
-    Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink, RegistersHandle,
-    Reply, ResetHandle, Resources, Result, Retry, Router, Spi, Status, StreamHandle, Tag, Uart,
-    UsbDeviceHandle, UsbFunctionHandle, Watchdog,
+    AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
+    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock,
+    HostOwned, I2c, InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
+    MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
+    RegistersHandle, Reply, ResetHandle, Resources, Result, Retry, Router, Spi, Status,
+    StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 
 use crate::board::{
@@ -2537,6 +2537,18 @@ impl Provider for Binding<'_> {
         if self.slot.spec.streams.contains_key(need) {
             return true;
         }
+        // A lend need is provided when the board names the stream it reads (`lend`), and no other way:
+        // an optional lend need is not a bus, so the name rules below never reach it.
+        let lend_need = self.slot.entry.is_some_and(|entry| {
+            entry
+                .manifest
+                .needs
+                .iter()
+                .any(|n| n.name == need && matches!(n.kind, NeedKind::Bus(BusKind::Lend)))
+        });
+        if lend_need {
+            return self.slot.spec.lend.is_some();
+        }
         if self.slot.spec.uses.contains_key(need) && self.bus_is_absent(need) {
             let running = self.target(need).is_some_and(|target| target.is_running());
             if !running {
@@ -2622,6 +2634,30 @@ impl Provider for Binding<'_> {
         clocks -> ClocksHandle, "clock";
         reset -> ResetHandle, "reset line";
         watchdog -> Watchdog, "watchdog";
+    }
+
+    fn lend(&mut self, _need: &str) -> Result<lemnos_core::LendHandle> {
+        // The upstream is the one device whose `link` names this one, and the stream is the one this
+        // device's board entry names in `lend`: a block reads exactly that stream. Neither is taken from
+        // the consumer. No `lend` named, no upstream, or more than one: no lend.
+        let stream = self.slot.spec.lend.as_deref().ok_or(Status::NOT_FOUND)?;
+        let me = self.slot.spec.id.as_str();
+        let slots = self
+            .inner
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut linked = slots
+            .iter()
+            .filter(|slot| slot.spec.link.as_deref() == Some(me))
+            .map(|slot| slot.index);
+        let upstream = linked.next().ok_or(Status::NOT_FOUND)?;
+        if linked.next().is_some() {
+            return Err(Status::NOT_FOUND);
+        }
+        drop(slots);
+        let view = self.inner.streams.lend_view(upstream, stream)?;
+        Ok(lemnos_core::Held::boxed(Box::new(view)))
     }
 
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {

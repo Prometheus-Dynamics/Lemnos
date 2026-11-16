@@ -539,6 +539,11 @@ int main(void)
 				    "wedge", NULL }),
 	      "lemnos_vip_check wedge");
 	check(!bind_block(PISP), "PiSP block bound");
+	/* A system-heap dma-buf lent to the block. It rebinds the block itself when it is done, so the
+	 * wedge checks below start from a fresh block. */
+	check(!run((char *const[]){ "/lemnos_lend_check", "/dev/lemnos", PISP, BIND, UNBIND,
+				    (char *)cma_heap(), "/dev/dma_heap/system", NULL }),
+	      "lemnos_lend_check");
 	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
 				    (char *)cma_heap(), "wedge", NULL }),
 	      "lemnos_pisp_be_check wedge");

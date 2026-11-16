@@ -288,6 +288,7 @@ impl Lifecycle for JobReader {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: now_ns,
+                end_ns: 0,
             });
         }
         Some(now_ns + 1_000_000)
@@ -339,7 +340,7 @@ fn a_consumers_jobs_never_reach_a_host_owned_devices_driver_and_its_frames_still
         assert!(consumer.jobs().post(b"and again").unwrap());
         run(&host, &clock, 2);
         assert_eq!(read_u32(&host, 1), expected, "{owner:?}");
-        assert!(consumer.pop_frame().unwrap().is_some(), "{owner:?}");
+        assert!(consumer.pop_entry().unwrap().is_some(), "{owner:?}");
         assert_eq!(host.device("j").unwrap().state, DeviceState::Running);
     }
 }
