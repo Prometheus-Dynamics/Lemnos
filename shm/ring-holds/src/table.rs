@@ -31,6 +31,14 @@ struct Slot<M> {
     cut_off: bool,
 }
 
+/// Cuts one reader off: the flag the publisher reads, and the word the reader reads. Both
+/// [`HoldTable::enforce`] and [`HoldTable::cut_off`] cut off through here, and nothing else sets
+/// the flag.
+fn cut_reader<M: Mem>(reader: &mut Slot<M>, pool_page: &impl MemMut, buffers: u32, slot: u32) {
+    reader.cut_off = true;
+    page::cut_off(pool_page, buffers, slot);
+}
+
 /// How long a reader's marks may stay uncountable when it has no hold-time limit of its own.
 const UNCOUNTED_FOR: Duration = Duration::from_secs(10);
 
@@ -123,6 +131,47 @@ impl<M: Mem> HoldTable<M> {
         matches!(self.slots.get(slot as usize), Some(Some(reader)) if reader.cut_off)
     }
 
+    /// The slots of the readers that hold `buffer` now: each marks it, and none is cut off. A
+    /// cut-off reader holds nothing, so it is not listed. Allocates: this is for the publisher's
+    /// decision to cut someone off, not for the steady path, which is [`Holders::held`].
+    #[must_use]
+    pub fn holders_of(&self, buffer: BufferIndex) -> Vec<u32> {
+        if buffer.0 >= self.buffers {
+            return Vec::new();
+        }
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, reader)| {
+                let reader = reader.as_ref()?;
+                (!reader.cut_off && marked(&reader.page, buffer)).then_some(slot as u32)
+            })
+            .collect()
+    }
+
+    /// Cuts off the reader in `slot`, the same way [`enforce`](Self::enforce) cuts off one over
+    /// its limits: its marks stop counting, so its buffers can be reused, and the reader is told
+    /// through `pool_page` the next time it looks (its [`BufferReader::next`] returns `CutOff`).
+    ///
+    /// The slot is kept. It is not free and cannot be given to another reader until the owner
+    /// [`remove`](Self::remove)s it, which is the normal release. Returns `true` if this call cut
+    /// the reader off; `false` if there is no reader in `slot` or it was cut off already.
+    ///
+    /// What this does not do: it does not stop a reader that is in the middle of reading a
+    /// buffer. That reader still has the bytes in hand, and the buffer can be written over under
+    /// it. A reader that checks the buffer's ticket after using the bytes (`Held::read`) sees
+    /// that and drops the value as torn.
+    pub fn cut_off(&mut self, slot: u32, pool_page: &impl MemMut) -> bool {
+        let Some(Some(reader)) = self.slots.get_mut(slot as usize) else {
+            return false;
+        };
+        if reader.cut_off {
+            return false;
+        }
+        cut_reader(reader, pool_page, self.buffers, slot);
+        true
+    }
+
     /// Applies every reader's limits at `now_ns`, a time on any steady clock of the
     /// publisher's (a sample time will do). Readers over a limit are cut off: their marks stop
     /// counting, and they are told through `pool_page`. Returns how many were cut off by this
@@ -173,8 +222,7 @@ impl<M: Mem> HoldTable<M> {
                 }
             }
             if stuck || over {
-                reader.cut_off = true;
-                page::cut_off(pool_page, self.buffers, slot as u32);
+                cut_reader(reader, pool_page, self.buffers, slot as u32);
                 cut += 1;
             }
         }

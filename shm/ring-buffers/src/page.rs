@@ -106,8 +106,10 @@ pub fn retire<M: MemMut>(mem: &M, buffer: BufferIndex) {
     M::fence(Ordering::SeqCst);
 }
 
-/// Publisher: `buffer`, taken back and held by nobody, is free for its next frame.
-pub fn release(mem: &impl MemMut, buffer: BufferIndex) {
+/// Publisher: `buffer`, taken back and held by nobody, is free for its next frame. The fence after
+/// the store orders it before whatever the caller writes into the buffer next: a reader that sees
+/// those bytes sees this use end (see [`same_use`]).
+pub fn release<M: MemMut>(mem: &M, buffer: BufferIndex) {
     let ticket = ticket(mem, buffer);
     if ticket & 1 == 1 {
         mem.store(
@@ -115,6 +117,7 @@ pub fn release(mem: &impl MemMut, buffer: BufferIndex) {
             ticket.wrapping_add(1),
             Ordering::Release,
         );
+        M::fence(Ordering::SeqCst);
     }
 }
 
@@ -131,6 +134,21 @@ pub fn use_of(mem: &impl Mem, buffer: BufferIndex) -> u64 {
 pub fn still<M: Mem>(mem: &M, buffer: BufferIndex, ticket: u32) -> bool {
     M::fence(Ordering::SeqCst);
     self::ticket(mem, buffer) as u32 == ticket
+}
+
+/// Reader, after using the bytes of `buffer` that the frame published with `ticket` named: whether
+/// the buffer is still in that use, so no frame has been published in it since.
+///
+/// It compares the use counter ([`use_of`]), not the whole ticket. [`retire`] moves the ticket's low
+/// bit on every attempt to take a buffer back, and a publisher makes that attempt on each frame
+/// while a reader holds the buffer, so the whole ticket moves under an honest reader. The counter
+/// moves only on [`release`], which the publisher does before it writes the next frame into the
+/// buffer. The fence pairs with the one in `release`, as `still` pairs with `retire`: a reader that
+/// read the next frame's bytes sees the release. Counts are compared in 31 bits, the ticket's
+/// width in an entry: a use counter that wraps there is not a reuse this check can tell.
+pub fn same_use<M: Mem>(mem: &M, buffer: BufferIndex, ticket: u32) -> bool {
+    M::fence(Ordering::SeqCst);
+    (use_of(mem, buffer) as u32) & (u32::MAX >> 1) == ticket >> 1
 }
 
 /// Publisher: cuts reader `slot` off. It is told the next time it looks.

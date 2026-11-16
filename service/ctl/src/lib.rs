@@ -1037,6 +1037,7 @@ impl Tool<'_> {
                 let how = match status {
                     Status::CANCELLED => " (cancelled)",
                     Status::INTERRUPTED => " (interrupted)",
+                    Status::TORN => " (torn: a frame's buffer was reused while it was read)",
                     _ => "",
                 };
                 return Err(format!("job {job:#x} failed: status {}{how}", status.0));

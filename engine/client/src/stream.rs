@@ -897,6 +897,10 @@ impl FrameStream {
     /// planes this is the first plane's part of the frame: read each with
     /// [`plane`](Self::plane). A frame from another stream reads as whatever its numbers fall
     /// on here, and within this stream's memory. Empty on an unmapped stream.
+    ///
+    /// **Unchecked.** The slice is not checked against reuse: a frame whose reader was cut off can
+    /// have its buffer written over while the slice is kept. Use [`read_bytes`](Self::read_bytes),
+    /// which reports [`Error::StreamTorn`] instead, for bytes that are used or kept.
     #[must_use]
     pub fn bytes(&self, frame: &HeldFrame) -> &[u8] {
         self.plane(frame, 0)
@@ -907,6 +911,9 @@ impl FrameStream {
     /// is cut there. Empty for a plane the buffers don't have, and on an unmapped stream
     /// ([`is_mapped`](Self::is_mapped)). On a stream of one plane this is
     /// [`bytes`](Self::bytes).
+    ///
+    /// **Unchecked**, as [`bytes`](Self::bytes) is. [`read_plane`](Self::read_plane) is the checked
+    /// form, and [`plane_checked`](Self::plane_checked) checks at the call.
     #[must_use]
     pub fn plane(&self, frame: &HeldFrame, plane: u32) -> &[u8] {
         if !self.consumer.mapped() {
@@ -922,6 +929,86 @@ impl FrameStream {
             .bytes(BufferIndex(index))
             .and_then(|bytes| bytes.get(..held))
             .unwrap_or(&[])
+    }
+
+    /// Uses the bytes of the held frame's plane `plane` in place, and then checks that the frame's
+    /// buffer was not reused while `read` ran. `read` gets the plane's bytes, as
+    /// [`plane`](Self::plane) gives them, and returns a value of its own. If the buffer was reused,
+    /// that value is dropped and `Err(StreamTorn)` is returned: the bytes were not the frame's, and
+    /// nothing is returned as good. An unmapped stream, or a plane the stream does not have, gives
+    /// `read` an empty slice, as [`plane`](Self::plane) does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::StreamTorn`] if the buffer was reused while `read` ran.
+    pub fn read_plane<T>(
+        &self,
+        frame: &HeldFrame,
+        plane: u32,
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, Error> {
+        let length = self.plane_len(frame, plane);
+        let mut read = Some(read);
+        let Some(index) = self.plane_index(frame, plane) else {
+            return Ok((read.take().expect("taken once"))(&[]));
+        };
+        match frame._held.read(index, |bytes| {
+            (read.take().expect("taken once"))(bytes.get(..length).unwrap_or(&[]))
+        }) {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(_)) => Err(Error::StreamTorn {
+                buffer: frame.buffer,
+            }),
+            None => Ok((read.take().expect("taken once"))(&[])),
+        }
+    }
+
+    /// The bytes of the held frame's plane `plane`, checked at this call: `Err(StreamTorn)` if the
+    /// buffer was already reused, so the bytes are not the frame's. This is the form for a caller
+    /// that hands the bytes out as a pointer: the check is at hand-out, and nothing after the call
+    /// is checked. The stream's reader is cut off before its buffers can be reused under it, and
+    /// its next call on the stream says so. Empty on an unmapped stream.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::StreamTorn`] if the buffer was already reused.
+    pub fn plane_checked<'a>(&self, frame: &'a HeldFrame, plane: u32) -> Result<&'a [u8], Error> {
+        let length = self.plane_len(frame, plane);
+        let Some(index) = self.plane_index(frame, plane) else {
+            return Ok(&[]);
+        };
+        match frame._held.current(index) {
+            Some(Ok(bytes)) => Ok(bytes.get(..length).unwrap_or(&[])),
+            Some(Err(_)) => Err(Error::StreamTorn {
+                buffer: frame.buffer,
+            }),
+            None => Ok(&[]),
+        }
+    }
+
+    /// The checked form of [`bytes`](Self::bytes): the first plane, through
+    /// [`read_plane`](Self::read_plane).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::StreamTorn`] if the buffer was reused while `read` ran.
+    pub fn read_bytes<T>(
+        &self,
+        frame: &HeldFrame,
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, Error> {
+        self.read_plane(frame, 0, read)
+    }
+
+    /// The index of the held frame's plane `plane` in the frame's own holds: the frame's buffers
+    /// are held in plane order, so the index is the plane. `None` for an unmapped stream, a plane
+    /// the stream does not have, or a frame whose holds do not name that plane's buffer.
+    fn plane_index(&self, frame: &HeldFrame, plane: u32) -> Option<usize> {
+        if !self.consumer.mapped() || plane >= self.planes.count() {
+            return None;
+        }
+        let index = self.index(frame.buffer, plane)?;
+        (frame._held.buffer(plane as usize)? == BufferIndex(index)).then_some(plane as usize)
     }
 
     /// The bytes of the held frame that are in plane `plane` of its buffer: the length
@@ -1099,8 +1186,12 @@ impl FrameStream {
 
     /// Copies from `buffer` at `offset` into `out`, for a buffer that isn't a frame: what a
     /// job left in a buffer the consumer named (a program's outputs, say). A frame is read in
-    /// place with [`bytes`](Self::bytes). Refused as [`write`](Self::write) is for a buffer or
+    /// place with [`read_plane`](Self::read_plane). Refused as [`write`](Self::write) is for a buffer or
     /// a range the stream doesn't have. Never waits and allocates nothing.
+    ///
+    /// The copy is checked for a reuse during it: `Err(StreamTorn)` then, and `out` is not the
+    /// buffer's. A buffer already reused before the call is not reported, since this consumer
+    /// holds no frame in it.
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Error> {
         if !self.consumer.mapped() {
             return Err(Error::StreamUnmapped);
@@ -1118,15 +1209,27 @@ impl FrameStream {
                 .index(buffer, plane)
                 .ok_or(Error::Stream(RingError::BadBuffer))?;
             self.sync_plane(index, Access::Read, true);
-            let source = self
+            // Copied under the check: a buffer reused while it is copied is torn, not copied as good.
+            let copy = self
                 .consumer
                 .frames()
                 .pool()
-                .bytes(BufferIndex(index))
-                .and_then(|bytes| bytes.get(place..place + take));
-            match (source, out.get_mut(to..to + take)) {
-                (Some(source), Some(into)) => into.copy_from_slice(source),
-                _ => copied = false,
+                .read(BufferIndex(index), |bytes| {
+                    match (bytes.get(place..place + take), out.get_mut(to..to + take)) {
+                        (Some(source), Some(into)) => {
+                            into.copy_from_slice(source);
+                            true
+                        }
+                        _ => false,
+                    }
+                });
+            match copy {
+                Some(Ok(true)) => {}
+                Some(Ok(false)) | None => copied = false,
+                Some(Err(_)) => {
+                    self.sync_plane(index, Access::Read, false);
+                    return Err(Error::StreamTorn { buffer });
+                }
             }
             self.sync_plane(index, Access::Read, false);
             at += take;

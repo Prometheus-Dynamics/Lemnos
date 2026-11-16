@@ -22,7 +22,8 @@
 //! - A reader may hold a buffer at most `max_hold`. One that keeps it longer is stuck, and is
 //!   cut off.
 //! - A reader that is cut off no longer counts: its marks are ignored, its buffers come back,
-//!   and it is told the next time it looks.
+//!   and it is told the next time it looks. The publisher can cut one off by hand with
+//!   [`HoldTable::cut_off`], which is the same cut-off the limits make.
 //! - A reader that dies leaves its marks behind in its page. They go when the publisher drops
 //!   the page ([`HoldTable::remove`]), which the ring's owner asks for when the connection closes;
 //!   until then the hold-time limit covers it.

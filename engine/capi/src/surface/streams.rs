@@ -348,7 +348,11 @@ pub unsafe extern "C" fn lemnos_stream_next_frame(
                 let bytes = if s.stream.planes().count() > 1 || !s.stream.is_mapped() {
                     core::ptr::null()
                 } else {
-                    s.stream.bytes(&got).as_ptr()
+                    // Checked at hand-out: a frame whose buffer is already reused is not handed out.
+                    match s.stream.plane_checked(&got, 0) {
+                        Ok(bytes) => bytes.as_ptr(),
+                        Err(error) => return fail_access(error, sink),
+                    }
                 };
                 // SAFETY: not null, and valid for a write by the contract.
                 unsafe { data.write(bytes) };
@@ -531,7 +535,11 @@ pub unsafe extern "C" fn lemnos_stream_plane(
             let Some(Some(frame)) = s.held.get(buffer as usize) else {
                 return Status::INVALID_ARGUMENT;
             };
-            let bytes = s.stream.plane(frame, plane);
+            // Checked at the call: a plane whose buffer is already reused is not handed out.
+            let bytes = match s.stream.plane_checked(frame, plane) {
+                Ok(bytes) => bytes,
+                Err(error) => return Status::from(error),
+            };
             // SAFETY: not null, and valid for a write by the contract.
             unsafe { data.write(bytes.as_ptr()) };
             // SAFETY: not null, and valid for a write by the contract.

@@ -654,6 +654,12 @@ buffer, and `plane(frame, p)` the bytes of plane `p` that the frame holds.
   frames it is given only while the first process holds them, and it must not mark the hold table
   itself. Its protection against reuse is only what the first process's hold gives. Giving another
   process its own reader slot is I2d.
+- The publisher can cut a reader off by hand (`HoldTable::cut_off`). Its buffers come back at once,
+  and it is told on its next call. A value it was reading when its buffer was reused is not returned
+  as good: `Held::read` drops it as `Torn` and counts it. The client's checked reads are
+  `Stream::read_plane`, `read_bytes` and `read`, which report `Error::StreamTorn` for it (status
+  `TORN`, C: `LEMNOS_E_TORN`), and `plane_checked` for a caller that hands the bytes out at the call. `Stream::bytes` and
+  `Stream::plane` are unchecked, and say so.
 - A `generation` changes whenever the host makes a new pool for the stream: a reopen, or any
   reallocation. A lease that has an older generation is on a pool that is gone. A consumer that gets
   The frame reader reports a pool change as `RingError::Broken`: the stream is then reopened, and the

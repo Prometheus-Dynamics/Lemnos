@@ -86,12 +86,23 @@ pub enum Error {
     /// maps none of its buffers, so its bytes can't be read or written through the stream: use
     /// the buffers' regions and descriptors instead. Nothing was read or written.
     StreamUnmapped,
+    /// A frame's buffer was reused while the frame was being read, so the bytes read are not the
+    /// frame's: they were dropped, and nothing was returned as good. This happens only once the
+    /// stream's reader has been cut off (by the producer, for breaking its limits), and the next
+    /// call on the stream says so.
+    StreamTorn {
+        /// The buffer, as the producer numbers it.
+        buffer: u32,
+    },
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Disconnected => f.write_str("not connected to the service"),
+            Self::Refused { status, text } if !named(*status) => {
+                write!(f, "unknown status {}: {text}", status.0)
+            }
             Self::Refused { status, text } => write!(f, "refused ({}): {text}", status.0),
             Self::Version { ours, theirs } => {
                 write!(
@@ -157,6 +168,10 @@ impl core::fmt::Display for Error {
             Self::StreamUnmapped => {
                 f.write_str("this stream maps none of its buffers: read them through their regions")
             }
+            Self::StreamTorn { buffer } => write!(
+                f,
+                "buffer {buffer} was reused while the frame was read: the bytes are dropped, not returned"
+            ),
             Self::StreamUnsupported => {
                 f.write_str("the frame stream's buffers are dma-bufs, which can't be mapped here")
             }
@@ -178,6 +193,24 @@ impl From<WireError> for Error {
     }
 }
 
+/// Whether this client names `status`: 0, an errno (which the kernel names), or one of this crate's
+/// codes. A status a newer service sends that is none of these is unknown to this client. It is
+/// still carried as it arrived, so the caller sees the number, and a status is never mapped to a
+/// different one.
+fn named(status: Status) -> bool {
+    status.is_ok()
+        || status.errno().is_some()
+        || [
+            Status::STALE_HANDLE,
+            Status::VERSION_MISMATCH,
+            Status::BUFFER_TOO_SMALL,
+            Status::PANIC,
+            Status::LAYOUT_MISMATCH,
+            Status::TORN,
+        ]
+        .contains(&status)
+}
+
 impl From<Error> for Status {
     fn from(error: Error) -> Self {
         match error {
@@ -197,8 +230,55 @@ impl From<Error> for Status {
             Error::Full => Status::BUSY,
             Error::Stream(RingError::Layout { .. }) => Status::LAYOUT_MISMATCH,
             Error::Stream(_) | Error::StreamWait(_) => Status::IO,
+            Error::StreamTorn { .. } => Status::TORN,
             Error::StreamUnsupported | Error::StreamUnmapped => Status::NOT_SUPPORTED,
             Error::StreamReadOnly | Error::StreamBuffersReadOnly => Status::ACCESS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A status a newer service sends, which this client does not name, is kept as it arrived: the
+    /// caller gets its number back and the error says it is unknown. Nothing maps it to another.
+    #[test]
+    fn an_unknown_status_number_is_kept_and_said_to_be_unknown() {
+        let unknown = Status(-4199);
+        let refused = || Error::Refused {
+            status: unknown,
+            text: "from a newer service".to_string(),
+        };
+        assert_eq!(Status::from(refused()), unknown);
+        assert_eq!(
+            refused().to_string(),
+            "unknown status -4199: from a newer service"
+        );
+    }
+
+    /// A status this client names is refused as a refusal with its number, and TORN is one.
+    #[test]
+    fn a_named_status_is_a_refusal_with_its_number() {
+        let named = Error::Refused {
+            status: Status::TORN,
+            text: "x".to_string(),
+        };
+        assert_eq!(named.to_string(), "refused (-4101): x");
+        assert_eq!(Status::from(named), Status::TORN);
+        let errno = Error::Refused {
+            status: Status::BUSY,
+            text: "x".to_string(),
+        };
+        assert_eq!(errno.to_string(), "refused (-16): x");
+    }
+
+    /// A torn frame is its own status for a C caller, and an older client, which does not name
+    /// TORN, sees the same number and reads it as unknown.
+    #[test]
+    fn a_torn_frame_is_torn_and_an_older_reader_sees_an_unknown_status() {
+        assert_eq!(Status::from(Error::StreamTorn { buffer: 2 }), Status::TORN);
+        assert_eq!(Status::TORN.0, -4101);
+        assert!(!named(Status(-4101 - 1)));
     }
 }

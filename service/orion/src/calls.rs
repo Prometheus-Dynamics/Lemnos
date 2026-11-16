@@ -1077,6 +1077,9 @@ mod ending_tests {
             Status::VERSION_MISMATCH,
             Status::PANIC,
             Status::LAYOUT_MISMATCH,
+            // A torn read comes from a frame stream, which no action reads, so no action can end
+            // with it. Were a device ever to return it, it is a failure, like any other.
+            Status::TORN,
             Status(-999),
         ] {
             assert_eq!(ending_of_status(status), Ending::FAILED, "{status:?}");

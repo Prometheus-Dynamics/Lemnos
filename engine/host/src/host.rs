@@ -2503,6 +2503,7 @@ fn status_words(status: Status) -> &'static str {
         Status::BUFFER_TOO_SMALL => "buffer too small",
         Status::PANIC => "the driver panicked",
         Status::LAYOUT_MISMATCH => "layout mismatch",
+        Status::TORN => "a frame's buffer was reused while it was read",
         _ => "failed with an unnamed error",
     }
 }

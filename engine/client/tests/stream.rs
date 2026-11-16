@@ -1835,3 +1835,41 @@ fn an_unknown_job_end_reason_keeps_its_number_and_is_never_read_as_a_known_one()
     assert_eq!(future.to_string(), "unknown job-end reason 99");
     assert_ne!(future, JobReason::Failed, "an unknown code is not failed");
 }
+
+/// A frame whose buffer the producer reuses after cutting its reader off: the client reads it as
+/// torn and hands out no bytes for it, on the checked reads, while the unchecked accessor still
+/// shows what the buffer holds now (which is why it is unchecked).
+#[test]
+fn a_frame_reused_after_its_reader_is_cut_off_reads_as_torn_not_as_its_bytes() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    assert_eq!(host.push_next(1, 128, 1), Some(0));
+    let frame = stream.try_next().unwrap().unwrap();
+    // Honest: before any cut-off, the checked read gives the frame's bytes.
+    assert_eq!(stream.read_bytes(&frame, |bytes| bytes[0]).unwrap(), 1);
+    assert_eq!(stream.plane_checked(&frame, 0).unwrap()[0], 1);
+
+    assert!(host.cut_off_reader(), "the consumer's reader is there");
+    // The second buffer is free; the third frame takes the first buffer, which the reader
+    // no longer holds, and writes over it.
+    assert_eq!(host.push_next(2, 128, 2), Some(1));
+    assert_eq!(host.push_next(3, 128, 3), Some(0), "buffer 0 is reused");
+
+    assert!(matches!(
+        stream.read_bytes(&frame, |bytes| bytes.to_vec()),
+        Err(lemnos_client::Error::StreamTorn { buffer: 0 })
+    ));
+    assert!(matches!(
+        stream.plane_checked(&frame, 0),
+        Err(lemnos_client::Error::StreamTorn { buffer: 0 })
+    ));
+    // The status a C caller gets for it is its own: not IO, and not a number of a device's.
+    let torn = stream.plane_checked(&frame, 0).unwrap_err();
+    assert_eq!(Status::from(torn), Status::TORN);
+    // `read` copies a buffer that is not a held frame. Its check is for a reuse during the copy,
+    // not one before the call, so a buffer reused before it is copied as it is: it is not a
+    // frame read, and the frame's own checked reads above are the ones that report TORN.
+    // The unchecked accessor is unchanged: it shows what the buffer holds now.
+    assert_eq!(stream.bytes(&frame)[0], 3);
+}

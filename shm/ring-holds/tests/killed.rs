@@ -60,7 +60,10 @@ fn reader_process() {
         }
         std::thread::sleep(Duration::from_millis(1));
     };
-    assert!(held.bytes(0).expect("bytes").iter().all(|byte| *byte == 1));
+    assert_eq!(
+        held.read(0, |bytes| bytes.iter().all(|byte| *byte == 1)),
+        Some(Ok(true))
+    );
     send(socket.as_fd(), &[b"holding"], &[], false).expect("say holding");
     loop {
         std::thread::sleep(Duration::from_secs(1));
