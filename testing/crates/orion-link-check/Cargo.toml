@@ -9,7 +9,13 @@ description = "Board-check in the QEMU harness: the real lemnosd and the real le
 [lints]
 workspace = true
 
+# The bounce trace (src/trace.rs): off by default, on with the `trace` feature (LINK_CHECK_TRACE=1 in run.sh).
+[features]
+trace = ["dep:tracing", "dep:tracing-subscriber"]
+
 [dependencies]
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"], optional = true }
 toml = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 lemnos-client = { path = "../../../engine/client" }

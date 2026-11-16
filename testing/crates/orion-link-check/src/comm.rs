@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use orion_hello::Hello as HelloService;
 use orion_keys::{Keys, KeysConfig, SharedKeys};
+
 use orion_link_serial::StreamCarrier;
 use orion_link_usb::UsbLinks;
 use orion_server::{Comm as CommCore, Limits, Security};
@@ -17,6 +18,9 @@ pub const NODE: &str = "board";
 
 /// Serves forever: the comm core named [`NODE`] with the USB links `links`, on the socket `socket`.
 pub fn run(socket: &Path, links: &[String]) {
+    // The comm core's own log, for the bounce trace (built with the `trace` feature only).
+    #[cfg(feature = "trace")]
+    crate::trace::subscriber();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -28,6 +32,12 @@ pub fn run(socket: &Path, links: &[String]) {
         tokio::task::spawn_local(async move { serving.serve(unix).await });
         std::future::pending::<()>().await;
     });
+}
+
+/// Serves one link from the comm core, on the local task.
+fn serve_link<C: orion_server::Carrier + 'static>(comm: &CommCore, carrier: C) {
+    let serving = comm.clone();
+    tokio::task::spawn_local(async move { serving.serve(carrier).await });
 }
 
 /// The comm core with its services and one carrier per USB link, serving. Everything that depends
@@ -50,9 +60,14 @@ fn comm_core(links: &[String]) -> CommCore {
     let usb = UsbLinks::new();
     comm.add_service(usb.service());
     for name in links {
-        let carrier = StreamCarrier::new(name.parse().expect("the link's name"), usb.link(name));
-        let serving = comm.clone();
-        tokio::task::spawn_local(async move { serving.serve(carrier).await });
+        let link_name = name.parse().expect("the link's name");
+        #[cfg(feature = "trace")]
+        serve_link(
+            &comm,
+            StreamCarrier::new(link_name, crate::trace::Traced(usb.link(name))),
+        );
+        #[cfg(not(feature = "trace"))]
+        serve_link(&comm, StreamCarrier::new(link_name, usb.link(name)));
     }
     comm
 }

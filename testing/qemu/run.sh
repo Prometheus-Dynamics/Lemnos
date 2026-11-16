@@ -51,7 +51,13 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   -o "$root/lemnos_lend_check" "$here/lemnos_lend_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion --target "$target")
+# The bounce trace of the link check (its comm core's log and each read and write on the link) is off
+# unless asked for: LINK_CHECK_TRACE=1 builds it in. Left out, the check runs as it does in CI.
+link_check_features=()
+if [[ "${LINK_CHECK_TRACE:-0}" == 1 ]]; then
+  link_check_features=(--features lemnos-orion-link-check/trace)
+fi
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"

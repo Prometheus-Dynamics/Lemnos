@@ -32,7 +32,9 @@ struct Pongs {
 }
 
 /// The host side. `true` when the session came up and every round trip came back.
-pub fn run(rounds: u64) -> bool {
+/// `hello_after` is the time between claiming the link's interface and sending the first HELLO: the
+/// test-only knob for the order of the host's hello and the bridge's re-offer after a bounce.
+pub fn run(rounds: u64, hello_after: Duration) -> bool {
     let Some(path) = find_device(Duration::from_secs(60)) else {
         say!("FAIL the host sees the gadget on the bus");
         return false;
@@ -102,6 +104,7 @@ pub fn run(rounds: u64) -> bool {
         timeout: Duration::from_secs(30),
         ..Options::default()
     };
+    std::thread::sleep(hello_after);
     let mut session = match Session::over_link(OwnedFd::from(client), "usb-host", options) {
         Ok(session) => session,
         Err(error) => {

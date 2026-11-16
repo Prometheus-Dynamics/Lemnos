@@ -38,6 +38,8 @@ mod bridge;
 mod comm;
 mod daemon;
 mod host;
+#[cfg(feature = "trace")]
+mod trace;
 
 use bridge::Bridge;
 use daemon::{Lemnosd, enabled, wait_until};
@@ -110,7 +112,8 @@ fn main() -> ExitCode {
         }
         Some("host") => {
             let rounds = args.next().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
-            let ok = host::run(rounds);
+            let hello_after_ms: u64 = args.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let ok = host::run(rounds, Duration::from_millis(hello_after_ms));
             // The shim's threads sit in transfers: leave without waiting for them.
             std::process::exit(i32::from(!ok));
         }
@@ -250,7 +253,7 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         "the gadget's description says the pair is lent",
     );
     check(
-        host_session(&me, 1),
+        host_session(&me, 1, 0),
         "host session 1: up over the emulated bus, and the round trips with the node",
     );
 
@@ -277,11 +280,61 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         "the gadget's description says the pair is lent again",
     );
     check(
-        host_session(&me, 2),
+        host_session(&me, 2, 0),
         "host session 2: up again over the emulated bus, and the round trips with the node",
     );
+
+    // 4. The hello sweep: each bounce, with the host's first HELLO sent a set time after it claims the
+    // link. After a re-offer, a reader of the stream that was replaced can still be inside a read of the same
+    // endpoint, and it takes the HELLO (see tmp/BRIDGE-BOUNCE/orderings.md). See `HELLO_SWEEP_MS`.
+    if let Some(reason) = BOUNCE_SKIP {
+        say!("not run: the hello sweep, the bounce regression ({reason})");
+        return Ok(());
+    }
+    for (cycle, &hello_after_ms) in HELLO_SWEEP_MS.iter().enumerate() {
+        let went_down = bridge.count(WENT_DOWN) + 1;
+        let offered = bridge.count(OFFERED) + 1;
+        check(
+            fs::write(format!("{GADGET_DIR}/UDC"), "\n").is_ok(),
+            &format!("bounce {}: the controller lets go of the gadget", cycle + 3),
+        );
+        check(
+            bridge.wait_for(WENT_DOWN, went_down, LONG),
+            &format!("bounce {}: the bridge gives the hold up", cycle + 3),
+        );
+        check(
+            wait_until(LONG, enabled),
+            &format!("bounce {}: the daemon enables the gadget again", cycle + 3),
+        );
+        let up = host_session(&me, 3 + cycle as u32, hello_after_ms);
+        check(
+            bridge.wait_for(OFFERED, offered, LONG),
+            &format!(
+                "bounce {}: the bridge offers the endpoints again",
+                cycle + 3
+            ),
+        );
+        check(
+            up,
+            &format!(
+                "hello sweep: the host's hello {hello_after_ms} ms after its claim, after the gadget is enabled: session up"
+            ),
+        );
+    }
     Ok(())
 }
+
+/// The delays the hello sweep tries, in milliseconds, one bounce each. Test-only: a short delay sends the
+/// host's first HELLO before the bridge has offered the endpoints again.
+const HELLO_SWEEP_MS: [u64; 5] = [0, 150, 400, 1000, 2500];
+
+/// Why the bounce regression (the hello sweep) is not run, or `None` once it runs. It is skipped, not
+/// passed: the sweep's orderings fail at the Orion rev the bridge pins, because a reader of the old stream
+/// takes the host's first HELLO after a bounce and discards it (Orion's stale reader; BRIDGE-BOUNCE in
+/// tmp/flakes.md). Set to `None` in the PR that pins the Orion rev with that fix.
+const BOUNCE_SKIP: Option<&str> = Some(
+    "needs Orion's fix for the stale link reader: a reader of the old stream takes the host's HELLO after a bounce",
+);
 
 /// What the kernel shows of the gadget, for a step that did not come up.
 fn diagnose() {
@@ -349,10 +402,11 @@ fn pair_lent_method(description: &lemnos_client::DeviceDescription) -> Option<u1
 
 /// Runs the host role as a child, with its lines on this check's output. True when the session came
 /// up, in that order the round trips followed, and the child exited cleanly.
-fn host_session(me: &Path, number: u32) -> bool {
+fn host_session(me: &Path, number: u32, hello_after_ms: u64) -> bool {
     let child = Command::new(me)
         .arg("host")
         .arg(ROUNDS.to_string())
+        .arg(hello_after_ms.to_string())
         .stdout(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
