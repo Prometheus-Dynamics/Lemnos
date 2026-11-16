@@ -120,7 +120,7 @@ pub fn address(value: Option<&str>) -> Result<Address, String> {
 }
 
 /// Whether the bridge can publish through `address`, from the address alone. The bridge publishes as a
-/// provider (`publish.rs`, `Open`), so the carrier must offer that role. At Orion 671d29d the network
+/// provider (`publish.rs`, `Open`), so the carrier must offer that role. At Orion 3dde304 the network
 /// carrier (`orion+tcp://`) offers only `CLIENT` and `PEER` (`crates/comm/tcp/src/lib.rs`, `NETWORK_ROLES`),
 /// and a signed serial link offers the same two (`crates/comm/link-serial/src/carrier.rs`, `offers`); an
 /// unsigned serial link offers the provider role. A local socket offers every role the board serves.
@@ -132,14 +132,14 @@ pub fn publishes_on(address: &Address) -> Result<(), String> {
     match address {
         Address::Local(_) => Ok(()),
         Address::Network { .. } => Err(
-            "this carrier cannot publish: at Orion 671d29d the network carrier offers only the CLIENT \
+            "this carrier cannot publish: at Orion 3dde304 the network carrier offers only the CLIENT \
              and PEER roles, and the bridge publishes as a provider. Leave ORION_ADDRESS unset to use the \
              board's own socket, or give a unix:<path> socket"
                 .to_owned(),
         ),
         Address::Serial { key: Some(_), .. } => Err(
             "this carrier cannot publish: a signed serial link offers only the CLIENT and PEER roles at \
-             Orion 671d29d, and the bridge publishes as a provider. Use an unsigned serial link, or leave \
+             Orion 3dde304, and the bridge publishes as a provider. Use an unsigned serial link, or leave \
              ORION_ADDRESS unset"
                 .to_owned(),
         ),

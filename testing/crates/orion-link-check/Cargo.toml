@@ -18,12 +18,12 @@ lemnos-linux-sys = { path = "../../../backends/linux-sys" }
 # The setting the bridge is started with comes from the tool an image builder runs: `tree --bridge-env`.
 lemnos-ctl = { path = "../../../service/ctl" }
 # The comm core and the host's session, from the one pinned Orion the bridge uses (service/orion).
-orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-link-serial = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
-orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "671d29d626f49e06ab7332417275ef1b0ac31b01" }
+orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-link-serial = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-unix = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-hello = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }
+orion-keys = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "3dde304e396f5769d3aa25884b5a9ff5bd4b9180" }

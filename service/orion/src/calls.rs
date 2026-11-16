@@ -98,6 +98,9 @@ pub struct Job {
     /// says it again when that session ends (`Request::CallerGone`). Zero from a node that does not
     /// say.
     pub token: u64,
+    /// The run goes on past its caller (`Request::Run`'s `detached`): a `CallerGone` for its session
+    /// does not end it. False from a node that does not say.
+    pub detached: bool,
     /// The run, as Orion numbered it.
     pub call: u64,
     pub device: String,
@@ -113,9 +116,10 @@ pub struct Job {
 pub enum Message {
     /// Run this.
     Run(Job),
-    /// Stop run `call` of session `session`, if it is a long job still going. `reason` is Orion's
+    /// Stop run `call`, if it is a long job still going. `call` is the node-issued number of the run,
+    /// unique for the node logic's life, so it names one run with no session. `reason` is Orion's
     /// cancel reason by its wire value (see [`cancel_words`]).
-    Cancel { session: u64, call: u64, reason: u8 },
+    Cancel { call: u64, reason: u8 },
     /// The Orion session with token `token` ended: its callers' holds are released.
     CallerGone { token: u64 },
 }
@@ -154,6 +158,8 @@ struct Running {
     session: u64,
     /// The Orion session token the run came from ([`Job::token`]).
     token: u64,
+    /// The run goes on past its caller ([`Job::detached`]).
+    detached: bool,
     call: u64,
     job: u64,
     /// The caller the run came from: the key of its lemnosd connection.
@@ -307,27 +313,15 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             Some(Message::CallerGone { token }) => {
                 caller_gone(
                     &mut clients,
-                    &running,
+                    &mut running,
                     &mut ended,
                     &mut departed,
                     token,
                     shared,
                 );
             }
-            Some(Message::Cancel {
-                session,
-                call,
-                reason,
-            }) => {
-                cancel(
-                    &mut clients,
-                    &mut running,
-                    &mut ended,
-                    session,
-                    call,
-                    reason,
-                    shared,
-                );
+            Some(Message::Cancel { call, reason }) => {
+                cancel(&mut clients, &mut running, &mut ended, call, reason, shared);
             }
             None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}
@@ -478,23 +472,20 @@ pub(crate) fn cancel_words(reason: u8) -> &'static str {
     }
 }
 
-/// Stops run `call` of `session`. A long job is cancelled on lemnosd, and the run ends as cancelled
-/// at once: nothing else would answer it. The caller's connection is kept, and its lease starts from
-/// now. The reason (Orion's `CancelReason`) is logged and does not change the run: the session's end
-/// comes as `CallerGone`, which releases the holds (see [`caller_gone`]).
+/// Stops run `call`. A long job is cancelled on lemnosd, and the run ends as cancelled at once:
+/// nothing else would answer it. The caller's connection is kept, and its lease starts from now. The
+/// reason (Orion's `CancelReason`) is logged and does not change the run: the session's end comes as
+/// `CallerGone`, which releases the holds (see [`caller_gone`]). A cancel carries no session: the
+/// node's number for the run is unique, so the call alone names it.
 fn cancel(
     clients: &mut Callers,
     running: &mut Vec<Running>,
     ended: &mut Vec<CallerKey>,
-    session: u64,
     call: u64,
     reason: u8,
     shared: &Shared,
 ) {
-    let Some(at) = running
-        .iter()
-        .position(|r| r.session == session && r.call == call)
-    else {
+    let Some(at) = running.iter().position(|r| r.call == call) else {
         return;
     };
     let r = running.remove(at);
@@ -564,6 +555,7 @@ fn run_one(
         Ok(Served::Started(started)) => {
             running.push(Running {
                 token: job.token,
+                detached: job.detached,
                 session: job.session,
                 call: job.call,
                 job: started,
@@ -697,21 +689,23 @@ fn lost(caller: &str, running: &mut Vec<Running>, shared: &Shared) {
     );
 }
 
-/// Orion's session `token` ended (`Request::CallerGone`). Orion cancels the session's attached runs
-/// before it says so (`Cancel`, reason 2), so a run of the session still in flight is a detached one,
-/// which goes on past its caller. Its connection stays: lemnosd ends a job with the connection it was
-/// started on. The connection is let go when its last run ends ([`release_departed`]). With nothing in
-/// flight, the session's connection is released now, as a dropped one is: its holds go, and lemnosd's
+/// Orion's session `token` ended (`Request::CallerGone`). The session's attached runs end here: Orion
+/// has already cancelled them with reason 2, and any still in flight is ended as a cancel ends one
+/// ([`end_attached`]). A run the request marked detached goes on past its caller: it keeps the
+/// session's connection, since lemnosd ends a job with the connection it was started on, and the
+/// connection is let go when its last detached run ends ([`release_departed`]). With no detached run
+/// left, the session's connection is released now, as a dropped one is: its holds go, and lemnosd's
 /// drivers hear the caller is gone. A session with no connection here is a no-op.
 fn caller_gone(
     clients: &mut Callers,
-    running: &[Running],
+    running: &mut Vec<Running>,
     ended: &mut Vec<CallerKey>,
     departed: &mut Vec<CallerKey>,
     token: u64,
     shared: &Shared,
 ) {
     let caller = caller_key(token);
+    end_attached(clients, running, ended, &caller, shared);
     match departure(running, &caller) {
         Departure::Keep => {
             if !departed.contains(&caller) {
@@ -722,23 +716,52 @@ fn caller_gone(
     }
 }
 
+/// Ends the attached runs of `caller` as cancelled, each as [`cancel`] ends one. Orion's reason-2
+/// cancel has normally ended them already, so this only does anything when that cancel did not come.
+/// A detached run is never ended here.
+fn end_attached(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
+    caller: &str,
+    shared: &Shared,
+) {
+    let mut kept = Vec::with_capacity(running.len());
+    for r in running.drain(..) {
+        if r.caller != caller || r.detached {
+            kept.push(r);
+            continue;
+        }
+        if let Some(lemnosd) = clients.get_mut(&r.caller) {
+            let _ = lemnosd.client.cancel_job(r.job);
+            lemnosd.seen = Instant::now();
+        }
+        let detail = noted(ended, &r.caller, "cancelled".to_owned());
+        shared.finished(Done {
+            session: r.session,
+            call: r.call,
+            ending: Ending::CANCELLED,
+            output: String::new(),
+            detail,
+        });
+    }
+    *running = kept;
+}
+
 /// What a session's end does to its connection (see [`caller_gone`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Departure {
-    /// Nothing of the session is in flight: its connection is released now.
+    /// Nothing of the session is in flight that goes on past it: its connection is released now.
     Release,
-    /// A run of the session is still in flight. Its connection is kept until that run ends.
+    /// A detached run of the session is still in flight. Its connection is kept until that run ends.
     Keep,
 }
 
-/// The decision at `CallerGone`. Orion has already cancelled the session's attached runs, with reason 2,
-/// and [`cancel`] removes each one it cancels from `running`. So a run still in `running` at `CallerGone`
-/// is one that never got its reason-2 cancel: a detached run, or an ambiguous one. It is always kept
-/// (`Keep`), because ending a run that might be detached is the unsafe error. Only the order Orion sends
-/// the two messages in makes the rest of this safe; `live_orion_order_*` in `orion_bridge.rs` pins it at
-/// the pinned revision.
+/// The decision at `CallerGone`, once [`end_attached`] has ended the attached runs: the connection is
+/// kept while a detached run of the caller is in flight, which the request said goes on, and released
+/// otherwise. A run of another session does not keep this one.
 fn departure(running: &[Running], caller: &str) -> Departure {
-    if running.iter().any(|r| r.caller == caller) {
+    if running.iter().any(|r| r.caller == caller && r.detached) {
         Departure::Keep
     } else {
         Departure::Release
@@ -988,40 +1011,41 @@ mod cancel_reason_tests {
 mod departure_tests {
     use super::*;
 
-    fn run(caller: &str, call: u64) -> Running {
+    fn run(caller: &str, call: u64, detached: bool) -> Running {
         Running {
             session: 1,
             token: 2,
+            detached,
             call,
             job: call,
             caller: caller.to_owned(),
         }
     }
 
-    /// Attached: Orion's reason-2 cancel comes first and removes the run, so `CallerGone` finds nothing
-    /// in flight and the session is released. Order recorded from Orion's `gone()` at 671d29d
-    /// (`crates/node/action-list/src/lib.rs`), pinned live by `orion_order_pins_*`.
+    /// Attached runs of the session are ended before the decision (`end_attached`), so the session
+    /// with nothing detached in flight is released.
     #[test]
-    fn a_session_whose_attached_runs_were_cancelled_is_released() {
+    fn a_session_with_nothing_detached_in_flight_is_released() {
         let running: Vec<Running> = Vec::new();
         assert_eq!(departure(&running, &caller_key(2)), Departure::Release);
     }
 
-    /// Detached: no cancel is sent, the run stays in flight at `CallerGone`, so the connection is kept
-    /// until the run ends.
+    /// The request marked the run detached: its connection is kept until the run ends.
     #[test]
-    fn a_session_with_a_run_in_flight_is_kept() {
-        let running = vec![run(&caller_key(2), 7)];
+    fn a_session_with_a_detached_run_in_flight_is_kept() {
+        let running = vec![run(&caller_key(2), 7, true)];
         assert_eq!(departure(&running, &caller_key(2)), Departure::Keep);
     }
 
-    /// The ambiguous case: a run in flight at `CallerGone` with no reason-2 cancel for it. Whether it is
-    /// detached cannot be told from here, so it is kept. A run of another session does not keep this one.
+    /// A run that is not detached never keeps the session, whatever is still in `running`: it is
+    /// ended by `end_attached` first. A detached run of another session does not keep this one.
     #[test]
-    fn an_ambiguous_run_is_kept_and_another_sessions_run_does_not_keep_it() {
-        let running = vec![run(&caller_key(9), 3)];
+    fn an_attached_run_does_not_keep_and_another_sessions_detached_run_does_not() {
+        let running = vec![run(&caller_key(2), 3, false)];
         assert_eq!(departure(&running, &caller_key(2)), Departure::Release);
-        let running = vec![run(&caller_key(2), 3), run(&caller_key(9), 4)];
+        let running = vec![run(&caller_key(9), 4, true)];
+        assert_eq!(departure(&running, &caller_key(2)), Departure::Release);
+        let running = vec![run(&caller_key(2), 3, false), run(&caller_key(2), 5, true)];
         assert_eq!(departure(&running, &caller_key(2)), Departure::Keep);
     }
 }
@@ -1036,6 +1060,7 @@ mod ending_tests {
             token: 2,
             call: 3,
             job: 4,
+            detached: false,
             caller: caller_key(2),
         }
     }

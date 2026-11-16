@@ -200,7 +200,7 @@ Nothing is compiled in. `--map FILE` names one map file instead. For the referen
 **What building needs.** Checked with a fresh `CARGO_HOME` for each case:
 
 - `cargo build -p lemnos-ctl --locked` online: exit 0. Cargo fetched the crates.io crates in `Cargo.lock` **and**
-  the git checkout of `https://github.com/Prometheus-Dynamics/Orion.git` at rev `671d29d6`, although `lemnos-ctl`
+  the git checkout of `https://github.com/Prometheus-Dynamics/Orion.git` at rev `3dde304e`, although `lemnos-ctl`
   does not use Orion (`cargo tree -p lemnos-ctl` shows no git package). `service/orion` declares those git
   dependencies, and the workspace member is part of the resolution.
 - The same build offline with only the crates.io cache (no Orion checkout): fails with `can't checkout from

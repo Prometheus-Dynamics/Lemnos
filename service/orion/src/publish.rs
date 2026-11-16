@@ -600,7 +600,7 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args, caller, token) = match request {
+            let (call, name, target, args, caller, token, detached) = match request {
                 Request::Run {
                     call,
                     name,
@@ -608,8 +608,9 @@ impl Session {
                     args,
                     caller,
                     session,
+                    detached,
                     ..
-                } => (call, name, target, args, caller, session),
+                } => (call, name, target, args, caller, session, detached),
                 // The session with this token ended: whatever its callers hold is released
                 // (see `calls::caller_gone`).
                 Request::CallerGone { session } => {
@@ -623,7 +624,6 @@ impl Session {
                 Request::Cancel { call, reason } => {
                     if self.pending.contains(&call) {
                         let _ = jobs.send(Message::Cancel {
-                            session: self.number,
                             call,
                             reason: reason.code(),
                         });
@@ -631,9 +631,11 @@ impl Session {
                     continue;
                 }
             };
-            let job = self
-                .job(call, &name, &target, args, caller)
-                .map(|job| Job { token, ..job });
+            let job = self.job(call, &name, &target, args, caller).map(|job| Job {
+                token,
+                detached,
+                ..job
+            });
             match job {
                 Ok(job) => {
                     if jobs.send(Message::Run(job)).is_ok() {
@@ -691,6 +693,7 @@ impl Session {
         Ok(Job {
             session: self.number,
             token: 0,
+            detached: false,
             call,
             device: device_name(device),
             verb,

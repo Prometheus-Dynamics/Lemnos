@@ -788,27 +788,22 @@ releases only its own holds. A token of zero (a node that does not say) is one s
 cancels its run and nothing else: the job is cancelled on lemnosd, and the caller's connection and the
 driver's holds for it stay.
 
-**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision 671d29d). Orion cancels
-the session's attached runs first (a `Cancel` with reason 2), so a run of the session still in flight when
-`CallerGone` comes is a detached one. A session with nothing in flight is released as a dropped connection is:
-its connection closes, its runs end, and lemnosd tells the drivers the caller is gone (`caller_gone`). A
-session with a detached run in flight keeps its connection open, because lemnosd ends a job with the
-connection it was started on; the connection is released when the last of those runs ends. The attached runs
-of the ended session are cancelled on lemnosd at once. A session with no connection here is a no-op.
+**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision 3dde304). Each run
+says whether it is detached: `Request::Run` carries `detached` (`Claim.detached` on the wire, false from a node
+too old to say), and the bridge takes it as written. There is no inference from the order of messages. Orion
+cancels an attached run of an ending session with reason 2 before `CallerGone` (Orion's `gone()` in
+`crates/node/action-list/src/lib.rs`), and `calls::caller_gone` ends any attached run still in flight the same
+way, so the bridge never ends a run the request marked detached. A session with no detached run in flight is
+released as a dropped connection is: its connection closes, and lemnosd tells the drivers the caller is gone
+(`caller_gone`). A session with a detached run in flight keeps its connection open, because lemnosd ends a job
+with the connection it was started on; the connection is released when the last of those runs ends. A session
+with no connection here is a no-op.
 
-Orion's program API at this revision does not carry the `detached` flag (`Request::Run` has no `detached`),
-so the bridge reads a run as detached by that order, not by the flag. A detached run goes on past its
-caller (E12): its end goes to whoever attached, and `Actions::attach` finds it by its number and its
-starter's identity. The bridge needs nothing for an attach. A detached run needs a deadline at this revision.
-
-The inference, and what it rests on. For an attached run, Orion sends `Cancel` with reason 2 before
-`CallerGone` (Orion's `gone()` in `crates/node/action-list/src/lib.rs`). `orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel`
-(`service/orion/tests/orion_bridge.rs`) drives Orion's real node logic and fails if that order changes. The
-ambiguous case is a run still in flight at `CallerGone` with no reason-2 cancel for it. The bridge keeps it:
-`calls::departure` answers `Keep` for any run in flight, so a run that might be detached is never ended. The
-cost of the safe error is that a connection can outlive its session until a detached run ends. The inference is
-removed in the same change that takes Orion's `detached` flag, which is planned on Orion's side: then the bridge
-reads the flag, ends attached runs on `CallerGone` directly, and keeps detached ones.
+A detached run goes on past its caller (E12): its end goes to whoever attached, and `Actions::attach` finds it
+by its number (the number the starter last ran under that caller; an earlier run is reached by handle only,
+`Actions::attach_handle`). The bridge needs nothing for an attach. A detached run needs a deadline at this
+revision. `the_program_is_told_which_runs_are_detached_and_how_each_one_ends` in `service/orion/tests/orion_bridge.rs`
+pins the order Orion sends an attached run's cancel in, and what each run's `detached` says.
 
 **Leases.** The bridge also bounds the holds of a caller by a lease, for the case no session end reaches it
 (a caller that holds and then says nothing). When a caller has been silent for the lease, the bridge drops
@@ -853,7 +848,8 @@ closed peer shows up at once as a lost session, and silence means a comm core th
 sides keep the session while it is quiet (the comm core marks it quiet), so a stalled but open link keeps its
 session: nothing is torn down or published again, and publishing goes on on the same session when the stall
 ends. Each request still times out on its own deadline. The bridge adds no probe of its own. A network link (`orion+tcp://`) cannot publish: at the pinned revision the network carrier offers only the
-`CLIENT` and `PEER` roles, and the bridge publishes as a provider. So the bridge refuses `orion+tcp://` by name at
+`CLIENT` and `PEER` roles, and the bridge publishes as a provider. A provider role over the network carrier is
+not offered, by design at this pin. So the bridge refuses `orion+tcp://` by name at
 start (`ORION_ADDRESS`, below), and if it is handed one only at connect, the comm core's refusal is said once and the
 bridge stops; that is a configuration error, not a link fault, so it is not retried and the process exits with a
 failure. The silence rule still holds for a network session a remote caller holds: its session is lost after the
@@ -892,7 +888,7 @@ otherwise silent sends it at least every lease divided by three, or keeps a run 
 push that keeps sending. A silent holder, one that renews nothing for the lease and has no run in flight, loses its holds when the
 lease runs out, whether it is alive or not. The bridge cannot tell the two apart at this revision.
 
-A caller that is detached from its run is not told apart from a live one by the lease (the bridge does not
+A caller that is detached from its run is not told apart from a live one by the lease (the lease does not
 read the detached flag): its holds last while its run's progress does, and a session's end releases them at
 once, detached or not. Power and the boot holds of VBUS are not caller holds and are not released by a lease.
 
@@ -936,7 +932,7 @@ run in flight is never dropped for silence (see "Only silence expires a lease").
 |---|---|---|---|
 | `call`, `set`, `power` | lemnosd's call deadline, 2 s by default, per board with `call_deadline_ms` | lemnosd | `TimedOut`, code 110 |
 | a long job, its start | the same call deadline | lemnosd | `TimedOut`, code 110 |
-| a long job, once started | a deadline the caller states on its run (`Run.deadline_ms`), enforced by Orion's node: `TimedOut`, code 0, words `it ran out of time`. The bridge does not pass its own deadline to lemnosd | Orion's node | `TimedOut`, code 0 |
+| a long job, once started | a deadline the caller states on its run (`Run.deadline_ms`), enforced by Orion's node: `TimedOut`, code 110 (`DEADLINE_CODE`), words `it ran out of time`. The bridge does not pass its own deadline to lemnosd | Orion's node | `TimedOut`, code 0 |
 | a long job, cancelled | the caller's cancel, or its session ending (Orion cancels its attached runs) | caller, Orion | `Cancelled`, code 0 |
 | file install | a partial file is deleted after 600 s with no chunk | the bridge | nothing is sent at expiry: the sender sees silence |
 | flash stream | the stream is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the transfer stops |
