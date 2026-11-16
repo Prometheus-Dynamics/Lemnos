@@ -543,6 +543,7 @@ error numbers, and Lemnos's own codes below -4095:
 | -110 | `TIMED_OUT` | The call ran past its deadline: 2 s, or the board file's `call_deadline_ms` |
 | -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
 | -4100 | `LAYOUT_MISMATCH` | A frame stream's shared memory (its ring header or its marks page) is of another layout than this build reads. The message names the structure and both values; the C surface reports them with `lemnos_layout_refusal` |
+| -4101 | `TORN` | A frame's buffer was reused while the frame was being read, so the bytes read were dropped and nothing was returned as the frame. Only a reader the producer cut off can see it; its next call on the stream says so. Comes from a frame stream's read, never from an action: no action ending carries it |
 
 ## Named files (`lemnos/`)
 
@@ -912,7 +913,7 @@ one in `ending_of_status` (`service/orion/src/calls.rs`); each row has a test.
 | `INVALID_ARGUMENT` | -22 | `Rejected` | 22 |
 | `NOT_SUPPORTED` | -95 | `Rejected` | 95 |
 | `BUFFER_TOO_SMALL` | -4098 | `Rejected` | 4098 |
-| every other status: `IO`, `INTERRUPTED`, `NO_MEMORY`, `ACCESS`, `STALE_HANDLE`, `VERSION_MISMATCH`, `PANIC`, `LAYOUT_MISMATCH`, and any other | | `Failed` | 0 |
+| every other status: `IO`, `INTERRUPTED`, `NO_MEMORY`, `ACCESS`, `STALE_HANDLE`, `VERSION_MISMATCH`, `PANIC`, `LAYOUT_MISMATCH`, `TORN` (no action returns it: a frame read does), and any other | | `Failed` | 0 |
 
 The rows above are the statuses lemnosd answers a call or a job with. The bridge's own endings have no
 status and so code zero:

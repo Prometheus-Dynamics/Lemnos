@@ -166,6 +166,26 @@ impl fmt::Display for BufferError {
 
 impl std::error::Error for BufferError {}
 
+/// A value that [`Held::read`] dropped: the buffer was taken back and reused while the caller
+/// was using its bytes, so the bytes are not the frame's. Nothing was returned as good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Torn {
+    /// The buffer that was reused.
+    pub buffer: BufferIndex,
+}
+
+impl fmt::Display for Torn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "buffer {} was reused while it was read; the value is dropped",
+            self.buffer.0
+        )
+    }
+}
+
+impl std::error::Error for Torn {}
+
 /// Every buffer is published and held by some reader, so there is nowhere to put a frame. The
 /// publisher drops the frame; it never waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

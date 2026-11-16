@@ -2,10 +2,11 @@
 
 use std::os::fd::BorrowedFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use shm_ring::{FieldId, Mem, Next, ReadMap, Reader, SampleTime};
 
-use crate::{BufferDesc, BufferIndex, MAX_PER_FRAME, Marker, NoMarks, PoolView, entry, page};
+use crate::{BufferDesc, BufferIndex, MAX_PER_FRAME, Marker, NoMarks, PoolView, Torn, entry, page};
 
 /// How many entries one [`BufferReader::next`] call steps over looking for a frame that is still
 /// there.
@@ -16,6 +17,8 @@ const PROBES: u32 = 64;
 struct Shared<K> {
     pool: PoolView,
     marker: K,
+    /// How many values [`Held::read`] has dropped as torn, for the reader and all its frames.
+    torn: Arc<AtomicU64>,
 }
 
 /// The buffers of one frame, held: the publisher will not reuse them until this is dropped.
@@ -32,6 +35,9 @@ struct Shared<K> {
 pub struct Held<K: Marker = NoMarks> {
     shared: Arc<Shared<K>>,
     buffers: [BufferIndex; MAX_PER_FRAME],
+    /// The ticket each buffer had when the frame was taken: the low half of the entry's ticket.
+    /// [`Held::read`] checks the buffer still has it after the bytes are used.
+    tickets: [u32; MAX_PER_FRAME],
     count: usize,
 }
 
@@ -55,13 +61,62 @@ impl<K: Marker> Held<K> {
     }
 
     /// The bytes of the frame's buffer `index`, in place.
+    ///
+    /// **Unchecked.** Nothing here says whether the buffer was reused while the caller reads
+    /// the slice: a reader that was cut off has no mark keeping its buffers, so the publisher
+    /// may write over them. Code that needs the bytes to be the frame's uses [`Held::read`],
+    /// which re-checks the buffer after the use and reports [`Torn`].
     #[must_use]
     pub fn bytes(&self, index: usize) -> Option<&[u8]> {
         self.shared.pool.bytes(self.buffer(index)?)
     }
 
+    /// Uses the bytes of the frame's buffer `index`, in place, and then checks that the buffer
+    /// was not reused while `read` ran.
+    ///
+    /// `read` gets the bytes and returns a value of its own; it cannot keep a reference into them,
+    /// since its return type does not borrow the slice. After it returns, the buffer's use counter
+    /// ([`page::same_use`]) is checked against the one the frame was taken with. If it moved, the
+    /// buffer was taken back and written over during the use, so the value is dropped, the
+    /// reader's torn count goes up ([`BufferReader::torn`]) and `Err(Torn)` is returned. Otherwise
+    /// the value is `Ok`. A publisher trying to take a held buffer back does not count as a reuse.
+    ///
+    /// `None` if the frame has no buffer `index`, or the view maps none of the buffers' memory.
+    #[must_use]
+    pub fn read<T>(&self, index: usize, read: impl FnOnce(&[u8]) -> T) -> Option<Result<T, Torn>> {
+        let buffer = self.buffer(index)?;
+        let bytes = self.shared.pool.bytes(buffer)?;
+        let value = read(bytes);
+        // The bytes were used before this check; `same_use` fences between the two.
+        if page::same_use(self.shared.pool.page(), buffer, self.tickets[index]) {
+            Some(Ok(value))
+        } else {
+            self.shared.torn.fetch_add(1, Ordering::Relaxed);
+            Some(Err(Torn { buffer }))
+        }
+    }
+
+    /// The bytes of the frame's buffer `index` as they are at this call: checked now, not after a
+    /// use. `Some(Err(Torn))` if the buffer was already reused, so the bytes are not the frame's.
+    /// Nothing says what happens after the call returns; a reader that is cut off can have its
+    /// buffers reused under the slice it gets here. Its next call on the reader says so.
+    #[must_use]
+    pub fn current(&self, index: usize) -> Option<Result<&[u8], Torn>> {
+        let buffer = self.buffer(index)?;
+        let bytes = self.shared.pool.bytes(buffer)?;
+        if page::same_use(self.shared.pool.page(), buffer, self.tickets[index]) {
+            Some(Ok(bytes))
+        } else {
+            self.shared.torn.fetch_add(1, Ordering::Relaxed);
+            Some(Err(Torn { buffer }))
+        }
+    }
+
     /// The descriptor behind the frame's buffer `index` and where the buffer is in it, for
     /// handing the buffer to something else instead of reading it.
+    ///
+    /// **Unchecked**, as [`Held::bytes`] is: whatever is handed the descriptor reads the buffer
+    /// with no ticket check.
     #[must_use]
     pub fn descriptor(&self, index: usize) -> Option<(BorrowedFd<'_>, BufferDesc)> {
         self.shared.pool.descriptor(self.buffer(index)?)
@@ -149,6 +204,7 @@ pub struct BufferReader<M: Mem = ReadMap, K: Marker = NoMarks> {
     /// An entry found behind lost ones, kept for the next call.
     pending: Option<Pending<K>>,
     missed: u64,
+    torn: Arc<AtomicU64>,
 }
 
 /// An entry kept for the next call: a frame, or an entry that names no buffer.
@@ -194,13 +250,19 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
     #[must_use]
     pub fn new(reader: Reader<M>, field: FieldId, pool: PoolView, marker: K) -> Self {
         let meta = vec![0; reader.geometry().max_payload() as usize].into_boxed_slice();
+        let torn = Arc::new(AtomicU64::new(0));
         Self {
             reader,
             field,
-            shared: Arc::new(Shared { pool, marker }),
+            shared: Arc::new(Shared {
+                pool,
+                marker,
+                torn: torn.clone(),
+            }),
             meta,
             pending: None,
             missed: 0,
+            torn,
         }
     }
 
@@ -230,11 +292,22 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         self.missed
     }
 
+    /// How many values [`Held::read`] has dropped as torn, for this reader and every frame it
+    /// has handed out, across pools.
+    #[must_use]
+    pub fn torn(&self) -> u64 {
+        self.torn.load(Ordering::Relaxed)
+    }
+
     /// Switches to a new pool, with the marker for it. Frames of the old pool that are still
     /// held keep it mapped, and marked, until they are dropped.
     pub fn set_pool(&mut self, pool: PoolView, marker: K) {
         self.pending = None;
-        self.shared = Arc::new(Shared { pool, marker });
+        self.shared = Arc::new(Shared {
+            pool,
+            marker,
+            torn: self.torn.clone(),
+        });
     }
 
     /// The next entry: a frame, held, or an entry that names no buffer (see [`NextBatch`]).
@@ -368,6 +441,7 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         let mut held = Held {
             shared: self.shared.clone(),
             buffers: [BufferIndex(0); MAX_PER_FRAME],
+            tickets: [0; MAX_PER_FRAME],
             count: 0,
         };
         for (buffer, ticket) in &entry.buffers[..entry.count] {
@@ -380,6 +454,7 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
                 return Step::Limited;
             }
             held.buffers[held.count] = *buffer;
+            held.tickets[held.count] = *ticket;
             held.count += 1;
             if !page::still(pool.page(), *buffer, *ticket) {
                 return Step::Gone;

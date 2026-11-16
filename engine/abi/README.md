@@ -5,7 +5,7 @@ wrappers do not each invent their own.
 
 - `Status`: an `i32`. 0 is success, -1 to -4095 a negated Linux errno (a kernel error passes
   through as is), `Status::LEMNOS_BASE` (-4096) and below this crate's own codes
-  (`STALE_HANDLE`, `VERSION_MISMATCH`, `BUFFER_TOO_SMALL`, `PANIC`, `LAYOUT_MISMATCH`), positive a count.
+  (`STALE_HANDLE`, `VERSION_MISMATCH`, `BUFFER_TOO_SMALL`, `PANIC`, `LAYOUT_MISMATCH`, `TORN`), positive a count.
 - `Handle`: a `u64` with a slot index and a generation; 0 is null. `Slab` (feature `alloc`)
   issues them, reuses released slots with a new generation and refuses stale handles.
 - `BufferDesc` (a memory location: a dma-buf, an offset and a size, nothing about what the bytes
@@ -90,10 +90,14 @@ value, size and offset in it against the Rust types with a C compiler.
 - **Major version.** Changing a frozen layout, renaming or renumbering a status code, flag or
   fence kind, or changing what an existing value means is a new major. That is a new
   `LEMNOS_ABI_TYPES_MAJOR`, and every surface that embeds these types takes a new major too.
-- **Minor version.** Additions are a minor: a new status code below `PANIC`, a new
-  `BufferDesc` flag or fence kind, or a new type. Peers already accept values they do not know.
-  A receiver refuses a fence kind it does not know, and passes through a status code it does not
-  know.
+- **Additions are structural, and no version changes.** A new status code below `PANIC` (such as
+  `TORN`, -4101), a new `BufferDesc` flag or fence kind, or a new type is additive: the layout
+  hash does not move, because the hash folds the shapes of the frozen types and not the status
+  list. Peers already accept values they do not know. A receiver refuses a fence kind it does not
+  know, and passes through a status code it does not know: the client keeps its number and says
+  it is unknown, the host and the C surface pass it on unchanged, and an action ending maps it to
+  `Failed`. No version number is bumped for an addition during the rebuild; compatibility is what
+  the hashes and these rules check.
 - **Growing a struct.** Only the structs with a `struct_size` field (`BufferDesc`,
   `AbiVersion`) may grow, by fields appended at the end, as a minor. A receiver reads up to the
   size the sender gave.

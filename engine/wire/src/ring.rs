@@ -962,19 +962,29 @@ impl Consumer {
     }
 
     /// Copies from whole buffer `buffer` at `offset` into `out`, for a buffer that isn't a frame.
-    /// `false` if the range isn't in the buffer, or this consumer doesn't map the buffers. A
-    /// stream of one plane per buffer.
+    /// `false` if the range isn't in the buffer, this consumer doesn't map the buffers, or the
+    /// buffer was reused while it was copied (`out` is then not the buffer's: it is not to be
+    /// used). A stream of one plane per buffer.
     #[must_use]
     pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> bool {
         if !self.mapped {
             return false;
         }
-        self.frames
-            .pool()
-            .bytes(BufferIndex(buffer))
-            .and_then(|bytes| bytes.get(offset..offset.checked_add(out.len())?))
-            .map(|src| out.copy_from_slice(src))
-            .is_some()
+        let Some(end) = offset.checked_add(out.len()) else {
+            return false;
+        };
+        matches!(
+            self.frames
+                .pool()
+                .read(BufferIndex(buffer), |bytes| match bytes.get(offset..end) {
+                    Some(src) => {
+                        out.copy_from_slice(src);
+                        true
+                    }
+                    None => false,
+                }),
+            Some(Ok(true))
+        )
     }
 
     /// Gives back a buffer whose frame [`pop_entry`](Self::pop_entry) took. `false` if this

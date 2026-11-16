@@ -408,8 +408,32 @@ impl PoolView {
         &self.page
     }
 
-    /// The bytes of `buffer`, to read. Only while the frame that names it is held, for a
-    /// consumer's read of a frame's bytes; see [`crate::Held`].
+    /// Uses the bytes of `buffer` in place, then checks that the buffer was not reused while `read`
+    /// ran. The check is against the buffer's use when this call began, so it catches a reuse
+    /// during the use, not one before it: a buffer read here without a hold has no protection
+    /// from a reuse that comes first. A consumer that holds the frame reads through
+    /// [`crate::Held::read`], which checks against the use the frame was taken in.
+    ///
+    /// `None` if the buffer is not in the pool or the view maps none of its bytes.
+    pub fn read<T>(
+        &self,
+        buffer: BufferIndex,
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Option<Result<T, crate::Torn>> {
+        let bytes = self.bytes(buffer)?;
+        let at_start = page::ticket(self.page(), buffer) as u32;
+        let value = read(bytes);
+        if page::same_use(self.page(), buffer, at_start) {
+            Some(Ok(value))
+        } else {
+            Some(Err(crate::Torn { buffer }))
+        }
+    }
+
+    /// The bytes of `buffer`, to read, **unchecked**: nothing says whether the buffer was reused
+    /// while the slice is read. Only while the frame that names it is held, for a consumer's read
+    /// of a frame's bytes; see [`crate::Held`]. Use [`PoolView::read`] or [`crate::Held::read`] for a
+    /// value that is kept.
     pub fn bytes(&self, buffer: BufferIndex) -> Option<&[u8]> {
         self.read_bytes(buffer).ok()
     }

@@ -681,6 +681,38 @@ impl StreamHost {
         free
     }
 
+    /// Cuts off the consumer's reader (reader slot 0), as the host does to a reader that breaks its
+    /// limits: its marks stop counting, so its buffers can be reused under it. `true` if this cut
+    /// it off.
+    pub fn cut_off_reader(&mut self) -> bool {
+        self.holds.cut_off(0, self.publisher.pool().page())
+    }
+
+    /// Publishes one plane's frame of `bytes` bytes, every byte `fill`, in the buffer the producer
+    /// takes: a never-published one, or the oldest that no reader holds. Returns that buffer.
+    /// For a stream of one plane.
+    pub fn push_next(&mut self, fill: u8, bytes: u32, sequence: u64) -> Option<u32> {
+        assert_eq!(self.planes, 1, "push_next is for a stream of one plane");
+        let BufferIndex(buffer) = self.publisher.take(&self.holds).ok()?;
+        self.publisher.buffer_mut(BufferIndex(buffer))?.fill(fill);
+        let meta = FrameInfo {
+            sequence,
+            identity: 0,
+            bytes,
+            reason: 0,
+            end_ns: 0,
+        }
+        .encode();
+        self.publisher
+            .publish(
+                &[BufferIndex(buffer)],
+                SampleTime::from_nanos(sequence),
+                &meta,
+            )
+            .ok()?;
+        Some(buffer)
+    }
+
     /// Rings the consumer's bell, as the host does after each frame it publishes: a sleeping
     /// consumer wakes. `publish` does not ring, so a test that wants a sleeper woken rings after it.
     pub fn ring(&mut self) {

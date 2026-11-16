@@ -132,3 +132,117 @@ fn letting_go_frees_the_buffer_and_never_before() {
         assert!(!first || second, "a buffer went from free back to held");
     });
 }
+
+/// A cut-off against a release, under `loom`. The publisher cuts the reader off and then takes
+/// the buffer back; the reader lets go of its mark at the same time. In every interleaving the
+/// buffer is free once the publisher has looked, the table reports the reader cut off, and the
+/// pool page says so: the two writes do not undo each other.
+#[test]
+fn a_cut_off_and_a_release_at_once_leave_the_buffer_free_and_the_reader_cut_off() {
+    loom::model(|| {
+        let pool = Model::new(page::bytes(1) / 8);
+        page::format(&pool, 1, 1).expect("pool page");
+        let marks_page = stamped_page();
+        let mut table = HoldTable::new(1);
+        table
+            .add_over(0, marks_page.clone(), Limits::default())
+            .expect("reader");
+        let marks = Marks::over(marks_page, 1, 0, 0).expect("marks");
+        assert!(marks.mark(BUFFER) && page::still(&pool, BUFFER, 0));
+
+        let publisher = {
+            let pool = pool.clone();
+            loom::thread::spawn(move || {
+                assert!(table.cut_off(0, &pool), "the reader was there");
+                page::retire(&pool, BUFFER);
+                let free = !table.held(BUFFER);
+                if free {
+                    page::release(&pool, BUFFER);
+                }
+                (table, free)
+            })
+        };
+        // The reader lets go while the publisher cuts it off.
+        marks.unmark(BUFFER);
+        let (table, free) = publisher.join().expect("publisher");
+        assert!(
+            free,
+            "a cut-off reader holds nothing, whatever its marks say"
+        );
+        assert!(table.is_cut_off(0));
+        assert!(page::is_cut_off(&pool, 1, 0));
+        assert!(!table.holders_of(BUFFER).contains(&0));
+    });
+}
+
+/// The use of a cut-off reader's buffer, under `loom`. The reader reads the frame's two words
+/// and then checks the buffer's use counter, as `Held::read` does. The publisher cuts the reader off,
+/// takes the buffer back (retire, check, release) and writes the next frame over it. Whenever the
+/// check passes, the reader's two words are the frame's: a reused buffer is never returned as good.
+///
+/// `checked` is the real reader. Without the check after the use, the model must find the torn
+/// read; that is the variant the second test runs.
+fn torn_use(checked: bool) {
+    loom::model(move || {
+        const OLD: u64 = 1;
+        const NEW: u64 = 2;
+        let pool = Model::new(page::bytes(1) / 8);
+        page::format(&pool, 1, 1).expect("pool page");
+        let frame = Model::new(2);
+        frame.store(0, OLD, Ordering::Relaxed);
+        frame.store(1, OLD, Ordering::Relaxed);
+        let marks_page = stamped_page();
+        let mut table = HoldTable::new(1);
+        table
+            .add_over(0, marks_page.clone(), Limits::default())
+            .expect("reader");
+        let marks = Marks::over(marks_page, 1, 0, 0).expect("marks");
+        let entry = page::ticket(&pool, BUFFER) as u32;
+        assert!(marks.mark(BUFFER) && page::still(&pool, BUFFER, entry));
+
+        let publisher = {
+            let pool = pool.clone();
+            let frame = frame.clone();
+            loom::thread::spawn(move || {
+                table.cut_off(0, &pool);
+                page::retire(&pool, BUFFER);
+                if !table.held(BUFFER) {
+                    page::release(&pool, BUFFER);
+                    // The next frame goes in: both words, the way the publisher fills them.
+                    frame.store(0, NEW, Ordering::Relaxed);
+                    frame.store(1, NEW, Ordering::Relaxed);
+                }
+            })
+        };
+        // The use: the bytes, read as the caller reads them.
+        let first = frame.load(0, Ordering::Relaxed);
+        let second = frame.load(1, Ordering::Relaxed);
+        let good = if checked {
+            page::same_use(&pool, BUFFER, entry)
+        } else {
+            true
+        };
+        publisher.join().expect("publisher");
+        if good {
+            assert_eq!(
+                (first, second),
+                (OLD, OLD),
+                "a reused buffer was returned as the frame"
+            );
+        }
+    });
+}
+
+/// The checked reader: a value the check passes is the frame's, in every interleaving.
+#[test]
+fn a_reused_buffer_is_never_returned_as_good() {
+    torn_use(true);
+}
+
+/// The model has teeth: a reader that returns its bytes without the check after the use gets a
+/// reused frame, and the model finds it.
+#[test]
+#[should_panic(expected = "a reused buffer was returned as the frame")]
+fn returning_the_bytes_without_the_check_is_caught() {
+    torn_use(false);
+}

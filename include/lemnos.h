@@ -287,7 +287,15 @@ LemnosStatus lemnos_stream_info(LemnosHandle client, LemnosHandle stream, Lemnos
  * *data, when data is not NULL, is the frame's frame->len bytes, read in place
  * and valid until the frame is released or the stream closed. On a stream whose
  * buffers are in planes (info.planes above 1), or an unmapped one, *data is NULL:
- * read each plane with lemnos_stream_plane. Allocates nothing. */
+ * read each plane with lemnos_stream_plane. Allocates nothing.
+ *
+ * *data is checked at hand-out, not during the caller's use. A frame whose buffer
+ * was already reused is not handed out: the call fails with LEMNOS_E_TORN and
+ * nothing is returned as the frame. After the pointer is handed out, a buffer can
+ * be reused under the caller only once the stream's reader has been cut off by the
+ * producer for breaking its limits; the stream's next call then fails with
+ * LEMNOS_E_TORN, so a caller that reads a frame keeps it only while its next call
+ * on the stream succeeds. */
 LemnosStatus lemnos_stream_next_frame(LemnosHandle client, LemnosHandle stream, uint32_t timeout_ms,
                                       LemnosFrame *frame, const uint8_t **data,
                                       LemnosMessageSink sink);
@@ -315,7 +323,12 @@ LemnosStatus lemnos_stream_buffer_handle(LemnosHandle client, LemnosHandle strea
 /* The part of the held frame in buffer that is in plane plane: *data and *len,
  * read in place and valid as lemnos_stream_next_frame's data. The planes hold the
  * frame's bytes end to end, so a plane past its end is empty. A buffer not held
- * or a plane the stream doesn't have is -EINVAL. Allocates nothing. */
+ * or a plane the stream doesn't have is -EINVAL. Allocates nothing.
+ *
+ * Checked at the call, as lemnos_stream_next_frame's data is: a plane whose buffer
+ * was already reused is not handed out, and the call fails with LEMNOS_E_TORN. After
+ * the call a buffer can be reused under the caller only once the reader has been cut
+ * off; the stream's next call then fails with LEMNOS_E_TORN. */
 LemnosStatus lemnos_stream_plane(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
                                  uint32_t plane, const uint8_t **data, size_t *len);
 /* The length of plane plane of the held frame in buffer: what lemnos_stream_plane

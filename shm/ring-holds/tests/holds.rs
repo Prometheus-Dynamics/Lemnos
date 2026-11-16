@@ -80,11 +80,12 @@ fn hold(reader: &mut Reader) -> (u8, Held<Marks>) {
     panic!("no frame");
 }
 
+/// Whether the frame's first buffer is all `fill`, checked: a buffer reused during the read is torn.
 fn whole(held: &Held<Marks>, fill: u8) -> bool {
-    held.bytes(0)
-        .expect("bytes")
-        .iter()
-        .all(|byte| *byte == fill)
+    matches!(
+        held.read(0, |bytes| bytes.iter().all(|byte| *byte == fill)),
+        Some(Ok(true))
+    )
 }
 
 #[test]

@@ -46,6 +46,11 @@ impl Status {
     /// A shared layout (a stream's ring or marks page) is not the one this build reads. The
     /// message names the structure and both values; the C surface also reports them.
     pub const LAYOUT_MISMATCH: Self = Self(Self::LEMNOS_BASE - 4);
+    /// A frame's buffer was reused while the frame was being read, so the bytes read are not the
+    /// frame's: they were dropped, not returned. Only a reader that the producer cut off can see
+    /// this, and its next call on the stream says so. It comes from a frame stream's read; no
+    /// action of a device returns it.
+    pub const TORN: Self = Self(Self::LEMNOS_BASE - 5);
 
     /// Success, or success with a count.
     pub const fn is_ok(self) -> bool {

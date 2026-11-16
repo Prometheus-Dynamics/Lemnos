@@ -265,6 +265,27 @@ still holds stay mapped until it lets go.
 published in it and odd from the moment the publisher starts taking it back. A reader may hold a
 frame only while each buffer's ticket is exactly the one in the entry.
 
+**Reading the bytes.** A held frame's bytes are reached two ways, and only one of them checks:
+
+- `Held::read(index, f)` runs `f` on the buffer's bytes and then checks the buffer's use counter
+  (`page::same_use`) against the one the frame was taken with. It returns `Some(Ok(value))` if the
+  buffer was not reused during `f`, and `Some(Err(Torn { buffer }))` if it was: the value is dropped,
+  not returned as good, and `BufferReader::torn()` goes up. `f` gets a slice and returns a value of
+  its own, so nothing can keep a reference into the bytes past the check. `None` if the frame has no
+  buffer at `index`, or the view maps no bytes.
+- `Held::current(index)` checks the buffer at the call and returns its bytes if it is still the
+  frame's: for a caller that hands the bytes out as a pointer, where nothing after the call is checked.
+- `PoolView::read(buffer, f)` is the same check for a buffer read without a hold. It checks against
+  the use the buffer was in when the call began, so it catches a reuse during the read only.
+- `Held::bytes(index)` and `PoolView::bytes(buffer)` are **unchecked**: a plain slice, with nothing
+  saying whether the buffer was reused while it is read. `Held::descriptor` is unchecked the same
+  way. Code that needs the bytes to be the frame's uses `read`.
+
+The check is the use counter, not the whole ticket. The publisher moves the ticket's low bit on every
+attempt to take a buffer back, and it makes that attempt on each frame while a reader holds the
+buffer, so the whole ticket moves under an honest reader. The counter moves only on release, which
+happens before the publisher writes the next frame, and a fence after the release orders the two.
+
 ## Hold marks
 
 `shm-ring-holds`. A reader's marks are a sealed page only that reader writes: word 0 is the page's layout in its top byte
@@ -314,6 +335,28 @@ A reader that is cut off no longer counts: its marks are ignored and its buffers
 told through its cut-off word in the pool page. A reader that dies leaves its marks in its page;
 they go when the publisher drops that page, on the owner's word that the connection closed, and
 the hold time covers the gap.
+
+**Cutting off by hand.** The publisher can cut a reader off without waiting for a limit:
+
+- `HoldTable::holders_of(buffer)` returns the slots of the readers that mark `buffer` and are not
+  cut off. It allocates, so it is for the decision to cut someone off, not for the steady path.
+- `HoldTable::cut_off(slot, pool_page)` cuts the reader in `slot` off by the same path `enforce`
+  takes: the same flag, and the same cut-off word in the pool page. It returns `true` if this call
+  cut the reader off, and `false` if there is no reader in the slot or it was cut off already.
+
+What a cut-off guarantees: its marks stop counting at once, so `held` and `taken` ignore them and the
+publisher reuses its buffers; its next `BufferReader::next` returns `NextBatch::CutOff`, which is the
+typed result of its own next operation; the slot is kept, so `free_slot` never returns it and `add`
+refuses it, until the owner calls `HoldTable::remove`, which is the normal release. Other readers are
+not touched.
+
+What it does not guarantee: a reader that is in the middle of using a buffer keeps the bytes in hand,
+and the buffer can be written over under it. That is what `Held::read` is for: it re-checks the use
+counter after the use and returns `Torn`. A reader that reads with `bytes` after a cut-off sees whatever
+the buffer holds now.
+
+Neither change moves a layout. The marks page and the cut-off word are as they were, so the wire part
+hash is unchanged.
 
 ## Unsafe code
 

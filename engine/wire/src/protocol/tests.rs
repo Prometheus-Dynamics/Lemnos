@@ -1179,6 +1179,23 @@ mod layout {
         assert_eq!(PARTS, 5);
     }
 
+    /// The shared-rings part's hash is the value `docs/wire.md` and `shm/README.md` record. It
+    /// folds the shm layouts (the ring's and the marks page's), the descriptor layout and the frame
+    /// metadata. A change to any of those moves it, so this is where that shows: update the docs'
+    /// value with it, and say so in the change.
+    #[test]
+    fn the_shared_rings_part_hash_is_the_recorded_one() {
+        let index = PART_NAMES
+            .iter()
+            .position(|name| *name == "shared-rings")
+            .expect("the shared-rings part");
+        assert_eq!(
+            PART_HASHES[index], 0x81a5_753a_1c95_76e6,
+            "the shared-rings part hash moved: {:#018x}",
+            PART_HASHES[index]
+        );
+    }
+
     #[test]
     fn the_parts_and_the_core_are_different_hashes() {
         let mut all = vec![CORE_HASH];
