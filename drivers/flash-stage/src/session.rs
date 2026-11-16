@@ -521,4 +521,14 @@ mod tests {
             "the session did not wait for the watchdog"
         );
     }
+
+    #[test]
+    fn the_configuration_value_the_host_sets_is_the_one_the_device_names() {
+        // The value SET_CONFIGURATION accepts is the one the configuration descriptor names: a host that reads the
+        // descriptor and sets that value configures the device.
+        use crate::usb::descriptors::CONFIGURATION;
+        use lemnos_flash_wire::usb::CONFIGURATION_VALUE;
+        assert_eq!(CONFIGURATION_VALUE, 1);
+        assert_eq!(CONFIGURATION[5], CONFIGURATION_VALUE, "bConfigurationValue in the descriptor");
+    }
 }
