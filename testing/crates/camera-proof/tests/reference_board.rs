@@ -166,7 +166,7 @@ fn listed(board: &BoardFile) -> Vec<DeviceEntry> {
             reason: String::new(),
             link: d.link.clone(),
             jobs: Vec::new(),
-            refusal: None,
+            refusal: lemnos_client::Refusal::NONE,
         })
         .collect()
 }

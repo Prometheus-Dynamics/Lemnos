@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use lemnos_contract_self_test::{
     Outcome as SelfOutcome, RECORD_BYTES, Record, read_last, read_tests,
 };
-use lemnos_core::Reader;
+use lemnos_core::{Reader, RefusalKind};
 use lemnos_driver_board_self_test::BoardSelfTest;
 use lemnos_driver_system_identity::Identity;
 use lemnos_driver_system_slots::SystemSlots;
@@ -2118,6 +2118,105 @@ fn a_device_that_cannot_come_up_is_described_with_its_state_and_reason() {
         records.iter().any(|r| r.word == "method"),
         "its methods come from the manifest: {text}"
     );
+}
+
+/// What lemnosd can refuse a bind with, by its `RefusalKind`: the device id and the word the fake
+/// driver is given for it, and the wire number the bridge must carry. Adding a kind to
+/// `RefusalKind` does not compile until it has a row here.
+fn refusal_case(kind: RefusalKind) -> (&'static str, &'static str, u8) {
+    match kind {
+        RefusalKind::Absent => ("missing", "absent", lemnos_wire::refusal::ABSENT),
+        RefusalKind::Failed => ("broken", "failed", lemnos_wire::refusal::FAILED),
+    }
+}
+
+/// Every kind lemnosd can produce for a refused bind. Listed by hand: a kind added to the enum fails
+/// `refusal_case` to compile until it has a row there, and must be listed here to be tested.
+const EVERY_KIND: [RefusalKind; 2] = [RefusalKind::Absent, RefusalKind::Failed];
+
+/// A board with one device refused with each kind of `EVERY_KIND`, and one device that runs.
+fn refusal_board() -> String {
+    let mut text =
+        String::from("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n");
+    for kind in EVERY_KIND {
+        let (id, word, _) = refusal_case(kind);
+        text.push_str(&format!(
+            "[[devices]]\nid = \"{id}\"\ndriver = \"fake-accelerometer\"\n\
+             [devices.config]\nrefusal = \"{word}\"\n"
+        ));
+    }
+    text.push_str("[[devices]]\nid = \"steady\"\ndriver = \"fake-accelerometer\"\n");
+    text
+}
+
+/// Every refusal kind lemnosd can produce reaches the bridge unchanged: on the status topic (field
+/// `refusal`, after `reason`), in the describe record, and in the snapshot the bridge takes when it
+/// connects after the refusal. A device that runs says 0. The fields the first three of the status
+/// topic carry are as they were, so a reader of those still reads them.
+#[test]
+fn every_refusal_kind_reaches_the_status_topic_and_describe_unchanged() {
+    let dir = dir("refusal-kinds");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &refusal_board());
+    // The snapshot: lemnosd already says each refusal before the bridge connects.
+    wait_for("lemnosd to refuse every device", || {
+        let client = lemnos_client::Client::connect(&lemnosd, "test").ok()?;
+        let list = client.list().ok()?;
+        EVERY_KIND
+            .into_iter()
+            .all(|kind| {
+                let (id, _, number) = refusal_case(kind);
+                list.iter()
+                    .any(|e| e.name == id && e.refusal.code() == number)
+            })
+            .then_some(())
+    });
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    let mut expected = vec![("steady", lemnos_wire::refusal::NONE)];
+    expected.extend(EVERY_KIND.into_iter().map(|kind| {
+        let (id, _, number) = refusal_case(kind);
+        (id, number)
+    }));
+    for (id, number) in expected {
+        let resource_name = format!("lemnos.{id}");
+        wait_for(&format!("{resource_name}'s resource"), || {
+            resource(&dashboard, &resource_name)
+        });
+        let mut status = dashboard
+            .subscribe(&format!("{resource_name}.status"))
+            .expect("subscribe");
+        let want = number.to_string();
+        wait_for(&format!("{id}'s refusal on the status topic"), || {
+            (latest(&mut status, 3).as_deref() == Some(want.as_bytes())).then_some(())
+        });
+        if number != lemnos_wire::refusal::NONE {
+            assert_eq!(
+                latest(&mut status, 0).as_deref(),
+                Some(b"retrying".as_slice()),
+                "a refused device is retrying, as the first field says"
+            );
+            assert!(
+                latest(&mut status, 2).is_some_and(|r| !r.is_empty()),
+                "the reason field is still there"
+            );
+        }
+        let done = wait_for(&format!("{id}'s describe"), || {
+            let done = run_once_said(
+                &dashboard,
+                &format!("{resource_name}.call"),
+                &resource_name,
+                "describe",
+            );
+            (done.outcome == Outcome::Succeeded).then_some(done)
+        });
+        let text = String::from_utf8(done.output).expect("text");
+        let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
+        let device = records.iter().find(|r| r.word == "device").expect("device");
+        assert_eq!(device.get("refusal"), Some(want.as_str()), "{id}: {text}");
+    }
 }
 
 /// What a program that registered an action is sent, in order, until `CallerGone` (or `wait` runs out).

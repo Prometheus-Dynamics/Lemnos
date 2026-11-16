@@ -615,7 +615,7 @@ connects the offer to these snapshots is not compiled: the marked `ORION-OFFER` 
 | a device | the resource `lemnos.<device>`, of the kind `lemnos.device`, with the labels `lemnos.driver`, `lemnos.tag` (one per tag) and `lemnos.control.<item>` (the shapes a control or action item takes) |
 | its state and health | the resource's state: `Ready` while it runs, `Failed` while it retries or reports failed health, `Pending` while it is off |
 | its value items | the topic `lemnos.<device>.values`: a field per item that is a number (a float in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes |
-| its events | the topic `lemnos.<device>.status`: `state`, `health` and `reason` as text, as `lemnos-ctl list` names them |
+| its events | the topic `lemnos.<device>.status`: `state`, `health`, `reason` and `refusal` as text, as `lemnos-ctl list` names them |
 | `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. `.call describe` with no arguments gives the device's description (below). Programs on the board and operators granted them may run them |
 
 **Topics and how each is read.** Every topic the bridge publishes is a state: its newest sample is what
@@ -626,7 +626,7 @@ state is a latest-value topic (history 2). The table is in code as `publish::CLA
 | topic | kind | expiry | history | what it says, and why it is current until changed |
 |---|---|---|---|---|
 | `lemnos.<device>.values` | state | zero | 2 | a device's readings: published as each changes; withdrawn with the device |
-| `lemnos.<device>.status` | state | zero | 2 | `state`, `health`, `reason`: published as each changes; `gone` when lemnosd stops listing the device |
+| `lemnos.<device>.status` | state | zero | 2 | `state`, `health`, `reason`, `refusal`: published as each changes; `gone` when lemnosd stops listing the device. `refusal` is why a device waits, in decimal: `0` none, `1` absent, `2` failed, and any other number as lemnosd sent it: the bridge passes a number it does not name on unchanged, so a reader can show it as an unknown reason with its code |
 | `lemnos.<device>.description` | state, a generation | zero | 2 | the device's description generation (an `int`): it moves when what `describe` says of the device changes (its state or reason, which the description carries). A client that sees it move asks `describe` again |
 | `lemnos.devices` | state, a generation | zero | 2 | the device set's generation (an `int`): it moves when a device comes or goes |
 | `hello.<fact>` | state | zero | 2 | a board fact: published when it changes; withdrawn when it goes or the session ends |
@@ -705,7 +705,7 @@ whole. A method whose reply can exceed 60 KiB needs a paged form to be called th
 
 **The records.**
 
-- `device generation lease_seconds label kind bus address location state reason live`. `generation` is the device's description generation, the number its `lemnos.<device>.description` topic carries, and is absent before the device has one. `lease_seconds` is the bridge's caller lease (the hello fact `lease.seconds`), absent when the lease is off. `address` is `0xNN` or `none`. `state` is `running`, `retrying`, `off`, or `unknown` when none is given, and `reason` says why the device is not running or what its last failure was (empty when it runs). `live` is `true` when the device's running driver gave the rest of the description, and `false` when the device is not running (off, retrying, failed or never started).
+- `device generation lease_seconds label kind bus address location state reason live refusal`. `generation` is the device's description generation, the number its `lemnos.<device>.description` topic carries, and is absent before the device has one. `lease_seconds` is the bridge's caller lease (the hello fact `lease.seconds`), absent when the lease is off. `address` is `0xNN` or `none`. `state` is `running`, `retrying`, `off`, or `unknown` when none is given, and `reason` says why the device is not running or what its last failure was (empty when it runs). `live` is `true` when the device's running driver gave the rest of the description, and `false` when the device is not running (off, retrying, failed or never started). `refusal` is why the device waits, as the wire numbers it: `0` none, `1` absent (no such device here), `2` failed (present but not working), and any other number as it came. It is the record's last key, after `live`, so a reader from before it ignores it.
 - `contract index tag kind hash methods`. `index` is the contract's position, which an item's `contract` names. `hash` is hex. `methods` is the count of the `method` records that follow for this contract: those are the records whose `contract` is `index`.
 - `method contract id name params returns out_buffer job`. `params` is each `name:shape`, joined by a space, as one quoted text. `out_buffer` and `job` are `true` or `false`.
 - `job id state done total percent`: one for each long job open on the device, after the items, and none when there is none. `id` is the host's number for the job, in hex, the one `start_job` gave; `state` is `running`, the only state of an open job (a finished one is gone from the table); `done` and `total` are the driver's last progress in the contract's unit (bytes for a slot install or a flash write, steps for others), both 0 until it gives one; `percent` is the whole percent `done` is of `total` and is absent while `total` is 0. They come from the host's job table, never from the driver, so a device in a step still says them. At most 64 `job` records (the host's limit on open jobs), so a description grows by at most 64 short lines. A reader from before the record ignores it (the grammar skips an unknown record word), and the wire form carries the same list appended to the identity block, which an older reader skips. Example: `job id=0x6a1b00000001 state=running done=41943040 total=104857600 percent=40`.
@@ -731,7 +731,7 @@ The contract and method records come from the manifest because lemnosd has it fo
 
 ```describe
 describe 1
-device label="zone" kind="sensor" bus="" address=none location="/sys/class/thermal/thermal_zone0" state=running reason="" live=true
+device label="zone" kind="sensor" bus="" address=none location="/sys/class/thermal/thermal_zone0" state=running reason="" live=true refusal=0
 contract index=0 tag="temperature/1" kind="sensor" hash=0xc77f0ded2da1235c methods=1
 method contract=0 id=1 name="read" params="" returns="f32" out_buffer=false job=false
 item kind=value name="temperature" unit="°C" unit_state=known exponent=0 contract=0 method=1 field=none reading=number group=none
@@ -739,14 +739,14 @@ item kind=value name="temperature" unit="°C" unit_state=known exponent=0 contra
 
 ```describe
 describe 1
-device label="zone" kind="sensor" bus="" address=none location="" state=off reason="manual" live=false
+device label="zone" kind="sensor" bus="" address=none location="" state=off reason="manual" live=false refusal=0
 contract index=0 tag="temperature/1" kind="sensor" hash=0xc77f0ded2da1235c methods=1
 method contract=0 id=1 name="read" params="" returns="f32" out_buffer=false job=false
 ```
 
 ```describe
 describe 1
-device label="n-a733-di" kind="compute" bus="" address=none location="" state=retrying reason="bind failed: Status(-2)" live=false
+device label="n-a733-di" kind="compute" bus="" address=none location="" state=retrying reason="bind failed: Status(-2)" live=false refusal=0
 contract index=0 tag="codec.block/1" kind="compute" hash=0x7c1ff4f41c048c36 methods=4
 method contract=0 id=1 name="info" params="" returns="{max_work_bytes: u32, max_refs: u16, max_items: u16, max_read_back: u32, max_buffers: u32}" out_buffer=false job=false
 method contract=0 id=2 name="block" params="" returns="bytes" out_buffer=true job=false

@@ -26,7 +26,7 @@
 //!
 //! **The records.**
 //!
-//! - `device generation lease_seconds label kind bus address location state reason live`: `generation`
+//! - `device generation lease_seconds label kind bus address location state reason live refusal`: `generation`
 //!   is the device's description generation, the number its `lemnos.<device>.description` topic
 //!   carries (absent before the device has one); `lease_seconds` is the bridge's caller lease
 //!   (the hello fact `lease.seconds`), absent when the lease is off; `address` is `0xNN` or `none`;
@@ -35,7 +35,9 @@
 //!   device's running driver gave the rest of the description, and `false` when the device is not
 //!   running (off, retrying, failed, or never started): then the contracts and methods are the
 //!   manifest's, and there are no items, no address and no location, since only a running driver
-//!   knows them.
+//!   knows them. `refusal` is the number the wire gives why the device waits, in decimal: `0` none,
+//!   `1` absent (no such device here), `2` failed (present but not working), and any other number as
+//!   it came. It is the last key of the record, after `live`, so a reader from before it ignores it.
 //! - `contract index tag kind hash methods`: `index` is the contract's position, which an item's
 //!   `contract` names; `hash` is hex; `methods` is the COUNT of the method records that follow for
 //!   this contract, and those records are the ones whose `contract` is `index`.
@@ -246,7 +248,7 @@ fn device_record(
         .map_or_else(|| "none".to_owned(), |a| format!("{a:#04x}"));
     let _ = write!(
         out,
-        " label={} kind={} bus={} address={address} location={} state={} reason={} live={}",
+        " label={} kind={} bus={} address={address} location={} state={} reason={} live={} refusal={}",
         quote(&description.label)?,
         quote(&description.kind)?,
         quote(&description.bus)?,
@@ -254,6 +256,7 @@ fn device_record(
         state_name(description.state),
         quote(&description.reason)?,
         if description.live { "true" } else { "false" },
+        description.refusal.code(),
     );
     Ok(out)
 }
@@ -599,6 +602,7 @@ mod tests {
             live: true,
             jobs: Vec::new(),
             streams: Vec::new(),
+            refusal: lemnos_wire::refusal::Refusal::NONE,
             contracts: vec![OwnedContract {
                 tag: "imu/1".to_owned(),
                 kind: "sensor".to_owned(),
@@ -819,6 +823,31 @@ mod tests {
 
     /// A device that is not running: its state and reason are there, `live` is false, and it has no
     /// items. Its contracts stay (the manifest's). A running one is live, and its lease shows only
+    /// The refusal is written as the number the wire gave, after `live`: 0, 1 and 2 as they are, and
+    /// a number this bridge does not name as it came. A reader that stops at `live` still reads the
+    /// record.
+    #[test]
+    fn the_refusal_is_written_as_the_number_the_wire_gave() {
+        for refusal in [0u8, 1, 2, 7] {
+            let mut description = described("pump", "bind failed");
+            description.refusal = lemnos_wire::refusal::Refusal::from_code(refusal);
+            let text = render(&description, None, None).expect("renders");
+            let records = parse(&text).expect("parses");
+            assert_eq!(
+                records[0].get("refusal"),
+                Some(refusal.to_string().as_str()),
+                "{text}"
+            );
+            assert!(
+                text.lines()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .ends_with(&format!("live=true refusal={refusal}")),
+                "refusal is the device record's last key: {text}"
+            );
+        }
+    }
+
     /// while the lease is on.
     #[test]
     fn a_device_that_is_not_running_is_described_with_its_state_and_reason() {

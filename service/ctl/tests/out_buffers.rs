@@ -67,6 +67,7 @@ fn described() -> DeviceDescription {
         not_live: false,
         jobs: "",
         streams: "",
+        refusal: lemnos_wire::refusal::Refusal::NONE,
     };
     let n = encode_description(&manifest, &Description::new(), &identity, &mut bytes).unwrap();
     decode_description(&bytes[..n]).unwrap()

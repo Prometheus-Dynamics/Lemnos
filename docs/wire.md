@@ -591,6 +591,9 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   empty when none), and `not_live` (a bool: true when the device's driver is not running, so the description
   is the manifest's alone, with no items and no address or location; absent reads as false). `not_live` is the
   last field of the block: a reader from before it skips it, and a host from before it sends none.
+  Then `jobs` and `streams`, and `refusal` (a `Tail` u8, the refusal number of the device frame: 0 none,
+  1 absent, 2 failed; a host from before it sends none, which reads as 0). `refusal` is a trailing
+  field, so it is left out of the core hash, as the rest of the identity is.
 - A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
   `other`).
 - A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0

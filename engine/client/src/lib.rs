@@ -31,6 +31,7 @@ pub use asynchronous::AsyncClient;
 pub use client::{Client, RemoteCaller};
 pub use error::Error;
 pub use lemnos_wire::DeviceDescription;
+pub use lemnos_wire::refusal::Refusal;
 pub use session::{
     DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, JobEvent, PackageEntry,
     PackageList, PackageMode, Session, Subscription, UsbEndpoints, UsbEndpointsEnd, ValueInfo,

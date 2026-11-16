@@ -4,9 +4,9 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Health, HostClock, RefusalKind, Retry, Tail};
+use lemnos_core::{Health, HostClock, Retry, Tail};
 use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
-use lemnos_wire::{Frame, health, refusal, state};
+use lemnos_wire::{Frame, health, state};
 
 use crate::Core;
 use crate::notify::Notifier;
@@ -22,20 +22,14 @@ pub(crate) fn wire_state(info: &DeviceInfo, now_ns: u64) -> (u8, u8, String) {
     wire_of(&info.state, info.retry, &info.health, now_ns)
 }
 
-/// Why a device waits, as the wire numbers it (`refusal::ABSENT` or `refusal::FAILED`), and
-/// `refusal::NONE` for a device that is running or was just switched on.
-pub(crate) fn wire_refusal(device: &DeviceState) -> u8 {
-    match device {
-        DeviceState::Backoff {
-            kind: Some(RefusalKind::Absent),
-            ..
-        } => refusal::ABSENT,
-        DeviceState::Backoff {
-            kind: Some(RefusalKind::Failed),
-            ..
-        } => refusal::FAILED,
-        _ => refusal::NONE,
-    }
+/// Why a device waits, as the wire numbers it: the kind of its refusal, or none for a device that
+/// is running or was just switched on. The numbers are [`lemnos_wire::refusal::Refusal`]'s.
+pub(crate) fn wire_refusal(device: &DeviceState) -> lemnos_wire::refusal::Refusal {
+    let kind = match device {
+        DeviceState::Backoff { kind, .. } => *kind,
+        _ => None,
+    };
+    lemnos_wire::refusal::Refusal::of(kind)
 }
 
 /// The most of a reason's text the wire carries: a longer one is cut and marked with `...`.
@@ -157,7 +151,7 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<O
             state,
             health,
             reason: &reason,
-            refusal: Tail(wire_refusal(&info.state)),
+            refusal: Tail(wire_refusal(&info.state).code()),
         };
         for client in crate::lock(&core.clients).iter() {
             if client.wants_events() {

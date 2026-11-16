@@ -60,7 +60,7 @@ fn entry(index: u32, name: &str, link: Option<&str>) -> DeviceEntry {
         reason: String::new(),
         link: link.map(str::to_string),
         jobs: Vec::new(),
-        refusal: None,
+        refusal: lemnos_client::Refusal::NONE,
     }
 }
 
