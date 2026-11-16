@@ -282,38 +282,39 @@ pub fn usb_descriptors() -> Vec<u8> {
     set
 }
 
-/// Builds the package written in C (`tests/c-package/package.c`) with the C compiler, with
-/// `flags` added, and returns the file it made in `dir`.
-pub fn c_package(dir: &Path, name: &str, flags: &[&str]) -> PathBuf {
-    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../include");
-    c_package_with(dir, name, &include, flags)
+/// Builds the package written against the header (`engine/abi/tests/raw-package/package.rs`) with rustc, as
+/// a `cdylib` with each of `cfgs` set, and returns the file it made in `dir`.
+pub fn raw_package(dir: &Path, name: &str, cfgs: &[&str]) -> PathBuf {
+    raw_package_with(dir, name, cfgs, &[])
 }
 
-/// [`c_package`] against the boundary as it was before the extras: `tests/c-package/base`, a
-/// copy of `include/lemnos` from before them.
-pub fn c_package_base(dir: &Path, name: &str, flags: &[&str]) -> PathBuf {
-    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/c-package/base");
-    c_package_with(dir, name, &include, flags)
-}
-
-fn c_package_with(dir: &Path, name: &str, include: &Path, flags: &[&str]) -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+/// [`raw_package`] with `args` for rustc too: a library path, or a link argument.
+pub fn raw_package_with(dir: &Path, name: &str, cfgs: &[&str], args: &[&str]) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../abi/tests/raw-package/package.rs");
     let out = dir.join(name);
-    let output = Command::new("cc")
-        .args([
-            "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
-        ])
-        .arg("-I")
-        .arg(include)
-        .arg(manifest.join("tests/c-package/package.c"))
-        .args(flags)
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let mut command = Command::new(rustc);
+    command.args([
+        "--edition",
+        "2024",
+        "--crate-type",
+        "cdylib",
+        "-D",
+        "warnings",
+    ]);
+    for cfg in cfgs {
+        command.args(["--cfg", *cfg]);
+    }
+    let output = command
+        .args(args)
         .arg("-o")
         .arg(&out)
+        .arg(&source)
         .output()
-        .expect("the C compiler runs");
+        .expect("rustc runs");
     assert!(
         output.status.success(),
-        "cc: {}",
+        "rustc: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     out

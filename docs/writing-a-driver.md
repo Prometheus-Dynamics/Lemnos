@@ -592,11 +592,11 @@ wait
 A package need not be Rust. `include/lemnos/package.h` is the whole boundary as a C header: the
 descriptor, the manifest, the table of functions the service calls on the driver and the tables
 the driver calls on the service, one for each kind of resource. It is checked against the Rust
-types by a test that compiles it and compares every size, offset and value, and
-`engine/package/tests/c-package/package.c` is a small driver written against it that the loader's
-tests build with the C compiler, load and run. Its rules are at the top of the header: nothing
-unwinds across the boundary, a pointer and its length are what they say, and what `register_driver`
-hands over stays valid while the package is loaded.
+types by a test that compares every size, offset and value, and
+`engine/abi/tests/raw-package/package.rs` is a small driver written against it, with no Lemnos
+crate in it: the loader's tests build it as a `cdylib` with `rustc`, load it and run it. Its rules
+are at the top of the header: nothing unwinds across the boundary, a pointer and its length are
+what they say, and what `register_driver` hands over stays valid while the package is loaded.
 
 ### What a package can break
 
