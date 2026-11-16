@@ -1,0 +1,62 @@
+# A board file for the RK3588S SoC (socs/rk3588.toml): the system identity, the reboot and slot devices of a board that
+# boots from SD (slot medium), with the eMMC socket declared as a second medium. The slot record is U-Boot's own
+# environment (`record = "uboot"`). Untested on board.
+#
+# Every fact below cites its source as TREE:path:line. DERIVED: from the source, not run or booted. UNVERIFIED: no source.
+# Sources: the image-builder facts report (notes BB1b-citations.md) section 1 and section 2 (this SoC's board), unless a row says otherwise.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rk3588-slots"
+soc = "rk3588"
+
+# The hardware watchdog: the map's row (socs/rk3588.toml). The mainline node is enabled (no status line).
+[[hardware]]
+controller = "watchdog"
+
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+[[devices]]
+id = "reboot"
+driver = "system-reboot"
+
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/watchdog@feaf0000" }
+config = { timeout_s = 15 }
+
+[[devices]]
+id = "slots"
+driver = "system-slots"
+# The media, SD first. Each is U-Boot's path of the controller, the same node as the kernel's path: SD
+# `/mmc@fe2c0000` (`sdmmc`, TREE:UB dts/upstream/src/arm64/rockchip/rk3588-base.dtsi:2200, enabled by the board dts at
+# the board dts:539-552) and eMMC `/mmc@fe2e0000` (`sdhci`, rk3588-base.dtsi:2230, enabled at the board dts:529-545).
+# The eMMC fitted: yes, per the board dts (DERIVED).
+# UNVERIFIED: whether the boot ROM loads from the eMMC on this board.
+config = { data = "/data", boot = "/boot", record = "uboot", boot_args = "os", boot_sources = ["/mmc@fe2c0000=/mmc@fe2c0000", "/mmc@fe2e0000=/mmc@fe2e0000"], uboot_env_size = 0x10000, uboot_env_mmc_index = 1, uboot_usb_vendor = 0x1209, uboot_usb_product = 0x0001 }
+
+# The U-Boot environment: the MMC device it lives on is the SD (device 1). Gaia's rk35xx U-Boot (rev to follow) sets
+# `CONFIG_ENV_MMC_DEVICE_INDEX=1`, so the environment moves from the eMMC (device 0, as the U-Boot build is now) to the SD.
+# The environment size: `uboot_env_size = 0x10000`, the whole copy with its 5-byte header (`CONFIG_ENV_SIZE`,
+# include/env_internal.h:57-62). Gaia's rk35xx fragment (rev to follow): a redundant environment in the GPT partition
+# `uboot-env` (16 MiB, 128 KiB), copy 0 at 16 MiB + 64 KiB and copy 1 at 16 MiB, each 0x10000 bytes; the raw-offset fallback is off.
+# The layout is checked against U-Boot's selection and save rule by the test the_rk_layout_writes_... (drivers/slot-store).
+#
+# INERT until Gaia's rev lands: the record is not what U-Boot reads, so a trial is never seen by U-Boot and the default keeps
+# booting. The outcome is harmless: slot-init spends each attempt and restarts, the attempts run out, and the daemon ends the
+# trial with a named reason (`slot <id> did not reach a running daemon in N boots`) and clears the record. No state needs hands.
+# Remove this comment when Gaia's rev lands.
+#
+# Hazard until then (DERIVED, the report): the U-Boot build as it is keeps its environment on the eMMC. Its first-start saveenv
+# (packaging/uboot/boot.cmd:85-90) writes there, and without a uboot-env partition on the eMMC the redundant copy falls back to
+# offset 0x0, the partition table (env/mmc.c:194-202). The image must not ship that build before Gaia's rev.
+# The environment is the partition with the U-Boot environment's type GUID on the boot disk (no raw offset). Without that
+# partition, U-Boot's second copy falls to offset 0x0, the partition table (TREE:UB env/mmc.c:194-202, DERIVED); this writer
+# refuses instead, by name (drivers/slot-store/src/gpt.rs; drivers/system-slots/src/uboot/tests.rs:661).
+# The fastboot pair `1209:0001` is the pid.codes test pair: test, not registered. It is replaced before any release.

@@ -2,7 +2,8 @@
 //! states it, the writer's one copy, and a cut at every byte of a write, over an in-memory device.
 
 use super::{
-    Copy, EnvDev, Geometry, Place, Which, encode_copy, encode_vars, load, select, set, vars,
+    Copy, EnvDev, Geometry, Place, Which, encode_copy, encode_vars, load, refuse_if_fat_env,
+    select, set, vars,
 };
 use std::io;
 
@@ -607,4 +608,153 @@ fn the_gpt_form_finds_the_partition_and_writes_the_copies_at_its_top() {
         err.contains("of 4096 bytes here: U-Boot may be built with another CONFIG_ENV_SIZE"),
         "{err}"
     );
+}
+
+#[test]
+fn a_fat_environment_file_refuses_the_gpt_write_and_its_absence_allows_it() {
+    use crate::tests::TempDir;
+    let dir = TempDir::new("uboot-fat-env");
+    // A FAT volume holding uboot.env: the GPT write is refused, by name, and says U-Boot reads it first.
+    let with = dir.0.join("with.img");
+    std::fs::write(
+        &with,
+        crate::fatimage::fat16(&[(b"UBOOT   ENV", b"env\n".to_vec())]),
+    )
+    .unwrap();
+    let why = refuse_if_fat_env(&with).unwrap_err();
+    assert!(why.contains("uboot.env"), "{why}");
+    assert!(why.contains("U-Boot reads it first"), "{why}");
+    // The same volume without it: the write may go ahead.
+    let without = dir.0.join("without.img");
+    std::fs::write(
+        &without,
+        crate::fatimage::fat16(&[(b"SLOT    LAY", b"layout\n".to_vec())]),
+    )
+    .unwrap();
+    refuse_if_fat_env(&without).unwrap();
+    // A boot partition that is not FAT cannot rule the file out: refused too (fail-closed).
+    let not_fat = dir.0.join("not-fat.img");
+    std::fs::write(&not_fat, vec![0u8; 16 * 512]).unwrap();
+    let why = refuse_if_fat_env(&not_fat).unwrap_err();
+    assert!(why.contains("can't be read as FAT"), "{why}");
+}
+
+/// The layout the RK boards' U-Boot environment uses (Gaia's rk35xx fragment, rev to follow): a 128 KiB
+/// `uboot-env` partition at 16 MiB, `CONFIG_ENV_SIZE` 0x10000, redundant. U-Boot v2026.10 places copy 0 in the
+/// top `CONFIG_ENV_SIZE` bytes of the partition and copy 1 the block run below it (`env/mmc.c:114-148`), so
+/// copy 0 is at 16 MiB + 64 KiB and copy 1 at 16 MiB. Each copy is the CRC-32 word of its data (little endian),
+/// the serial byte, then `ENV_SIZE` = `CONFIG_ENV_SIZE` - 5 bytes of data (`include/env_internal.h:57-62`,
+/// `:78-84`). The selection and the save are `env/common.c:474-551` and `:580-597`: the valid copy with the
+/// higher serial is active (255 against 0: the 0 is newer), the inactive copy is written with the active serial
+/// plus one, and the CRC covers the data only.
+#[test]
+fn the_rk_layout_writes_the_inactive_copy_with_its_crc_and_serial_at_the_positions_u_boot_reads() {
+    use crate::twocopy::crc32;
+    const MIB16: u64 = 16 * 1024 * 1024;
+    let g = Geometry::in_partition(0x10000, MIB16 / 512, 256).unwrap();
+    assert_eq!(g.offset, MIB16 + 64 * 1024, "copy 0 is the top half");
+    assert_eq!(g.offset_redund, MIB16, "copy 1 is the bottom half");
+    assert_eq!(
+        g.data_len(),
+        0x10000 - 5,
+        "ENV_SIZE is the size less the header"
+    );
+    let mut dev = Mem::new((MIB16 + 128 * 1024) as usize);
+    let data = |vars: &[(&str, &str)]| {
+        let list: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        encode_vars(&list, g.data_len()).unwrap()
+    };
+    // Copy 1 (the bottom) is the valid one, serial 7.
+    let first_data = data(&[("default", "os-1")]);
+    dev.write_at(g.offset_redund, &encode_copy(&first_data, 7))
+        .unwrap();
+    let before_copy_one = dev.bytes[g.offset_redund as usize..][..0x10000].to_vec();
+    // The write goes to copy 0 (the top): serial 7 + 1, data = the list with the trial.
+    set(&mut dev, &g, &[("trial", Some("os-2"))]).unwrap();
+    let top = &dev.bytes[g.offset as usize..][..0x10000];
+    let expect_top_data = data(&[("default", "os-1"), ("trial", "os-2")]);
+    assert_eq!(
+        &top[..4],
+        &crc32(&expect_top_data).to_le_bytes(),
+        "the CRC word covers the data"
+    );
+    assert_eq!(top[4], 8, "the serial is the active copy's plus one");
+    assert_eq!(
+        &top[5..],
+        &expect_top_data[..],
+        "the data area follows the serial byte"
+    );
+    assert_eq!(
+        &dev.bytes[g.offset_redund as usize..][..0x10000],
+        &before_copy_one[..],
+        "the active copy is not touched"
+    );
+    // The next save: copy 0 (serial 8) is active, so copy 1 is written with serial 9.
+    set(&mut dev, &g, &[("trial_attempts", Some("2"))]).unwrap();
+    let bottom = &dev.bytes[g.offset_redund as usize..][..0x10000];
+    assert_eq!(bottom[4], 9, "the serial advances");
+    let (which, vars_now) = load(&mut dev, &g).unwrap().unwrap();
+    assert_eq!(
+        which,
+        Which::Second,
+        "the newer copy (serial 9) is the one read"
+    );
+    assert!(vars_now.contains(&("trial_attempts".to_string(), "2".to_string())));
+    // The wrap: serial 255 at the top against 0 at the bottom makes the 0 the newer, and the save writes
+    // the top with serial 1.
+    dev.write_at(g.offset, &encode_copy(&data(&[("default", "os-1")]), 255))
+        .unwrap();
+    dev.write_at(
+        g.offset_redund,
+        &encode_copy(&data(&[("default", "os-1")]), 0),
+    )
+    .unwrap();
+    set(&mut dev, &g, &[("trial", Some("os-3"))]).unwrap();
+    assert_eq!(
+        dev.bytes[g.offset as usize + 4],
+        1,
+        "the save after serial 0 writes serial 1"
+    );
+    let (which, vars_now) = load(&mut dev, &g).unwrap().unwrap();
+    assert_eq!(
+        which,
+        Which::First,
+        "serial 1 at the top is the newer copy again"
+    );
+    assert!(vars_now.contains(&("trial".to_string(), "os-3".to_string())));
+}
+
+/// A tie: both copies valid with the same serial. U-Boot takes the primary (`env/common.c:569-570`, `tmp_env1`), which is
+/// the copy at `offset` in both forms: the device form's `CONFIG_ENV_OFFSET`, and in the GPT form copy 0 at the top of the
+/// partition. This matters on first flash, where an SDK may write the same environment to both copies.
+#[test]
+fn a_tie_in_the_serial_selects_the_primary_copy_at_offset_in_both_forms() {
+    // A 4 KiB copy: its data area is 4096 - 5 bytes.
+    let data = |value: &str| {
+        encode_vars(&[("default".to_string(), value.to_string())], 0x1000 - 5).unwrap()
+    };
+    let check = |g: &Geometry, mut dev: Mem| {
+        // The primary at `offset` says "primary", the redundant copy at `offset_redund` says "redundant". Both valid, serial 4.
+        dev.write_at(g.offset, &encode_copy(&data("primary"), 4))
+            .unwrap();
+        dev.write_at(g.offset_redund, &encode_copy(&data("redundant"), 4))
+            .unwrap();
+        let (which, vars) = load(&mut dev, g).unwrap().unwrap();
+        assert_eq!(which, Which::First, "equal serials take the primary copy");
+        assert!(vars.contains(&("default".to_string(), "primary".to_string())));
+    };
+    // The device form: CONFIG_ENV_OFFSET 0x4000 (primary), CONFIG_ENV_OFFSET_REDUND 0x8000.
+    let device = Geometry::new(0x1000, 0x4000, 0x8000).unwrap();
+    check(&device, Mem::new(0x10000));
+    // The GPT form: a 128 KiB partition at 16 MiB holds two 4 KiB copies; copy 0 (the primary) is at the top.
+    let gpt = Geometry::in_partition(0x1000, (16 * 1024 * 1024) / 512, 256).unwrap();
+    assert_eq!(
+        gpt.offset,
+        16 * 1024 * 1024 + 128 * 1024 - 0x1000,
+        "copy 0 is at the top of the partition"
+    );
+    check(&gpt, Mem::new((16 * 1024 * 1024 + 128 * 1024) as usize));
 }

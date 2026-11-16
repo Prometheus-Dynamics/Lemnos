@@ -1,0 +1,54 @@
+# A board file for the A733 SoC (socs/sun60i-a733.toml): the system identity, the reboot and slot devices of an A733 board
+# with an SD slot and an eMMC socket. The watchdog is the always-on watchdog (r_wdt). The slot record is U-Boot's own
+# environment (`record = "uboot"`). Untested on board.
+#
+# Every fact below cites its source as TREE:path:line. DERIVED: from the source, not run or booted. UNVERIFIED: no source.
+# Sources: the image-builder facts report (notes BB1b-citations.md) sections 1 to 3 (this SoC's board), unless a row says otherwise.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "sun60i-a733-slots"
+soc = "sun60i-a733"
+
+[[hardware]]
+controller = "watchdog"
+
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+[[devices]]
+id = "reboot"
+driver = "system-reboot"
+
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/soc@0/watchdog@7021000" }
+config = { timeout_s = 15 }
+
+[[devices]]
+id = "slots"
+driver = "system-slots"
+# The media, SD first. SD `/soc@0/mmc@4020000` (kernel `mmc0`, the series' `mmc0 = &mmc0` alias and `status = "okay"`,
+# DERIVED from the series patch for the board, :47-49, :65-70; U-Boot's node at TREE:UB arch/arm/dts/sun60i-a733.dtsi:382, disabled at :393,
+# enabled by the board's U-Boot dts, lines 60-63). eMMC `/soc@0/mmc@4022000` (kernel `mmc2`, DERIVED from
+# the series eMMC patch, lines 37 and 61-68; U-Boot node at sun60i-a733.dtsi:424, enabled at the board's U-Boot dts, lines 66-75).
+# UNVERIFIED: the boot ROM's eMMC support on this SoC.
+config = { data = "/data", boot = "/boot", record = "uboot", boot_args = "os", boot_sources = ["/soc@0/mmc@4020000=/soc@0/mmc@4020000", "/soc@0/mmc@4022000=/soc@0/mmc@4022000"], uboot_env_size = 0x8000, uboot_env_mmc_index = 0, uboot_usb_vendor = 0x1209, uboot_usb_product = 0x0001 }
+
+# The U-Boot environment: device 0, the SD (U-Boot's `mmc 0`, from DM's auto sequence: the SD node `mmc0` is bound first; no
+# alias in the control tree; DERIVED from drivers/core/device.c:94-101, not run).
+# HAZARD (DERIVED, the report, section 1): on an MMC boot U-Boot loads the environment from the FAT file `uboot.env` first, and
+# from the GPT partition only when the FAT load fails (TREE:UBR board/sunxi/board.c:155-158). A GPT write is therefore not read
+# while `uboot.env` exists on the boot FAT. Fail-closed here: the writer refuses the GPT write while that file is present, by
+# name, and writes nothing (`uboot_env::refuse_if_fat_env`, drivers/slot-store/src/uboot_env.rs; tests in uboot_env_tests.rs and
+# drivers/system-slots/src/uboot/tests.rs). What is still needed is the U-Boot build without the FAT environment, or the image
+# without `uboot.env` (the U-Boot builder's change). Until then the slot record on this file is refused, not silently ignored.
+# The GPT partition `uboot-env` (16 MiB offset, 128 KiB, the image-builder family file (notes BB1b-citations.md):130-134) and the size 0x8000
+# (the family's U-Boot fragment, sun60i/assets/u-boot.fragment:15, DERIVED).
+# Without the partition the writer refuses by name (drivers/slot-store/src/gpt.rs; drivers/system-slots/src/uboot/tests.rs:661).
+# The fastboot pair 1209:0001: test, not registered (pid.codes test pair).

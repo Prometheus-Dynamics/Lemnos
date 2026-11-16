@@ -58,6 +58,17 @@ pub fn tryboot_image(first: &str) -> Vec<u8> {
     bootimage::build(&parts, size, first, &refs(&payloads(first))).unwrap()
 }
 
+/// The U-Boot form's image as [`uboot_image`], with a FAT `uboot.env` at its root: the file U-Boot reads
+/// before the GPT environment on an MMC boot, so a GPT write must be refused while it is there.
+pub fn uboot_image_with_env(first: &str) -> Vec<u8> {
+    let mut parts = uboot_parts();
+    parts
+        .root
+        .push(("uboot.env", b"FAT environment\n".to_vec()));
+    let size = bootimage::min_size(&parts).unwrap();
+    bootimage::build(&parts, size, first, &refs(&payloads(first))).unwrap()
+}
+
 /// The U-Boot form's image with slot `first` in bay 0 and its composed extlinux file.
 pub fn uboot_image(first: &str) -> Vec<u8> {
     let parts = uboot_parts();

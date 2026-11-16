@@ -98,3 +98,15 @@ kind = "usb-peripheral"
 path = "/soc@0/usb@4100000"
 sysfs = "4100000.usb"
 reason = "the USB OTG controller (MUSB) on the A733, port 0; device mode (allwinner,sun60i-a733-musb)"
+
+# The always-on hardware watchdog, `r_wdt` (WDT_CPUS), `allwinner,sun60i-a733-wdt` with the `allwinner,sun55i-a523-wdt`
+# fallback (the driver binds through the fallback, `sunxi_wdt`, DERIVED). Node from the DockSeed series, add-the-watchdogs.patch
+# (`r_wdt: watchdog@7021000`, reg 0x07021000, no status line so enabled; the patch is applied to sun60i-a733.dtsi after
+# `r_ccu`). The series' bus node is renamed `soc@0` by a later patch (name-the-bus-node-soc-0), so the path is written that way.
+# UNCONFIRMED: the path is from the series patch, not from a built dtb. The mainline driver caps the timeout at 16 s
+# (drivers/watchdog/sunxi_wdt.c:25); slot-init uses 15 s, which fits.
+# Not used: WDT0 (`watchdog@2050000`, series status disabled: "does not reliably reset the SoC").
+[controllers.watchdog]
+kind = "watchdog"
+path = "/soc@0/watchdog@7021000"
+reason = "the always-on hardware watchdog on the A733 (r_wdt, sun60i-a733-wdt, sun55i-a523-wdt fallback; series node, unconfirmed)"

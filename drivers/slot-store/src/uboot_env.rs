@@ -10,7 +10,7 @@
 //!   and the serial is `++env_flags`.
 //! - `env/common.c:484-551` (`env_check_redund`): the selection rule [`select`] mirrors: a copy
 //!   counts when its CRC is right; of two, serial 255 against 0 makes the 0 newer, otherwise the
-//!   higher serial wins and a tie takes copy one; neither right is no environment.
+//!   higher serial wins and a tie takes the primary copy (the one at `CONFIG_ENV_OFFSET`; in the GPT form, copy 0 at the top of the partition); neither right is no environment.
 //! - `env/common.c:553-578` (`env_import_redund`): the serial of the chosen copy becomes
 //!   `env_flags`, so the next save is that serial plus one.
 //! - `env/common.c:443-466` (`env_import`): an import replaces the table (`himport_r` without
@@ -146,7 +146,7 @@ pub enum Which {
 
 /// U-Boot's selection (`env_check_redund`). A copy is taken when its CRC is right. With both
 /// right, serial 255 against 0 makes the 0 copy the newer (the serial wrapped), otherwise the
-/// higher serial wins, and equal serials take copy one. With neither, there is no environment.
+/// higher serial wins, and equal serials take the primary copy (`Which::First`, the one at `offset`: `CONFIG_ENV_OFFSET`, or in the GPT form copy 0 at the top of the partition; `env/common.c:569-570`). With neither, there is no environment.
 pub fn select(first: Option<&Copy>, second: Option<&Copy>) -> Option<Which> {
     let first = first.filter(|c| c.valid());
     let second = second.filter(|c| c.valid());
@@ -156,7 +156,7 @@ pub fn select(first: Option<&Copy>, second: Option<&Copy>) -> Option<Which> {
         (None, Some(_)) => Some(Which::Second),
         (Some(a), Some(b)) => {
             // Serial 255 against 0: the 0 is the newer. Otherwise the higher serial wins; a tie
-            // takes copy one.
+            // takes the primary copy (`Which::First`, at `offset`).
             let second_newer = if a.flags == 255 && b.flags == 0 {
                 true
             } else if b.flags == 255 && a.flags == 0 {
@@ -347,6 +347,28 @@ pub fn load_checked<D: EnvDev + ?Sized>(
 /// is the active one and the other is the copy written. After the write both copies are read again:
 /// the new copy must be valid and the one U-Boot's rule selects, or the write is reported as
 /// failed (the old copy is untouched and still valid).
+/// The file on the boot partition's root that U-Boot reads before the GPT partition, when its
+/// environment is in FAT as well as in the GPT partition (`ENV_IS_IN_FAT`, the A733 family's default).
+pub const FAT_ENV_FILE: &str = "uboot.env";
+
+/// Refuses a write of the GPT environment while the boot partition holds [`FAT_ENV_FILE`]. On an MMC boot
+/// U-Boot loads that file first and reads the GPT partition only when the load fails (on that family,
+/// `board/sunxi/board.c`: FAT before the GPT partition). A write to the GPT partition would then not be read,
+/// so it is refused, by name, and nothing is written. Fail-closed: a boot partition that cannot be read as
+/// FAT cannot rule the file out, so it is refused too.
+pub fn refuse_if_fat_env(boot: &Path) -> Result<(), String> {
+    let mut file = File::open(boot).map_err(|e| format!("{}: {e}", boot.display()))?;
+    match crate::bootfat::size_of_path(&mut file, FAT_ENV_FILE) {
+        Err(crate::bootfat::Refusal::Missing) => Ok(()),
+        Ok(size) => Err(format!(
+            "refusing to write the U-Boot environment on the GPT partition: the boot partition holds {FAT_ENV_FILE} ({size} bytes); U-Boot reads it first on an MMC boot, so this write would not be read; nothing was written"
+        )),
+        Err(why) => Err(format!(
+            "refusing to write the U-Boot environment on the GPT partition: the boot partition can't be read as FAT, so {FAT_ENV_FILE} can't be ruled out ({why}); nothing was written"
+        )),
+    }
+}
+
 pub fn set<D: EnvDev + ?Sized>(
     dev: &mut D,
     g: &Geometry,
