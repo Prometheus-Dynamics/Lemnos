@@ -137,8 +137,8 @@ U-Boot chain line by line.
 | Radxa ROCK 5C | RK3588S | U-Boot | eMMC | `/mmc@fe2e0000=/mmc@fe2e0000` | kernel path; U-Boot path unverified |
 | Radxa ROCK 4D | RK3576 | U-Boot | microSD | `/soc/mmc@2a310000=/soc/mmc@2a310000` | the RK3576 node sits under `/soc`; the U-Boot path is unverified |
 | Radxa CUBIE A7A, A7S, A7Z | A733 (sun60i) | U-Boot | microSD, eMMC | `/soc@0/mmc@4020000=…`, `/soc@0/mmc@4022000=…` | from the patch series; the Radxa U-Boot tree is not read; UNVERIFIED |
-| Kendryte K230 (K230D board) | K230 | U-Boot | microSD (`mmc1`, SD slot) | `/soc/mmc1@91581000=/soc/sdhci1@91581000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 161-170, kernel path from the SDK kernel `k230.dtsi` lines 166-176; UNVERIFIED on board, and the K230D boot host is not stated by the board file |
-| Kendryte K230 (K230D board) | K230 | U-Boot | eMMC (`mmc0`) | `/soc/mmc0@91580000=/soc/sdhci0@91580000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 149-159, kernel path from the SDK kernel `k230.dtsi` lines 154-164; UNVERIFIED on board |
+| Kendryte K230 (K230D board) | K230 | U-Boot | microSD (`mmc1`, SD slot) | `/soc/mmc1@91581000=/soc/mmc@91581000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 163-172, kernel name the mainline `mmc@` form (`socs/k230.toml`); UNVERIFIED on board, and the K230D boot host is not stated by the board file |
+| Kendryte K230 (K230D board) | K230 | U-Boot | the SDIO0/eMMC host (`mmc0`) | `/soc/mmc0@91580000=/soc/mmc@91580000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 150-161, kernel name the mainline `mmc@` form (`socs/k230.toml`); what sits on the host is a board fact; UNVERIFIED on board |
 | Raspberry Pi compute module with the BCM2712 (the reference board) | BCM2712 | Pi firmware, no U-Boot | on-board eMMC | `rpi-boot-mode-1=/soc@107c000000/mmc@fff000` | code 1 is the SD card or the eMMC on the Pi family (measured on the reference board); other codes are from documentation, unverified |
 
 Unsupported: a scsi or UFS boot device on a U-Boot board is refused by name (the path form cannot
