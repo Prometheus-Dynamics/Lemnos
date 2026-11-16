@@ -82,7 +82,7 @@ pub const EP_OUT: u8 = 0x02;
 const ROUNDS: u64 = 20;
 const LONG: Duration = Duration::from_secs(60);
 const OFFERED: &str = "link orion-link: offered the endpoints";
-const WENT_DOWN: &str = "link orion-link: the gadget went down";
+const WENT_DOWN: &str = "link orion-link: the gadget is down or unconfigured; the hold is kept";
 const NO_LINK: &str = "no USB link is configured (LEMNOS_ORION_LINKS is unset): none is offered";
 /// The `pair_lent` method of `usb.function/1`.
 const PAIR_LENT: u16 = 12;
@@ -271,9 +271,12 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         wait_until(LONG, enabled),
         "the daemon enables the gadget again",
     );
+    // The controller let go and took the gadget back on the same endpoints: the bridge keeps its offer
+    // (no second offer). A new host's HELLO begins a session on the kept stream (C57).
+    std::thread::sleep(Duration::from_secs(3));
     check(
-        bridge.wait_for(OFFERED, 2, LONG),
-        "the bridge offers the endpoints again",
+        bridge.count(OFFERED) == 1,
+        "the bridge keeps its offer across the controller's let-go: the endpoints did not change",
     );
     check(
         wait_until(Duration::from_secs(10), || lent() == Some(true)),
@@ -285,32 +288,31 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     );
 
     // 4. The hello sweep: each bounce, with the host's first HELLO sent a set time after it claims the
-    // link. After a re-offer, a reader of the stream that was replaced can still be inside a read of the same
-    // endpoint, and it takes the HELLO (see tmp/BRIDGE-BOUNCE/orderings.md). See `HELLO_SWEEP_MS`.
-    if let Some(reason) = BOUNCE_SKIP {
-        say!("not run: the hello sweep, the bounce regression ({reason})");
-        return Ok(());
-    }
+    // link. The endpoints are the same after each bounce, so the bridge keeps its offer, and each new
+    // host's HELLO begins a session on the kept stream (C57). See `HELLO_SWEEP_MS`.
     for (cycle, &hello_after_ms) in HELLO_SWEEP_MS.iter().enumerate() {
         let went_down = bridge.count(WENT_DOWN) + 1;
-        let offered = bridge.count(OFFERED) + 1;
         check(
             fs::write(format!("{GADGET_DIR}/UDC"), "\n").is_ok(),
             &format!("bounce {}: the controller lets go of the gadget", cycle + 3),
         );
         check(
             bridge.wait_for(WENT_DOWN, went_down, LONG),
-            &format!("bounce {}: the bridge gives the hold up", cycle + 3),
+            &format!(
+                "bounce {}: the bridge keeps the hold while the gadget is down",
+                cycle + 3
+            ),
         );
         check(
             wait_until(LONG, enabled),
             &format!("bounce {}: the daemon enables the gadget again", cycle + 3),
         );
+        let offers = bridge.count(OFFERED);
         let up = host_session(&me, 3 + cycle as u32, hello_after_ms);
         check(
-            bridge.wait_for(OFFERED, offered, LONG),
+            bridge.count(OFFERED) == offers,
             &format!(
-                "bounce {}: the bridge offers the endpoints again",
+                "bounce {}: no second offer: the endpoints did not change",
                 cycle + 3
             ),
         );
@@ -324,17 +326,9 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The delays the hello sweep tries, in milliseconds, one bounce each. Test-only: a short delay sends the
-/// host's first HELLO before the bridge has offered the endpoints again.
+/// The delays the hello sweep tries, in milliseconds, one bounce each. A short delay sends the host's
+/// first HELLO before the bridge has seen the gadget up again.
 const HELLO_SWEEP_MS: [u64; 5] = [0, 150, 400, 1000, 2500];
-
-/// Why the bounce regression (the hello sweep) is not run, or `None` once it runs. It is skipped, not
-/// passed: the sweep's orderings fail at the Orion rev the bridge pins, because a reader of the old stream
-/// takes the host's first HELLO after a bounce and discards it (Orion's stale reader; BRIDGE-BOUNCE in
-/// tmp/flakes.md). Set to `None` in the PR that pins the Orion rev with that fix.
-const BOUNCE_SKIP: Option<&str> = Some(
-    "needs Orion's fix for the stale link reader: a reader of the old stream takes the host's HELLO after a bounce",
-);
 
 /// What the kernel shows of the gadget, for a step that did not come up.
 fn diagnose() {

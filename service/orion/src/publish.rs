@@ -42,6 +42,7 @@ use orion::topics::{
 };
 use orion::types::Error as Refusal;
 use orion::{ClientError, Error, Options, Orion, Roles};
+use orion_msg_session::RejectReason;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 use lemnos_client::{DeviceHealth, DeviceState};
@@ -485,6 +486,11 @@ impl Session {
                         config.orion
                     ))
                 }
+                // A path too long for a socket cannot be fixed by trying again (see `config::publishes_on`).
+                Error::Client(ClientError::PathTooLong { path, len }) => Opening::Refused(format!(
+                    "Orion's socket path {} is {len} bytes, too long for a Unix socket. Stopping; a configuration error is not retried",
+                    path.display()
+                )),
                 error => Opening::Failed(format!("Orion not available at {}: {error}", config.orion)),
             }
         })?;
@@ -1182,6 +1188,11 @@ fn client_refused(error: ClientError) -> Refused {
             ..
         } => Refused::Device(why.as_str().to_owned()),
         ClientError::Protocol(why) => Refused::Device(why.to_owned()),
+        // The comm core answered no session where a hello was due (C57): the session is over, and the
+        // bridge opens a new one, as for a lost connection.
+        reject @ ClientError::Rejected(RejectReason::NoSession) => {
+            Refused::Session(Error::Client(reject))
+        }
         other => Refused::Session(Error::Client(other)),
     }
 }

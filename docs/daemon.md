@@ -792,7 +792,7 @@ releases only its own holds. A token of zero (a node that does not say) is one s
 cancels its run and nothing else: the job is cancelled on lemnosd, and the caller's connection and the
 driver's holds for it stay.
 
-**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision 3dde304). Each run
+**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision bfff313). Each run
 says whether it is detached: `Request::Run` carries `detached` (`Claim.detached` on the wire, false from a node
 too old to say), and the bridge takes it as written. There is no inference from the order of messages. Orion
 cancels an attached run of an ending session with reason 2 before `CallerGone` (Orion's `gone()` in
@@ -1036,7 +1036,9 @@ It reads:
   address and a signed serial link (`#key`) cannot: at the pinned revision they offer only the `CLIENT` and
   `PEER` roles, and the bridge publishes as a provider. The bridge refuses them at start, by name, with what to
   use instead; a refusal that only shows at connect is said once and the bridge stops (a configuration error,
-  not retried). `publishes_on` (`service/orion/src/config.rs`) has the start-time rule;
+  not retried). `publishes_on` (`service/orion/src/config.rs`) has the start-time rule. A `unix:<path>`
+  longer than a Unix socket's 107 bytes is refused at start the same way (`ClientError::PathTooLong`, Orion
+  C55): a shorter path is needed, and it is not tried again;
 - `ORION_NODE_ID`: when it is set, a comm core that is any other node gets nothing;
 - `LEMNOS_ORION_FILES`, described above. It has been run against a real Orion node on a PC
 ([`B20.md`](../testing/board-runs/B20.md) has that run); not yet on a board.

@@ -5,13 +5,14 @@
 //! and keeps the hold while the gadget is up. The pair goes as `[read, write]`: the OUT endpoint's
 //! file first (the host's writes, which the comm core reads), then the IN endpoint's.
 //!
-//! END is the hold's own word. It reads EOF or hangs up when the hold is over for good (the
-//! service closed it because the driver ended the endpoints, or the hold was given up). This thread
-//! then gives all three back and offers again once the gadget is back. A gadget that goes down
-//! ends the hold too, as lemnosd sees it, so this thread gives the hold back and offers again once
-//! the gadget is up. The pair is offered only while the host has the gadget configured, and the hold is
-//! given up when it deconfigures too: the comm core's reader reads an endpoint that is not enabled as the
-//! end of the stream and does not retry. Failures wait at 1 s, doubling, capped at 8 s, and never give up.
+//! END is the hold's own word. It reads EOF or hangs up when the hold is over for good: the device was
+//! switched off, reloaded or shut down, or the driver ended its endpoints. Only then does this thread give
+//! all three back and offer again, because only then are the endpoint files new. A controller that lets go
+//! of the gadget and takes it back (`UDC` cleared and set) leaves the pair the same, so the hold and the
+//! comm core's stream on it are kept: the comm core's reader retries an endpoint that is down (its
+//! `ESHUTDOWN` and `EAGAIN`), and a new host's HELLO begins a new session on the same stream (C57). The
+//! gadget's state is still watched and logged. Failures wait at 1 s, doubling, capped at 8 s, and never
+//! give up.
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
@@ -88,7 +89,7 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     watch
         .subscribe(&mut handle, STATE, 100_000, true)
         .map_err(|error| format!("watching {:?}: {error}", link.device))?;
-    wait_for_ready(&mut watch, true, None)?;
+    wait_for_ready(&mut watch)?;
 
     let UsbEndpointsEnd { out, input, end } = lemnos
         .usb_endpoints_end(index, Arc::new(LinuxStreams))
@@ -99,7 +100,7 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     // and it is what says the hold is over for good.
     drop((out, input));
 
-    let over = wait_for_ready(&mut watch, false, Some(&end))?;
+    let over = wait_while_held(&mut watch, link, &end)?;
     lemnos
         .usb_endpoints_release(index)
         .or_else(|error| match error {
@@ -109,11 +110,6 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
         })?;
     if over {
         log(&format!("link {}: the endpoints' hold is over", link.link));
-    } else {
-        log(&format!(
-            "link {}: the gadget went down or lost its host configuration",
-            link.link
-        ));
     }
     Ok(())
 }
@@ -131,26 +127,58 @@ fn over(end: &OwnedFd) -> bool {
     }
 }
 
-/// Waits until the gadget is ready (`up` and the host has chosen its configuration) is `want`. The
-/// comm core's reader takes an `EAGAIN` from an endpoint that is not enabled for the end of the
-/// stream, and one that is not yet configured gives it, so the pair is offered only to a configured
-/// host and the hold is given up when the host deconfigures or the gadget goes down. With `end`, also
-/// returns `Ok(true)` as soon as END says the hold is over for good; `Ok(false)` when the gadget got
-/// to `want` first.
-fn wait_for_ready(watch: &mut Session, want: bool, end: Option<&OwnedFd>) -> Result<bool, String> {
+/// Waits until the gadget is ready (`up` and the host has chosen its configuration), and returns when it
+/// is. The pair is offered only to a configured host: the comm core's reader takes an endpoint that is not
+/// enabled as its own reading, so the first offer waits for the host.
+fn wait_for_ready(watch: &mut Session) -> Result<(), String> {
     // The state record is a block: its length, then its four bools, `up` and `configured` first.
     let mut state = [0u8; 64];
     loop {
-        if end.is_some_and(over) {
+        match watch.next_value(&mut state, Duration::from_secs(1)) {
+            Ok(Some(info)) => {
+                let body = state.get(4..info.len).unwrap_or(&[]);
+                if let [up, configured, ..] = body
+                    && *up != 0
+                    && *configured != 0
+                {
+                    return Ok(());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("watching the gadget: {error}")),
+        }
+    }
+}
+
+/// Holds the endpoints while END says the hold is not over, and logs each change of the gadget's state
+/// (`up` and the host has chosen its configuration) without acting on it. Returns `Ok(true)` when END says the
+/// hold is over for good: the endpoints are new, and the caller offers them again. A controller's let-go
+/// does not end the hold (see the module's header).
+fn wait_while_held(watch: &mut Session, link: &Link, end: &OwnedFd) -> Result<bool, String> {
+    // The state record is a block: its length, then its four bools, `up` and `configured` first.
+    let mut state = [0u8; 64];
+    let mut ready: Option<bool> = None;
+    loop {
+        if over(end) {
             return Ok(true);
         }
         match watch.next_value(&mut state, Duration::from_secs(1)) {
             Ok(Some(info)) => {
                 let body = state.get(4..info.len).unwrap_or(&[]);
-                if let [up, configured, ..] = body
-                    && ((*up != 0 && *configured != 0) == want)
-                {
-                    return Ok(false);
+                if let [up, configured, ..] = body {
+                    let now = *up != 0 && *configured != 0;
+                    if ready != Some(now) {
+                        ready = Some(now);
+                        log(&format!(
+                            "link {}: the gadget is {}; the hold is kept",
+                            link.link,
+                            if now {
+                                "configured"
+                            } else {
+                                "down or unconfigured"
+                            }
+                        ));
+                    }
                 }
             }
             Ok(None) => {}
