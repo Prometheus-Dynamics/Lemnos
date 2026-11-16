@@ -18,8 +18,8 @@
 //!   is a plain number (not an `_IOC` encoding); the kernel copies `bytes` from `buffer`, calls
 //!   the command, and copies the same bytes back.
 //!
-//! The sizes and offsets are pinned in `layout.rs`, generated from the headers with gcc on x86_64
-//! by `layout-check/run.sh`; every field has a fixed width and the same alignment on aarch64.
+//! The sizes and offsets are pinned in `layout.rs`, checked against the headers by
+//! `lemnos-layout-check vip9000`; every field has a fixed width and the same alignment on aarch64.
 
 /// The node the kernel creates (`DEVICE_NAME`, a misc device or a character device).
 pub const DEVICE: &str = "/dev/vipcore";

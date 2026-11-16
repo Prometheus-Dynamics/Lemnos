@@ -35,8 +35,8 @@
 //!   is not `CONFIG_ARCH_SUN55IW6`), `ISP_STAT_TOTAL_SIZE` (`0x6a00`),
 //!   `ISP_SAVE_LOAD_STATISTIC_SIZE` (`0x3300`).
 //!
-//! `layout-check/run.sh <allwinner-bsp checkout>` compiles a C program against that header and
-//! diffs the sizes, offsets and numbers it prints against `src/layout.rs`.
+//! `lemnos-layout-check isp600-sys -I <allwinner-bsp checkout>` compares the sizes, offsets and
+//! numbers of `src/layout.rs` with bindgen's reading of that header (`testing/crates/layout-check`).
 //!
 //! Hardware status: untested on board. The check is `testing/board-runs/E13.md`.
 

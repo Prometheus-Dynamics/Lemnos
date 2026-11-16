@@ -289,24 +289,24 @@ impl Region<'_> {
     /// The region's `nonai2d_osd_attr` at `index`, valid.
     fn encode(&self, index: usize, out: &mut [u8]) {
         let r = self.rect;
-        // The index fits: below REGIONS.
-        out[0] = index as u8;
-        out[1] = 1;
-        out[2..4].copy_from_slice(&r.width.to_le_bytes());
-        out[4..6].copy_from_slice(&r.height.to_le_bytes());
-        out[6..8].copy_from_slice(&r.x.to_le_bytes());
-        out[8..10].copy_from_slice(&r.y.to_le_bytes());
+        // Each field is written at its offset in `OsdWire`, the SDK's structure.
+        out[OSD_INDEX] = index as u8;
+        out[OSD_VALID] = 1;
+        out[OSD_WIDTH..OSD_WIDTH + 2].copy_from_slice(&r.width.to_le_bytes());
+        out[OSD_HEIGHT..OSD_HEIGHT + 2].copy_from_slice(&r.height.to_le_bytes());
+        out[OSD_STARTX..OSD_STARTX + 2].copy_from_slice(&r.x.to_le_bytes());
+        out[OSD_STARTY..OSD_STARTY + 2].copy_from_slice(&r.y.to_le_bytes());
         // The pointer the kernel copies the image from. It escapes to the kernel, which reads
         // `image_bytes()` from it while the control is set, and `check` made sure the image
         // holds that many. The kernel's pointer field is 64 bits whatever ours are.
         let data = self.image.as_ptr().expose_provenance() as u64;
-        out[16..24].copy_from_slice(&data.to_le_bytes());
-        out[24] = self.background_alpha;
-        out[25] = self.osd_alpha;
-        out[26] = self.video_alpha;
-        out[28..32].copy_from_slice(&(self.order as u32).to_le_bytes());
-        out[32..36].copy_from_slice(&self.background.to_le_bytes());
-        out[36..40].copy_from_slice(&self.format.fourcc().to_le_bytes());
+        out[OSD_DATA..OSD_DATA + 8].copy_from_slice(&data.to_le_bytes());
+        out[OSD_BG_ALPHA] = self.background_alpha;
+        out[OSD_OSD_ALPHA] = self.osd_alpha;
+        out[OSD_VIDEO_ALPHA] = self.video_alpha;
+        out[OSD_ADD_ORDER..OSD_ADD_ORDER + 4].copy_from_slice(&(self.order as u32).to_le_bytes());
+        out[OSD_BG_COLOR..OSD_BG_COLOR + 4].copy_from_slice(&self.background.to_le_bytes());
+        out[OSD_PIXFMT..OSD_PIXFMT + 4].copy_from_slice(&self.format.fourcc().to_le_bytes());
     }
 }
 
@@ -327,14 +327,15 @@ impl Border {
     fn encode(&self, index: usize) -> [u8; BORDER_BYTES] {
         let r = self.rect;
         let mut out = [0u8; BORDER_BYTES];
-        // The index fits: below BORDERS.
-        out[0] = index as u8;
-        out[2..4].copy_from_slice(&r.width.to_le_bytes());
-        out[4..6].copy_from_slice(&r.height.to_le_bytes());
-        out[6..8].copy_from_slice(&self.line_width.to_le_bytes());
-        out[8..12].copy_from_slice(&self.color.to_le_bytes());
-        out[12..14].copy_from_slice(&r.x.to_le_bytes());
-        out[14..16].copy_from_slice(&r.y.to_le_bytes());
+        // Each field is written at its offset in `BorderWire`, the SDK's structure.
+        out[BORDER_INDEX] = index as u8;
+        out[BORDER_WIDTH..BORDER_WIDTH + 2].copy_from_slice(&r.width.to_le_bytes());
+        out[BORDER_HEIGHT..BORDER_HEIGHT + 2].copy_from_slice(&r.height.to_le_bytes());
+        out[BORDER_LINE_WIDTH..BORDER_LINE_WIDTH + 2]
+            .copy_from_slice(&self.line_width.to_le_bytes());
+        out[BORDER_COLOR..BORDER_COLOR + 4].copy_from_slice(&self.color.to_le_bytes());
+        out[BORDER_STARTX..BORDER_STARTX + 2].copy_from_slice(&r.x.to_le_bytes());
+        out[BORDER_STARTY..BORDER_STARTY + 2].copy_from_slice(&r.y.to_le_bytes());
         out
     }
 }
@@ -443,3 +444,94 @@ impl<'a> Overlay<'a> {
 
 #[cfg(test)]
 mod tests;
+
+// The byte offsets the encoding writes, as the SDK's `osd_attr` and `border_attr` lay them out on a
+// 64-bit kernel (`nonai2d-v4l2-controls.h`, k230_linux_sdk at fc6cc2151d54cb307be47f81815023f7ffb0eae6).
+// The test-only `const _` block at the end of this file mirrors each structure and asserts these
+// numbers against it, so a change to either fails `cargo test`.
+const OSD_INDEX: usize = 0;
+const OSD_VALID: usize = 1;
+const OSD_WIDTH: usize = 2;
+const OSD_HEIGHT: usize = 4;
+const OSD_STARTX: usize = 6;
+const OSD_STARTY: usize = 8;
+const OSD_DATA: usize = 16;
+const OSD_BG_ALPHA: usize = 24;
+const OSD_OSD_ALPHA: usize = 25;
+const OSD_VIDEO_ALPHA: usize = 26;
+const OSD_ADD_ORDER: usize = 28;
+const OSD_BG_COLOR: usize = 32;
+const OSD_PIXFMT: usize = 36;
+const BORDER_INDEX: usize = 0;
+const BORDER_WIDTH: usize = 2;
+const BORDER_HEIGHT: usize = 4;
+const BORDER_LINE_WIDTH: usize = 6;
+const BORDER_COLOR: usize = 8;
+const BORDER_STARTX: usize = 12;
+const BORDER_STARTY: usize = 14;
+
+// The header's structures, mirrored here only for the assertions. The block is test-only: the
+// mirrors are never read, and `cargo test` (the gate) compiles and checks it.
+#[cfg(test)]
+const _: () = {
+    use core::mem::{offset_of, size_of};
+
+    #[repr(C)]
+    struct OsdAttr {
+        index: u8,
+        valid: u8,
+        width: u16,
+        height: u16,
+        startx: u16,
+        starty: u16,
+        data: u64,
+        bg_alpha: u8,
+        osd_alpha: u8,
+        video_alpha: u8,
+        add_order: u32,
+        bg_color: u32,
+        pixfmt: u32,
+    }
+
+    #[repr(C)]
+    struct BorderAttr {
+        index: u8,
+        width: u16,
+        height: u16,
+        line_width: u16,
+        color: u32,
+        startx: u16,
+        starty: u16,
+    }
+
+    assert!(size_of::<OsdAttr>() == REGION_BYTES);
+    assert!(REGION_BYTES == 40);
+    assert!(OSD_CONTROL_BYTES == 320);
+    assert!(offset_of!(OsdAttr, index) == OSD_INDEX);
+    assert!(offset_of!(OsdAttr, valid) == OSD_VALID);
+    assert!(offset_of!(OsdAttr, width) == OSD_WIDTH);
+    assert!(offset_of!(OsdAttr, height) == OSD_HEIGHT);
+    assert!(offset_of!(OsdAttr, startx) == OSD_STARTX);
+    assert!(offset_of!(OsdAttr, starty) == OSD_STARTY);
+    assert!(offset_of!(OsdAttr, data) == OSD_DATA);
+    assert!(offset_of!(OsdAttr, bg_alpha) == OSD_BG_ALPHA);
+    assert!(offset_of!(OsdAttr, osd_alpha) == OSD_OSD_ALPHA);
+    assert!(offset_of!(OsdAttr, video_alpha) == OSD_VIDEO_ALPHA);
+    assert!(offset_of!(OsdAttr, add_order) == OSD_ADD_ORDER);
+    assert!(offset_of!(OsdAttr, bg_color) == OSD_BG_COLOR);
+    assert!(offset_of!(OsdAttr, pixfmt) == OSD_PIXFMT);
+
+    assert!(size_of::<BorderAttr>() == BORDER_BYTES);
+    assert!(BORDER_BYTES == 16);
+    assert!(offset_of!(BorderAttr, index) == BORDER_INDEX);
+    assert!(offset_of!(BorderAttr, width) == BORDER_WIDTH);
+    assert!(offset_of!(BorderAttr, height) == BORDER_HEIGHT);
+    assert!(offset_of!(BorderAttr, line_width) == BORDER_LINE_WIDTH);
+    assert!(offset_of!(BorderAttr, color) == BORDER_COLOR);
+    assert!(offset_of!(BorderAttr, startx) == BORDER_STARTX);
+    assert!(offset_of!(BorderAttr, starty) == BORDER_STARTY);
+
+    assert!(CID_MODE == 0x0098_1B00);
+    assert!(CID_OSD_ATTR == 0x0098_1B03);
+    assert!(CID_BORDER_ATTR == 0x0098_1B04);
+};

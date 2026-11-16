@@ -35,8 +35,8 @@ static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_al
 
 #[test]
 fn request_numbers_match_the_header() {
-    // DRM_IOWR(DRM_COMMAND_BASE + n, struct ...), from gcc and aarch64-linux-gnu-gcc on
-    // rknpu_ioctl.h (layout-check/).
+    // DRM_IOWR(DRM_COMMAND_BASE + n, struct ...), as rknpu_ioctl.h gives it (checked by
+    // `lemnos-layout-check rknpu-sys`).
     assert_eq!(uapi::IOCTL_ACTION, 0xc008_6440);
     assert_eq!(uapi::IOCTL_SUBMIT, 0xc068_6441);
     assert_eq!(uapi::IOCTL_MEM_CREATE, 0xc030_6442);

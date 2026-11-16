@@ -47,7 +47,7 @@ fn the_control_ids_and_sizes_are_the_headers() {
     assert_eq!(CID_OSD_ATTR, 0x0098_1b03);
     assert_eq!(CID_BORDER_ATTR, 0x0098_1b04);
     // sizeof(nonai2d_osd_attr) * NONAI2D_OSD_REGION_NUM and sizeof(nonai2d_border_attr) on a
-    // 64-bit kernel; `layout-check/run.sh` asks the compilers.
+    // 64-bit kernel; the layout assertions in `overlay.rs` pin them.
     assert_eq!(OSD_CONTROL_BYTES, 320);
     assert_eq!(BORDER_BYTES, 16);
     assert_eq!(
