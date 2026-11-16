@@ -151,8 +151,14 @@ impl Card {
 impl Storage for Card {
     fn write(&mut self, lba: u32, data: &[u8], budget_us: u64) -> Result<(), IoError> {
         self.range(lba, data.len())?;
-        self.charge(data.len().div_ceil(SECTOR), budget_us)?;
+        // Sector by sector: a slow card writes each sector as its time comes. When the budget runs out partway, the sectors
+        // before that point are written and the rest are not: a partial write, reported as a timeout, never past the range.
         for (i, chunk) in data.chunks(SECTOR).enumerate() {
+            if let Some(per) = self.slow_us_per_sector
+                && (i as u64 + 1).saturating_mul(per) > budget_us
+            {
+                return Err(IoError::Timeout);
+            }
             let mut sector = [0u8; SECTOR];
             sector[..chunk.len()].copy_from_slice(chunk);
             self.written.insert(lba + i as u32, sector);

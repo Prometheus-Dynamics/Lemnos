@@ -43,7 +43,8 @@ the timing and the compare rule. This README is about the stage side of that con
   before or after the status stage of SET_ADDRESS. The shared code does not assume either. Each chip records its
   controller's behaviour as a bench check.
 - **Device side** (`usb`): the control endpoint's standard requests, the descriptors, the enumeration loop, and the bulk
-  pair as a `Link`. A chip implements `usb::Controller` (poll, set the address and the configuration, the control
+  pair as a `Link`. `BulkLink::recv` takes a completed frame first, then checks the deadline, then services one control
+  event, so a control request that lands near the deadline does not drop the frame behind it. A chip implements `usb::Controller` (poll, set the address and the configuration, the control
   packets, stalls, and the bulk transfers), and nothing else. The control endpoint's state is `Ep0`. Its descriptors
   are built from the wire's USB identity, so the host and the device read the same numbers.
 
@@ -65,9 +66,17 @@ host's word, and the compare rule is in the wire's README.
 
 ## Storage state
 
-A write that fails in storage (status 2) or fails its read-back (status 3) may leave the range partly written. The
-stage does not roll it back: it has no copy to roll back to. The status says so, and the host must read the range back
-and verify it before it relies on it. A read that fails (status 2 alone) changes nothing.
+A write may leave part of its range written, and nothing outside the range is touched. Two cases:
+
+- **Status 2 (storage)**: the storage call failed, or ran past its budget, or the read-back of the write failed in storage.
+  Sectors that were written before the failure stay written; the rest are not. A write cut off by its deadline is the
+  same case: the sectors that fit the budget are written, the others are not (sim test
+  `a_write_cut_off_by_its_deadline_is_status_two_with_part_of_the_range_written_and_nothing_outside_it`).
+- **Status 3 (verify)**: the read-back succeeded and differs from the payload. The range may be partly written.
+
+The stage does not roll either back: it has no copy to roll back to. After either status the host must read the range
+back and verify it before it relies on it. **Nothing is written** only for the refusals that come before any storage call:
+status 1 (crc) and status 5 (bad request). A read that fails (status 2 alone) changes nothing.
 
 **The storage budget.** Each storage phase has `TRANSFER_BUDGET_US` (3.5 s) for the whole call, a 64 KiB write included: the
 chip's storage checks its deadline across the sector loop and inside every device wait, and a call that cannot finish in its
@@ -103,7 +112,7 @@ same enumeration over its own USB stack. The frame-level `sim::Transport` is wha
   a bad CRC (status 1, nothing stored, no feed); a cut before the payload (a stop); a boot-area write without the mark
   (status 4); a boot-area write with the mark (stored); a header write with a bad CRC and the mark (status 1, nothing
   stored, no feed); a header write without the mark (status 4); a header write with the mark (stored); a chunk crossing a boundary
-  without the mark (status 4); a chunk of the wrong length (status 5, the session goes on); END with maskrom (ok, then
+  (status 5, nothing stored); a chunk of the wrong length (status 5, the session goes on); END with maskrom (ok, then
   `Ended(Maskrom)`); a request with a bad CRC (status 1, the session goes on); a reserved bit (status 5, the session goes
   on); an empty queue (idle, not a stop); and the published regions (a digest that is not zero).
 - `sim::model` is a scripted device controller: an ordered script of control events and bulk frames, so a reset can
@@ -114,6 +123,12 @@ same enumeration over its own USB stack. The frame-level `sim::Transport` is wha
   answered); (b) a bus reset between two requests (re-enumerate, serve again); (c) a host that never configures (the
   enumeration limit is the stop, and nothing is fed); (d) an unsupported control request (stalled; the session goes on);
   plus a reset with a chunk in flight (the chunk is not written) and an idle host (the idle limit is the stop).
+  The clock is exact: each controller pass takes 1 ms (`sim::model::SimClock`), and the tests assert the instants the
+  code reaches, not a tolerance. They cover the first deadline from the arm, a bus reset at 25 s and at 20 s, an identify
+  every 29 s, refusals that leave the deadline unmoved, a write that moves it, a control request one pass before the
+  deadline (the frame behind it is still served), a request armed one second before the deadline whose command takes one
+  second (not accepted) and half a second (accepted), a slow card (status 2), and a write cut off by its budget (status 2,
+  part written).
 
 ## What a chip's stage must still show on its own
 
@@ -131,3 +146,23 @@ same enumeration over its own USB stack. The frame-level `sim::Transport` is wha
 - Its region table, from the card's layout, and its build id.
 - Its `Report` (or the no-op, with the reason).
 - Board runs. Nothing in this crate has run on a board.
+
+## API changes in this revision
+
+Every change a caller of the stage sees, so a chip's stage and the host's code can be checked against it:
+
+- `session::Setup` gains `armed_at_us`: the instant the watchdog was armed, on the session's clock. The first idle deadline
+  counts from it.
+- `guard::Watchdog::feed_at(now_us)` is new (default: `feed`). The session records the instant of each feed through it.
+- `usb::Controller::poll(deadline_us)` and `Controller::bulk_arm(len, deadline_us)` take a deadline. Every controller
+  command runs inside it.
+- `Controller::speed()` and `Controller::address_before_status()` are required: the speed decides high speed, and the
+  address order is the controller's bench check.
+- `usb::enumerate(ctrl, clock, ep0, deadline_us)` takes the deadline; `enumerate_from_now` is the helper that starts it at
+  the clock's reading. `EnumError::NotHighSpeed` is new.
+- `serve::ServeError::Idle` is new: the distinct idle outcome, separate from a link timeout.
+- `region::decide(regions, lba, count, card, image)` returns `Result<Decision, DecideError>`. `DecideError::Length` and
+  `DecideError::Straddle` are checked in every build; a caller that gets either must stop, not write.
+- `lemnos-rockchip-maskrom-stage` (the chip's own stage, not this crate): `io::start_transfer`, `io::end_transfer`,
+  `io::sd_read_block` and `io::sd_write_block` take a deadline, and `io::until` is public.
+
