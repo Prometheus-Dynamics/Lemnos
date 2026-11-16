@@ -69,6 +69,70 @@ const STATUS_MAX: usize = 256;
 const IDLE: Duration = Duration::from_secs(1);
 /// How soon a resource state Orion refused is written again.
 const RETRY: Duration = Duration::from_secs(1);
+/// The refusals an opening has said. The same refusal again is not said at every retry: it is said
+/// once, and again only every [`SAID_EVERY`] with how many times it came since.
+#[derive(Default)]
+struct Said {
+    last: Option<(String, Instant, u64)>,
+}
+
+/// How long an unchanged refusal is left unsaid before it is said again, with its count.
+const SAID_EVERY: Duration = Duration::from_secs(60);
+
+impl Said {
+    /// The line to say for `message` now, if it is to be said: the first time, and then again every
+    /// [`SAID_EVERY`] with the count of retries since.
+    fn line(&mut self, message: &str, now: Instant) -> Option<String> {
+        match &mut self.last {
+            Some((last, at, repeats)) if last == message => {
+                *repeats += 1;
+                if now.duration_since(*at) < SAID_EVERY {
+                    return None;
+                }
+                let line = format!("{message} (again: {repeats} retries since it was first said)");
+                *at = now;
+                *repeats = 0;
+                Some(line)
+            }
+            _ => {
+                self.last = Some((message.to_owned(), now, 0));
+                Some(message.to_owned())
+            }
+        }
+    }
+
+    fn say(&mut self, message: &str) {
+        if let Some(line) = self.line(message, Instant::now()) {
+            log(&line);
+        }
+    }
+}
+
+#[cfg(test)]
+mod said_tests {
+    use super::*;
+
+    /// The refusal of a retry is said once, not at every retry; it is said again only after
+    /// [`SAID_EVERY`], with how many retries came since. A different refusal is said at once.
+    #[test]
+    fn a_repeated_refusal_is_said_once_then_once_a_minute() {
+        let mut said = Said::default();
+        let start = Instant::now();
+        assert!(said.line("refused: not supported", start).is_some());
+        for step in 1..=7 {
+            assert_eq!(
+                said.line("refused: not supported", start + Duration::from_secs(step)),
+                None
+            );
+        }
+        let again = said
+            .line("refused: not supported", start + SAID_EVERY)
+            .expect("said again after a minute");
+        assert!(again.contains("(again: 8 retries"), "{again}");
+        assert!(said.line("another refusal", start + SAID_EVERY).is_some());
+    }
+}
+
 /// How soon a session is opened again after the comm core went away, before the retry delays of
 /// a session Orion refuses. The comm core is usually back within this.
 const RECONNECT: Duration = Duration::from_millis(100);
@@ -195,6 +259,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut done = Vec::new();
     // What the lost session still holds on the comm core, until it is gone: see [`Held`].
     let mut held: Option<Held> = None;
+    let mut said = Said::default();
     while !shared.stopping() {
         let (devices, facts, set) = shared.with(|mirror| {
             let (devices, facts) = mirror.snapshot();
@@ -225,7 +290,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
                 continue;
             }
             Err(Opening::Failed(message)) => {
-                log(&message);
+                said.say(&message);
                 pause(shared, backoff.next_delay());
                 continue;
             }
@@ -237,6 +302,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             }
         };
         held = None;
+        said = Said::default();
         log(&format!(
             "connected to Orion node {}; {} devices published",
             session.node,
@@ -424,6 +490,8 @@ impl Session {
         })?;
         let node = orion.welcomed().node.as_str().to_owned();
         check_node(&node, config.node_id.as_deref()).map_err(Opening::Failed)?;
+        // Said with each refusal: what was asked, of which node, over which carrier.
+        let at = format!("node {node} on {}", config.orion);
         let anchor = orion
             .register_action(
                 &ActionDecl {
@@ -434,7 +502,12 @@ impl Session {
                 ANCHOR_POLICY,
             )
             .map_err(|error| {
-                opening(held, ANCHOR, error, &format!("Orion did not take {ANCHOR}"))
+                opening(
+                    held,
+                    ANCHOR,
+                    error,
+                    &format!("Orion did not take {ANCHOR} (register action, {at})"),
+                )
             })?;
         let mut device_set = orion
             .declare(&TopicDecl {
@@ -450,7 +523,10 @@ impl Session {
                     held,
                     DEVICE_SET.name,
                     error,
-                    &format!("Orion did not take {}", DEVICE_SET.name),
+                    &format!(
+                        "Orion did not take {} (declare topic, {at})",
+                        DEVICE_SET.name
+                    ),
                 )
             })?;
         sample(&mut device_set, 0, now(), &generation_bytes(set)).map_err(|error| {
@@ -483,7 +559,7 @@ impl Session {
                 }
                 Err(Refused::Session(error)) => {
                     return Err(Opening::Failed(format!(
-                        "Orion did not take {}: {error}",
+                        "Orion did not take {} (declare topic, {at}): {error}",
                         spec.name
                     )));
                 }
@@ -500,7 +576,7 @@ impl Session {
                 }
                 Err(refused) => {
                     return Err(Opening::Failed(format!(
-                        "Orion did not take hello.{name}: {}",
+                        "Orion did not take hello.{name} (declare topic, {at}): {}",
                         refused.why()
                     )));
                 }

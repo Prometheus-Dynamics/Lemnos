@@ -247,14 +247,12 @@ fn run(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished 
         .unwrap_or_else(|error| panic!("{action} {args:?} on {resource}: {error:?}"))
 }
 
-/// A run of an action, asked again while the comm core does not run it yet. After a comm core
-/// restart Orion lists a resource with its actions before it takes the actions back, so until the
-/// bridge has said them all a run is refused as not found. Asked again for at most [`WAIT`].
-// ORION-R2: Orion restores actions before records at R2, so this retry is removed and every caller
-// uses `run`. The bridge no longer waits on Orion's restore order: after a comm core restart it
-// opens a new session that registers each device's actions before its resource, so a resource is
-// never listed without them (`a_comm_core_restart_gets_every_device_and_value_again` checks this
-// with `run`, not this helper).
+/// A run of an action, asked again while the comm core does not run it yet. Two refusals are retried,
+/// as `docs/client.md` ("When another program is not back yet") tells a client to do: `NotFound`, and
+/// `Restoring` ("not back yet after a restart: ask again"), which the comm core returns for a name
+/// not yet re-registered after a restart. Both are retried for at most [`WAIT`]; past that the
+/// helper panics with the last refusal, so a state that never ends fails the test. Only these two are
+/// retried: any other refusal is the test's failure.
 fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
     let deadline = Instant::now() + WAIT;
     loop {
