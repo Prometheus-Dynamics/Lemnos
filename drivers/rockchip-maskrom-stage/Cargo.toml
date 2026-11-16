@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-rockchip-maskrom-stage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The Rockchip maskrom flasher's on-chip stages: the 472 loader's session on the shared flash stage and wire, with the controller models and the host tests. no_std, no unsafe"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-flash-wire = { path = "../flash-wire" }
+lemnos-flash-stage = { path = "../flash-stage" }
