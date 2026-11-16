@@ -17,7 +17,7 @@ use lemnos_flash_wire::usb::{BULK_MAX_PACKET, EP0_MAX_PACKET};
 
 use crate::dwc3link::{Bus, DmaMem, IN_SLOT, OUT_SLOT};
 use crate::io::{
-    EP_TYPE_BULK, EP_TYPE_CONTROL, IoFault, Trb, configure_endpoint, set_stall,
+    EP_TYPE_BULK, EP_TYPE_CONTROL, IoFault, Trb, configure_endpoint, end_transfer, set_stall,
     start_control_endpoints, start_transfer,
 };
 use crate::regs::dwc3;
@@ -229,6 +229,13 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
             // A device event: the type is bits 8 to 11.
             return match (word >> 8) & 0xF {
                 t if t == dwc3::DEVT_USBRST => {
+                    // A bus reset ends whatever is armed on the bulk pair (its TRB is abandoned), and the setup TRB
+                    // is armed again afterwards. Bench check: the end-transfer command's resource id (zero here).
+                    if self.bulk_len.is_some() {
+                        self.bus.with(|regs, clock| {
+                            let _ = end_transfer(regs, clock, base, BULK_OUT);
+                        });
+                    }
                     self.setup_armed = false;
                     self.bulk_len = None;
                     self.bus.with(|regs, _| {
@@ -255,6 +262,12 @@ impl<C: Clock, M: DmaMem + EventMem> Controller for Dwc3Dev<'_, '_, C, M> {
             return Event::Setup(self.dma.setup_bytes());
         }
         Event::None
+    }
+
+    fn address_before_status(&self) -> bool {
+        // DWC3 writes the address (DCFG.DEVADDR) in the set-address handler, before the status stage is queued
+        // (mainline ep0.c:598-626, DCFG at core.h:440-446). Bench check: the controller takes it from the next token.
+        true
     }
 
     fn set_address(&mut self, address: u8) -> Result<(), UsbError> {
@@ -558,6 +571,27 @@ mod tests {
                 .iter()
                 .any(|(a, v)| *a == reg(dwc3::DCFG) && *v == dwc3::DCFG_HIGHSPEED),
             "the start wrote DCFG"
+        );
+    }
+
+    #[test]
+    fn a_bus_reset_with_a_bulk_transfer_armed_ends_that_transfer_first() {
+        let mut regs = Regs::default();
+        let (mut clock, mut mem) = started(&mut regs);
+        mem.events[0] = 1 | (dwc3::DEVT_USBRST << 8);
+        let bus = Bus::new(&mut regs, &mut clock);
+        let mut dev = Dwc3Dev::start(&bus, mem, DWC3_BASE_FOR_TESTS).unwrap();
+        dev.set_configured(true).unwrap();
+        dev.bulk_arm(12).unwrap();
+        bus.with(|regs, _| regs.write32(reg(dwc3::GEVNTCOUNT), 4));
+        assert_eq!(dev.poll(), Event::BusReset);
+        drop(dev);
+        let log = &regs.log;
+        let armed = first(log, depcmd_write(BULK_OUT, dwc3::DEPCMD_STARTTRANSFER)).unwrap();
+        let ended = first(log, depcmd_write(BULK_OUT, dwc3::DEPCMD_ENDTRANSFER)).unwrap();
+        assert!(
+            armed < ended,
+            "the transfer was started, then ended by the reset"
         );
     }
 

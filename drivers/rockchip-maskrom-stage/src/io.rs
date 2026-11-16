@@ -166,6 +166,22 @@ pub fn configure_bulk_endpoint<C: Clock>(
     configure_endpoint(regs, clock, base, ep, EP_TYPE_BULK, max_packet, fifo)
 }
 
+/// Ends the transfer in flight on endpoint `ep` (DEPCMD ENDTRANSFER), as a bus reset requires: the controller drops
+/// the TRB it was given. The resource id is 0, the one DEPSTARTCFG allocated; a bench check.
+pub fn end_transfer<C: Clock>(
+    regs: &mut dyn RegAccess,
+    clock: &mut C,
+    base: usize,
+    ep: usize,
+) -> Result<(), IoFault> {
+    regs.write32(base + dwc3::depcmdpar0(ep), 0);
+    regs.write32(
+        base + dwc3::depcmd(ep),
+        dwc3::DEPCMD_ENDTRANSFER | dwc3::DEPCMD_CMDACT,
+    );
+    wait_depcmd(regs, clock, base, ep)
+}
+
 /// Stalls endpoint `ep` (DEPCMD SETSTALL; ep0.c:224 restarts the control endpoint after it).
 pub fn set_stall<C: Clock>(
     regs: &mut dyn RegAccess,

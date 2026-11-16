@@ -12,7 +12,7 @@
 
 use crate::link::{IoError, Link};
 use crate::wait::Clock;
-use lemnos_flash_wire::timing::ENUMERATION_LIMIT_US;
+use lemnos_flash_wire::timing::IDLE_LIMIT_US;
 use lemnos_flash_wire::usb::{
     BULK_IN, BULK_MAX_PACKET, BULK_OUT, CONFIGURATION_VALUE, EP0_MAX_PACKET, INTERFACE_CLASS,
     INTERFACE_PROTOCOL, INTERFACE_SUBCLASS, LANGUAGE, PRODUCT, PRODUCT_ID, VENDOR_ID,
@@ -59,6 +59,11 @@ pub trait Controller {
     fn ep0_out_status(&mut self) -> Result<(), UsbError>;
     /// Stalls the control endpoint for the request in flight.
     fn ep0_stall(&mut self);
+    /// Whether this controller takes the new address before the status stage of SET_ADDRESS (`true`), or only
+    /// after it (`false`). The shared control code calls `set_address` on the side this says, so a controller
+    /// that applies the address late is not assumed to apply it early. Each chip decides this from its own
+    /// controller's behaviour, and records it as a bench check.
+    fn address_before_status(&self) -> bool;
     /// Arms the bulk OUT transfer for exactly `len` bytes.
     fn bulk_arm(&mut self, len: usize) -> Result<(), UsbError>;
     /// Takes the armed transfer if it has completed, without waiting: `Some(n)` with its length.
@@ -120,7 +125,7 @@ pub mod descriptors {
         INTERFACE_CLASS,
         INTERFACE_SUBCLASS,
         INTERFACE_PROTOCOL,
-        0,
+        3, // iInterface: the wire's name and short hash (string index 3)
         // endpoint OUT
         7,
         5,
@@ -158,6 +163,27 @@ pub mod descriptors {
 
     /// The product string descriptor: its bytes (see [`product`]).
     pub const PRODUCT_STRING: [u8; 2 + 2 * PRODUCT.len()] = product();
+
+    /// The interface string descriptor (index 3): the wire's name and short hash, as UTF-16LE. Built from the wire
+    /// crate's [`lemnos_flash_wire::usb::INTERFACE_NAME`], so a host reads the same text the wire names.
+    pub const fn interface_string() -> [u8; 2 + 2 * INTERFACE_NAME_LEN] {
+        let name = lemnos_flash_wire::usb::INTERFACE_NAME;
+        let mut out = [0u8; 2 + 2 * INTERFACE_NAME_LEN];
+        out[0] = (2 + 2 * INTERFACE_NAME_LEN) as u8;
+        out[1] = 3;
+        let mut i = 0;
+        while i < INTERFACE_NAME_LEN {
+            out[2 + 2 * i] = name[i];
+            i += 1;
+        }
+        out
+    }
+
+    /// The length of the interface string in characters.
+    pub const INTERFACE_NAME_LEN: usize = lemnos_flash_wire::usb::INTERFACE_NAME.len();
+
+    /// The interface string descriptor, as bytes.
+    pub const INTERFACE_STRING: [u8; 2 + 2 * INTERFACE_NAME_LEN] = interface_string();
 }
 
 /// The request's fields.
@@ -233,11 +259,25 @@ impl Ep0 {
                 }];
                 self.data_in(ctrl, &value, setup.length)
             }
-            // SET_ADDRESS (device): a seven-bit address. The address is set before the status stage.
+            // SET_ADDRESS (device): a seven-bit address. When the address takes effect is the controller's
+            // (`address_before_status`); the status stage is the same either way.
             (true, true, false, 5) if setup.value < 128 => {
                 self.address = setup.value as u8;
-                ctrl.set_address(self.address)?;
-                ctrl.ep0_in_status()
+                if ctrl.address_before_status() {
+                    ctrl.set_address(self.address)?;
+                    ctrl.ep0_in_status()
+                } else {
+                    ctrl.ep0_in_status()?;
+                    ctrl.set_address(self.address)
+                }
+            }
+            // GET_STATUS to an interface (index 0) or an endpoint the device has (0x00, 0x01, 0x81): both zero.
+            (true, _, true, 0)
+                if (setup.request_type & 0x1F == 1 && setup.index == 0)
+                    || (setup.request_type & 0x1F == 2
+                        && matches!(setup.index as u8, 0x00 | 0x01 | 0x81)) =>
+            {
+                self.data_in(ctrl, &[0, 0], setup.length)
             }
             // SET_CONFIGURATION (device): 0 unconfigures, CONFIGURATION_VALUE configures; anything else stalls.
             (true, true, false, 9)
@@ -284,6 +324,7 @@ pub fn descriptor(value: u16, index: u16) -> Option<&'static [u8]> {
         (2, 0, _) => Some(&descriptors::CONFIGURATION),
         (3, 0, _) => Some(&descriptors::LANGUAGES),
         (3, 2, index) if index == LANGUAGE => Some(&descriptors::PRODUCT_STRING),
+        (3, 3, index) if index == LANGUAGE => Some(&descriptors::INTERFACE_STRING),
         _ => None,
     }
 }
@@ -291,7 +332,7 @@ pub fn descriptor(value: u16, index: u16) -> Option<&'static [u8]> {
 /// Why enumeration ended without a configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnumError {
-    /// No configuration was set within [`ENUMERATION_LIMIT_US`]. The host never finished; the stage ends.
+    /// No configuration was set before the session's deadline. The host never finished; the stage ends.
     NotConfigured,
     /// The cable was removed.
     Disconnected,
@@ -299,31 +340,39 @@ pub enum EnumError {
     Controller(UsbError),
 }
 
-/// Answers the host's control requests until a configuration is set, bounded by [`ENUMERATION_LIMIT_US`].
-/// A bus reset starts the count again: the host re-enumerates from the beginning.
+/// Answers the host's control requests until a configuration is set, or the deadline passes. The deadline is an
+/// absolute time on `clock`, and it is the session's idle deadline (counted from the last watchdog feed): a bus reset
+/// does not move it, so re-enumeration does not grant a fresh limit beyond what the watchdog allows.
 pub fn enumerate<C: Controller, K: Clock>(
     ctrl: &mut C,
     clock: &mut K,
     ep0: &mut Ep0,
+    deadline_us: u64,
 ) -> Result<(), EnumError> {
-    let mut deadline = clock.now_us().saturating_add(ENUMERATION_LIMIT_US);
     loop {
         if ep0.configured() {
             return Ok(());
         }
-        if clock.now_us() >= deadline {
+        if clock.now_us() >= deadline_us {
             return Err(EnumError::NotConfigured);
         }
         match ctrl.poll() {
             Event::None => {}
-            Event::BusReset => {
-                ep0.reset();
-                deadline = clock.now_us().saturating_add(ENUMERATION_LIMIT_US);
-            }
+            Event::BusReset => ep0.reset(),
             Event::Setup(bytes) => ep0.handle(ctrl, bytes).map_err(EnumError::Controller)?,
             Event::Disconnect => return Err(EnumError::Disconnected),
         }
     }
+}
+
+/// Enumerates with the idle limit counted from now: the start of a session, where the watchdog is armed.
+pub fn enumerate_from_now<C: Controller, K: Clock>(
+    ctrl: &mut C,
+    clock: &mut K,
+    ep0: &mut Ep0,
+) -> Result<(), EnumError> {
+    let deadline = clock.now_us().saturating_add(IDLE_LIMIT_US);
+    enumerate(ctrl, clock, ep0, deadline)
 }
 
 /// The bulk pair as a [`Link`]. While a frame waits for its bytes, control requests are answered, so a host
@@ -345,7 +394,11 @@ impl<C: Controller, K: Clock> Link for BulkLink<'_, C, K> {
             }
             match self.ctrl.poll() {
                 Event::None => {}
-                Event::BusReset | Event::Disconnect => return Err(IoError::Reset),
+                Event::BusReset => {
+                    self.ep0.reset();
+                    return Err(IoError::Reset);
+                }
+                Event::Disconnect => return Err(IoError::Reset),
                 Event::Setup(bytes) => {
                     self.ep0.handle(self.ctrl, bytes).map_err(map_error)?;
                     if !self.ep0.configured() {

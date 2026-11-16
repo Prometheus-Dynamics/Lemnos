@@ -66,6 +66,7 @@ pub mod dwc3 {
     pub const DEPCMD_DEPSTARTCFG: u32 = 0x09;
     pub const DEPCMD_SETTRANSFRESOURCE: u32 = 0x02;
     pub const DEPCMD_SETSTALL: u32 = 0x04;
+    pub const DEPCMD_ENDTRANSFER: u32 = 0x08;
     pub const DEPCMD_SETEPCONFIG: u32 = 0x01;
     pub const DEPCMD_STARTTRANSFER: u32 = 0x06;
     /// DCTL RUN_STOP (bit 31).

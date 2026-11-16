@@ -21,14 +21,16 @@ use crate::frame::{
     STATUS_OK, STATUS_STORAGE, STATUS_VERIFY,
 };
 use crate::hash::{OFFSET, bytes, text, word};
-use crate::identity::IDENTITY_MAGIC;
+use crate::identity::{IDENTITY_MAGIC, MAX_PEER_ENTRIES};
+use crate::region::MAX_REGIONS;
 use crate::timing::{
-    ENUMERATION_LIMIT_US, HOST_BULK_TIMEOUT_US, IDLE_LIMIT_US, ROUND_BUDGET_US, SESSION_BUDGET_US,
-    TRANSFER_BUDGET_US,
+    FEED_TO_FEED_US, HOST_BULK_TIMEOUT_US, IDLE_LIMIT_US, REFERENCE_WATCHDOG_PERIOD_US,
+    ROUND_BUDGET_US, ROUND_PHASES, TRANSFER_BUDGET_US,
 };
 use crate::usb::{
     BULK_IN, BULK_MAX_PACKET, BULK_OUT, CONFIGURATION_VALUE, EP0_MAX_PACKET, INTERFACE_CLASS,
-    INTERFACE_PROTOCOL, INTERFACE_SUBCLASS, LANGUAGE, PRODUCT, PRODUCT_ID, VENDOR_ID,
+    INTERFACE_NAME_PREFIX, INTERFACE_PROTOCOL, INTERFACE_SUBCLASS, LANGUAGE, PRODUCT, PRODUCT_ID,
+    VENDOR_ID,
 };
 
 /// The family of the frame layout and the timing contract.
@@ -114,10 +116,14 @@ const fn frame_hash() -> u64 {
     );
     // The timing contract: the same numbers on both sides.
     h = word(text(h, "transfer_budget_us"), TRANSFER_BUDGET_US);
+    h = word(text(h, "round_phases"), ROUND_PHASES);
     h = word(text(h, "round_budget_us"), ROUND_BUDGET_US);
     h = word(text(h, "idle_limit_us"), IDLE_LIMIT_US);
-    h = word(text(h, "enumeration_limit_us"), ENUMERATION_LIMIT_US);
-    h = word(text(h, "session_budget_us"), SESSION_BUDGET_US);
+    h = word(text(h, "feed_to_feed_us"), FEED_TO_FEED_US);
+    h = word(
+        text(h, "reference_watchdog_period_us"),
+        REFERENCE_WATCHDOG_PERIOD_US,
+    );
     h = word(text(h, "host_bulk_timeout_us"), HOST_BULK_TIMEOUT_US);
     h
 }
@@ -169,6 +175,8 @@ const fn identity_hash() -> u64 {
         h,
         "a reader skips trailing bytes it does not know; a family listed twice is refused",
     );
+    h = word(text(h, "max_regions"), MAX_REGIONS as u64);
+    h = word(text(h, "max_peer_entries"), MAX_PEER_ENTRIES as u64);
     h
 }
 
@@ -187,6 +195,8 @@ const fn usb_hash() -> u64 {
     h = word(text(h, "language"), LANGUAGE as u64);
     h = text(h, "product string");
     h = text(h, PRODUCT);
+    h = text(h, "interface string prefix");
+    h = text(h, INTERFACE_NAME_PREFIX);
     h
 }
 
@@ -226,15 +236,15 @@ mod tests {
     // The values this build computes. A layout change moves them: change them in the same commit as the
     // layout, and say so in the README's table of hashes. Each was recomputed outside this crate by an
     // independent FNV walk over the same bytes (see the README).
-    const PINNED_WIRE_HASH: u64 = 0xEF7C_B550_316C_1D7A;
-    const PINNED_WIRE_SHORT: u16 = 30266;
+    const PINNED_WIRE_HASH: u64 = 0x12B1_412A_AA81_ACE8;
+    const PINNED_WIRE_SHORT: u16 = 22002;
     const PINNED_FAMILY_HASHES: [u64; FAMILY_COUNT] = [
-        0x883E_42AC_7085_675A,
+        0xE0D8_DB7C_F61E_3D06,
         0xC170_D815_DF17_757F,
         0xE2B5_4BEB_21DA_BF76,
         0x40FE_F3FE_A154_445F,
-        0xDA93_D5B6_F43E_8100,
-        0x4580_FE1F_F9B1_A6EB,
+        0x2065_1D23_2C11_F17D,
+        0x8F59_A043_B5C3_0419,
     ];
 
     #[test]

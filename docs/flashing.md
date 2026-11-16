@@ -33,22 +33,6 @@ is to be replaced before a release.
 
 ## Timing
 
-Every session is bounded by the contract in `drivers/flash-wire/README.md` (the transfer, round, idle and
-enumeration limits, and the watchdog's period that covers them). A host must meet those numbers.
-
-## Rules every stage keeps
-
-Stated in `drivers/flash-stage/README.md`. In short: arm the watchdog first and read it back; never feed
-without a verified round; every wait is bounded; a cause is reported before any reset; a chunk is written
-only after its CRC matches; a boot area or header is written only with the compared mark.
-
-## Reset kinds
-
-An END carries a reset kind in its reserved byte: 0 is a normal reset and 3 asks the boot ROM for its
-maskrom path. Any other value reads as a normal reset. Whether the boot ROM acts on the maskrom value is
-not proven; it is the open item in `testing/board-runs/MR1.md`.
-
-## Where the chip records are
-
-Each board run is a record in `testing/board-runs/`. The Rockchip maskrom path is `MR1.md`. Its status
-is untested on board.
+Every session is bounded by the contract in `drivers/flash-wire/README.md`: one idle deadline, counted from the last watchdog
+feed (not from a reply and not from a bus reset), a round of four bounded phases, and a watchdog period that covers the
+worst gap between two feeds. A host must meet those numbers, and the build checks the bound against the reference watchdog.

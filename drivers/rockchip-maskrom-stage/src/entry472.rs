@@ -15,10 +15,10 @@ use crate::sd::{InitError, sd_init};
 use crate::usb::{Dwc3Dev, EventMem};
 pub use lemnos_flash_stage::guard::park;
 use lemnos_flash_stage::guard::{Cause, Report, StartError, finish, start};
-use lemnos_flash_stage::link::IoError;
 use lemnos_flash_stage::region::{Class, Region};
-use lemnos_flash_stage::serve::{ServeError, serve};
-use lemnos_flash_stage::usb::{BulkLink, EnumError, Ep0, UsbError, enumerate};
+use lemnos_flash_stage::serve::ServeError;
+use lemnos_flash_stage::session::{self as shared, SessionStop, Setup};
+use lemnos_flash_stage::usb::{EnumError, Ep0, UsbError};
 use lemnos_flash_stage::wait::{Clock, WaitError};
 use lemnos_flash_wire::frame::ResetKind;
 use lemnos_flash_wire::identity::{IDENTITY_LEN, identity_record};
@@ -120,27 +120,24 @@ pub fn session<C: Clock, M: DmaMem + EventMem>(
     let mut wdt = WdtFeed::new(&bus);
     let mut time = BusClock { bus: &bus };
     let mut ep0 = Ep0::new();
-    loop {
-        enumerate(&mut dev, &mut time, &mut ep0).map_err(Stop::Enumerate)?;
-        let mut link = BulkLink {
-            ctrl: &mut dev,
-            clock: &mut time,
-            ep0: &mut ep0,
-        };
-        match serve(
-            &mut link,
-            &mut storage,
-            &mut wdt,
-            &REGIONS,
-            &IDENTITY,
+    // The shared session: enumerate, serve, and enumerate again after a bus reset (flash-stage's `session::run`).
+    shared::run(
+        &mut dev,
+        &mut time,
+        &mut ep0,
+        &mut storage,
+        &mut wdt,
+        Setup {
+            regions: &REGIONS,
+            identity: &IDENTITY,
             buf,
             scratch,
-        ) {
-            Ok(kind) => return Ok(kind),
-            Err(ServeError::Link(IoError::Reset)) => continue,
-            Err(e) => return Err(Stop::Serve(e)),
-        }
-    }
+        },
+    )
+    .map_err(|stop| match stop {
+        SessionStop::Enumerate(e) => Stop::Enumerate(e),
+        SessionStop::Serve(e) => Stop::Serve(e),
+    })
 }
 
 /// The chip's report: the cause is kept where a reset does not clear it, and this stage has no such place

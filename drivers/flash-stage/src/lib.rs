@@ -19,6 +19,7 @@ pub mod guard;
 pub mod link;
 pub mod region;
 pub mod serve;
+pub mod session;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
 pub mod usb;

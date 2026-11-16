@@ -11,23 +11,9 @@
 //! What the stage can check is the payload's CRC and the region gating. It cannot know that the host
 //! compared anything: the mark is the host's word, and the compare rule for it is in the wire's README.
 
-pub use lemnos_flash_wire::region::{Class, MAX_REGIONS, Region, region_digest};
+pub use lemnos_flash_wire::region::{Class, MAX_REGIONS, Region, classify, region_digest};
 
 use lemnos_flash_wire::frame::crc16_ccitt;
-
-/// The strictest class of any region that a write of `count` sectors at `lba` overlaps. A write that overlaps
-/// no region is [`Class::Plain`].
-pub fn classify(regions: &[Region], lba: u32, count: u16) -> Class {
-    let first = u64::from(lba);
-    let end = first + u64::from(count);
-    let mut class = Class::Plain;
-    for region in regions {
-        if first < u64::from(region.end) && u64::from(region.first) < end && region.class > class {
-            class = region.class;
-        }
-    }
-    class
-}
 
 /// A chunk whose CRC matched its payload. Only [`verify`] makes one.
 #[derive(Debug, PartialEq, Eq)]

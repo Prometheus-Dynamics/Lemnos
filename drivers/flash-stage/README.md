@@ -28,6 +28,17 @@ the timing and the compare rule. This README is about the stage side of that con
   status and the session goes on; a storage failure gets its status and the session goes on; an END ends it with its
   reset kind; an idle host ends it at the idle limit; a bus reset ends it with `IoError::Reset` so the device side
   enumerates again; a cut ends it with its timeout (the only silent end).
+- **Session loop** (`session::run`): from reset, enumerate the device; serve the bulk pair until an END; on a bus reset
+  or an unconfiguration during the session, enumerate again and serve again. It runs on **one clock**: the idle deadline
+  is `IDLE_LIMIT_US` after the last watchdog feed (or the start). The loop counts the feeds a step makes and moves the
+  deadline only on a feed. Enumeration, before the first request and after every bus reset, shares that deadline, so a
+  reset grants no fresh limit. It returns the END's reset kind, or why it stopped: `SessionStop::Enumerate` (no
+  configuration before the deadline), or `SessionStop::Serve(ServeError::Idle)` (no request before the deadline; a
+  distinct outcome from a link timeout), or `SessionStop::Serve(Link(..))` (a link that failed for good). The chip's entry
+  calls this one function; the tests drive the same function through the model controller from reset.
+- **Address timing** is the controller's decision: `Controller::address_before_status` says whether `set_address` runs
+  before or after the status stage of SET_ADDRESS. The shared code does not assume either. Each chip records its
+  controller's behaviour as a bench check.
 - **Device side** (`usb`): the control endpoint's standard requests, the descriptors, the enumeration loop, and the bulk
   pair as a `Link`. A chip implements `usb::Controller` (poll, set the address and the configuration, the control
   packets, stalls, and the bulk transfers), and nothing else. The control endpoint's state is `Ep0`. Its descriptors
@@ -56,15 +67,29 @@ and verify it before it relies on it. A read that fails (status 2 alone) changes
 
 ## Simulated device, and the conformance list
 
-`sim` (feature `sim`) is a card, a queue link and the real serve step, with the frame-level `sim::Transport` a host
-implements over its own link.
+`sim` (feature `sim`) is a stage **from reset**: the device side over a scripted controller (`sim::model`), the stage's
+real serve step, and a sparse card. **The simulated device starts at reset.** Every scenario starts with
+`Transport::connect`, which runs the host's enumeration (descriptors, SET_ADDRESS, SET_CONFIGURATION) before the
+scenario's first request. So a host that passes the list has also enumerated the device. A board transport performs the
+same enumeration over its own USB stack. The frame-level `sim::Transport` is what a host implements over its link.
 
+- `Transport::connect` runs the host's enumeration from reset. It is required: a transport that does not enumerate
+  its device cannot run the suite.
 - `Transport::send_frame` sends one frame (one transfer). `Transport::take_reply` runs the stage as far as it needs to
   and returns the next reply, or `None` when the stage has nothing more to say until the host sends again. A host can
   act on each reply before it asks for the next. `Transport::feeds` reports the watchdog's count where the transport can
   see it (the simulated device can; a board cannot).
-- `sim::SCENARIOS` is the conformance list: 17 scenarios, each run with `sim::run(&scenario, &mut transport)` against a
-  fresh stage. A scenario reads the stage's identity record for its sectors, so the list follows the stage's regions.
+- `sim::SCENARIOS` is the conformance list: 17 scenarios, each run with `sim::run(&scenario, &mut transport,
+  ScratchCard::acknowledge())`, which connects first, against a fresh stage. The list is public behind the `sim` feature,
+  so another crate can call it.
+- **Scratch card only.** The suite writes real sectors: the header at sector 64 (`header_with_mark_stored`), a boot-area
+  sector at 100 (`boot_area_with_mark_stored`), and plain sectors past the boot area (the write at the region end,
+  32768). Running it against any transport takes a `ScratchCard`, which only `ScratchCard::acknowledge()` makes: the
+  caller states the card is a scratch card. It is a typed argument, not an environment variable, so a run on a card that
+  matters does not compile without that statement.
+- **A check that could not be made is not a pass.** When the transport cannot count feeds, the feed checks are recorded as
+  not checked, and `run` returns `Verdict::NotChecked(names)`, never `Verdict::Passed`. A transport failure is
+  `TransportError::Transport(message)`, a host-side fault and not a verdict on the stage. A scenario reads the stage's identity record for its sectors, so the list follows the stage's regions.
   The list is: identify (with a build id); read (with its CRC, one feed); a plain write (stored, one feed); a write with
   a bad CRC (status 1, nothing stored, no feed); a cut before the payload (a stop); a boot-area write without the mark
   (status 4); a boot-area write with the mark (stored); a header write with a bad CRC and the mark (status 1, nothing
@@ -72,14 +97,24 @@ implements over its own link.
   without the mark (status 4); a chunk of the wrong length (status 5, the session goes on); END with maskrom (ok, then
   `Ended(Maskrom)`); a request with a bad CRC (status 1, the session goes on); a reserved bit (status 5, the session goes
   on); an empty queue (idle, not a stop); and the published regions (a digest that is not zero).
-- `sim::model` is a scripted device controller. It drives the same `usb` code the chip runs, for the enumeration and
-  bulk tests: a full enumeration, the descriptors, a host that never configures, a bus reset during enumeration, a
-  disconnect, a control request that is stalled, a control request in the middle of a bulk session, a bus reset and an
-  unconfiguration while a frame waits.
+- `sim::model` is a scripted device controller: an ordered script of control events and bulk frames, so a reset can
+  land between two requests. It starts at reset. It drives the same `usb` and `session` code the chip runs. Its tests
+  cover the enumeration, the descriptors, a host that never configures, a bus reset during enumeration, a disconnect, a
+  stalled control request, a control request in a session, a reset and an unconfiguration while a frame waits.
+- `session` tests run the whole session from reset through the model: (a) a cold start (enumerate, then the first request
+  answered); (b) a bus reset between two requests (re-enumerate, serve again); (c) a host that never configures (the
+  enumeration limit is the stop, and nothing is fed); (d) an unsupported control request (stalled; the session goes on);
+  plus a reset with a chunk in flight (the chunk is not written) and an idle host (the idle limit is the stop).
 
 ## What a chip's stage must still show on its own
 
 - The `Guard` over its watchdog registers, with a read-back of the arming.
+- The `Controller::address_before_status` answer, with its controller source cited, and marked as a bench check.
+- The end-transfer on a bus reset (`io::end_transfer`): the resource id is zero; a bench check.
+- The surplus question: a host's frame longer than its receive transfer leaves its surplus on the endpoint, where the
+  next header receive would read it. **Not closed.** The exact-length receive does not expose the surplus on the DWC3
+  path; the stage refuses nothing it cannot see. The fix is a drain receive whose semantics must be shown on the bench,
+  and it is not in this revision.
 - The `usb::Controller` over its device controller, with every wait bounded on its own clock and its cache maintenance.
   Its own tests must show the controller's register sequences (the event buffer, the control endpoints, the transfer
   resources before the transfers, the device address write) and its event decoding.

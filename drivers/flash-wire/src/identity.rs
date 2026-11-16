@@ -35,8 +35,9 @@ pub const REGION_LEN: usize = 9;
 pub const IDENTITY_LEN: usize =
     HEAD_LEN + FAMILY_COUNT * ENTRY_LEN + BUILD_LEN + 1 + MAX_REGIONS * REGION_LEN;
 
-/// The most family entries a peer's record may carry, which bounds how far a reader looks.
-const MAX_PEER_ENTRIES: usize = 16;
+/// The most family entries a peer's record may carry, which bounds how far a reader looks. Part of the wire: it is
+/// folded into the identity family's hash.
+pub const MAX_PEER_ENTRIES: usize = 16;
 
 /// Builds this stage's identity record: its build id and its region table.
 ///

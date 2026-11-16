@@ -1,14 +1,16 @@
 //! The serve loop: one request at a time over a [`Link`], until an END.
 //!
 //! What ends the session, and what does not:
-//! - **A refused request** (a bad length, a bad CRC, an unknown op, a reserved bit it does not define, a
-//!   short or long chunk) gets a one-byte status reply and the session goes on. Nothing is done for it.
+//! - **A refused request** (a bad length, a bad CRC, an unknown op, a reserved bit it does not define, a chunk of the
+//!   wrong length) gets a one-byte status reply and the session goes on. Nothing is done for it.
 //! - **A failed storage operation** gets its status and the session goes on. The range may be partly written.
 //! - **An END** replies its status and returns the reset kind it asked for.
-//! - **The idle limit** (no request within [`IDLE_LIMIT_US`]) ends the session with [`Progress::Idle`].
+//! - **The idle deadline.** The header wait gets the budget the session computes: the time left before the idle
+//!   deadline, counted from the last watchdog feed. If no request arrives in that budget the loop returns
+//!   [`Progress::Idle`], and `serve` reports [`ServeError::Idle`]. A reply does not restart it.
 //! - **A bus reset or an unconfiguration** ends the session with `IoError::Reset`: the chip enumerates again.
-//! - **A link cut** (a transfer that started and never finished) ends the session with its timeout. No reply
-//!   is possible then.
+//! - **A link cut** (a transfer that started and never finished) ends the session with its timeout. No reply is
+//!   possible then.
 
 use crate::chunk::{Fault, read_round, write_round};
 use crate::guard::Watchdog;
@@ -18,7 +20,7 @@ use lemnos_flash_wire::frame::{
     FrameError, MAX_CHUNK, Op, REQUEST_LEN, Request, ResetKind, STATUS_BAD_REQUEST, STATUS_CRC,
     STATUS_NOT_COMPARED, STATUS_OK, STATUS_STORAGE, STATUS_VERIFY,
 };
-use lemnos_flash_wire::timing::{IDLE_LIMIT_US, TRANSFER_BUDGET_US};
+use lemnos_flash_wire::timing::TRANSFER_BUDGET_US;
 
 /// What one step of the loop did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub enum Progress {
     Served,
     /// A request was refused: its status was sent, and nothing was done for it.
     Refused(u8),
-    /// No request came within the idle limit.
+    /// No request came before the idle deadline.
     Idle,
     /// An END was served; the reset kind it asked for.
     Ended(ResetKind),
@@ -38,6 +40,8 @@ pub enum Progress {
 pub enum ServeError {
     /// The link failed: a cut, a reset, or a stall. See the module docs.
     Link(IoError),
+    /// The idle deadline passed with no request. The host did not ask in time; the watchdog has not fired.
+    Idle,
 }
 
 /// The status a refused frame gets.
@@ -48,30 +52,36 @@ fn refusal_status(error: FrameError) -> u8 {
     }
 }
 
-/// Serves one step: one request, or one idle wait. `buf` and `scratch` each hold at least [`MAX_CHUNK`] bytes.
-/// `identity` is the stage's identity record, sent in reply to an identify.
+/// What a step serves from: the card's regions and the stage's identity record.
+#[derive(Clone, Copy)]
+pub struct Context<'a> {
+    pub regions: &'a [Region],
+    pub identity: &'a [u8],
+}
+
+/// Serves one step: one request, or one idle wait of at most `header_budget_us`. `buf` and `scratch` each hold at
+/// least [`BUFFER_LEN`] bytes. `identity` is the stage's identity record, sent in reply to an identify.
 pub fn step<L: Link, S: Storage, W: Watchdog>(
     link: &mut L,
     storage: &mut S,
     wdt: &mut W,
-    regions: &[Region],
-    identity: &[u8],
+    ctx: &Context<'_>,
+    header_budget_us: u64,
     buf: &mut [u8],
     scratch: &mut [u8],
 ) -> Result<Progress, ServeError> {
     let mut header = [0u8; REQUEST_LEN];
-    let n = match link.recv(&mut header, IDLE_LIMIT_US) {
+    let n = match link.recv(&mut header, header_budget_us) {
         Ok(n) => n,
         Err(IoError::Timeout) => return Ok(Progress::Idle),
         Err(e) => return Err(ServeError::Link(e)),
     };
-    let request = if n != REQUEST_LEN {
-        return refuse(link, STATUS_BAD_REQUEST);
-    } else {
-        match Request::decode(&header) {
-            Ok(request) => request,
-            Err(error) => return refuse(link, refusal_status(error)),
-        }
+    if n != REQUEST_LEN {
+        return send_status(link, STATUS_BAD_REQUEST);
+    }
+    let request = match Request::decode(&header) {
+        Ok(request) => request,
+        Err(error) => return send_status(link, refusal_status(error)),
     };
     match request.op {
         Op::Read => {
@@ -96,7 +106,7 @@ pub fn step<L: Link, S: Storage, W: Watchdog>(
                 link,
                 storage,
                 wdt,
-                regions,
+                ctx.regions,
                 &request,
                 &mut buf[..len],
                 &mut scratch[..len - 2],
@@ -112,7 +122,7 @@ pub fn step<L: Link, S: Storage, W: Watchdog>(
             send_status(link, status)
         }
         Op::Identify => {
-            link.send(identity, TRANSFER_BUDGET_US)
+            link.send(ctx.identity, TRANSFER_BUDGET_US)
                 .map_err(ServeError::Link)?;
             Ok(Progress::Served)
         }
@@ -124,6 +134,7 @@ pub fn step<L: Link, S: Storage, W: Watchdog>(
     }
 }
 
+/// Sends a one-byte status and reports what it was.
 fn send_status<L: Link>(link: &mut L, status: u8) -> Result<Progress, ServeError> {
     link.send(&[status], TRANSFER_BUDGET_US)
         .map_err(ServeError::Link)?;
@@ -134,31 +145,26 @@ fn send_status<L: Link>(link: &mut L, status: u8) -> Result<Progress, ServeError
     })
 }
 
-fn refuse<L: Link>(link: &mut L, status: u8) -> Result<Progress, ServeError> {
-    send_status(link, status)
-}
-
-/// Serves until an END. The idle limit and every failure end the loop as an error or as [`Progress::Idle`]
-/// (returned as an error here, `IoError::Timeout`, so the caller ends the session).
+/// Serves until an END. The idle deadline ends it with [`ServeError::Idle`]; every link failure with its error.
 pub fn serve<L: Link, S: Storage, W: Watchdog>(
     link: &mut L,
     storage: &mut S,
     wdt: &mut W,
-    regions: &[Region],
-    identity: &[u8],
+    ctx: &Context<'_>,
+    header_budget_us: u64,
     buf: &mut [u8],
     scratch: &mut [u8],
 ) -> Result<ResetKind, ServeError> {
     loop {
-        match step(link, storage, wdt, regions, identity, buf, scratch)? {
+        match step(link, storage, wdt, ctx, header_budget_us, buf, scratch)? {
             Progress::Ended(kind) => return Ok(kind),
-            Progress::Idle => return Err(ServeError::Link(IoError::Timeout)),
+            Progress::Idle => return Err(ServeError::Idle),
             Progress::Served | Progress::Refused(_) => {}
         }
     }
 }
 
-/// The size both buffers of [`serve`] must hold.
+/// The size both buffers of [`serve`] must hold: a read reply, which carries its status first.
 pub const BUFFER_LEN: usize = MAX_CHUNK + 1;
 
 #[cfg(test)]
@@ -220,6 +226,8 @@ mod tests {
         }
     }
 
+    const IDLE_BUDGET: u64 = 30_000_000;
+
     const REGIONS: [Region; 1] = [Region {
         first: 64,
         end: 100,
@@ -245,8 +253,11 @@ mod tests {
             &mut link,
             &mut card,
             &mut dog,
-            &REGIONS,
-            &[],
+            &Context {
+                regions: &REGIONS,
+                identity: &[],
+            },
+            IDLE_BUDGET,
             &mut buf,
             &mut scratch,
         )
@@ -279,8 +290,11 @@ mod tests {
             &mut link,
             &mut card,
             &mut dog,
-            &REGIONS,
-            &[],
+            &Context {
+                regions: &REGIONS,
+                identity: &[],
+            },
+            IDLE_BUDGET,
             &mut buf,
             &mut scratch,
         );
@@ -308,8 +322,11 @@ mod tests {
             &mut link,
             &mut card,
             &mut dog,
-            &REGIONS,
-            &[],
+            &Context {
+                regions: &REGIONS,
+                identity: &[],
+            },
+            IDLE_BUDGET,
             &mut buf,
             &mut scratch,
         )

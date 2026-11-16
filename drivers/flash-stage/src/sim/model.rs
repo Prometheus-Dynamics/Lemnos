@@ -1,6 +1,7 @@
-//! A scripted device controller for the device side's tests. The script is the host: it queues events (SETUP
-//! packets, bus resets) and bulk frames, and the model records what the device side did to the controller.
-//! The same code the chip runs (`usb::enumerate`, `usb::BulkLink`) drives it.
+//! A scripted device controller, for the device side's tests and for the simulated device. The script is the
+//! host: an ordered list of control events (SETUP packets, bus resets) and bulk frames. The controller hands the
+//! steps out in order, so a reset can land between two requests. The model starts at reset: address 0, no
+//! configuration. The same code the chip runs (`usb::enumerate`, `usb::BulkLink`, `session::run`) drives it.
 
 use std::collections::VecDeque;
 use std::vec::Vec;
@@ -8,7 +9,18 @@ use std::vec::Vec;
 use crate::usb::{Controller, Event, UsbError};
 use lemnos_flash_wire::usb::EP0_MAX_PACKET;
 
-/// What the device side did on the control endpoint or the configuration, in order.
+/// One step of the host's script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// A control event: a SETUP packet, a bus reset, a disconnect.
+    Event(Event),
+    /// A bulk OUT frame, delivered to the next armed receive.
+    Frame(Vec<u8>),
+    /// A pause: the next `n` receive polls find nothing. Each poll is a turn of the wait, so the clock moves on.
+    Gap(u64),
+}
+
+/// What the device side did to the controller, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Data(Vec<u8>),
@@ -22,27 +34,51 @@ pub enum Action {
 /// The scripted controller.
 #[derive(Default)]
 pub struct Model {
-    /// Events the host has queued, in order.
-    pub events: VecDeque<Event>,
-    /// Bulk OUT frames the host has sent, in order.
-    pub bulk_out: VecDeque<Vec<u8>>,
+    /// The host's script, in order.
+    pub script: VecDeque<Step>,
     /// What the device side did, in order.
     pub log: Vec<Action>,
-    /// Bulk IN replies the device sent, in order.
+    /// The bulk IN replies the device sent, in order.
     pub bulk_in: Vec<Vec<u8>>,
     armed: Option<usize>,
 }
 
 impl Model {
-    /// A model whose host sends `events` in order.
-    pub fn with_events(events: impl IntoIterator<Item = Event>) -> Self {
-        Self {
-            events: events.into_iter().collect(),
-            ..Self::default()
-        }
+    /// A controller at reset with an empty script.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// The control request a host sends: its eight bytes.
+    /// Queues a control event.
+    pub fn event(&mut self, event: Event) -> &mut Self {
+        self.script.push_back(Step::Event(event));
+        self
+    }
+
+    /// Queues a bulk OUT frame.
+    pub fn frame(&mut self, frame: Vec<u8>) -> &mut Self {
+        self.script.push_back(Step::Frame(frame));
+        self
+    }
+
+    /// Queues a pause of `polls` receive turns.
+    pub fn gap(&mut self, polls: u64) -> &mut Self {
+        self.script.push_back(Step::Gap(polls));
+        self
+    }
+
+    /// Queues the standard enumeration a host runs after a reset: the device and configuration descriptors, the
+    /// strings, SET_ADDRESS, and SET_CONFIGURATION 1.
+    pub fn enumeration(&mut self, address: u16) -> &mut Self {
+        self.event(Self::setup(GET, 6, 0x0100, 0, 18))
+            .event(Self::setup(GET, 6, 0x0200, 0, 255))
+            .event(Self::setup(GET, 6, 0x0300, 0, 255))
+            .event(Self::setup(GET, 6, 0x0302, 0x0409, 255))
+            .event(Self::setup(SET, 5, address, 0, 0))
+            .event(Self::setup(SET, 9, 1, 0, 0))
+    }
+
+    /// The control request a host sends: its eight bytes, as an event.
     pub fn setup(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> Event {
         let v = value.to_le_bytes();
         let i = index.to_le_bytes();
@@ -50,7 +86,7 @@ impl Model {
         Event::Setup([request_type, request, v[0], v[1], i[0], i[1], l[0], l[1]])
     }
 
-    /// The device side's data packets for one control IN request, as the host reads them.
+    /// The data packets the device side sent on control IN, in order.
     pub fn data_of(&self) -> Vec<Vec<u8>> {
         self.log
             .iter()
@@ -60,16 +96,36 @@ impl Model {
             })
             .collect()
     }
+
+    /// Whether the next script step is a frame: the link has something to deliver.
+    pub fn frame_pending(&self) -> bool {
+        matches!(self.script.front(), Some(Step::Frame(_)))
+    }
 }
+
+/// The request types the enumeration uses.
+const GET: u8 = 0x80;
+const SET: u8 = 0x00;
 
 impl Controller for Model {
     fn poll(&mut self) -> Event {
-        self.events.pop_front().unwrap_or(Event::None)
+        match self.script.front() {
+            Some(Step::Event(_)) => match self.script.pop_front() {
+                Some(Step::Event(event)) => event,
+                _ => Event::None,
+            },
+            _ => Event::None,
+        }
     }
 
     fn set_address(&mut self, address: u8) -> Result<(), UsbError> {
         self.log.push(Action::Address(address));
         Ok(())
+    }
+
+    fn address_before_status(&self) -> bool {
+        // The model stands in for a controller that takes the address before the status stage.
+        true
     }
 
     fn set_configured(&mut self, on: bool) -> Result<(), UsbError> {
@@ -109,11 +165,17 @@ impl Controller for Model {
         let Some(len) = self.armed else {
             return Err(UsbError::Failed);
         };
-        // The host's control requests come before its next frame: a frame is not delivered while events are queued.
-        if !self.events.is_empty() {
+        if let Some(Step::Gap(polls)) = self.script.front_mut() {
+            if *polls > 0 {
+                *polls -= 1;
+                return Ok(None);
+            }
+            self.script.pop_front();
+        }
+        if !self.frame_pending() {
             return Ok(None);
         }
-        let Some(frame) = self.bulk_out.pop_front() else {
+        let Some(Step::Frame(frame)) = self.script.pop_front() else {
             return Ok(None);
         };
         self.armed = None;
@@ -132,30 +194,39 @@ impl Controller for Model {
 mod tests {
     use super::*;
     use crate::link::{IoError, Link};
-    use crate::usb::{BulkLink, EnumError, Ep0, descriptors, enumerate};
-    use crate::wait::IterClock;
+    use crate::usb::{BulkLink, EnumError, Ep0, descriptors, enumerate_from_now};
+    use crate::wait::{Clock, IterClock};
     use lemnos_flash_wire::usb::{PRODUCT, PRODUCT_ID, VENDOR_ID};
 
-    const GET: u8 = 0x80;
-    const SET: u8 = 0x00;
+    /// A clock that moves a millisecond per read, so a limit of thirty seconds is thirty thousand reads.
+    struct Quick(u64);
 
-    fn host_enumerates_fully() -> Vec<Event> {
-        vec![
-            Model::setup(GET, 6, 0x0100, 0, 18),       // device descriptor
-            Model::setup(GET, 6, 0x0200, 0, 255),      // configuration, wLength past its size
-            Model::setup(GET, 6, 0x0300, 0, 255),      // string 0
-            Model::setup(GET, 6, 0x0302, 0x0409, 255), // product string
-            Model::setup(SET, 5, 7, 0, 0),             // SET_ADDRESS 7
-            Model::setup(SET, 9, 1, 0, 0),             // SET_CONFIGURATION 1
-        ]
+    impl Clock for Quick {
+        fn now_us(&mut self) -> u64 {
+            self.0 += 1_000;
+            self.0
+        }
+    }
+
+    fn enumerated() -> (Model, Ep0) {
+        let mut ctrl = Model::new();
+        ctrl.enumeration(7);
+        let mut ep0 = Ep0::new();
+        enumerate_from_now(&mut ctrl, &mut IterClock::new(), &mut ep0).unwrap();
+        ctrl.log.clear();
+        (ctrl, ep0)
     }
 
     #[test]
-    fn a_host_that_enumerates_fully_gets_the_device_and_the_configuration() {
-        let mut ctrl = Model::with_events(host_enumerates_fully());
-        let mut clock = IterClock::new();
+    fn a_host_that_enumerates_fully_from_reset_gets_the_device_and_the_configuration() {
+        let mut ctrl = Model::new();
+        ctrl.enumeration(7);
         let mut ep0 = Ep0::new();
-        enumerate(&mut ctrl, &mut clock, &mut ep0).unwrap();
+        assert!(
+            !ep0.configured(),
+            "the device starts at reset: unconfigured, address 0"
+        );
+        enumerate_from_now(&mut ctrl, &mut IterClock::new(), &mut ep0).unwrap();
         assert!(ep0.configured());
         assert_eq!(ep0.address(), 7);
         let data = ctrl.data_of();
@@ -168,12 +239,12 @@ mod tests {
         assert_eq!(data[2], descriptors::LANGUAGES.to_vec());
         assert_eq!(data[3], descriptors::PRODUCT_STRING.to_vec());
         assert!(ctrl.log.contains(&Action::Address(7)));
+        assert!(ctrl.log.contains(&Action::Configured(true)));
         assert_eq!(
             ctrl.log.last(),
             Some(&Action::StatusIn),
             "SET_CONFIGURATION ends with its status stage"
         );
-        assert!(ctrl.log.contains(&Action::Configured(true)));
     }
 
     #[test]
@@ -210,23 +281,22 @@ mod tests {
 
     #[test]
     fn a_request_the_device_does_not_answer_is_stalled_and_enumeration_goes_on() {
-        let mut events = vec![Model::setup(0xC0, 1, 0, 0, 16)]; // a vendor request
-        events.extend(host_enumerates_fully());
-        let mut ctrl = Model::with_events(events);
-        let mut clock = IterClock::new();
+        let mut ctrl = Model::new();
+        ctrl.event(Model::setup(0xC0, 1, 0, 0, 16));
+        ctrl.enumeration(7);
         let mut ep0 = Ep0::new();
-        enumerate(&mut ctrl, &mut clock, &mut ep0).unwrap();
+        enumerate_from_now(&mut ctrl, &mut IterClock::new(), &mut ep0).unwrap();
         assert_eq!(ctrl.log[0], Action::Stall);
         assert!(ep0.configured());
     }
 
     #[test]
     fn a_host_that_never_sets_a_configuration_ends_the_enumeration_at_its_limit() {
-        let mut ctrl = Model::with_events([Model::setup(GET, 6, 0x0100, 0, 18)]);
-        let mut clock = IterClock::new();
+        let mut ctrl = Model::new();
+        ctrl.event(Model::setup(GET, 6, 0x0100, 0, 18));
         let mut ep0 = Ep0::new();
         assert_eq!(
-            enumerate(&mut ctrl, &mut clock, &mut ep0),
+            enumerate_from_now(&mut ctrl, &mut Quick(0), &mut ep0),
             Err(EnumError::NotConfigured)
         );
         assert!(!ep0.configured());
@@ -234,12 +304,12 @@ mod tests {
 
     #[test]
     fn a_bus_reset_during_enumeration_starts_it_again() {
-        let mut events = vec![Model::setup(SET, 5, 9, 0, 0), Event::BusReset];
-        events.extend(host_enumerates_fully());
-        let mut ctrl = Model::with_events(events);
-        let mut clock = IterClock::new();
+        let mut ctrl = Model::new();
+        ctrl.event(Model::setup(SET, 5, 9, 0, 0))
+            .event(Event::BusReset)
+            .enumeration(7);
         let mut ep0 = Ep0::new();
-        enumerate(&mut ctrl, &mut clock, &mut ep0).unwrap();
+        enumerate_from_now(&mut ctrl, &mut IterClock::new(), &mut ep0).unwrap();
         assert_eq!(
             ep0.address(),
             7,
@@ -250,27 +320,19 @@ mod tests {
 
     #[test]
     fn a_disconnect_ends_the_enumeration() {
-        let mut ctrl = Model::with_events([Event::Disconnect]);
-        let mut clock = IterClock::new();
+        let mut ctrl = Model::new();
+        ctrl.event(Event::Disconnect);
         let mut ep0 = Ep0::new();
         assert_eq!(
-            enumerate(&mut ctrl, &mut clock, &mut ep0),
+            enumerate_from_now(&mut ctrl, &mut IterClock::new(), &mut ep0),
             Err(EnumError::Disconnected)
         );
     }
 
-    fn configured_device() -> (Model, Ep0) {
-        let mut ctrl = Model::with_events(host_enumerates_fully());
-        let mut ep0 = Ep0::new();
-        enumerate(&mut ctrl, &mut IterClock::new(), &mut ep0).unwrap();
-        ctrl.log.clear();
-        (ctrl, ep0)
-    }
-
     #[test]
     fn a_bulk_frame_is_received_whole_and_a_reply_is_sent() {
-        let (mut ctrl, mut ep0) = configured_device();
-        ctrl.bulk_out.push_back(vec![7u8; 12]);
+        let (mut ctrl, mut ep0) = enumerated();
+        ctrl.frame(vec![7u8; 12]);
         let mut clock = IterClock::new();
         let mut link = BulkLink {
             ctrl: &mut ctrl,
@@ -286,21 +348,21 @@ mod tests {
 
     #[test]
     fn a_frame_that_never_comes_times_out_at_the_budget() {
-        let (mut ctrl, mut ep0) = configured_device();
-        let mut clock = IterClock::new();
+        let (mut ctrl, mut ep0) = enumerated();
+        let mut clock = Quick(0);
         let mut link = BulkLink {
             ctrl: &mut ctrl,
             clock: &mut clock,
             ep0: &mut ep0,
         };
         let mut buf = [0u8; 12];
-        assert_eq!(link.recv(&mut buf, 1_000), Err(IoError::Timeout));
+        assert_eq!(link.recv(&mut buf, 1_000_000), Err(IoError::Timeout));
     }
 
     #[test]
-    fn a_bus_reset_while_waiting_for_a_frame_is_a_reset() {
-        let (mut ctrl, mut ep0) = configured_device();
-        ctrl.events.push_back(Event::BusReset);
+    fn a_bus_reset_while_waiting_for_a_frame_is_a_reset_and_forgets_the_configuration() {
+        let (mut ctrl, mut ep0) = enumerated();
+        ctrl.event(Event::BusReset);
         let mut clock = IterClock::new();
         let mut link = BulkLink {
             ctrl: &mut ctrl,
@@ -309,12 +371,13 @@ mod tests {
         };
         let mut buf = [0u8; 12];
         assert_eq!(link.recv(&mut buf, 1_000_000), Err(IoError::Reset));
+        assert!(!ep0.configured());
     }
 
     #[test]
     fn an_unconfiguration_while_waiting_for_a_frame_is_a_reset() {
-        let (mut ctrl, mut ep0) = configured_device();
-        ctrl.events.push_back(Model::setup(SET, 9, 0, 0, 0));
+        let (mut ctrl, mut ep0) = enumerated();
+        ctrl.event(Model::setup(SET, 9, 0, 0, 0));
         let mut clock = IterClock::new();
         let mut link = BulkLink {
             ctrl: &mut ctrl,
@@ -328,9 +391,9 @@ mod tests {
 
     #[test]
     fn a_control_request_during_a_session_is_answered_and_the_frame_still_comes() {
-        let (mut ctrl, mut ep0) = configured_device();
-        ctrl.events.push_back(Model::setup(GET, 0, 0, 0, 2)); // GET_STATUS
-        ctrl.bulk_out.push_back(vec![3u8; 12]);
+        let (mut ctrl, mut ep0) = enumerated();
+        ctrl.event(Model::setup(GET, 0, 0, 0, 2))
+            .frame(vec![3u8; 12]); // GET_STATUS, then the frame
         let mut clock = IterClock::new();
         let mut link = BulkLink {
             ctrl: &mut ctrl,
@@ -344,9 +407,9 @@ mod tests {
 
     #[test]
     fn a_stalled_unsupported_request_in_a_session_does_not_end_it() {
-        let (mut ctrl, mut ep0) = configured_device();
-        ctrl.events.push_back(Model::setup(0x21, 0x20, 0, 0, 7)); // a class request
-        ctrl.bulk_out.push_back(vec![3u8; 12]);
+        let (mut ctrl, mut ep0) = enumerated();
+        ctrl.event(Model::setup(0x21, 0x20, 0, 0, 7))
+            .frame(vec![3u8; 12]); // a class request, then the frame
         let mut clock = IterClock::new();
         let mut link = BulkLink {
             ctrl: &mut ctrl,

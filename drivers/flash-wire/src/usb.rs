@@ -28,3 +28,30 @@ pub const EP0_MAX_PACKET: u8 = 64;
 pub const PRODUCT: &str = "Lemnos flash stage";
 /// The language the strings are in (US English).
 pub const LANGUAGE: u16 = 0x0409;
+
+/// The prefix of the interface string (string index 3, the interface's `iInterface`). The string names the wire and
+/// its short hash, so a host can tell this wire from another one at the same VID:PID before it claims the interface:
+/// `lemnos flash wire XXXX`, where `XXXX` is [`crate::WIRE_SHORT`] as four upper-case hexadecimal digits.
+pub const INTERFACE_NAME_PREFIX: &str = "lemnos flash wire ";
+
+/// The interface string as ASCII: the prefix, then the short hash in hexadecimal. The layout hash folds only the
+/// prefix, so the string does not depend on the hash it names.
+pub const fn interface_name(short: u16) -> [u8; INTERFACE_NAME_PREFIX.len() + 4] {
+    let mut out = [0u8; INTERFACE_NAME_PREFIX.len() + 4];
+    let prefix = INTERFACE_NAME_PREFIX.as_bytes();
+    let mut i = 0;
+    while i < prefix.len() {
+        out[i] = prefix[i];
+        i += 1;
+    }
+    let digits = b"0123456789ABCDEF";
+    let mut d = 0;
+    while d < 4 {
+        out[prefix.len() + d] = digits[((short >> (12 - 4 * d)) & 0xF) as usize];
+        d += 1;
+    }
+    out
+}
+
+/// The interface string this build presents, with the short hash of the wire it is built into.
+pub const INTERFACE_NAME: [u8; INTERFACE_NAME_PREFIX.len() + 4] = interface_name(crate::WIRE_SHORT);
