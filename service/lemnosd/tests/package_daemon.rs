@@ -3,7 +3,7 @@
 //! neither stops it.
 //!
 //! The packages are built here: the loader's fixture crate with cargo, and the package written
-//! in C with the C compiler, once as it is and once with no driver name.
+//! against the header, built with rustc, once as it is and once with no driver name.
 
 use std::io::Read;
 use std::os::unix::net::UnixStream;
@@ -31,7 +31,7 @@ config = { start = 10 }
 
 [[devices]]
 id = "pin"
-driver = "c-package"
+driver = "raw-package"
 config = { base = 7 }
 "#;
 
@@ -79,20 +79,31 @@ fn fixture() -> &'static Path {
     })
 }
 
-/// The package written in C, built with `flags` added.
-fn c_package(out: &Path, flags: &[&str]) {
-    let output = Command::new("cc")
-        .args(["-std=c11", "-Wall", "-Werror", "-shared", "-fPIC", "-I"])
-        .arg(repository().join("include"))
-        .arg(repository().join("engine/package/tests/c-package/package.c"))
-        .args(flags)
+/// The package written against `include/lemnos/package.h` (`engine/package/tests/raw-package`),
+/// built with rustc as a cdylib with `cfgs` set.
+fn raw_package(out: &Path, cfgs: &[&str]) {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let mut command = Command::new(rustc);
+    command.args([
+        "--edition",
+        "2024",
+        "--crate-type",
+        "cdylib",
+        "-D",
+        "warnings",
+    ]);
+    for cfg in cfgs {
+        command.args(["--cfg", *cfg]);
+    }
+    let output = command
         .arg("-o")
         .arg(out)
+        .arg(repository().join("engine/abi/tests/raw-package/package.rs"))
         .output()
-        .expect("the C compiler runs");
+        .expect("rustc runs");
     assert!(
         output.status.success(),
-        "cc: {}",
+        "rustc: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -104,7 +115,7 @@ fn sign(path: &Path, key: &SigningKey) {
     std::fs::write(name, signature.to_bytes()).unwrap();
 }
 
-/// A directory of packages: one that loads, one written in C that loads, one file that is no
+/// A directory of packages: one that loads, one written against the header that loads, one file that is no
 /// package, and one whose driver has no name. The first, second and last are signed by `key`.
 struct Packages {
     dir: PathBuf,
@@ -119,10 +130,10 @@ impl Packages {
         let dir = root.join("packages");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::copy(fixture(), dir.join("a-fixture.so")).unwrap();
-        c_package(&dir.join("b-in-c.so"), &[]);
+        raw_package(&dir.join("b-raw.so"), &[]);
         std::fs::write(dir.join("c-junk.so"), "not a shared object").unwrap();
-        c_package(&dir.join("d-nameless.so"), &["-DNO_NAME"]);
-        for signed in ["a-fixture.so", "b-in-c.so", "d-nameless.so"] {
+        raw_package(&dir.join("d-nameless.so"), &["no_name"]);
+        for signed in ["a-fixture.so", "b-raw.so", "d-nameless.so"] {
             sign(&dir.join(signed), key);
         }
         let keys = root.join("keys");
@@ -280,7 +291,7 @@ fn the_daemon_runs_the_packages_it_loads_and_says_what_it_refused() {
         list.packages,
         [
             loaded(packages.path("a-fixture.so"), "package-fixture"),
-            loaded(packages.path("b-in-c.so"), "c-package"),
+            loaded(packages.path("b-raw.so"), "raw-package"),
             refused(
                 packages.path("c-junk.so"),
                 "not a driver package: not a shared object"
@@ -292,7 +303,7 @@ fn the_daemon_runs_the_packages_it_loads_and_says_what_it_refused() {
         ]
     );
 
-    // Both loaded drivers run: the one built from Rust and the one written in C.
+    // Both loaded drivers run: the one built from Rust and the one written against the header.
     let (running, tags, _) = state(&client, "thing");
     assert_eq!(
         (running, tags),
@@ -306,10 +317,10 @@ fn the_daemon_runs_the_packages_it_loads_and_says_what_it_refused() {
     let (running, tags, _) = state(&client, "pin");
     assert_eq!(
         (running, tags),
-        (DeviceState::Running, vec!["example.c/1".to_string()])
+        (DeviceState::Running, vec!["example.raw/1".to_string()])
     );
     // The simulated board the daemon starts with has no line for it, so it runs without one.
-    let mut pin = client.open_tag("pin", "example.c/1").unwrap();
+    let mut pin = client.open_tag("pin", "example.raw/1").unwrap();
     client.call(&mut pin, 1, &[], &mut reply).unwrap();
     assert_eq!(u32::from_le_bytes(reply), 7, "its setting arrived");
     assert!(matches!(
@@ -354,8 +365,8 @@ fn the_daemon_runs_the_packages_it_loads_and_says_what_it_refused() {
             packages.path("a-fixture.so")
         ),
         format!(
-            "lemnosd: package {}: driver \"c-package\"",
-            packages.path("b-in-c.so")
+            "lemnosd: package {}: driver \"raw-package\"",
+            packages.path("b-raw.so")
         ),
         format!(
             "lemnosd: package {} refused: not a driver package: not a shared object",
@@ -376,8 +387,8 @@ fn the_daemon_in_signed_mode_runs_only_what_its_keys_signed() {
     let packages = Packages::new("signed", &key);
     let dir = packages.dir.display().to_string();
     let keys = packages.keys.display().to_string();
-    // One byte added to the C package after it was signed.
-    let changed = packages.dir.join("b-in-c.so");
+    // One byte added to the raw package after it was signed.
+    let changed = packages.dir.join("b-raw.so");
     let mut bytes = std::fs::read(&changed).unwrap();
     bytes.push(0);
     std::fs::write(&changed, bytes).unwrap();
@@ -392,7 +403,7 @@ fn the_daemon_in_signed_mode_runs_only_what_its_keys_signed() {
         [
             loaded(packages.path("a-fixture.so"), "package-fixture"),
             refused(
-                packages.path("b-in-c.so"),
+                packages.path("b-raw.so"),
                 "bad signature: not signed by a trusted key, or changed since"
             ),
             refused(

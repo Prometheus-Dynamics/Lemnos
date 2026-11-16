@@ -1,25 +1,29 @@
-//! A package written in C against `include/lemnos/package.h`, built with the C compiler and
-//! loaded for real: the header is the boundary. The same file, built to misbehave, gives the
-//! refusals that need a package nothing in Rust would produce, and files the dynamic loader
-//! itself refuses, files too large and files that can't be read give the rest.
+//! A package written against `include/lemnos/package.h` with no Lemnos crate in it
+//! (`engine/abi/tests/raw-package/package.rs`), built with rustc as a `cdylib` and loaded for real: the
+//! header is the boundary. The same file, built with other cfgs, gives the refusals that need a
+//! package nothing in Rust would produce, and files the dynamic loader itself refuses, files too
+//! large and files that can't be read give the rest.
 
 mod common;
 
-use common::{c_package, host_on, index, method, new_key, scratch, sign, signature_path, trusted};
+use common::{
+    host_on, index, method, new_key, raw_package, raw_package_with, scratch, sign, signature_path,
+    trusted,
+};
 use lemnos_core::Status;
 use lemnos_host::{DeviceState, Options};
 use lemnos_package::{Loader, MAX_PACKAGE_BYTES, Mode, Refusal};
 use lemnos_sim::SimBoard;
 
 #[test]
-fn a_package_written_in_c_binds_takes_a_line_and_answers() {
-    let dir = scratch("c-package");
-    let file = c_package(&dir, "c.so", &[]);
+fn a_package_written_against_the_header_binds_takes_a_line_and_answers() {
+    let dir = scratch("raw-package");
+    let file = raw_package(&dir, "raw.so", &[]);
     let mut loader = Loader::new(Mode::Open);
     let package = loader.load(&file).unwrap();
-    assert_eq!(package.name(), "c-package");
+    assert_eq!(package.name(), "raw-package");
     let manifest = package.manifest();
-    assert_eq!(manifest.provides[0].tag.as_str(), "example.c/1");
+    assert_eq!(manifest.provides[0].tag.as_str(), "example.raw/1");
     let methods = manifest.provides[0].methods;
     assert_eq!((methods[0].id, methods[0].name), (1, "level"));
     assert_eq!(
@@ -34,7 +38,7 @@ fn a_package_written_in_c_binds_takes_a_line_and_answers() {
     let devices = r#"
 [[devices]]
 id = "thing"
-driver = "c-package"
+driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
@@ -43,7 +47,7 @@ config = { base = 40 }
     assert_eq!(host.device("thing").unwrap().state, DeviceState::Running);
     assert_eq!(
         host.device("thing").unwrap().tags[0].as_str(),
-        "example.c/1"
+        "example.raw/1"
     );
     // Its bind configured the line through the host's table: an output, low.
     assert_eq!(line.level(), Some(false));
@@ -79,64 +83,69 @@ config = { base = 40 }
 
 #[test]
 fn what_a_package_registers_is_checked_before_it_is_used() {
-    let dir = scratch("c-refused");
+    let dir = scratch("raw-refused");
     let mut loader = Loader::new(Mode::Open);
     let mut refused = |name: &str, flag: &str| {
         loader
-            .load(&c_package(&dir, name, &[flag]))
+            .load(&raw_package(&dir, name, &[flag]))
             .map(|package| package.name())
             .unwrap_err()
     };
     assert_eq!(
-        refused("fails.so", "-DFAIL_REGISTRATION"),
+        refused("fails.so", "fail_registration"),
         Refusal::RegistrationFailed(Status::NO_MEMORY)
     );
     assert_eq!(
-        refused("none.so", "-DNO_DRIVER"),
+        refused("none.so", "no_driver"),
         Refusal::BadManifest("it did not register exactly one driver")
     );
     assert_eq!(
-        refused("nameless.so", "-DNO_NAME"),
+        refused("nameless.so", "no_name"),
         Refusal::BadManifest("the driver has no name")
     );
     assert_eq!(
-        refused("tag.so", "-DBAD_TAG"),
+        refused("tag.so", "bad_tag"),
         Refusal::BadManifest("a contract tag is not name/major")
     );
     assert_eq!(
-        refused("need.so", "-DBAD_NEED"),
+        refused("need.so", "bad_need"),
         Refusal::BadManifest("a need of a kind this host does not know")
     );
     // None of them took the name, and none left a driver behind.
     assert!(loader.entries().is_empty());
     assert_eq!(
         loader
-            .load(&c_package(&dir, "good.so", &[]))
+            .load(&raw_package(&dir, "good.so", &[]))
             .map(|p| p.name()),
-        Ok("c-package")
+        Ok("raw-package")
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn a_package_the_dynamic_loader_cannot_load_is_refused_in_its_words() {
-    let dir = scratch("c-unloadable");
+    let dir = scratch("raw-unloadable");
     // A library the package needs, there when it is linked and gone when it is loaded.
-    let source = dir.join("gone.c");
-    std::fs::write(&source, "int lemnos_test_gone(void) { return 1; }\n").unwrap();
+    let source = dir.join("gone.rs");
+    std::fs::write(
+        &source,
+        "#[unsafe(no_mangle)] pub extern \"C\" fn lemnos_test_gone() -> i32 { 1 }\n",
+    )
+    .unwrap();
     let library = dir.join("libgone.so");
-    let built = std::process::Command::new("cc")
-        .args(["-shared", "-fPIC", "-o"])
+    let built = std::process::Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "cdylib", "-o"])
         .arg(&library)
         .arg(&source)
         .status()
         .unwrap();
     assert!(built.success());
-    let link = format!("-L{}", dir.display());
-    let file = c_package(
+    let search = format!("native={}", dir.display());
+    let file = raw_package_with(
         &dir,
         "needs-gone.so",
-        &[&link, "-Wl,--no-as-needed", "-lgone"],
+        &["needs_gone"],
+        &["-L", search.as_str(), "-C", "link-arg=-Wl,--no-as-needed"],
     );
     std::fs::remove_file(&library).unwrap();
 
@@ -184,7 +193,7 @@ fn files_too_large_or_unreadable_are_refused_without_being_looked_at() {
 
     // Signed mode: a signature that is there and can't be read is not "unsigned".
     let key = new_key();
-    let file = c_package(&dir, "signed.so", &[]);
+    let file = raw_package(&dir, "signed.so", &[]);
     std::fs::create_dir(signature_path(&file)).unwrap();
     let mut signed = Loader::new(Mode::Signed(trusted(&[&key])));
     assert!(matches!(
@@ -193,7 +202,7 @@ fn files_too_large_or_unreadable_are_refused_without_being_looked_at() {
     ));
     std::fs::remove_dir(signature_path(&file)).unwrap();
     sign(&file, &key);
-    assert_eq!(signed.load(&file).map(|p| p.name()), Ok("c-package"));
+    assert_eq!(signed.load(&file).map(|p| p.name()), Ok("raw-package"));
 
     // In a scan, each is recorded with its reason and the rest still load.
     let scanned = scratch("unreadable-scan");
@@ -213,10 +222,10 @@ fn files_too_large_or_unreadable_are_refused_without_being_looked_at() {
 }
 
 #[test]
-fn a_c_package_gives_its_items_limits_readings_and_kinds() {
+fn a_package_gives_its_items_limits_readings_and_kinds() {
     use lemnos_core::{Item, ItemKind, MethodId, Reading, Unit};
-    let dir = scratch("c-package-extras");
-    let file = c_package(&dir, "extras.so", &["-DWITH_EXTRAS"]);
+    let dir = scratch("raw-package-extras");
+    let file = raw_package(&dir, "extras.so", &["with_extras"]);
     let mut loader = Loader::new(Mode::Open);
     let package = loader.load(&file).unwrap();
     // The manifest: the contract's kind, and the method's reading, with no driver bound.
@@ -230,7 +239,7 @@ fn a_c_package_gives_its_items_limits_readings_and_kinds() {
     let devices = r#"
 [[devices]]
 id = "thing"
-driver = "c-package"
+driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
@@ -271,8 +280,9 @@ config = { base = 40 }
 #[test]
 fn a_package_built_before_the_extras_loads_and_its_items_read_unknown() {
     use lemnos_core::{MethodId, Reading};
-    let dir = scratch("c-package-base");
-    let file = common::c_package_base(&dir, "base.so", &["-DWITH_EXTRAS"]);
+    let dir = scratch("raw-package-base");
+    // Built against the boundary before the extras: the base layout hash, no describe_extra.
+    let file = raw_package(&dir, "base.so", &["with_extras", "pre_extras"]);
     let mut loader = Loader::new(Mode::Open);
     let package = loader.load(&file).unwrap();
     let contract = &package.manifest().provides[0];
@@ -284,7 +294,7 @@ fn a_package_built_before_the_extras_loads_and_its_items_read_unknown() {
     let devices = r#"
 [[devices]]
 id = "thing"
-driver = "c-package"
+driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
@@ -315,8 +325,8 @@ config = { base = 40 }
 
 #[test]
 fn a_package_with_a_boundary_this_host_does_not_know_is_refused() {
-    let dir = scratch("c-package-future");
-    let file = c_package(&dir, "future.so", &["-DFUTURE_LAYOUT"]);
+    let dir = scratch("raw-package-future");
+    let file = raw_package(&dir, "future.so", &["future_layout"]);
     let mut loader = Loader::new(Mode::Open);
     assert!(matches!(loader.load(&file), Err(Refusal::LayoutMismatch)));
     let _ = std::fs::remove_dir_all(dir);

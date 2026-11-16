@@ -12,8 +12,8 @@ keywords = ["ffi", "abi", "no-std", "hardware", "lemnos"]
 categories = ["development-tools::ffi", "no-std"]
 
 # The package boundary and its loader need unsafe code, so this crate carries its own table. Each
-# block holds one unsafe operation and says why it is sound. Only `src/package` and `src/load.rs`
-# have any.
+# block holds one unsafe operation and says why it is sound. Only `src/package`, `src/load.rs` and the
+# conformance fixture under `tests/raw-package` have any.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_lifetimes = "deny"
