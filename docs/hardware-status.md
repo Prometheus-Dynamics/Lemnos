@@ -322,3 +322,9 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`M36.md`](../testing/board-runs/M36.md) | The watchdog's gap at the boot's hand-over: slot-init arms the watchdog at 15 s, and lemnosd takes over feeding. QEMU showed the arming, a 45 s feed and the stall reset; the board's gap and lemnosd's feeding are **untested on board** |
 | [`M37.md`](../testing/board-runs/M37.md) | A refused bind says why: on the reference board the I2C chips' identity reads at bind, the sensor's power-up order (the supply binds before the sensor's identity read) and present devices reading `running ok`. The board's services are stopped with systemctl behind a failsafe timer for the window and started again. Run 2 (rev e0f4f74b): identity and cpu-thermal `running ok`; imu, mag and power did not reach `running ok` (their bring-up waited for a client's read). Fixed in M41; the M37 record is in `M37.md` |
 | [`M41.md`](../testing/board-runs/M41.md) | The IMU, magnetometer and power monitor reach `running ok` from bind with no client: the daemon ticks their bring-up, and logs each device's time from bind. The second board check (same procedure as M37) must show all four devices `running ok` at +15 s with `list` only, the GPIO levels of the image daemon's lines, and the USB power switches' decision. Host side tested on simulated chips with their waits; **untested on board** |
+
+## Written, untested on board
+
+| Check | Result |
+|---|---|
+| [`MR1.md`](../testing/board-runs/MR1.md) | The maskrom reflash of the RK3566 board: the on-chip stage and the shared wire pass their tests on the host (the PC-side host is in another project); the reboot-mode entry, the watchdog's survival through the boot ROM, the 472 load address and the first SD write are untested on board. Nothing has been run on the board |
