@@ -229,6 +229,12 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
                 pause(shared, backoff.next_delay());
                 continue;
             }
+            Err(Opening::Refused(message)) => {
+                log(&message);
+                shared.refuse(message);
+                shared.stop();
+                return;
+            }
         };
         held = None;
         log(&format!(
@@ -313,6 +319,9 @@ impl Held {
 enum Opening {
     StillHeld(String),
     Failed(String),
+    /// The comm core will not give this session the role the bridge publishes with: a configuration
+    /// error, reported once and not retried.
+    Refused(String),
 }
 
 /// Why a session ended.
@@ -397,7 +406,21 @@ impl Session {
             ..Options::default()
         };
         let orion = Orion::connect_with(&config.orion, CLIENT_NAME, options).map_err(|error| {
-            Opening::Failed(format!("Orion not available at {}: {error}", config.orion))
+            match error {
+                // The reason is `RoleNotOffered`: the carrier does not offer the provider role. The
+                // reason type is not re-exported, so it is matched by its name.
+                Error::Client(ClientError::Rejected(reason))
+                    if format!("{reason:?}") == "RoleNotOffered" =>
+                {
+                    Opening::Refused(format!(
+                        "Orion at {} does not offer the provider role this bridge publishes with: \
+                         that carrier cannot publish. Leave ORION_ADDRESS unset to use the board's own \
+                         socket. Stopping; a configuration error is not retried",
+                        config.orion
+                    ))
+                }
+                error => Opening::Failed(format!("Orion not available at {}: {error}", config.orion)),
+            }
         })?;
         let node = orion.welcomed().node.as_str().to_owned();
         check_node(&node, config.node_id.as_deref()).map_err(Opening::Failed)?;

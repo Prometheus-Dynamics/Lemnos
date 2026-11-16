@@ -62,6 +62,8 @@ pub struct Shared {
     /// When a file or stream chunk was last accepted: a transfer making progress renews the caller
     /// leases (see [`crate::calls`]).
     transferred: Mutex<Option<Instant>>,
+    /// Why the publisher stopped for good: a configuration the comm core refuses (see [`Shared::refuse`]).
+    refused: Mutex<Option<String>>,
     /// Written by the other threads when there is something for the publisher. A byte waiting
     /// there is a wake-up; one is enough, so a full socket is not an error.
     bell: UnixStream,
@@ -83,6 +85,7 @@ impl Shared {
             done: Mutex::new(Vec::new()),
             progress: Mutex::new(Vec::new()),
             transferred: Mutex::new(None),
+            refused: Mutex::new(None),
             bell,
             woken,
             stop: AtomicBool::new(false),
@@ -93,6 +96,20 @@ impl Shared {
     pub fn with<R>(&self, f: impl FnOnce(&mut Mirror) -> R) -> R {
         let mut mirror = self.mirror.lock().unwrap_or_else(PoisonError::into_inner);
         f(&mut mirror)
+    }
+
+    /// The publisher was refused a configuration it cannot run with, and stopped: the reason, in words.
+    /// A configuration error is not a link fault, so it is not retried.
+    pub fn refuse(&self, why: String) {
+        *self.refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(why);
+    }
+
+    /// The reason the publisher was refused, if it was.
+    pub fn refusal(&self) -> Option<String> {
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// A file or stream chunk was accepted now.

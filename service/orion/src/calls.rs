@@ -275,7 +275,7 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
     loop {
         expire(
             &mut clients,
-            &mut running,
+            &running,
             &mut ended,
             lease,
             Instant::now(),
@@ -369,8 +369,13 @@ pub fn caller_class(caller: &str) -> &'static str {
 ///   does not say which session sent a chunk, so an accepted chunk renews every caller's lease.
 ///
 /// The bridge's own housekeeping (its publishing, its hello document, its ticks) renews nothing, and
-/// neither does a topic published to a caller. A caller with a silent run in progress is not renewed
-/// by it: its run is silent too and its lease runs out like any caller's.
+/// neither does a topic published to a caller.
+///
+/// A caller with a run in flight is alive, whether or not the run reports progress, so its lease does
+/// not run out while the run is in flight, however silent the caller is. Such a run ends by its own end,
+/// by its cancel, or by its session's end (`CallerGone`, see [`caller_gone`]), not by the lease. A caller
+/// with no run in flight whose lease runs out is dropped here: its connection closes, and lemnosd
+/// releases what it held.
 ///
 /// A holder keeps its holds by renewing them: `<resource>.call describe` is the renewal with nothing
 /// else to do.
@@ -378,7 +383,7 @@ pub fn caller_class(caller: &str) -> &'static str {
 // for a caller that holds and says nothing: it is the only release for a silent holder.
 fn expire(
     clients: &mut Callers,
-    running: &mut Vec<Running>,
+    running: &[Running],
     ended: &mut Vec<CallerKey>,
     lease: Option<Duration>,
     now: Instant,
@@ -403,12 +408,6 @@ fn expire(
         .map(|(caller, _)| caller.clone())
         .collect();
     for caller in gone {
-        ended_with(
-            &caller,
-            running,
-            shared,
-            "its lease ran out; the job ended with its connection",
-        );
         release(clients, ended, &caller, "its lease ran out", shared);
     }
 }
