@@ -140,6 +140,9 @@ fn repoint(
     state: &State,
     why: &str,
 ) -> Result<(), String> {
+    // Before anything is marked: a default the loader can't be made to read is not moved.
+    crate::boot::loader_reads_record(record)
+        .map_err(|e| format!("couldn't point the default at {}: {e}", state.previous))?;
     let mut meta = Meta::load(layout, &state.default);
     meta.set("FAILED", "yes");
     meta.set(
@@ -159,4 +162,53 @@ fn repoint(
     next.default = state.previous.clone();
     next.save(layout)
         .map_err(|e| format!("couldn't save the state: {e}"))
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+    use crate::uboot::UbootEnv;
+    use lemnos_slot_store::uboot_env::Place;
+
+    /// A repoint is refused before the old default is marked failed, when the loader can't read the record
+    /// (here: its environment has no device, so trial updates are unavailable).
+    #[test]
+    fn a_repoint_is_refused_before_anything_is_written_when_the_loader_cannot_read_the_record() {
+        let dir = std::env::temp_dir().join(format!("lemnos-repoint-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = Layout::new(dir.join("data"), dir.join("boot"));
+        let state = State {
+            default: "a".into(),
+            previous: "b".into(),
+            ..State::default()
+        };
+        state.save(&layout).unwrap();
+        let mut record = UbootEnv {
+            disk: Err("no disk in this test".into()),
+            place: Place::device(dir.join("missing-env").to_str().unwrap(), 1024, 0, 4096).unwrap(),
+            restarter: crate::boot::Restarter {
+                check: None,
+                systemctl: "/bin/true".into(),
+            },
+            boot_node: Err("no boot partition in this test".into()),
+            partitions: None,
+        };
+        let err = repoint(&layout, &mut record, &state, "why").unwrap_err();
+        assert!(err.contains("couldn't point the default at b"), "{err}");
+        assert!(
+            !Meta::load(&layout, "a").failed(),
+            "the old default is not marked failed"
+        );
+        assert_eq!(
+            State::load(&layout).default,
+            "a",
+            "the default did not move"
+        );
+        assert!(
+            !dir.join("missing-env").exists(),
+            "nothing was created in the environment"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -216,7 +216,10 @@ pub fn encode_vars(vars: &[(String, String)], data_len: usize) -> Result<Vec<u8>
     }
     out.push(0);
     if out.len() > data_len {
-        return Err("the environment is full".into());
+        return Err(format!(
+            "the environment is full: {} bytes needed for its variables, {data_len} in the copy (header excluded)",
+            out.len()
+        ));
     }
     out.resize(data_len, 0);
     Ok(out)
@@ -351,19 +354,42 @@ pub fn load_checked<D: EnvDev + ?Sized>(
 /// environment is in FAT as well as in the GPT partition (`ENV_IS_IN_FAT`, the A733 family's default).
 pub const FAT_ENV_FILE: &str = "uboot.env";
 
+/// What the boot partition holds for [`FAT_ENV_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FatEnv {
+    /// No such file: U-Boot reads the GPT partition.
+    Absent,
+    /// The file is there, with this many bytes: U-Boot reads it first on an MMC boot.
+    Present(u64),
+    /// The boot partition can't be read as FAT (or can't be opened): the file can't be ruled out.
+    Unreadable(String),
+}
+
+/// The state of [`FAT_ENV_FILE`] on the boot partition at `boot`.
+pub fn fat_env(boot: &Path) -> FatEnv {
+    let mut file = match File::open(boot) {
+        Ok(file) => file,
+        Err(e) => return FatEnv::Unreadable(format!("{}: {e}", boot.display())),
+    };
+    match crate::bootfat::size_of_path(&mut file, FAT_ENV_FILE) {
+        Err(crate::bootfat::Refusal::Missing) => FatEnv::Absent,
+        Ok(size) => FatEnv::Present(size),
+        Err(why) => FatEnv::Unreadable(why.to_string()),
+    }
+}
+
 /// Refuses a write of the GPT environment while the boot partition holds [`FAT_ENV_FILE`]. On an MMC boot
 /// U-Boot loads that file first and reads the GPT partition only when the load fails (on that family,
 /// `board/sunxi/board.c`: FAT before the GPT partition). A write to the GPT partition would then not be read,
 /// so it is refused, by name, and nothing is written. Fail-closed: a boot partition that cannot be read as
 /// FAT cannot rule the file out, so it is refused too.
 pub fn refuse_if_fat_env(boot: &Path) -> Result<(), String> {
-    let mut file = File::open(boot).map_err(|e| format!("{}: {e}", boot.display()))?;
-    match crate::bootfat::size_of_path(&mut file, FAT_ENV_FILE) {
-        Err(crate::bootfat::Refusal::Missing) => Ok(()),
-        Ok(size) => Err(format!(
+    match fat_env(boot) {
+        FatEnv::Absent => Ok(()),
+        FatEnv::Present(size) => Err(format!(
             "refusing to write the U-Boot environment on the GPT partition: the boot partition holds {FAT_ENV_FILE} ({size} bytes); U-Boot reads it first on an MMC boot, so this write would not be read; nothing was written"
         )),
-        Err(why) => Err(format!(
+        FatEnv::Unreadable(why) => Err(format!(
             "refusing to write the U-Boot environment on the GPT partition: the boot partition can't be read as FAT, so {FAT_ENV_FILE} can't be ruled out ({why}); nothing was written"
         )),
     }

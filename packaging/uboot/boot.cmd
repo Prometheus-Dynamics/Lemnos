@@ -1,3 +1,7 @@
+# U-Boot marker: the patched U-Boot's default environment carries lemnos_env_rev=1 (uboot::ENV_MARKER,
+# uboot::ENV_MARKER_VALUE). This script does not read it. The driver (system-slots, trial updates) reads it from
+# the stored environment and reports loader-not-updated while it is absent. docs/boards.md, "What an image
+# builder checks", names the check; docs/slots.md, "Trial updates on the uboot record", the reasons.
 # Starts the board's slot from the record the slot driver keeps in U-Boot's own environment
 # (record = "uboot"), and never ends at a prompt. Build: mkimage -A <arch> -O linux -T script -C none
 # -d boot.cmd boot.scr. Install as BOOT/boot.scr: the built script at the root of the boot partition

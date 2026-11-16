@@ -293,13 +293,13 @@ cannot lack an option; `lemnos-ctl boot-partition` writes the locator `uboot-env
 
 | Driver | Key | Default | Range | Meaning |
 |---|---|---|---|---|
-| `system-slots` | `uboot_env_size` | required | at least 16 | `CONFIG_ENV_SIZE`, the size of one copy in bytes, header included. Both copies are checked at this size before the first write |
+| `system-slots` | `uboot_env_size` | required | at least 394 | `CONFIG_ENV_SIZE`, the size of one copy in bytes, header included. Refused below 394: the variables the driver, the preamble and the restart count store take 394 bytes in the worst case (`docs/slots.md`, "What the driver writes into the environment"). Both copies are checked at this size before the first write |
 | `system-slots` | `uboot_env_partuuid` | refused | | Not a key. A board file that gives it is refused by name: the environment is found by type, never by a PARTUUID |
 | `system-slots` | `uboot_env_device` | unset | an absolute block device path | The explicit form for an environment outside the GPT (fixed `CONFIG_ENV_OFFSET`s): the device, with `uboot_env_offset` and `uboot_env_offset_redund`, all required together, none allowed without it. `/dev/mtd*` and `/dev/ubi*` are refused by name: their writes need an erase the raw writer does not do |
 | `system-slots` | `uboot_env_offset`, `uboot_env_offset_redund` | with `uboot_env_device` | multiples of 512, 0 up | The two copies' byte offsets on the device (`CONFIG_ENV_OFFSET`, `CONFIG_ENV_OFFSET_REDUND`). The copies must not overlap |
-| `system-slots` | `uboot_env_mmc_index` | `0` | 0 up | The MMC device U-Boot keeps the environment on and flashes in download mode (`CONFIG_ENV_MMC_DEVICE_INDEX`, `CONFIG_FASTBOOT_FLASH_MMC_DEV`; `mmc list`'s number). Read by `--uboot-config` only |
-| `system-slots` | `uboot_fastboot_usb` | `0` | 0 up | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `lemnos-ctl boot-partition` (it is set before `boot.cmd` in the image) |
-| `system-slots` | `uboot_led` | unset | a U-Boot LED label | The LED that is on while the board waits in download mode (`led <label> on`). `boot-partition` sets it in the image's `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
+| `system-slots` | `uboot_env_mmc_index` | `0` | 0 to 99 | The MMC device U-Boot keeps the environment on and flashes in download mode (`CONFIG_ENV_MMC_DEVICE_INDEX`, `CONFIG_FASTBOOT_FLASH_MMC_DEV`; `mmc list`'s number). Read by `--uboot-config` only |
+| `system-slots` | `uboot_fastboot_usb` | `0` | 0 to 99 | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `lemnos-ctl boot-partition` (it is set before `boot.cmd` in the image) |
+| `system-slots` | `uboot_led` | unset | a U-Boot LED label, at most 32 bytes | The LED that is on while the board waits in download mode (`led <label> on`). `boot-partition` sets it in the image's `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
 | `system-slots` | `uboot_reset_word` | unset | a 32-bit register address, `0x` and up to eight hex digits | The SoC's reset-status word (the CRU's global reset status). When set, a power-on reset (the word reads 0) sets the U-Boot restart count to 0, and any other reset raises it (see [the U-Boot restart count](slots.md#the-u-boot-restart-count)). Unset, every boot raises the count. No SoC has a cited word yet, so no shipped board sets it: the RK3588 (`0xfd7c0c04`), the RK3566 and RK3568 (`0xfdd200e0`, the CRU at `rk356x-base.dtsi:412`) and the A733 are all counted every boot, because the meaning of the bits is not cited for them |
 | `system-slots` | `uboot_usb_vendor`, `uboot_usb_product` | unset | 0 to 65535, given together | The fastboot gadget's VID and PID (`CONFIG_USB_GADGET_VENDOR_NUM`, `CONFIG_USB_GADGET_PRODUCT_NUM`). `1209:0001` is the pid.codes test pair, not registered: `--uboot-config` labels it, and it is replaced before a release. Unset, U-Boot's own default for the SoC stays: a placeholder the project replaces with its own |
 | `system-slots` | `uboot_watchdog_ms` | unset | 0 up | `CONFIG_WATCHDOG_TIMEOUT_MSECS`. Unset, U-Boot's default for the SoC stays |
@@ -336,6 +336,26 @@ The device form replaces the three GUID lines with `CONFIG_ENV_OFFSET=0x...` and
 file and line that define the options. What the fragment leaves to the board's own defconfig: the
 storage, USB device-controller, watchdog and LED drivers, and the fastboot buffer
 (`CONFIG_FASTBOOT_BUF_ADDR`, `CONFIG_FASTBOOT_BUF_SIZE`: RAM only the board knows).
+
+### What an image builder checks before it builds a slot image
+
+Three checks, in the image builder, before a `uboot` slot image is built. Each is also what
+`system-slots` checks at bind and at each trial request, so a failure is named at both ends.
+
+1. **The `uboot-env` partition.** The image's GPT has a partition named `uboot-env` with the environment's
+   type GUID, on the device the environment is kept on (`uboot_env_mmc_index`). `sgdisk -p <disk>`
+   lists it. `boot.cmd` asks for it by name (`part start mmc <dev> uboot-env`) before it saves.
+2. **The marker.** The U-Boot that is built carries `lemnos_env_rev=1` in its default environment:
+   `grep -a -c 'lemnos_env_rev=1' u-boot.bin` gives at least 1. The text is set by the patched U-Boot's
+   default environment (the image's U-Boot fragment, `CONFIG_EXTRA_ENV_TEXT`); this repository does not
+   carry that patch. `packaging/uboot/boot.cmd` names the marker in its header.
+3. **No `uboot.env` on the boot partition** (GPT form). `mdir -i <boot partition> ::uboot.env` must
+   fail. A FAT `uboot.env` makes U-Boot read that file before the GPT environment, so a GPT write would
+   not be read.
+
+A board whose environment was rebuilt by an earlier U-Boot holds no marker until a U-Boot that carries
+it rebuilds the environment (see [Slots](slots.md#trial-updates-on-the-uboot-record)). Until then `info`
+says `trial_block` `loader-not-updated`, and no trial is recorded.
 
 ## `[board]` identity
 

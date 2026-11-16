@@ -72,7 +72,9 @@ impl SystemSlots {
             if log.boot != self.boot {
                 let given_back = (left + 1).min(self.policy.attempts);
                 if pending.is_some() {
-                    let _ = self.record.set_attempts(given_back);
+                    // Refused while the loader can't read the record: the attempt is not counted there.
+                    let _ = crate::boot::loader_reads_record(self.record.as_ref())
+                        .and_then(|()| self.record.set_attempts(given_back));
                 }
                 log.seen = given_back;
                 log.add_attempt();
@@ -259,6 +261,10 @@ impl SystemSlots {
             .pending()
             .map_err(|error| format!("the boot record can't be read: {error}"))?
         {
+            if left > 0 {
+                crate::boot::loader_reads_record(self.record.as_ref())
+                    .map_err(|error| format!("the boot record can't be written: {error}"))?;
+            }
             self.record
                 .set_attempts(left)
                 .map_err(|error| format!("the boot record can't be written: {error}"))?;
@@ -379,10 +385,16 @@ impl SystemSlots {
                 state.staged.clear();
                 self.record.clear_trial().map_err(|_| Status::IO)?;
             } else {
+                // The switch to the running slot is refused while the loader can't read the record: the
+                // trial stays pending, and the state says why.
+                crate::boot::loader_reads_record(self.record.as_ref())
+                    .map_err(|e| self.record_refused(e))?;
                 self.record
                     .fallback_copy(&self.layout, &running)
                     .map_err(|_| Status::IO)?;
-                self.record.set_default(&running).map_err(|_| Status::IO)?;
+                self.record
+                    .set_default(&running)
+                    .map_err(|e| self.record_refused(e))?;
                 self.record.clear_trial().map_err(|_| Status::IO)?;
                 if state.default != running {
                     state.previous = core::mem::replace(&mut state.default, running.clone());

@@ -287,6 +287,182 @@ impl BootRecord for Uboot {
     }
 }
 
+/// The environment variable the image's U-Boot carries when it has the slot environment change: the
+/// default environment of the patched U-Boot sets `lemnos_env_rev` to [`ENV_MARKER_VALUE`]. It reaches
+/// the stored environment at U-Boot's first save of a valid environment (the defaults are imported when
+/// the stored one is invalid, and `saveenv` writes them with the rest). Checked by [`UbootEnv::trial_updates`]
+/// and by an image builder before it builds an RK slot image (`docs/boards.md`, "The U-Boot marker").
+pub const ENV_MARKER: &str = "lemnos_env_rev";
+/// The value of [`ENV_MARKER`] the driver expects.
+pub const ENV_MARKER_VALUE: &str = "1";
+/// The variable the image's boot preamble sets to the MMC device the environment is kept on
+/// (`service/ctl` `boot_dir`, `setenv lemnos_envdev {env_device}`). Not written by the driver; it is in
+/// the budget because it is in the same environment.
+pub const ENVDEV_VARIABLE: &str = "lemnos_envdev";
+/// The largest `uboot_env_mmc_index` the board file may give: [`ENVDEV_VARIABLE`] is at most two digits.
+pub const MAX_MMC_INDEX: i64 = 99;
+/// The restart count's saturation (`packaging/uboot/boot.cmd`: the count stops at 8).
+pub const RESTARTS_MAX: u8 = 8;
+/// The variables the boot preamble (`service/ctl` `boot_dir`) sets, which the script's `saveenv` stores too.
+pub const USB_VARIABLE: &str = "lemnos_usb";
+pub const LED_VARIABLE: &str = "lemnos_led";
+pub const RESET_VARIABLE: &str = "lemnos_rst";
+/// The episodes' bay and count (BB2: `set_episodes`, a driver write on the arrival and good-boot paths).
+pub const EPISODES_BAY_VARIABLE: &str = "lemnos_episodes_bay";
+pub const EPISODES_VARIABLE: &str = "lemnos_episodes";
+/// Most fastboot USB controller index the board file gives (two digits, as `MAX_MMC_INDEX`).
+pub const MAX_USB_INDEX: i64 = 99;
+/// The longest `uboot_led` label the board file gives (bytes).
+pub const MAX_LED_BYTES: usize = 32;
+/// The longest `uboot_reset_word` the board file gives: `0x` and eight hex digits.
+pub const MAX_RESET_BYTES: usize = 10;
+/// The most bytes the variables the driver, the image's preamble and the restart count store take in one
+/// copy, header included: the worst case of [`worst_case_entries`] in `name=value\0` form, with the list's
+/// final NUL and the 5-byte header. Derived in docs/slots.md, "What the driver writes into the environment".
+pub const ENV_WORST_CASE_BYTES: usize = 394;
+/// The budget those variables must stay within. A test fails when [`worst_case_copy_bytes`] exceeds it.
+pub const ENV_BUDGET_BYTES: usize = 400;
+
+/// The longest slot id the driver writes into the environment (`valid_id`: at most 64 bytes).
+const WORST_ID_BYTES: usize = 64;
+
+/// The worst-case value of one of the variables the driver or the image writes, `None` for a name the
+/// budget does not know (a new variable must be given a value here, or the budget test fails).
+fn worst_value(name: &str) -> Option<String> {
+    Some(match name {
+        "default" | "trial" => "a".repeat(WORST_ID_BYTES),
+        "default_bay" | "previous_bay" | "trial_bay" => {
+            lemnos_slot_store::bays::set_name(lemnos_slot_store::bays::SETS - 1)
+        }
+        "trial_attempts" => MAX_ATTEMPTS.to_string(),
+        n if n == ENV_MARKER => ENV_MARKER_VALUE.to_string(),
+        n if n == ENVDEV_VARIABLE => MAX_MMC_INDEX.to_string(),
+        "lemnos_restarts" => RESTARTS_MAX.to_string(),
+        n if n == EPISODES_BAY_VARIABLE => {
+            lemnos_slot_store::bays::set_name(lemnos_slot_store::bays::SETS - 1)
+        }
+        // The episodes are at most the demotion threshold, which is at most 255 (`demote_after_episodes`).
+        n if n == EPISODES_VARIABLE => u8::MAX.to_string(),
+        n if n == USB_VARIABLE => MAX_USB_INDEX.to_string(),
+        n if n == LED_VARIABLE => "a".repeat(MAX_LED_BYTES),
+        n if n == RESET_VARIABLE => format!("0x{}", "f".repeat(MAX_RESET_BYTES - 2)),
+        _ => return None,
+    })
+}
+
+/// The variables the driver writes (`VARIABLES`), the marker and the image's `lemnos_envdev`, each with
+/// its worst-case value. A name [`worst_value`] does not know is given the longest slot id, so it is
+/// over-counted rather than missed.
+pub fn worst_case_entries() -> Vec<(String, String)> {
+    VARIABLES
+        .iter()
+        .copied()
+        .chain(COUNT_VARIABLES)
+        .chain([
+            ENV_MARKER,
+            ENVDEV_VARIABLE,
+            USB_VARIABLE,
+            LED_VARIABLE,
+            RESET_VARIABLE,
+            EPISODES_BAY_VARIABLE,
+            EPISODES_VARIABLE,
+        ])
+        .map(|name| {
+            let value = worst_value(name).unwrap_or_else(|| "a".repeat(WORST_ID_BYTES));
+            (name.to_string(), value)
+        })
+        .collect()
+}
+
+/// The bytes of one copy the worst-case entries take: the header, each `name=value\0`, and the list's
+/// final NUL. The same bytes `encode_vars` produces for them.
+pub fn worst_case_copy_bytes() -> usize {
+    let entries: usize = worst_case_entries()
+        .iter()
+        .map(|(name, value)| name.len() + 1 + value.len() + 1)
+        .sum();
+    lemnos_slot_store::uboot_env::HEADER + entries + 1
+}
+
+/// Why a board file's `uboot_env_size` is refused, if it is: a copy must hold the worst case of the
+/// driver's variables (U-Boot's own default environment is in the same copy and is not known here).
+pub fn size_refusal(size: usize) -> Option<&'static str> {
+    (size < ENV_WORST_CASE_BYTES).then_some(
+        "is too small: the driver's own variables need 394 bytes in one copy, header included, in the worst case (docs/slots.md, \"What the driver writes into the environment\"); U-Boot's default environment needs more",
+    )
+}
+
+/// The name of the environment's partition on its device: what `boot.cmd` looks for with
+/// `part start mmc <dev> uboot-env` before it saves the environment.
+pub const ENV_PARTITION: &str = "uboot-env";
+
+/// Why trial updates are unavailable on a `uboot` board. A fixed set: the code is what `info` carries,
+/// and the sentence is what a refused trial and `health` say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// No partition named `uboot-env` on the environment's device: `boot.cmd` never saves the
+    /// environment and never starts a trial.
+    NoEnvPartition,
+    /// The environment has no valid copy, or its device or disk can't be opened.
+    EnvUnreadable,
+    /// The GPT environment is written only where U-Boot reads it; the boot partition holds the FAT
+    /// `uboot.env`, which U-Boot reads first, so a GPT write would not be read.
+    FatEnvFile,
+    /// The boot partition is unknown or can't be read as FAT, so `uboot.env` can't be ruled out.
+    BootPartitionUnreadable,
+    /// The image's U-Boot does not carry the slot environment change ([`ENV_MARKER`] is not the expected value).
+    LoaderNotUpdated,
+}
+
+impl Reason {
+    /// The fixed code `info` carries.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NoEnvPartition => "no-env-partition",
+            Self::EnvUnreadable => "env-unreadable",
+            Self::FatEnvFile => "fat-env-file",
+            Self::BootPartitionUnreadable => "boot-partition-unreadable",
+            Self::LoaderNotUpdated => "loader-not-updated",
+        }
+    }
+
+    /// The sentence a refused trial and `health` say: the reason, and that nothing was written.
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Self::NoEnvPartition => {
+                "trial updates are unavailable: the U-Boot environment's device has no uboot-env partition, so U-Boot's boot script never saves the environment and never starts a trial; nothing was written"
+            }
+            Self::EnvUnreadable => {
+                "trial updates are unavailable: the U-Boot environment can't be read (no valid copy, or its device can't be opened); nothing was written"
+            }
+            Self::FatEnvFile => {
+                "trial updates are unavailable: the boot partition holds uboot.env, which U-Boot reads before the GPT environment, so a write of the GPT environment would not be read; nothing was written"
+            }
+            Self::BootPartitionUnreadable => {
+                "trial updates are unavailable: the boot partition can't be read as FAT, so uboot.env can't be ruled out, and the GPT environment is not written; nothing was written"
+            }
+            Self::LoaderNotUpdated => {
+                "trial updates are unavailable: the image's U-Boot does not carry the slot environment change (lemnos_env_rev is not 1 in the environment; docs/boards.md, \"What an image builder checks\"); nothing was written"
+            }
+        }
+    }
+}
+
+/// A reason trial updates are unavailable, with what the driver found for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unavailable {
+    pub reason: Reason,
+    /// What was found, for `info` (the error text of the read or the check).
+    pub detail: String,
+}
+
+/// Whether a trial can be recorded and started on this board, as the driver found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrialUpdates {
+    Available,
+    Unavailable(Unavailable),
+}
+
 /// The `uboot` record: `default`, `trial` and `trial_attempts` are variables of U-Boot's own
 /// redundant environment, at `place` (a raw, two-copy record, `lemnos_slot_store::uboot_env`).
 /// `packaging/uboot/boot.cmd` reads them and saves the environment with `saveenv` before it starts a
@@ -299,6 +475,10 @@ pub struct UbootEnv {
     /// The boot partition's block node: the payload bays and their records are written there, raw.
     /// The reason it is not known is kept: an install is then refused by it.
     pub boot_node: Result<PathBuf, String>,
+    /// The device whose partition table names the `uboot-env` partition, when it is not the environment's
+    /// own device (the boot disk for the GPT form, the device for the device form): `None` for both
+    /// in a board file. Set by a test whose environment is a file with no partition table.
+    pub partitions: Option<PathBuf>,
 }
 
 impl UbootEnv {
@@ -339,6 +519,89 @@ impl UbootEnv {
             uboot_env::refuse_if_fat_env(boot).map_err(io::Error::other)?;
         }
         uboot_env::set(&mut dev, &geometry, updates).map_err(io::Error::other)
+    }
+
+    /// Every variable of the environment as stored, `load_checked`'s list.
+    fn list(&self) -> io::Result<Vec<(String, String)>> {
+        let (mut dev, geometry) = self.open()?;
+        let (_, list) = uboot_env::load_checked(&mut dev, &geometry).map_err(io::Error::other)?;
+        Ok(list)
+    }
+
+    /// Whether trial updates are available on this board, found now: the environment's device has the
+    /// `uboot-env` partition the script saves to; the environment reads; for the GPT form, the boot
+    /// partition does not hold `uboot.env` (the write would be refused) and can be read to rule it out;
+    /// and the image's U-Boot carries the slot environment change ([`ENV_MARKER`]). The first failing
+    /// check is the reason. Reads only; nothing is written.
+    pub fn trial_updates(&self) -> TrialUpdates {
+        let fail = |reason: Reason, detail: String| {
+            TrialUpdates::Unavailable(Unavailable { reason, detail })
+        };
+        let table = match (&self.partitions, &self.place) {
+            (Some(path), _) => path.clone(),
+            (None, Place::Gpt { .. }) => match &self.disk {
+                Ok(disk) => disk.clone(),
+                Err(why) => {
+                    return fail(
+                        Reason::EnvUnreadable,
+                        format!("the boot disk isn't known: {why}"),
+                    );
+                }
+            },
+            (None, Place::Device { device, .. }) => PathBuf::from(device),
+        };
+        let mut dev = match FileEnv::open(&table) {
+            Ok(dev) => dev,
+            Err(e) => return fail(Reason::EnvUnreadable, format!("{}: {e}", table.display())),
+        };
+        match lemnos_slot_store::gpt::count_named(&mut dev, ENV_PARTITION) {
+            Ok(1..) => {}
+            Ok(0) => {
+                return fail(
+                    Reason::NoEnvPartition,
+                    format!("no partition named {ENV_PARTITION} on {}", table.display()),
+                );
+            }
+            Err(why) => return fail(Reason::NoEnvPartition, why),
+        }
+        let list = match self.list() {
+            Ok(list) => list,
+            Err(e) => return fail(Reason::EnvUnreadable, e.to_string()),
+        };
+        if let Place::Gpt { .. } = &self.place {
+            match &self.boot_node {
+                Err(why) => return fail(Reason::BootPartitionUnreadable, why.clone()),
+                Ok(boot) => match uboot_env::fat_env(boot) {
+                    uboot_env::FatEnv::Absent => {}
+                    uboot_env::FatEnv::Present(size) => {
+                        return fail(
+                            Reason::FatEnvFile,
+                            format!(
+                                "{} ({size} bytes) on the boot partition",
+                                uboot_env::FAT_ENV_FILE
+                            ),
+                        );
+                    }
+                    uboot_env::FatEnv::Unreadable(why) => {
+                        return fail(Reason::BootPartitionUnreadable, why);
+                    }
+                },
+            }
+        }
+        let marker = list
+            .iter()
+            .find(|(key, _)| key == ENV_MARKER)
+            .map(|(_, value)| value.as_str());
+        if marker != Some(ENV_MARKER_VALUE) {
+            return fail(
+                Reason::LoaderNotUpdated,
+                format!(
+                    "{ENV_MARKER} is {} in the environment, expected {ENV_MARKER_VALUE}",
+                    marker.map_or("unset".to_string(), |v| format!("{v:?}"))
+                ),
+            );
+        }
+        TrialUpdates::Available
     }
 
     /// The boot partition's bays, opened raw on its node (this form has no pointer or record files
@@ -455,6 +718,10 @@ impl BootRecord for UbootEnv {
 
     fn clear_episodes(&mut self) -> io::Result<()> {
         self.set(&[("lemnos_episodes_bay", None), ("lemnos_episodes", None)])
+    }
+
+    fn trial_updates(&self) -> TrialUpdates {
+        UbootEnv::trial_updates(self)
     }
 
     /// Points the default at the slot's bay. The bay the default had becomes `previous_bay` (as the Pi

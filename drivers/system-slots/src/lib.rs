@@ -140,7 +140,7 @@ pub use offline::{
 };
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
-use uboot::{Uboot, UbootEnv};
+use uboot::{TrialUpdates, Uboot, UbootEnv};
 
 #[driver("system-slots", provides = [Slots, SecurityPrecondition])]
 pub struct SystemSlots {
@@ -153,6 +153,12 @@ pub struct SystemSlots {
     /// The board's `boot_sources` entries as given (`source=path`): each slot's command line must
     /// carry `<boot_args>.src.<entry>` for every one.
     boot_sources: Vec<String>,
+    /// Whether trial updates are available on this board, as the record last found it (see
+    /// [`uboot::TrialUpdates`]); `info` and `health` say it, and `trial` checks it again before it writes.
+    trial_updates: TrialUpdates,
+    /// When the record's trial updates are next looked at (monotonic ns), while the board has a record
+    /// that can say no.
+    trial_watch_ns: u64,
     /// The boot partition's block node, found from the boot chain's source and `boot_sources`
     /// (refused by name when not found). Its reason record is written raw here.
     boot_node: core::result::Result<PathBuf, String>,
@@ -325,6 +331,7 @@ fn record_for(
             place: uboot_env_place(cfg).map_err(|_| Status::INVALID_ARGUMENT)?,
             restarter,
             boot_node: boot_node_of(cfg),
+            partitions: None,
         }),
         "ubi" => match (&layout.ubi, ubi_write) {
             (Some(device), Some(writer)) => Box::new(Uboot {
@@ -355,6 +362,9 @@ fn uboot_env_place(cfg: &Config<'_>) -> core::result::Result<Place, ConfigError<
             "uboot_env_size",
             "is required for the uboot record: CONFIG_ENV_SIZE in bytes",
         ))?;
+    if let Some(why) = uboot::size_refusal(size) {
+        return Err(ConfigError::new("uboot_env_size", why));
+    }
     let int = |key: &'static str| {
         cfg.int(key)
             .and_then(|n| u64::try_from(n).ok())
@@ -495,6 +505,8 @@ impl SystemSlots {
             offline_free: None,
             uncleared: None,
             grow: None,
+            trial_updates: TrialUpdates::Available,
+            trial_watch_ns: 0,
         };
         slots.clear_interrupted();
         // The one thing the board's own record keeps of an install is that a restart cut it short.
@@ -651,7 +663,15 @@ impl SystemSlots {
                 self.save(&state)?;
                 install.drop_source();
                 install.end = Some(Ok(id));
-                self.end_attempt(Ended::Installed, "", Some(install));
+                // The bays are written whether or not the loader will act on them. When it won't, the reply says so.
+                let reason = match self.record.trial_updates() {
+                    TrialUpdates::Available => String::new(),
+                    TrialUpdates::Unavailable(why) => format!(
+                        "the boot loader will not start it: {}",
+                        why.reason.sentence()
+                    ),
+                };
+                self.end_attempt(Ended::Installed, &reason, Some(install));
                 self.show("done", NO_PROGRESS);
                 Ok(())
             }
@@ -1066,6 +1086,19 @@ impl SystemSlots {
         if self.crash.is_some() {
             out.push_str(",\"crash_log\":");
             quoted(&self.crash_note, &mut out);
+        }
+        // Appended last: whether trial updates are available on this board. When not, the reason's
+        // fixed code, its sentence and what the driver found for it.
+        match &self.trial_updates {
+            TrialUpdates::Available => out.push_str(",\"trial_updates\":\"available\",\"trial_block\":\"\",\"trial_block_text\":\"\",\"trial_block_detail\":\"\""),
+            TrialUpdates::Unavailable(why) => {
+                out.push_str(",\"trial_updates\":\"unavailable\",\"trial_block\":");
+                quoted(why.reason.code(), &mut out);
+                out.push_str(",\"trial_block_text\":");
+                quoted(why.reason.sentence(), &mut out);
+                out.push_str(",\"trial_block_detail\":");
+                quoted(&why.detail, &mut out);
+            }
         }
         out.push('}');
         out
@@ -1520,9 +1553,12 @@ impl Lifecycle for SystemSlots {
     /// Down while the firmware refuses to clear the boot count: the words name the wait, and the
     /// driver keeps retrying (see [`count::Uncleared`]). Degraded, not failed: restarts still work.
     fn health(&self) -> Health {
-        match &self.uncleared {
-            None => Health::Ok,
-            Some(pending) => Health::Degraded(count::health_text(pending.wait_ns)),
+        if let Some(pending) = &self.uncleared {
+            return Health::Degraded(count::health_text(pending.wait_ns));
+        }
+        match &self.trial_updates {
+            TrialUpdates::Available => Health::Ok,
+            TrialUpdates::Unavailable(why) => Health::Degraded(why.reason.sentence()),
         }
     }
 
@@ -1550,7 +1586,8 @@ impl Lifecycle for SystemSlots {
         let slow = self.slow_check(now_ns);
         let count = self.count_tick(now_ns);
         let grow = self.grow_tick(now_ns);
-        [install, settle, slow, count, grow]
+        let trial = self.trial_watch(now_ns);
+        [install, settle, slow, count, grow, trial]
             .into_iter()
             .flatten()
             .min()
@@ -1592,6 +1629,42 @@ impl Lifecycle for SystemSlots {
             })?;
         if cfg.str("record") == Some("uboot") {
             uboot_env_place(cfg)?;
+            if cfg
+                .int("uboot_env_mmc_index")
+                .is_some_and(|n| n > uboot::MAX_MMC_INDEX)
+            {
+                return Err(ConfigError::new(
+                    "uboot_env_mmc_index",
+                    "is at most 99: the image writes it as lemnos_envdev, which the budget allows two digits for",
+                ));
+            }
+            if cfg
+                .int("uboot_fastboot_usb")
+                .is_some_and(|n| n > uboot::MAX_USB_INDEX)
+            {
+                return Err(ConfigError::new(
+                    "uboot_fastboot_usb",
+                    "is at most 99: the image stores it as lemnos_usb, which the environment's budget allows two digits for",
+                ));
+            }
+            if cfg
+                .str("uboot_led")
+                .is_some_and(|label| label.len() > uboot::MAX_LED_BYTES)
+            {
+                return Err(ConfigError::new(
+                    "uboot_led",
+                    "is at most 32 bytes: the image stores it as lemnos_led, which the environment's budget allows for",
+                ));
+            }
+            if cfg
+                .str("uboot_reset_word")
+                .is_some_and(|word| word.len() > uboot::MAX_RESET_BYTES)
+            {
+                return Err(ConfigError::new(
+                    "uboot_reset_word",
+                    "is 0x and at most eight hex digits: the image stores it as lemnos_rst, which the environment's budget allows for",
+                ));
+            }
         }
         for key in [
             "uboot_env_mmc_index",
@@ -1623,7 +1696,9 @@ impl Lifecycle for SystemSlots {
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|text| parse_keys(&text).ok())
             .unwrap_or_default();
+        let trial_updates = record.trial_updates();
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
+        slots.trial_updates = trial_updates;
         slots.check = Some(check);
         slots.boot_node = node;
         slots.firmware = firmware;
@@ -1870,7 +1945,12 @@ impl Slots for SystemSlots {
             return Err(Status::NOT_PERMITTED);
         }
         let mut state = self.state();
-        self.record.set_default(id).map_err(|_| Status::IO)?;
+        // A switch the boot loader can't act on is refused before anything is written.
+        crate::boot::loader_reads_record(self.record.as_ref())
+            .map_err(|e| self.record_refused(e))?;
+        self.record
+            .set_default(id)
+            .map_err(|e| self.record_refused(e))?;
         self.record
             .fallback_copy(&self.layout, id)
             .map_err(|_| Status::IO)?;
@@ -1885,6 +1965,11 @@ impl Slots for SystemSlots {
         self.installed(id)?;
         self.fits_board(id)?;
         self.fits_signature(id)?;
+        // Before anything is written: a board whose loader can't start a trial refuses it, by its reason.
+        if let TrialUpdates::Unavailable(why) = self.look_at_trial_updates() {
+            self.note(why.reason.sentence().to_string());
+            return Err(Status::NOT_PERMITTED);
+        }
         if id == self.running() {
             return Err(Status::BUSY);
         }
@@ -2086,6 +2171,43 @@ impl SystemSlots {
             }
         }
         Some(self.next_check_ns)
+    }
+
+    /// Whether trial updates are available on this board, found now (the record is read; nothing is
+    /// written). `info` and `health` show the last look, which `trial` and a periodic look refresh.
+    pub fn trial_updates(&self) -> TrialUpdates {
+        self.record.trial_updates()
+    }
+
+    /// Finds whether trial updates are available now, and keeps it for `info` and `health`.
+    fn look_at_trial_updates(&mut self) -> TrialUpdates {
+        let found = self.record.trial_updates();
+        self.trial_updates = found.clone();
+        found
+    }
+
+    /// Looks at the trial updates again every ten seconds, while the record can say no (a partition
+    /// added, or U-Boot's marker saved, changes the answer without a request). Returns the next look.
+    fn trial_watch(&mut self, now_ns: u64) -> Option<u64> {
+        const EVERY_NS: u64 = 10_000_000_000;
+        if now_ns >= self.trial_watch_ns {
+            self.look_at_trial_updates();
+            self.trial_watch_ns = now_ns.saturating_add(EVERY_NS);
+        }
+        Some(self.trial_watch_ns)
+    }
+
+    /// A record write's error as a status, with its text as the state's error (what `info` shows): a
+    /// refusal by the loader's state is `NOT_PERMITTED` (the write was not made); any other failure, such as
+    /// an environment that does not fit, is `IO`.
+    pub(crate) fn record_refused(&self, error: std::io::Error) -> Status {
+        let refused = error.kind() == std::io::ErrorKind::Unsupported;
+        self.note(error.to_string());
+        if refused {
+            Status::NOT_PERMITTED
+        } else {
+            Status::IO
+        }
     }
 
     /// Writes `text` as the state's error (what `info` and `list` show).
