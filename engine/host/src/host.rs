@@ -3345,6 +3345,13 @@ impl Host {
     /// call returns, so the caller looks again then. Health is read from the driver at each look,
     /// so the caller decides how often to look: the host never looks on its own, and a look
     /// allocates nothing.
+    /// When the device at `index` was last bound, on the host's clock (ns). Zero when it never was.
+    /// Read by the daemon to say how long a device took to come up (see [`Host::look`]).
+    pub fn bound_ns(&self, index: u32) -> Option<u64> {
+        let slot = self.inner.slot(index)?;
+        Some(slot.bound_ns.load(Ordering::Acquire))
+    }
+
     pub fn look(&self, index: u32) -> Option<(u64, Health)> {
         let slot = self.inner.slot(index)?;
         // The revision is read first, as in `info`.

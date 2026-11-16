@@ -53,6 +53,11 @@ struct FifoStream {
 struct Target {
     attached: bool,
     dead: bool,
+    /// Per register: how long the chip stays silent after a write to it, in ns. A chip that is
+    /// resetting or powering up does not acknowledge until its time has passed.
+    settle: BTreeMap<u8, u64>,
+    /// The chip does not acknowledge before this time (host ns).
+    quiet_until_ns: u64,
     layout: Layout,
     pointer: u8,
     bytes: BTreeMap<u8, u8>,
@@ -95,11 +100,16 @@ impl Fifo {
 }
 
 impl Target {
-    fn write(&mut self, data: &[u8]) {
+    fn write(&mut self, data: &[u8], now_ns: u64) {
         let Some((first, rest)) = data.split_first() else {
             return;
         };
         self.pointer = *first;
+        if !rest.is_empty()
+            && let Some(settle) = self.settle.get(&self.pointer)
+        {
+            self.quiet_until_ns = now_ns.saturating_add(*settle);
+        }
         match self.layout {
             Layout::Words => {
                 if !rest.is_empty() {
@@ -194,6 +204,15 @@ impl SimI2c {
             for (i, byte) in bytes.iter().enumerate() {
                 t.bytes.insert(register.wrapping_add(i as u8), *byte);
             }
+        });
+    }
+
+    /// Makes `register` of the chip at `address` settle: after a write to it, the chip does not
+    /// acknowledge for `settle` of simulated time. This is how a chip that is resetting or
+    /// powering up behaves on the bus: it refuses transfers until its time has passed.
+    pub fn set_settle(&self, address: u8, register: u8, settle: Duration) {
+        self.with_target(address, |t| {
+            t.settle.insert(register, settle.as_nanos() as u64);
         });
     }
 
@@ -295,11 +314,11 @@ impl I2c for SimI2c {
             let target = s
                 .targets
                 .get_mut(&address)
-                .filter(|t| t.attached && !t.dead)
+                .filter(|t| t.attached && !t.dead && now >= t.quiet_until_ns)
                 .ok_or(ErrorKind::Nack)?;
             for operation in operations {
                 match operation {
-                    Operation::Write(data) => target.write(data),
+                    Operation::Write(data) => target.write(data, now),
                     Operation::Read(out) => target.read(out, now),
                 }
             }

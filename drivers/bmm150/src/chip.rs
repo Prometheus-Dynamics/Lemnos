@@ -143,9 +143,9 @@ impl Fault {
 
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Bus(_) => "bus error",
-            Self::WrongChip => "chip ID mismatch",
-            Self::PoweredDown => "powered down by its owner",
+            Self::Bus(_) => "the chip did not answer on its bus, retrying",
+            Self::WrongChip => "the chip answered another ID, retrying",
+            Self::PoweredDown => "the chip is powered down by its owner, retrying",
         }
     }
 }

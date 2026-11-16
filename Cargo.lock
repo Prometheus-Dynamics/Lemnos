@@ -2010,6 +2010,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-sensor-power-up"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+ "lemnos-driver-bmi088",
+ "lemnos-driver-bmm150",
+ "lemnos-driver-ina2xx",
+ "lemnos-host",
+ "lemnos-sim",
+]
+
+[[package]]
 name = "lemnos-shm-bell-check"
 version = "2.0.1-dev"
 dependencies = [

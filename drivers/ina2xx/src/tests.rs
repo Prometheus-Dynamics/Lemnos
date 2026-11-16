@@ -625,6 +625,8 @@ fn without_a_range_the_test_is_skipped_and_the_bus_is_not_touched() {
     let (mut board, sim) = board_with_bus();
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let mut driver = bind(&mut board, &INA226).unwrap();
+    // The tick verifies the chip, as the host's would; the skipped test then reads nothing more.
+    Driver::tick(&mut driver, 0);
     let before = sim.transactions();
     let (_, record) = run_test(&mut driver, "bus_voltage");
     let record = record.unwrap();

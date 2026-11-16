@@ -18,11 +18,12 @@
 //! does not acknowledge its address is absent, and one that answers another
 //! manufacturer is failed: either refuses the bind, which the host retries under
 //! the failure rule, so a chip that appears later binds on a later retry. The chip
-//! is verified and calibrated on the first read, and again after any read fails,
-//! so a chip that resets is picked up by a later read. Until then health reports
-//! `Degraded`. The driver never gives up and never switches itself off. It makes
-//! no retries of its own, so pacing between attempts (capped at 8 s) is the
-//! host's job, done by how often it reads.
+//! is verified and calibrated by the host's tick from its bind, and again after
+//! any read fails, so a chip that resets is picked up without a client. Until
+//! then health reports `Degraded`, naming the check it waits on. A failed attempt
+//! is retried by the tick from 100 ms, doubling, capped at 8 s. The driver never
+//! gives up and never switches itself off. A chip needs no time after its
+//! configuration write, so the verification has no wait of its own.
 //!
 //! On a device the board gives to the host (`owner = "host"`) the operating
 //! system's driver runs the chip, and this one only reads it: the first read
@@ -53,6 +54,9 @@ use lemnos_hal::HalError;
 
 /// The largest 7-bit I2C address.
 const MAX_ADDRESS: u8 = 0x7f;
+/// A failed verification is retried after this, doubling each time, capped at 8 s.
+const RETRY_FIRST_NS: u64 = 100_000_000;
+const RETRY_CAP_NS: u64 = 8_000_000_000;
 
 const READ: MethodId = MethodId {
     contract: 0,
@@ -76,6 +80,10 @@ pub struct Ina2xx {
     bus: I2c,
     chip: chip::Ina,
     verified: bool,
+    /// The next verification attempt is due, host ns. `None`: now.
+    up_due: Option<u64>,
+    /// The current retry wait after a failed attempt, ns. Zero when the last attempt worked.
+    retry_ns: u64,
     /// The operating system's driver runs the chip: read it, never set it up.
     host_owned: bool,
     /// The board's warning limits, in nano-units (the items' raw scale). Unset means none.
@@ -199,6 +207,8 @@ impl Lifecycle for Ina2xx {
             bus,
             chip,
             verified: false,
+            up_due: None,
+            retry_ns: 0,
             host_owned: cfg.host_owned(),
             warn: warnings(cfg)?,
             bus_range_mv: bus_range_from_config(cfg)?,
@@ -208,12 +218,17 @@ impl Lifecycle for Ina2xx {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let verifying = self.verify_step(now_ns);
         let mut bench = BusVoltage {
             chip: &self.chip,
             bus: &mut self.bus,
             range_mv: self.bus_range_mv,
         };
-        self.runner.tick(now_ns, &mut bench)
+        let jobs = self.runner.tick(now_ns, &mut bench);
+        match (verifying, jobs) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn caller(&mut self, caller: CallerId) {
@@ -282,7 +297,7 @@ impl Lifecycle for Ina2xx {
 
     fn health(&self) -> Health {
         if !self.verified {
-            Health::Degraded("chip not verified: retried on each read")
+            Health::Degraded("chip not verified: retrying its ID check and configuration write")
         } else if let Some(why) = self.runner.health() {
             Health::Degraded(why)
         } else {
@@ -354,6 +369,44 @@ fn bus_range_from_config(cfg: &Config<'_>) -> Result<Option<(i64, i64)>> {
     }
 }
 
+impl Ina2xx {
+    /// One verification attempt, once it is due, while the chip is not verified. Returns when the
+    /// next attempt is due.
+    fn verify_step(&mut self, now: u64) -> Option<u64> {
+        if self.verified {
+            return None;
+        }
+        if let Some(due) = self.up_due
+            && now < due
+        {
+            return Some(due);
+        }
+        self.up_due = None;
+        let verified = if self.host_owned {
+            self.chip.attach(&mut self.bus)
+        } else {
+            self.chip.init(&mut self.bus)
+        };
+        match verified {
+            Ok(()) => {
+                self.verified = true;
+                self.retry_ns = 0;
+                None
+            }
+            Err(_) => {
+                self.retry_ns = if self.retry_ns == 0 {
+                    RETRY_FIRST_NS
+                } else {
+                    self.retry_ns.saturating_mul(2).min(RETRY_CAP_NS)
+                };
+                let due = now.saturating_add(self.retry_ns);
+                self.up_due = Some(due);
+                Some(due)
+            }
+        }
+    }
+}
+
 impl PowerMonitor for Ina2xx {
     fn read(&mut self) -> Result<PowerReading> {
         if !self.verified {
@@ -364,6 +417,8 @@ impl PowerMonitor for Ina2xx {
             };
             verified.map_err(|error| status_of(error.kind()))?;
             self.verified = true;
+            self.up_due = None;
+            self.retry_ns = 0;
         }
         match self.chip.read_fixed(&mut self.bus) {
             Ok(raw) => Ok(power_reading(raw)),
