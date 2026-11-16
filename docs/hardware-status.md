@@ -320,3 +320,9 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`M32.md`](../testing/board-runs/M32.md) | A stated camera link (the board names the receiver) reads `ok` when the receiver cannot say what is wired to its input, as rp1-csi2 does on c1: the sensor was `degraded` with a healthy chain. Checked on the simulated chain through the service and `lemnos-ctl` list, chain and describe. Untested on board: the read on the reference board is the check in the record |
 | [`M36.md`](../testing/board-runs/M36.md) | The watchdog's gap at the boot's hand-over: slot-init arms the watchdog at 15 s, and lemnosd takes over feeding. QEMU showed the arming, a 45 s feed and the stall reset; the board's gap and lemnosd's feeding are **untested on board** |
 | [`M37.md`](../testing/board-runs/M37.md) | A refused bind says why: on the reference board the I2C chips' identity reads at bind, the sensor's power-up order (the supply binds before the sensor's identity read) and present devices reading `running ok`. The board's services are stopped with systemctl behind a failsafe timer for the window and started again. Checked off board on the simulated devices and the reference board file; **untested on board** |
+
+## Written, untested on board
+
+| Check | Result |
+|---|---|
+| [`MR1.md`](../testing/board-runs/MR1.md) | The maskrom reflash of the RK3566 board: the on-chip stage and the shared wire pass their tests on the host (the PC-side host is in another project); the reboot-mode entry, the watchdog's survival through the boot ROM, the 472 load address and the first SD write are untested on board. Nothing has been run on the board |

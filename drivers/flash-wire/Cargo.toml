@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-flash-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The wire of the flash link between a PC-side flasher and an on-chip stage: request and reply frames, the CRC, the reset kinds and the identity record, with a layout hash the PC side pins. no_std, no unsafe"
+
+[lints]
+workspace = true
+
+# No dependencies: the PC side pins this crate by a locked revision, and the stages build it for
+# bare metal. Nothing here is allowed to grow a dependency without a reason written in the README.
+[dependencies]

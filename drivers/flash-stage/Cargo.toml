@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-flash-stage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The shared rules of an on-chip flash stage: the watchdog-first start, bounded waits, the serve loop over a link, and the order rules (a verified chunk before any write, the compared mark before a boot area). no_std, no unsafe; the chips' stages build on it"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-flash-wire = { path = "../flash-wire" }
+
+# The simulated device (`sim`) is for a PC side's conformance run and for this crate's tests. It needs
+# std; a stage build leaves the feature off.
+[features]
+sim = []

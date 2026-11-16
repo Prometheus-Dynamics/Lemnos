@@ -1508,6 +1508,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-rockchip-maskrom-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-flash-stage",
+ "lemnos-flash-wire",
+ "lemnos-rockchip-maskrom-stage",
+]
+
+[[package]]
 name = "lemnos-driver-rp1-csi2"
 version = "2.0.1-dev"
 dependencies = [
@@ -1759,6 +1768,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-flash-stage"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-flash-wire",
+]
+
+[[package]]
+name = "lemnos-flash-wire"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-gadget-check"
 version = "2.0.1-dev"
 dependencies = [
@@ -2007,6 +2027,14 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+]
+
+[[package]]
+name = "lemnos-rockchip-maskrom-stage"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-flash-stage",
+ "lemnos-flash-wire",
 ]
 
 [[package]]
