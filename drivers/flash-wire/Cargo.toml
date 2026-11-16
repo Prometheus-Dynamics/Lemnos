@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-flash-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "The wire of the flash link between a PC-side flasher and an on-chip stage: frames, CRC, reset kinds, identity record, regions, timing and the USB identity, with a layout hash the PC side pins. no_std, no unsafe"
+
+[lints]
+workspace = true
+
+# No dependencies: a PC side pins this crate by a locked git revision and needs nothing else from the repository.
+[dependencies]
