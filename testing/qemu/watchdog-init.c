@@ -5,7 +5,9 @@
  * devtmpfs, opens /dev/watchdog (an open arms it, and the descriptor is close-on-exec, as Rust's
  * OpenOptions makes it), sets the timeout to 15 s and reads it back, feeds it with byte 0 (never `V`)
  * while it works, and then hands PID 1 to the userspace stand-in by exec, the way switch_root does.
- * The last feed's time goes to the stand-in, which reports the gap to its own first open.
+ * Its last feed is made right before the exec, as slot-init's is (no wait between them). The last feed's
+ * time goes to the stand-in, which reports the gap from it to its own first feed (run-watchdog.sh checks
+ * that gap against the applied period).
  *
  * It does not run slot-init's boot: the slot is not in the guest. Static, so the image needs nothing else.
  */
@@ -31,6 +33,12 @@ static double now(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void feed(int fd)
+{
+	if (write(fd, "\0", 1) != 1)
+		printf("hook: a feed failed: %s\n", strerror(errno));
 }
 
 /* The stand-in's mode, from the command line: `lemnos.watchdog=stall` or the default `normal`. */
@@ -69,11 +77,12 @@ int main(void)
 	}
 	printf("hook: watchdog armed: %d s\n", applied);
 	for (int i = 0; i < FEEDS; i++) {
-		if (write(fd, "\0", 1) != 1)
-			printf("hook: a feed failed: %s\n", strerror(errno));
-		last = now();
+		feed(fd);
 		sleep(1);
 	}
+	/* The last feed, right before the exec: nothing waits between it and the hand-over. */
+	feed(fd);
+	last = now();
 	snprintf(when, sizeof when, "%.6f", last);
 	printf("hook: last feed at %s, handing over to /sbin/watchdog-user\n", when);
 	fflush(stdout);

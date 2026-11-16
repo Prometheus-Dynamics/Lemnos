@@ -33,6 +33,11 @@
 #                                    (drivers/firmware/Kconfig, depends on MAILBOX; vcio.c calls its
 #                                    rpi_firmware_property_list). The checker: scripts/check-kernel-config.py
 #                                    --check-config <.config> --firmware rpi-tryboot.
+#   - watchdog.all                   each symbol =y (built in: =m or unset is refused) on every slot board, and
+#                                    watchdog.open_timeout_s is CONFIG_WATCHDOG_OPEN_TIMEOUT (=30 exactly). Named in
+#                                    [watchdog] below: the kernel's watchdog chain, docs/slots.md, "The watchdog chain".
+#   - watchdog.family.F.driver       each symbol =y for a board whose SoC is in watchdog.family.F.socs (a slot family).
+#                                    The checker: scripts/check-kernel-config.py --check-config <.config> --watchdog F.
 #   - optional.all is named, not enforced: a missing one is logged and the boot carries on.
 #   - boot_check.checked is the set of symbols slot-init checks when it boots and names when one is
 #     absent. It must equal the names slot-init's self-check gives.
@@ -43,6 +48,7 @@
 #   - Per-SoC storage hosts (for example MMC_SDHCI_BRCMSTB) are not here: they are board data.
 #     MODULES is not required and is not listed: slot-init loads no modules.
 
+# [watchdog] (version 3, additive): the watchdog the kernel and slot-init share; see the table above.
 # What changed from version 2: always.all gains EROFS_FS_ZIP. slot-init mounts the slot's root as an EROFS
 # image, usually compressed (EROFS_FS was already listed). From the kernel tree (linux 7.3.3, fs/erofs/
 # Kconfig): EROFS_FS depends on BLOCK (listed) and selects LZ4_DECOMPRESS when EROFS_FS_ZIP is set;
@@ -114,6 +120,39 @@ all = [
 all = [
   "VFAT_FS",
 ]
+
+# The watchdog (additive at version 3, like [crash_log]: a reader that knows it must accept it).
+# The numbers slot-init and the image builder share: slot-init asks for request_s seconds and holds a
+# device whose applied period is at most max_applied_s (see service/slot-init/src/dog.rs, which states
+# the derivation). A device applying more, or 0, is a named refusal, and a board whose declared period
+# (the hw-watchdog device's timeout_s in its board file) is outside [1, max_applied_s] is refused by
+# lemnos-ctl validate with reason watchdog-period-outside-bound.
+# open_timeout_s is CONFIG_WATCHDOG_OPEN_TIMEOUT: 30 s from the watchdog driver's probe to the first open,
+# which slot-init makes early in its initramfs (docs/kernel-config.md, "Watchdog").
+[watchdog]
+all = [
+  "WATCHDOG",
+  "WATCHDOG_CORE",
+  "WATCHDOG_HANDLE_BOOT_ENABLED",
+]
+request_s = 15
+max_applied_s = 30
+open_timeout_s = 30
+
+[watchdog.family.bcm2712]
+# The Raspberry Pi 5 family: the Broadcom watchdog (bcm2835_wdt; its maximum is 15 s).
+socs = ["bcm2712-rp1"]
+driver = ["BCM2835_WDT"]
+
+[watchdog.family.rk35xx]
+# Rockchip RK3566 and RK3588: the Synopsys DesignWare watchdog (dw_wdt, power-of-two periods).
+socs = ["rk3566", "rk3588"]
+driver = ["DW_WATCHDOG"]
+
+[watchdog.family.sun60i]
+# Allwinner A733 (sun60i): the always-on watchdog (sunxi_wdt; its maximum is 16 s).
+socs = ["sun60i-a733"]
+driver = ["SUNXI_WATCHDOG"]
 
 [initramfs]
 gzip = "RD_GZIP"

@@ -376,13 +376,35 @@ driver's exports. Module route: `rp1_pio_*` plus the firmware interface under it
 
 ### Watchdog
 
-Stock route: `/dev/watchdog0`. Module route: none.
+Stock route: `/dev/watchdog0`. Module route: none. The slot board's requirements are the
+`[watchdog]` table of `contracts/slot-kernel.toml`, checked for each slot family by
+`scripts/check-kernel-config.py --check-config <.config> --watchdog <family>`.
 
 | Symbol | Stock | Module | Built in | Reference | Feature |
 | --- | --- | --- | --- | --- | --- |
 | `CONFIG_WATCHDOG` | required | not needed | `y` | `y` | the watchdog menu |
 | `CONFIG_WATCHDOG_CORE` | required | not needed | `y` | `y` | the core, which makes `/dev/watchdogN` (`watchdog_dev.o` is part of it). `WATCHDOG_DEV` does not exist in this tree |
-| SoC driver (per SoC, see below) | required | not needed | `y` | see below | the hardware timer |
+| `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED` | required | not needed | `y` | not read | the core feeds a device the firmware or the boot left running, from its probe until userspace first opens it. The slot board relies on it (below); the default is `y` |
+| `CONFIG_WATCHDOG_OPEN_TIMEOUT` | required | not needed | `30` | not read | the limit, in seconds from the probe, on that kernel feeding: after it the kernel stops feeding, and the device resets the board unless userspace has opened it (below) |
+| SoC driver (per SoC, see below) | required | not needed | `y` | see below | the hardware timer. Built in (`=y`), not `=m`: the watchdog must be running before any module could load |
+
+Why the open timeout is 30 s. With `WATCHDOG_HANDLE_BOOT_ENABLED`, the core keeps feeding the device
+the firmware left running, from the driver's probe until the first open of `/dev/watchdogN`. The
+open timeout is how long that feeding lasts. slot-init opens `/dev/watchdog` early in its initramfs,
+right after it mounts proc, sysfs and devtmpfs (`service/slot-init/src/boot.rs`), so the window the
+30 s has to cover is probe to slot-init's open, not probe to lemnosd's bind. The slowest initramfs
+start is not known: the tree gives no number for it, so 30 s is the first-boot setting, and the first
+boot on each board measures the probe-to-open time (`testing/board-runs/WDT-CHAIN.md`). A longer
+initramfs start than 30 s resets the board before slot-init can arm it, and the board rolls back
+through its boot counters like any other early hang.
+
+The family drivers (the contract's `[watchdog.family.*]`):
+
+| Slot family | SoCs (`socs/`) | Driver symbol | Period it can apply for a 15 s request | Verified |
+| --- | --- | --- | --- | --- |
+| `bcm2712` | `bcm2712-rp1` | `CONFIG_BCM2835_WDT` (see the SoC drivers table) | at most 15 s | the driver's maximum is 15 s (the reference SoC row below) |
+| `rk35xx` | `rk3566`, `rk3588` | `CONFIG_DW_WATCHDOG` | the first power-of-two period at or above 15 s: below 30 s on any clock (`slot-init`'s bound) | the Synopsys driver's symbol (the K230 row below); the Rockchip rows are not read on this tree |
+| `sun60i` | `sun60i-a733` | `CONFIG_SUNXI_WATCHDOG` | at most 16 s (the driver's maximum) | not read on this tree: the symbol is the mainline driver's (`drivers/watchdog/sunxi_wdt.c`); to be checked on the board |
 
 ### hwmon and thermal
 
@@ -471,6 +493,7 @@ not a claim.
 | k230 | GPIO | `CONFIG_GPIO_DWAPB` | `gpio-dwapb.c` | `snps,dw-apb-gpio` only | not verified (mainline v7.3.3, riscv): `gpio-dwapb.c` matches `snps,dw-apb-gpio` only, not a K230 string |
 | k230 | PWM | none | none | the map's `pwm` is kind `block` | not applicable (no stock route) |
 | k230 | watchdog | `CONFIG_DW_WATCHDOG` | `drivers/watchdog/dw_wdt.c` | `snps,dw-wdt` | verified (mainline v7.3.3, riscv): `dw_wdt.c` matches `snps,dw-wdt` |
+| sun60i-a733 | watchdog | `CONFIG_SUNXI_WATCHDOG` | `drivers/watchdog/sunxi_wdt.c` | `allwinner,sun55i-a523-wdt` (fallback) | not verified in this tree: the symbol is the mainline driver's, the A733 node is `socs/sun60i-a733.toml` (unconfirmed) |
 | rk3566 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only (mainline v7.3.3, arm64): `i2c-rk3x.c` matches `rockchip,rk3399-i2c`; no rk3566 string |
 | rk3566 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only (mainline v7.3.3, arm64): `spi-rockchip.c` matches `rockchip,rk3066-spi` and the other listed strings; no rk3566 string |
 | rk3566 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | generic only (mainline v7.3.3, arm64): `gpio-rockchip.c` matches the generic `rockchip,gpio-bank`; the SoC's own compatible is not read: not verified for rk3566 |
@@ -554,6 +577,9 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_DM_BUFIO` | Slot path | `CONFIG_BLOCK` |
 | `CONFIG_DM_VERITY` | Slot path | `CONFIG_BLOCK` |
 | `CONFIG_DW_WATCHDOG` | The SoC drivers | none |
+| `CONFIG_SUNXI_WATCHDOG` | The SoC drivers | none |
+| `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED` | Watchdog | none |
+| `CONFIG_WATCHDOG_OPEN_TIMEOUT` | Watchdog | none |
 | `CONFIG_EROFS_FS` | Slot path | `CONFIG_BLOCK` |
 | `CONFIG_EROFS_FS_ZIP` | Slot path | `CONFIG_EROFS_FS` |
 | `CONFIG_EVENTFD` | Symbols of lemnos.ko | none |

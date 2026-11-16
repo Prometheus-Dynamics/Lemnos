@@ -41,6 +41,11 @@ device's config, `docs/slots.md`, "The crash log") requires `crash_log.all` buil
 `check-kernel-config.py --check-config <.config> --crash-log` refuses a configuration that leaves any of
 those symbols =m or unset. Both harness configurations carry them.
 
+Watchdog (an additive group at contract version 3, `[watchdog]`): `check-kernel-config.py --check-config <.config>
+--watchdog <family>` refuses a configuration in which a slot board's watchdog is not built in: the `[watchdog] all`
+symbols and the family's SoC driver must be =y, and CONFIG_WATCHDOG_OPEN_TIMEOUT must be 30. The families are
+bcm2712, rk35xx and sun60i. The doc's Watchdog section must name each family's driver symbol.
+
 Exits 1 and says what is wrong; 0 when all hold.
 """
 import os
@@ -69,6 +74,7 @@ CONTRACT_VERSION = 3
 WHEN_GROUPS = ("always.all", "kind.disk.all", "kind.disk.one_of", "kind.mtd.all", "kind.mtd.one_of",
                "firmware.rpi-tryboot.all", "crash_log.all", "optional.all", "initramfs")
 FIRMWARES = ("rpi-tryboot",)
+WATCHDOG_KEYS = ("all", "request_s", "max_applied_s", "open_timeout_s", "family")
 WHEN_BOARD = ("board", "none")
 
 
@@ -369,7 +375,7 @@ def contract():
         sys.exit(f"{where}: cannot be read: {err}")
     if data.get("version") != CONTRACT_VERSION:
         sys.exit(f"{where}: version {data.get('version')!r} is not one this reader knows (it reads {CONTRACT_VERSION}); refusing the file")
-    _keys(data, ("version", "always", "kind", "firmware", "crash_log", "optional", "initramfs", "boot_check"), where, "")
+    _keys(data, ("version", "always", "kind", "firmware", "crash_log", "optional", "initramfs", "boot_check", "watchdog"), where, "")
     _keys(data["always"], ("all",), where, "always.")
     _keys(data["kind"], ("disk", "mtd"), where, "kind.")
     for kind in ("disk", "mtd"):
@@ -381,6 +387,15 @@ def contract():
     _keys(data["optional"], ("all",), where, "optional.")
     _keys(data["initramfs"], ("gzip", "xz", "zstd", "lz4", "none"), where, "initramfs.")
     _keys(data["boot_check"], ("checked",), where, "boot_check.")
+    _keys(data["watchdog"], WATCHDOG_KEYS, where, "watchdog.")
+    for family, table in data["watchdog"]["family"].items():
+        _keys(table, ("socs", "driver"), where, f"watchdog.family.{family}.")
+        for soc in _strings(table["socs"], where, f"watchdog.family.{family}.socs"):
+            if not (ROOT / "socs" / f"{soc}.toml").is_file():
+                sys.exit(f"{where}: watchdog.family.{family}.socs names {soc!r}, which is no socs/{soc}.toml")
+        _strings(table["driver"], where, f"watchdog.family.{family}.driver")
+    if not isinstance(data["watchdog"]["family"], dict) or not data["watchdog"]["family"]:
+        sys.exit(f"{where}: watchdog.family must name at least one slot family")
     return data
 
 
@@ -494,6 +509,43 @@ def firmware_config_problems(values, firmware):
     return problems
 
 
+def watchdog_config_problems(values, family):
+    """A kernel configuration against the watchdog group for slot family `family` (`[watchdog]`, version 3): the
+    `all` symbols and the family's driver built in (=y), and CONFIG_WATCHDOG_OPEN_TIMEOUT exactly 30. =m, unset and
+    another value are refused, each one named."""
+    data = contract()
+    where = CONTRACT.relative_to(ROOT)
+    if family not in data["watchdog"]["family"]:
+        return [f"{family!r} is not a slot family in {where} (it has: {', '.join(data['watchdog']['family'])})"]
+    problems = []
+    for name in data["watchdog"]["all"] + data["watchdog"]["family"][family]["driver"]:
+        have = values.get(f"CONFIG_{name}", "unset")
+        if have != "y":
+            problems.append(
+                f"CONFIG_{name} must be built in (=y) for a {family} slot board ({where}) but is "
+                f"{'=m' if have == 'm' else 'unset' if have == 'unset' else '=' + have}")
+    timeout = values.get("CONFIG_WATCHDOG_OPEN_TIMEOUT", "unset")
+    if timeout != str(data["watchdog"]["open_timeout_s"]):
+        problems.append(
+            f"CONFIG_WATCHDOG_OPEN_TIMEOUT must be {data['watchdog']['open_timeout_s']} for a slot board ({where}) "
+            f"but is {timeout}")
+    return problems
+
+
+def watchdog_doc_problems(problems):
+    """The Watchdog section of the doc names each family's driver symbol, the open timeout and the feeding symbol."""
+    data = contract()
+    where = CONTRACT.relative_to(ROOT)
+    text = section_text("### Watchdog")
+    for family, table in data["watchdog"]["family"].items():
+        for name in table["driver"]:
+            if f"`CONFIG_{name}`" not in text:
+                problems.append(f"{DOC.relative_to(ROOT)}: the Watchdog section does not name CONFIG_{name} ({where}, watchdog.family.{family})")
+    for name in ("WATCHDOG_OPEN_TIMEOUT", "WATCHDOG_HANDLE_BOOT_ENABLED"):
+        if f"`CONFIG_{name}`" not in text:
+            problems.append(f"{DOC.relative_to(ROOT)}: the Watchdog section does not name CONFIG_{name}")
+
+
 def crash_log_config_problems(values):
     """A kernel configuration against the crash-log group (an additive group at contract version 3): every symbol built in
     (=y). =m and unset are both refused, and each is named."""
@@ -547,6 +599,7 @@ def slot_checks(problems):
 
 def plain_checks(problems):
     slot_checks(problems)
+    watchdog_doc_problems(problems)
     rows = table()
     for name, where in referenced().items():
         if name not in rows:
@@ -632,6 +685,7 @@ def main(argv):
         config = pathlib.Path(argv[1])
         firmware = argv[argv.index("--firmware") + 1] if "--firmware" in argv else ""
         crash_log = "--crash-log" in argv
+        watchdog = argv[argv.index("--watchdog") + 1] if "--watchdog" in argv else ""
         try:
             values = fragment(config)
         except OSError as err:
@@ -640,10 +694,12 @@ def main(argv):
         problems = firmware_config_problems(values, firmware) if firmware else []
         if crash_log:
             problems += crash_log_config_problems(values)
+        if watchdog:
+            problems += watchdog_config_problems(values, watchdog)
         for problem in problems:
             print(f"kernel-config: {problem}", file=sys.stderr)
         if not problems:
-            print(f"kernel-config: {config} carries the {' and '.join(g for g in (firmware, 'crash-log' if crash_log else '') if g)} group(s)")
+            print(f"kernel-config: {config} carries the {' and '.join(g for g in (firmware, 'crash-log' if crash_log else '', f'watchdog {watchdog}' if watchdog else '') if g)} group(s)")
         return 1 if problems else 0
     if argv[:1] == ["--print-table"]:
         tree, defconfig = argv[1], argv[2]

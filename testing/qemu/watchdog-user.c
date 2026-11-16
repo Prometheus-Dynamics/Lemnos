@@ -5,7 +5,8 @@
  * feed, on CLOCK_MONOTONIC.
  *
  *   normal  opens /dev/watchdog (its first open after the handover), reports the gap from the last
- *           feed, feeds once a second for 45 s, then powers off. The guest staying up that long is the check.
+ *           feed to its first open and to its first feed, feeds once a second for 45 s, then powers off.
+ *           The guest staying up that long is the check; the first-feed gap is checked against the bound.
  *   stall   never opens /dev/watchdog. Nothing feeds the device after the hook's last feed, so the
  *           watchdog resets the guest within its timeout. The stall is reported before it starts.
  *
@@ -56,6 +57,10 @@ int main(int argc, char **argv)
 	for (int s = 0; s < STAY_SECONDS; s++) {
 		if (write(fd, "\0", 1) != 1)
 			printf("user: a feed failed: %s\n", strerror(errno));
+		if (s == 0) {
+			printf("user: first feed of /dev/watchdog %.3f s after the hook's last feed\n", now() - last);
+			fflush(stdout);
+		}
 		sleep(1);
 	}
 	printf("user: fed the watchdog for %d s and the guest stayed up; powering off\n", STAY_SECONDS);

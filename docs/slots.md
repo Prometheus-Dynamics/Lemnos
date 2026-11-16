@@ -1558,6 +1558,91 @@ writes that object for the board, as the whole `boot` object the generator is th
 (`docs/boards.md`, "The board overlay file"). The installer and the image builder
 check that a `rpi-tryboot` slot has every required file (`layout::rpi_tryboot_missing`).
 
+## The watchdog chain
+
+A slot board is watched by two things, and they catch different hangs. The hardware watchdog resets
+the board when nothing feeds it for its period. The good-boot deadline (below) restarts the board when a
+boot runs but never becomes good. The boot counters decide which slot the next boot starts. This section
+writes the window of the watchdog from the first power-up to steady running, who feeds in each, and what
+bounds it. The numbers are the contract's: `contracts/slot-kernel.toml`, `[watchdog]`.
+
+Exactly two programs open the device, in this order: `lemnos-slot-init` (the initramfs `/init`, the
+first opener, once it has mounted `/proc`, `/sys` and `/devtmpfs`), and then lemnosd's `hw-watchdog`
+driver (`drivers/hw-watchdog`, at its bind). Nothing else opens it. An image that gives the device to
+systemd's `RuntimeWatchdogSec=` or `ShutdownWatchdogSec=`, or to a BusyBox `watchdog` daemon, adds a third
+opener that feeds it even when lemnosd is dead. That hides the hang this chain exists to catch
+(`packaging/README.md`, "The hardware watchdog"; `scripts/check-packaging.sh` refuses a unit that sets
+`WatchdogSec=` or the systemd watchdog keys; the M37 board record's probe found systemd feeding the device).
+slot-init holds the device from its open until its exec, and lemnosd takes it over at its bind. The windows,
+in the order a boot passes them:
+
+| # | Window | Who feeds in it | What bounds it | A hang in it |
+| --- | --- | --- | --- | --- |
+| 1 | Firmware or U-Boot arms the watchdog, before the kernel | the firmware: the device runs its own period, nothing feeds | the firmware's period (the board's boot setting; U-Boot's `CONFIG_WATCHDOG_TIMEOUT_MSECS` when the board sets it) | reset at that period; the firmware counts the restart |
+| 2 | Kernel probe to the first open | the kernel, with `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED` | `CONFIG_WATCHDOG_OPEN_TIMEOUT`, 30 s from the driver's probe. After it the kernel stops feeding | reset at the device's period after the last kernel feed |
+| 3 | Slot-init from its open to `switch_root` | slot-init, at each log line and each wait (`service/slot-init/src/sys.rs`) | the applied period, read back from the device: 15 s asked, at most 30 s allowed (`service/slot-init/src/dog.rs`). A feed every min(5 s, half the applied period) | reset at the applied period after the last feed; the boot counters decide the next slot |
+| 4 | Unfed hand-over: from slot-init's last feed before the exec to lemnosd's first feed | nobody. The exec closes slot-init's descriptor without the magic close, so the device keeps running with no feeder | the applied period. The gap must be well under it (below) | reset; the restart starts the default or the previous slot |
+| 5 | lemnosd's bind to its first healthy tick | nobody yet. The bind opens the node; the first tick (the timeout request and the first feed) waits until the daemon is healthy | the same applied period; the daemon's healthy test (`service/lemnosd/src/liveness.rs`) | reset at the applied period, if lemnosd never becomes healthy |
+| 6 | Steady running | lemnosd, at half its timeout, only while it is healthy | `timeout_s` on the `hw-watchdog` device (15 s by default, read back) | a daemon that stops being healthy stops feeding: reset at `timeout_s` |
+
+The first-flash chain (below) has the same windows 1, 2, 5 and 6, and an unknown window 3.
+
+**Window 2, and why the open timeout is 30 s.** The kernel's feeding runs from the driver's probe to the
+first open, so the 30 s has to cover probe to slot-init's open. slot-init opens early: it does that right
+after it mounts `/proc`, `/sys` and `/devtmpfs`, before it reads the boot partition or the data partition. So
+the only work the 30 s covers is the start of the initramfs. The slowest such start is not known: the tree
+gives no number for it. The first boot on each board measures probe to open (`testing/board-runs/WDT-CHAIN.md`).
+A start longer than 30 s resets the board before slot-init arms it: the reset is counted like any early
+hang, so a board that always starts slower than 30 s rolls back and never confirms a slot.
+
+**Window 3, and the bound.** slot-init asks for 15 s. Hardware rounds that: the DesignWare watchdog of
+the rk35xx family applies the first power-of-two period at or above the request, which is below 30 s
+on any clock (`service/slot-init/src/dog.rs` derives it), and the sun60i family's watchdog stops at 16 s.
+A device applying more than 30 s, or 0, is refused by name (`watchdog-period-outside-bound`,
+`watchdog-period-zero`) and is still fed, at the same cadence. slot-init names the refusal in the kernel
+log. `lemnos-ctl validate` refuses a board whose own declared period (the `hw-watchdog` device's `timeout_s`)
+is outside 1 to 30 s, under the same name. A device that cannot be read at all is named
+`watchdog-period-unreadable`. If the device node never appears, slot-init retries the open with a backoff
+that starts at 250 ms, doubles and is capped at 8 s, until the waits reach 20 s; then it logs
+`watchdog-node-absent` and arms nothing. The kernel's feeding of window 2 is then all there is until
+lemnosd binds the device, and the open timeout bounds it.
+
+**What slot-init does with a device it refuses.** It keeps the open descriptor and feeds it while
+boot runs, at half the applied period, or every 5 s when the period is 0 or unknown. The device is armed
+whether slot-init likes its period or not, so a dropped descriptor would leave it running unfed. The one
+hand-over that closes the descriptor is the exec of `switch_root`, and it comes after a feed right before
+it. Feeding stops, as before, when boot returns (`service/slot-init/src/main.rs`): a stuck final loop
+must reset the board, so this is the one place a device is left to its period on purpose.
+
+**Window 4, and the bound.** The gap starts at slot-init's last feed before the exec and ends at lemnosd's
+first feed. The bound is one third of the applied period: 5 s when the period is 15 s. The reason: the gap
+is time nothing feeds, so it has to be well under the period, and the third leaves the rest of the period
+for the host's own delays (the stamps, a slow disk, a busy kernel). The bound is a named constant in the
+QEMU check (`testing/qemu/run-watchdog.sh`, `HANDOVER_GAP_DIVISOR`), which reads the applied period the
+guest reports. The QEMU check measures only the exec to the first feed of a stand-in. The real gap also
+contains systemd's start of lemnosd and lemnosd's bind, which no test here runs: the board run measures it
+(`testing/board-runs/WDT-CHAIN.md`).
+
+**Window 5.** A keep-alive device is not ticked while the daemon is not healthy (`engine/host/src/host.rs`,
+`may_tick`). So the first feed, and the timeout request, come at the first healthy tick, not at the bind. A
+lemnosd that binds and never becomes healthy never feeds the device, and the device resets at its period.
+
+**Which mechanism catches which hang.**
+
+| Hang | Caught by | Then |
+| --- | --- | --- |
+| In the firmware or U-Boot, before the kernel | window 1 (the firmware's period) | reset; the firmware's count goes up |
+| In the kernel, before the first open, past 30 s | window 2 (the open timeout) | reset; the count goes up |
+| In slot-init, after its open | window 3 (the applied period) | reset; the count goes up |
+| In a slot-init loop after boot returned | window 3 (feeding stopped on purpose) | reset at the applied period |
+| In lemnosd after the hand-over, or a daemon that is not healthy | window 6 (`timeout_s`) | reset; the count goes up |
+| A boot that runs with lemnosd healthy but never confirms good (the marker is missing, the slot never reaches ready) | the good-boot deadline (`good_boot_s`, default 300 s, from 30 to 3600), which is not the watchdog: the daemon keeps feeding while it is healthy | `reboot-force` at the deadline |
+| Restarts that keep failing, whatever the cause | the boot counters: the Pi firmware's count (previous at 4 to 7, RPIBOOT at 8 on the rescue), and the U-Boot restart count | the previous slot, then the flashing mode |
+| A trial that fails | the tryboot record and its attempts (`trial_attempts`) | the default, by a plain restart |
+
+The watchdog does not see a boot that is alive and wrong. That is the deadline's job, and the counters
+decide what the next boot starts. Neither the watchdog nor the deadline changes a slot.
+
 ## Booting a slot: `lemnos-slot-init`
 
 `service/slot-init` builds `lemnos-slot-init`, the `/init` of a slot's initramfs. It is a static
@@ -1585,8 +1670,9 @@ Nothing in the initramfs makes up for it.
 
 ### What it does
 
-1. It mounts `/proc`, `/sys` and `/dev`, and reads the slot arguments from the kernel command
-   line. The prefix is whatever stands before `.slot=` (the driver's `boot_args`).
+1. It mounts `/proc`, `/sys` and `/dev`, then arms the hardware watchdog (window 3 of "The watchdog
+   chain"), and reads the slot arguments from the kernel command line. The prefix is whatever stands
+   before `.slot=` (the driver's `boot_args`).
    The line is written by `lemnos-ctl tree BOARD --slot ID --cmdline-slot FILE` (`docs/boards.md`).
 2. It finds the data partition by a fixed rule, not from the command line. On raw NAND, when the
    UBI device `ubi0` is attached, it is the UBI volume `data` (below). Otherwise it is the ext4
@@ -1609,7 +1695,8 @@ Nothing in the initramfs makes up for it.
 6. It opens the image through a read-only loop device and dm-verity with the table above, and
    mounts it read-only as EROFS.
 7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
-   trial. Then it `switch_root`s into `/sbin/init`.
+   trial. Then it feeds the watchdog once more and `switch_root`s into `/sbin/init` (window 4 of "The
+   watchdog chain").
 
 ### The kernel self-check
 
@@ -2205,6 +2292,17 @@ format argument is still the compression (1 xz, 0 raw).
 ### Not delivered
 
 - A UBI attach of the written partition on a board was not run (see `testing/board-runs/W1b.md`).
+
+### The watchdog in a flasher
+
+The flasher is the first-flash image. Its `/init` is not `lemnos-slot-init` and is not in this tree, so
+the chain of "The watchdog chain" holds with one window unknown here. Windows 1 and 2 are the firmware's
+and the kernel's, as before. Window 3 (the flasher's own start to its first open) is not checked: the
+flasher's init must open the device within the 30 s of the open timeout, or lemnosd's bind has to come
+within it, or the kernel stops feeding and the board resets during the flash. Once lemnosd is running
+the chain is windows 5 and 6, as on a slot board. The image builder that makes the flasher must state its
+init's open (or lemnosd's bind) within 30 s of probe, and the first-flash board run records the probe-to-open
+time (`testing/board-runs/WDT-CHAIN.md`).
 
 ### After the write
 

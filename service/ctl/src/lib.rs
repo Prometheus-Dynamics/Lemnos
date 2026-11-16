@@ -300,6 +300,31 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
             )?;
         }
     }
+    // The board's declared watchdog period (the hw-watchdog device's `timeout_s`) is held to the slot
+    // contract's bound (`contracts/slot-kernel.toml`, `[watchdog]`): a period outside 1 to
+    // WATCHDOG_MAX_APPLIED_S is refused here, under the reason slot-init gives a device it refuses.
+    for device in &board.devices {
+        if device.driver != "hw-watchdog" {
+            continue;
+        }
+        let Some(value) = device.config.get("timeout_s") else {
+            continue;
+        };
+        let outside = match value.as_integer() {
+            Some(seconds) if (1..=WATCHDOG_MAX_APPLIED_S).contains(&seconds) => None,
+            Some(seconds) => Some(format!("timeout_s is {seconds} s")),
+            None => Some(format!(
+                "timeout_s is a {}, not a whole number of seconds",
+                value.type_str()
+            )),
+        };
+        if let Some(what) = outside {
+            return Err(format!(
+                "{path}: device {:?}: watchdog-period-outside-bound: {what}; a slot board's watchdog period is 1 to {WATCHDOG_MAX_APPLIED_S} s (contracts/slot-kernel.toml, [watchdog] max_applied_s)",
+                device.id
+            ));
+        }
+    }
     let findings = match (&board.board.soc, live) {
         (Some(_), true) => live_problems(&board, socs)?,
         _ => lemnos_devtree::check::Findings::default(),
@@ -320,6 +345,10 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     }
     Ok(())
 }
+
+/// The longest watchdog period a board may declare, in seconds: `max_applied_s` of
+/// `contracts/slot-kernel.toml`'s `[watchdog]` (a unit test reads the file and holds the two equal).
+pub const WATCHDOG_MAX_APPLIED_S: i64 = 30;
 
 /// A name of a GPIO chip, PWM chip or watchdog by its number, which the kernel may renumber.
 fn unstable_name(name: &str) -> bool {
@@ -1127,5 +1156,64 @@ mod good_boot_unit_tests {
             text.contains("ExecStart=\n"),
             "the base unit's command is cleared first: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod watchdog_bound_tests {
+    use super::{WATCHDOG_MAX_APPLIED_S, validate};
+
+    /// The example board with its keep-alive watchdog's `timeout_s` set to `seconds`, written to a
+    /// temporary file. The example validates as it is (the board-files test says so).
+    fn board_with_timeout(seconds: &str, name: &str) -> std::path::PathBuf {
+        let text = include_str!("../../../docs/examples/full-board.toml");
+        assert!(
+            text.contains("timeout_s = 15"),
+            "the example names the 15 s timeout"
+        );
+        let path =
+            std::env::temp_dir().join(format!("lemnos-wdt-{}-{name}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            text.replace("timeout_s = 15", &format!("timeout_s = {seconds}")),
+        )
+        .unwrap();
+        path
+    }
+
+    /// A declared period above the bound is refused by name. A period of 0 never reaches this check: the
+    /// hw-watchdog driver refuses it first, as a setting out of range.
+    #[test]
+    fn a_board_whose_watchdog_period_is_outside_the_bound_is_refused_by_name() {
+        let path = board_with_timeout("60", "long");
+        let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
+        std::fs::remove_file(&path).unwrap();
+        let error = result.expect_err("a period above the bound is refused");
+        assert!(error.contains("watchdog-period-outside-bound"), "{error}");
+        assert!(error.contains("timeout_s is 60 s"), "{error}");
+
+        let path = board_with_timeout("0", "zero");
+        let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
+        std::fs::remove_file(&path).unwrap();
+        let error = result.expect_err("a period of 0 is refused");
+        assert!(error.contains("timeout_s"), "{error}");
+    }
+
+    #[test]
+    fn a_board_whose_watchdog_period_is_inside_the_bound_passes_that_check() {
+        let path = board_with_timeout("15", "inside");
+        let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result, Ok(()));
+    }
+
+    /// The bound this crate checks is the contract's: the two cannot drift apart unnoticed.
+    #[test]
+    fn the_board_bound_is_the_contracts_max_applied_s() {
+        let file: toml::Table = include_str!("../../../contracts/slot-kernel.toml")
+            .parse()
+            .unwrap();
+        let max = file["watchdog"]["max_applied_s"].as_integer().unwrap();
+        assert_eq!(max, WATCHDOG_MAX_APPLIED_S);
     }
 }

@@ -294,6 +294,10 @@ watchdog resets the board.
 - **The bound.** The board's watchdog is set by its `hw-watchdog` device, to `timeout_s` seconds
   (15 by default, clamped to the range the device reports, and read back). Feeding stops whenever
   the daemon is not healthy, so the board resets `timeout_s` seconds after the last feed.
+- **Before lemnosd.** On a slot board, slot-init opens the same device early in the boot, arms it at
+  15 s and feeds it until it hands over (`docs/slots.md`, "The watchdog chain"). The device is never
+  unarmed between slot-init and lemnosd's bind: the hand-over gap is bounded by the period the device
+  applies, and lemnosd's first feed comes at its first healthy tick, not at its bind.
 - **Healthy** means both of these hold. The main loop finished a pass within 10 s. The control
   socket answered a handshake within 5 s; a probe asks it every second, and an answer comes from
   the serving thread, so a wedged socket counts. A driver that panics or hangs does not make the

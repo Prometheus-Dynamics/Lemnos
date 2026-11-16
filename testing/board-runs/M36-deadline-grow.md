@@ -28,8 +28,10 @@ Every step that can restart the board runs with the hardware watchdog armed, and
 deliberate hang that must return by itself before any other step. The plan for each step:
 
 - Expiry: the unit fails and systemd reboots (`reboot-force`), so the board returns with nobody present.
-  Who arms what, checked against the code: the watchdog is lemnosd's; a lemnosd that never starts never
-  arms it, so the systemd reboot is the only return and it does not depend on lemnosd.
+  Who arms what, checked against the code: slot-init arms the watchdog at boot, and lemnosd's driver feeds it
+  after the hand-over. A lemnosd that never starts never feeds it after the hand-over, so the board resets
+  at the applied period (15 s) after slot-init's last feed, unless the systemd reboot comes first. Either
+  way the return does not depend on lemnosd.
 - A trial boot that never goes good falls back through tryboot, as before.
 - The grow only writes four bytes of sector 0 and only on a layout that validates. A refused layout
   boots as it was. A torn write is refused on the next start.
