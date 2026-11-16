@@ -28,6 +28,10 @@ fn scratch() -> PathBuf {
 fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     assert!(lemnos_camera_sim::pisp::install());
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
+    // The chain's clock is the sim's: frames move it, and the proof reads it from this file.
+    let clock_dir = scratch();
+    let clock = clock_dir.join("sim-clock");
+    lemnos_camera_sim::time::install_file(&clock).unwrap();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
     let socket = dir.join("lemnosd.sock");
@@ -56,19 +60,8 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     } else {
         ("3664", "30")
     };
-    // The latch runs on its own, first, as a board run does it: the receiver's raw stream and the
-    // front end are exclusive in the module, so the latch cannot run beside the chain (the
-    // simulated receiver refuses it too, `chain_latch_beside.rs`).
-    let latch = Command::new(env!("CARGO_BIN_EXE_lemnos-sensor-proof"))
-        .args(["latch", "--socket", socket.to_str().unwrap()])
-        .args(["--sensor", "cam0-sensor", "--trials", "2"])
-        .output()
-        .unwrap();
-    let latch_text = String::from_utf8_lossy(&latch.stdout).into_owned();
-    assert!(
-        latch.status.success(),
-        "the latch on its own failed:\n{latch_text}"
-    );
+    // The latch is not run here: it is timed on the host's clock on a board, and runs in process
+    // on the sim clock in `chain_latch_sim.rs`. The proof says so, and does not check it again.
     let output = Command::new(env!("CARGO_BIN_EXE_lemnos-chain-proof"))
         .args([
             "--socket",
@@ -77,8 +70,10 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
             "cam0-sensor",
         ])
         .args(["--frames", &frames, "--frame-length", length, "--fps", fps])
-        .args(["--pattern", "1", "--allow-skip", "latch", "--reference"])
+        .args(["--pattern", "1", "--reference"])
         .arg(&reference)
+        .arg("--clock-file")
+        .arg(&clock)
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -86,7 +81,7 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     if std::env::var_os("CHAIN_SHOW").is_some() {
         let _ = writeln!(
             std::io::stdout(),
-            "stream buffers: {kind}\nlatch on its own:\n{latch_text}\nchain proof:\n{text}"
+            "stream buffers: {kind}\nchain proof:\n{text}"
         );
     }
     service.stop();
@@ -96,6 +91,20 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         "the chain proof failed (stream buffers: {kind}):\n{text}"
     );
     assert!(text.contains("chain proof: pass"), "{text}");
+    // Exact counts, whatever the host's load: the sim clock moves only with frame starts, so
+    // nothing is late, nothing is dropped and no placeholder is delivered in a steady run.
+    for line in [
+        "front end: jobs ".to_string(),
+        "dropped 0, errors 0".to_string(),
+        format!(
+            "frames taken more than 1 s after their start: front end 0 of {frames}, back end 0 of {frames}"
+        ),
+        "placeholder frames: front end 0, back end 0".to_string(),
+        "clock: sim clock file".to_string(),
+        "sensor latch: checked in-process (sim clock)".to_string(),
+    ] {
+        assert!(text.contains(&line), "missing {line:?} in:\n{text}");
+    }
     // What a board run must show before it claims the path: both stages bound, the streams as
     // declared (the back end's input is dma-bufs its caller fills), and frames end to end.
     for line in [
@@ -104,7 +113,6 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         "cam0-fe config: 8 buffers of 632 bytes, job-driven, shared memory, taken writable",
         "cam0-fe statistics: 8 buffers of 23200 bytes, job-driven, dma-buf per buffer",
         "cam0-isp input: 2 buffers of 2048000 bytes, job-driven, dma-buf per buffer, taken writable",
-        "sensor latch: not run (--allow-skip latch)",
         &format!("frames delivered end to end: {frames}"),
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");

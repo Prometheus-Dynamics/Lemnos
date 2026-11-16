@@ -5,7 +5,13 @@
 //!                    [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE]
 //!                    [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N]
 //!                    [--min-mean-luma N] [--allow-skip lit-scene|latch|reference]...
+//!                    [--clock-file PATH]
 //! ```
+//!
+//! `--clock-file PATH` is test only: the simulated chain's clock (`lemnos-sim-clock`) replaces
+//! `CLOCK_MONOTONIC` for the age check. A board image never passes it. A clock file that is
+//! missing, short, unreadable or goes backwards fails the run by name; it never falls back to
+//! `CLOCK_MONOTONIC`.
 //!
 //! A check that is not made is a failure, named in the output: `--fps` (the sensor mode's frame
 //! rate, within 2 %), `--reference` (the first frame's lines), `--latch-trials` (the sensor's latch,
@@ -72,37 +78,18 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_camera_proof::chain::{Stage, resolve};
+use lemnos_camera_proof::setup::{self, post_back, post_front};
 use lemnos_client::{Client, FrameStream};
-use lemnos_contract_camera_isp::{BayerOrder, CameraIsp, IspInput, IspJob, IspOutput, NO_BUFFER};
+use lemnos_contract_camera_isp::CameraIsp;
 use lemnos_contract_camera_receiver::CameraReceiver;
-use lemnos_contract_camera_sensor::{CameraSensor, Controls};
-use lemnos_contract_isp_pisp::{LAYOUT_BACK_END, LAYOUT_FRONT_END, OUTPUT_FRONT_END_0};
-use lemnos_core::{Encode, Writer};
-use lemnos_driver_pisp::be::BackEnd;
-use lemnos_driver_pisp::fe::FrontEnd;
-use lemnos_driver_pisp::format::{compute_stride_align, formats};
-use lemnos_driver_pisp::uapi::{
-    AGC_STATS_NUM_ZONES, BayerOrder as Order, BeCcmConfig, BeTilesConfig, Branch, FeAgcStatsConfig,
-    FeAwbStatsConfig, FeConfig, FeRgbyConfig, ImageFormatConfig, Wire, fe_enable as en,
-};
-use lemnos_linux_stream::LinuxStreams;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 800;
 const RAW10_STRIDE: usize = 1600;
-/// RAW10's black level, moved to 16 bits.
-const BLACK: u16 = 64 << 6;
-/// Full-range BT.601, as the isp proof uses.
-const CSC: BeCcmConfig = BeCcmConfig {
-    coeffs: [306, 601, 117, -173, -339, 512, 512, -429, -83],
-    pad: [0; 2],
-    offsets: [0, 33_554_432, 33_554_432],
-};
-const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME] [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene|latch|reference]...";
+const USAGE: &str = "usage: lemnos-chain-proof [--socket PATH] [--sensor NAME] [--receiver NAME] [--front-end NAME] [--back-end NAME] [--frames N] [--frame-length N] [--pattern CODE] [--reference FILE] [--jobs-queued N] [--fps RATE] [--latch-trials N] [--min-mean-luma N] [--allow-skip lit-scene|latch|reference]... [--clock-file PATH (test only)]";
 /// A timestamp older than this, at the moment the frame is taken, is not a frame start of this run.
 const MAX_AGE_NS: u64 = 1_000_000_000;
 /// The dark scene's back-end mean luma was about 20 on the board (black level 16); a lit scene is
@@ -117,7 +104,30 @@ fn rate_ok(measured: f64, expected: f64) -> bool {
 /// Whether a frame timestamp is not a `CLOCK_MONOTONIC` frame start taken at `now`: in the future,
 /// or older than `MAX_AGE_NS`.
 fn age_bad(stamp: u64, now: u64) -> bool {
-    stamp > now || now - stamp > MAX_AGE_NS
+    lemnos_sim_clock::age_bad(stamp, now, MAX_AGE_NS)
+}
+
+/// The clock the frame ages are read on: `CLOCK_MONOTONIC` on a board, the sim clock file under
+/// test. Set once by `run`.
+static CLOCK: std::sync::OnceLock<Box<dyn lemnos_sim_clock::Clock>> = std::sync::OnceLock::new();
+/// The first clock read that failed, named. A failed read fails the run.
+static CLOCK_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `CLOCK_MONOTONIC`, the board's clock.
+struct Monotonic;
+
+impl lemnos_sim_clock::Clock for Monotonic {
+    fn now_ns(&self) -> Result<u64, String> {
+        lemnos_linux_sys::time::monotonic_now()
+            .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX))
+            .map_err(|e| format!("CLOCK_MONOTONIC: {e:?}"))
+    }
+}
+
+/// A frame the driver made for a failed stream (its give-up or reconfigure path): no bytes, no
+/// timestamp. It is counted as a placeholder, never as a stale frame.
+fn placeholder(frame: &lemnos_client::HeldFrame) -> bool {
+    frame.is_empty() && frame.timestamp_ns() == 0
 }
 
 struct Args {
@@ -126,6 +136,8 @@ struct Args {
     sensor: Option<String>,
     /// Each stage named on the command line instead of followed from the sensor's links.
     receiver: Option<String>,
+    /// Test only: the sim clock file to read frame times from (`--clock-file`).
+    clock_file: Option<PathBuf>,
     front_end: Option<String>,
     back_end: Option<String>,
     frames: u64,
@@ -156,6 +168,7 @@ fn parse_from(argv: Vec<String>) -> Option<Args> {
         socket: "/run/lemnos/lemnosd.sock".into(),
         sensor: None,
         receiver: None,
+        clock_file: None,
         front_end: None,
         back_end: None,
         frames: 600,
@@ -177,6 +190,7 @@ fn parse_from(argv: Vec<String>) -> Option<Args> {
             "--socket" => args.socket = value,
             "--sensor" => args.sensor = Some(value),
             "--receiver" => args.receiver = Some(value),
+            "--clock-file" => args.clock_file = Some(PathBuf::from(value)),
             "--front-end" => args.front_end = Some(value),
             "--back-end" => args.back_end = Some(value),
             "--frames" => args.frames = value.parse().ok()?,
@@ -204,9 +218,20 @@ fn out(text: std::fmt::Arguments<'_>) {
 }
 
 fn now_ns() -> u64 {
-    lemnos_linux_sys::time::monotonic_now()
-        .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+    let read = CLOCK
+        .get()
+        .ok_or_else(|| "no clock installed".to_string())
+        .and_then(|clock| clock.now_ns());
+    match read {
+        Ok(ns) => ns,
+        Err(e) => {
+            let mut first = CLOCK_ERROR
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            first.get_or_insert(e);
+            0
+        }
+    }
 }
 
 fn percentile(sorted: &[u64], p: usize) -> u64 {
@@ -214,71 +239,6 @@ fn percentile(sorted: &[u64], p: usize) -> u64 {
         .get((sorted.len() * p / 100).min(sorted.len().saturating_sub(1)))
         .copied()
         .unwrap_or(0)
-}
-
-fn order(bayer: BayerOrder) -> Order {
-    match bayer {
-        BayerOrder::Rggb => Order::Rggb,
-        BayerOrder::Grbg => Order::Grbg,
-        BayerOrder::Gbrg => Order::Gbrg,
-        BayerOrder::Bggr => Order::Bggr,
-        BayerOrder::Mono => Order::Greyscale,
-    }
-}
-
-/// The front end's configuration: output 0 on, 16-bit; AWB, AGC and focus statistics on, every
-/// pixel counted, as `lemnos-fe-proof` builds it.
-fn front_config(bayer: Order) -> Result<Vec<u8>, String> {
-    let mut fe = FrontEnd::new(WIDTH as u16, HEIGHT as u16, bayer);
-    fe.set_output_format(
-        Branch::Zero,
-        ImageFormatConfig {
-            format: formats::BAYER16,
-            ..Default::default()
-        },
-    );
-    fe.set_rgby(FeRgbyConfig {
-        gain_r: 306,
-        gain_g: 601,
-        gain_b: 117,
-        ..Default::default()
-    });
-    fe.set_awb_stats(FeAwbStatsConfig {
-        r_hi: u16::MAX,
-        g_hi: u16::MAX,
-        b_hi: u16::MAX,
-        ..Default::default()
-    });
-    fe.set_agc_stats(FeAgcStatsConfig {
-        weights: [0x11; AGC_STATS_NUM_ZONES / 2],
-        ..Default::default()
-    });
-    fe.enable(
-        en::output(0) | en::AWB_STATS | en::RGBY | en::AGC_STATS | en::CDAF_STATS,
-        true,
-    );
-    let cfg = fe
-        .prepare()
-        .map_err(|e| format!("the configuration library refused: {e:?}"))?;
-    let mut bytes = vec![0u8; FeConfig::SIZE];
-    cfg.write_to(&mut bytes)
-        .map_err(|_| "configuration size".to_string())?;
-    Ok(bytes)
-}
-
-/// The back end's configuration: Bayer to NV12 at the input size, as `lemnos-isp-proof` builds it.
-fn back_config(input: ImageFormatConfig, bayer: BayerOrder) -> Result<BeTilesConfig, String> {
-    BackEnd::simple_bayer(
-        input,
-        order(bayer),
-        BLACK,
-        (1.6, 1.0, 1.6),
-        None,
-        formats::NV12,
-        Some(CSC),
-    )
-    .prepare()
-    .map_err(|e| format!("the configuration library refused: {e:?}"))
 }
 
 /// Packed RAW10 (four pixels in five bytes, the low bits last) line `row`, unpacked to 10 bits.
@@ -348,40 +308,6 @@ fn declared(stream: &FrameStream) -> String {
 
 /// A job on the front end's buffer `buffer` (config, statistics and output 0), as
 /// `lemnos-fe-proof` posts it.
-fn post_front(cfg: &mut FrameStream, identity: u64, buffer: u32) -> Result<(), String> {
-    let job = IspJob {
-        identity,
-        layout: LAYOUT_FRONT_END,
-        config_buffer: buffer,
-        input_buffer: NO_BUFFER,
-        outputs: [NO_BUFFER, NO_BUFFER, buffer, NO_BUFFER],
-    };
-    post_job(cfg, &job)
-}
-
-/// A back-end job reading input and config buffer `slot` and writing output 0 buffer `output`.
-fn post_back(cfg: &mut FrameStream, identity: u64, slot: u32, output: u32) -> Result<(), String> {
-    let job = IspJob {
-        identity,
-        layout: LAYOUT_BACK_END,
-        config_buffer: slot,
-        input_buffer: slot,
-        outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
-    };
-    post_job(cfg, &job)
-}
-
-fn post_job(cfg: &mut FrameStream, job: &IspJob) -> Result<(), String> {
-    let mut buf = [0u8; 128];
-    let mut w = Writer::new(&mut buf);
-    let n = job.encode(&mut w).map(|()| w.len()).unwrap_or(0);
-    match cfg.post_job(buf.get(..n).unwrap_or(&[])) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("the job queue is full".into()),
-        Err(e) => Err(format!("post: {e:?}")),
-    }
-}
-
 /// What one stage's frames show from their sequence numbers and timestamps.
 #[derive(Default)]
 struct Track {
@@ -426,8 +352,10 @@ struct FrontStage {
     identity_bad: u64,
     stats_bad: u64,
     stats_missing: u64,
-    /// Frames whose timestamp is not a recent `CLOCK_MONOTONIC` frame start (see `age_bad`).
+    /// Frames whose timestamp is not a recent frame start (see `age_bad`).
     age_bad: u64,
+    /// Placeholder frames (see `placeholder`): counted, not checked for age.
+    placeholders: u64,
 }
 
 /// The back end's streams, the jobs in flight and what the frames show.
@@ -444,6 +372,7 @@ struct BackStage {
     identity_bad: u64,
     zero_luma: u64,
     age_bad: u64,
+    placeholders: u64,
     /// Luma summed over every frame, and the bytes it is summed over: the mean.
     luma_total: u64,
     luma_pixels: u64,
@@ -467,6 +396,13 @@ impl BackStage {
             self.pending.clear();
             return Ok(false);
         };
+        if placeholder(&frame) {
+            self.placeholders += 1;
+            self.out
+                .release(frame)
+                .map_err(|e| format!("release: {e:?}"))?;
+            return Ok(true);
+        }
         let now = now_ns();
         self.track.see(frame.sequence(), frame.timestamp_ns());
         self.latency.push(now.saturating_sub(frame.timestamp_ns()));
@@ -522,8 +458,12 @@ fn pump(
             matched =
                 reference.map(|raw| matched_lines(raw, front.out.bytes(&frame), front.stride));
         }
-        front.track.see(frame.sequence(), frame.timestamp_ns());
-        front.age_bad += u64::from(age_bad(frame.timestamp_ns(), now_ns()));
+        if placeholder(&frame) {
+            front.placeholders += 1;
+        } else {
+            front.track.see(frame.sequence(), frame.timestamp_ns());
+            front.age_bad += u64::from(age_bad(frame.timestamp_ns(), now_ns()));
+        }
         front.identity_bad += u64::from(frame.identity() != k + 1);
         match front
             .stats
@@ -573,8 +513,23 @@ fn pump(
 
 #[allow(clippy::too_many_lines)]
 fn run(args: &Args) -> Result<bool, String> {
+    let clock: Box<dyn lemnos_sim_clock::Clock> = match &args.clock_file {
+        None => Box::new(Monotonic),
+        Some(path) => Box::new(lemnos_sim_clock::FileClock::open(path)?),
+    };
+    let clock_name = match &args.clock_file {
+        None => "CLOCK_MONOTONIC".to_string(),
+        Some(path) => format!("sim clock file {}", path.display()),
+    };
+    CLOCK
+        .set(clock)
+        .map_err(|_| "clock already installed".to_string())?;
+    out(format_args!("clock: {clock_name}"));
     if !(1..=3).contains(&args.jobs_queued) {
         return Err("--jobs-queued takes 1 to 3".into());
+    }
+    if args.clock_file.is_some() && args.latch_trials.is_some() {
+        return Err("--latch-trials and --clock-file: under the simulated clock the latch is checked in process (tests/chain_latch_sim.rs)".into());
     }
     let client = Client::connect(&args.socket, "lemnos-chain-proof")
         .map_err(|e| format!("{}: {e}", args.socket))?;
@@ -608,34 +563,16 @@ fn run(args: &Args) -> Result<bool, String> {
     out(format_args!(
         "chain: {sensor_name} -> {receiver_name} -> {front_name} -> {back_name}"
     ));
-    let index = |name: &str| {
-        list.iter()
-            .find(|d| d.name == name)
-            .map(|d| d.index)
-            .ok_or(format!("no device {name}"))
-    };
-    let fe_index = index(front_name)?;
-    let be_index = index(back_name)?;
-    let mut sensor = client
-        .open::<dyn CameraSensor>(sensor_name)
-        .map_err(|e| format!("{sensor_name}: {e}"))?;
-    let mut receiver = client
-        .open::<dyn CameraReceiver>(receiver_name)
-        .map_err(|e| format!("{receiver_name}: {e}"))?;
-    let mut fe = client
-        .open::<dyn CameraIsp>(front_name)
-        .map_err(|e| format!("{front_name}: {e}"))?;
-    let mut be = client
-        .open::<dyn CameraIsp>(back_name)
-        .map_err(|e| format!("{back_name}: {e}"))?;
-
-    let _ = sensor.stop();
-    let _ = fe.stop();
-    let _ = be.stop();
-    sensor
-        .select_mode(0)
-        .map_err(|s| format!("select_mode: {s:?}"))?;
-    let mode = sensor.mode(0).map_err(|s| format!("mode: {s:?}"))?;
+    let mut chain = setup::Chain::open(
+        &client,
+        &list,
+        [sensor_name, receiver_name, front_name, back_name],
+        setup::Tuning {
+            frame_length: args.frame_length,
+            pattern: args.pattern,
+        },
+    )?;
+    let mode = chain.mode;
     out(format_args!(
         "sensor mode 0: {}x{}, {} lanes at {} Mbit/s, {:?}; line length {}, frame length {}..={}",
         mode.link.width,
@@ -647,126 +584,48 @@ fn run(args: &Args) -> Result<bool, String> {
         mode.frame_length_min,
         mode.frame_length_max
     ));
-    if let Some(lines) = args.frame_length {
-        sensor
-            .set_controls(Controls {
-                frame_length: Some(lines),
-                ..Controls::default()
-            })
-            .map_err(|s| format!("set_controls: {s:?}"))?;
-    }
-    if let Some(code) = args.pattern {
-        sensor
-            .set_test_pattern(code)
-            .map_err(|s| format!("set_test_pattern: {s:?}"))?;
-    }
-
-    let mut input = ImageFormatConfig {
-        width: WIDTH as u16,
-        height: HEIGHT as u16,
-        format: formats::BAYER16,
-        ..Default::default()
-    };
-    compute_stride_align(&mut input, 64);
-    fe.set_input(IspInput {
-        width: WIDTH,
-        height: HEIGHT,
-        bit_depth: 16,
-        bayer: mode.bayer,
-    })
-    .map_err(|s| format!("front end set_input: {s:?}"))?;
-    let fe_layout = fe
-        .set_output(
-            OUTPUT_FRONT_END_0,
-            IspOutput {
-                width: WIDTH,
-                height: HEIGHT,
-                fourcc: u32::from_le_bytes(*b"BYR2"),
-                pad_bytes: 0,
-            },
-        )
-        .map_err(|s| format!("front end set_output: {s:?}"))?;
-    if i64::from(fe_layout.stride) != i64::from(input.stride) {
-        return Err(format!(
-            "front-end output stride {} is not the back end's input stride {}",
-            fe_layout.stride, input.stride
-        ));
-    }
-    be.set_input(IspInput {
-        width: WIDTH,
-        height: HEIGHT,
-        bit_depth: 16,
-        bayer: mode.bayer,
-    })
-    .map_err(|s| format!("back end set_input: {s:?}"))?;
-    let be_layout = be
-        .set_output(
-            0,
-            IspOutput {
-                width: WIDTH,
-                height: HEIGHT,
-                fourcc: u32::from_le_bytes(*b"NV12"),
-                pad_bytes: 0,
-            },
-        )
-        .map_err(|s| format!("back end set_output: {s:?}"))?;
-    let fe_bytes = front_config(order(mode.bayer))?;
-    let be_config = back_config(input, mode.bayer)?;
-    if i64::from(be_config.config.output_format[0].image.stride) != i64::from(be_layout.stride) {
-        return Err(format!(
-            "back-end configuration's output stride {} is not its layout's {}",
-            be_config.config.output_format[0].image.stride, be_layout.stride
-        ));
-    }
-    let mut be_bytes = vec![0u8; BeTilesConfig::SIZE];
-    be_config
-        .write_to(&mut be_bytes)
-        .map_err(|_| "configuration size".to_string())?;
     out(format_args!(
         "front end: output 0 stride {} size {}; back end: input stride {}, output 0 stride {} size {}, {} tiles",
-        fe_layout.stride,
-        fe_layout.size,
-        input.stride,
-        be_layout.stride,
-        be_layout.size,
-        be_config.num_tiles
+        chain.fe_stride,
+        chain.fe_size,
+        chain.input_stride,
+        chain.be_stride,
+        chain.be_size,
+        chain.be_tiles
     ));
 
-    let platform = Arc::new(LinuxStreams);
+    // The stages start before any stream is read: the back end, the front end, then the sensor.
+    chain.start()?;
+    let (fe_stride, be_stride) = (chain.fe_stride, chain.be_stride);
+    let mut fe = chain.fe;
+    let mut be = chain.be;
+    let mut receiver = chain.receiver;
+    // Kept for the run: the sensor is the daemon's, and its client is only dropped at the end.
+    let _sensor = chain.sensor;
     let mut front = FrontStage {
-        cfg: client
-            .open_stream_writable(fe_index, "config", platform.clone())
-            .map_err(|e| format!("front end config stream: {e}"))?,
-        stats: client
-            .open_stream(fe_index, "statistics", platform.clone())
-            .map_err(|e| format!("front end statistics stream: {e}"))?,
-        out: client
-            .open_stream(fe_index, "output0", platform.clone())
-            .map_err(|e| format!("front end output0 stream: {e}"))?,
-        stride: fe_layout.stride as usize,
+        cfg: chain.front.cfg,
+        stats: chain.front.stats,
+        out: chain.front.out,
+        stride: fe_stride as usize,
         track: Track::default(),
         identity_bad: 0,
         stats_bad: 0,
         stats_missing: 0,
         age_bad: 0,
+        placeholders: 0,
     };
     let mut back = BackStage {
-        cfg: client
-            .open_stream_writable(be_index, "config", platform.clone())
-            .map_err(|e| format!("back end config stream: {e}"))?,
-        input: client
-            .open_stream_writable(be_index, "input", platform.clone())
-            .map_err(|e| format!("back end input stream: {e}"))?,
-        out: client
-            .open_stream(be_index, "output0", platform)
-            .map_err(|e| format!("back end output0 stream: {e}"))?,
-        luma_bytes: be_layout.stride as usize * HEIGHT as usize,
+        cfg: chain.back.cfg,
+        input: chain.back.input,
+        out: chain.back.out,
+        luma_bytes: be_stride as usize * HEIGHT as usize,
         track: Track::default(),
         pending: VecDeque::new(),
         latency: Vec::new(),
         identity_bad: 0,
         zero_luma: 0,
         age_bad: 0,
+        placeholders: 0,
         luma_total: 0,
         luma_pixels: 0,
     };
@@ -808,27 +667,11 @@ fn run(args: &Args) -> Result<bool, String> {
             out(format_args!("  {name} {stream}: {}", declared(handle)));
         }
     }
-    // Every buffer of each configuration stream holds the configuration: a job names one of them.
-    for buffer in 0..front.out.layout().buffers {
-        front
-            .cfg
-            .write(buffer, 0, &fe_bytes)
-            .map_err(|e| format!("front end config write: {e:?}"))?;
-    }
-    for buffer in 0..back.cfg.layout().buffers {
-        back.cfg
-            .write(buffer, 0, &be_bytes)
-            .map_err(|e| format!("back end config write: {e:?}"))?;
-    }
     let reference = match &args.reference {
         Some(path) => Some(std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?),
         None => None,
     };
 
-    be.start().map_err(|s| format!("back end start: {s:?}"))?;
-    fe.start().map_err(|s| format!("front end start: {s:?}"))?;
-    sensor.start().map_err(|s| format!("sensor start: {s:?}"))?;
-    // The sensor's latch (`lemnos-sensor-proof latch`) runs beside the chain, as its own process.
     let latch = spawn_latch(args, sensor_name)?;
     let started = Instant::now();
     let pumped = pump(args, &mut front, &mut back, reference.as_deref());
@@ -950,8 +793,13 @@ fn run(args: &Args) -> Result<bool, String> {
     ));
     let mean_luma = back.luma_total.checked_div(back.luma_pixels).unwrap_or(0);
     out(format_args!(
-        "back-end mean luma {mean_luma}; timestamps not a recent frame start: front end {}, back end {}",
-        front.age_bad, back.age_bad
+        "back-end mean luma {mean_luma}; frames taken more than 1 s after their start: front end {} of {}, back end {} of {}; placeholder frames: front end {}, back end {}",
+        front.age_bad,
+        fe_track.frames,
+        back.age_bad,
+        be_track.frames,
+        front.placeholders,
+        back.placeholders
     ));
     out(format_args!(
         "back-end frames {}, sequence gaps {}, timestamp steps not increasing {}, identity mismatches {}, all-zero luma {}",
@@ -1061,8 +909,26 @@ fn run(args: &Args) -> Result<bool, String> {
     check(
         front.age_bad == 0 && back.age_bad == 0,
         format!(
-            "timestamps not a recent CLOCK_MONOTONIC frame start: front end {}, back end {}",
-            front.age_bad, back.age_bad
+            "frames taken more than 1 s after their start: front end {} of {}, back end {} of {}",
+            front.age_bad, fe_track.frames, back.age_bad, be_track.frames
+        ),
+    );
+    check(
+        front.placeholders == 0 && back.placeholders == 0,
+        format!(
+            "placeholder frames delivered (no bytes, timestamp 0): front end {}, back end {}",
+            front.placeholders, back.placeholders
+        ),
+    );
+    let clock_failure = CLOCK_ERROR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    check(
+        clock_failure.is_none(),
+        format!(
+            "clock read failed: {}",
+            clock_failure.as_deref().unwrap_or("")
         ),
     );
     if args.allow_skip_lit {
@@ -1084,18 +950,24 @@ fn run(args: &Args) -> Result<bool, String> {
     } else {
         "lit-scene check skipped"
     };
-    match latch {
-        None if skip_latch => out(format_args!("sensor latch: not run ({why})")),
-        None => check(
-            false,
-            "sensor latch not checked: give --latch-trials".into(),
-        ),
-        Some(Ok(done)) if done.status.success() => {}
-        Some(Ok(done)) if skip_latch => {
-            out(format_args!("sensor latch: exit {} ({why})", done.status))
+    if args.clock_file.is_some() {
+        // Under the simulated clock the latch is run in process by `tests/chain_latch_sim.rs`, the
+        // same function the board's latch runs; the host-timed latch is not run beside it.
+        out(format_args!("sensor latch: checked in-process (sim clock)"));
+    } else {
+        match latch {
+            None if skip_latch => out(format_args!("sensor latch: not run ({why})")),
+            None => check(
+                false,
+                "sensor latch not checked: give --latch-trials".into(),
+            ),
+            Some(Ok(done)) if done.status.success() => {}
+            Some(Ok(done)) if skip_latch => {
+                out(format_args!("sensor latch: exit {} ({why})", done.status))
+            }
+            Some(Ok(done)) => check(false, format!("sensor latch failed: exit {}", done.status)),
+            Some(Err(e)) => check(false, format!("sensor latch did not finish: {e}")),
         }
-        Some(Ok(done)) => check(false, format!("sensor latch failed: exit {}", done.status)),
-        Some(Err(e)) => check(false, format!("sensor latch did not finish: {e}")),
     }
     if failed.is_empty() {
         out(format_args!("chain proof: pass"));

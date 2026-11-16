@@ -1,0 +1,12 @@
+[package]
+name = "lemnos-sim-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The sim clock file: one monotonic clock the simulated chain writes and the chain proof reads across processes (test only)"
+
+[lints]
+workspace = true
+
+[dependencies]

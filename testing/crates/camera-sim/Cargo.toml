@@ -15,6 +15,7 @@ lemnos-host = { path = "../../../engine/host" }
 lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
 lemnos-sim = { path = "../../../backends/sim" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-sim-clock = { path = "../sim-clock" }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
