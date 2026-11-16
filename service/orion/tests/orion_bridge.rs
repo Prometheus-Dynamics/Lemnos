@@ -2134,3 +2134,44 @@ fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel(
         "CallerGone for the detached run's session: {seen:?}"
     );
 }
+
+/// Two callers hold, both silent for three leases. One has a run in flight: it keeps its run and its
+/// hold, and the run is still going. The other has no run in flight: it is dropped, and its hold is
+/// released. Mutation: with the in-flight shield removed the busy caller's hold goes and the first
+/// check fails; with the drop of an idle caller removed the second check fails.
+#[test]
+fn a_silent_caller_with_a_run_in_flight_keeps_its_run_and_hold_and_one_without_is_dropped() {
+    let dir = dir("lease-run-or-not");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
+    let busy = second_session(&board);
+    let idle = second_session(&board);
+    for caller in [&busy, &idle] {
+        let finished = run(caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+        assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    }
+    assert_eq!(tracked_call(&dashboard, "held"), "2");
+    let mut long = busy
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    // Both callers send nothing for three leases.
+    std::thread::sleep(TEST_LEASE * 3);
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "the busy caller lost its hold, or the idle one kept it"
+    );
+    assert!(
+        long.finish(Duration::from_millis(200)).is_err(),
+        "the busy caller's run ended while it was in flight"
+    );
+    long.cancel().expect("cancel");
+    let _ = long.finish(WAIT);
+    drop(busy);
+    drop(idle);
+}

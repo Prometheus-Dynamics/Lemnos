@@ -851,11 +851,31 @@ back after that sees no note, and `leases.ended` still counts the drop.
 closed peer shows up at once as a lost session, and silence means a comm core that is busy or stopped. Both
 sides keep the session while it is quiet (the comm core marks it quiet), so a stalled but open link keeps its
 session: nothing is torn down or published again, and publishing goes on on the same session when the stall
-ends. Each request still times out on its own deadline. The bridge adds no probe of its own. A network link
-(`orion+tcp://`) keeps the silence rule: its session is lost after the idle time. **The TCP silence case is
-untested.** Nothing in this repository exercises a stalled TCP link. The TCP relay harness and its test are the
-next bridge item, not part of this change. Orion may add a `silent_for()` accessor later (it needs the
-consumer's OK); nothing here waits on it.
+ends. Each request still times out on its own deadline. The bridge adds no probe of its own. A network link (`orion+tcp://`) cannot publish: at the pinned revision the network carrier offers only the
+`CLIENT` and `PEER` roles, and the bridge publishes as a provider. So the bridge refuses `orion+tcp://` by name at
+start (`ORION_ADDRESS`, below), and if it is handed one only at connect, the comm core's refusal is said once and the
+bridge stops; that is a configuration error, not a link fault, so it is not retried and the process exits with a
+failure. The silence rule still holds for a network session a remote caller holds: its session is lost after the
+idle time, which is three heartbeats at the comm core (`comm.idle_ms`, or three `comm.heartbeat_ms` when zero). These
+are tested through a relay on 127.0.0.1 that stalls, resumes, closes and resets the link
+(`service/orion/tests/support/tcp_relay.rs`), in `service/orion/tests/tcp_reconnect.rs`, with the threshold and its
+source lines in that file's header. A remote caller holds through the bridge on its local socket, and the tests
+assert on the bridge's side:
+
+- `a_silent_tcp_caller_is_ended_and_the_bridge_releases_its_holds_and_cancels_its_run`: the node ends a silent
+  caller's session, the bridge releases its holds at lemnosd and cancels its attached run, so the job is gone;
+- `a_short_tcp_stall_below_the_silence_check_keeps_the_caller_its_hold_and_its_run`: a stall of one heartbeat keeps
+  the caller's hold and its job, and the caller answers when the link carries on;
+- `a_closed_tcp_caller_releases_its_holds_and_its_run_is_cancelled`: a link the relay closes releases the caller's
+  holds and cancels its run, and the caller's session is lost;
+- `a_tcp_caller_reset_with_unread_bytes_releases_its_holds`: a link closed with bytes unread is reset by the kernel,
+  and the caller's holds are released;
+- `a_bridge_given_a_carrier_that_cannot_publish_is_refused_once_and_stops`: the connect-time refusal is stated once
+  and the bridge stops.
+
+Not tested over TCP: a network caller's own silence check in its session when it is not pumping (only the
+short-stall case and the pumping callers exercise the client's check). Orion may add a `silent_for()` accessor later
+(it needs the consumer's OK); nothing here waits on it.
 
 **The lease is readable.** While the lease is on, the hello document carries `lease.seconds` (the lease
 in whole seconds, so no client hard-codes it) and `leases.ended` (how many callers' leases have ended
@@ -907,6 +927,25 @@ status and so code zero:
 A long job that ends takes the table's endings for `CANCELLED` and `TIMED_OUT` (its job was cancelled or timed
 out on lemnosd), and `Failed` with code zero for any other status: it ran, so a refusal does not apply.
 
+
+**What bounds a run.** Each kind of run has its own bound, and the lease does not bound any run: a caller with a
+run in flight is never dropped for silence (see "Only silence expires a lease").
+
+| Run | Bound | Set by | The caller sees on expiry |
+|---|---|---|---|
+| `call`, `set`, `power` | lemnosd's call deadline, 2 s by default, per board with `call_deadline_ms` | lemnosd | `TimedOut`, code 110 |
+| a long job, its start | the same call deadline | lemnosd | `TimedOut`, code 110 |
+| a long job, once started | a deadline the caller states on its run (`Run.deadline_ms`), enforced by Orion's node: `TimedOut`, code 0, words `it ran out of time`. The bridge does not pass its own deadline to lemnosd | Orion's node | `TimedOut`, code 0 |
+| a long job, cancelled | the caller's cancel, or its session ending (Orion cancels its attached runs) | caller, Orion | `Cancelled`, code 0 |
+| file install | a partial file is deleted after 600 s with no chunk | the bridge | nothing is sent at expiry: the sender sees silence |
+| flash stream | the stream is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the transfer stops |
+
+**Known gap: a stalled attached run with no deadline is not bounded.** A long job started with no deadline
+(`deadline_ms` zero) on a local session that stays open and quiet is not bounded by anything: lemnosd has no job timer,
+the driver decides when a job ends, the bridge keeps the run while its caller is alive, and a quiet local session
+is kept. A network session is bounded by the comm core's idle time, since the comm core drops it. Nothing in this
+repository bounds the local case today; a per-job bound declared by the driver is the proposed fix, not in this
+change.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:
@@ -991,8 +1030,12 @@ that is not the workspace's.
 It reads:
 
 - `LEMNOSD_SOCKET`;
-- `ORION_ADDRESS`: any address the Orion client takes. When it is unset, the board's own
-  `/run/orion/orion.sock`;
+- `ORION_ADDRESS`: an address the bridge can publish through. When it is unset, the board's own
+  `/run/orion/orion.sock`; a `unix:<path>` socket and an unsigned serial link can publish. An `orion+tcp://`
+  address and a signed serial link (`#key`) cannot: at the pinned revision they offer only the `CLIENT` and
+  `PEER` roles, and the bridge publishes as a provider. The bridge refuses them at start, by name, with what to
+  use instead; a refusal that only shows at connect is said once and the bridge stops (a configuration error,
+  not retried). `publishes_on` (`service/orion/src/config.rs`) has the start-time rule;
 - `ORION_NODE_ID`: when it is set, a comm core that is any other node gets nothing;
 - `LEMNOS_ORION_FILES`, described above. It has been run against a real Orion node on a PC
 ([`B20.md`](../testing/board-runs/B20.md) has that run); not yet on a board.

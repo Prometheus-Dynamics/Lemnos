@@ -108,10 +108,42 @@ pub fn run_as(user: Option<&str>, group: Option<&str>, groups: Option<&str>) -> 
 /// When it is set and is not an address.
 pub fn address(value: Option<&str>) -> Result<Address, String> {
     match value {
-        Some(text) if !text.is_empty() => text
-            .parse()
-            .map_err(|error| format!("ORION_ADDRESS {text:?}: {error}")),
+        Some(text) if !text.is_empty() => {
+            let address: Address = text
+                .parse()
+                .map_err(|error| format!("ORION_ADDRESS {text:?}: {error}"))?;
+            publishes_on(&address).map_err(|why| format!("ORION_ADDRESS {text:?}: {why}"))?;
+            Ok(address)
+        }
         _ => Ok(Address::default()),
+    }
+}
+
+/// Whether the bridge can publish through `address`, from the address alone. The bridge publishes as a
+/// provider (`publish.rs`, `Open`), so the carrier must offer that role. At Orion 671d29d the network
+/// carrier (`orion+tcp://`) offers only `CLIENT` and `PEER` (`crates/comm/tcp/src/lib.rs`, `NETWORK_ROLES`),
+/// and a signed serial link offers the same two (`crates/comm/link-serial/src/carrier.rs`, `offers`); an
+/// unsigned serial link offers the provider role. A local socket offers every role the board serves.
+///
+/// # Errors
+///
+/// The reason, in words, for a carrier that cannot publish, and what to use instead.
+pub fn publishes_on(address: &Address) -> Result<(), String> {
+    match address {
+        Address::Local(_) => Ok(()),
+        Address::Network { .. } => Err(
+            "this carrier cannot publish: at Orion 671d29d the network carrier offers only the CLIENT \
+             and PEER roles, and the bridge publishes as a provider. Leave ORION_ADDRESS unset to use the \
+             board's own socket, or give a unix:<path> socket"
+                .to_owned(),
+        ),
+        Address::Serial { key: Some(_), .. } => Err(
+            "this carrier cannot publish: a signed serial link offers only the CLIENT and PEER roles at \
+             Orion 671d29d, and the bridge publishes as a provider. Use an unsigned serial link, or leave \
+             ORION_ADDRESS unset"
+                .to_owned(),
+        ),
+        Address::Serial { key: None, .. } => Ok(()),
     }
 }
 
@@ -319,5 +351,23 @@ mod tests {
             Ok(Address::Local(PathBuf::from("/tmp/o.sock")))
         );
         assert!(address(Some("nope://x")).is_err());
+        // A carrier that cannot publish is refused at start, by name, with what to use instead.
+        let refused =
+            address(Some("orion+tcp://board.local")).expect_err("the network cannot publish");
+        assert!(
+            refused.contains("ORION_ADDRESS") && refused.contains("provider"),
+            "{refused}"
+        );
+        assert!(address(Some("orion+tcp://board.local#00")).is_err());
+        let signed = format!("serial:/dev/ttyUSB0@115200#{}", "00".repeat(32));
+        assert!(
+            address(Some(&signed))
+                .expect_err("signed serial")
+                .contains("signed serial")
+        );
+        assert!(matches!(
+            address(Some("serial:/dev/ttyUSB0")),
+            Ok(Address::Serial { key: None, .. })
+        ));
     }
 }

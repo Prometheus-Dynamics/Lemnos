@@ -83,5 +83,9 @@ fn main() -> ExitCode {
         }
     }
     publish::run(&config, &shared, &jobs);
+    // A configuration the comm core refuses is a failure of the service, not a clean stop.
+    if shared.refusal().is_some() {
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
