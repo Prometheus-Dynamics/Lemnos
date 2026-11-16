@@ -29,3 +29,29 @@ pub trait Medium {
     /// Erases `len` bytes at `offset` (to the erased state, 0xff).
     fn erase(&mut self, offset: u64, len: u64) -> Result<(), MediumError>;
 }
+
+/// A medium that is not there: the stage runs with it when the card cannot be started, and every
+/// operation is refused, so no write reaches storage and no header is ever written.
+pub struct NoMedium;
+
+impl Medium for NoMedium {
+    fn geometry(&self) -> Geometry {
+        Geometry {
+            capacity: 0,
+            block: 512,
+            erase: 4096,
+        }
+    }
+
+    fn read(&mut self, _offset: u64, _out: &mut [u8]) -> Result<(), MediumError> {
+        Err(MediumError("there is no medium"))
+    }
+
+    fn write(&mut self, _offset: u64, _data: &[u8]) -> Result<(), MediumError> {
+        Err(MediumError("there is no medium"))
+    }
+
+    fn erase(&mut self, _offset: u64, _len: u64) -> Result<(), MediumError> {
+        Err(MediumError("there is no medium"))
+    }
+}

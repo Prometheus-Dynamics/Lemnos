@@ -12,10 +12,13 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod format;
+pub mod image;
 pub mod medium;
 pub mod ram;
 pub mod sd;
 pub mod stage;
+pub mod probe;
 pub mod sysctl;
+pub mod telemetry;
 pub mod usb_dev;
 pub mod wdt;

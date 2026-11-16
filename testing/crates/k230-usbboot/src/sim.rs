@@ -472,6 +472,7 @@ pub struct SimBoard {
     start_reply: StartReply,
     /// The stage does not come back after the start (the device stays off the bus).
     stage_never_returns: bool,
+    deaf_after_us: Option<u64>,
 }
 
 /// The stage's image, as the simulated ROM loads it. Any bytes will do; the simulator checks that
@@ -568,6 +569,7 @@ impl SimBoard {
             stage_ident: STAGE_IDENT.to_string(),
             start_reply: StartReply::Disconnect,
             stage_never_returns: false,
+            deaf_after_us: None,
         }
     }
 
@@ -628,6 +630,22 @@ impl SimBoard {
     /// Makes the stage fail to come back after its start: the device stays off the bus.
     pub fn set_stage_never_returns(&mut self, on: bool) {
         self.stage_never_returns = on;
+    }
+
+    /// The ROM goes deaf this long after its reset: its control and bulk transfers fail (EPROTO, as the
+    /// bench saw), and the device stays enumerated. `None` (the default) never goes deaf.
+    pub fn set_deaf_after(&mut self, us: Option<u64>) {
+        self.deaf_after_us = us;
+    }
+
+    fn deaf(&self) -> bool {
+        match (self.deaf_after_us, &self.mode) {
+            (Some(after), Mode::Rom) => {
+                let s = self.shared.borrow();
+                s.now_us >= s.reset_at + after
+            }
+            _ => false,
+        }
     }
 
     /// Sets the IDs the device re-enumerates with (the download IDs by default).
@@ -758,9 +776,15 @@ impl UsbIo for SimBoard {
     ) -> Result<Vec<u8>, UsbError> {
         let _ = index;
         self.power()?;
+        if self.deaf() {
+            return Err(UsbError::Deaf);
+        }
         let len = len as usize;
         match &self.mode {
-            Mode::Rom if request == GET_CPU_INFO && value == 0 => Ok(cpu_info(TEXT_BOOT_ROM, len)),
+            // The real ROM answers the four bytes of its text, not a padded 32 (bench: "K230", 4b323330).
+            Mode::Rom if request == GET_CPU_INFO && value == 0 => {
+                Ok(TEXT_BOOT_ROM.as_bytes()[..len.min(TEXT_BOOT_ROM.len())].to_vec())
+            }
             Mode::Stage(_) if request == GET_CPU_INFO && value == 0 => {
                 Ok(cpu_info(&self.stage_ident, len))
             }
@@ -779,6 +803,9 @@ impl UsbIo for SimBoard {
         data: &[u8],
     ) -> Result<(), UsbError> {
         self.power()?;
+        if self.deaf() {
+            return Err(UsbError::Deaf);
+        }
         let _ = data;
         if !matches!(self.mode, Mode::Rom) {
             return Err(UsbError::Stall);
@@ -813,6 +840,9 @@ impl UsbIo for SimBoard {
 
     fn bulk_out(&mut self, data: &[u8]) -> Result<(), UsbError> {
         self.power()?;
+        if self.deaf() {
+            return Err(UsbError::Deaf);
+        }
         match &mut self.mode {
             Mode::Rom => {
                 if self.ram_addr.is_none() {
@@ -838,6 +868,9 @@ impl UsbIo for SimBoard {
 
     fn bulk_in(&mut self, len: usize) -> Result<Vec<u8>, UsbError> {
         self.power()?;
+        if self.deaf() {
+            return Err(UsbError::Deaf);
+        }
         match &mut self.mode {
             Mode::Stage(stage) => {
                 let mut buf = vec![0u8; len];

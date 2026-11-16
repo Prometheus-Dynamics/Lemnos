@@ -1855,6 +1855,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-k230-usbboot-image"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-k230-usbboot-sys",
+]
+
+[[package]]
 name = "lemnos-k230-usbboot-stage"
 version = "2.0.1-dev"
 dependencies = [

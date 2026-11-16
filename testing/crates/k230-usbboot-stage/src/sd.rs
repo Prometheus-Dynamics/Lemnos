@@ -187,6 +187,18 @@ pub struct Card<H: SdHost> {
     host: H,
     rca: u32,
     blocks: u64,
+    cid: [u8; 16],
+}
+
+/// The card check the stage reports before any write: the CID, the capacity, and a CRC of one block
+/// read at the start and one at the middle. A read failure is a card fault candidate (a card that is
+/// hot, or worn), reported as such, not only a flasher fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardCheck {
+    pub cid: [u8; 16],
+    pub blocks: u64,
+    pub crc_first: u32,
+    pub crc_middle: u32,
 }
 
 impl<H: SdHost> Card<H> {
@@ -223,9 +235,32 @@ impl<H: SdHost> Card<H> {
         }
         let c_size = field(&csd, 69, 48);
         let blocks = (c_size + 1) * 1024;
+        let cid = match command(&mut host, 10, rca << 16, Expect::Long)? {
+            Reply::Long(cid) => cid,
+            _ => [0; 16],
+        };
         short(command(&mut host, 7, rca << 16, Expect::Short)?, 7)?;
         short(command(&mut host, 16, BLOCK as u32, Expect::Short)?, 16)?;
-        Ok(Self { host, rca, blocks })
+        Ok(Self {
+            host,
+            rca,
+            blocks,
+            cid,
+        })
+    }
+
+    /// The card check: the CID, the capacity, and a CRC of a block at the start and one in the middle.
+    pub fn check(&mut self) -> Result<CardCheck, SdError> {
+        let mut first = [0u8; BLOCK];
+        let mut middle = [0u8; BLOCK];
+        self.read(0, &mut first)?;
+        self.read(self.blocks / 2, &mut middle)?;
+        Ok(CardCheck {
+            cid: self.cid,
+            blocks: self.blocks,
+            crc_first: crate::format::crc32(&first),
+            crc_middle: crate::format::crc32(&middle),
+        })
     }
 
     /// The card's relative address.
@@ -425,6 +460,7 @@ mod tests {
                     Ok(Reply::Short(ocr))
                 }
                 (2, _) => Ok(Reply::Long([0x11; 16])),
+                (10, _) => Ok(Reply::Long([0x5c; 16])),
                 (3, _) => Ok(Reply::Short(0x1234_0000)),
                 (9, _) => Ok(Reply::Long(self.csd())),
                 (7, _) | (16, _) => Ok(Reply::Short(0x0000_0900)),
@@ -577,6 +613,24 @@ mod tests {
     fn the_controller_bases_are_the_device_tree_ones() {
         assert_eq!(SdController::Sdhci0.base(), 0x9158_0000);
         assert_eq!(SdController::Sdhci1.base(), 0x9158_1000);
+    }
+
+    #[test]
+    fn the_card_check_reports_the_cid_capacity_and_two_block_crcs() {
+        let mut card = Card::init(FakeCard::new(1024)).unwrap();
+        let check = card.check().unwrap();
+        assert_eq!(check.cid, [0x5c; 16]);
+        assert_eq!(check.blocks, 1024);
+        // Both reads of a zeroed card give the same CRC: the check sees the data, not a fault.
+        assert_eq!(check.crc_first, check.crc_middle);
+    }
+
+    #[test]
+    fn a_card_that_stops_answering_mid_check_is_an_error_to_report_as_a_card_fault_candidate() {
+        // A card whose reads are refused (here, past its capacity) makes the check an error, not a pass.
+        let mut card = Card::init(FakeCard::new(1024)).unwrap();
+        card.blocks = 0;
+        assert!(card.check().is_err());
     }
 
     #[test]

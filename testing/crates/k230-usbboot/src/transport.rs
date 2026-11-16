@@ -10,6 +10,9 @@ pub enum UsbError {
     Stall,
     /// No answer in time, after this many milliseconds.
     Timeout(u32),
+    /// The device is still on the bus, but its boot ROM has stopped answering (EPROTO, not a stall). It
+    /// stays enumerated, so only a load within the window after its re-enumeration can use it.
+    Deaf,
     /// The device answered, but not what the protocol says.
     Protocol(String),
     /// Anything else, with the reason as text.
@@ -21,6 +24,7 @@ impl std::fmt::Display for UsbError {
         match self {
             Self::Disconnected => write!(f, "the device disconnected"),
             Self::Stall => write!(f, "the device stalled the request"),
+            Self::Deaf => write!(f, "the boot ROM stopped answering (EPROTO) and stays enumerated: a load must come within its window"),
             Self::Timeout(ms) => write!(f, "no answer after {ms} ms"),
             Self::Protocol(text) | Self::Other(text) => write!(f, "{text}"),
         }

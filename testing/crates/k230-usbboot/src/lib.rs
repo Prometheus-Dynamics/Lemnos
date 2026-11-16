@@ -16,6 +16,7 @@
 
 pub mod bootrom;
 pub mod burner;
+pub mod console;
 pub mod flash;
 pub mod packet;
 pub mod probe;

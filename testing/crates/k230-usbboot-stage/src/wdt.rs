@@ -187,6 +187,9 @@ pub enum Fault {
     CrIgnored,
     /// CR reads enabled, but the counter is frozen: CCVR does not move and nothing fires.
     CounterStuck,
+    /// The counter fires at three quarters of its period: a watchdog that disagrees with its
+    /// arithmetic, which the telemetry's prediction must catch.
+    FiresEarly,
 }
 
 /// A model of one watchdog's counter for the simulator. It runs while CR's enable bit is set, a
@@ -283,6 +286,9 @@ impl RegAccess for Model {
             TORR => self.torr = value,
             CRR if value == KICK => {
                 self.remaining = period_cycles((self.torr & 0x0f) as u8);
+                if self.fault == Fault::FiresEarly {
+                    self.remaining = self.remaining / 4 * 3;
+                }
                 self.kicks += 1;
             }
             _ => {}
@@ -421,7 +427,7 @@ mod tests {
     /// entry is assembly, so this test reads its source and checks the constants it names.
     #[test]
     fn the_sys_entry_arms_both_with_this_sequence_and_reads_back() {
-        let source = include_str!("../../../../drivers/k230-usbboot-sys/src/lib.rs");
+        let source = include_str!("../../../../drivers/k230-usbboot-sys/src/image.rs");
         for needle in [
             "0x91106000",
             "0x91106800",
