@@ -4037,9 +4037,15 @@ fn choice_over(
         .unwrap()
         .unwrap();
     let names = vars.iter().map(|(k, _)| k.clone()).collect();
-    let (dtbs, run) = crate::uboot::hush::choose(
+    // The fixture's environment is the uboot-env partition on device 0 (the script's default device, as
+    // `lemnos_envdev` is not set here): without that partition the script saves nothing and starts no trial.
+    let parts = [("0".to_string(), "uboot-env".to_string())]
+        .into_iter()
+        .collect();
+    let (dtbs, run) = crate::uboot::hush::choose_on(
         include_str!("../../../packaging/uboot/boot.cmd"),
         vars.into_iter().collect(),
+        &parts,
     );
     (dtbs, run.reads, names)
 }
@@ -4087,6 +4093,9 @@ fn the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can
     let dtbs = take();
     assert_eq!(dtbs, ["", "/slots/bay1/board.dtb", "/slots/bay0/board.dtb"]);
     assert_eq!(board.slots.record.slot_bay("os-3").unwrap().0, "slots/bay2");
+    // `lemnos_envdev` is not in the environment: the image's boot preamble sets it (service/ctl `boot_dir`,
+    // `setenv lemnos_envdev {env_device}`), and the script reads it from there.
+    reads.remove("lemnos_envdev");
     let listed: BTreeSet<String> = crate::uboot::VARIABLES.map(String::from).into();
     assert_eq!(
         reads, listed,

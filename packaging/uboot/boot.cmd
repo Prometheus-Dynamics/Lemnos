@@ -7,7 +7,7 @@
 # below give them defaults.
 #
 # The script takes devtype, devnum and distro_bootpart from U-Boot's standard boot flow. It needs
-# sysboot, fdt, test, setenv, saveenv, sleep, fastboot and (with a board LED) led, which the config
+# sysboot, fdt, test, part (start, for the environment's partition), echo, setenv, saveenv, sleep, fastboot and (with a board LED) led, which the config
 # fragment from `lemnos-ctl tree --uboot-config` turns on.
 #
 # THE RECORD is these variables of U-Boot's redundant environment: default, trial and
@@ -82,13 +82,32 @@ if test -z "${lemnos_usb}"; then
 	setenv lemnos_usb 0
 fi
 
+# A save is made only where the environment has a partition. `saveenv` writes the environment on the device U-Boot
+# keeps it on (CONFIG_ENV_MMC_DEVICE_INDEX, the image's `lemnos_envdev`); without a uboot-env partition on that device,
+# its redundant copy falls back to offset 0x0, the partition table. `part start` with a name is in U-Boot v2026.10
+# (cmd/part.c, do_part_start, line 487) and the Radxa tree (same lines); it is false when there is no such partition.
+# Not saved means the boot goes on: a trial is not started (it could not be recorded), and the default boots.
+if test -z "${lemnos_envdev}"; then
+	setenv lemnos_envdev 0
+fi
+setenv lemnos_saveable
+if part start mmc ${lemnos_envdev} uboot-env lemnos_envpart; then
+	setenv lemnos_saveable 1
+else
+	echo "lemnos: no uboot-env partition on mmc ${lemnos_envdev}: the environment is not saved"
+fi
+
 if test -z "${lemnos_env}"; then
 	setenv lemnos_env 1
-	if saveenv; then
-		echo "lemnos: saved the first U-Boot environment"
+	if test -n "${lemnos_saveable}"; then
+		if saveenv; then
+			echo "lemnos: saved the first U-Boot environment"
+		else
+			setenv lemnos_env
+			echo "lemnos: the first U-Boot environment could not be saved, going on"
+		fi
 	else
 		setenv lemnos_env
-		echo "lemnos: the first U-Boot environment could not be saved, going on"
 	fi
 fi
 
@@ -130,9 +149,11 @@ while test "${lemnos_go}" = "1"; do
 			if test -n "${left}"; then
 				setenv trial_attempts ${left}
 				setenv left
-				if saveenv; then
-					setenv take_trial ${trial}
-					setenv take_trial_bay ${trial_bay}
+				if test -n "${lemnos_saveable}"; then
+					if saveenv; then
+						setenv take_trial ${trial}
+						setenv take_trial_bay ${trial_bay}
+					fi
 				fi
 			fi
 		fi

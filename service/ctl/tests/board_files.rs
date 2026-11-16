@@ -93,6 +93,11 @@ const TABLE: &[Row] = &[
         ),
     },
     Row {
+        file: "testing/boards/rk3566-slots.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
         file: "testing/boards/rk3566.toml",
         validate: Validate::Pass,
         daemon: Daemon::Pass,
@@ -105,12 +110,22 @@ const TABLE: &[Row] = &[
         ),
     },
     Row {
+        file: "testing/boards/rk3588-slots.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
         file: "testing/boards/rk3588.toml",
         validate: Validate::Pass,
         daemon: Daemon::Pass,
     },
     Row {
         file: "testing/boards/rv1126b.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
+        file: "testing/boards/sun60i-a733-slots.toml",
         validate: Validate::Pass,
         daemon: Daemon::Pass,
     },

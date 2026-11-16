@@ -550,10 +550,13 @@ fn uboot_script_inner(board: &BoardFile) -> Result<String, String> {
             format!("setenv lemnos_led {label}\n")
         }
     };
+    // The device U-Boot keeps its environment on (CONFIG_ENV_MMC_DEVICE_INDEX): the script's save guard
+    // looks for the environment's partition there, so the save never goes to a device without one.
+    let env_device = setting(config, "uboot_env_mmc_index", Some(0))?;
     Ok(format!(
         "# Written by lemnos-ctl boot-partition from the board file: the USB controller the download\n\
-         # mode uses and the LED it lights. The script follows.\n\
-         setenv lemnos_usb {usb}\n{led}{BOOT_CMD}"
+         # mode uses, the LED it lights, and the MMC device the environment is kept on. The script follows.\n\
+         setenv lemnos_usb {usb}\n{led}setenv lemnos_envdev {env_device}\n{BOOT_CMD}"
     ))
 }
 
@@ -651,6 +654,7 @@ fn uboot_config_inner(board: &BoardFile) -> Result<String, String> {
     ) {
         (None, None) => {}
         (Some(_), Some(_)) => {
+            let mut pair = Vec::new();
             for (key, name) in [
                 ("uboot_usb_vendor", "CONFIG_USB_GADGET_VENDOR_NUM"),
                 ("uboot_usb_product", "CONFIG_USB_GADGET_PRODUCT_NUM"),
@@ -659,7 +663,14 @@ fn uboot_config_inner(board: &BoardFile) -> Result<String, String> {
                 if id > 0xffff {
                     return Err(format!("system-slots: {key} must be 0 to 65535"));
                 }
+                pair.push(id);
                 fastboot.push(format!("{name}=0x{id:04x}"));
+            }
+            // The pid.codes test pair is for trying the gadget, not a registered identity.
+            if pair == [0x1209, 0x0001] {
+                fastboot.push(
+                    "# 1209:0001 is the pid.codes test pair: test, not registered; replace it before a release".into(),
+                );
             }
         }
         _ => {

@@ -706,6 +706,11 @@ fn the_uboot_config_fragment_names_what_the_boot_path_needs() {
     ] {
         assert!(full.lines().any(|l| l == want), "{want}\n{full}");
     }
+    assert!(
+        full.lines()
+            .any(|l| l.contains("1209:0001") && l.contains("test, not registered")),
+        "the test pair is labelled\n{full}"
+    );
     let device = config(
         "record = \"uboot\", uboot_env_size = 8192, uboot_env_device = \"/dev/mmcblk0\", uboot_env_offset = 4194304, uboot_env_offset_redund = 4202496",
     );

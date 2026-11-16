@@ -738,8 +738,29 @@ impl Boot<'_> {
 
     /// Sets U-Boot environment variables, in one write of the inactive copy (`uboot_env::set`).
     fn uboot_env_set(&self, updates: &[(&str, Option<&str>)]) -> Result<(), String> {
+        self.refuse_fat_env_on_gpt()?;
         let (mut dev, geometry) = self.uboot_env()?;
         uboot_env::set(&mut *dev, &geometry, updates)
+    }
+
+    /// Refuses a write of the GPT environment while the boot partition holds the FAT environment file
+    /// U-Boot reads first (`uboot_env::refuse_if_fat_env`). The device form is not checked here.
+    fn refuse_fat_env_on_gpt(&self) -> Result<(), String> {
+        let bytes = self.boot_text(uboot_env::LOCATOR).ok_or_else(|| {
+            format!(
+                "{} is not readable on the boot partition",
+                uboot_env::LOCATOR
+            )
+        })?;
+        let text =
+            String::from_utf8(bytes).map_err(|_| format!("{} isn't text", uboot_env::LOCATOR))?;
+        if let Place::Gpt { .. } = Place::parse(&text)? {
+            let (_, boot) = self.boot_dev().ok_or(
+                "refusing to write the U-Boot environment on the GPT partition: the boot partition isn't known, so uboot.env can't be ruled out; nothing was written",
+            )?;
+            uboot_env::refuse_if_fat_env(&boot)?;
+        }
+        Ok(())
     }
 
     /// The bay of a slot on the boot partition (see [`Ops::slot_bay`]). Refused by name when the boot

@@ -1,0 +1,57 @@
+# A board file for the RK3566 SoC (socs/rk3566.toml): the system identity, the reboot and slot devices of a board that
+# boots from SD. The eMMC socket is not declared: its node is disabled in the board's kernel tree. The slot record is U-Boot's
+# own environment (`record = "uboot"`). Untested on board.
+#
+# Every fact below cites its source as TREE:path:line. DERIVED: from the source, not run or booted. UNVERIFIED: no source.
+# Sources: the image-builder facts report (notes BB1b-citations.md) section 1 and section 2 (this SoC's board), unless a row says otherwise.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rk3566-slots"
+soc = "rk3566"
+
+[[hardware]]
+controller = "watchdog"
+
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+[[devices]]
+id = "reboot"
+driver = "system-reboot"
+
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/watchdog@fe600000" }
+config = { timeout_s = 15 }
+
+[[devices]]
+id = "slots"
+driver = "system-slots"
+# The one medium: SD `/mmc@fe2b0000` (`sdmmc0`, enabled by the board dts at the board's base dtsi, lines 474-482;
+# its base node at rk356x-base.dtsi:1062-1073 is disabled and the board enables it, DERIVED).
+# The eMMC is not declared: `&sdhci` at rk356x-base.dtsi:1101-1111 is `status = "disabled"` (:1111), and no board dts enables it (image-builder report, DERIVED).
+config = { data = "/data", boot = "/boot", record = "uboot", boot_args = "os", boot_sources = ["/mmc@fe2b0000=/mmc@fe2b0000"], uboot_env_size = 0x10000, uboot_env_mmc_index = 1, uboot_usb_vendor = 0x1209, uboot_usb_product = 0x0001 }
+
+# The U-Boot environment is on the SD: device 1. Gaia's rk35xx U-Boot (rev to follow) sets `CONFIG_ENV_MMC_DEVICE_INDEX=1`.
+# U-Boot's device 0 names the disabled eMMC (no node bound), so a lookup on 0 fails as the build is now (DERIVED, not run).
+# The environment size: `uboot_env_size = 0x10000`, the whole copy with its 5-byte header (`CONFIG_ENV_SIZE`, include/env_internal.h:57-62).
+# Gaia's rk35xx fragment (rev to follow): the GPT partition `uboot-env` (16 MiB, 128 KiB), redundant, copy 0 at 16 MiB + 64 KiB and
+# copy 1 at 16 MiB, each 0x10000 bytes; the raw-offset fallback is off. The layout is checked by the test
+# the_rk_layout_writes_... (drivers/slot-store).
+#
+# INERT until Gaia's rev lands: the record is not what U-Boot reads, so a trial is never seen by U-Boot and the default keeps
+# booting. The outcome is harmless: slot-init spends each attempt and restarts, the attempts run out, and the daemon ends the
+# trial with a named reason and clears the record. No state needs hands. Remove this comment when Gaia's rev lands.
+#
+# Hazard until then (DERIVED, the report): the as-built U-Boot's first-start saveenv (packaging/uboot/boot.cmd:85-90) writes its
+# environment on the device it is built for. Without a uboot-env partition there, the redundant copy falls back to offset 0x0, the
+# partition table (env/mmc.c:194-202). The image must not ship that build before Gaia's rev.
+# Fastboot pair 1209:0001: test, not registered (pid.codes test pair).
+# UNVERIFIED: the ZERO 3E's U-Boot defconfig still names the 3W tree (TREE:UB configs/radxa-zero-3-rk3566_defconfig:6); the
+# 3E tree is taken from the U-Boot builder, not checked here.

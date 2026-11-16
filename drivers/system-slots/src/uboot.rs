@@ -323,6 +323,17 @@ impl UbootEnv {
 
     fn set(&self, updates: &[(&str, Option<&str>)]) -> io::Result<()> {
         let (mut dev, geometry) = self.open()?;
+        if let Place::Gpt { .. } = &self.place {
+            // The GPT environment is written only where U-Boot will read it: not while the boot
+            // partition holds the FAT environment file U-Boot reads first.
+            let boot = self.boot_node.as_ref().map_err(|why| {
+                io::Error::other(format!(
+                    "refusing to write the U-Boot environment on the GPT partition: the boot partition isn't known, so {} can't be ruled out ({why}); nothing was written",
+                    uboot_env::FAT_ENV_FILE
+                ))
+            })?;
+            uboot_env::refuse_if_fat_env(boot).map_err(io::Error::other)?;
+        }
         uboot_env::set(&mut dev, &geometry, updates).map_err(io::Error::other)
     }
 

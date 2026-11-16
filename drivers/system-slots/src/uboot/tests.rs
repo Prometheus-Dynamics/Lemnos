@@ -534,7 +534,43 @@ fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
         let p = crate::bay_fixture::payloads(id);
         env.install(id, &crate::bay_fixture::refs(&p)).unwrap();
     };
+    // A FAT uboot.env on the boot partition: U-Boot reads it first, so a GPT write is refused by name and
+    // the environment does not change.
+    let plain_boot = fs::read(env.boot_node.as_ref().unwrap()).unwrap();
+    let node_before = fs::read(&node).unwrap();
+    fs::write(
+        env.boot_node.as_ref().unwrap(),
+        crate::bay_fixture::uboot_image_with_env("os-1"),
+    )
+    .unwrap();
+    // The image has a bay for os-1 only, so the slot written is os-1 (the write is what is refused).
+    let why = env.set_default("os-1").unwrap_err().to_string();
+    assert!(
+        why.contains("uboot.env")
+            && why.contains("reads it first")
+            && why.contains("nothing was written"),
+        "{why}"
+    );
+    assert!(
+        why.contains("refusing to write the U-Boot environment on the GPT partition"),
+        "{why}"
+    );
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        node_before,
+        "the environment is unchanged"
+    );
+    let why = env.set_trial("os-1", 2).unwrap_err().to_string();
+    assert!(why.contains("uboot.env"), "{why}");
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        node_before,
+        "a trial is not written either"
+    );
+    // Without the file, the same write goes ahead.
+    fs::write(env.boot_node.as_ref().unwrap(), &plain_boot).unwrap();
     env.set_default("os-1").unwrap();
+    assert!(current().contains(&("default".to_string(), "os-1".to_string())));
     install(&env, "os-2");
     env.set_default("os-2").unwrap();
     install(&env, "os-3");
@@ -723,9 +759,12 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
 
 use super::hush::{Env, choose};
 
+/// An environment as the script sees it after its first-start block, on a device that has the
+/// environment's partition: `lemnos_saveable` is set, so a trial may be taken.
 fn env(pairs: &[(&str, &str)]) -> Env {
     pairs
         .iter()
+        .chain(std::iter::once(&("lemnos_saveable", "1")))
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
@@ -800,4 +839,78 @@ fn the_previous_step_runs_on_a_different_bay_and_only_then() {
         ])),
         "/slots/bay0/board.dtb"
     );
+}
+
+/// The first-start block of the script, run on its own: the environment is saved only where the device the
+/// environment is kept on (`lemnos_envdev`) has a uboot-env partition. Without one, nothing is saved and the
+/// boot goes on (the block does not stop).
+#[test]
+fn the_script_saves_the_environment_only_on_the_device_that_has_its_partition() {
+    use super::hush::{Run, code};
+    let script = SCRIPT;
+    let lines = code(script);
+    let from = lines
+        .iter()
+        .position(|l| *l == r#"if test -z "${lemnos_envdev}"; then"#)
+        .expect("the script has the environment device default");
+    let to = lines
+        .iter()
+        .position(|l| *l == "setenv lemnos_pass")
+        .expect("the script has its pass setup");
+    let block = &lines[from..to];
+    let run = |device: &str, parts: &[(&str, &str)]| {
+        let mut run = Run::new(env(&[("lemnos_envdev", device)]));
+        // Start from a fresh environment: the first-start block is what is under test.
+        run.env.remove("lemnos_saveable");
+        run.parts = parts
+            .iter()
+            .map(|(d, n)| (d.to_string(), n.to_string()))
+            .collect();
+        run.run(block);
+        run
+    };
+    // No partition on the device: nothing is saved, the first-start flag is cleared, and the boot goes on.
+    let none = run("1", &[]);
+    assert_eq!(none.saves, 0, "no partition, no saveenv");
+    assert!(
+        !none.env.contains_key("lemnos_env"),
+        "the flag is cleared so a later boot tries again"
+    );
+    assert!(!none.env.contains_key("lemnos_saveable"));
+    // The partition is on the device the environment is kept on: the environment is saved.
+    let on_device = run("1", &[("1", "uboot-env")]);
+    assert_eq!(on_device.saves, 1, "the partition is there: saveenv runs");
+    assert_eq!(
+        on_device.env.get("lemnos_env").map(String::as_str),
+        Some("1")
+    );
+    // A partition on another device does not count: the save goes to the device the environment is on.
+    let elsewhere = run("1", &[("0", "uboot-env")]);
+    assert_eq!(
+        elsewhere.saves, 0,
+        "a partition on device 0 is no help for device 1"
+    );
+}
+
+/// The trial's save: a trial is taken only when the environment could be saved. Without the first-start
+/// block's `lemnos_saveable` the trial is not started (the default boots instead).
+#[test]
+fn a_trial_is_taken_only_when_the_environment_is_saved() {
+    let pairs = [
+        ("default", "os-1"),
+        ("default_bay", "bay0"),
+        ("trial", "os-2"),
+        ("trial_bay", "bay1"),
+        ("trial_attempts", "2"),
+    ];
+    let trial = |env: Env| choose(SCRIPT, env).0[0].clone();
+    assert!(
+        trial(env(&pairs)).contains("bay1"),
+        "saved: the trial is taken"
+    );
+    let unsaved: Env = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(trial(unsaved), "", "not saved: no trial is started");
 }

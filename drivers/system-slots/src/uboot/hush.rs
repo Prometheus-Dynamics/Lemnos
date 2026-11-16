@@ -17,6 +17,10 @@ pub struct Run {
     /// Names read from the environment the run began with, before the lines set them.
     pub reads: BTreeSet<String>,
     set: BTreeSet<String>,
+    /// The partitions the device has, as `(device, name)`: what `part start` finds.
+    pub parts: BTreeSet<(String, String)>,
+    /// How many `saveenv` lines ran (a save that the script reaches, not one it skips).
+    pub saves: usize,
 }
 
 impl Run {
@@ -25,6 +29,8 @@ impl Run {
             env,
             reads: BTreeSet::new(),
             set: BTreeSet::new(),
+            parts: BTreeSet::new(),
+            saves: 0,
         }
     }
 
@@ -57,7 +63,23 @@ impl Run {
     /// `test ...` or `saveenv` (which succeeds here).
     fn condition(&mut self, text: &str) -> bool {
         if text == "saveenv" {
+            self.saves += 1;
             return true;
+        }
+        if let Some(args) = text.strip_prefix("part start ") {
+            // `part start <interface> <dev> <name> <varname>` (U-Boot cmd/part.c, do_part_info): true when a
+            // partition of that name is on the device, and the variable gets its number.
+            let words: Vec<String> = args.split_whitespace().map(|w| self.word(w)).collect();
+            let [interface, dev, name, var] = words.as_slice() else {
+                panic!("part start takes four words here: {text}");
+            };
+            assert_eq!(interface, "mmc", "the script asks the MMC device only");
+            let found = self.parts.contains(&(dev.clone(), name.clone()));
+            if found {
+                self.set.insert(var.clone());
+                self.env.insert(var.clone(), "1".into());
+            }
+            return found;
         }
         let args = text
             .strip_prefix("test ")
@@ -115,6 +137,8 @@ impl Run {
                 } else {
                     self.env.insert(name.to_string(), value);
                 }
+            } else if line.starts_with("echo ") {
+                // A message: it changes no variable and decides nothing.
             } else if live(&frames) {
                 panic!("a command this evaluator does not run: {line}");
             }
@@ -146,6 +170,22 @@ impl Run {
 /// `lemnos_dtb` values, trial, default and previous (empty: the step starts nothing), and the run
 /// that holds every read of the environment.
 pub fn choose(script: &str, env: Env) -> ([String; 3], Run) {
+    choose_with(script, env, &BTreeSet::new(), false)
+}
+
+/// [`choose`] on a device with the partitions `parts` (`(device, name)`, what `part start` finds), with the
+/// save decision (`lemnos_envdev`, `part start`, `lemnos_saveable`) run first, as the script runs it before
+/// its loop.
+pub fn choose_on(script: &str, env: Env, parts: &BTreeSet<(String, String)>) -> ([String; 3], Run) {
+    choose_with(script, env, parts, true)
+}
+
+fn choose_with(
+    script: &str,
+    env: Env,
+    parts: &BTreeSet<(String, String)>,
+    save_decision: bool,
+) -> ([String; 3], Run) {
     let code = code(script);
     let at = |needle: &str| {
         code.iter()
@@ -156,11 +196,18 @@ pub fn choose(script: &str, env: Env) -> ([String; 3], Run) {
     let for_at = at("for step in trial default previous; do");
     let load_at = at(r#"if test -n "${lemnos_dtb}"; then"#);
     let mut run = Run::new(env);
+    run.parts = parts.clone();
+    if save_decision {
+        let from = at(r#"if test -z "${lemnos_envdev}"; then"#);
+        let to = at(r#"if test -z "${lemnos_env}"; then"#);
+        run.run(&code[from..to]);
+    }
     run.run(&code[first..for_at]);
     let after = run.env.clone();
     let mut dtbs = [String::new(), String::new(), String::new()];
     for (i, step) in ["trial", "default", "previous"].iter().enumerate() {
         let mut each = Run::new(after.clone());
+        each.parts = parts.clone();
         each.preset("step", step);
         // The choice's own variables are set by the script, not the record.
         each.set.extend(run.set.iter().cloned());

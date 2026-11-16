@@ -948,7 +948,7 @@ The format is U-Boot's, from its sources at tag `v2026.10` (commit 5508406): `in
 `env/common.c`, `env/mmc.c`. Each copy is a CRC-32 over the whole data area, a one-byte serial and the
 data (`env/common.c:582-600`, `env_export`); the serial is the active copy's plus one, wrapping from
 255 to 0; U-Boot takes the copy whose CRC is right, and of two, the higher serial (255 against 0: the 0
-is newer), and copy one on a tie (`env/common.c:484-551`, `env_check_redund`).
+is newer), and on a tie the primary copy, the one at `CONFIG_ENV_OFFSET` (in the GPT form, copy 0 at the top of the partition), as `env/common.c:569-570` takes `tmp_env1` (`env_check_redund`, `env/common.c:484-551`).
 
 - **Where the copies are.** The environment is the one partition on the boot disk whose GPT type GUID
   is `3de21764-95bd-54bd-a5c3-4abe786f38a8` (`include/part_efi.h:61`). With `CONFIG_PARTITION_TYPE_GUID`

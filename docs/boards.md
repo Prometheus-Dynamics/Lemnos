@@ -188,7 +188,9 @@ log reads it for.
 | Board | Region (`reg`) | `console-size` | `record-size` | `ecc-size` | Source | Status |
 |---|---|---|---|---|---|---|
 | The A733 boards (sun60i) | `<0x0 0x60000000 0x0 0x100000>` (1 MiB at 0x60000000) | `0x40000` | `0x20000` | 16 | the A733 board's own kernel patch that adds the ramoops node, lines 36 to 42 (checked against the patch) | untested on board |
-| The RK boards (RK35xx, RK3588S, RK3576) | `<0x0 0x110000 0x0 0xf0000>` | `0x20000` | `0x10000` | not given | the image builder's board device tree (2026-11-14), to confirm on board; UNVERIFIED: untested on board, not checked against any board tree on disk |
+| The RK3588 boards (RK3588S) | `<0x0 0x110000 0x0 0xe0000>` | `0x20000` | `0x10000` | not given | the board vendor's kernel (radxa/kernel 0eb18670e, `arch/arm64/boot/dts/rockchip/rk3588-linux.dtsi`:92-102); the minidump-smem region sits at 0x1f0000, directly after it. UNVERIFIED: untested on board; read `/proc/iomem` on a board to confirm |
+| The RK3566 boards (RK35xx) | `<0x0 0x110000 0x0 0xf0000>` | `0x20000` | `0x10000` | not given | the mainline `rk3566-lckfb-tspi` board tree, as the precedent for this region. UNVERIFIED: untested on board; read `/proc/iomem` on a board to confirm |
+| The RK3576 boards | not given | `0x20000` | `0x10000` | not given | UNVERIFIED, no source: no board tree for this SoC was read. The single row this replaces gave `<0x0 0x110000 0x0 0xf0000>` for all RK boards, which the RK3588 source contradicts |
 
 ## Boot count (`system-slots`, `record = "tryboot"`)
 
@@ -295,7 +297,7 @@ cannot lack an option; `lemnos-ctl boot-partition` writes the locator `uboot-env
 | `system-slots` | `uboot_env_mmc_index` | `0` | 0 up | The MMC device U-Boot keeps the environment on and flashes in download mode (`CONFIG_ENV_MMC_DEVICE_INDEX`, `CONFIG_FASTBOOT_FLASH_MMC_DEV`; `mmc list`'s number). Read by `--uboot-config` only |
 | `system-slots` | `uboot_fastboot_usb` | `0` | 0 up | The USB device controller the download mode uses (`fastboot usb <n>`, `CONFIG_FASTBOOT_USB_DEV`). Read by `--uboot-config` and `lemnos-ctl boot-partition` (it is set before `boot.cmd` in the image) |
 | `system-slots` | `uboot_led` | unset | a U-Boot LED label | The LED that is on while the board waits in download mode (`led <label> on`). `boot-partition` sets it in the image's `boot.cmd`; `--uboot-config` then adds `CONFIG_LED` and `CONFIG_CMD_LED` |
-| `system-slots` | `uboot_usb_vendor`, `uboot_usb_product` | unset | 0 to 65535, given together | The fastboot gadget's VID and PID (`CONFIG_USB_GADGET_VENDOR_NUM`, `CONFIG_USB_GADGET_PRODUCT_NUM`). Unset, U-Boot's own default for the SoC stays: a placeholder the project replaces with its own |
+| `system-slots` | `uboot_usb_vendor`, `uboot_usb_product` | unset | 0 to 65535, given together | The fastboot gadget's VID and PID (`CONFIG_USB_GADGET_VENDOR_NUM`, `CONFIG_USB_GADGET_PRODUCT_NUM`). `1209:0001` is the pid.codes test pair, not registered: `--uboot-config` labels it, and it is replaced before a release. Unset, U-Boot's own default for the SoC stays: a placeholder the project replaces with its own |
 | `system-slots` | `uboot_watchdog_ms` | unset | 0 up | `CONFIG_WATCHDOG_TIMEOUT_MSECS`. Unset, U-Boot's default for the SoC stays |
 
 The fragment (`--uboot-config`), for the GPT form with a 8192-byte environment, MMC 0 and USB 0:
