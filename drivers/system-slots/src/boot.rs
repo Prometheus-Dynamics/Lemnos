@@ -70,6 +70,15 @@ pub trait BootRecord: Send {
     fn clear_episodes(&mut self) -> io::Result<()> {
         Err(no_episodes())
     }
+    /// The restart count of the U-Boot form (`lemnos_restarts`, the boots attempted since the last good
+    /// boot): kept in U-Boot's environment, so only that form has one. `None` when unset.
+    fn restarts(&self) -> io::Result<Option<u8>> {
+        Err(no_restarts())
+    }
+    /// Keeps the restart count (`lemnos_restarts`).
+    fn set_restarts(&mut self, _restarts: u8) -> io::Result<()> {
+        Err(no_restarts())
+    }
     /// The restart baseline (M36b): the firmware count the last good boot started from, `None` when
     /// unknown. Only the `tryboot` form keeps one; the others refuse by name.
     fn baseline(&self) -> io::Result<Option<u32>> {
@@ -95,6 +104,12 @@ pub trait BootRecord: Send {
     fn slot_bay(&self, id: &str) -> io::Result<(String, Vec<(String, u64)>)> {
         Ok((format!("slots/{id}"), Vec::new()))
     }
+}
+
+fn no_restarts() -> io::Error {
+    io::Error::other(
+        "the restart count is kept in U-Boot's environment, which this boot record form doesn't have",
+    )
 }
 
 fn no_episodes() -> io::Error {

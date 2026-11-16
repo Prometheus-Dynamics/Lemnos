@@ -407,6 +407,20 @@ fn guard_check(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let note = boot_guard::check(&layout, &node, record.as_mut(), restart)?;
+        // The U-Boot form's restart count is cleared before an intended restart too, with a write only
+        // when it is not already 0 (see `count`).
+        if restart
+            && firmware.is_none()
+            && let Ok(Some(restarts)) = record.restarts()
+            && restarts != 0
+            && let Err(e) = record.set_restarts(0)
+        {
+            let mut state = State::load(&layout);
+            state.error = format!(
+                "the restart count couldn't be cleared before this restart ({e}): this boot is counted"
+            );
+            let _ = state.save(&layout);
+        }
         if restart && let Some(firmware) = &firmware {
             // A count that can't be cleared does not stop the restart the board was asked for: the
             // restart then counts one boot, and the state says so.
@@ -1332,6 +1346,7 @@ const KEYS: &[Key] = &[
     Key::optional("uboot_env_mmc_index", Kind::Int),
     Key::optional("uboot_fastboot_usb", Kind::Int),
     Key::optional("uboot_led", Kind::Str),
+    Key::optional("uboot_reset_word", Kind::Str),
     Key::optional("uboot_usb_vendor", Kind::Int),
     Key::optional("uboot_usb_product", Kind::Int),
     Key::optional("uboot_watchdog_ms", Kind::Int),

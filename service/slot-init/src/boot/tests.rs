@@ -1037,6 +1037,21 @@ fn a_slot_that_isnt_the_default_is_a_trial() {
     assert_eq!(board.read("data/board/slots/trial-init"), "os-1\n");
 }
 
+/// BB2: the U-Boot previous the restart count starts (`lemnos,default-failed = "restarts"`, the script's
+/// rung at 4 to 7) goes through the same path as the Pi's count-picked previous: a slot that isn't the
+/// default is a trial (`trial-init` is written), and the loader's files rule does not mark the default
+/// failed, since the value is not `files`.
+#[test]
+fn a_count_picked_uboot_previous_is_a_trial_as_the_pi_previous_is() {
+    let board = Board::new();
+    board.cmdline("os-1", &hash("os-1"));
+    board.write(crate::boot::DEFAULT_FAILED, b"restarts\0");
+    let (_, why) = board.boot(&[]);
+    assert_eq!(why, "");
+    assert_eq!(board.read("data/board/slots/trial-init"), "os-1\n");
+    assert_ne!(board.meta("os-2").get("FAILED"), "yes");
+}
+
 /// Falls back from the default to the previous slot on trial, recorded: the common end of every
 /// refusal.
 fn assert_fell_back(board: &Board, fake: &Fake, reason: &str) {

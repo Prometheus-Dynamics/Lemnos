@@ -1287,6 +1287,38 @@ rotation above still reads the raw count.
   --boot-dir` is removed (the flag is refused). Other records have no boot partition here and are refused
   by name.
 
+### The U-Boot restart count
+
+The `uboot` form has the Pi's count in U-Boot's environment: `lemnos_restarts` is the boots attempted since the
+last good boot, this one included, and it saturates at 8. `packaging/uboot/boot.cmd` raises it once per script
+run, with one `saveenv`, before any slot starts. lemnosd clears it at a good boot and before its own intended
+restart, with a write only when it is not already 0 (so a healthy boot writes nothing).
+
+- **The rung.** `lemnos_restarts & 4` (the Pi's `[boot_count&4]`): at 0 to 3 the default starts, at 4 to 7 the
+  previous starts first (the default is skipped in the first pass only, and taken on the next pass if the
+  previous does not start), at 8 no slot starts and download mode is offered at once (the Pi's RPIBOOT
+  equivalent; the host flasher is the exit). The previous at 4 is `lemnos,default-failed = "restarts"` on
+  `/chosen`. slot-init treats the U-Boot previous exactly as it treats the Pi's count-picked previous: a slot that
+  isn't the default is a trial (`trial-init` is written, `slot-init` boot.rs:1298), and only the value `files`
+  marks the default failed (the test `a_count_picked_uboot_previous_is_a_trial_as_the_pi_previous_is` pins this).
+- **Episodes.** An arrival on the previous slot by the count, with the default's files matching, records one
+  episode against the default (`lemnos_episodes`, with the default's slot id in `lemnos_episodes_bay`). The
+  episodes demote the default at `demote_after_episodes`, as the Pi's do, and the count is cleared after the
+  arrival. A good boot clears the episodes of the slot it runs.
+- **Power-on resets.** A power-on reset resets the count to 0 only when the image names the SoC's reset-status
+  word (`uboot_reset_word`, see [Boards](boards.md#the-keys)). The word's bits are the CRU's global reset
+  status, and a SoC gets a word only with a citation for its bits. No SoC has one today, so every boot counts,
+  power-on included, and the count does not distinguish a power cut from a restart on any shipped board.
+  The count's semantics mirror the Pi's, with that difference stated.
+- **Writes.** A healthy power-on boot writes nothing. A healthy warm boot writes twice: the raise and the
+  clear at its good boot. A failing boot writes once per restart. Rescue at 8 writes nothing while it waits.
+  Every write is the cut-safe copy write of the environment (`drivers/slot-store/src/uboot_env.rs`).
+- **Limits.** A boot that never reaches the script counts nothing. The U-Boot form has no baseline record: the
+  count is the environment variable, cleared by its own write, so the Pi form's baseline (`count.rec`) does not
+  apply here.
+- **The rescue's exit.** Download mode at 8 waits for the host flasher, which is also the operator's default
+  switch: a default switch clears the count and the episodes.
+
 ### The good-boot deadline
 
 Every boot of a slot board is judged, by systemd and not by lemnosd. The unit

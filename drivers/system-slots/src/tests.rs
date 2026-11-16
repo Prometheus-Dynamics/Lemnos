@@ -4042,11 +4042,12 @@ fn choice_over(
     let parts = [("0".to_string(), "uboot-env".to_string())]
         .into_iter()
         .collect();
-    let (dtbs, run) = crate::uboot::hush::choose_on(
+    let (dtbs, mut run) = crate::uboot::hush::choose_on(
         include_str!("../../../packaging/uboot/boot.cmd"),
         vars.into_iter().collect(),
         &parts,
     );
+    run.reads.remove("lemnos_saveable");
     (dtbs, run.reads, names)
 }
 
@@ -4097,9 +4098,14 @@ fn the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can
     // `setenv lemnos_envdev {env_device}`), and the script reads it from there.
     reads.remove("lemnos_envdev");
     let listed: BTreeSet<String> = crate::uboot::VARIABLES.map(String::from).into();
+    let counted: BTreeSet<String> = listed
+        .iter()
+        .cloned()
+        .chain(crate::uboot::COUNT_VARIABLES.map(String::from))
+        .collect();
     assert_eq!(
-        reads, listed,
-        "what the script reads is the documented list"
+        reads, counted,
+        "what the script reads is the documented list and the restart count"
     );
     assert_eq!(
         written, listed,
@@ -5234,4 +5240,96 @@ fn the_info_text_carries_the_crash_note_only_for_a_declared_log() {
             .info_json()
             .contains("\"crash_log\":\"crash log: no record")
     );
+}
+
+/// BB2: the lemnosd count paths over the U-Boot record's real environment: the writer's own two-copy file
+/// (`uboot_board`), not a stand-in. os-2 is installed, then promoted by a trial and its confirmation, as the
+/// loader's own switch does: os-2 is the default (its files match its manifest), os-1 the previous.
+fn uboot_count_board() -> (Board, PathBuf) {
+    let (mut board, boot_node, node, _geometry) = uboot_board();
+    // The slots verify a boot file through the boot partition's node: the fixture's image, as the daemon
+    // gets it from the board's boot disk.
+    board.slots.boot_node = Ok(boot_node);
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+    board.boot_into("os-2");
+    board.slots.confirm().unwrap();
+    assert_eq!(board.state().default, "os-2");
+    assert_eq!(board.state().previous, "os-1");
+    (board, node)
+}
+
+/// An arrival on the previous slot at count 4 records one episode against the default in the real
+/// environment, and the arrival clears the count.
+#[test]
+fn the_uboot_arrival_on_previous_records_an_episode_in_the_real_environment() {
+    let (mut board, _node) = uboot_count_board();
+    board.slots.record.set_restarts(4).unwrap();
+    board.boot_into("os-1");
+    board.slots.arrive_at_start();
+    assert!(
+        board.state().error.contains("episode 1 for os-2 recorded"),
+        "{:?}",
+        board.state().error
+    );
+    assert_eq!(
+        board.slots.record.episodes().unwrap(),
+        Some(("os-2".to_string(), 1))
+    );
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+}
+
+/// A good boot clears the count and the episodes in the real environment.
+#[test]
+fn the_uboot_good_boot_clears_the_count_and_the_episodes_in_the_real_environment() {
+    let (mut board, _node) = uboot_count_board();
+    board.slots.record.set_restarts(5).unwrap();
+    board.slots.record.set_episodes("os-2", 1).unwrap();
+    board.boot_into("os-2");
+    board.slots.boot_good("os-2");
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    assert_eq!(board.slots.record.episodes().unwrap(), None);
+}
+
+/// The good boot's clear, cut at every byte of its write: the environment is whole at every cut (the
+/// count is the old 5 or the new 0), and the next good boot finishes the clear.
+#[test]
+fn a_cut_in_the_uboot_count_clear_leaves_the_real_environment_whole_and_the_next_good_boot_finishes_it()
+ {
+    let (mut board, node) = uboot_count_board();
+    board.slots.record.set_restarts(5).unwrap();
+    board.slots.record.set_episodes("os-2", 1).unwrap();
+    board.boot_into("os-2");
+    let before = fs::read(&node).unwrap();
+    board.slots.boot_good("os-2");
+    let after = fs::read(&node).unwrap();
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    // The writer changes one copy only: the first changed byte says which (copies at 0 and 4096, 1024 bytes).
+    let first = before
+        .iter()
+        .zip(&after)
+        .position(|(a, b)| a != b)
+        .expect("the clear changed the file");
+    let copy = first / 4096 * 4096;
+    for cut in 0..=1024 {
+        let mut image = before.clone();
+        image[copy..copy + cut].copy_from_slice(&after[copy..copy + cut]);
+        fs::write(&node, &image).unwrap();
+        let count = board
+            .slots
+            .record
+            .restarts()
+            .unwrap_or_else(|e| panic!("no whole environment after a cut at {cut}: {e}"));
+        assert!(
+            count == Some(5) || count == Some(0),
+            "cut {cut}: restarts {count:?}"
+        );
+        board.slots.boot_good("os-2");
+        assert_eq!(
+            board.slots.record.restarts().unwrap(),
+            Some(0),
+            "cut {cut}: the next good boot finishes the clear"
+        );
+        fs::write(&node, &before).unwrap();
+    }
 }

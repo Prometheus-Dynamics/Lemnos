@@ -110,10 +110,6 @@ fn ladder_is_there(script: &str) {
     assert!(rung(script, 3, 2), "3 takes one to 2");
     assert!(rung(script, 2, 1), "2 takes one to 1");
     assert!(rung(script, 1, 0), "1 takes one to 0");
-    assert!(
-        !script.contains("setexpr"),
-        "no setexpr: U-Boot builds without it"
-    );
     assert!(!rung(script, 0, 0), "nothing is taken at 0");
 }
 
@@ -192,8 +188,8 @@ fn the_script_mirrors_the_decision() {
     );
     assert_eq!(
         code.iter().filter(|l| l.contains("saveenv")).count(),
-        2,
-        "the first environment and the trial's attempt"
+        5,
+        "the first environment, the restart count's three writes (power-on clear, warm raise, raise without a reset word) and the trial's attempt"
     );
 }
 
@@ -757,6 +753,7 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
     assert_eq!(record.pending().unwrap(), Some(("b".to_string(), 3)));
 }
 
+use super::hush;
 use super::hush::{Env, choose};
 
 /// An environment as the script sees it after its first-start block, on a device that has the
@@ -853,10 +850,11 @@ fn the_script_saves_the_environment_only_on_the_device_that_has_its_partition() 
         .iter()
         .position(|l| *l == r#"if test -z "${lemnos_envdev}"; then"#)
         .expect("the script has the environment device default");
+    // The first-start block ends where the restart count begins: the count's own saves are another test's.
     let to = lines
         .iter()
-        .position(|l| *l == "setenv lemnos_pass")
-        .expect("the script has its pass setup");
+        .position(|l| *l == r#"if test -z "${lemnos_restarts}"; then"#)
+        .expect("the script has its restart count");
     let block = &lines[from..to];
     let run = |device: &str, parts: &[(&str, &str)]| {
         let mut run = Run::new(env(&[("lemnos_envdev", device)]));
@@ -913,4 +911,139 @@ fn a_trial_is_taken_only_when_the_environment_is_saved() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     assert_eq!(trial(unsaved), "", "not saved: no trial is started");
+}
+
+/// BB2: the restart count, the power-on reset and the rung at 4 to 7 and the rescue at 8, run over
+/// the script's own lines. `reset` is the SoC's reset-status word when the image names one.
+fn count_run(pairs: &[(&str, &str)], reset: Option<u32>) -> hush::Run {
+    let mut run = hush::Run::new(env(pairs));
+    // A device with the environment's partition: the saves are made (the first-start block's guard).
+    run.preset("lemnos_saveable", "1");
+    if let Some(word) = reset {
+        run.mem.insert(0x1000_0000, word);
+        run.preset("lemnos_rst", "0x10000000");
+    }
+    run.run(&hush::count_lines(SCRIPT));
+    run
+}
+
+/// A warm reset (`RST`, bit 0) raises the count by one and saves it once.
+#[test]
+fn a_warm_reset_raises_the_count_and_saves_once() {
+    let run = count_run(&[("lemnos_restarts", "0")], Some(1));
+    assert_eq!(run.env["lemnos_restarts"], "1");
+    assert_eq!(run.saves, 1);
+}
+
+/// A power-on reset (`POR`, the register reads 0) sets the count to 0, and writes only when it
+/// was not already 0.
+#[test]
+fn a_power_on_reset_sets_the_count_to_zero_and_writes_only_when_it_changes() {
+    let run = count_run(&[("lemnos_restarts", "5")], Some(0));
+    assert_eq!(run.env["lemnos_restarts"], "0");
+    assert_eq!(run.saves, 1);
+    let run = count_run(&[("lemnos_restarts", "0")], Some(0));
+    assert_eq!(run.env["lemnos_restarts"], "0");
+    assert_eq!(run.saves, 0, "a healthy power-on boot writes nothing");
+}
+
+/// The count saturates at 8 and a boot at 8 writes nothing more.
+#[test]
+fn the_count_saturates_at_eight() {
+    let run = count_run(&[("lemnos_restarts", "8")], Some(1));
+    assert_eq!(run.env["lemnos_restarts"], "8");
+    assert_eq!(run.saves, 0);
+}
+
+/// An image with no reset-status word counts every boot, power-on included (the SoCs whose
+/// register is not cited: see docs/slots.md).
+#[test]
+fn without_a_reset_word_every_boot_counts() {
+    let run = count_run(&[], None);
+    assert_eq!(run.env["lemnos_restarts"], "1");
+    assert_eq!(run.saves, 1);
+}
+
+/// The rung: 0 to 3 starts the default, 4 to 7 the previous first (the default is skipped in the
+/// first pass only), and the pass after a previous that did not start starts the default.
+#[test]
+fn the_rung_at_four_starts_the_previous_first_and_the_default_on_the_next_pass() {
+    let base = [
+        ("default", "a"),
+        ("default_bay", "bay0"),
+        ("previous_bay", "bay1"),
+    ];
+    let steps = |restarts: &str, pass: &str| {
+        let mut pairs = base.to_vec();
+        pairs.push(("lemnos_restarts", restarts));
+        if !pass.is_empty() {
+            pairs.push(("lemnos_pass", pass));
+        }
+        choose(SCRIPT, env(&pairs)).0
+    };
+    // 0 to 3: the default, as before.
+    for restarts in ["0", "1", "2", "3"] {
+        assert_eq!(
+            steps(restarts, "")[1],
+            "/slots/bay0/board.dtb",
+            "restarts {restarts}"
+        );
+    }
+    // 4 to 7: no default in the first pass; the previous starts.
+    for restarts in ["4", "5", "6", "7"] {
+        let first = steps(restarts, "");
+        assert_eq!(first[1], "", "restarts {restarts}: default skipped first");
+        assert_eq!(
+            first[2], "/slots/bay1/board.dtb",
+            "restarts {restarts}: previous first"
+        );
+        assert_eq!(
+            steps(restarts, "x")[1],
+            "/slots/bay0/board.dtb",
+            "restarts {restarts}: default on the next pass"
+        );
+    }
+    // Without a previous bay the default starts in the first pass.
+    let no_previous = choose(
+        SCRIPT,
+        env(&[
+            ("default", "a"),
+            ("default_bay", "bay0"),
+            ("lemnos_restarts", "5"),
+        ]),
+    )
+    .0;
+    assert_eq!(no_previous[1], "/slots/bay0/board.dtb");
+}
+
+/// The rescue: at 8 no slot starts and the pass is set so download mode is offered at once.
+#[test]
+fn at_eight_the_rescue_starts_no_slot_and_offers_download_mode() {
+    let decide = |restarts: &str| {
+        let mut run = hush::Run::new(env(&[("lemnos_restarts", restarts)]));
+        // The rescue decision and the branch that takes it, run over the script's own lines.
+        let code = hush::code(SCRIPT);
+        let at = |needle: &str| code.iter().position(|l| *l == needle).expect(needle);
+        let start = at("setenv lemnos_rescue");
+        let rescue = at(r#"if test -n "${lemnos_rescue}"; then"#);
+        run.run(&code[start..rescue]);
+        let rescued = run.env.contains_key("lemnos_rescue");
+        if !rescued {
+            // The other branches are the steps, which this run does not take: nothing to check.
+            return (false, None, false);
+        }
+        let mut branch = hush::Run::new(run.env.clone());
+        let end = at("setenv lemnos_pass ${lemnos_pass}x");
+        branch.run(&code[rescue..end]);
+        (
+            true,
+            branch.env.get("lemnos_pass").cloned(),
+            branch.env.contains_key("lemnos_dtb"),
+        )
+    };
+    assert_eq!(decide("7"), (false, None, false));
+    let (rescued, pass, dtb) = decide("8");
+    assert!(rescued);
+    assert_eq!(pass.as_deref(), Some("xx"));
+    assert!(!dtb, "no slot is started at 8");
 }

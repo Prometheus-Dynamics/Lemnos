@@ -16,6 +16,8 @@ pub struct Run {
     pub env: Env,
     /// Names read from the environment the run began with, before the lines set them.
     pub reads: BTreeSet<String>,
+    /// The words a `setexpr.l name *ADDR` reads: the SoC's registers, as a test gives them.
+    pub mem: BTreeMap<u64, u32>,
     set: BTreeSet<String>,
     /// The partitions the device has, as `(device, name)`: what `part start` finds.
     pub parts: BTreeSet<(String, String)>,
@@ -28,6 +30,7 @@ impl Run {
         Self {
             env,
             reads: BTreeSet::new(),
+            mem: BTreeMap::new(),
             set: BTreeSet::new(),
             parts: BTreeSet::new(),
             saves: 0,
@@ -125,6 +128,44 @@ impl Run {
                 *frames.last_mut().unwrap() = (parent, true, parent && !taken);
             } else if *line == "fi" {
                 frames.pop().expect("fi without if");
+            } else if line.starts_with("echo ") {
+                // A message: it has no effect on what boots, so the run passes over it.
+            } else if *line == "saveenv" {
+                if live(&frames) {
+                    self.saves += 1;
+                }
+            } else if let Some(args) = line.strip_prefix("setexpr.l ") {
+                if !live(&frames) {
+                    continue;
+                }
+                let (name, src) = args.split_once(' ').expect("setexpr.l NAME *ADDR");
+                let addr = self.word(src.trim().strip_prefix('*').expect("setexpr.l reads *ADDR"));
+                let addr = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+                    .expect("setexpr.l address");
+                let value = *self
+                    .mem
+                    .get(&addr)
+                    .unwrap_or_else(|| panic!("no test register at {addr:#x}"));
+                self.set.insert(name.to_string());
+                self.env.insert(name.to_string(), value.to_string());
+            } else if let Some(args) = line.strip_prefix("setexpr ") {
+                if !live(&frames) {
+                    continue;
+                }
+                let mut words = args.split_whitespace();
+                let name = words.next().expect("setexpr NAME A OP B");
+                let a = self.word(words.next().expect("setexpr A"));
+                let op = self.word(words.next().expect("setexpr OP"));
+                let b = self.word(words.next().expect("setexpr B"));
+                let a: u64 = a.parse().expect("setexpr A is a number");
+                let b: u64 = b.parse().expect("setexpr B is a number");
+                let value = match op.as_str() {
+                    "+" => a + b,
+                    "&" => a & b,
+                    other => panic!("setexpr operator {other} is not run here"),
+                };
+                self.set.insert(name.to_string());
+                self.env.insert(name.to_string(), value.to_string());
             } else if let Some(args) = line.strip_prefix("setenv ") {
                 if !live(&frames) {
                     continue;
@@ -145,6 +186,21 @@ impl Run {
         }
         assert!(frames.is_empty(), "an if without its fi");
     }
+}
+
+/// The restart count's lines of the script (BB2): from the count's first `if` to the first pass's
+/// `setenv lemnos_pass`, which is where the count stops.
+pub fn count_lines(script: &str) -> Vec<&str> {
+    let code = code(script);
+    let first = code
+        .iter()
+        .position(|l| *l == r#"if test -z "${lemnos_restarts}"; then"#)
+        .expect("the script has no restart count");
+    let end = code
+        .iter()
+        .position(|l| *l == "setenv lemnos_pass")
+        .expect("the script has no `setenv lemnos_pass`");
+    code[first..end].to_vec()
 }
 
 /// The script's code lines: trimmed, no comments or blank lines.
@@ -182,10 +238,14 @@ pub fn choose_on(script: &str, env: Env, parts: &BTreeSet<(String, String)>) -> 
 
 fn choose_with(
     script: &str,
-    env: Env,
+    mut env: Env,
     parts: &BTreeSet<(String, String)>,
     save_decision: bool,
 ) -> ([String; 3], Run) {
+    // The restart count block sets lemnos_restarts before the rung reads it; a caller that gives no
+    // count is a boot with none raised yet.
+    env.entry("lemnos_restarts".to_string())
+        .or_insert_with(|| "0".to_string());
     let code = code(script);
     let at = |needle: &str| {
         code.iter()
