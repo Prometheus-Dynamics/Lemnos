@@ -1,5 +1,5 @@
 //! The K230 USB OTG port in `socs/k230.toml`: a board that gives a gadget the port by its platform device name
-//! passes the generator; one naming the wrong UDC is refused by name. A board that boots from an MMC host names
+//! (`91500000.usb`) passes the generator; one naming the wrong UDC is refused by name. A board that boots from an MMC host names
 //! it in its system-slots `boot_sources`, which the generator does not read; that list is checked here with the
 //! slot store's parser, the one the system-slots driver uses. The map is the SoC's; the boards are written here.
 
@@ -49,12 +49,12 @@ fn generated(port: &str, udc: &str) -> Result<String, String> {
 
 #[test]
 fn a_gadget_on_the_k230_port_by_its_platform_device_name_passes() {
-    let overlay = match generated("udc:91500000.usb-otg", "udc:91500000.usb-otg") {
+    let overlay = match generated("udc:91500000.usb", "udc:91500000.usb") {
         Ok(overlay) => overlay,
         Err(why) => panic!("the K230 port should pass: {why}"),
     };
     assert!(
-        overlay.contains("&{/soc/usb-otg@91500000}"),
+        overlay.contains("&{/soc/usb@91500000}"),
         "the port's node is in the overlay: {overlay}"
     );
     assert!(
@@ -65,11 +65,11 @@ fn a_gadget_on_the_k230_port_by_its_platform_device_name_passes() {
 
 #[test]
 fn a_gadget_naming_the_k230_port_by_the_wrong_udc_is_refused_by_name() {
-    // `udc:91500000.usb` is the name a guess from the node's bus address gives: the driver names the port `91500000.usb-otg`.
-    let why = generated("udc:91500000.usb", "udc:91500000.usb")
+    // `91500000.usb-otg` is the name a node called `usb-otg@91500000` (the vendor U-Boot's) would give; the mainline node is `usb@91500000`.
+    let why = generated("udc:91500000.usb-otg", "udc:91500000.usb-otg")
         .expect_err("a UDC the K230 port does not have must be refused");
     assert!(
-        why.contains("91500000.usb") && why.contains("91500000.usb-otg"),
+        why.contains("91500000.usb-otg") && why.contains("91500000.usb"),
         "the refusal names the wrong and the right UDC: {why}"
     );
 }
@@ -79,14 +79,14 @@ fn a_gadget_naming_the_k230_port_by_the_wrong_udc_is_refused_by_name() {
 fn slots_board(source: &str) -> String {
     format!(
         "{}\n[[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\nconfig = {{ data = \"/data\", boot = \"/boot\", record = \"uboot\", boot_args = \"os\", boot_sources = [\"{source}\"] }}\n",
-        board_text("udc:91500000.usb-otg", "udc:91500000.usb-otg")
+        board_text("udc:91500000.usb", "udc:91500000.usb")
     )
 }
 
 #[test]
 fn a_board_that_boots_from_the_k230_sd_slot_passes_and_its_boot_source_parses() {
-    // `<U-Boot path>=<kernel path>`: U-Boot names the SD host `mmc1`, the kernel `sdhci1`.
-    let sd = "/soc/mmc1@91581000=/soc/sdhci1@91581000";
+    // `<U-Boot path>=<kernel path>`: U-Boot names the SD host `mmc1`, the kernel `mmc`.
+    let sd = "/soc/mmc1@91581000=/soc/mmc@91581000";
     let board = board::parse(&slots_board(sd)).expect("the board parses");
     let map = SocMap::parse(K230_MAP).expect("the map parses");
     generate(&board, &map, &manifests())
@@ -95,13 +95,13 @@ fn a_board_that_boots_from_the_k230_sd_slot_passes_and_its_boot_source_parses() 
     let table = Table::parse(&[sd]).expect("the SD host's boot source is valid");
     assert_eq!(
         table.controller("/soc/mmc1@91581000").ok(),
-        Some("/soc/sdhci1@91581000")
+        Some("/soc/mmc@91581000")
     );
 }
 
 #[test]
 fn a_boot_source_that_is_not_source_equals_path_is_refused_by_the_slot_store() {
     let why =
-        Table::parse(&["/soc/sdhci1@91581000"]).expect_err("a source with no path must be refused");
+        Table::parse(&["/soc/mmc@91581000"]).expect_err("a source with no path must be refused");
     assert!(why.contains("not source=path"), "{why}");
 }
