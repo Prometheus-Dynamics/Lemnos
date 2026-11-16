@@ -270,7 +270,7 @@ fn usb_port(
     }
     if let (Some(name), Some(udc)) = (&hardware.name, &controller.sysfs)
         && name.starts_with("udc:")
-        && !live.udc.join(udc).exists()
+        && !udc_present(live.udc, udc)
     {
         problems.push(format!(
             "{who}: no UDC {udc:?} under {}: the gadget's controller is not in device mode, so the \
@@ -632,4 +632,21 @@ fn check_boot_holds(
             )),
         }
     }
+}
+
+/// Whether the UDC `name` is listed under `/sys/class/udc`: an entry of that name, or the one entry under a platform
+/// device of that name (a controller the kernel names by an index, like the A733's OTG port). The same rule as the
+/// backend's `resolve_udc` (lemnos-linux), which is what the daemon uses at run time. Reads the directory only.
+fn udc_present(class: &std::path::Path, name: &str) -> bool {
+    if class.join(name).exists() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(class) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        std::fs::canonicalize(entry.path())
+            .map(|real| real.components().any(|part| part.as_os_str() == name))
+            .unwrap_or(false)
+    })
 }

@@ -42,6 +42,13 @@ line = "gpio:gpio1:4"
 boot = "low"
 reason = "the switched load's enable: off from power-on until Lemnos's power switch takes it"
 
+# The system identity: the board serial the gadget derives its addresses from (`identity` below).
+# RK3566: the device-tree serial, verified read-only on a board (docs/identity.md, RK3566 row).
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
 [[devices]]
 id = "imu"
 driver = "bmi088"
@@ -66,3 +73,4 @@ uses = { line = "gpio:gpio1:4" }
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:fcc00000.usb" }
+config = { identity = "identity" }

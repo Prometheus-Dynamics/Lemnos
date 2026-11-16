@@ -1,0 +1,16 @@
+# The SoC map for the RV1126B (Rockchip). Data only: `lemnos-ctl tree` and `lemnos-ctl validate` read it.
+#
+# Source: the Rockchip vendor kernel tree (rockchip-linux/kernel, develop-6.1), `arch/arm64/boot/dts/rockchip/rv1126b.dtsi`,
+# read as a text copy (gate tmp `rv1126b.dtsi.txt`, 4074 lines). Its nodes are root-level children of `/`, so the paths
+# below have no `soc` node. Every node named here is `status = "disabled"` in the SoC file; a board enables what it uses.
+#
+# Only the blocks a bench board uses are given. Not in the map yet: I2C, SPI, UART, GPIO chips, PWM, the camera and
+# the NPU. Their nodes are in the same vendor file and can be added with their citations when a board uses them.
+soc = "rv1126b"
+
+# The hardware watchdog, Synopsys DW (`snps,dw-wdt`): `wdt: watchdog@20b60000` at the root, reg `0x20b60000`,
+# clocks `tclk`/`pclk`. The board must enable it. No kernel fragment for this SoC is in the repository yet.
+[controllers.watchdog]
+kind = "watchdog"
+path = "/watchdog@20b60000"
+reason = "the hardware watchdog on the RV1126B (snps,dw-wdt, vendor dtsi, disabled in the SoC file)"

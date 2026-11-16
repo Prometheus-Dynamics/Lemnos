@@ -83,3 +83,18 @@ reason = "the camera sensor interface on the A733 (allwinner,sun60i-a733-csic); 
 kind = "block"
 path = "/soc/isp@5900000"
 reason = "the image signal processor on the A733 (allwinner,sun60i-a733-isp)"
+
+# The USB OTG controller (MUSB) as a device port, port 0. Node from the DockSeed series, the file
+# `patches/a733-usb0-gadget/arm64-dts-allwinner-a733-add-the-usb0-otg-controller.patch` (fe0a8ed, sun60i-a733.dtsi):
+# `usb_otg: usb@4100000`, compatible `allwinner,sun60i-a733-musb`, `allwinner,sun8i-a33-musb`, reg 0x04100000,
+# status disabled in the SoC file (the board patch enables it, `dr_mode = "peripheral"`). The path is the series'
+# bus node renamed `soc@0` (the rename is a later patch). UNCONFIRMED: from the series, not a built dtb.
+# The UDC name is not fixed: the kernel names the controller `musb-hdrc.N.auto` (N is not fixed), under the platform
+# device `4100000.usb`, which is the name the port is given here (UNVERIFIED: to confirm on board). A gadget names it
+# as `udc:4100000.usb`; the backend resolves it to the controller's own entry (lemnos-linux `resolve_udc`).
+# No PHY `needs` entry: the series names `phys = <&usbphy 0>` and the PHY node's path is not in any source read.
+[controllers.usb-otg0]
+kind = "usb-peripheral"
+path = "/soc@0/usb@4100000"
+sysfs = "4100000.usb"
+reason = "the USB OTG controller (MUSB) on the A733, port 0; device mode (allwinner,sun60i-a733-musb)"

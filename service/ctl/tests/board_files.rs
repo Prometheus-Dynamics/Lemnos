@@ -94,10 +94,8 @@ const TABLE: &[Row] = &[
     },
     Row {
         file: "testing/boards/rk3566.toml",
-        validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
-        daemon: Daemon::Refused(
-            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device",
-        ),
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
     },
     Row {
         file: "testing/boards/rk3576.toml",
@@ -108,10 +106,13 @@ const TABLE: &[Row] = &[
     },
     Row {
         file: "testing/boards/rk3588.toml",
-        validate: Validate::Refused(RK_GADGET_NO_IDENTITY),
-        daemon: Daemon::Refused(
-            "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device",
-        ),
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
+        file: "testing/boards/rv1126b.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
     },
     Row {
         file: "testing/boards/sun60i-a733.toml",

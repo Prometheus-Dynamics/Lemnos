@@ -137,6 +137,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`Q1.md`](../testing/board-runs/Q1.md) | `ws2812` on the RP1 PIO block: the bit stream, reset gap and retry, on a 16-LED ring |
 | [`Q2c.md`](../testing/board-runs/Q2c.md) | the reference board's overlay, boot fragment and module configuration; stable GPIO and PWM names |
 | [`Q2b.md`](../testing/board-runs/Q2b.md) | the device-tree maps for the RK3566, RK3588, K230 and A733 families; untested on board |
+| [`BB1.md`](../testing/board-runs/BB1.md) | serving data for the bench SoCs (the RK3566, RK3588, A733 and RV1126B maps and boards, `--check` and the offline serve run); the A733 USB OTG port by its platform device, the sources and what is unconfirmed; not run on a board |
 | [`Q2e.md`](../testing/board-runs/Q2e.md) | USB device ports in the RK3566, RK3588 and RK3576 maps: peripheral mode, the PHYs, the UDC names; untested on board |
 | [`Q2f.md`](../testing/board-runs/Q2f.md) | VBUS of a USB device port: the PHY's host supply replaced by a stand-in, the board's line or undriven statement, and the start check; untested on board |
 | [`Q2g.md`](../testing/board-runs/Q2g.md) | boot holds: the overlay's `gpio-hog`, the boot fragment and the U-Boot fragment; the VBUS regulator disabled under a held line; untested on board |

@@ -569,8 +569,9 @@ pub fn prepare(
     functions: &[GadgetFunction],
     system: &mut dyn Mounts,
 ) -> io::Result<()> {
+    let udc = resolve_udc(roots.udc_class, udc_name).unwrap_or_else(|| udc_name.to_string());
     Trees::new(roots)
-        .setup(udc_name, owner, descriptors, functions, system, Udc::Owner)
+        .setup(&udc, owner, descriptors, functions, system, Udc::Owner)
         .map(drop)
 }
 
@@ -956,6 +957,27 @@ pub struct FunctionFsGadget {
     serial: Option<bool>,
 }
 
+/// The `/sys/class/udc` entry a `udc:` name stands for. A name that is an entry of that directory is
+/// itself. Otherwise the name may be the platform device the controller sits under: a controller the kernel
+/// names by an index (`musb-hdrc.N.auto` on the A733's OTG port, N not fixed) sits under the device named by
+/// its address (`4100000.usb`), so the name matches the one entry whose sysfs path runs through a directory of
+/// that name. `None` when there is none, or more than one. Reads the directory only.
+pub fn resolve_udc(udc_class: &Path, name: &str) -> Option<String> {
+    if udc_class.join(name).exists() {
+        return Some(name.to_string());
+    }
+    let mut found = Vec::new();
+    for entry in fs::read_dir(udc_class).ok()?.flatten() {
+        let Ok(real) = fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if real.components().any(|part| part.as_os_str() == name) {
+            found.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    (found.len() == 1).then(|| found.remove(0))
+}
+
 impl FunctionFsGadget {
     /// The gadget for the controller `udc`, a name as `/sys/class/udc` lists it. `configfs` is
     /// where configfs is mounted (`/sys/kernel/config`), `mounts` the directory that holds the
@@ -963,6 +985,8 @@ impl FunctionFsGadget {
     /// where the controllers are listed (`/sys/class/udc`). Nothing is touched until
     /// [`UsbFunction::enable`]. `None` for a name that can't be a controller's.
     pub fn new(configfs: &Path, mounts: &Path, udc_class: &Path, udc: &str) -> Option<Self> {
+        // A name that is the controller's platform device stands for the controller's entry (see `resolve_udc`).
+        let udc = resolve_udc(udc_class, udc).unwrap_or_else(|| udc.to_string());
         let need = format!("{PREFIX}{udc}");
         let name = controller(&need)?;
         Some(Self {

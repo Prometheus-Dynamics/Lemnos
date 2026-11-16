@@ -40,6 +40,13 @@ vbus = "gpio:gpio4:11"
 vbus_off = "low"
 vbus_reason = "the OTG port's 5 V regulator is enabled by GPIO4 line 11; low is off"
 
+# The system identity: the board serial the gadget derives its addresses from (`identity` below).
+# RK3588: candidate source (docs/identity.md, Rockchip row).
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
 [[devices]]
 id = "imu"
 driver = "bmi088"
@@ -64,3 +71,4 @@ uses = { pwm = "pwm:/pwm@fd8b0010:1" }
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:fc000000.usb" }
+config = { identity = "identity" }

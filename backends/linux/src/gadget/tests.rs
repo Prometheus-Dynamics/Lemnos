@@ -1781,3 +1781,44 @@ fn a_configfs_directory_that_is_not_a_mounted_configfs_is_not_there_yet() {
     let error = helper_setup(&mut trees, &mut Recorder::default()).unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::ENOENT), "{error}");
 }
+
+/// A `udc:` name that is the controller's platform device (`4100000.usb`) resolves to the controller's own entry
+/// in `/sys/class/udc`, whatever its index is; a name of an entry is itself; a name of no device, or of two, is none.
+#[test]
+fn a_platform_device_name_resolves_to_its_controller_entry() {
+    let root = std::env::temp_dir().join(format!("lemnos-udc-resolve-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let class = root.join("class/udc");
+    fs::create_dir_all(&class).unwrap();
+    // The kernel's layout: the controller under its platform device, and the class entry a symlink to it.
+    let device =
+        root.join("devices/platform/soc/4100000.usb/musb-hdrc.1.auto/udc/musb-hdrc.1.auto");
+    fs::create_dir_all(&device).unwrap();
+    std::os::unix::fs::symlink(&device, class.join("musb-hdrc.1.auto")).unwrap();
+    assert_eq!(
+        resolve_udc(&class, "4100000.usb").as_deref(),
+        Some("musb-hdrc.1.auto"),
+        "the platform device's name finds the entry"
+    );
+    assert_eq!(
+        resolve_udc(&class, "musb-hdrc.1.auto").as_deref(),
+        Some("musb-hdrc.1.auto"),
+        "an entry's own name is itself"
+    );
+    assert_eq!(
+        resolve_udc(&class, "4100001.usb"),
+        None,
+        "no such device: none"
+    );
+    // A second controller under the same device makes the name ambiguous: none.
+    let second =
+        root.join("devices/platform/soc/4100000.usb/musb-hdrc.2.auto/udc/musb-hdrc.2.auto");
+    fs::create_dir_all(&second).unwrap();
+    std::os::unix::fs::symlink(&second, class.join("musb-hdrc.2.auto")).unwrap();
+    assert_eq!(
+        resolve_udc(&class, "4100000.usb"),
+        None,
+        "two entries: none"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
