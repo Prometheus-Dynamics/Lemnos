@@ -1,6 +1,6 @@
 //! Orion's silence check over TCP, through a relay on 127.0.0.1 that stalls, resumes and closes the link.
 //!
-//! What these tests cover, at the pinned Orion revision (671d29d):
+//! What these tests cover, at the pinned Orion revision (3dde304):
 //! - The bridge publishes as a provider, and the network carrier (`orion+tcp://`) offers only the `CLIENT`
 //!   and `PEER` roles (`crates/comm/tcp/src/lib.rs`, `NETWORK_ROLES`), so the bridge cannot publish over TCP.
 //!   It is refused at start (`service/orion/src/config.rs`, `publishes_on`) and, if the address is not known
@@ -12,7 +12,7 @@
 //!   The client's own silence check (`crates/client/connect/src/alive.rs`) is exercised in the short-stall
 //!   case and where the client pumps.
 //!
-//! The threshold, read at the pinned Orion revision (671d29d), with the file and line of each fact:
+//! The threshold, read at the pinned Orion revision (3dde304), with the file and line of each fact:
 //! - a session over the network gives up once it has heard nothing for its idle time: `alive.rs`
 //!   (`silent_at` is `None` only for a local transport, so `orion+tcp://` has the check);
 //! - the idle time the client uses is the comm core's `idle_ms` from the welcome, or three heartbeats when

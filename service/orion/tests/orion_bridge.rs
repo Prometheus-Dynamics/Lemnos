@@ -269,7 +269,7 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
             .expect("run");
         match run.finish(WAIT) {
             Err(ClientError::Refused {
-                error: Refusal::NotFound,
+                error: Refusal::NotFound | Refusal::Restoring,
                 ..
             }) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -1694,6 +1694,94 @@ fn two_sessions_of_one_identity_keep_their_own_holds() {
     );
 }
 
+/// Two Orion sessions each start a long run on the tracked device, and each session's first run carries
+/// the same caller number. The node names each run with its own number, so a cancel reaches only the run
+/// it names, and ending one session releases only its own hold and leaves the other's run going.
+/// Mutation: a cancel that ends every run it matches by number alone, or a session's end that cancels
+/// the other session's run, fails the checks after the cancel and after the end.
+#[test]
+fn two_sessions_with_the_same_run_number_each_start_a_run_and_a_cancel_or_an_end_reaches_only_its_own()
+ {
+    let dir = dir("same-run-number");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let first = second_session(&board);
+    let second = second_session(&board);
+    for caller in [&first, &second] {
+        let finished = run(caller, "lemnos.tracked.call", "lemnos.tracked", "take");
+        assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    }
+    assert_eq!(tracked_call(&dashboard, "held"), "2", "each session holds");
+
+    // Each session's first run: the same number from each, and two different jobs on the device.
+    let mut first_run = first
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    let mut second_run = second
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"count_until_cancelled",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    assert_eq!(
+        first_run.call(),
+        second_run.call(),
+        "the two sessions' first runs should carry the same caller number"
+    );
+    // A moment for both to reach the driver; neither has ended.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        matches!(first_run.finish(Duration::from_millis(300)), Err(ClientError::Io(ref e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "the first session's run did not start"
+    );
+    assert!(
+        matches!(second_run.finish(Duration::from_millis(300)), Err(ClientError::Io(ref e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "the second session's run did not start"
+    );
+
+    // Cancelling the first run ends it, and the second session's run goes on.
+    first_run.cancel().expect("cancel");
+    let ended = first_run.finish(WAIT).expect("the cancelled run ends");
+    assert_eq!(ended.outcome, Outcome::Cancelled, "{ended:?}");
+    assert!(
+        matches!(second_run.finish(Duration::from_millis(300)), Err(ClientError::Io(ref e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "cancelling the first session's run ended the second session's run"
+    );
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "2",
+        "a cancel released a hold"
+    );
+
+    // Ending the first session releases only its hold; the second session's run and hold stay.
+    drop(first_run);
+    drop(first);
+    wait_for("the ended session's hold is released", || {
+        (tracked_call(&dashboard, "held") == "1").then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        tracked_call(&dashboard, "held"),
+        "1",
+        "ending one session released the other's hold"
+    );
+    assert!(
+        matches!(second_run.finish(Duration::from_millis(300)), Err(ClientError::Io(ref e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "ending the first session ended the second session's run"
+    );
+    second_run.cancel().expect("cancel");
+    let ended = second_run.finish(WAIT).expect("the cancelled run ends");
+    assert_eq!(ended.outcome, Outcome::Cancelled, "{ended:?}");
+}
+
 /// A detached run goes on past its session (E12: it outlives its caller). When its session ends, the
 /// attached runs of that session are released (the driver is free for the next caller), and the
 /// detached run keeps going: a session of the same identity attaches to it and sees its progress, then
@@ -2052,12 +2140,12 @@ fn requests_until_caller_gone(
     seen
 }
 
-/// The order Orion sends a program at this revision, through its real node logic: for an attached run
-/// of a session that ends, `Cancel` with reason `CallerGone` comes first, then `CallerGone`. The bridge's
-/// detached inference (`calls::departure`) relies on this order. An Orion change that reverses it fails
-/// here, not in a silent release. Also pinned: a detached run gets no cancel, only `CallerGone`.
+/// The order Orion sends a program, and what each run says of itself. An attached run's program is sent
+/// `Run` with `detached` false, then `Cancel` with reason 2, then `CallerGone`. A detached run's program is
+/// sent `Run` with `detached` true, and no `Cancel` for it; only `CallerGone` comes. The bridge reads the
+/// flag, not the order. Mutation: a node that sent a detached run a cancel, or dropped the flag, fails here.
 #[test]
-fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel() {
+fn the_program_is_told_which_runs_are_detached_and_how_each_one_ends() {
     let dir = dir("order");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
     let node: orion::types::NodeName = dashboard.node().expect("node").name.parse().expect("name");
@@ -2082,31 +2170,36 @@ fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel(
             detached: false,
         })
         .expect("run");
-    let attached_call = attached.call();
     drop(attached);
     drop(attached_caller);
     let seen = requests_until_caller_gone(&mut program, WAIT);
-    let names: Vec<String> = seen
-        .iter()
-        .map(|r| match r {
-            orion::actions::Request::Run { call, .. } => format!("run {call}"),
-            orion::actions::Request::Cancel { call, reason } => {
-                format!("cancel {call} {}", reason.code())
-            }
-            orion::actions::Request::CallerGone { .. } => "caller-gone".to_owned(),
-        })
-        .collect();
+    // The program names each run by the node's number, which the caller does not see.
+    let [
+        orion::actions::Request::Run {
+            call: first,
+            detached: false,
+            ..
+        },
+        orion::actions::Request::Cancel {
+            call: cancelled,
+            reason,
+        },
+        orion::actions::Request::CallerGone { .. },
+    ] = seen.as_slice()
+    else {
+        panic!("an attached run: Orion's order at the pinned revision: {seen:?}");
+    };
     assert_eq!(
-        names,
-        [
-            format!("run {attached_call}"),
-            format!("cancel {attached_call} 2"),
-            "caller-gone".to_owned(),
-        ],
-        "Orion's order at the pinned revision"
+        cancelled, first,
+        "the cancel is for the attached run: {seen:?}"
+    );
+    assert_eq!(
+        reason.code(),
+        2,
+        "its cancel says its caller's session ended"
     );
 
-    // A detached run: no cancel for it when its session ends; only `CallerGone` comes.
+    // A detached run: the flag says so, no cancel for it when its session ends; only `CallerGone`.
     let detached_caller = second_session(&board);
     let detached = detached_caller
         .run(&ActionCall {
@@ -2117,14 +2210,23 @@ fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel(
             detached: true,
         })
         .expect("run");
-    let detached_call = detached.call();
     drop(detached);
     drop(detached_caller);
     let seen = requests_until_caller_gone(&mut program, WAIT);
+    let Some(run_call) = seen.iter().find_map(|r| match r {
+        orion::actions::Request::Run {
+            call,
+            detached: true,
+            ..
+        } => Some(*call),
+        _ => None,
+    }) else {
+        panic!("the detached run was not handed on as detached: {seen:?}");
+    };
     assert!(
         seen.iter().all(|r| !matches!(
             r,
-            orion::actions::Request::Cancel { call, .. } if *call == detached_call
+            orion::actions::Request::Cancel { call, .. } if *call == run_call
         )),
         "a detached run was cancelled: {seen:?}"
     );
@@ -2133,6 +2235,48 @@ fn orion_order_pins_cancel_before_caller_gone_and_a_detached_run_gets_no_cancel(
             .any(|r| matches!(r, orion::actions::Request::CallerGone { .. })),
         "CallerGone for the detached run's session: {seen:?}"
     );
+}
+
+/// A run whose deadline passes ends `TimedOut` with code 110 (`DEADLINE_CODE`), which node logic gives it,
+/// and the bridge does not end it first: the device's job is cancelled with it, so the device is free
+/// again. Mutation: a node that ends the run with code 0 fails the code check.
+#[test]
+fn a_run_whose_deadline_passes_ends_timed_out_with_code_110() {
+    let dir = dir("deadline-110");
+    let (board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let mut long = caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"hold_until_cancelled",
+            deadline_ms: 500,
+            detached: false,
+        })
+        .expect("run");
+    let finished = long.finish(WAIT).expect("the run ends at its deadline");
+    assert_eq!(finished.outcome, Outcome::TimedOut, "{finished:?}");
+    assert_eq!(finished.code, 110, "{finished:?}");
+    // The device is free again: a new long job starts, as the deadline's cancel reached the device.
+    wait_for("the device's job is over after the deadline", || {
+        let mut run = dashboard
+            .run(&ActionCall {
+                name: "lemnos.tracked.call",
+                target: Target::Resource("lemnos.tracked".parse().expect("name")),
+                args: b"hold_until_cancelled",
+                deadline_ms: 0,
+                detached: false,
+            })
+            .ok()?;
+        match run.finish(Duration::from_millis(200)) {
+            Ok(_) => None,
+            Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                let _ = run.cancel();
+                Some(())
+            }
+            Err(_) => None,
+        }
+    });
 }
 
 /// Two callers hold, both silent for three leases. One has a run in flight: it keeps its run and its
