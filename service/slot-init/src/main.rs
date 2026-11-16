@@ -8,6 +8,7 @@
 mod boot;
 mod cmdline;
 mod decide;
+mod dog;
 mod kernel;
 mod ops;
 mod partition;

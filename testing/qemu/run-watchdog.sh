@@ -8,12 +8,16 @@
 #              guest was up past the 15 s timeout.
 #   normal     the hook (watchdog-init.c) arms the watchdog as slot-init does and hands PID 1 to the
 #              userspace stand-in (watchdog-user.c), which opens /dev/watchdog and feeds it for 45 s.
-#              Passes when the stand-in feeds for the whole 45 s and powers off.
+#              Passes when the stand-in feeds for the whole 45 s and powers off, and the hand-over gap
+#              (the hook's last feed, made right before its exec, to the stand-in's first feed) is at
+#              most a third of the applied period (HANDOVER_GAP_DIVISOR).
 #   stall      the same hook, and the stand-in never opens /dev/watchdog. The watchdog must reset the
 #              guest within about 15 s of the hook's last feed. Passes when the reset comes in that window.
 #
 # The normal and stall modes stand in for lemnosd: no slot is in the guest, so lemnosd never runs here.
-# The gap the normal mode prints is the hook's last feed to the stand-in's first open, not lemnosd's.
+# The gap the normal mode checks is the hook's last feed to the stand-in's first feed, not lemnosd's: the
+# real gap also holds systemd's start of lemnosd and its bind, which only a board run measures
+# (testing/board-runs/WDT-CHAIN.md).
 #
 # The verdicts read the console of one QEMU run, after QEMU has exited. Each check names the exact
 # line it looks for; when one is missing, the check prints the console's marker lines.
@@ -47,6 +51,11 @@ LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-watchdog}"
 target=x86_64-unknown-linux-musl
 DOG_SECONDS=15
 TIMING_SLACK=3
+# The hand-over bound (docs/slots.md, "The watchdog chain", window 4): the gap from the last feed before the
+# exec to the first feed after it must be at most applied / HANDOVER_GAP_DIVISOR, where applied is the period
+# the hook reads back. A third: the gap is time nothing feeds, so it must be well under the period; a third
+# leaves two thirds of the period for the host's delays.
+HANDOVER_GAP_DIVISOR=3
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
@@ -131,6 +140,16 @@ for mode in $MODES; do
     normal)
       expect "$mode" "$text" 'user: first open of /dev/watchdog'
       expect "$mode" "$text" 'fed the watchdog for 45 s and the guest stayed up'
+      # The hand-over gap: the hook's last feed (right before its exec) to the stand-in's first feed.
+      expect "$mode" "$text" 'hook: watchdog armed: '
+      expect "$mode" "$text" 'user: first feed of /dev/watchdog'
+      # The serial console ends lines with CR and can put terminal codes before them: the markers are matched anywhere.
+      applied="$(tr -d '\r' <"$text" | sed -n 's/.*hook: watchdog armed: \([0-9]*\) s$/\1/p' | head -1)"
+      gap="$(sed -n 's/.*user: first feed of \/dev\/watchdog \([0-9.]*\) s after.*/\1/p' "$text" | head -1)"
+      [[ -n "$applied" && -n "$gap" ]] || fail "normal: the hand-over lines (the applied period, the first feed) are not in the console"
+      bound="$(awk -v a="$applied" -v d="$HANDOVER_GAP_DIVISOR" 'BEGIN{printf "%.3f", a/d}')"
+      echo "qemu-watchdog: normal: the hand-over gap is ${gap} s; the bound is ${bound} s (a third of the ${applied} s applied period)" >&2
+      awk -v g="$gap" -v b="$bound" 'BEGIN{exit !(g <= b)}' || fail "normal: the hand-over gap ${gap} s is above the bound ${bound} s"
       ;;
     stall)
       expect "$mode" "$text" 'user: stalled after the handover'

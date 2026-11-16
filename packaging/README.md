@@ -152,10 +152,15 @@ the restart delay is a constant 1 s.
 
 Three rules follow, and the OS must keep them:
 
-- **Do not give the watchdog to systemd.** The device has one opener, which is lemnosd's `hw-watchdog`
-  driver. Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in `/etc/systemd/system.conf`
-  (and its drop-ins): either would have systemd open the same device.
-- **Do not run a second feeder** on BusyBox: no `watchdog` daemon, and no init step that opens the node.
+- **Do not give the watchdog to systemd.** The device has exactly two openers, in order: slot-init (the
+  initramfs `/init` of a slot, from its open to its `switch_root`) and then lemnosd's `hw-watchdog` driver
+  (at its bind). Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in
+  `/etc/systemd/system.conf` (and its drop-ins): either would have systemd open the same device and feed it
+  while lemnosd is dead. `scripts/check-packaging.sh` checks the units for these keys, not `system.conf`; the
+  `system.conf` rule is checked by hand on the board (the M37 probe read it: `testing/board-runs/M37.md`,
+  where systemd fed `/dev/watchdog0` itself with `RuntimeWatchdogUSec=15s`).
+- **Do not run a second feeder** on BusyBox: no `watchdog` daemon, and no other init step that opens the
+  node. slot-init is the only init step that opens it (`docs/slots.md`, "The watchdog chain").
 - **The units set no `WatchdogSec=`.** A software timeout that restarts a hung daemon would race the
   hardware reboot with a second, shorter clock. Dropping it keeps one escalation, identical on both
   init systems. `Type=notify` stays, for readiness only.

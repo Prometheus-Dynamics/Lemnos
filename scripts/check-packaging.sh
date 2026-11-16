@@ -156,7 +156,8 @@ grep -q 'lemnos-orion.env' packaging/systemd/lemnos-orion.service || {
   exit 1
 }
 
-# The hardware watchdog belongs to lemnosd alone, and a restart delay is constant: no unit may set
+# The hardware watchdog is opened by slot-init and then lemnosd only (docs/slots.md, "The watchdog chain"),
+# and a restart delay is constant: no unit may set
 # a systemd watchdog, or a restart delay that grows (packaging/README.md, "The hardware watchdog").
 echo "==> watchdog and restart"
 for unit in packaging/systemd/*.service; do

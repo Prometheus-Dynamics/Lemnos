@@ -28,6 +28,8 @@ struct Device {
     timeout: u32,
     /// It applies at most this (clamps larger requests). `u32::MAX` for none.
     clamp: u32,
+    /// It applies this, whatever is asked (a device with power-of-two periods rounds up). None for none.
+    applies: Option<u32>,
     /// The next this many timeout requests fail.
     set_failures: u32,
     /// Every feed fails from this time (ns), if set.
@@ -52,6 +54,7 @@ impl Fake {
             feeds: Vec::new(),
             timeout,
             clamp: u32::MAX,
+            applies: None,
             set_failures: 0,
             feed_fails_from: None,
             now: 0,
@@ -88,7 +91,7 @@ impl RawWatchdog for Fake {
                 d.set_failures -= 1;
                 return Err(ErrorKind::Failed);
             }
-            d.timeout = seconds.min(d.clamp);
+            d.timeout = d.applies.unwrap_or(seconds.min(d.clamp));
             Ok(d.timeout)
         })
     }
@@ -147,7 +150,7 @@ fn the_timeout_is_not_set_again_once_it_is_set() {
 }
 
 #[test]
-fn a_timeout_the_device_applies_differently_is_reported() {
+fn a_timeout_the_device_applies_differently_is_read_back_and_healthy() {
     let fake = Fake::new(60);
     fake.with(|d| d.clamp = 12);
     let mut dog = driver(&fake, 15);
@@ -157,7 +160,7 @@ fn a_timeout_the_device_applies_differently_is_reported() {
         Some(12),
         "the device's own answer is what is read back"
     );
-    assert_eq!(dog.health(), Health::Degraded(TIMEOUT_DIFFERS));
+    assert_eq!(dog.health(), Health::Ok);
 }
 
 #[test]
@@ -185,6 +188,25 @@ fn a_failed_timeout_request_is_retried_on_the_backoff_and_then_succeeds() {
         "each retry waits twice as long as the one before"
     );
     assert_eq!(dog.health(), Health::Ok);
+}
+
+#[test]
+fn a_device_that_rounds_the_request_up_is_fed_at_half_the_period_it_applies() {
+    // A power-of-two watchdog asked for 15 s applies 22 s. The feed follows the 22 s the device
+    // reads back, not the 15 s asked for: 11 s apart, so the device is fed before it resets.
+    let fake = Fake::new(60);
+    fake.with(|d| d.applies = Some(22));
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    assert_eq!(dog.applied_s, Some(22), "read back after the request");
+    assert_eq!(dog.health(), Health::Ok);
+    assert_eq!(tick_at(&fake, &mut dog, 11 * S), Some(22 * S));
+    assert_eq!(tick_at(&fake, &mut dog, 22 * S), Some(33 * S));
+    assert_eq!(
+        fake.with(|d| d.feeds.clone()),
+        vec![0, 11 * S, 22 * S],
+        "a feed every 11 s, half of 22 s"
+    );
 }
 
 #[test]

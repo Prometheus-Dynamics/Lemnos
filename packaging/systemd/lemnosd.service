@@ -6,9 +6,10 @@
 # The unit gives it no User= and no AmbientCapabilities=. Device nodes are reached through group
 # `lemnos` (packaging/udev/70-lemnos.rules).
 # Change this unit with a drop-in (/etc/systemd/system/lemnosd.service.d/*.conf), not an edited copy.
-# The hardware watchdog belongs to lemnosd alone (its hw-watchdog driver opens it: one opener). The
-# OS must not set RuntimeWatchdogSec= or ShutdownWatchdogSec= in /etc/systemd/system.conf, which
-# would have systemd open the same device.
+# The hardware watchdog has two openers, in order: slot-init (the initramfs, until its exec) and then
+# lemnosd's hw-watchdog driver (docs/slots.md, "The watchdog chain"). The OS must not set
+# RuntimeWatchdogSec= or ShutdownWatchdogSec= in /etc/systemd/system.conf, which would have systemd
+# open the same device and feed it while lemnosd is dead.
 
 [Unit]
 Description=Lemnos hardware daemon

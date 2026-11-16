@@ -139,7 +139,6 @@ const ATTRIBUTES: [(&str, Unit); 5] = [
 /// Reason strings for [`Health::Degraded`].
 const FEED_FAILING: &str = "feed failed: retried with backoff";
 const TIMEOUT_NOT_SET: &str = "timeout not set: retried with backoff";
-const TIMEOUT_DIFFERS: &str = "timeout differs from the one asked for";
 const TIMEOUT_UNKNOWN: &str = "timeout unknown: fed every 1 s";
 
 /// The node the `device` setting names: `dev_root/<device>`, opened for writing, with its sysfs
@@ -406,12 +405,10 @@ impl Lifecycle for HwWatchdog {
             Health::Degraded(FEED_FAILING)
         } else if self.set_attempts > 0 {
             Health::Degraded(TIMEOUT_NOT_SET)
-        } else if let Some(applied) = self.applied_s {
-            if applied == self.wanted_s {
-                Health::Ok
-            } else {
-                Health::Degraded(TIMEOUT_DIFFERS)
-            }
+        } else if self.applied_s.is_some() {
+            // A device that rounds or clamps the request is not degraded: the feed follows the
+            // period it read back, and `timeout` reports that period as a fact.
+            Health::Ok
         } else {
             Health::Degraded(TIMEOUT_UNKNOWN)
         }
