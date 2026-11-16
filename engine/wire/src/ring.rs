@@ -38,7 +38,11 @@ pub const MAX_JOB_SLOTS: u32 = 64;
 pub const MAX_JOB_BYTES: u32 = 4096;
 /// Buffers start on multiples of this inside a shared pool.
 pub const BUFFER_ALIGN: u64 = 4096;
-/// Bytes of a frame's metadata: sequence, identity and length.
+/// The core-hash record of the pre-M34 core frame part: the first revision's frame metadata, 20
+/// bytes (sequence, identity, length). It is folded into `CORE_HASH` with its value, so changing it
+/// would refuse every peer at the handshake. Ring sizes do not come from it: the frame's metadata
+/// is [`frame::META_BYTES`] (32, see [`FrameInfo`]), a shared-rings part change. Nothing computes an
+/// offset or a size from this constant.
 pub const FRAME_BYTES: usize = 20;
 /// Pool buffers one frame may name: one per plane, at most `VIDEO_MAX_PLANES` (8).
 pub const MAX_PLANES: usize = shm_ring_buffers::MAX_PER_FRAME;
@@ -61,6 +65,58 @@ pub const STATE_FAULT: u32 = 2;
 /// the handshake does not check, as a field appended at the end is not.
 pub const STATE_DEVICE_FAILED: u32 = 3;
 
+/// The frame ring's metadata and its end words, folded into the shared-rings part. A frame whose
+/// `reason` is 0 is a result; a nonzero `reason` says why the job ended with none ([`reason`]).
+pub mod frame {
+    constants! {
+    /// Bytes of a frame's metadata: [`super::FrameInfo`] (sequence, identity, length, reason and end time).
+    pub const META_BYTES: usize = 32;
+    /// The buffer a job end names: none, since a job that ended with no result has no buffer.
+    pub const NO_BUFFER: u32 = u32::MAX;
+    }
+}
+
+/// Why a job ended without a result: a nonzero [`FrameInfo::reason`]. Each one is a word in the
+/// reply ([`reason::word`]); a code this build does not know is passed through as its number.
+pub mod reason {
+    constants! {
+    /// A frame that is a result.
+    pub const NONE: u32 = 0;
+    /// The block ran the job and flagged the result bad.
+    pub const FAILED: u32 = 1;
+    /// The job's time ran out, or the stream stopped with it still in flight.
+    pub const TIMEOUT: u32 = 2;
+    /// A job named a buffer of another stream that was not lent to it.
+    pub const NOT_LENT: u32 = 3;
+    /// A lent buffer's frame identity is not the job's identity.
+    pub const IDENTITY_MISMATCH: u32 = 4;
+    /// A lent buffer's size or stride does not fit the block's input.
+    pub const SIZE_OR_STRIDE: u32 = 5;
+    /// The block is wedged: a reset that did not recover it. Only a board restart frees it.
+    pub const WEDGED: u32 = 6;
+    /// The job names a buffer that is held or in use: by a consumer, or by a job in flight.
+    pub const BUSY: u32 = 7;
+    /// The job's configuration record is refused: a layout or field the block cannot run.
+    pub const BAD_CONFIG: u32 = 8;
+    }
+
+    /// The reason as the one word a reply names it by. An unknown code is `"unknown"`.
+    #[must_use]
+    pub const fn word(code: u32) -> &'static str {
+        match code {
+            FAILED => "failed",
+            TIMEOUT => "timeout",
+            NOT_LENT => "not-lent",
+            IDENTITY_MISMATCH => "identity-mismatch",
+            SIZE_OR_STRIDE => "size-or-stride",
+            WEDGED => "wedged",
+            BUSY => "busy",
+            BAD_CONFIG => "bad-config",
+            _ => "unknown",
+        }
+    }
+}
+
 /// Where each descriptor of a stream is in the order the host passes them: the frame ring, the
 /// pool page, the job ring, the job acks, the doorbell's eventfd, its page, the holds page, and then
 /// the pool's buffers, one descriptor per plane of each buffer (shared memory is one descriptor).
@@ -77,7 +133,9 @@ pub mod layouts {
 /// Folds the shared-rings part's constants into `hash`: the descriptor layout and the shm layouts.
 #[cfg_attr(not(feature = "protocol"), allow(dead_code))]
 pub(crate) const fn fold_shared(hash: u64) -> u64 {
-    layouts::fold_constants(fds::fold_constants(hash))
+    reason::fold_constants(frame::fold_constants(layouts::fold_constants(
+        fds::fold_constants(hash),
+    )))
 }
 
 pub mod fds {
@@ -272,7 +330,7 @@ impl Layout {
         Spec {
             fields: 1,
             history: self.frame_slots,
-            max_payload: shm_ring_buffers::entry::len(MAX_PLANES, FRAME_BYTES) as u32,
+            max_payload: shm_ring_buffers::entry::len(MAX_PLANES, frame::META_BYTES) as u32,
             expiry_ms: 0,
         }
     }
@@ -326,8 +384,9 @@ pub const fn pool_index(buffer: u32, plane: u32, planes: u32) -> u32 {
     buffer * planes + plane
 }
 
-/// One frame a consumer took with [`Consumer::pop_frame`]: its buffer, and its metadata. The
-/// buffer is held until [`Consumer::release`] gives it back.
+/// One frame a consumer took with [`Consumer::pop_entry`]: its buffer, and its metadata. The
+/// buffer is held until [`Consumer::release`] gives it back. A frame always has a buffer; a job
+/// that ended with none is an [`Entry::JobEnd`], never one of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameSlot {
     /// The buffer, as the producer numbers it (a plane's pool buffers are its buffer's).
@@ -337,12 +396,62 @@ pub struct FrameSlot {
     pub sequence: u64,
     /// Means something only to the producer and the consumer.
     pub identity: u64,
-    /// `CLOCK_MONOTONIC` nanoseconds.
+    /// `CLOCK_MONOTONIC` nanoseconds of the frame's start.
     pub timestamp_ns: u64,
+    /// `CLOCK_MONOTONIC` nanoseconds of the frame's end (EOF, or the block's finish); 0 when not stamped.
+    pub end_ns: u64,
+    /// Why the job ended with a result it flagged bad ([`reason`]); 0 for a result that is ok.
+    pub reason: u32,
 }
 
-/// One frame's metadata, as the frame ring's payload carries it. The frame's buffers are the
-/// entry's, not this.
+/// A job that ended without a result: its entry on the frame ring names no buffer. Its
+/// [`reason`] is nonzero, and it has no bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobEnd {
+    /// The producer's sequence for the entry, in order with the frames.
+    pub sequence: u64,
+    /// The job's identity.
+    pub identity: u64,
+    /// `CLOCK_MONOTONIC` nanoseconds when the entry was published.
+    pub timestamp_ns: u64,
+    /// `CLOCK_MONOTONIC` nanoseconds of the job's end; 0 when not stamped.
+    pub end_ns: u64,
+    /// Why the job ended without a result ([`reason`]). Never 0.
+    pub reason: u32,
+}
+
+/// What [`Consumer::pop_entry`] took: a frame, or a job's end. Matching on it tells them apart, so
+/// a job end can't be taken for a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// A frame, its buffer held until released.
+    Frame(FrameSlot),
+    /// A job that ended without a result.
+    JobEnd(JobEnd),
+}
+
+impl Entry {
+    /// The frame, or `None` for a job end.
+    #[must_use]
+    pub const fn frame(self) -> Option<FrameSlot> {
+        match self {
+            Self::Frame(slot) => Some(slot),
+            Self::JobEnd(_) => None,
+        }
+    }
+}
+
+/// One frame's metadata, as the frame ring's payload carries it, little-endian, 32 bytes:
+///
+/// | Bytes | Field |
+/// | --- | --- |
+/// | 0 to 7 | `sequence`: counts from the producer's start, one per frame |
+/// | 8 to 15 | `identity`: means something only to the producer and the consumer |
+/// | 16 to 19 | `bytes`: the frame's length across its planes; 0 for a job end |
+/// | 20 to 23 | `reason`: 0 for a result, else why the job ended ([`reason`]) |
+/// | 24 to 31 | `end_ns`: `CLOCK_MONOTONIC` nanoseconds of the end; 0 when the producer has none |
+///
+/// The frame's buffers are the entry's, not this. An entry with no buffer is a job end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
     /// Counts from the producer's start, one per frame.
@@ -351,26 +460,34 @@ pub struct FrameInfo {
     pub identity: u64,
     /// The frame's length, across its planes.
     pub bytes: u32,
+    /// Why the job ended without a result; 0 for a frame that is one.
+    pub reason: u32,
+    /// The end of the frame, `CLOCK_MONOTONIC` nanoseconds; 0 when the producer has no time for it.
+    pub end_ns: u64,
 }
 
 impl FrameInfo {
     #[must_use]
-    pub fn encode(self) -> [u8; FRAME_BYTES] {
-        let mut out = [0_u8; FRAME_BYTES];
+    pub fn encode(self) -> [u8; frame::META_BYTES] {
+        let mut out = [0_u8; frame::META_BYTES];
         out[0..8].copy_from_slice(&self.sequence.to_le_bytes());
         out[8..16].copy_from_slice(&self.identity.to_le_bytes());
         out[16..20].copy_from_slice(&self.bytes.to_le_bytes());
+        out[20..24].copy_from_slice(&self.reason.to_le_bytes());
+        out[24..32].copy_from_slice(&self.end_ns.to_le_bytes());
         out
     }
 
     /// The metadata in `bytes`, or `None` if it is not exactly one frame's.
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let bytes: &[u8; FRAME_BYTES] = bytes.try_into().ok()?;
+        let bytes: &[u8; frame::META_BYTES] = bytes.try_into().ok()?;
         Some(Self {
             sequence: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             identity: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
             bytes: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            reason: u32::from_le_bytes(bytes[20..24].try_into().ok()?),
+            end_ns: u64::from_le_bytes(bytes[24..32].try_into().ok()?),
         })
     }
 }
@@ -590,7 +707,7 @@ pub struct Consumer {
     /// can hand them on. A mapped consumer's view owns them, and this is empty.
     pool_fds: Vec<OwnedFd>,
     frames: shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>>,
-    /// The frames [`pop_frame`](Self::pop_frame) took and nobody has released, by buffer.
+    /// The frames [`pop_entry`](Self::pop_entry) took and nobody has released, by buffer.
     held: Vec<Option<shm_ring_buffers::Held<shm_ring_holds::Marks<WriteMap>>>>,
     /// How many planes each buffer has: one, or each plane's pool buffer.
     planes: u32,
@@ -751,19 +868,19 @@ impl Consumer {
         &self.layout
     }
 
-    /// Takes the next frame and holds its buffer until [`release`](Self::release) gives it back.
-    /// `Ok(None)` when no frame is waiting. Frames the ring lost before the consumer got to them
-    /// are skipped, as [`shm_ring_buffers::BufferReader::next`] does.
+    /// Takes the next entry: a frame, held until [`release`](Self::release) gives its buffer back,
+    /// or a job's end. `Ok(None)` when nothing is waiting. Frames the ring lost before the consumer
+    /// got to them are skipped, as [`shm_ring_buffers::BufferReader::next`] does.
     ///
     /// # Errors
     ///
-    /// [`RingError::Broken`] if the frame's metadata or buffers can't be right, or the topic
+    /// [`RingError::Broken`] if the entry's metadata or buffers can't be right, or the topic
     /// ended.
-    pub fn pop_frame(&mut self) -> Result<Option<FrameSlot>, RingError> {
+    pub fn pop_entry(&mut self) -> Result<Option<Entry>, RingError> {
         let planes = self.planes;
         let buffer_bytes = self.layout.buffer_bytes;
         let taken = match self.frames.next() {
-            shm_ring_buffers::NextBatch::Batch(batch) => {
+            shm_ring_buffers::NextBatch::Frame(batch) => {
                 let info = FrameInfo::decode(batch.meta).ok_or(RingError::Broken)?;
                 let first = batch.held.buffer(0).ok_or(RingError::Broken)?;
                 let buffer = first.0 / planes;
@@ -776,12 +893,28 @@ impl Consumer {
                     sequence: info.sequence,
                     identity: info.identity,
                     timestamp_ns: batch.time.as_nanos(),
+                    end_ns: info.end_ns,
+                    reason: info.reason,
                 };
                 let held = batch.held;
                 if let Some(place) = self.held.get_mut(buffer as usize) {
                     *place = Some(held);
                 }
-                Some(slot)
+                Some(Entry::Frame(slot))
+            }
+            shm_ring_buffers::NextBatch::NoBuffers(entry) => {
+                // A job's end: no buffer, and no result to hold. Only a nonzero reason says so.
+                let info = FrameInfo::decode(entry.meta).ok_or(RingError::Broken)?;
+                if info.reason == reason::NONE || info.bytes != 0 {
+                    return Err(RingError::Broken);
+                }
+                Some(Entry::JobEnd(JobEnd {
+                    sequence: info.sequence,
+                    identity: info.identity,
+                    timestamp_ns: entry.time.as_nanos(),
+                    end_ns: info.end_ns,
+                    reason: info.reason,
+                }))
             }
             shm_ring_buffers::NextBatch::Empty
             | shm_ring_buffers::NextBatch::Skipped(_)
@@ -844,7 +977,7 @@ impl Consumer {
             .is_some()
     }
 
-    /// Gives back a buffer whose frame [`pop_frame`](Self::pop_frame) took. `false` if this
+    /// Gives back a buffer whose frame [`pop_entry`](Self::pop_entry) took. `false` if this
     /// consumer doesn't hold it.
     pub fn release(&mut self, buffer: u32) -> bool {
         self.held

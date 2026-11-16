@@ -63,6 +63,7 @@ impl Emitting for Emitter {
                 sequence: 41,
                 identity: 0xABCD,
                 timestamp_ns: 5,
+                end_ns: 0,
             })
             .map_err(|_| Status::IO)?;
         Ok(buffer)
@@ -179,7 +180,11 @@ fn frames_arrive_in_order_with_contents_and_identities_over_many_cycles() {
     let mut expected = [0u8; FRAME_BYTES];
     for sequence in 0..1000u64 {
         assert!(produce(&mut source, &mut producer), "frame {sequence}");
-        let frame = consumer.pop_frame().unwrap().unwrap();
+        let frame = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap();
         assert_eq!(frame.sequence, sequence);
         assert_eq!(frame.identity, 0);
         assert_eq!(frame.timestamp_ns, sequence * 1000);
@@ -189,7 +194,7 @@ fn frames_arrive_in_order_with_contents_and_identities_over_many_cycles() {
         assert_eq!(read, expected, "frame {sequence}");
         assert!(consumer.release(frame.buffer));
     }
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
     let stats = host.stream_stats(0, "frames").unwrap();
     assert_eq!(stats.published, 1000);
     assert_eq!(stats.delivered, 1000);
@@ -215,7 +220,13 @@ fn a_consumer_that_holds_every_buffer_stops_the_producer_without_a_fault() {
     }
     // The consumer pops and holds every frame: nothing is reclaimable, so the producer stops.
     let held: Vec<_> = (0..4)
-        .map(|_| consumer.pop_frame().unwrap().unwrap())
+        .map(|_| {
+            consumer
+                .pop_entry()
+                .unwrap()
+                .and_then(|entry| entry.frame())
+                .unwrap()
+        })
         .collect();
     assert!(!produce(&mut source, &mut producer), "no buffer free");
     assert!(consumer.release(held[0].buffer));
@@ -245,7 +256,12 @@ fn an_unpopped_frame_is_reclaimed_only_when_the_producer_runs_out_of_buffers() {
     assert!(produce(&mut source, &mut producer));
     // The lost frame reads as a skip, so the first pop may come back empty; the next has frame 1.
     let first = (0..3)
-        .find_map(|_| consumer.pop_frame().unwrap())
+        .find_map(|_| {
+            consumer
+                .pop_entry()
+                .unwrap()
+                .and_then(|entry| entry.frame())
+        })
         .expect("a frame");
     assert_eq!(first.sequence, 1, "frame 0 was reclaimed");
 }
@@ -269,9 +285,14 @@ fn a_released_newest_frame_comes_back_without_another_publish() {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         })
         .unwrap();
-    let frame = consumer.pop_frame().unwrap().expect("the frame");
+    let frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("the frame");
     assert_eq!(frame.buffer, published);
     assert!(consumer.release(frame.buffer));
     // Three buffers were never used, so they come first; the fourth is the released frame.
@@ -318,9 +339,10 @@ fn a_buffer_granted_before_a_consumer_attached_is_dropped_not_delivered() {
             sequence: 1,
             identity: 2,
             timestamp_ns: 3,
+            end_ns: 0,
         })
         .unwrap();
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
     let stats = host.stream_stats(0, "frames").unwrap();
     assert_eq!((stats.dropped, stats.delivered, stats.free), (1, 0, 4));
 }
@@ -337,6 +359,7 @@ fn a_producer_cant_publish_or_write_what_it_doesnt_hold() {
         sequence: 1,
         identity: 2,
         timestamp_ns: 3,
+        end_ns: 0,
     };
     assert_eq!(producer.publish(frame), Err(ErrorKind::InvalidInput));
     assert_eq!(
@@ -376,6 +399,7 @@ fn write_and_publish(stream: &mut dyn StreamEndpoint<Error = ErrorKind>, bytes: 
             sequence: 1,
             identity: 2,
             timestamp_ns: 3,
+            end_ns: 0,
         })
         .unwrap();
     buffer
@@ -397,7 +421,11 @@ fn a_driver_writes_a_frame_through_the_trait_and_the_consumer_reads_it() {
         .unwrap();
     let sent: [u8; FRAME_BYTES] = std::array::from_fn(|i| i as u8 ^ 0x5a);
     let buffer = write_and_publish(&mut producer, &sent);
-    let frame = consumer.pop_frame().unwrap().unwrap();
+    let frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!(frame.buffer, buffer);
     let mut read = [0u8; FRAME_BYTES];
     assert!(consumer.read(frame.buffer, 0, &mut read));
@@ -546,7 +574,11 @@ fn the_consumer_going_tears_the_stream_down_and_frees_its_buffers() {
     for _ in 0..3 {
         assert!(produce(&mut source, &mut producer));
     }
-    let _held = consumer.pop_frame().unwrap().unwrap();
+    let _held = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     // Only the frame the consumer holds counts as its; the other two were published and not held.
     assert_eq!(host.stream_stats(0, "frames").unwrap().consumer_held, 1);
 
@@ -583,7 +615,11 @@ fn fault_case(craft: impl FnOnce(&Raw)) -> (Host, Consumer, ProducerEndpoint) {
     let (mut consumer, raw) = attach_raw(&host, CONSUMER);
     let mut source = SimFrameSource::new(FRAME_BYTES);
     assert!(produce(&mut source, &mut producer));
-    let _frame = consumer.pop_frame().unwrap().unwrap();
+    let _frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     let _held = producer.next_buffer().unwrap().unwrap();
     craft(&raw);
     (host, consumer, producer)
@@ -636,7 +672,7 @@ fn after_a_fault_the_producer_carries_on_and_a_new_consumer_can_attach() {
         .consumer()
         .unwrap();
     assert!(produce(&mut source, &mut producer));
-    assert!(fresh.pop_frame().unwrap().is_some());
+    assert!(fresh.pop_entry().unwrap().is_some());
 }
 
 #[test]
@@ -650,7 +686,11 @@ fn a_producer_faults_the_consumer_that_posted_what_is_no_job() {
         .unwrap();
     let mut source = SimFrameSource::new(FRAME_BYTES);
     assert!(produce(&mut source, &mut producer));
-    let _frame = consumer.pop_frame().unwrap().unwrap();
+    let _frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     let _held = producer.next_buffer().unwrap().unwrap();
     assert!(consumer.jobs().post(b"not a job").unwrap());
     let mut out = [0u8; 16];
@@ -672,7 +712,7 @@ fn a_producer_faults_the_consumer_that_posted_what_is_no_job() {
         .consumer()
         .unwrap();
     assert!(produce(&mut source, &mut producer));
-    assert!(fresh.pop_frame().unwrap().is_some());
+    assert!(fresh.pop_entry().unwrap().is_some());
     assert_eq!(host.stream_stats(0, "frames").unwrap().faults, 1);
 }
 
@@ -707,7 +747,11 @@ fn a_driver_that_needs_a_stream_gets_this_one_and_its_frames_arrive() {
         method: 1,
     };
     host.call(1, method, &[], &mut reply).unwrap();
-    let frame = consumer.pop_frame().unwrap().unwrap();
+    let frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!((frame.sequence, frame.identity), (41, 0xABCD));
     assert!(host.stream_stats(1, "frames").unwrap().claimed);
 }
@@ -853,7 +897,7 @@ fn a_failing_device_keeps_the_stream_attached_and_frames_resume_on_the_same_atta
     let (host, clock) = start_with_clock();
     let mut consumer = attach_emitter(&host);
     emit(&host);
-    assert!(consumer.pop_frame().unwrap().is_some(), "a frame before");
+    assert!(consumer.pop_entry().unwrap().is_some(), "a frame before");
     // The device fails: the consumer is woken once, sees it retrying with a since-time, and the
     // stream is still open and still attached.
     let (woke, words) = wakes_on_edge(&mut consumer, || explode(&host));
@@ -865,7 +909,7 @@ fn a_failing_device_keeps_the_stream_attached_and_frames_resume_on_the_same_atta
     assert!(stats.attached, "{stats:?}");
     assert_eq!((stats.faults, stats.attachments), (0, 1));
     // Silence while it is retried.
-    assert!(consumer.pop_frame().unwrap().is_none());
+    assert!(consumer.pop_entry().unwrap().is_none());
     // Back: woken once more, running, rebound by the host so what it was given is lost.
     let (woke, words) = wakes_on_edge(&mut consumer, || bring_back(&host, &clock));
     assert!(woke, "woken by the return");
@@ -876,7 +920,11 @@ fn a_failing_device_keeps_the_stream_attached_and_frames_resume_on_the_same_atta
     );
     // The same attachment, the same memory: one attachment still, and the frame arrives.
     emit(&host);
-    let after = consumer.pop_frame().unwrap().expect("a frame after");
+    let after = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame after");
     assert_eq!((after.sequence, after.identity), (41, 0xABCD));
     let stats = host.stream_stats(1, "frames").unwrap();
     assert!(stats.attached);
@@ -930,11 +978,11 @@ fn a_consumer_attaching_during_the_stall_reads_it_with_its_since_time() {
     let words = consumer.producer().unwrap();
     assert_eq!((words.state, words.edges), (producer::RETRYING, 1));
     assert!(words.since_ns >= 3_000_000_000, "{words:?}");
-    assert!(consumer.pop_frame().unwrap().is_none());
+    assert!(consumer.pop_entry().unwrap().is_none());
     bring_back(&host, &clock);
     emit(&host);
     assert!(
-        consumer.pop_frame().unwrap().is_some(),
+        consumer.pop_entry().unwrap().is_some(),
         "frames on that attachment once it is back"
     );
 }

@@ -230,7 +230,11 @@ fn frames_reach_a_consumer_and_a_camera_that_leaves_is_opened_again_by_name() {
         payload(FID | EOF, b"frame"),
     ]);
     rig.ticks();
-    let frame = consumer.pop_frame().unwrap().expect("a frame on the ring");
+    let frame = consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame on the ring");
     let mut bytes = vec![0u8; frame.bytes as usize];
     assert!(consumer.read(frame.buffer, 0, &mut bytes));
     assert_eq!(bytes, b"one frame");

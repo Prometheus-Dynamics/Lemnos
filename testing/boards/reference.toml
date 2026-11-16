@@ -220,7 +220,7 @@ heap = "linux,cma"
 # 4 of 2052096 bytes: BAYER16 at 1280 x 800. Its stride is 2560 (2 bytes a pixel, aligned to 64,
 # `FE_OUTPUT_ALIGN`), so 2560 x 800 = 2048000, plus a 4096-byte pad: the jobs' `pad_bytes`.
 [devices.streams.output0]
-buffers = 4
+buffers = 6
 buffer_bytes = 2052096
 memory = "dma-buf"
 heap = "linux,cma"
@@ -236,6 +236,7 @@ heap = "linux,cma"
 [[devices]]
 id = "cam0-isp"
 driver = "pisp-be"
+lend = "output0"
 config = { device = "1000880000.pisp_be" }
 
 # 2 of 16720 bytes: one back-end configuration per job (`CONFIG_BYTES`, the block's own size).

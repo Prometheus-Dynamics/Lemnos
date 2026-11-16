@@ -111,9 +111,17 @@ impl BufferPool {
         }
     }
 
-    /// Takes back every published buffer. The consumer has gone.
-    pub(super) fn reclaim_published(&mut self) -> u32 {
-        self.reclaim(|state| matches!(state, BufferState::Consumer { .. }))
+    /// Takes back every published buffer that `keep` does not hold back. A buffer lent to a block is
+    /// held back, so the memory the block reads is never reused under it.
+    pub(super) fn reclaim_published_where(&mut self, keep: impl Fn(u32) -> bool) -> u32 {
+        let mut count = 0;
+        for buffer in 0..self.states.len() as u32 {
+            if matches!(self.state(buffer), Some(BufferState::Consumer { .. })) && !keep(buffer) {
+                self.make_free(buffer);
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Takes back every buffer the producer held. The producer has gone.
@@ -219,7 +227,7 @@ mod tests {
         let a = pool.take(1).unwrap();
         let _b = pool.take(1).unwrap();
         pool.publish(a);
-        assert_eq!(pool.reclaim_published(), 1);
+        assert_eq!(pool.reclaim_published_where(|_| false), 1);
         assert_eq!(pool.counts(), (2, 1, 0, 0));
         assert_eq!(pool.reclaim_producer(), 1);
         assert_eq!(pool.counts(), (3, 0, 0, 0));
@@ -232,7 +240,7 @@ mod tests {
         pool.keep(a);
         assert_eq!(pool.counts(), (1, 0, 0, 1));
         assert_eq!(pool.release(a, 0), Err(NotDue), "nobody was handed it");
-        assert_eq!(pool.reclaim_published(), 0);
+        assert_eq!(pool.reclaim_published_where(|_| false), 0);
         assert_eq!(pool.reclaim_producer(), 0);
         let fence = pool.publish(a);
         assert_eq!(pool.counts(), (1, 0, 1, 0));

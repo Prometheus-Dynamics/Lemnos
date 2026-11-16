@@ -74,11 +74,12 @@ use lemnos_contract_isp_pisp::{
     IspPisp, LAYOUT_BACK_END, OUTPUT_FRONT_END_0, OUTPUT_FRONT_END_1, PispInfo,
 };
 use lemnos_core::{
-    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
-    RefusalKind, Result, Status, StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, LendHandle, Lifecycle,
+    MethodId, Reader, RefusalKind, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
+use lemnos_wire::ring::reason;
 
 use crate::be_hw::{Finished, Hardware, Placed, Plan, Registered, Settings};
 use crate::be_job::{self, JobMemory, KernelJob};
@@ -107,6 +108,36 @@ pub const OUTPUT_STREAMS: [&str; BE_NUM_OUTPUTS] = ["output0", "output1"];
 const MAX_BUFFERS: usize = 32;
 /// Jobs the block may hold at once, the most `buffers` allows.
 const MAX_JOBS: usize = 32;
+
+/// Why an image's buffer was refused by [`PispBe::lend`]: an image size the block can't take is the
+/// job's configuration (`bad-config`); anything else is a buffer that is held or in use (`busy`).
+fn refused_image(bytes: Option<u64>) -> u32 {
+    match bytes {
+        Some(b) if b > 0 && b <= MAX_IMAGE_BYTES => reason::BUSY,
+        _ => reason::BAD_CONFIG,
+    }
+}
+
+/// The health text of a wedged block. Only a board restart frees the buffers it holds, and Lemnos
+/// never reboots on its own, so the text says so. `held` is the number of front-end buffers the
+/// block holds: the lent inputs of the jobs in flight. The table covers 0 to 8 exactly; from 9 on
+/// the text says `9 or more`, never a number it does not know.
+fn wedged_text(held: u32) -> &'static str {
+    const TEXT: [&str; 9] = [
+        "the back end is wedged; 0 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 1 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 2 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 3 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 4 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 5 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 6 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 7 front-end buffers stay with it until the board restarts",
+        "the back end is wedged; 8 front-end buffers stay with it until the board restarts",
+    ];
+    TEXT.get(held as usize).copied().unwrap_or(
+        "the back end is wedged; 9 or more front-end buffers stay with it until the board restarts",
+    )
+}
 /// A buffer's largest size (`LEMNOS_STREAM_MAX_BUFFER_BYTES`).
 const MAX_IMAGE_BYTES: u64 = 1 << 28;
 /// The input's alignment; the block needs 4, and importers like more.
@@ -204,6 +235,17 @@ impl Buffers {
     }
 }
 
+/// What lending a job's input gave: the input's device address, its record, and the lend to give back, or
+/// the reason the job is refused (`Err`).
+type LendOutcome = core::result::Result<(u64, Lent, Option<LentJob>), u32>;
+
+/// A front-end buffer lent to a job as its input: what the lend is given back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LentJob {
+    buffer: u32,
+    identity: u64,
+}
+
 /// One image of a job, on the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Lent {
@@ -222,6 +264,8 @@ struct InFlight {
     outputs: [Option<Lent>; BE_NUM_OUTPUTS],
     /// The config buffer the job named.
     config: u32,
+    /// The front-end buffer lent as the input, when the job named one.
+    lent: Option<LentJob>,
 }
 
 /// Which stream an image is on.
@@ -236,12 +280,18 @@ enum Image {
 pub struct PispBe {
     #[needs(job)]
     config: StreamHandle,
-    #[needs(job)]
-    input: StreamHandle,
+    /// The raw input the block reads for a job that names one of its own buffers. Absent when the
+    /// board gives no `input` stream: then every job reads a lent front-end buffer (`input_lent`).
+    #[needs(optional, job)]
+    input: Option<StreamHandle>,
     #[needs(job)]
     output0: StreamHandle,
     #[needs(optional, job)]
     output1: Option<StreamHandle>,
+    /// The upstream device's output0, lent to this block as its input for a job that names one
+    /// (`input_lent`). Absent when no device links to this one.
+    #[needs(optional)]
+    lend: Option<LendHandle>,
     hw: Box<dyn Hardware>,
     options: Options,
     raw: Option<IspInput>,
@@ -268,6 +318,10 @@ pub struct PispBe {
     outputs: [Buffers; BE_NUM_OUTPUTS],
     /// Jobs on the block, by pool buffer.
     jobs: [Option<InFlight>; MAX_JOBS],
+    /// The block is wedged: the module keeps the buffers it could not prove idle until a reboot.
+    wedged: bool,
+    /// Jobs in flight when the block wedged: the front-end buffers they hold stay with it.
+    wedged_held: u32,
     /// The driver's copy of the job being taken, parsed.
     parsed: Box<BeTilesConfig>,
     /// The driver's copy of the job being taken, as read: what goes to the module.
@@ -338,7 +392,9 @@ impl Lifecycle for PispBe {
         };
         let options = Options::new(int("buffers", 4)?, int("job_slots", 4)?)?;
         // The block reads and writes images only as dma-bufs: known now, before any client.
-        handles_only(&needs.input).map_err(|status| plain_memory(cfg, status))?;
+        if let Some(input) = needs.input.as_ref() {
+            handles_only(input).map_err(|status| plain_memory(cfg, status))?;
+        }
         handles_only(&needs.output0).map_err(|status| plain_memory(cfg, status))?;
         if let Some(output1) = needs.output1.as_ref() {
             handles_only(output1).map_err(|status| plain_memory(cfg, status))?;
@@ -358,6 +414,9 @@ impl Lifecycle for PispBe {
     }
 
     fn health(&self) -> Health {
+        if self.wedged {
+            return Health::Failed(wedged_text(self.wedged_held));
+        }
         match self.state {
             State::Recovering { .. } => {
                 Health::Failed("the back end's stream ended while running: restarting it")
@@ -425,6 +484,7 @@ impl PispBe {
             input: needs.input,
             output0: needs.output0,
             output1: needs.output1,
+            lend: needs.lend,
             hw,
             options,
             raw: None,
@@ -444,6 +504,8 @@ impl PispBe {
             inputs: Buffers::NONE,
             outputs: [Buffers::NONE; BE_NUM_OUTPUTS],
             jobs: [None; MAX_JOBS],
+            wedged: false,
+            wedged_held: 0,
             parsed: Box::default(),
             bytes: Box::new([0; CONFIG_BYTES]),
         }
@@ -459,7 +521,7 @@ impl PispBe {
         &mut dyn Hardware,
     ) {
         let (stream, buffers) = match image {
-            Image::Input => (Some(&mut self.input), Some(&mut self.inputs)),
+            Image::Input => (self.input.as_mut(), Some(&mut self.inputs)),
             Image::Output(o) => {
                 let stream = match o {
                     0 => Some(&mut self.output0),
@@ -484,7 +546,24 @@ impl PispBe {
     /// Ends the module's stream. What it had registered went with it, so the buffers the block
     /// had are the driver's again.
     fn stop_block(&mut self) {
-        self.hw.stop();
+        if self.hw.stop() {
+            // The block may still read the buffers its jobs named: they stay with it, until a restart.
+            self.wedged = true;
+            // The front-end buffers held: the lent inputs of the jobs in flight.
+            self.wedged_held = self
+                .jobs
+                .iter()
+                .flatten()
+                .filter(|j| j.lent.is_some())
+                .count() as u32;
+        } else {
+            // Not wedged: the block has stopped reading, so the front-end buffers its jobs lent are
+            // the front end's again.
+            for at in 0..MAX_JOBS {
+                let lent = self.jobs[at].and_then(|job| job.lent);
+                self.unlend(lent);
+            }
+        }
         self.jobs = [None; MAX_JOBS];
         self.inputs.busy = [false; MAX_BUFFERS];
         self.config_busy = [false; MAX_BUFFERS];
@@ -505,7 +584,9 @@ impl PispBe {
 
     /// Makes everything from nothing.
     fn begin(&mut self) -> Result<()> {
-        handles_only(&self.input)?;
+        if let Some(input) = self.input.as_ref() {
+            handles_only(input)?;
+        }
         handles_only(&self.output0)?;
         if let Some(output1) = self.output1.as_ref() {
             handles_only(output1)?;
@@ -554,8 +635,12 @@ impl PispBe {
             // Again for each job: its consumer may have given a buffer back and named it in
             // this job since the last look.
             self.take_returns()?;
-            if !self.submit(&job)? {
+            if let Some(reason) = self.submit(&job)? {
+                // Refused: the job's consumer is told why, so it releases what it held for it.
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
+                self.output0
+                    .publish_job_end(job.identity, reason, 0)
+                    .map_err(|_| Status::IO)?;
             }
         }
         Ok(())
@@ -577,6 +662,7 @@ impl PispBe {
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
+                    end_ns: 0,
                 })
                 .map_err(|_| Status::IO)?;
             Buffers::set(&mut self.configs.held, buffer, false);
@@ -587,7 +673,9 @@ impl PispBe {
     /// Takes every buffer each stream has free.
     fn take_returns(&mut self) -> Result<()> {
         self.configs.take(&mut self.config)?;
-        self.inputs.take(&mut self.input)?;
+        if let Some(input) = self.input.as_mut() {
+            self.inputs.take(input)?;
+        }
         self.outputs[0].take(&mut self.output0)?;
         if let Some(output1) = self.output1.as_mut() {
             self.outputs[1].take(output1)?;
@@ -606,7 +694,10 @@ impl PispBe {
         };
         // The block is done with them: the module has released the job's hold.
         self.hw.unregister(job.input.region)?;
-        Buffers::set(&mut self.inputs.busy, job.input.buffer, false);
+        if job.lent.is_none() {
+            Buffers::set(&mut self.inputs.busy, job.input.buffer, false);
+        }
+        self.unlend(job.lent);
         Buffers::set(&mut self.config_busy, job.config, false);
         for lent in job.outputs.iter().flatten() {
             self.hw.unregister(lent.region)?;
@@ -633,6 +724,7 @@ impl PispBe {
                 sequence: done.sequence,
                 identity: done.identity,
                 timestamp_ns: done.timestamp_ns,
+                end_ns: done.end_ns,
             };
             let (stream, buffers, _) = self.parts(Image::Output(o));
             let published = stream.map(|stream| stream.publish(frame));
@@ -649,15 +741,27 @@ impl PispBe {
 
     /// Sends one job. `false` for a job that can't be sent, a caller's mistake or no room; an
     /// error means the stream is over.
-    fn submit(&mut self, job: &IspJob) -> Result<bool> {
+    /// Takes a job for the block, or says why it is refused: `None` when it is taken, else the
+    /// [`reason`](lemnos_wire::ring::reason) its consumer is told in the job's end.
+    fn submit(&mut self, job: &IspJob) -> Result<Option<u32>> {
+        if self.wedged {
+            return Ok(Some(reason::WEDGED));
+        }
         let named = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
+        // A job the block can't take as written: a layout it doesn't run, a named output past the
+        // block's, or no input at all. Its configuration record is refused.
         if job.layout != LAYOUT_BACK_END
-            || !self.configs.free(job.config_buffer)
-            || self.config_busy.get(job.config_buffer as usize) != Some(&false)
-            || !self.inputs.free(job.input_buffer)
+            || (!job.input_lent && (job.input_buffer == NO_BUFFER || self.input.is_none()))
             || (BE_NUM_OUTPUTS..MAX_OUTPUTS).any(|i| named(i) != NO_BUFFER)
         {
-            return Ok(false);
+            return Ok(Some(reason::BAD_CONFIG));
+        }
+        // Buffers the job names that are held: by the client, or by a job in flight.
+        if !self.configs.free(job.config_buffer)
+            || self.config_busy.get(job.config_buffer as usize) != Some(&false)
+            || (!job.input_lent && !self.inputs.free(job.input_buffer))
+        {
+            return Ok(Some(reason::BUSY));
         }
         for o in 0..BE_NUM_OUTPUTS {
             let buffer = named(o);
@@ -665,23 +769,27 @@ impl PispBe {
                 continue;
             }
             let on = self.output_bytes.get(o).copied().flatten().is_some();
-            if !on || !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
-                // An output that's off, or a buffer the client has or the block is writing.
-                return Ok(false);
+            if !on {
+                // An output the configuration of this board does not have.
+                return Ok(Some(reason::BAD_CONFIG));
+            }
+            if !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
+                // A buffer the client has, or the block is writing.
+                return Ok(Some(reason::BUSY));
             }
         }
         let Some(token) = (0..self.options.buffers as usize)
             .find(|&at| self.jobs.get(at).is_some_and(Option::is_none))
         else {
-            return Ok(false);
+            return Ok(Some(reason::BUSY));
         };
         // The one read of the client's buffer. Everything after uses the copy.
         match self.config.read(job.config_buffer, 0, &mut self.bytes[..]) {
             Ok(true) => {}
-            Ok(false) | Err(_) => return Ok(false),
+            Ok(false) | Err(_) => return Ok(Some(reason::BAD_CONFIG)),
         }
         if self.parsed.read_from(&self.bytes[..]).is_err() || be_job::check(&self.parsed).is_err() {
-            return Ok(false);
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let c = &self.parsed.config;
         // The configuration must describe the frame set_input described: its size and stride.
@@ -692,13 +800,14 @@ impl PispBe {
             .raw_layout
             .is_some_and(|l| u32::try_from(c.input_format.stride).ok() == Some(l.stride));
         if !frame_ok {
-            return Ok(false);
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let bayer = c.global.bayer_enables;
         let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
         let writes_average = bayer & bayer_enable::TDN_OUTPUT != 0;
         if reads_average && (!self.tdn_valid || self.tdn_reset) {
-            return Ok(false);
+            // The averages a job reads are not there yet: the block's state, not the job's.
+            return Ok(Some(reason::BUSY));
         }
         // The averages are the driver's memory: an image larger than they are is refused here
         // rather than by the module, which would end the stream.
@@ -709,7 +818,7 @@ impl PispBe {
         if !average_fits(reads_average, &c.tdn_input_format)
             || !average_fits(writes_average, &c.tdn_output_format)
         {
-            return Ok(false);
+            return Ok(Some(reason::BAD_CONFIG));
         }
         let input_bytes = be_job::image_bytes(&c.input_format);
         let output_bytes = c.output_format.map(|o| be_job::image_bytes(&o.image));
@@ -722,14 +831,23 @@ impl PispBe {
             memory.tdn_output = average(self.tdn_next);
         }
 
-        let Some(input) = self.lend(Image::Input, job.input_buffer, input_bytes)? else {
-            return Ok(false);
+        let (input_addr, input_lent, lent_job) = if job.input_lent {
+            match self.lend_input(job, input_bytes)? {
+                Ok(lent) => lent,
+                Err(reason) => return Ok(Some(reason)),
+            }
+        } else {
+            let Some(input) = self.lend(Image::Input, job.input_buffer, input_bytes)? else {
+                return Ok(Some(refused_image(input_bytes)));
+            };
+            (input.0, input.1, None)
         };
-        memory.input = input.0;
+        memory.input = input_addr;
         let mut flight = InFlight {
-            input: input.1,
+            input: input_lent,
             outputs: [None; BE_NUM_OUTPUTS],
             config: job.config_buffer,
+            lent: lent_job,
         };
         for (o, bytes) in output_bytes.into_iter().enumerate() {
             let buffer = named(o);
@@ -743,13 +861,13 @@ impl PispBe {
                 }
                 None => {
                     self.release(&flight)?;
-                    return Ok(false);
+                    return Ok(Some(refused_image(bytes)));
                 }
             }
         }
         let Ok(addr) = be_job::addresses(&self.parsed.config, &memory) else {
             self.release(&flight)?;
-            return Ok(false);
+            return Ok(Some(reason::BAD_CONFIG));
         };
         let kernel = KernelJob {
             identity: job.identity,
@@ -761,11 +879,13 @@ impl PispBe {
             Ok(()) => {}
             Err(Status::BUSY) => {
                 self.release(&flight)?;
-                return Ok(false);
+                return Ok(Some(reason::BUSY));
             }
             Err(e) => return Err(e),
         }
-        Buffers::set(&mut self.inputs.busy, flight.input.buffer, true);
+        if flight.lent.is_none() {
+            Buffers::set(&mut self.inputs.busy, flight.input.buffer, true);
+        }
         Buffers::set(&mut self.config_busy, flight.config, true);
         for (o, lent) in flight.outputs.iter().enumerate() {
             if let (Some(lent), Some(buffers)) = (lent, self.outputs.get_mut(o)) {
@@ -780,16 +900,76 @@ impl PispBe {
             self.tdn_next = 1 - self.tdn_next;
             self.tdn_reset = false;
         }
-        Ok(true)
+        Ok(None)
     }
 
     /// Lets go of what a job that won't be sent had registered.
     fn release(&mut self, flight: &InFlight) -> Result<()> {
         self.hw.unregister(flight.input.region)?;
+        self.unlend(flight.lent);
         for lent in flight.outputs.iter().flatten() {
             self.hw.unregister(lent.region)?;
         }
         Ok(())
+    }
+
+    /// Gives a lent input back to its upstream device, for the job that was lent it. A refusal means
+    /// the lend was not this job's, which is counted as an error.
+    fn unlend(&mut self, lent: Option<LentJob>) {
+        let (Some(lent), Some(source)) = (lent, self.lend.as_mut()) else {
+            return;
+        };
+        if source.unlend(lent.buffer, lent.identity).is_err() {
+            self.counters.errors = self.counters.errors.saturating_add(1);
+        }
+    }
+
+    /// Lends the front-end buffer a job names as its input, and registers it with the block read-only.
+    /// `Ok(Ok(..))` is the input's device address, its [`Lent`] record and what the lend is given back
+    /// with. `Ok(Err(reason))` is the job refused, as its consumer is told. Nothing is left lent on a
+    /// refusal.
+    fn lend_input(&mut self, job: &IspJob, bytes: Option<u64>) -> Result<LendOutcome> {
+        let Some(need) = bytes.filter(|&b| b > 0 && b <= MAX_IMAGE_BYTES) else {
+            return Ok(Err(reason::BAD_CONFIG));
+        };
+        let Some(source) = self.lend.as_mut() else {
+            // This block was not given a lend source: the input can't be the front end's.
+            return Ok(Err(reason::NOT_LENT));
+        };
+        let frame = match source.lend(job.lent_buffer, job.identity) {
+            Ok(lemnos_hal::Lend::Lent(frame)) => frame,
+            Ok(lemnos_hal::Lend::Busy) => return Ok(Err(reason::BUSY)),
+            Ok(lemnos_hal::Lend::IdentityMismatch) => return Ok(Err(reason::IDENTITY_MISMATCH)),
+            Err(_) => return Ok(Err(reason::NOT_LENT)),
+        };
+        // The frame must hold the image the configuration reads, or the block would read past it.
+        if u64::from(frame.bytes) < need {
+            let _ = source.unlend(job.lent_buffer, job.identity);
+            return Ok(Err(reason::SIZE_OR_STRIDE));
+        }
+        let registered = match self.hw.register_lent(frame.handle.fd(), frame.generation) {
+            Ok(registered) => registered,
+            // The kernel refuses a lent file that is not a dma-buf with EINVAL (`INVALID_ARGUMENT`):
+            // that is this job's input, which the block cannot take, so the job is refused as its
+            // consumer is told, and the stream goes on. Any other failure is the block's.
+            Err(e) => {
+                let _ = source.unlend(job.lent_buffer, job.identity);
+                if e == Status::INVALID_ARGUMENT {
+                    return Ok(Err(reason::BAD_CONFIG));
+                }
+                return Err(e);
+            }
+        };
+        let lent = Lent {
+            buffer: job.lent_buffer,
+            region: registered.region,
+            bytes: frame.bytes,
+        };
+        let job_lent = LentJob {
+            buffer: job.lent_buffer,
+            identity: job.identity,
+        };
+        Ok(Ok((registered.addr, lent, Some(job_lent))))
     }
 
     /// Registers `buffer` of `image`'s stream for one job, when it can hold `bytes`: its device
@@ -819,6 +999,7 @@ impl PispBe {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             });
             Buffers::set(&mut buffers.held, buffer, false);
             buffers.take(stream)?;
@@ -901,6 +1082,7 @@ impl CameraIsp for PispBe {
             config_layouts: 1,
             statistics_layout: 0,
             statistics_bytes: 0,
+            input_lend: false,
         })
     }
 
@@ -1009,6 +1191,9 @@ impl CameraIsp for PispBe {
     }
 
     fn input_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if self.input.is_none() {
+            return Err(Status::NOT_FOUND);
+        }
         name(INPUT_STREAM, into)
     }
 

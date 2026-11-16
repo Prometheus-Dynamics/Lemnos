@@ -26,8 +26,9 @@ fn main() {
         let started = Instant::now();
         assert!(host.publish(buffer, 16, sequence, 7, SampleTime::now().as_nanos()));
         let frame = consumer
-            .pop_frame()
+            .pop_entry()
             .expect("no error")
+            .and_then(|entry| entry.frame())
             .expect("the frame is there");
         samples.push(started.elapsed().as_nanos() as u64);
         ready_at_first_look += 1;

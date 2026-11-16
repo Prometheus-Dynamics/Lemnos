@@ -125,7 +125,10 @@ fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks()
     for _ in 0..4 {
         clock.0.fetch_add(1_000_000, Ordering::Relaxed);
         host.tick();
-        done = consumer.pop_frame().unwrap();
+        done = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame());
         if done.is_some() {
             break;
         }
@@ -187,7 +190,10 @@ fn a_result_released_and_named_again_is_completed_again_through_the_hosts_ticks(
         for _ in 0..4 {
             clock.0.fetch_add(1_000_000, Ordering::Relaxed);
             host.tick();
-            done = consumer.pop_frame().unwrap();
+            done = consumer
+                .pop_entry()
+                .unwrap()
+                .and_then(|entry| entry.frame());
             if done.is_some() {
                 break;
             }
@@ -264,7 +270,7 @@ fn a_finished_job_leaves_the_convert_stream_holding_nothing_once_the_consumer_de
     for _ in 0..4 {
         clock.0.fetch_add(1_000_000, Ordering::Relaxed);
         host.tick();
-        if consumer.pop_frame().unwrap().is_some() {
+        if consumer.pop_entry().unwrap().is_some() {
             break;
         }
     }

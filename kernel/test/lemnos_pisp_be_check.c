@@ -185,6 +185,8 @@ struct stream {
 	void *configs;
 	size_t config_bytes;
 	uint64_t pool_addr, region_addr;
+	/* The last frame wait_frame took: its start and its end (frame words 3 and 5). */
+	uint64_t last_start, last_end;
 	uint32_t region;
 	size_t returns_at, jobs_at, job_words;
 	uint64_t jobs_head, frames_tail, returns_head;
@@ -319,6 +321,8 @@ static int wait_frame(struct stream *st, uint64_t *identity)
 			uint64_t word = st->ring[at];
 			uint64_t fence = st->ring[at + 4];
 
+			st->last_start = st->ring[at + 3];
+			st->last_end = st->ring[at + 5];
 			if (identity)
 				*identity = st->ring[at + 2];
 			st->frames_tail++;
@@ -958,6 +962,9 @@ static void test_counters_two_jobs(void)
 	complete_job(&st, 1, 2);
 	CHECK(wait_frame(&st, &id) == 0 && id == 7);
 	CHECK(wait_frame(&st, &id) == 1 && id == 8);
+	/* The block's finish is both the frame's time and its end: frame word 5 (the end time) is that
+	 * stamp, nonzero, and the same as its start. */
+	CHECK(st.last_end != 0 && st.last_end == st.last_start);
 	stream_close(&st);
 }
 

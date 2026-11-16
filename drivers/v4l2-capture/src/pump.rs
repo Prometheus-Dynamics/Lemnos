@@ -270,6 +270,7 @@ impl Pump {
                         sequence,
                         identity: 0,
                         timestamp_ns: frame.timestamp_ns,
+                        end_ns: 0,
                     });
                     return Delivery::Dropped;
                 }
@@ -289,6 +290,7 @@ impl Pump {
             sequence,
             identity: 0,
             timestamp_ns: frame.timestamp_ns,
+            end_ns: 0,
         });
         match published {
             Ok(()) => Delivery::Published,
@@ -307,6 +309,7 @@ impl Pump {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         });
     }
 
@@ -422,6 +425,7 @@ impl Pump {
                     sequence,
                     identity: 0,
                     timestamp_ns: frame.timestamp_ns,
+                    end_ns: 0,
                 });
                 match published {
                     Ok(()) => Delivery::Published,

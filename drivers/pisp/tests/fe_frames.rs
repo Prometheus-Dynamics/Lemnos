@@ -317,6 +317,7 @@ impl Block {
             sequence: identity,
             identity,
             timestamp_ns: 1,
+            end_ns: 0,
         });
     }
 }
@@ -606,6 +607,8 @@ impl App {
             config_buffer: config,
             input_buffer: NO_BUFFER,
             outputs: [NO_BUFFER, NO_BUFFER, output0, output1],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);
@@ -641,7 +644,13 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
         app.post(identity, config, output0, output1);
         now = two_ticks(&mut fe, now);
 
-        let frame = app.output0.ring.pop_frame().unwrap().expect("output 0");
+        let frame = app
+            .output0
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("output 0");
         assert_eq!(
             (frame.buffer, frame.identity, frame.bytes),
             (output0, identity, OUTPUT_BYTES)
@@ -653,7 +662,13 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
         );
         assert!(app.output0.ring.release(frame.buffer));
 
-        let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+        let stats = app
+            .stats
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("statistics");
         assert_eq!(
             (stats.buffer, stats.identity, stats.bytes),
             (config, identity, STATS_BYTES as u32),
@@ -666,7 +681,12 @@ fn the_client_reads_what_the_block_made_from_its_configuration() {
         );
         assert!(app.stats.ring.release(stats.buffer));
 
-        let second = app.output1.ring.pop_frame().unwrap();
+        let second = app
+            .output1
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame());
         if with1 {
             let second = second.expect("output 1");
             assert_eq!(
@@ -720,12 +740,24 @@ fn a_config_changed_after_the_job_was_posted_changes_nothing_the_block_runs() {
         &posted[..],
         "the module copied the configuration as it was when the job was taken"
     );
-    let frame = app.output0.ring.pop_frame().unwrap().unwrap();
+    let frame = app
+        .output0
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert!(
         app.output0.read(frame.buffer, OUTPUT_BYTES as usize)
             == expected(0, 0x5a, 9, OUTPUT_BYTES as usize)
     );
-    let stats = app.stats.ring.pop_frame().unwrap().unwrap();
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert!(app.stats.read(stats.buffer, STATS_BYTES) == expected(2, 0x5a, 9, STATS_BYTES));
 }
 
@@ -744,7 +776,7 @@ fn a_configuration_with_an_address_never_reaches_the_module() {
     assert_eq!(hw.with(|b| b.keys.len() + b.lost as usize), 0);
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
     assert_eq!(hw.registered(), 0);
-    assert!(app.output0.ring.pop_frame().unwrap().is_none());
+    assert!(app.output0.ring.pop_entry().unwrap().is_none());
 }
 
 #[test]
@@ -757,7 +789,13 @@ fn a_job_naming_a_statistics_buffer_the_driver_does_not_hold_is_dropped() {
     app.config.fill(0, &config_for(1, true, false));
     app.post(1, 0, 0, NO_BUFFER);
     let mut now = two_ticks(&mut fe, 1);
-    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("statistics");
     assert_eq!((stats.buffer, stats.identity), (0, 1));
     let first = expected(2, 1, 1, STATS_BYTES);
 
@@ -765,16 +803,17 @@ fn a_job_naming_a_statistics_buffer_the_driver_does_not_hold_is_dropped() {
     app.config.fill(0, &config_for(2, true, false));
     app.post(2, 0, 1, NO_BUFFER);
     now = two_ticks(&mut fe, now);
-    assert!(app.stats.ring.pop_frame().unwrap().is_none());
+    assert!(app.stats.ring.pop_entry().unwrap().is_none());
     assert!(
         app.output0
             .ring
-            .pop_frame()
+            .pop_entry()
             .unwrap()
+            .and_then(|entry| entry.frame())
             .is_some_and(|f| f.identity == 1),
         "only the first job's image"
     );
-    assert!(app.output0.ring.pop_frame().unwrap().is_none());
+    assert!(app.output0.ring.pop_entry().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
     assert!(app.stats.read(0, STATS_BYTES) == first, "untouched");
     assert_eq!(hw.with(|b| b.keys.clone()), [1]);
@@ -783,7 +822,13 @@ fn a_job_naming_a_statistics_buffer_the_driver_does_not_hold_is_dropped() {
     assert!(app.stats.ring.release(stats.buffer));
     app.post(3, 0, 2, NO_BUFFER);
     two_ticks(&mut fe, now);
-    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("statistics");
     assert_eq!((stats.buffer, stats.identity), (0, 3));
     assert!(app.stats.read(0, STATS_BYTES) == expected(2, 2, 3, STATS_BYTES));
     assert_eq!(hw.with(|b| b.lost), 0);
@@ -809,10 +854,16 @@ fn a_job_naming_a_statistics_buffer_another_job_has_is_dropped() {
         "the second never reached the block"
     );
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
-    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("statistics");
     assert_eq!((stats.buffer, stats.identity), (0, 1));
     assert!(app.stats.read(0, STATS_BYTES) == expected(2, 1, 1, STATS_BYTES));
-    assert!(app.stats.ring.pop_frame().unwrap().is_none());
+    assert!(app.stats.ring.pop_entry().unwrap().is_none());
     fe.tick(now).unwrap();
     assert_eq!(hw.with(|b| b.lost), 0);
     assert_eq!(hw.registered(), 0);
@@ -845,7 +896,13 @@ fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_s
     app.post(2, 0, 0, NO_BUFFER);
     let now = two_ticks(&mut fe, now);
     assert_eq!(hw.with(|b| b.keys.clone()), [4]);
-    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("statistics");
     assert_eq!((stats.buffer, stats.identity), (0, 2));
     fe.tick(now).unwrap();
     assert_eq!(hw.with(|b| b.lost), 0);
@@ -870,7 +927,13 @@ fn a_new_statistics_client_gets_statistics_in_its_own_memory() {
     // writes the new client's memory: nothing is dropped.
     app.post(1, 1, 0, NO_BUFFER);
     two_ticks(&mut fe, now);
-    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    let stats = app
+        .stats
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("statistics");
     assert_eq!((stats.buffer, stats.identity), (1, 1));
     assert!(app.stats.read(1, STATS_BYTES) == expected(2, 7, 1, STATS_BYTES));
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 0);
@@ -901,7 +964,12 @@ fn jobs_in_steady_state_allocate_nothing() {
             }
         }
         for client in [&mut app.output0, &mut app.stats, &mut app.output1] {
-            let frame = client.ring.pop_frame().unwrap().expect("a frame");
+            let frame = client
+                .ring
+                .pop_entry()
+                .unwrap()
+                .and_then(|entry| entry.frame())
+                .expect("a frame");
             assert_eq!(frame.identity, identity);
             assert!(client.ring.release(frame.buffer));
         }
@@ -987,8 +1055,9 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
         let frame = app
             .output1
             .ring
-            .pop_frame()
+            .pop_entry()
             .unwrap()
+            .and_then(|entry| entry.frame())
             .expect("job A's output 1");
         assert_eq!((frame.buffer, frame.identity), (0, 1));
         assert!(
@@ -1005,15 +1074,17 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
     let a = app
         .output0
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job A's output 0");
     assert_eq!((a.buffer, a.identity), (1, 1));
     let x = app
         .output0
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job X's output 0");
     assert_eq!((x.buffer, x.identity), (3, 2));
     assert!(
@@ -1023,8 +1094,9 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
     let b = app
         .output0
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job B's output 0");
     assert_eq!((b.buffer, b.identity), (2, 3));
     assert!(
@@ -1034,8 +1106,9 @@ fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_j
     let second = app
         .output1
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job B's output 1");
     assert_eq!((second.buffer, second.identity), (0, 3));
     assert!(
@@ -1079,20 +1152,22 @@ fn an_unread_statistics_result_is_never_replaced_by_a_later_job() {
     let first = app
         .stats
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job 1 statistics");
     assert_eq!((first.buffer, first.identity), (0, 1));
     assert!(app.stats.read(0, STATS_BYTES) == expected(2, 1, 1, STATS_BYTES));
     let second = app
         .stats
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("job 2 statistics");
     assert_eq!((second.buffer, second.identity), (1, 2));
     assert!(
-        app.stats.ring.pop_frame().unwrap().is_none(),
+        app.stats.ring.pop_entry().unwrap().is_none(),
         "no third result"
     );
     assert_eq!(hw.with(|b| b.lost), 0);

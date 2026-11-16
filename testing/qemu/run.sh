@@ -46,6 +46,9 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_be_check.c"
 "${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
   "$work/kernel/test/lemnos_pisp_fe_check.c"
+# The dma-buf lend check: a real system-heap buffer lent to the back end, with the same fake block.
+"${compiler[@]}" "${flags[@]}" -I"$source" -I"$work/kernel" -I"$work/kernel/test" -pthread \
+  -o "$root/lemnos_lend_check" "$here/lemnos_lend_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
 (cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion --target "$target")

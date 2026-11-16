@@ -446,7 +446,7 @@ fn take_frame(
     pending: &mut Option<(u64, HeldFrame)>,
 ) {
     if pending.is_none()
-        && let NextBatch::Batch(frame) = reader.next()
+        && let NextBatch::Frame(frame) = reader.next()
     {
         *pending = Some((frame.time.as_nanos(), frame.held));
     }
@@ -496,7 +496,7 @@ fn frames_awake() {
         {
             return false;
         }
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             held += u64::from(frame.held.bytes(0).is_some());
         }
         true

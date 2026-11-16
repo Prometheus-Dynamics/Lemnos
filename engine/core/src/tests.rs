@@ -343,12 +343,13 @@ mod package {
             BusKind::Stream,
             BusKind::Pio,
             BusKind::Watchdog,
+            BusKind::Lend,
         ] {
             assert_ne!(bus_code(bus), abi::NEED_DEVICE);
             assert_eq!(bus_of(bus_code(bus)), Some(bus));
         }
         assert_eq!(bus_of(0), None);
-        assert_eq!(bus_of(16), None);
+        assert_eq!(bus_of(17), None);
         let mut seen = std::vec::Vec::new();
         for kind in [
             ErrorKind::NotFound,
@@ -460,6 +461,7 @@ mod package {
             sequence: 1 << 40,
             identity: u64::MAX,
             timestamp_ns: 5,
+            end_ns: 0,
         };
         assert_eq!(frame_in(frame_out(frame)), frame);
 

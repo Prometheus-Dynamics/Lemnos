@@ -49,7 +49,9 @@ pub struct FrontStreams {
 
 pub struct BackStreams {
     pub cfg: FrameStream,
-    pub input: FrameStream,
+    /// The back end's `input` stream, when the board declares one. This chain never writes it: the
+    /// front end's output 0 is lent to each job (`None`: the board declares none).
+    pub input: Option<FrameStream>,
     pub out: FrameStream,
 }
 
@@ -149,12 +151,37 @@ pub fn post_front(cfg: &mut FrameStream, identity: u64, buffer: u32) -> Result<(
         config_buffer: buffer,
         input_buffer: NO_BUFFER,
         outputs: [NO_BUFFER, NO_BUFFER, buffer, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     };
     post_job(cfg, &job)
 }
 
-/// A back-end job reading input and config buffer `slot` and writing output 0 buffer `output`.
+/// A back-end job with configuration buffer `slot`, reading the front-end buffer `lent` (a frame of
+/// the front end's output 0, lent: no copy), and writing output 0 buffer `output`.
 pub fn post_back(
+    cfg: &mut FrameStream,
+    identity: u64,
+    slot: u32,
+    lent: u32,
+    output: u32,
+) -> Result<(), String> {
+    let job = IspJob {
+        identity,
+        layout: LAYOUT_BACK_END,
+        config_buffer: slot,
+        input_buffer: NO_BUFFER,
+        outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: true,
+        lent_buffer: lent,
+    };
+    post_job(cfg, &job)
+}
+
+/// A back-end job whose input is the buffer `slot` of the back end's own `input` stream, which the
+/// caller has written (the copy path, for a host whose buffers are memfds and cannot be lent), and
+/// that writes output 0 buffer `output`.
+pub fn post_back_copied(
     cfg: &mut FrameStream,
     identity: u64,
     slot: u32,
@@ -166,6 +193,8 @@ pub fn post_back(
         config_buffer: slot,
         input_buffer: slot,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+        input_lent: false,
+        lent_buffer: 0,
     };
     post_job(cfg, &job)
 }
@@ -321,7 +350,7 @@ impl Chain {
                 .map_err(|e| format!("back end config stream: {e}"))?,
             input: client
                 .open_stream_writable(be_index, "input", platform.clone())
-                .map_err(|e| format!("back end input stream: {e}"))?,
+                .ok(),
             out: client
                 .open_stream(be_index, "output0", platform)
                 .map_err(|e| format!("back end output0 stream: {e}"))?,

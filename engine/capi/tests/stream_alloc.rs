@@ -49,6 +49,7 @@ fn frames_through_the_c_surface_allocate_nothing_anywhere_in_the_process() {
                 sequence,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })
             .unwrap();
         let got = frames

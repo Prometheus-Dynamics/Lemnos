@@ -402,7 +402,8 @@ impl Fixture {
                     sequence: u64::from(byte(data, 1)?),
                     identity: 0xfeed,
                     timestamp_ns: 99,
-                };
+                    end_ns: 0,
+                    };
                 stream.publish(frame).map(|()| 0).map_err(failed)
             }
             5 => {

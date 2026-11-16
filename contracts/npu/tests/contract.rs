@@ -369,8 +369,9 @@ impl Rig {
         let done = self
             .npu
             .consumer
-            .pop_frame()
+            .pop_entry()
             .unwrap()
+            .and_then(|entry| entry.frame())
             .expect("a completion");
         assert_eq!(done.buffer, job.result);
         assert_eq!(done.bytes as usize, RESULT_BYTES);

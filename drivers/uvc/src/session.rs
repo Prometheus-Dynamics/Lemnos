@@ -134,6 +134,7 @@ impl Outlet {
             sequence,
             identity: identity(frame.pts, frame.stc),
             timestamp_ns: now_ns,
+            end_ns: 0,
         });
         match published {
             Ok(()) => self.frames += 1,

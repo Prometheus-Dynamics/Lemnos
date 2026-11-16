@@ -181,6 +181,7 @@ impl Block {
             sequence: identity,
             identity,
             timestamp_ns: 1,
+            end_ns: 0,
         });
         Some(index)
     }
@@ -399,6 +400,8 @@ impl Client {
             config_buffer: 0,
             input_buffer: NO_BUFFER,
             outputs: [NO_BUFFER, NO_BUFFER, output0, NO_BUFFER],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);
@@ -452,8 +455,9 @@ fn the_consumer_reads_what_the_block_wrote_for_its_job() {
         now = fe.tick(now).unwrap();
         let frame = frames
             .ring
-            .pop_frame()
+            .pop_entry()
             .unwrap()
+            .and_then(|entry| entry.frame())
             .expect("a frame for the job");
         assert_eq!(
             (frame.buffer, frame.identity, frame.bytes),
@@ -493,7 +497,12 @@ fn a_job_on_a_buffer_the_consumer_holds_or_a_job_has_is_dropped() {
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
     hw.with(Block::run);
     now = fe.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().unwrap();
+    let frame = frames
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!((frame.buffer, frame.identity), (1, 1));
     // Buffer 1 is the consumer's now: the block must not write it again.
     jobs.post(3, 1);
@@ -543,7 +552,7 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
     // module still holds. The second consumer is told nothing and its memory is untouched.
     assert_eq!(hw.with(Block::run), Some(3));
     now = fe.tick(now).unwrap();
-    assert!(second.ring.pop_frame().unwrap().is_none());
+    assert!(second.ring.pop_entry().unwrap().is_none());
     assert!(read(&old[3]) == image(7));
     assert!(second.read(3).iter().all(|&byte| byte == 0));
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 2);
@@ -556,7 +565,12 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
         now = fe.tick(now).unwrap();
         assert_eq!(hw.with(Block::run), Some(output));
         now = fe.tick(now).unwrap();
-        let frame = second.ring.pop_frame().unwrap().expect("a frame");
+        let frame = second
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!((frame.buffer, frame.identity), (output, identity));
         assert!(
             second.read(output) == image(identity),
@@ -597,7 +611,12 @@ fn with_no_consumer_no_job_is_sent() {
     now = fe.tick(now).unwrap();
     assert_eq!(hw.with(Block::run), Some(0));
     fe.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().expect("a frame");
+    let frame = frames
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.identity, 2);
     assert!(frames.read(0) == image(2));
 }
@@ -613,6 +632,6 @@ fn a_stream_without_handles_is_refused_with_or_without_a_consumer() {
     let mut frames = Client::attach(&host, "output0");
     assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_SUPPORTED));
     assert_eq!(fe.tick(1), None, "not running");
-    assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert!(frames.ring.pop_entry().unwrap().is_none());
     assert_eq!(hw.with(|b| (b.given, b.queue.len(), b.refused)), (0, 0, 0));
 }

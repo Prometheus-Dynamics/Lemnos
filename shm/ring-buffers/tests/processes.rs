@@ -73,7 +73,7 @@ fn subscriber_process() {
 
     let mut found = None;
     wait_for("a frame", || {
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             assert_eq!(
                 (frame.time, frame.meta),
                 (SampleTime::from_nanos(1234), &b"exposure=7"[..])

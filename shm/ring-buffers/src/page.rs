@@ -4,8 +4,9 @@
 //! | Word | Holds |
 //! | --- | --- |
 //! | 0 | Magic: `SHMPOOL1` |
-//! | 1 | Generation (low 32 bits), buffers (high 32 bits) |
-//! | 2 to 7 | Reserved, zero |
+//! | 1 | Layout: [`LAYOUT`]. A reader of another layout refuses the page with [`RingError::Layout`] |
+//! | 2 | Generation (low 32 bits), buffers (high 32 bits) |
+//! | 3 to 7 | Reserved, zero |
 //! | 8 | Tickets: one word per buffer, `uses << 1 | taken back` |
 //! | 8 + buffers | Cut-off: one word per reader slot, nonzero once that reader is cut off |
 //!
@@ -21,8 +22,12 @@ use shm_ring::{Mem, MemMut, RingError};
 use crate::{BufferIndex, MAX_BUFFERS, MAX_READERS};
 
 const MAGIC: u64 = u64::from_le_bytes(*b"SHMPOOL1");
+/// The layout this build reads and writes. Layout 2 is the first pool page with a layout word (layout 1
+/// was the magic and the shape alone, never published as a layout). Same rule as the ring's.
+pub const LAYOUT: u64 = 2;
 const W_MAGIC: usize = 0;
-const W_SHAPE: usize = 1;
+const W_LAYOUT: usize = 1;
+const W_SHAPE: usize = 2;
 const TICKETS_AT: usize = 8;
 
 /// Bytes a pool page of `buffers` buffers needs.
@@ -48,6 +53,7 @@ pub fn format(mem: &impl MemMut, generation: u32, buffers: u32) -> Result<(), Ri
         u64::from(generation) | u64::from(buffers) << 32,
         Ordering::Relaxed,
     );
+    mem.store(W_LAYOUT, LAYOUT, Ordering::Relaxed);
     mem.store(W_MAGIC, MAGIC, Ordering::Release);
     Ok(())
 }
@@ -58,7 +64,20 @@ pub fn format(mem: &impl MemMut, generation: u32, buffers: u32) -> Result<(), Ri
 ///
 /// [`RingError::Malformed`] if `mem` doesn't hold a pool page that fits in it.
 pub fn read(mem: &impl Mem) -> Result<(u32, u32), RingError> {
-    if mem.words() <= TICKETS_AT || mem.load(W_MAGIC, Ordering::Acquire) != MAGIC {
+    if mem.words() <= TICKETS_AT {
+        return Err(RingError::Malformed("not a pool page"));
+    }
+    // The layout is checked before anything else, as a ring's is: an old or new page is refused with
+    // the value it holds and the one this build reads.
+    let layout = mem.load(W_LAYOUT, Ordering::Relaxed);
+    if layout != LAYOUT {
+        return Err(RingError::Layout {
+            what: "this pool page",
+            found: layout,
+            reads: LAYOUT,
+        });
+    }
+    if mem.load(W_MAGIC, Ordering::Acquire) != MAGIC {
         return Err(RingError::Malformed("not a pool page"));
     }
     let shape = mem.load(W_SHAPE, Ordering::Relaxed);
@@ -153,6 +172,31 @@ mod tests {
 
     /// The magic this page carried before the rename, as its 8 ASCII bytes.
     const RETIRED_MAGIC: [u8; 8] = [0x4f, 0x52, 0x49, 0x4f, 0x4e, 0x50, 0x4c, 0x31];
+
+    #[test]
+    fn a_pool_page_of_another_layout_is_refused_with_both_numbers() {
+        let mem = Heap::new(bytes(4) / 8);
+        format(&mem, 7, 4).expect("format");
+        // A page as the layout-less build wrote it: the shape where the layout now is, and no layout
+        // word after the magic.
+        mem.store(W_LAYOUT, u64::from(7u32) | 4 << 32, Ordering::Relaxed);
+        assert!(matches!(
+            read(&mem),
+            Err(RingError::Layout { what: "this pool page", found, reads: 2 }) if found == (u64::from(7u32) | 4 << 32)
+        ));
+        // A future layout is refused the same way.
+        mem.store(W_LAYOUT, 3, Ordering::Relaxed);
+        assert!(matches!(
+            read(&mem),
+            Err(RingError::Layout {
+                what: "this pool page",
+                found: 3,
+                reads: 2
+            })
+        ));
+        mem.store(W_LAYOUT, LAYOUT, Ordering::Relaxed);
+        assert_eq!(read(&mem).expect("read"), (7, 4));
+    }
 
     #[test]
     fn a_pool_page_with_the_retired_magic_is_refused() {

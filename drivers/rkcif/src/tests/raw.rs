@@ -402,7 +402,12 @@ fn the_capture_node_fills_the_streams_own_buffers_and_nothing_is_copied() {
         let byte = 0xc0 + sequence as u8;
         rig.node_fills(slot, sequence as u32, byte);
         rig.tick();
-        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        let frame = client
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!((frame.buffer, frame.bytes), (slot, FRAME as u32));
         assert_eq!(client.bytes(slot), vec![byte; FRAME]);
         assert!(client.ring.release(frame.buffer));
@@ -430,7 +435,7 @@ fn the_capture_node_fills_the_streams_own_buffers_and_nothing_is_copied() {
     rig.tick();
     rig.tick();
     assert!(rig.node.with(|n| n.handles) > before);
-    assert!(next.ring.pop_frame().unwrap().is_none());
+    assert!(next.ring.pop_entry().unwrap().is_none());
     assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
 }
 
@@ -449,7 +454,12 @@ fn on_a_stream_of_plain_memory_each_frame_is_copied_once() {
     let mut client = Client::attach(&rig, 1);
     rig.node.with(|n| n.filled.push_back((1, 0)));
     rig.tick();
-    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    let frame = client
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.bytes, FRAME as u32);
     assert_eq!(client.bytes(frame.buffer), vec![0x5a; FRAME]);
     assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
@@ -491,7 +501,12 @@ fn raw_frames_through_the_streams_own_buffers_allocate_nothing() {
         rig.node_fills(slot, round, round as u8);
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
-        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        let frame = client
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert!(client.ring.release(frame.buffer));
         let ((), count) = allocations(|| rig.tick());
         allocated += count;
@@ -560,8 +575,9 @@ fn on_standby_the_node_captures_with_nobody_attached_and_a_consumer_gets_the_new
     let mut client = Client::attach(&rig, 1);
     let frame = client
         .ring
-        .pop_frame()
+        .pop_entry()
         .unwrap()
+        .and_then(|entry| entry.frame())
         .expect("the newest frame, at once");
     assert_eq!((frame.buffer, frame.sequence), (1, 1));
     assert_eq!(client.bytes(1), vec![0x22; FRAME]);
@@ -569,7 +585,12 @@ fn on_standby_the_node_captures_with_nobody_attached_and_a_consumer_gets_the_new
     // Buffers the node holds from before it came are still the consumer's memory.
     rig.node_fills(2, 2, 0x33);
     rig.tick();
-    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    let frame = client
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.buffer, 2);
     assert_eq!(client.bytes(2), vec![0x33; FRAME]);
     // Steady state with nobody attached allocates nothing either.
@@ -656,7 +677,11 @@ fn embedded_lines_come_off_the_metadata_node_onto_the_embedded_stream() {
     let mut ring = lease.consumer().unwrap();
     node.with(|n| n.filled.push_back((0, 5)));
     Lifecycle::tick(&mut driver, 1_000_000).expect("a started driver ticks");
-    let line = ring.pop_frame().unwrap().expect("the line is published");
+    let line = ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("the line is published");
     assert_eq!((line.bytes, line.sequence), (FRAME as u32, 5));
     assert!(ring.release(line.buffer));
     let mut out = vec![0u8; FRAME];

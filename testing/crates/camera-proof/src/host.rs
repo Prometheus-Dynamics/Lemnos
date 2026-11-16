@@ -9,7 +9,7 @@ use std::time::Duration;
 use lemnos_core::{Bound, Caller, CallerId, Contract, LOCAL_ARGS, MethodId, Result, Status};
 use lemnos_host::Host;
 use lemnos_sim::SimClock;
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, RingError};
 
 use crate::{Bus, Device, Error, Frames};
 
@@ -77,7 +77,15 @@ impl Frames for HostFrames<'_> {
     }
 
     fn pop(&mut self) -> std::result::Result<Option<FrameSlot>, Error> {
-        self.consumer.pop_frame().map_err(Error::Ring)
+        match self.consumer.pop_entry().map_err(Error::Ring)? {
+            None => Ok(None),
+            // A job's end on a stream the proof reads frames from is a failure: the proof has no
+            // frame for it, and it was a failure before job ends had their own arm.
+            Some(entry) => entry
+                .frame()
+                .map(Some)
+                .ok_or(Error::Ring(RingError::Broken)),
+        }
     }
 
     fn read(&mut self, frame: &FrameSlot, out: &mut [u8]) -> std::result::Result<(), Error> {

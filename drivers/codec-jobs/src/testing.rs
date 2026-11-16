@@ -152,7 +152,7 @@ impl Caller {
     /// The next completion, if one has come: the job's identity, its record and its
     /// read-back. The result buffer goes back to the stream.
     pub fn completion(&mut self) -> Option<(u64, Completion, Vec<u8>)> {
-        let frame = self.ring.pop_frame().unwrap()?;
+        let frame = self.ring.pop_entry().unwrap()?.frame()?;
         let record = self.read(frame.buffer, 0, COMPLETION_BYTES);
         let record = Completion::decode(&mut Reader::new(&record)).unwrap();
         assert_eq!(frame.bytes as usize, DATA_OFFSET + record.count as usize);

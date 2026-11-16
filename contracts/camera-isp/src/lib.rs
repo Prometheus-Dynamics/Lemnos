@@ -79,6 +79,11 @@ pub struct IspInfo {
     /// The layout of a statistics buffer, a number that means something per driver.
     pub statistics_layout: u32,
     pub statistics_bytes: u32,
+    /// Whether this ISP takes a lent input: a job names an upstream output0 buffer
+    /// ([`IspJob::input_lent`]) rather than a buffer of its own input stream. A consumer posts
+    /// lent jobs only when this is true; a driver from before the field reads it as false.
+    #[added]
+    pub input_lend: bool,
 }
 
 /// One configuration layout.
@@ -133,6 +138,14 @@ pub struct IspJob {
     pub input_buffer: u32,
     /// For each output, a buffer on its stream, or [`NO_BUFFER`] to skip it this job.
     pub outputs: [u32; MAX_OUTPUTS],
+    /// When true the input is lent: `input_buffer` is [`NO_BUFFER`], and [`lent_buffer`](Self::lent_buffer)
+    /// is a buffer of the upstream device's output0, which the host lends for this job. Read as false
+    /// by a driver from before the field.
+    #[added]
+    pub input_lent: bool,
+    /// The lent input's buffer, when [`input_lent`](Self::input_lent) is set; otherwise unused.
+    #[added]
+    pub lent_buffer: u32,
 }
 
 /// Counted since the last `start`.
@@ -144,6 +157,9 @@ pub struct Counters {
     pub dropped: u64,
     /// Jobs the block reported as failed.
     pub errors: u64,
+    /// Jobs whose input was lent (counted whether or not they ran).
+    #[added]
+    pub lent: u64,
 }
 
 #[contract("camera.isp", version = 1, kind = "camera")]

@@ -53,7 +53,7 @@ memory = "dma-buf"
 heap = "linux,cma"
 
 [devices.streams.output0]
-buffers = 4
+buffers = 6
 buffer_bytes = 2052096
 memory = "dma-buf"
 heap = "linux,cma"
@@ -67,6 +67,7 @@ heap = "linux,cma"
 [[devices]]
 id = "cam0-be"
 driver = "pisp-be"
+lend = "output0"
 config = { device = "1000880000.pisp_be" }
 
 [devices.streams.config]

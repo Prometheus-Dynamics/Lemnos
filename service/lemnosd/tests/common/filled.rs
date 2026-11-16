@@ -140,6 +140,7 @@ impl FilledDriver {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             });
             while let Ok(Some(_)) = self.output.next_buffer() {}
         }
@@ -166,6 +167,7 @@ impl FilledDriver {
             sequence: u64::from(self.done),
             identity: job.identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         });
     }
 }

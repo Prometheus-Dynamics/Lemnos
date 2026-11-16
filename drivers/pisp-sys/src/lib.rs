@@ -28,7 +28,7 @@ pub const STATE_OPEN: u32 = 0;
 /// `sizeof(struct pisp_be_tiles_config)`, one configuration slot.
 pub const CONFIG_BYTES: usize = 16720;
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_JOB_SLOTS: usize = 5;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;
@@ -132,6 +132,18 @@ struct Register {
     size: u64,
 }
 
+/// `struct lemnos_stream_register_lent`: a dma-buf the block only reads, with its memory generation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct RegisterLent {
+    fd: i32,
+    region: u32,
+    addr: u64,
+    size: u64,
+    generation: u32,
+    reserved: u32,
+}
+
 /// `struct lemnos_stream_unregister`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -156,6 +168,7 @@ const IOC_BE_CREATE: u32 = iowr::<BeCreate>(b'L', 0xb0);
 const IOC_BE_STATUS: u32 = ior::<BeStatus>(b'L', 0xb1);
 const IOC_KICK: u32 = lemnos_linux_sys::ioc(0, b'L', 0x81, 0);
 const IOC_REGISTER: u32 = iowr::<Register>(b'L', 0x82);
+const IOC_REGISTER_LENT: u32 = iowr::<RegisterLent>(b'L', 0x8a);
 const IOC_UNREGISTER: u32 = lemnos_linux_sys::iow::<Unregister>(b'L', 0x83);
 const IOC_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
 
@@ -185,6 +198,8 @@ pub struct Frame {
     pub identity: u64,
     /// When it was published.
     pub timestamp_ns: u64,
+    /// When the frame ended (its end of frame, or the block's finish); 0 when not stamped.
+    pub end_ns: u64,
     /// What its return must carry.
     pub fence: u32,
 }
@@ -345,6 +360,24 @@ impl BeStream {
         })
     }
 
+    /// Lets the block read `memory`, a dma-buf another stream owns, read-only, for as long as it is
+    /// registered: the module maps it to the block `DMA_TO_DEVICE` and keeps the mapping pinned while
+    /// its memory `generation` holds, so registering it again costs no attach or map. Unregister it
+    /// the same way as any region.
+    pub fn register_lent(&self, memory: BorrowedFd<'_>, generation: u32) -> io::Result<Region> {
+        let mut reg = RegisterLent {
+            fd: memory.as_raw_fd(),
+            generation,
+            ..Default::default()
+        };
+        ioctl(self.fd.as_fd(), IOC_REGISTER_LENT, (&raw mut reg).cast())?;
+        Ok(Region {
+            region: reg.region,
+            addr: reg.addr,
+            size: reg.size,
+        })
+    }
+
     /// Lets go of a registered dma-buf. The module refuses (`EBUSY`) while a job uses it.
     pub fn unregister(&self, region: u32) -> io::Result<()> {
         let mut arg = Unregister {
@@ -433,6 +466,7 @@ impl BeStream {
             identity: self.word(at + 2)?.load(Ordering::Relaxed),
             timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
             fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
+            end_ns: self.word(at + 5)?.load(Ordering::Relaxed),
         };
         self.frames_tail += 1;
         self.word(WORD_FRAMES_TAIL)?

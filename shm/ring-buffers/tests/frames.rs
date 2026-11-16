@@ -53,7 +53,7 @@ fn send(
 
 fn frame<'a>(next: NextBatch<'a>) -> Batch<'a> {
     match next {
-        NextBatch::Batch(frame) => frame,
+        NextBatch::Frame(frame) => frame,
         other => panic!("{other:?}"),
     }
 }
@@ -141,7 +141,7 @@ fn the_publisher_drops_frames_instead_of_waiting_and_keeps_the_newest_frame() {
     for _ in 0..2 {
         assert!(matches!(
             reader.next(),
-            NextBatch::Skipped(_) | NextBatch::Batch(_)
+            NextBatch::Skipped(_) | NextBatch::Frame(_)
         ));
     }
     // One reader lets go: that buffer, and only that one, comes back.
@@ -304,12 +304,16 @@ fn a_pool_that_does_not_add_up_is_refused_by_the_subscriber() {
         attach(memfd(4096, true), &one(0, 64)),
         Err(RingError::Malformed(_))
     ));
-    // A page that isn't a pool page.
+    // A page that isn't a pool page: blank, so its layout word is 0 where this build reads 2.
     let not_a_page = memfd(4096, true);
     let buffers = two(one(0, 64), one(64, 64));
     assert!(matches!(
         PoolView::attach(not_a_page, vec![memfd(4096, true)], &buffers),
-        Err(RingError::Malformed(_))
+        Err(RingError::Layout {
+            what: "this pool page",
+            found: 0,
+            reads: 2
+        })
     ));
     // And one that adds up.
     let view = attach(memfd(4096, true), &buffers).expect("view");
@@ -366,9 +370,53 @@ fn publishing_and_reading_frames_allocates_nothing() {
     assert_steady_no_allocs("frames", 16, 10_000, || {
         fill = fill.wrapping_add(1);
         send(&mut writer, &NoHolders, fill, u64::from(fill)).expect("frame");
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             read += u64::from(frame.held.bytes(0).expect("bytes")[100] == fill);
         }
     });
     assert_eq!(read, 10_016);
+}
+
+/// An entry that names no buffer comes back as its own arm, in order with the frames, and never as
+/// a frame: a frame's arm always holds a buffer.
+#[test]
+fn an_entry_that_names_no_buffer_is_its_own_arm_and_never_a_frame() {
+    let (_ring, mut writer, mut reader) = topic(4);
+    let buffer = send(&mut writer, &NoHolders, 0xAB, 10).expect("frame");
+    writer
+        .publish_empty(SampleTime::from_nanos(20), &[7, 7])
+        .expect("a job's end");
+    {
+        let first = frame(reader.next());
+        assert_eq!((first.seq, first.held.buffer(0)), (0, Some(buffer)));
+        assert!(!first.held.is_empty(), "a frame always holds a buffer");
+    }
+    match reader.next() {
+        NextBatch::NoBuffers(end) => {
+            assert_eq!(
+                (end.seq, end.time, end.meta),
+                (1, SampleTime::from_nanos(20), &[7, 7][..])
+            );
+        }
+        other => panic!("a buffer-less entry must be NoBuffers, got {other:?}"),
+    }
+    assert!(matches!(reader.next(), NextBatch::Empty));
+}
+
+/// The entry reader says which arm a payload is: a buffer-less entry is `Read::NoBuffers`, and a
+/// frame is `Read::Buffers` with its buffers.
+#[test]
+fn the_entry_reader_says_which_arm_a_payload_is() {
+    use shm_ring_buffers::entry::{self, Read};
+    let mut payload = [0u8; 64];
+    let n = entry::write(&mut payload, 3, &[], &[9, 9]).expect("entry");
+    assert!(matches!(
+        entry::read(&payload[..n]),
+        Some(Read::NoBuffers { generation: 3, meta }) if meta == [9, 9]
+    ));
+    let n = entry::write(&mut payload, 3, &[(BufferIndex(1), 5)], &[]).expect("entry");
+    match entry::read(&payload[..n]) {
+        Some(Read::Buffers(e)) => assert_eq!((e.count, e.buffers[0].0), (1, BufferIndex(1))),
+        other => panic!("a frame must be Buffers, got {other:?}"),
+    }
 }

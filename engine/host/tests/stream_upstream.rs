@@ -111,6 +111,7 @@ impl Node for Holder {
                 sequence: 1,
                 identity: 1,
                 timestamp_ns: 5,
+                end_ns: 0,
             })
             .map_err(|_| Status::IO)?;
         Ok(buffer)
@@ -245,7 +246,7 @@ fn an_upstream_device_recovering_stalls_the_stream_once_and_resumes_kept_before_
     let rig = Rig::new();
     let mut consumer = rig.attach(R);
     rig.call(R, 3).unwrap();
-    assert!(consumer.pop_frame().unwrap().is_some());
+    assert!(consumer.pop_entry().unwrap().is_some());
     let before = words(&consumer);
     assert_eq!((before.state, before.edges), (producer::RUNNING, 0));
 
@@ -255,7 +256,7 @@ fn an_upstream_device_recovering_stalls_the_stream_once_and_resumes_kept_before_
     assert_eq!((stalled.state, stalled.edges), (producer::RETRYING, 1));
     assert!(stalled.since_ns >= 2_000_000_000, "{stalled:?}");
     assert_eq!(consumer.state(), STATE_OPEN);
-    assert!(consumer.pop_frame().unwrap().is_none(), "frames stop");
+    assert!(consumer.pop_entry().unwrap().is_none(), "frames stop");
     // Still failing, ticked again: no second edge.
     rig.settle();
     rig.settle();
@@ -269,7 +270,7 @@ fn an_upstream_device_recovering_stalls_the_stream_once_and_resumes_kept_before_
     );
     rig.call(R, 3).unwrap();
     assert!(
-        consumer.pop_frame().unwrap().is_some(),
+        consumer.pop_entry().unwrap().is_some(),
         "frames on the same attachment"
     );
     assert_eq!(rig.host.stream_stats(R, "frames").unwrap().attachments, 1);

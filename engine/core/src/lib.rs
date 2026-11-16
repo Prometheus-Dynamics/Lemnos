@@ -50,10 +50,10 @@ pub use lemnos_hal::blocks::BufferHandle;
 pub use lemnos_hal::register::AddressWidth;
 pub use lemnos_macros::{Decode, Encode, contract, driver};
 pub use resources::{
-    BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, Home, I2c, InterruptHandle, Line,
-    Lock, Need, NeedKind, Pio, Provider, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource,
-    Resources, Spi, StreamHandle, StreamKind, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
-    checked_stream,
+    BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, Home, I2c, InterruptHandle,
+    LendHandle, Line, Lock, Need, NeedKind, Pio, Provider, Pwm, RawSpiBus, RegistersHandle,
+    ResetHandle, Resource, Resources, Spi, StreamHandle, StreamKind, Uart, UsbDeviceHandle,
+    UsbFunctionHandle, Watchdog, checked_stream,
 };
 pub use tag::Tag;
 

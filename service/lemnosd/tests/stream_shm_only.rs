@@ -159,6 +159,7 @@ fn a_process_with_only_the_shm_crates_reads_a_lemnosd_stream() {
             sequence: 42,
             identity: 7,
             timestamp_ns: CAPTURED_NS,
+            end_ns: 0,
         })
         .unwrap();
 
@@ -195,7 +196,7 @@ fn a_process_with_only_the_shm_crates_reads_a_lemnosd_stream() {
 
     // Read one frame: its metadata decodes, and its bytes are the driver's.
     match frames.next() {
-        NextBatch::Batch(batch) => {
+        NextBatch::Frame(batch) => {
             let info = FrameInfo::decode(batch.meta).expect("the frame's metadata");
             assert_eq!(
                 (info.sequence, info.identity, info.bytes),

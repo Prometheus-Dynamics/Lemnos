@@ -196,6 +196,10 @@ pub struct StreamFrame {
     /// When the frame was made, in nanoseconds on the host's monotonic clock
     /// (`CLOCK_MONOTONIC` on Linux); 0 when the producer has no time for it.
     pub timestamp_ns: u64,
+    /// When the entry ended (the producer's end of it: a capture's end of frame, or a block's
+    /// finish), on the same clock; 0 when the producer has no time for the end. Never a guess from
+    /// the start.
+    pub end_ns: u64,
 }
 
 #[cfg(all(feature = "std", unix))]
@@ -204,6 +208,49 @@ extern crate std;
 /// Nothing: there is no value of this type, so no handle can be made here.
 #[cfg(not(all(feature = "std", unix)))]
 type HandleInner<'a> = (core::convert::Infallible, core::marker::PhantomData<&'a ()>);
+
+/// One buffer of a stream lent to a job of another stream: the buffer's handle, and the length of
+/// the entry it holds.
+#[derive(Debug, Clone)]
+pub struct LentBuffer<'a> {
+    /// The buffer's memory, shared with the holder for as long as this lives.
+    pub handle: BufferHandle<'a>,
+    /// The entry's length, across its planes.
+    pub bytes: u32,
+    /// The generation of the memory the handle is, which keys a block's pin cache: a memory
+    /// replaced by the producer has a new one.
+    pub generation: u32,
+}
+
+/// What a lend answers: the frame lent, or why it could not be (the reasons the job's end names).
+#[derive(Debug, Clone)]
+pub enum Lend<'a> {
+    /// The buffer holds the frame, and is lent until it is unlent.
+    Lent(LentBuffer<'a>),
+    /// The buffer is not published, or is already lent: busy, a reason the job's end names `busy`.
+    Busy,
+    /// The buffer holds a frame, but not the identity asked for: `identity-mismatch`.
+    IdentityMismatch,
+}
+
+/// A buffer of one stream lent to a job of another stream, for a block that only reads it. The job
+/// names the buffer, never a descriptor, and the stream it is lent from is the one the board names
+/// for the lending device. The holder of the stream answers with the buffer's handle for the entry it
+/// is publishing as `identity`, and the block gives the buffer back with [`unlend`](Self::unlend). A
+/// buffer is lent to one block at a time, and a lent buffer is never taken back for the producer's
+/// next entry until it is unlent.
+pub trait LendSource {
+    /// Every stream's errors have the kinds' meaning, so a default here can refuse.
+    type Error: HalError + From<crate::ErrorKind>;
+
+    /// Lends `buffer` for the frame `identity`: its handle and length, when the buffer holds that
+    /// frame and is not already lent. `Ok(None)` when it can't be lent now: not published, another
+    /// frame, or lent already. Allocates nothing.
+    fn lend(&mut self, buffer: u32, identity: u64) -> Result<Lend<'static>, Self::Error>;
+
+    /// Gives `buffer` back, lent for `identity`. Refused (`InvalidInput`) for a buffer not lent.
+    fn unlend(&mut self, buffer: u32, identity: u64) -> Result<(), Self::Error>;
+}
 
 /// What names a buffer on a host that has file descriptors.
 #[cfg(all(feature = "std", unix))]
@@ -321,6 +368,20 @@ pub trait StreamEndpoint {
     fn buffer_kind(&self) -> BufferKind;
     /// Passes a filled buffer to the consumer.
     fn publish(&mut self, frame: StreamFrame) -> Result<(), Self::Error>;
+    /// Ends a job with no result, a refusal or a timeout: the consumer gets the job's end with
+    /// `identity` and `reason` (a nonzero `lemnos_wire::ring::reason` word), in order with the
+    /// frames, and no buffer. `end_ns` is the end's time on the monotonic clock, 0 for none.
+    /// Nothing is published when no consumer is attached, and it is counted as dropped. A stream
+    /// that cannot say so refuses, rather than leaving the consumer waiting on the identity.
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), Self::Error> {
+        let _ = (identity, reason, end_ns);
+        Err(crate::ErrorKind::Unsupported.into())
+    }
     /// The next buffer the consumer has returned, if any. This is collection: finding none is
     /// nothing, and is not counted as a refusal.
     fn next_buffer(&mut self) -> Result<Option<u32>, Self::Error>;

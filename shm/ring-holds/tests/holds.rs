@@ -73,7 +73,7 @@ impl Topic {
 /// Reads until a frame comes, and holds it.
 fn hold(reader: &mut Reader) -> (u8, Held<Marks>) {
     for _ in 0..100 {
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             return (frame.meta[0], frame.held);
         }
     }
@@ -182,7 +182,7 @@ fn a_stuck_reader_is_cut_off_and_its_buffers_come_back() {
     let mut last = 0;
     loop {
         match good.next() {
-            NextBatch::Batch(frame) => last = frame.meta[0],
+            NextBatch::Frame(frame) => last = frame.meta[0],
             NextBatch::Empty => break,
             // It was not reading while the others ran, so the oldest frames are gone.
             NextBatch::Skipped(_) => {}
@@ -314,7 +314,7 @@ fn frames_held_across_threads_are_never_torn() {
                         }
                     });
                     while !done.load(Ordering::Acquire) {
-                        if let NextBatch::Batch(frame) = reader.next() {
+                        if let NextBatch::Frame(frame) = reader.next() {
                             let fill = frame.meta[0];
                             assert!(whole(&frame.held, fill), "a frame was torn when read");
                             send.send((fill, frame.held)).expect("checker");
@@ -358,7 +358,7 @@ fn holding_and_enforcing_allocate_nothing() {
     assert_steady_no_allocs("frames with holds", 16, 10_000, || {
         round += 1;
         topic.send(round as u8, round).expect("frame");
-        if let NextBatch::Batch(frame) = reader.next() {
+        if let NextBatch::Frame(frame) = reader.next() {
             read += u64::from(whole(&frame.held, round as u8));
             // Keep each frame until the next one, so a hold is always live.
             kept = Some(frame.held);

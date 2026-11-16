@@ -242,7 +242,11 @@ struct lemnos_claim {
 #define LEMNOS_STREAM_MAX_JOB_SLOTS	64u
 #define LEMNOS_STREAM_MAX_JOB_BYTES	4096u
 #define LEMNOS_STREAM_BUFFER_ALIGN	4096u
-#define LEMNOS_STREAM_FRAME_WORDS	5
+/*
+ * A frame's words in the frame ring: buffer and bytes, sequence, identity, start time, fence, and
+ * the end time (word 5: CLOCK_MONOTONIC ns of the frame's end, 0 when the block stamps none).
+ */
+#define LEMNOS_STREAM_FRAME_WORDS	6
 /* Buffers a stream made with LEMNOS_STREAM_CREATE_BUFFERS may have. */
 #define LEMNOS_STREAM_MAX_OWN_BUFFERS	64u
 #define LEMNOS_STREAM_JOB_RANGES	4
@@ -320,6 +324,21 @@ struct lemnos_stream_register {
 	__u32 region;		/* out: for LEMNOS_STREAM_IOC_UNREGISTER */
 	__u64 addr;		/* out: its device address */
 	__u64 size;		/* out: bytes */
+};
+
+/*
+ * A dma-buf the block only reads: an input lent from another stream's buffer. It is mapped to the
+ * block read-only (DMA_TO_DEVICE), and when unregistered it stays pinned in the stream's pin cache
+ * while its memory's generation is unchanged, so registering the same dma-buf again costs no
+ * attach or map. A cached pin of another generation is unmapped when the next lent register comes.
+ */
+struct lemnos_stream_register_lent {
+	__s32 fd;		/* in: a dma-buf */
+	__u32 region;		/* out: for LEMNOS_STREAM_IOC_UNREGISTER */
+	__u64 addr;		/* out: its device address */
+	__u64 size;		/* out: bytes */
+	__u32 generation;	/* in: the generation of the memory this dma-buf is */
+	__u32 reserved;		/* must be 0 */
 };
 
 struct lemnos_stream_unregister {
@@ -448,6 +467,7 @@ struct lemnos_stream_bell {
 };
 
 #define LEMNOS_STREAM_IOC_BELL         _IOW('L', 0x89, struct lemnos_stream_bell)
+#define LEMNOS_STREAM_IOC_REGISTER_LENT _IOWR('L', 0x8a, struct lemnos_stream_register_lent)
 
 #define LEMNOS_BUS_MAX_SEGMENTS 16
 

@@ -57,7 +57,7 @@ const JOB_SLOTS: u32 = 4;
 /// `sizeof(struct lemnos_stream_job)`.
 const JOB_BYTES: u32 = 80;
 /// The shm ring's words for one field of `FRAME_SLOTS` samples (as `shm-ring-check`).
-const RING_WORDS: usize = 17 + 10 * FRAME_SLOTS as usize;
+const RING_WORDS: usize = 17 + 11 * FRAME_SLOTS as usize;
 /// The pool page starts after the ring.
 const PAGE_AT: usize = RING_WORDS;
 /// Frames the reader holds its buffer across. Four buffers and one held leave three to reuse.
@@ -242,7 +242,7 @@ fn run_with(
         match reader.next() {
             Next::Sample(sample) => {
                 let sequence = sample.seq;
-                let Some(e) = entry::read(sample.payload) else {
+                let Some(entry::Read::Buffers(e)) = entry::read(sample.payload) else {
                     continue;
                 };
                 let buffer = e.buffers[0].0.0;
@@ -483,7 +483,7 @@ fn scenario(
     while Instant::now() < deadline {
         match reader.next() {
             Next::Sample(sample) => {
-                let Some(e) = entry::read(sample.payload) else {
+                let Some(entry::Read::Buffers(e)) = entry::read(sample.payload) else {
                     continue;
                 };
                 let buffer = e.buffers[0].0.0;
@@ -644,7 +644,7 @@ fn hold_first(fx: &Fixture, marks: &Marks) -> Option<(u32, u32, u64)> {
     while Instant::now() < deadline {
         match reader.next() {
             Next::Sample(sample) => {
-                let Some(e) = entry::read(sample.payload) else {
+                let Some(entry::Read::Buffers(e)) = entry::read(sample.payload) else {
                     continue;
                 };
                 let buffer = e.buffers[0].0.0;

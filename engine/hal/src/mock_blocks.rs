@@ -489,6 +489,8 @@ struct StreamState {
     stale: Vec<bool>,
     /// Times the producer faulted its consumer.
     faults: u32,
+    /// Job ends the producer published: identity, reason and end time, in order.
+    job_ends: VecDeque<(u64, u32, u64)>,
 }
 
 /// A stream with a test playing the consumer.
@@ -638,6 +640,11 @@ impl MockStream {
         with(&self.state, |s| s.published.pop_front())
     }
 
+    /// The next job end the producer published, as (identity, reason, end time).
+    pub fn take_job_end(&self) -> Option<(u64, u32, u64)> {
+        with(&self.state, |s| s.job_ends.pop_front())
+    }
+
     pub fn return_buffer(&self, buffer: u32) {
         with(&self.state, |s| s.returned.push_back(buffer));
     }
@@ -660,6 +667,21 @@ impl StreamEndpoint for MockStream {
             return BufferKind::Handles;
         }
         BufferKind::Plain
+    }
+
+    fn publish_job_end(
+        &mut self,
+        identity: u64,
+        reason: u32,
+        end_ns: u64,
+    ) -> Result<(), ErrorKind> {
+        if reason == 0 {
+            return Err(ErrorKind::InvalidInput);
+        }
+        with(&self.state, |s| {
+            s.job_ends.push_back((identity, reason, end_ns))
+        });
+        Ok(())
     }
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {
@@ -1662,6 +1684,7 @@ mod tests {
             sequence: 1,
             identity: 7,
             timestamp_ns: 9,
+            end_ns: 0,
         };
         stream.publish(frame).unwrap();
         assert_eq!(consumer.take_frame(), Some(frame));
@@ -1697,6 +1720,7 @@ mod tests {
             sequence: 1,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         };
         stream.publish(frame).unwrap();
         assert_eq!(stream.write(buffer, 0, &[1]), Err(ErrorKind::InvalidInput));
@@ -1818,6 +1842,7 @@ mod tests {
             sequence: 1,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         };
         stream.publish(frame).unwrap();
         assert_eq!(
@@ -1839,6 +1864,7 @@ mod tests {
             sequence: 1,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         };
         stream.publish(frame).unwrap();
         consumer.post_job(&[1]);

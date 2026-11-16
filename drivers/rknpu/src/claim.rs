@@ -529,6 +529,7 @@ impl<D: Device> Claim<D> {
             sequence: 0,
             identity: 0,
             timestamp_ns: 0,
+            end_ns: 0,
         })?;
         self.set_held(buffer, false);
         Ok(())
@@ -807,6 +808,7 @@ impl<D: Device> Claim<D> {
                 sequence: 0,
                 identity: 0,
                 timestamp_ns: 0,
+                end_ns: 0,
             })?;
             self.set_held(buffer, false);
         }
@@ -841,6 +843,7 @@ impl<D: Device> Claim<D> {
             sequence: self.sequence,
             identity: job.identity,
             timestamp_ns: now_ns,
+            end_ns: 0,
         };
         let published = stream.publish(frame);
         if published.is_ok() {

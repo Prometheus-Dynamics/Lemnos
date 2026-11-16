@@ -33,7 +33,7 @@ use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
-use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
+use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT, reason};
 
 /// The driver's entry with its real manifest, so each stream's kind is the one the driver declares.
 /// The device is never bound (this binder refuses), so the test drives the driver itself.
@@ -251,6 +251,7 @@ impl Block {
             sequence: job.identity,
             identity: job.identity,
             timestamp_ns: 1,
+            end_ns: 0,
         });
     }
 }
@@ -294,8 +295,14 @@ impl Hardware for Hw {
         Ok(Placed { tdn: None })
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         self.with(|b| b.regions.clear());
+        false
+    }
+
+    /// Stand-in, as the unit tests': the lent dma-buf is registered as any region here.
+    fn register_lent(&mut self, memory: BorrowedFd<'_>, _generation: u32) -> Result<Registered> {
+        self.register(memory)
     }
 
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
@@ -409,9 +416,10 @@ fn driver(host: &Host, hw: &Hw) -> PispBe {
         Box::new(hw.clone()),
         PispBeNeeds {
             config: stream("config"),
-            input: stream("input"),
+            input: Some(stream("input")),
             output0: stream("output0"),
             output1: None,
+            lend: None,
         },
         Options::new(BUFFERS, 4).unwrap(),
     );
@@ -466,6 +474,8 @@ impl Client {
             config_buffer: config,
             input_buffer: input,
             outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
+            input_lent: false,
+            lent_buffer: 0,
         };
         let mut buf = [0; 128];
         let mut w = Writer::new(&mut buf);
@@ -539,8 +549,9 @@ fn the_client_reads_what_the_block_made_from_its_input_and_config() {
         let frame = app
             .output
             .ring
-            .pop_frame()
+            .pop_entry()
             .unwrap()
+            .and_then(|entry| entry.frame())
             .expect("a frame for the job");
         assert_eq!(
             (frame.buffer, frame.identity, frame.bytes),
@@ -595,7 +606,13 @@ fn a_config_changed_after_the_driver_read_it_changes_nothing_the_block_runs() {
         "the module got the configuration as it was when the job was taken"
     );
     assert_eq!(hw.with(|b| b.keys.clone()), [0x5a]);
-    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    let frame = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 0x5a));
 }
 
@@ -615,9 +632,25 @@ fn a_job_naming_an_input_buffer_the_driver_does_not_hold_is_dropped() {
     app.config.post(3, 0, 1, 2);
     let now = be.tick(1).unwrap();
     be.tick(now).unwrap();
-    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    // A refused job's end is published when it is taken, with no buffer and its reason. The result
+    // comes when the block finishes it, after the refusals taken in the same look.
+    let Some(lemnos_wire::ring::Entry::JobEnd(end)) = app.output.ring.pop_entry().unwrap() else {
+        panic!("a refused job's end")
+    };
+    assert_eq!((end.identity, end.reason), (1, reason::BUSY));
+    let Some(lemnos_wire::ring::Entry::JobEnd(end)) = app.output.ring.pop_entry().unwrap() else {
+        panic!("a refused job's end")
+    };
+    assert_eq!((end.identity, end.reason), (3, reason::BUSY));
+    let frame = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     assert_eq!((frame.identity, frame.buffer), (2, 1));
-    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    assert!(app.output.ring.pop_entry().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 2);
     assert_eq!(hw.with(|b| b.lost), 0);
     assert_eq!(hw.registered(), 0);
@@ -639,7 +672,7 @@ fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_s
     // The client that posted them sees its config stream faulted, and the job it posted behind
     // them never reached the block.
     assert_eq!(app.config.ring.state(), STATE_FAULT);
-    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    assert!(app.output.ring.pop_entry().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
     let stats = host.stream_stats(0, "config").unwrap();
     assert_eq!((stats.faults, stats.attached), (1, false));
@@ -654,7 +687,13 @@ fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_s
     app.config.post(2, 0, 1, 0);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
-    let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+    let frame = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.identity, 2);
     assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 3));
     assert_eq!(hw.with(|b| b.lost), 0);
@@ -681,7 +720,13 @@ fn a_new_input_client_gives_frames_from_its_own_memory() {
     app.config.post(1, 0, 2, 0);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
-    let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+    let frame = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(frame.identity, 1);
     assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 3));
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 0);
@@ -700,13 +745,23 @@ fn a_job_on_an_output_the_client_holds_is_dropped() {
     app.config.post(1, 0, 0, 1);
     let mut now = be.tick(1).unwrap();
     now = be.tick(now).unwrap();
-    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    let frame = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .unwrap();
     // Output 1 is the client's now: the block must not write it again.
     app.give_input(0, 2);
     app.config.post(2, 0, 0, 1);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
-    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    let Some(lemnos_wire::ring::Entry::JobEnd(end)) = app.output.ring.pop_entry().unwrap() else {
+        panic!("a refused job's end")
+    };
+    assert_eq!((end.identity, end.reason), (2, reason::BUSY));
+    assert!(app.output.ring.pop_entry().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
     assert!(
         app.output.read(1, OUTPUT_BYTES) == expected(&first, 1),
@@ -727,7 +782,7 @@ fn streams_without_handles_are_refused_with_or_without_a_client() {
         let mut app = App::attach(&host);
         assert_eq!(CameraIsp::start(&mut be), Err(Status::NOT_SUPPORTED));
         assert_eq!(be.tick(1), None, "not running");
-        assert!(app.output.ring.pop_frame().unwrap().is_none());
+        assert!(app.output.ring.pop_entry().unwrap().is_none());
         assert_eq!(hw.with(|b| b.finished.len() + b.lost as usize), 0);
         assert_eq!(hw.registered(), 0);
     }
@@ -800,7 +855,13 @@ fn jobs_in_steady_state_allocate_nothing() {
                 allocated += n;
             }
         }
-        let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+        let frame = app
+            .output
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("a frame");
         assert_eq!(frame.identity, identity);
         assert!(app.output.ring.release(frame.buffer));
     }
@@ -834,7 +895,13 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
     let shared = Arc::clone(&app);
     hw.hook_after_post(2, move || {
         let mut app = shared.lock().unwrap();
-        let frame = app.output.ring.pop_frame().unwrap().expect("job A's frame");
+        let frame = app
+            .output
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("job A's frame");
         assert_eq!((frame.buffer, frame.identity), (0, 1));
         assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_a, 0x11));
         assert!(app.output.ring.release(frame.buffer));
@@ -844,10 +911,22 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
     be.tick(now).unwrap();
 
     let mut app = app.lock().unwrap();
-    let x = app.output.ring.pop_frame().unwrap().expect("job X's frame");
+    let x = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("job X's frame");
     assert_eq!((x.buffer, x.identity), (1, 2));
     assert!(app.output.read(x.buffer, x.bytes) == expected(&frame_x, 0x11));
-    let b = app.output.ring.pop_frame().unwrap().expect("job B's frame");
+    let b = app
+        .output
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("job B's frame");
     assert_eq!((b.buffer, b.identity), (0, 3));
     assert!(app.output.read(b.buffer, b.bytes) == expected(&frame_b, 0x11));
     assert_eq!(hw.with(|b| b.keys.clone()), [0x11, 0x11, 0x11]);

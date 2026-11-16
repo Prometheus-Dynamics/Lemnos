@@ -44,7 +44,7 @@ pub const fn slot_addr(n: u32) -> u32 {
     (n + 1) << 28
 }
 
-const FRAME_WORDS: usize = 5;
+const FRAME_WORDS: usize = 6;
 const WORD_JOB_SLOTS: usize = 5;
 const WORD_FRAMES_HEAD: usize = 16;
 const WORD_FRAMES_TAIL: usize = 24;

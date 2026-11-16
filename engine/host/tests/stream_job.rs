@@ -89,7 +89,11 @@ fn run(every: u64) -> (Vec<u64>, u64, u64, u64, u64) {
     let mut seen = Vec::new();
     let mut bad = 0;
     let read = |consumer: &mut lemnos_wire::ring::Consumer, seen: &mut Vec<u64>, bad: &mut u64| {
-        if let Some(slot) = consumer.pop_frame().unwrap() {
+        if let Some(slot) = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+        {
             let mut got = [0u8; FRAME];
             assert!(consumer.read(slot.buffer, 0, &mut got[..slot.bytes as usize]));
             if got[..slot.bytes as usize] != pattern(slot.sequence)[..slot.bytes as usize] {
@@ -114,6 +118,7 @@ fn run(every: u64) -> (Vec<u64>, u64, u64, u64, u64) {
                         sequence: p,
                         identity: 0,
                         timestamp_ns: p + 1,
+                        end_ns: 0,
                     })
                     .unwrap();
             }
@@ -181,10 +186,15 @@ fn collecting_returns_before_each_job_counts_no_refusal_for_a_consumer_that_keep
                 sequence: p,
                 identity: 0,
                 timestamp_ns: p + 1,
+                end_ns: 0,
             })
             .unwrap();
         // The consumer takes the result and releases it at once.
-        let slot = consumer.pop_frame().unwrap().expect("the result");
+        let slot = consumer
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .expect("the result");
         assert_eq!(slot.sequence, p);
         assert!(consumer.release(slot.buffer));
     }

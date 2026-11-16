@@ -580,12 +580,13 @@ static void lpf_sof(struct lem_pisp_fe *fe, u64 now)
 	lpf_arm(fe);
 }
 
-static void lpf_eof(struct lem_pisp_fe *fe)
+static void lpf_eof(struct lem_pisp_fe *fe, u64 now)
 {
 	if (fe->cur.valid) {
 		fe->written++;
-		lem_stream_complete(fe->stream, &fe->cur.slot, fe->cur.slot.bytes, fe->frames - 1,
-				    fe->fs_ns);
+		/* Timestamped at the start, stamped at the end of frame: now is the EOF. */
+		lem_stream_complete_at(fe->stream, &fe->cur.slot, fe->cur.slot.bytes, fe->frames - 1,
+				       fe->fs_ns, now);
 		fe->cur.valid = false;
 	}
 	fe->fe_int = true;
@@ -616,7 +617,7 @@ void lem_pisp_fe_isr(struct lem_pisp_fe *fe, u64 now)
 				lpf_sof(fe, now);
 				sof = false;
 			}
-			lpf_eof(fe);
+			lpf_eof(fe, now);
 		}
 		if (sof)
 			lpf_sof(fe, now);

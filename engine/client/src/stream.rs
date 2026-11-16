@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use lemnos_wire::Planes;
 use lemnos_wire::ring::{
     Consumer, FrameInfo, Layout, Mapping, RingError, STATE_CLOSED, STATE_DEVICE_FAILED,
-    STATE_FAULT, STATE_OPEN, producer,
+    STATE_FAULT, STATE_OPEN, producer, reason as wire_reason,
 };
 use shm_ring::WriteMap;
 use shm_ring_buffers::{BufferIndex, Held, NextBatch};
@@ -75,6 +75,8 @@ pub struct Region<'a> {
 struct Slot {
     writable: bool,
     allocated: u64,
+    /// Whether the descriptor is a dma-buf (the platform's answer; a memfd is not).
+    dma_buf: bool,
 }
 
 /// The one kind of access a platform brackets for the kernel on a dma-buf.
@@ -104,6 +106,13 @@ pub trait StreamPlatform: Debug + Send + Sync {
         false
     }
 
+    /// Whether `fd` is a dma-buf (a platform's descriptor kind), so a stream of them can be lent. The
+    /// default says `false`: a platform that can't tell has no lend. A memfd is never a dma-buf.
+    fn is_dma_buf(&self, fd: BorrowedFd<'_>) -> bool {
+        let _ = fd;
+        false
+    }
+
     /// Tells the kernel the CPU is starting (`begin`) or has finished an access of `access` to the
     /// dma-buf `fd`, so a device whose memory isn't cache-coherent sees what was written and the
     /// CPU sees what the device wrote. Called only for the buffers of a stream of dma-bufs, around
@@ -123,6 +132,12 @@ pub trait StreamPlatform: Debug + Send + Sync {
     fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool>;
 }
 
+/// What the ring held next: a frame, or a job's end.
+enum Taken {
+    Frame(HeldFrame),
+    JobEnd { identity: u64, reason: JobReason },
+}
+
 /// One frame taken from a stream, held until it's given back with [`FrameStream::release`]. Only
 /// [`FrameStream`] can make one, and it can't be cloned, so a frame is given back once.
 #[derive(Debug)]
@@ -132,6 +147,8 @@ pub struct HeldFrame {
     sequence: u64,
     identity: u64,
     timestamp_ns: u64,
+    end_ns: u64,
+    reason: u32,
     /// The buffers of the frame, held while this lives: their marks go when it is dropped.
     _held: Held<Marks<WriteMap>>,
 }
@@ -141,6 +158,19 @@ impl HeldFrame {
     #[must_use]
     pub const fn buffer(&self) -> u32 {
         self.buffer
+    }
+
+    /// When the frame ended on the monotonic clock, when the producer stamped it (its end of
+    /// frame, or the block's finish); 0 when it did not. Never a guess from the start.
+    #[must_use]
+    pub const fn end_ns(&self) -> u64 {
+        self.end_ns
+    }
+
+    /// Why the job failed, for a result the block flagged bad; `None` for a result.
+    #[must_use]
+    pub fn failure(&self) -> Option<JobReason> {
+        (self.reason != wire_reason::NONE).then(|| JobReason::from_code(self.reason))
     }
 
     /// The frame's length, across its planes.
@@ -245,10 +275,92 @@ pub enum Carried {
     Lost,
 }
 
+/// Why a job ended without a result. Each is one word in a reply ([`JobReason::word`]); a code this
+/// build does not know is [`JobReason::Unknown`], with its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobReason {
+    /// The block ran the job and flagged the result bad.
+    Failed,
+    /// The job's time ran out, or the stream stopped with it in flight.
+    Timeout,
+    /// The job named a buffer that was not lent to it.
+    NotLent,
+    /// A lent buffer's frame identity is not the job's identity.
+    IdentityMismatch,
+    /// A lent buffer's size or stride does not fit the block's input.
+    SizeOrStride,
+    /// The block is wedged: only a board restart frees it.
+    Wedged,
+    /// The job names a buffer that is held or in use.
+    Busy,
+    /// The job's configuration record is refused.
+    BadConfig,
+    /// A code this build does not know. Its number is kept, and it is never read as a known
+    /// reason: a reader prints it as `unknown job-end reason N`.
+    Unknown(u32),
+}
+
+impl core::fmt::Display for JobReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unknown(code) => write!(f, "unknown job-end reason {code}"),
+            known => f.write_str(known.word()),
+        }
+    }
+}
+
+impl JobReason {
+    /// The reason a wire code names.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Self {
+        match code {
+            wire_reason::FAILED => Self::Failed,
+            wire_reason::TIMEOUT => Self::Timeout,
+            wire_reason::NOT_LENT => Self::NotLent,
+            wire_reason::IDENTITY_MISMATCH => Self::IdentityMismatch,
+            wire_reason::SIZE_OR_STRIDE => Self::SizeOrStride,
+            wire_reason::WEDGED => Self::Wedged,
+            wire_reason::BUSY => Self::Busy,
+            wire_reason::BAD_CONFIG => Self::BadConfig,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The wire code.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Failed => wire_reason::FAILED,
+            Self::Timeout => wire_reason::TIMEOUT,
+            Self::NotLent => wire_reason::NOT_LENT,
+            Self::IdentityMismatch => wire_reason::IDENTITY_MISMATCH,
+            Self::SizeOrStride => wire_reason::SIZE_OR_STRIDE,
+            Self::Wedged => wire_reason::WEDGED,
+            Self::Busy => wire_reason::BUSY,
+            Self::BadConfig => wire_reason::BAD_CONFIG,
+            Self::Unknown(code) => code,
+        }
+    }
+
+    /// The one word a reply names a known reason by. An unknown code has no word: print it with
+    /// its number, through `Display`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Unknown(_) => "unknown",
+            known => wire_reason::word(known.code()),
+        }
+    }
+}
+
 /// What a wait on a stream found: a frame, nothing within the time, a change of the producer, or
 /// the end.
 #[derive(Debug)]
 pub enum Next {
+    /// A job ended without a result: a refusal, or a timeout. The consumer that posted the job
+    /// holds nothing for it and should release whatever it held for `identity`. Counted by
+    /// [`FrameStream::job_ends`].
+    JobEnded { identity: u64, reason: JobReason },
     /// The producer failed and is being retried. Returned once for each failure the reader sees,
     /// when no frame is pending (frames from before it come first), then [`Next::TimedOut`]
     /// continues while it lasts. Never an end.
@@ -284,6 +396,8 @@ pub struct FrameStream {
     slots: Box<[Slot]>,
     /// The producer's working set, as the answer gave it.
     working: u32,
+    /// Job ends the reader has passed over in [`FrameStream::try_next`] and `next_frame`.
+    job_ends: u64,
     /// Whether the frames are job results (`StreamKind::JobDriven`), as the answer gave it.
     job_driven: bool,
     platform: Arc<dyn StreamPlatform>,
@@ -305,6 +419,7 @@ fn probe(
     lengths: &[u32],
     shared: bool,
     writable_of: &dyn Fn(BorrowedFd<'_>) -> bool,
+    dma_of: &dyn Fn(BorrowedFd<'_>) -> bool,
 ) -> Result<Box<[Slot]>, Error> {
     let descs = layout.pool_descs(shared, lengths);
     let mut seen: [Option<Slot>; 256] = [None; 256];
@@ -317,6 +432,7 @@ fn probe(
                     .get(lemnos_wire::ring::fds::BUFFERS + usize::from(desc.descriptor))
                     .ok_or(Error::Stream(RingError::BadLayout))?;
                 let slot = Slot {
+                    dma_buf: dma_of(fd.as_fd()),
                     writable: writable_of(fd.as_fd()),
                     // A shared pool's buffers sit a stride apart; a dma-buf's memory is its size.
                     allocated: if shared {
@@ -375,17 +491,18 @@ impl FrameStream {
             planes.lengths()
         };
         let layout = layout.checked().map_err(Error::Stream)?;
+        let dma_of = |fd: BorrowedFd<'_>| platform.is_dma_buf(fd);
         let slots = match mapping {
             Mapping::Unmapped => {
                 let by_platform = |fd: BorrowedFd<'_>| platform.writable_descriptor(fd);
-                probe(&fds, layout, lengths, shared, &by_platform)?
+                probe(&fds, layout, lengths, shared, &by_platform, &dma_of)?
             }
             Mapping::ReadOnly | Mapping::Writable => {
                 // A sealed memfd (a shared pool) is probed by mapping it. A dma-buf can't be
                 // sealed, so that probe always refuses it; the platform reads its access mode.
                 let either =
                     |fd: BorrowedFd<'_>| writable_fd(fd) || platform.writable_descriptor(fd);
-                probe(&fds, layout, lengths, shared, &either)?
+                probe(&fds, layout, lengths, shared, &either, &dma_of)?
             }
         };
         let writable = mapping == Mapping::Writable;
@@ -401,6 +518,7 @@ impl FrameStream {
             name: name.to_string(),
             consumer,
             working,
+            job_ends: 0,
             job_driven,
             dma: !shared,
             writable,
@@ -446,6 +564,14 @@ impl FrameStream {
     #[must_use]
     pub const fn has_buffer_handles(&self) -> bool {
         self.dma
+    }
+
+    /// Whether every buffer is a dma-buf, as the platform tells each descriptor at open. Only a stream
+    /// of dma-bufs can be lent to another device (a memfd can't: the kernel refuses it). `false` for a
+    /// stream with no buffers.
+    #[must_use]
+    pub fn buffers_are_dma_bufs(&self) -> bool {
+        !self.slots.is_empty() && self.slots.iter().all(|slot| slot.dma_buf)
     }
 
     #[must_use]
@@ -574,30 +700,64 @@ impl FrameStream {
     /// nothing to read (`docs/streams.md`, "Waiting on the doorbell"). The losses are counted in
     /// [`skipped`](Self::skipped).
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
+        loop {
+            match self.take()? {
+                Some(Taken::Frame(frame)) => return Ok(Some(frame)),
+                Some(Taken::JobEnd { .. }) => self.job_ends += 1,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// The job ends this reader passed over in [`try_next`](Self::try_next) and
+    /// [`next_frame`](Self::next_frame). A reader that wants each end, with its reason, uses
+    /// [`next_or_end`](Self::next_or_end), which returns [`Next::JobEnded`].
+    #[must_use]
+    pub const fn job_ends(&self) -> u64 {
+        self.job_ends
+    }
+
+    /// Takes the next thing in the ring: a frame, held, or a job's end. `None` when none is
+    /// pending. Lost entries are passed over, as `try_next` describes.
+    fn take(&mut self) -> Result<Option<Taken>, Error> {
         let planes = self.planes.count();
         let buffer_bytes = self.layout().buffer_bytes as usize;
         let taken = loop {
             match self.consumer.frames_mut().next() {
-                NextBatch::Batch(batch) => {
+                NextBatch::Frame(batch) => {
                     let info =
                         FrameInfo::decode(batch.meta).ok_or(Error::Stream(RingError::Broken))?;
+                    let timestamp_ns = batch.time.as_nanos();
                     let first = batch
                         .held
                         .buffer(0)
                         .ok_or(Error::Stream(RingError::Broken))?;
                     let buffer = first.0 / planes;
-                    let timestamp_ns = batch.time.as_nanos();
                     let held = batch.held;
                     if info.bytes as usize > buffer_bytes {
                         return Err(Error::Stream(RingError::Broken));
                     }
-                    break Some(HeldFrame {
+                    break Some(Taken::Frame(HeldFrame {
                         buffer,
                         bytes: info.bytes,
                         sequence: info.sequence,
                         identity: info.identity,
                         timestamp_ns,
+                        end_ns: info.end_ns,
+                        reason: info.reason,
                         _held: held,
+                    }));
+                }
+                NextBatch::NoBuffers(entry) => {
+                    // A job's end: no buffer, and a reason that says why there is no result.
+                    let info =
+                        FrameInfo::decode(entry.meta).ok_or(Error::Stream(RingError::Broken))?;
+                    if info.reason == wire_reason::NONE || info.bytes != 0 {
+                        return Err(Error::Stream(RingError::Broken));
+                    }
+                    break Some(Taken::JobEnd {
+                        identity: info.identity,
+                        reason: JobReason::from_code(info.reason),
                     });
                 }
                 NextBatch::Empty => break None,
@@ -609,7 +769,7 @@ impl FrameStream {
                 }
             }
         };
-        if let Some(frame) = taken.as_ref() {
+        if let Some(Taken::Frame(frame)) = taken.as_ref() {
             // The frame is read in place from here until it is given back.
             for plane in 0..planes {
                 self.sync_plane(frame.buffer * planes + plane, Access::Read, true);
@@ -641,7 +801,9 @@ impl FrameStream {
             match self.next_or_end(left)? {
                 Next::Frame(frame) => return Ok(Some(frame)),
                 Next::TimedOut | Next::Ended(_) => return Ok(None),
-                // A change of the producer is not a frame: the wait goes on.
+                // A job's end is not a frame, and a change of the producer is not one either: the
+                // wait goes on.
+                Next::JobEnded { .. } => self.job_ends += 1,
                 Next::Stalled(_) | Next::Resumed { .. } => {}
             }
         }
@@ -674,8 +836,12 @@ impl FrameStream {
                 };
                 return Ok(Next::Resumed { state });
             }
-            if let Some(frame) = self.try_next()? {
-                return Ok(Next::Frame(frame));
+            match self.take()? {
+                Some(Taken::Frame(frame)) => return Ok(Next::Frame(frame)),
+                Some(Taken::JobEnd { identity, reason }) => {
+                    return Ok(Next::JobEnded { identity, reason });
+                }
+                None => {}
             }
             if let Some(end) = end {
                 return Ok(Next::Ended(end));

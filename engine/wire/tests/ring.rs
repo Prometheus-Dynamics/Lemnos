@@ -25,9 +25,24 @@ fn a_frame_round_trips_through_its_metadata_and_a_short_one_is_refused() {
         sequence: 7,
         identity: 0xfeed,
         bytes: 1234,
+        reason: 0,
+        end_ns: 987_654_321,
     };
     assert_eq!(FrameInfo::decode(&info.encode()), Some(info));
-    assert_eq!(FrameInfo::decode(&[0; 19]), None);
+    assert_eq!(FrameInfo::decode(&[0; 31]), None);
+    // The layout, by byte: a reader that counts from these offsets reads the same fields.
+    let bytes = info.encode();
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(&bytes[24..32], &987_654_321u64.to_le_bytes());
+    let job_end = FrameInfo {
+        bytes: 0,
+        reason: 3,
+        ..info
+    };
+    assert_eq!(
+        FrameInfo::decode(&job_end.encode()).map(|i| i.reason),
+        Some(3)
+    );
 }
 
 #[test]
@@ -37,7 +52,11 @@ fn a_published_frame_is_read_once_and_its_buffer_is_held_until_released() {
     assert!(host.write(buffer, 0, &[9, 8, 7]));
     assert!(host.publish(buffer, 3, 5, 0xabc, 42));
 
-    let frame = consumer.pop_frame().expect("no error").expect("a frame");
+    let frame = consumer
+        .pop_entry()
+        .expect("no error")
+        .and_then(|entry| entry.frame())
+        .expect("a frame");
     assert_eq!(
         (
             frame.buffer,
@@ -48,7 +67,7 @@ fn a_published_frame_is_read_once_and_its_buffer_is_held_until_released() {
         ),
         (buffer, 3, 5, 0xabc, 42)
     );
-    assert_eq!(consumer.pop_frame().expect("no error"), None);
+    assert_eq!(consumer.pop_entry().expect("no error"), None);
 
     // Held: the producer can't take it back while the consumer has it. The other buffer is
     // published too, so it is the newest frame and is left alone as well.
@@ -89,7 +108,11 @@ fn a_writable_consumer_fills_a_buffer_the_producer_then_sees() {
     host.publish(buffer, 0, 1, 0, 0);
     assert!(consumer.write(buffer, 4, b"job"));
     let mut seen = [0_u8; 3];
-    let frame = consumer.pop_frame().expect("no error").expect("frame");
+    let frame = consumer
+        .pop_entry()
+        .expect("no error")
+        .and_then(|entry| entry.frame())
+        .expect("frame");
     assert_eq!(frame.buffer, buffer);
     assert!(consumer.read(buffer, 4, &mut seen));
     assert_eq!(&seen, b"job");
@@ -143,6 +166,10 @@ fn a_dma_buf_style_stream_maps_one_descriptor_per_buffer() {
     let buffer = host.take().expect("free");
     assert!(consumer.write(buffer, 0, &[5; 16]));
     host.publish(buffer, 16, 1, 0, 0);
-    let frame = consumer.pop_frame().expect("no error").expect("frame");
+    let frame = consumer
+        .pop_entry()
+        .expect("no error")
+        .and_then(|entry| entry.frame())
+        .expect("frame");
     assert_eq!(frame.bytes, 16);
 }

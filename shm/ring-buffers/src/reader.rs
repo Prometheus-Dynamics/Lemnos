@@ -90,11 +90,36 @@ pub struct Batch<'a, K: Marker = NoMarks> {
     pub held: Held<K>,
 }
 
+/// An entry that names no buffer, as [`NextBatch::NoBuffers`] hands it out.
+#[derive(Debug)]
+pub struct NoBuffers<'a> {
+    /// Its number in the order of publication.
+    pub seq: u64,
+    /// The time it belongs to.
+    pub time: SampleTime,
+    /// The publisher's metadata, passed on unread. Valid until the next call on the reader.
+    pub meta: &'a [u8],
+}
+
 /// What [`BufferReader::next`] found.
 #[derive(Debug)]
 pub enum NextBatch<'a, K: Marker = NoMarks> {
-    /// The next batch.
-    Batch(Batch<'a, K>),
+    /// The next frame: one or more buffers, held. Never an entry with no buffer.
+    ///
+    /// A reader that matched this arm as `NextBatch::Batch` no longer compiles, which is the
+    /// point: an entry that names no buffer is now [`NextBatch::NoBuffers`], and a match on the
+    /// old name has to be changed by hand.
+    ///
+    /// ```compile_fail
+    /// use shm_ring_buffers::NextBatch;
+    /// fn old_reader(next: NextBatch<'_>) {
+    ///     if let NextBatch::Batch(_frame) = next {}
+    /// }
+    /// ```
+    Frame(Batch<'a, K>),
+    /// An entry that names no buffer: a job's end, or any other entry of metadata alone. Only
+    /// its sequence, time and metadata are here; the metadata's layout is its publisher's.
+    NoBuffers(NoBuffers<'a>),
     /// Nothing new.
     Empty,
     /// This many frames were gone before the reader got to them: overwritten in the ring, or
@@ -121,9 +146,25 @@ pub struct BufferReader<M: Mem = ReadMap, K: Marker = NoMarks> {
     field: FieldId,
     shared: Arc<Shared<K>>,
     meta: Box<[u8]>,
-    /// A frame found behind lost ones, kept for the next call: sequence, time, metadata length.
-    pending: Option<(u64, SampleTime, usize, Held<K>)>,
+    /// An entry found behind lost ones, kept for the next call.
+    pending: Option<Pending<K>>,
     missed: u64,
+}
+
+/// An entry kept for the next call: a frame, or an entry that names no buffer.
+#[derive(Debug)]
+enum Pending<K: Marker> {
+    Frame {
+        seq: u64,
+        time: SampleTime,
+        meta: usize,
+        held: Held<K>,
+    },
+    NoBuffers {
+        seq: u64,
+        time: SampleTime,
+        meta: usize,
+    },
 }
 
 /// What one step found, with nothing borrowed.
@@ -133,6 +174,11 @@ enum Step<K: Marker> {
         time: SampleTime,
         meta: usize,
         held: Held<K>,
+    },
+    NoBuffers {
+        seq: u64,
+        time: SampleTime,
+        meta: usize,
     },
     Gone,
     Other,
@@ -191,7 +237,7 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         self.shared = Arc::new(Shared { pool, marker });
     }
 
-    /// The next frame, held.
+    /// The next entry: a frame, held, or an entry that names no buffer (see [`NextBatch`]).
     // Not an iterator: a frame's metadata borrows the reader.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> NextBatch<'_, K> {
@@ -201,13 +247,8 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         {
             return NextBatch::CutOff;
         }
-        if let Some((seq, time, meta, held)) = self.pending.take() {
-            return NextBatch::Batch(Batch {
-                seq,
-                time,
-                meta: &self.meta[..meta],
-                held,
-            });
+        if let Some(pending) = self.pending.take() {
+            return self.entry(pending);
         }
         let mut gone = 0_u64;
         for _ in 0..PROBES {
@@ -220,17 +261,26 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
                     meta,
                     held,
                 } => {
-                    if gone > 0 {
-                        // Say what was lost first; this frame is returned by the next call.
-                        self.pending = Some((seq, time, meta, held));
-                        break;
-                    }
-                    return NextBatch::Batch(Batch {
+                    let pending = Pending::Frame {
                         seq,
                         time,
-                        meta: &self.meta[..meta],
+                        meta,
                         held,
-                    });
+                    };
+                    if gone > 0 {
+                        // Say what was lost first; this entry is returned by the next call.
+                        self.pending = Some(pending);
+                        break;
+                    }
+                    return self.entry(pending);
+                }
+                Step::NoBuffers { seq, time, meta } => {
+                    let pending = Pending::NoBuffers { seq, time, meta };
+                    if gone > 0 {
+                        self.pending = Some(pending);
+                        break;
+                    }
+                    return self.entry(pending);
                 }
                 Step::Empty => break,
                 Step::Skipped(count) => {
@@ -254,6 +304,28 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         NextBatch::Skipped(gone)
     }
 
+    /// The arm for one entry. A frame's arm always holds at least one buffer.
+    fn entry(&mut self, pending: Pending<K>) -> NextBatch<'_, K> {
+        match pending {
+            Pending::Frame {
+                seq,
+                time,
+                meta,
+                held,
+            } => NextBatch::Frame(Batch {
+                seq,
+                time,
+                meta: &self.meta[..meta],
+                held,
+            }),
+            Pending::NoBuffers { seq, time, meta } => NextBatch::NoBuffers(NoBuffers {
+                seq,
+                time,
+                meta: &self.meta[..meta],
+            }),
+        }
+    }
+
     fn step(&mut self) -> Step<K> {
         let sample = match self.reader.next() {
             Next::Sample(sample) => sample,
@@ -263,8 +335,26 @@ impl<M: Mem, K: Marker> BufferReader<M, K> {
         if sample.field != self.field {
             return Step::Other;
         }
-        let Some(entry) = entry::read(sample.payload) else {
-            return Step::Gone;
+        let entry = match entry::read(sample.payload) {
+            None => return Step::Gone,
+            Some(entry::Read::NoBuffers { generation, meta }) => {
+                // Only the pool's generation check applies to an entry that names no buffer.
+                let pool = &self.shared.pool;
+                if generation != pool.generation() {
+                    return if generation > pool.generation() {
+                        Step::PoolChanged(generation)
+                    } else {
+                        Step::Gone
+                    };
+                }
+                self.meta[..meta.len()].copy_from_slice(meta);
+                return Step::NoBuffers {
+                    seq: sample.seq,
+                    time: sample.time,
+                    meta: meta.len(),
+                };
+            }
+            Some(entry::Read::Buffers(entry)) => entry,
         };
         let pool = &self.shared.pool;
         if entry.generation != pool.generation() {

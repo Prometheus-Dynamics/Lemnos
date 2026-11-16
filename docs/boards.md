@@ -84,6 +84,7 @@ In a device:
 | `bus` | The resource this device sits on, by the backend's name for it (below) |
 | `uses` | A table from one of the driver's need names to a device `id` or a resource name. A key the driver does not take, or a device id the board does not have or that does not serve the need's contract, is refused by name (above) |
 | `link` | The `id` of another device this one is wired to. The host only hands it over, and `lemnos-ctl validate` refuses a `link` to a device the board doesn't have. `lemnos-ctl chain` follows it. A driver that needs the link takes it at bind (a `#[link]` field) and confirms it from the hardware side: see [Drivers and contracts](drivers.md#contracts) |
+| `lend` | The stream of the device whose `link` names this one, that this device reads as a lend: each job that names a buffer of it is given that buffer, lent, with no copy. Left out, this device gets no lend. The host resolves exactly that stream, on the one device linked to this one; none, or more than one, and the lend is refused at bind |
 | `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own; a key it does not read is refused by name (above) |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
 | `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |

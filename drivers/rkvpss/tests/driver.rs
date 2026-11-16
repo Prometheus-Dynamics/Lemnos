@@ -169,7 +169,11 @@ fn consumer(lease: Lease) -> Consumer {
 }
 
 fn completion(consumer: &mut Consumer) -> FrameSlot {
-    consumer.pop_frame().unwrap().expect("a completion")
+    consumer
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("a completion")
 }
 
 #[test]
@@ -431,7 +435,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
         (third.buffer, third.identity, third.bytes),
         (1, 3, OUT_BYTES)
     );
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
 }
 
 #[test]
@@ -550,7 +554,7 @@ fn what_the_channel_or_the_block_cant_do_never_reaches_it() {
         post(&mut consumer, &twice);
         driver.tick(MS);
         (
-            consumer.pop_frame().unwrap(),
+            consumer.pop_entry().unwrap(),
             driver.server().last_failure(),
             log.runs(),
         )
@@ -571,7 +575,7 @@ fn a_frame_that_times_out_holds_its_output_back_until_the_block_finishes_another
     log.run_failures.store(1, Ordering::Relaxed);
     post(&mut consumer, &job(0xD1, 0, 1));
     driver.tick(MS);
-    assert_eq!(consumer.pop_frame().unwrap(), None, "nothing published");
+    assert_eq!(consumer.pop_entry().unwrap(), None, "nothing published");
     assert!(driver.server().held_back(1));
     assert_eq!(driver.server().holds_taken(), 1, "the driver's own hold");
     assert!(matches!(driver.health(), Health::Degraded(m) if m.contains("held back")));
@@ -588,7 +592,7 @@ fn a_frame_that_times_out_holds_its_output_back_until_the_block_finishes_another
     driver.tick(MS + 250 * MS);
     assert_eq!(log.runs(), 2);
     assert_eq!(log.last_width(), 32, "the driver's own frame");
-    assert_eq!(consumer.pop_frame().unwrap(), None);
+    assert_eq!(consumer.pop_entry().unwrap(), None);
     assert_eq!(driver.server().holds_taken(), 1);
     // The next one finishes: the held-back output goes out as its job's failed completion,
     // and the hold is let go.
@@ -661,7 +665,7 @@ fn a_consumer_that_goes_while_an_output_is_held_back_leaves_the_hold_in_place() 
     // the old job, and the old attachments are released.
     driver.tick(250 * MS);
     assert_eq!(driver.server().holds_taken(), 0);
-    assert_eq!(consumer2.pop_frame().unwrap(), None);
+    assert_eq!(consumer2.pop_entry().unwrap(), None);
     assert_eq!(log.releases.load(Ordering::Relaxed), 1);
 }
 
