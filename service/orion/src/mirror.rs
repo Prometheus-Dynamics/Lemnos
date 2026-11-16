@@ -61,6 +61,9 @@ pub struct Status {
     pub state: DeviceState,
     pub health: DeviceHealth,
     pub reason: String,
+    /// Why the device waits, as the wire numbers it (`lemnos_wire::refusal`): 0 none, 1 absent, 2
+    /// failed, and any other number as the service sent it.
+    pub refusal: u8,
 }
 
 /// The devices with their slots, and the facts, as [`Mirror::snapshot`] gives them.
@@ -154,7 +157,7 @@ pub struct Mirror {
 /// Whether a change of status changes what `describe` says: its state or its reason. Health is
 /// not in the description, so a change of health alone is not one.
 fn described_moved(held: &Status, new: &Status) -> bool {
-    held.state != new.state || held.reason != new.reason
+    held.state != new.state || held.reason != new.reason || held.refusal != new.refusal
 }
 
 /// Whether the items or controls `describe` shows for a device changed. A device that is not
@@ -331,12 +334,17 @@ impl Mirror {
         state: DeviceState,
         health: DeviceHealth,
         reason: &str,
+        refusal: u8,
     ) {
         let Some(device) = self.devices.iter_mut().find(|d| d.spec.index == index) else {
             return;
         };
         let status = &mut device.spec.status;
-        if status.state == state && status.health == health && status.reason == reason {
+        if status.state == state
+            && status.health == health
+            && status.reason == reason
+            && status.refusal == refusal
+        {
             return;
         }
         let moved = status.state != state;
@@ -346,6 +354,7 @@ impl Mirror {
                 state,
                 health,
                 reason: reason.to_owned(),
+                refusal,
             },
         ) {
             device.generation += 1;
@@ -354,6 +363,7 @@ impl Mirror {
         status.state = state;
         status.health = health;
         reason.clone_into(&mut status.reason);
+        status.refusal = refusal;
         device.status_dirty = true;
         // Only a running device offers its contracts, so a change of state can change offers.
         if moved {
@@ -494,6 +504,7 @@ mod tests {
             state: DeviceState::Running,
             health: DeviceHealth::Ok,
             reason: String::new(),
+            refusal: 0,
         }
     }
 
@@ -593,12 +604,29 @@ mod tests {
         );
     }
 
+    /// What `describe` says carries the refusal, so a refusal that changes alone moves the generation.
+    #[test]
+    fn a_refusal_that_changes_alone_moves_the_description() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        take(&mut mirror);
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus", 1);
+        assert_eq!(take(&mut mirror).described.len(), 1);
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus", 2);
+        assert_eq!(take(&mut mirror).described.len(), 1);
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus", 2);
+        assert!(
+            take(&mut mirror).described.is_empty(),
+            "the same refusal is no change"
+        );
+    }
+
     #[test]
     fn a_status_goes_out_when_any_part_of_it_moves() {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(7, "thing", &[])], None);
         let _ = take(&mut mirror);
-        mirror.set_status(7, DeviceState::Running, DeviceHealth::Ok, "");
+        mirror.set_status(7, DeviceState::Running, DeviceHealth::Ok, "", 0);
         assert!(
             take(&mut mirror).is_empty(),
             "the same status is not a change"
@@ -608,11 +636,13 @@ mod tests {
             DeviceState::BackingOff,
             DeviceHealth::Failed,
             "read: timeout",
+            0,
         );
         let moved = Status {
             state: DeviceState::BackingOff,
             health: DeviceHealth::Failed,
             reason: "read: timeout".to_owned(),
+            refusal: 0,
         };
         assert_eq!(take(&mut mirror).status, [(0, moved)]);
         mirror.set_status(
@@ -620,6 +650,7 @@ mod tests {
             DeviceState::BackingOff,
             DeviceHealth::Failed,
             "read: again",
+            0,
         );
         assert_eq!(take(&mut mirror).status[0].1.reason, "read: again");
     }
@@ -629,7 +660,7 @@ mod tests {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "thing", &["count"])], None);
         let _ = take(&mut mirror);
-        mirror.set_status(99, DeviceState::Off, DeviceHealth::Ok, "");
+        mirror.set_status(99, DeviceState::Off, DeviceHealth::Ok, "", 0);
         mirror.set_reading(5, 0, Reading::Number(1.0), 1);
         mirror.set_reading(0, 5, Reading::Number(1.0), 1);
         assert!(take(&mut mirror).is_empty());
@@ -683,30 +714,42 @@ mod tests {
             [(0, 1)],
             "a new device's first generation"
         );
-        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus");
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus", 0);
         assert_eq!(take(&mut mirror).described, [(0, 2)]);
-        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus gone");
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus gone", 0);
         assert_eq!(
             take(&mut mirror).described,
             [(0, 3)],
             "the reason is in the description"
         );
-        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Failed, "bus gone");
+        mirror.set_status(
+            0,
+            DeviceState::BackingOff,
+            DeviceHealth::Failed,
+            "bus gone",
+            0,
+        );
         assert!(
             take(&mut mirror).described.is_empty(),
             "health is not in the description"
         );
-        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone");
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone", 0);
         assert_eq!(take(&mut mirror).described, [(0, 4)]);
         // Steady: the same status again is not a change.
-        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone");
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone", 0);
         assert!(take(&mut mirror).described.is_empty());
         // Off, and back: each is a change of state, so each moves the generation.
-        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off", 0);
         assert_eq!(take(&mut mirror).described, [(0, 5)], "off is a state");
-        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "off", 0);
         assert!(take(&mut mirror).described.is_empty());
-        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Failed, "bus gone");
+        mirror.set_status(
+            0,
+            DeviceState::BackingOff,
+            DeviceHealth::Failed,
+            "bus gone",
+            0,
+        );
         assert_eq!(take(&mut mirror).described, [(0, 6)], "retrying is a state");
     }
 
@@ -722,7 +765,7 @@ mod tests {
 
         // The change is in the mirror as soon as it arrives: `describe` answers it before the topic
         // is published, and the publish that follows carries the same number.
-        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual", 0);
         assert_eq!(mirror.description_generation("a"), Some(2));
         let published = take(&mut mirror).described;
         assert_eq!(published, [(0, 2)]);
@@ -744,7 +787,7 @@ mod tests {
         take(&mut mirror);
         assert_eq!(mirror.description_generation("a"), Some(1));
 
-        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Failed, "manual", 0);
         assert_eq!(
             mirror.description_generation("a"),
             Some(2),
@@ -757,6 +800,7 @@ mod tests {
             state: DeviceState::Off,
             health: DeviceHealth::Failed,
             reason: "manual".to_owned(),
+            refusal: 0,
         };
         mirror.set_devices(vec![listed], None);
         assert_eq!(
@@ -805,14 +849,14 @@ mod tests {
                 fact("leases.ended", "0")
             ]
         );
-        mirror.set_status(0, DeviceState::Off, DeviceHealth::Ok, "");
+        mirror.set_status(0, DeviceState::Off, DeviceHealth::Ok, "", 0);
         assert!(take(&mut mirror).hello.is_none());
-        mirror.set_status(1, DeviceState::Off, DeviceHealth::Ok, "");
+        mirror.set_status(1, DeviceState::Off, DeviceHealth::Ok, "", 0);
         assert_eq!(
             take(&mut mirror).hello,
             Some(vec![fact("lease.seconds", "60"), fact("leases.ended", "0")])
         );
-        mirror.set_status(0, DeviceState::Running, DeviceHealth::Ok, "");
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Ok, "", 0);
         assert_eq!(
             take(&mut mirror).hello,
             Some(vec![
@@ -821,7 +865,7 @@ mod tests {
                 fact("leases.ended", "0")
             ])
         );
-        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "read");
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "read", 0);
         assert!(take(&mut mirror).hello.is_none());
     }
 

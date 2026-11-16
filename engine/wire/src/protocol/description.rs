@@ -10,6 +10,7 @@ use lemnos_core::{
     Reader, Reading, Result, Shape, Status, Tail, UnitState, Writer,
 };
 
+use super::refusal::Refusal;
 use crate::hash;
 
 /// The codes a [`Shape`] is written as. Folded into the core hash.
@@ -173,6 +174,10 @@ pub struct DeviceDescription {
     /// driver's handle still holds open (both 0 when none), as [`stream_standby_text`] writes
     /// them. Empty when there are none, and from a host from before it.
     pub streams: Vec<StreamStandby>,
+    /// Why the device waits, as [`crate::refusal`] numbers it: `NONE` for a device that runs,
+    /// `ABSENT` or `FAILED` for one refused its bind. A number this build does not name is kept as it
+    /// came. A host from before it sends none, which reads as `NONE`.
+    pub refusal: Refusal,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
 }
@@ -306,6 +311,8 @@ pub struct Identity<'a> {
     /// The device's streams and their standby bytes, as [`stream_standby_text`] writes them.
     /// Empty when there are none, and from a host from before it.
     pub streams: &'a str,
+    /// Why the device waits (see [`DeviceDescription::refusal`]).
+    pub refusal: Refusal,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -376,6 +383,9 @@ struct DescIdentity<'a> {
     /// Appended after `jobs`: the streams and their standby bytes, as [`stream_standby_text`].
     /// Absent reads as none.
     streams: &'a str,
+    /// Appended after `streams`: why the device waits, as [`crate::refusal`] numbers it. Absent reads
+    /// as `NONE` (0).
+    refusal: Tail<u8>,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -717,6 +727,7 @@ pub(crate) fn encode_trailer(
         not_live: identity.not_live,
         jobs: identity.jobs,
         streams: identity.streams,
+        refusal: Tail(identity.refusal.code()),
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -852,6 +863,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.location = identity.location.to_string();
         out.jobs = parse_running_jobs(identity.jobs);
         out.streams = parse_stream_standby(identity.streams);
+        out.refusal = Refusal::from_code(identity.refusal.0);
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {

@@ -180,7 +180,7 @@ mod tests {
             reason: String::new(),
             link: link.map(Into::into),
             jobs: Vec::new(),
-            refusal: None,
+            refusal: lemnos_client::Refusal::NONE,
         }
     }
 

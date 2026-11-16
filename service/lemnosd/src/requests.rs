@@ -230,7 +230,7 @@ impl Client {
                 reason: &reason,
                 link: Tail(info.link.as_deref().unwrap_or("")),
                 jobs: Tail(&running_jobs_text(&self.running_jobs(info.index))),
-                refusal: Tail(wire_refusal(&info.state)),
+                refusal: Tail(wire_refusal(&info.state).code()),
             });
         }
         self.conn.answer(&Frame::ListDone { id });
@@ -345,6 +345,7 @@ impl Client {
                     .map(|(name, standby, held)| (name.as_str(), *standby, *held))
                     .collect::<Vec<_>>(),
             ),
+            refusal: wire_refusal(&info.state),
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {

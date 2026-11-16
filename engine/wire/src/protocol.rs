@@ -134,11 +134,80 @@ pub mod state {
 /// failing, or no refusal at all (a device switched on, or running). Carried after the reason in
 /// the device and event frames: a peer from before it sends none, which reads as [`NONE`](none).
 pub mod refusal {
+    use core::fmt;
+
+    use lemnos_core::RefusalKind;
+
     // Plain constants, not `constants!`: this field is added after the core frames, so its values
     // are left out of the core hash (see docs/wire.md, "added").
     pub const NONE: u8 = 0;
     pub const ABSENT: u8 = 1;
     pub const FAILED: u8 = 2;
+
+    /// A refusal as the wire numbers it. It keeps the number, so a number this build does not name
+    /// is kept as sent, and gives the kind: [`Refusal::kind`] is the one place the numbers and
+    /// [`RefusalKind`] meet (see [`Refusal::of`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct Refusal(u8);
+
+    impl Refusal {
+        /// The device runs, or waits with no refusal behind it.
+        pub const NONE: Self = Self(NONE);
+        /// No such device here.
+        pub const ABSENT: Self = Self(ABSENT);
+        /// Present, but not working.
+        pub const FAILED: Self = Self(FAILED);
+
+        /// The refusal a kind is carried as, or [`Refusal::NONE`] for no kind. The match has no
+        /// wildcard: a new [`RefusalKind`] does not compile until its number is given here.
+        pub const fn of(kind: Option<RefusalKind>) -> Self {
+            match kind {
+                None => Self(NONE),
+                Some(RefusalKind::Absent) => Self(ABSENT),
+                Some(RefusalKind::Failed) => Self(FAILED),
+            }
+        }
+
+        /// The refusal a number on the wire carries. Any number is accepted and kept.
+        pub const fn from_code(code: u8) -> Self {
+            Self(code)
+        }
+
+        /// The number as the wire carries it.
+        pub const fn code(self) -> u8 {
+            self.0
+        }
+
+        /// Whether the device runs, or waits with no refusal behind it.
+        pub const fn is_none(self) -> bool {
+            self.0 == NONE
+        }
+
+        /// The kind this number names, or `None` for none and for a number this build does not name.
+        pub const fn kind(self) -> Option<RefusalKind> {
+            match self.0 {
+                ABSENT => Some(RefusalKind::Absent),
+                FAILED => Some(RefusalKind::Failed),
+                _ => None,
+            }
+        }
+
+        /// Whether the number is one this build does not name (a newer service may send one).
+        pub const fn is_unknown(self) -> bool {
+            self.0 > FAILED
+        }
+    }
+
+    impl fmt::Display for Refusal {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self.kind() {
+                Some(RefusalKind::Absent) => f.write_str("absent"),
+                Some(RefusalKind::Failed) => f.write_str("failed"),
+                None if self.is_none() => f.write_str("none"),
+                None => write!(f, "unknown (code {})", self.0),
+            }
+        }
+    }
 }
 
 /// How a device's health is carried on the wire.

@@ -9,8 +9,9 @@
 //! - the topic `lemnos.<device>.values` has a field per value item that is a number (a float,
 //!   in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes,
 //!   each sample at the time the driver read it;
-//! - the topic `lemnos.<device>.status` has the fields `state`, `health` and `reason`, as
-//!   `lemnos-ctl list` names them, published as they change;
+//! - the topic `lemnos.<device>.status` has the fields `state`, `health`, `reason` and `refusal`, as
+//!   `lemnos-ctl list` names them, published as they change. `refusal` is the number the wire gives
+//!   the refusal kind in decimal: 0 none, 1 absent, 2 failed, and any other number as it came;
 //! - the actions `set`, `call` and `power` (see [`crate::calls`]) drive it.
 //!
 //! The board's facts (`hello.<fact>`, see [`crate::hello`]) are topics of the same session, one
@@ -235,11 +236,28 @@ const GENERATION_FIELDS: [Field<'static>; 1] = [Field {
 }];
 
 /// The status topic's fields.
-const STATUS_FIELDS: [Field<'static>; 3] = [
+const STATUS_FIELDS: [Field<'static>; 4] = [
     text_field("state"),
     text_field("health"),
     text_field("reason"),
+    text_field("refusal"),
 ];
+
+/// A refusal kind's number as the status topic says it, in decimal, written into `buf`. A `u8`
+/// has at most three digits, so nothing is allocated.
+fn refusal_text(refusal: u8, buf: &mut [u8; 3]) -> &str {
+    let digits = [refusal / 100, refusal / 10 % 10, refusal % 10];
+    for (slot, digit) in buf.iter_mut().zip(digits) {
+        *slot = b'0' + digit;
+    }
+    let start = match refusal {
+        0..=9 => 2,
+        10..=99 => 1,
+        _ => 0,
+    };
+    // The digits are ASCII, so the slice is UTF-8.
+    core::str::from_utf8(&buf[start..]).unwrap_or("0")
+}
 
 const fn text_field(name: &'static str) -> Field<'static> {
     Field {
@@ -819,10 +837,12 @@ impl Session {
             let Some(device) = self.devices.get_mut(slot) else {
                 continue;
             };
+            let mut refusal = [0u8; 3];
             let texts = [
                 state_name(status.state),
                 health_name(status.health),
                 cut(&status.reason, STATUS_MAX),
+                refusal_text(status.refusal, &mut refusal),
             ];
             for (field, text) in texts.iter().enumerate() {
                 sample(&mut device.status, field, time, text.as_bytes())?;
@@ -869,7 +889,8 @@ impl Session {
             return Ok(());
         };
         let time = now();
-        for (field, text) in [GONE, "", DEVICE_GONE].iter().enumerate() {
+        // A device that is gone is refused by nothing: its refusal is `0`.
+        for (field, text) in [GONE, "", DEVICE_GONE, "0"].iter().enumerate() {
             if sample(&mut device.status, field, time, text.as_bytes()).is_err() {
                 break;
             }
@@ -981,7 +1002,7 @@ impl Session {
     fn withdraw(mut self, why: &str) {
         let time = now();
         for device in self.devices.values_mut() {
-            for (field, text) in [GONE, "", why].iter().enumerate() {
+            for (field, text) in [GONE, "", why, "0"].iter().enumerate() {
                 if sample(&mut device.status, field, time, text.as_bytes()).is_err() {
                     break;
                 }
@@ -1335,6 +1356,7 @@ mod tests {
             state,
             health,
             reason: String::new(),
+            refusal: 0,
         }
     }
 

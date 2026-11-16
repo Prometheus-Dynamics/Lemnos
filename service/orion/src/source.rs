@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use std::time::Instant;
 
-use lemnos_client::{Client, DeviceEntry, DeviceState, Error, Handle};
+use lemnos_client::{Client, DeviceEntry, DeviceState, Error, Event, Handle};
 use lemnos_core::ItemKind;
 use lemnos_wire::text::{method_of, shape_name};
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
 use crate::backoff::Backoff;
 use crate::hello;
-use crate::mirror::{ControlSpec, DeviceSpec, ItemSpec, Status};
+use crate::mirror::{ControlSpec, DeviceSpec, ItemSpec, Mirror, Status};
 use crate::values::{self, Plain, plain_of};
 use crate::{LEMNOSD_NAME, Shared, log};
 
@@ -167,9 +167,7 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
             if event.state == DeviceState::Running && undescribed.contains(&event.device) {
                 return Ok(Ended::Undescribed);
             }
-            shared.with(|mirror| {
-                mirror.set_status(event.device, event.state, event.health, &event.reason);
-            });
+            shared.with(|mirror| apply_event(mirror, &event));
             shared.changed();
         }
         if let Some(read) = identity.as_mut()
@@ -289,21 +287,40 @@ fn discover(
                 undescribed.push(entry.index);
             }
         }
+        let status = status_of(&entry);
         specs.push(DeviceSpec {
             index: entry.index,
             name: entry.name,
             driver: entry.driver,
             tags: entry.tags,
-            status: Status {
-                state: entry.state,
-                health: entry.health,
-                reason: entry.reason,
-            },
+            status,
             items,
             controls,
         });
     }
     Ok((specs, routes, undescribed, identity))
+}
+
+/// A status change from lemnosd's event, into the mirror. The refusal is passed on as the wire
+/// numbers it, a number this bridge does not name included.
+fn apply_event(mirror: &mut Mirror, event: &Event) {
+    mirror.set_status(
+        event.device,
+        event.state,
+        event.health,
+        &event.reason,
+        event.refusal.code(),
+    );
+}
+
+/// A device as lemnosd lists it, with its status: the state, health, reason and refusal it gives.
+fn status_of(entry: &DeviceEntry) -> Status {
+    Status {
+        state: entry.state,
+        health: entry.health,
+        reason: entry.reason.clone(),
+        refusal: entry.refusal.code(),
+    }
 }
 
 /// A device's description. lemnosd waits for a call or a tick in flight and does not answer
@@ -406,6 +423,43 @@ mod tests {
     use super::*;
     use lemnos_wire::{OwnedContract, OwnedParam};
     use std::cell::Cell;
+
+    /// A refusal number from an event reaches the mirror as the wire sent it. A number this bridge
+    /// does not name (7 here, from a service after it) is kept, never read as none.
+    #[test]
+    fn an_event_passes_its_refusal_number_on_as_sent() {
+        use lemnos_client::DeviceHealth;
+        let mut mirror = Mirror::new();
+        mirror.set_devices(
+            vec![DeviceSpec {
+                index: 3,
+                name: "x".to_owned(),
+                driver: "d".to_owned(),
+                tags: Vec::new(),
+                status: Status {
+                    state: DeviceState::Running,
+                    health: DeviceHealth::Ok,
+                    reason: String::new(),
+                    refusal: 0,
+                },
+                items: Vec::new(),
+                controls: Vec::new(),
+            }],
+            None,
+        );
+        for refusal in [0, 1, 2, 7] {
+            let event = Event {
+                device: 3,
+                state: DeviceState::BackingOff,
+                health: DeviceHealth::Ok,
+                reason: "bind failed".to_owned(),
+                refusal: lemnos_client::Refusal::from_code(refusal),
+            };
+            apply_event(&mut mirror, &event);
+            let (devices, _) = mirror.snapshot();
+            assert_eq!(devices[0].1.status.refusal, refusal);
+        }
+    }
 
     fn method(id: u16, params: usize, returns: OwnedShape, out: bool) -> OwnedMethod {
         OwnedMethod {

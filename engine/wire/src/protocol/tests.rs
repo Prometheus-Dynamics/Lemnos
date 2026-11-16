@@ -620,7 +620,34 @@ mod description {
             not_live: false,
             jobs: "",
             streams: "",
+            refusal: crate::refusal::Refusal::NONE,
         }
+    }
+
+    /// The refusal number rides in the identity: each number round-trips as it was sent, and a
+    /// number this build does not name is kept as it came (it is never read as none).
+    #[test]
+    fn the_refusal_number_round_trips_as_sent() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[],
+        };
+        let mut buf = [0; 512];
+        use crate::refusal::Refusal;
+        let mut at = |refusal: Refusal| {
+            let identity = Identity {
+                refusal,
+                ..identity()
+            };
+            let n =
+                encode_description(&manifest, &Description::new(), &identity, &mut buf).unwrap();
+            decode_description(&buf[..n]).unwrap().refusal
+        };
+        assert_eq!(at(Refusal::NONE), Refusal::NONE);
+        assert_eq!(at(Refusal::ABSENT), Refusal::ABSENT);
+        assert_eq!(at(Refusal::FAILED), Refusal::FAILED);
+        assert_eq!(at(Refusal::from_code(7)).code(), 7);
     }
 
     #[test]
@@ -1463,4 +1490,56 @@ mod handshake {
         let bytes = frame(1, &[1, 2, 3], &[]);
         assert_eq!(decode(&bytes), Err(WireError::Malformed));
     }
+}
+
+/// The refusal number through the type: 0, 1, 2 and 7 each keep their code, and name a kind only
+/// where one exists. The match below has no wildcard, so a new `RefusalKind` breaks the build
+/// until its number is given in `Refusal::of`, and the test then checks the new number too.
+#[test]
+fn a_refusal_number_gives_its_kind_and_keeps_its_code() {
+    use crate::refusal::{ABSENT, FAILED, NONE, Refusal};
+    use lemnos_core::RefusalKind;
+
+    let none = Refusal::from_code(NONE);
+    assert!(none.is_none() && !none.is_unknown() && none.kind().is_none());
+    assert_eq!(none.to_string(), "none");
+
+    let absent = Refusal::from_code(ABSENT);
+    assert_eq!(absent.kind(), Some(RefusalKind::Absent));
+    assert!(!absent.is_none() && !absent.is_unknown());
+    assert_eq!(absent.to_string(), "absent");
+
+    let failed = Refusal::from_code(FAILED);
+    assert_eq!(failed.kind(), Some(RefusalKind::Failed));
+    assert!(!failed.is_none() && !failed.is_unknown());
+    assert_eq!(failed.to_string(), "failed");
+
+    let seven = Refusal::from_code(7);
+    assert_eq!(seven.code(), 7);
+    assert_eq!(seven.kind(), None);
+    assert!(seven.is_unknown() && !seven.is_none());
+    assert_eq!(seven.to_string(), "unknown (code 7)");
+
+    assert_eq!(Refusal::NONE, none);
+    assert_eq!(Refusal::ABSENT, absent);
+    assert_eq!(Refusal::FAILED, failed);
+    assert_eq!(Refusal::default(), none);
+}
+
+/// Every kind maps to its number and back, through the type the bridge and the client use.
+#[test]
+fn every_refusal_kind_has_its_number_in_the_table() {
+    use crate::refusal::Refusal;
+    use lemnos_core::RefusalKind;
+
+    for kind in [RefusalKind::Absent, RefusalKind::Failed] {
+        // No wildcard: a new kind fails to compile here until it is listed in the table.
+        match kind {
+            RefusalKind::Absent | RefusalKind::Failed => {}
+        }
+        let refusal = Refusal::of(Some(kind));
+        assert_eq!(refusal.kind(), Some(kind));
+        assert!(!refusal.is_none() && !refusal.is_unknown());
+    }
+    assert_eq!(Refusal::of(None), Refusal::NONE);
 }

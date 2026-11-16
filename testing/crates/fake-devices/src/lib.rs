@@ -10,8 +10,8 @@ use lemnos_contract_magnetometer::Magnetometer;
 
 pub mod probe;
 use lemnos_core::{
-    Config, ConfigError, Description, Item, Key, Kind, Lifecycle, MethodId, Result, Status, Unit,
-    Vector3, contract, driver,
+    Config, ConfigError, Description, Item, Key, Kind, Lifecycle, MethodId, RefusalKind, Result,
+    Status, Unit, Vector3, contract, driver,
 };
 pub use probe::FakeProbe;
 
@@ -63,12 +63,23 @@ macro_rules! fake_vector {
                     Key::optional("y", Kind::Float),
                     Key::optional("z", Kind::Float),
                     Key::optional("refuse", Kind::Bool),
+                    Key::optional("refusal", Kind::Str),
                 ])
             }
 
             fn start(_needs: $needs, cfg: &Config<'_>) -> Result<Self> {
                 if cfg.bool("refuse").unwrap_or(false) {
                     return Err(Status::IO);
+                }
+                // `refusal = "absent"` or `"failed"`: the bind is refused with that kind, as a driver
+                // says it with `Config::refuse`. Any other word is a setting the driver does not take.
+                if let Some(word) = cfg.str("refusal") {
+                    let (status, kind) = match word {
+                        "absent" => (Status::NO_DEVICE, RefusalKind::Absent),
+                        "failed" => (Status::IO, RefusalKind::Failed),
+                        _ => return Err(Status::INVALID_ARGUMENT),
+                    };
+                    return Err(cfg.refuse(status, kind, format_args!("fake refusal: {word}")));
                 }
                 Ok(Self {
                     value: vector(cfg, 1.0),
