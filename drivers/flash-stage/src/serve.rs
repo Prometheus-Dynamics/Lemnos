@@ -457,4 +457,149 @@ mod tests {
             "the write was attempted and the status sent; no feed"
         );
     }
+
+    /// A card whose read-back returns other bytes than the write stored: the write lands, the read differs.
+    struct MismatchedReadBack<'a>(&'a RefCell<Vec<&'static str>>);
+
+    impl Storage for MismatchedReadBack<'_> {
+        fn write(&mut self, _lba: u32, _data: &[u8], _budget_us: u64) -> Result<(), IoError> {
+            self.0.borrow_mut().push("write");
+            Ok(())
+        }
+        fn read(&mut self, _lba: u32, out: &mut [u8], _budget_us: u64) -> Result<(), IoError> {
+            out.fill(0x00);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_read_back_that_differs_from_the_write_is_verify_status_three_and_nothing_is_fed() {
+        let log = RefCell::new(Vec::new());
+        let mut link = Wire {
+            inbound: vec![
+                Request::write(40_000, 1, false).encode().to_vec(),
+                chunk_of(1),
+            ],
+            log: &log,
+            fail_send: false,
+        };
+        let mut card = MismatchedReadBack(&log);
+        let mut dog = Dog(&log);
+        let mut buf = vec![0u8; MAX_CHUNK + 1];
+        let mut scratch = vec![0u8; MAX_CHUNK];
+        let ctx = Context {
+            regions: &BOOT,
+            identity: &[],
+        };
+        let progress = step(
+            &mut link,
+            &mut card,
+            &mut dog,
+            &ctx,
+            IDLE_BUDGET,
+            &mut buf,
+            &mut scratch,
+        );
+        assert_eq!(
+            progress,
+            Ok(Progress::Refused(3)),
+            "the read-back mismatch is verify (3), not storage (2)"
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec!["write", "send"],
+            "written, reported, not fed"
+        );
+    }
+
+    /// A plain-data write of `count` sectors at `lba`, served through one step, with its effects.
+    fn plain_write(lba: u32, count: u16) -> (Result<Progress, ServeError>, Vec<&'static str>) {
+        let log = RefCell::new(Vec::new());
+        let mut link = Wire {
+            inbound: vec![
+                Request::write(lba, count, false).encode().to_vec(),
+                chunk_of(usize::from(count)),
+            ],
+            log: &log,
+            fail_send: false,
+        };
+        let mut card = Card(&log);
+        let mut dog = Dog(&log);
+        let mut buf = vec![0u8; MAX_CHUNK + 1];
+        let mut scratch = vec![0u8; MAX_CHUNK];
+        let ctx = Context {
+            regions: &BOOT,
+            identity: &[],
+        };
+        let progress = step(
+            &mut link,
+            &mut card,
+            &mut dog,
+            &ctx,
+            IDLE_BUDGET,
+            &mut buf,
+            &mut scratch,
+        );
+        let effects = log.borrow().clone();
+        (progress, effects)
+    }
+
+    #[test]
+    fn a_write_of_128_sectors_is_served_and_fed() {
+        let (progress, effects) = plain_write(40_000, 128);
+        assert_eq!(progress, Ok(Progress::Served));
+        assert_eq!(
+            effects,
+            vec!["write", "feed", "send"],
+            "the largest chunk: written, fed, then the status"
+        );
+    }
+
+    #[test]
+    fn a_write_of_129_sectors_is_refused_as_bad_request_and_nothing_is_written() {
+        // The count is 1..=128. A count of 129 is refused by the frame, before any chunk is read from the link.
+        let log = RefCell::new(Vec::new());
+        let mut link = Wire {
+            inbound: vec![Request::write(40_000, 129, false).encode().to_vec()],
+            log: &log,
+            fail_send: false,
+        };
+        let mut card = Card(&log);
+        let mut dog = Dog(&log);
+        let mut buf = vec![0u8; MAX_CHUNK + 1];
+        let mut scratch = vec![0u8; MAX_CHUNK];
+        let ctx = Context {
+            regions: &BOOT,
+            identity: &[],
+        };
+        let progress = step(
+            &mut link,
+            &mut card,
+            &mut dog,
+            &ctx,
+            IDLE_BUDGET,
+            &mut buf,
+            &mut scratch,
+        );
+        assert_eq!(progress, Ok(Progress::Refused(5)));
+        assert_eq!(
+            *log.borrow(),
+            vec!["send"],
+            "the status only: no write, no feed"
+        );
+    }
+
+    #[test]
+    fn a_chunk_with_a_bad_crc_is_status_one_and_nothing_is_written_or_fed() {
+        let mut bad = chunk_of(1);
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        let (progress, effects) = one_write(500, 1, bad);
+        assert_eq!(
+            progress,
+            Ok(Progress::Refused(1)),
+            "a CRC mismatch is crc (1)"
+        );
+        assert_eq!(effects, vec!["send"], "the status only: no write, no feed");
+    }
 }

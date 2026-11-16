@@ -55,10 +55,19 @@ pub const REFERENCE_WATCHDOG_PERIOD_US: u64 = 44_739_242;
 /// The host's default bulk timeout this contract is sized against, in microseconds.
 pub const HOST_BULK_TIMEOUT_US: u64 = 5_000_000;
 
+/// The longest a host may take to read one reply after the stage has it posted, in microseconds. This is separate from
+/// the 5 s bulk-OUT bound: a reply is read after the stage's own phases (a read of up to 128 sectors, then the send),
+/// so the host waits through the stage's whole round, one bulk timeout per phase, not one OUT transfer. Derived as
+/// [`ROUND_PHASES`] times [`HOST_BULK_TIMEOUT_US`] and asserted below to be at least 16 s.
+pub const REPLY_READ_BOUND_US: u64 = ROUND_PHASES * HOST_BULK_TIMEOUT_US;
+
 // The watchdog must cover the worst feed-to-feed gap, and the phase count must be the write round's: checked at build.
 const _: () = assert!(
     FEED_TO_FEED_US < REFERENCE_WATCHDOG_PERIOD_US,
     "the feed-to-feed bound must be under the reference watchdog period"
 );
+// The reply-read bound covers the stage's phases at the host's bulk timeout, and is longer than one OUT bound.
+const _: () = assert!(REPLY_READ_BOUND_US >= 16_000_000);
+const _: () = assert!(REPLY_READ_BOUND_US > HOST_BULK_TIMEOUT_US);
 // The idle limit must expire before the watchdog would fire, so the distinct idle outcome comes first.
 const _: () = assert!(IDLE_LIMIT_US < REFERENCE_WATCHDOG_PERIOD_US);

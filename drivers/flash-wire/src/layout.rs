@@ -25,7 +25,7 @@ use crate::identity::{IDENTITY_MAGIC, MAX_PEER_ENTRIES};
 use crate::region::MAX_REGIONS;
 use crate::timing::{
     FEED_TO_FEED_US, HOST_BULK_TIMEOUT_US, IDLE_LIMIT_US, REFERENCE_WATCHDOG_PERIOD_US,
-    ROUND_BUDGET_US, ROUND_PHASES, TRANSFER_BUDGET_US, WRITE_TO_FEED_PHASES,
+    REPLY_READ_BOUND_US, ROUND_BUDGET_US, ROUND_PHASES, TRANSFER_BUDGET_US, WRITE_TO_FEED_PHASES,
 };
 use crate::usb::{
     BULK_IN, BULK_MAX_PACKET, BULK_OUT, CONFIGURATION_VALUE, EP0_MAX_PACKET, INTERFACE_CLASS,
@@ -127,6 +127,7 @@ const fn frame_hash() -> u64 {
         REFERENCE_WATCHDOG_PERIOD_US,
     );
     h = word(text(h, "host_bulk_timeout_us"), HOST_BULK_TIMEOUT_US);
+    h = word(text(h, "reply_read_bound_us"), REPLY_READ_BOUND_US);
     h
 }
 
@@ -238,10 +239,10 @@ mod tests {
     // The values this build computes. A layout change moves them: change them in the same commit as the
     // layout, and say so in the README's table of hashes. Each was recomputed outside this crate by an
     // independent FNV walk over the same bytes (see the README).
-    const PINNED_WIRE_HASH: u64 = 0xB469_96DE_2002_08F2;
-    const PINNED_WIRE_SHORT: u16 = 2631;
+    const PINNED_WIRE_HASH: u64 = 0x7FEB_E907_98A3_0EBD;
+    const PINNED_WIRE_SHORT: u16 = 242;
     const PINNED_FAMILY_HASHES: [u64; FAMILY_COUNT] = [
-        0xB2E7_5CFC_7235_3844,
+        0x7897_7FF4_E1FE_C3CF,
         0xC170_D815_DF17_757F,
         0xE2B5_4BEB_21DA_BF76,
         0x40FE_F3FE_A154_445F,

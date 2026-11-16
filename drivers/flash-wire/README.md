@@ -85,7 +85,7 @@ CRC-16 (big-endian) over the payload. A chunk of any other length is a bad-reque
 | 2 | storage | the storage failed. **The range may be partly written.** The host reads the range back and verifies it before it relies on it |
 | 3 | verify | the read-back of a write did not equal what was written. **The range may be partly written**, as for 2 |
 | 4 | not compared | the write went to a boot area or header without the compared mark. Nothing was written |
-| 5 | bad request | the frame was not a request this build understands (a wrong length, an unknown op, a count outside 1 to 128, a reserved bit the op does not define), or a chunk had the wrong length. Nothing was done |
+| 5 | bad request | the frame was not a request this build understands (a wrong length, an unknown op, a count outside 1 to 128, a reserved bit the op does not define), a chunk had the wrong length, a chunk was not whole sectors, or a write crosses a region boundary. Nothing was done: no storage call was made |
 
 ## One clock: the session's limits
 
@@ -100,6 +100,10 @@ feed, or after the start of the session. The start counts as a feed, because the
 - **The idle outcome comes first.** The idle deadline is earlier than the watchdog's period from the same feed, so the
   session ends with its own outcome (`Serve(Idle)` on the stage, or the host's idle end) before the watchdog resets the
   stage. A host sees no difference except the outcome's name.
+
+The idle deadline is an instant on one clock, counted from the watchdog arm for the first deadline and from the last feed
+after it. A request's phase is bounded by the deadline: if its controller command would run past the deadline, the phase
+ends at the deadline and the request is not served (sim test `a_request_armed_one_second_before_the_deadline_is_not_accepted_when_the_command_takes_one_second`).
 
 ## Session rules: what ends it, and what does not
 
@@ -126,7 +130,8 @@ The numbers are constants in `src/timing.rs`, folded into the wire hash. A host 
 | `IDLE_LIMIT_US` | 30 s | the idle deadline, from the last feed or the arm |
 | `FEED_TO_FEED_US` | 40.5 s | the worst gap between two feeds: `IDLE_LIMIT_US` plus `WRITE_TO_FEED_PHASES` times `TRANSFER_BUDGET_US` |
 | `REFERENCE_WATCHDOG_PERIOD_US` | 44.739 s | the period of the reference watchdog's setting TOP 14: 2^30 cycles at 24 MHz |
-| `HOST_BULK_TIMEOUT_US` | 5 s | the host's default bulk timeout the contract is sized against |
+| `HOST_BULK_TIMEOUT_US` | 5 s | the host's default bulk timeout the contract is sized against (one OUT transfer) |
+| `REPLY_READ_BOUND_US` | 20 s | the longest a host may take to read one reply once the stage has it posted: `ROUND_PHASES` times `HOST_BULK_TIMEOUT_US`, asserted at least 16 s and above one OUT bound. Separate from the 5 s OUT bound, because a reply follows the stage's own phases |
 
 **The arithmetic, in one place.** A feed is recorded at the feed: after the write's read-back, or after a read's reply is
 taken. It is not recorded after the status is sent. The watchdog must be fed again before its period from that instant.
@@ -144,6 +149,10 @@ watchdog's period (44.739 s) from the same feed, so the idle outcome comes first
 **Storage.** A storage phase is bounded by `TRANSFER_BUDGET_US` for the whole call, not for each block: 3.5 s for the
 write of a whole chunk. Bench check: 64 KiB on a slow card must fit that budget. A call that cannot finish in it ends with
 storage status 2, and the watchdog is not fed.
+
+A storage write that is cut off by its budget is status 2 with the part already written left in place: sectors that fit
+the budget are written, the rest are not, and nothing outside the range is touched (sim test
+`a_write_cut_off_by_its_deadline_is_status_two_with_part_of_the_range_written_and_nothing_outside_it`).
 
 Every bound is a deadline on the stage's clock. No wait spins without one.
 
@@ -194,8 +203,12 @@ code. The write lies wholly inside one class (the host has split it at the bound
    `Decision::Skip`: nothing is written and no mark is set. If any byte differs it is `Decision::Write { mark: true }`: the
    write is made with the mark.
 
-A failed read of the card during the stage's own read-back (the stage's compare after its write) is storage status 2:
-nothing is fed, and the status says the range may be partly written.
+The stage's own read-back of a write (after the write, before the feed) has two failures, with different statuses:
+
+- the read itself fails in storage: status 2 (storage), and the status says the range may be partly written;
+- the read succeeds and any byte differs from the payload: status 3 (verify), and the range may be partly written.
+
+In both cases nothing is fed. Nothing is written before a status 1 or 5 refusal: those refusals come before any storage call.
 
 The baseline is the host's image, never the card. A read of the card is never a baseline for itself.
 
@@ -206,7 +219,10 @@ Tests: `region.rs` has one per decision (plain, boot-area equal, boot-area diffe
 multi-sector write with one differing byte) and one per boundary: a write crossing the start of the boot area (63 to 64),
 starting at 64, crossing the header end (64 to 66), starting at the header end (65), crossing the boot-area end (32767 to
 32768), ending at the boot-area end (32767), and starting at it (32768). `serve.rs` has the stage's refusals for the start and
-the end boundaries, for a chunk that is not whole sectors, and for a failed read-back (status 2, not fed).
+the end boundaries, for a chunk that is not whole sectors, for a bad CRC (status 1), for a read-back that fails in storage
+(status 2), for a read-back that differs (status 3), for 128 sectors served and 129 refused (status 5), and for a write cut off
+by its budget (status 2, with the range partly written). Every refusal test checks that the only effect is the status: no
+storage call and no feed.
 
 ## Identity record
 
@@ -239,9 +255,9 @@ The values this build computes:
 
 | Name | Value |
 |---|---|
-| wire hash | `0xB469_96DE_2002_08F2` |
-| wire short | `2631` |
-| frame family (1) | `0xB2E7_5CFC_7235_3844` |
+| wire hash | `0x7FEB_E907_98A3_0EBD` |
+| wire short | `242` |
+| frame family (1) | `0x7897_7FF4_E1FE_C3CF` |
 | ops family (2) | `0xC170_D815_DF17_757F` |
 | status family (3) | `0xE2B5_4BEB_21DA_BF76` |
 | reset family (4) | `0x40FE_F3FE_A154_445F` |
@@ -266,15 +282,45 @@ A host that talks to the stage must:
 2. **Read each reply with a buffer for the largest reply its request allows**, and accept only the two lengths in the table
    above (the full reply with status 0, or exactly one byte). Any other length is a failure on the host's side.
 3. **Stop the session on an unexpected status or length.** After an unexpected status 1 (crc) or 5 (bad request), or a reply
-   of an unexpected length, the host stops that session: it does not reissue the request blindly, and it does not send
-   further requests on that session. It re-verifies the card and starts again from enumeration.
-4. **Post its IN read within `TRANSFER_BUDGET_US` (3.5 s)** of sending a request.
-5. **Meet the timing contract**: the idle deadline (30 s after the last feed, which the host sees as the last reply that moved
-   the stage's watchdog, or the start) and the feed-to-feed bound (40.5 s).
+   of an unexpected length, the host stops that session. It does not reissue the request blindly, and it sends nothing
+   more on that session. The stop procedure: release the interface, reset the port. The stage re-enumerates on the same
+   idle deadline (it is not extended), and a surplus transfer may still be in the stage's buffers when it does. The host
+   re-verifies the card before it starts again from enumeration.
+4. **Post its IN read within `TRANSFER_BUDGET_US` (3.5 s)** of sending a request, and read each reply within
+   `REPLY_READ_BOUND_US` (20 s) of the stage's posting it.
+5. **Meet the timing contract.** The stage's idle deadline is 30 s after its last feed. The host counts its own idle window
+   from the **send time of the last request the stage fed** (a verified write, or a read that was sent), which is never
+   later than the stage's feed, so the host's window ends first. The feed-to-feed bound is 40.5 s.
+6. **Treat a write that did not complete as undefined.** A write round's status 2 or 3 may leave part of the range written,
+   and nothing outside the range. After status 2 or 3 the host re-reads or rewrites the range within the idle budget. A host
+   that stops (rule 3) reports a boot-area or header piece as **left undefined**, not as unwritten.
 
 What bounds the stage when a host breaks these: the stage ends the session at the idle deadline, **at most 30 s after the
 last feed**, with the idle outcome. If the stage cannot finish, the watchdog resets it, **at most 44.7 s after the last
 feed**. Neither outcome needs the host's cooperation; the host re-verifies the card after either.
+
+## A conforming host, step by step
+
+This is the sequence a host follows against the stage. Each line is a rule the stage relies on; the PC side implements the
+same rule in code, and a line that disagrees with the code is a bug in the code or in this list.
+
+1. **Identity.** Read the identity record, and run `identity::check` on it. A `Skew` other than none stops the host.
+   The host's regions are `Peer::regions()` from that check, not a copy of its own table.
+2. **Split.** Split each write at the start and the end of every region that lies strictly inside it, and at 128
+   sectors. A boundary at the first or last sector of a write does not split it. Reads are split at 128 sectors only.
+3. **Pad.** A partial last sector is padded with `PAD_BYTE` (`0x00`). The stage does not pad or trim.
+4. **Plain pieces.** A piece in plain data is written with no mark. No read and no compare.
+5. **Boot-area and header pieces.** The host reads the card's range, compares it with the image for the same range, and
+   decides with `region::decide`. Equal is `Decision::Skip`: nothing is sent. Different is written with the compared mark
+   set. The read is repeated before each piece; a comparison is valid only until the next write.
+6. **Read failure.** If the host's read of the card fails, it writes nothing for that piece and stops (rule 3). The piece
+   is reported as left undefined.
+7. **One transfer per frame.** The request is one bulk-out of 12 bytes; a chunk is one bulk-out of its exact length.
+8. **Reply read.** The IN read is posted at once after the request, within `TRANSFER_BUDGET_US`, and completes within
+   `REPLY_READ_BOUND_US`.
+9. **Idle.** The host's idle window runs from the send time of the last fed request, and is at most 30 s.
+10. **Stops.** On status 1 or 5, or a reply of an unexpected length, the host stops the session (rule 3). On status 2 or
+    3, the host treats the range as undefined and re-reads it (rule 6).
 
 **Negotiated speed.** After the host configures the device, the stage reads the negotiated speed from the controller.
 Anything but high speed undoes the configuration and the enumeration fails (`EnumError::NotHighSpeed`): the device does not
@@ -315,7 +361,8 @@ string or any version number.
   bytes were computed with a separate CRC implementation.
 - `src/identity.rs`: the record's check: a hash mismatch, a missing family, a duplicate family, trailing bytes, a foreign
   family, the build id and the region table, and malformed bytes.
-- `src/region.rs`: the classifier and one test per case of the compare rule.
+- `src/region.rs`: the classifier, one test per case of the compare rule, a length and a straddle refusal of `decide`.
+- `src/timing.rs`: the reply-read bound, checked at compile time (at least 16 s, above the OUT bound).
 - `src/timing.rs`: the watchdog bound, checked at compile time.
 - `src/layout.rs`: the pinned hashes.
 - `src/hash.rs`: the shared FNV vectors (also checked in `engine/wire`).

@@ -85,18 +85,32 @@ impl Trb {
     }
 }
 
-/// Waits until the endpoint's command in flight is done (DEPCMD CMDACT clear), or times out.
+/// Waits until the endpoint's command in flight is done (DEPCMD CMDACT clear), or until `deadline_us`. A command issued
+/// inside a transfer phase is bounded by that phase's deadline, so the arm of a transfer counts against the phase.
+fn wait_depcmd_until<C: Clock>(
+    regs: &mut dyn RegAccess,
+    clock: &mut C,
+    base: usize,
+    ep: usize,
+    deadline_us: u64,
+) -> Result<(), IoFault> {
+    let budget = until(clock, deadline_us)?;
+    let depcmd = base + dwc3::depcmd(ep);
+    wait_for(clock, budget, LONGEST_PERIOD_US, || {
+        (regs.read32(depcmd) & dwc3::DEPCMD_CMDACT == 0).then_some(())
+    })?;
+    Ok(())
+}
+
+/// Waits for a command outside any transfer phase (bring-up and endpoint configuration), bounded by `IO_WAIT_US`.
 fn wait_depcmd<C: Clock>(
     regs: &mut dyn RegAccess,
     clock: &mut C,
     base: usize,
     ep: usize,
 ) -> Result<(), IoFault> {
-    let depcmd = base + dwc3::depcmd(ep);
-    wait_for(clock, IO_WAIT_US, LONGEST_PERIOD_US, || {
-        (regs.read32(depcmd) & dwc3::DEPCMD_CMDACT == 0).then_some(())
-    })?;
-    Ok(())
+    let deadline_us = clock.now_us().saturating_add(IO_WAIT_US);
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)
 }
 
 /// The endpoint type field of DEPCFG (gadget.c:596-597): control is 0, bulk is 2.
@@ -173,13 +187,14 @@ pub fn end_transfer<C: Clock>(
     clock: &mut C,
     base: usize,
     ep: usize,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
     regs.write32(base + dwc3::depcmdpar0(ep), 0);
     regs.write32(
         base + dwc3::depcmd(ep),
         dwc3::DEPCMD_ENDTRANSFER | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, ep)
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)
 }
 
 /// Stalls endpoint `ep` (DEPCMD SETSTALL; ep0.c:224 restarts the control endpoint after it).
@@ -204,6 +219,7 @@ pub fn start_transfer<C: Clock>(
     base: usize,
     ep: usize,
     trb_addr: u64,
+    deadline_us: u64,
 ) -> Result<(), IoFault> {
     regs.write32(base + dwc3::depcmdpar0(ep), (trb_addr >> 32) as u32);
     regs.write32(base + dwc3::depcmdpar1(ep), trb_addr as u32);
@@ -211,7 +227,7 @@ pub fn start_transfer<C: Clock>(
         base + dwc3::depcmd(ep),
         dwc3::DEPCMD_STARTTRANSFER | dwc3::DEPCMD_CMDACT,
     );
-    wait_depcmd(regs, clock, base, ep)
+    wait_depcmd_until(regs, clock, base, ep, deadline_us)
 }
 
 /// Waits for the controller to hand the TRB back (HWO clear). `owned` reads the TRB's HWO bit.
@@ -232,7 +248,7 @@ pub const CMD_WRITE_BLOCK: u32 = 24;
 
 /// The time left until `deadline_us`: a bounded wait takes no more than this, and none is left once the deadline has
 /// passed (a timeout, so the call ends).
-fn until<C: Clock>(clock: &mut C, deadline_us: u64) -> Result<u64, IoFault> {
+pub fn until<C: Clock>(clock: &mut C, deadline_us: u64) -> Result<u64, IoFault> {
     let now = clock.now_us();
     if now >= deadline_us {
         Err(IoFault::Timeout)

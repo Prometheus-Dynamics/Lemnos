@@ -3,11 +3,46 @@
 //! steps out in order, so a reset can land between two requests. The model starts at reset: address 0, no
 //! configuration. The same code the chip runs (`usb::enumerate`, `usb::BulkLink`, `session::run`) drives it.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::vec::Vec;
 
 use crate::usb::{Controller, Event, Speed, UsbError};
+use crate::wait::Clock;
 use lemnos_flash_wire::usb::EP0_MAX_PACKET;
+
+/// The simulated controller's clock. It moves only when the controller moves it: each controller pass takes one tick,
+/// and a command takes its own time (`Model::with_command_us`). So a sim run has exact instants: the deadline tests
+/// assert the instant they expect, not a tolerance.
+#[derive(Clone, Default)]
+pub struct SimClock(Rc<Cell<u64>>);
+
+impl SimClock {
+    /// A clock reading `us`.
+    pub fn at(us: u64) -> Self {
+        Self(Rc::new(Cell::new(us)))
+    }
+
+    /// The clock's reading.
+    pub fn now(&self) -> u64 {
+        self.0.get()
+    }
+
+    /// Moves the clock forward by `us`.
+    pub fn advance(&self, us: u64) {
+        self.0.set(self.0.get() + us);
+    }
+}
+
+impl Clock for SimClock {
+    fn now_us(&mut self) -> u64 {
+        self.now()
+    }
+}
+
+/// One controller pass, in microseconds, when a clock is attached.
+const PASS_US: u64 = 1_000;
 
 /// One step of the host's script.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +77,10 @@ pub struct Model {
     pub bulk_in: Vec<Vec<u8>>,
     /// The speed the bus negotiated. High by default.
     pub speed: Speed,
+    /// The simulated clock, when the test wants exact instants. `None` leaves time to the test's own clock.
+    clock: Option<SimClock>,
+    /// How long a bulk arm takes. A command that would not finish by its deadline times out at the deadline.
+    command_us: u64,
     armed: Option<usize>,
 }
 
@@ -49,6 +88,18 @@ impl Model {
     /// A controller at reset with an empty script.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attaches the simulated clock: every controller pass moves it by one tick.
+    pub fn on(mut self, clock: &SimClock) -> Self {
+        self.clock = Some(clock.clone());
+        self
+    }
+
+    /// Makes a bulk arm take `us` (the controller's command time). An arm whose deadline comes sooner times out there.
+    pub fn with_command_us(mut self, us: u64) -> Self {
+        self.command_us = us;
+        self
     }
 
     /// Queues a control event.
@@ -110,7 +161,10 @@ const GET: u8 = 0x80;
 const SET: u8 = 0x00;
 
 impl Controller for Model {
-    fn poll(&mut self) -> Event {
+    fn poll(&mut self, _deadline_us: u64) -> Event {
+        if let Some(clock) = &self.clock {
+            clock.advance(PASS_US);
+        }
         match self.script.front() {
             Some(Step::Event(_)) => match self.script.pop_front() {
                 Some(Step::Event(event)) => event,
@@ -162,7 +216,20 @@ impl Controller for Model {
         self.log.push(Action::Stall);
     }
 
-    fn bulk_arm(&mut self, len: usize) -> Result<(), UsbError> {
+    fn bulk_arm(&mut self, len: usize, deadline_us: u64) -> Result<(), UsbError> {
+        if let Some(clock) = &self.clock {
+            let now = clock.now();
+            if now >= deadline_us {
+                return Err(UsbError::Timeout);
+            }
+            let remaining = deadline_us - now;
+            if self.command_us > remaining {
+                // The command runs into the deadline: the phase ends there, and the arm did not complete.
+                clock.advance(remaining);
+                return Err(UsbError::Timeout);
+            }
+            clock.advance(self.command_us);
+        }
         self.armed = Some(len);
         Ok(())
     }

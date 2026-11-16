@@ -58,8 +58,9 @@ pub enum UsbError {
 /// The device controller, as the device side uses it. Every method that waits is bounded (the controller
 /// uses its own clock); none of them spins without a deadline.
 pub trait Controller {
-    /// The next event, without waiting.
-    fn poll(&mut self) -> Event;
+    /// The next event, without waiting for one. `deadline_us` bounds any command the controller issues to produce the
+    /// event (the setup arm): a command that cannot finish by it is not issued to completion, and the event is `None`.
+    fn poll(&mut self, deadline_us: u64) -> Event;
     /// Sets the device's address. Called before the status stage of SET_ADDRESS, as the host expects.
     fn set_address(&mut self, address: u8) -> Result<(), UsbError>;
     /// Enables the bulk pair when `on` (the configuration is set), or disables it.
@@ -81,8 +82,9 @@ pub trait Controller {
     /// that applies the address late is not assumed to apply it early. Each chip decides this from its own
     /// controller's behaviour, and records it as a bench check.
     fn address_before_status(&self) -> bool;
-    /// Arms the bulk OUT transfer for exactly `len` bytes.
-    fn bulk_arm(&mut self, len: usize) -> Result<(), UsbError>;
+    /// Arms the bulk OUT transfer for exactly `len` bytes. The arm command is bounded by `deadline_us`: an arm that cannot
+    /// finish by it is a timeout, so the phase that asked for it does not run past its deadline.
+    fn bulk_arm(&mut self, len: usize, deadline_us: u64) -> Result<(), UsbError>;
     /// Takes the armed transfer if it has completed, without waiting: `Some(n)` with its length.
     fn bulk_poll(&mut self, out: &mut [u8]) -> Result<Option<usize>, UsbError>;
     /// Sends one bulk IN transfer, bounded by `budget_us`.
@@ -383,7 +385,7 @@ pub fn enumerate<C: Controller, K: Clock>(
         if clock.now_us() >= deadline_us {
             return Err(EnumError::NotConfigured);
         }
-        match ctrl.poll() {
+        match ctrl.poll(deadline_us) {
             Event::None => {}
             Event::BusReset => ep0.reset(),
             Event::Setup(bytes) => ep0.handle(ctrl, bytes).map_err(EnumError::Controller)?,
@@ -414,12 +416,19 @@ pub struct BulkLink<'a, C: Controller, K: Clock> {
 impl<C: Controller, K: Clock> Link for BulkLink<'_, C, K> {
     fn recv(&mut self, buf: &mut [u8], budget_us: u64) -> Result<usize, IoError> {
         let deadline = self.clock.now_us().saturating_add(budget_us);
-        self.ctrl.bulk_arm(buf.len()).map_err(map_error)?;
+        // The arm is part of the phase: it is bounded by the same deadline as the wait.
+        self.ctrl.bulk_arm(buf.len(), deadline).map_err(map_error)?;
+        // Each pass, in this order: a completed frame is taken (even one that completed after the deadline was
+        // computed); then the deadline is checked; then one control event is serviced. So a frame completed before the
+        // deadline is never dropped as a timeout because a control request came first.
         loop {
             if let Some(n) = self.ctrl.bulk_poll(buf).map_err(map_error)? {
                 return Ok(n);
             }
-            match self.ctrl.poll() {
+            if self.clock.now_us() >= deadline {
+                return Err(IoError::Timeout);
+            }
+            match self.ctrl.poll(deadline) {
                 Event::None => {}
                 Event::BusReset => {
                     self.ep0.reset();
@@ -432,9 +441,6 @@ impl<C: Controller, K: Clock> Link for BulkLink<'_, C, K> {
                         return Err(IoError::Reset);
                     }
                 }
-            }
-            if self.clock.now_us() >= deadline {
-                return Err(IoError::Timeout);
             }
         }
     }

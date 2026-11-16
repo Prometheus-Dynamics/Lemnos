@@ -494,7 +494,8 @@ mod tests {
     fn a_transfer_start_writes_the_trb_address_high_word_first() {
         let mut dwc = DwcEndpoints::new(DWC);
         let mut clock = IterClock::new();
-        start_transfer(&mut dwc, &mut clock, DWC, 3, 0x1_2345_6780).unwrap();
+        let deadline = 1_000_000;
+        start_transfer(&mut dwc, &mut clock, DWC, 3, 0x1_2345_6780, deadline).unwrap();
         assert_eq!(dwc.depcmdpar0[3], 0x1);
         assert_eq!(dwc.depcmdpar1[3], 0x2345_6780);
         assert_eq!(

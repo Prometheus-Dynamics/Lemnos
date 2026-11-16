@@ -108,25 +108,40 @@ pub enum Decision {
     Skip,
 }
 
-/// The compare rule, as code, for a write that [`wholly_inside_one_class`] accepts (the host splits the others first).
+/// Why [`decide`] refuses to decide. The host checks both before it compares, so a refusal here is a host bug: the
+/// caller must stop, not write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecideError {
+    /// The card's read or the image is not the write's length (`count * 512` bytes each).
+    Length,
+    /// The write crosses a region boundary: the host splits the write at region boundaries first.
+    Straddle,
+}
+
+/// The compare rule, as code, for a write that [`wholly_inside_one_class`] accepts.
 ///
 /// - **Plain**: the write is made without a mark. No compare is required, and none is made here.
 /// - **Boot area or header**: the host has compared **every sector of the write**, byte for byte, the card's read of the
 ///   range (`card`) against the image bytes the host means to write for the same range (`image`). If the two are equal
 ///   the write is [`Decision::Skip`]. If any byte differs it is made with the mark.
 ///
-/// `card` and `image` are both `count * 512` bytes, the length of the write by construction (the host reads exactly the
-/// range it is about to write, and its image is sliced to that range). A caller that passes another length has a bug;
-/// debug builds check it.
-pub fn decide(regions: &[Region], lba: u32, count: u16, card: &[u8], image: &[u8]) -> Decision {
+/// `card` and `image` must each be `count * 512` bytes; any other length is [`DecideError::Length`]. A write that crosses
+/// a region boundary is [`DecideError::Straddle`]. Both checks run on every call, in every build.
+pub fn decide(
+    regions: &[Region],
+    lba: u32,
+    count: u16,
+    card: &[u8],
+    image: &[u8],
+) -> Result<Decision, DecideError> {
     let len = usize::from(count) * 512;
-    debug_assert_eq!(card.len(), len, "the card's read is the range of the write");
-    debug_assert_eq!(image.len(), len, "the image is the range of the write");
-    debug_assert!(
-        wholly_inside_one_class(regions, lba, count),
-        "the host splits a write at region boundaries first"
-    );
-    match classify(regions, lba, count) {
+    if card.len() != len || image.len() != len {
+        return Err(DecideError::Length);
+    }
+    if !wholly_inside_one_class(regions, lba, count) {
+        return Err(DecideError::Straddle);
+    }
+    Ok(match classify(regions, lba, count) {
         Class::Plain => Decision::Write { mark: false },
         Class::BootArea | Class::Header => {
             if card == image {
@@ -135,7 +150,7 @@ pub fn decide(regions: &[Region], lba: u32, count: u16, card: &[u8], image: &[u8
                 Decision::Write { mark: true }
             }
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -166,7 +181,7 @@ mod tests {
         // Sector 40000 is past every region. Even a differing card does not change the decision.
         assert_eq!(
             decide(&REGIONS, 40_000, 1, &bytes(1, 1), &bytes(2, 1)),
-            Decision::Write { mark: false }
+            Ok(Decision::Write { mark: false })
         );
     }
 
@@ -174,7 +189,7 @@ mod tests {
     fn a_boot_area_write_whose_range_equals_the_image_is_skipped() {
         assert_eq!(
             decide(&REGIONS, 100, 1, &bytes(7, 1), &bytes(7, 1)),
-            Decision::Skip
+            Ok(Decision::Skip)
         );
     }
 
@@ -182,7 +197,7 @@ mod tests {
     fn a_boot_area_write_whose_range_differs_is_made_with_the_mark() {
         assert_eq!(
             decide(&REGIONS, 100, 1, &bytes(7, 1), &bytes(8, 1)),
-            Decision::Write { mark: true }
+            Ok(Decision::Write { mark: true })
         );
     }
 
@@ -190,11 +205,11 @@ mod tests {
     fn a_header_write_whose_range_equals_the_image_is_skipped_and_a_differing_one_is_marked() {
         assert_eq!(
             decide(&REGIONS, 64, 1, &bytes(7, 1), &bytes(7, 1)),
-            Decision::Skip
+            Ok(Decision::Skip)
         );
         assert_eq!(
             decide(&REGIONS, 64, 1, &bytes(7, 1), &bytes(8, 1)),
-            Decision::Write { mark: true }
+            Ok(Decision::Write { mark: true })
         );
     }
 
@@ -205,7 +220,7 @@ mod tests {
         card[2 * 512 + 9] = 1;
         assert_eq!(
             decide(&REGIONS, 100, 3, &card, &image),
-            Decision::Write { mark: true }
+            Ok(Decision::Write { mark: true })
         );
     }
 
@@ -261,5 +276,28 @@ mod tests {
     #[test]
     fn a_write_starting_at_the_boot_area_end_is_wholly_plain() {
         assert!(wholly_inside_one_class(&REGIONS, 32_768, 1));
+    }
+
+    #[test]
+    fn a_compare_of_the_wrong_length_is_refused_and_nothing_is_decided() {
+        // One sector at 100 with a card read of two sectors, and an image of one: both lengths are refused, whichever is
+        // wrong, and no decision is made.
+        assert_eq!(
+            decide(&REGIONS, 100, 1, &bytes(7, 2), &bytes(7, 1)),
+            Err(DecideError::Length)
+        );
+        assert_eq!(
+            decide(&REGIONS, 100, 1, &bytes(7, 1), &bytes(7, 2)),
+            Err(DecideError::Length)
+        );
+    }
+
+    #[test]
+    fn a_write_crossing_a_region_boundary_is_refused_as_straddle_and_nothing_is_decided() {
+        // Sectors 63 and 64: the header starts at 64, so the write crosses into it.
+        assert_eq!(
+            decide(&REGIONS, 63, 2, &bytes(7, 2), &bytes(7, 2)),
+            Err(DecideError::Straddle)
+        );
     }
 }
