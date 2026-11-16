@@ -5,7 +5,7 @@
 //!
 //! - [`uapi`]: what the kernel offers for the block (a node with `open`, `release`, `poll` and
 //!   `fasync` only, its register window and interrupt) and the memory zone node's requests and
-//!   structure, pinned by `layout.rs` and by `layout-check/run.sh` against the C compiler.
+//!   structure, pinned by the compile-time assertions in `layout.rs`.
 //! - [`request`]: checked builders for the memory zone requests, each refusing the fields the
 //!   kernel takes unchecked.
 //! - [`confine`]: what the kernel lets a job reach, as read from its source, and the check that a

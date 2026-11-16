@@ -21,7 +21,7 @@
 //! *and the sensor's reset line* (the sensor is its own driver's), and `VVCAM_MIPI_SET_STREAM`
 //! does nothing in this kernel. Their numbers are kept for the layout test.
 
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 const fn iow(nr: u8, size: usize) -> u32 {
     assert!(size < (1 << 14));
@@ -204,3 +204,26 @@ pub const RESET: u32 = iow(0x01, size_of::<u32>());
 pub const SET_DEV_ATTR: u32 = iow(0x02, size_of::<DevAttr>());
 /// `VVCAM_MIPI_SET_STREAM`: `_IOW('v', 0x03, unsigned int)`. Not issued.
 pub const SET_STREAM: u32 = iow(0x03, size_of::<u32>());
+
+// Last-known-good layouts of `vvcam_mipi.h` as k230_linux_sdk at fc6cc21 declares them
+// (buildroot-overlay/package/vvcam/mipi/, asm-generic `_IOC` encoding). These numbers were checked
+// by the C compiler before that check was removed; the assertions below
+// are the same numbers, so a change to any of these structures fails the build.
+const _: () = {
+    assert!(size_of::<Interface>() == 48);
+    assert!(offset_of!(Interface, vcid) == 4);
+    assert!(offset_of!(Interface, bit_mode) == 8);
+    assert!(offset_of!(Interface, data_type) == 12);
+    assert!(offset_of!(Interface, h_time) == 16);
+    assert!(offset_of!(Interface, v_time) == 32);
+    assert!(size_of::<MipiAttr>() == 404);
+    assert!(offset_of!(MipiAttr, lane_id) == 384);
+    assert!(offset_of!(MipiAttr, phy_freq) == 400);
+    assert!(size_of::<DevAttr>() == 424);
+    assert!(offset_of!(DevAttr, image_rect) == 4);
+    assert!(offset_of!(DevAttr, mipi) == 20);
+    // `_IOW('v', 0x01, unsigned int)`, `_IOW('v', 0x02, vvcam_input_dev_attr_t)`, `_IOW('v', 0x03, unsigned int)`.
+    assert!(RESET == 0x4004_7601);
+    assert!(SET_DEV_ATTR == 0x41A8_7602);
+    assert!(SET_STREAM == 0x4004_7603);
+};

@@ -2,7 +2,7 @@
 //! `buildroot-overlay/package/vvcam/isp/vvcam_isp.h` and `vvcam_event.h` of the vendor SDK
 //! (`k230_linux_sdk` at `fc6cc21`; VeriSilicon, dual MIT and GPL, used under MIT). Interface facts
 //! only; no code is copied. The numbers are the asm-generic `_IOC` encodings (riscv, arm, x86),
-//! pinned by the tests and by `layout-check/check.c` against the C compiler.
+//! pinned by the tests and by the assertions at the end of this file.
 //!
 //! Requests the device has and this crate does not issue:
 //!
@@ -14,7 +14,7 @@
 //!   not reset the block, which would drop whatever programmed its frame path.
 //! - `mmap` of the register window: it would give unchecked access to every register.
 
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 const NRSHIFT: u32 = 0;
 const TYPESHIFT: u32 = 8;
@@ -91,3 +91,21 @@ pub const UNSUBSCRIBE_EVENT: u32 = ioc(WRITE, MAGIC, 0x05, size_of::<Subscriptio
 /// `VVCAM_ISP_DQEVENT`: `_IOR('v', 0x06, vvcam_event_t)`. Fails with `ENOENT` when no event is
 /// queued; it never blocks.
 pub const DQEVENT: u32 = ioc(READ, MAGIC, 0x06, size_of::<Event>());
+
+// Last-known-good layouts of `vvcam_isp.h` and `vvcam_event.h` (k230_linux_sdk at fc6cc21), as the
+// C compiler gave them before that check was removed. The assertions below keep those numbers.
+const _: () = {
+    assert!(size_of::<RegPair>() == 8);
+    assert!(offset_of!(RegPair, value) == 4);
+    assert!(size_of::<Subscription>() == 8);
+    assert!(offset_of!(Subscription, id) == 4);
+    assert!(size_of::<Event>() == 24);
+    assert!(offset_of!(Event, irq_value) == 8);
+    assert!(offset_of!(Event, timestamp) == 16);
+    assert!(RESET == 0x4004_7601);
+    assert!(READ_REG == 0xC008_7602);
+    assert!(WRITE_REG == 0x4008_7603);
+    assert!(SUBSCRIBE_EVENT == 0x4008_7604);
+    assert!(UNSUBSCRIBE_EVENT == 0x4008_7605);
+    assert!(DQEVENT == 0x8018_7606);
+};

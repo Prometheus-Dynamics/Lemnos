@@ -76,8 +76,9 @@ buffer the client holds (a frame it has not released) cannot be named by a job.
 
 ## Layout check (manual)
 
-`layout-check/run.sh <linux-tree>` compiles `check.c` against the kernel headers and diffs the
-sizes and offsets it prints against the generated block in `src/uapi/layout.rs`. It needs a Raspberry
+`lemnos-layout-check pisp/be -I <uapi/linux/media/raspberrypi> --header-version <rev>` (and
+`pisp/fe` with `rp1_cfe` and its `pisp_statistics.h`) compares the sizes and offsets bindgen reads
+with the block in `src/uapi/layout.rs`, and only when `<rev>` is rpi-7.2.y. It needs a Raspberry
 Pi kernel tree, for `drivers/media/platform/raspberrypi/rp1_cfe/` and
 `include/uapi/linux/media/raspberrypi/`.
 

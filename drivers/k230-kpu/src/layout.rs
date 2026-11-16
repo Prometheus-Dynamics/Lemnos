@@ -1,8 +1,7 @@
-//! The C compiler's sizes, offsets and numbers for the kernel's declarations, checked at compile
-//! time. `layout-check/run.sh` asserts the same numbers in C, compiled with
-//! `clang --target=riscv64-unknown-linux-gnu` and with the host compiler, against the declarations
-//! of `drivers/misc/canaan/mmz/mmz.c` (ruyisdk/linux-xuantie-kernel at
-//! `7d4e1f444f461dbe3833bd99a4640e7b6c2cd529`).
+//! The sizes, offsets and numbers of the kernel's declarations, checked at compile time. The
+//! declarations are those of `drivers/misc/canaan/mmz/mmz.c` (ruyisdk/linux-xuantie-kernel at
+//! `7d4e1f444f461dbe3833bd99a4640e7b6c2cd529`). They are the numbers the C compiler gave on riscv64
+//! and on the host before that check was removed.
 
 use core::mem::{offset_of, size_of};
 

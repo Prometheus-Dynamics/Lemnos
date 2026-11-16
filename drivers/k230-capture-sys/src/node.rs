@@ -31,7 +31,7 @@ fn call<T: Arg>(fd: BorrowedFd<'_>, request: u32, arg: &mut T) -> io::Result<()>
     let ptr = std::ptr::from_mut(arg);
     loop {
         // SAFETY: `request` is one of the numbers below, each made with `size_of::<T>()` for the
-        // `T` it is called with (checked by the layout tests and `layout-check`); `ptr` points to
+        // `T` it is called with (checked by the layout assertions in `mipi.rs`); `ptr` points to
         // a live, exclusive `T` for the whole call; `T` holds integers only, so the kernel follows
         // no pointer in it; `fd` is open for the duration of the call.
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), request as _, ptr) };

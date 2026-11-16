@@ -48,8 +48,8 @@
 //! (`__isp_set_load_reg`, `isp_3d_pingpong_update`, `sunxi_isp_set_load_ddr`, the parameter load
 //! in `isp_isr`, and stream on in `sunxi_isp_subdev_s_stream`) and `drivers/vin/vin-stat/vin_h3a.c`
 //! (`isp_stat_buf_get`). The chip is the one built without `CONFIG_ARCH_SUN55IW6` and
-//! `CONFIG_ARCH_SUN55IW3`. `layout-check/run.sh <allwinner-bsp checkout>` compiles a C program
-//! against the two headers and diffs what it prints against the block below.
+//! `CONFIG_ARCH_SUN55IW3`. `lemnos-layout-check isp600 -I <allwinner-bsp checkout>` compares the
+//! block below with bindgen's reading of the two headers (`testing/crates/layout-check`).
 //!
 //! The vendor user-space library, `radxa/allwinner-isp6xx` at
 //! `516fd7443810e0807b289829dbae1ae5a62e0cb5` (`isp6xx/libisp/include/isp_comm.h`, the

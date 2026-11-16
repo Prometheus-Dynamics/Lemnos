@@ -1,0 +1,10 @@
+[package]
+name = "lemnos-layout-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Checks each vendor-header driver's layout assertions against the header, with bindgen's reading of it"
+
+[lints]
+workspace = true

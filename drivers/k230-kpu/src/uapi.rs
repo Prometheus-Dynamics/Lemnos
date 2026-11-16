@@ -18,9 +18,8 @@
 //!   - `arch/riscv/configs/k230_defconfig`: `CONFIG_K230_GNNE_DRIVER=y`, `CONFIG_K230_MMZ=y`, and
 //!     no `CONFIG_STRICT_DEVMEM`.
 //!
-//! The sizes and offsets are pinned in `layout.rs`, and were checked by `layout-check/check.c`
-//! with `clang --target=riscv64-unknown-linux-gnu` and `gcc` on x86_64 (both 64-bit, the K230
-//! Linux target).
+//! The sizes and offsets are pinned in `layout.rs`, against the declarations of the vendor's
+//! `mmz.c` (64-bit, the K230 Linux target).
 
 /// The KPU's node (`device_create(..., "k230-gnne")`).
 pub const DEVICE: &str = "/dev/k230-gnne";

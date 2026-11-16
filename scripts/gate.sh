@@ -56,6 +56,9 @@ step "usb gadget, std" cargo test -q -p lemnos-driver-usb-gadget --features std
 step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
 step "client on tokio" cargo test -q -p lemnos-client --features tokio
 step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
+# The vendor-header layouts: with no header given, the tool says per variant which header it needs and
+# compares nothing (the drivers' own layout assertions are compiled and tested above).
+step "layout headers, not run in the gate" cargo run -q -p lemnos-layout-check
 
 # The crates used as plain libraries, alone and without their driver halves.
 step libraries scripts/check-libraries.sh
