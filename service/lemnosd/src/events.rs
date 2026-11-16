@@ -117,9 +117,10 @@ struct Told {
 /// the call returns. Reads and sends nothing for a device that has not changed, and allocates
 /// only to send.
 /// The line the daemon writes when a device first reaches `running ok` after a bind: its id and
-/// how long after the bind that was, in whole milliseconds.
-fn running_line(id: &str, bound_ns: u64, now_ns: u64) -> String {
-    let ms = now_ns.saturating_sub(bound_ns) / 1_000_000;
+/// how long after the bind the host first saw it running ok, in whole milliseconds. `ok_ns` is the
+/// host's stamp of that moment (`Host::running_ok_ns`), not the time this thread looked.
+fn running_line(id: &str, bound_ns: u64, ok_ns: u64) -> String {
+    let ms = ok_ns.saturating_sub(bound_ns) / 1_000_000;
     format!("lemnosd: {id}: running ok {ms} ms after bind")
 }
 
@@ -142,10 +143,11 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<O
         if health == Health::Ok
             && matches!(info.state, DeviceState::Running)
             && let Some(bound) = core.host.bound_ns(index as u32)
+            && let Some(ok) = core.host.running_ok_ns(index as u32)
             && announced[index] != Some(bound)
         {
             announced[index] = Some(bound);
-            let line = running_line(&info.id, bound, core.clock.now_ns());
+            let line = running_line(&info.id, bound, ok);
             let _ = writeln!(std::io::stderr(), "{line}");
         }
         let (state, health, reason) =

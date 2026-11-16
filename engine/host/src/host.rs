@@ -467,6 +467,18 @@ pub struct DeviceInfo {
     pub revision: u64,
 }
 
+/// Whether the device's driver needs another device (a `uses` entry), whose health its own health
+/// is combined with.
+fn has_device_needs(slot: &Slot) -> bool {
+    slot.entry.is_some_and(|entry| {
+        entry
+            .manifest
+            .needs
+            .iter()
+            .any(|need| matches!(need.kind, NeedKind::Device(_)))
+    })
+}
+
 struct Slot {
     index: u32,
     /// Which lane runs this device: its bus, or itself when it has none.
@@ -497,6 +509,10 @@ struct Slot {
     tried_ns: AtomicU64,
     /// When the driver last bound.
     bound_ns: AtomicU64,
+    /// When this bind's device first ran with health Ok, on the host's clock, plus one: zero
+    /// until this bind stamps it, and each bind sets it back to zero. The first stamp wins. See
+    /// [`Inner::set_running_ok`].
+    running_ok_ns: AtomicU64,
     /// Runs in a row that ended sooner than the retry cap after their bind. A driver that fails
     /// straight after each bind waits longer each time, as a bind that fails does.
     short_runs: AtomicU32,
@@ -712,6 +728,7 @@ impl Slot {
             next_tick_ns: AtomicU64::new(NO_TICK),
             tried_ns: AtomicU64::new(0),
             bound_ns: AtomicU64::new(0),
+            running_ok_ns: AtomicU64::new(0),
             short_runs: AtomicU32::new(0),
             stalled: AtomicBool::new(false),
             hinted: AtomicBool::new(false),
@@ -1803,6 +1820,7 @@ impl Inner {
                 instance.caller(caller);
             }
             let mut status = instance.dispatch(method, args, &mut writer);
+            self.stamp_running_ok(slot, instance.as_ref(), slot.is_running());
             if as_job && status.is_ok() {
                 status = match JobId::decode(&mut Reader::new(writer.written())) {
                     Ok(job) if writer.len() == 8 => {
@@ -1906,6 +1924,7 @@ impl Inner {
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 work(instance.as_mut());
+                self.stamp_running_ok(&target, instance.as_ref(), target.is_running());
                 let next = (target.ticks() && self.may_tick(&target)).then(|| {
                     let now = self.clock.now_ns();
                     self.tick_instance(&target, instance.as_mut(), now)
@@ -2031,6 +2050,7 @@ impl Inner {
     /// Builds the driver, on its lane, inside the panic boundary.
     fn bind(&'static self, slot: Arc<Slot>) {
         slot.tried_ns.store(self.clock.now_ns(), Ordering::Release);
+        slot.running_ok_ns.store(0, Ordering::Release);
         // A device whose settings its driver refuses is never made. It shows failed, with the
         // reason, and is retried under the failure rule like any device that fails to bind.
         if let Some(reason) = &slot.refusal {
@@ -2133,6 +2153,10 @@ impl Inner {
             Ok(Ok(_)) => {
                 slot.errors.store(0, Ordering::Relaxed);
                 slot.bound_ns.store(self.clock.now_ns(), Ordering::Release);
+                // Before the device shows as running, so a look that finds it running finds the stamp too.
+                if let Some(instance) = lock(&slot.instance).as_ref() {
+                    self.stamp_running_ok(&slot, instance.as_ref(), true);
+                }
                 *lock(&slot.state) = DeviceState::Running;
                 // A new instance starts not stalled: its own first failure is an edge.
                 slot.stalled.store(false, Ordering::Release);
@@ -2200,6 +2224,7 @@ impl Inner {
             instance.board(&BoardRead { inner: self });
         }
         let next = instance.tick(now_ns);
+        self.stamp_running_ok(slot, instance, slot.is_running());
         if instance.endpoints_ended() {
             slot.end_close();
         }
@@ -2215,6 +2240,31 @@ impl Inner {
             }
         }
         next
+    }
+
+    /// Stamps the moment this bind's device first runs with health Ok, from the driver's own run:
+    /// the bind, a tick, or a call that the host has just made, with the instance still held, so a
+    /// look that finds the device running finds the stamp too. Exact to the run. Skipped for a
+    /// device with device needs: its health also depends on its children, which the host does not
+    /// watch at that moment, so [`Host::look`] stamps it (see [`Host::running_ok_ns`]).
+    fn stamp_running_ok(&self, slot: &Slot, instance: &dyn Instance, running: bool) {
+        if !running || slot.running_ok_ns.load(Ordering::Acquire) != 0 || has_device_needs(slot) {
+            return;
+        }
+        let ok = catch_unwind(AssertUnwindSafe(|| instance.health()))
+            .is_ok_and(|health| health == Health::Ok);
+        if ok {
+            self.set_running_ok(slot);
+        }
+    }
+
+    /// Stamps the first moment this bind's device is seen running with health Ok. The first stamp of
+    /// a bind wins, so a look never replaces the driver's exact one. Allocates nothing.
+    fn set_running_ok(&self, slot: &Slot) {
+        let now = self.clock.now_ns().saturating_add(1);
+        let _ = slot
+            .running_ok_ns
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
     }
 
     /// Whether a device comes and goes: an `[[each]]` entry made it, or it sits on a bus the
@@ -3353,12 +3403,30 @@ impl Host {
         Some(slot.bound_ns.load(Ordering::Acquire))
     }
 
+    /// When the device at `index` first ran with health Ok in its current bind, on the host's clock
+    /// (ns), and how exactly. A device with no device needs is stamped by its own run: at its bind,
+    /// tick or call, the moment the host ran the driver and saw Ok. A device whose Ok depends on its
+    /// children is stamped by the first [`Host::look`] that finds it running ok, so the stamp is the
+    /// time of that look (up to one look interval after the transition). `None` until the bind is
+    /// stamped, and again from each bind. Read by the daemon to say how long bring-up took.
+    pub fn running_ok_ns(&self, index: u32) -> Option<u64> {
+        let slot = self.inner.slot(index)?;
+        slot.running_ok_ns.load(Ordering::Acquire).checked_sub(1)
+    }
+
     pub fn look(&self, index: u32) -> Option<(u64, Health)> {
         let slot = self.inner.slot(index)?;
         // The revision is read first, as in `info`.
         let revision = slot.revision.load(Ordering::Acquire);
         match self.inner.health_of(&slot, MAX_DEPTH) {
-            (health, true) => Some((revision, health)),
+            (health, true) => {
+                // The fallback stamp: a device found running ok that no driver run has stamped in
+                // this bind is stamped now. The driver's own stamp, where it exists, is already set.
+                if health == Health::Ok && slot.running_ok_ns.load(Ordering::Acquire) == 0 {
+                    self.inner.set_running_ok(&slot);
+                }
+                Some((revision, health))
+            }
             (_, false) => None,
         }
     }
