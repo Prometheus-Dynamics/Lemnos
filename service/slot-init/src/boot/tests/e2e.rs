@@ -261,6 +261,7 @@ fn end_to_end_uboot_form_install_trial_confirm_keep_previous_free() {
         place: place.clone(),
         restarter: restarter(),
         boot_node: Ok(node.clone()),
+        partitions: None,
     };
     let var = |name: &str| {
         board

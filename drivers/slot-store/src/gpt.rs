@@ -51,9 +51,9 @@ fn le64(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(word)
 }
 
-/// The one partition with the environment's type GUID. Refused by name when the disk has no valid
-/// GPT, no such partition, or several.
-pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, String> {
+/// The primary table's entries, each `(type GUID bytes, first, last, name)`. Refused by name when the
+/// header or the entry array can't be read or fails its CRC.
+fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<([u8; 16], Part, String)>, String> {
     let mut header = vec![0u8; SECTOR];
     dev.read_at(SECTOR as u64, &mut header)
         .map_err(|e| format!("the GPT header can't be read: {e}"))?;
@@ -84,18 +84,39 @@ pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, Strin
     if crc32(&table) != le32(&header, 88) {
         return Err("the GPT entry array's CRC is wrong".into());
     }
-    let mut found = Vec::new();
+    let mut out = Vec::new();
     for raw in table.chunks_exact(entry as usize) {
-        if raw[..16] == ENV_TYPE_BYTES {
-            let part = Part {
-                first: le64(raw, 32),
-                last: le64(raw, 40),
-            };
-            if part.last < part.first {
-                return Err("a GPT entry ends before it starts".into());
-            }
-            found.push(part);
+        if raw[..16] == [0u8; 16] {
+            continue;
         }
+        let part = Part {
+            first: le64(raw, 32),
+            last: le64(raw, 40),
+        };
+        // The name: 72 bytes of UTF-16LE from offset 56, NUL-terminated.
+        let units: Vec<u16> = raw[56..128]
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .take_while(|unit| *unit != 0)
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        let mut kind = [0u8; 16];
+        kind.copy_from_slice(&raw[..16]);
+        out.push((kind, part, name));
+    }
+    Ok(out)
+}
+
+/// The one partition with the environment's type GUID. Refused by name when the disk has no valid
+/// GPT, no such partition, or several.
+pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, String> {
+    let found: Vec<Part> = entries(dev)?
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == ENV_TYPE_BYTES)
+        .map(|(_, part, _)| part)
+        .collect();
+    if found.iter().any(|part| part.last < part.first) {
+        return Err("a GPT entry ends before it starts".into());
     }
     match found.as_slice() {
         [one] => Ok(*one),
@@ -107,6 +128,15 @@ pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, Strin
             many.len()
         )),
     }
+}
+
+/// How many partitions of the primary table are named `name` (the name is compared as text). What
+/// U-Boot's `part start <interface> <dev> <name>` finds, which `boot.cmd` asks before it saves.
+pub fn count_named<D: EnvDev + ?Sized>(dev: &mut D, name: &str) -> Result<usize, String> {
+    Ok(entries(dev)?
+        .iter()
+        .filter(|(_, _, found)| found == name)
+        .count())
 }
 
 /// A GPT image (header, entry array, no partition contents) of `total_blocks` blocks, for tests of

@@ -515,6 +515,7 @@ fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
         place: place.clone(),
         restarter: restarter(),
         boot_node: Ok(boot_node),
+        partitions: None,
     };
     let current = || {
         let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
@@ -674,6 +675,7 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
         place: Place::gpt(size).unwrap(),
         restarter: restarter(),
         boot_node: Err("not needed: the environment only".into()),
+        partitions: None,
     };
     // No boot disk is known.
     let mut record = env(
@@ -748,6 +750,7 @@ fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_no
         place,
         restarter: restarter(),
         boot_node: Ok(boot),
+        partitions: None,
     };
     record.set_trial("b", 3).unwrap();
     assert_eq!(record.pending().unwrap(), Some(("b".to_string(), 3)));
@@ -1046,4 +1049,86 @@ fn at_eight_the_rescue_starts_no_slot_and_offers_download_mode() {
     assert!(rescued);
     assert_eq!(pass.as_deref(), Some("xx"));
     assert!(!dtb, "no slot is started at 8");
+}
+
+// ---- The environment's byte budget (BB1c) ----
+
+#[test]
+fn the_driver_and_the_marker_stay_within_the_stated_budget() {
+    use crate::uboot::{ENV_BUDGET_BYTES, ENV_WORST_CASE_BYTES, worst_case_copy_bytes};
+    assert_eq!(
+        worst_case_copy_bytes(),
+        ENV_WORST_CASE_BYTES,
+        "the stated worst case is the computed one: update ENV_WORST_CASE_BYTES with the variables"
+    );
+    let worst = worst_case_copy_bytes();
+    assert!(
+        worst <= ENV_BUDGET_BYTES,
+        "the driver's own variables take {worst} bytes in the worst case; the budget is {ENV_BUDGET_BYTES}"
+    );
+}
+
+#[test]
+fn every_variable_the_driver_writes_has_a_worst_case_value() {
+    use crate::uboot::{VARIABLES, worst_case_entries};
+    let entries = worst_case_entries();
+    for name in VARIABLES {
+        assert!(
+            entries.iter().any(|(n, _)| n == name),
+            "{name} is in the worst case"
+        );
+    }
+    // A name without a worst-case value is counted at the longest id (see `worst_case_entries`); this
+    // test is what notices, so the value is given where the variable is added.
+    for (name, _) in &entries {
+        assert!(
+            crate::uboot::worst_value(name).is_some(),
+            "{name} has no worst-case value in uboot.rs"
+        );
+    }
+}
+
+#[test]
+fn the_worst_case_encodes_to_exactly_the_stated_size() {
+    use crate::uboot::{ENV_WORST_CASE_BYTES, worst_case_entries};
+    use lemnos_slot_store::uboot_env::{HEADER, encode_vars};
+    let data = encode_vars(&worst_case_entries(), ENV_WORST_CASE_BYTES - HEADER).unwrap();
+    assert_eq!(data.len() + HEADER, ENV_WORST_CASE_BYTES);
+}
+
+#[test]
+fn a_copy_of_0x2000_bytes_holds_the_worst_case_with_room_to_spare() {
+    use crate::uboot::{ENV_WORST_CASE_BYTES, size_refusal, worst_case_entries};
+    use lemnos_slot_store::uboot_env::{HEADER, encode_vars};
+    assert_eq!(
+        size_refusal(0x2000),
+        None,
+        "a 0x2000 environment is accepted"
+    );
+    let data = encode_vars(&worst_case_entries(), 0x2000 - HEADER).unwrap();
+    assert_eq!(data.len() + HEADER, 0x2000);
+    assert_eq!(
+        0x2000 - ENV_WORST_CASE_BYTES,
+        7798,
+        "bytes left for U-Boot's defaults"
+    );
+}
+
+#[test]
+fn a_copy_below_the_worst_case_is_refused_at_validation_by_name() {
+    use crate::uboot::{ENV_WORST_CASE_BYTES, size_refusal};
+    let why = size_refusal(ENV_WORST_CASE_BYTES - 1).expect("refused");
+    assert!(why.contains(&ENV_WORST_CASE_BYTES.to_string()), "{why}");
+    assert_eq!(size_refusal(ENV_WORST_CASE_BYTES), None);
+}
+
+#[test]
+fn a_write_that_does_not_fit_says_how_many_bytes_it_needs() {
+    use lemnos_slot_store::uboot_env::encode_vars;
+    let vars = vec![("default".to_string(), "x".repeat(40))];
+    let err = encode_vars(&vars, 16).unwrap_err();
+    assert!(
+        err.contains("bytes needed") && err.contains("16 in the copy"),
+        "{err}"
+    );
 }

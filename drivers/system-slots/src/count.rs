@@ -139,6 +139,8 @@ impl<M: ClearCount> Actions for Fallback<'_, M> {
     }
 
     fn point_default(&mut self, to: &str) -> Result<(), String> {
+        crate::boot::loader_reads_record(&*self.record)
+            .map_err(|e| format!("couldn't point the default at {to}: {e}"))?;
         self.record
             .set_default(to)
             .map_err(|e| format!("couldn't point the default at {to}: {e}"))?;

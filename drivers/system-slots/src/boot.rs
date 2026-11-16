@@ -32,6 +32,20 @@ use crate::store::{Layout, replace, sync_dir};
 /// A trial is a slot the loader starts for the boots its attempts allow ([`BootRecord::set_trial`]).
 /// Each trial boot takes one attempt before the trial starts (the loader does it: the script, or
 /// `lemnos-slot-init` for the other forms), so a boot that never reaches the daemon uses one up.
+/// The refusal for an operation whose effect is the boot loader reading the record (a switch, a trial,
+/// an attempt that must be counted, a demotion): `Unsupported`, with the reason's sentence, when trial
+/// updates are unavailable on `record`. Checked before anything is written. Operations that only remove
+/// what the driver recorded (clearing a trial, stopping one) and the install (bays only) don't call it.
+pub(crate) fn loader_reads_record(record: &dyn BootRecord) -> io::Result<()> {
+    match record.trial_updates() {
+        crate::uboot::TrialUpdates::Available => Ok(()),
+        crate::uboot::TrialUpdates::Unavailable(why) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            why.reason.sentence(),
+        )),
+    }
+}
+
 pub trait BootRecord: Send {
     /// The slot every ordinary boot starts.
     fn set_default(&mut self, id: &str) -> io::Result<()>;
@@ -45,6 +59,11 @@ pub trait BootRecord: Send {
     fn clear_trial(&mut self) -> io::Result<()>;
     /// Restarts the board, into whatever the loader starts first.
     fn restart(&mut self) -> io::Result<()>;
+    /// Whether a trial can be recorded and started on this board (see [`crate::uboot::TrialUpdates`]).
+    /// Only the `uboot` record can say no; the others always can.
+    fn trial_updates(&self) -> crate::uboot::TrialUpdates {
+        crate::uboot::TrialUpdates::Available
+    }
     /// Writes a slot's five payloads (`ROLES` order) into a free bay set and commits its record. No
     /// pointer moves: the default and trial switches are separate calls. Nothing on the boot partition
     /// is written at file level.

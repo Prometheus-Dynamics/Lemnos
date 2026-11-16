@@ -1002,6 +1002,121 @@ is newer), and on a tie the primary copy, the one at `CONFIG_ENV_OFFSET` (in the
   refused rather than read from the backup. 512-byte blocks. Not run on a board:
   `testing/board-runs/I5i7.md`.
 
+### Trial updates on the `uboot` record
+
+A trial needs the environment's writes to be read by U-Boot, and the boot script to save them: the
+script saves only where the environment's device has a partition named `uboot-env` (`part start mmc
+<dev> uboot-env`, `packaging/uboot/boot.cmd`), and it starts a trial only after that save. So the
+driver finds, at bind, after each look at the board (every ten seconds, and before each trial request),
+whether a trial can be recorded and started. It reads only; nothing is written by the check. The
+answer is typed, with a fixed set of reasons, checked in this order (the first failing check is the
+reason):
+
+| Reason (`info` code) | Found when | Sentence (a refused trial and `health` say it) |
+|---|---|---|
+| `no-env-partition` | the environment's device (the boot disk for the GPT form, the device for the device form) has no partition named `uboot-env`, or no readable GPT | the environment's device has no uboot-env partition, so the boot script never saves the environment and never starts a trial |
+| `env-unreadable` | the device can't be opened, or the environment has no valid copy, or (GPT form) the boot disk isn't known | the environment can't be read |
+| `fat-env-file` | GPT form: the boot partition holds `uboot.env`, which U-Boot reads before the GPT partition, so a GPT write would not be read | the boot partition holds uboot.env |
+| `boot-partition-unreadable` | GPT form: the boot partition is not known, or can't be read as FAT, so `uboot.env` can't be ruled out | the boot partition can't be read as FAT |
+| `loader-not-updated` | the environment does not hold `lemnos_env_rev=1`: the image's U-Boot does not carry the slot environment change (the marker below) | the image's U-Boot does not carry the slot environment change |
+
+When trials are available, `info` carries `"trial_updates":"available"` and an empty `trial_block`.
+When not, `info` carries `"trial_updates":"unavailable"`, `trial_block` (the code above),
+`trial_block_text` (the sentence) and `trial_block_detail` (what was found). `health` is `Degraded`
+with the sentence, since restarts still work. A `trial` request on such a board is refused before
+anything is written: its status is `NOT_PERMITTED`, and the state's `error` is the sentence. A board
+with the partition and the marker reports `available`.
+
+**The U-Boot marker.** `lemnos_env_rev` is the variable the image's U-Boot carries in its default
+environment, with the value `1` (`uboot::ENV_MARKER`, `uboot::ENV_MARKER_VALUE`). It is defined by the
+patched U-Boot, not by this repository: the image's U-Boot fragment sets it in the default environment
+(`CONFIG_EXTRA_ENV_TEXT`, `lemnos_env_rev=1`), and `packaging/uboot/boot.cmd` names it in its header.
+It reaches the stored environment when U-Boot first saves a valid environment: an absent or invalid
+environment is rebuilt from the defaults, and `saveenv` writes them with the rest. An environment
+written by an earlier U-Boot never gains it, so such a board reports `loader-not-updated` until its
+environment is rebuilt by a U-Boot that carries the marker. The image builder checks the marker
+before it builds an RK slot image (`docs/boards.md`, "What an image builder checks").
+
+### What the driver writes into the environment
+
+The environment is one copy of `uboot_env_size` bytes (header included) in U-Boot's form: the 5-byte
+header (CRC-32 word and serial, `encode_copy`), then `name=value` strings each ended by a NUL, then one
+more NUL that ends the list (`lemnos_slot_store::uboot_env::encode_vars`). The variables the budget
+counts are the ones the driver writes, the ones the image's preamble and the restart count store, and the
+marker. Each is stored by `saveenv`, so each takes its bytes whether or not the script still needs it:
+
+| Variable | Set by | Worst-case value | Entry bytes (name + `=` + value + NUL) |
+|---|---|---|---|
+| `default` | the default switch | a slot id, 64 bytes (`valid_id`, `store.rs`) | 7 + 1 + 64 + 1 = 73 |
+| `default_bay` | the default switch | `bay2` (`SETS` = 3, `bays.rs`) | 11 + 1 + 4 + 1 = 17 |
+| `previous_bay` | the default switch | `bay2` | 12 + 1 + 4 + 1 = 18 |
+| `trial` | the trial | a slot id, 64 bytes | 5 + 1 + 64 + 1 = 71 |
+| `trial_bay` | the trial | `bay2` | 9 + 1 + 4 + 1 = 15 |
+| `trial_attempts` | the trial, the attempt bookkeeping | `3` (`MAX_ATTEMPTS`, `records.rs`) | 14 + 1 + 1 + 1 = 17 |
+| `lemnos_env_rev` | U-Boot's default environment (the marker) | `1` | 14 + 1 + 1 + 1 = 17 |
+| `lemnos_envdev` | the image's boot preamble (`service/ctl` `boot_dir`) | two digits (`uboot_env_mmc_index` is at most 99) | 13 + 1 + 2 + 1 = 17 |
+| `lemnos_restarts` | the restart count: the script raises it, the driver clears it (BB2) | `8` (the script saturates it at 8, `packaging/uboot/boot.cmd`) | 15 + 1 + 1 + 1 = 18 |
+| `lemnos_episodes_bay` | the episodes: the driver (BB2) | `bay2` | 19 + 1 + 4 + 1 = 25 |
+| `lemnos_episodes` | the episodes: the driver (BB2) | `255` (`demote_after_episodes` is at most 255) | 15 + 1 + 3 + 1 = 20 |
+| `lemnos_usb` | the preamble (`uboot_fastboot_usb`) | two digits (at most 99) | 10 + 1 + 2 + 1 = 14 |
+| `lemnos_led` | the preamble (`uboot_led`) | 32 bytes (the board file's limit) | 10 + 1 + 32 + 1 = 44 |
+| `lemnos_rst` | the preamble (`uboot_reset_word`) | `0x` and eight hex digits | 10 + 1 + 10 + 1 = 22 |
+
+The sum of the entries is 388 bytes; the list's final NUL makes 389; the header makes **394 bytes**
+(`uboot::ENV_WORST_CASE_BYTES`). The budget the variables must stay within is 400 bytes
+(`uboot::ENV_BUDGET_BYTES`). Two tests hold the number: one computes the worst case from
+`uboot::worst_case_entries` and fails if it differs from the stated 394 or exceeds the budget; another
+encodes the worst case and checks that the stored length is 394. A variable the driver starts to write
+must be added to `VARIABLES` (or `COUNT_VARIABLES`) and given a worst-case value in `worst_value`; a name
+without one is counted at the longest slot id, so it is over-counted rather than missed. The board file's
+caps that the table depends on are checked at validation: `uboot_env_mmc_index` and `uboot_fastboot_usb` at
+most 99, `uboot_led` at most 32 bytes, `uboot_reset_word` at most 10 bytes.
+
+**The board file.** `uboot_env_size` below 394 is refused at validation, by name: the sentence says the
+variables need 394 bytes, header included, in the worst case. A 0x2000 (8192-byte) copy holds them with
+7798 bytes to spare. Whether U-Boot's own default environment fits in the rest is not known to Lemnos:
+the default environment is compiled into the image's U-Boot, and nothing here reads it.
+
+**A write that does not fit.** The encoder refuses it before any byte is written, with the bytes it
+needs and the copy's size (`the environment is full: N bytes needed for its variables, M in the copy`).
+The driver records that text as the state's error, so `info` shows it. The write is refused with `IO`.
+
+**Not in the budget.** `saveenv` writes the whole environment in U-Boot, not only the variables above.
+The boot script also sets interim variables before its saves (`lemnos_saveable`, `lemnos_envpart`,
+`lemnos_env`, `lemnos_dtb`, `lemnos_conf`, `lemnos_src`, `lemnos_why`, `lemnos_pass`, `take_trial`, and
+others: `grep -o 'setenv [a-z_]*' packaging/uboot/boot.cmd`), and those are stored too. Their worst case
+is not derived here. The sentences in `lemnos_why` are the longest of them. A board whose default
+environment and these interim variables together exceed `uboot_env_size` gets a write refused as above.
+
+### Loader-dependent operations
+
+An operation whose effect is the boot loader reading the record is refused before any write while trial
+updates are unavailable, with the reason's sentence as the state's error (`boot::loader_reads_record`).
+The decisions, by caller in `system-slots` (and `service/slot-init`, which is outside it):
+
+| Caller | Operation | Decision while unavailable |
+|---|---|---|
+| `Slots::set_default` (`lib.rs`) | the switch: writes `default`, `default_bay`, `previous_bay` | refused, `NOT_PERMITTED`, nothing written |
+| `Slots::trial` (`lib.rs`) | the trial: writes `trial`, `trial_bay`, `trial_attempts` | refused, `NOT_PERMITTED`, nothing written (checked before the others) |
+| `Slots::install` completion (`lib.rs`) | the bays and the slot's files; no environment write | written; the install's reply says the boot loader will not start it |
+| `resolve`: confirm's switch to the running slot (`confirm_as`) | `default`, then `trial` cleared | refused before anything is written; the trial stays pending |
+| `resolve`: confirm's trial-only branch | clears `trial` | allowed: removing a trial starts nothing |
+| `resolve`: give-back of an attempt (`resolve_at_start`) | `trial_attempts` to the count given back | refused; the attempt is not counted in the record |
+| `resolve`: `writes_work` | `trial_attempts` rewritten to the count left | refused when a count is left; a count of 0 is written |
+| `resolve`: fallback, back-on, and the give-up | clears `trial`, or sets `trial_attempts` to 0 | allowed: they stop a trial |
+| `boot_guard::repoint` | the default moves to the previous slot | refused before the old default is marked failed; the restart is refused with the reason |
+| `count::point_default` | the default moves (the `tryboot` count's fallback) | refused (guarded for uniformity; the `uboot` form has no count, so it is not reached there) |
+| `arrive_uboot`: the arrival's episode (`record_episode`, `set_episodes`) | `lemnos_episodes_bay`, `lemnos_episodes` | allowed: the driver's own count, which the loader never reads; it is what demotion is decided from |
+| `arrive_uboot`: the arrival's demotion (`point_default`, `set_default`) | the default moves to the previous slot | refused, as `repoint` is: the demotion is not made, the arrival's note says why |
+| `arrive_uboot` and `boot_good_uboot`: clearing the episodes | `lemnos_episodes_bay`, `lemnos_episodes` removed | allowed: removing bookkeeping starts nothing |
+| the restart count's reset (`clear_count` on a good boot, and `guard_check` before an intended restart) | `lemnos_restarts` set to 0 | allowed: the driver writes only 0, which stops a count the loader would act on; a count that is already 0 writes nothing |
+| `UbootEnv` baseline | none on this form | refused by name (the trait's defaults), no write |
+| `OfflineRecord` (`offline.rs`) | pointer records of the `tryboot` form | no environment write: the U-Boot form refuses pointer operations by name (`boot_raw`) |
+| `service/slot-init` (boot-time attempt accounting) | `trial_attempts`, `trial` and the environment at boot | not refused: it runs after the loader has started a slot, and refusing would strand the count |
+| `packaging/uboot/boot.cmd` | saves the environment at its first start and when it takes a trial | the script's own; it runs on the device, not in the driver |
+
+There is no rescue operation in `system-slots`; the nearest is the give-up path above.
+
 ### The `file` record
 
 The `file` form (one `boot-record` file on the boot partition, for a loader with one fixed kernel)

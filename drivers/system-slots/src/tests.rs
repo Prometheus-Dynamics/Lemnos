@@ -716,7 +716,7 @@ fn a_refused_boot_count_is_retried_from_the_tick_and_said_in_health_and_info() {
         info.contains("\"boot_count\":\"the boot count is not cleared: the firmware mailbox could not clear it: "),
         "{info}"
     );
-    assert!(info.contains("retrying every 8s\"}"), "{info}");
+    assert!(info.contains("retrying every 8s\","), "{info}");
     let state = board.state();
     assert!(
         state.error.contains("the boot count is not cleared"),
@@ -3888,6 +3888,10 @@ fn use_uboot(board: &mut Board) -> PathBuf {
     let list = vec![
         ("default".to_string(), "os-1".to_string()),
         ("default_bay".to_string(), "bay0".to_string()),
+        (
+            crate::uboot::ENV_MARKER.to_string(),
+            crate::uboot::ENV_MARKER_VALUE.to_string(),
+        ),
     ];
     let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
     let mut image = vec![0u8; 8192];
@@ -3902,6 +3906,7 @@ fn use_uboot(board: &mut Board) -> PathBuf {
             systemctl: "/bin/true".into(),
         },
         boot_node: Ok(boot_node.clone()),
+        partitions: Some(env_partitions(&board.dir.0)),
     });
     boot_node
 }
@@ -4097,6 +4102,8 @@ fn the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can
     // `lemnos_envdev` is not in the environment: the image's boot preamble sets it (service/ctl `boot_dir`,
     // `setenv lemnos_envdev {env_device}`), and the script reads it from there.
     reads.remove("lemnos_envdev");
+    // The marker is set by the image's U-Boot defaults, not by a writer and not read by the script.
+    written.remove(crate::uboot::ENV_MARKER);
     let listed: BTreeSet<String> = crate::uboot::VARIABLES.map(String::from).into();
     let counted: BTreeSet<String> = listed
         .iter()
@@ -4221,6 +4228,10 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
         let list = vec![
             ("default".to_string(), "os-1".to_string()),
             ("default_bay".to_string(), "bay0".to_string()),
+            (
+                crate::uboot::ENV_MARKER.to_string(),
+                crate::uboot::ENV_MARKER_VALUE.to_string(),
+            ),
         ];
         let vars = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
         let mut image = vec![0u8; 8192];
@@ -4240,6 +4251,7 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
                 systemctl: "/bin/true".into(),
             },
             boot_node: Ok(node.clone()),
+            partitions: Some(env_partitions(&board.dir.0)),
         });
     }
 }
@@ -4502,7 +4514,7 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
     let mut out = vec![0u8; 4096];
     let len = slots.info(&mut out).unwrap();
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
-    // Appended after `key_ids`, which is after everything `info` said before; `boot_count` is last.
+    // Appended after `key_ids`, which is after everything `info` said before; the trial updates are last.
     let keys: Vec<&str> = json.members().iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         keys,
@@ -4513,7 +4525,11 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "boot_unverified",
             "key_ids",
             "last_attempt",
-            "boot_count"
+            "boot_count",
+            "trial_updates",
+            "trial_block",
+            "trial_block_text",
+            "trial_block_detail"
         ]
     );
     let a = json.get("last_attempt").unwrap();
@@ -5332,4 +5348,439 @@ fn a_cut_in_the_uboot_count_clear_leaves_the_real_environment_whole_and_the_next
         );
         fs::write(&node, &before).unwrap();
     }
+}
+
+use crate::uboot::TrialUpdates;
+
+// ---- Trial updates (BB1c): the reasons a uboot board can't start a trial, and the refusal ----
+
+/// CRC-32 (IEEE 802.3), bitwise: the test disks' GPT checksums.
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// A 64 KiB disk with a valid primary GPT. Partition `i` is 4 KiB at LBA 40 + 8 i, named `names[i]`; the
+/// one named `uboot-env` carries the U-Boot environment's type GUID, as the image builder makes it.
+fn gpt_image(names: &[&str]) -> Vec<u8> {
+    let mut image = vec![0u8; 128 * 512];
+    let mut table = vec![0u8; 128 * 128];
+    for (i, name) in names.iter().enumerate() {
+        let entry = &mut table[i * 128..(i + 1) * 128];
+        let kind = if *name == "uboot-env" {
+            lemnos_slot_store::gpt::ENV_TYPE_BYTES
+        } else {
+            [0x11; 16]
+        };
+        entry[..16].copy_from_slice(&kind);
+        entry[16..32].copy_from_slice(&[0x20 + i as u8; 16]);
+        let first = 40 + 8 * i as u64;
+        entry[32..40].copy_from_slice(&first.to_le_bytes());
+        entry[40..48].copy_from_slice(&(first + 7).to_le_bytes());
+        for (at, unit) in name.encode_utf16().enumerate() {
+            entry[56 + 2 * at..58 + 2 * at].copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+    image[1024..1024 + table.len()].copy_from_slice(&table);
+    let mut header = vec![0u8; 92];
+    header[..8].copy_from_slice(b"EFI PART");
+    header[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+    header[12..16].copy_from_slice(&92u32.to_le_bytes());
+    header[24..32].copy_from_slice(&1u64.to_le_bytes());
+    header[32..40].copy_from_slice(&127u64.to_le_bytes());
+    header[40..48].copy_from_slice(&34u64.to_le_bytes());
+    header[48..56].copy_from_slice(&126u64.to_le_bytes());
+    header[56..72].copy_from_slice(&[0x33; 16]);
+    header[72..80].copy_from_slice(&2u64.to_le_bytes());
+    header[80..84].copy_from_slice(&128u32.to_le_bytes());
+    header[84..88].copy_from_slice(&128u32.to_le_bytes());
+    header[88..92].copy_from_slice(&crc32_ieee(&table).to_le_bytes());
+    let crc = crc32_ieee(&header);
+    header[16..20].copy_from_slice(&crc.to_le_bytes());
+    image[512..512 + 92].copy_from_slice(&header);
+    image
+}
+
+/// The partition table file a uboot board's `partitions` names: a GPT with `uboot-env`.
+fn env_partitions(dir: &Path) -> PathBuf {
+    let path = dir.join("partitions.img");
+    fs::write(&path, gpt_image(&["uboot-env"])).unwrap();
+    path
+}
+
+/// A uboot board whose environment is the GPT partition of a disk file (the GPT form), with the default
+/// os-1 and the marker. Returns the board, the disk and the boot partition's node.
+fn uboot_gpt_board() -> (Board, PathBuf, PathBuf) {
+    let mut board = Board::new("os-1");
+    let boot_node = board.dir.0.join("boot.img");
+    fs::write(&boot_node, crate::bay_fixture::uboot_image("os-1")).unwrap();
+    let disk = board.dir.0.join("disk.img");
+    fs::write(&disk, gpt_image(&["uboot-env"])).unwrap();
+    let geometry = lemnos_slot_store::uboot_env::Geometry::in_partition(1024, 40, 8).unwrap();
+    let list = vec![
+        ("default".to_string(), "os-1".to_string()),
+        ("default_bay".to_string(), "bay0".to_string()),
+        (
+            crate::uboot::ENV_MARKER.to_string(),
+            crate::uboot::ENV_MARKER_VALUE.to_string(),
+        ),
+    ];
+    let data = lemnos_slot_store::uboot_env::encode_vars(&list, geometry.data_len()).unwrap();
+    let copy = lemnos_slot_store::uboot_env::encode_copy(&data, 1);
+    {
+        use std::os::unix::fs::FileExt;
+        let file = fs::OpenOptions::new().write(true).open(&disk).unwrap();
+        file.write_all_at(&copy, geometry.offset).unwrap();
+        file.write_all_at(&copy, geometry.offset_redund).unwrap();
+    }
+    board.slots.record = Box::new(crate::uboot::UbootEnv {
+        disk: Ok(disk.clone()),
+        place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+        boot_node: Ok(boot_node.clone()),
+        partitions: None,
+    });
+    (board, disk, boot_node)
+}
+
+/// What the driver says about trial updates on `board`: the info's `trial_block` code (empty when available).
+fn trial_block_code(board: &Board) -> String {
+    let info = board.slots.info_json();
+    let rest = info
+        .split("\"trial_block\":\"")
+        .nth(1)
+        .expect("info carries trial_block");
+    rest.split('"').next().unwrap().to_string()
+}
+
+#[test]
+fn a_uboot_env_partition_and_the_marker_make_trials_available() {
+    let (mut board, _boot_node, _node, _geometry) = uboot_board();
+    assert_eq!(board.slots.trial_updates(), TrialUpdates::Available);
+    assert!(
+        board
+            .slots
+            .info_json()
+            .contains("\"trial_updates\":\"available\"")
+    );
+    assert_eq!(board.slots.health(), Health::Ok);
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+}
+
+#[test]
+fn a_board_without_a_uboot_env_partition_refuses_a_trial_before_anything_is_written() {
+    let (mut board, boot_node, node, _geometry) = uboot_board();
+    board.install_ok("os-2");
+    fs::write(board.dir.0.join("partitions.img"), gpt_image(&["rootfs"])).unwrap();
+    let env_before = fs::read(&node).unwrap();
+    let boot_before = fs::read(&boot_node).unwrap();
+    let state_before = board.state();
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the environment is unchanged"
+    );
+    assert_eq!(
+        fs::read(&boot_node).unwrap(),
+        boot_before,
+        "the boot partition is unchanged"
+    );
+    let state = board.state();
+    assert_eq!(state.trial, state_before.trial);
+    assert!(
+        state.error.contains("no uboot-env partition"),
+        "{}",
+        state.error
+    );
+    assert_eq!(trial_block_code(&board), "no-env-partition");
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.contains("uboot-env partition"))
+    );
+}
+
+#[test]
+fn an_unreadable_environment_refuses_a_trial_before_anything_is_written() {
+    let (mut board, _boot_node, node, _geometry) = uboot_board();
+    board.install_ok("os-2");
+    fs::write(&node, vec![0u8; 8192]).unwrap();
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        vec![0u8; 8192],
+        "nothing was written"
+    );
+    assert_eq!(trial_block_code(&board), "env-unreadable");
+    assert!(board.state().error.contains("can't be read"));
+}
+
+#[test]
+fn a_missing_marker_refuses_a_trial_as_a_loader_that_is_not_updated() {
+    let (mut board, _boot_node, node, geometry) = uboot_board();
+    board.install_ok("os-2");
+    {
+        let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(&node).unwrap();
+        lemnos_slot_store::uboot_env::set(&mut dev, &geometry, &[(crate::uboot::ENV_MARKER, None)])
+            .unwrap();
+    }
+    let env_before = fs::read(&node).unwrap();
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(fs::read(&node).unwrap(), env_before, "nothing was written");
+    assert_eq!(trial_block_code(&board), "loader-not-updated");
+    assert!(
+        board
+            .state()
+            .error
+            .contains("does not carry the slot environment change")
+    );
+    assert!(
+        matches!(board.slots.health(), Health::Degraded(text) if text.contains("slot environment change"))
+    );
+}
+
+#[test]
+fn a_gpt_environment_with_a_fat_uboot_env_file_refuses_a_trial() {
+    let (mut board, disk, _boot) = uboot_gpt_board();
+    board.install_ok("os-2");
+    // The boot partition now holds the FAT environment file U-Boot reads first.
+    let boot = board.dir.0.join("boot.img");
+    fs::write(&boot, crate::bay_fixture::uboot_image_with_env("os-1")).unwrap();
+    let disk_before = fs::read(&disk).unwrap();
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(fs::read(&disk).unwrap(), disk_before, "nothing was written");
+    assert_eq!(trial_block_code(&board), "fat-env-file");
+    assert!(board.state().error.contains("holds uboot.env"));
+}
+
+#[test]
+fn a_gpt_environment_whose_boot_partition_is_not_fat_refuses_a_trial() {
+    let (mut board, _disk, boot) = uboot_gpt_board();
+    board.install_ok("os-2");
+    fs::write(&boot, vec![0u8; 4096]).unwrap();
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(trial_block_code(&board), "boot-partition-unreadable");
+    assert!(board.state().error.contains("can't be ruled out"));
+}
+
+#[test]
+fn a_gpt_environment_whose_disk_is_not_known_refuses_a_trial() {
+    let (mut board, _disk, _boot) = uboot_gpt_board();
+    board.install_ok("os-2");
+    board.slots.record = Box::new(crate::uboot::UbootEnv {
+        disk: Err("no boot disk in this test".into()),
+        place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+        boot_node: Ok(board.dir.0.join("boot.img")),
+        partitions: None,
+    });
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(trial_block_code(&board), "env-unreadable");
+}
+
+#[test]
+fn a_gpt_environment_on_a_boot_disk_with_a_proper_partition_reports_trials_available() {
+    let (mut board, _disk, _boot) = uboot_gpt_board();
+    assert_eq!(board.slots.trial_updates(), TrialUpdates::Available);
+    assert_eq!(trial_block_code(&board), "");
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+}
+
+// ---- Loader-dependent operations (BB1c): each refusal leaves the environment and the boot partition as they were ----
+
+/// Removes the marker from the environment the fixture (`uboot_board`) keeps, as an image whose U-Boot does
+/// not carry the change would hold it.
+fn remove_marker(node: &Path, geometry: &lemnos_slot_store::uboot_env::Geometry) {
+    let mut dev = lemnos_slot_store::uboot_env::FileEnv::open(node).unwrap();
+    lemnos_slot_store::uboot_env::set(&mut dev, geometry, &[(crate::uboot::ENV_MARKER, None)])
+        .unwrap();
+}
+
+#[test]
+fn a_switch_is_refused_before_anything_is_written_when_the_loader_cannot_read_the_record() {
+    let (mut board, boot_node, node, geometry) = uboot_board();
+    board.install_ok("os-2");
+    board.trial_slot("os-2");
+    board.boot_into("os-2");
+    board.slots.confirm().unwrap();
+    assert_eq!(board.state().default, "os-2");
+    remove_marker(&node, &geometry);
+    let env_before = fs::read(&node).unwrap();
+    let boot_before = fs::read(&boot_node).unwrap();
+    let status = board.slots.set_default("os-1", false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the environment is unchanged"
+    );
+    assert_eq!(
+        fs::read(&boot_node).unwrap(),
+        boot_before,
+        "the boot partition is unchanged"
+    );
+    let state = board.state();
+    assert_eq!(state.default, "os-2", "the default did not move");
+    assert!(
+        state
+            .error
+            .contains("does not carry the slot environment change"),
+        "{}",
+        state.error
+    );
+}
+
+#[test]
+fn an_install_is_written_and_its_reply_says_the_loader_will_not_start_it() {
+    let (mut board, boot_node, node, geometry) = uboot_board();
+    remove_marker(&node, &geometry);
+    let env_before = fs::read(&node).unwrap();
+    board.install_ok("os-2");
+    let info = board.slots.info_json();
+    assert!(
+        info.contains(
+            "installed: the boot loader will not start it: trial updates are unavailable"
+        ),
+        "{info}"
+    );
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the environment is unchanged by an install"
+    );
+    assert!(fs::read(&boot_node).is_ok());
+    // Install-then-try: the trial that follows is refused, with the environment unchanged.
+    let status = board.slots.trial("os-2", false, false, false).unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(fs::read(&node).unwrap(), env_before);
+}
+
+#[test]
+fn confirming_a_trial_that_would_become_the_default_is_refused_when_the_loader_cannot_read_the_record()
+ {
+    let (mut board, boot_node, node, geometry) = uboot_board();
+    board.install_ok("os-2");
+    board.trial_slot("os-2");
+    board.boot_into("os-2");
+    remove_marker(&node, &geometry);
+    let env_before = fs::read(&node).unwrap();
+    let boot_before = fs::read(&boot_node).unwrap();
+    let status = board.slots.confirm().unwrap_err();
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the environment is unchanged"
+    );
+    assert_eq!(
+        fs::read(&boot_node).unwrap(),
+        boot_before,
+        "the boot partition is unchanged"
+    );
+    let state = board.state();
+    assert_eq!(state.trial, "os-2", "the trial stays pending, and says why");
+    assert!(
+        state
+            .error
+            .contains("does not carry the slot environment change"),
+        "{}",
+        state.error
+    );
+}
+
+#[test]
+fn a_restart_does_not_give_back_the_trial_attempt_while_the_loader_cannot_read_the_record() {
+    let (mut board, _boot_node, node, geometry) = uboot_board();
+    board.install_ok("os-2");
+    board.trial_slot("os-2");
+    // The loader took one attempt before the trial booted: the record now says two are left.
+    board.slots.record.set_attempts(2).unwrap();
+    remove_marker(&node, &geometry);
+    let env_before = fs::read(&node).unwrap();
+    board.next_boot(2);
+    assert_eq!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the attempt is not given back in the record"
+    );
+    assert_eq!(
+        board.slots.record.pending().unwrap(),
+        Some(("os-2".to_string(), 2))
+    );
+}
+
+// ---- BB2's count writes under BB1c's rule (the restart count, the episodes, the demotion) ----
+
+/// An arrival on the previous slot records its episode (a driver write the loader doesn't read, so it is
+/// allowed), and the demotion it reaches is refused while the loader can't read the record: the default is
+/// unchanged, and the state says why.
+#[test]
+fn the_uboot_arrival_records_its_episode_and_refuses_the_demotion_when_the_loader_cannot_read_the_record()
+ {
+    let (mut board, node) = uboot_count_board();
+    board.slots.record.set_restarts(4).unwrap();
+    // One more episode reaches the threshold: the arrival records it and then demotes.
+    let threshold = board.slots.demote_after;
+    board
+        .slots
+        .record
+        .set_episodes("os-2", threshold - 1)
+        .unwrap();
+    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    remove_marker(&node, &geometry);
+    let env_before = fs::read(&node).unwrap();
+    board.boot_into("os-1");
+    board.slots.arrive_at_start();
+    assert_eq!(board.state().default, "os-2", "the default did not move");
+    assert!(
+        board
+            .state()
+            .error
+            .contains("couldn't point the default at os-1"),
+        "{}",
+        board.state().error
+    );
+    assert_ne!(
+        fs::read(&node).unwrap(),
+        env_before,
+        "the episode is recorded in the environment"
+    );
+}
+
+/// A good boot clears the count and the episodes even while the loader can't read the record: both are
+/// driver bookkeeping, and clearing them starts nothing.
+#[test]
+fn the_uboot_good_boot_clears_the_count_and_the_episodes_when_the_loader_cannot_read_the_record() {
+    let (mut board, node) = uboot_count_board();
+    board.slots.record.set_restarts(3).unwrap();
+    board.slots.record.set_episodes("os-2", 1).unwrap();
+    let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
+    remove_marker(&node, &geometry);
+    board.slots.boot_good("os-2");
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    assert_eq!(board.slots.record.episodes().unwrap(), None);
+    assert_eq!(board.state().default, "os-2");
 }
