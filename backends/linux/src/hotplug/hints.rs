@@ -117,11 +117,13 @@ fn fits_for(name: &str) -> Option<Fits> {
     if name.contains('/') {
         return None;
     }
-    // A USB device controller, by its name in `/sys/class/udc`: it appears when the controller
-    // comes up or switches to the device role, and a gadget waiting for it is tried then.
+    // A USB device controller, by its name in `/sys/class/udc`, or by the platform device it sits under
+    // (`4100000.usb` for a controller the kernel names `musb-hdrc.N.auto`). It appears when the controller comes
+    // up or switches to the device role, and a gadget waiting for it is tried then. The same rule as
+    // `resolve_udc`: the name anywhere in the devpath of a udc event.
     if let Some(controller) = name.strip_prefix("udc:") {
         return (!controller.is_empty())
-            .then(|| node(["udc", ""], [controller.to_string(), String::new()], false));
+            .then(|| node(["udc", ""], [controller.to_string(), String::new()], true));
     }
     let one =
         |subsystem: &'static str| node([subsystem, ""], [name.to_string(), String::new()], false);
@@ -397,6 +399,31 @@ mod tests {
             ["Changed(\"udc:fe980000.usb\")"]
         );
         // Another subsystem's event with the same name hints nothing.
+        assert!(hints_among(&names, "add", path, &[("SUBSYSTEM", "usb")]).is_empty());
+    }
+
+    #[test]
+    fn a_controller_under_the_named_platform_device_is_hinted_when_it_appears() {
+        // The A733's OTG port: the gadget names the platform device `4100000.usb`, and the kernel announces the
+        // controller under it as `musb-hdrc.N.auto` (N not fixed). That is a real udc class event, so the gadget
+        // waiting on the port is tried on the event, not on its retries.
+        let names = ["udc:4100000.usb"];
+        let class = [("SUBSYSTEM", "udc")];
+        let path = "/devices/platform/soc@0/4100000.usb/musb-hdrc.1.auto/udc/musb-hdrc.1.auto";
+        assert_eq!(
+            hints_among(&names, "add", path, &class),
+            ["Changed(\"udc:4100000.usb\")"]
+        );
+        // The same controller with another index is the same port.
+        let again = "/devices/platform/soc@0/4100000.usb/musb-hdrc.2.auto/udc/musb-hdrc.2.auto";
+        assert_eq!(
+            hints_among(&names, "add", again, &class),
+            ["Changed(\"udc:4100000.usb\")"]
+        );
+        // A controller under a different platform device is not this port.
+        let other = "/devices/platform/soc@0/4100001.usb/musb-hdrc.0.auto/udc/musb-hdrc.0.auto";
+        assert!(hints_among(&names, "add", other, &class).is_empty());
+        // A USB device on the port (the bus, not the controller class) is not the controller either.
         assert!(hints_among(&names, "add", path, &[("SUBSYSTEM", "usb")]).is_empty());
     }
 

@@ -78,6 +78,9 @@ kind = "block"
 path = "/soc/pwm@9140a000"
 reason = "the PWM block on the K230 (canaan,k230-pwm); its pins are the board's pinctrl's, which this map does not give"
 
+# The node is checked against the SDK revision the header names (kendryte/k230_sdk 7e302f73): its
+# `src/little/linux/arch/riscv/boot/dts/kendryte/k230.dtsi` has `watchdog0: wdt0@91106000`, reg 0x91106000,
+# `snps,dw-wdt`. A different K230 dtsi on disk (`wdt1@91106800`) is not this SDK's tree and is not used.
 [controllers.watchdog0]
 kind = "watchdog"
 path = "/soc/wdt0@91106000"

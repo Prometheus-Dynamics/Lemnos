@@ -180,3 +180,11 @@ regulator = "/vcc5v0-otg-vbus"
 regulator_name = "vcc5v0_otg"
 switch = "gpio:gpio4:11"
 reason = "a fixed regulator on the OTG port's phy-supply, switched by its enable line (the base tree's)"
+
+# The hardware watchdog (Synopsys DW, `snps,dw-wdt`). Node path from the mainline v6.12 base tree,
+# `arch/arm64/boot/dts/rockchip/rk3588-base.dtsi`, node `wdt: watchdog@feaf0000` (no status line, so
+# enabled). The same node in the U-Boot tree's copy of that file: dts/upstream/src/arm64/rockchip/rk3588-base.dtsi:2526.
+[controllers.watchdog]
+kind = "watchdog"
+path = "/watchdog@feaf0000"
+reason = "the hardware watchdog on the RK3588 (rockchip,rk3588-wdt, snps,dw-wdt)"

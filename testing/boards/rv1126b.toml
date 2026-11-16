@@ -1,0 +1,33 @@
+# A board file for the RV1126B map (socs/rv1126b.toml): the system identity and the hardware watchdog as the daemon's
+# keep-alive. No slot device yet: the boot medium, the U-Boot record's environment size and the crash-log region are
+# not yet citable (see the note below). Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rv1126b"
+soc = "rv1126b"
+
+# The watchdog node from the SoC map. The vendor SoC file leaves it disabled, so the board must enable it before this
+# binds; until then the device is listed as retrying.
+[[hardware]]
+controller = "watchdog"
+
+# The system identity. Its serial source is the device tree's `serial-number`, a candidate for this family
+# (docs/identity.md, the Rockchip row; untested on board).
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+# The daemon's keep-alive: the hardware watchdog, set to 15 s.
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/watchdog@20b60000" }
+config = { timeout_s = 15 }
+
+# Slot declaration (pending): the boot medium is SD (P3). The `system-slots` device waits for two citable facts that are
+# not in the repository: the U-Boot path of the SD controller (`/mmc@21d60000` is its kernel path in the vendor dtsi)
+# and the environment size of the U-Boot build the board boots (`uboot_env_size`).

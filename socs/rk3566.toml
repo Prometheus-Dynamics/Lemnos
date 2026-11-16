@@ -203,3 +203,11 @@ reason = "the OTG port of that USB 2 PHY, the one the controller is wired to (it
 # nothing for the stand-in to replace.
 [bases.usb-no-vbus.vbus.usb-otg0]
 reason = "the base tree's OTG port has no phy-supply"
+
+# The hardware watchdog (Synopsys DW, `snps,dw-wdt`). Node path from the mainline v6.12 tree,
+# `arch/arm64/boot/dts/rockchip/rk356x.dtsi` (which rk3566.dtsi includes), node `wdt: watchdog@fe600000`
+# (no status line, so enabled). The fetched text gave no line numbers.
+[controllers.watchdog]
+kind = "watchdog"
+path = "/watchdog@fe600000"
+reason = "the hardware watchdog on the RK3566 (rockchip,rk3568-wdt, snps,dw-wdt)"
