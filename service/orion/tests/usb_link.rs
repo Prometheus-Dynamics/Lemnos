@@ -224,7 +224,7 @@ impl Host {
 }
 
 #[test]
-fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_gadget_goes_down() {
+fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_hold_is_over() {
     let dir = dir("both-ways");
     let (out_device, out_host) = UnixStream::pair().expect("pair");
     let (in_device, in_host) = UnixStream::pair().expect("pair");
@@ -255,12 +255,12 @@ fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_gadget_goes
         assert_eq!(Pong::decode(&payload).expect("pong").now_ms, round);
     }
 
-    // The gadget goes down: the controller lets go, and the hold ends with it.
+    // The controller lets go: the endpoints did not change, so the hold stands (no second offer).
     function.release();
-    let ended = hold
-        .recv_timeout(WAIT)
-        .expect("the bridge gives the hold up when the gadget goes down");
-    assert_eq!(ended, Ok(()));
+    assert!(
+        hold.recv_timeout(Duration::from_millis(1500)).is_err(),
+        "the hold ended on a controller's let-go: the endpoints did not change"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -305,7 +305,7 @@ fn a_link_the_comm_core_does_not_have_is_refused_and_the_pair_is_given_back() {
 }
 
 #[test]
-fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
+fn a_link_comes_back_after_the_controller_lets_go_on_the_same_endpoints() {
     let dir = dir("reconnect");
     let (out_device, out_host) = UnixStream::pair().expect("pair");
     let (in_device, in_host) = UnixStream::pair().expect("pair");
@@ -328,18 +328,71 @@ fn a_link_comes_back_after_the_gadget_reconnects_and_carries_frames_again() {
     });
     assert_eq!(host.next().0, kind::WELCOME);
 
-    // The host goes away: the gadget comes down, and the bridge gives the hold up.
+    // The host goes away with the controller's let-go: the hold stands, the endpoints being the same.
     function.release();
-    assert_eq!(hold.recv_timeout(WAIT).expect("the hold ends"), Ok(()));
+    assert!(
+        hold.recv_timeout(Duration::from_millis(1500)).is_err(),
+        "the hold ended on a controller's let-go"
+    );
 
-    // The gadget reconnects: the bridge takes the pair again and offers it once more.
-    let again = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+    // The host is back on the same endpoints, and says hello again: a new session on the kept stream
+    // (C57), welcomed, and frames flow.
+    host.send(&Hello {
+        name: "sensor",
+        roles: Roles::DEVICE,
+        max_frame: 512,
+        revision: 1,
+        level: 0,
+    });
+    assert_eq!(
+        host.next().0,
+        kind::WELCOME,
+        "a new hello is welcomed on the kept stream"
+    );
     for round in 0..5u64 {
         host.send(&Ping { now_ms: round });
         let (kind_seen, payload) = host.next();
         assert_eq!(kind_seen, kind::PONG, "frames flow after the reconnect");
         assert_eq!(Pong::decode(&payload).expect("pong").now_ms, round);
     }
-    assert!(again.try_recv().is_err(), "the second hold stands");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hold_ends_when_the_device_is_switched_off_and_the_pair_is_offered_again() {
+    let dir = dir("switched-off");
+    let (out_device, _out_host) = UnixStream::pair().expect("pair");
+    let (in_device, _in_host) = UnixStream::pair().expect("pair");
+    let function =
+        MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
+    let lemnosd = dir.join("lemnosd.sock");
+    let _service = start_lemnosd(&lemnosd, &function);
+    keep_configured(&function);
+    let orion = dir.join("orion.sock");
+    let _comm = start_comm(&orion, &["usb0"]);
+    let hold = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+    std::thread::sleep(Duration::from_millis(300));
+
+    // The device is switched off through the daemon: lemnosd ends the endpoints, END hangs up, and the
+    // hold is over for good. The endpoints are new after the next switch-on, so the bridge offers again.
+    let mut session = Session::connect(&lemnosd, "switch").expect("lemnosd");
+    let device = session
+        .find("usb.function/1")
+        .expect("find")
+        .expect("the gadget")
+        .index;
+    session.set_power(device, false).expect("switched off");
+    assert_eq!(
+        hold.recv_timeout(WAIT)
+            .expect("the hold is over when the device is switched off"),
+        Ok(()),
+    );
+    session.set_power(device, true).expect("switched on");
+    let again = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        again.try_recv().is_err(),
+        "the pair is offered again, and the second hold stands"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

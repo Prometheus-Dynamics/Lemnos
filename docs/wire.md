@@ -530,18 +530,14 @@ A controller that lets go of the gadget does not end the hold, as the daemon see
 ep0 and the endpoint files open and binds the gadget again by writing `UDC`, END stays open, and the
 holder's copies are the same open files and work again once the gadget is up (case 4 above). While the
 gadget is down the daemon lends no new copies (`NO_DEVICE`). What a holder does about that is its own
-choice, and the Orion bridge (`service/orion/src/links.rs`) does not carry on: when the function's `up`
-goes false, or the host's configuration goes (`configured` false), it gives its hold up (EndpointsClose, so
-END hangs up), waits for `up` and `configured` to be true again (the comm core's reader reads an endpoint
-that is not enabled as the end of the stream and does not retry, so the pair is offered only to a configured
-host), takes the pair again, which are new duplicates of the same endpoint files, and offers them to the comm core again.
-The comm core still has the copies of the first offer. An offer for a link that already has a handle ends
-the old stream and carries on over the new, so the link comes back because the comm core ends its old
-stream and closes its old copies when the new offer arrives; that is the comm core's behaviour, not the
-daemon's, and no copy of the bridge's has to be closed for the gadget to bind again (the bridge closes its
-own at the offer). The check on a board is in `testing/board-runs/R1.md`, and the QEMU check
-`testing/crates/orion-link-check` makes the let-go with the pinned comm core and a host session on the
-emulated bus.
+choice, and the Orion bridge (`service/orion/src/links.rs`) keeps its hold through it: when the function's
+`up` or the host's configuration goes, the bridge keeps the pair and its offer on the comm core, and
+logs the change. It offers the pair again only when END says the hold is over, because only then are the
+endpoints new. The comm core's reader retries an endpoint that is down (`ESHUTDOWN`, `EAGAIN`), and a
+host that comes back and says hello again on the same stream is welcomed in a new session (the comm core's
+rule that a hello on a link always begins a session, Orion C57). The check on a board is in
+`testing/board-runs/R1.md`, and the QEMU check `testing/crates/orion-link-check` makes the let-go with the
+pinned comm core and a host session on the emulated bus.
 
 ### The bus state
 
