@@ -20,6 +20,10 @@ use lemnos_core::{JobId, Result, contract};
 pub const FORMAT_RAW: u8 = 0;
 /// The image is an xz stream.
 pub const FORMAT_XZ: u8 = 1;
+/// Most blocks an xz image stream may hold (its index lists them all). A stream with more is refused.
+pub const XZ_MAX_BLOCKS: u32 = 8192;
+/// The largest dictionary, in MiB, a block of an xz image may declare: the ceiling of `max_dict_mb`.
+pub const XZ_MAX_DICT_MIB: u64 = 8;
 
 #[contract("system.flash", version = 1)]
 pub trait Flash {

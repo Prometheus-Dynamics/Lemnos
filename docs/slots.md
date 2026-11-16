@@ -2120,9 +2120,19 @@ manifest for another board is refused first.
 - The xz dictionary is the decoder's memory. A block that declares a dictionary over the board's
   limit is refused at its header, before anything is allocated for it. The decoder's memory is the
   dictionary plus 256 KiB (8.25 MiB at the 8 MiB ceiling).
+- Limit: blocks ≤ 8192 per stream. The index lists every block and the decoder keeps them all; a
+  stream with more is refused by name.
+- Limit: dictionary ≤ 8 MiB per block (`max_dict_mb`).
+- The block size sets the block count. For an image of `S` bytes the smallest block size that keeps
+  the stream within 8192 blocks is `S / 8192` rounded up: 20 KiB for a 160 MiB image, 1 MiB for an 8 GiB
+  image. Build with a larger block size than that, never a smaller one.
+- The bytes do not depend on the thread count: `-T2` and any larger `-T` give the same file. `-T1` is a
+  different, single-thread encoding (no sized block headers), so the build uses `-T2`.
+
+The build's command, with the 64 MiB block size the threaded encoder is given:
 
 ```text
-xz -6 --check=crc64 -T1 -k image.img        # image.img.xz, dictionary 8 MiB
+xz -6 --check=crc64 --block-size=64MiB -T2 -k image.img    # image.img.xz, 8 MiB dictionary per block
 ```
 
 A file holds one image stream and optionally one record stream, and nothing else. A third stream,

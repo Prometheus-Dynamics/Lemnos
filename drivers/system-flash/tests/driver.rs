@@ -1231,3 +1231,88 @@ fn the_per_device_require_signed_key_is_refused_by_the_driver_start() {
         "a board file with require_signed does not start the driver"
     );
 }
+
+/// The builder's threaded stream (`threaded-64m.img.xz`) decodes to this 160 MiB image.
+const THREADED_LEN: u64 = 167_772_160;
+const THREADED_SHA: &str = "326c678268e0a2ca05ce03d3c5cc2b0737f6137bb484a53017a998cfd507a16f";
+
+#[test]
+fn a_threaded_xz_image_is_written_and_verified_against_the_builders_hash() {
+    let rig = Rig::new("threaded", THREADED_LEN + 4096);
+    let stream_bytes = fixture("threaded-64m.img.xz");
+    let mut driver = ready(&rig, THREADED_SHA, THREADED_LEN);
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    stream(&mut driver, &stream_bytes, 4096).unwrap();
+    assert_eq!(
+        job_result(&mut driver, job),
+        (Status::OK, written(THREADED_LEN, 1))
+    );
+    assert_eq!(
+        sha_hex(&rig.file_bytes()[..THREADED_LEN as usize]),
+        THREADED_SHA
+    );
+
+    let check = driver.verify().unwrap();
+    let (status, reply, _) = run_to_end(&mut driver, check);
+    assert_eq!(
+        (status, reply),
+        (Status::OK, THREADED_LEN.to_le_bytes().to_vec())
+    );
+    assert!(info(&mut driver).contains("\"state\":\"verified\""));
+}
+
+#[test]
+fn a_threaded_signed_image_verifies_and_is_written_with_its_record() {
+    let mut rig = Rig::new("threaded-signed", THREADED_LEN + 4096);
+    rig.trust(&[vector_key()]);
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    let record = record_by(&vector_key(), rig.board, THREADED_LEN, THREADED_SHA);
+    driver
+        .manifest(
+            &manifest_json(rig.board, THREADED_LEN, THREADED_SHA, None),
+            &record,
+        )
+        .unwrap();
+    assert!(info(&mut driver).contains("\"signed\":\"verified\""));
+
+    // The builder's image, then the record as its second stream (threaded-record.xz).
+    let mut stream_bytes = fixture("threaded-64m.img.xz");
+    stream_bytes.extend_from_slice(&fixture("threaded-record.xz"));
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    stream(&mut driver, &stream_bytes, 4096).unwrap();
+    assert_eq!(
+        job_result(&mut driver, job),
+        (Status::OK, written(THREADED_LEN, 0))
+    );
+    assert_eq!(
+        sha_hex(&rig.file_bytes()[..THREADED_LEN as usize]),
+        THREADED_SHA
+    );
+}
+
+#[test]
+fn a_stream_of_exactly_8192_blocks_is_written() {
+    let size = 8192u64 * 64;
+    let rig = Rig::new("blocks-8192", size + 4096);
+    let stream_bytes = fixture("blocks-8192.img.xz");
+    let mut driver = ready(&rig, &sha_hex(&vec![0u8; size as usize]), size);
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    stream(&mut driver, &stream_bytes, 4096).unwrap();
+    assert_eq!(job_result(&mut driver, job), (Status::OK, written(size, 1)));
+}
+
+#[test]
+fn a_stream_of_8193_blocks_is_refused_by_name() {
+    let size = 8193u64 * 64;
+    let rig = Rig::new("blocks-8193", size + 4096);
+    let stream_bytes = fixture("blocks-8193.img.xz");
+    let mut driver = ready(&rig, &sha_hex(&vec![0u8; size as usize]), size);
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    assert_eq!(
+        stream(&mut driver, &stream_bytes, 4096),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
+    assert!(info(&mut driver).contains("more blocks than the board takes"));
+}
