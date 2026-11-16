@@ -30,13 +30,65 @@ use crate::scene;
 #[must_use]
 pub fn install() -> bool {
     be::install_simulated(|_| Box::new(BeBlock::default()))
-        && fe::install_simulated(|_| Box::new(FeBlock::default()))
+        && fe::install_simulated(|_| {
+            let block = FeBlock::default();
+            FRONT_ENDS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(block.clone());
+            Box::new(block)
+        })
 }
 
-fn now_ns() -> u64 {
-    lemnos_linux_sys::time::monotonic_now()
-        .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::time;
+
+/// Every front end this process has installed, so [`step_front_ends`] can step them.
+static FRONT_ENDS: Mutex<Vec<FeBlock>> = Mutex::new(Vec::new());
+/// Set by a test: the front end is stepped by the sensor and not started by its jobs.
+static PACED: AtomicBool = AtomicBool::new(false);
+/// A test knob: every frame is stamped this many nanoseconds before its start. Zero is the
+/// simulator as the hardware runs. A stale stamp makes the chain proof fail on its age check.
+pub static STALE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Puts every front end and receiver on the sensor's clock (`true`: a sensor step starts their
+/// frames, a job does not) or back on demand (`false`: a job starts the next frame, as the chain
+/// proof's runs need). A process's blocks share it.
+pub fn set_paced(paced: bool) {
+    PACED.store(paced, Ordering::SeqCst);
+}
+
+/// Whether the front ends and the receiver wait for a sensor step instead of their consumers.
+pub fn is_paced() -> bool {
+    PACED.load(Ordering::SeqCst)
+}
+
+/// The jobs queued in the front ends of this process, in total: the jobs the driver has passed to
+/// the block and no start has taken yet. A consumer's post reaches the block on the driver's next
+/// tick, so a test that posts and then steps the sensor waits for this count first.
+#[must_use]
+pub fn jobs_queued() -> usize {
+    let blocks: Vec<FeBlock> = FRONT_ENDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    blocks
+        .iter()
+        .map(|block| block.with(|b| b.pending.len()))
+        .sum()
+}
+
+/// One sensor start, for every front end: each with a job queued makes its frame; each with none
+/// drops the start and counts it, as the hardware counts a start with no buffer.
+pub fn step_front_ends(start: u64) {
+    let blocks: Vec<FeBlock> = FRONT_ENDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    for block in blocks {
+        block.with(|b| b.step_at(start));
+    }
 }
 
 /// Memory the block can reach, by device address: a dma-buf (or a memfd where the host has no
@@ -115,7 +167,6 @@ struct FeState {
     parsed: Box<FeConfig>,
     /// Output 0's picture, made at `go`.
     picture: Vec<u8>,
-    next_start_ns: Option<u64>,
     sequence: u64,
     counters: Counters,
 }
@@ -139,28 +190,43 @@ impl FeState {
             .is_some_and(|(region, at)| region.map.write_bytes(at, data).is_some())
     }
 
-    /// Runs the oldest job once a frame starts for it. The frame rate is the sensor's: its
-    /// registers' frame period, from the first start after both are running. A start with no job
-    /// waits for one instead of being dropped; only silicon shows a frame start with no job.
+    /// The sensor's frame period in nanoseconds, from its registers.
+    fn period() -> u64 {
+        crate::period_ns()
+    }
+
+    /// Demand mode: a queued job starts the sensor's next frame, which is taken from the sensor's
+    /// schedule, so a frame is never stamped late by the host's scheduling.
     fn run(&mut self) {
         if !self.started || !crate::world(|w| w.streaming) {
-            self.next_start_ns = None;
             return;
         }
-        let period = u64::try_from(crate::period_ps() / 1000)
-            .unwrap_or(u64::MAX)
-            .max(1);
-        let now = now_ns();
-        let due = *self.next_start_ns.get_or_insert(now + period);
-        // The schedule is the sensor's and never moves: a start that finds no job waits for one,
-        // and its frame keeps the time the sensor started it.
-        if due > now || self.pending.is_empty() {
+        if PACED.load(Ordering::SeqCst) || self.pending.is_empty() {
             return;
         }
+        let due = time::take_start(Self::period());
+        time::advance_to(due);
+        self.start_frame(due);
+    }
+
+    /// Paced mode: the sensor's start `start`. With a job queued it makes the frame; with none the
+    /// start is dropped and counted (no buffer).
+    fn step_at(&mut self, start: u64) {
+        if !self.started || !crate::world(|w| w.streaming) {
+            return;
+        }
+        if self.pending.is_empty() {
+            self.counters.dropped += 1;
+            return;
+        }
+        self.start_frame(start);
+    }
+
+    /// Makes the frame for the oldest queued job, which the sensor started at `due`.
+    fn start_frame(&mut self, due: u64) {
         let Some(job) = self.pending.pop_front() else {
             return;
         };
-        self.next_start_ns = Some(due + period);
         let Some(fixed) = self.fixed else {
             self.counters.errors += 1;
             return;
@@ -222,7 +288,7 @@ impl FeState {
             bytes: self.output0_bytes,
             sequence: self.sequence,
             identity: job.identity,
-            timestamp_ns: due,
+            timestamp_ns: due.saturating_sub(STALE_NS.load(Ordering::SeqCst)),
         });
         self.sequence += 1;
     }
@@ -294,8 +360,8 @@ impl fe::Hardware for FeBlock {
             b.picture = scene::frame16(start.output_stride as usize, b.output0_bytes as usize);
             b.started = true;
             b.sequence = 0;
-            b.next_start_ns = None;
             b.counters = Counters::default();
+            time::reset_schedule();
             Ok(())
         })
     }
@@ -453,8 +519,10 @@ impl BeState {
             });
         // A job that did not complete is a finished job with no bytes: the block flagged it.
         let bytes = if wrote { 4096 } else { 0 };
-        // Timestamps strictly increase, as frame completions do.
-        self.last_ns = now_ns().max(self.last_ns + 1);
+        // Timestamps strictly increase, as frame completions do. The clock moves to the stamp, so no
+        // frame is stamped ahead of the clock it is read on.
+        self.last_ns = time::now().max(self.last_ns + 1);
+        time::advance_to(self.last_ns);
         self.finished.push_back(be::Finished {
             buffer: job.buffer,
             bytes,

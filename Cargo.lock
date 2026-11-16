@@ -389,6 +389,7 @@ dependencies = [
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnos-sim",
+ "lemnos-sim-clock",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -411,6 +412,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-sim",
+ "lemnos-sim-clock",
  "lemnosd",
 ]
 
@@ -2042,6 +2044,10 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
 ]
+
+[[package]]
+name = "lemnos-sim-clock"
+version = "2.0.1-dev"
 
 [[package]]
 name = "lemnos-sim-walk"

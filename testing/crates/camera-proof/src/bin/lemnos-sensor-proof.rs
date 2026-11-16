@@ -23,8 +23,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lemnos_camera_proof::{Error, Options, SocketBus, assemble_with};
-use lemnos_client::{Client, FrameStream, HeldFrame};
+use lemnos_camera_proof::{SocketBus, latch};
+use lemnos_client::Client;
 use lemnos_contract_camera_sensor::{CameraSensor, Controls, FrameValues};
 use lemnos_core::{Config, ConfigValue, I2c, Lifecycle, Provider};
 use lemnos_driver_ov9782::chip::OTP_PROGRAM;
@@ -242,59 +242,7 @@ fn trace(args: &[String]) -> Result<bool, String> {
     Ok(otp.is_empty() && !log.is_empty())
 }
 
-/// Mean of the high bytes of a packed RAW10 frame, every 61st sample.
-fn brightness(bytes: &[u8]) -> f64 {
-    let (mut sum, mut n) = (0u64, 0u64);
-    for (i, &b) in bytes.iter().enumerate().step_by(61) {
-        if i % 5 != 4 {
-            sum += u64::from(b);
-            n += 1;
-        }
-    }
-    sum as f64 / n.max(1) as f64
-}
-
-struct Seen {
-    sequence: u64,
-    start_ns: u64,
-    level: f64,
-}
-
-fn next(stream: &mut FrameStream) -> Result<Seen, String> {
-    let frame: HeldFrame = stream
-        .next_frame(Duration::from_secs(1))
-        .map_err(|e| format!("frames: {e:?}"))?
-        .ok_or("no frame for 1 s")?;
-    let seen = Seen {
-        sequence: frame.sequence(),
-        start_ns: frame.timestamp_ns(),
-        level: brightness(stream.bytes(&frame)),
-    };
-    stream
-        .release(frame)
-        .map_err(|e| format!("release: {e:?}"))?;
-    Ok(seen)
-}
-
-#[allow(clippy::too_many_lines)]
-/// Runs `call` again while the sensor answers BUSY, for up to two seconds: a sensor that has just
-/// been started powers up for 10 ms before it takes a write, and a post refuses until the receiver
-/// has counted a frame start.
-fn while_busy<T>(mut call: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
-    let until = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        match call() {
-            Err(Error::Call {
-                status: lemnos_core::Status::BUSY,
-                ..
-            }) if std::time::Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            other => return other,
-        }
-    }
-}
-
+/// The board's latch: `CLOCK_MONOTONIC` for timing, the sensor making its own frames.
 fn latch(args: &[String]) -> Result<bool, String> {
     let socket = flag(args, "--socket").unwrap_or_else(|| "/run/lemnos/lemnosd.sock".into());
     let trials: u32 = flag(args, "--trials")
@@ -304,185 +252,16 @@ fn latch(args: &[String]) -> Result<bool, String> {
         Client::connect(&socket, "lemnos-sensor-proof").map_err(|e| format!("{socket}: {e}"))?;
     client.set_timeout(Duration::from_secs(5));
     let bus = SocketBus::new(client);
-    // The latch runs beside the chain proof, which has the front end in use: the ISP is not opened.
-    let mut camera = assemble_with(
-        &bus,
-        &Options {
-            sensor: flag(args, "--sensor"),
-            mode: 0,
-        },
-        false,
-    )
-    .map_err(|e: Error| format!("{e}"))?;
-    // Beside a chain that already runs the mode, the frame length is the chain's: the latch does
-    // not change the rate the chain is measured at. On its own it uses its usual one.
-    let beside = camera.keep_selected().map_err(|e| format!("{e}"))?;
-    let held = if beside {
-        camera.frame_length_in_force().map_err(|e| format!("{e}"))?
-    } else {
-        None
+    let settings = latch::Settings {
+        sensor: flag(args, "--sensor"),
+        trials,
+        offsets_us: &latch::OFFSETS_US,
+        frame_wait: Duration::from_secs(1),
     };
-    let frame_length = held.unwrap_or_else(|| camera.mode().frame_length_min.max(1822));
-    let max_exposure = (frame_length - 25) * 16;
-    let (short, middle, long) = (max_exposure / 8, max_exposure / 3, max_exposure);
-    let controls = |exposure| Controls {
-        exposure: Some(exposure),
-        frame_length: Some(frame_length),
-        ..Controls::default()
-    };
-    // The scene: the sensor keeps a test pattern an earlier caller chose.
-    while_busy(|| camera.set_test_pattern(0)).map_err(|e| format!("{e}"))?;
-    while_busy(|| camera.set_controls(controls(short))).map_err(|e| format!("{e}"))?;
-    let receiver = camera.receiver().clone();
-    let name = camera.stream().to_string();
-    let mut stream = bus
-        .take_stream(&receiver, &name, false)
-        .map_err(|e| format!("{e}"))?;
-    camera.start().map_err(|e| format!("{e}"))?;
-    let mut identity = 0u64;
-    let mut post = |camera: &mut lemnos_camera_proof::Camera<'_, SocketBus>, exposure| {
-        identity += 1;
-        while_busy(|| {
-            camera.post_values(FrameValues {
-                identity,
-                controls: controls(exposure),
-            })
-        })
-    };
-    // Settle, and the three levels.
-    let mut level = |stream: &mut FrameStream, camera: &mut _, exposure| -> Result<f64, String> {
-        post(camera, exposure).map_err(|e| format!("{e}"))?;
-        let mut last = 0.0;
-        for _ in 0..8 {
-            last = next(stream)?.level;
-        }
-        Ok(last)
-    };
-    let l_long = level(&mut stream, &mut camera, long)?;
-    let l_middle = level(&mut stream, &mut camera, middle)?;
-    let l_short = level(&mut stream, &mut camera, short)?;
-    let period = {
-        let a = next(&mut stream)?;
-        let b = next(&mut stream)?;
-        b.start_ns.saturating_sub(a.start_ns)
-    };
-    out(format_args!(
-        "frame length {frame_length}, period {} us; exposures short {short} middle {middle} long {long}: brightness {l_short:.1}, {l_middle:.1}, {l_long:.1}",
-        period / 1000
-    ));
-    // A landing is told by brightness: with no light on the sensor the exposures look alike, and
-    // every count below would be noise.
-    if l_long - l_short < 8.0 {
-        let _ = if beside {
-            camera.stop_receiver()
-        } else {
-            camera.stop()
-        };
-        return Err(format!(
-            "the scene does not change with exposure (brightness {l_short:.1} short, {l_long:.1} long): light it and run again"
-        ));
-    }
-    let halfway = (l_short + l_long) / 2.0;
-    let mut deadline_ok = None;
-    let mut all_ok = true;
-    for offset_us in [
-        500u64, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 15000, 16000, 16500,
-    ] {
-        let (mut predicted, mut early, mut late, mut lost) = (0u32, 0u32, 0u32, 0u32);
-        let mut wire = Vec::new();
-        for _ in 0..trials {
-            let f = next(&mut stream)?;
-            // The frame start the offset counts from is this frame's; the post goes in that long
-            // after it, which may already be into the next frame.
-            let due = f.start_ns + offset_us * 1000;
-            while now_ns() < due {
-                std::hint::spin_loop();
-            }
-            let posted = now_ns();
-            post(&mut camera, long).map_err(|e| format!("{e}"))?;
-            let done = now_ns();
-            wire.push(done - posted);
-            // Frame sequence numbers count frame starts: the frame the call completed in.
-            let completed_in = f.sequence + (done - f.start_ns) / period.max(1);
-            // The launch is the call's last write, somewhere between `posted` and `done`: a call
-            // that straddles a frame start may have launched in either frame, and either landing
-            // is the predicted one.
-            let started_in = f.sequence + (posted - f.start_ns) / period.max(1);
-            let mut landed = None;
-            for _ in 0..8 {
-                let g = next(&mut stream)?;
-                if g.level > halfway && landed.is_none() {
-                    landed = Some(g.sequence);
-                }
-            }
-            match landed {
-                Some(s) if (started_in + 2..=completed_in + 2).contains(&s) => predicted += 1,
-                Some(s) if s < started_in + 2 => early += 1,
-                Some(_) => late += 1,
-                None => lost += 1,
-            }
-            post(&mut camera, short).map_err(|e| format!("{e}"))?;
-            for _ in 0..5 {
-                next(&mut stream)?;
-            }
-        }
-        wire.sort_unstable();
-        out(format_args!(
-            "post at {:.1} ms: {trials} posts, {predicted} on the predicted frame (completed in + 2), {early} earlier, {late} later, {lost} never; call median {} us, max {} us",
-            offset_us as f64 / 1000.0,
-            wire.get(wire.len() / 2).copied().unwrap_or(0) / 1000,
-            wire.last().copied().unwrap_or(0) / 1000
-        ));
-        all_ok &= early == 0 && lost == 0;
-        if predicted == trials {
-            deadline_ok = Some(offset_us);
-        }
-    }
-    out(format_args!(
-        "largest offset with every post on the predicted frame: {:?} us",
-        deadline_ok
-    ));
-
-    // Two posts in one frame: middle at 4 ms, long at 12 ms.
-    let (mut second, mut first_seen) = (0u32, 0u32);
-    for _ in 0..trials {
-        let f = next(&mut stream)?;
-        for (at, exposure) in [(4000u64, middle), (12000, long)] {
-            let due = f.start_ns + at * 1000;
-            while now_ns() < due {
-                std::hint::spin_loop();
-            }
-            post(&mut camera, exposure).map_err(|e| format!("{e}"))?;
-        }
-        let (mut saw_middle, mut saw_long) = (false, false);
-        for _ in 0..6 {
-            let g = next(&mut stream)?;
-            let to_long = (g.level - l_long).abs();
-            let to_middle = (g.level - l_middle).abs();
-            let to_short = (g.level - l_short).abs();
-            saw_long |= to_long < to_middle && to_long < to_short;
-            saw_middle |= to_middle < to_long && to_middle < to_short;
-        }
-        second += u32::from(saw_long);
-        first_seen += u32::from(saw_middle);
-        post(&mut camera, short).map_err(|e| format!("{e}"))?;
-        for _ in 0..5 {
-            next(&mut stream)?;
-        }
-    }
-    out(format_args!(
-        "two posts in one frame (middle at 4 ms, long at 12 ms), {trials} times: the long one showed {second} times, the middle one {first_seen} times"
-    ));
-    let counters = camera.counters().map_err(|e| format!("{e}"))?;
-    out(format_args!("receiver counters: {counters:?}"));
-    // Beside a chain the sensor is the chain's: only the receiver this tool started is stopped.
-    if beside {
-        camera.stop_receiver()
-    } else {
-        camera.stop()
-    }
-    .map_err(|e| format!("{e}"))?;
-    Ok(all_ok && second == trials && first_seen == 0)
+    let report = latch::run(&bus, &settings, &latch::Monotonic, &mut |line| {
+        out(format_args!("{line}"));
+    })?;
+    Ok(report.passed)
 }
 
 fn main() -> ExitCode {

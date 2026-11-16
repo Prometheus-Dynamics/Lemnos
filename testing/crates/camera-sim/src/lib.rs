@@ -12,6 +12,7 @@
 
 pub mod pisp;
 pub mod scene;
+pub mod time;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -64,9 +65,12 @@ pub struct World {
     held: Option<BTreeMap<u16, u8>>,
     /// Between the group hold's start and its end: writes go to `held`.
     capturing: bool,
-    /// Each time the sensor's exposure was launched (CLOCK_MONOTONIC ns) and what it became, in
-    /// sensor units (sixteenths of a line).
+    /// Each time the sensor's exposure was launched (sim ns) and what it became, in sensor units
+    /// (sixteenths of a line).
     launches: Vec<(u64, u32)>,
+    /// The frame a launch shows in: a launch in frame F shows in frame F + `latch_frames`. Two is
+    /// the sensor's; a stand-in that shows it a frame early (one) is how a test makes the latch fail.
+    pub latch_frames: u64,
 }
 
 pub static WORLD: Mutex<Option<World>> = Mutex::new(None);
@@ -165,6 +169,7 @@ pub fn new_world(claims_on: bool, model: Model) -> World {
         held: None,
         capturing: false,
         launches: Vec::new(),
+        latch_frames: 2,
     }
 }
 
@@ -180,7 +185,8 @@ impl World {
     /// of the frame before it. A group launched in frame F is latched at the start of F + 1, and
     /// its picture is read out in F + 2.
     pub fn level_for_frame_at(&self, start_ns: u64, period_ns: u64) -> u8 {
-        let before = start_ns.saturating_sub(period_ns);
+        let before =
+            start_ns.saturating_sub(period_ns * self.latch_frames.max(1).saturating_sub(1));
         let units = self
             .launches
             .iter()
@@ -192,10 +198,98 @@ impl World {
     }
 }
 
-fn now_ns() -> u64 {
-    lemnos_linux_sys::time::monotonic_now()
-        .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+/// The sensor's next start is taken by every consumer of a sensor step ([`sensor_step`]): the front
+/// ends by a call, each running receiver through this queue. The receiver's tick takes the starts
+/// and says when each is made, so a step returns only once the receiver has made its frame.
+struct Steps {
+    pending: std::collections::VecDeque<u64>,
+    /// Steps asked for, and steps the receiver has made.
+    issued: u64,
+    done: u64,
+    /// Receivers running in this process.
+    receivers: usize,
+}
+
+static STEPS: (Mutex<Steps>, std::sync::Condvar) = (
+    Mutex::new(Steps {
+        pending: std::collections::VecDeque::new(),
+        issued: 0,
+        done: 0,
+        receivers: 0,
+    }),
+    std::sync::Condvar::new(),
+);
+
+/// How long a sensor step waits for a receiver's tick before it is named as stuck.
+const STEP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn steps() -> std::sync::MutexGuard<'static, Steps> {
+    STEPS.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A receiver started (`true`) or stopped (`false`) in this process.
+fn receivers(started: bool) {
+    let mut s = steps();
+    if started {
+        s.receivers += 1;
+    } else {
+        s.receivers = s.receivers.saturating_sub(1);
+        // Starts it would have made are not waited for any more.
+        s.pending.clear();
+        s.done = s.issued;
+        STEPS.1.notify_all();
+    }
+}
+
+/// The receiver's next step to make, if one was asked for.
+fn take_step() -> Option<u64> {
+    steps().pending.pop_front()
+}
+
+/// The receiver has made the step it took.
+fn finish_step() {
+    steps().done += 1;
+    STEPS.1.notify_all();
+}
+
+/// One sensor start, shared by every consumer of the sensor. The clock moves to the start; each
+/// front end with a job queued makes its frame, and each with none drops the start; each running
+/// receiver makes its frame (or drops it, with no buffer). Returns once every one has done so.
+///
+/// # Panics
+/// A running receiver does not take the step within ten seconds: its daemon's tick is not running.
+pub fn sensor_step() -> u64 {
+    let start = time::take_start(period_ns());
+    time::advance_to(start);
+    pisp::step_front_ends(start);
+    let mut s = steps();
+    if s.receivers == 0 {
+        return start;
+    }
+    s.issued += 1;
+    let wanted = s.issued;
+    s.pending.push_back(start);
+    STEPS.1.notify_all();
+    let deadline = std::time::Instant::now() + STEP_WAIT;
+    while s.done < wanted {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !left.is_zero(),
+            "sensor start {start} was not taken by the receiver within {STEP_WAIT:?}: its tick is not running"
+        );
+        s = STEPS
+            .1
+            .wait_timeout(s, left)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+    }
+    start
+}
+
+/// The frame period in ns, from the model's registers (at least 1).
+#[must_use]
+pub fn period_ns() -> u64 {
+    u64::try_from(period_ps() / 1000).unwrap_or(u64::MAX).max(1)
 }
 
 /// The frame period in ps from the model's registers.
@@ -324,7 +418,7 @@ impl HalI2c for Handle {
             w.capturing = capturing;
             if launched {
                 let units = w.exposure_regs();
-                w.launches.push((now_ns(), units));
+                w.launches.push((time::now(), units));
             }
             if address == 0x60 && self.bus == "i2c-10" {
                 if let Some(v) = mode_select {
@@ -395,7 +489,6 @@ pub struct SimReceiver {
     layout: Option<FrameLayout>,
     running: bool,
     counters: Counters,
-    next_ps: Option<u128>,
     emitted: u64,
     latest_ns: u64,
     /// The shared scene as packed RAW10, made once, for a test pattern.
@@ -417,7 +510,6 @@ impl Lifecycle for SimReceiver {
             layout: None,
             running: false,
             counters: Counters::default(),
-            next_ps: None,
             emitted: 0,
             latest_ns: 0,
             scene: None,
@@ -427,11 +519,70 @@ impl Lifecycle for SimReceiver {
         if !self.running {
             return None;
         }
+        let again = Some(now_ns + 1_000_000);
         if !world(|w| w.streaming) {
-            self.next_ps = None;
-            return Some(now_ns + 1_000_000);
+            // A sensor step with the receiver not streaming makes no frame, but it is still taken.
+            while let Some(_at) = take_step() {
+                finish_step();
+            }
+            return again;
         }
-        let now_ps = u128::from(now_ns) * 1000;
+        if pisp::is_paced() {
+            // Paced: one frame per sensor start the test steps, in the order they were stepped.
+            while let Some(at) = take_step() {
+                self.start_frame(at, true);
+                finish_step();
+            }
+            return again;
+        }
+        // Demand: the next start is made when a buffer is free for it, and waits for one otherwise.
+        let period = period_ns();
+        let at = time::peek_start(period);
+        if self.start_frame(at, false) {
+            let _ = time::take_start(period);
+        }
+        again
+    }
+}
+
+impl Drop for SimReceiver {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+impl SimReceiver {
+    /// Stops the receiver's running state, if it has one, and leaves the sensor steps' registry.
+    fn halt(&mut self) {
+        if self.running {
+            self.running = false;
+            receivers(false);
+        }
+    }
+
+    /// Makes the frame for the sensor start `at` (sim ns) if a buffer is free. Paced, a start with
+    /// no buffer is dropped and counted; demand, it is left for the next tick. Returns whether the
+    /// start was taken.
+    fn start_frame(&mut self, at_ns: u64, paced: bool) -> bool {
+        let Some(frames) = self.frames.as_mut() else {
+            self.counters.errors += 1;
+            return true;
+        };
+        time::advance_to(at_ns);
+        let buffer = match frames.next_buffer() {
+            Ok(Some(buffer)) => buffer,
+            Ok(None) if paced => {
+                self.counters.dropped += 1;
+                self.emitted += 1;
+                self.latest_ns = at_ns;
+                return true;
+            }
+            Ok(None) => return false,
+            Err(_) => {
+                self.counters.errors += 1;
+                return true;
+            }
+        };
         let size = self.layout.map_or(0, |l| l.size);
         // A test pattern is a static picture the sensor makes itself: with the pattern on
         // (`0x5e00` bit 7) the frames are the shared scene as packed RAW10, the same picture the
@@ -446,46 +597,33 @@ impl Lifecycle for SimReceiver {
         let scene_frame = (pattern
             && size as usize == scene::RAW10_STRIDE * scene::HEIGHT as usize)
             .then(|| &*self.scene.get_or_insert_with(scene::reference_raw10));
-        let mut next = *self.next_ps.get_or_insert(now_ps + period_ps());
-        while next <= now_ps {
-            let at_ns = (next / 1000) as u64;
-            let Some(frames) = self.frames.as_mut() else {
-                self.counters.errors += 1;
-                break;
-            };
-            match frames.next_buffer() {
-                Ok(Some(buffer)) => {
-                    // The picture's brightness is the sensor's exposure as it latched (`World::level_for_frame_at`).
-                    let period_ns = (period_ps() / 1000) as u64;
-                    let level = world(|w| w.level_for_frame_at(at_ns, period_ns));
-                    let wrote = match scene_frame {
-                        Some(picture) => frames.write(buffer, 0, picture),
-                        None => frames.write(buffer, 0, &vec![level; size as usize]),
-                    };
-                    if wrote.is_err() {
-                        self.counters.errors += 1;
-                    }
-                    let frame = StreamFrame {
-                        buffer,
-                        bytes: size,
-                        sequence: self.emitted,
-                        identity: 0,
-                        timestamp_ns: at_ns,
-                    };
-                    match frames.publish(frame) {
-                        Ok(()) => self.counters.frames += 1,
-                        Err(_) => self.counters.errors += 1,
-                    }
-                }
-                Ok(None) => self.counters.dropped += 1,
-                Err(_) => self.counters.errors += 1,
-            }
-            self.emitted += 1;
-            self.latest_ns = at_ns;
-            next += period_ps();
+        // The picture's brightness is the sensor's exposure as it latched (`World::level_for_frame_at`).
+        let period = period_ns();
+        let level = world(|w| w.level_for_frame_at(at_ns, period));
+        let Some(frames) = self.frames.as_mut() else {
+            return true;
+        };
+        let wrote = match scene_frame {
+            Some(picture) => frames.write(buffer, 0, picture),
+            None => frames.write(buffer, 0, &vec![level; size as usize]),
+        };
+        if wrote.is_err() {
+            self.counters.errors += 1;
         }
-        self.next_ps = Some(next);
-        Some((next / 1000) as u64)
+        let frame = StreamFrame {
+            buffer,
+            bytes: size,
+            sequence: self.emitted,
+            identity: 0,
+            timestamp_ns: at_ns,
+        };
+        match frames.publish(frame) {
+            Ok(()) => self.counters.frames += 1,
+            Err(_) => self.counters.errors += 1,
+        }
+        self.emitted += 1;
+        self.latest_ns = at_ns;
+        true
     }
 }
 
@@ -540,12 +678,13 @@ impl CameraReceiver for SimReceiver {
         take(RAW)?;
         self.counters = Counters::default();
         self.emitted = 0;
-        self.next_ps = None;
+        time::reset_schedule();
         self.running = true;
+        receivers(true);
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
-        self.running = false;
+        self.halt();
         release(RAW);
         Ok(())
     }

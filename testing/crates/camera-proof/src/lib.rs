@@ -12,6 +12,8 @@
 
 pub mod chain;
 pub mod host;
+pub mod latch;
+pub mod setup;
 pub mod socket;
 pub mod stall;
 
