@@ -16,17 +16,20 @@
 //!   2000) and `gyro_rate` (Hz: 100, 200, 400, 1000 or 2000; default 2000).
 //! - `fifo` (bool; default false): read through the chip's FIFOs. See below.
 //!
-//! Power-up is spread over reads, and the driver never sleeps. Each die's first
-//! read soft-resets it and returns `AGAIN`; the next steps check the chip ID,
-//! power the die on and write its range and rate, one step a read. The host's
-//! read interval gives the chip time between steps. Each step can be retried,
-//! and the range and rate are read back, so a write that landed too early fails
-//! its readback and is written again on a later read. A failed transfer reports
-//! on that read, and the die starts over on a later one (a failed power-up step
-//! is retried in place). A wrong chip ID is refused and nothing is written. The
-//! driver never gives up and never switches itself off. The pacing of retries
-//! is the host's: the driver asks for no timer of its own while a die is
-//! powering up.
+//! Power-up is timed work, and the driver never sleeps. The host ticks a device
+//! from its bind, so each die's power-up runs without any client: the first
+//! tick soft-resets the die, and later ticks check the chip ID, power the
+//! accelerometer on and write its range and rate, one step at a time. Each step
+//! is due when the chip's own wait since the step before has passed (the
+//! datasheets' times: 1 ms after an accelerometer reset, 30 ms after a
+//! gyroscope's, 1 ms between the accelerometer's suspend-mode writes, 5 ms after
+//! it powers on), and the tick returns that time. Until a die is ready, a read
+//! says `AGAIN` and steps nothing. The range and rate are read back, so a write
+//! that landed too early fails its readback and the step is retried. A failed
+//! step is retried by the tick from 100 ms, doubling, capped at 8 s; a wrong chip
+//! ID is refused and nothing is written. A die that was ready and fails a
+//! transfer starts over at the next tick. The driver never gives up and never
+//! switches itself off.
 //!
 //! Without `fifo`, each read takes the die's current sample, and there are no
 //! batches (`read_batch` is `NOT_SUPPORTED`).
@@ -72,8 +75,8 @@
 //! call, at the call's start), and the auto-calibration, which the caller does
 //! (the chip does not calibrate itself).
 //!
-//! Retries of a failed die are paced by the host: a die that failed is started
-//! again by the next `read` or `read_batch`, never by a timer of its own.
+//! Retries of a failed die are its own ticks, under the backoff above. Reads never
+//! step a die: a read that comes before the die is ready returns `AGAIN`.
 
 #![no_std]
 
@@ -110,6 +113,16 @@ const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
 /// Ring slots: each die's FIFO depth in frames.
 const ACC_RING: usize = chip::ACC_FIFO_FRAMES;
 const GYRO_RING: usize = chip::GYRO_FIFO_FRAMES;
+/// The waits the chips need between power-up steps, in ns: the dev line's `init` waits, from the
+/// datasheets (`lemnos-drivers-bmi088`, `ACC_RESET_US` and the others). The gyroscope's
+/// configure step waits 5 ms too, which is more than it needs: conservative, not measured.
+const ACC_RESET_NS: u64 = 1_000_000;
+const GYR_RESET_NS: u64 = 30_000_000;
+const ACC_SUSPEND_NS: u64 = 1_000_000;
+const ACC_POWER_NS: u64 = 5_000_000;
+/// A failed power-up step is retried after this, doubling each time, capped at 8 s.
+const RETRY_FIRST_NS: u64 = 100_000_000;
+const RETRY_CAP_NS: u64 = 8_000_000_000;
 
 const ACCEL_READ: MethodId = MethodId {
     contract: 0,
@@ -139,7 +152,12 @@ enum Phase {
 #[derive(Debug, Clone, Copy)]
 enum Note {
     NotStarted,
-    Powering,
+    /// Reset, waiting for the chip to restart.
+    Resetting,
+    /// Accelerometer only: powered on in suspend mode, waiting for the chip to start.
+    PoweringOn,
+    /// Waiting for the range and rate to be written.
+    Configuring,
     WrongId,
     Transfer,
     /// The FIFO overflowed: samples were lost inside the chip.
@@ -150,16 +168,24 @@ enum Note {
 
 fn text(kind: Kind, note: Note) -> &'static str {
     match (kind, note) {
-        (Kind::Accel, Note::NotStarted) => "accelerometer: not started",
-        (Kind::Accel, Note::Powering) => "accelerometer: powering up",
-        (Kind::Accel, Note::WrongId) => "accelerometer: wrong chip id",
-        (Kind::Accel, Note::Transfer) => "accelerometer: transfer failed",
+        (Kind::Accel, Note::NotStarted) => "accelerometer: waiting for its first power-up step",
+        (Kind::Accel, Note::Resetting) => "accelerometer: waiting for the chip to reset",
+        (Kind::Accel, Note::PoweringOn) => "accelerometer: waiting for the chip to power on",
+        (Kind::Accel, Note::Configuring) => {
+            "accelerometer: waiting for its range and rate to be written"
+        }
+        (Kind::Accel, Note::WrongId) => "accelerometer: wrong chip id, retrying",
+        (Kind::Accel, Note::Transfer) => "accelerometer: transfer failed, retrying",
         (Kind::Accel, Note::Overflow) => "accelerometer: FIFO overflowed, samples lost",
         (Kind::Accel, Note::Batch) => "accelerometer: batch missed samples",
-        (Kind::Gyro, Note::NotStarted) => "gyroscope: not started",
-        (Kind::Gyro, Note::Powering) => "gyroscope: powering up",
-        (Kind::Gyro, Note::WrongId) => "gyroscope: wrong chip id",
-        (Kind::Gyro, Note::Transfer) => "gyroscope: transfer failed",
+        (Kind::Gyro, Note::NotStarted) => "gyroscope: waiting for its first power-up step",
+        (Kind::Gyro, Note::Resetting) => "gyroscope: waiting for the chip to reset",
+        (Kind::Gyro, Note::PoweringOn) => "gyroscope: waiting for the chip to power on",
+        (Kind::Gyro, Note::Configuring) => {
+            "gyroscope: waiting for its range and rate to be written"
+        }
+        (Kind::Gyro, Note::WrongId) => "gyroscope: wrong chip id, retrying",
+        (Kind::Gyro, Note::Transfer) => "gyroscope: transfer failed, retrying",
         (Kind::Gyro, Note::Overflow) => "gyroscope: FIFO overflowed, samples lost",
         (Kind::Gyro, Note::Batch) => "gyroscope: batch missed samples",
     }
@@ -244,6 +270,13 @@ struct Die<const RING: usize> {
     pending: Option<Note>,
     /// The loss a read shows in health.
     shown: Option<Note>,
+    /// The next power-up step (or retry) is due, host ns. `None`: now.
+    up_due: Option<u64>,
+    /// The current retry wait after a failed step, ns. Zero when the last step worked.
+    retry_ns: u64,
+    /// A transfer failed and the die has not been ready since: a read reports the failure, so the
+    /// host counts it, and not `AGAIN` (which is only the wait for a first start).
+    failed: bool,
 }
 
 impl<const RING: usize> Die<RING> {
@@ -264,14 +297,82 @@ impl<const RING: usize> Die<RING> {
             due: None,
             pending: None,
             shown: None,
+            up_due: None,
+            retry_ns: 0,
+            failed: false,
+        }
+    }
+
+    /// What a read says while the die is not ready: the failure, when one happened, else `AGAIN`.
+    fn not_ready(&self) -> Status {
+        if self.failed {
+            Status::IO
+        } else {
+            Status::AGAIN
         }
     }
 
     fn set(&mut self, phase: Phase) {
         self.phase = phase;
-        if phase != Phase::Ready {
-            self.note = text(self.kind, Note::Powering);
+        let note = match phase {
+            Phase::Off => Note::NotStarted,
+            Phase::Reset => Note::Resetting,
+            Phase::Power => Note::PoweringOn,
+            Phase::Configure => Note::Configuring,
+            Phase::Ready => return,
+        };
+        self.note = text(self.kind, note);
+    }
+
+    /// How long the chip needs after the step that brought it to its current phase.
+    fn gap(&self) -> u64 {
+        match (self.phase, self.kind) {
+            (Phase::Reset, Kind::Accel) => ACC_RESET_NS,
+            (Phase::Reset, Kind::Gyro) => GYR_RESET_NS,
+            (Phase::Power, _) => ACC_SUSPEND_NS,
+            (Phase::Configure, _) => ACC_POWER_NS,
+            _ => 0,
         }
+    }
+
+    /// One power-up step, once its time has come. Returns when the next step, or the retry of
+    /// this one, is due.
+    fn step_up(&mut self, now: u64, bus: &mut I2c) -> Option<u64> {
+        if let Some(due) = self.up_due
+            && now < due
+        {
+            return Some(due);
+        }
+        self.up_due = None;
+        match self.power(bus) {
+            Ok(true) => {
+                self.retry_ns = 0;
+                self.failed = false;
+                self.tick(now, bus)
+            }
+            Ok(false) => {
+                self.retry_ns = 0;
+                let due = now.saturating_add(self.gap());
+                self.up_due = Some(due);
+                Some(due)
+            }
+            Err(failure) => {
+                self.fail(&failure);
+                self.retry_at(now)
+            }
+        }
+    }
+
+    /// Schedules the next attempt after a failure: from 100 ms, doubling, capped at 8 s.
+    fn retry_at(&mut self, now: u64) -> Option<u64> {
+        self.retry_ns = if self.retry_ns == 0 {
+            RETRY_FIRST_NS
+        } else {
+            self.retry_ns.saturating_mul(2).min(RETRY_CAP_NS)
+        };
+        let due = now.saturating_add(self.retry_ns);
+        self.up_due = Some(due);
+        Some(due)
     }
 
     /// One step of power-up. `Ok(true)` once the die is ready to measure.
@@ -309,10 +410,10 @@ impl<const RING: usize> Die<RING> {
         Ok(true)
     }
 
-    /// A read's step: power-up, or the die's newest sample. `None` while the
-    /// die is still powering up.
+    /// A read's sample: the die's newest one. `None` while the die is still powering up, which a
+    /// read does not step (the tick does).
     fn sample(&mut self, bus: &mut I2c) -> chip::Step<Option<[i16; 3]>> {
-        if !self.power(bus)? {
+        if self.phase != Phase::Ready {
             return Ok(None);
         }
         if self.fifo {
@@ -456,14 +557,17 @@ impl<const RING: usize> Die<RING> {
     /// Runs a tick: drains the FIFO if its drain is due. Returns when the next
     /// drain is due.
     fn tick(&mut self, now: u64, bus: &mut I2c) -> Option<u64> {
-        if !self.fifo || self.phase != Phase::Ready {
+        if self.phase != Phase::Ready {
+            return self.step_up(now, bus);
+        }
+        if !self.fifo {
             self.due = None;
             return None;
         }
         if self.due.is_none_or(|due| now >= due) {
             if let Err(failure) = self.drain(bus, Some(now)) {
                 self.fail(&failure);
-                return None;
+                return self.retry_at(now);
             }
             let half_depth = RING as u64 * self.setting.period_ns / 2;
             self.due = Some(now.saturating_add(half_depth));
@@ -475,6 +579,7 @@ impl<const RING: usize> Die<RING> {
     /// die back to power-up for a later read. Any other failure is retried in
     /// place.
     fn fail(&mut self, failure: &Failure) -> Status {
+        self.failed = true;
         let wrong_id = matches!(failure, Failure::WrongChip);
         self.note = text(
             self.kind,
@@ -489,6 +594,7 @@ impl<const RING: usize> Die<RING> {
             self.last = None;
             self.timing = Timing::default();
             self.due = None;
+            self.up_due = None;
             self.pending = None;
             self.shown = None;
         }
@@ -518,7 +624,7 @@ impl<const RING: usize> Die<RING> {
 fn read_die<const RING: usize>(die: &mut Die<RING>, bus: &mut I2c) -> Result<Vector3> {
     let out = match die.sample(bus) {
         Ok(Some(raw)) => Ok(chip::to_vector(raw, die.setting.scale)),
-        Ok(None) => Err(Status::AGAIN),
+        Ok(None) => Err(die.not_ready()),
         Err(failure) => Err(die.fail(&failure)),
     };
     die.settle();
@@ -536,13 +642,14 @@ fn batch_die<const RING: usize>(
     let out = if !die.fifo {
         Err(Status::NOT_SUPPORTED)
     } else {
-        match die.power(bus) {
-            Ok(false) => Err(Status::AGAIN),
-            Err(failure) => Err(die.fail(&failure)),
-            Ok(true) => match die.drain(bus, None) {
+        // Not ready: the tick steps the power-up, so a batch says `AGAIN` and steps nothing.
+        if die.phase != Phase::Ready {
+            Err(die.not_ready())
+        } else {
+            match die.drain(bus, None) {
                 Err(failure) => Err(die.fail(&failure)),
                 Ok(()) => Ok(die.deliver(into, record)),
-            },
+            }
         }
     };
     die.settle();

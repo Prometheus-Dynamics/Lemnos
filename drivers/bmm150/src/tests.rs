@@ -55,6 +55,18 @@ fn place(sim: &SimI2c) {
     sim.set_bytes(ADDRESS, reg(REG_TRIM_Z2), &trim_rest());
 }
 
+/// Ticks the driver at 1 ms steps until the chip is up, as the host's ticks do: the tick steps the
+/// power-up, and a read only says `AGAIN` until then.
+fn up(mag: &mut Bmm150) {
+    for step in 0..100u64 {
+        Lifecycle::tick(mag, step * 1_000_000);
+        if Driver::health(mag) == Health::Ok {
+            return;
+        }
+    }
+    panic!("the chip never came up");
+}
+
 /// Binds as [`bind`] does, and says what the driver gave as its refusal reason, with its kind.
 fn bind_saying(board: &mut SimBoard) -> (Result<Bmm150>, Vec<(RefusalKind, String)>) {
     let reasons = std::sync::Mutex::new(Vec::new());
@@ -112,12 +124,14 @@ fn power_up_takes_one_read_then_configures() {
         ],
     )
     .unwrap();
-    assert_eq!(Driver::health(&mag), Health::Failed("not started"));
+    assert_eq!(
+        Driver::health(&mag),
+        Health::Degraded("powering up: waiting for the first power-up step")
+    );
 
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     assert_eq!(sim.byte(ADDRESS, reg(REG_POWER)), Some(0x01));
-    assert_eq!(sim.byte(ADDRESS, reg(REG_REP_XY)), None);
-    assert_eq!(Driver::health(&mag), Health::Degraded("powering up"));
+    assert_eq!(Driver::health(&mag), Health::Ok);
 
     mag.read().unwrap();
     assert_eq!(sim.byte(ADDRESS, reg(REG_REP_XY)), Some(0x07));
@@ -139,7 +153,7 @@ fn config_selects_preset_and_rate() {
         ],
     )
     .unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     mag.read().unwrap();
     assert_eq!(sim.byte(ADDRESS, reg(REG_REP_XY)), Some(0x17));
     assert_eq!(sim.byte(ADDRESS, reg(REG_REP_Z)), Some(0x52));
@@ -176,7 +190,7 @@ fn reads_tesla_after_start_up() {
     let (mut board, sim) = chip();
     sim.set_bytes(ADDRESS, reg(REG_DATA), &data(160, -320, 1000, XYZ1));
     let mut mag = bind(&mut board, &[]).unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
 
     let field = mag.read().unwrap();
     // Neutral X/Y trim at rhall = xyz1: 256 × 160 / 8192 / 16 = 0.3125 µT per LSB.
@@ -194,7 +208,7 @@ fn overflowed_axes_read_as_nan() {
     let bytes = data(RawSample::XY_OVERFLOW, 10, RawSample::Z_OVERFLOW, XYZ1);
     sim.set_bytes(ADDRESS, reg(REG_DATA), &bytes);
     let mut mag = bind(&mut board, &[]).unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     let field = mag.read().unwrap();
     assert!(field.x.is_nan());
     assert!(field.y.is_finite());
@@ -219,7 +233,7 @@ fn a_chip_with_another_id_is_refused_at_bind_as_failed_and_bound_once_it_reads_r
     sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[CHIP_ID]);
     sim.set_bytes(ADDRESS, reg(REG_DATA), &data(0, 0, 0, XYZ1));
     let mut mag = bind(&mut board, &[]).unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     assert!(mag.read().is_ok());
     assert_eq!(Driver::health(&mag), Health::Ok);
 }
@@ -261,15 +275,18 @@ fn bus_fault_powers_up_again_on_the_next_read() {
     let (mut board, sim) = chip();
     sim.set_bytes(ADDRESS, reg(REG_DATA), &data(160, -320, 1000, XYZ1));
     let mut mag = bind(&mut board, &[]).unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     mag.read().unwrap();
 
     sim.set_dead(ADDRESS, true);
     assert_eq!(mag.read(), Err(Status::IO));
-    assert_eq!(Driver::health(&mag), Health::Failed("bus error"));
+    assert_eq!(
+        Driver::health(&mag),
+        Health::Failed("the chip did not answer on its bus, retrying")
+    );
 
     sim.set_dead(ADDRESS, false);
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     assert!(mag.read().is_ok());
 }
 
@@ -287,7 +304,7 @@ fn stale_read_repeats_the_last_conversion() {
     let (mut board, sim) = chip();
     sim.set_bytes(ADDRESS, reg(REG_DATA), &data(160, -320, 1000, XYZ1));
     let mut mag = bind(&mut board, &[]).unwrap();
-    assert_eq!(mag.read(), Err(Status::AGAIN));
+    up(&mut mag);
     let ready = mag.read().unwrap();
 
     // Nothing new converted: the same field again, until a new conversion.
@@ -426,6 +443,7 @@ fn the_identity_test_reports_another_chip_as_a_failure_with_what_it_read() {
 fn the_identity_test_reports_a_dead_chip_as_no_response_and_leaves_the_driver_alone() {
     let (mut board, sim) = chip();
     let mut mag = bind(&mut board, &[]).unwrap();
+    up(&mut mag);
     let before = Driver::health(&mag);
     sim.set_dead(ADDRESS, true);
     let (_, record) = run_identity(&mut mag);

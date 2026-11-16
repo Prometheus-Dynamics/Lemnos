@@ -1,5 +1,6 @@
 //! Keeps devices retrying and tells clients when one changes state, reason or health.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,8 +116,16 @@ struct Told {
 /// A device whose driver is in a call is left for the next look: its health is not known until
 /// the call returns. Reads and sends nothing for a device that has not changed, and allocates
 /// only to send.
-fn send_changes(core: &Core, told: &mut Vec<Option<Told>>) {
+/// The line the daemon writes when a device first reaches `running ok` after a bind: its id and
+/// how long after the bind that was, in whole milliseconds.
+fn running_line(id: &str, bound_ns: u64, now_ns: u64) -> String {
+    let ms = now_ns.saturating_sub(bound_ns) / 1_000_000;
+    format!("lemnosd: {id}: running ok {ms} ms after bind")
+}
+
+fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<Option<u64>>) {
     told.resize(core.host.device_count(), None);
+    announced.resize(core.host.device_count(), None);
     for (index, told) in told.iter_mut().enumerate() {
         let Some((revision, health)) = core.host.look(index as u32) else {
             continue;
@@ -129,6 +138,16 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>) {
         let Some(info) = devices.iter().find(|info| info.index == index as u32) else {
             continue;
         };
+        // Once per bind: a device that reaches `running ok` says how long its bring-up took.
+        if health == Health::Ok
+            && matches!(info.state, DeviceState::Running)
+            && let Some(bound) = core.host.bound_ns(index as u32)
+            && announced[index] != Some(bound)
+        {
+            announced[index] = Some(bound);
+            let line = running_line(&info.id, bound, core.clock.now_ns());
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }
         let (state, health, reason) =
             wire_of(&info.state, info.retry, &health, core.clock.now_ns());
         let event = Frame::Event {
@@ -180,8 +199,9 @@ fn send_jobs(core: &Core, updates: &mut Vec<JobUpdate>) {
 pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
     let mut seen = core.host.changes();
     let mut told = Vec::new();
+    let mut announced = Vec::new();
     let mut updates = Vec::new();
-    send_changes(core, &mut told);
+    send_changes(core, &mut told, &mut announced);
     let mut next_look = Instant::now() + LOOK_EVERY;
     let watchdog = notifier.watchdog_interval();
     let mut next_ping = Instant::now();
@@ -203,7 +223,7 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
             if looking {
                 next_look = Instant::now() + LOOK_EVERY;
             }
-            send_changes(core, &mut told);
+            send_changes(core, &mut told, &mut announced);
         }
         send_jobs(core, &mut updates);
         if let Some(interval) = watchdog
@@ -257,5 +277,28 @@ mod tests {
             "{text}"
         );
         assert!(text.len() < MAX_REASON + 64, "{}", text.len());
+    }
+}
+
+#[cfg(test)]
+mod running_line_tests {
+    use super::running_line;
+
+    /// A device that reaches `running ok` says its id and the milliseconds since its bind.
+    #[test]
+    fn the_bring_up_line_names_the_device_and_the_time_since_bind() {
+        assert_eq!(
+            running_line("imu", 2_000_000_000, 2_000_000_000 + 37_900_000),
+            "lemnosd: imu: running ok 37 ms after bind"
+        );
+    }
+
+    /// A clock that reads before the bind (the bind's own time is zero) never underflows.
+    #[test]
+    fn a_time_before_the_bind_reads_as_zero() {
+        assert_eq!(
+            running_line("mag", 5_000, 1),
+            "lemnosd: mag: running ok 0 ms after bind"
+        );
     }
 }

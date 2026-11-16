@@ -263,13 +263,21 @@ fn a_host_owned_bmm150_its_owner_powered_down_waits_and_is_not_powered_up() {
     let (host, clock, bus) = board("owner = \"host\"", true);
     bus.set_bytes(MAG, 0x4b, &[0x00]);
     let before = registers(&bus, MAG);
+    // Before its first tick the chip says `AGAIN`; once the tick has tried to attach, the refused
+    // attach is a failure a read reports (`IO`), and it is retried by the host's ticks.
     for _ in 0..3 {
-        assert_eq!(read::<Vector3>(&host, "mag"), Err(Status::AGAIN));
+        let status = read::<Vector3>(&host, "mag").unwrap_err();
+        assert!(
+            status == Status::AGAIN || status == Status::IO,
+            "{status:?}"
+        );
         run(&host, &clock, 1);
     }
     assert_eq!(registers(&bus, MAG), before);
     // Its owner powers it up: the next read reads.
     bus.set_bytes(MAG, 0x4b, &[0x01]);
+    // The host's ticks attach to it once its retry is due (100 ms after the last failure).
+    run(&host, &clock, 1);
     assert!(read::<Vector3>(&host, "mag").is_ok());
 }
 

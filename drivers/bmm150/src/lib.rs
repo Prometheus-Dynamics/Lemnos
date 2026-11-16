@@ -1,13 +1,14 @@
 //! The BMM150 geomagnetic sensor as a magnetometer, over an I2C bus.
 //!
-//! The first read after bind powers the chip up and returns `AGAIN`. Each
-//! later read checks the chip, reads its factory trim, starts normal mode,
-//! and returns the field in tesla. The chip needs about 3 ms after power-up;
-//! the host's next read provides that gap, so the driver never sleeps.
+//! Power-up is timed work, and the driver never sleeps. The host ticks the
+//! device from its bind, so the first tick powers the chip up; 3 ms later (the
+//! chip's start-up time) a tick checks it, reads its factory trim and starts
+//! normal mode. Until then a read returns `AGAIN` and steps nothing, and the
+//! health names the wait. Once it measures, a read returns the field in tesla.
 //!
-//! Any bus or chip fault puts the chip back to power-up on the next read. The
-//! driver never gives up: it reports the fault, and the host decides how long
-//! to back off.
+//! Any bus or chip fault puts the chip back to power-up at the next tick. A
+//! failed step is retried by the tick from 100 ms, doubling, capped at 8 s: the
+//! driver never gives up, and never switches itself off.
 //!
 //! An axis the chip cannot measure (overflow, or a trim that cannot compensate
 //! it) reads as NaN.
@@ -65,6 +66,12 @@ const SPECS: &[Spec] = &[Spec::read(
     20,
 )];
 
+/// The chip's start-up time after power-on (the dev line's `POWER_ON_US`).
+const POWER_ON_NS: u64 = 3_000_000;
+/// A failed power-up step is retried after this, doubling each time, capped at 8 s.
+const RETRY_FIRST_NS: u64 = 100_000_000;
+const RETRY_CAP_NS: u64 = 8_000_000_000;
+
 /// Where the chip is in its power-up sequence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
@@ -87,6 +94,12 @@ pub struct Bmm150 {
     last: Option<Vector3>,
     /// Why the chip is not measuring, while it is not.
     fault: &'static str,
+    /// Whether the last thing that happened was a failure (as opposed to waiting to start).
+    faulted: bool,
+    /// The next power-up step (or retry) is due, host ns. `None`: now.
+    up_due: Option<u64>,
+    /// The current retry wait after a failed step, ns. Zero when the last step worked.
+    retry_ns: u64,
     /// The operating system's driver runs the chip: read it, never set it up.
     host_owned: bool,
     /// The self-test checks: their runs and the last result of each.
@@ -145,7 +158,10 @@ impl Lifecycle for Bmm150 {
             settings: settings(cfg)?,
             phase: Phase::Off,
             last: None,
-            fault: "not started",
+            fault: "powering up: waiting for the first power-up step",
+            faulted: false,
+            up_due: None,
+            retry_ns: 0,
             host_owned: cfg.host_owned(),
             runner: Runner::new(SPECS),
             calling: CallerId::LOCAL,
@@ -153,11 +169,16 @@ impl Lifecycle for Bmm150 {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let powering = self.step_up(now_ns);
         let mut bench = Identity {
             bus: &mut self.bus,
             address: self.address,
         };
-        self.runner.tick(now_ns, &mut bench)
+        let jobs = self.runner.tick(now_ns, &mut bench);
+        match (powering, jobs) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn caller(&mut self, caller: CallerId) {
@@ -208,8 +229,9 @@ impl Lifecycle for Bmm150 {
                 Some(why) => Health::Degraded(why),
                 None => Health::Ok,
             },
-            Phase::Starting => Health::Degraded("powering up"),
-            Phase::Off => Health::Failed(self.fault),
+            Phase::Starting => Health::Degraded("powering up: waiting 3 ms for the chip to start"),
+            Phase::Off if self.faulted => Health::Failed(self.fault),
+            Phase::Off => Health::Degraded(self.fault),
         }
     }
 }
@@ -256,39 +278,85 @@ impl Bench for Identity<'_> {
 }
 
 impl Bmm150 {
-    /// Records a fault, so the next read powers the chip up again.
+    /// Records a fault, so the next tick powers the chip up again.
     fn fail(&mut self, fault: Fault) -> Status {
         self.phase = Phase::Off;
         self.fault = fault.reason();
+        self.faulted = true;
         fault.status()
+    }
+
+    /// One power-up step, once its time has come. Returns when the next step, or the retry of
+    /// this one, is due.
+    fn step_up(&mut self, now: u64) -> Option<u64> {
+        if let Some(due) = self.up_due
+            && now < due
+        {
+            return Some(due);
+        }
+        self.up_due = None;
+        let step = match self.phase {
+            Phase::Ready(_) => return None,
+            // The operating system's driver runs the chip: this one only attaches.
+            Phase::Off if self.host_owned => {
+                chip::attach(&mut self.bus, self.address).map(|trim| {
+                    self.phase = Phase::Ready(trim);
+                    None
+                })
+            }
+            Phase::Off => chip::power_on(&mut self.bus, self.address).map(|()| {
+                self.phase = Phase::Starting;
+                Some(POWER_ON_NS)
+            }),
+            Phase::Starting => {
+                chip::start_up(&mut self.bus, self.address, self.settings).map(|trim| {
+                    self.phase = Phase::Ready(trim);
+                    None
+                })
+            }
+        };
+        match step {
+            Ok(Some(gap)) => {
+                self.retry_ns = 0;
+                let due = now.saturating_add(gap);
+                self.up_due = Some(due);
+                Some(due)
+            }
+            Ok(None) => {
+                self.retry_ns = 0;
+                self.faulted = false;
+                None
+            }
+            Err(fault) => {
+                let _ = self.fail(fault);
+                self.retry_at(now)
+            }
+        }
+    }
+
+    /// Schedules the next attempt after a failure: from 100 ms, doubling, capped at 8 s.
+    fn retry_at(&mut self, now: u64) -> Option<u64> {
+        self.retry_ns = if self.retry_ns == 0 {
+            RETRY_FIRST_NS
+        } else {
+            self.retry_ns.saturating_mul(2).min(RETRY_CAP_NS)
+        };
+        let due = now.saturating_add(self.retry_ns);
+        self.up_due = Some(due);
+        Some(due)
     }
 }
 
 impl Magnetometer for Bmm150 {
     fn read(&mut self) -> Result<Vector3> {
-        let trim = match self.phase {
-            Phase::Off if self.host_owned => match chip::attach(&mut self.bus, self.address) {
-                Ok(trim) => {
-                    self.phase = Phase::Ready(trim);
-                    trim
-                }
-                Err(fault) => return Err(self.fail(fault)),
-            },
-            Phase::Off => {
-                if let Err(fault) = chip::power_on(&mut self.bus, self.address) {
-                    return Err(self.fail(fault));
-                }
-                self.phase = Phase::Starting;
-                return Err(Status::AGAIN);
-            }
-            Phase::Starting => match chip::start_up(&mut self.bus, self.address, self.settings) {
-                Ok(trim) => {
-                    self.phase = Phase::Ready(trim);
-                    trim
-                }
-                Err(fault) => return Err(self.fail(fault)),
-            },
-            Phase::Ready(trim) => trim,
+        // Power-up is the tick's: until the chip is ready, a read says so and steps nothing.
+        let Phase::Ready(trim) = self.phase else {
+            // A failure since the chip was last ready is reported, so the host counts it.
+            return Err(if self.faulted {
+                Status::IO
+            } else {
+                Status::AGAIN
+            });
         };
         let raw = match chip::read_raw(&mut self.bus, self.address) {
             Ok(raw) => raw,

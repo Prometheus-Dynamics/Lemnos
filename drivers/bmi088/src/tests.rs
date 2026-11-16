@@ -84,23 +84,33 @@ fn close(actual: f32, expected: f32, tolerance: f32) {
     );
 }
 
-/// Reads the accelerometer until it has a sample, and returns it.
+/// Ticks the driver at 1 ms steps until the accelerometer has a sample, and returns it. The
+/// tick steps the power-up, as the host's ticks do; a read says `AGAIN` until then, or the failure
+/// of a step that is being retried.
 fn accel_up(dev: &mut Bmi088) -> Vector3 {
-    for _ in 0..10 {
+    for step in 0..10_000u64 {
+        Lifecycle::tick(dev, step * 1_000_000);
         match Accelerometer::read(dev) {
             Ok(sample) => return sample,
-            Err(status) => assert_eq!(status, Status::AGAIN),
+            Err(status) => assert!(
+                status == Status::AGAIN || status == Status::IO,
+                "{status:?}"
+            ),
         }
     }
     panic!("accelerometer never became ready");
 }
 
-/// Reads the gyroscope until it has a sample, and returns it.
+/// Ticks the driver at 1 ms steps until the gyroscope has a sample, and returns it.
 fn gyro_up(dev: &mut Bmi088) -> Vector3 {
-    for _ in 0..10 {
+    for step in 0..10_000u64 {
+        Lifecycle::tick(dev, step * 1_000_000);
         match Gyroscope::read(dev) {
             Ok(sample) => return sample,
-            Err(status) => assert_eq!(status, Status::AGAIN),
+            Err(status) => assert!(
+                status == Status::AGAIN || status == Status::IO,
+                "{status:?}"
+            ),
         }
     }
     panic!("gyroscope never became ready");
@@ -114,52 +124,81 @@ fn the_manifest_provides_both_contracts() {
 }
 
 #[test]
-fn accelerometer_powers_up_one_step_per_read() {
+fn accelerometer_powers_up_one_step_per_tick_at_the_chips_waits() {
     let (mut board, sim) = chip();
     sim.set_bytes(ACCEL, ACC_DATA, &axes_bytes(16384, 0, 0));
     let mut dev = bind(&mut board, &[]).unwrap();
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("accelerometer: not started")
+        Health::Degraded("accelerometer: waiting for its first power-up step")
     );
-
     assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
+    assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), None, "a read steps nothing");
+
+    // The first tick resets the chip and asks for the next step after its 1 ms.
+    assert_eq!(Driver::tick(&mut dev, 0), Some(1_000_000));
     assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), Some(0xb6));
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("accelerometer: powering up")
+        Health::Degraded("accelerometer: waiting for the chip to reset")
     );
 
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
+    assert_eq!(
+        Driver::tick(&mut dev, 500_000),
+        Some(1_000_000),
+        "not yet due"
+    );
+    assert_eq!(sim.byte(ACCEL, ACC_PWR_CONF), None);
+    assert_eq!(Driver::tick(&mut dev, 1_000_000), Some(2_000_000));
     assert_eq!(sim.byte(ACCEL, ACC_PWR_CONF), Some(0x00));
-    assert_eq!(sim.byte(ACCEL, ACC_RANGE), None);
-
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
-    assert_eq!(sim.byte(ACCEL, ACC_PWR_CTRL), Some(0x04));
-    assert_eq!(sim.byte(ACCEL, ACC_RANGE), None);
-
-    // The configuration step writes the settings and reads the sample.
-    let sample = Accelerometer::read(&mut dev).unwrap();
-    assert_eq!(sim.byte(ACCEL, ACC_RANGE), Some(0x01));
-    assert_eq!(sim.byte(ACCEL, ACC_CONF), Some(0xa8));
-    close(sample.x, 3.0 * G, 1e-3);
-    // The gyroscope has not been read, so the device is still degraded.
+    assert_eq!(sim.byte(ACCEL, ACC_PWR_CTRL), None);
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("gyroscope: not started")
+        Health::Degraded("accelerometer: waiting for the chip to power on")
+    );
+
+    assert_eq!(Driver::tick(&mut dev, 2_000_000), Some(7_000_000));
+    assert_eq!(sim.byte(ACCEL, ACC_PWR_CTRL), Some(0x04));
+    assert_eq!(sim.byte(ACCEL, ACC_RANGE), None);
+    assert_eq!(Driver::tick(&mut dev, 6_999_999), Some(7_000_000));
+    assert_eq!(
+        sim.byte(ACCEL, ACC_RANGE),
+        None,
+        "the 5 ms after power-on are not over"
+    );
+
+    // The configuration step writes the settings; the gyroscope's reset is due at 30 ms.
+    assert_eq!(Driver::tick(&mut dev, 7_000_000), Some(30_000_000));
+    assert_eq!(sim.byte(ACCEL, ACC_RANGE), Some(0x01));
+    assert_eq!(sim.byte(ACCEL, ACC_CONF), Some(0xa8));
+    let sample = Accelerometer::read(&mut dev).unwrap();
+    close(sample.x, 3.0 * G, 1e-3);
+    assert_eq!(
+        Driver::health(&dev),
+        Health::Degraded("gyroscope: waiting for the chip to reset")
     );
 }
 
 #[test]
-fn gyroscope_powers_up_in_two_steps_and_reads_in_rad_per_s() {
+fn gyroscope_powers_up_in_steps_from_its_ticks_and_reads_in_rad_per_s() {
     let (mut board, sim) = chip();
     sim.set_bytes(GYRO, GYR_DATA, &axes_bytes(16384, -16384, 0));
     let mut dev = bind(&mut board, &[]).unwrap();
 
     assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
+    assert_eq!(sim.byte(GYRO, GYR_SOFTRESET), None, "a read steps nothing");
+    // Ticks at 1 ms steps: the reset, 30 ms of waiting, the check and then the configuration.
+    let mut now = 0;
+    while sim.byte(GYRO, GYR_RANGE).is_none() {
+        Driver::tick(&mut dev, now);
+        now += 1_000_000;
+        assert!(now <= 100_000_000, "the gyroscope never configured");
+    }
     assert_eq!(sim.byte(GYRO, GYR_SOFTRESET), Some(0xb6));
-    assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
-    assert_eq!(sim.byte(GYRO, GYR_RANGE), None);
+    assert!(
+        now >= 35_000_000,
+        "the 30 ms reset and the 5 ms after it: {now}"
+    );
 
     let sample = Gyroscope::read(&mut dev).unwrap();
     // Default 2000 degrees per second: half scale is 1000.
@@ -201,10 +240,10 @@ fn wrong_chip_is_refused_at_bind_and_nothing_is_written() {
     );
     assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), None);
 
-    // Once the right chip is there, the retry binds and the next read powers it up.
+    // Once the right chip is there, the retry binds and the first tick powers it up.
     sim.set_bytes(ACCEL, ACC_ID, &[0x1e]);
     let mut dev = bind(&mut board, &[]).unwrap();
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
+    Driver::tick(&mut dev, 0);
     assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), Some(0xb6));
 }
 
@@ -236,17 +275,14 @@ fn a_missing_gyroscope_does_not_stop_the_accelerometer() {
     let mut dev = bind(&mut board, &[]).unwrap();
     accel_up(&mut dev);
 
-    // The transfer fails on that read, and the gyroscope is retried on the next.
-    assert_eq!(Gyroscope::read(&mut dev), Err(Status::IO));
+    // The gyroscope's ticks fail on the bus and are retried; the accelerometer still reads.
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("gyroscope: transfer failed")
+        Health::Degraded("gyroscope: transfer failed, retrying")
     );
     assert!(Accelerometer::read(&mut dev).is_ok());
 
     sim.set_dead(GYRO, false);
-    assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
-    assert_eq!(sim.byte(GYRO, GYR_SOFTRESET), Some(0xb6));
     gyro_up(&mut dev);
 }
 
@@ -260,13 +296,13 @@ fn a_transfer_failure_while_measuring_restarts_power_up_on_a_later_read() {
     assert_eq!(Accelerometer::read(&mut dev), Err(Status::IO));
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("accelerometer: transfer failed")
+        Health::Degraded("accelerometer: transfer failed, retrying")
     );
 
-    // The chip comes back: the next read soft-resets it and starts over.
+    // The chip comes back: the next tick soft-resets it and starts over.
     sim.set_bytes(ACCEL, ACC_SOFTRESET, &[0]);
     sim.set_dead(ACCEL, false);
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
+    Driver::tick(&mut dev, 0);
     assert_eq!(sim.byte(ACCEL, ACC_SOFTRESET), Some(0xb6));
     accel_up(&mut dev);
 }
@@ -356,7 +392,7 @@ fn addresses_come_from_the_config() {
         ],
     )
     .unwrap();
-    assert_eq!(Accelerometer::read(&mut dev), Err(Status::AGAIN));
+    Driver::tick(&mut dev, 0);
     assert_eq!(sim.byte(0x19, ACC_SOFTRESET), Some(0xb6));
     assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
     assert_eq!(sim.byte(0x6a, GYR_SOFTRESET), Some(0xb6));
@@ -757,9 +793,13 @@ fn fifo_device_at(accel_rate: i64) -> (SimBoard, SimI2c, Bmi088) {
 
 /// Four accelerometer reads: the four power-up steps, each `AGAIN`.
 fn powered(dev: &mut Bmi088) {
-    for _ in 0..4 {
-        assert_eq!(Accelerometer::read(dev), Err(Status::AGAIN));
+    for step in 0..10_000u64 {
+        Driver::tick(dev, step * 1_000_000);
+        if Driver::health(dev) == Health::Ok {
+            return;
+        }
     }
+    panic!("the device never came up");
 }
 
 /// Pushes accelerometer frames `from..from + count`, with X the frame's number.
@@ -843,10 +883,7 @@ fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
     }
     assert_eq!(delivered, 6 * 73);
     assert_eq!(sim.fifo_len(ACCEL), 0);
-    assert_eq!(
-        Driver::health(&dev),
-        Health::Degraded("gyroscope: not started")
-    );
+    assert_eq!(Driver::health(&dev), Health::Ok);
 }
 
 #[test]
@@ -871,23 +908,46 @@ fn ticks_alone_keep_the_fifo_from_overflowing() {
 #[test]
 fn a_tick_drains_only_when_due_and_says_when_next() {
     let (_board, sim, mut dev) = fifo_device_at(200);
-    assert_eq!(Driver::tick(&mut dev, 5), None, "not powered: nothing due");
-    powered(&mut dev);
+    assert!(
+        dev.accel.tick(5, &mut dev.bus).is_some(),
+        "not powered: its power-up is due"
+    );
+    // Power the accelerometer up with its own ticks. The tick that finds it ready drains the
+    // (empty) FIFO and sets the first drain a half FIFO later.
+    let mut t0 = 5;
+    while dev.accel.phase != Phase::Ready {
+        t0 += 1_000_000;
+        dev.accel.tick(t0, &mut dev.bus);
+    }
+    let due = t0 + TICK_NS;
+    assert_eq!(
+        dev.accel.due,
+        Some(due),
+        "the ready tick set the first drain"
+    );
+
+    // Counts are relative: the chip's FIFO may already hold frames the stream put there.
+    let base = sim.fifo_len(ACCEL);
     push_numbered(&sim, 0, 3);
-    assert_eq!(Driver::tick(&mut dev, 1_000), Some(1_000 + TICK_NS));
-    assert_eq!(sim.fifo_len(ACCEL), 0);
+    assert_eq!(dev.accel.tick(t0 + 1_000, &mut dev.bus), Some(due));
+    assert_eq!(
+        sim.fifo_len(ACCEL),
+        base + 21,
+        "not due: nothing drained (7 bytes a frame)"
+    );
     push_numbered(&sim, 3, 3);
     assert_eq!(
-        Driver::tick(&mut dev, 1_000 + TICK_NS - 1),
-        Some(1_000 + TICK_NS),
+        dev.accel.tick(due - 1, &mut dev.bus),
+        Some(due),
         "early tick"
     );
-    assert_eq!(sim.fifo_len(ACCEL), 21, "an early tick takes nothing");
     assert_eq!(
-        Driver::tick(&mut dev, 1_000 + TICK_NS),
-        Some(1_000 + 2 * TICK_NS)
+        sim.fifo_len(ACCEL),
+        base + 42,
+        "an early tick takes nothing"
     );
-    assert_eq!(sim.fifo_len(ACCEL), 0);
+    assert_eq!(dev.accel.tick(due, &mut dev.bus), Some(due + TICK_NS));
+    assert_eq!(sim.fifo_len(ACCEL), 0, "due: the FIFO is drained");
 }
 
 #[test]
@@ -1030,9 +1090,8 @@ fn a_fifo_length_above_the_fifo_is_clamped_to_it() {
 #[test]
 fn gyro_batches_are_stamped_at_the_gyro_rate() {
     let (_board, sim, mut dev) = fifo_chip();
-    for _ in 0..3 {
-        assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
-    }
+    assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
+    powered(&mut dev);
     let mut bytes = Vec::new();
     for n in 1..=10i16 {
         bytes.extend(gyro_frame(n, 0, 0));

@@ -151,9 +151,18 @@ fn read(table: &Table, device: u32, contract: u8) -> Result<Vector3, Status> {
     Vector3::decode(&mut Reader::new(&reply[..n]))
 }
 
-/// Reads until the dies have powered up (each read takes one step) and returns the first value.
-fn first_value(table: &Table, device: u32, contract: u8) -> Vector3 {
-    for _ in 0..20 {
+/// Ticks the table at 10 ms steps until the dies have powered up (the ticks step power-up, as the
+/// host's do; a read says `AGAIN` until then), and returns the first value.
+fn first_value(
+    table: &'static Table,
+    clock: &Steps,
+    buses: &mut dyn lemnos_core::Provider,
+    device: u32,
+    contract: u8,
+) -> Vector3 {
+    for _ in 0..100 {
+        clock.advance_ms(10);
+        table.poll(buses);
         match read(table, device, contract) {
             Ok(value) => return value,
             Err(status) => assert_eq!(status, Status::AGAIN),
@@ -188,11 +197,12 @@ fn both_drivers_bind_children_first_and_answer_through_the_table() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
     let i2c = i2c0!(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&i2c));
+    let mut buses = Buses::new().with_i2c(&i2c);
+    TABLE.start(&mut buses);
     assert_eq!(TABLE.state(SENSOR), Some(State::Running));
     assert_eq!(TABLE.state(FUSED), Some(State::Running));
 
-    let angles = first_value(&TABLE, FUSED, 0);
+    let angles = first_value(&TABLE, &CLOCK, &mut buses, FUSED, 0);
     assert!(angles.x.abs() < 1e-3 && angles.y.abs() < 1e-3, "{angles:?}");
     let before = TRANSACTIONS.load(Ordering::Relaxed);
     read(&TABLE, FUSED, 0).unwrap();
@@ -205,12 +215,13 @@ fn a_call_reaches_the_device_and_contract_it_names() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
     let i2c = i2c0!(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&i2c));
+    let mut buses = Buses::new().with_i2c(&i2c);
+    TABLE.start(&mut buses);
 
-    let acceleration = first_value(&TABLE, SENSOR, 0);
+    let acceleration = first_value(&TABLE, &CLOCK, &mut buses, SENSOR, 0);
     assert!((acceleration.z - 9.806).abs() < 0.01, "{acceleration:?}");
     assert!(acceleration.x == 0.0 && acceleration.y == 0.0);
-    let rate = first_value(&TABLE, SENSOR, 1);
+    let rate = first_value(&TABLE, &CLOCK, &mut buses, SENSOR, 1);
     assert_eq!((rate.x, rate.y, rate.z), (0.0, 0.0, 0.0));
     assert_eq!(read(&TABLE, 7, 0), Err(Status::NOT_FOUND));
     let mut reply = [0; 16];
@@ -290,7 +301,7 @@ fn a_parent_waits_for_its_child_without_using_up_a_bus_then_binds() {
     }
     assert_eq!(TABLE.state(SENSOR), Some(State::Running));
     assert_eq!(TABLE.state(FUSED), Some(State::Running));
-    first_value(&TABLE, FUSED, 0);
+    first_value(&TABLE, &CLOCK, &mut buses, FUSED, 0);
 }
 
 #[test]
@@ -298,8 +309,9 @@ fn health_passes_up_and_off_and_on_are_immediate() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
     let i2c = i2c0!(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&i2c));
-    first_value(&TABLE, FUSED, 0);
+    let mut buses = Buses::new().with_i2c(&i2c);
+    TABLE.start(&mut buses);
+    first_value(&TABLE, &CLOCK, &mut buses, FUSED, 0);
     assert_eq!(
         TABLE.health(FUSED),
         Health::Degraded("six-axis: yaw is relative")

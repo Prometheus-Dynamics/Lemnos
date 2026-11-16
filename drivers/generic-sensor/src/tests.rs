@@ -119,8 +119,10 @@ fn second_sensor_from_a_file_reads_what_the_chip_holds_beside_the_first() {
     close(field.z, -70_000e-6);
     assert_eq!(Driver::health(&mag), Health::Ok);
 
-    // The first sensor on the same bus is unaffected.
+    // The first sensor on the same bus is unaffected: its ticks bring it up, then it reads.
     assert_eq!(compass.read(), Err(Status::AGAIN));
+    Driver::tick(&mut compass, 0);
+    Driver::tick(&mut compass, 3_000_000);
     assert!(compass.read().is_ok());
     assert_eq!(Driver::health(&compass), Health::Ok);
 }

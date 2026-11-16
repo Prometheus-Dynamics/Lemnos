@@ -189,6 +189,27 @@ fallback for a wake that never came, and the rp1 receiver uses one frame period 
 the frames a deadline tick finds (`lost_wakes`). `tick` must still not block: the host waits on the descriptor,
 not the driver.
 
+### Bring-up on the host's ticks
+
+A driver must reach its steady state from bind on its own ticks, with no caller's read. The host
+ticks a device once when it binds it, and after each call; a driver whose bring-up is timed (a
+soft reset, a wait for the chip after power-on, a retry of a failed step) does these steps in
+`tick`, sets `TICKS`, and returns the time each next step is due. The rules:
+
+- A read before the device is ready says `AGAIN` (or the reason) and steps nothing. A read is a
+  caller's call, and a bring-up that waits for one never finishes on a board with no client.
+- The chip's waits are the gaps between steps, not sleeps: the driver never sleeps, it returns the
+  due time from `tick`.
+- A failed step is retried by `tick` under the failure rule: 100 ms, doubling, capped at 8 s, and
+  never given up. Its health names what it waits on while it waits (`accelerometer: waiting for the
+  chip to reset`) and says what failed after (`... transfer failed, retrying`).
+- A bind that fails on its first identity read is refused, and the host retries the bind.
+
+The rule is enforced by `testing/crates/sensor-power-up`, which binds the reference board's three
+sensors with no client and needs `running ok` within 250 ms of bind on simulated chips that refuse
+transfers for their waits (`SimI2c::set_settle`). Every other driver with timed bring-up must get
+the same test (its list is in `testing/board-runs/M41.md`).
+
 ### Watching the board
 
 A driver that needs to know the rest of the board sets `WATCHES_BOARD` and implements `board(view)`.
@@ -779,6 +800,7 @@ that moves a base hash shows there as a changed row, and the PR says which consu
 - Settings are checked by `check_config` (see [Settings](#settings-check_config)): the host runs it when it
   validates the board file and before it makes the device, and the generated bind runs it again.
 - Each failure is reported through health, and a read after it tries again.
+- A driver with timed bring-up reaches its steady state from its ticks alone, with no read (see [Bring-up on the host's ticks](#bring-up-on-the-hosts-ticks)).
 - Tests run on the simulated bus, and a test shows that a wrong register fails.
 - Hardware you could not reach is marked `untested on board` in the crate's documentation, with
   the check written to a file under `testing/board-runs/` ([Testing](testing.md#board-runs)).

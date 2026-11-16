@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-sensor-power-up"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-sim = { path = "../../../backends/sim" }
+lemnos-driver-bmi088 = { path = "../../../drivers/bmi088" }
+lemnos-driver-bmm150 = { path = "../../../drivers/bmm150" }
+lemnos-driver-ina2xx = { path = "../../../drivers/ina2xx" }
