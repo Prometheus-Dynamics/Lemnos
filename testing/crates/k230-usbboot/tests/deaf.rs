@@ -5,7 +5,7 @@
 
 use lemnos_k230_usbboot::UsbError;
 use lemnos_k230_usbboot::bootrom::{self, Stage};
-use lemnos_k230_usbboot::probe::{Outcome, run_probe};
+use lemnos_k230_usbboot::probe::run_probe;
 use lemnos_k230_usbboot::sim::{SimBoard, SimConfig, sim_stage_image};
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ fn a_host_that_is_late_gets_the_named_error_at_its_first_transfer_and_sends_no_i
 fn the_probe_flow_across_a_reset_into_a_deaf_rom_is_named_not_a_missing_return() {
     let mut board = board();
     board.set_deaf_after(Some(0));
-    let outcome: Outcome = run_probe(&mut board, &sim_stage_image(), Duration::from_secs(5))
+    let error = run_probe(&mut board, &sim_stage_image(), Duration::from_secs(5))
         .expect_err("a deaf ROM is an error, not an outcome");
-    let _ = outcome;
+    assert_eq!(error, UsbError::Deaf, "{error}");
 }

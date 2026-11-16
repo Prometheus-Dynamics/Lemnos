@@ -26,8 +26,8 @@ SECTIONS
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         . = ALIGN(16);
-        lemnos_stack_bottom = .;
-        . += 0x4000;
+        lemnos_stack_bottom = .;  /* 64 KiB: the report's records and the boot areas are built on it */
+        . += 0x10000;
         . = ALIGN(16);
         lemnos_stack_top = .;
     }

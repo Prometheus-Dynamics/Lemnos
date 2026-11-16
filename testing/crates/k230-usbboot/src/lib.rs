@@ -21,6 +21,7 @@ pub mod flash;
 pub mod packet;
 pub mod probe;
 pub mod sim;
+pub mod stage_report;
 pub mod transport;
 pub mod usb;
 pub mod write;

@@ -454,7 +454,22 @@ pub enum BoardState {
 enum Mode {
     Rom,
     Stage(Box<Stage<SimMedium, Dog<SharedWdt>>>),
+    /// The stage image in report mode: it answers the queued records and feeds nothing; wdt0 returns the board.
+    Report { next: usize },
     Absent,
+}
+
+/// The tag at the start of the sim's report image: the sim's ROM runs an image that begins with it in report
+/// mode. The image carries the mode block (the host patches it), so it is a real patch target.
+pub const SIM_REPORT_TAG: &[u8] = b"lemnos-sim-report";
+
+/// The report image, as the sim's ROM loads it: the tag, the mode block's magic and zeroed fields, and padding.
+pub fn sim_report_image() -> Vec<u8> {
+    let mut image = vec![0u8; 2500];
+    image[..SIM_REPORT_TAG.len()].copy_from_slice(SIM_REPORT_TAG);
+    let at = 64;
+    image[at..at + 4].copy_from_slice(&lemnos_k230_usbboot_stage::image::BLOCK_MAGIC.to_le_bytes());
+    image
 }
 
 /// A simulated K230: the boot ROM, the stage, the watchdogs and the medium, on one clock.
@@ -473,6 +488,7 @@ pub struct SimBoard {
     /// The stage does not come back after the start (the device stays off the bus).
     stage_never_returns: bool,
     deaf_after_us: Option<u64>,
+    report_records: Vec<[u8; 60]>,
 }
 
 /// The stage's image, as the simulated ROM loads it. Any bytes will do; the simulator checks that
@@ -570,6 +586,7 @@ impl SimBoard {
             start_reply: StartReply::Disconnect,
             stage_never_returns: false,
             deaf_after_us: None,
+            report_records: Vec::new(),
         }
     }
 
@@ -622,6 +639,11 @@ impl SimBoard {
         self.shared.borrow_mut().reset_lost = lost;
     }
 
+    /// The records the report image answers, in order (set before the start that runs the report).
+    pub fn set_report_records(&mut self, records: Vec<[u8; 60]>) {
+        self.report_records = records;
+    }
+
     /// Sets what the start request does.
     pub fn set_start_reply(&mut self, reply: StartReply) {
         self.start_reply = reply;
@@ -668,7 +690,7 @@ impl SimBoard {
         let _ = self.power();
         match self.mode {
             Mode::Rom => BoardState::Rom,
-            Mode::Stage(_) => BoardState::Stage,
+            Mode::Stage(_) | Mode::Report { .. } => BoardState::Stage,
             Mode::Absent if self.booted => BoardState::Booted,
             Mode::Absent => BoardState::Absent,
         }
@@ -718,6 +740,15 @@ impl SimBoard {
     /// them back; a failed readback takes the SoC reset. Any other image is not ours: the ROM answers
     /// again (the board resets into download mode with the image gone).
     fn run_image(&mut self, image: Vec<u8>) {
+        if image.starts_with(SIM_REPORT_TAG) {
+            // Report mode: wdt0 armed at TOP 11 (as the image's mode arms it), no spin, no feed.
+            let mut regs = SharedWdt(Rc::clone(&self.shared));
+            regs.write32(wdt::BASE0 + wdt::TORR, wdt::torr(wdt::TOP));
+            regs.write32(wdt::BASE0 + wdt::CRR, wdt::KICK);
+            regs.write32(wdt::BASE0 + wdt::CR, wdt::CR_ENABLE);
+            self.mode = Mode::Report { next: 0 };
+            return;
+        }
         if image != self.stage_image {
             reset_board(&mut self.shared.borrow_mut());
             return;
@@ -784,6 +815,9 @@ impl UsbIo for SimBoard {
             // The real ROM answers the four bytes of its text, not a padded 32 (bench: "K230", 4b323330).
             Mode::Rom if request == GET_CPU_INFO && value == 0 => {
                 Ok(TEXT_BOOT_ROM.as_bytes()[..len.min(TEXT_BOOT_ROM.len())].to_vec())
+            }
+            Mode::Report { .. } if request == GET_CPU_INFO && value == 0 => {
+                Ok(cpu_info(STAGE_IDENT, len))
             }
             Mode::Stage(_) if request == GET_CPU_INFO && value == 0 => {
                 Ok(cpu_info(&self.stage_ident, len))
@@ -862,6 +896,8 @@ impl UsbIo for SimBoard {
                 }
                 Ok(())
             }
+            // The report image reads its records; a host write to it is ignored.
+            Mode::Report { .. } => Ok(()),
             Mode::Absent => Err(UsbError::Disconnected),
         }
     }
@@ -872,6 +908,15 @@ impl UsbIo for SimBoard {
             return Err(UsbError::Deaf);
         }
         match &mut self.mode {
+            Mode::Report { next } => {
+                // The next record; a host that does not read leaves the queue where it is.
+                let Some(packet) = self.report_records.get(*next) else {
+                    return Err(UsbError::Timeout(TIMEOUT_MS));
+                };
+                let packet = packet.to_vec();
+                *next += 1;
+                Ok(packet)
+            }
             Mode::Stage(stage) => {
                 let mut buf = vec![0u8; len];
                 match stage.on_in(&mut buf) {

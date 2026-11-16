@@ -436,6 +436,7 @@ pub fn report(run: &Run, outcome: &Outcome) -> String {
             record: Record::Card { blocks, .. },
             ..
         }) => format!("card record, {blocks} blocks"),
+        Some(_) => "report record".to_string(),
         None => "none (telemetry missing)".to_string(),
     };
     let actual = match outcome.returned_s {

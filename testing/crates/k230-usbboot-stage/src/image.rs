@@ -36,6 +36,9 @@ pub const WDT1: u32 = 1 << 1;
 pub const SOC_AT_ONCE: u32 = 1 << 2;
 /// Mode flag: run the stage (the medium, the device path, the feed) instead of a probe.
 pub const STAGE: u32 = 1 << 3;
+/// Mode flag: the report (stage L): the banner, the boot mode, the pad dump, the card's boot area, and the
+/// records answered over USB. It writes nothing and feeds nothing; the armed watchdog returns the board.
+pub const REPORT: u32 = 1 << 4;
 
 /// The mode word of a named run: the five probe runs and the stage.
 pub fn mode_word(name: &str) -> Option<u32> {
@@ -46,6 +49,7 @@ pub fn mode_word(name: &str) -> Option<u32> {
         "all" => Some(WDT0 | WDT1),
         "soc" => Some(SOC_AT_ONCE),
         "stage" => Some(STAGE | WDT0 | WDT1),
+        "report" => Some(REPORT | WDT0),
         _ => None,
     }
 }

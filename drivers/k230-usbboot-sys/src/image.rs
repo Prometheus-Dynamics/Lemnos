@@ -14,7 +14,12 @@
 //! The image is linked at `LOAD_ADDRESS` (`drivers/k230-usbboot-image/image.ld`), so it is not
 //! position-independent: the host loads it there and only there.
 
-use lemnos_k230_usbboot_stage::image::{BLOCK_MAGIC, SD_NONE, STAGE, read_block};
+use lemnos_k230_usbboot_stage::image::{BLOCK_MAGIC, REPORT, SD_NONE, STAGE, read_block};
+use lemnos_k230_usbboot_stage::pads::{self, PadGuard};
+use lemnos_k230_usbboot_stage::report::{self, BootAreas, CardState, NoCard};
+use lemnos_k230_usbboot_stage::sd::SdController;
+use lemnos_k230_usbboot_stage::uart;
+use lemnos_k230_usbboot_stage::wdt::RegAccess;
 use lemnos_k230_usbboot_stage::medium::{Geometry, Medium, MediumError, NoMedium};
 use lemnos_k230_usbboot_stage::probe::{Action, Clock, Probe};
 use lemnos_k230_usbboot_stage::sd::{
@@ -164,11 +169,100 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
 /// medium, its device path and its state machine) or a probe (telemetry and the deadline).
 #[unsafe(no_mangle)]
 pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
-    if flags & STAGE != 0 {
+    if flags & REPORT != 0 {
+        run_report()
+    } else if flags & STAGE != 0 {
         run_stage()
     } else {
         run_probe(flags)
     }
+}
+
+/// Writes a line on the first UART. Nothing else is written to the UART block, and the pads are not touched.
+fn say<R: RegAccess>(regs: &mut R, line: &str) {
+    let _ = uart::write_line(regs, line);
+}
+
+/// Writes a 32-bit value as eight hex digits on the UART (no formatting machinery in the image).
+fn say_hex<R: RegAccess>(regs: &mut R, label: &str, value: u32) {
+    let digits = hex8(value);
+    let digits = core::str::from_utf8(&digits).unwrap_or("????????");
+    let _ = uart::write_line_parts(regs, &[label, " ", digits]);
+}
+
+fn hex8(value: u32) -> [u8; 8] {
+    let mut out = [b'0'; 8];
+    for (i, digit) in out.iter_mut().enumerate() {
+        let nibble = (value >> (28 - 4 * i)) & 0xf;
+        *digit = b"0123456789abcdef"[nibble as usize];
+    }
+    out
+}
+
+/// The report (stage L): read everything, write nothing, answer the records. The order is the reviewer's:
+/// the banner, the boot mode, the pad dump, the gate, then the SD card only if the gate passed and a controller
+/// was given, then the records over USB until the watchdog returns the board.
+fn run_report() -> ! {
+    let mut regs = PadGuard::new(Mmio);
+    uart::configure_if_unset(&mut regs);
+    say(&mut regs, "lemnos stage: report (no writes; watchdog armed before this line)");
+    let ctl = boot_ctl();
+    say_hex(&mut regs, "step 1: boot mode soc_boot_ctl", ctl);
+    let pad_words = pads::dump(&mut regs);
+    say(&mut regs, "step 2: pad dump read, IO0 to IO63 (no pad written)");
+    for row in 0..8 {
+        let mut line = [0u8; 8 * 9];
+        let mut at = 0;
+        for i in 0..8 {
+            let v = hex8(pad_words[8 * row + i]);
+            line[at..at + 8].copy_from_slice(&v);
+            at += 8;
+            line[at] = b' ';
+            at += 1;
+        }
+        let _ = uart::write_line(&mut regs, core::str::from_utf8(&line[..at]).unwrap_or("?"));
+    }
+    let mut cid = [0u8; 16];
+    let mut blocks = 0u64;
+    let (areas, reason) = match pads::sd_pads_on_sd_function(&pad_words) {
+        Err(pad) => {
+            say(&mut regs, "SD not reachable without pad setup: an SD pad is not on the SD function as the ROM left it");
+            let _ = pad;
+            (None, NoCard::PadGate)
+        }
+        Ok(()) => match read_sd_parameter().and_then(|v| controller_from_parameter(v).ok()) {
+            None => {
+                say(&mut regs, "step 3: no SD controller given; the card is not read");
+                (None, NoCard::NotGiven)
+            }
+            Some(controller) => {
+                say(&mut regs, "step 3: card read (CID, CSD, boot area)");
+                match read_card(controller, &mut cid, &mut blocks) {
+                    Ok(areas) => (Some(areas), NoCard::Failed),
+                    Err(()) => {
+                        say(&mut regs, "step 3: the card did not answer or a read failed");
+                        (None, NoCard::Failed)
+                    }
+                }
+            }
+        },
+    };
+    let state = match &areas {
+        Some(areas) => CardState::Read(areas),
+        None => CardState::Absent(reason),
+    };
+    let records = report::build(ctl, &pad_words, &cid, blocks, state);
+    say(&mut regs, "step 4: report built; answering over USB until the watchdog returns the board");
+    report::serve(Dwc2::new(), &records)
+}
+
+/// The card's identity, capacity and boot area, read through the SD host the parameter names.
+fn read_card(controller: SdController, cid: &mut [u8; 16], blocks: &mut u64) -> Result<BootAreas, ()> {
+    let host = SdhciHost::new(controller.base()).map_err(|_| ())?;
+    let mut card = Card::init(host).map_err(|_| ())?;
+    *cid = card.cid();
+    *blocks = card.blocks();
+    report::read_boot_areas(&mut card).map_err(|_| ())
 }
 
 fn run_probe(flags: u32) -> ! {

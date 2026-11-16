@@ -45,28 +45,39 @@ pub unsafe fn write32(addr: usize, value: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
-/// The watchdogs' registers over MMIO. It reaches only the two watchdogs' register windows, so an
-/// address outside them is ignored whatever the caller passes.
+/// The register access of the stage image: the watchdogs (read and write), the first UART (read and write,
+/// the block only), and the pad block (read only). A write into the pad block is refused here too (the stage's
+/// `PadGuard` refuses it first). An address outside these windows reads as zero and is never written.
 pub struct Mmio;
 
 impl RegAccess for Mmio {
     fn read32(&mut self, addr: usize) -> u32 {
-        if !in_window(addr) {
+        if !addr.is_multiple_of(4) || !(in_window(addr) || in_pad_block(addr) || in_uart(addr)) {
             return 0;
         }
-        // SAFETY: `in_window` holds, so `addr` is one of the watchdogs' registers, which are mapped
-        // and aligned; reading them has no effect the arming does not expect.
+        // SAFETY: the address is aligned and lies in a watchdog, UART or pad register window; reading these
+        // registers has no effect the stage does not expect (status and pad words).
         unsafe { read32(addr) }
     }
 
     fn write32(&mut self, addr: usize, value: u32) {
-        if !in_window(addr) {
+        if !addr.is_multiple_of(4) || !(in_window(addr) || in_uart(addr)) || in_pad_block(addr) {
             return;
         }
-        // SAFETY: `in_window` holds, so `addr` is one of the watchdogs' registers, which are mapped
-        // and aligned; the callers write only the arming and feeding values.
+        // SAFETY: the address is aligned and lies in a watchdog or UART register window (never the pad block);
+        // the callers write only the documented arming, feeding and line-setup values.
         unsafe { write32(addr, value) }
     }
+}
+
+/// The pad block (`board.h:165-166`, 2 KiB at `0x91105000`): read only from the stage's side.
+fn in_pad_block(addr: usize) -> bool {
+    (0x9110_5000..0x9110_5800).contains(&addr)
+}
+
+/// The first UART's block (`k230.dtsi:84-92`, `serial0`).
+fn in_uart(addr: usize) -> bool {
+    (0x9140_0000..0x9140_0400).contains(&addr)
 }
 
 /// True when `addr` is an aligned register in either watchdog's window.

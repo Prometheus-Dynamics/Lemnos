@@ -188,6 +188,7 @@ pub struct Card<H: SdHost> {
     rca: u32,
     blocks: u64,
     cid: [u8; 16],
+    csd: [u8; 16],
 }
 
 /// The card check the stage reports before any write: the CID, the capacity, and a CRC of one block
@@ -234,6 +235,7 @@ impl<H: SdHost> Card<H> {
             return Err(SdError::NotSdhc);
         }
         let c_size = field(&csd, 69, 48);
+        let csd_bytes = csd;
         let blocks = (c_size + 1) * 1024;
         let cid = match command(&mut host, 10, rca << 16, Expect::Long)? {
             Reply::Long(cid) => cid,
@@ -246,6 +248,7 @@ impl<H: SdHost> Card<H> {
             rca,
             blocks,
             cid,
+            csd: csd_bytes,
         })
     }
 
@@ -261,6 +264,16 @@ impl<H: SdHost> Card<H> {
             crc_first: crate::format::crc32(&first),
             crc_middle: crate::format::crc32(&middle),
         })
+    }
+
+    /// The card's CID (16 bytes, as the R2 reply gave it).
+    pub fn cid(&self) -> [u8; 16] {
+        self.cid
+    }
+
+    /// The card's CSD (16 bytes, as the R2 reply gave it).
+    pub fn csd(&self) -> [u8; 16] {
+        self.csd
     }
 
     /// The card's relative address.

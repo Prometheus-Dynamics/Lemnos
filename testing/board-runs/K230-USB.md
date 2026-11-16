@@ -68,7 +68,7 @@ From the SDK's `board/common/gen_image_cfg/genimage-sdcard.cfg` (7e302f7): the f
 then `BOOT_DEVICE_MMC1` (`k230_spl.c:65-68`); which controller those are is UNVERIFIED.
 
 The probe image's own first-stage header is checked on the file: sector 2048 and sector 3072 both begin with the ASCII
-magic `K230T1` (`4b 32 33 30 54 31`, then `03 00 00 00 00 00`, then `49 99 d7 e5 …`). Which copy the ROM reads first,
+magic `K230` (`4b 32 33 30`) and a 528-byte firmware header (length, type, SHA-256 of the payload, zeros, the payload from byte 528). Which copy the ROM reads first,
 or whether it reads both, is UNVERIFIED. The sectors the ROM reads on SD are not in any SDK source (the ROM is mask
 ROM). The firmware header's layout beyond the magic is made by host tools with no source in the SDK (UNVERIFIED).
 
@@ -85,23 +85,55 @@ Then the stage, with nothing written:
 - reads the boot mode (`soc_boot_ctl`, `0x91102040`) and reports it;
 - reads the **card report**: CID, CSD (capacity), the first 512 bytes of sectors 2048 and 3072 (CRC-32 of each), and a
   **verdict with its reason**:
-  - **bootable**: `K230T1` at sector 2048 or at sector 3072;
-  - **blank**: neither sector holds `K230T1`, and both are all `0xff` or all zero throughout (the 4 KiB header blocks);
-  - **unknown**: anything else, which stops the run (reported with the CRCs);
-- sends the report on the bulk IN endpoint (a card record, `telemetry::card`), and prints it on the UART.
-
-The card report is the only thing reviewed before the next step.
-
-Gate after L (reviewer):
-- **Blank:** the proving runs go ahead (Stage R).
-- **Bootable:** Stage B runs next (approved in advance; no further word), then the proving runs.
+  - **bootable, hash verified**: a copy has the magic `K230`, a sane length (non-zero, at most 4 MiB, inside the card)
+    and a known type, and its payload's SHA-256 is the stored one;
+  - **header present, payload hash mismatch** (or over the 1 MiB hash cap, "not checked"): the magic and header are present
+    but the hash does not match. The ROM would presumably reject it (UNVERIFIED); Stage B treats it as bootable and blanks it;
+  - **not bootable, blank**: no header at either copy, and both 4 KiB blocks are all `0xff` or all zero;
+  - **not bootable, contents unrecognised**: no header at either copy, and the blocks hold other bytes (Stage R may run);
+  - **read error** (or an absent card): the run stops; only this stops the run.
+  Report, per copy: the magic, the length, the type and the stored hash, and the CRC of each 4 KiB block.
+- **Bootable (either hash state):** Stage B runs next (approved in advance; no further word), then the proving runs.
+- **Not bootable (blank or unrecognised):** the proving runs go ahead (Stage R). Only a read error stops the run.
 - **Unknown:** the run stops; the reviewer reads the CRCs.
+
+## The pad rule (what the stage may touch)
+
+- **No pad write, ever.** The stage writes no iomux, pad-control or bank-voltage register: not the SD function
+  select, not a pull, not a bank supply. `lemnos_k230_usbboot_stage::pads::PadGuard` refuses any write into the pad
+  blocks (`0x91105000`, 2 KiB, `board.h:165-166`; pmu iomux `0x91000080`, `k230.dtsi:288-290`), and the sim test
+  `tests/no_pad_writes.rs` asserts no write reaches them in the report, stage and probe modes. The image's own
+  register window (`drivers/k230-usbboot-sys/src/lib.rs`) refuses pad writes a second time.
+- **The read-only pad dump is allowed and is sent first** (after the banner): all 64 pad registers, IO0 to IO63, raw
+  32-bit values (`pads::dump`). Field bits from `include/dt-bindings/pinctrl/k230_evb.h` (ST 0, DS 1, PD 5, PU 6,
+  OE 7, IE 8, MSC 9, SL 10, SEL 11; `MSC` 0 = 3V3, 1 = 1V8, `K230_MSC_3V3`/`K230_MSC_1V8`). The widths of the
+  multi-bit fields (DS, SEL) are UNVERIFIED: three bits are taken for SEL.
+- **The SD gate, before any SD access:** every SD pad (IO26 clk, IO27 cmd, IO28 to IO31 data) must have SEL equal
+  to the SD function value. That value is taken from the other board's pad table (SEL=1, a reference, not proof on
+  this SoC; `k230d_canmv_bpi-pins.txt`). If any SD pad is not on it, the stage reports "SD not reachable without pad
+  setup" with the dump, and makes **no** SD access: no clock, no command. Stage R does not need the SD card, so it
+  still runs; the card then stays as it is, and a reset in a proving run may boot whatever is on it (accepted under
+  the first-load risk).
+- **The UART:** the stage writes its own UART block only (divisor and line format, if the line is not already 8N1),
+  and never a pad. Whether the ROM left the UART's pins muxed is shown by the dump (IO38, IO39 for UART0 in
+  `k230_evb.h`); the stage does not mux them.
+- **The reset defaults** of the pads are not stated in the SDK (`k230_evb.h`, `k230.dtsi`), so the report prints them
+  as unknown. "Selected by the ROM" is the only proven state, and it is the value the ROM left, read from the dump.
+
+## Pad records in the run record
+
+The host decodes the dump into a table (`stage_report::pad_table`): each pad's raw word, SEL, OE, IE, pull-up,
+pull-down, MSC (the bank mode) and SL, and for the SD and UART0 pads what the ROM left selected. The other board's
+table (`k230d_canmv_bpi-pins.txt`) is printed beside it, marked "other board model, for comparison only". The dump is
+taken in each ROM state, labelled in the record: (1) "USB boot entered by KEY" (the first load); (2) each return to
+USB boot after a proving run. **Built so far: the report mode sends the dump first. The probe and stage modes do not
+send a dump yet; that is not built.**
 
 ## Stage B: blank the boot area the ROM reads (approved in advance, no further word)
 
 Runs only after a bootable report. Writes only these, and nothing else on the card:
 - **the 4 KiB header block at sector 2048 and the 4 KiB header block at sector 3072 (8 sectors each), zeroed.** That is
-  the block that begins `K230T1` in each copy. Which sectors the ROM reads is UNVERIFIED; the zeroed set is a superset
+  the block that begins `K230` in each copy. Which sectors the ROM reads is UNVERIFIED; the zeroed set is a superset
   of the header block. The stored environment (byte `0x1e0000`, sector 3840), U-Boot proper (sector 4096) and the GPT
   partitions are not touched.
 - Each sector is zeroed, read back, and every byte of the read-back is checked to be zero. A mismatch, or a card
@@ -141,7 +173,7 @@ listening (`K230` confirmed after the return).
 
 Facts from the file (checked by the coordinator):
 - the first stage (SPL with the ROM header) is at sector 2048 (1 MiB) and a second copy at sector 3072; both begin with
-  `K230T1`;
+  `K230` (the magic; the firmware header follows it, see the card report);
 - the stored environment is at byte `0x1e0000` (sector 3840), 64 KiB: `bootdelay=3`, `bootcmd=run blinux;`,
   `baudrate=115200`, no stop string. **Any key stops autoboot**;
 - U-Boot proper at 2 MiB (sector 4096): SDK 2022.10 with the BPI board configuration (there is no AI-CAM U-Boot
@@ -151,7 +183,7 @@ Facts from the file (checked by the coordinator):
   without pinctrl. No watchdog driver is enabled in the defconfig, and none was found armed (UNVERIFIED against the binary).
 
 **The write rules.** The write is the whole image. This plan does not skip zero runs (a skipped run would need the card
-region verified zero first, which this plan does not do). The two header sectors (2048 and 3072, `K230T1`) are written
+region verified zero first, which this plan does not do). The two header sectors (2048 and 3072, begin `K230`) are written
 **last**, after the whole image's read-back SHA-256 equals P5's value, so a cut or failure before them leaves a card the
 ROM cannot boot from those sectors. A mismatch stops the step.
 
@@ -215,6 +247,9 @@ the console bytes captured on both ports. Written to NVMe, not the Github HDD.
 |---|---|
 | Whether a reset with a blank card returns to USB boot (vendor order, documented, not observed) | Stage L's blank report; R1 to R5 |
 | Whether a reset with a bootable card boots the card (no return) | Stage L's report (bootable branch: Stage B first) |
+| The firmware header's layout beyond the magic, and which copy the ROM reads | the report of both copies; the SDK generator `src/little/uboot/tools/firmware_gen.py` (`-n` branch, lines 344-358, 428-440) and the verified image |
+| The SD function value on this SoC (SEL, IO26 to IO31) and the UART0 function value | the pad dump; the other board's table gives SEL=1 for SD (reference, not proof); no SDK source for our SoC's value |
+| The pads' reset-default functions | none stated in the SDK (`k230_evb.h`, `k230.dtsi`); printed as unknown |
 | Which SD sectors the ROM reads, and which copy it tries first | Stage L's report and the probe image's boot behaviour |
 | Which controller is `MMC1` and `MMC2` in the SPL, and the boot controller | the boot record, the lead's parameter, `mmc dev` at the prompt (3a) |
 | Whether 0x80300000..0x80400000 is SRAM (no DDR init needed) | the banner and telemetry arriving with no DDR init |
