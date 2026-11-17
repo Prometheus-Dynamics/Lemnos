@@ -995,6 +995,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-bus-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-camera-proof"
 version = "2.0.1-dev"
 dependencies = [
