@@ -667,7 +667,9 @@ a fan's duty from its per-mille limits. Where it does not know, it leaves the it
 unknown figure is never a guess. A float value's range, which no integer scale states exactly, is
 given with `real_range(min, max)` and `real_step(step)` in the item's unit.
 
-**The scale rule.** An item's exponent is the scale of an integer value: the value is
+#### The scale rule
+
+An item's exponent is the scale of an integer value: the value is
 `raw * 10^exponent`, in its unit, so `Unit::Volt` with exponent -3 and a raw 4500 is 4.5 V. A
 **real** value (an `f32` or `f64` reply, already in base units such as volts, m/s² or rad/s) has
 exponent 0. The renderers scale a float reply by the exponent as they do an integer, so a real
