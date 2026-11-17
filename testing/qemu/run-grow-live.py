@@ -12,8 +12,8 @@ Modes:
              (--kill-at sets the delay for the kill modes)
   refuse     a 2 TiB disk, wd15: the grow is refused by name (grow-too-large) and the table stays as it was
 
-The disk is a sparse raw file (2 TiB unless --size) with the MBR layout and the builder's data filesystem (mke2fs -t ext4 -b 4096
--I 256 -m 0 -N 112 -J size=4 -L lemnos-data). The guest's init (the crate testing/crates/grow-live-init, --init) mounts /data, runs the harness,
+The disk is a sparse raw file (2 TiB unless --size) with the MBR or GPT layout and the builder's data filesystem
+(mke2fs -t ext4 -b 4096 -I 256 -m 0 -i 16384 -O meta_bg -J size=4 -L lemnos-data). The guest's init (the crate testing/crates/grow-live-init, --init) mounts /data, runs the harness,
 unmounts and powers off. After the run the data partition's extents are copied sparsely out of the image and
 e2fsck -fn (as the disk is) and e2fsck -fy (after the journal replay, which must change nothing) check the copy.
 Nothing is run as root, and no loop device is used.
@@ -29,19 +29,24 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=False, capture_output=True, text=True, **kw)
 
 
-def make_disk(path, size_bytes, tree):
+def make_disk(path, size_bytes, tree, table_kind="mbr"):
     if os.path.exists(path):
         os.remove(path)
     with open(path, "wb") as f:
         f.truncate(size_bytes)
-    table = (f"label: dos\nstart={P1_START}, size={P1_SECTORS}, type=c\n"
-             f"start={START_SECTOR}, size=77824, type=83\n")
+    if table_kind == "gpt":
+        table = (f"label: gpt\nstart={P1_START}, size={P1_SECTORS}, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=boot\n"
+                 f"start={START_SECTOR}, size=77824, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=lemnos-data\n")
+    else:
+        table = (f"label: dos\nstart={P1_START}, size={P1_SECTORS}, type=c\n"
+                 f"start={START_SECTOR}, size=77824, type=83\n")
     r = subprocess.run(["sfdisk", "--no-reread", "-q", path], input=table, text=True,
                        capture_output=True)
     if r.returncode:
         raise SystemExit(f"sfdisk: {r.stderr}")
     u = str(uuid.uuid4())
-    r = run(["mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-I", "256", "-m", "0", "-N", "112",
+    # The image builder's contract (docs/slots.md): 4 KiB blocks, one inode per 16 KiB, meta_bg.
+    r = run(["mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-I", "256", "-m", "0", "-i", "16384", "-O", "meta_bg,^resize_inode",
              "-U", u, "-E", f"hash_seed={u},root_owner=0:0,offset={START_SECTOR * 512}",
              "-J", "size=4", "-L", "lemnos-data", "-d", tree, path, "9728"])
     if r.returncode:
@@ -100,6 +105,13 @@ class Qmp:
                 return reply
 
 
+def gpt_target_bytes(size_bytes):
+    """The grown GPT partition 2's length: the last whole MiB before the usable end (disk end - 34 LBAs)."""
+    last_usable = size_bytes // 512 - 34
+    target_end = ((last_usable + 1) // 2048) * 2048 - 1
+    return (target_end + 1 - START_SECTOR) * 512
+
+
 def copy_partition(image, out, length):
     """Copies the data extents of the image's partition 2 to `out` (sparse), from the partition's start.
 
@@ -146,6 +158,7 @@ def main():
     ap.add_argument("--init", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--size", default="2T", help="the disk size: 2T or a number of bytes")
+    ap.add_argument("--table", choices=["mbr", "gpt"], default="mbr", help="the partition table")
     ap.add_argument("--max-run", type=int, default=240, help="the harness's run limit, s")
     ap.add_argument("--kill-at", type=float, default=None,
                     help="kill modes: the reset's delay after the resize starts, s (default 0.5 early, 6.0 late)")
@@ -156,7 +169,7 @@ def main():
     image = os.path.join(args.work, "disk.img")
     tree = os.path.join(args.work, "tree")
     make_tree(tree)
-    make_disk(image, size, tree)
+    make_disk(image, size, tree, args.table)
     initramfs = make_initramfs(args.work, args.harness, args.init)
     wd = 3 if args.mode == "wd3" else 15
     # The partition the disk is expected to end with: the whole disk's end, or (refuse) the table's own
@@ -225,6 +238,9 @@ def main():
     if args.mode == "refuse":
         part_len = 77824 * 512  # the table's partition 2 (38 MiB), unchanged by a refused grow
         expect_bytes = part_len
+    elif args.table == "gpt":
+        expect_bytes = gpt_target_bytes(size)
+        part_len = size - START_SECTOR * 512
     else:
         expect_bytes = part_len - (part_len % 4096)
     copy = os.path.join(args.work, "part2.img")

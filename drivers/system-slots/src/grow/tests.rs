@@ -155,6 +155,8 @@ struct Fake {
     view_frozen: bool,
     /// The filesystem resize waits on this gate, as a long ioctl does.
     gate: Option<Arc<Gate>>,
+    /// The data partition is mounted read-only.
+    read_only: bool,
 }
 
 /// A gate the fake resize waits on until a test releases it.
@@ -182,10 +184,7 @@ impl Fake {
     fn boot(file: &Path) -> Self {
         let disk_sectors = fs::metadata(file).unwrap().len() / SECT;
         // An unreadable table (no signature) leaves the kernel with no partition: grow refuses it.
-        let (kernel_start, kernel_sectors) = match mbr::entries(&sector0_of(file)) {
-            Ok(t) => (u64::from(t[ENTRY].start), u64::from(t[ENTRY].sectors)),
-            Err(_) => (0, 0),
-        };
+        let (kernel_start, kernel_sectors) = kernel_values(file);
         Self {
             file: file.to_path_buf(),
             disk_sectors,
@@ -225,6 +224,7 @@ impl Fake {
             view_blocks: 0,
             view_frozen: false,
             gate: None,
+            read_only: false,
         }
     }
 
@@ -263,6 +263,10 @@ impl Fake {
 }
 
 impl Disk for Fake {
+    fn data_read_only(&self) -> io::Result<bool> {
+        Ok(self.read_only)
+    }
+
     fn disk_sectors(&self) -> io::Result<u64> {
         Ok(self.disk_sectors)
     }
@@ -1089,10 +1093,12 @@ fn a_grow_to_more_than_256_gib_is_refused_by_name_and_nothing_is_written() {
         "{}",
         refusal.reason
     );
-    assert!(refusal.target_bytes > refusal.max_bytes);
-    assert_eq!(refusal.max_bytes, 256 << 30);
-    assert!(refusal.reason.contains(&refusal.target_bytes.to_string()));
-    assert!(refusal.reason.contains(&refusal.max_bytes.to_string()));
+    let (target, max) = refusal.sizes.expect("the sizes are named");
+    assert!(target > max);
+    assert_eq!(max, 256 << 30);
+    assert_eq!(refusal.state, "grow-too-large");
+    assert!(refusal.reason.contains(&target.to_string()));
+    assert!(refusal.reason.contains(&max.to_string()));
     assert_eq!(fake.mutations, 0, "a refused grow writes nothing");
     assert_eq!(sector0_of(&img), before_mbr);
     assert_eq!(snapshot(&img), before);
@@ -1131,7 +1137,10 @@ fn a_refused_grow_is_named_once_by_the_driver_and_never_tried_again() {
     };
     assert!(fresh, "noted once");
     assert!(why.starts_with("grow-too-large:"));
-    assert!(task.refused().is_some_and(|r| r.target_bytes > r.max_bytes));
+    assert!(
+        task.refused()
+            .is_some_and(|r| r.sizes.is_some_and(|(t, m)| t > m))
+    );
     for step in 1..5u64 {
         match task.tick(now + step * 1_000_000_000, &open) {
             Tick::Refused { fresh, .. } => assert!(!fresh, "not noted again"),
@@ -1139,4 +1148,338 @@ fn a_refused_grow_is_named_once_by_the_driver_and_never_tried_again() {
         }
     }
     assert_eq!(snapshot(&img), before, "nothing was written by any tick");
+}
+
+/// The kernel's partition 2 for an image: from the GPT when sector 1 is one, else from the MBR.
+fn kernel_values(file: &Path) -> (u64, u64) {
+    let mut second = [0u8; 512];
+    File::open(file)
+        .unwrap()
+        .read_exact_at(&mut second, 512)
+        .unwrap();
+    if &second[..8] == b"EFI PART" {
+        let disk = fs::metadata(file).unwrap().len() / SECT;
+        // A damaged primary leaves the kernel with no partition (the backup is not read here).
+        let Ok(header) = gpt::parse_header(&second, 1) else {
+            return (0, 0);
+        };
+        let mut array = vec![0u8; gpt::ARRAY_BYTES];
+        File::open(file)
+            .unwrap()
+            .read_exact_at(&mut array, header.array_lba * SECT)
+            .unwrap();
+        let (first, last, _) = gpt::entry(&array, ENTRY);
+        let _ = disk;
+        return (first, last - first + 1);
+    }
+    match mbr::entries(&sector0_of(file)) {
+        Ok(t) => (u64::from(t[ENTRY].start), u64::from(t[ENTRY].sectors)),
+        Err(_) => (0, 0),
+    }
+}
+
+use super::gpt;
+
+/// A GPT disk of `disk` sectors: a protective MBR, partition 1 (type GUID [1; 16]), partition 2 (the
+/// data partition, `[2; 16]`, `p2_sectors` long, with an ext4 superblock labelled `lemnos-data`), the
+/// primary and backup headers and arrays with their CRCs.
+fn make_gpt_disk(path: &Path, disk: u64, p2_sectors: u64) -> PathBuf {
+    let f = File::create(path).unwrap();
+    f.set_len(disk * SECT).unwrap();
+    let mut mbr_sector = [0u8; 512];
+    mbr_sector[446 + 4] = 0xEE;
+    mbr_sector[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+    mbr_sector[446 + 12..446 + 16]
+        .copy_from_slice(&((disk - 1).min(0xFFFF_FFFF) as u32).to_le_bytes());
+    mbr_sector[510] = 0x55;
+    mbr_sector[511] = 0xAA;
+    f.write_all_at(&mbr_sector, 0).unwrap();
+    let mut array = vec![0u8; gpt::ARRAY_BYTES];
+    let put_entry = |array: &mut [u8], index: usize, guid: [u8; 16], first: u64, last: u64| {
+        let at = index * 128;
+        array[at..at + 16].copy_from_slice(&guid);
+        array[at + 16..at + 32].copy_from_slice(&[3; 16]);
+        array[at + 32..at + 40].copy_from_slice(&first.to_le_bytes());
+        array[at + 40..at + 48].copy_from_slice(&last.to_le_bytes());
+    };
+    put_entry(
+        &mut array,
+        0,
+        [1; 16],
+        u64::from(P1_START),
+        u64::from(P1_START) + u64::from(P1_SECTORS) - 1,
+    );
+    let p2_start = u64::from(P2_START);
+    put_entry(&mut array, 1, [2; 16], p2_start, p2_start + p2_sectors - 1);
+    let crc = gpt::array_crc(&array);
+    let base = gpt::Header {
+        my_lba: 1,
+        alt_lba: disk - 1,
+        first_usable: 34,
+        last_usable: disk - 34,
+        disk_guid: [9; 16],
+        array_lba: 2,
+        array_crc: crc,
+    };
+    f.write_all_at(&array, 2 * SECT).unwrap();
+    f.write_all_at(&gpt::encode_header(&base), SECT).unwrap();
+    let backup_array = disk - 1 - gpt::ARRAY_SECTORS;
+    f.write_all_at(&array, backup_array * SECT).unwrap();
+    let backup = gpt::Header {
+        my_lba: disk - 1,
+        alt_lba: 1,
+        array_lba: backup_array,
+        ..base
+    };
+    f.write_all_at(&gpt::encode_header(&backup), (disk - 1) * SECT)
+        .unwrap();
+    let mut sb = [0u8; 1024];
+    sb[0x38..0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
+    sb[0x18..0x1C].copy_from_slice(&2u32.to_le_bytes());
+    let blocks = (p2_sectors * SECT / BLOCK) as u32;
+    sb[0x04..0x08].copy_from_slice(&blocks.to_le_bytes());
+    sb[0x78..0x78 + LABEL.len()].copy_from_slice(LABEL.as_bytes());
+    f.write_all_at(&sb, p2_start * SECT + 1024).unwrap();
+    path.to_path_buf()
+}
+
+/// Reads one copy of the table from the image: the header at `lba` and its array. `None` when it
+/// does not parse or fails its CRC.
+fn read_table_copy(path: &Path, lba: u64) -> Option<(gpt::Header, Vec<u8>)> {
+    let f = File::open(path).unwrap();
+    let mut sector = [0u8; 512];
+    f.read_exact_at(&mut sector, lba * SECT).ok()?;
+    let disk = f.metadata().unwrap().len() / SECT;
+    let expect = if lba == 1 { 1 } else { disk - 1 };
+    let header = gpt::parse_header(&sector, expect).ok()?;
+    let mut array = vec![0u8; gpt::ARRAY_BYTES];
+    f.read_exact_at(&mut array, header.array_lba * SECT).ok()?;
+    gpt::check_array(&array, &header).ok()?;
+    Some((header, array))
+}
+
+/// The table as a reader sees it: the primary if it is good, else the backup. `None` when neither
+/// is: that is the state a grow must never leave.
+fn readable_table(path: &Path) -> Option<(gpt::Header, Vec<u8>)> {
+    read_table_copy(path, 1)
+        .or_else(|| read_table_copy(path, path.metadata().unwrap().len() / SECT - 1))
+}
+
+/// The partition 2 end the readable table gives.
+fn table_end(path: &Path) -> Option<u64> {
+    readable_table(path).map(|(_, array)| gpt::entry(&array, ENTRY).1)
+}
+
+/// The old and new partition 2 ends on a disk of `disk` sectors, with partition 2 at its start.
+fn ends(disk: u64) -> (u64, u64) {
+    let old = u64::from(P2_START) + P2_OLD_GPT - 1;
+    let new = gpt::target_end(disk);
+    (old, new)
+}
+
+const P2_OLD_GPT: u64 = 100_000;
+
+/// A GPT disk of [`DISK`] sectors, grown in place: its backup is at the end and the old one sits
+/// where the image's end was (extended by a file set_len, see [`make_gpt_extended`]).
+fn make_gpt_extended(name: &str, old_disk: u64, new_disk: u64) -> PathBuf {
+    let img = make_gpt_disk(&dir(name).join("disk.img"), old_disk, P2_OLD_GPT);
+    let f = OpenOptions::new().write(true).open(&img).unwrap();
+    f.set_len(new_disk * SECT).unwrap();
+    img
+}
+
+#[test]
+fn a_gpt_last_partition_grows_and_both_copies_move_to_the_new_end() {
+    let disk = 2 * DISK;
+    let img = make_gpt_extended("gpt-full", DISK, disk);
+    let (_, new_end) = ends(disk);
+    let mut fake = Fake::boot(&img);
+    assert!(matches!(grow(&mut fake).unwrap(), Pass::Resized { .. }));
+    let (primary, array) = read_table_copy(&img, 1).expect("the primary reads");
+    assert_eq!(primary.alt_lba, disk - 1);
+    assert_eq!(primary.last_usable, disk - 34);
+    assert_eq!(gpt::entry(&array, ENTRY).1, new_end);
+    let (backup, backup_array) = read_table_copy(&img, disk - 1).expect("the backup reads");
+    assert_eq!(backup.my_lba, disk - 1);
+    assert_eq!(backup.alt_lba, 1);
+    assert_eq!(backup_array, array, "the backup array is the primary's");
+    assert_eq!(fake.kernel_sectors, new_end + 1 - u64::from(P2_START));
+    assert_eq!(fs_blocks(&img), fake.kernel_sectors * SECT / BLOCK);
+}
+
+#[test]
+fn a_stale_backup_gpt_past_the_old_end_is_zeroed_before_the_grow_writes() {
+    let disk = 2 * DISK;
+    let img = make_gpt_extended("gpt-stale", DISK, disk);
+    let old_backup = DISK - 1;
+    let mut before = [0u8; 512];
+    File::open(&img)
+        .unwrap()
+        .read_exact_at(&mut before, old_backup * SECT)
+        .unwrap();
+    assert!(
+        gpt::parse_header(&before, old_backup).is_ok(),
+        "the old backup is there before the grow"
+    );
+    let mut fake = Fake::boot(&img);
+    grow(&mut fake).unwrap();
+    let mut sector = [0u8; 512];
+    File::open(&img)
+        .unwrap()
+        .read_exact_at(&mut sector, old_backup * SECT)
+        .unwrap();
+    // Inside the grown partition now: the stale header is gone, the sector is the data's (zero).
+    assert!(
+        sector.iter().all(|b| *b == 0),
+        "the stale backup header is zeroed"
+    );
+    assert!(read_table_copy(&img, disk - 1).is_some());
+}
+
+#[test]
+fn a_gpt_grow_cut_after_any_write_reads_as_the_old_table_or_the_new_one() {
+    let disk = 2 * DISK;
+    let (old_end, new_end) = ends(disk);
+    for cut in 1..=12usize {
+        let img = make_gpt_extended(&format!("gpt-cut-{cut}"), DISK, disk);
+        let mut fake = Fake::boot(&img);
+        fake.die_after = Some(cut);
+        let _ = grow(&mut fake);
+        let end =
+            table_end(&img).unwrap_or_else(|| panic!("cut after write {cut}: neither table reads"));
+        assert!(
+            end == old_end || end == new_end,
+            "cut after write {cut}: the table ends at {end}, not {old_end} or {new_end}"
+        );
+        // The restarted driver finishes the grow from whichever table it finds.
+        let mut again = Fake::restarted(&fake);
+        for _ in 0..4 {
+            match grow(&mut again).unwrap() {
+                Pass::Done => break,
+                Pass::Resized { .. } => continue,
+                Pass::Refused(r) => panic!("cut {cut}: refused on restart: {}", r.reason),
+            }
+        }
+        assert_eq!(
+            table_end(&img),
+            Some(new_end),
+            "cut after write {cut}: the restart finishes the table"
+        );
+        assert_eq!(
+            fs_blocks(&img),
+            (new_end + 1 - u64::from(P2_START)) * SECT / BLOCK,
+            "cut {cut}: the filesystem follows"
+        );
+    }
+}
+
+#[test]
+fn a_damaged_primary_is_repaired_from_the_backup_when_the_table_is_already_grown() {
+    let disk = 2 * DISK;
+    let img = make_gpt_extended("gpt-repair", DISK, disk);
+    let mut fake = Fake::boot(&img);
+    grow(&mut fake).unwrap();
+    poke(&img, SECT + 60, &[0xff]); // the primary's header CRC
+    assert!(read_table_copy(&img, 1).is_none(), "the primary is damaged");
+    let mut again = Fake::restarted(&fake);
+    assert!(matches!(
+        grow(&mut again).unwrap(),
+        Pass::Done | Pass::Resized { .. }
+    ));
+    assert!(
+        read_table_copy(&img, 1).is_some(),
+        "the primary reads again"
+    );
+}
+
+#[test]
+fn a_gpt_with_no_readable_copy_is_the_named_unavailable_state_and_nothing_is_written() {
+    let img = make_gpt_extended("gpt-dead", DISK, 2 * DISK);
+    poke(&img, SECT + 60, &[0xff]);
+    poke(&img, (2 * DISK - 1) * SECT + 60, &[0xff]);
+    let before = snapshot(&img);
+    let mut fake = Fake::boot(&img);
+    let Pass::Refused(refusal) = grow(&mut fake).unwrap() else {
+        panic!("a GPT with no readable copy is refused");
+    };
+    assert_eq!(refusal.state, "gpt-unavailable");
+    assert_eq!(fake.mutations, 0);
+    assert_eq!(snapshot(&img), before);
+}
+
+#[test]
+fn a_gpt_partition_two_that_is_not_the_last_is_the_named_unavailable_state() {
+    let img = make_gpt_extended("gpt-not-last", DISK, 2 * DISK);
+    // A used entry 3 starting after partition 2: rewrite the primary array and its header.
+    let (mut primary, mut array) = read_table_copy(&img, 1).unwrap();
+    let at = 2 * 128;
+    array[at..at + 16].copy_from_slice(&[4; 16]);
+    array[at + 32..at + 40].copy_from_slice(&(u64::from(P2_START) + P2_OLD_GPT + 10).to_le_bytes());
+    array[at + 40..at + 48].copy_from_slice(&(u64::from(P2_START) + P2_OLD_GPT + 20).to_le_bytes());
+    primary.array_crc = gpt::array_crc(&array);
+    let f = OpenOptions::new().write(true).open(&img).unwrap();
+    f.write_all_at(&array, 2 * SECT).unwrap();
+    f.write_all_at(&gpt::encode_header(&primary), SECT).unwrap();
+    drop(f);
+    let mut fake = Fake::boot(&img);
+    let Pass::Refused(refusal) = grow(&mut fake).unwrap() else {
+        panic!("a later partition is refused");
+    };
+    assert_eq!(refusal.state, "gpt-unavailable");
+    assert!(
+        refusal.reason.contains("must be the last one"),
+        "{}",
+        refusal.reason
+    );
+    assert_eq!(fake.mutations, 0);
+}
+
+#[test]
+fn a_read_only_data_partition_is_a_named_state_and_nothing_is_written() {
+    let img = make(&dir("read-only").join("disk.img"));
+    let before = snapshot(&img);
+    let mut fake = Fake::boot(&img);
+    fake.read_only = true;
+    let Pass::Refused(refusal) = grow(&mut fake).unwrap() else {
+        panic!("a read-only data partition is refused");
+    };
+    assert_eq!(refusal.state, "data-read-only");
+    assert!(refusal.sizes.is_none());
+    assert_eq!(fake.mutations, 0);
+    assert_eq!(snapshot(&img), before);
+}
+
+#[test]
+fn the_grow_too_large_info_keys_name_the_state_the_sizes_and_the_reason() {
+    let img = make_disk_bytes("info-keys", 512 << 30);
+    let open = {
+        let img = img.clone();
+        move || -> Result<Box<dyn Disk + Send>, String> {
+            Ok(Box::new(Fake::boot(&img)) as Box<dyn Disk + Send>)
+        }
+    };
+    let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    let mut now = 0u64;
+    loop {
+        now += 100_000_000;
+        match task.tick(now, &open) {
+            Tick::Refused { .. } => break,
+            Tick::At(_) => thread::sleep(std::time::Duration::from_millis(5)),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+    }
+    let mut info = String::new();
+    crate::grow_info(Some(&task), &mut info);
+    let (target, max) = task.refused().unwrap().sizes.unwrap();
+    assert!(info.contains("\"grow_state\":\"grow-too-large\""), "{info}");
+    assert!(
+        info.contains(&format!("\"grow_target_bytes\":{target}")),
+        "{info}"
+    );
+    assert!(
+        info.contains(&format!("\"grow_max_bytes\":{}", 256u64 << 30)),
+        "{info}"
+    );
+    assert!(info.contains("\"grow_reason\":\"grow-too-large:"), "{info}");
+    assert_eq!(max, 256 << 30);
 }
