@@ -322,6 +322,77 @@ pub fn private_mapping(fd: BorrowedFd<'_>, len: usize, offset: u64) -> io::Resul
     Ok(())
 }
 
+/// Asks for a mapping of `len` bytes of `fd` at `offset`, with `prot` and `flags` (the `PROT_*` and
+/// `MAP_*` constants). The kernel's refusal is the error; a granted mapping is unmapped again at
+/// once. For a check of what the kernel refuses to map, where [`private_mapping`] is too narrow.
+///
+/// # Errors
+///
+/// `mmap(2)` refuses the mapping.
+pub fn mapping_probe(
+    fd: BorrowedFd<'_>,
+    len: usize,
+    offset: u64,
+    prot: i32,
+    flags: i32,
+) -> io::Result<()> {
+    // SAFETY: a null hint lets the kernel choose the address; `fd` is live for the call; the
+    // result is compared with MAP_FAILED before it is used.
+    let raw = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            prot,
+            flags,
+            fd.as_raw_fd(),
+            offset as libc::off_t,
+        )
+    };
+    if raw == libc::MAP_FAILED {
+        return Err(last_error());
+    }
+    // SAFETY: `raw` is the mapping `mmap` just returned, of `len` bytes, and nothing else uses it.
+    unsafe { libc::munmap(raw, len) };
+    Ok(())
+}
+
+/// The descriptor limits, soft and hard, as `getrlimit(2)` gives them for `RLIMIT_NOFILE`.
+///
+/// # Errors
+///
+/// `getrlimit(2)` fails.
+pub fn nofile_limits() -> io::Result<(u64, u64)> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `lim` is a live `rlimit` for the call, which writes it.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
+    if rc != 0 {
+        return Err(last_error());
+    }
+    Ok((lim.rlim_cur, lim.rlim_max))
+}
+
+/// Sets the descriptor limits, soft and hard, to `soft` and `hard` (unlike [`set_nofile_limit`],
+/// which sets both to one value).
+///
+/// # Errors
+///
+/// `setrlimit(2)` fails.
+pub fn set_nofile_limits(soft: u64, hard: u64) -> io::Result<()> {
+    let lim = libc::rlimit {
+        rlim_cur: soft,
+        rlim_max: hard,
+    };
+    // SAFETY: `lim` is a live `rlimit` for the call, which only reads it.
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) };
+    if rc != 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
 /// Whether child `pid` has ended, without waiting: `None` while it runs.
 ///
 /// # Errors

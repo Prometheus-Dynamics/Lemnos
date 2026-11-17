@@ -2846,6 +2846,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-pisp-be-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-power-check"
 version = "2.0.1-dev"
 dependencies = [
