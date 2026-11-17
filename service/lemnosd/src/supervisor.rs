@@ -22,7 +22,7 @@
 //!   ([`PARENT_CALLS`]: the helper's calls, which it passes on, and the calls that fork, wait and
 //!   sleep).
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -215,7 +215,7 @@ impl Process for System<'_> {
     }
 
     fn log(&mut self, line: &str) {
-        let _ = writeln!(io::stderr(), "{line}");
+        lemnos_linux_sys::stderr::line(line);
     }
 
     fn now_ms(&mut self) -> u64 {
@@ -245,23 +245,20 @@ pub fn run(stream: UnixStream, gadgets: &[Gadget]) -> ! {
         .map(|now| privilege::verify(&plan, &now).is_ok())
         .unwrap_or(false);
     if !ok {
-        let _ = writeln!(
-            io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "{PROCESS_NAME}: cannot take its name, its signals or its capabilities: ending"
-        );
+        ));
         std::process::exit(1);
     }
     if let Err(error) = seccomp::install(&calls()) {
-        let _ = writeln!(
-            io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "{PROCESS_NAME}: cannot install its filter ({error}): ending"
-        );
+        ));
         std::process::exit(1);
     }
-    let _ = writeln!(
-        io::stderr(),
+    lemnos_linux_sys::stderr::line(&format!(
         "{PROCESS_NAME}: running, for daemon pid {daemon_pid}"
-    );
+    ));
     let mut system = System {
         stream,
         gadgets,
@@ -276,6 +273,7 @@ pub fn run(stream: UnixStream, gadgets: &[Gadget]) -> ! {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::Write;
 
     #[test]
     fn the_parent_keeps_no_capability_and_allows_no_call_that_changes_a_user_or_group_id() {
@@ -479,6 +477,44 @@ mod tests {
 
     fn libc_execve() -> i64 {
         59
+    }
+
+    /// A forked child that logs while another thread of the test process holds the stderr lock: the
+    /// child inherits that lock and waits for it in a futex. The helper's filter does not allow
+    /// futex, so the child dies with SIGSYS (the flake of `every_verb_runs...`); the parent's filter
+    /// allows futex, so the same wait hung `the_parents_cleaning...` for good.
+    #[test]
+    fn a_forked_child_that_logs_does_not_wait_on_a_stderr_lock_it_inherited() {
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _held = io::stderr().lock();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let (_daemon, parent) = UnixStream::pair().unwrap();
+        let exit = seccomp::run_forked(|| {
+            if seccomp::install(&helper::calls()).is_err() {
+                return 2;
+            }
+            let mut system = System {
+                stream: parent,
+                gadgets: &[],
+                daemon_pid: 1,
+                began: Instant::now(),
+            };
+            system.log("lemnosd: a line logged by a forked child");
+            0
+        })
+        .unwrap();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(
+            exit,
+            seccomp::Exit::Code(0),
+            "the child logs under the helper's filter"
+        );
     }
 
     #[test]
