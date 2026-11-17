@@ -222,7 +222,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_COMMON_CLK` | `y` | required | `clk_prepare`, `clk_unprepare`, `clk_bulk_*`, `devm_clk_*` (`lemnos_power.c`, register jobs, CSI-2). `HAVE_CLK` is selected by it |
 | `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `lemnos_regjob.c`) |
 | `CONFIG_EVENTFD` | `y` | required | `eventfd_ctx_fdget`, `eventfd_ctx_put`, `eventfd_signal_mask` (stream completion) |
-| `CONFIG_RUST` | `y` | optional | The Rust skeleton (`kernel/rust/`), built beside the C module by the QEMU harness, with the kernel's Rust support and clang (`LLVM=1`). From stage 1 the module's Rust half (the entry and the claims) requires it, and this row becomes required then |
+| `CONFIG_RUST` | `y` | required | The Rust half of the module: the entry (`kernel/lemnos_entry.rs`) and the claims (`kernel/lemnos_claims_rs.rs`), built with the kernel's Rust support and clang (`LLVM=1`). Not a symbol of the C objects: the Kbuild refuses a build without it |
 | `CONFIG_CPU_BIG_ENDIAN` | unset | must be unset | `BUILD_BUG_ON(IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))` in `lemnos_stream.c`. The module builds only for little-endian kernels |
 | `CONFIG_LEMNOS` | `y` or `m` | optional | The in-tree switch in `kernel/Kbuild`; set by the image builder for the built-in route. Not in the out-of-tree build |
 | `CONFIG_RP1_PIO` | `m` or `y` | optional | The RP1 PIO part (`lemnos_pio.c`, claim `pio-0`), compiled when set. Needs `<linux/pio_rp1.h>` from the board kernel. Must be `y` when lemnos is built in |

@@ -28,6 +28,8 @@ unsafe extern "C" {
     fn platform_driver_unregister(drv: *mut c_void);
     fn misc_register(misc: *mut c_void) -> c_int;
     fn misc_deregister(misc: *mut c_void);
+    /// lemnos_claims_rs.rs: the claim table and the claim files' owner. Built with CONFIG_RUST.
+    fn lem_claims_init(owner: *mut c_void);
 }
 
 struct LemnosEntry;
@@ -37,6 +39,9 @@ impl kernel::Module for LemnosEntry {
         // The descriptors are statics the C module defines (LEM_STATIC, lemnos_core.c). Only their
         // addresses are taken; the C side never frees them.
         let (driver, misc) = (addr_of!(lem_driver) as *mut c_void, addr_of!(lem_misc) as *mut c_void);
+        // SAFETY: THIS_MODULE is `module`, live for the module's life; the claim table is made once here,
+        // before any claim can be made.
+        unsafe { lem_claims_init(module.as_ptr().cast()) };
         // SAFETY: the bus is initialised once, here, at module load; its exit is paired below.
         to_result(unsafe { lem_bus_init() })?;
         // SAFETY: THIS_MODULE is `module`; the name is the module's, the same string KBUILD_MODNAME gives.

@@ -8,6 +8,7 @@
 
 config LEMNOS
 	tristate "Lemnos hardware engine kernel module"
+	depends on RUST
 	depends on PM && OF && HAS_DMA && COMMON_CLK && DMA_SHARED_BUFFER
 	depends on I2C && SPI_MASTER && GPIOLIB && PWM && REGULATOR && THERMAL && RESET_CONTROLLER
 	depends on !CPU_BIG_ENDIAN
