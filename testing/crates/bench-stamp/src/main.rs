@@ -16,10 +16,15 @@ use std::time::Instant;
 pub fn rows(stamps: &[u64], values: &[String], period_ms: f64, expect: usize) -> Vec<String> {
     let note = format!("board, lemnos-ctl watch at {period_ms} ms, {expect} requested");
     if values.is_empty() {
-        return ["imu.delivered", "imu.misses", "imu.largest_gap_ms", "imu.repeats"]
-            .iter()
-            .map(|key| format!("{key}\tnot_measured\t\tno readings from the IMU"))
-            .collect();
+        return [
+            "imu.delivered",
+            "imu.misses",
+            "imu.largest_gap_ms",
+            "imu.repeats",
+        ]
+        .iter()
+        .map(|key| format!("{key}\tnot_measured\t\tno readings from the IMU"))
+        .collect();
     }
     let gaps_ms: Vec<f64> = stamps
         .windows(2)
@@ -30,7 +35,10 @@ pub fn rows(stamps: &[u64], values: &[String], period_ms: f64, expect: usize) ->
     let repeats = values.windows(2).filter(|pair| pair[0] == pair[1]).count();
     let largest = gaps_ms.iter().cloned().fold(0.0_f64, f64::max);
     vec![
-        format!("imu.delivered\tmeasured\t{} of {expect}\t{note}", values.len()),
+        format!(
+            "imu.delivered\tmeasured\t{} of {expect}\t{note}",
+            values.len()
+        ),
         format!("imu.misses\tmeasured\t{misses}\tgaps over {limit} ms"),
         format!("imu.largest_gap_ms\tmeasured\t{largest:.2}\t{note}"),
         format!("imu.repeats\tmeasured\t{repeats}\treadings equal to the one before"),
@@ -100,10 +108,19 @@ mod tests {
         let mut values = lines(5);
         values[2] = values[1].clone(); // a repeat of the one before
         let out = rows(&stamps, &values, 5.0, 9000);
-        assert_eq!(out[0], "imu.delivered\tmeasured\t5 of 9000\tboard, lemnos-ctl watch at 5 ms, 9000 requested");
+        assert_eq!(
+            out[0],
+            "imu.delivered\tmeasured\t5 of 9000\tboard, lemnos-ctl watch at 5 ms, 9000 requested"
+        );
         assert_eq!(out[1], "imu.misses\tmeasured\t1\tgaps over 7.5 ms");
-        assert_eq!(out[2], "imu.largest_gap_ms\tmeasured\t20.00\tboard, lemnos-ctl watch at 5 ms, 9000 requested");
-        assert_eq!(out[3], "imu.repeats\tmeasured\t1\treadings equal to the one before");
+        assert_eq!(
+            out[2],
+            "imu.largest_gap_ms\tmeasured\t20.00\tboard, lemnos-ctl watch at 5 ms, 9000 requested"
+        );
+        assert_eq!(
+            out[3],
+            "imu.repeats\tmeasured\t1\treadings equal to the one before"
+        );
     }
 
     /// testing/crates/bench-stamp/src/main.rs::tests::no_readings_is_not_measured
