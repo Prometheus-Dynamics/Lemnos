@@ -14,12 +14,20 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The file's length in bytes.
 pub const LEN: u64 = 16;
-/// Reads that may see a write in progress before a reader gives up. A writer holds the sequence
-/// odd only for two 8-byte writes, so a reader that keeps losing is a broken writer.
-const TRIES: u32 = 1_000_000;
+/// How long a reader waits for a write in progress to finish, in wall time. A writer holds the
+/// sequence odd only for two 8-byte writes, so a sequence still odd after this is a writer that is
+/// gone or stopped, not one that was descheduled. This is the failure rule's cap (8 s), so the wait
+/// is never a fixed number of tries.
+const PATIENCE: Duration = Duration::from_secs(8);
+/// Reads before the reader starts to sleep between tries. A sleeping reader gives the CPU to the
+/// writer it is waiting for: a spinning one, sharing a CPU with it, starves it.
+const SPINS: u32 = 64;
+/// The longest sleep between two tries.
+const SLEEP_CAP: Duration = Duration::from_millis(1);
 
 /// A clock a proof can read. `now_ns` is the time in nanoseconds.
 pub trait Clock: Send + Sync {
@@ -135,7 +143,10 @@ impl FileClock {
 
 impl Clock for FileClock {
     fn now_ns(&self) -> Result<u64, String> {
-        for _ in 0..TRIES {
+        let started = Instant::now();
+        let mut sleep = Duration::from_micros(10);
+        let mut tries = 0u32;
+        loop {
             if let Some(ns) = self.read_once()? {
                 let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
                 if ns < *last {
@@ -144,9 +155,20 @@ impl Clock for FileClock {
                 *last = ns;
                 return Ok(ns);
             }
-            std::thread::yield_now();
+            if started.elapsed() >= PATIENCE {
+                return Err(format!(
+                    "clock file never settled within {} s: the writer is stuck mid-write",
+                    PATIENCE.as_secs()
+                ));
+            }
+            tries += 1;
+            if tries <= SPINS {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(sleep);
+                sleep = (sleep * 2).min(SLEEP_CAP);
+            }
         }
-        Err("clock file never settled: the writer is stuck mid-write".into())
     }
 }
 
@@ -206,6 +228,45 @@ mod tests {
         // A file rewritten behind the reader's back, earlier, is refused.
         std::fs::write(&path, [0u8; 16]).unwrap();
         assert!(reader.now_ns().is_err());
+    }
+
+    /// Writes the sequence and time raw, as a writer does, so a test can stop between the two.
+    fn raw_write(file: &File, seq: u64, ns: u64) {
+        file.write_all_at(&seq.to_le_bytes(), 0).unwrap();
+        file.write_all_at(&ns.to_le_bytes(), 8).unwrap();
+    }
+
+    #[test]
+    fn a_reader_waits_out_a_writer_stalled_mid_write() {
+        // The writer leaves the sequence odd for 3 s, longer than the reader used to wait (about
+        // 2.1 s, by try count). The reader must still get the time once the writer finishes.
+        let path = scratch("stalled");
+        let w = ClockWriter::create(&path, 5).unwrap();
+        raw_write(&w.file, 3, 5);
+        let reader = FileClock::open(&path).unwrap();
+        let file = w.file;
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            raw_write(&file, 4, 9_000);
+        });
+        assert_eq!(reader.now_ns().unwrap(), 9_000);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn a_writer_that_never_finishes_is_refused_after_the_stated_wait() {
+        let path = scratch("never");
+        let w = ClockWriter::create(&path, 5).unwrap();
+        raw_write(&w.file, 3, 5);
+        let reader = FileClock::open(&path).unwrap();
+        let started = Instant::now();
+        let error = reader.now_ns().unwrap_err();
+        assert!(error.contains("stuck mid-write"), "{error}");
+        assert!(
+            started.elapsed() >= PATIENCE,
+            "gave up after {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
