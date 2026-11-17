@@ -12,7 +12,9 @@
 //!   dma-buf pinned.
 //!
 //! Usage: `lemnos-lend-check /dev/lemnos <device> <bind> <unbind> <cma heap> <system heap>` (init
-//! runs it as `/lemnos_lend_check`). Port of `testing/qemu/lemnos_lend_check.c` (CZ-GUEST-2).
+//! runs it as `/lemnos_lend_check`). Port of `testing/qemu/lemnos_lend_check.c` (CZ-GUEST-2), in the
+//! shared-memory ring form of `kernel/test/shm_ring.h` (I2b2-6): frames are read through the index,
+//! and no buffer is given back by a ring word.
 //!
 //! The uAPI structures are laid out in bytes, sized as the C structures are: `lemnos.h`'s
 //! `lemnos_stream_create` (56 bytes, inside the 80-byte `lemnos_pisp_be_create`),
@@ -53,16 +55,22 @@ const _: () = assert!(
         && PISP_BE_STATUS == 0x8018_4cb1
 );
 
-// lemnos.h: the ring's header words (word indices, as the module's ring is read), the frame and
-// state values, and the frame's words.
-const RING_FRAMES_HEAD: usize = 16;
-const RING_FRAMES_TAIL: usize = 24;
-const RING_RETURNS_HEAD: usize = 32;
-const RING_JOBS_HEAD: usize = 48;
-const RING_FRAMES: usize = 64;
+// lemnos.h: the ring's state values.
 const RING_STATE_OPEN: u32 = 0;
 const RING_STATE_FAULT: u32 = 2;
-const FRAME_WORDS: usize = 6;
+
+// kernel/test/shm_ring.h (layout 2): the word numbers of the frame ring and the job block. The
+// frame index holds, for each frame slot, the lane slot the frame was published in (from bit 16).
+// A lane slot is SHM_SLOT_WORDS words: the stamp, the time, the meta, then the 48-byte entry from
+// SHM_ENTRY on (the buffer in the pair word, the identity at SHM_ENTRY + 3).
+const SHM_W_HEAD: usize = 8;
+const SHM_INDEX: usize = 17;
+const SHM_SLOT_WORDS: usize = 10;
+const SHM_ENTRY: usize = 4;
+const SHM_TICKETS: usize = 8;
+const SHM_READERS: usize = 64;
+const SHM_JOB_HEAD: usize = 2;
+const SHM_JOB_SLOTS: usize = 4;
 
 // The stream the check makes: a pool of BUFFERS buffers, FRAME_SLOTS frame slots, JOB_SLOTS job
 // slots of a job of JOB_BYTES bytes (one length word, then 15 words: 16 words a slot).
@@ -267,11 +275,11 @@ struct Stream {
     fd: OwnedFd,
     _pool: OwnedFd,
     pool_addr: u64,
-    returns_at: usize,
+    /// The control block's first word (`shm_control`): the job head is at `control + SHM_JOB_HEAD`.
+    control: usize,
     jobs_at: usize,
     jobs_head: u64,
     frames_tail: u64,
-    returns_head: u64,
     /// What the fake hardware says it has done.
     hw_started: u8,
     hw_done: u8,
@@ -307,18 +315,17 @@ fn stream_open(h: &mut Harness, ctl: &OwnedFd) -> Option<Stream> {
     let mut regs = [0u8; 64];
     read_regs(h, &mut regs);
     let batch = get32(&regs, BE_BATCH as usize);
-    let returns_at = RING_FRAMES + FRAME_SLOTS as usize * FRAME_WORDS;
+    let control = shm_control(FRAME_SLOTS as usize, BUFFERS as usize);
     Some(Stream {
         ring,
         configs,
         fd,
         _pool: pool,
         pool_addr: get64(&c, 48),
-        returns_at,
-        jobs_at: returns_at + FRAME_SLOTS as usize,
+        control,
+        jobs_at: control + SHM_JOB_SLOTS,
         jobs_head: 0,
         frames_tail: 0,
-        returns_head: 0,
         hw_done: batch as u8,
         hw_started: (batch >> 8) as u8,
     })
@@ -453,7 +460,7 @@ fn post(st: &mut Stream, job: &[u8; JOB_BYTES as usize]) {
     }
     st.jobs_head += 1;
     fence(Ordering::Release);
-    ring[RING_JOBS_HEAD].store(st.jobs_head, Ordering::Relaxed);
+    ring[st.control + SHM_JOB_HEAD].store(st.jobs_head, Ordering::Relaxed);
 }
 
 /// The fake hardware says it started and finished one job.
@@ -469,30 +476,60 @@ fn complete_job(h: &mut Harness, st: &mut Stream, started: u8, done: u8) {
     raise_irq(h);
 }
 
-/// The next frame's buffer, and its identity, or -1 if none arrives in time. Gives the buffer back.
-fn wait_frame(st: &mut Stream) -> (i32, u64) {
-    let mut identity = 0;
-    for _ in 0..1000 {
-        let ring = words(&st.ring);
-        let head = ring[RING_FRAMES_HEAD].load(Ordering::Acquire);
-        if head != st.frames_tail {
-            let at =
-                RING_FRAMES + (st.frames_tail as usize & (FRAME_SLOTS as usize - 1)) * FRAME_WORDS;
-            let word = ring[at].load(Ordering::Relaxed);
-            let fence_word = ring[at + 4].load(Ordering::Relaxed);
-            identity = ring[at + 2].load(Ordering::Relaxed);
-            st.frames_tail += 1;
-            ring[RING_FRAMES_TAIL].store(st.frames_tail, Ordering::Release);
-            let buffer = word as u32;
-            let ret_at = st.returns_at + (st.returns_head as usize & (FRAME_SLOTS as usize - 1));
-            ring[ret_at].store(u64::from(buffer) | (fence_word << 32), Ordering::Relaxed);
-            st.returns_head += 1;
-            ring[RING_RETURNS_HEAD].store(st.returns_head, Ordering::Release);
-            return (buffer as i32, identity);
-        }
-        thread::sleep(Duration::from_millis(2));
+/// `shm_control(frame_slots, buffers)`: the control block's first word, after the pool page's
+/// tickets and cut-off words (the page starts after the frame ring).
+fn shm_control(frame_slots: usize, buffers: usize) -> usize {
+    let page_at = SHM_INDEX + frame_slots + frame_slots * SHM_SLOT_WORDS;
+    page_at + SHM_TICKETS + buffers + SHM_READERS
+}
+
+/// What `shm_frame_read` found for one frame sequence number.
+enum FrameRead {
+    /// The module has not published it yet (the frame head has not passed it).
+    NotYet,
+    /// Its slot holds another frame, or its stamp moved while it was read: the consumer was too slow.
+    Reused,
+    /// The frame, read once and checked against its stamp: the buffer it was published in, and its
+    /// identity.
+    Frame { buffer: u32, identity: u64 },
+}
+
+/// Frame `seq` through the index, as `shm_frame_read` reads it (`kernel/test/shm_ring.h`).
+fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead {
+    if ring[SHM_W_HEAD].load(Ordering::Acquire) <= seq {
+        return FrameRead::NotYet;
     }
-    (-1, identity)
+    let index = SHM_INDEX + (seq & (frame_slots as u64 - 1)) as usize;
+    let slot = (ring[index].load(Ordering::Acquire) >> 16) as usize;
+    let at = SHM_INDEX + frame_slots + slot * SHM_SLOT_WORDS;
+    let stamp = ring[at].load(Ordering::Acquire);
+    if stamp != (seq + 1) << 1 {
+        return FrameRead::Reused;
+    }
+    let pair = ring[at + SHM_ENTRY + 1].load(Ordering::Acquire);
+    let identity = ring[at + SHM_ENTRY + 3].load(Ordering::Acquire);
+    if ring[at].load(Ordering::Acquire) != stamp {
+        return FrameRead::Reused;
+    }
+    FrameRead::Frame {
+        buffer: pair as u32,
+        identity,
+    }
+}
+
+/// The next frame's buffer, and its identity, or -1 if none arrives in time. A buffer needs no
+/// giving back here: the module reuses a buffer only when no reader marks it.
+fn wait_frame(st: &mut Stream) -> (i32, u64) {
+    for _ in 0..1000 {
+        match shm_frame_read(words(&st.ring), FRAME_SLOTS as usize, st.frames_tail) {
+            FrameRead::Frame { buffer, identity } => {
+                st.frames_tail += 1;
+                return (buffer as i32, identity);
+            }
+            FrameRead::NotYet | FrameRead::Reused => thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    (-1, 0)
 }
 
 /// The dma-buf's reference count, from its fdinfo: above 1 means the kernel still holds it. -1 when
