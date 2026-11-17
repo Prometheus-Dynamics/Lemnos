@@ -766,6 +766,7 @@ dependencies = [
  "lemnos-driver-usb-gadget",
  "lemnos-fake-devices",
  "lemnos-host",
+ "lemnos-identity",
  "lemnos-linux",
  "lemnos-shipped-features",
  "lemnos-sim",
@@ -1886,6 +1887,7 @@ dependencies = [
 name = "lemnos-identity"
 version = "2.0.1-dev"
 dependencies = [
+ "sha2 0.10.9",
  "thiserror",
 ]
 
@@ -2180,6 +2182,7 @@ dependencies = [
  "lemnos-driver-hw-watchdog-sys",
  "lemnos-driver-rpi-firmware-sys",
  "lemnos-driver-system-slots",
+ "lemnos-identity",
  "lemnos-linux-sys",
  "lemnos-shipped-features",
  "lemnos-slot-store",
