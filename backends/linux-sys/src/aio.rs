@@ -96,6 +96,10 @@ fn reap(id: libc::c_ulong, timeout: *mut libc::timespec) -> io::Result<Option<Io
     }
 }
 
+// `libc` deprecates `time_t` on 32-bit musl (it says the width changes in a later musl release).
+// The field is `time_t`, so the width follows the target; the lint is allowed here, once, for both
+// call sites (the submit wait and the reap wait).
+#[allow(deprecated)]
 fn timespec(timeout: Duration) -> libc::timespec {
     libc::timespec {
         tv_sec: libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX),
@@ -753,10 +757,7 @@ impl Context {
         if check(submitted)? != 1 {
             return Err(io::Error::from_raw_os_error(libc::EIO));
         }
-        let mut wait = libc::timespec {
-            tv_sec: libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX),
-            tv_nsec: timeout.subsec_nanos() as _,
-        };
+        let mut wait = timespec(timeout);
         let (event, timed_out) = match self.reap(&raw mut wait) {
             Ok(Some(event)) => (event, false),
             Ok(None) => {

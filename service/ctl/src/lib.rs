@@ -261,6 +261,20 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     if let Some((device, reason)) = lemnosd::gadget::link_refusals(&board).into_iter().next() {
         return Err(format!("{path}: device {device:?}: {reason}"));
     }
+    // A backend resource name the SoC map does not have (an `i2c-N` the SoC has no bus for, a
+    // `udc:` no controller of the SoC has) is refused here by name, before any device is made. The
+    // map is the SoC's (`socs/<soc>.toml`, or `--socs`). A board that names a checkable resource and
+    // a SoC needs that map, since without it the name cannot be checked. A board with no SoC, or no
+    // checkable name, does not need it, and its names are checked at bind.
+    if board.board.soc.is_some() && lemnos_devtree::resources::any_checkable(&board) {
+        let map = load_map(&board, socs).map_err(|e| format!("{path}: {e}"))?;
+        if let Some(refusal) = lemnos_devtree::resources::refusals(&board, &map)
+            .into_iter()
+            .next()
+        {
+            return Err(format!("{path}: {refusal}"));
+        }
+    }
     // Each driver's own check of its settings, the one the daemon's start runs before it makes a
     // device: a setting a driver refuses is refused here, by device and key.
     lemnos_host::check_settings(&board, &lemnosd::builtin::drivers())

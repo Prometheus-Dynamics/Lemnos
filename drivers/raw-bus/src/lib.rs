@@ -194,7 +194,7 @@ impl RawBusContract for RawBus {
             .filter(|address| *address <= 0x7f)
             .ok_or(Status::INVALID_ARGUMENT)?;
         let read = read_len_of(read_len, into, write.is_empty())?;
-        self.policy.admit_i2c(address, !write.is_empty())?;
+        self.policy.admit_i2c(address, read > 0)?;
         let bus = self.i2c.as_mut().ok_or(Status::NOT_SUPPORTED)?;
         let incoming = &mut into[..read];
         let result = match (write.is_empty(), read) {
@@ -212,7 +212,7 @@ impl RawBusContract for RawBus {
 
     fn spi_transfer(&mut self, write: &[u8], read_len: u32, into: &mut [u8]) -> Result<usize> {
         let read = read_len_of(read_len, into, write.is_empty())?;
-        self.policy.admit_spi()?;
+        self.policy.admit_spi(read > 0)?;
         let spi = self.spi.as_mut().ok_or(Status::NOT_SUPPORTED)?;
         let common = write.len().min(read);
         let result = match (write.len(), read) {

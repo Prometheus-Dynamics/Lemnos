@@ -165,8 +165,8 @@ config = { default_on = true }
 # 640x400 (binned), each RAW10 and RAW8. The camera streams below run mode 0 (1280x800 RAW10, the
 # first entry of the driver's mode table), and their formats are this file's own choices (the back
 # end's outputs are NV12, the front end's are BAYER16): the product does not state them here.
-# Each buffer size is derived in its comment, and `pisp_reference_sizes` in
-# `testing/crates/camera-proof/tests/reference_board.rs` recomputes every one from the drivers.
+# Each buffer size is derived in its comment, and `every_camera_stream_is_sized_as_its_drivers_compute`
+# in `testing/crates/camera-proof/tests/reference_board.rs` recomputes every one from the drivers.
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
@@ -246,8 +246,8 @@ buffer_bytes = 16720
 job_slots = 8
 job_bytes = 128
 
-# 2 of 2048000 bytes: the raw frame the job reads, BAYER16 at 1280 x 800 with a 64-aligned stride of
-# 2560 (`BE_INPUT_ALIGN`): 2560 x 800 = 2048000.
+# 2 of 2048000 bytes: the raw frame the job reads, BAYER16 at 1280 x 800 with a stride of 2560 (two
+# bytes a pixel, already a multiple of `BE_INPUT_ALIGN`, which is 4): 2560 x 800 = 2048000.
 [devices.streams.input]
 buffers = 2
 buffer_bytes = 2048000

@@ -465,6 +465,12 @@ When the [kernel module](kernel-module.md) is loaded, the daemon opens it and re
 GPIO lines, PWM channels and the SPI devices bound to the module through it, under claims the
 kernel enforces. Without the module the same names go through the stock interfaces.
 
+`lemnos-ctl validate` checks the names it can against the board's SoC map (`socs/<soc>.toml`, or
+`--socs`): `i2c-N` and `spidevB.C` against the SoC's I2C and SPI buses, `watchdog:NODE` and
+`pwm:NODE:CHANNEL` against its nodes, `gpio:LABEL:LINE` against its GPIO chips and `udc:NAME` against
+its USB controllers. A name the map does not have is refused by name, with what the SoC has. A board
+that names one of these and a `soc` needs that map; the other forms are checked at bind.
+
 A block's own resources (`dma:`, `regs:`, `irq:`, `clocks:`, `resets:`) exist only with the module:
 there is no other source of them, and nothing stands in. Each is refused with `NOT_SUPPORTED`
 without the module and `NO_DEVICE` when the module has no block of that name bound. Register

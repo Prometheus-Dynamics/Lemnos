@@ -3,13 +3,19 @@
 //! any call reaches the bus. It is closed by default: with no settings, every bus call is refused
 //! except reading a GPIO line.
 //!
+//! What a read and a write are, exactly. A transfer on an I2C or SPI bus is a **read** when it has a
+//! read part (a read length above zero), and a **write** when it has none. A **register read** is
+//! one read transfer whose write part (the register pointer) comes before its read part, in the
+//! same transaction; it is a read. The write part is sent to the device as given, so it is the
+//! board owner's choice of address and device that decides what a read may send.
+//!
 //! The settings, both optional:
 //!
-//! - `writes` (boolean, default `false`). With `false`, these are refused: an I2C transfer with a
-//!   write part, every SPI transfer (SPI clocks bytes out on every transfer), `line_set`, configuring
-//!   the line as an output at bind (that drives its level), `pwm_set` and `uart_write`. Reading
-//!   the UART is allowed. With `true`, they are
-//!   allowed.
+//! - `writes` (boolean, default `false`). With `false`, every read is admitted (an allowed I2C
+//!   address, and any SPI transfer that has a read part) and every write is refused: an I2C or SPI
+//!   transfer with no read part, `line_set`, configuring the line as an output at bind (that
+//!   drives its level), `pwm_set` and `uart_write`. Reading a line and the UART is always allowed.
+//!   With `true`, writes are allowed too.
 //! - `allow_i2c` (default none): the 7-bit addresses the device may use, read or write. It is an
 //!   integer for one address, or a string of comma-separated addresses, each decimal or `0x` hex.
 //!   Ranges are not supported. With none, every I2C transfer is refused, reads included.
@@ -45,17 +51,19 @@ impl Policy {
         (self.allowed_i2c[address / 64] >> (address % 64)) & 1 == 1
     }
 
-    /// An I2C transaction to `address`. `write` is whether it has a write part.
-    pub fn admit_i2c(&self, address: u8, write: bool) -> Result<()> {
-        if !self.i2c_allowed(address) || (write && !self.writes) {
+    /// An I2C transaction to `address`. `read` is whether it has a read part: a transaction with
+    /// none is a write, and needs `writes`. An address not on the list is refused either way.
+    pub fn admit_i2c(&self, address: u8, read: bool) -> Result<()> {
+        if !self.i2c_allowed(address) || (!read && !self.writes) {
             return Err(REFUSED);
         }
         Ok(())
     }
 
-    /// An SPI transfer. Every one clocks bytes out, so it is a write.
-    pub fn admit_spi(&self) -> Result<()> {
-        if !self.writes {
+    /// An SPI transfer. `read` is whether it has a read part: one with none is a write, and needs
+    /// `writes`.
+    pub fn admit_spi(&self, read: bool) -> Result<()> {
+        if !read && !self.writes {
             return Err(REFUSED);
         }
         Ok(())
