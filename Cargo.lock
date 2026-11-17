@@ -1937,6 +1937,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-irq-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-k230-usbboot"
 version = "2.0.1-dev"
 dependencies = [
