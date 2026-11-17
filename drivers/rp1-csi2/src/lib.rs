@@ -98,7 +98,7 @@ use lemnos_contract_camera_receiver::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind,
-    Lifecycle, MethodId, RefusalKind, Result, Status, StreamHandle, driver,
+    Lifecycle, MethodId, RefusalKind, Result, ResumeRecord, Status, StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -139,6 +139,88 @@ const FALLBACK_NS: u64 = 33_000_000;
 const STREAM: &str = "frames";
 /// The stream of the embedded data, when the board declares one on the device.
 const EMBEDDED: &str = "embedded";
+
+/// The version of the resume record's layout: a record of another version is not restored.
+const RESUME_VERSION: u8 = 1;
+/// The bytes of a resume record (see [`Lifecycle::resume_record`]).
+const RESUME_LEN: usize = 44;
+/// The bytes of the link in a resume record: [`LinkConfig`] as `put_link` writes it.
+const LINK_LEN: usize = 25;
+const FLAG_CONFIGURED: u8 = 1 << 0;
+const FLAG_STREAMING: u8 = 1 << 1;
+const FLAG_OWNED: u8 = 1 << 2;
+
+/// `flag` when `on`, else nothing.
+const fn flag(on: bool, bit: u8) -> u8 {
+    if on { bit } else { 0 }
+}
+
+/// Writes `link` into `out` (`LINK_LEN` bytes): lanes, virtual channel, data type, bit depth, the
+/// clock flag, width, height, the pixel rate and the per-lane link rate, little-endian.
+fn put_link(link: &LinkConfig, out: &mut [u8]) {
+    out[0] = link.lanes;
+    out[1] = link.virtual_channel;
+    out[2] = link.data_type;
+    out[3] = link.bit_depth;
+    out[4] = u8::from(link.continuous_clock);
+    out[5..9].copy_from_slice(&link.width.to_le_bytes());
+    out[9..13].copy_from_slice(&link.height.to_le_bytes());
+    out[13..21].copy_from_slice(&link.pixel_rate_hz.to_le_bytes());
+    out[21..25].copy_from_slice(&link.link_rate_mbps.to_le_bytes());
+}
+
+/// What a resume record says, decoded: the inverse of `resume_record`.
+struct Saved {
+    link: Option<LinkConfig>,
+    packing: Packing,
+    streaming: bool,
+    owner: Option<CallerId>,
+    next_sequence: u64,
+}
+
+impl Saved {
+    /// The record's values, or `None` for bytes that are not a record of this layout.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; RESUME_LEN] = bytes.try_into().ok()?;
+        if bytes[0] != RESUME_VERSION {
+            return None;
+        }
+        let flags = bytes[1];
+        let le64 = |at: usize| {
+            let mut word = [0; 8];
+            word.copy_from_slice(&bytes[at..at + 8]);
+            u64::from_le_bytes(word)
+        };
+        let le32 = |at: usize| {
+            let mut word = [0; 4];
+            word.copy_from_slice(&bytes[at..at + 4]);
+            u32::from_le_bytes(word)
+        };
+        let link = &bytes[18..18 + LINK_LEN];
+        let packing = match bytes[43] {
+            0 => Packing::Packed,
+            1 => Packing::Unpacked16,
+            _ => return None,
+        };
+        Some(Self {
+            link: (flags & FLAG_CONFIGURED != 0).then(|| LinkConfig {
+                lanes: link[0],
+                virtual_channel: link[1],
+                data_type: link[2],
+                bit_depth: link[3],
+                continuous_clock: link[4] != 0,
+                width: le32(18 + 5),
+                height: le32(18 + 9),
+                pixel_rate_hz: le64(18 + 13),
+                link_rate_mbps: le32(18 + 21),
+            }),
+            packing,
+            streaming: flags & FLAG_STREAMING != 0,
+            owner: (flags & FLAG_OWNED != 0).then(|| CallerId(le64(2))),
+            next_sequence: le64(10),
+        })
+    }
+}
 
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
@@ -309,6 +391,61 @@ impl Lifecycle for Rp1Csi2 {
             self.owner = None;
             let _ = CameraReceiver::stop(self);
         }
+    }
+
+    /// What a rebind keeps: the link and packing the receiver was configured with, whether it was
+    /// streaming and whose START it was, and where its frame sequence had got to. Read from the
+    /// driver's own fields: the block is not asked, since the instance may have lost it.
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        let mut out = [0; RESUME_LEN];
+        out[0] = RESUME_VERSION;
+        out[1] = flag(self.link.is_some(), FLAG_CONFIGURED)
+            | flag(self.state != State::Stopped, FLAG_STREAMING)
+            | flag(self.owner.is_some(), FLAG_OWNED);
+        out[2..10].copy_from_slice(&self.owner.map_or(0, |owner| owner.0).to_le_bytes());
+        out[10..18].copy_from_slice(&self.relay.next_sequence().to_le_bytes());
+        if let Some(link) = self.link {
+            put_link(&link, &mut out[18..43]);
+        }
+        out[43] = self.packing as u8;
+        ResumeRecord::new(&out)
+    }
+
+    /// Restores what [`Lifecycle::resume_record`] kept, on a freshly bound receiver: the same
+    /// configuration through `configure`, and, when it was streaming, `start` again with the same
+    /// owner. The frame numbering continues from the record. A record that does not decode, or a
+    /// block that refuses the configuration or the start now, is a fresh start: `false`, with the
+    /// receiver left unconfigured and stopped.
+    fn resume(&mut self, record: &ResumeRecord) -> bool {
+        let Some(saved) = Saved::decode(record.bytes()) else {
+            return false;
+        };
+        if self.state != State::Stopped || self.link.is_some() {
+            return false;
+        }
+        match saved.link {
+            Some(link) => {
+                if CameraReceiver::configure(self, link, saved.packing).is_err() {
+                    return false;
+                }
+                if saved.streaming {
+                    if CameraReceiver::start(self).is_err() {
+                        let _ = CameraReceiver::stop(self);
+                        self.link = None;
+                        self.layout = None;
+                        return false;
+                    }
+                    // `start` takes the caller in the call, and there is none here: the owner
+                    // is the one the record names.
+                    self.owner = saved.owner;
+                }
+            }
+            None if saved.streaming => return false,
+            None => {}
+        }
+        self.relay.continue_sequence(saved.next_sequence);
+        self.embedded_relay.continue_sequence(saved.next_sequence);
+        true
     }
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {

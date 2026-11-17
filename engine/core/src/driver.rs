@@ -24,6 +24,39 @@ pub struct Manifest {
     pub provides: &'static [ContractInfo],
 }
 
+/// The most bytes a driver's resume record holds (see [`Lifecycle::resume_record`]).
+pub const RESUME_BYTES: usize = 64;
+
+/// What a driver keeps across a host-level rebind: the state its next instance needs to carry on
+/// as the old one did, written by the driver itself as bytes it reads back. Fixed size, so none
+/// is allocated, and a driver whose state is larger than [`RESUME_BYTES`] keeps only what it can
+/// restore from less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeRecord {
+    len: u8,
+    bytes: [u8; RESUME_BYTES],
+}
+
+impl ResumeRecord {
+    /// A record of `bytes`, or `None` if it is longer than [`RESUME_BYTES`].
+    #[must_use]
+    pub fn new(bytes: &[u8]) -> Option<Self> {
+        let len = u8::try_from(bytes.len()).ok()?;
+        if usize::from(len) > RESUME_BYTES {
+            return None;
+        }
+        let mut out = [0; RESUME_BYTES];
+        out[..usize::from(len)].copy_from_slice(bytes);
+        Some(Self { len, bytes: out })
+    }
+
+    /// The bytes the driver wrote.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
 /// A driver that retries a failed step itself says so here while it is down: how many attempts
 /// have failed in a row, the reason the last one failed (a fixed text, as [`Health`] texts are),
 /// and when the next attempt is due on the host's clock. The host and the daemon show all three
@@ -213,6 +246,14 @@ pub trait Driver: Sized {
     fn retrying(&self) -> Option<Retry> {
         None
     }
+    /// See [`Lifecycle::resume_record`].
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        None
+    }
+    /// See [`Lifecycle::resume`].
+    fn resume(&mut self, _record: &ResumeRecord) -> bool {
+        false
+    }
     /// Runs a method. `args` and `reply` mean something only to the contract.
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     /// Whether the host should call [`Driver::tick`]. See [`Lifecycle::TICKS`].
@@ -295,6 +336,23 @@ pub trait Lifecycle: Sized {
     /// `None` by default: a driver the host retries (a failed bind) says nothing here.
     fn retrying(&self) -> Option<Retry> {
         None
+    }
+    /// What the driver keeps when the host lets go of it to bind it again (a rebind after
+    /// [`Health::Gone`]): the state a new instance needs to carry on as this one does. The host
+    /// asks while the instance is still held, so this reads the driver's own fields only and never
+    /// touches the hardware. `None`, the default, keeps nothing.
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        None
+    }
+    /// Restores what [`Lifecycle::resume_record`] kept, on the new instance the host bound in place
+    /// of the old one. The host calls it once, after the bind and before the first tick, on the
+    /// driver's lane. Returns `true` only if the instance is now as the old one was: its state is
+    /// back and it runs as it did, which a consumer of the stream sees as a recovery that kept its state.
+    /// `false` means it could not, and the instance is taken as a fresh start (the consumer
+    /// selects, configures and starts again). A `false` never gives up: the instance keeps
+    /// running as bound. Driver-specific; `false` by default.
+    fn resume(&mut self, _record: &ResumeRecord) -> bool {
+        false
     }
     /// Set this to `true` to have [`Lifecycle::tick`] called. Other drivers cost the host nothing.
     const TICKS: bool = false;
