@@ -240,13 +240,16 @@ def conjuncts(node):
 
 def closure(syms, config, root):
     """The prompted symbols that `root` needs and that `config` leaves unset, followed through the
-    dependency chain (a dependency that is set still has its own dependencies followed)."""
-    missing, seen, todo = set(), set(), [root]
+    dependency chain (a dependency that is set still has its own dependencies followed). A symbol
+    reached only through an alternative (||) is followed, but what it needs is not required of
+    `root`: `!MODVERSIONS || GENDWARFKSYMS` does not make GENDWARFKSYMS's own dependencies
+    (MODVERSIONS, and through it MODULES) dependencies of the symbol that names the alternative."""
+    missing, seen, todo = set(), {}, [(root, True)]
     while todo:
-        s = todo.pop()
-        if s in seen or s not in syms:
+        s, required = todo.pop()
+        if s not in syms or seen.get(s) is True or (s in seen and not required):
             continue
-        seen.add(s)
+        seen[s] = required
         for expr in syms[s]["deps"]:
             toks = tokens(expr)
             if not toks:
@@ -256,16 +259,32 @@ def closure(syms, config, root):
             except (ValueError, IndexError):
                 continue
             for c in conjuncts(node):
+                # A lone symbol is required when its parent is; the names inside an alternative are not.
+                child_required = required and c[0] == "sym"
                 for t in names(c, set()):
-                    if t in syms and t not in seen:
-                        todo.append(t)
+                    if t in syms and seen.get(t) is not True:
+                        todo.append((t, child_required))
                 # A single required symbol is reported. An alternative (||) is not: the
                 # configuration may mean any of them, so its symbols are followed only.
-                if c[0] == "sym" and not evaluate(c, config):
+                if required and c[0] == "sym" and not evaluate(c, config):
                     t = c[1]
                     if t in syms and syms[t]["prompt"] and config.get(t, "n") not in ("y", "m"):
                         missing.add(t)
     return missing
+
+
+def closure_self_check(problems):
+    """The closure on a fixed Kconfig shape, so a change to it shows here before it shows on a tree:
+    ROOT needs A, A needs B (unset): B is required of ROOT. ROOT also needs `!MV || GD`, and GD needs
+    MV, which needs MOD: none of those is required of ROOT (CONFIG_RUST's `!MODVERSIONS ||
+    GENDWARFKSYMS` on a kernel with no modules)."""
+    sym = lambda deps: {"deps": deps, "prompt": True}
+    syms = {"ROOT": sym(["A", "!MV || GD"]), "A": sym(["B"]), "B": sym([]), "GD": sym(["MV"]),
+            "MV": sym(["MOD"]), "MOD": sym([])}
+    config = {"ROOT": "y", "A": "y", "B": "n", "GD": "n", "MV": "n", "MOD": "n"}
+    got = sorted(closure(syms, config, "ROOT"))
+    if got != ["B"]:
+        problems.append(f"closure self-check: expected ['B'] required of ROOT, got {got}")
 
 
 def read_config(path):
@@ -707,6 +726,7 @@ def main(argv):
         print_table(tree, defconfig, arch)
         return 0
     problems = []
+    closure_self_check(problems)
     if "--tree" in argv:
         tree = argv[argv.index("--tree") + 1]
         config = argv[argv.index("--config") + 1]
