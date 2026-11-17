@@ -146,7 +146,7 @@ usb_cycle() {
 if [ "$mode" = board ]; then
   put cpu.idle_pct "$(window 30)" "board, 30 s, no subscriber"
 
-  "$ctl" --socket "$sock" watch imu acceleration --period-ms 20 --count 1500 \
+  "$ctl" --socket "$sock" watch imu acceleration.x --period-ms 20 --count 1500 \
     >/dev/null 2>&1 &
   sub=$!
   g=$(guard "$sub" 90)
@@ -154,7 +154,7 @@ if [ "$mode" = board ]; then
   wait "$sub" 2>/dev/null || true
   kill "$g" 2>/dev/null
 
-  "$ctl" --socket "$sock" watch imu acceleration --period-ms 5 --count 9000 \
+  "$ctl" --socket "$sock" watch imu acceleration.x --period-ms 5 --count 9000 \
     2>"$work/imu.err" | "$work/lemnos-bench-stamp" --period-ms 5 --expect 9000 >"$work/imu.tsv" &
   imu=$!
   g=$(guard "$imu" 150)

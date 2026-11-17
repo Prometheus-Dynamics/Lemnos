@@ -48,13 +48,13 @@ config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s 
 [[devices]]
 id = "usb-c-power"
 driver = "gpio-power-switch"
-bus = "gpiochip0:16"
+bus = "gpiochip15:16"
 config = { default_on = true }
 
 [[devices]]
 id = "usb-a-power"
 driver = "gpio-power-switch"
-bus = "gpiochip0:20"
+bus = "gpiochip15:20"
 config = { default_on = true }
 
 # A WS2812 ring for the status light. Not fitted on every bench, so it stays disabled until it is.
