@@ -94,14 +94,15 @@ fn an_allow_list_with_writes_off_permits_reads_and_no_writes() {
     assert_eq!(wiring.i2c.transactions(), before + 1);
 
     all_buses_down(&wiring);
-    // Writes to it are refused, alone or in a combined transfer, whatever the bus would do.
+    // Writes to it are refused, whatever the bus would do. A write alone is refused; a register
+    // read (a write part, then a read) is a read and reaches the bus.
     assert_eq!(
         client(&mut driver).i2c_transfer(0x50, &[0x20, 0x42], 0, &mut []),
         Err(REFUSED)
     );
     assert_eq!(
         client(&mut driver).i2c_transfer(0x50, &[0x10], 2, &mut into),
-        Err(REFUSED)
+        Err(Status::BUSY)
     );
     // A read of an address not on the list is refused too.
     assert_eq!(
@@ -288,10 +289,10 @@ fn writes_off_refuses_each_write_on_a_bound_device_and_a_refusal_leaves_it_worki
         client(&mut driver).i2c_transfer(0x50, &[], 2, &mut into),
         Ok(2)
     );
-    // And the same address with a write part is refused, so the read above sent no pointer.
+    // A register read of the same address (a pointer, then a read) is a read too, and works.
     assert_eq!(
         client(&mut driver).i2c_transfer(0x50, &[0x10], 2, &mut into),
-        Err(REFUSED)
+        Ok(2)
     );
 }
 
@@ -314,4 +315,61 @@ fn a_bad_setting_is_refused_at_bind() {
             "{key} = {value:?}"
         );
     }
+}
+
+/// With `writes` off, a read is admitted and a write is not. A register read is one transfer with a
+/// read part: its write part is the register pointer, and it is admitted for an allowed address
+/// (I2C) or for the bound device (SPI). A transfer with no read part is a write and is refused.
+#[test]
+fn read_only_admits_register_reads_and_refuses_pure_writes() {
+    let mut wiring = wired();
+    let mut driver = bind(
+        &mut wiring.board,
+        &[("allow_i2c", ConfigValue::Str("0x50"))],
+    )
+    .unwrap();
+
+    // Buses up: a register read (pointer, then read) and a pure read both reach the bus.
+    let mut into = [0; 2];
+    let before = wiring.i2c.transactions();
+    assert_eq!(
+        client(&mut driver).i2c_transfer(0x50, &[0x10], 2, &mut into),
+        Ok(2),
+        "a register read is a read"
+    );
+    assert_eq!(
+        client(&mut driver).i2c_transfer(0x50, &[], 2, &mut into),
+        Ok(2)
+    );
+    assert_eq!(wiring.i2c.transactions(), before + 2);
+    let mut spi_into = [0; 4];
+    assert_eq!(
+        client(&mut driver).spi_transfer(&[0x9f, 0, 0, 0], 4, &mut spi_into),
+        Ok(4),
+        "an SPI read is a read"
+    );
+
+    // Buses down: a register read reaches the bus (BUSY), a pure write is refused by policy.
+    all_buses_down(&wiring);
+    assert_eq!(
+        client(&mut driver).i2c_transfer(0x50, &[0x10], 2, &mut into),
+        Err(Status::BUSY)
+    );
+    assert_eq!(
+        client(&mut driver).i2c_transfer(0x50, &[0x20, 0x42], 0, &mut []),
+        Err(REFUSED)
+    );
+    assert_eq!(
+        client(&mut driver).spi_transfer(&[1, 2], 0, &mut []),
+        Err(REFUSED)
+    );
+    assert_eq!(
+        client(&mut driver).spi_transfer(&[0x9f, 0, 0, 0], 4, &mut spi_into),
+        Err(Status::BUSY)
+    );
+    // A register read of an address not on the list is refused.
+    assert_eq!(
+        client(&mut driver).i2c_transfer(0x18, &[0x10], 1, &mut [0; 1]),
+        Err(REFUSED)
+    );
 }

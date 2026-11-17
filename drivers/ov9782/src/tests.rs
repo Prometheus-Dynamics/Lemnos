@@ -2012,3 +2012,41 @@ fn the_frame_length_for_an_asked_rate_is_the_nearest_on_the_frame_period() {
         Some((2091, 59_989))
     );
 }
+
+#[test]
+fn each_mode_describes_its_own_frame_length_exposure_and_gain_ranges_once_selected() {
+    // The ranges are the selected mode's: its frame length limits from the mode table, the exposure
+    // up to the most its default frame length allows, and the gain range, which is the same in every
+    // mode. Checked for every mode, so a mode whose limits drift from its table is caught.
+    for (index, entry) in MODES.iter().enumerate() {
+        let (mut s, _bus) = sensor();
+        s.select_mode(index as u16).unwrap();
+        let frame = Current::defaults(entry).frame_length;
+        let mode = entry.describe(false);
+        let mut out = Description::new();
+        Lifecycle::describe(&s, &mut out);
+        let length = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+        assert_eq!(
+            (length.min, length.max),
+            (
+                Some(i64::from(mode.frame_length_min)),
+                Some(i64::from(mode.frame_length_max))
+            ),
+            "mode {index}: frame length"
+        );
+        let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+        assert_eq!(
+            exposure.max,
+            Some(i64::from(
+                chip::exposure_max(frame) >> chip::EXPOSURE_FRACTION_BITS
+            )),
+            "mode {index}: exposure"
+        );
+        let gain = item_named(&out, "analogue_gain", lemnos_core::ItemKind::Control);
+        assert_eq!(
+            (gain.min, gain.max),
+            (Some(0x10), Some(0xff)),
+            "mode {index}: gain"
+        );
+    }
+}

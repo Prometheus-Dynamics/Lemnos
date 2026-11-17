@@ -239,7 +239,7 @@ const fn has(mask: u64, index: u32) -> bool {
 }
 
 /// `mask` with bit `index` set or cleared; unchanged past the mask.
-const fn with(mask: u64, index: u32, set: bool) -> u64 {
+pub(crate) const fn with(mask: u64, index: u32, set: bool) -> u64 {
     if index >= 64 {
         mask
     } else if set {
@@ -368,7 +368,7 @@ fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
 /// The buffer a statistics result goes into, which the driver picks: one it holds, or else one the
 /// stream hands out now. `None` when neither is there: the job's result cannot be published, and
 /// the stream counts the ask as refused.
-fn statistics_buffer(stream: &mut StreamHandle, mask: &mut u64) -> Result<Option<u32>> {
+pub(crate) fn statistics_buffer(stream: &mut StreamHandle, mask: &mut u64) -> Result<Option<u32>> {
     if let Some(buffer) = lowest(*mask) {
         return Ok(Some(buffer));
     }

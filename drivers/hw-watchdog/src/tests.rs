@@ -505,3 +505,66 @@ fn a_watchdog_node_that_cannot_be_opened_is_refused_as_absent_and_names_its_path
     let node = Path::new(&dev_root).join("watchdog0").display().to_string();
     assert!(reason.contains(&node), "{reason}");
 }
+
+#[test]
+fn a_failed_feed_waits_half_the_time_left_before_the_deadline_when_that_is_less_than_the_backoff() {
+    // Fed at 0 with a 15 s timeout, so the deadline is 15 s; the feed fails from 7.5 s on. The
+    // backoff doubles (250 ms, 500 ms, 1 s, 2 s, 4 s), but from the fifth failure on the wait is
+    // held to half the time left before the deadline: 3.75 s left at 11.25 s, so 1.875 s, not 4 s.
+    let fake = Fake::new(15);
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    fake.with(|d| d.feed_fails_from = Some(15 * S / 2));
+    let mut at = 15 * S / 2;
+    let mut waits = Vec::new();
+    for _ in 0..5 {
+        let due = tick_at(&fake, &mut dog, at).unwrap();
+        waits.push(due - at);
+        at = due;
+    }
+    assert_eq!(
+        waits,
+        [250 * MS, 500 * MS, S, 2 * S, 1_875 * MS],
+        "the fifth wait is half of the 3.75 s left, not the 4 s backoff"
+    );
+}
+
+#[test]
+fn a_failed_feed_retry_is_never_shorter_than_the_floor_however_close_the_deadline() {
+    // A 1 s timeout: the deadline is 1 s after the feed at 0. Failing from 0.5 s on, the retry
+    // halves the time left each time, and once that is under 20 ms the wait is the 10 ms floor and
+    // no shorter.
+    let fake = Fake::new(1);
+    let mut dog = driver(&fake, 1);
+    tick_at(&fake, &mut dog, 0);
+    fake.with(|d| d.feed_fails_from = Some(S / 2));
+    let mut at = S / 2;
+    let mut waits = Vec::new();
+    for _ in 0..40 {
+        let due = tick_at(&fake, &mut dog, at).unwrap();
+        waits.push(due - at);
+        at = due;
+    }
+    assert_eq!(
+        *waits.iter().min().unwrap(),
+        RETRY_FLOOR_NS,
+        "no wait below the floor: {waits:?}"
+    );
+}
+
+#[test]
+fn a_timeout_set_late_feeds_at_once_when_the_set_succeeds() {
+    // The first feed is at 0 with the timeout unknown (one second to the next). The timeout request
+    // fails at 0 and succeeds at 250 ms: from then the feed is due at once, not at the old 1 s mark.
+    let fake = Fake::new(15);
+    fake.with(|d| d.set_failures = 1);
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    let next = tick_at(&fake, &mut dog, 250 * MS);
+    assert_eq!(
+        fake.with(|d| d.feeds.clone()),
+        vec![0, 250 * MS],
+        "fed when the timeout is set"
+    );
+    assert_eq!(next, Some(250 * MS + 15 * S / 2));
+}

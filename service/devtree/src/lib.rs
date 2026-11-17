@@ -17,6 +17,7 @@ pub mod generate;
 pub mod map;
 pub mod mdev;
 pub mod permissions;
+pub mod resources;
 pub mod udev;
 
 pub use check::check;

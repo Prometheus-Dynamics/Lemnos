@@ -41,6 +41,11 @@ struct Row {
 /// the file is not changed here.
 const RK_GADGET_NO_IDENTITY: &str = "device \"gadget\": setting \"identity\" is required with `function ncm derive`: the NCM addresses come from the board serial, so name the system-identity device";
 
+/// The fixture names the SoC `test-soc`, which has no map in `socs/`, and names bus and line
+/// resources the map would check; validation needs the map and refuses the file for want of it. The
+/// repository root is written `<repo>`, so the text does not depend on the checkout.
+const ALL_KINDS_NO_MAP: &str = "<repo>/socs/test-soc.toml: No such file or directory (os error 2)";
+
 const TABLE: &[Row] = &[
     Row {
         file: "docs/examples/full-board.toml",
@@ -59,7 +64,7 @@ const TABLE: &[Row] = &[
     },
     Row {
         file: "service/devtree/tests/fixtures/all-kinds-board.toml",
-        validate: Validate::Pass,
+        validate: Validate::Refused(ALL_KINDS_NO_MAP),
         daemon: Daemon::Pass,
     },
     Row {
@@ -177,18 +182,24 @@ fn all_board_files() -> Vec<String> {
     found
 }
 
-/// `lemnos-ctl validate --no-live` on the file: `Ok`, or the refusal's reason (the text after the
+/// `lemnos-ctl validate --no-live --socs <repo>/socs` on the file: `Ok`, or the refusal's reason (the text after the
 /// path).
 fn validate(path: &Path) -> Result<(), String> {
     let mut out = Vec::new();
     let args = [
         "validate".to_string(),
         "--no-live".to_string(),
+        "--socs".to_string(),
+        repo().join("socs").display().to_string(),
         path.display().to_string(),
     ];
+    let root = repo().display().to_string();
     lemnos_ctl::run(&args, &mut out).map_err(|error| {
         let prefix = format!("{}: ", path.display());
-        error.strip_prefix(&prefix).unwrap_or(&error).to_string()
+        error
+            .strip_prefix(&prefix)
+            .unwrap_or(&error)
+            .replace(&root, "<repo>")
     })
 }
 

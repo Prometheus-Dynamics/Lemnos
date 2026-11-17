@@ -1437,3 +1437,142 @@ fn the_steady_state_allocates_nothing() {
         (u64::from(JOBS), 0, 0)
     );
 }
+
+/// A stream whose `ask_buffer` answers from a script, for the ask path of `statistics_buffer`. Once
+/// the script is spent it asks the mock, as the default does. Everything else is the mock's.
+struct Asks {
+    inner: MockStream,
+    script: Mutex<VecDeque<std::result::Result<Option<u32>, ErrorKind>>>,
+    asked: Arc<AtomicUsize>,
+}
+
+impl StreamEndpoint for Asks {
+    type Error = ErrorKind;
+
+    fn buffer_count(&self) -> u32 {
+        self.inner.buffer_count()
+    }
+
+    fn buffer_current(&self, buffer: u32) -> std::result::Result<bool, ErrorKind> {
+        self.inner.buffer_current(buffer)
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        self.inner.buffer_kind()
+    }
+
+    fn publish(&mut self, frame: StreamFrame) -> std::result::Result<(), ErrorKind> {
+        self.inner.publish(frame)
+    }
+
+    fn next_buffer(&mut self) -> std::result::Result<Option<u32>, ErrorKind> {
+        self.inner.next_buffer()
+    }
+
+    fn ask_buffer(&mut self) -> std::result::Result<Option<u32>, ErrorKind> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let scripted = self.script.lock().unwrap().pop_front();
+        match scripted {
+            Some(answer) => answer,
+            None => self.inner.next_buffer(),
+        }
+    }
+
+    fn next_job(&mut self, out: &mut [u8]) -> std::result::Result<Option<usize>, ErrorKind> {
+        self.inner.next_job(out)
+    }
+
+    fn write(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> std::result::Result<bool, ErrorKind> {
+        self.inner.write(buffer, offset, data)
+    }
+
+    fn read(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        out: &mut [u8],
+    ) -> std::result::Result<bool, ErrorKind> {
+        self.inner.read(buffer, offset, out)
+    }
+
+    fn buffer_handle(
+        &self,
+        buffer: u32,
+    ) -> std::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.buffer_handle(buffer)
+    }
+
+    fn fault_consumer(&mut self) -> std::result::Result<(), ErrorKind> {
+        self.inner.fault_consumer()
+    }
+}
+
+/// A statistics stream answering `ask_buffer` from `script`, and the count of its asks.
+fn asking(
+    script: Vec<std::result::Result<Option<u32>, ErrorKind>>,
+) -> (StreamHandle, Arc<AtomicUsize>) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let stream = Asks {
+        inner: MockStream::with_bytes(4, 64),
+        script: Mutex::new(script.into()),
+        asked: asked.clone(),
+    };
+    (lemnos_core::Held::boxed(Box::new(stream)), asked)
+}
+
+#[test]
+fn statistics_buffer_takes_a_buffer_it_holds_and_does_not_ask() {
+    let (mut stream, asked) = asking(vec![Ok(Some(3))]);
+    let mut mask = crate::driver::with(0, 2, true);
+    assert_eq!(
+        crate::driver::statistics_buffer(&mut stream, &mut mask),
+        Ok(Some(2))
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "no ask when one is held");
+    assert_eq!(mask, crate::driver::with(0, 2, true));
+}
+
+#[test]
+fn statistics_buffer_asks_the_stream_when_it_holds_none_and_keeps_what_it_gets() {
+    let (mut stream, asked) = asking(vec![Ok(Some(3))]);
+    let mut mask = 0;
+    assert_eq!(
+        crate::driver::statistics_buffer(&mut stream, &mut mask),
+        Ok(Some(3))
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        mask,
+        crate::driver::with(0, 3, true),
+        "the buffer it was given is now held"
+    );
+}
+
+#[test]
+fn statistics_buffer_is_none_when_the_stream_has_no_buffer_free() {
+    let (mut stream, asked) = asking(vec![Ok(None)]);
+    let mut mask = 0;
+    assert_eq!(
+        crate::driver::statistics_buffer(&mut stream, &mut mask),
+        Ok(None)
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(mask, 0, "nothing is held when none was given");
+}
+
+#[test]
+fn statistics_buffer_reports_a_failed_ask_as_an_io_error_and_holds_nothing() {
+    let (mut stream, asked) = asking(vec![Err(ErrorKind::Busy)]);
+    let mut mask = 0;
+    assert_eq!(
+        crate::driver::statistics_buffer(&mut stream, &mut mask),
+        Err(Status::IO)
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(mask, 0);
+}
