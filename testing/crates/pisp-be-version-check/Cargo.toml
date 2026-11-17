@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-pisp-be-version-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's PiSP back-end version read-back on the fake block (CZ-GUEST-3 port of lemnos_pisp_be_version_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
