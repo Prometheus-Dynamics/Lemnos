@@ -66,7 +66,7 @@ fn one(claim: &mut Claim<LinuxModule>, stream: &mut MockStream) -> Option<(u64, 
         return None;
     }
     let status = RunResult::decode(&mut Reader::new(record)).ok()?.status;
-    stream.return_buffer(frame.buffer);
+    stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
     Some((frame.identity, status))
 }
 
@@ -152,7 +152,7 @@ pub fn run(device: &str, heap: &str) -> u32 {
                 let (served, allocated) = allocations(|| claim.serve(&mut stream, 0));
                 n += allocated;
                 let done = stream.take_frame().map(|f| {
-                    stream.return_buffer(f.buffer);
+                    stream.return_buffer(f.buffer).expect("the consumer holds this buffer");
                     f.bytes
                 });
                 if served != Ok(1) || done != Some(RESULT_BYTES as u32) {

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::module;
-use lemnos_linux_sys::stream::{self, CREATE_SHM};
+use lemnos_linux_sys::stream;
 use shm_ring::{Mem, Next, Reader, SampleTime};
 use shm_ring_doorbell::{Doorbell, Wake};
 
@@ -128,7 +128,7 @@ fn fixture(node_path: &str, block_name: &str, heap_path: &str) -> Result<Fixture
             node.as_fd(),
             &stream::Spec {
                 block,
-                flags: CREATE_SHM,
+                flags: 0,
                 buffers: BUFFERS,
                 buffer_bytes: BUFFER_BYTES,
                 frame_slots: FRAME_SLOTS,

@@ -364,7 +364,7 @@ fn a_caller_answers_a_request_and_echoes_bytes_on_an_endpoint_pair() {
     assert!(!UsbFunction::state(&mut rig.driver).unwrap().request_pending);
 
     // One whose data comes from the host.
-    rig.consumer.return_buffer(0);
+    rig.consumer.return_buffer(0).expect("the consumer holds this buffer");
     rig.want_event(3, 0);
     rig.host.request(request(0x40), 3, b"abc");
     rig.tick();
@@ -374,7 +374,7 @@ fn a_caller_answers_a_request_and_echoes_bytes_on_an_endpoint_pair() {
     assert_eq!(&taken[..3], b"abc");
 
     // And one the caller refuses.
-    rig.consumer.return_buffer(1);
+    rig.consumer.return_buffer(1).expect("the consumer holds this buffer");
     rig.want_event(4, 1);
     rig.host.request(request(0xc1), 2, &[]);
     rig.tick();
@@ -435,7 +435,7 @@ fn a_job_that_asks_for_what_it_may_not_is_refused_and_nothing_moves() {
         assert_eq!(record_of(&rig, identity), JobStatus::Refused);
     }
     for buffer in 0..4 {
-        rig.consumer.return_buffer(buffer);
+        rig.consumer.return_buffer(buffer).expect("the consumer holds this buffer");
     }
 
     // A length the driver's own memory can't hold, one past the buffer, a receive of nothing.
@@ -564,7 +564,7 @@ fn a_buffer_given_back_and_named_again_while_jobs_are_read_is_no_broken_consumer
             // The first job's completion: taken, its buffer given back and named again.
             let done = consumer.take_frame().expect("a completion");
             assert_eq!((done.buffer, done.identity), (0, 1));
-            consumer.return_buffer(done.buffer);
+            consumer.return_buffer(done.buffer).expect("the consumer holds this buffer");
             let mut bytes = [0u8; JOB_BYTES];
             let mut writer = Writer::new(&mut bytes);
             again.encode(&mut writer).unwrap();
@@ -758,7 +758,7 @@ fn when_the_configuration_goes_transfers_fail_and_event_jobs_wait_on() {
     rig.want_event(7, 6);
     rig.tick();
     assert_eq!(rig.event(7).kind, EventKind::Configured);
-    rig.consumer.return_buffer(6);
+    rig.consumer.return_buffer(6).expect("the consumer holds this buffer");
     rig.want_event(8, 6);
     rig.host.release();
     rig.tick();
@@ -819,7 +819,7 @@ fn a_consumer_that_goes_takes_its_jobs_and_its_request_with_it() {
     assert_eq!(rig.event(1).kind, EventKind::Configured);
     rig.tick();
     assert_eq!(rig.driver.serve.waiting(), 2);
-    rig.consumer.return_buffer(0);
+    rig.consumer.return_buffer(0).expect("the consumer holds this buffer");
     rig.want_event(4, 0);
     rig.tick();
     assert_eq!(rig.event(4).kind, EventKind::Setup);
@@ -852,7 +852,7 @@ fn cancel_takes_back_the_jobs_of_one_endpoint_or_the_event_jobs() {
     rig.want_event(4, 3);
     rig.tick();
     assert_eq!(rig.event(4).kind, EventKind::Configured);
-    rig.consumer.return_buffer(3);
+    rig.consumer.return_buffer(3).expect("the consumer holds this buffer");
     rig.want_event(5, 3);
     rig.tick();
 
@@ -867,7 +867,7 @@ fn cancel_takes_back_the_jobs_of_one_endpoint_or_the_event_jobs() {
     assert!(rig.host.host_received().is_empty());
 
     // A cancelled buffer is the consumer's until it returns it, then usable again.
-    rig.consumer.return_buffer(0);
+    rig.consumer.return_buffer(0).expect("the consumer holds this buffer");
     rig.receive(6, OUT, 0, 64);
     rig.host.host_sends(OUT, b"again");
     rig.tick();
@@ -1159,11 +1159,12 @@ fn carrying_bytes_both_ways_allocates_nothing() {
 #[test]
 fn a_control_out_that_cannot_hold_the_request_is_refused_before_anything_is_taken() {
     let mut rig = Rig::configured();
-    rig.consumer.return_buffer(0);
+    // No give-back here: the producer still holds buffer 0 (its Configured event is not published),
+    // and a consumer returns only a frame it took. Returning it would fail the producer's write.
     rig.want_event(1, 0);
     rig.tick();
     assert_eq!(rig.event(1).kind, EventKind::Configured);
-    rig.consumer.return_buffer(0);
+    rig.consumer.return_buffer(0).expect("the consumer holds this buffer");
     rig.want_event(3, 0);
     rig.host.request(request(0x40), 8, b"12345678");
     rig.tick();

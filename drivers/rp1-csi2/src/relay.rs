@@ -69,6 +69,9 @@ pub struct Relay {
     sequence_base: u64,
     /// The sequence the next finished frame takes, from every finished frame, published or not.
     next_sequence: u64,
+    /// The sequence of the last frame published on this stream. A frame published after a newer
+    /// one is never published: its sequence is not above this, so it is dropped and counted.
+    published: Option<u64>,
 }
 
 impl Relay {
@@ -86,6 +89,7 @@ impl Relay {
             channel,
             sequence_base: 0,
             next_sequence: 0,
+            published: None,
         }
     }
 
@@ -109,6 +113,7 @@ impl Relay {
         self.count = count.min(MAX_BUFFERS as u32);
         self.no_handles = false;
         self.lost = 0;
+        self.published = None;
         for slot in &mut self.slots {
             slot.matched = false;
             slot.fence = None;
@@ -262,6 +267,17 @@ impl Relay {
         };
         slot.fence = Some(done.fence);
         let ready = slot.held && slot.matched;
+        if ready && self.published.is_some_and(|last| sequence <= last) {
+            // Its buffer's wait finished after a newer frame was published. Published now it would
+            // reach the consumer out of order, so it is dropped and counted. Its hold was given back
+            // by the settle that ended the wait (a settle gives back the fence a finish left), so
+            // nothing is given back here, and the fence is cleared so it is not given back twice.
+            if let Some(slot) = self.slot(done.buffer) {
+                slot.fence = None;
+            }
+            self.lost = self.lost.saturating_add(1);
+            return Ok(false);
+        }
         if ready && matches!(frames.buffer_handle(done.buffer), Ok(Some(_))) {
             let frame = StreamFrame {
                 buffer: done.buffer,
@@ -272,6 +288,9 @@ impl Relay {
                 end_ns: 0,
             };
             let published = frames.publish(frame).is_ok();
+            if published {
+                self.published = Some(sequence);
+            }
             if let Some(slot) = self.slot(done.buffer) {
                 if published {
                     slot.held = false;

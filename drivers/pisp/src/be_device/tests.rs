@@ -43,6 +43,8 @@ struct Mock {
     posted: Vec<(KernelJob, Box<[u8; CONFIG_BYTES]>)>,
     finished: Vec<Finished>,
     given_back: Vec<u32>,
+    /// Frames taken and not yet given back, per buffer (the real ring's hold).
+    holds: Vec<u32>,
     /// Registered and not let go of: size, by region.
     regions: Vec<Option<u64>>,
     /// What `stop` reports: the block could not be seen to stop.
@@ -62,6 +64,7 @@ impl Default for Mock {
             posted: Vec::with_capacity(64),
             finished: Vec::with_capacity(64),
             given_back: Vec::with_capacity(64),
+            holds: Vec::new(),
             regions: Vec::with_capacity(64),
             wedged_on_stop: false,
             refuse_lent: None,
@@ -175,12 +178,19 @@ impl Hardware for Hw {
     }
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {
-        Ok(self.with(|m| m.finished.pop()))
+        Ok(self.with(|m| {
+            let frame = m.finished.pop()?;
+            hold_take(&mut m.holds, frame.buffer);
+            Some(frame)
+        }))
     }
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
-        self.with(|m| m.given_back.push(buffer));
-        Ok(())
+        self.with(|m| {
+            hold_release(&mut m.holds, buffer)?;
+            m.given_back.push(buffer);
+            Ok(())
+        })
     }
 
     fn check(&mut self) -> Result<()> {
@@ -774,7 +784,7 @@ fn temporal_denoise_alternates_its_averages_and_resets_when_told() {
         }
         run_once(be, identity * 2 + 1);
         if let Some(frame) = streams.output0.take_frame() {
-            streams.output0.return_buffer(frame.buffer);
+            streams.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
         }
     };
     // Reading an average before one exists is dropped.
@@ -1013,7 +1023,7 @@ fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
     // The consumer reads the completion and gives the output back, then rewrites config 1.
     let frame = streams.output0.take_frame().expect("job 1's frame");
     assert_eq!(frame.identity, 1);
-    streams.output0.return_buffer(frame.buffer);
+    streams.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
     let mut second = config();
     second.config.wbg.gain_r = 0x2222;
     streams.configure(&second);
@@ -1527,4 +1537,48 @@ fn bind_version_takes_the_family_at_any_minor_revision_and_refuses_another_by_na
     assert_eq!(kind, RefusalKind::Failed);
     assert!(reason.contains("0x01146666"), "{reason}");
     assert!(reason.contains("0x02252700"), "{reason}");
+}
+
+/// The real ring's hold, per buffer: a frame taken from the stream holds its buffer until it is
+/// given back, and a release with no hold is refused (`INVALID_ARGUMENT`), as `Ring::release` is.
+fn hold_take(holds: &mut Vec<u32>, buffer: u32) {
+    let at = buffer as usize;
+    if holds.len() <= at {
+        holds.resize(at + 1, 0);
+    }
+    holds[at] += 1;
+}
+
+fn hold_release(holds: &mut [u32], buffer: u32) -> Result<()> {
+    match holds.get_mut(buffer as usize) {
+        Some(held) if *held > 0 => {
+            *held -= 1;
+            Ok(())
+        }
+        _ => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
+/// The fake holds a buffer from its take until its give-back, as the real ring does: a second
+/// release of one taken frame, or a release of a buffer never taken, is refused, not counted.
+#[test]
+fn a_second_or_unheld_give_back_is_refused_as_the_real_ring_refuses_it() {
+    let mut hw = Hw::default();
+    hw.finish(2, 7, 64);
+    assert!(hw.next_finished().unwrap().is_some());
+    assert!(
+        hw.give_back(2).is_ok(),
+        "the first give-back releases the taken frame"
+    );
+    assert_eq!(
+        hw.give_back(2),
+        Err(Status::INVALID_ARGUMENT),
+        "a second release of the same frame is refused"
+    );
+    assert_eq!(
+        hw.give_back(3),
+        Err(Status::INVALID_ARGUMENT),
+        "a release of a buffer never taken is refused"
+    );
+    assert_eq!(hw.with(|m| m.given_back.clone()), [2]);
 }

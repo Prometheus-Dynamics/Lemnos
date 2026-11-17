@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "pisp_be_config.h"
+#include "shm_ring.h"
 #include "../lemnos.h"
 #include "../lemnos_pisp_be.h"
 #include "find_block.h"
@@ -188,8 +189,8 @@ struct stream {
 	/* The last frame wait_frame took: its start and its end (frame words 3 and 5). */
 	uint64_t last_start, last_end;
 	uint32_t region;
-	size_t returns_at, jobs_at, job_words;
-	uint64_t jobs_head, frames_tail, returns_head;
+	size_t control, jobs_at, job_words;
+	uint64_t jobs_head, frames_tail;
 	/* What the fake hardware says it has done. */
 	uint8_t hw_started, hw_done;
 };
@@ -233,8 +234,8 @@ static int stream_open(struct stream *st)
 			   c.config_mmap_offset);
 	if (st->ring == MAP_FAILED || st->configs == MAP_FAILED)
 		return -1;
-	st->returns_at = LEMNOS_RING_FRAMES + FRAME_SLOTS * LEMNOS_STREAM_FRAME_WORDS;
-	st->jobs_at = st->returns_at + FRAME_SLOTS;
+	st->control = shm_control(FRAME_SLOTS, BUFFERS);
+	st->jobs_at = st->control + SHM_JOB_SLOTS;
 	st->job_words = 1 + (JOB_BYTES + 7) / 8;
 
 	memset(&reg, 0, sizeof(reg));
@@ -286,7 +287,7 @@ static void post(struct stream *st, const struct lemnos_pisp_be_job *job)
 		st->ring[at + 1 + i] = words[i];
 	st->jobs_head++;
 	__atomic_thread_fence(__ATOMIC_RELEASE);
-	st->ring[LEMNOS_RING_JOBS_HEAD] = st->jobs_head;
+	st->ring[st->control + SHM_JOB_HEAD] = st->jobs_head;
 }
 
 static int kick(struct stream *st)
@@ -309,34 +310,23 @@ static void complete_job(struct stream *st, int started, int done)
 	raise_irq();
 }
 
-/* The next frame: its buffer, or -1 if none arrives in time. */
+/*
+ * The next frame: its buffer, or -1 if none arrives in time. A buffer needs no giving back: with no
+ * reader marking it, the module takes it back when it needs it.
+ */
 static int wait_frame(struct stream *st, uint64_t *identity)
 {
 	for (int tries = 0; tries < 1000; tries++) {
-		uint64_t head = __atomic_load_n(&st->ring[LEMNOS_RING_FRAMES_HEAD], __ATOMIC_ACQUIRE);
+		struct shm_frame f;
+		int got = shm_frame_read(st->ring, FRAME_SLOTS, st->frames_tail, &f);
 
-		if (head != st->frames_tail) {
-			size_t at = LEMNOS_RING_FRAMES +
-				    (st->frames_tail & (FRAME_SLOTS - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-			uint64_t word = st->ring[at];
-			uint64_t fence = st->ring[at + 4];
-
-			st->last_start = st->ring[at + 3];
-			st->last_end = st->ring[at + 5];
+		if (got == 1) {
+			st->last_start = f.timestamp_ns;
+			st->last_end = f.end_ns;
 			if (identity)
-				*identity = st->ring[at + 2];
+				*identity = f.identity;
 			st->frames_tail++;
-			__atomic_store_n(&st->ring[LEMNOS_RING_FRAMES_TAIL], st->frames_tail,
-					 __ATOMIC_RELEASE);
-			/* Give it back so the next job can have it. */
-			uint32_t buffer = (uint32_t)word;
-			size_t ret_at = st->returns_at + (st->returns_head & (FRAME_SLOTS - 1));
-
-			st->ring[ret_at] = (uint64_t)buffer | fence << 32;
-			st->returns_head++;
-			__atomic_store_n(&st->ring[LEMNOS_RING_RETURNS_HEAD], st->returns_head,
-					 __ATOMIC_RELEASE);
-			return (int)buffer;
+			return (int)f.buffer;
 		}
 		usleep(2000);
 	}
@@ -803,7 +793,7 @@ static void refuse_ring(void)
 
 	/* A head that can't be. */
 	CHECK(!stream_open(&st));
-	st.ring[LEMNOS_RING_JOBS_HEAD] = 1000;
+	st.ring[st.control + SHM_JOB_HEAD] = 1000;
 	got = kick(&st);
 	CHECK(got == ERANGE);
 	stream_close(&st);
@@ -1408,7 +1398,7 @@ static void test_wedge_counters(void)
 	CHECK(!status_of(&st, &status) && status.state == LEMNOS_RING_STATE_FAULT &&
 	      status.frames == 0);
 	CHECK(!ioctl(st.fd, LEMNOS_PISP_BE_IOC_STATUS, &pb) && pb.wedged == 1);
-	CHECK(st.ring[LEMNOS_RING_FRAMES_HEAD] == 0);
+	CHECK(st.ring[SHM_W_HEAD] == 0);
 	close_and_expect_pinned(&st, "wedged by counters");
 }
 

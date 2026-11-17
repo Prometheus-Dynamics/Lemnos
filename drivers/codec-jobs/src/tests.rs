@@ -199,7 +199,7 @@ fn a_job_reaches_the_block_as_it_was_written_and_completes_with_its_read_back() 
     assert_eq!(rig.server.counters().jobs, 1);
 
     // The result buffer may be the work's: the work was read before the record was written.
-    rig.consumer.return_buffer(1);
+    rig.consumer.return_buffer(1).expect("the consumer holds this buffer");
     let len = rig.work(0, &[], &[(1, &[1])]);
     rig.post(2, 0, len, 0);
     rig.tick();
@@ -220,7 +220,7 @@ fn work_that_is_malformed_or_names_what_it_may_not_is_refused_before_the_block()
         rig.tick();
         assert_eq!(rig.status(identity), JobStatus::Refused, "{what}");
         assert!(rig.block.asked.is_empty(), "{what}");
-        rig.consumer.return_buffer(result);
+        rig.consumer.return_buffer(result).expect("the consumer holds this buffer");
     };
     refused(&mut rig, "cut short", 0, good - 1, 1);
     refused(&mut rig, "a byte over", 0, good + 1, 1);

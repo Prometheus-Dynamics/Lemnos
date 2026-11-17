@@ -6,6 +6,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use lemnos_core::{Result, Status};
 use lemnos_driver_pisp_sys::{self as sys, BeStream, CONFIG_BYTES, Control, Job, StreamParams};
 use lemnos_linux_sys::dma_heap;
+use lemnos_linux_sys::stream::ring::Marks;
 
 use crate::be_job::KernelJob;
 
@@ -196,8 +197,6 @@ struct Running {
     stream: BeStream,
     /// The pool and the temporal denoise averages, held as long as the stream is.
     _memory: Vec<OwnedFd>,
-    /// What each buffer's return must carry; a job gives its buffer a new one.
-    fences: Vec<u32>,
 }
 
 /// The block through `/dev/lemnos`. Opened as it's needed, so a block not yet bound is a failed
@@ -227,7 +226,7 @@ impl LinuxHardware {
             heap.as_fd(),
             u64::from(plan.buffers) * u64::from(TOKEN_BYTES),
         )?;
-        let stream = control.create(
+        let mut stream = control.create(
             block,
             &StreamParams {
                 buffers: plan.buffers,
@@ -237,6 +236,12 @@ impl LinuxHardware {
             },
             pool.as_fd(),
         )?;
+        // A taken frame is held until give_back: the marks page, at most B - 2 at once (docs/streams.md,
+        // the margin: N = B - 1 - W - held, with W = 1 for a producer that asks while it fills one).
+        let max_held = plan.buffers.saturating_sub(2).max(1);
+        let marks = Marks::create(plan.buffers, 0, max_held)
+            .map_err(|e| io::Error::other(format!("make the marks page: {e:?}")))?;
+        stream.add_marks(marks, plan.buffers, max_held)?;
         let mut memory = vec![pool];
         let tdn = match plan.tdn_bytes {
             Some(bytes) => {
@@ -251,7 +256,6 @@ impl LinuxHardware {
         self.running = Some(Running {
             stream,
             _memory: memory,
-            fences: vec![0; plan.buffers as usize],
         });
         Ok(Placed { tdn })
     }
@@ -351,9 +355,6 @@ impl Hardware for LinuxHardware {
         let Some(frame) = r.stream.next_frame().map_err(|e| status(&e))? else {
             return Ok(None);
         };
-        if let Some(fence) = r.fences.get_mut(frame.buffer as usize) {
-            *fence = frame.fence;
-        }
         Ok(Some(Finished {
             buffer: frame.buffer,
             bytes: frame.bytes,
@@ -366,13 +367,7 @@ impl Hardware for LinuxHardware {
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
         let r = self.running()?;
-        let fence = *r
-            .fences
-            .get(buffer as usize)
-            .ok_or(Status::INVALID_ARGUMENT)?;
-        r.stream
-            .return_buffer(buffer, fence)
-            .map_err(|e| status(&e))
+        r.stream.return_buffer(buffer).map_err(|e| status(&e))
     }
 
     fn check(&mut self) -> Result<()> {

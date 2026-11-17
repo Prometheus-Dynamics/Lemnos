@@ -226,8 +226,11 @@ fn module(args: &Args, image: &[u8], config: &BeTilesConfig) -> Result<(), Strin
     let mut hw = LinuxHardware::new(
         Settings::new(&args.device, "linux,cma").map_err(|s| format!("settings: {s:?}"))?,
     );
+    // The pool follows docs/streams.md's margin: buffers >= working + held + 2. The back end fills one
+    // buffer at a time (working = 0) and this proof holds the frame it reads (held = 1), so 3 is the
+    // least; the old 2 left no buffer free beside the newest frame.
     let plan = Plan {
-        buffers: 2,
+        buffers: 3,
         job_slots: 8,
         tdn_bytes: None,
     };

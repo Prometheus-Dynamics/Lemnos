@@ -187,6 +187,8 @@ fn same_file(a: &File, b: &File) -> bool {
 }
 
 struct Block {
+    /// Frames taken and not yet given back, per buffer (the real ring's hold).
+    holds: Vec<u32>,
     /// The configuration slots the driver writes: the module was given this memory at `make`.
     configs: Option<Region>,
     /// What was registered; a slot let go of is `None` and is used again.
@@ -214,6 +216,7 @@ struct Block {
 impl Default for Block {
     fn default() -> Self {
         Self {
+            holds: Vec::new(),
             configs: None,
             regions: Vec::with_capacity(MAX_REGIONS),
             buffers: Vec::with_capacity(BUFFERS as usize),
@@ -466,12 +469,17 @@ impl Hardware for Hw {
     fn next_finished(&mut self) -> Result<Option<Finished>> {
         Ok(self.with(|b| {
             b.run();
-            b.finished.pop_front()
+            let frame = b.finished.pop_front()?;
+            hold_take(&mut b.holds, frame.buffer);
+            Some(frame)
         }))
     }
 
-    fn give_back(&mut self, _buffer: u32) -> Result<()> {
-        Ok(())
+    fn give_back(&mut self, buffer: u32) -> Result<()> {
+        self.with(|b| {
+            hold_release(&mut b.holds, buffer)?;
+            Ok(())
+        })
     }
 
     fn check(&mut self) -> Result<()> {
@@ -1171,4 +1179,24 @@ fn an_unread_statistics_result_is_never_replaced_by_a_later_job() {
         "no third result"
     );
     assert_eq!(hw.with(|b| b.lost), 0);
+}
+
+/// The real ring's hold, per buffer: a frame taken from the stream holds its buffer until it is
+/// given back, and a release with no hold is refused (`INVALID_ARGUMENT`), as `Ring::release` is.
+fn hold_take(holds: &mut Vec<u32>, buffer: u32) {
+    let at = buffer as usize;
+    if holds.len() <= at {
+        holds.resize(at + 1, 0);
+    }
+    holds[at] += 1;
+}
+
+fn hold_release(holds: &mut [u32], buffer: u32) -> Result<()> {
+    match holds.get_mut(buffer as usize) {
+        Some(held) if *held > 0 => {
+            *held -= 1;
+            Ok(())
+        }
+        _ => Err(Status::INVALID_ARGUMENT),
+    }
 }

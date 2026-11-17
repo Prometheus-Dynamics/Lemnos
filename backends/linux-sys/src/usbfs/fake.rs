@@ -6,8 +6,9 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use super::ring::UrbStorage;
 use super::{
@@ -158,9 +159,43 @@ struct State {
     left: bool,
 }
 
+/// The fake kernel's state and the condition a `poll` waits on. Every change made under the lock
+/// notifies the condition, so a waiting `poll` sees it at once instead of on a timer.
+#[derive(Default)]
+struct Shared {
+    state: Mutex<State>,
+    changed: Condvar,
+}
+
 /// The fake kernel. Clones share state.
 #[derive(Clone, Default)]
-pub struct FakeUsbfs(Arc<Mutex<State>>);
+pub struct FakeUsbfs(Arc<Shared>);
+
+/// The state, locked. Dropping it notifies every `poll` waiting on the fake, since whatever the
+/// holder did may have made a descriptor ready (or hung up).
+struct Locked<'a> {
+    guard: MutexGuard<'a, State>,
+    changed: &'a Condvar,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.guard
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.guard
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        self.changed.notify_all();
+    }
+}
 
 impl FakeUsbfs {
     /// A fake that records every call.
@@ -175,8 +210,11 @@ impl FakeUsbfs {
         fake
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            guard: self.0.state.lock().unwrap_or_else(PoisonError::into_inner),
+            changed: &self.0.changed,
+        }
     }
 
     /// Stops recording calls, so a steady-state run records nothing.
@@ -278,22 +316,35 @@ impl FakeUsbfs {
         Ok(n)
     }
 
-    /// `poll` on the device file, for `POLLOUT`.
+    /// `poll` on the device file, for `POLLOUT`: waits up to `timeout` for a completion or a
+    /// hang-up, woken by each change to the fake's state, and returns 0 when neither came.
     pub(super) fn poll(&self, timeout: Duration) -> i16 {
-        {
-            let state = self.lock();
-            let ready = !state.in_flight.is_empty()
-                && (!state.ready.is_empty() || state.steady_urb.is_some())
-                || state.duplicate.is_some();
+        let deadline = Instant::now().checked_add(timeout);
+        let mut guard = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let ready = !guard.in_flight.is_empty()
+                && (!guard.ready.is_empty() || guard.steady_urb.is_some())
+                || guard.duplicate.is_some();
             if ready {
                 return POLLOUT;
             }
-            if state.gone {
+            if guard.gone {
                 return POLLHUP;
             }
+            let left = match deadline {
+                Some(at) => at.saturating_duration_since(Instant::now()),
+                None => Duration::MAX,
+            };
+            if left.is_zero() {
+                return 0;
+            }
+            guard = self
+                .0
+                .changed
+                .wait_timeout(guard, left.min(Duration::from_secs(3600)))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
-        std::thread::sleep(timeout.min(Duration::from_millis(1)));
-        0
     }
 
     pub(super) fn ioctl_int(
@@ -633,4 +684,42 @@ unsafe fn complete(urb: *mut UrbStorage, crafted: &CraftedUrb) {
 
 fn errno(code: i32) -> std::io::Error {
     std::io::Error::from_raw_os_error(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    /// A poll on a fake with nothing ready waits its whole timeout, and only then returns 0.
+    #[test]
+    fn poll_waits_out_its_timeout_when_nothing_is_ready() {
+        let fake = FakeUsbfs::new();
+        let start = Instant::now();
+        assert_eq!(fake.poll(Duration::from_millis(200)), 0);
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A hang-up made while a poll waits wakes it at once, not at its timeout.
+    #[test]
+    fn poll_wakes_when_the_fake_hangs_up() {
+        let fake = FakeUsbfs::new();
+        let other = fake.clone();
+        let hang_up = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            other.set_gone(true);
+        });
+        let start = Instant::now();
+        assert_eq!(fake.poll(Duration::from_secs(10)), POLLHUP);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        hang_up.join().unwrap();
+    }
 }
