@@ -2474,6 +2474,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-gpio-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-grow-host"
 version = "2.0.1-dev"
 dependencies = [

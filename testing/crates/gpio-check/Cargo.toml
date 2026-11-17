@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-gpio-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's GPIO and PWM check: lines through gpiolib and channels through the PWM core, against simulated chips (CZ-GUEST-2 port of lemnos_gpio_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
