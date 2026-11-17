@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-crash-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's first process for the crash-log run: mounts pstore and the state disk, then runs the crash probe (CZ-GUEST port of crash-init.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true

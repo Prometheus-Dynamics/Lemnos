@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-watchdog-user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's userspace stand-in for lemnosd in the watchdog runs: feeds for 45 s, or stalls (CZ-GUEST port of watchdog-user.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }

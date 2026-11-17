@@ -4,7 +4,7 @@
 #   KERNEL  the bootable image of a kernel built with CONFIG_PSTORE, _PSTORE_RAM and _PSTORE_CONSOLE =y
 #           (the modules-off harness kernel: testing/qemu/build-kernel.sh --modules-off)
 #   CARGO   the cargo that builds the probe for musl (default: cargo; the group's e-cargo.sh)
-#   CC      the compiler for the guest's init, a static musl link (default: zig cc -target x86_64-linux-musl)
+#   CARGO   the cargo that builds the probe and the guest's init for musl (default: cargo; the group's e-cargo.sh)
 #   LOGS    where the console logs and the state images' reads are kept (default: a crash-log directory
 #           under the gates' tmp directory)
 #
@@ -23,7 +23,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_PSTORE, CONFIG_PSTORE_RAM and CONFIG_PSTORE_CONSOLE =y}"
 CARGO="${CARGO:-cargo}"
-CC="${CC:-zig cc -target x86_64-linux-musl}"
+CARGO="${CARGO:-cargo}"
 LOGS="${LOGS:-/mnt/nvme-wd/lemnos-gates/tmp/qemu-crash}"
 target=x86_64-unknown-linux-musl
 # The ramoops region: 1 MiB at 496 MiB, reserved from the guest's memory (-m 512) by memmap=. A guest only.
@@ -31,7 +31,6 @@ REGION=0x1f000000
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
-read -r -a compiler <<<"$CC"
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
 
@@ -40,10 +39,12 @@ fail() { echo "qemu-crash: $*" >&2; exit 1; }
 (cd "$repo" && "$CARGO" build -q -p lemnos-driver-system-slots --example crash_probe --target "$target")
 probe="${CARGO_TARGET_DIR:-$repo/target}/$target/debug/examples/crash_probe"
 [[ -x "$probe" ]] || fail "the probe was not built at $probe"
-"${compiler[@]}" -static -O2 -Wall -Wextra -o "$work/crash-init" "$here/crash-init.c"
+(cd "$repo" && "$CARGO" build -q -p lemnos-crash-init --target "$target")
+init="${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-crash-init"
+[[ -x "$init" ]] || fail "the guest's init was not built at $init"
 
 mkdir -p "$work/root"/{dev,proc,sys,sbin,state,sys/fs/pstore}
-cp "$work/crash-init" "$work/root/init"
+cp "$init" "$work/root/init"
 cp "$probe" "$work/root/sbin/crash-probe"
 (cd "$work/root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 
