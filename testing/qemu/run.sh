@@ -33,14 +33,13 @@ make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/test_block" module
 make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
 make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel" CONFIG_RP1_PIO=m \
   LEMNOS_EXTRA_CFLAGS="-I$work/mock_rp1" KBUILD_EXTRA_SYMBOLS="$work/mock_rp1/Module.symvers" modules
-# The Rust half's skeleton (kernel/rust): built beside the C module, loaded by init.c.
+# The Rust half's skeleton (kernel/rust): built beside the C module, loaded by lemnos-init.
 make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel/rust" modules
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -pthread -I"$work/test_block")
 read -r -a compiler <<<"$CC"
-"${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
 for check in lemnos_stream_check lemnos_rp1_csi2_check lemnos_gsdma_check lemnos_vip_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
@@ -62,7 +61,7 @@ link_check_features=()
 if [[ "${LINK_CHECK_TRACE:-0}" == 1 ]]; then
   link_check_features=(--features lemnos-orion-link-check/trace)
 fi
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check -p lemnos-lend-check --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check -p lemnos-lend-check -p lemnos-init --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
@@ -97,6 +96,8 @@ cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-regjob-isp-check" "$r
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-pio-check" "$root/lemnos_pio_check"
 # The dma-buf lend check is Rust (CZ-GUEST-2); init runs it as /lemnos_lend_check.
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-lend-check" "$root/lemnos_lend_check"
+# The first process is Rust (CZ-GUEST-3): it runs as the image's init.
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-init" "$root/init"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$work/kernel/rust/lemnos_rs.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.
@@ -127,7 +128,7 @@ esac
 # The Rust checks (CZ-GUEST-2) are static binaries with debug info, about 5 MB each unstripped. No check reads
 # their symbols or line tables (they compare output lines), so they are stripped here to keep the initramfs
 # within the guest's memory. The workspace's debug profile is unchanged.
-for guest in lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check; do
+for guest in init lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check; do
   strip "$root/$guest"
 done
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
