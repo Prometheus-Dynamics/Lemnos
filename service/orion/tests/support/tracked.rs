@@ -18,9 +18,9 @@ pub trait Tracked {
     fn held(&mut self) -> Result<u32>;
     #[method(3)]
     fn who(&mut self) -> Result<u32>;
-    #[method(4, job)]
+    #[method(4, job, stall = 60)]
     fn hold_until_cancelled(&mut self) -> Result<JobId>;
-    #[method(5, job)]
+    #[method(5, job, stall = 60)]
     fn count_until_cancelled(&mut self) -> Result<JobId>;
 }
 

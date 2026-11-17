@@ -1,0 +1,5 @@
+error: a stall bound is from 1 to 16777215 seconds
+ --> tests/fail/stall_zero.rs:2:40
+  |
+2 | pub trait T { #[method(1, job, stall = 0)] fn a(&mut self) -> lemnos_core::Result<lemnos_core::JobId>; }
+  |                                        ^

@@ -66,6 +66,8 @@ struct Param {
 struct Method {
     id: u16,
     job: bool,
+    /// A job's stall bound, in seconds: required for a job, zero for a method that is not one.
+    stall_secs: u32,
     reading: Option<Ident>,
     /// An addition after the base shape: `#[added]`, unless `#[breaking]`.
     added: bool,
@@ -76,38 +78,64 @@ struct Method {
     returns: Type,
 }
 
-/// `#[method(N)]`, `#[method(N, job)]` for a method that starts a long job, and
-/// `#[method(N, reading = switch)]` for the reading its value shows as.
+/// The largest stall bound a job can declare, in seconds: the package ABI carries it in 24 bits.
+const MAX_STALL_SECS: u32 = 0x00FF_FFFF;
+
+/// `#[method(N)]`, `#[method(N, job, stall = SECS)]` for a method that starts a long job and the
+/// longest it may go without progress, and `#[method(N, reading = switch)]` for the reading its
+/// value shows as.
 struct MethodArgs {
     id: LitInt,
     job: bool,
+    stall_secs: Option<LitInt>,
     reading: Option<Ident>,
 }
 
 impl Parse for MethodArgs {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let id = input.parse()?;
+        let id: LitInt = input.parse()?;
         let mut job = false;
+        let mut stall_secs = None;
         let mut reading = None;
         while input.parse::<Option<Token![,]>>()?.is_some() {
             let word: Ident = input.parse()?;
             if word == "job" {
                 job = true;
+            } else if word == "stall" {
+                input.parse::<Token![=]>()?;
+                stall_secs = Some(input.parse::<LitInt>()?);
             } else if word == "reading" {
                 input.parse::<Token![=]>()?;
                 reading = Some(input.parse::<Ident>()?);
             } else {
                 return Err(Error::new(
                     word.span(),
-                    "expected #[method(N)], #[method(N, job)] or #[method(N, reading = ...)]",
+                    "expected #[method(N)], #[method(N, job, stall = SECS)] or #[method(N, reading = ...)]",
                 ));
             }
         }
-        Ok(Self { id, job, reading })
+        if job && stall_secs.is_none() {
+            return Err(Error::new(
+                id.span(),
+                "a job method declares how long it may go without progress: #[method(N, job, stall = SECS)]",
+            ));
+        }
+        if !job && stall_secs.is_some() {
+            return Err(Error::new(
+                id.span(),
+                "only a job method has a stall bound: add `job` to #[method(N, ...)]",
+            ));
+        }
+        Ok(Self {
+            id,
+            job,
+            stall_secs,
+            reading,
+        })
     }
 }
 
-fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, Option<Ident>)> {
+fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, u32, Option<Ident>)> {
     let position = method
         .attrs
         .iter()
@@ -120,7 +148,20 @@ fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, Option<Ident
         })?;
     let attr = method.attrs.remove(position);
     let args = attr.parse_args::<MethodArgs>()?;
-    Ok((args.id.base10_parse()?, args.job, args.reading))
+    let stall_secs = match &args.stall_secs {
+        None => 0,
+        Some(secs) => {
+            let value: u32 = secs.base10_parse()?;
+            if value == 0 || value > MAX_STALL_SECS {
+                return Err(Error::new(
+                    secs.span(),
+                    format!("a stall bound is from 1 to {MAX_STALL_SECS} seconds"),
+                ));
+            }
+            value
+        }
+    };
+    Ok((args.id.base10_parse()?, args.job, stall_secs, args.reading))
 }
 
 /// Removes `#[name]` from `attrs` and says whether it was there.
@@ -182,7 +223,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             "a contract method can't be generic",
         ));
     }
-    let (id, job, reading) = remove_method_id(method)?;
+    let (id, job, stall_secs, reading) = remove_method_id(method)?;
     let marked_added = take_flag(&mut method.attrs, "added");
     let breaking = take_flag(&mut method.attrs, "breaking");
     let added = marked_added && !breaking;
@@ -264,6 +305,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
     Ok(Method {
         id,
         job,
+        stall_secs,
         reading,
         added,
 
@@ -346,6 +388,7 @@ fn method_info(method: &Method) -> TokenStream {
     let returned = &method.returns;
     let has_out = method.out.is_some();
     let job = method.job;
+    let stall_secs = method.stall_secs;
     let reading = match &method.reading {
         Some(variant) => quote! { ::core::option::Option::Some(::lemnos_core::Reading::#variant) },
         None => quote! { ::core::option::Option::None },
@@ -369,6 +412,7 @@ fn method_info(method: &Method) -> TokenStream {
             returns: #returns,
             has_out_buffer: #has_out,
             job: #job,
+            stall_secs: #stall_secs,
             reading: #reading,
             added: #added,
 

@@ -285,6 +285,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             returns: Shape::U8,
                             has_out_buffer: false,
                             job: false,
+                            stall_secs: 0,
                             reading: None,
                             added: false,
                         }],

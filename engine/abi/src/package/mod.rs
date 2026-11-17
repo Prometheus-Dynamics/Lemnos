@@ -288,7 +288,8 @@ pub struct PackageMethod {
     pub id: u16,
     /// Not 0: the method also fills a caller-supplied byte buffer.
     pub has_out_buffer: u16,
-    /// [`METHOD_JOB`]. Other bits are 0.
+    /// [`METHOD_JOB`], and for a job the stall bound in seconds from [`METHOD_STALL_SHIFT`] up.
+    /// Every other bit is 0.
     pub flags: u32,
     pub name: Str<'static>,
     pub params: Slice<'static, PackageField>,
@@ -476,6 +477,9 @@ pub const DRIVER_TRACKS_CALLERS: u32 = 2;
 pub const DRIVER_JOBS: u32 = 4;
 /// [`PackageMethod::flags`]: the method starts a long job and returns its number, a `u64`.
 pub const METHOD_JOB: u32 = 1;
+/// [`PackageMethod::flags`]: where a job's stall bound starts, in seconds: `flags >> 8`. A job
+/// method carries a bound of at least one second; a method that is not a job carries none.
+pub const METHOD_STALL_SHIFT: u32 = 8;
 
 /// How a long job stands, as [`DriverTable::job`] writes it.
 #[repr(C)]

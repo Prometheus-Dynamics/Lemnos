@@ -170,6 +170,7 @@ fn the_package_header_matches_the_crate() {
         ),
         ("LEMNOS_EXTRA_UNIT_UNKNOWN", EXTRA_UNIT_UNKNOWN.to_string()),
         ("LEMNOS_METHOD_JOB", METHOD_JOB.to_string()),
+        ("LEMNOS_METHOD_STALL_SHIFT", METHOD_STALL_SHIFT.to_string()),
     ] {
         checks.push((name.to_string(), value));
     }

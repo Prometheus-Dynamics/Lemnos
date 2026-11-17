@@ -97,19 +97,19 @@ fn what_a_package_registers_is_checked_before_it_is_used() {
     );
     assert_eq!(
         refused("none.so", "no_driver"),
-        Refusal::BadManifest("it did not register exactly one driver")
+        Refusal::BadManifest("it did not register exactly one driver".into())
     );
     assert_eq!(
         refused("nameless.so", "no_name"),
-        Refusal::BadManifest("the driver has no name")
+        Refusal::BadManifest("the driver has no name".into())
     );
     assert_eq!(
         refused("tag.so", "bad_tag"),
-        Refusal::BadManifest("a contract tag is not name/major")
+        Refusal::BadManifest("a contract tag is not name/major".into())
     );
     assert_eq!(
         refused("need.so", "bad_need"),
-        Refusal::BadManifest("a need of a kind this host does not know")
+        Refusal::BadManifest("a need of a kind this host does not know".into())
     );
     // None of them took the name, and none left a driver behind.
     assert!(loader.entries().is_empty());

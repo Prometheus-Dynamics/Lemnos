@@ -527,7 +527,7 @@ pub trait SelfTest {
     /// result is a [`Record`], written with [`Record::write`]. `INVALID_ARGUMENT` for a name the
     /// device does not list. `BUSY` while another test runs, or for an intrusive test while
     /// another caller uses the device. `confirmed` is the operator's word for a test that needs one.
-    #[method(2, job)]
+    #[method(2, job, stall = 600)]
     fn run(&mut self, name: &str, confirmed: bool) -> Result<JobId>;
     /// Writes the last result of each test that has one, [`write_last`] form.
     #[method(3)]

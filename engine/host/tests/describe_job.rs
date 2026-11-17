@@ -44,7 +44,7 @@ pub trait Stepping {
     #[method(1)]
     fn value(&mut self) -> Result<u32>;
     /// Starts a job of a few short steps.
-    #[method(2, job)]
+    #[method(2, job, stall = 60)]
     fn begin(&mut self) -> Result<JobId>;
 }
 

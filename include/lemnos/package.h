@@ -140,7 +140,7 @@ typedef struct LemnosPackageMethod {
     uint16_t id;
     /* Not 0: the method also fills a caller-supplied byte buffer. */
     uint16_t has_out_buffer;
-    /* LEMNOS_METHOD_JOB. Other bits are 0. */
+    /* LEMNOS_METHOD_JOB, and for a job the stall bound in seconds from LEMNOS_METHOD_STALL_SHIFT up. Every other bit is 0. */
     uint32_t flags;
     LemnosStr name;
     /* LemnosPackageField. */
@@ -589,6 +589,8 @@ typedef struct LemnosHostTable {
 #define LEMNOS_DRIVER_JOBS 4
 /* LemnosPackageMethod.flags: the method starts a long job and returns its number, a uint64_t. */
 #define LEMNOS_METHOD_JOB 1
+/* LemnosPackageMethod.flags: where a job's stall bound starts, in seconds: flags >> 8. */
+#define LEMNOS_METHOD_STALL_SHIFT 8
 /* tick's answer when the driver wants no tick. */
 #define LEMNOS_NO_TICK UINT64_MAX
 

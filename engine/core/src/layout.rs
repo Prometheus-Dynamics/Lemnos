@@ -279,6 +279,7 @@ mod tests {
                     returns: Shape::Unit,
                     has_out_buffer: false,
                     job: false,
+                    stall_secs: 0,
                     reading: None,
                     added: false,
                 }],
@@ -293,6 +294,7 @@ mod tests {
         returns: Shape::Unit,
         has_out_buffer: false,
         job: false,
+        stall_secs: 0,
         reading: None,
         added: false,
     };
@@ -305,6 +307,7 @@ mod tests {
         returns: Shape::U8,
         has_out_buffer: false,
         job: false,
+        stall_secs: 0,
         reading: None,
         added: true,
     };

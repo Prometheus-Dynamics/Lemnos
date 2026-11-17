@@ -1,0 +1,5 @@
+error: only a job method has a stall bound: add `job` to #[method(N, ...)]
+ --> tests/fail/stall_without_job.rs:2:24
+  |
+2 | pub trait T { #[method(1, stall = 60)] fn a(&mut self) -> lemnos_core::Result<u32>; }
+  |                        ^

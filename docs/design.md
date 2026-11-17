@@ -320,7 +320,7 @@ pub trait Lifecycle: Sized {
     const TRACKS_CALLERS: bool = false; // true to be told who is calling, and when they go
     fn caller(&mut self, caller: CallerId) {} // just before each method
     fn caller_gone(&mut self, caller: CallerId) {} // give up what it held
-    const JOBS: bool = false; // true when a method is marked #[method(N, job)]
+    const JOBS: bool = false; // true when a method is marked #[method(N, job, stall = SECS)]
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState { .. } // how a long job stands
     fn job_cancel(&mut self, job: JobId) {} // stop it; `job` then answers Finished(CANCELLED)
     const HOST_OWNED: HostOwned = HostOwned::Refused; // whether it may bind to a host-owned device
@@ -328,8 +328,8 @@ pub trait Lifecycle: Sized {
     fn board(&mut self, view: &dyn BoardView) {} // reads the board; the view is gone after the call
 }
 
-// A long job: a method marked #[method(N, job)] returns Result<JobId> at once and the work goes
-// on in tick. The host keeps the job for its starter, asks `job` after each call and tick, and
+// A long job: a method marked #[method(N, job, stall = SECS)] returns Result<JobId> at once and the work goes
+// on in tick. The host ends a job that goes SECS without progress as TIMED_OUT. The host keeps the job for its starter, asks `job` after each call and tick, and
 // sends Running { done, total } as progress and Finished(status) with the result as the end.
 // The starter can cancel it, and it is cancelled when the starter goes. A restart ends it as
 // INTERRUPTED: drivers keep nothing across one.

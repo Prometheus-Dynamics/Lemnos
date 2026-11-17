@@ -76,6 +76,19 @@ impl Answer {
             detail: detail.into(),
         }
     }
+
+    /// The transfer ran out of time: nothing came for `idle`. Orion's file states have no timed-out
+    /// state, so this is a rejection whose words say so.
+    pub(crate) fn timed_out(received: u64, idle: Duration) -> Self {
+        Self {
+            received,
+            state: FileState::Rejected,
+            detail: format!(
+                "ran out of time: nothing came for {} seconds, so the file was deleted",
+                idle.as_secs()
+            ),
+        }
+    }
 }
 
 /// One file on its way in.
@@ -226,17 +239,21 @@ impl Receiver {
         }
     }
 
-    /// Deletes the files that have had nothing for `idle`.
-    pub fn expire(&mut self, idle: Duration) {
-        let old: Vec<u64> = self
+    /// Deletes the files that have had nothing for `idle`, and says for each one how it ended: it ran
+    /// out of time, with the bytes it had. The sender is told, so it does not wait on silence.
+    pub fn expire(&mut self, idle: Duration) -> Vec<(u64, Answer)> {
+        let old: Vec<(u64, u64)> = self
             .partials
             .iter()
             .filter(|(_, p)| p.last.elapsed() >= idle)
-            .map(|(t, _)| *t)
+            .map(|(t, p)| (*t, p.received))
             .collect();
-        for transfer in old {
+        let mut ended = Vec::with_capacity(old.len());
+        for (transfer, received) in old {
             self.drop_partial(transfer);
+            ended.push((transfer, Answer::timed_out(received, idle)));
         }
+        ended
     }
 
     /// Files on their way in.
@@ -353,8 +370,16 @@ fn serve(
     let look = LOOK / u32::try_from(takers.len()).unwrap_or(1).max(1);
     while !shared.stopping() {
         for taker in takers.iter_mut() {
-            taker.receiver.expire(config.stall);
-            taker.streamer.expire(config.stall);
+            for (transfer, answer) in taker.receiver.expire(config.stall) {
+                taker
+                    .sink
+                    .status(transfer, answer.received, answer.state, &answer.detail)?;
+            }
+            if let Some((transfer, answer)) = taker.streamer.expire(config.stall) {
+                taker
+                    .sink
+                    .status(transfer, answer.received, answer.state, &answer.detail)?;
+            }
             let Some(handed) = taker.sink.next(look)? else {
                 continue;
             };

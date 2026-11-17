@@ -28,7 +28,7 @@ pub trait Thing {
 pub trait Other {
     #[method(1)]
     fn ping(&mut self) -> Result<()>;
-    #[method(2, job)]
+    #[method(2, job, stall = 60)]
     fn count_to(&mut self, to: u32) -> Result<JobId>;
 }
 

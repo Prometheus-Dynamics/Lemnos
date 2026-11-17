@@ -129,7 +129,7 @@ pub enum Refusal {
     /// Its `register` failed with this status.
     RegistrationFailed(Status),
     /// What it registered is not a usable driver, and why.
-    BadManifest(&'static str),
+    BadManifest(String),
     /// Its driver has the name of a built-in driver or of a package loaded before it.
     DuplicateName(String),
 }
@@ -398,7 +398,8 @@ fn open(path: &Path, mode: &Mode) -> Result<Package, Refusal> {
         return Err(Refusal::RegistrationFailed(status));
     }
     let base = descriptor.version.layout == PACKAGE_BASE_LAYOUT_HASH;
-    let driver = registered_driver(drivers, base).map_err(Refusal::BadManifest)?;
+    let driver =
+        registered_driver(drivers, base).map_err(|why| Refusal::BadManifest(why.into()))?;
     let driver: &'static PackageDriver = Box::leak(Box::new(driver));
     // The contract kinds and method readings: asked with no driver, once, here.
     let mut extras = vec![PackageExtra::EMPTY; MAX_EXTRAS];
@@ -406,14 +407,14 @@ fn open(path: &Path, mode: &Mode) -> Result<Package, Refusal> {
         Some(Ok(count)) => count as usize,
         Some(Err(_)) => {
             return Err(Refusal::BadManifest(
-                "the package did not give its manifest's extras",
+                "the package did not give its manifest's extras".into(),
             ));
         }
         None => 0,
     };
     if count > extras.len() {
         return Err(Refusal::BadManifest(
-            "its manifest has more extras than the host reads",
+            "its manifest has more extras than the host reads".into(),
         ));
     }
     let manifest = lemnos_core::package::manifest_in(&driver.manifest, &extras[..count])
