@@ -277,6 +277,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E17.md`](../testing/board-runs/E17.md) | The IEP deinterlacer: strides, scratch size, results, a dropped job |
 | [`E40.md`](../testing/board-runs/E40.md) | `rk-iep` through its job stream |
 | [`E18.md`](../testing/board-runs/E18.md) | The JPEG block: hardware ID, the register file, offsets |
+| [`RKJPEG-DEC.md`](../testing/board-runs/RKJPEG-DEC.md) | The JPEG decoder: the table-length units (joint sweep), the output format and chroma plane, the reach |
 | [`E38.md`](../testing/board-runs/E38.md) | `a733-di` output and field order; JPEG through `rk-mpp` |
 | [`E19.md`](../testing/board-runs/E19.md) | `a733-video`: the register window, the claim, a second claimant |
 | [`H8a.md`](../testing/board-runs/H8a.md) | `a733-video` through `lemnos.ko`: the encoder's register map, an encode, tight extents, refusals, a timeout reset |
