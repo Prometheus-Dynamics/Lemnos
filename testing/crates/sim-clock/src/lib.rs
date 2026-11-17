@@ -14,12 +14,20 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The file's length in bytes.
 pub const LEN: u64 = 16;
 /// Reads that may see a write in progress before a reader gives up. A writer holds the sequence
 /// odd only for two 8-byte writes, so a reader that keeps losing is a broken writer.
-const TRIES: u32 = 1_000_000;
+/// Looks that yield before the reader starts to sleep. A writer that is runnable but not running
+/// finishes its two-word write in a few scheduling slices; yields alone, a million of them, can
+/// pass in less than one slice under load, which is how a reader gave up on a writer that was
+/// still working.
+const YIELDS: u32 = 1_000;
+/// The longest sleep between looks, and the longest the reader waits for a writer that is stuck
+/// mid-write (the failure rule's cap): past it the clock is reported as stuck.
+const MAX_WAIT: Duration = Duration::from_secs(8);
 
 /// A clock a proof can read. `now_ns` is the time in nanoseconds.
 pub trait Clock: Send + Sync {
@@ -135,7 +143,10 @@ impl FileClock {
 
 impl Clock for FileClock {
     fn now_ns(&self) -> Result<u64, String> {
-        for _ in 0..TRIES {
+        let started = Instant::now();
+        let mut looks = 0u32;
+        let mut pause = Duration::from_micros(1);
+        loop {
             if let Some(ns) = self.read_once()? {
                 let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
                 if ns < *last {
@@ -144,9 +155,17 @@ impl Clock for FileClock {
                 *last = ns;
                 return Ok(ns);
             }
-            std::thread::yield_now();
+            if started.elapsed() >= MAX_WAIT {
+                return Err("clock file never settled: the writer is stuck mid-write".into());
+            }
+            looks += 1;
+            if looks <= YIELDS {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(MAX_WAIT);
+            }
         }
-        Err("clock file never settled: the writer is stuck mid-write".into())
     }
 }
 
@@ -193,6 +212,24 @@ mod tests {
         writer.join().unwrap();
         assert!(seen > 0);
         assert_eq!(reader.now_ns().unwrap(), 200_000 * 1_000_003 + 200_000);
+    }
+
+    #[test]
+    fn a_reader_waits_out_a_writer_that_is_stuck_mid_write() {
+        // The writer is descheduled between the two halves of its write for five seconds. The
+        // reader must wait it out and return the time written, not report the clock stuck.
+        let path = scratch("stuck");
+        let mut w = ClockWriter::create(&path, 5).unwrap();
+        let reader = FileClock::open(&path).unwrap();
+        // The first half of a write is on the file (odd sequence) and the second is not yet.
+        w.file.write_all_at(&(w.seq + 1).to_le_bytes(), 0).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            w.set(9_000).unwrap();
+        });
+        // The reader goes first, while the write is still open.
+        assert_eq!(reader.now_ns(), Ok(9_000));
+        writer.join().unwrap();
     }
 
     #[test]

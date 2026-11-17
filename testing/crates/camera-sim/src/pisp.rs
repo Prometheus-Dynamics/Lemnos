@@ -478,6 +478,12 @@ struct BeState {
     parsed: Box<BeTilesConfig>,
     sequence: u64,
     last_ns: u64,
+    /// The input the luma was made from, and the luma and chroma written for it.
+    input: Vec<u8>,
+    luma: Vec<u8>,
+    chroma: Vec<u8>,
+    /// The strides and size the luma was made for: a job with a different shape converts again.
+    shape: (usize, usize, usize, usize),
 }
 
 /// The back end's block.
@@ -498,31 +504,52 @@ impl BeState {
         let output = self.parsed.config.output_format[0].image;
         let (width, height) = (usize::from(output.width), usize::from(output.height));
         let (in_stride, out_stride) = (input.stride as usize, output.stride as usize);
-        let mut raw = vec![0u8; in_stride * usize::from(input.height)];
-        let read = find(self.regions.iter().flatten(), job.addr[0], raw.len() as u64)
-            .and_then(|(region, at)| region.map.as_slice().get(at..at + raw.len()))
-            .is_some_and(|bytes| {
-                raw.copy_from_slice(bytes);
+        let raw_len = in_stride * usize::from(input.height);
+        let luma_len = out_stride * height;
+        let chroma_len = out_stride * height / 2;
+        // The input is read in place; it is copied into `self.input` only when it changed, so a
+        // steady input (the sim's scene) costs one comparison a job, not a copy and a conversion.
+        let src = find(self.regions.iter().flatten(), job.addr[0], raw_len as u64)
+            .and_then(|(region, at)| region.map.as_slice().get(at..at + raw_len));
+        let read = match src {
+            Some(bytes) => {
+                let shape = (in_stride, out_stride, width, height);
+                if self.input.as_slice() != bytes || self.shape != shape {
+                    self.shape = shape;
+                    self.input.clear();
+                    self.input.extend_from_slice(bytes);
+                    self.luma.clear();
+                    self.luma.resize(luma_len, 0);
+                    for (src, dst) in self
+                        .input
+                        .chunks(in_stride)
+                        .zip(self.luma.chunks_mut(out_stride))
+                    {
+                        // The high byte of each 16-bit pixel, a line at a time.
+                        for (pixel, slot) in src
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .take(width)
+                            .zip(dst.iter_mut())
+                        {
+                            *slot = pixel[1];
+                        }
+                    }
+                    LUMA_CONVERSIONS.fetch_add(1, Ordering::Relaxed);
+                }
+                if self.chroma.len() != chroma_len {
+                    self.chroma.clear();
+                    self.chroma.resize(chroma_len, 128);
+                }
                 true
-            });
-        let mut luma = vec![0u8; out_stride * height];
-        for (src, dst) in raw.chunks(in_stride).zip(luma.chunks_mut(out_stride)) {
-            // The high byte of each 16-bit pixel, a line at a time.
-            for (pixel, slot) in src
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .take(width)
-                .zip(dst.iter_mut())
-            {
-                *slot = pixel[1];
             }
-        }
-        let chroma = vec![128u8; out_stride * height / 2];
+            None => false,
+        };
         let wrote = read
             && [
-                (job.addr[addr_output(0, 0)], &luma),
-                (job.addr[addr_output(0, 1)], &chroma),
+                (job.addr[addr_output(0, 0)], &self.luma[..]),
+                (job.addr[addr_output(0, 1)], &self.chroma[..]),
             ]
             .into_iter()
             .all(|(addr, data)| {
@@ -547,6 +574,10 @@ impl BeState {
         self.sequence += 1;
     }
 }
+
+/// How many times the back end's luma was converted from its input in this process: once per
+/// input that differs from the one before it, not once per job.
+pub static LUMA_CONVERSIONS: AtomicU64 = AtomicU64::new(0);
 
 impl BeBlock {
     fn with<R>(&self, f: impl FnOnce(&mut BeState) -> R) -> R {
