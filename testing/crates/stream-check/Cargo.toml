@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-stream-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's frame stream check: the shared-memory ring, jobs, buffer pools, lends and marks, and the module's refusals (CZ-GUEST-4 port of lemnos_stream_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
