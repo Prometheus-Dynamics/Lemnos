@@ -32,6 +32,7 @@ struct Args {
     device: String,
     seconds: u64,
     period_ms: u64,
+    sample_period_ms: u64,
     out: Option<String>,
 }
 
@@ -48,6 +49,7 @@ fn parse() -> Args {
         device: "imu".into(),
         seconds: 45,
         period_ms: 50,
+        sample_period_ms: 5,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -58,14 +60,27 @@ fn parse() -> Args {
             "--device" => args.device = value,
             "--seconds" => args.seconds = value.parse().unwrap_or_else(|_| usage()),
             "--period-ms" => args.period_ms = value.parse().unwrap_or_else(|_| usage()),
+            "--sample-period-ms" => {
+                args.sample_period_ms = value.parse().unwrap_or_else(|_| usage())
+            }
             "--out" => args.out = Some(value),
             _ => usage(),
         }
     }
-    if args.socket.is_empty() || args.period_ms == 0 || args.seconds == 0 {
+    if args.socket.is_empty()
+        || args.period_ms == 0
+        || args.seconds == 0
+        || args.sample_period_ms == 0
+    {
         usage();
     }
     args
+}
+
+/// The chip's sample period in nanoseconds: what a gap is measured against (`--sample-period-ms`,
+/// 5 ms at 200 Hz). Not the poll period (`--period-ms`), which is how often the tool reads.
+fn sample_period_ns(args: &Args) -> u64 {
+    args.sample_period_ms * 1_000_000
 }
 
 fn not_measured(why: &str) -> ! {
@@ -127,8 +142,7 @@ fn main() {
         }
     }
     let elapsed = started.elapsed();
-    let period_ns = period.as_nanos() as u64;
-    let text = rows(&report, period_ns, elapsed.as_nanos() as u64);
+    let text = rows(&report, sample_period_ns(&args), elapsed.as_nanos() as u64);
     let _ = write!(std::io::stdout(), "{text}");
     if let Some(path) = &args.out {
         let mut file = std::fs::File::create(path).unwrap_or_else(|e| {
@@ -149,4 +163,26 @@ fn main() {
         report.records,
         elapsed.as_secs_f64()
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// testing/crates/bmi088-batch/src/main.rs::tests::gaps_are_measured_at_the_sample_period_not_the_poll_period
+    /// Fails on the code before this fix: the rows were given the poll period (50 ms), so a 9 ms gap
+    /// between two samples was not a miss.
+    #[test]
+    fn gaps_are_measured_at_the_sample_period_not_the_poll_period() {
+        let args = Args {
+            socket: String::new(),
+            device: String::new(),
+            seconds: 1,
+            period_ms: 50,
+            sample_period_ms: 5,
+            out: None,
+        };
+        assert_eq!(sample_period_ns(&args), 5_000_000);
+        assert_ne!(sample_period_ns(&args), 50_000_000);
+    }
 }
