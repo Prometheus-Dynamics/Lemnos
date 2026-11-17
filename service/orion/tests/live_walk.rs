@@ -463,7 +463,13 @@ fn a_description_generation_moves_once_per_change_and_holds_while_nothing_change
         .expect("subscribe");
     let mut set = dashboard.subscribe("lemnos.devices").expect("subscribe");
     let first = wait_for("the description generation", || generation(&mut described));
-    let devices = wait_for("the device-set generation", || generation(&mut set));
+    // The baseline is taken once the device is running, so the set has settled: a device that
+    // comes up after its first listing changes its own slot, not the set (mirror.rs).
+    let devices = wait_for("the device-set generation, with the device running", || {
+        let running = resource(dashboard, "lemnos.imu").map(|found| found.state)
+            == Some(ResourceState::Ready);
+        if running { generation(&mut set) } else { None }
+    });
     assert_eq!(first, 1, "a device's first generation");
     // What the topic has carried so far is the first generation, which is said; from here every
     // sample is a change after it.
