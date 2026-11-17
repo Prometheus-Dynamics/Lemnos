@@ -984,6 +984,21 @@ and the first-slot writer (`lemnos-ctl data-partition --boot-image`) all read th
 `firmware::check_config_text` first. The refusal names the missing line and says that Lemnos never edits
 `config.txt`.
 
+**A board with the old count filter.** Before the threshold, the Pi 5 text carried `[boot_count&4]`. Its mask
+form is selected at counts 4 to 7 and 12 to 15 and not at 8 to 11, so the firmware bounces between the pointers,
+and `pick` models only the threshold. Lemnos never rewrites `config.txt`, so it does not run a firmware view it
+disagrees with: a `config.txt` carrying `[boot_count&` is refused (`firmware::OLD_FILTER_REFUSAL`). The driver starts
+**degraded**, its health and `list` name `[boot_count&4]`, and `install`, `set_default` and `trial` are refused by
+name, as for a missing include line. Test: `a_config_txt_with_the_old_mask_filter_is_degraded_and_refuses_a_trial`
+and `a_config_txt_with_the_old_mask_filter_is_refused_by_name_and_the_threshold_text_is_not`.
+
+Such a board is brought back by rebuilding its boot partition offline: `lemnos-ctl boot-partition` builds the image
+with the threshold text (the Pi 5 family's `CONFIG_TXT`), and that image is written to the board's boot partition
+while the board is not running a slot from it. Rebuilding the partition rebuilds its bays, so each slot the board
+keeps is installed again from its bundle (`install` or `lemnos-ctl data-partition --boot-image`). The data partition
+and the slots' images are not touched by the rebuild. Until then the board runs its own boot as it did, and no
+trial or default switch is made on it.
+
 **What a power cut leaves (the firmware's view).** The firmware applies the `os_prefix` lines of a pointer
 file in turn, so the last whole line is the slot it boots. Lemnos writes sector 1 first, then sector 0,
 and reads sector 1 first. With a single-sector write that completes or does not start (the storage contract

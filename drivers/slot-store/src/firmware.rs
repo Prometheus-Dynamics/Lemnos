@@ -243,6 +243,11 @@ pub fn pointer_file_slot(file: &[u8; POINTER_FILE_BYTES]) -> Option<String> {
 /// The refusal for a `config.txt` that lacks [`SELECT_LINE`], and for one that is not text. Static, so
 /// the driver's health can carry it without allocating.
 pub const SELECT_REFUSAL: &str = "config.txt has no `include default.txt` line: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt carries the lines of the image's own text (firmware::CONFIG_TXT)";
+/// The refusal for a `config.txt` carrying the old mask filter (`[boot_count&4]`, the earlier Pi 5 text). Its
+/// `ARG&MASK` form is selected at counts 4 to 7 and 12 to 15 and not at 8 to 11, so the firmware bounces
+/// between the pointers, and `pick` models the threshold only. Lemnos never rewrites config.txt, so such a
+/// board is refused until its boot partition is rebuilt offline.
+pub const OLD_FILTER_REFUSAL: &str = "config.txt carries the old count filter `[boot_count&4]`, whose mask form bounces between the pointers: Lemnos never rewrites config.txt, so no slot is set up on this boot partition; rebuild the boot partition offline (lemnos-ctl boot-partition) to get the threshold form `[boot_count>3]`";
 /// The refusal for a `config.txt` that is not text.
 pub const NOT_TEXT_REFUSAL: &str = "config.txt is not text: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt is the image's own text";
 
@@ -252,6 +257,9 @@ pub fn config_refusal(text: &[u8]) -> Option<&'static str> {
     let Ok(text) = std::str::from_utf8(text) else {
         return Some(NOT_TEXT_REFUSAL);
     };
+    if text.lines().any(|l| l.trim().starts_with("[boot_count&")) {
+        return Some(OLD_FILTER_REFUSAL);
+    }
     (!text.lines().any(|l| l.trim() == SELECT_LINE)).then_some(SELECT_REFUSAL)
 }
 
