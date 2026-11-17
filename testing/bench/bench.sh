@@ -111,6 +111,8 @@ build() {
   cd "$repo"
   CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --profile service "${target[@]}" \
     -p lemnosd -p lemnos-ctl
+  # The 200 Hz stamping step: a static Rust binary, because the board has no python3.
+  CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --profile service "${target[@]}" -p lemnos-bench-stamp
   local name
   while read -r name; do
     case $name in
@@ -121,14 +123,14 @@ build() {
   done < <(service_names)
 }
 build
-for bin in lemnosd lemnos-ctl; do
+for bin in lemnosd lemnos-ctl lemnos-bench-stamp; do
   [ -x "$bin_dir/$bin" ] || die "$bin_dir/$bin is missing after the build"
 done
 
 work=$out/work
 mkdir -p "$work"
-cp "$bench_dir/board.toml" "$bench_dir/stamp.py" "$bench_dir/board-side.sh" "$work/"
-cp "$bin_dir/lemnosd" "$bin_dir/lemnos-ctl" "$work/"
+cp "$bench_dir/board.toml" "$bench_dir/board-side.sh" "$work/"
+cp "$bin_dir/lemnosd" "$bin_dir/lemnos-ctl" "$bin_dir/lemnos-bench-stamp" "$work/"
 
 # Rows for every key of the reference set. A step that measures a key writes a later row, which
 # wins. So a key that no step reached stays not measured, with the reason here.
@@ -181,14 +183,15 @@ real_run() {
   arch=$(ssh_run "uname -m") || die "cannot reach $board over ssh"
   printf '%s\n' "$arch" >"$out/board-arch.txt"
   ssh_run "mkdir -p '$remote'"
-  tar -C "$work" -cf - lemnosd lemnos-ctl board.toml stamp.py board-side.sh |
+  tar -C "$work" -cf - lemnosd lemnos-ctl lemnos-bench-stamp board.toml board-side.sh |
     ssh ${BENCH_SSH_OPTS:-} "$board" "tar -C '$remote' -xf -"
 
   units=$(ssh_run "$sudo systemctl list-units --type=service --state=active --plain --no-legend 'lemnos*' ${BENCH_EXTRA_UNITS:-} | awk '{print \$1}'") ||
     die "could not list the services on $board"
   : >"$stopped"
   note "stopping on $board: ${units:-no services matched}"
-  for unit in $units; do
+  # Dependents first, lemnosd last: restore_services starts lemnosd first (it is the last one stopped).
+  for unit in $(printf '%s\n' $units | awk '$0 != "lemnosd.service"') $(printf '%s\n' $units | awk '$0 == "lemnosd.service"'); do
     ssh_run "$sudo systemctl stop '$unit'" || die "could not stop $unit"
     printf '%s\n' "$unit" >>"$stopped"
   done

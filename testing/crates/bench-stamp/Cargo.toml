@@ -1,0 +1,12 @@
+[package]
+name = "lemnos-bench-stamp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The bench's 200 Hz stamping step: stamps each lemnos-ctl watch line with the monotonic clock and prints the IMU rows (replaces stamp.py on boards without python3)"
+
+[lints]
+workspace = true
+
+[dependencies]
