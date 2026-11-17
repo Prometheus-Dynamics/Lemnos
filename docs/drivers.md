@@ -381,8 +381,8 @@ by omission):
 | `hw-watchdog` | `identity` | (none) | dimensionless | (none) | none | none | bind: read from sysfs when the driver binds (the chip's identity text; no figure) |
 | `hw-watchdog` | `bootstatus` | (none) | dimensionless | (none) | none | none | bind: read from sysfs when the driver binds (the boot status (0 or 1); no figure) |
 | `hw-watchdog` | `state` | (none) | dimensionless | (none) | none | none | bind: read from sysfs when the driver binds (the device state text; no figure) |
-| `ov9782` | `exposure` (value and control) | line | known | 1 line to the selected mode's frame length less 25 lines; unknown before a mode is selected | 1 | none | chip: the mode table (`MODES`) and `EXPOSURE_MARGIN` |
-| `ov9782` | `frame_length` (value and control) | line | known | the selected mode's frame length min to max; unknown before a mode is selected | 1 | none | chip: the mode table |
+| `ov9782` | `exposure` (value and control) | line | known | 1 line to the selected mode's frame length less 25 lines; before a mode is selected, the envelope over every mode (up to the greatest frame length's maximum less 25 lines) | 1 | none | chip: the mode table (`MODES`) and `EXPOSURE_MARGIN` |
+| `ov9782` | `frame_length` (value and control) | line | known | the selected mode's frame length min to max; before a mode is selected, the envelope over every mode (least minimum to greatest maximum) | 1 | none | chip: the mode table |
 | `ov9782` | `analogue_gain` (value and control) | (none): a ratio, 16 is one times | dimensionless | `0x10` to `0xff` (16 to 255), the codes in every mode | 1 | none | chip: `ANALOGUE_GAIN_RANGE` |
 | `vcm` | `position` | (none) | dimensionless | `min` (board, default 0) to `max` (board, default 2^bits − 1 of the chip) | 1 | none | board for `min` and `max`; chip for the default (1023 or 4095) |
 | `gpio-power-switch` | `power.on`, `power.fault` | switch | dimensionless | (none) | none | none | a switch: no figure |
