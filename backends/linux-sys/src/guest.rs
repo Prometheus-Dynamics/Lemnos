@@ -171,6 +171,23 @@ pub fn regjob_open(node: BorrowedFd<'_>, arg: &mut [u8; 24]) -> io::Result<Owned
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `LEMNOS_IOC_PISP_BE_CREATE`, `_IOWR('L', 0xb0, struct lemnos_pisp_be_create)`: 80 bytes.
+const LEMNOS_IOC_PISP_BE_CREATE: u32 = iowr::<[u8; 80]>(b'L', 0xb0);
+
+/// Makes a frame stream on a PiSP back-end block of the control node. `arg` is the request's 80
+/// bytes as the kernel reads and writes them: `struct lemnos_stream_create` (56 bytes) in, then the
+/// back end's out fields. The stream's descriptor (at byte 36) is returned owned.
+///
+/// # Errors
+///
+/// The kernel refuses the stream, with its errno.
+pub fn pisp_be_create(node: BorrowedFd<'_>, arg: &mut [u8; 80]) -> io::Result<OwnedFd> {
+    ioctl_bytes(node, LEMNOS_IOC_PISP_BE_CREATE, arg)?;
+    let fd = i32::from_ne_bytes([arg[36], arg[37], arg[38], arg[39]]);
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// Sets the open-descriptor limit, soft and hard, to `limit`.
 ///
 /// # Errors
