@@ -189,6 +189,9 @@ impl Mirror {
     pub fn set_devices(&mut self, specs: Vec<DeviceSpec>, identity: Option<Vec<(String, String)>>) {
         let mut held = std::mem::take(&mut self.devices);
         let mut kept = Vec::with_capacity(specs.len());
+        // Whether a device came into the set by name. A device with the same name and a new shape
+        // is updated in its own slot and is not a change of the set (see the set generation).
+        let mut came = false;
         for spec in specs {
             let same = held
                 .iter()
@@ -213,7 +216,7 @@ impl Mirror {
                     self.added.push(slot);
                     // The same device with another shape (its items, say, once it runs) is a new
                     // slot, but not a new device: its generation carries on, one step on, so a
-                    // generation never goes back.
+                    // generation never goes back. It is not a change of the set either.
                     let (generation, generation_dirty) =
                         match held.iter().find(|d| d.spec.name == spec.name) {
                             Some(d) => {
@@ -221,7 +224,10 @@ impl Mirror {
                                     || shown_shape_moved(&d.spec, &spec);
                                 (d.generation + u64::from(moved), moved)
                             }
-                            None => (1, true),
+                            None => {
+                                came = true;
+                                (1, true)
+                            }
                         };
                     kept.push(Device {
                         slot,
@@ -242,8 +248,12 @@ impl Mirror {
                 }
             }
         }
+        // A device left the set when no device of its name is in the new list.
+        let went = held
+            .iter()
+            .any(|d| !kept.iter().any(|k| k.spec.name == d.spec.name));
         self.removed.extend(held.iter().map(|d| d.slot));
-        if !self.added.is_empty() || !self.removed.is_empty() {
+        if came || went {
             self.set_generation += 1;
             self.set_dirty = true;
         }
@@ -550,6 +560,24 @@ mod tests {
         assert_eq!(changes.added.len(), 1);
         assert_eq!(changes.added[0].0, 2);
         assert!(changes.removed.is_empty());
+    }
+
+    #[test]
+    fn a_device_that_comes_up_after_the_set_was_published_moves_its_slot_and_not_the_set() {
+        // Not running at the first publication: no items. It comes up later, with items, while
+        // the set is steady. The device keeps its name, so the set does not move; its slot does.
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "imu", &[])], None);
+        let first = take(&mut mirror);
+        assert_eq!(first.set, Some(1));
+        let set = mirror.set_generation();
+        mirror.set_devices(vec![spec(0, "imu", &["count"])], None);
+        let changes = take(&mut mirror);
+        assert_eq!(mirror.set_generation(), set, "the set did not change");
+        assert!(changes.set.is_none(), "no set change goes out");
+        assert_eq!(changes.removed, [0], "the old slot goes");
+        assert_eq!(changes.added.len(), 1);
+        assert_ne!(changes.added[0].0, 0, "the device has a new slot");
     }
 
     #[test]
