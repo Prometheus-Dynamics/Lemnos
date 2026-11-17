@@ -16,15 +16,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# scripts/gate.sh runs in parts: the checks, and four shards of the workspace tests. The gate job at
+# the end is the one check to require: it passes only when every part passed.
 jobs:
-  gate:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       # rust-toolchain.toml selects the toolchain and its components.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # dtc and fdtoverlay: the device-tree loader tests (service/devtree/tests/apply.rs) run them.
+        with:
+          shared-key: next-checks
+      # dtc: the documents and devtree checks may run the dtc on PATH, as the single gate job did.
       - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
       # The mdev check (testing/mdev/check.sh) runs the BusyBox 1.37.0 and 1.38.0 mdev, built from their
       # release tarballs (sha256 pinned in testing/mdev/build-busybox.sh) with zig as the C compiler: the
@@ -46,12 +50,35 @@ jobs:
         with:
           path: ${{ runner.temp }}/busybox
           key: ${{ steps.busybox.outputs.cache-primary-key }}
-      # The real dtmerge, built from raspberrypi/utils at a pinned commit (3f5fa2965292168b7e428976044f1ac2da50130a,
+      - run: ./scripts/gate.sh
+        env:
+          GATE_PART: checks
+          BUSYBOX_DIR: ${{ runner.temp }}/busybox
+          ZIG_CC: ${{ runner.temp }}/zig/bin/python -m ziglang cc
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: tests ${{ matrix.shard }}/4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: next-tests-${{ matrix.shard }}
+      # dtc: the device-tree loader tests (service/devtree/tests/apply.rs) run the dtc on PATH.
+      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      # dtmerge (shard 1, which holds lemnos-ctl: scripts/gate.sh): the real tool, built from raspberrypi/utils at a pinned commit (3f5fa2965292168b7e428976044f1ac2da50130a,
       # dtmerge: security fixes for dtoverlay.c, 2026-11-02): the dtmerge/ directory alone, which needs libfdt.
       # The host-merge tests in service/ctl/tests/firmware_overlays.rs run it through LEMNOS_DTMERGE, and the
       # __overrides__ test runs only there (CI is set, so a missing tool fails the job).
       - run: sudo apt-get install -y libfdt-dev cmake
+        if: matrix.shard == 1
       - name: Build dtmerge at the pinned commit
+        if: matrix.shard == 1
         run: |
           git init -q "$RUNNER_TEMP/utils"
           git -C "$RUNNER_TEMP/utils" fetch -q --depth 1 https://github.com/raspberrypi/utils.git 3f5fa2965292168b7e428976044f1ac2da50130a
@@ -61,5 +88,18 @@ jobs:
           echo "LEMNOS_DTMERGE=$RUNNER_TEMP/dtmerge-build/dtmerge" >> "$GITHUB_ENV"
       - run: ./scripts/gate.sh
         env:
-          BUSYBOX_DIR: ${{ runner.temp }}/busybox
-          ZIG_CC: ${{ runner.temp }}/zig/bin/python -m ziglang cc
+          GATE_PART: tests:${{ matrix.shard }}/4
+
+  # The one check to require. It passes only when every part above passed.
+  gate:
+    name: gate
+    needs: [checks, tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed
+        run: |
+          echo "checks: ${{ needs.checks.result }}"
+          echo "tests: ${{ needs.tests.result }}"
+          test "${{ needs.checks.result }}" = success
+          test "${{ needs.tests.result }}" = success
