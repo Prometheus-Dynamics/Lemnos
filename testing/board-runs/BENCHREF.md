@@ -146,3 +146,23 @@ whose `default_on = true` drives the line high again. So `off` never switched th
 Not changed here: the fix needs a decision on where the off path lives (daemon routing to the switch's `set`, or a
 new lifecycle hook in engine/core, which is an A-series change). Until then, the harness's usb.cycle stays
 `not_measured`, and the switch is only reachable through `call ... set`.
+
+## usb.cycle through the fixed build (pr/USB-OFF, ea56e87d): measured (2026-11-17, 12:33 to 12:39 local)
+
+Build under test: `origin/next` 8642b8e8 plus the USB-OFF change (pr/USB-OFF, ea56e87d), aarch64 musl, service profile.
+Board: Raze #2, boot 0f80a3d6-6aa1-4814-ba3d-800bfff5dd06 (unchanged). Failsafe armed and cancelled each time.
+
+Direct check (`lemnos-ctl off usb-a-power`, then `on`; RAZE/flip/u5/usb3-log.txt):
+- before: `gpio-20` is `out hi`, held by `lemnos`; sysfs USB devices 2.
+- `off`: the line is `out lo`, still held by `lemnos`; devices drop to 1 within about 0.4 s of the request.
+- `on`: `out hi`, devices back to 2 within about 0.4 s.
+
+Bench row (`board-side.sh` usb.cycle, the same run as the rows below):
+- usb.cycle: measured, devices 2, down after 50 ms, back after 490 ms.
+
+Other rows in this run (same build): imu 9000 of 9000 delivered, 0 misses, largest gap 5.68 ms, 274 repeats;
+cpu idle 0.00 %, 50 Hz 0.53 %, 200 Hz 1.51 %; threads 13, PSS 2936 kB. The CPU load rows are still lower than dev's,
+recorded as they were (see the rerun 4 section).
+
+Restore: lemnosd and lemnos-orion active, `systemctl --failed` 0, helios-engine active, failsafe stopped, the remote run
+directory removed.
