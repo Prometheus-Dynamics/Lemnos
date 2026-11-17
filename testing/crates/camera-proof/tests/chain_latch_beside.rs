@@ -70,10 +70,13 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
     service.stop();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!ok, "a latch beside the chain must fail the proof:\n{text}");
-    // Whichever side loses the race for the block (the latch's raw start, or the front end's
-    // first job), the proof fails and the failure names the latch or the receiver start.
+    // The latch's raw start is the receiver's refusal while the front end holds the block: the
+    // proof's failure names the latch, and the latch's own error names the start that was refused
+    // and why (BUSY, the kernel's EBUSY for a second stream on the node).
+    assert!(text.contains("sensor latch failed"), "{text}");
+    let refused = format!("receiver.start failed: {:?}", lemnos_core::Status::BUSY);
     assert!(
-        text.contains("sensor latch failed") || text.contains("receiver.start"),
-        "{text}"
+        text.contains(&refused),
+        "the latch's refusal must be `{refused}` (BUSY from the receiver's start):\n{text}"
     );
 }
