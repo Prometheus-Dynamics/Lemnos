@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0
+//! The module entry of lemnos.ko, Rust side (stage 1a of the port, docs/kernel-module.md).
+//!
+//! The Rust half owns `module_init` and `module_exit`, the module's name, description, license and
+//! imports, and the registrations of the module's platform driver and its `/dev/lemnos` node. The
+//! bus, the csi2 receiver and the descriptors the registrations take (`lem_driver`, `lem_misc`) are
+//! still C in this stage: lemnos_core.c exports them with the Rust owner. Built only with
+//! CONFIG_RUST; without it lemnos_core.c keeps `module_init`, as before.
+//!
+//! The order and the unwinding are those of the C `lem_init` and `lem_exit` it replaces.
+
+use core::ptr::addr_of;
+use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
+
+// Opaque: the C descriptors are passed by address only. Their types are struct platform_driver and
+// struct miscdevice, which this file never reads.
+unsafe extern "C" {
+    static lem_driver: [u8; 0];
+    static lem_misc: [u8; 0];
+    /// lemnos_bus.c: the I2C and SPI bus glue. Its exit undoes its init.
+    fn lem_bus_init() -> c_int;
+    fn lem_bus_exit();
+    /// lemnos_rp1_csi2.c: the csi2 receiver's platform driver and its node.
+    fn lem_rp1_csi2_register() -> c_int;
+    fn lem_rp1_csi2_unregister();
+    /// `platform_driver_register` is a macro over this, with THIS_MODULE and KBUILD_MODNAME.
+    fn __platform_driver_register(drv: *mut c_void, owner: *mut c_void, name: *const c_char) -> c_int;
+    fn platform_driver_unregister(drv: *mut c_void);
+    fn misc_register(misc: *mut c_void) -> c_int;
+    fn misc_deregister(misc: *mut c_void);
+}
+
+struct LemnosEntry;
+
+impl kernel::Module for LemnosEntry {
+    fn init(module: &'static ThisModule) -> Result<Self> {
+        // The descriptors are statics the C module defines (LEM_STATIC, lemnos_core.c). Only their
+        // addresses are taken; the C side never frees them.
+        let (driver, misc) = (addr_of!(lem_driver) as *mut c_void, addr_of!(lem_misc) as *mut c_void);
+        // SAFETY: the bus is initialised once, here, at module load; its exit is paired below.
+        to_result(unsafe { lem_bus_init() })?;
+        // SAFETY: THIS_MODULE is `module`; the name is the module's, the same string KBUILD_MODNAME gives.
+        if let Err(e) = to_result(unsafe {
+            __platform_driver_register(driver, module.as_ptr().cast(), c"lemnos".as_ptr().cast())
+        }) {
+            // SAFETY: undoes lem_bus_init, which succeeded above.
+            unsafe { lem_bus_exit() };
+            return Err(e);
+        }
+        // SAFETY: registers the csi2 receiver; undone in the error path below and in Drop.
+        if let Err(e) = to_result(unsafe { lem_rp1_csi2_register() }) {
+            // SAFETY: undoes the platform driver and the bus, both registered above.
+            unsafe {
+                platform_driver_unregister(driver);
+                lem_bus_exit();
+            }
+            return Err(e);
+        }
+        // SAFETY: registers /dev/lemnos from the C descriptor; undone in the error path and in Drop.
+        if let Err(e) = to_result(unsafe { misc_register(misc) }) {
+            // SAFETY: undoes the csi2 receiver, the platform driver and the bus, all registered above.
+            unsafe {
+                lem_rp1_csi2_unregister();
+                platform_driver_unregister(driver);
+                lem_bus_exit();
+            }
+            return Err(e);
+        }
+        Ok(LemnosEntry)
+    }
+}
+
+impl Drop for LemnosEntry {
+    fn drop(&mut self) {
+        // The reverse of init, as lem_exit does it.
+        let (driver, misc) = (addr_of!(lem_driver) as *mut c_void, addr_of!(lem_misc) as *mut c_void);
+        // SAFETY: called once, at unload, after a successful init; each call undoes one init step.
+        unsafe {
+            misc_deregister(misc);
+            lem_rp1_csi2_unregister();
+            platform_driver_unregister(driver);
+            lem_bus_exit();
+        }
+    }
+}
+
+module! {
+    type: LemnosEntry,
+    name: "lemnos",
+    authors: ["Lemnos"],
+    description: "Lemnos: platform blocks for drivers in user space",
+    license: "GPL",
+    imports_ns: ["DMA_BUF"],
+}
