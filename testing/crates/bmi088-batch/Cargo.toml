@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-bmi088-batch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "B8 board-check tool: reads the accelerometer's FIFO batches through the daemon for a capture, and reports what the chip delivered (records, gaps, misses, repeats, reads that came back empty)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-contract-accelerometer = { path = "../../../contracts/accelerometer" }

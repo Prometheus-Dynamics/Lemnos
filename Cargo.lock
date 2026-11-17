@@ -369,6 +369,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-bmi088-batch"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-contract-accelerometer",
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-builtin-init"
 version = "2.0.1-dev"
 dependencies = [

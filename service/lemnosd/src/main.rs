@@ -80,7 +80,7 @@ fn drivers() -> Vec<lemnos_host::DriverEntry> {
     #[cfg(feature = "fake-devices")]
     {
         use lemnos_fake_devices::{
-            FakeAccelerometer, FakeCounter, FakeGyroscope, FakeMagnetometer,
+            FakeAccelerometer, FakeCounter, FakeFifoAccelerometer, FakeGyroscope, FakeMagnetometer,
         };
         use lemnos_host::entry;
         drivers.extend([
@@ -88,6 +88,7 @@ fn drivers() -> Vec<lemnos_host::DriverEntry> {
             entry::<FakeGyroscope>(),
             entry::<FakeMagnetometer>(),
             entry::<FakeCounter>(),
+            entry::<FakeFifoAccelerometer>(),
         ]);
     }
     drivers
