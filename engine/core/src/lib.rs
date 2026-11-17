@@ -39,7 +39,8 @@ pub use description::{
 };
 pub use driver::{
     BoardDevice, BoardView, CallerId, Driver, FIGURES, Figures, Health, HostClock, HostOwned,
-    JobId, JobState, Lifecycle, Manifest, MethodId, Origin, Reply, Retry,
+    JobId, JobState, Lifecycle, Manifest, MethodId, Origin, RESUME_BYTES, Reply, ResumeRecord,
+    Retry,
 };
 #[cfg(feature = "float")]
 pub use fixed::to_f32;

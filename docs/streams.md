@@ -497,7 +497,12 @@ reason, state `running`, until it is back.
 
 Which recovery. `Lost` when the host bound the device again: a new driver instance, so what the
 caller gave the old one (mode, controls, started) is gone and the consumer selects, configures and
-starts again. `Kept` when the same instance's health went back to ok.
+starts again. `Kept` when the same instance's health went back to ok. A rebind (the driver reports
+`Health::Gone`) is `Kept` too when the new instance takes up the resume record the old one kept
+(`Lifecycle::resume_record`, then `resume`, in `docs/writing-a-driver.md`): the stall is lost only if
+that fails. A driver that panics keeps nothing, so a panic is `Lost`, and so is a switch off or on by
+hand. Each device's record is taken up by the next bind that succeeds, once, and a bind that is
+refused keeps it for the next one.
 
 Sequence across a stall (from `drivers/rp1-csi2`): the frame's `sequence` is the receiver driver's
 count of the block's frame starts since its own `start`, less one. A silent sensor raises no frame
@@ -507,9 +512,12 @@ before it, and the frames the sensor never made are not counted. The stall shows
 and `Next::Resumed` and as a gap in the frames' timestamps (the first timestamp after it is later
 than the last before it by about the stall). Counted gaps in the sequence are frames the block saw
 start while it was running and that were not delivered (dropped for want of a buffer, or taken back
-from a reader that fell behind), not the sensor's silence. When the receiver driver is rebound (a new
-instance, `start` again) the count begins at zero: a sequence lower than the one before means a
-restart. A frame after a stall is identified by `Next::Resumed`, which comes before it.
+from a reader that fell behind), not the sensor's silence. When the receiver driver is rebound and
+resumes from its record (`drivers/rp1-csi2`: the same configuration, started again), the sequence
+carries on from where the old instance left it, so the first frame after the stall takes the next
+number. A rebound receiver that starts fresh (`Lost`) counts from zero again: a sequence lower than
+the one before means a restart. A frame after a stall is identified by `Next::Resumed`, which comes
+before it.
 
 The sensor that stops sending. The `ov9782` driver does not wait for a write to fail: while it
 streams it reads its linked receiver's frame-start count once a watch (100 ms), and when that known

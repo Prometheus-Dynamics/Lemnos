@@ -1022,3 +1022,122 @@ fn a_receiver_with_no_node_is_refused_at_bind_as_absent_and_names_the_node() {
         )]
     );
 }
+
+#[test]
+fn a_streaming_receiver_resumes_streaming_with_its_link_packing_owner_and_numbering() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Unpacked16).unwrap();
+    Lifecycle::caller(&mut d, CallerId(7));
+    d.start().unwrap();
+    hw.with(|m| m.finished.push(frame(0, 0, 1)));
+    d.tick(0).unwrap();
+    hw.with(|m| m.finished.push(frame(1, 1, 2)));
+    d.tick(1_000_000).unwrap();
+    assert_eq!(frames.take_frame().map(|f| f.sequence), Some(0));
+    assert_eq!(frames.take_frame().map(|f| f.sequence), Some(1));
+    // The consumer gives its two frames back: the stream's buffers are its own again.
+    frames.return_buffer(0);
+    frames.return_buffer(1);
+    let record = Lifecycle::resume_record(&d).expect("a receiver keeps a record");
+    drop(d);
+
+    // A new instance on the same frames stream: the block is started again from nothing, so its
+    // own count begins at zero, and the frame numbering carries on from the record.
+    let (mut fresh, hw2) = driver_on(&frames);
+    assert!(
+        Lifecycle::resume(&mut fresh, &record),
+        "the receiver resumes"
+    );
+    assert_eq!(
+        fresh.link,
+        Some(raw10()),
+        "the link is configured as it was"
+    );
+    assert_eq!(fresh.packing, Packing::Unpacked16);
+    assert_eq!(fresh.state, crate::State::Streaming { next_check: None });
+    assert_eq!(fresh.owner, Some(CallerId(7)), "the owner the record names");
+    assert_eq!(hw2.with(|m| m.started), 1, "the block was started again");
+    // The block's own count restarted at zero: this is its first frame, on a buffer the resumed
+    // receiver holds (the consumer gave buffers 0 and 1 back before the rebind).
+    hw2.with(|m| m.finished.push(frame(0, 0, 3)));
+    fresh.tick(2_000_000).unwrap();
+    assert_eq!(
+        frames.take_frame().map(|f| f.sequence),
+        Some(2),
+        "the first frame after the resume carries on from the record: not 0 again"
+    );
+}
+
+#[test]
+fn a_block_that_refuses_to_start_on_resume_is_a_fresh_start_and_numbering_starts_again() {
+    // The real case: the block is not running when the rebind comes back, so its start is refused.
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    hw.with(|m| m.finished.push(frame(0, 0, 1)));
+    d.tick(0).unwrap();
+    let record = Lifecycle::resume_record(&d).expect("a record");
+    drop(d);
+
+    let (mut fresh, hw2) = driver_on(&frames);
+    hw2.with(|m| m.fail_start = Some(Status::IO));
+    assert!(
+        !Lifecycle::resume(&mut fresh, &record),
+        "a refused start is not resumed"
+    );
+    assert_eq!((fresh.state, fresh.link), (crate::State::Stopped, None));
+    assert_eq!(
+        fresh.relay.next_sequence(),
+        0,
+        "nothing is carried over from the record"
+    );
+
+    // A consumer's own configure and start work once the block answers again.
+    hw2.with(|m| m.fail_start = None);
+    fresh.configure(raw10(), Packing::Packed).unwrap();
+    fresh.start().unwrap();
+    assert_eq!(fresh.state, crate::State::Streaming { next_check: None });
+}
+
+#[test]
+fn a_stopped_receiver_keeps_its_link_and_does_not_start_the_block() {
+    let frames = stream(4);
+    let (mut d, _hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    let record = Lifecycle::resume_record(&d).expect("a record");
+
+    let (mut fresh, hw2) = driver_on(&frames);
+    assert!(Lifecycle::resume(&mut fresh, &record));
+    assert_eq!(fresh.link, Some(raw10()));
+    assert_eq!(fresh.state, crate::State::Stopped);
+    assert_eq!(
+        hw2.with(|m| m.started),
+        0,
+        "a receiver that was not started is not started"
+    );
+}
+
+#[test]
+fn a_record_that_does_not_decode_is_not_restored() {
+    let frames = stream(4);
+    let (mut d, _hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    let good = Lifecycle::resume_record(&d).expect("a record");
+    let short = lemnos_core::ResumeRecord::new(&good.bytes()[..20]).unwrap();
+    let mut other_version = good.bytes().to_vec();
+    other_version[0] = 2;
+    let other_version = lemnos_core::ResumeRecord::new(&other_version).unwrap();
+    let mut bad_packing = good.bytes().to_vec();
+    bad_packing[43] = 7;
+    let bad_packing = lemnos_core::ResumeRecord::new(&bad_packing).unwrap();
+    for record in [short, other_version, bad_packing] {
+        let (mut fresh, _) = driver_on(&frames);
+        assert!(!Lifecycle::resume(&mut fresh, &record));
+        assert_eq!(
+            fresh.link, None,
+            "nothing is restored from a record it refuses"
+        );
+    }
+}

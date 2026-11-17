@@ -12,8 +12,8 @@ use lemnos_core::{
     ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
     HostOwned, I2c, InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, Retry, Router, Spi, Status,
-    StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
+    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Spi,
+    Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 
 use crate::board::{
@@ -38,6 +38,14 @@ pub trait Instance: Send {
     /// See [`Driver::retrying`].
     fn retrying(&self) -> Option<Retry> {
         None
+    }
+    /// See [`Driver::resume_record`].
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        None
+    }
+    /// See [`Driver::resume`].
+    fn resume(&mut self, _record: &ResumeRecord) -> bool {
+        false
     }
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
@@ -84,6 +92,14 @@ impl<D: Driver + Send> Instance for D {
 
     fn retrying(&self) -> Option<Retry> {
         Driver::retrying(self)
+    }
+
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        Driver::resume_record(self)
+    }
+
+    fn resume(&mut self, record: &ResumeRecord) -> bool {
+        Driver::resume(self, record)
     }
 
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status {
@@ -500,6 +516,9 @@ struct Slot {
     lists: Vec<(String, Vec<String>)>,
     entry: Option<DriverEntry>,
     instance: Mutex<Option<Box<dyn Instance>>>,
+    /// What the last rebind kept for the next instance (see [`Inner::rebind`]). Held from the
+    /// rebind until a bind takes it up or the device is switched off or on.
+    resume: Mutex<Option<ResumeRecord>>,
     state: Mutex<DeviceState>,
     /// Goes up after each change to `state`. See [`DeviceInfo::revision`].
     revision: AtomicU64,
@@ -728,6 +747,7 @@ impl Slot {
             refusal,
             spec,
             instance: Mutex::new(None),
+            resume: Mutex::new(None),
             state: Mutex::new(state),
             revision: AtomicU64::new(0),
             hung: AtomicBool::new(false),
@@ -1152,6 +1172,15 @@ fn asks_rebind(instance: &dyn Instance) -> Option<&'static str> {
 }
 
 impl Inner {
+    /// Lets go of what a rebind kept, when the device is switched off or on by hand: the next
+    /// instance is a fresh start, so a stall that was waiting on the record reads lost.
+    fn forget_record(&self, slot: &Slot) {
+        if lock(&slot.resume).take().is_some() {
+            self.streams
+                .producer_failed(slot.index, self.clock.now_ns(), true);
+        }
+    }
+
     /// Records that a device's state has just been changed: its revision and the host's count go
     /// up. Called after the change is written.
     fn moved(&self, slot: &Slot) {
@@ -1603,12 +1632,19 @@ impl Inner {
     /// the old one is lost). Off for good (`auto_off_after`): the stream ends, device failed.
     fn streams_follow(&self, slot: &Slot, next: &DeviceState) {
         match next {
-            DeviceState::Off(_) => self
-                .streams
-                .end_device(slot.index, lemnos_wire::ring::STATE_DEVICE_FAILED),
-            DeviceState::Backoff { .. } => {
+            DeviceState::Off(_) => {
+                // Off for good: nothing a rebind kept survives it.
+                *lock(&slot.resume) = None;
                 self.streams
-                    .producer_failed(slot.index, self.clock.now_ns(), true);
+                    .end_device(slot.index, lemnos_wire::ring::STATE_DEVICE_FAILED);
+            }
+            DeviceState::Backoff { .. } => {
+                // With a record held, the next bind decides whether the stall is lost: it is
+                // `Lost` only if the new instance does not take the record up (see `bind`). Without
+                // one, a new instance is a fresh start from the first failure.
+                let held = lock(&slot.resume).is_some();
+                self.streams
+                    .producer_failed(slot.index, self.clock.now_ns(), !held);
             }
             DeviceState::Running => {}
         }
@@ -1712,7 +1748,17 @@ impl Inner {
     /// The driver says what it was bound with is dead: let go of it and bind it again under
     /// the failure rule. If a hint is what made it look, the hardware may already be back, so
     /// the bind is brought forward as the hint would have brought it.
+    ///
+    /// What the driver keeps for its next instance is read first, while the instance is still held
+    /// (`Driver::resume_record`), and the next bind takes it up. A driver that panics while it
+    /// answers keeps nothing: a panic is a fault, not a rebind.
     fn rebind(&self, slot: &Slot, guard: MutexGuard<'_, Option<Box<dyn Instance>>>, why: &str) {
+        let record = guard.as_ref().and_then(|instance| {
+            catch_unwind(AssertUnwindSafe(|| instance.resume_record()))
+                .ok()
+                .flatten()
+        });
+        *lock(&slot.resume) = record;
         Self::let_go(guard);
         self.fault(slot, why);
         if slot.hinted.swap(false, Ordering::AcqRel) {
@@ -2215,26 +2261,37 @@ impl Inner {
                 refused: &refused,
             };
             let link = target.spec.link.as_deref();
-            let built = catch_unwind(AssertUnwindSafe(|| {
+            // What the device's last rebind kept, if anything: the new instance is asked to take it
+            // up before it is ever ticked (`Driver::resume`).
+            let record = *lock(&target.resume);
+            let built = catch_unwind(AssertUnwindSafe(|| -> Result<(Box<dyn Instance>, bool)> {
                 let mut res = Resources::new(&mut binding, link);
-                entry.factory.bind(&mut res, &config)
+                let mut instance = entry.factory.bind(&mut res, &config)?;
+                let kept = record.is_some_and(|record| instance.resume(&record));
+                Ok((instance, kept))
             }));
             let missing = binding.missing.take();
             *lock(&target.bind_refusal) = refused.lock().unwrap_or_else(|e| e.into_inner()).take();
             match built {
-                Ok(Ok(instance)) => {
+                Ok(Ok((instance, kept))) => {
                     *lock(&target.missing) = missing;
                     *lock(&target.instance) = Some(instance);
-                    Ok(0)
+                    Ok(usize::from(kept))
                 }
                 Ok(Err(status)) => Err(status),
                 Err(_) => Err(Status::PANIC),
             }
         }));
         match lane.run(&[], &mut [], self.options.call_deadline, work) {
-            Ok(Ok(_)) => {
+            Ok(Ok(kept)) => {
                 slot.errors.store(0, Ordering::Relaxed);
                 slot.bound_ns.store(self.clock.now_ns(), Ordering::Release);
+                // The record was for this bind, and is spent either way. One the new instance did
+                // not take up makes the stall a new instance's, so it reads lost.
+                if lock(&slot.resume).take().is_some() && kept == 0 {
+                    self.streams
+                        .producer_failed(slot.index, self.clock.now_ns(), true);
+                }
                 // Before the device shows as running, so a look that finds it running finds the stamp too.
                 if let Some(instance) = lock(&slot.instance).as_ref() {
                     self.stamp_running_ok(&slot, instance.as_ref(), true);
@@ -3545,6 +3602,7 @@ impl Host {
     /// Switches a device off and lets go of its hardware.
     pub fn off(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
+        self.inner.forget_record(&slot);
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
         self.inner.moved(&slot);
         self.inner.end_jobs(&slot, Status::INTERRUPTED);
@@ -3561,6 +3619,8 @@ impl Host {
     /// Switches a device on, whatever turned it off, and binds it now.
     pub fn on(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
+        // A switch on is a fresh start: what a rebind kept is not carried over it.
+        self.inner.forget_record(&slot);
         slot.short_runs.store(0, Ordering::Release);
         // Not announced: the bind that follows announces the device once, as running, or as
         // retrying with the reason its bind gave. Announcing "switched on" first would be a

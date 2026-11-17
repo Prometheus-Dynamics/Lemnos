@@ -172,7 +172,18 @@ and while a call is running on the driver the host reports it as not yet looked 
 One failure a driver can't get past by trying again: what it was bound with is dead, such as the
 handle of a USB device that was unplugged. Its `health` then returns `Health::Gone(reason)`. The
 host looks after every method and every tick, drops the driver and binds it again under the same
-rule, which opens whatever is there now by its board name. Use `Health::Failed` for everything the
+rule, which opens whatever is there now by its board name. Before it lets the old
+instance go, the host asks it for a resume record (`Lifecycle::resume_record`): up to 64 bytes the driver
+writes from its own fields, without touching the hardware. The new instance is asked to take the record
+up (`Lifecycle::resume`) once, after its bind and before its first tick. `resume` returns `true` only when
+the instance is as the old one was (its state is back and it runs as it did), which makes the device's
+stream read `Kept`; `false` is a fresh start, `Lost`, and the instance keeps running as bound. Both
+default to nothing, so a driver that keeps nothing is `Lost` as before. A panic keeps nothing (a panic is a
+fault, not a rebind). A record is for the next bind only: a refused bind keeps it, and a switch off or on by
+hand drops it. The ov9782 keeps its mode, controls, flips, test pattern and owner and programs the sensor
+again when it was streaming; the rp1-csi2 keeps its link, packing, owner and frame numbering and starts the
+block again. Both refuse a record they cannot restore, and both are `Lost` when the bus or the block does
+not answer in `resume`. Use `Health::Failed` for everything the
 driver can recover from itself. That includes a driver in its own
 recovery or backoff state (a sensor restarting after a bus error): it reports `Failed` with its
 reason until it is back, so a stream it feeds reads as stalled (`docs/streams.md`, "Producer state").

@@ -205,6 +205,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::retrying(self)
             }
 
+            fn resume_record(&self) -> ::core::option::Option<::lemnos_core::ResumeRecord> {
+                <Self as ::lemnos_core::Lifecycle>::resume_record(self)
+            }
+
+            fn resume(&mut self, __record: &::lemnos_core::ResumeRecord) -> bool {
+                <Self as ::lemnos_core::Lifecycle>::resume(self, __record)
+            }
+
             const TICKS: bool = <Self as ::lemnos_core::Lifecycle>::TICKS;
 
             fn tick(&mut self, __now_ns: u64) -> ::core::option::Option<u64> {

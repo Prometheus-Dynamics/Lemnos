@@ -2080,3 +2080,117 @@ fn each_mode_describes_its_own_frame_length_exposure_and_gain_ranges_once_select
         );
     }
 }
+
+#[test]
+fn a_streaming_sensor_resumes_streaming_with_its_mode_controls_flips_and_owner() {
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    Lifecycle::caller(&mut s, CallerId(7));
+    start_up(&mut s);
+    s.set_controls(Controls {
+        exposure: Some(32),
+        analogue_gain: Some(0x18),
+        digital_gain: None,
+        frame_length: Some(2000),
+    })
+    .unwrap();
+    s.set_flips(true, false).unwrap();
+    let kept = s.selected;
+    let record = Lifecycle::resume_record(&s).expect("a sensor keeps a record");
+    drop(s);
+
+    // The host binds a new instance on the same bus: the chip is the same chip.
+    let mut fresh = sensor_on(&bus, &[]);
+    clear(&bus);
+    assert!(Lifecycle::resume(&mut fresh, &record), "the sensor resumes");
+    assert_eq!(
+        fresh.state,
+        State::Streaming,
+        "it is streaming again, with no call from the consumer"
+    );
+    assert_eq!(
+        fresh.selected, kept,
+        "the mode and the controls in force are kept"
+    );
+    assert!(
+        fresh.flip_horizontal && !fresh.flip_vertical,
+        "the flips are kept"
+    );
+    assert!(
+        writes(&bus).contains(&(MODE_SELECT, STREAMING)),
+        "the configuration is written and the sensor started"
+    );
+    // The owner the record names stops the sensor when it goes away.
+    Lifecycle::caller_gone(&mut fresh, CallerId(7));
+    assert!(
+        writes(&bus).contains(&(MODE_SELECT, STANDBY)),
+        "the owner the record names stops the sensor"
+    );
+}
+
+#[test]
+fn a_stopped_sensor_keeps_its_selection_and_writes_nothing_on_resume() {
+    let (mut s, bus) = sensor();
+    s.select_mode(1).unwrap();
+    let kept = s.selected;
+    let record = Lifecycle::resume_record(&s).expect("a record");
+
+    let mut fresh = sensor_on(&bus, &[]);
+    clear(&bus);
+    assert!(Lifecycle::resume(&mut fresh, &record));
+    assert_eq!(fresh.selected, kept);
+    assert_eq!(fresh.state, State::Stopped);
+    assert_eq!(
+        writes(&bus),
+        vec![],
+        "a sensor that was not started is not written"
+    );
+}
+
+#[test]
+fn a_sensor_whose_chip_does_not_answer_on_resume_is_a_fresh_start_and_starts_again_later() {
+    // The real case: the rebind happens while the chip is not on the bus (a supply dip). The
+    // resume cannot program it, so the stream reads lost, and the next start works.
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    start_up(&mut s);
+    let record = Lifecycle::resume_record(&s).expect("a record");
+    drop(s);
+
+    let mut fresh = sensor_on(&bus, &[]);
+    bus.down.store(true, Ordering::SeqCst);
+    assert!(
+        !Lifecycle::resume(&mut fresh, &record),
+        "a chip that does not answer is not resumed"
+    );
+    assert_eq!(fresh.state, State::Stopped);
+    assert_eq!(fresh.selected, None, "a fresh start selects nothing");
+
+    bus.down.store(false, Ordering::SeqCst);
+    fresh.select_mode(0).unwrap();
+    start_up(&mut fresh);
+    assert_eq!(fresh.state, State::Streaming);
+}
+
+#[test]
+fn a_record_that_is_not_of_this_layout_or_names_no_mode_is_not_restored() {
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    let good = Lifecycle::resume_record(&s).expect("a record");
+
+    let short = ResumeRecord::new(&good.bytes()[..10]).unwrap();
+    let mut other_version = good.bytes().to_vec();
+    other_version[0] = 2;
+    let other_version = ResumeRecord::new(&other_version).unwrap();
+    let mut no_such_mode = good.bytes().to_vec();
+    no_such_mode[2..4].copy_from_slice(&99u16.to_le_bytes());
+    let no_such_mode = ResumeRecord::new(&no_such_mode).unwrap();
+    for record in [short, other_version, no_such_mode] {
+        let mut fresh = sensor_on(&bus, &[]);
+        assert!(!Lifecycle::resume(&mut fresh, &record));
+        assert_eq!(
+            fresh.selected, None,
+            "nothing is restored from a record it refuses"
+        );
+    }
+}

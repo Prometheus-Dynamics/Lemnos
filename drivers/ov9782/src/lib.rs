@@ -144,8 +144,8 @@ use lemnos_contract_camera_sensor::{
 };
 use lemnos_core::{
     CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, ErrorKind, Figures,
-    Health, I2c, Item, Key, Kind, Lifecycle, MethodId, Reader, RefusalKind, Result, Status,
-    StreamHandle, Unit, driver, status_of,
+    Health, I2c, Item, Key, Kind, Lifecycle, MethodId, Reader, RefusalKind, Result, ResumeRecord,
+    Status, StreamHandle, Unit, driver, status_of,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
@@ -353,6 +353,16 @@ struct Current {
 }
 
 impl Current {
+    /// The values of no mode: nothing is selected, so nothing reads them.
+    const fn zero() -> Self {
+        Self {
+            exposure: 0,
+            analogue_gain: 0,
+            frame_length: 0,
+            clamped: 0,
+        }
+    }
+
     fn defaults(mode: &ModeEntry) -> Self {
         Self {
             exposure: DEFAULT_EXPOSURE_LINES << EXPOSURE_FRACTION_BITS,
@@ -496,6 +506,65 @@ pub struct Ov9782 {
     owner: Option<CallerId>,
 }
 
+/// The version of the resume record's layout: a record of another version is not restored.
+const RESUME_VERSION: u8 = 1;
+/// The bytes of a resume record (see [`Lifecycle::resume_record`]).
+const RESUME_LEN: usize = 27;
+const FLAG_SELECTED: u8 = 1 << 0;
+const FLAG_STREAMING: u8 = 1 << 1;
+const FLAG_FLIP_H: u8 = 1 << 2;
+const FLAG_FLIP_V: u8 = 1 << 3;
+const FLAG_OWNED: u8 = 1 << 4;
+
+/// What a resume record says, decoded. Written by `resume_record`, read back by `resume`.
+struct Saved {
+    selected: bool,
+    index: u16,
+    current: Current,
+    streaming: bool,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    test_pattern: u16,
+    owner: Option<CallerId>,
+}
+
+impl Saved {
+    /// The record's values, or `None` for bytes that are not a record of this layout, or a mode
+    /// this driver does not have.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; RESUME_LEN] = bytes.try_into().ok()?;
+        if bytes[0] != RESUME_VERSION {
+            return None;
+        }
+        let flags = bytes[1];
+        let le16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        let le32 = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        let index = le16(2);
+        if flags & FLAG_SELECTED != 0 && usize::from(index) >= MODES.len() {
+            return None;
+        }
+        let mut owner = [0; 8];
+        owner.copy_from_slice(&bytes[19..27]);
+        Some(Self {
+            selected: flags & FLAG_SELECTED != 0,
+            index,
+            current: Current {
+                exposure: le32(4),
+                analogue_gain: le32(8),
+                frame_length: le32(12),
+                clamped: bytes[16],
+            },
+            streaming: flags & FLAG_STREAMING != 0,
+            flip_horizontal: flags & FLAG_FLIP_H != 0,
+            flip_vertical: flags & FLAG_FLIP_V != 0,
+            test_pattern: le16(17),
+            owner: (flags & FLAG_OWNED != 0).then(|| CallerId(u64::from_le_bytes(owner))),
+        })
+    }
+}
+
 /// The settings a board file gives the sensor.
 const KEYS: &[Key] = &[
     Key::optional("address", Kind::Int),
@@ -533,6 +602,71 @@ impl Lifecycle for Ov9782 {
             // A bus error on the standby write is reported by `stop`'s own path; the sensor then
             // stays as the bus left it (see the PR's notes on a failed standby).
             let _ = CameraSensor::stop(self);
+        }
+    }
+
+    /// What a rebind keeps: the mode and the controls in force, the flips and the test pattern,
+    /// whether the sensor was started and whose START it was. Read from the driver's own fields.
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        let mut out = [0; RESUME_LEN];
+        out[0] = RESUME_VERSION;
+        let (index, current) = self.selected.unwrap_or((0, Current::zero()));
+        let flags = [
+            (self.selected.is_some(), FLAG_SELECTED),
+            (self.state != State::Stopped, FLAG_STREAMING),
+            (self.flip_horizontal, FLAG_FLIP_H),
+            (self.flip_vertical, FLAG_FLIP_V),
+            (self.owner.is_some(), FLAG_OWNED),
+        ];
+        out[1] = flags
+            .iter()
+            .fold(0, |bits, (on, bit)| if *on { bits | bit } else { bits });
+        out[2..4].copy_from_slice(&index.to_le_bytes());
+        out[4..8].copy_from_slice(&current.exposure.to_le_bytes());
+        out[8..12].copy_from_slice(&current.analogue_gain.to_le_bytes());
+        out[12..16].copy_from_slice(&current.frame_length.to_le_bytes());
+        out[16] = current.clamped;
+        out[17..19].copy_from_slice(&self.test_pattern.to_le_bytes());
+        let owner = self.owner.map_or(0, |owner| owner.0);
+        out[19..27].copy_from_slice(&owner.to_le_bytes());
+        ResumeRecord::new(&out)
+    }
+
+    /// Restores what [`Lifecycle::resume_record`] kept, on a sensor that is freshly bound: the
+    /// selection and controls, and, when it was started, a program of the whole configuration
+    /// from them, as the restart after a bus error does. A record that does not decode, or a
+    /// sensor that cannot be programmed now (the bus refuses it), is a fresh start: `false`, with
+    /// nothing selected and nothing running.
+    fn resume(&mut self, record: &ResumeRecord) -> bool {
+        let Some(saved) = Saved::decode(record.bytes()) else {
+            return false;
+        };
+        if self.state != State::Stopped || self.selected.is_some() {
+            return false;
+        }
+        self.flip_horizontal = saved.flip_horizontal;
+        self.flip_vertical = saved.flip_vertical;
+        self.test_pattern = saved.test_pattern;
+        self.selected = saved.selected.then_some((saved.index, saved.current));
+        if !saved.streaming {
+            return true;
+        }
+        if self.selected.is_none() {
+            return false;
+        }
+        self.watch = Watch::default();
+        self.owner = saved.owner;
+        match self.program() {
+            Ok(()) => {
+                self.state = State::Streaming;
+                true
+            }
+            Err(_) => {
+                self.state = State::Stopped;
+                self.selected = None;
+                self.owner = None;
+                false
+            }
         }
     }
 

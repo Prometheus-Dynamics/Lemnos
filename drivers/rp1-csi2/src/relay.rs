@@ -64,6 +64,11 @@ pub struct Relay {
     lost: u64,
     /// The stream this relay serves: the image's or the embedded data's.
     channel: Channel,
+    /// Added to each finished frame's block sequence: the frame stream's numbering continues from
+    /// where a rebound instance's predecessor left it (see [`Relay::continue_sequence`]).
+    sequence_base: u64,
+    /// The sequence the next finished frame takes, from every finished frame, published or not.
+    next_sequence: u64,
 }
 
 impl Relay {
@@ -79,7 +84,22 @@ impl Relay {
             no_handles: false,
             lost: 0,
             channel,
+            sequence_base: 0,
+            next_sequence: 0,
         }
+    }
+
+    /// The sequence the next frame this relay finishes takes. Read by `resume_record`.
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    /// Continues the frame numbering at `from`: the next frame finished takes `from`, and the
+    /// block's own count (from zero at its start) is added to it from then on. A receiver resumed
+    /// on a new instance calls this, so its frame sequence does not start again at zero.
+    pub fn continue_sequence(&mut self, from: u64) {
+        self.sequence_base = from;
+        self.next_sequence = from;
     }
 
     /// The module's stream is new: it has no buffer's memory and has published nothing. What
@@ -235,6 +255,8 @@ impl Relay {
         frames: &mut Frames,
         hw: &mut dyn Hardware,
     ) -> Result<bool> {
+        let sequence = done.sequence.wrapping_add(self.sequence_base);
+        self.next_sequence = sequence.wrapping_add(1);
         let Some(slot) = self.slot(done.buffer) else {
             return Ok(false);
         };
@@ -244,7 +266,7 @@ impl Relay {
             let frame = StreamFrame {
                 buffer: done.buffer,
                 bytes: done.bytes,
-                sequence: done.sequence,
+                sequence,
                 identity: 0,
                 timestamp_ns: done.timestamp_ns,
                 end_ns: 0,
