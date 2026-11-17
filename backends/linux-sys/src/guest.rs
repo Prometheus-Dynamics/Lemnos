@@ -36,18 +36,29 @@ fn last_error() -> io::Error {
 ///
 /// `mount(2)` fails, or a name holds a NUL.
 pub fn mount(source: &str, target: &str, fstype: &str) -> io::Result<()> {
+    mount_data(source, target, fstype, "")
+}
+
+/// Mounts `fstype` from `source` at `target` with `data` as its options (`mount(2)`'s data
+/// argument, for example `size=64M` for tmpfs).
+///
+/// # Errors
+///
+/// `mount(2)` fails, or a name or the options hold a NUL.
+pub fn mount_data(source: &str, target: &str, fstype: &str, data: &str) -> io::Result<()> {
     let source = c_string(source)?;
     let target = c_string(target)?;
     let fstype = c_string(fstype)?;
-    // SAFETY: the three strings are NUL-terminated and live across the call; the data argument is
-    // null, which mount(2) accepts for filesystems that take no options.
+    let data = c_string(data)?;
+    // SAFETY: the four strings are NUL-terminated and live across the call; mount(2) reads the
+    // data as a string of options, which may be empty.
     let rc = unsafe {
         libc::mount(
             source.as_ptr(),
             target.as_ptr(),
             fstype.as_ptr(),
             0,
-            std::ptr::null(),
+            data.as_ptr().cast(),
         )
     };
     if rc != 0 {
@@ -96,6 +107,52 @@ pub fn init_module_errno() -> Option<i32> {
         return last_error().raw_os_error();
     }
     None
+}
+
+/// Loads the module `fd` names, with `params` as its parameter string, as `finit_module(2)` with
+/// no flags.
+///
+/// # Errors
+///
+/// `params` holds a NUL, or the kernel refuses the module, with its errno.
+pub fn finit_module(fd: BorrowedFd<'_>, params: &str) -> io::Result<()> {
+    let params = c_string(params)?;
+    // SAFETY: `SYS_finit_module` takes a descriptor, a NUL-terminated parameter string and flags.
+    // `fd` is live for the call, `params` outlives it, and the kernel only reads the string.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_finit_module,
+            fd.as_raw_fd() as libc::c_long,
+            params.as_ptr(),
+            0 as libc::c_long,
+        )
+    };
+    if rc != 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Unloads the module `name`, with `flags` (`O_NONBLOCK` asks for no wait), as `delete_module(2)`.
+///
+/// # Errors
+///
+/// `name` holds a NUL, or the kernel refuses the unload (EBUSY, EAGAIN), with its errno.
+pub fn delete_module(name: &str, flags: u32) -> io::Result<()> {
+    let name = c_string(name)?;
+    // SAFETY: `SYS_delete_module` takes a NUL-terminated module name and flags. `name` outlives
+    // the call, and the kernel only reads the string.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_delete_module,
+            name.as_ptr(),
+            flags as libc::c_long,
+        )
+    };
+    if rc != 0 {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// Makes descriptors 0, 1 and 2 the console, as a process started by the kernel as init has them.
