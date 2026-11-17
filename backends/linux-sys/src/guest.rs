@@ -261,6 +261,73 @@ pub fn rp1_csi2_stream_create(node: BorrowedFd<'_>, arg: &mut [u8; 56]) -> io::R
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `LEMNOS_IOC_STREAM_CREATE`, `_IOWR('L', 0x80, struct lemnos_stream_create)`: 56 bytes, on the
+/// control node.
+const LEMNOS_IOC_STREAM_CREATE: u32 = iowr::<[u8; 56]>(b'L', 0x80);
+
+/// `LEMNOS_STREAM_IOC_READER`, `_IOWR('L', 0x87, struct lemnos_stream_reader)`: 48 bytes, on a
+/// stream's file.
+const LEMNOS_STREAM_IOC_READER: u32 = iowr::<[u8; 48]>(b'L', 0x87);
+
+/// Makes a frame stream on the control node, as `LEMNOS_IOC_STREAM_CREATE`. `arg` is the 56-byte
+/// `struct lemnos_stream_create`, and its ring size and pool address come back in it; the stream's
+/// descriptor (at byte 36) is returned owned.
+///
+/// # Errors
+///
+/// The kernel refuses the stream, with its errno.
+pub fn stream_create(node: BorrowedFd<'_>, arg: &mut [u8; 56]) -> io::Result<OwnedFd> {
+    ioctl_bytes(node, LEMNOS_IOC_STREAM_CREATE, arg)?;
+    let fd = i32::from_ne_bytes([arg[36], arg[37], arg[38], arg[39]]);
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Gives a stream a reader's marks page, as `LEMNOS_STREAM_IOC_READER`. `arg` is the 48-byte
+/// `struct lemnos_stream_reader` with the page's memfd in its first word; the registration's slot
+/// and refusal come back in it, and the registration's file (at byte 12) is returned owned.
+///
+/// # Errors
+///
+/// The module refuses the page, with its errno.
+pub fn stream_reader(stream: BorrowedFd<'_>, arg: &mut [u8; 48]) -> io::Result<OwnedFd> {
+    ioctl_bytes(stream, LEMNOS_STREAM_IOC_READER, arg)?;
+    let fd = i32::from_ne_bytes([arg[12], arg[13], arg[14], arg[15]]);
+    if fd < 0 {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Pins the calling thread to CPU `cpu`, or, for `None`, lets it run on every CPU
+/// (`sched_setaffinity(2)` on pid 0).
+///
+/// # Errors
+///
+/// `sched_setaffinity(2)` fails.
+pub fn set_cpu_affinity(cpu: Option<usize>) -> io::Result<()> {
+    if cpu.is_some_and(|cpu| cpu >= libc::CPU_SETSIZE as usize) {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    // SAFETY: an all-zero `cpu_set_t` is an empty set: its words are plain integers.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    for i in 0..libc::CPU_SETSIZE as usize {
+        if cpu.is_none_or(|cpu| cpu == i) {
+            // SAFETY: `i` is below CPU_SETSIZE, the set's size, so the bit it sets is in `set`.
+            unsafe { libc::CPU_SET(i, &mut set) };
+        }
+    }
+    // SAFETY: `set` is a live `cpu_set_t` of the size passed, which the call only reads.
+    let rc = unsafe {
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &raw const set)
+    };
+    if rc != 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
 /// Sets the open-descriptor limit, soft and hard, to `limit`.
 ///
 /// # Errors
