@@ -736,7 +736,8 @@ impl Lifecycle for Ov9782 {
         let mut exposure = Item::value("exposure", IN_FORCE)
             .field("exposure_lines")
             .unit(Unit::Line, 0);
-        let mut exposure_set = Item::control("exposure", SET_EXPOSURE).unit(Unit::Line, 0);
+        // A control has a name of its own: the read below is `exposure`, so a client's set finds this one.
+        let mut exposure_set = Item::control("set_exposure", SET_EXPOSURE).unit(Unit::Line, 0);
         if let Some(max) = exposure_max {
             exposure = exposure.range(lines, max).step(1);
             exposure_set = exposure_set.range(lines, max).step(1);
@@ -746,7 +747,7 @@ impl Lifecycle for Ov9782 {
         let mut frame_value = Item::value("frame_length", IN_FORCE)
             .field("frame_length")
             .unit(Unit::Line, 0);
-        let mut frame_set = Item::control("frame_length", SET_FRAME_LENGTH).unit(Unit::Line, 0);
+        let mut frame_set = Item::control("set_frame_length", SET_FRAME_LENGTH).unit(Unit::Line, 0);
         if let Some((min, max)) = frame {
             frame_value = frame_value.range(min, max).step(1);
             frame_set = frame_set.range(min, max).step(1);
@@ -762,7 +763,7 @@ impl Lifecycle for Ov9782 {
                 .step(i64::from(gain.step)),
         );
         out.add(
-            Item::control("analogue_gain", SET_ANALOGUE_GAIN)
+            Item::control("set_analogue_gain", SET_ANALOGUE_GAIN)
                 .dimensionless()
                 .range(i64::from(gain.min), i64::from(gain.max))
                 .step(i64::from(gain.step)),

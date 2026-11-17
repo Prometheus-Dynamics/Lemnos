@@ -16,6 +16,7 @@ lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
 
 [dev-dependencies]
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
 
 [package.metadata.lemnos]
 driver = "Bmi088"

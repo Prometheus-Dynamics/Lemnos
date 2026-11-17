@@ -264,6 +264,8 @@ config = { base = 40 }
         real_min: None,
         real_max: None,
         real_step: None,
+        real_warn_low: None,
+        real_warn_high: None,
         reading: Some(Reading::Range),
         group: Some("grp"),
         method: MethodId {

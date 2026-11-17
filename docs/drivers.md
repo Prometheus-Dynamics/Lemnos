@@ -348,7 +348,9 @@ A value that the driver reads as a float (`f32`) has no integer raw scale. Its r
 number in the unit (`real_range` and `real_step` in the description, appended to the item trailer
 on the wire), so a float value is not left unknown for lack of a format: `bmm150`, the generic
 sensors' channels and the orientation angles give theirs that way. A package carries no real range
-yet: a packaged float item keeps the integer ones only.
+yet: a packaged float item keeps the integer ones only. A float value's warning limits are real too
+(`real_warn_below` and `real_warn_above`), and a float item has exponent 0 (see
+[the scale rule](writing-a-driver.md#the-scale-rule)).
 
 **Unit state** is one of three, and every item of a built-in driver is set (none is left unknown
 by omission):

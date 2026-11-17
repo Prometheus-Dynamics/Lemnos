@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
-    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
+    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock, Item,
     HostOwned, I2c, InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
     RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Spi,
@@ -1144,6 +1144,37 @@ fn is_off(slot: &Slot) -> bool {
     matches!(*lock(&slot.state), DeviceState::Off(_))
 }
 
+/// What a bind refuses in a driver's description, named: two items with one name (a client finds
+/// an item by its name, so the second could never be reached), or a real value with a nonzero
+/// exponent. A real value is already in its unit, so its exponent is 0; an integer item's exponent
+/// is its scale (`raw * 10^exponent`).
+fn describe_fault(instance: &dyn Instance) -> Option<String> {
+    let mut description = Description::new();
+    instance.describe(&mut description);
+    let items: Vec<&Item> = description.items().collect();
+    for (at, item) in items.iter().enumerate() {
+        if items[..at].iter().any(|earlier| earlier.name == item.name) {
+            return Some(format!("item {}: two items have this name", item.name));
+        }
+    }
+    items
+        .into_iter()
+        .find(|item| {
+            item.exponent != 0
+                && (item.real_min.is_some()
+                    || item.real_max.is_some()
+                    || item.real_step.is_some()
+                    || item.real_warn_low.is_some()
+                    || item.real_warn_high.is_some())
+        })
+        .map(|item| {
+            format!(
+                "item {}: a real value carries exponent 0 (it has exponent {})",
+                item.name, item.exponent
+            )
+        })
+}
+
 fn only_reads(instance: &dyn Instance, method: MethodId) -> bool {
     let mut description = Description::new();
     instance.describe(&mut description);
@@ -2273,6 +2304,18 @@ impl Inner {
             }));
             let missing = binding.missing.take();
             *lock(&target.bind_refusal) = refused.lock().unwrap_or_else(|e| e.into_inner()).take();
+            // A real-valued item must carry exponent 0: the renderer scales a float by the exponent,
+            // so a nonzero one shows the value wrong. Refused by name, before the device runs.
+            let built = match built {
+                Ok(Ok(instance)) => match describe_fault(instance.as_ref()) {
+                    Some(reason) => {
+                        *lock(&target.bind_refusal) = Some((RefusalKind::Failed, reason));
+                        Ok(Err(Status::INVALID_ARGUMENT))
+                    }
+                    None => Ok(Ok(instance)),
+                },
+                other => other,
+            };
             match built {
                 Ok(Ok((instance, kept))) => {
                     *lock(&target.missing) = missing;

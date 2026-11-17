@@ -14,6 +14,7 @@ lemnos-contract-fan = { path = "../../contracts/fan" }
 lemnos-contract-self-test = { path = "../../contracts/self-test" }
 
 [dev-dependencies]
+lemnos-wire = { path = "../../engine/wire" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]
