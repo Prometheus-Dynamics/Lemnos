@@ -655,10 +655,6 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 #   `"$NAME"` takes the value of parameter NAME on a `dtoverlay=` line (decimal or `0x` hex). Needs
 #   `firmware_overlays`. The merge is a host check: it runs on the machine that verifies the image, and
 #   nothing it shows is loaded by firmware.
-# - `config_owner`: `"lemnos"` (the default) or `"board"`. With `"board"` the Raspberry Pi's config.txt is the
-#   board's own: Lemnos writes none, the trial route uses `tryboot.txt` and the pointers only, and a default
-#   switch is refused by name. It takes no `config_lines` and no `firmware_overlays`. See `docs/slots.md`,
-#   "A board's own config.txt".
 #
 # [boot] config_lines = ["dtoverlay=test-gpu"]
 # [boot] firmware_overlays = ["test-gpu"]
