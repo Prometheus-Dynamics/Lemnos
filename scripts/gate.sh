@@ -135,5 +135,10 @@ step documents scripts/check-docs.py
 # mdev, built from the pinned release tarballs), in a namespace, and each node's owner, group and mode
 # are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
 step mdev testing/mdev/check.sh
+# packaging/uboot/boot.cmd run by U-Boot itself: stock U-Boot v2026.10 under QEMU's raspi3b (the Pi 64-bit build from its pinned release
+# (testing/uboot/build-uboot.sh, cached in UBOOT_DIR), with the disk image as the SD card, runs the script over disk images with the slot files and
+# the uboot-env partition, boot by boot, and checks the slot each boot starts, the environment it leaves, and
+# the guards (the boot-count ladder, the rescue at 8, and the no-partition case). CI caches UBOOT_DIR.
+step uboot testing/uboot/check.sh
 
 echo "gate passed${GATE_PART:+ (part $GATE_PART)}"

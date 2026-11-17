@@ -50,10 +50,27 @@ jobs:
         with:
           path: ${{ runner.temp }}/busybox
           key: ${{ steps.busybox.outputs.cache-primary-key }}
+      # The U-Boot check (testing/uboot/check.sh) runs stock U-Boot v2026.10 (the Raspberry Pi 64-bit defconfig, built from
+      # its pinned release tarball, sha256 in testing/uboot/build-uboot.sh) under QEMU's raspi3b, with the disk image as the
+      # SD card. It needs the aarch64 cross compiler, QEMU, mtools and dosfstools (the FAT partition), and device-tree-compiler
+      # (fdtput and dtc). Cached on the build script, as the BusyBox builds are.
+      - run: sudo apt-get install -y gcc-aarch64-linux-gnu qemu-system-arm mtools dosfstools device-tree-compiler
+      - uses: actions/cache/restore@v4
+        id: uboot
+        with:
+          path: ${{ runner.temp }}/uboot
+          key: uboot-${{ hashFiles('testing/uboot/build-uboot.sh') }}
+      - run: testing/uboot/build-uboot.sh "$RUNNER_TEMP/uboot" 2026.10
+      - uses: actions/cache/save@v4
+        if: steps.uboot.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/uboot
+          key: ${{ steps.uboot.outputs.cache-primary-key }}
       - run: ./scripts/gate.sh
         env:
           GATE_PART: checks
           BUSYBOX_DIR: ${{ runner.temp }}/busybox
+          UBOOT_DIR: ${{ runner.temp }}/uboot
           ZIG_CC: ${{ runner.temp }}/zig/bin/python -m ziglang cc
 
   tests:
