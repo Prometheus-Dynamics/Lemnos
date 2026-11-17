@@ -647,7 +647,6 @@ fn a_duty_of_302_per_mille_displays_as_302() {
     let mut out = Description::new();
     Driver::describe(&fan, &mut out);
     let duty = out.find("duty").unwrap();
-    assert_eq!(duty.exponent, 0, "a per-mille count is shown as the count");
     // The reply of `duty` is a u16, here 302 per mille (77 in pwm counts).
     let mut fan = fan;
     write(tree.root(), &format!("{CHIP}/pwm1"), "77");
@@ -659,7 +658,8 @@ fn a_duty_of_302_per_mille_displays_as_302() {
         &wire_item(duty),
     )
     .unwrap();
-    assert_eq!(shown, "302");
+    assert_eq!(shown, "302", "a per-mille count is shown as the count");
+    assert_eq!(duty.exponent, 0);
 }
 
 /// The read and the control have names of their own, so a client finds the control by name.

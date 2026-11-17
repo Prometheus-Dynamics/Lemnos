@@ -1308,9 +1308,9 @@ fn one_g_displays_as_about_nine_point_eight_one_metres_per_second_squared() {
     let mut out = Description::new();
     Driver::describe(&dev, &mut out);
     let item = out.find("acceleration.x").unwrap();
-    assert_eq!(item.exponent, 0, "a real value is in base units");
     let shown = lemnos_wire::text::render(&shape, false, &reply, &wire_item(item)).unwrap();
     let number: f64 = shown.split(' ').next().unwrap().parse().unwrap();
     assert!((number - 9.81).abs() < 0.01, "shown as {shown}");
     assert!(shown.ends_with("m/s²"), "shown as {shown}");
+    assert_eq!(item.exponent, 0, "a real value is in base units");
 }
