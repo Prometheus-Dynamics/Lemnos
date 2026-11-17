@@ -35,21 +35,14 @@ struct Pongs {
 /// `hello_after` is the time between claiming the link's interface and sending the first HELLO: the
 /// test-only knob for the order of the host's hello and the bridge's re-offer after a bounce.
 pub fn run(rounds: u64, hello_after: Duration) -> bool {
-    let Some(path) = find_device(Duration::from_secs(60)) else {
-        say!("FAIL the host sees the gadget on the bus");
-        return false;
-    };
-    let usb = match UsbfsFile::open(&path) {
-        Ok(usb) => Arc::new(usb),
+    let (usb, path) = match open_and_claim(Duration::from_secs(60)) {
+        Ok(claimed) => claimed,
         Err(error) => {
-            say!("FAIL open {}: {error}", path.display());
+            say!("FAIL {error}");
             return false;
         }
     };
-    if let Err(error) = usb.claim_interface(LINK_INTERFACE) {
-        say!("FAIL claim the link's interface: {error}");
-        return false;
-    }
+    let usb = Arc::new(usb);
     say!(
         "ok   host: the link's interface is claimed on {}",
         path.display()
@@ -185,6 +178,63 @@ impl Tap {
     }
 }
 
+/// Linux's `ENODEV`: the device is gone (it re-enumerated, or was unplugged) when it is used.
+const ENODEV: i32 = 19;
+/// How many times the host finds the gadget again after its path vanished, before it gives up. A
+/// bounce re-enumerates the gadget once or twice; a path that keeps vanishing is a fault, not a race.
+const REFINDS: u32 = 20;
+
+/// Whether `error`, from opening or claiming a path the host found, means the device went away
+/// between the find and the use: the path is gone (`ENOENT`) or the device is (`ENODEV`). Those are the
+/// only errors a re-find answers. Any other error (a permission, a busy interface) is a failure.
+fn vanished(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(ENODEV)
+}
+
+/// Finds the gadget, opens it and claims the link's interface. A bounce re-enumerates the gadget, so a
+/// path found a moment ago can vanish before it is opened or claimed: that is waited out by finding
+/// the gadget again (the scan waits for the bus to show it), up to [`REFINDS`] times and `within` in
+/// all. Anything else fails at once.
+fn open_and_claim(within: Duration) -> Result<(UsbfsFile, PathBuf), String> {
+    let until = Instant::now() + within;
+    claim_with(
+        || find_device(until.saturating_duration_since(Instant::now())),
+        UsbfsFile::open,
+        |usb| usb.claim_interface(LINK_INTERFACE),
+    )
+}
+
+/// [`open_and_claim`] with the find, open and claim as steps, so the race is tested without a bus.
+fn claim_with<T>(
+    mut find: impl FnMut() -> Option<PathBuf>,
+    mut open: impl FnMut(&std::path::Path) -> std::io::Result<T>,
+    mut claim: impl FnMut(&T) -> std::io::Result<()>,
+) -> Result<(T, PathBuf), String> {
+    let mut refinds = 0;
+    loop {
+        let path = find().ok_or("the host sees the gadget on the bus")?;
+        let attempt = open(&path).and_then(|usb| claim(&usb).map(|()| usb));
+        match attempt {
+            Ok(usb) => return Ok((usb, path)),
+            Err(error) if vanished(&error) => {
+                refinds += 1;
+                if refinds > REFINDS {
+                    return Err(format!(
+                        "{} vanished {refinds} times while the host claimed it: giving up",
+                        path.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "open {} and claim the link's interface: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
 /// The gadget on the bus by the identity `contracts/usb-link.toml` gives.
 fn find_device(within: Duration) -> Option<PathBuf> {
     let (vendor, product) = crate::identity();
@@ -221,4 +271,121 @@ fn scan(vendor: &str, product: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{Error, ErrorKind};
+
+    fn gone() -> Error {
+        Error::from(ErrorKind::NotFound)
+    }
+
+    fn unplugged() -> Error {
+        Error::from_raw_os_error(ENODEV)
+    }
+
+    fn found() -> Option<PathBuf> {
+        Some(PathBuf::from("/dev/bus/usb/001/014"))
+    }
+
+    /// A race at open: the path vanishes after the find; the host finds it again and claims it.
+    #[test]
+    fn host_finds_the_gadget_again_when_its_path_vanishes_on_open() {
+        let opens = Cell::new(0);
+        let finds = Cell::new(0);
+        let result = claim_with(
+            || {
+                finds.set(finds.get() + 1);
+                found()
+            },
+            |_| {
+                opens.set(opens.get() + 1);
+                if opens.get() == 1 {
+                    Err(gone())
+                } else {
+                    Ok(())
+                }
+            },
+            |()| Ok(()),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!((finds.get(), opens.get()), (2, 2));
+    }
+
+    /// A race at claim: the device re-enumerated (`ENODEV`) after it was opened; the host finds it again.
+    #[test]
+    fn host_finds_the_gadget_again_when_it_is_gone_at_claim() {
+        let claims = Cell::new(0);
+        let finds = Cell::new(0);
+        let result = claim_with(
+            || {
+                finds.set(finds.get() + 1);
+                found()
+            },
+            |_| Ok(()),
+            |()| {
+                claims.set(claims.get() + 1);
+                if claims.get() == 1 {
+                    Err(unplugged())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!((finds.get(), claims.get()), (2, 2));
+    }
+
+    /// Any other error is the failure it is: no re-find, no retry (a busy interface is not a race).
+    #[test]
+    fn a_busy_interface_at_claim_fails_at_once() {
+        let finds = Cell::new(0);
+        let result: Result<((), PathBuf), String> = claim_with(
+            || {
+                finds.set(finds.get() + 1);
+                found()
+            },
+            |_| Ok(()),
+            |()| Err(Error::from_raw_os_error(16)),
+        );
+        let message = result.expect_err("busy must fail");
+        assert!(message.contains("claim the link's interface"), "{message}");
+        assert_eq!(finds.get(), 1);
+    }
+
+    /// A permission error at open fails at once too.
+    #[test]
+    fn a_permission_error_at_open_fails_at_once() {
+        let finds = Cell::new(0);
+        let result: Result<((), PathBuf), String> = claim_with(
+            || {
+                finds.set(finds.get() + 1);
+                found()
+            },
+            |_| Err(Error::from(ErrorKind::PermissionDenied)),
+            |()| Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(finds.get(), 1);
+    }
+
+    /// A path that never settles is given up after the bound, not looped on for ever.
+    #[test]
+    fn a_path_that_keeps_vanishing_is_given_up_after_the_bound() {
+        let opens = Cell::new(0);
+        let result: Result<((), PathBuf), String> = claim_with(
+            found,
+            |_| {
+                opens.set(opens.get() + 1);
+                Err(gone())
+            },
+            |()| Ok(()),
+        );
+        let message = result.expect_err("must give up");
+        assert!(message.contains("giving up"), "{message}");
+        assert_eq!(opens.get(), REFINDS + 1);
+    }
 }
