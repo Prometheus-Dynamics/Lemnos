@@ -116,7 +116,9 @@ if test -z "${lemnos_env}"; then
 fi
 
 # THE RESTART COUNT (BB2, the Pi firmware's boot_count in this form). lemnos_restarts is the boots
-# attempted since the last good boot, this one included, saturating at 8. It is raised here, once per
+# attempted since the last good boot, this one included, saturating at 8. The rungs are thresholds on the count, not
+# bits of it: at 4 to 7 the previous starts first, at 8 and above the rescue holds (a bit test of 4 is true again at
+# 12 to 15, so a count past 8 would swing between rungs). It is raised here, once per
 # script run, with one saveenv. When the image names the reset-status word (lemnos_rst, a SoC register:
 # see docs/slots.md, "The U-Boot restart count"), a power-on reset sets the count to 0 instead of
 # raising it, as the Pi firmware's count is lost at power loss. Without lemnos_rst every boot raises it.
@@ -133,13 +135,13 @@ if test -n "${lemnos_rst}"; then
 				saveenv
 			fi
 		fi
-	elif test "${lemnos_restarts}" != "8"; then
+	elif test "${lemnos_restarts}" -lt 8; then
 		setexpr lemnos_restarts "${lemnos_restarts}" + 1
 		if test -n "${lemnos_saveable}"; then
 			saveenv
 		fi
 	fi
-elif test "${lemnos_restarts}" != "8"; then
+elif test "${lemnos_restarts}" -lt 8; then
 	setexpr lemnos_restarts "${lemnos_restarts}" + 1
 	if test -n "${lemnos_saveable}"; then
 		saveenv
@@ -155,7 +157,7 @@ while test "${lemnos_go}" = "1"; do
 	# At 8 the board is rescued: no slot starts, and download mode is offered at once (the host
 	# flasher is the exit). At 4 to 7 (the Pi's [boot_count&4]) the previous starts before the default.
 	setenv lemnos_rescue
-	if test "${lemnos_restarts}" = "8"; then
+	if test "${lemnos_restarts}" -ge 8; then
 		setenv lemnos_rescue 1
 	fi
 	if test "${devtype}" != "mmc"; then
@@ -214,9 +216,10 @@ while test "${lemnos_go}" = "1"; do
 		# The rung at 4 to 7: the previous starts first. The default is skipped in the first pass only when
 		# a previous is named; when that previous does not start, the next pass starts the default.
 		setenv lemnos_window
-		setexpr lemnos_bit "${lemnos_restarts}" "&" 4
-		if test "${lemnos_bit}" = "4"; then
-			setenv lemnos_window 1
+		if test "${lemnos_restarts}" -ge 4; then
+			if test "${lemnos_restarts}" -lt 8; then
+				setenv lemnos_window 1
+			fi
 		fi
 		if test -n "${lemnos_window}"; then
 			if test -n "${take_previous_bay}"; then

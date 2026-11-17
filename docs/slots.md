@@ -1258,7 +1258,7 @@ moment the default's files fail to load.
 | What the previous is started as | a trial (see below) | a trial too: the previous slot is not the default, so slot-init writes `trial-init` for it and lemnosd judges it as a trial. It is not confirmed until it proves healthy, so if it also fails the count keeps rising to the rescue at 8. A boot that lands on it by the count is reported by lemnosd as described under "Boot count" |
 | Flashing mode | download mode, after three passes that started nothing | RPIBOOT, requested by slot-init after 8 restarts without a good boot, and only from a refusal slot-init itself reaches (see "Boot count"); a firmware that cannot read the default's files never runs slot-init, so Lemnos asks for nothing there and the firmware's own `BOOT_ORDER` applies |
 | Exists in generated files today | yes: `boot.cmd` (written into the image by `lemnos-ctl boot-partition`) | yes, the count filter is in `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`); there is no Pi step that detects an unreadable default |
-| Tested | structurally on this PC (`drivers/system-slots/src/uboot/tests.rs`); the script is not run by any U-Boot here; slot-init's side is run on image files | on this PC the text is only compared; the firmware's behaviour is **untested on board** (`testing/board-runs/I5i6.md`, rows 3 and 15, and `I5i8.md`) |
+| Tested | in the gate: `testing/uboot/check.py` runs the script under stock U-Boot v2026.10 (`testing/uboot/build-uboot.sh`, pinned release, Raspberry Pi 64-bit build) in QEMU's raspi3b, with the disk as the SD card over a disk with the boot partition and the `uboot-env` partition, and checks each boot's slot, the environment it leaves, and the guards; structurally in `drivers/system-slots/src/uboot/tests.rs`; slot-init's side is run on image files | on this PC the text is only compared; the firmware's behaviour is **untested on board** (`testing/board-runs/I5i6.md`, rows 3 and 15, and `I5i8.md`) |
 
 **The U-Boot form's third step, exactly.** The previous slot is named by the environment's `previous_bay`
 alone: the environment holds no variable `previous` and no id for the previous slot (the loader needs
@@ -1270,8 +1270,8 @@ touched, so a real pending trial keeps its attempts and its record. A test runs 
 the environment the real writers produce (`drivers/system-slots/src/tests.rs`,
 `the_loader_script_reads_only_what_the_writers_wrote_and_its_previous_step_can_run`) and holds the
 variables the script reads, the variables the writers write and the list in this section equal. That test
-evaluates the script's conditions with a small evaluator, not U-Boot: the script's evaluation by a real U-Boot
-is **untested on board** (`testing/board-runs/I5i8.md`, row U6). The step
+evaluates the script's conditions with a small evaluator; the gate's check (`testing/uboot/check.py`) runs the script under
+stock U-Boot in QEMU, and the board evaluation is **untested on board** (`testing/board-runs/I5i8.md`, row U6). The step
 loads `board.dtb` and `extlinux/extlinux.conf` from the previous bay, names the boot source in the tree as for the other steps, and, if the default had been named
 and did not start, adds the property `lemnos,default-failed = "files"` to `/chosen` of the tree it hands to
 the kernel. `previous_bay` is never repointed by the loader.
