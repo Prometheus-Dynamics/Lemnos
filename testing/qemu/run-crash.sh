@@ -5,8 +5,7 @@
 #           (the modules-off harness kernel: testing/qemu/build-kernel.sh --modules-off)
 #   CARGO   the cargo that builds the probe for musl (default: cargo; the group's e-cargo.sh)
 #   CARGO   the cargo that builds the probe and the guest's init for musl (default: cargo; the group's e-cargo.sh)
-#   LOGS    where the console logs and the state images' reads are kept (default: a crash-log directory
-#           under the gates' tmp directory)
+#   LOGS    where the console logs and the state images' reads are kept (default: ${TMPDIR:-/tmp}/qemu-crash)
 #
 # Cases, each a QEMU guest with a fresh state disk (ext4, the boot history and the index live there):
 #   crash      the first boot arms, records its own history entry and panics with sysrq-c; panic=1 reboots the
@@ -24,7 +23,7 @@ repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_PSTORE, CONFIG_PSTORE_RAM and CONFIG_PSTORE_CONSOLE =y}"
 CARGO="${CARGO:-cargo}"
 CARGO="${CARGO:-cargo}"
-LOGS="${LOGS:-/mnt/nvme-wd/lemnos-gates/tmp/qemu-crash}"
+LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-crash}"
 target=x86_64-unknown-linux-musl
 # The ramoops region: 1 MiB at 496 MiB, reserved from the guest's memory (-m 512) by memmap=. A guest only.
 REGION=0x1f000000
