@@ -1551,6 +1551,75 @@ A torn table write (the count's top byte lands wrong) is caught by the read back
 one with exactly the four count bytes replaced, and the pass fails otherwise, naming the bytes that changed.
 A new count whose byte equals the old one is not a refusal.
 
+**Off the tick.** A pass runs on its own thread, one at a time, and the driver's tick only starts it and
+takes its result (`try_recv`), so the tick never waits on the kernel and the trial watch and every other
+call keep their cadence. The resize cannot be interrupted, so its bound only names an overrun: the bound is
+10 s plus 30 s per TiB of disk, and past it `info` says `grow_state` `resize-overrun` (with
+`grow_elapsed_ms`, `grow_bound_ms`, `grow_started_ms`, `grow_target_bytes`) and health is degraded. The
+result is still taken when it arrives. Measured on the mounted builder shape (QEMU, NVMe): the resize takes
+about 0.5 s at 15 GiB, 2.2 s at 512 GiB and 8.6 s at 2 TiB (about 4.3 s per TiB), so a 2 TiB disk exceeds
+the 2 s call deadline the old on-tick call would have hit.
+
+**The 256 GiB cap.** `grow::MAX_BYTES` is 256 GiB: the largest data partition a grow may make. A target above
+it is refused by name before anything is written, with the sizes:
+`grow-too-large: the data partition would be N bytes (M GiB) and the maximum is 274877906944 bytes (256 GiB):
+nothing changed; the boot continues with the partition as it is`. `info` gives `grow_state` `grow-too-large`,
+`grow_target_bytes`, `grow_max_bytes` and `grow_reason`, and the driver notes the reason once. Health is not
+degraded by it: a partition left as it is is the ordinary state of a board with `grow_data` false. The media
+this runs on is at most about 16 GB, and the bench cards go to 64 GB. Tests: `grow/tests.rs`
+`a_grow_to_more_than_256_gib_is_refused_by_name_and_nothing_is_written`,
+`a_grow_to_256_gib_or_less_is_allowed`, `a_refused_grow_is_named_once_by_the_driver_and_never_tried_again`.
+
+**The QEMU check (`testing/qemu/run-grow-live.py`, guest init `testing/crates/grow-live-init`).** The engine host
+runs with `system-slots` on the real disk and `hw-watchdog` on a QEMU i6300esb, a 2 TiB, 256 GiB or 64 GiB disk
+with the builder's data filesystem, and a latency probe on `host.call` every 100 ms. Each case copies partition 2
+out of the image, then checks it twice: `e2fsck -fn` (as the disk is) and `e2fsck -fy` after the journal replay,
+which must change nothing and exit 0. A case passes only when the replayed check is clean, the block count is the
+full partition, and the baseline record is gone. The results below were run on NVMe-backed QEMU, not on a board.
+
+| Case | Disk | Result | Resize (driver clock) | Probe: calls, max latency, max gap | e2fsck -fn / -fy | Blocks |
+|---|---|---|---|---|---|---|
+| refuse | 2 TiB | `grow-too-large` at 0.58 s, nothing written | none | 5, 4.9 ms, 100.5 ms | 0 / 0 | 9728 (unchanged) |
+| full 256 GiB | 256 GiB | finished | 0.27 s to 2.11 s (about 1.8 s) | 21, 2.0 ms, 103.0 ms | 0 / 0 | 67087616 |
+| reset at 0.2 s | 256 GiB | 2 boots, full size | first boot cut at 0.21 s | 27, 4.4 ms, 105.8 ms | 0 / 0 | 67087616 |
+| reset at 1.0 s | 256 GiB | 2 boots, full size | first boot cut at 1.02 s | 49, 2.6 ms, 102.8 ms | 0 / 0 | 67087616 |
+| reset at 2.0 s | 256 GiB | 2 boots, full size | first boot cut at 2.01 s | 5, 1.0 ms, 100.9 ms | 0 / 0 | 67087616 |
+| full 64 GiB | 64 GiB | finished | 0.27 s to 0.67 s (about 0.4 s) | 7, 0.9 ms, 100.4 ms | 0 / 0 | 16755968 |
+
+Every case has no baseline record left, one or two boots, and the watchdog never fired. The 2 TiB disk is refused
+by the cap, so the earlier 2 TiB runs (before the cap) are not part of the shipped check; they are kept as the
+evidence for the decision below.
+
+**Decision: the resize stays on its own thread.** Evidence, all on the same 2 TiB disk shape:
+- The synchronous code (`c79935c0`) blocks the host's loop for the whole resize. Its `info` calls failed with
+  `Status(-110)` at the 2 s deadline, then `Status(-19)`, the slots device reported `Failed("retrying")`, and the
+  harness got no reply in 240 s. The threaded code (`8d01f944`) on the same disk: the tick returned at once, the
+  probe's largest latency was 4.3 ms, and the resize finished in 17.1 s.
+- The e2fsck failures and the stuck second boot recorded in GROW2 were not caused by the thread. Both come from the
+  same kernel call, which the synchronous code makes too (see below).
+- The "four times slower" figure (30 to 33 s against 8.6 s) is not explained by the thread: it only calls the same
+  `EXT4_IOC_RESIZE_FS`. The synchronous run did not finish, so its resize time was not measured. The 17.1 s
+  threaded run and the earlier 30 s runs differ on the same host; the cause of that spread is not known.
+
+**What the GROW2 failures were.**
+- The e2fsck exit 12 was the harness. Its partition copy mixed `os.lseek` on the descriptor with a buffered
+  file's `seek` and `read`: a buffered seek inside its own buffer does not move the descriptor, so reads after a
+  `SEEK_HOLE` came from the wrong place and blocks were lost (block 1077 of the data directory read as zeros
+  where the raw image holds it). The copy now uses `pread`/`pwrite` at absolute offsets. With that copy the three
+  finished 2 TiB runs are clean.
+- The second boot that stuck (2 TiB, reset 6 s into the resize, before the cap) was a kernel defect. The journal
+  held the resize (`needs_recovery`). After the replay, `e2fsck -fy` found "Last group block bitmap uninitialized"
+  and wrong free block and inode counts, although `e2fsck -fn` (which does not replay) had called the copy clean.
+  The second boot's mount logged `error 117` (EUCLEAN), and its resize call hit `kernel BUG at fs/ext4/resize.c:546`
+  (`BUG_ON` in `setup_new_flex_group_blocks`: `group_data[0].group != s_groups_count`) on the grow thread. That
+  thread never returned, and the unmount was busy. The kernel is `7.3.3` (pinned). This is ext4's online resize
+  not being crash-consistent across the groups it adds. It is in the kernel, not in Lemnos, so it is reported
+  there and not fixed here. The cap keeps a grow to at most 256 GiB; at that size three mid-resize resets came back
+  clean, which is evidence, not a proof.
+
+**Not proved here.** The card or eMMC writes one sector whole on a power cut, the board's own timing, and the
+watchdog's feed on a board. The board check for a first boot is GROW3's (`testing/board-runs/GROW.md`).
+
 **Measured in QEMU (not on a board).** With the kernel's own partition resize and online resize on an NVMe
 disk, mounted `/data`, the builder's shape (9728 4 KiB blocks, 112 inodes per group, 4 reserved GDT blocks):
 a 15 GiB disk grows partition 2 to 16,019,095,552 bytes and the filesystem to 3910912 blocks in one pass of

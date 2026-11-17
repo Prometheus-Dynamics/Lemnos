@@ -1105,6 +1105,29 @@ impl SystemSlots {
         // bound, with the sizes seen in bytes), or `none` (finished, or `grow_data` is false).
         match self.grow.as_ref() {
             None => out.push_str(",\"grow_state\":\"none\""),
+            Some(grow) if grow.refused().is_some() => {
+                let refusal = grow.refused().unwrap_or_else(|| unreachable!());
+                out.push_str(&format!(
+                    ",\"grow_state\":\"grow-too-large\",\"grow_target_bytes\":{},\"grow_max_bytes\":{},\"grow_reason\":",
+                    refusal.target_bytes, refusal.max_bytes
+                ));
+                quoted(&refusal.reason, &mut out);
+            }
+            Some(grow) if grow.progress().is_some() => {
+                let progress = grow.progress().unwrap_or_else(|| unreachable!());
+                let state = if progress.overrun {
+                    "resize-overrun"
+                } else {
+                    "resizing"
+                };
+                out.push_str(&format!(
+                    ",\"grow_state\":\"{state}\",\"grow_started_ms\":{},\"grow_elapsed_ms\":{},\"grow_bound_ms\":{},\"grow_target_bytes\":{}",
+                    progress.started_ns / 1_000_000,
+                    progress.elapsed_ns / 1_000_000,
+                    progress.bound_ns / 1_000_000,
+                    progress.target_bytes
+                ));
+            }
             Some(grow) => match grow.unconfirmed() {
                 None => out.push_str(",\"grow_state\":\"pending\""),
                 Some(unconfirmed) => {
@@ -1574,6 +1597,17 @@ impl Lifecycle for SystemSlots {
     fn health(&self) -> Health {
         if let Some(pending) = &self.uncleared {
             return Health::Degraded(count::health_text(pending.wait_ns));
+        }
+        if self
+            .grow
+            .as_ref()
+            .and_then(|grow| grow.progress())
+            .is_some_and(|progress| progress.overrun)
+        {
+            // The elapsed time and the bound are in `info` (grow_elapsed_ms, grow_bound_ms).
+            return Health::Degraded(
+                "resize-overrun: the data partition's resize has run past its bound; it is not abandoned and its result is taken when it arrives",
+            );
         }
         if let Some(unconfirmed) = self.grow.as_ref().and_then(|grow| grow.unconfirmed()) {
             // The words and the sizes are in `info` (grow_reason, grow_baseline_bytes, grow_seen_bytes).
@@ -2121,23 +2155,25 @@ impl SystemSlots {
     /// is dropped. It never holds up the driver.
     fn grow_tick(&mut self, now_ns: u64) -> Option<u64> {
         let task = self.grow.as_mut()?;
-        if now_ns < task.retry.next_ns {
-            return Some(task.retry.next_ns);
-        }
-        match task.attempt() {
-            Ok(()) => {
-                self.grow = None;
+        match task.tick_real(now_ns) {
+            grow::Tick::At(next) => Some(next),
+            grow::Tick::Refused { why, fresh } => {
+                if fresh {
+                    self.note(why);
+                }
                 None
             }
-            Err(why) => {
-                let fresh = task.retry.last != why;
-                let next = task.retry.failed(now_ns, &why);
+            grow::Tick::Failed { why, fresh, at } => {
                 if fresh {
                     self.note(format!(
                         "the data partition is not grown yet: {why}; it is tried again"
                     ));
                 }
-                Some(next)
+                Some(at)
+            }
+            grow::Tick::Finished => {
+                self.grow = None;
+                None
             }
         }
     }

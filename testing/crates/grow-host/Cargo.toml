@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-grow-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The GROW2 harness, test only: the engine host with system-slots on the real disk and hw-watchdog, run in the QEMU guest"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core" }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-linux = { path = "../../../backends/linux" }
+lemnos-driver-host-clock = { path = "../../../drivers/host-clock" }
+lemnos-driver-hw-watchdog = { path = "../../../drivers/hw-watchdog" }
+lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
+# The `testing` feature is the boot-chain seam (`boot_node::TEST_ROOTS`): a test stands the boot
+# chain in, since an x86 guest has no device tree. Never in a shipped binary.
+lemnos-slot-store = { path = "../../../drivers/slot-store", features = ["testing"] }

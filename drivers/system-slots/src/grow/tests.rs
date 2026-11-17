@@ -7,8 +7,12 @@
 //! Those are the board check (`testing/board-runs`), not proved here.
 
 use super::*;
+use lemnos_slot_store::mbr;
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Instant;
 
 const SECT: u64 = 512;
 /// The disk: 32 000 000 sectors (16 GB).
@@ -149,6 +153,29 @@ struct Fake {
     view_blocks: u64,
     /// The kernel's view never shows a resize (the size it reports stays what it was at boot).
     view_frozen: bool,
+    /// The filesystem resize waits on this gate, as a long ioctl does.
+    gate: Option<Arc<Gate>>,
+}
+
+/// A gate the fake resize waits on until a test releases it.
+#[derive(Default)]
+struct Gate {
+    open: Mutex<bool>,
+    moved: Condvar,
+}
+
+impl Gate {
+    fn wait(&self) {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.moved.wait(open).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.moved.notify_all();
+    }
 }
 
 impl Fake {
@@ -197,6 +224,7 @@ impl Fake {
             journal_holds_count: false,
             view_blocks: 0,
             view_frozen: false,
+            gate: None,
         }
     }
 
@@ -319,6 +347,9 @@ impl Disk for Fake {
 
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()> {
         self.alive()?;
+        if let Some(gate) = self.gate.clone() {
+            gate.wait();
+        }
         if self.fs_fails > 0 {
             self.fs_fails -= 1;
             return Err(io::Error::from_raw_os_error(ENOSPC));
@@ -906,4 +937,206 @@ fn the_partition_two_node_follows_the_kernels_naming() {
     let mmc = Real::new(Path::new("/dev/mmcblk0"), Path::new("/data"));
     assert_eq!(mmc.sys_part, PathBuf::from("/sys/class/block/mmcblk0p2"));
     assert_eq!(mmc.sys_disk, PathBuf::from("/sys/block/mmcblk0"));
+}
+
+/// Ticks the task (virtual time from `now`, real time between ticks so a pass can run) until the
+/// grow finishes. Returns the time of the last tick.
+fn finish(task: &mut Task, open: &Opener, mut now: u64) -> u64 {
+    for _ in 0..5_000 {
+        match task.tick(now, open) {
+            Tick::Finished => return now,
+            Tick::At(at) => now = at,
+            Tick::Failed { at, .. } => now = at,
+            Tick::Refused { .. } => panic!("the grow was refused"),
+        }
+        thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the grow did not finish");
+}
+
+fn gated_open(
+    img: PathBuf,
+    gate: Arc<Gate>,
+) -> impl Fn() -> Result<Box<dyn Disk + Send>, String> + Send + Sync {
+    move || {
+        let mut fake = Fake::boot(&img);
+        fake.gate = Some(gate.clone());
+        Ok(Box::new(fake) as Box<dyn Disk + Send>)
+    }
+}
+
+#[test]
+fn a_tick_returns_at_once_while_the_resize_blocks_and_takes_the_result_when_it_finishes() {
+    let img = make(&dir("tick-blocks").join("disk.img"));
+    let gate = Arc::new(Gate::default());
+    let open = gated_open(img.clone(), gate.clone());
+    let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    let began = Instant::now();
+    assert!(matches!(task.tick(0, &open), Tick::At(_)));
+    assert!(
+        began.elapsed() < std::time::Duration::from_millis(500),
+        "the first tick does not wait for the resize"
+    );
+    let mut now = 0;
+    for _ in 0..20 {
+        now += 100_000_000;
+        let t = Instant::now();
+        assert!(
+            matches!(task.tick(now, &open), Tick::At(_)),
+            "a tick while the resize blocks"
+        );
+        assert!(t.elapsed() < std::time::Duration::from_millis(500));
+    }
+    assert!(
+        task.progress().is_some_and(|p| !p.overrun),
+        "resizing, within its bound"
+    );
+    gate.release();
+    finish(&mut task, &open, now);
+    assert!(task.unconfirmed().is_none());
+    assert!(task.progress().is_none());
+    assert_eq!(
+        fs_blocks(&img),
+        TARGET * SECT / BLOCK,
+        "the result was taken and the grow confirmed"
+    );
+}
+
+#[test]
+fn a_resize_past_its_bound_is_named_and_its_result_is_still_taken() {
+    let img = make(&dir("overrun").join("disk.img"));
+    let gate = Arc::new(Gate::default());
+    let open = gated_open(img.clone(), gate.clone());
+    let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    task.tick(0, &open);
+    // The disk is 16 GB: one TiB or less, so the bound is the base plus one TiB's share.
+    let bound = overrun_bound(DISK * SECT);
+    assert_eq!(bound, OVERRUN_BASE + OVERRUN_PER_TIB);
+    let past = bound.as_nanos() as u64 + 1_000_000_000;
+    assert!(matches!(task.tick(past, &open), Tick::At(_)));
+    let p = task.progress().expect("the resize is in flight");
+    assert!(p.overrun, "named as an overrun past the bound");
+    assert_eq!(p.bound_ns, bound.as_nanos() as u64);
+    gate.release();
+    finish(&mut task, &open, past);
+    assert!(task.progress().is_none(), "the late result was taken");
+    assert_eq!(fs_blocks(&img), TARGET * SECT / BLOCK);
+}
+
+#[test]
+fn a_restart_during_the_resize_is_confirmed_from_the_stored_baseline() {
+    // The first process starts the resize and dies inside it: its thread never returns from the
+    // ioctl, so the superblock and the kernel's view are still the old size. The table and the
+    // kernel's partition are already the new ones, and the baseline is stored.
+    let img = make(&dir("restart-during").join("disk.img"));
+    let gate = Arc::new(Gate::default());
+    let mut first = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    first.tick(0, &gated_open(img.clone(), gate.clone()));
+    let mut waited = 0;
+    while !(mbr::entries(&sector0_of(&img)).unwrap()[ENTRY].sectors == TARGET as u32
+        && img.with_extension("grow").exists())
+    {
+        thread::sleep(std::time::Duration::from_millis(2));
+        waited += 1;
+        assert!(waited < 2_000, "the first pass never reached the resize");
+    }
+    drop(first);
+    let restarted = {
+        let img = img.clone();
+        move || -> Result<Box<dyn Disk + Send>, String> { Ok(Box::new(Fake::boot(&img))) }
+    };
+    let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    finish(&mut task, &restarted, 0);
+    assert!(task.unconfirmed().is_none(), "not grown-unconfirmed");
+    assert_eq!(
+        fs_blocks(&img),
+        TARGET * SECT / BLOCK,
+        "the restart resized"
+    );
+    assert!(
+        !img.with_extension("grow").exists(),
+        "confirmed: the baseline is cleared"
+    );
+    gate.release();
+}
+
+/// A disk of `bytes` with the same table and filesystem as [`make`], for the cap's tests.
+fn make_disk_bytes(name: &str, bytes: u64) -> PathBuf {
+    make_custom(
+        &dir(name).join("disk.img"),
+        bytes / SECT,
+        P2_OLD,
+        0x83,
+        false,
+        LABEL,
+        true,
+        true,
+    )
+}
+
+#[test]
+fn a_grow_to_more_than_256_gib_is_refused_by_name_and_nothing_is_written() {
+    let img = make_disk_bytes("too-large", 2 << 40);
+    let before = snapshot(&img);
+    let before_mbr = sector0_of(&img);
+    let mut fake = Fake::boot(&img);
+    let pass = grow(&mut fake).unwrap();
+    let Pass::Refused(refusal) = pass else {
+        panic!("a 2 TiB disk must be refused, got {pass:?}");
+    };
+    assert!(
+        refusal.reason.starts_with("grow-too-large:"),
+        "{}",
+        refusal.reason
+    );
+    assert!(refusal.target_bytes > refusal.max_bytes);
+    assert_eq!(refusal.max_bytes, 256 << 30);
+    assert!(refusal.reason.contains(&refusal.target_bytes.to_string()));
+    assert!(refusal.reason.contains(&refusal.max_bytes.to_string()));
+    assert_eq!(fake.mutations, 0, "a refused grow writes nothing");
+    assert_eq!(sector0_of(&img), before_mbr);
+    assert_eq!(snapshot(&img), before);
+}
+
+#[test]
+fn a_grow_to_256_gib_or_less_is_allowed() {
+    let img = make_disk_bytes("at-the-cap", 256 << 30);
+    let mut fake = Fake::boot(&img);
+    assert!(matches!(grow(&mut fake).unwrap(), Pass::Resized { .. }));
+    let t = mbr::entries(&sector0_of(&img)).unwrap();
+    assert!(u64::from(t[ENTRY].sectors) * SECT <= 256 << 30);
+    assert_eq!(fs_blocks(&img), u64::from(t[ENTRY].sectors) * SECT / BLOCK);
+}
+
+#[test]
+fn a_refused_grow_is_named_once_by_the_driver_and_never_tried_again() {
+    let img = make_disk_bytes("refused-driver", 512 << 30);
+    let before = snapshot(&img);
+    let open = {
+        let img = img.clone();
+        move || -> Result<Box<dyn Disk + Send>, String> {
+            Ok(Box::new(Fake::boot(&img)) as Box<dyn Disk + Send>)
+        }
+    };
+    let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
+    // The pass runs on its thread: the refusal is taken by a later tick, once.
+    let mut now = 0u64;
+    let (why, fresh) = loop {
+        now += 100_000_000;
+        match task.tick(now, &open) {
+            Tick::Refused { why, fresh } => break (why, fresh),
+            Tick::At(_) => thread::sleep(std::time::Duration::from_millis(5)),
+            other => panic!("the refusal is the only outcome, got {other:?}"),
+        }
+    };
+    assert!(fresh, "noted once");
+    assert!(why.starts_with("grow-too-large:"));
+    assert!(task.refused().is_some_and(|r| r.target_bytes > r.max_bytes));
+    for step in 1..5u64 {
+        match task.tick(now + step * 1_000_000_000, &open) {
+            Tick::Refused { fresh, .. } => assert!(!fresh, "not noted again"),
+            other => panic!("a refused grow stays refused, got {other:?}"),
+        }
+    }
+    assert_eq!(snapshot(&img), before, "nothing was written by any tick");
 }

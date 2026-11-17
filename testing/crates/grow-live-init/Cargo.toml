@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-grow-live-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The GROW2 guest's first process, test only: mounts /data, runs the harness, unmounts and powers off"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
