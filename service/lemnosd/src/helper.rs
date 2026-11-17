@@ -301,18 +301,16 @@ impl<M: Mounts> Ops for System<M> {
         match outcome {
             Outcome::Made => {}
             Outcome::Adopted => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd-gadget: gadget {}: the tree that was there is the board file's: adopted",
                     gadget.udc
-                );
+                ));
             }
             Outcome::Remade => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd-gadget: gadget {}: the tree that was there differed and was unbound: made again",
                     gadget.udc
-                );
+                ));
             }
         }
         // Told from the tree as it is now, so an adopted tree's own string counts.
@@ -487,10 +485,9 @@ pub fn run_child(mut stream: UnixStream, gadgets: &[Gadget], daemon: Daemon) -> 
         .map(|now| privilege::verify(&plan, &now).is_ok())
         .unwrap_or(false);
     if !ok {
-        let _ = writeln!(
-            io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "{PROCESS_NAME}: cannot take its name, its signals or its capabilities: ending"
-        );
+        ));
         std::process::exit(1);
     }
     // The directories it works in are opened now, once, where they can be (configfs may not be
@@ -501,19 +498,17 @@ pub fn run_child(mut stream: UnixStream, gadgets: &[Gadget], daemon: Daemon) -> 
     // Last, once every step above has run: from here the helper makes only the calls in `calls()`.
     // A filter that cannot be installed ends the helper, rather than letting it run unfiltered.
     if let Err(error) = seccomp::install(&calls()) {
-        let _ = writeln!(
-            io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "{PROCESS_NAME}: cannot install its filter ({error}): ending"
-        );
+        ));
         std::process::exit(1);
     }
     let code = match serve(&mut stream, gadgets, &mut ops, &daemon) {
         Ok(()) => 0,
         Err(error) => {
-            let _ = writeln!(
-                io::stderr(),
+            lemnos_linux_sys::stderr::line(&format!(
                 "{PROCESS_NAME}: the socket failed ({error}): ending"
-            );
+            ));
             1
         }
     };
@@ -1361,6 +1356,61 @@ mod tests {
     /// so a call the filter does not allow kills that verb's child and names it. The mounts are
     /// fakes: this PC makes no mount, and the filter's allowance of `mount` and `umount2` is read
     /// from the list.
+    /// A setup that logs its line, run in a forked child while another thread of the test process
+    /// holds the process's stderr lock. The child inherits that lock held by a thread it does not
+    /// have, so a write through `std::io::stderr` waits on it, in a futex the filter does not allow:
+    /// the child dies with SIGSYS. Found as `every_verb_runs...` failing once under load.
+    #[test]
+    fn a_setup_that_logs_does_not_wait_on_the_stderr_lock_a_fork_inherited() {
+        let dir = scratch("stderr-lock");
+        let (configfs, mounts, udc) = stand_in(&dir, "udc0");
+        std::fs::create_dir_all(configfs.join("usb_gadget")).unwrap();
+        let serial = dir.join("serial-number");
+        std::fs::write(&serial, b"0123456789abcdef\0").unwrap();
+        let gadgets = deriving(&serial);
+        let gadget = &gadgets[0];
+        let setup_once = || {
+            seccomp::run_forked(|| {
+                let roots = Roots {
+                    configfs: &configfs,
+                    mounts: &mounts,
+                    udc_class: &udc,
+                };
+                let mut system = System::over(Trees::new(&roots), NoMounts::default());
+                system.open();
+                if seccomp::install(&calls()).is_err() {
+                    return 2;
+                }
+                // The first call makes the tree; a later one finds it and logs that it adopted it.
+                let _ = system.setup(gadget);
+                0
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            setup_once(),
+            seccomp::Exit::Code(0),
+            "the first setup makes the tree"
+        );
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _held = io::stderr().lock();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let exit = setup_once();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(
+            exit,
+            seccomp::Exit::Code(0),
+            "a setup that logs, with stderr held by another thread"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn every_verb_runs_under_the_filter_and_a_forbidden_call_ends_the_child() {
         let dir = scratch("filter");

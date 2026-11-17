@@ -41,6 +41,7 @@ pub mod serial;
 pub mod signal;
 pub mod spi;
 pub mod statfs;
+pub mod stderr;
 pub mod stream;
 pub mod time;
 pub mod ubi;
