@@ -13,10 +13,9 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use lemnos_linux_sys::mmap::Mapping;
+use lemnos_linux_sys::stream::ring::{Layout, Ring};
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// `LEMNOS_VIP_SLOTS`: the slots a job may name.
@@ -44,15 +43,6 @@ pub const fn slot_addr(n: u32) -> u32 {
     (n + 1) << 28
 }
 
-const FRAME_WORDS: usize = 6;
-const WORD_JOB_SLOTS: usize = 5;
-const WORD_FRAMES_HEAD: usize = 16;
-const WORD_FRAMES_TAIL: usize = 24;
-const WORD_RETURNS_HEAD: usize = 32;
-const WORD_RETURNS_TAIL: usize = 40;
-const WORD_JOBS_HEAD: usize = 48;
-const WORD_JOBS_TAIL: usize = 56;
-const WORD_FRAMES: usize = 64;
 /// A job on the ring, in 64-bit words.
 const JOB_WORDS: usize = size_of::<Job>() / 8;
 
@@ -338,28 +328,23 @@ impl Control {
         let fd = unsafe { OwnedFd::from_raw_fd(create.stream.fd) };
         let bytes = usize::try_from(create.stream.ring_bytes)
             .map_err(|_| io::Error::from_raw_os_error(libc::E2BIG))?;
-        let ring = Mapping::new(fd.as_fd(), bytes, 0, true)?;
-        let frame_slots = params.frame_slots as usize;
-        let returns_at = WORD_FRAMES + frame_slots * FRAME_WORDS;
-        let stream = Stream {
+        // Checks the mapping is the layout the stream was made with, before anything relies on it.
+        let ring = Ring::map(
+            fd.as_fd(),
+            bytes,
+            &Layout {
+                frame_slots: params.frame_slots,
+                buffers: params.buffers,
+                job_slots: params.job_slots,
+                job_bytes: size_of::<Job>() as u32,
+            },
+        )?;
+        Ok(Stream {
             fd,
             ring,
-            frame_slots,
-            job_slots: params.job_slots as usize,
-            buffers: params.buffers,
-            returns_at,
-            jobs_at: returns_at + frame_slots,
-            jobs_head: 0,
-            frames_tail: 0,
-            returns_head: 0,
             chip: create.chip,
             mmu: create.mmu,
-        };
-        // Checks the mapping is what the module says it made, before anything relies on it.
-        if stream.word(WORD_JOB_SLOTS)?.load(Ordering::Acquire) != u64::from(params.job_slots) {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        Ok(stream)
+        })
     }
 }
 
@@ -368,15 +353,7 @@ impl Control {
 #[derive(Debug)]
 pub struct Stream {
     fd: OwnedFd,
-    ring: Mapping,
-    frame_slots: usize,
-    job_slots: usize,
-    buffers: u32,
-    returns_at: usize,
-    jobs_at: usize,
-    jobs_head: u64,
-    frames_tail: u64,
-    returns_head: u64,
+    ring: Ring,
     chip: u32,
     mmu: u32,
 }
@@ -431,11 +408,10 @@ impl Stream {
         Ok(())
     }
 
-    fn word(&self, at: usize) -> io::Result<&AtomicU64> {
-        self.ring
-            .as_atomic_words()
-            .and_then(|w| w.get(at))
-            .ok_or_else(|| io::ErrorKind::InvalidData.into())
+    /// Starts holding frames: the module gets a marks page, and each frame taken holds its buffer
+    /// until [`return_buffer`](Self::return_buffer). At most `max_held` frames are held at once.
+    pub fn hold_frames(&mut self, buffers: u32, max_held: u32) -> io::Result<()> {
+        self.ring.hold_frames(self.fd.as_fd(), buffers, max_held)
     }
 
     /// Pins a dma-buf jobs may name, until [`unregister`](Self::unregister) or the stream's end.
@@ -465,21 +441,7 @@ impl Stream {
 
     /// Posts a job. `WouldBlock` when the job ring is full.
     pub fn post(&mut self, job: &Job) -> io::Result<()> {
-        let tail = self.word(WORD_JOBS_TAIL)?.load(Ordering::Acquire);
-        if self.jobs_head.wrapping_sub(tail) >= self.job_slots as u64 {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        let slot = self.jobs_head as usize & (self.job_slots - 1);
-        let at = self.jobs_at + slot * (1 + JOB_WORDS);
-        self.word(at)?
-            .store(size_of::<Job>() as u64, Ordering::Relaxed);
-        for (i, w) in job.words().iter().enumerate() {
-            self.word(at + 1 + i)?.store(*w, Ordering::Relaxed);
-        }
-        self.jobs_head += 1;
-        self.word(WORD_JOBS_HEAD)?
-            .store(self.jobs_head, Ordering::Release);
-        Ok(())
+        self.ring.post_job(&job.words())
     }
 
     /// Has the module take what has been posted now; its refusal is the error, and ends the
@@ -498,47 +460,23 @@ impl Stream {
         .map(|events| events != 0)
     }
 
-    /// The next frame published, if any.
+    /// The next frame published, if any. With holds, its buffer is held until
+    /// [`return_buffer`](Self::return_buffer).
     pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        let head = self.word(WORD_FRAMES_HEAD)?.load(Ordering::Acquire);
-        if head == self.frames_tail {
-            return Ok(None);
-        }
-        let at = WORD_FRAMES + (self.frames_tail as usize & (self.frame_slots - 1)) * FRAME_WORDS;
-        let word = self.word(at)?.load(Ordering::Relaxed);
-        let buffer = word as u32;
-        if buffer >= self.buffers {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        let frame = Frame {
-            buffer,
-            bytes: (word >> 32) as u32,
-            sequence: self.word(at + 1)?.load(Ordering::Relaxed),
-            identity: self.word(at + 2)?.load(Ordering::Relaxed),
-            timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
-            fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
-        };
-        self.frames_tail += 1;
-        self.word(WORD_FRAMES_TAIL)?
-            .store(self.frames_tail, Ordering::Release);
-        Ok(Some(frame))
+        Ok(self.ring.next_frame()?.map(|f| Frame {
+            buffer: f.buffer,
+            bytes: f.bytes,
+            sequence: f.sequence,
+            identity: f.identity,
+            timestamp_ns: f.timestamp_ns,
+            fence: f.fence,
+        }))
     }
 
-    /// Gives a frame's buffer back. `WouldBlock` when the return ring is full.
-    pub fn return_buffer(&mut self, buffer: u32, fence: u32) -> io::Result<()> {
-        let tail = self.word(WORD_RETURNS_TAIL)?.load(Ordering::Acquire);
-        if self.returns_head.wrapping_sub(tail) >= self.frame_slots as u64 {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        let slot = self.returns_head as usize & (self.frame_slots - 1);
-        self.word(self.returns_at + slot)?.store(
-            u64::from(buffer) | u64::from(fence) << 32,
-            Ordering::Relaxed,
-        );
-        self.returns_head += 1;
-        self.word(WORD_RETURNS_HEAD)?
-            .store(self.returns_head, Ordering::Release);
-        Ok(())
+    /// Gives a frame's buffer back: the hold ends, and the module may reuse the buffer. `InvalidInput`
+    /// when no frame is held in `buffer` (a double return, or one never taken).
+    pub fn return_buffer(&mut self, buffer: u32, _fence: u32) -> io::Result<()> {
+        self.ring.release(buffer)
     }
 
     /// How the stream is doing.

@@ -9,6 +9,7 @@ use lemnos_driver_pisp_fe_sys::{self as sys, Node, Stream, StreamParams};
 pub use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
+use lemnos_linux_sys::stream::ring::Marks;
 
 use crate::fe_job::{ALIGN, CONFIG_BYTES};
 
@@ -221,8 +222,6 @@ struct Running {
     configs: Mapping,
     /// The configuration slots' memory, held as long as the stream is.
     _memory: Vec<OwnedFd>,
-    /// What each buffer's return must carry; a frame gives its buffer a new one.
-    fences: Vec<u32>,
 }
 
 /// The block through its receiver's node. Opened as it's needed, so a block not yet bound is a
@@ -250,12 +249,18 @@ impl LinuxHardware {
         // is EBUSY, so a second front end on this block is refused, by the module.
         node.claim()?;
         let heap = std::fs::File::open(format!("/dev/dma_heap/{}", self.settings.heap))?;
-        let stream = node.stream_create(&StreamParams {
+        let mut stream = node.stream_create(&StreamParams {
             buffers: plan.buffers,
             buffer_bytes: plan.output0_bytes,
             frame_slots: plan.buffers.next_power_of_two(),
             job_slots: plan.job_slots,
         })?;
+        // A taken frame is held until give_back: the marks page, at most B - 2 at once (docs/streams.md,
+        // the margin: N = B - 1 - W - held, with W = 1 for a producer that asks while it fills one).
+        let max_held = plan.buffers.saturating_sub(2).max(1);
+        let marks = Marks::create(plan.buffers, 0, max_held)
+            .map_err(|e| io::Error::other(format!("make the marks page: {e:?}")))?;
+        stream.add_marks(marks, plan.buffers, max_held)?;
         let config_bytes = page_align(u64::from(plan.buffers) * slot_bytes(CONFIG_BYTES as u32));
         let fd = dma_heap::allocate(heap.as_fd(), config_bytes)?;
         let config = stream.register(fd.as_fd())?;
@@ -267,7 +272,6 @@ impl LinuxHardware {
             node,
             configs,
             _memory: vec![fd],
-            fences: vec![0; plan.buffers as usize],
         });
         Ok(Placed { config })
     }
@@ -372,9 +376,6 @@ impl Hardware for LinuxHardware {
         let Some(frame) = r.stream.next_frame().map_err(|e| status(&e))? else {
             return Ok(None);
         };
-        if let Some(fence) = r.fences.get_mut(frame.buffer as usize) {
-            *fence = frame.fence;
-        }
         Ok(Some(Finished {
             buffer: frame.buffer,
             bytes: frame.bytes,
@@ -387,13 +388,7 @@ impl Hardware for LinuxHardware {
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
         let r = self.running()?;
-        let fence = *r
-            .fences
-            .get(buffer as usize)
-            .ok_or(Status::INVALID_ARGUMENT)?;
-        r.stream
-            .return_buffer(buffer, fence)
-            .map_err(|e| status(&e))
+        r.stream.return_buffer(buffer).map_err(|e| status(&e))
     }
 
     fn check(&mut self) -> Result<()> {

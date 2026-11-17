@@ -778,7 +778,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
     k.frame(5, &pattern(2, STATISTICS_BYTES), &pattern(3, IMAGE));
     d.tick(3);
     let s = streams.statistics.take_frame().unwrap();
-    streams.statistics.return_buffer(s.buffer);
+    streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
     assert_eq!(d.counters().unwrap().jobs, 1);
 
     // Job 2 names a config buffer past the ring, so it is dropped. Then, before job 3 is read,
@@ -791,7 +791,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         reads += 1;
         if reads == 2 {
             let frame = consumer.output0.take_frame().unwrap();
-            consumer.output0.return_buffer(frame.buffer);
+            consumer.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
             post(&consumer.config, &job(3, 2, frame.buffer));
         }
     }));
@@ -1079,7 +1079,7 @@ fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_cont
         d.tick(4);
         let s = streams.statistics.take_frame().unwrap();
         assert_eq!(s.identity, identity);
-        streams.statistics.return_buffer(s.buffer);
+        streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
     }
     assert_eq!(
         k.loads(),
@@ -1148,9 +1148,9 @@ fn the_steady_state_allocates_nothing() {
         }
         *now = d.tick(*now).unwrap();
         let s = streams.statistics.take_frame().unwrap();
-        streams.statistics.return_buffer(s.buffer);
+        streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
         let o = streams.output0.take_frame().unwrap();
-        streams.output0.return_buffer(o.buffer);
+        streams.output0.return_buffer(o.buffer).expect("the consumer holds this buffer");
     };
     for n in 0..WARM {
         one_job(&mut d, &mut now, n);
@@ -1292,11 +1292,11 @@ fn run_statistics(keep_up: bool, jobs: u64) -> (u32, u64, u64) {
             d.tick(now);
             while let Some(s) = streams.statistics.take_frame() {
                 if keep_up {
-                    streams.statistics.return_buffer(s.buffer);
+                    streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
                 }
             }
             while let Some(o) = streams.output0.take_frame() {
-                streams.output0.return_buffer(o.buffer);
+                streams.output0.return_buffer(o.buffer).expect("the consumer holds this buffer");
             }
             if finished(&mut d) > done_before {
                 break;

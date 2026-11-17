@@ -719,9 +719,23 @@ static void tgd_wr(unsigned int off, u32 v)
 	writel(v, (u8 __iomem *)tgd_regs() + off);
 }
 
+/*
+ * A descriptor's address names memory the block may read. A page that is free has no references, so one
+ * whose count is zero was freed (a stale descriptor, the bug KASAN found): the fake refuses it, as the
+ * block would refuse an unmapped address, and says so in the log.
+ */
 static void *tgd_at(u64 bus)
 {
-	return pfn_valid(PHYS_PFN(bus)) ? phys_to_virt(bus) : NULL;
+	unsigned long pfn = PHYS_PFN(bus);
+
+	if (!pfn_valid(pfn))
+		return NULL;
+	if (!page_ref_count(pfn_to_page(pfn))) {
+		pr_err("lemnos-test-block: gsdma descriptor reads a freed page at %llx\n",
+		       (unsigned long long)bus);
+		return NULL;
+	}
+	return phys_to_virt(bus);
 }
 
 /* One descriptor: its plane, mirrored, then turned clockwise. */

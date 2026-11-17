@@ -305,6 +305,15 @@ trusted.
 
 ## Streams
 
+**Kernel uAPI (module streams), no socket hash moves.** The module's own frame streams (`LEMNOS_STREAM_*`
+in `kernel/lemnos.h`) have one form now: the shm ring, with the job block after the pool page. The
+`LEMNOS_RING_*` frame and return words are removed, `LEMNOS_STREAM_CREATE_SHM` is no longer a flag (a create
+with it is `EINVAL`), and frame rings of fewer than two slots are refused. The job words are at the pool
+page's control block: head `control + 2`, tail `control + 3`, slots from `control + 4`, where `control` is
+the pool page's start plus 8, plus the buffer count, plus 64. The socket protocol is unchanged, so none of
+the hashes below moves. The kernel uAPI has no hash of its own: its change is recorded here and in
+[`kernel-module.md`](kernel-module.md#the-modules-own-streams).
+
 StreamOpen takes one stream of one device for this connection. `name` is the stream's name under
 that device in the board file (`[devices.streams.<name>]`). A stream has one consumer: a second
 StreamOpen gets Refusal with `BUSY`; an unknown device or name gets `NOT_FOUND`. StreamClose gives

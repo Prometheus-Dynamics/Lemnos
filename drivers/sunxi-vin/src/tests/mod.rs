@@ -491,7 +491,7 @@ fn frames_come_out_of_the_stream_with_the_nodes_bytes_in_order() {
             stream.contents(frame.buffer) == *bytes,
             "frame {i} arrived with other bytes"
         );
-        stream.return_buffer(frame.buffer);
+        stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
     }
     assert_eq!(
         node.with(|n| n.requeued.clone()),
@@ -832,7 +832,7 @@ fn the_steady_state_allocates_nothing() {
         node.with(|n| n.filled.push_back((0, 0, false, vec![pattern(0, FRAME)])));
         now = d.tick(now).unwrap();
         let frame = stream.take_frame().unwrap();
-        stream.return_buffer(frame.buffer);
+        stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
     }
     node.with(|n| n.filled.reserve(1000));
     let mut frames = frames.into_iter();
@@ -842,7 +842,7 @@ fn the_steady_state_allocates_nothing() {
             node.with(|n| n.filled.push_back(frame));
             now = d.tick(now).unwrap();
             let frame = stream.take_frame().unwrap();
-            stream.return_buffer(frame.buffer);
+            stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
             let counters = d.counters().unwrap();
             assert_eq!(counters.dropped, 0);
         }

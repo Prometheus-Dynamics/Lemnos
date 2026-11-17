@@ -308,10 +308,15 @@ impl Hardware for Hw {
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
         self.with(|b| match b.buffers.get_mut(buffer as usize) {
-            Some(slot) if slot.at == Where::Out => slot.at = Where::Free,
-            _ => b.bad_returns += 1,
-        });
-        Ok(())
+            Some(slot) if slot.at == Where::Out => {
+                slot.at = Where::Free;
+                Ok(())
+            }
+            _ => {
+                b.bad_returns += 1;
+                Err(Status::INVALID_ARGUMENT)
+            }
+        })
     }
 
     fn check(&mut self) -> Result<()> {

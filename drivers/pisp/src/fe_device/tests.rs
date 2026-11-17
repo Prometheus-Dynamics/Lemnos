@@ -46,6 +46,8 @@ struct Mock {
     posted: Vec<Job>,
     finished: Vec<Finished>,
     given_back: Vec<u32>,
+    /// Frames taken and not yet given back, per buffer: a release needs one (the real ring's hold).
+    holds: Vec<u32>,
     /// Buffers given memory on the stream now, in order; cleared when a stream is made.
     set: Vec<u32>,
     /// What the module says to the next memory offered for a buffer.
@@ -70,6 +72,7 @@ impl Default for Mock {
             posted: Vec::with_capacity(64),
             finished: Vec::with_capacity(64),
             given_back: Vec::with_capacity(4096),
+            holds: Vec::new(),
             set: Vec::with_capacity(4096),
             answer: None,
             regions: [None; MAX_REGIONS],
@@ -184,12 +187,19 @@ impl Hardware for Hw {
     }
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {
-        Ok(self.with(|m| m.finished.pop()))
+        Ok(self.with(|m| {
+            let frame = m.finished.pop()?;
+            hold_take(&mut m.holds, frame.buffer);
+            Some(frame)
+        }))
     }
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
-        self.with(|m| m.given_back.push(buffer));
-        Ok(())
+        self.with(|m| {
+            hold_release(&mut m.holds, buffer)?;
+            m.given_back.push(buffer);
+            Ok(())
+        })
     }
 
     fn check(&mut self) -> Result<()> {
@@ -479,7 +489,7 @@ fn statistics_and_output1_are_published_with_the_jobs_identity_and_let_go_of() {
         0,
         "what was registered for it was let go"
     );
-    r.stats.return_buffer(1);
+    r.stats.return_buffer(1).expect("the consumer holds this buffer");
     r.post(&job(0x79, 1, 0, 3));
     r.fe.tick(4);
     assert_eq!(r.hw.with(|m| m.posted.len()), 2);
@@ -816,7 +826,7 @@ fn a_finished_job_is_published_and_its_buffer_goes_back_when_returned() {
     assert_eq!(r.hw.with(|m| m.posted.len()), 1);
     assert_eq!(r.fe.counters.dropped, 1);
 
-    r.frames.return_buffer(2);
+    r.frames.return_buffer(2).expect("the consumer holds this buffer");
     r.fe.tick(4);
     assert_eq!(r.hw.with(|m| m.given_back.clone()), [2]);
     assert_eq!(
@@ -1109,9 +1119,9 @@ fn the_steady_state_allocates_nothing() {
         assert_eq!(r.frames.take_frame().map(|f| f.identity), Some(now));
         assert_eq!(r.stats.take_frame().map(|f| f.identity), Some(now));
         assert_eq!(r.out1.take_frame().map(|f| f.identity), Some(now));
-        r.frames.return_buffer(0);
-        r.stats.return_buffer(0);
-        r.out1.return_buffer(1);
+        r.frames.return_buffer(0).expect("the consumer holds this buffer");
+        r.stats.return_buffer(0).expect("the consumer holds this buffer");
+        r.out1.return_buffer(1).expect("the consumer holds this buffer");
         tick(&mut r.fe, now + 2);
         assert!(r.hw.with(|m| m.given_back == [0]));
         now += 3;
@@ -1222,4 +1232,24 @@ fn a_caller_going_away_stops_the_front_end_it_started() {
         before + 1,
         "and nothing more once it is stopped"
     );
+}
+
+/// The real ring's hold, per buffer: a frame taken from the stream holds its buffer until it is
+/// given back, and a release with no hold is refused (`INVALID_ARGUMENT`), as `Ring::release` is.
+fn hold_take(holds: &mut Vec<u32>, buffer: u32) {
+    let at = buffer as usize;
+    if holds.len() <= at {
+        holds.resize(at + 1, 0);
+    }
+    holds[at] += 1;
+}
+
+fn hold_release(holds: &mut [u32], buffer: u32) -> Result<()> {
+    match holds.get_mut(buffer as usize) {
+        Some(held) if *held > 0 => {
+            *held -= 1;
+            Ok(())
+        }
+        _ => Err(Status::INVALID_ARGUMENT),
+    }
 }

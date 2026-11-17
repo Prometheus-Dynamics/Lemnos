@@ -894,7 +894,7 @@ fn an_output_buffer_is_used_once_until_the_consumer_gives_it_back() {
     d.tick(3);
     assert_eq!(d.counters().unwrap().dropped, 2);
     let frame = streams.output0.take_frame().unwrap();
-    streams.output0.return_buffer(frame.buffer);
+    streams.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
     post(&streams.config, &job(4, 1, 0));
     d.tick(4);
     assert_eq!(d.counters().unwrap().dropped, 2);
@@ -932,7 +932,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         reads += 1;
         if reads == 2 {
             let frame = consumer.output0.take_frame().unwrap();
-            consumer.output0.return_buffer(frame.buffer);
+            consumer.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
             post(&consumer.config, &job(3, 2, frame.buffer));
         }
     }));
@@ -1326,7 +1326,7 @@ fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_cont
         d.tick(4);
         let s = streams.statistics.take_frame().unwrap();
         assert_eq!(s.identity, identity);
-        streams.statistics.return_buffer(s.buffer);
+        streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
         assert_eq!(
             k.params_seen(0),
             pattern(20 + buffer as u8, PARAMS),
@@ -1371,9 +1371,9 @@ fn one_job(
     });
     *now = d.tick(*now).unwrap();
     let s = streams.statistics.take_frame().unwrap();
-    streams.statistics.return_buffer(s.buffer);
+    streams.statistics.return_buffer(s.buffer).expect("the consumer holds this buffer");
     let o = streams.output0.take_frame().unwrap();
-    streams.output0.return_buffer(o.buffer);
+    streams.output0.return_buffer(o.buffer).expect("the consumer holds this buffer");
 }
 
 #[test]

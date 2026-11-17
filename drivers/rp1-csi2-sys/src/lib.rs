@@ -17,9 +17,8 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use lemnos_linux_sys::mmap::Mapping;
+use lemnos_linux_sys::stream::ring::{Layout, Marks, Ring};
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// `LEMNOS_RP1_CSI2_ABI`: the node's interface revision this crate speaks.
@@ -40,13 +39,6 @@ pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
 const CREATE_BUFFERS: u32 = 1;
 
-const FRAME_WORDS: usize = 6;
-const WORD_FRAME_SLOTS: usize = 4;
-const WORD_FRAMES_HEAD: usize = 16;
-const WORD_FRAMES_TAIL: usize = 24;
-const WORD_RETURNS_HEAD: usize = 32;
-const WORD_RETURNS_TAIL: usize = 40;
-const WORD_FRAMES: usize = 64;
 
 /// `struct lemnos_rp1_csi2_info`.
 #[repr(C)]
@@ -305,25 +297,18 @@ impl Node {
         let fd = unsafe { OwnedFd::from_raw_fd(create.fd) };
         let len = usize::try_from(create.ring_bytes)
             .map_err(|_| io::Error::from_raw_os_error(libc::E2BIG))?;
-        let ring = Mapping::new(fd.as_fd(), len, 0, true)?;
-        let frame_slots = params.frame_slots as usize;
-        let stream = Stream {
-            fd,
-            ring,
-            frame_slots,
-            buffers: params.buffers,
-            returns_at: WORD_FRAMES + frame_slots * FRAME_WORDS,
-            frames_tail: 0,
-            returns_head: 0,
-        };
-        // Checks the mapping is what the module says it made, before anything relies on it.
-        if !frame_slots.is_power_of_two()
-            || stream.word(WORD_FRAME_SLOTS)?.load(Ordering::Acquire)
-                != u64::from(params.frame_slots)
-        {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        Ok(stream)
+        // Checks the mapping is the layout the stream was made with, before anything relies on it.
+        let ring = Ring::map(
+            fd.as_fd(),
+            len,
+            &Layout {
+                frame_slots: params.frame_slots,
+                buffers: params.buffers,
+                job_slots: params.job_slots,
+                job_bytes: JOB_BYTES,
+            },
+        )?;
+        Ok(Stream { fd, ring })
     }
 
     /// Asks for the embedded stream `embedded.stream_fd` names, for the next START. Only while
@@ -365,12 +350,7 @@ pub struct BufferMemory {
 #[derive(Debug)]
 pub struct Stream {
     fd: OwnedFd,
-    ring: Mapping,
-    frame_slots: usize,
-    buffers: u32,
-    returns_at: usize,
-    frames_tail: u64,
-    returns_head: u64,
+    ring: Ring,
 }
 
 impl Stream {
@@ -378,13 +358,6 @@ impl Stream {
     #[must_use]
     pub fn raw_fd(&self) -> i32 {
         self.fd.as_raw_fd()
-    }
-
-    fn word(&self, at: usize) -> io::Result<&AtomicU64> {
-        self.ring
-            .as_atomic_words()
-            .and_then(|w| w.get(at))
-            .ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
     /// Gives `buffer` the dma-buf `memory`, which the module pins for as long as the buffer has
@@ -405,46 +378,31 @@ impl Stream {
         })
     }
 
-    /// The next frame published, if any.
-    pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        let head = self.word(WORD_FRAMES_HEAD)?.load(Ordering::Acquire);
-        if head == self.frames_tail {
-            return Ok(None);
-        }
-        let at = WORD_FRAMES + (self.frames_tail as usize & (self.frame_slots - 1)) * FRAME_WORDS;
-        let word = self.word(at)?.load(Ordering::Relaxed);
-        let buffer = word as u32;
-        if buffer >= self.buffers {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        let frame = Frame {
-            buffer,
-            bytes: (word >> 32) as u32,
-            sequence: self.word(at + 1)?.load(Ordering::Relaxed),
-            timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
-            fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
-        };
-        self.frames_tail += 1;
-        self.word(WORD_FRAMES_TAIL)?
-            .store(self.frames_tail, Ordering::Release);
-        Ok(Some(frame))
+    /// Turns the stream's buffer holds on: from now on each frame [`next_frame`](Self::next_frame)
+    /// takes is held until [`release`](Self::release) gives it back. `max_held` frames at most may
+    /// be held at once. `buffers` is the stream's pool size.
+    pub fn add_marks(&mut self, buffers: u32, max_held: u32) -> io::Result<()> {
+        let marks = Marks::create(buffers, 0, max_held)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("marks: {e:?}")))?;
+        self.ring.add_marks(self.fd.as_fd(), marks, buffers, max_held)
     }
 
-    /// Gives a frame's buffer back. `WouldBlock` when the return ring is full.
-    pub fn return_buffer(&mut self, buffer: u32, fence: u32) -> io::Result<()> {
-        let tail = self.word(WORD_RETURNS_TAIL)?.load(Ordering::Acquire);
-        if self.returns_head.wrapping_sub(tail) >= self.frame_slots as u64 {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        let slot = self.returns_head as usize & (self.frame_slots - 1);
-        self.word(self.returns_at + slot)?.store(
-            u64::from(buffer) | u64::from(fence) << 32,
-            Ordering::Relaxed,
-        );
-        self.returns_head += 1;
-        self.word(WORD_RETURNS_HEAD)?
-            .store(self.returns_head, Ordering::Release);
-        Ok(())
+    /// The next frame published, if any. With holds on, the frame's buffer is held until
+    /// [`release`](Self::release).
+    pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
+        Ok(self.ring.next_frame()?.map(|f| Frame {
+            buffer: f.buffer,
+            bytes: f.bytes,
+            sequence: f.sequence,
+            timestamp_ns: f.timestamp_ns,
+            fence: f.fence,
+        }))
+    }
+
+    /// Lets go of a frame's buffer: the module may reuse it. `InvalidInput` when the stream holds
+    /// no frame in `buffer`.
+    pub fn release(&mut self, buffer: u32) -> io::Result<()> {
+        self.ring.release(buffer)
     }
 
     /// How the stream is doing.

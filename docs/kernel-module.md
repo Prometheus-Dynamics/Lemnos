@@ -69,13 +69,14 @@ backend hands those two to no driver.
 
 ## The module's own streams
 
-A stream the module makes (`LEMNOS_STREAM_*`) has its own ring. By default it is the module's own
-layout (`LEMNOS_RING_*`), which the four sys crates read; the driver that runs the block reads it,
-with its fences and job ranges. With `LEMNOS_STREAM_CREATE_SHM` the frame ring is the shared-memory
-ring of [`shm/README.md`](../shm/README.md) instead: one field, one sample per frame, each sample's
-entry naming its buffer and ticket, and the pool page after the ring. A reader maps it read-only and
-reads it with the shm crates alone (`testing/crates/shm-ring-check` does, in the QEMU harness). In
-this form a buffer is not returned through a words queue: a consumer gives the module its marks page
+A stream the module makes (`LEMNOS_STREAM_*`) has one ring form: the frame ring is the shared-memory
+ring of [`shm/README.md`](../shm/README.md), one field, one sample per frame, each sample's entry
+naming its buffer and ticket, and the pool page after the ring. A reader maps it read-only and reads
+it with the shm crates alone (`testing/crates/shm-ring-check` does, in the QEMU harness). There is no
+other form: the earlier `LEMNOS_RING_*` words (frame and return queues, a magic and a version of their
+own) are gone, and `LEMNOS_STREAM_CREATE_SHM` is no longer a flag. A create with any flag but
+`LEMNOS_STREAM_CREATE_BUFFERS` is `EINVAL`, and so is a frame ring of fewer than two slots. A buffer is
+not returned through a words queue: a consumer gives the module its marks page
 (`shm-ring-holds`) with `LEMNOS_STREAM_IOC_READER`, and the module pins that page read-only. A buffer
 goes back to the frame path only when no reader marks it, and the module checks that when it needs the
 buffer, so a held buffer is never reused. `LEMNOS_STREAM_IOC_READER` also returns `reader_fd`, a file that
@@ -114,8 +115,13 @@ sleeps, so a frame published before its wait is still read without a sleep, and 
 during the arm is seen by the look. `testing/crates/shm-bell-check` proves both on the pinned kernel:
 the first wait returns at once with frames published before it, and a consumer that sleeps on the
 bell reads 2000 frames at a 2 ms period, with the bell's median latency below a 1 ms poll's (QEMU
-numbers; the regression check only). The jobs words still follow the old layout in this form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
-and [`TODO.md`](../TODO.md) lists the port.
+numbers; the regression check only).
+
+The job block follows the pool page, from its control words (`control` = the pool page's start + 8 +
+buffers + 64 reader cut-off words): word `control + 2` the jobs posted (the consumer's), `control + 3`
+the jobs taken (the module's), then the job slots from `control + 4`, each `1 + job_bytes / 8` words,
+its length first. The return queue that sat between the frame ring and the jobs is gone, so the job
+slots sit `frame_slots` words earlier than in the old form. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits.
 
 ## What it never does
 

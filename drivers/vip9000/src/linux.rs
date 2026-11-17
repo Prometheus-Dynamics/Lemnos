@@ -83,7 +83,7 @@ impl Module for LinuxModule {
         let block = control.find_block(&self.settings.device)?;
         let heap = File::open(format!("/dev/dma_heap/{}", self.settings.heap))?;
         let pool = dma_heap::allocate(heap.as_fd(), u64::from(TOKENS * TOKEN_BYTES))?;
-        let stream = control.create(
+        let mut stream = control.create(
             block,
             &StreamParams {
                 buffers: TOKENS,
@@ -93,6 +93,9 @@ impl Module for LinuxModule {
             },
             pool.as_fd(),
         )?;
+        // A result is taken and given back inside one call (`post_and_wait`): one hold at a time.
+        // The stream is job-driven, so a buffer is named by a job and not taken between jobs.
+        stream.hold_frames(TOKENS, 1)?;
         Ok(LinuxSession {
             stream,
             _pool: pool,

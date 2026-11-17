@@ -5,7 +5,7 @@
 //! lemnos-shm-ring-check <control node> <block name> <heap node>
 //! ```
 //!
-//! Makes a stream on the test block with `LEMNOS_STREAM_CREATE_SHM`, starts the module's test
+//! Makes a stream on the test block with the shm ring (no create flag), starts the module's test
 //! source, maps the ring read-only, and reads it with `shm_ring::Reader` (which checks the
 //! header against the shape it derives) and `shm_ring_buffers` (the pool page and the entries). It
 //! checks the first frames: their sequence numbers, times, buffers, tickets and entries. A frame
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::module;
-use lemnos_linux_sys::stream::{self, CREATE_SHM};
+use lemnos_linux_sys::stream;
 use lemnos_linux_sys::time::monotonic_ns;
 use shm_ring::{Mem, Reader};
 use shm_ring_buffers::{BufferIndex, entry, page};
@@ -157,7 +157,7 @@ fn run_with(
             node.as_fd(),
             &stream::Spec {
                 block,
-                flags: CREATE_SHM,
+                flags: 0,
                 buffers: BUFFERS,
                 buffer_bytes: BUFFER_BYTES,
                 frame_slots: FRAME_SLOTS,
