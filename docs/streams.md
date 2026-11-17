@@ -525,10 +525,13 @@ consumer that holds every buffer of the receiver leaves `rp1-csi2` with nothing 
 frame start; the receiver then answers `frame_starts` with `None` ("cannot say now"), which is no
 judgement, and counts again once a buffer is armed.
 The frame stop. `rp1-csi2` and `k230-capture` watch their own frames: when no frame moves for
-`max(4 x the active picture's period, 200 ms)` while streaming, the frame path restarts under the same
+`max(4 x the measured frame period, 200 ms)` while streaming, the frame path restarts under the same
 backoff (capped at 8 s, never gives up), with health failed and the reason "no frame arrived within the
-bound for the configured mode". The period is `width x height` at the link's pixel rate (the mode as
-configured, not a board measurement), so the bound is a little shorter than four real frame periods.
+bound". The measured period is the longest of the last four intervals between frame start times
+(`rp1-csi2`) or frame-end times (`k230-capture`), so a long exposure that stretches the frame raises the
+bound with it. Before two frames have given an interval the bound is `max(4 x the mode's nominal period,
+3 s)`, where the nominal period is `width x height` at the link's pixel rate (blanking and exposure left
+out). Unmeasured on a board.
 `rp1-csi2` judges only while a buffer is armed (its frame count is known); `k230-capture` counts frame
 ends whether or not a consumer holds a buffer. Unmeasured on a board. Named limit: `rkcif` and
 `sunxi-vin` cannot count frame starts (`NOT_SUPPORTED`), so they do not watch yet; that needs a

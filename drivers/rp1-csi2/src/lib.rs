@@ -86,12 +86,14 @@
 //! A node that answers `ENODEV` (its block was unbound) is dropped, and the next attempt opens
 //! the path again, so the driver comes back once the block is bound again.
 //!
-//! Frame stop. While streaming, a frame that does not come is a failure too. The bound is taken
-//! from the configured mode, not measured on a board: the frame period is the active picture
-//! (width times height) at the link's pixel rate, and the receiver counts a stop at the first
-//! one-second check after no frame has moved for `max(4 x that period, 200 ms)`. The active picture leaves out blanking, so the period
-//! is shorter than a real frame's; the bound is four of those, which stays above a real frame period
-//! while blanking is less than three times the active picture. The judgement is made only while the
+//! Frame stop. While streaming, a frame that does not come is a failure too. The bound follows the
+//! frame period the block reports: the receiver measures the interval between frame start times and
+//! takes the longest of the last four, so a long exposure (which stretches the frame) raises the
+//! bound with it. A stop is counted at the first one-second check after no frame has moved for
+//! `max(4 x that measured period, 200 ms)`. Before two frames have given an interval the bound is
+//! `max(4 x the mode's nominal period, 3 s)`: the first frame carries the exposure and readout, which
+//! are not yet measured. The nominal period is width times height at the link's pixel rate, and it
+//! leaves out blanking and exposure, so it is only the fallback. The judgement is made only while the
 //! block has a buffer armed (`frame_starts` is `Some`): with every buffer held by the consumer no
 //! frame can reach it, and that is no stop. A stop restarts the receiver under the failure rule
 //! above, and health is failed with a reason that names the stop. Unmeasured on a board.
@@ -149,6 +151,10 @@ const FALLBACK_NS: u64 = 33_000_000;
 const FRAME_STOP_MIN_NS: u64 = 200_000_000;
 /// Frame periods a stop waits for before it is judged.
 const FRAME_STOP_PERIODS: u64 = 4;
+/// Until two frames have given an interval, a stop waits this long: the first frame carries the
+/// sensor's exposure and readout, which the driver has not measured yet (the same allowance the
+/// `ov9782` driver gives the first frame after a restart).
+const FIRST_FRAME_NS: u64 = 3_000_000_000;
 /// The stream the board declares on the device, and the name its consumer opens it by.
 const STREAM: &str = "frames";
 /// The stream of the embedded data, when the board declares one on the device.
@@ -212,19 +218,63 @@ pub struct Rp1Csi2 {
     last_frame_ns: Option<u64>,
     /// Set while recovering from a frame stop, so health names it.
     frame_stopped: bool,
+    /// The frame times the block reports, for the measured frame period.
+    clock: FrameClock,
 }
 
-/// The no-frame bound for a link: `max(4 x active-picture period, 200 ms)`, where the active
-/// picture is width times height at the pixel rate. `None` for a link with no pixel rate.
-fn frame_stop_bound_ns(link: &LinkConfig) -> Option<u64> {
+/// The frame intervals of the last few frames, from the frame start times the block reports. The
+/// period is measured, not read from the mode: a long exposure stretches the frame (VTS), so the
+/// real period can be far longer than the mode's nominal one.
+#[derive(Debug, Clone, Copy, Default)]
+struct FrameClock {
+    last: Option<u64>,
+    intervals: [u64; 4],
+    next: usize,
+}
+
+impl FrameClock {
+    /// One frame at `at_ns`. A frame that is not later than the last gives no interval.
+    fn frame(&mut self, at_ns: u64) {
+        if let Some(prev) = self.last.filter(|prev| at_ns > *prev) {
+            self.intervals[self.next] = at_ns - prev;
+            self.next = (self.next + 1) % self.intervals.len();
+        }
+        self.last = Some(at_ns);
+    }
+
+    /// The longest of the last four intervals, or `None` before any frame pair has given one.
+    /// The longest, so one short interval (a burst) cannot shorten the bound.
+    fn period(&self) -> Option<u64> {
+        let longest = self.intervals.iter().copied().max().unwrap_or(0);
+        (longest > 0).then_some(longest)
+    }
+}
+
+/// The frame period of the configured mode, from its active picture (width times height at the
+/// pixel rate). A nominal figure: it leaves out blanking and any exposure stretch.
+fn nominal_period_ns(link: &LinkConfig) -> Option<u64> {
     if link.pixel_rate_hz == 0 {
         return None;
     }
     let period = u128::from(link.width) * u128::from(link.height) * 1_000_000_000
         / u128::from(link.pixel_rate_hz);
-    let four =
-        u64::try_from(period.saturating_mul(u128::from(FRAME_STOP_PERIODS))).unwrap_or(u64::MAX);
-    Some(four.max(FRAME_STOP_MIN_NS))
+    u64::try_from(period).ok()
+}
+
+/// The no-frame bound: `max(4 x the measured frame period, 200 ms)`. Before a period is measured
+/// it is `max(4 x the nominal period, 3 s)`, so a slow start is not a stop.
+fn frame_stop_bound_ns(link: &LinkConfig, period: Option<u64>) -> Option<u64> {
+    match period {
+        Some(period) => Some(
+            period
+                .saturating_mul(FRAME_STOP_PERIODS)
+                .max(FRAME_STOP_MIN_NS),
+        ),
+        None => {
+            let nominal = nominal_period_ns(link)?.saturating_mul(FRAME_STOP_PERIODS);
+            Some(nominal.max(FIRST_FRAME_NS))
+        }
+    }
 }
 
 /// The smallest ring holding `buffers` frames, a power of two.
@@ -475,6 +525,8 @@ impl Lifecycle for Rp1Csi2 {
                 Ok(()) => {
                     self.frame_stopped = false;
                     self.last_frame_ns = Some(now_ns);
+                    // A restart is a new stream: its first interval is not the gap across the stop.
+                    self.clock = FrameClock::default();
                     self.state = State::Streaming {
                         next_check: Some(now_ns.saturating_add(CHECK_NS)),
                     };
@@ -502,7 +554,7 @@ impl Rp1Csi2 {
         let (Some(link), Some(since)) = (self.link, self.last_frame_ns) else {
             return false;
         };
-        let Some(bound) = frame_stop_bound_ns(&link) else {
+        let Some(bound) = frame_stop_bound_ns(&link, self.clock.period()) else {
             return false;
         };
         if now_ns.saturating_sub(since) <= bound {
@@ -533,6 +585,7 @@ impl Rp1Csi2 {
             lost_wakes: 0,
             last_frame_ns: None,
             frame_stopped: false,
+            clock: FrameClock::default(),
         }
     }
 
@@ -569,6 +622,7 @@ impl Rp1Csi2 {
         };
         while let Some(done) = self.hw.next_frame(Channel::Image)? {
             self.frames_moved += 1;
+            self.clock.frame(done.timestamp_ns);
             self.relay.finished(&done, &mut **frames, &mut *self.hw)?;
         }
         self.relay.sweep(&mut **frames);
@@ -745,6 +799,7 @@ impl CameraReceiver for Rp1Csi2 {
         self.state = State::Stopped;
         self.last_frame_ns = None;
         self.frame_stopped = false;
+        self.clock = FrameClock::default();
         self.hw.stop()
     }
 

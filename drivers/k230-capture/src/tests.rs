@@ -778,19 +778,21 @@ fn a_device_error_is_retried_with_capped_backoff() {
     assert_eq!(stream.contents(frame.buffer), pattern(9, FRAME));
 }
 
-/// The bound for raw10 here (64 x 64 at 80 MHz) is the 200 ms floor: four active-picture periods
-/// are 3.3 ms. A frame end that does not come within it restarts the frame path, with a reason that
-/// names the stop, and the first delay of the failure rule.
+/// No frame end has come, so no period is measured: the bound is the first-frame allowance, 3 s
+/// (raw10 is 64 x 64 at 80 MHz, whose nominal period is 3.3 ms, so `max(4 x that, 3 s)` is 3 s).
+/// Past it a frame end that does not come restarts the frame path, with a reason that names the
+/// stop, and the first delay of the failure rule. (Was 200 ms before the bound followed the measured
+/// period.)
 #[test]
 fn a_frame_end_that_does_not_come_within_the_bound_restarts_the_frame_path_with_a_named_reason() {
     let stream = MockStream::with_bytes(4, FRAME);
     let (mut d, _block) = streaming(&stream);
     d.tick(0).unwrap();
     assert_eq!(d.health(), Health::Ok);
-    d.tick(199_000_000).unwrap();
-    assert_eq!(d.health(), Health::Ok, "inside the bound");
-    let at = d.tick(201_000_000).unwrap();
-    assert_eq!(at, 201_000_000 + 250_000_000, "the first recovery delay");
+    d.tick(2_999_000_000).unwrap();
+    assert_eq!(d.health(), Health::Ok, "inside the 3 s allowance");
+    let at = d.tick(3_000_000_001).unwrap();
+    assert_eq!(at, 3_000_000_001 + 250_000_000, "the first recovery delay");
     match d.health() {
         Health::Failed(reason) => assert!(
             reason.contains("no frame end arrived within the bound"),
@@ -798,6 +800,54 @@ fn a_frame_end_that_does_not_come_within_the_bound_restarts_the_frame_path_with_
         ),
         other => panic!("a frame stop is a failure, not {other:?}"),
     }
+}
+
+/// Ticks every 10 ms from `from` to `to`, with a frame end (its time is the tick's) whenever
+/// `period_ns` divides the time. Each frame is delivered, read and returned. Returns the last time
+/// ticked. The 10 ms steps put the one-second-scale judgement on ticks with no frame end.
+fn frame_ends_every(
+    d: &mut K230Capture,
+    block: &Handle,
+    stream: &MockStream,
+    from: u64,
+    to: u64,
+    period_ns: u64,
+) -> u64 {
+    let mut t = from;
+    let mut seed = 0u8;
+    while t < to {
+        t += 10_000_000;
+        if t.is_multiple_of(period_ns) {
+            seed = seed.wrapping_add(1);
+            let bytes = pattern(seed, FRAME);
+            block.frame(&bytes, t);
+            d.tick(t).unwrap();
+            let frame = stream.take_frame().expect("published");
+            assert!(stream.contents(frame.buffer) == bytes);
+            stream.return_buffer(frame.buffer);
+        } else {
+            d.tick(t).unwrap();
+        }
+    }
+    t
+}
+
+/// A long exposure stretches the frame: 350 ms frame ends, where the mode's nominal period is 3.3 ms
+/// (64 x 64 at 80 MHz). The bound follows the period the frame ends show, so the stream is not a
+/// stop. Fails on the nominal bound (200 ms): the one-second-scale check finds the last frame end
+/// 300 ms before, which is a stop.
+#[test]
+fn a_long_exposure_frame_period_does_not_restart_the_frame_path() {
+    let stream = MockStream::with_bytes(4, FRAME);
+    let (mut d, block) = streaming(&stream);
+    d.tick(0).unwrap();
+    let end = frame_ends_every(&mut d, &block, &stream, 0, 3_000_000_000, 350_000_000);
+    assert_eq!(end, 3_000_000_000);
+    assert_eq!(
+        d.health(),
+        Health::Ok,
+        "a stream at its 350 ms period is healthy"
+    );
 }
 
 #[test]
