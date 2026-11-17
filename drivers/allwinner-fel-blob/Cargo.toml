@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-allwinner-fel-blob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "The Allwinner FEL thunk blob as a PC side writes it: the pinned code words, the layout and its hash, the stated version per target, and the writer for the swap table and the watchdog fields. no_std, no unsafe"
+
+[lints]
+workspace = true
+
+# No dependencies: a PC side pins this crate by a locked git revision and needs nothing else from the repository.
+[dependencies]

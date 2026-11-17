@@ -369,6 +369,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-allwinner-fel-blob"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-builtin-init"
 version = "2.0.1-dev"
 dependencies = [
@@ -864,6 +868,14 @@ name = "lemnos-driver-a733-video-sys"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
+name = "lemnos-driver-allwinner-fel-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-allwinner-fel-blob",
  "libc",
 ]
 
