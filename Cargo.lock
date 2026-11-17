@@ -1799,6 +1799,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-grow-host"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+ "lemnos-driver-host-clock",
+ "lemnos-driver-hw-watchdog",
+ "lemnos-driver-system-slots",
+ "lemnos-host",
+ "lemnos-linux",
+ "lemnos-slot-store",
+]
+
+[[package]]
+name = "lemnos-grow-live-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-hal"
 version = "2.0.1-dev"
 dependencies = [

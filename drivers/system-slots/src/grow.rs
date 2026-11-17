@@ -32,6 +32,8 @@ use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use lemnos_slot_store::mbr::{self, Plan, SECTOR};
@@ -102,6 +104,22 @@ pub trait Disk {
     fn clear_record(&mut self) -> io::Result<()>;
 }
 
+/// The largest the data partition may be after a grow: 256 GiB. A target above it is refused by name
+/// (`grow-too-large`) before anything is written; the boot continues with the partition as it is.
+/// The media this runs on is at most about 16 GB, and the bench cards 64 GB.
+pub const MAX_BYTES: u64 = 256 << 30;
+
+/// A grow refused by name, before any write: the target and the limit, in bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The data partition's length the disk's end would give (bytes).
+    pub target_bytes: u64,
+    /// The limit it exceeds (bytes), [`MAX_BYTES`].
+    pub max_bytes: u64,
+    /// The reason in words, starting with the name `grow-too-large`.
+    pub reason: String,
+}
+
 /// What one pass did with the filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pass {
@@ -111,6 +129,8 @@ pub enum Pass {
     /// The filesystem was resized (the kernel accepted it). `baseline` is what the confirmation
     /// compares the kernel's view with.
     Resized { baseline: Baseline },
+    /// The grow is refused by name and nothing was written (see [`MAX_BYTES`]).
+    Refused(Refusal),
 }
 
 /// The kernel's size of the filesystem before the resize, as stored before the grow's first write.
@@ -263,6 +283,19 @@ pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
     // so a grow that has begun always has one: a restart after the resize finds it, and a record
     // that is missing or does not decode is named by the confirmation, not taken for a new start.
     let plan = mbr::plan_grow(&sector, ENTRY, disk_sectors).map_err(|r| r.to_string())?;
+    if let Plan::Grow { sectors } = plan {
+        let target_bytes = u64::from(sectors) * SECTOR as u64;
+        if target_bytes > MAX_BYTES {
+            return Ok(Pass::Refused(Refusal {
+                target_bytes,
+                max_bytes: MAX_BYTES,
+                reason: format!(
+                    "grow-too-large: the data partition would be {target_bytes} bytes ({} GiB) and the maximum is {MAX_BYTES} bytes (256 GiB): nothing changed; the boot continues with the partition as it is",
+                    target_bytes >> 30
+                ),
+            }));
+        }
+    }
     let expected = match plan {
         Plan::Grow { sectors } => sectors,
         Plan::Done => mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY].sectors,
@@ -404,9 +437,68 @@ impl Default for Retry {
     }
 }
 
+/// The overrun bound: a fixed part plus a part per TiB of disk. The resize cannot be interrupted, so
+/// the bound only names an overrun; the result is still taken when it arrives.
+pub const OVERRUN_BASE: Duration = Duration::from_secs(10);
+/// Per TiB of disk (the resize's cost grows with the number of groups; QEMU, GROW2: 4.3 s per TiB).
+pub const OVERRUN_PER_TIB: Duration = Duration::from_secs(30);
+/// How often the tick looks at a pass in flight.
+pub const POLL_EVERY: Duration = Duration::from_millis(100);
+
+/// The bound for a disk of `disk_bytes`: [`OVERRUN_BASE`] plus [`OVERRUN_PER_TIB`] for each TiB,
+/// rounded up.
+pub fn overrun_bound(disk_bytes: u64) -> Duration {
+    let tib = disk_bytes.div_ceil(1 << 40);
+    OVERRUN_BASE + OVERRUN_PER_TIB * u32::try_from(tib).unwrap_or(u32::MAX)
+}
+
+/// Opens the disk for one pass. Called on the tick, once per pass.
+pub type Opener = dyn Fn() -> Result<Box<dyn Disk + Send>, String> + Send + Sync;
+
+/// What a tick asks of the driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tick {
+    /// Look again at this driver-clock time (ns).
+    At(u64),
+    /// The grow is refused by name and nothing was written; `fresh` is set once, to be noted.
+    Refused { why: String, fresh: bool },
+    /// A pass failed: its reason, whether it is new (to be noted once), and the next try (ns).
+    Failed { why: String, fresh: bool, at: u64 },
+    /// The grow is finished and its record is cleared.
+    Finished,
+}
+
+/// A pass in flight on its own thread.
+#[derive(Debug)]
+struct Worker {
+    result: Receiver<(Box<dyn Disk + Send>, Result<Pass, String>)>,
+    handle: Option<JoinHandle<()>>,
+    started_ns: u64,
+    bound_ns: u64,
+    disk_bytes: u64,
+}
+
+/// The progress of a pass in flight, as the tick last saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// The driver clock when the pass started (ns).
+    pub started_ns: u64,
+    /// The time from the start to the last tick (ns).
+    pub elapsed_ns: u64,
+    /// The disk's size, which the grow ends at (bytes).
+    pub target_bytes: u64,
+    /// The bound (ns) the pass has passed, when it has.
+    pub bound_ns: u64,
+    /// Whether the elapsed time has passed the bound.
+    pub overrun: bool,
+}
+
 /// The grow of one boot: where the boot disk is (or why it is not known), where the data
 /// filesystem is, and the retry state. Held by the driver until a pass finishes.
-#[derive(Debug, Clone)]
+///
+/// A pass runs on its own thread, one at a time, so the driver's tick never waits on the kernel:
+/// the tick starts a pass, looks at it on each tick, and takes its result when it arrives.
+#[derive(Debug)]
 pub struct Task {
     /// The boot disk's whole-disk node, or the reason it is not known.
     pub source: Result<PathBuf, String>,
@@ -418,6 +510,12 @@ pub struct Task {
     checks: u32,
     /// Set while the kernel's view has not shown an accepted resize.
     unconfirmed: Option<Unconfirmed>,
+    /// The pass in flight, if any.
+    worker: Option<Worker>,
+    /// Set when the grow is refused by name (`grow-too-large`): no pass is tried again this start.
+    refused: Option<Refusal>,
+    /// The driver clock at the last tick (ns).
+    last_tick_ns: u64,
 }
 
 impl Task {
@@ -429,6 +527,9 @@ impl Task {
             retry: Retry::new(),
             checks: 0,
             unconfirmed: None,
+            worker: None,
+            refused: None,
+            last_tick_ns: 0,
         }
     }
 
@@ -436,6 +537,24 @@ impl Task {
     /// confirmed it (`grown-unconfirmed`).
     pub fn unconfirmed(&self) -> Option<&Unconfirmed> {
         self.unconfirmed.as_ref()
+    }
+
+    /// The refusal, when the grow is refused by name (`grow-too-large`).
+    pub fn refused(&self) -> Option<&Refusal> {
+        self.refused.as_ref()
+    }
+
+    /// The pass in flight and its progress, as the last tick saw it.
+    pub fn progress(&self) -> Option<Progress> {
+        let worker = self.worker.as_ref()?;
+        let elapsed_ns = self.last_tick_ns.saturating_sub(worker.started_ns);
+        Some(Progress {
+            started_ns: worker.started_ns,
+            elapsed_ns,
+            target_bytes: worker.disk_bytes,
+            bound_ns: worker.bound_ns,
+            overrun: elapsed_ns > worker.bound_ns,
+        })
     }
 
     /// Partition 2's length in MiB as the kernel has it now, `None` when the boot disk is not known
@@ -446,7 +565,8 @@ impl Task {
         Some((sectors * SECTOR as u64) >> 20)
     }
 
-    /// One pass against the real disk, and its confirmation.
+    /// One pass against the real disk, run here and now, and its confirmation. Used where a caller
+    /// has no tick to return to; the driver's tick is [`Task::tick_real`].
     ///
     /// # Errors
     ///
@@ -456,6 +576,108 @@ impl Task {
         let mut real = Real::new(&disk, &self.data);
         let pass = grow(&mut real)?;
         self.confirm(&mut real, pass)
+    }
+
+    /// One tick of the driver against the real disk (see [`Task::tick`]).
+    pub fn tick_real(&mut self, now_ns: u64) -> Tick {
+        let source = self.source.clone();
+        let data = self.data.clone();
+        let open = move || -> Result<Box<dyn Disk + Send>, String> {
+            let disk = source.clone()?;
+            Ok(Box::new(Real::new(&disk, &data)))
+        };
+        self.tick(now_ns, &open)
+    }
+
+    /// One tick of the driver. Never waits on the kernel: it starts a pass on its own thread when
+    /// one is due, looks at the pass in flight, and takes its result when it has arrived. A resize
+    /// that runs past its bound is named by [`Task::progress`]; it is not abandoned.
+    pub fn tick(&mut self, now_ns: u64, open: &Opener) -> Tick {
+        self.last_tick_ns = now_ns;
+        if let Some(refusal) = self.refused.as_ref() {
+            return Tick::Refused {
+                why: refusal.reason.clone(),
+                fresh: false,
+            };
+        }
+        if let Some(worker) = self.worker.as_mut() {
+            return match worker.result.try_recv() {
+                Ok((mut disk, result)) => {
+                    if let Some(handle) = worker.handle.take() {
+                        // The thread sent its result as its last act: this join does not wait for the kernel.
+                        let _ = handle.join();
+                    }
+                    self.worker = None;
+                    self.finish(disk.as_mut(), now_ns, result)
+                }
+                Err(TryRecvError::Empty) => Tick::At(now_ns + POLL_EVERY.as_nanos() as u64),
+                Err(TryRecvError::Disconnected) => {
+                    self.worker = None;
+                    self.failed(now_ns, "the resize thread ended without a result".into())
+                }
+            };
+        }
+        if now_ns < self.retry.next_ns {
+            return Tick::At(self.retry.next_ns);
+        }
+        let disk = match self.source.as_ref() {
+            Ok(_) => match open() {
+                Ok(disk) => disk,
+                Err(why) => return self.failed(now_ns, why),
+            },
+            Err(why) => return self.failed(now_ns, why.clone()),
+        };
+        self.start(now_ns, disk)
+    }
+
+    /// Starts a pass on its own thread. The thread gives the disk back with the result.
+    fn start(&mut self, now_ns: u64, mut disk: Box<dyn Disk + Send>) -> Tick {
+        let disk_bytes = disk
+            .disk_sectors()
+            .unwrap_or(0)
+            .saturating_mul(SECTOR as u64);
+        let bound = overrun_bound(disk_bytes);
+        let (sender, result) = mpsc::channel();
+        let spawned = thread::Builder::new().name("grow".into()).spawn(move || {
+            let outcome = grow(disk.as_mut());
+            let _ = sender.send((disk, outcome));
+        });
+        match spawned {
+            Ok(handle) => {
+                self.worker = Some(Worker {
+                    result,
+                    handle: Some(handle),
+                    started_ns: now_ns,
+                    bound_ns: u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX),
+                    disk_bytes,
+                });
+                Tick::At(now_ns + POLL_EVERY.as_nanos() as u64)
+            }
+            Err(e) => self.failed(now_ns, format!("the resize thread can't start: {e}")),
+        }
+    }
+
+    /// A pass's result: a finished pass confirms its resize and ends; a failure is retried.
+    fn finish(&mut self, disk: &mut dyn Disk, now_ns: u64, result: Result<Pass, String>) -> Tick {
+        if let Ok(Pass::Refused(refusal)) = result {
+            let why = refusal.reason.clone();
+            self.refused = Some(refusal);
+            return Tick::Refused { why, fresh: true };
+        }
+        let confirmed = result.and_then(|pass| self.confirm(disk, pass));
+        match confirmed {
+            Ok(()) => {
+                self.retry = Retry::new();
+                Tick::Finished
+            }
+            Err(why) => self.failed(now_ns, why),
+        }
+    }
+
+    fn failed(&mut self, now_ns: u64, why: String) -> Tick {
+        let fresh = self.retry.last != why;
+        let at = self.retry.failed(now_ns, &why);
+        Tick::Failed { why, fresh, at }
     }
 
     /// Checks the kernel's view after a pass. A resize the kernel accepted is confirmed when the
@@ -477,6 +699,8 @@ impl Task {
                 return Ok(());
             }
             Pass::Resized { baseline } => baseline,
+            // A refusal is recorded by `finish`; nothing was written and nothing is confirmed.
+            Pass::Refused(_) => return Ok(()),
         };
         let seen = disk
             .fs_bytes()
