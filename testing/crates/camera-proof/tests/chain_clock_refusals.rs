@@ -139,12 +139,25 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     service.stop();
     let _ = std::fs::remove_dir_all(&dir);
+    if std::env::var_os("CHAIN_SHOW").is_some() {
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stdout(),
+            format_args!("chain proof:\n{text}\n"),
+        );
+    }
     assert!(
         !output.status.success(),
         "a clock that went backwards passed the proof:\n{text}"
     );
+    // The proof fails by the clock's refusal and nothing else: its failure line is the clock's own
+    // words, as FileClock gives them, with no other failed check after it.
+    let failed = text
+        .lines()
+        .find_map(|line| line.strip_prefix("chain proof: FAILED: "))
+        .unwrap_or_else(|| panic!("the proof must print a FAILED line:\n{text}"));
     assert!(
-        text.contains("sim clock went backwards"),
-        "the refusal must name the backwards clock:\n{text}"
+        failed.starts_with("clock read failed: sim clock went backwards: ")
+            && !failed.contains("; "),
+        "the proof must fail by the clock's refusal alone, by name:\n{text}"
     );
 }
