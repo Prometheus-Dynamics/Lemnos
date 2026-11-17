@@ -27,8 +27,8 @@ use lemnos_core::package::{
 use lemnos_core::{
     Caller, CallerId, ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c,
     InterruptHandle, JobId, JobState, Line, MAX_ITEMS, Manifest, MethodId, NeedKind, Pwm,
-    RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Spi, Status, StreamHandle,
-    Uart, UsbDeviceHandle, UsbFunctionHandle,
+    RESUME_BYTES, RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord,
+    Spi, Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 use lemnos_hal::blocks::{BufferKind, IsoPacket};
 use lemnos_hal::i2c::{I2c as _, Operation};
@@ -877,6 +877,27 @@ struct Running {
 }
 
 impl Instance for Running {
+    /// What the package's driver keeps across a rebind. A package without the resume entries keeps
+    /// nothing, and so does one whose driver says so.
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        let mut bytes = [0u8; RESUME_BYTES];
+        match self.loaded.resume_record(&mut bytes) {
+            Some(Ok(len)) => ResumeRecord::new(bytes.get(..len)?),
+            Some(Err(Status::PANIC)) => panicked(),
+            _ => None,
+        }
+    }
+
+    /// Restores the record on this driver. A package without the resume entries, or one that
+    /// cannot restore it, is a fresh start.
+    fn resume(&mut self, record: &ResumeRecord) -> bool {
+        match self.loaded.resume(record.bytes()) {
+            Some(Ok(kept)) => kept,
+            Some(Err(Status::PANIC)) => panicked(),
+            _ => false,
+        }
+    }
+
     fn describe(&self, out: &mut Description) {
         let mut items = [PackageItem::EMPTY; MAX_ITEMS];
         let count = match self.loaded.describe(&mut items) {

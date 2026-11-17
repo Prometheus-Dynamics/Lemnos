@@ -71,8 +71,8 @@ use std::path::{Path, PathBuf};
 use lemnos_abi::AbiVersion;
 use lemnos_abi::load::{LoadError, load, seal};
 use lemnos_abi::package::{
-    Loaded, Out, PACKAGE_BASE_LAYOUT_HASH, PACKAGE_MAGIC, PACKAGE_VERSION, PackageDriver,
-    PackageExtra, Slice, registered_driver,
+    Loaded, Out, PACKAGE_MAGIC, PACKAGE_VERSION, PackageDriver, PackageExtra, PackageLayout, Slice,
+    registered_driver,
 };
 use lemnos_core::{Manifest, Status};
 use lemnos_host::DriverEntry;
@@ -326,8 +326,9 @@ fn check(magic: u64, version: &AbiVersion) -> Result<(), Refusal> {
             host: (host.major, host.minor),
         });
     }
-    // A package built before the extras has the boundary's base layout: it loads with none.
-    if version.layout != host.layout && version.layout != PACKAGE_BASE_LAYOUT_HASH {
+    // A package built before this boundary has an older layout: it loads with what it has, and
+    // none of the entries it lacks (`PackageLayout`).
+    if PackageLayout::of(version.layout).is_none() {
         return Err(Refusal::LayoutMismatch);
     }
     Ok(())
@@ -397,9 +398,9 @@ fn open(path: &Path, mode: &Mode) -> Result<Package, Refusal> {
     if !status.is_ok() {
         return Err(Refusal::RegistrationFailed(status));
     }
-    let base = descriptor.version.layout == PACKAGE_BASE_LAYOUT_HASH;
+    let layout = PackageLayout::of(descriptor.version.layout).ok_or(Refusal::LayoutMismatch)?;
     let driver =
-        registered_driver(drivers, base).map_err(|why| Refusal::BadManifest(why.into()))?;
+        registered_driver(drivers, layout).map_err(|why| Refusal::BadManifest(why.into()))?;
     let driver: &'static PackageDriver = Box::leak(Box::new(driver));
     // The contract kinds and method readings: asked with no driver, once, here.
     let mut extras = vec![PackageExtra::EMPTY; MAX_EXTRAS];

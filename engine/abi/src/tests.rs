@@ -378,6 +378,10 @@ mod package {
         assert_eq!(PACKAGE_VERSION.layout, PACKAGE_LAYOUT_HASH);
         // A package built before the extras carries the hash the boundary had then.
         assert_eq!(PACKAGE_BASE_LAYOUT_HASH, 0x57cd_e501_ca6c_0a8c);
+        // A package built with the extras but before the resume entries carries the hash of the
+        // boundary before them.
+        assert_eq!(PACKAGE_EXTRAS_LAYOUT_HASH, 0x4324_6004_0a3b_bd5e);
+        assert_eq!(PACKAGE_LAYOUT_HASH, 0x3545_9eaa_3ecf_a7e6);
         assert_eq!(
             PACKAGE_VERSION.struct_size as usize,
             size_of::<AbiVersion>()
@@ -403,9 +407,11 @@ mod package {
         assert_eq!(size_of::<PackageItem>(), 56);
         assert_eq!(size_of::<PackageExtra>(), 56);
         assert_eq!(size_of::<PackageSetting<'static>>(), 56);
-        // The table before the extras is 88 bytes; the current one adds its pointer.
+        // The table before the extras is 88 bytes; the extras-era one adds its pointer (96); the
+        // current one adds the two resume entries (112).
         assert_eq!(size_of::<DriverTableBase>(), 88);
-        assert_eq!(size_of::<DriverTable>(), 96);
+        assert_eq!(size_of::<DriverTableExtras>(), 96);
+        assert_eq!(size_of::<DriverTable>(), 112);
         assert_eq!(size_of::<PackageJobState>(), 24);
         assert_eq!(size_of::<HostTable>(), 592);
         assert_eq!(core::mem::offset_of!(HostTable, device), 32);
@@ -444,7 +450,8 @@ mod package {
             assert_eq!(table, functions * pointer);
         }
         assert_eq!(size_of::<PackageDriverBase>(), 136);
-        assert_eq!(size_of::<PackageDriver>(), 144);
+        assert_eq!(size_of::<PackageDriverExtras>(), 144);
+        assert_eq!(size_of::<PackageDriver>(), 160);
         assert_eq!(size_of::<PackageDescriptor>(), 32);
     }
 

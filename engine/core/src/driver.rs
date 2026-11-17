@@ -27,6 +27,9 @@ pub struct Manifest {
 /// The most bytes a driver's resume record holds (see [`Lifecycle::resume_record`]).
 pub const RESUME_BYTES: usize = 64;
 
+// The package boundary carries records of this size (`lemnos_abi::package::RESUME_BYTES`).
+const _: () = assert!(RESUME_BYTES == lemnos_abi::package::RESUME_BYTES);
+
 /// What a driver keeps across a host-level rebind: the state its next instance needs to carry on
 /// as the old one did, written by the driver itself as bytes it reads back. Fixed size, so none
 /// is allocated, and a driver whose state is larger than [`RESUME_BYTES`] keeps only what it can

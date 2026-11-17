@@ -56,8 +56,8 @@ use crate::{
     BusKind, CallerId, ClocksHandle, Config, ConfigValue, ContractInfo, Description, DmaHandle,
     Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line,
     LocalCaller, Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
-    Reading, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
-    StreamHandle, Tag, Uart, Unit, UnitState, UsbDeviceHandle, UsbFunctionHandle,
+    Reading, RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Router, Shape,
+    Spi, Status, StreamHandle, Tag, Uart, Unit, UnitState, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 /// The boundary's own types, for [`export_package!`](crate::export_package) and the loader.
@@ -1832,6 +1832,23 @@ impl<D: Driver + Send + 'static> PackageInstance for Exported<D> {
         }
         let left_out = description.items().count() - count + description.dropped();
         (count + left_out) as u32
+    }
+
+    fn resume_record(&self, record: &mut [u8]) -> Result<usize> {
+        let kept = Driver::resume_record(&self.driver).ok_or(Status::NOT_SUPPORTED)?;
+        let bytes = kept.bytes();
+        record
+            .get_mut(..bytes.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn resume(&mut self, record: &[u8]) -> bool {
+        match ResumeRecord::new(record) {
+            Some(record) => Driver::resume(&mut self.driver, &record),
+            None => false,
+        }
     }
 
     fn describe_extra(&self, extras: &mut [PackageExtra]) -> u32 {

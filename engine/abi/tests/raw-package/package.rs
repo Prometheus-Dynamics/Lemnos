@@ -14,7 +14,13 @@
 //!                      the manifest's kind and method reading through `describe_extra`
 //!   pre_extras         built against the boundary before the extras: the base layout hash
 //!                      (`PACKAGE_BASE_LAYOUT_HASH`) and no `describe_extra`
+//!   with_resume        the resume entries (`resume_record`, `resume`): the boundary as it is now,
+//!                      with the driver's counter kept across a rebind
 //!   needs_gone         links `libgone.so`, which the test removes before the file is loaded
+//!
+//! Without `with_resume` the file is built against the boundary before the resume entries (the
+//! extras layout, `PACKAGE_EXTRAS_LAYOUT_HASH`): an old-shape package, whose driver keeps nothing.
+//! Its methods `leave` (3) and `bump` (4) make a driver Gone, and count, in every variant.
 //!
 //! Nothing here may unwind: every function is `extern "C"` and returns a status.
 //!
@@ -230,6 +236,8 @@ struct Setting {
     text: Str,
 }
 
+use core::cell::Cell;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DriverTable {
@@ -247,9 +255,17 @@ struct DriverTable {
     job_cancel: Option<extern "C" fn(*mut c_void, u64) -> Status>,
     #[cfg(not(pre_extras))]
     describe_extra: Option<ExtraFn>,
+    #[cfg(with_resume)]
+    resume_record: Option<ResumeRecordFn>,
+    #[cfg(with_resume)]
+    resume: Option<ResumeFn>,
 }
 
 type ExtraFn = extern "C" fn(*mut c_void, SliceMut, *mut u32) -> Status;
+#[cfg(with_resume)]
+type ResumeRecordFn = extern "C" fn(*mut c_void, SliceMut, *mut usize) -> Status;
+#[cfg(with_resume)]
+type ResumeFn = extern "C" fn(*mut c_void, Slice, *mut u32) -> Status;
 
 #[repr(C)]
 struct PackageDriver {
@@ -298,8 +314,17 @@ const _: () = {
     assert!(offset_of!(LineConfig, debounce_us) == 8);
     assert!(offset_of!(DriverTable, bind) == 8);
     assert!(offset_of!(DriverTable, tick) == 40);
+    #[cfg(not(pre_extras))]
+    assert!(offset_of!(DriverTable, describe_extra) == 88);
     assert!(offset_of!(PackageDriver, table) == 48);
     assert!(offset_of!(Descriptor, register_driver) == 24);
+};
+
+#[cfg(with_resume)]
+const _: () = {
+    assert!(size_of::<DriverTable>() == 112);
+    assert!(offset_of!(DriverTable, resume_record) == 96);
+    assert!(offset_of!(DriverTable, resume) == 104);
 };
 
 #[cfg(all(with_extras, not(pre_extras)))]
@@ -313,8 +338,10 @@ const _: () = {
 
 const MAJOR: u16 = 2;
 const MINOR: u16 = 0;
-#[cfg(all(not(pre_extras), not(future_layout)))]
+#[cfg(all(not(pre_extras), not(with_resume), not(future_layout)))]
 const LAYOUT: u64 = 0x432460040a3bbd5e;
+#[cfg(all(with_resume, not(future_layout)))]
+const LAYOUT: u64 = 0x35459eaa3ecfa7e6;
 #[cfg(all(pre_extras, not(future_layout)))]
 const LAYOUT: u64 = 0x57cde501ca6c0a8c;
 #[cfg(future_layout)]
@@ -359,6 +386,10 @@ struct Driver {
     line: Handle,
     has_line: bool,
     base: u32,
+    /// What `bump` counts, kept across a rebind when the package has the resume entries.
+    value: Cell<u32>,
+    /// Set by `leave`: the driver says what it was bound with is gone.
+    gone: Cell<bool>,
 }
 
 #[cfg(no_name)]
@@ -425,6 +456,8 @@ extern "C" fn bind(
         line,
         has_line,
         base,
+        value: Cell::new(0),
+        gone: Cell::new(false),
     });
     // SAFETY: `driver` is the host's out pointer, written once.
     unsafe { *driver = Box::into_raw(made) as *mut c_void };
@@ -531,15 +564,53 @@ extern "C" fn describe_extra(driver: *mut c_void, extras: SliceMut, count: *mut 
     OK
 }
 
-extern "C" fn health(_driver: *mut c_void, out: *mut Health) -> Status {
+extern "C" fn health(driver: *mut c_void, out: *mut Health) -> Status {
+    // SAFETY: the host calls one function at a time on this driver, and never after drop.
+    let made = unsafe { &*(driver as *const Driver) };
     // SAFETY: `out` is the host's out pointer.
     unsafe {
         *out = Health {
-            kind: 0,
+            kind: if made.gone.get() { 3 } else { 0 },
             reserved: 0,
             reason: NOTHING,
         }
     };
+    OK
+}
+
+/// Writes the counter into the host's `record`: the record the driver keeps across a rebind.
+#[cfg(with_resume)]
+extern "C" fn resume_record_fn(driver: *mut c_void, record: SliceMut, len: *mut usize) -> Status {
+    // SAFETY: the host calls one function at a time on this driver, and never after drop.
+    let made = unsafe { &*(driver as *const Driver) };
+    if record.len < 4 {
+        return E_BUFFER_TOO_SMALL;
+    }
+    let bytes = made.value.get().to_le_bytes();
+    // SAFETY: `record` is writable for four bytes, checked above; `len` is the host's out pointer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), record.ptr as *mut u8, 4);
+        *len = 4;
+    }
+    OK
+}
+
+/// Restores the counter from the record, on the driver the host bound in place of the old one.
+#[cfg(with_resume)]
+extern "C" fn resume_fn(driver: *mut c_void, record: Slice, kept: *mut u32) -> Status {
+    // SAFETY: the host calls one function at a time on this driver, and never after drop.
+    let made = unsafe { &*(driver as *const Driver) };
+    if record.len != 4 {
+        // SAFETY: `kept` is the host's out pointer.
+        unsafe { *kept = 0 };
+        return OK;
+    }
+    let mut bytes = [0u8; 4];
+    // SAFETY: the record is four bytes, as its length says.
+    unsafe { core::ptr::copy_nonoverlapping(record.ptr as *const u8, bytes.as_mut_ptr(), 4) };
+    made.value.set(u32::from_le_bytes(bytes));
+    // SAFETY: `kept` is the host's out pointer.
+    unsafe { *kept = 1 };
     OK
 }
 
@@ -593,6 +664,25 @@ extern "C" fn dispatch(
             // SAFETY: the host's line table, valid while the package is loaded.
             let host = unsafe { &*made.host };
             (host.line.set)(made.line, value as u32)
+        }
+        3 => {
+            // leave(): from now on this driver says what it was bound with is gone.
+            made.gone.set(true);
+            OK
+        }
+        4 => {
+            // bump() -> u32: counts up, and answers the count.
+            made.value.set(made.value.get() + 1);
+            if reply.len < 4 {
+                return E_BUFFER_TOO_SMALL;
+            }
+            let bytes = made.value.get().to_le_bytes();
+            // SAFETY: `reply` is writable for four bytes, checked above; `len` is the host's.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), reply.ptr as *mut u8, 4);
+                *len = 4;
+            }
+            OK
         }
         _ => -95,
     }
@@ -726,6 +816,10 @@ static DRIVER: Shared<PackageDriver> = Shared(PackageDriver {
         job_cancel: None,
         #[cfg(not(pre_extras))]
         describe_extra: EXTRA_TABLE,
+        #[cfg(with_resume)]
+        resume_record: Some(resume_record_fn),
+        #[cfg(with_resume)]
+        resume: Some(resume_fn),
     },
 });
 

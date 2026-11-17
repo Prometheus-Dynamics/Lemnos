@@ -505,6 +505,10 @@ impl Default for PackageJobState {
     }
 }
 
+/// The most bytes a driver's resume record holds (`DriverTable::resume_record`). Core's
+/// `RESUME_BYTES` is the same value.
+pub const RESUME_BYTES: usize = 64;
+
 /// [`DriverTable::tick`]'s answer when the driver wants no tick.
 pub const NO_TICK: u64 = u64::MAX;
 
@@ -573,6 +577,111 @@ pub struct DriverTable {
             count: Out<'_, u32>,
         ) -> Status,
     >,
+    /// Writes the record the driver keeps across a host-level rebind into `record` and its length
+    /// into `len`. `NOT_SUPPORTED` when the driver keeps nothing, and `BUFFER_TOO_SMALL` when the
+    /// record does not fit `record` (at most [`RESUME_BYTES`]). `None` in a package built before the
+    /// resume entries: the host takes no record from it.
+    pub resume_record: Option<
+        extern "C" fn(driver: *mut c_void, record: SliceMut<'_, u8>, len: Out<'_, usize>) -> Status,
+    >,
+    /// Restores `record` (what `resume_record` wrote) on a new driver the host has bound in place of
+    /// the old one, and writes 1 to `kept` when the driver is as the old one was, 0 when it is not.
+    /// `None` in a package built before the resume entries: the device reads as a fresh start.
+    pub resume: Option<
+        extern "C" fn(driver: *mut c_void, record: Slice<'_, u8>, kept: Out<'_, u32>) -> Status,
+    >,
+}
+
+/// [`DriverTable`] as a package built with [`PackageExtra`] but before the resume entries
+/// has it: the same functions and no `resume_record` or `resume`. The host reads such a package
+/// as this, and such a package keeps nothing across a rebind.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DriverTableExtras {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub bind: extern "C" fn(
+        host: &HostTable,
+        binding: *mut c_void,
+        settings: Slice<'_, PackageSetting<'_>>,
+        link: Str<'_>,
+        has_link: u32,
+        driver: Out<'_, *mut c_void>,
+    ) -> Status,
+    pub describe: extern "C" fn(
+        driver: *mut c_void,
+        items: SliceMut<'_, PackageItem>,
+        count: Out<'_, u32>,
+    ) -> Status,
+    pub health: extern "C" fn(driver: *mut c_void, health: Out<'_, PackageHealth>) -> Status,
+    pub dispatch: extern "C" fn(
+        driver: *mut c_void,
+        contract: u8,
+        method: u16,
+        args: Slice<'_, u8>,
+        reply: SliceMut<'_, u8>,
+        len: Out<'_, usize>,
+    ) -> Status,
+    pub tick: extern "C" fn(driver: *mut c_void, now_ns: u64, next_ns: Out<'_, u64>) -> Status,
+    pub caller: extern "C" fn(driver: *mut c_void, caller: u64) -> Status,
+    pub caller_gone: extern "C" fn(driver: *mut c_void, caller: u64) -> Status,
+    pub drop: extern "C" fn(driver: *mut c_void) -> Status,
+    pub job: extern "C" fn(
+        driver: *mut c_void,
+        job: u64,
+        result: SliceMut<'_, u8>,
+        len: Out<'_, usize>,
+        state: Out<'_, PackageJobState>,
+    ) -> Status,
+    pub job_cancel: extern "C" fn(driver: *mut c_void, job: u64) -> Status,
+    pub describe_extra: Option<
+        extern "C" fn(
+            driver: *mut c_void,
+            extras: SliceMut<'_, PackageExtra>,
+            count: Out<'_, u32>,
+        ) -> Status,
+    >,
+}
+
+impl DriverTableExtras {
+    /// The table as the current one, with no resume entries.
+    pub fn widen(self) -> DriverTable {
+        DriverTable {
+            struct_size: size_of::<DriverTable>() as u32,
+            flags: self.flags,
+            bind: self.bind,
+            describe: self.describe,
+            health: self.health,
+            dispatch: self.dispatch,
+            tick: self.tick,
+            caller: self.caller,
+            caller_gone: self.caller_gone,
+            drop: self.drop,
+            job: self.job,
+            job_cancel: self.job_cancel,
+            describe_extra: self.describe_extra,
+            resume_record: None,
+            resume: None,
+        }
+    }
+}
+
+/// [`PackageDriver`] as a package built with [`PackageExtra`] but before the resume entries has it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PackageDriverExtras {
+    pub manifest: PackageManifest,
+    pub table: DriverTableExtras,
+}
+
+impl PackageDriverExtras {
+    /// The driver as the current one, with no resume entries.
+    pub fn widen(self) -> PackageDriver {
+        PackageDriver {
+            manifest: self.manifest,
+            table: self.table.widen(),
+        }
+    }
 }
 
 /// [`DriverTable`] as a package built before [`PackageExtra`] has it: the same functions and
@@ -635,6 +744,8 @@ impl DriverTableBase {
             job: self.job,
             job_cancel: self.job_cancel,
             describe_extra: None,
+            resume_record: None,
+            resume: None,
         }
     }
 }
@@ -736,67 +847,99 @@ impl PackageDescriptor {
 
 use tables::shape;
 
-/// The one driver a package's `register` wrote, read with the layout the package was built with:
-/// `base` for one built before [`PackageExtra`] (its driver widened, with no extras). The reason
-/// it is refused, when it is not exactly one driver or its table is shorter than its layout.
+/// The boundary a package was built against, by its layout hash: how its driver table is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageLayout {
+    /// Built before [`PackageExtra`]: no extras, no resume entries.
+    Base,
+    /// Built with [`PackageExtra`], before the resume entries: no resume entries.
+    Extras,
+    /// This boundary: the resume entries too.
+    Resume,
+}
+
+impl PackageLayout {
+    /// The layout a package's hash names, or `None` for a hash this host does not know.
+    pub fn of(hash: u64) -> Option<Self> {
+        if hash == PACKAGE_LAYOUT_HASH {
+            Some(Self::Resume)
+        } else if hash == PACKAGE_EXTRAS_LAYOUT_HASH {
+            Some(Self::Extras)
+        } else if hash == PACKAGE_BASE_LAYOUT_HASH {
+            Some(Self::Base)
+        } else {
+            None
+        }
+    }
+}
+
+/// The one driver a package's `register` wrote, read with the layout the package was built with.
+/// The reason it is refused, when it is not exactly one driver or its table is shorter than its
+/// layout.
 pub fn registered_driver(
     drivers: Slice<'static, PackageDriver>,
-    base: bool,
+    layout: PackageLayout,
 ) -> Result<PackageDriver, &'static str> {
-    if !base {
-        let [driver] = drivers.as_slice() else {
-            return Err("it did not register exactly one driver");
-        };
-        if (driver.table.struct_size as usize) < size_of::<DriverTable>() {
-            return Err("its driver table is shorter than this host's");
+    // The header of `drivers` is the same for every element type: a pointer and a count. A
+    // package built before this boundary wrote the older element types, which the same header
+    // reads.
+    match layout {
+        PackageLayout::Resume => {
+            let [driver] = drivers.as_slice() else {
+                return Err("it did not register exactly one driver");
+            };
+            if (driver.table.struct_size as usize) < size_of::<DriverTable>() {
+                return Err("its driver table is shorter than this host's");
+            }
+            Ok(*driver)
         }
-        return Ok(*driver);
+        PackageLayout::Extras => {
+            // SAFETY: `Extras` is set only for a package whose registered layout is the extras
+            // layout, and such a package wrote `PackageDriverExtras`s in this header.
+            let extras = unsafe { drivers.cast::<PackageDriverExtras>() };
+            let [driver] = extras.as_slice() else {
+                return Err("it did not register exactly one driver");
+            };
+            if (driver.table.struct_size as usize) < size_of::<DriverTableExtras>() {
+                return Err("its driver table is shorter than this host's");
+            }
+            Ok((*driver).widen())
+        }
+        PackageLayout::Base => {
+            // SAFETY: `Base` is set only for a package whose registered layout is the base layout,
+            // and such a package wrote `PackageDriverBase`s in this header.
+            let bases = unsafe { drivers.cast::<PackageDriverBase>() };
+            let [base] = bases.as_slice() else {
+                return Err("it did not register exactly one driver");
+            };
+            if (base.table.struct_size as usize) < size_of::<DriverTableBase>() {
+                return Err("its driver table is shorter than this host's");
+            }
+            Ok((*base).widen())
+        }
     }
-    // The header of `drivers` is the same for either element type: a pointer and a count. The
-    // package wrote `PackageDriverBase`s, so the same header reads them.
-    // SAFETY: `base` is set only for a package whose registered layout is the base layout, and
-    // such a package wrote `PackageDriverBase`s in this header.
-    let bases = unsafe { drivers.cast::<PackageDriverBase>() };
-    let [base] = bases.as_slice() else {
-        return Err("it did not register exactly one driver");
-    };
-    if (base.table.struct_size as usize) < size_of::<DriverTableBase>() {
-        return Err("its driver table is shorter than this host's");
-    }
-    Ok((*base).widen())
 }
 
 /// The layout hash of the package boundary before [`PackageExtra`]: what a package built before
 /// it carries. A host loads such a package with no extras (see [`PackageDriverBase`]).
-pub const PACKAGE_BASE_LAYOUT_HASH: u64 = package_layout(false);
+pub const PACKAGE_BASE_LAYOUT_HASH: u64 = package_layout(PackageLayout::Base);
+
+/// The layout hash of the boundary with [`PackageExtra`] and before the resume entries: what a
+/// package built against the last boundary carries. A host loads it with no resume entries
+/// (see [`PackageDriverExtras`]).
+pub const PACKAGE_EXTRAS_LAYOUT_HASH: u64 = package_layout(PackageLayout::Extras);
 
 /// The layout hash of the package boundary: every type here and in [`tables`], with this
 /// crate's own [`LAYOUT_HASH`](crate::LAYOUT_HASH). The types hold pointers, so the hash follows
 /// the target's pointer width, which a package and its host share.
-pub const PACKAGE_LAYOUT_HASH: u64 = package_layout(true);
+pub const PACKAGE_LAYOUT_HASH: u64 = package_layout(PackageLayout::Resume);
 
-/// The hash of the boundary with (`extras`) or without the parts [`PackageExtra`] added. Without
-/// them, the parts it adds are empty, so the hash is the one a package built before them has.
-const fn package_layout(extras: bool) -> u64 {
-    let driver: &[u64] = if extras {
-        shape!(
-            DriverTable,
-            struct_size,
-            flags,
-            bind,
-            describe,
-            health,
-            dispatch,
-            tick,
-            caller,
-            caller_gone,
-            drop,
-            job,
-            job_cancel,
-            describe_extra
-        )
-    } else {
-        shape!(
+/// The hash of the boundary at `level`. Each level adds to the one before, so a level's hash is the
+/// one a package built at that level carries.
+const fn package_layout(level: PackageLayout) -> u64 {
+    let extras = !matches!(level, PackageLayout::Base);
+    let driver: &[u64] = match level {
+        PackageLayout::Base => shape!(
             DriverTableBase,
             struct_size,
             flags,
@@ -810,12 +953,46 @@ const fn package_layout(extras: bool) -> u64 {
             drop,
             job,
             job_cancel
-        )
+        ),
+        PackageLayout::Extras => shape!(
+            DriverTableExtras,
+            struct_size,
+            flags,
+            bind,
+            describe,
+            health,
+            dispatch,
+            tick,
+            caller,
+            caller_gone,
+            drop,
+            job,
+            job_cancel,
+            describe_extra
+        ),
+        PackageLayout::Resume => shape!(
+            DriverTable,
+            struct_size,
+            flags,
+            bind,
+            describe,
+            health,
+            dispatch,
+            tick,
+            caller,
+            caller_gone,
+            drop,
+            job,
+            job_cancel,
+            describe_extra,
+            resume_record,
+            resume
+        ),
     };
-    let package_driver: &[u64] = if extras {
-        shape!(PackageDriver, manifest, table)
-    } else {
-        shape!(PackageDriverBase, manifest, table)
+    let package_driver: &[u64] = match level {
+        PackageLayout::Base => shape!(PackageDriverBase, manifest, table),
+        PackageLayout::Extras => shape!(PackageDriverExtras, manifest, table),
+        PackageLayout::Resume => shape!(PackageDriver, manifest, table),
     };
     let extra: &[u64] = if extras {
         shape!(
@@ -928,8 +1105,9 @@ const fn package_layout(extras: bool) -> u64 {
 }
 
 /// The version of the package boundary. A host loads a package whose major is this one, whose
-/// minor is no newer, and whose layout hash is [`PACKAGE_LAYOUT_HASH`] or, for a package built
-/// before [`PackageExtra`], [`PACKAGE_BASE_LAYOUT_HASH`].
+/// minor is no newer, and whose layout hash is [`PACKAGE_LAYOUT_HASH`], or, for a package built
+/// before the resume entries, [`PACKAGE_EXTRAS_LAYOUT_HASH`], or, before [`PackageExtra`],
+/// [`PACKAGE_BASE_LAYOUT_HASH`]. A package of an older layout has none of the entries it lacks.
 pub const PACKAGE_VERSION: AbiVersion = AbiVersion::new(2, 0, PACKAGE_LAYOUT_HASH);
 
 #[cfg(all(test, feature = "std"))]

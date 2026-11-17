@@ -46,6 +46,19 @@ pub trait PackageInstance: Sized + Send + 'static {
         reply: &mut [u8],
     ) -> (Status, usize);
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
+    /// Writes the record the driver keeps across a host-level rebind into `record` and returns its
+    /// length. `NOT_SUPPORTED` by default: the driver keeps nothing. `BUFFER_TOO_SMALL` if the
+    /// record does not fit `record`.
+    fn resume_record(&self, record: &mut [u8]) -> Result<usize, Status> {
+        let _ = record;
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// Restores what [`resume_record`](Self::resume_record) wrote, on a driver bound in place of the
+    /// old one. `true` only when the driver is as the old one was. `false` by default.
+    fn resume(&mut self, record: &[u8]) -> bool {
+        let _ = record;
+        false
+    }
     fn caller(&mut self, caller: u64);
     fn caller_gone(&mut self, caller: u64);
     /// How job `job` stands; when it has finished, its result's length in `result`.
@@ -161,6 +174,39 @@ extern "C" fn tick<T: PackageInstance>(
     })
 }
 
+extern "C" fn resume_record<T: PackageInstance>(
+    driver: *mut c_void,
+    mut record: SliceMut<'_, u8>,
+    len: Out<'_, usize>,
+) -> Status {
+    guard(|| {
+        let Some(instance) = instance::<T>(driver) else {
+            return Status::STALE_HANDLE;
+        };
+        match instance.resume_record(record.as_mut_slice()) {
+            Ok(used) => {
+                len.set(used);
+                Status::OK
+            }
+            Err(status) => status,
+        }
+    })
+}
+
+extern "C" fn resume<T: PackageInstance>(
+    driver: *mut c_void,
+    record: Slice<'_, u8>,
+    kept: Out<'_, u32>,
+) -> Status {
+    guard(|| {
+        let Some(instance) = instance::<T>(driver) else {
+            return Status::STALE_HANDLE;
+        };
+        kept.set(u32::from(instance.resume(record.as_slice())));
+        Status::OK
+    })
+}
+
 extern "C" fn caller<T: PackageInstance>(driver: *mut c_void, caller: u64) -> Status {
     guard(|| {
         let Some(instance) = instance::<T>(driver) else {
@@ -239,5 +285,7 @@ pub const fn driver_table<T: PackageInstance>(flags: u32) -> DriverTable {
         job: job::<T>,
         job_cancel: job_cancel::<T>,
         describe_extra: Some(describe_extra::<T>),
+        resume_record: Some(resume_record::<T>),
+        resume: Some(resume::<T>),
     }
 }

@@ -43,7 +43,16 @@ frozen 1.0 layouts above are untouched.
   A host reads the first two and calls nothing unless both are right.
 - `register` hands the host one `PackageDriver`: a `PackageManifest` (the driver's name, its
   needs, and the contracts it provides with their methods and shapes) and a `DriverTable` (bind,
-  describe, health, dispatch, tick, caller, caller_gone, drop).
+  describe, health, dispatch, tick, caller, caller_gone, drop, job, job_cancel, describe_extra,
+  resume_record, resume).
+- The boundary has three layouts a host reads: the current one (`PACKAGE_LAYOUT_HASH`), the one
+  before the resume entries (`PACKAGE_EXTRAS_LAYOUT_HASH`, read as `PackageDriverExtras`, with no
+  resume entries) and the one before the extras (`PACKAGE_BASE_LAYOUT_HASH`, read as
+  `PackageDriverBase`). `PackageLayout::of` names which one a package's hash is. An older package
+  loads with the entries it has, and its driver keeps nothing across a rebind.
+- `resume_record` writes the driver's record of what it keeps across a rebind (at most 64 bytes,
+  `RESUME_BYTES`), and `resume` restores it on the new driver. Both are optional: a table without
+  them means no record.
 - When a driver binds, the host gives it a `HostTable`: `provided` and `take` while it binds,
   then `release` and one small table of functions for each kind of resource, used on the
   `Handle`s it took: `device`, `i2c`, `spi`, `line`, `pwm`, `uart`, `registers`, `interrupt`,
