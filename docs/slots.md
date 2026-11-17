@@ -791,32 +791,37 @@ step of a change to on and of a change to off; after each, the mark is checked n
 and a restart's repair brings the mark and the view to the record. A change with no fault leaves the mark,
 the record and the view agreeing.
 
-### The Orion precheck (designed, not wired)
+### The Orion precheck (wired)
 
-With `orion = true` on the board, turning the switch on is refused by name, because Orion cannot yet be
-asked (the marker `ORION-R3` in `drivers/system-security/src/flow.rs`). This section is the contact point
-Orion's side builds to. Nothing here is implemented yet.
+The `orion-precheck` device (`drivers/orion-precheck`, `docs/drivers.md`) serves `system.security-precondition/1`
+for the switch, backed by Orion's `security_precheck` (wire 0xB0 and 0xB1, interface level 5). It is bound in the
+`system-security` device as `uses = { orion = "<the device>" }`; the driver asks it through the same path as the
+other stakeholders, so its lines are named `orion: ...` in the refusal.
 
-- **Where.** The Orion bridge's device serves the contract `system.security-precondition/1`, as the
-  slot and first-flash drivers already do. The board binds it in the `system-security` device:
-  `uses = { orion = "<the bridge device's id>" }`. The driver asks it through the same path as the
-  other stakeholders (`ask("orion", …)`), so its lines are named `orion: …` in the refusal.
-- **What the driver calls.** Method 1, `precondition(on: bool, into: &mut [u8])`, with `on` the value
-  the switch would take and a buffer of `TEXT_MAX` (1024) bytes. The method is the same one the slots
-  and flash answer; Orion's `SecurityPrecheck` is its implementation behind the bridge.
+- **Where.** A device in the host, with its own Orion session to the comm core named by its `address` setting (a
+  `unix:<path>` or a socket path; unset, the board's own socket, as `ORION_ADDRESS` names it). It is not a bridge
+  device: the bridge publishes to Orion and is a separate process.
+- **Boards without Orion.** On a board whose `[security]` says `orion = false` the bound device is not asked, and
+  the switch says so by its `note:` line as before.
+- **What it calls.** `security_precheck(On)` for a change to on, `security_precheck(Off)` for a change to off. A
+  change to on on a board with Orion and no `orion` device bound is refused by name:
+  `missing: orion: the board has Orion, and no orion device is bound to ask it`.
 - **Answer shapes.**
-  - *Yes*: the text has no `missing:` or `busy:` line (empty is the usual form). The driver takes it.
-  - *No, with a reason*: one or more `missing: <reason>` lines (a fact that is not in place), or
-    `busy: <reason>` (work in progress, refused in either direction). The reason is shown in `state`.
-  - *Cannot answer*: any status error from the call (no such method, `NOT_SUPPORTED`, `BUSY` as a status,
-    an I/O failure). The driver refuses with `missing: it did not answer (<status>)`.
-- **Timeout and failure.** The call runs under the host's deadline (`call_deadline_ms`, default 2000 ms;
-  `docs/boards.md`). A call that does not return by then is `TIMED_OUT` and is a refusal, as a status
-  error is. The driver does not retry the precheck on a timer and never assumes Orion's answer: a
-  refusal leaves the switch as it was. A change is asked again by the operator. The switch is never
-  turned on by a timeout, and never turned off by one either.
-- **Until it is bound.** With `orion = true` and no `orion` need, ON is refused by name, as now. With the
-  need bound, the answer above replaces that refusal; `orion = false` boards are not asked at all.
+  - *Yes*: no line (the empty text). Orion says so when a way in exists (an enrolled operator, a recovery key, or
+    an enrollment key).
+  - *No, with a reason*: the `missing:` lines Orion gives, for example `missing: orion: nobody but root could get in
+    once it is on: enroll an operator, add a key to <recovery keys file>, or set enrollment.key`.
+  - *Below the level*: `missing: orion: the node speaks interface level N; the precheck needs level 5`.
+  - *Did not answer*: a call that times out, is refused, loses its session, or finds no session says
+    `missing: orion: it did not answer (<why>)`. A refusal of the change, never a change to the switch.
+- **Connecting and deadlines.** The session is kept by the driver's own worker thread. Connecting is tried on a
+  backoff of 1 s, doubling, capped at 8 s, and is never given up; the device's health is `Degraded` while it is not
+  connected. A call has a 1.5 s reply deadline, and the driver waits 1.7 s for the worker's reply, under the host's
+  2 s call deadline. A call is never retried. A lost session is dropped and reconnected at once.
+- **The boot mark.** The device has none: `apply` does nothing, since Orion keeps no mark for the switch.
+- **Tests.** `drivers/orion-precheck/tests/precheck.rs` (a fresh node, a node with an enrollment key, a node at level
+  4, a silent node, no comm core) and `drivers/system-security/tests/orion_bound.rs` (the bound device's answer, the
+  unbound refusal, and a board without Orion not asked).
 
 ## Two ways to send a bundle
 
