@@ -978,10 +978,6 @@ name = "lemnos-allwinner-fel-blob"
 version = "2.0.1-dev"
 
 [[package]]
-name = "lemnos-bench-stamp"
-version = "2.0.1-dev"
-
-[[package]]
 name = "lemnos-bmi088-batch"
 version = "2.0.1-dev"
 dependencies = [
@@ -1506,7 +1502,6 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
  "lemnos-sim",
- "lemnos-wire",
 ]
 
 [[package]]
@@ -1666,7 +1661,6 @@ dependencies = [
  "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-measure",
- "lemnos-wire",
 ]
 
 [[package]]
