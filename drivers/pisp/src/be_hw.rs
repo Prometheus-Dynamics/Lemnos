@@ -58,11 +58,11 @@ pub struct Registered {
 
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
-    /// Whether the block is there and answers, without claiming or changing it. The driver asks at
-    /// bind: a block that is not there refuses the bind rather than starting without it.
-    fn present(&mut self) -> Result<()> {
-        Ok(())
-    }
+    /// Whether the block is there, without claiming or changing it, and its version register as the
+    /// module read it at probe. The driver asks at bind: a block that is not there refuses the bind
+    /// rather than starting without it, and a version the driver does not know is refused by
+    /// [`bind_version`].
+    fn present(&mut self) -> Result<u32>;
     /// The block's version register, once a stream has run; 0 before.
     fn hw_version(&self) -> u32;
     /// Makes the memory and the stream.
@@ -172,6 +172,16 @@ fn status(e: &io::Error) -> Status {
     }
 }
 
+/// The version register family this driver knows: `BE_VERSION_BLOCK` in the module
+/// (`kernel/lemnos_pisp_be.c`), whose low four bits are the minor revision.
+pub const BE_VERSION_FAMILY: u32 = 0x0225_2700;
+const BE_VERSION_MINOR_MASK: u32 = 0xf;
+
+/// Whether `version` is a version of the family this driver knows (any minor revision).
+pub const fn known_version(version: u32) -> bool {
+    version & !BE_VERSION_MINOR_MASK == BE_VERSION_FAMILY
+}
+
 const PAGE: u64 = 4096;
 /// Bytes of a pool buffer. The pool holds no image: a buffer is only how the module counts a job
 /// and publishes its end. The module's stream still needs a pool, at least a byte per buffer,
@@ -252,13 +262,13 @@ impl LinuxHardware {
 }
 
 impl Hardware for LinuxHardware {
-    fn present(&mut self) -> Result<()> {
+    fn present(&mut self) -> Result<u32> {
         // The module's control node, and the block on it: nothing is claimed or changed.
         let control = Control::open("/dev/lemnos").map_err(|e| missing(&e))?;
-        control
+        let block = control
             .find_block(&self.settings.device)
-            .map(|_| ())
-            .map_err(|e| missing(&e))
+            .map_err(|e| missing(&e))?;
+        control.block_version(block).map_err(|e| status(&e))
     }
 
     fn hw_version(&self) -> u32 {

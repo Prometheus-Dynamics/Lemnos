@@ -51,6 +51,12 @@ impl Status {
     /// this, and its next call on the stream says so. It comes from a frame stream's read; no
     /// action of a device returns it.
     pub const TORN: Self = Self(Self::LEMNOS_BASE - 5);
+    /// The call is valid, but the device is not in the state it needs first (a step the call
+    /// depends on has not been taken, such as selecting a mode before setting its controls). Nothing
+    /// was changed. Use this for "not yet", not for a bad argument ([`Self::INVALID_ARGUMENT`]) and
+    /// not for a device that is busy ([`Self::BUSY`]). Added with DEBT-A2; older peers see a code
+    /// they do not name, which they carry as the number.
+    pub const FAILED_PRECONDITION: Self = Self(Self::LEMNOS_BASE - 6);
 
     /// Success, or success with a count.
     pub const fn is_ok(self) -> bool {

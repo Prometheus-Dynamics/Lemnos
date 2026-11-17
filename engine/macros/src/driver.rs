@@ -197,6 +197,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::health(self)
             }
 
+            fn figures(&self) -> ::lemnos_core::Figures {
+                <Self as ::lemnos_core::Lifecycle>::figures(self)
+            }
+
             fn retrying(&self) -> ::core::option::Option<::lemnos_core::Retry> {
                 <Self as ::lemnos_core::Lifecycle>::retrying(self)
             }

@@ -78,7 +78,17 @@ struct lemnos_pisp_be_status {
 	__u64 refused;			/* jobs refused by the checks */
 };
 
+/*
+ * The block's version register, as the module read it at probe (where an unknown version fails the
+ * bind). Read-only, on /dev/lemnos, for the block named in `block`.
+ */
+struct lemnos_pisp_be_version {
+	__u32 block;			/* in */
+	__u32 hw_version;		/* out: the version register */
+};
+
 #define LEMNOS_IOC_PISP_BE_CREATE _IOWR('L', 0xb0, struct lemnos_pisp_be_create)
+#define LEMNOS_IOC_PISP_BE_VERSION _IOWR('L', 0xb2, struct lemnos_pisp_be_version)
 /* On the stream's file. */
 #define LEMNOS_PISP_BE_IOC_STATUS _IOR('L', 0xb1, struct lemnos_pisp_be_status)
 

@@ -44,6 +44,8 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
 [[ -d "$source" ]] || source="$KDIR/include/uapi/linux/media/raspberrypi"
 "${compiler[@]}" "${flags[@]}" -I"$source" -pthread -o "$root/lemnos_pisp_be_check" \
   "$work/kernel/test/lemnos_pisp_be_check.c"
+"${compiler[@]}" "${flags[@]}" -I"$source" -I"$work/kernel" -I"$work/kernel/test" \
+  -o "$root/lemnos_pisp_be_version_check" "$work/kernel/test/lemnos_pisp_be_version_check.c"
 "${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
   "$work/kernel/test/lemnos_pisp_fe_check.c"
 # The dma-buf lend check: a real system-heap buffer lent to the back end, with the same fake block.

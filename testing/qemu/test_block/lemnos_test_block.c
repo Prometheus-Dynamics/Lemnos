@@ -40,6 +40,12 @@
 #define TB_PISP_ORDER 1
 #define TB_PISP_BYTES (PAGE_SIZE << TB_PISP_ORDER)
 #define TB_PISP_VERSION 0x02252700
+
+/* The version register the fake PiSP back end reports. The default is the family the module knows; a
+ * foreign value makes the probe refuse the block. */
+static unsigned int pisp_version = TB_PISP_VERSION;
+module_param(pisp_version, uint, 0444);
+MODULE_PARM_DESC(pisp_version, "Test only: the fake PiSP back end's version register");
 /* The fake K230 graphics DMA engine: a page of ordinary memory its driver is told is registers. */
 #define TB_GSDMA_IRQ 3
 #define TB_TCSI_IRQ 4
@@ -1162,7 +1168,7 @@ static int __init tb_init(void)
 		ret = -ENOMEM;
 		goto fail;
 	}
-	writel(TB_PISP_VERSION, tb_pisp_regs());
+	writel(pisp_version, tb_pisp_regs());
 	pisp_res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(tb_pisp_pages), TB_PISP_BYTES);
 	pisp_res[1] = (struct resource)DEFINE_RES_IRQ(tb_irq[TB_PISP_IRQ]);
 	tb_pisp = platform_device_register_full(&pisp);

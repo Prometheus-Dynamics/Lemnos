@@ -143,14 +143,18 @@ use lemnos_contract_camera_sensor::{
     landing_of, launch_frame,
 };
 use lemnos_core::{
-    CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, ErrorKind, Health, I2c,
-    Item, Key, Kind, Lifecycle, MethodId, Reader, RefusalKind, Result, Status, StreamHandle, Unit,
-    driver, status_of,
+    CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, ErrorKind, Figures,
+    Health, I2c, Item, Key, Kind, Lifecycle, MethodId, Reader, RefusalKind, Result, Status,
+    StreamHandle, Unit, driver, status_of,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
 /// runs the sensor itself, so no kernel names it, and a link is never confirmed from this side.
 const IDENTITY: Option<&[u8]> = None;
+
+/// The reason health gives while the receiver's frame-start count stands still. How long it stood
+/// still, and the frame length it stood at, are the figures that go with it.
+const SILENT_REASON: &str = "no frame start: restarting the sensor";
 
 const START: MethodId = MethodId {
     contract: 0,
@@ -233,28 +237,9 @@ const fn backoff_ns(attempt: u32) -> u64 {
 enum Cause {
     /// A register write failed while streaming.
     Bus,
-    /// The linked receiver's frame-start count stood still: the reason says how long, as far as a
-    /// fixed text can (see [`silence_reason`]).
-    Silent(&'static str),
-}
-
-/// The reason health gives when the count stood still for `ms` milliseconds. Health's reason is a
-/// fixed text, so the time is named by the largest step in the table that it reached: "over 250 ms"
-/// is a count that stood still for at least that long.
-const fn silence_reason(ms: u64) -> &'static str {
-    if ms >= 8000 {
-        "no frame start for over 8000 ms at the frame length in force: restarting the sensor"
-    } else if ms >= 4000 {
-        "no frame start for over 4000 ms at the frame length in force: restarting the sensor"
-    } else if ms >= 2000 {
-        "no frame start for over 2000 ms at the frame length in force: restarting the sensor"
-    } else if ms >= 1000 {
-        "no frame start for over 1000 ms at the frame length in force: restarting the sensor"
-    } else if ms >= 500 {
-        "no frame start for over 500 ms at the frame length in force: restarting the sensor"
-    } else {
-        "no frame start for over 250 ms at the frame length in force: restarting the sensor"
-    }
+    /// The linked receiver's frame-start count stood still for this many milliseconds. The figure
+    /// goes with the reason (see [`Lifecycle::figures`]), so the reason itself is a fixed text.
+    Silent(u64),
 }
 
 /// What the watch on the receiver's frame-start count knows. Judges nothing by itself: see
@@ -637,6 +622,20 @@ impl Lifecycle for Ov9782 {
         );
     }
 
+    fn figures(&self) -> Figures {
+        // The silence's length, and the frame length in force it was measured at (the figures go
+        // with the reason, so both are read now, under the same state).
+        match (self.state, self.cause) {
+            (State::Recovering { .. }, Cause::Silent(ms)) => {
+                let frame_length = self.selected.map_or(0, |(_, c)| c.frame_length);
+                Figures::NONE
+                    .with("silent_ms", ms as i64)
+                    .with("frame_length", i64::from(frame_length))
+            }
+            _ => Figures::NONE,
+        }
+    }
+
     fn health(&self) -> Health {
         // A mismatch is the first thing to report. Recovery, when it's under way, is next; an
         // unconfirmed link is what remains.
@@ -646,7 +645,7 @@ impl Lifecycle for Ov9782 {
         match (self.state, self.link_check) {
             (State::Recovering { .. }, _) => Health::Failed(match self.cause {
                 Cause::Bus => "bus error while streaming: restarting the sensor",
-                Cause::Silent(reason) => reason,
+                Cause::Silent(_) => SILENT_REASON,
             }),
             (State::PowerUp { .. }, _) => Health::Degraded("powering up"),
             (_, LinkCheck::Unknown(reason)) => Health::Degraded(reason),
@@ -884,7 +883,8 @@ impl Ov9782 {
 
     /// The selected mode, or `INVALID_ARGUMENT` before one is selected.
     fn mode_entry(&self) -> Result<(&'static ModeEntry, Current)> {
-        let (index, current) = self.selected.ok_or(Status::INVALID_ARGUMENT)?;
+        // No mode yet: a precondition the caller must take first, not a bad argument.
+        let (index, current) = self.selected.ok_or(Status::FAILED_PRECONDITION)?;
         Ok((&MODES[usize::from(index)], current))
     }
 
@@ -975,7 +975,7 @@ impl Ov9782 {
         }
         let attempt = self.watch.streak;
         self.watch.streak = attempt.saturating_add(1);
-        self.cause = Cause::Silent(silence_reason(frozen / 1_000_000));
+        self.cause = Cause::Silent(frozen / 1_000_000);
         self.state = State::Recovering { attempt, due: None };
         true
     }
@@ -1166,7 +1166,7 @@ impl CameraSensor for Ov9782 {
 
     fn start(&mut self) -> Result<()> {
         if self.selected.is_none() {
-            return Err(Status::INVALID_ARGUMENT);
+            return Err(Status::FAILED_PRECONDITION);
         }
         if self.state == State::Stopped {
             // Whoever starts the sensor owns it until it stops, even if this start then fails.

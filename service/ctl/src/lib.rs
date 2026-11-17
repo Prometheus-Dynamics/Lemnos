@@ -1081,6 +1081,9 @@ impl Tool<'_> {
                     Status::CANCELLED => " (cancelled)",
                     Status::INTERRUPTED => " (interrupted)",
                     Status::TORN => " (torn: a frame's buffer was reused while it was read)",
+                    Status::FAILED_PRECONDITION => {
+                        " (failed precondition: a step the call needs has not been taken)"
+                    }
                     _ => "",
                 };
                 return Err(format!("job {job:#x} failed: status {}{how}", status.0));

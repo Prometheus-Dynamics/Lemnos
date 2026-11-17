@@ -627,3 +627,26 @@ fn a_kind_on_a_need_that_is_not_a_stream_is_refused() {
         Some(crate::StreamKind::FreeRunning),
     );
 }
+
+/// The figures a driver names with its health: up to `FIGURES` of them, in the order added, and a
+/// fifth is dropped. An empty list is the default, and nothing is allocated for any of it.
+#[test]
+fn figures_keep_the_first_four_in_order_and_none_is_empty() {
+    use crate::{FIGURES, Figures};
+    assert!(Figures::NONE.is_empty());
+    assert_eq!(Figures::default(), Figures::NONE);
+    let figures = Figures::NONE
+        .with("a", 1)
+        .with("b", -2)
+        .with("c", 3)
+        .with("d", 4)
+        .with("e", 5);
+    assert_eq!(FIGURES, 4);
+    let mut shown = figures.iter();
+    assert_eq!(shown.next(), Some(("a", 1)));
+    assert_eq!(shown.next(), Some(("b", -2)));
+    assert_eq!(shown.next(), Some(("c", 3)));
+    assert_eq!(shown.next(), Some(("d", 4)));
+    assert_eq!(shown.next(), None, "a fifth figure is dropped");
+    assert!(!figures.is_empty());
+}

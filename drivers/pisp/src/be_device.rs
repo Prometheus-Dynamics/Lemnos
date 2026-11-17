@@ -403,8 +403,10 @@ impl Lifecycle for PispBe {
         // retried, and nothing reports running with nothing behind it.
         let label = settings.label();
         let mut hw = crate::be_hw::hardware(settings);
-        hw.present()
+        let version = hw
+            .present()
             .map_err(|status| refuse_missing(cfg, status, &label))?;
+        bind_version(cfg, version)?;
         Ok(Self::with_hardware(hw, needs, options))
     }
 
@@ -1271,6 +1273,23 @@ fn plain_memory(cfg: &Config<'_>, status: Status) -> Status {
         RefusalKind::Failed,
         format_args!("a frame stream is plain memory, and the block writes only into a dma-buf"),
     )
+}
+
+/// The bind's check of the block's version register: a version of the family the driver knows binds,
+/// any other is refused by name with the version it read. The module refuses an unknown version at
+/// probe too, so this is the check the driver owns when the module's is not there.
+pub(crate) fn bind_version(cfg: &Config<'_>, version: u32) -> Result<()> {
+    if crate::be_hw::known_version(version) {
+        return Ok(());
+    }
+    Err(cfg.refuse(
+        Status::NOT_SUPPORTED,
+        RefusalKind::Failed,
+        format_args!(
+            "the back end's version register is {version:#010x}, not the {:#010x} family this driver knows",
+            crate::be_hw::BE_VERSION_FAMILY
+        ),
+    ))
 }
 
 /// The refusal for a block that `present` refused: absent when it is not there, failed when it is

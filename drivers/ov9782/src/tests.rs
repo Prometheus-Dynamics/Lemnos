@@ -914,7 +914,7 @@ fn limits_are_clamped_to_the_nearest_value_and_reported() {
             exposure: Some(100),
             ..Controls::default()
         }),
-        Err(Status::INVALID_ARGUMENT)
+        Err(Status::FAILED_PRECONDITION)
     );
     assert_eq!(writes(&bus), vec![]);
 
@@ -1076,7 +1076,7 @@ fn select_mode_rules() {
     let (mut s, bus) = sensor();
     assert_eq!(s.selected(), Ok(None));
     assert_eq!(s.select_mode(6), Err(Status::NOT_FOUND));
-    assert_eq!(s.start(), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(s.start(), Err(Status::FAILED_PRECONDITION));
     s.select_mode(2).unwrap();
     assert_eq!(s.selected(), Ok(Some(2)));
     assert_eq!(writes(&bus), vec![], "select_mode alone touches nothing");
@@ -1613,6 +1613,36 @@ fn the_gain_and_frame_length_setters_land_as_their_posts_do() {
     // The launch is in frame 8 (the count was 9 at both reads), and the frame length delay is 2.
     assert_eq!(length.frame_length, Some(10));
     assert_eq!(by_item.in_force().unwrap().frame_length, Some(1000));
+}
+
+/// Before a mode is selected the ranges are unset (the describe carries none), and every call that
+/// needs a mode is refused with `FAILED_PRECONDITION` (a step the caller takes first), not with
+/// `INVALID_ARGUMENT`: the code is the message, and nothing is written.
+#[test]
+fn before_a_mode_every_mode_call_is_a_failed_precondition_and_nothing_is_written() {
+    let (mut s, bus) = sensor();
+    let mut out = Description::new();
+    Lifecycle::describe(&s, &mut out);
+    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    assert_eq!(
+        (exposure.min, exposure.max),
+        (None, None),
+        "no range before a mode"
+    );
+    assert_eq!(s.start(), Err(Status::FAILED_PRECONDITION));
+    assert_eq!(
+        s.set_controls(Controls {
+            exposure: Some(100),
+            ..Controls::default()
+        }),
+        Err(Status::FAILED_PRECONDITION)
+    );
+    assert_eq!(
+        s.post_values(FrameValues::default()),
+        Err(Status::FAILED_PRECONDITION)
+    );
+    assert_eq!(writes(&bus), vec![], "nothing written before a mode");
+    assert_eq!(s.selected(), Ok(None));
 }
 
 #[test]

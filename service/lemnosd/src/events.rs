@@ -4,7 +4,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Health, HostClock, Retry, Tail};
+use lemnos_core::{Figures, Health, HostClock, Retry, Tail};
 use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
 use lemnos_wire::{Frame, health, state};
 
@@ -19,7 +19,7 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 
 /// A device's state as the wire carries it: its state, and its health and reason with it.
 pub(crate) fn wire_state(info: &DeviceInfo, now_ns: u64) -> (u8, u8, String) {
-    wire_of(&info.state, info.retry, &info.health, now_ns)
+    wire_of(&info.state, info.retry, &info.health, &info.figures, now_ns)
 }
 
 /// Why a device waits, as the wire numbers it: the kind of its refusal, or none for a device that
@@ -51,10 +51,23 @@ pub(crate) fn retry_text(attempts: u32, last: &str, next_ns: u64, now_ns: u64) -
     format!("retrying: attempt {attempts}, last reason: {last}, next try in {ms} ms")
 }
 
+/// The health reason with the driver's measured figures after it, as `reason (name value, ...)`.
+fn with_figures(text: &str, figures: &Figures) -> String {
+    if figures.is_empty() {
+        return text.to_string();
+    }
+    let shown: Vec<String> = figures
+        .iter()
+        .map(|(name, value)| format!("{name} {value}"))
+        .collect();
+    format!("{text} ({})", shown.join(", "))
+}
+
 fn wire_of(
     device: &DeviceState,
     retry: Option<Retry>,
     health_now: &Health,
+    figures: &Figures,
     now_ns: u64,
 ) -> (u8, u8, String) {
     let (state, mut reason) = match device {
@@ -80,13 +93,13 @@ fn wire_of(
         Health::Ok => health::OK,
         Health::Degraded(text) => {
             if reason.is_empty() {
-                reason = (*text).to_string();
+                reason = with_figures(text, figures);
             }
             health::DEGRADED
         }
         Health::Failed(text) | Health::Gone(text) => {
             if reason.is_empty() {
-                reason = (*text).to_string();
+                reason = with_figures(text, figures);
             }
             health::FAILED
         }
@@ -144,8 +157,13 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<O
             let line = running_line(&info.id, bound, ok);
             let _ = writeln!(std::io::stderr(), "{line}");
         }
-        let (state, health, reason) =
-            wire_of(&info.state, info.retry, &health, core.clock.now_ns());
+        let (state, health, reason) = wire_of(
+            &info.state,
+            info.retry,
+            &health,
+            &info.figures,
+            core.clock.now_ns(),
+        );
         let event = Frame::Event {
             device: info.index,
             state,
@@ -295,6 +313,26 @@ mod running_line_tests {
         assert_eq!(
             running_line("mag", 5_000, 1),
             "lemnosd: mag: running ok 0 ms after bind"
+        );
+    }
+}
+
+#[cfg(test)]
+mod figures_tests {
+    use super::with_figures;
+    use lemnos_core::Figures;
+
+    /// The health reason with the measured figures after it, as `reason (name value, ...)`, and the
+    /// reason alone when the driver measured none.
+    #[test]
+    fn a_reason_shows_its_figures_after_it_and_alone_when_there_are_none() {
+        assert_eq!(with_figures("restarting", &Figures::NONE), "restarting");
+        let figures = Figures::NONE
+            .with("silent_ms", 300)
+            .with("frame_length", 1742);
+        assert_eq!(
+            with_figures("no frame start: restarting the sensor", &figures),
+            "no frame start: restarting the sensor (silent_ms 300, frame_length 1742)"
         );
     }
 }

@@ -41,6 +41,7 @@ typedef int32_t LemnosStatus;
 /* A frame's buffer was reused while it was read: the bytes were dropped, not returned. Only a
  * reader the producer cut off can see it, and its next call on the stream says so. */
 #define LEMNOS_E_TORN (LEMNOS_E_BASE - 5)
+#define LEMNOS_E_FAILED_PRECONDITION (LEMNOS_E_BASE - 6)
 
 /* A handle: slot index in the low 32 bits, generation in the high 32; 0 is null. */
 typedef uint64_t LemnosHandle;

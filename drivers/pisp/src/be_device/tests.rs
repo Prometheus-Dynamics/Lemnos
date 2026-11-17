@@ -102,6 +102,10 @@ impl Hw {
 }
 
 impl Hardware for Hw {
+    fn present(&mut self) -> lemnos_core::Result<u32> {
+        Ok(0x0225_2700)
+    }
+
     fn hw_version(&self) -> u32 {
         0x0225_2700
     }
@@ -1487,4 +1491,40 @@ fn a_lent_buffer_the_block_cannot_register_is_refused_bad_config_and_nothing_sta
     assert_eq!(lend.lent(2), None);
     assert_eq!(lend.unlends(), 1);
     assert!(hw.with(|m| m.regions.iter().all(|r| r.is_none())));
+}
+
+/// The bind's version check: a version of the family binds, any other is refused by name with the
+/// version the block reported (so the bind's refusal says what it read, and what it knows).
+#[test]
+fn bind_version_takes_the_family_at_any_minor_revision_and_refuses_another_by_name() {
+    use lemnos_core::{RefusalKind, RefusalSink};
+    use std::sync::Mutex;
+    let seen: Mutex<Option<(RefusalKind, String)>> = Mutex::new(None);
+    let sink = |kind: RefusalKind, reason: core::fmt::Arguments<'_>| {
+        *seen.lock().unwrap() = Some((kind, reason.to_string()));
+    };
+    let entries: [(&str, lemnos_core::ConfigValue<'_>); 0] = [];
+    let config = lemnos_core::Config::new(&entries).with_refusals(RefusalSink::new(&sink));
+    assert_eq!(super::bind_version(&config, 0x0225_2700), Ok(()));
+    assert_eq!(
+        super::bind_version(&config, 0x0225_270f),
+        Ok(()),
+        "a minor revision"
+    );
+    assert!(
+        seen.lock().unwrap().is_none(),
+        "no refusal for a known version"
+    );
+
+    assert_eq!(
+        super::bind_version(&config, 0x0114_6666),
+        Err(Status::NOT_SUPPORTED)
+    );
+    let (kind, reason) = seen
+        .into_inner()
+        .unwrap()
+        .expect("a refused bind gives its reason");
+    assert_eq!(kind, RefusalKind::Failed);
+    assert!(reason.contains("0x01146666"), "{reason}");
+    assert!(reason.contains("0x02252700"), "{reason}");
 }

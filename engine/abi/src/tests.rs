@@ -26,6 +26,7 @@ fn errnos_and_own_codes_do_not_overlap() {
         Status::PANIC,
         Status::LAYOUT_MISMATCH,
         Status::TORN,
+        Status::FAILED_PRECONDITION,
     ] {
         assert_eq!(own.errno(), None, "{own:?}");
         assert!(!own.is_ok());
@@ -279,7 +280,7 @@ fn the_header_matches_the_crate() {
     {
         return;
     }
-    let checks: [(&str, i64); 25] = [
+    let checks: [(&str, i64); 26] = [
         ("LEMNOS_OK", Status::OK.0.into()),
         ("LEMNOS_E_BASE", Status::LEMNOS_BASE.into()),
         ("LEMNOS_E_STALE_HANDLE", Status::STALE_HANDLE.0.into()),
@@ -294,6 +295,10 @@ fn the_header_matches_the_crate() {
         ("LEMNOS_E_PANIC", Status::PANIC.0.into()),
         ("LEMNOS_E_LAYOUT_MISMATCH", Status::LAYOUT_MISMATCH.0.into()),
         ("LEMNOS_E_TORN", Status::TORN.0.into()),
+        (
+            "LEMNOS_E_FAILED_PRECONDITION",
+            Status::FAILED_PRECONDITION.0.into(),
+        ),
         ("LEMNOS_BUFFER_OWNED", BufferDesc::OWNED.into()),
         ("LEMNOS_FENCE_NONE", FenceDesc::NONE.into()),
         ("LEMNOS_FENCE_SYNC_FILE", FenceDesc::SYNC_FILE.into()),
