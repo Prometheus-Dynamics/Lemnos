@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-k230-usbboot-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 USB-boot stage image: the one binary the boot ROM loads at 0x80360000, for the stage and every probe run. Linked by check.sh with image.ld; the entry and the code are in lemnos-driver-k230-usbboot-sys"
+
+[lib]
+crate-type = ["staticlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-driver-k230-usbboot-sys = { path = "../k230-usbboot-sys" }

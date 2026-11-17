@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-k230-usbboot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 USB-boot host: the boot ROM's download mode and the vendor burner's protocol over USB, the flasher's write order, and a simulated board that runs the stage's own code. Opens no device; the tests drive the simulator"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-k230-usbboot-stage = { path = "../k230-usbboot-stage" }
+sha2 = { version = "0.11", default-features = false }
+rusb = "0.9"

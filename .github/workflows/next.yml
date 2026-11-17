@@ -86,6 +86,9 @@ jobs:
           cmake -S "$RUNNER_TEMP/utils/dtmerge" -B "$RUNNER_TEMP/dtmerge-build"
           cmake --build "$RUNNER_TEMP/dtmerge-build" --target dtmerge
           echo "LEMNOS_DTMERGE=$RUNNER_TEMP/dtmerge-build/dtmerge" >> "$GITHUB_ENV"
+      # The K230 USB-boot stage's entry is bare-metal RISC-V, which the gate's host build does not cover.
+      - run: rustup target add riscv64imac-unknown-none-elf
+      - run: cargo build -p lemnos-driver-k230-usbboot-sys -p lemnos-k230-usbboot-stage --target riscv64imac-unknown-none-elf
       - run: ./scripts/gate.sh
         env:
           GATE_PART: tests:${{ matrix.shard }}/4
