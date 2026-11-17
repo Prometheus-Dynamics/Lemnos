@@ -252,7 +252,9 @@ impl Rig {
         while let Some(frame) = self.stream.take_frame() {
             let mut bytes = self.stream.contents(frame.buffer);
             bytes.truncate(frame.bytes as usize);
-            self.stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+            self.stream
+                .return_buffer(frame.buffer)
+                .expect("the consumer holds this buffer");
             self.taken.push(frame);
             self.taken_bytes.push(bytes);
         }
