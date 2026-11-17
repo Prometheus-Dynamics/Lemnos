@@ -12,8 +12,8 @@ use lemnos_core::{
     ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
     HostOwned, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Shape, Spi,
-    Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
+    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Shape,
+    Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 
 use crate::board::{
