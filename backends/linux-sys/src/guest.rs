@@ -300,6 +300,24 @@ pub fn stream_reader(stream: BorrowedFd<'_>, arg: &mut [u8; 48]) -> io::Result<O
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `LEMNOS_IOC_GSDMA_CREATE`, `_IOWR('L', 0xe8, struct lemnos_gsdma_create)`: 64 bytes, on the
+/// control node.
+const LEMNOS_IOC_GSDMA_CREATE: u32 = iowr::<[u8; 64]>(b'L', 0xe8);
+
+/// Makes a graphics DMA stream on the control node, as `LEMNOS_IOC_GSDMA_CREATE`. `arg` is the
+/// 64-byte `struct lemnos_gsdma_create`: its stream's ring size and pool address come back in it,
+/// with the engine's reach, and the stream's descriptor (at byte 36) is returned owned.
+///
+/// # Errors
+///
+/// The kernel refuses the stream, with its errno.
+pub fn gsdma_create(node: BorrowedFd<'_>, arg: &mut [u8; 64]) -> io::Result<OwnedFd> {
+    ioctl_bytes(node, LEMNOS_IOC_GSDMA_CREATE, arg)?;
+    let fd = i32::from_ne_bytes([arg[36], arg[37], arg[38], arg[39]]);
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// Pins the calling thread to CPU `cpu`, or, for `None`, lets it run on every CPU
 /// (`sched_setaffinity(2)` on pid 0).
 ///
