@@ -100,3 +100,8 @@ const _: () = assert!(FIRST_REQUEST_WINDOW_US > HOST_BULK_TIMEOUT_US);
 const _: () = assert!(INIT_BUDGET_US < IDLE_LIMIT_US);
 // The idle limit must expire before the watchdog would fire, so the distinct idle outcome comes first.
 const _: () = assert!(IDLE_LIMIT_US < REFERENCE_WATCHDOG_PERIOD_US);
+// The watchdog must cover the worst feed-to-feed gap (the idle limit plus a write round's phases up to its feed).
+const _: () = assert!(
+    FEED_TO_FEED_US < REFERENCE_WATCHDOG_PERIOD_US,
+    "the feed-to-feed bound must be under the reference watchdog period"
+);
