@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-lend-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's dma-buf lend check: a system-heap dma-buf lent to the fake PiSP back end, its pin and its release, and the wedged stop (CZ-GUEST-2 port of lemnos_lend_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true

@@ -2616,6 +2616,14 @@ name = "lemnos-layout-check"
 version = "2.0.1-dev"
 
 [[package]]
+name = "lemnos-lend-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-linux"
 version = "2.0.1-dev"
 dependencies = [
