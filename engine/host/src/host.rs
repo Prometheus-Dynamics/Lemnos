@@ -63,6 +63,18 @@ pub trait Instance: Send {
     }
     /// See [`Driver::job_cancel`].
     fn job_cancel(&mut self, _job: JobId) {}
+    /// See [`Driver::HOLDS_OFF`]: whether [`Instance::off`] keeps this instance.
+    fn holds_off(&self) -> bool {
+        false
+    }
+    /// See [`Driver::off`].
+    fn off(&mut self) -> lemnos_core::Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// See [`Driver::on`].
+    fn on(&mut self) -> lemnos_core::Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// See [`Driver::wait_fd`]: a duplicate of it, for the host to wait on.
     fn wait_fd(&self) -> Option<OwnedFd> {
         None
@@ -92,6 +104,18 @@ impl<D: Driver + Send> Instance for D {
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         Driver::tick(self, now_ns)
+    }
+
+    fn holds_off(&self) -> bool {
+        <D as Driver>::HOLDS_OFF
+    }
+
+    fn off(&mut self) -> lemnos_core::Result<()> {
+        Driver::off(self)
+    }
+
+    fn on(&mut self) -> lemnos_core::Result<()> {
+        Driver::on(self)
     }
 
     fn wait_fd(&self) -> Option<OwnedFd> {
@@ -432,6 +456,9 @@ pub enum OffReason {
     Manual,
     /// The board's explicit auto-off policy.
     Policy,
+    /// An off request reached a driver that keeps its hardware (`Driver::HOLDS_OFF`), and its
+    /// `off` returned this error. The instance was dropped, as an off always drops it.
+    Failed(Status),
 }
 
 /// Where a device stands. Every state is visible to anyone who asks.
@@ -3542,7 +3569,10 @@ impl Host {
         }
     }
 
-    /// Switches a device off and lets go of its hardware.
+    /// Switches a device off. A driver that keeps its hardware across off (`HOLDS_OFF`) is asked
+    /// to switch off in place: the instance and every line it claimed stay as they are, and only
+    /// [`Host::on`] reaches it again. Any other driver, and a driver whose `off` fails, has its
+    /// instance dropped, so it lets go of its hardware.
     pub fn off(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
@@ -3550,18 +3580,64 @@ impl Host {
         self.inner.end_jobs(&slot, Status::INTERRUPTED);
         slot.end_close();
         slot.stop_wait();
+        let mut failed = None;
         if let Ok(mut guard) = slot.instance.try_lock() {
-            let dead = guard.take();
-            drop(guard);
-            drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+            let held = match guard.as_mut() {
+                Some(instance) if instance.holds_off() => {
+                    match catch_unwind(AssertUnwindSafe(|| instance.off())) {
+                        Ok(Ok(())) => true,
+                        Ok(Err(status)) => {
+                            failed = Some(status);
+                            false
+                        }
+                        // A driver that panics is never trusted again: it is dropped below.
+                        Err(_) => {
+                            failed = Some(Status::PANIC);
+                            false
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if !held {
+                let dead = guard.take();
+                drop(guard);
+                drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+            }
+        }
+        if let Some(status) = failed {
+            *lock(&slot.state) = DeviceState::Off(OffReason::Failed(status));
+            self.inner.moved(&slot);
         }
         Ok(())
     }
 
-    /// Switches a device on, whatever turned it off, and binds it now.
+    /// Switches a device on, whatever turned it off, and binds it now. A kept instance (see
+    /// [`Host::off`]) is switched on in place, with no rebind; if its `on` fails, it is dropped and
+    /// the device is bound again under the failure rule.
     pub fn on(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
         slot.short_runs.store(0, Ordering::Release);
+        if matches!(*lock(&slot.state), DeviceState::Off(_)) {
+            let switched = match slot.instance.try_lock() {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(instance) => catch_unwind(AssertUnwindSafe(|| instance.on()))
+                        .map(|result| result.is_ok())
+                        .unwrap_or(false),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+            if switched {
+                *lock(&slot.state) = DeviceState::Running;
+                slot.bound_ns
+                    .store(self.inner.clock.now_ns(), Ordering::Release);
+                self.inner.moved(&slot);
+                self.inner
+                    .set_next_tick(&slot, Some(self.inner.clock.now_ns()));
+                return Ok(());
+            }
+        }
         // Not announced: the bind that follows announces the device once, as running, or as
         // retrying with the reason its bind gave. Announcing "switched on" first would be a
         // second state change for one power-on.

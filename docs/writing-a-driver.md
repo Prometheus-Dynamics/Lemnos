@@ -377,6 +377,30 @@ to the caller's memory, the driver refuses the job and says why, as `drivers/vip
 python3 scripts/generate-builtins.py --check
 ```
 
+### Switching off and on
+
+`lemnos-ctl off` and `lemnos-ctl on` switch a device; the daemon's `set_power` request is the same. What the
+switch means depends on whether the driver sets `HOLDS_OFF`.
+
+- **Without `HOLDS_OFF` (the default, every driver that does not set it).** An off drops the driver's
+  instance. The driver lets go of everything it claimed, so its lines are released, and the released pin keeps
+  whatever level the hardware leaves it at. An on binds a new instance, as a first start does. No driver code
+  runs at off.
+- **With `HOLDS_OFF = true`.** An off calls the driver's `off`, and the host keeps the instance with every
+  resource it claimed: a line the driver configured stays requested for the whole off period. While it is off the
+  host does not call `tick`, and it refuses every request except `describe` and `on`; its state reads
+  `off`. An on calls the driver's `on` on the kept instance. No rebind happens. `off` must drive the device to its
+  off state and hold it there: a line that is only released does not turn off on most chips. The power switch
+  (`gpio-power-switch`) drives its off level and holds the line this way.
+- **When `off` fails.** If `off` returns an error, or panics, the host drops the instance as an off without
+  `HOLDS_OFF` does, and the device's state reads `off` with the reason `Failed` and the status. A driver
+  that panics is never trusted again.
+- **What never calls `off`.** A rebind, a device gone for good, a panic in a call, a fault and the daemon's
+  shutdown do not. Only an explicit off request reaches `off`. A device that is switched off and then the daemon
+  stops is not switched on by it; the daemon itself is never down.
+
+A package keeps the default: `off` and `on` are not part of the package ABI, so a package behaves as it did.
+
 ## The package form
 
 A package is a built-in driver compiled on its own into a shared object, which lemnosd loads when

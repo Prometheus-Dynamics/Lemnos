@@ -119,7 +119,8 @@ Hardware goes away and comes back. Lemnos never gives up on it, and never hides 
   of an unplugged USB device), or its calls fail five times in a row the way a missing device
   fails. The host drops it, takes back its resources and binds it again under the rule above.
 - **Nothing is switched off automatically** unless its board entry asks. `lemnos-ctl off` and `on`
-  are the switch. A device with `auto_off_after = N` in the board file opts in to being turned off
+  are the switch. A driver that holds its hardware across off keeps its lines; the rest let go of them (see
+  [Switching off and on](writing-a-driver.md#switching-off-and-on)). A device with `auto_off_after = N` in the board file opts in to being turned off
   after N failed binds in a row; no setting turns that on for any other device. The waits and the
   call deadline are set in the board file's [`[host]`](boards.md#the-keys) section; the cap can be
   made shorter than 8 s, never longer.
