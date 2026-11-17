@@ -108,6 +108,49 @@ fn age_bad(stamp: u64, now: u64) -> bool {
     lemnos_sim_clock::age_bad(stamp, now, MAX_AGE_NS)
 }
 
+/// How a frame's timestamp judges against the clock read taken after it.
+#[derive(Debug, PartialEq, Eq)]
+enum Age {
+    /// A recent frame start.
+    Fine,
+    /// Too old, or not a frame start at all: a frame that was late, not a clock fault.
+    Stale,
+    /// Stamped after the clock read: the clock showed the later time first, so it went backwards.
+    /// The text is the clock's own refusal, as `FileClock` words it.
+    ClockWentBack(String),
+}
+
+/// Judges a frame stamp against `now`. A stamp later than `now` cannot come from a monotonic clock
+/// read after the frame started, so it is a clock fault, not a late frame: the proof reports it as
+/// the clock's refusal. The file-based clock reader only refuses a step it has already seen, so a
+/// reader that has only read the earlier values never reports it.
+fn judge(stamp: u64, now: u64) -> Age {
+    if stamp > now {
+        return Age::ClockWentBack(format!("sim clock went backwards: {stamp} -> {now}"));
+    }
+    if age_bad(stamp, now) {
+        Age::Stale
+    } else {
+        Age::Fine
+    }
+}
+
+/// Counts a frame's age against the run, and reports a clock fault as the run's clock failure
+/// (the first one kept, as a failed read is).
+fn record_age(stamp: u64, now: u64, bad: &mut u64) {
+    match judge(stamp, now) {
+        Age::Fine => {}
+        Age::Stale => *bad += 1,
+        Age::ClockWentBack(text) => {
+            *bad += 1;
+            let mut first = CLOCK_ERROR
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            first.get_or_insert(text);
+        }
+    }
+}
+
 /// The clock the frame ages are read on: `CLOCK_MONOTONIC` on a board, the sim clock file under
 /// test. Set once by `run`.
 static CLOCK: std::sync::OnceLock<Box<dyn lemnos_sim_clock::Clock>> = std::sync::OnceLock::new();
@@ -461,7 +504,7 @@ impl BackStage {
         }
         self.track.see(frame.sequence(), frame.timestamp_ns());
         self.latency.push(now.saturating_sub(frame.timestamp_ns()));
-        self.age_bad += u64::from(age_bad(frame.timestamp_ns(), now));
+        record_age(frame.timestamp_ns(), now, &mut self.age_bad);
         self.identity_bad += u64::from(frame.identity() != expected);
         let luma = self.out.bytes(&frame).get(..self.luma_bytes).unwrap_or(&[]);
         self.zero_luma += u64::from(luma.iter().all(|&b| b == 0));
@@ -529,7 +572,8 @@ fn pump(
             front.placeholders += 1;
         } else {
             front.track.see(frame.sequence(), frame.timestamp_ns());
-            front.age_bad += u64::from(age_bad(frame.timestamp_ns(), now_ns()));
+            let now = now_ns();
+            record_age(frame.timestamp_ns(), now, &mut front.age_bad);
         }
         front.identity_bad += u64::from(frame.identity() != k + 1);
         match front
@@ -1284,6 +1328,18 @@ mod tests {
         assert!(all.allow_skip_latch && all.allow_skip_reference && all.allow_skip_lit);
         let none = parse_from(vec!["x".to_string()]).unwrap();
         assert!(!none.allow_skip_latch && !none.allow_skip_reference && !none.allow_skip_lit);
+    }
+
+    #[test]
+    fn a_frame_stamped_after_the_clock_read_is_the_clock_going_backwards() {
+        // The clock showed 5 ns, then this frame, stamped 6 ns, was judged against it. The clock's
+        // own refusal names both times; a late frame is only "stale".
+        assert_eq!(
+            judge(6, 5),
+            Age::ClockWentBack("sim clock went backwards: 6 -> 5".into())
+        );
+        assert_eq!(judge(1, 5_000_000_000), Age::Stale);
+        assert_eq!(judge(5_000_000_000, 5_000_000_000), Age::Fine);
     }
 
     #[test]
