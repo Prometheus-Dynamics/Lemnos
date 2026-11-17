@@ -126,3 +126,23 @@ USB-A power (usb.cycle): not measured, for the reason below. Step 2 capture (RAZ
 
 Restore: both units active, failed 0, helios-engine active, failsafe stopped and removed; the board's remote run
 directory removed. Usb1 profile deleted.
+
+## usb.cycle: the hardware and the wiring work (2026-11-17, read-only of the switch's own method)
+
+Measured on Raze #2 under the failsafe (RAZE/flip/u2/usb2-log.txt):
+- `lemnos-ctl call usb-a-power set false` (the power-switch contract's own `set(on)`, method 1): line `gpio-20`
+  goes `out lo` (held by `lemnos`), and the sysfs USB device count falls from 2 to 1 within 0.2 s (the Creative
+  webcam on bus 3 drops off).
+- `lemnos-ctl call usb-a-power set true`: line goes `out hi`, and the count returns to 2 by about 0.4 s.
+So the GPIO line, the port power and the devices respond. VBUS is still not exposed on the board; the device count is
+the evidence.
+
+Why the earlier `usb.cycle` did not drop the devices: `lemnos-ctl off usb-a-power` is the daemon's device lifecycle,
+not a power command. `set_power` (service/lemnosd/src/requests.rs:478) calls `host.off()`, and `Host::off`
+(engine/host/src/host.rs:3546) drops the driver instance, which releases the GPIO line. The line is released, not driven
+low (debugfs shows no consumer or level during the off window), and the port stays powered. `on` rebinds the driver,
+whose `default_on = true` drives the line high again. So `off` never switched the port off.
+
+Not changed here: the fix needs a decision on where the off path lives (daemon routing to the switch's `set`, or a
+new lifecycle hook in engine/core, which is an A-series change). Until then, the harness's usb.cycle stays
+`not_measured`, and the switch is only reachable through `call ... set`.
