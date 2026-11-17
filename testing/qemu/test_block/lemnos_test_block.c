@@ -79,15 +79,24 @@ MODULE_PARM_DESC(csi2_phys, "Physical address of 16K set aside for the fake rece
 static void __iomem *tcsi_regs[4];	/* third: mipi cfg; fourth: the front end */
 static int tcsi_irq;
 static struct platform_device *tcsi_pdev;
-static DEFINE_MUTEX(tcsi_lock);
+/*
+ * The in-flight state is read and written from a hard timer, so the lock is a
+ * raw spinlock (the hard timer's context is not allowed a regular one). The timer runs at a line time, far below the driver's stillness
+ * window, and it is pinned to the CPU that started it: the check pins its own
+ * thread to that CPU, so the driver's reads and the timer share one vCPU. When
+ * the host takes that vCPU away, both stop, and a late timer counts every line
+ * it missed (the overrun) at once, before the driver's next read.
+ */
+#define TCSI_LINE_NS	50000
+static DEFINE_RAW_SPINLOCK(tcsi_lock);
 static u64 tcsi_cur_addr;
 static u32 tcsi_cur_len;
-static u32 tcsi_busy;		/* ms the line counter keeps moving after FORCE */
+static u32 tcsi_busy;		/* lines the channel still writes after FORCE; ~0: forever */
 static u8 tcsi_pattern;
 static u32 tcsi_lines;		/* the next armed frame end's lines; 0: the height */
 
-static void tcsi_tick(struct work_struct *work);
-static DECLARE_DELAYED_WORK(tcsi_work, tcsi_tick);
+static struct hrtimer tcsi_timer;
+static enum hrtimer_restart tcsi_tick(struct hrtimer *t);
 static u64 tfe_stats, tfe_out[2];
 static u32 tfe_out_bytes[2];
 static u8 tfe_pattern;
@@ -143,23 +152,31 @@ static u64 tcsi_emb_addr;
 static u32 tcsi_emb_len;
 static u32 tcsi_emb_lines = 1;	/* the next embedded frame end's lines; 0: no line */
 
-static void tcsi_tick(struct work_struct *work)
+/*
+ * The lines since the last tick: one for the expiry itself, and one for each
+ * period the timer ran past it. Only counted while the channel is forced; a gap
+ * while it isn't is dropped.
+ */
+static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 {
 	void __iomem *dma = tcsi_regs[0];
-	bool again = true;
+	enum hrtimer_restart next = HRTIMER_NORESTART;
+	unsigned long flags;
+	u64 lines = 1 + hrtimer_forward_now(t, ns_to_ktime(TCSI_LINE_NS));
 
-	mutex_lock(&tcsi_lock);
-	if (!tcsi_busy) {
-		/* Told to stop, including after "forever": it must not wrap. */
-		again = false;
-	} else if (readl(dma + R_CTRL) & R_FORCE) {
-		writel(readl(dma + R_DEBUG) + 1, dma + R_DEBUG);
-		if (tcsi_busy != U32_MAX && !--tcsi_busy)
-			again = false;
+	raw_spin_lock_irqsave(&tcsi_lock, flags);
+	if (tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
+		u32 step = tcsi_busy == U32_MAX ? (u32)min_t(u64, lines, U32_MAX)
+						: (u32)min_t(u64, lines, tcsi_busy);
+
+		writel(readl(dma + R_DEBUG) + step, dma + R_DEBUG);
+		if (tcsi_busy != U32_MAX)
+			tcsi_busy -= step;
 	}
-	mutex_unlock(&tcsi_lock);
-	if (again)
-		schedule_delayed_work(&tcsi_work, msecs_to_jiffies(1));
+	if (tcsi_busy)
+		next = HRTIMER_RESTART;
+	raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+	return next;
 }
 
 /*
@@ -275,16 +292,27 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == TCSI_IOC_EMB_LINES)
 		return get_user(tcsi_emb_lines, (u32 __user *)uarg);
 	if (cmd == TCSI_IOC_BUSY) {
-		u32 ms;
+		u32 lines;
+		unsigned long flags;
 
-		if (copy_from_user(&ms, uarg, sizeof(ms)))
+		if (copy_from_user(&lines, uarg, sizeof(lines)))
 			return -EFAULT;
-		mutex_lock(&tcsi_lock);
-		tcsi_busy = ms;
-		mutex_unlock(&tcsi_lock);
-		if (ms)
-			schedule_delayed_work(&tcsi_work, msecs_to_jiffies(1));
+		raw_spin_lock_irqsave(&tcsi_lock, flags);
+		tcsi_busy = lines;
+		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+		if (lines)
+			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS),
+				      HRTIMER_MODE_REL_PINNED_HARD);
 		return 0;
+	}
+	if (cmd == TCSI_IOC_BUSY_LEFT) {
+		unsigned long flags;
+		u32 left;
+
+		raw_spin_lock_irqsave(&tcsi_lock, flags);
+		left = tcsi_busy;
+		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+		return put_user(left, (u32 __user *)uarg);
 	}
 	if (cmd == TCSI_IOC_FIRE) {
 		u32 status;
@@ -541,6 +569,13 @@ static bool tgd_hanging;
 
 static void tgd_tick(struct work_struct *work);
 static DECLARE_DELAYED_WORK(tgd_work, tgd_tick);
+/*
+ * The tick runs on CPU 0, where the checks pin themselves, so the engine's
+ * progress and the driver's reads share a vCPU (see tcsi_tick). It counts the
+ * milliseconds that really passed since the last tick, so a late tick catches up.
+ */
+#define TGD_CPU		0
+static ktime_t tgd_last;
 
 static u32 __iomem *tgd_regs(void)
 {
@@ -614,8 +649,13 @@ static void tgd_run(void)
 static void tgd_tick(struct work_struct *work)
 {
 	bool raise = false, on;
+	ktime_t now = ktime_get();
+	u32 steps;
 
 	mutex_lock(&tgd_lock);
+	/* Whole milliseconds since the last tick, at least one: a tick that ran late counts what it missed. */
+	steps = max_t(s64, 1, ktime_ms_delta(now, tgd_last));
+	tgd_last = now;
 	if (tgd_rd(TGD_CTRL) == 1 && !tgd_hanging) {
 		tgd_wr(TGD_CTRL, 0);
 		tgd_wr(TGD_INT_STAT, 0);
@@ -630,17 +670,24 @@ static void tgd_tick(struct work_struct *work)
 	}
 	if (tgd_hanging) {
 		/* It moves while on; once off, for `left` ms more. */
-		if (!(tgd_rd(TGD_CH_EN) & TGD_CH_EN_BIT) && tgd_left != U32_MAX && !tgd_left--)
-			tgd_hanging = false;
-		else
-			tgd_wr(TGD_CUR_DADDR, tgd_rd(TGD_CUR_DADDR) + 1);
+		if (!(tgd_rd(TGD_CH_EN) & TGD_CH_EN_BIT) && tgd_left != U32_MAX) {
+			if (tgd_left <= steps) {
+				tgd_left = 0;
+				tgd_hanging = false;
+			} else {
+				tgd_left -= steps;
+				tgd_wr(TGD_CUR_DADDR, tgd_rd(TGD_CUR_DADDR) + steps);
+			}
+		} else {
+			tgd_wr(TGD_CUR_DADDR, tgd_rd(TGD_CUR_DADDR) + steps);
+		}
 	}
 	/* Looked at every ms only while a driver has the channel on, so it costs nothing otherwise. */
 	on = tgd_hanging || (tgd_rd(TGD_CH_EN) & TGD_CH_EN_BIT);
 	mutex_unlock(&tgd_lock);
 	if (raise)
 		irq_set_irqchip_state(tb_irq[TB_GSDMA_IRQ], IRQCHIP_STATE_PENDING, true);
-	schedule_delayed_work(&tgd_work, msecs_to_jiffies(on ? 1 : 50));
+	schedule_delayed_work_on(TGD_CPU, &tgd_work, msecs_to_jiffies(on ? 1 : 50));
 }
 
 /* "N": jobs from now on hang, moving for N ms after the channel is off (4294967295: forever). */
@@ -993,7 +1040,7 @@ static void tb_teardown(void)
 		__free_pages(tb_pisp_pages, TB_PISP_ORDER);
 	if (tcsi_misc.minor != MISC_DYNAMIC_MINOR)
 		misc_deregister(&tcsi_misc);
-	cancel_delayed_work_sync(&tcsi_work);
+	hrtimer_cancel(&tcsi_timer);
 	cancel_delayed_work_sync(&tfe_busy_work);
 	cancel_delayed_work_sync(&tfe_midframe_work);
 	if (!IS_ERR_OR_NULL(tcsi_pdev))
@@ -1029,6 +1076,7 @@ static struct resource vip_res[2] __initdata;
 
 static int __init tb_init(void)
 {
+	hrtimer_setup(&tcsi_timer, tcsi_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED_HARD);
 	struct resource res[1 + TB_BLOCK_IRQS];
 	struct platform_device_info pisp = {
 		.name = "lemnos-test-pisp",
@@ -1189,7 +1237,8 @@ static int __init tb_init(void)
 	ret = sysfs_create_group(&tb_gsdma->dev.kobj, &tb_gsdma_group);
 	if (ret)
 		goto fail;
-	schedule_delayed_work(&tgd_work, msecs_to_jiffies(1));
+	tgd_last = ktime_get();
+	schedule_delayed_work_on(TGD_CPU, &tgd_work, msecs_to_jiffies(1));
 
 	tb_vip_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 	if (!tb_vip_page) {

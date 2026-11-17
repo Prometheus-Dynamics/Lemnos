@@ -65,6 +65,7 @@ struct lrc_dev {
 	struct mutex ctl;		/* START, STOP, close, unbind */
 	bool gone;			/* unbound: every register access is off */
 	bool wedged;			/* a stop couldn't be confirmed */
+	unsigned int stop_still;	/* reads the line counter must hold still for, set at START */
 
 	struct lem_pisp_fe *fe;		/* the front end, when the block has one; NULL otherwise */
 	spinlock_t lock;		/* the frame path, everything below */

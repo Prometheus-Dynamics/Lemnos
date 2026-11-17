@@ -13,7 +13,9 @@
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
+#define _GNU_SOURCE
 #include <errno.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
 #include <stddef.h>
@@ -28,6 +30,7 @@
 
 #include "../lemnos.h"
 #include "../lemnos_rp1_csi2.h"
+#include "../lemnos_rp1_csi2_window.h"
 #include "find_block.h"
 #include "lemnos_test_csi2.h"
 
@@ -96,13 +99,6 @@ static void sleep_ms(unsigned int ms)
 		;
 }
 
-static uint64_t now_ms(void)
-{
-	struct timespec t;
-
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
-}
 
 static struct lemnos_rp1_csi2_info info(void)
 {
@@ -136,9 +132,9 @@ static struct tcsi_regs peek(void)
 	return r;
 }
 
-static void busy(uint32_t ms)
+static void busy(uint32_t lines)
 {
-	ioctl(hw, TCSI_IOC_BUSY, &ms);
+	ioctl(hw, TCSI_IOC_BUSY, &lines);
 }
 
 /* Fires a status word and waits until the handler has seen it. */
@@ -638,15 +634,32 @@ static void test_jobs(int pool_fd)
 	stream_close(&s);
 }
 
-/* A frame is left in flight; `ms` of fake counter movement must hold the stop back. */
-static uint64_t timed_stop(void (*action)(void *), void *arg, uint32_t ms)
+/* The lines the fake still has to write after FORCE: 0 once the block's DMA is done. */
+static uint32_t busy_left(void)
 {
-	uint64_t t;
+	uint32_t left = ~0u;
 
-	busy(ms);
-	t = now_ms();
+	CHECK(!ioctl(hw, TCSI_IOC_BUSY_LEFT, &left), "fake: lines in flight read");
+	return left;
+}
+
+/*
+ * A frame is left in flight: `lines` the fake will still write after FORCE.
+ * The action must not return while any of them is still due, so the fake
+ * reports none left when it does. The fake's count is its own state, not a
+ * clock, so this holds however long the host takes to run the fake's timer.
+ */
+static void drained_by(const char *what, void (*action)(void *), void *arg, uint32_t lines)
+{
+	uint32_t before;
+	uint32_t left;
+
+	busy(lines);
+	before = busy_left();
+	CHECK(before == lines, "%s: %u lines in flight going in (%u)", what, lines, before);
 	action(arg);
-	return now_ms() - t;
+	left = busy_left();
+	CHECK(left == 0, "%s: returned with %u of %u lines still in flight", what, left, lines);
 }
 
 static void act_stop(void *a)
@@ -660,18 +673,76 @@ static void act_close_stream(void *a)
 	stream_close(a);
 }
 
+static void act_close_node(void *a)
+{
+	(void)a;
+	close(ctl);
+}
+
+struct unbind_arg {
+	const char *unbind, *dev;
+};
+
+static void act_unbind(void *a)
+{
+	const struct unbind_arg *u = a;
+	int fd = open(u->unbind, O_WRONLY | O_CLOEXEC);
+
+	CHECK(fd >= 0, "unbind file opened");
+	CHECK(fd >= 0 && write(fd, u->dev, strlen(u->dev)) == (ssize_t)strlen(u->dev), "unbound");
+	if (fd >= 0)
+		close(fd);
+}
+
+/*
+ * The stop window scales with the line time. A 4096 px RAW12 line on one lane at
+ * 80 Mbit/s takes 615 us, so its window is 3 lines, 1845 us: 10 reads. START
+ * takes it, and STOP waits for it.
+ */
+static void test_window(int pool_fd)
+{
+	struct stream s;
+	struct lemnos_rp1_csi2_start a;
+	unsigned long long line = lrc_line_us(6144, 1, 80);
+
+	CHECK(line == 615, "a 4096 px RAW12 line on one lane at 80 Mbit/s takes %llu us", line);
+	CHECK(lrc_window_fits(line), "that line's window fits the poll budget");
+	CHECK(lrc_still_reads(line) == 10, "that line's window is %u reads", lrc_still_reads(line));
+	CHECK(!stream_open(&s, pool_fd), "stream made");
+	a = good_start(s.fd);
+	a.lanes = 1;
+	a.mbps = 80;
+	a.width = 4096;
+	a.height = 1;
+	a.stride = 6144;
+	a.size = 6144;
+	CHECK(!start(&a), "START takes the 4096 px RAW12 line at one lane, 80 Mbit/s");
+	fire(TCSI_FS);
+	drained_by("STOP waits the window of the slow link", act_stop, NULL, 100);
+	CHECK(!info().streaming, "stopped");
+	busy(0);
+	stream_close(&s);
+}
+
+static void pin_to_cpu0(void)
+{
+	cpu_set_t set;
+
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	CHECK(!sched_setaffinity(0, sizeof(set), &set), "this thread pinned to CPU 0");
+}
+
 static void test_stop_waits(int pool_fd)
 {
 	struct stream s;
 	struct lemnos_rp1_csi2_start a;
-	uint64_t ms;
 
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	a = good_start(s.fd);
 	CHECK(!start(&a), "START");
 	fire(TCSI_FS);
-	ms = timed_stop(act_stop, NULL, 40);
-	CHECK(ms >= 30, "STOP waits for DMA, frame in flight (took %llu ms)", (unsigned long long)ms);
+	drained_by("STOP waits for DMA, frame in flight", act_stop, NULL, 800);
 	CHECK(!info().streaming, "stopped");
 	busy(0);
 	/*
@@ -698,14 +769,11 @@ static void test_stop_waits(int pool_fd)
 	}
 
 	/* Stop again, then close: the DMA wait also holds for a stream's close. */
-	ms = timed_stop(act_stop, NULL, 20);
-	CHECK(ms >= 12, "STOP again waits (took %llu ms)", (unsigned long long)ms);
+	drained_by("STOP again waits for DMA", act_stop, NULL, 400);
 	busy(0);
 	CHECK(!start(&a), "START");
 	fire(TCSI_FS);
-	ms = timed_stop(act_close_stream, &s, 30);
-	CHECK(ms >= 20, "closing the stream with a frame in flight waits for DMA (took %llu ms)",
-	      (unsigned long long)ms);
+	drained_by("closing the stream with a frame in flight waits for DMA", act_close_stream, &s, 600);
 	CHECK(!info().streaming, "closing the stream stopped the receiver");
 	busy(0);
 }
@@ -715,7 +783,6 @@ static void test_close_node(const char *node, int pool_fd)
 	struct stream s;
 	struct lemnos_rp1_csi2_start a;
 	struct lemnos_rp1_csi2_info oi;
-	uint64_t ms;
 	int second;
 
 	/* A second file may open the node; it can't drive the receiver while the first claims it. */
@@ -733,11 +800,7 @@ static void test_close_node(const char *node, int pool_fd)
 	      "the second file cannot stop it (EPERM)");
 	close(second);
 	CHECK(info().streaming, "closing the second file stops nothing");
-	ms = now_ms();
-	close(ctl);
-	ms = now_ms() - ms;
-	CHECK(ms >= 15, "closing the node with a frame in flight waits for DMA (took %llu ms)",
-	      (unsigned long long)ms);
+	drained_by("closing the node with a frame in flight waits for DMA", act_close_node, NULL, 500);
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	CHECK(ctl >= 0, "the node opens again");
 	CHECK(!claim_csi2(ctl), "the reopened node claims the receiver again");
@@ -754,22 +817,13 @@ static void test_unbind(const char *node, const char *unbind, const char *dev, i
 {
 	struct stream s;
 	struct lemnos_rp1_csi2_start a;
-	uint64_t ms;
-	int fd;
+	struct unbind_arg u = { unbind, dev };
 
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	a = good_start(s.fd);
 	CHECK(!start(&a), "START");
 	fire(TCSI_FS);
-	busy(35);
-	fd = open(unbind, O_WRONLY | O_CLOEXEC);
-	CHECK(fd >= 0, "unbind file opened");
-	ms = now_ms();
-	CHECK(write(fd, dev, strlen(dev)) == (ssize_t)strlen(dev), "unbound");
-	ms = now_ms() - ms;
-	close(fd);
-	CHECK(ms >= 20, "unbinding with a frame in flight waits for DMA (took %llu ms)",
-	      (unsigned long long)ms);
+	drained_by("unbinding with a frame in flight waits for DMA", act_unbind, &u, 700);
 	busy(0);
 	CHECK(load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_CLOSED, "the stream ended");
 	CHECK(access(node, F_OK), "the node went away");
@@ -866,7 +920,6 @@ static void test_own_buffers(const char *heap, const char *dev)
 	struct frame f, f1;
 	struct lemnos_rp1_csi2_start a;
 	struct own o[BUFFERS], fresh;
-	uint64_t ms;
 	int before = bufinfo_attached(dev);
 
 	for (uint32_t i = 0; i < BUFFERS; i++)
@@ -930,8 +983,7 @@ static void test_own_buffers(const char *heap, const char *dev)
 	give_back(&s, 0, f.fence);
 	give_back(&s, 1, f1.fence);
 	fire(TCSI_FS);
-	ms = timed_stop(act_stop, NULL, 40);
-	CHECK(ms >= 30, "STOP waits for DMA on its own buffers (took %llu ms)", (unsigned long long)ms);
+	drained_by("STOP waits for DMA on its own buffers", act_stop, NULL, 800);
 	busy(0);
 	CHECK(!own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]) && !own_set(&s, 2, &o[2]) &&
 		      !own_set(&s, 3, &o[3]),
@@ -949,9 +1001,7 @@ static void test_own_buffers(const char *heap, const char *dev)
 		CHECK(seen == 0xf, "all four fill, each in its own dma-buf (%x)", seen);
 	}
 	fire(TCSI_FS);
-	ms = timed_stop(act_close_stream, &s, 30);
-	CHECK(ms >= 20, "closing it with a frame in flight waits for DMA (took %llu ms)",
-	      (unsigned long long)ms);
+	drained_by("closing it with a frame in flight waits for DMA", act_close_stream, &s, 600);
 	busy(0);
 	CHECK(!info().streaming, "and stops the receiver");
 	CHECK(bufinfo_attached(dev) == before, "closing released every buffer's pin");
@@ -1205,6 +1255,8 @@ int main(int argc, char **argv)
 	heap = argv[5];
 	snprintf(node, sizeof(node), "/dev/lemnos-rp1-csi2-%s", dev);
 
+	/* The fake's timers run on CPU 0; the driver's reads must share its vCPU (see the fake). */
+	pin_to_cpu0();
 	ctl = open(node, O_RDWR | O_CLOEXEC);
 	hw = open("/dev/lemnos-test-csi2", O_RDWR | O_CLOEXEC);
 	CHECK(!claim_csi2(ctl), "the receiver claimed");
@@ -1229,6 +1281,7 @@ int main(int argc, char **argv)
 	test_own_buffers(heap, dev);
 	test_embedded(pool_fd, heap);
 	test_stop_waits(pool_fd);
+	test_window(pool_fd);
 	test_close_node(node, pool_fd);
 	test_unbind(node, unbind, dev, pool_fd);
 	CHECK(bufinfo_attached(dev) == 0, "every mapping released after the unbind");
