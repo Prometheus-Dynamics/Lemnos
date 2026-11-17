@@ -2601,6 +2601,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-irq-check"
 version = "2.0.1-dev"
 dependencies = [
