@@ -14,7 +14,9 @@
 //! - each frame's capture time is on the monotonic clock, between the start of the check and now,
 //!   and never goes back;
 //! - each frame's bytes are one value throughout (the fake block fills a frame with one pattern),
-//!   and where two frames follow each other in the sequence, the pattern goes up by one.
+//!   and each frame carries the pattern its own sequence number names: the fake makes one pattern
+//!   step per frame it produces, so `pattern - sequence` is the same for every delivered frame,
+//!   even where frames were dropped (a gap in the sequence is allowed).
 //!
 //! It prints one line per check and exits nonzero on any failure. Each step's failure is printed
 //! with its cause.
@@ -288,16 +290,20 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         frames.iter().all(|f| f.uniform),
         "every frame's bytes are one pattern value",
     );
-    let pairs: Vec<bool> = frames
-        .windows(2)
-        .filter(|w| w[1].sequence == w[0].sequence + 1)
-        .map(|w| w[1].first == w[0].first.wrapping_add(1))
-        .collect();
+    let follows = pattern_follows_sequence(
+        &frames
+            .iter()
+            .map(|f| (f.sequence, f.first))
+            .collect::<Vec<_>>(),
+    );
     report.check(
-        !pairs.is_empty() && pairs.iter().all(|ok| *ok),
+        follows.is_ok(),
         format_args!(
-            "consecutive frames carry the next pattern value ({} pairs)",
-            pairs.len()
+            "each frame carries the pattern its sequence names ({})",
+            match &follows {
+                Ok(base) => format!("base {base}, {} frames", frames.len()),
+                Err(why) => why.clone(),
+            }
         ),
     );
     drop(camera);
@@ -329,5 +335,98 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Whether every frame carries the pattern its own sequence number names. The fake makes one step
+/// per frame produced, so `pattern - sequence` (mod 256) is one base for all frames; a gap in the
+/// sequence is a frame the driver dropped and is allowed. Returns the base, or the first frame that
+/// breaks it. An empty list is refused: nothing was checked.
+fn pattern_follows_sequence(frames: &[(u64, u8)]) -> Result<u8, String> {
+    let Some(&(first_seq, first)) = frames.first() else {
+        return Err("no frames to check".to_owned());
+    };
+    let base = first.wrapping_sub(first_seq as u8);
+    for &(sequence, pattern) in frames {
+        let expected = base.wrapping_add(sequence as u8);
+        if pattern != expected {
+            return Err(format!(
+                "sequence {sequence} carries pattern {pattern}, expected {expected} (base {base})"
+            ));
+        }
+    }
+    Ok(base)
+}
+
+/// The old rule, kept for the test that shows it passes a stale frame across a gap.
+#[cfg(test)]
+fn consecutive_pairs_step_by_one(frames: &[(u64, u8)]) -> bool {
+    let pairs: Vec<bool> = frames
+        .windows(2)
+        .filter(|w| w[1].0 == w[0].0 + 1)
+        .map(|w| w[1].1 == w[0].1.wrapping_add(1))
+        .collect();
+    !pairs.is_empty() && pairs.iter().all(|ok| *ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_forced_drop_leaves_a_gap_and_every_frame_still_follows_its_sequence() {
+        // Frames 0, 1, then frame 2 dropped by the driver (its sequence number is taken, its
+        // pattern is advanced by the fake when it was produced), then 3 and 4.
+        let frames = [(0u64, 1u8), (1, 2), (3, 4), (4, 5)];
+        assert_eq!(pattern_follows_sequence(&frames), Ok(1));
+        // The old rule also passes this one: it only looks across consecutive sequence numbers.
+        assert!(consecutive_pairs_step_by_one(&frames));
+    }
+
+    #[test]
+    fn a_stale_frame_across_a_gap_is_caught_by_the_sequence_rule_and_not_the_old_one() {
+        // Frame 3 was delivered with frame 1's pattern: its fill is missing. Its pair with frame 1
+        // is across a gap, which the old rule never looked at, so the old rule passes it wrongly.
+        let frames = [(0u64, 1u8), (1, 2), (3, 2)];
+        assert!(
+            consecutive_pairs_step_by_one(&frames),
+            "old rule: passes it wrongly"
+        );
+        let why = pattern_follows_sequence(&frames).unwrap_err();
+        assert!(why.contains("sequence 3 carries pattern 2"), "{why}");
+    }
+
+    #[test]
+    fn a_stale_frame_next_to_its_neighbour_is_caught_by_both_rules() {
+        let frames = [(0u64, 1u8), (1, 2), (2, 2)];
+        assert!(!consecutive_pairs_step_by_one(&frames));
+        assert!(pattern_follows_sequence(&frames).is_err());
+    }
+
+    #[test]
+    fn a_forced_drop_on_the_old_fake_fails_the_new_rule_and_passes_the_old_one_wrongly() {
+        // The old fake stepped the pattern only when a buffer was latched: frame 2 was dropped with
+        // no step, so frame 3 carries 3. The new rule catches it; the old rule passes it, because
+        // the pair is across the gap.
+        let frames = [(0u64, 1u8), (1, 2), (3, 3)];
+        assert!(
+            consecutive_pairs_step_by_one(&frames),
+            "old rule: passes wrongly"
+        );
+        assert!(
+            pattern_follows_sequence(&frames).is_err(),
+            "new rule: catches the old fake"
+        );
+    }
+
+    #[test]
+    fn the_base_may_be_any_value_and_wraps_at_256() {
+        let frames = [(255u64, 7u8), (256, 8), (257, 9)];
+        assert_eq!(pattern_follows_sequence(&frames), Ok(8));
+    }
+
+    #[test]
+    fn no_frames_is_refused_not_passed() {
+        assert!(pattern_follows_sequence(&[]).is_err());
     }
 }

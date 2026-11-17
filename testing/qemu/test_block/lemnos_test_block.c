@@ -98,7 +98,8 @@ static DEFINE_RAW_SPINLOCK(tcsi_lock);
 static u64 tcsi_cur_addr;
 static u32 tcsi_cur_len;
 static u32 tcsi_busy;		/* lines the channel still writes after FORCE; ~0: forever */
-static u8 tcsi_pattern;
+static u8 tcsi_pattern;	/* the last frame's pattern: one step per frame produced */
+static u8 tcsi_frame_pattern;	/* the current frame's pattern, set at its start */
 static u32 tcsi_lines;		/* the next armed frame end's lines; 0: the height */
 
 static struct hrtimer tcsi_timer;
@@ -326,6 +327,10 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&status, uarg, sizeof(status)))
 			return -EFAULT;
 		if (status & TCSI_FS) {
+			/* A real sensor makes a frame whether or not a buffer is armed: the pattern is
+			 * the frame's, taken here, so a frame with no buffer still counts (the driver's
+			 * sequence number counts it too). */
+			tcsi_frame_pattern = ++tcsi_pattern;
 			tcsi_cur_addr = (u64)readl(dma + R_ADDR1) << 36 |
 					(u64)readl(dma + R_ADDR0) << 4;
 			tcsi_cur_len = readl(dma + R_LENGTH) << 4;
@@ -340,7 +345,7 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			u32 lines = tcsi_emb_lines;
 
 			if (lines)
-				memset(phys_to_virt(tcsi_emb_addr), ++tcsi_pattern, tcsi_emb_len);
+				memset(phys_to_virt(tcsi_emb_addr), tcsi_frame_pattern, tcsi_emb_len);
 			tcsi_emb_addr = 0;
 			tcsi_emb_lines = 1;
 			writel(((dbg >> 16) + 1) << 16 | ((dbg + lines) & 0xffff), dma + R_EMB(R_DEBUG));
@@ -349,7 +354,7 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			u32 dbg = readl(dma + R_DEBUG);
 			u32 lines = tcsi_lines ? tcsi_lines : readl(dma + R_FRAME_SIZE) >> 16;
 
-			memset(phys_to_virt(tcsi_cur_addr), ++tcsi_pattern, tcsi_cur_len);
+			memset(phys_to_virt(tcsi_cur_addr), tcsi_frame_pattern, tcsi_cur_len);
 			tcsi_cur_addr = 0;
 			tcsi_lines = 0;
 			/* Frames in the high half, lines in the low, each wrapping. */
