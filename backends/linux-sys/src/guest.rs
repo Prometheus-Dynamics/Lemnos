@@ -245,6 +245,22 @@ pub fn pisp_be_create(node: BorrowedFd<'_>, arg: &mut [u8; 80]) -> io::Result<Ow
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `LEMNOS_RP1_CSI2_IOC_STREAM_CREATE`, `_IOWR('L', 0xc1, struct lemnos_stream_create)`: 56 bytes.
+const LEMNOS_RP1_CSI2_IOC_STREAM_CREATE: u32 = iowr::<[u8; 56]>(b'L', 0xc1);
+
+/// Makes a stream on a receiver's node, as `LEMNOS_RP1_CSI2_IOC_STREAM_CREATE`. `arg` is the
+/// 56-byte `struct lemnos_stream_create`; the stream's descriptor (at byte 36) is returned owned.
+///
+/// # Errors
+///
+/// The kernel refuses the stream, with its errno.
+pub fn rp1_csi2_stream_create(node: BorrowedFd<'_>, arg: &mut [u8; 56]) -> io::Result<OwnedFd> {
+    ioctl_bytes(node, LEMNOS_RP1_CSI2_IOC_STREAM_CREATE, arg)?;
+    let fd = i32::from_ne_bytes([arg[36], arg[37], arg[38], arg[39]]);
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// Sets the open-descriptor limit, soft and hard, to `limit`.
 ///
 /// # Errors
