@@ -11,7 +11,7 @@ use core::{ffi::c_void, mem::offset_of, ptr};
 use kernel::{
     alloc::KBox,
     bindings,
-    error::code::*,
+    error::{code::*, from_err_ptr},
     ffi::{c_char, c_int, c_long, c_uint},
     prelude::*,
     str::CStr,
@@ -165,11 +165,8 @@ fn lem_pwm_find(provider: &[u8], channel: u32) -> Result<*mut bindings::pwm_devi
     let pwm = unsafe { bindings::of_pwm_xlate_with_flags(chip, &args) };
     // SAFETY: drops the reference device_find_child took on `dev`.
     unsafe { bindings::put_device(dev) };
-    // The xlate returns an ERR_PTR on failure: its errno is returned as the C returned PTR_ERR.
-    if (pwm as usize) >= (-4095isize) as usize {
-        return Err(Error::from_errno((pwm as isize) as c_int));
-    }
-    Ok(pwm)
+    // The xlate returns an ERR_PTR on failure: the kernel's from_err_ptr gives its errno, as PTR_ERR did.
+    from_err_ptr(pwm)
 }
 
 /// The channel's release: the PWM reference, then the channel. The output is left as it is.
