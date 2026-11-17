@@ -11,8 +11,9 @@ use std::time::Duration;
 use lemnos_core::package::status_of_bus;
 use lemnos_core::{ConfigError, Key, Kind, 
     ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c, InterruptHandle,
-    Item, Lifecycle, Line, MethodId, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Result, Spi,
-    Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, contract, driver, status_of,
+    Item, Lifecycle, Line, MethodId, Pwm, RawSpiBus, RegistersHandle, ResetHandle, ResumeRecord,
+    Result, Spi, Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, contract, driver,
+    status_of,
 };
 use lemnos_hal::blocks::{
     BufferKind, ControlSetup, IsoPacket, StreamFrame, UartFormat, UsbFunctionEvent,
@@ -133,6 +134,8 @@ pub struct Fixture {
     count: u32,
     ticks: u32,
     gone: bool,
+    /// Whether `count` is kept across a rebind (`keep_state = 1` in the board file).
+    keep: bool,
 }
 
 impl Lifecycle for Fixture {
@@ -142,6 +145,7 @@ impl Lifecycle for Fixture {
         cfg.check_keys(&[
             Key::optional("panic_binds", Kind::Int),
             Key::optional("start", Kind::Int),
+            Key::optional("keep_state", Kind::Int),
         ])
     }
 
@@ -172,6 +176,7 @@ impl Lifecycle for Fixture {
             count: cfg.int("start").unwrap_or(0) as u32,
             ticks: 0,
             gone: false,
+            keep: cfg.int("keep_state").unwrap_or(0) != 0,
         })
     }
 
@@ -197,6 +202,22 @@ impl Lifecycle for Fixture {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         self.ticks += 1;
         None
+    }
+
+    /// With `keep_state`, the count is what a rebind keeps. Without it, nothing is kept.
+    fn resume_record(&self) -> Option<ResumeRecord> {
+        if !self.keep {
+            return None;
+        }
+        ResumeRecord::new(&self.count.to_le_bytes())
+    }
+
+    fn resume(&mut self, record: &ResumeRecord) -> bool {
+        let Ok(bytes) = <[u8; 4]>::try_from(record.bytes()) else {
+            return false;
+        };
+        self.count = u32::from_le_bytes(bytes);
+        true
     }
 }
 

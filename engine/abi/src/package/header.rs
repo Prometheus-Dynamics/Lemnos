@@ -424,7 +424,9 @@ fn the_package_header_matches_the_crate() {
         drop,
         job,
         job_cancel,
-        describe_extra
+        describe_extra,
+        resume_record,
+        resume
     );
     c_struct!(
         checks,

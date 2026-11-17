@@ -504,9 +504,12 @@ a small table of functions for its kind. Four things are worth knowing:
   the stream's next call, as it is for a built-in driver: duplicate it, or hand it to the kernel,
   to hold the memory longer.
 
-A package is built against one version of the Lemnos crates and runs only in a service built with
-the same package boundary: the same major version and the same layout hash. Anything else is
-refused with the reason, before any of its code runs.
+A package is built against one version of the Lemnos crates and runs in a service with the same
+package boundary major version. Its layout hash must be one the service knows: the current boundary's,
+or an older one's (the boundary before the resume entries, `PACKAGE_EXTRAS_LAYOUT_HASH`, and the one
+before the extras, `PACKAGE_BASE_LAYOUT_HASH`). A package of an older layout loads with what it has:
+the entries it lacks read as absent (its driver keeps nothing across a rebind, and its items have no
+extras). Anything else is refused with the reason, before any of its code runs.
 
 ### Loading
 
@@ -788,6 +791,7 @@ When you add a method or field, classify it in the PR:
 | `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |
 | `MethodInfo.job` set on an existing method | breaking | a client that calls it as a call would now get `NOT_SUPPORTED` |
 | `system.identity/1` (new contract) | additive | a new contract is only bound by a client that asks for it |
+| Package boundary: `DriverTable.resume_record` and `DriverTable.resume` (the resume entries) | additive | appended to the driver table. A package without them has the layout the boundary had before (`PACKAGE_EXTRAS_LAYOUT_HASH`), loads, and keeps nothing across a rebind (`Lost`). The layout hash changes (`PACKAGE_LAYOUT_HASH`); no version bump |
 
 ### Hashes and versions
 

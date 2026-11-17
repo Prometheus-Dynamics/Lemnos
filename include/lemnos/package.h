@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0x432460040a3bbd5eULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x35459eaa3ecfa7e6ULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */
@@ -587,6 +587,8 @@ typedef struct LemnosHostTable {
 #define LEMNOS_DRIVER_TRACKS_CALLERS 2
 /* LemnosDriverTable.flags: the driver runs long jobs; the host calls job and job_cancel. */
 #define LEMNOS_DRIVER_JOBS 4
+/* The most bytes a resume record holds (LemnosDriverTable.resume_record). */
+#define LEMNOS_RESUME_BYTES 64
 /* LemnosPackageMethod.flags: the method starts a long job and returns its number, a uint64_t. */
 #define LEMNOS_METHOD_JOB 1
 /* LemnosPackageMethod.flags: where a job's stall bound starts, in seconds: flags >> 8. */
@@ -645,6 +647,20 @@ typedef struct LemnosDriverTable {
      * LemnosPackageExtra: the host takes none.
      */
     LemnosStatus (*describe_extra)(void *driver, LemnosSliceMut extras, uint32_t *count);
+    /*
+     * Writes the record the driver keeps across a host-level rebind (at most
+     * LEMNOS_RESUME_BYTES) into `record` and its length into `len`. A driver that
+     * keeps nothing answers NOT_SUPPORTED. NULL in a package built before the
+     * resume entries: the host takes no record from it.
+     */
+    LemnosStatus (*resume_record)(void *driver, LemnosSliceMut record, size_t *len);
+    /*
+     * Restores `record` (what resume_record wrote) on a driver the host bound in
+     * place of the old one, and writes 1 to `kept` when it is as the old one was,
+     * 0 when it is not. NULL in a package built before the resume entries: the
+     * device is a fresh start.
+     */
+    LemnosStatus (*resume)(void *driver, LemnosSlice record, uint32_t *kept);
 } LemnosDriverTable;
 
 /* What register_driver hands the host: one driver. */

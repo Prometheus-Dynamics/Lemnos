@@ -179,6 +179,24 @@ impl Loaded {
         Some(status.into_result().map(|_| count))
     }
 
+    /// Writes the driver's resume record into `record` and returns its length. `None` when the
+    /// package has no resume entries; `Some(Err(NOT_SUPPORTED))` when the driver keeps nothing.
+    pub fn resume_record(&self, record: &mut [u8]) -> Option<Result<usize, Status>> {
+        let read = self.table.resume_record?;
+        let mut len = 0;
+        let status = read(self.driver, SliceMut::new(record), Out::new(&mut len));
+        Some(status.into_result().map(|_| len))
+    }
+
+    /// Restores `record` on this driver: `Some(true)` when it is as the old one was. `None` when the
+    /// package has no resume entries, and then the device is a fresh start.
+    pub fn resume(&self, record: &[u8]) -> Option<Result<bool, Status>> {
+        let restore = self.table.resume?;
+        let mut kept = 0;
+        let status = restore(self.driver, Slice::new(record), Out::new(&mut kept));
+        Some(status.into_result().map(|_| kept != 0))
+    }
+
     pub fn health(&self) -> Result<PackageHealth, Status> {
         let mut health = PackageHealth::OK;
         let status = (self.table.health)(self.driver, Out::new(&mut health));
