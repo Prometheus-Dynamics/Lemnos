@@ -223,7 +223,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `lemnos_regjob.c`) |
 | `CONFIG_SHMEM` | `y` | required | `shmem_mapping`: the memfd behind a stream's buffers (`lemnos_stream.c`; 7.3.5 no longer inlines `shmem_file`, so the module reads the mapping itself) |
 | `CONFIG_EVENTFD` | `y` | required | `eventfd_ctx_fdget`, `eventfd_ctx_put`, `eventfd_signal_mask` (stream completion) |
-| `CONFIG_RUST` | `y` | required | The Rust half of the module: the entry (`kernel/lemnos_entry.rs`) and the claims (`kernel/lemnos_claims_rs.rs`), built with the kernel's Rust support and clang (`LLVM=1`). Not a symbol of the C objects: the Kbuild refuses a build without it |
+| `CONFIG_RUST` | `y` | required | The Rust half of the module: the entry (`kernel/lemnos_entry.rs`) and the claims (`kernel/rs/claims.rs`), built with the kernel's Rust support and clang (`LLVM=1`). Not a symbol of the C objects: the Kbuild refuses a build without it |
 | `CONFIG_CPU_BIG_ENDIAN` | unset | must be unset | `BUILD_BUG_ON(IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))` in `lemnos_stream.c`. The module builds only for little-endian kernels |
 | `CONFIG_LEMNOS` | `y` or `m` | optional | The in-tree switch in `kernel/Kbuild`; set by the image builder for the built-in route. Not in the out-of-tree build |
 | `CONFIG_RP1_PIO` | `m` or `y` | optional | The RP1 PIO part (`lemnos_pio.c`, claim `pio-0`), compiled when set. Needs `<linux/pio_rp1.h>` from the board kernel. Must be `y` when lemnos is built in |

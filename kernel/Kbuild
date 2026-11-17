@@ -21,7 +21,8 @@ ifeq ($(CONFIG_RUST),)
 $(error lemnos needs CONFIG_RUST=y: the module entry and the claims are Rust, see docs/kernel-config.md)
 endif
 ccflags-y += -DLEMNOS_RUST_OWNER
-lemnos-y += lemnos_entry.o lemnos_claims_rs.o lemnos_pwm_rs.o lemnos_gpio_rs.o lemnos_power_rs.o lemnos_helpers.o
+# The Rust half is one crate: lemnos_entry.o (its ports and the shared ABI are its modules, kernel/rs/).
+lemnos-y += lemnos_entry.o lemnos_helpers.o
 # The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
 # A built-in lemnos needs RP1_PIO=y as well: a built-in object cannot link to a module's symbols.
 ifneq ($(CONFIG_RP1_PIO),)
