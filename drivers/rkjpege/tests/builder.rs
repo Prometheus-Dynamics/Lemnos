@@ -500,3 +500,78 @@ fn a_job_runs_end_to_end_on_the_jpeg_encoder_block() {
     assert_eq!((at(29) >> 16) & 0x1fff, 5);
     assert_eq!((at(32) >> 2) & 0xf, 6);
 }
+
+#[test]
+fn a_chroma_plane_that_reaches_past_its_buffer_is_refused() {
+    // 4:2:0 semi-planar, 64 x 48: luma is 64 x 48 = 3072 bytes, chroma is 64 x 24 = 1536 bytes.
+    // The luma buffer is big enough; the chroma buffer is not.
+    let big = buffer(MB);
+    let chroma_small = buffer(1000);
+    let mut regs = RegisterSet::new();
+    regs.set_picture(64, 48).unwrap();
+    regs.set_source(Source::Yuv420Sp, 64, 64).unwrap();
+    regs.set_address(reg022_adr_src0::ADDRESS, big, 0).unwrap();
+    regs.set_address(reg023_adr_src1::ADDRESS, chroma_small, 0)
+        .unwrap();
+    regs.set_address(reg016_adr_qtbl::ADDRESS, big, 0).unwrap();
+    regs.set_address(reg017_adr_bsbt::ADDRESS, big, 0).unwrap();
+    regs.set_address(reg018_adr_bsbb::ADDRESS, big, 65_520)
+        .unwrap();
+    regs.set_address(reg019_adr_bsbr::ADDRESS, big, 0).unwrap();
+    regs.set_address(reg020_adr_bsbs::ADDRESS, big, 0).unwrap();
+    assert_eq!(
+        regs.job(0).unwrap_err(),
+        JobError::Plane {
+            word: 23,
+            need: 1536,
+            size: 1000
+        }
+    );
+}
+
+#[test]
+fn a_luma_plane_placed_past_the_start_of_its_buffer_is_checked_at_its_offset() {
+    // The plane starts at offset 2000 in a 4096-byte buffer: 2000 + 3072 = 5072 is past the end.
+    // The same plane at offset 0 fits, so only the offset makes the difference.
+    let buf = buffer(4096);
+    let other = buffer(MB);
+    let mut regs = RegisterSet::new();
+    regs.set_picture(64, 48).unwrap();
+    regs.set_source(Source::Yuv400, 64, 0).unwrap();
+    regs.set_address(reg022_adr_src0::ADDRESS, buf, 2000)
+        .unwrap();
+    regs.set_address(reg016_adr_qtbl::ADDRESS, other, 0)
+        .unwrap();
+    regs.set_address(reg017_adr_bsbt::ADDRESS, other, 0)
+        .unwrap();
+    regs.set_address(reg018_adr_bsbb::ADDRESS, other, 65_520)
+        .unwrap();
+    regs.set_address(reg019_adr_bsbr::ADDRESS, other, 0)
+        .unwrap();
+    regs.set_address(reg020_adr_bsbs::ADDRESS, other, 0)
+        .unwrap();
+    assert_eq!(
+        regs.job(0).unwrap_err(),
+        JobError::Plane {
+            word: 22,
+            need: 5072,
+            size: 4096
+        }
+    );
+    // At offset 0 the same plane fits, so the job is made.
+    let mut fits = RegisterSet::new();
+    fits.set_picture(64, 48).unwrap();
+    fits.set_source(Source::Yuv400, 64, 0).unwrap();
+    fits.set_address(reg022_adr_src0::ADDRESS, buf, 0).unwrap();
+    fits.set_address(reg016_adr_qtbl::ADDRESS, other, 0)
+        .unwrap();
+    fits.set_address(reg017_adr_bsbt::ADDRESS, other, 0)
+        .unwrap();
+    fits.set_address(reg018_adr_bsbb::ADDRESS, other, 65_520)
+        .unwrap();
+    fits.set_address(reg019_adr_bsbr::ADDRESS, other, 0)
+        .unwrap();
+    fits.set_address(reg020_adr_bsbs::ADDRESS, other, 0)
+        .unwrap();
+    assert!(fits.job(0).is_ok());
+}
