@@ -154,7 +154,9 @@ pub struct Item {
     pub unit: Unit,
     /// Whether `unit` is known, dimensionless or not said (see [`UnitState`]).
     pub unit_state: UnitState,
-    /// The value is `raw * 10^exponent`, in `unit`.
+    /// The scale of an integer value: it is `raw * 10^exponent`, in `unit`. A real-valued item
+    /// (one with `real_range`, `real_step` or real warning limits) carries exponent 0: its value is
+    /// already in base units, and the host refuses a bind whose real item has a nonzero exponent.
     pub exponent: i8,
     /// The lowest and highest raw values the item can take. `None` when the driver does not know.
     pub min: Option<i64>,
@@ -162,7 +164,8 @@ pub struct Item {
     /// The smallest change the item can take, in raw units. `None` when not known.
     pub step: Option<i64>,
     /// A raw value below `warn_low`, or above `warn_high`, is a warning (an under-voltage, an
-    /// over-temperature). `None` when there is no such threshold.
+    /// over-temperature). `None` when there is no such threshold. For a real-valued item these are
+    /// unused: its limits are `real_warn_low` and `real_warn_high`.
     pub warn_low: Option<i64>,
     pub warn_high: Option<i64>,
     /// The lowest and highest values, as real numbers in `unit`, for a range no integer scale can
@@ -172,6 +175,11 @@ pub struct Item {
     pub real_max: Option<f64>,
     /// The smallest change, as a real number in `unit` (see [`Item::real_step`]).
     pub real_step: Option<f64>,
+    /// The warning limits as real numbers in `unit`: a value below `real_warn_low`, or above
+    /// `real_warn_high`, is a warning. Set with [`Item::real_warn_below`] and
+    /// [`Item::real_warn_above`]. A description from before them has none.
+    pub real_warn_low: Option<f64>,
+    pub real_warn_high: Option<f64>,
     /// How the value reads. `None` takes the reading the method declares, and failing that the
     /// one its shape suggests.
     pub reading: Option<Reading>,
@@ -198,6 +206,8 @@ impl Item {
             real_min: None,
             real_max: None,
             real_step: None,
+            real_warn_low: None,
+            real_warn_high: None,
             reading: None,
             group: None,
             method,
@@ -266,6 +276,19 @@ impl Item {
     /// The smallest change, as a real number in the item's unit.
     pub const fn real_step(mut self, step: f64) -> Self {
         self.real_step = Some(step);
+        self
+    }
+
+    /// Warns below `value`, in `unit` as a real number: a float item's limit (10.8 V, say), which
+    /// no integer raw scale states exactly.
+    pub const fn real_warn_below(mut self, value: f64) -> Self {
+        self.real_warn_low = Some(value);
+        self
+    }
+
+    /// Warns above `value`, in `unit` as a real number (see [`Item::real_warn_below`]).
+    pub const fn real_warn_above(mut self, value: f64) -> Self {
+        self.real_warn_high = Some(value);
         self
     }
 

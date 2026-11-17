@@ -112,7 +112,8 @@ what a generic panel shows, with no code for the device:
 - for each item, `unit_state` (`UnitState`: known, dimensionless or unknown; an empty unit is unknown
   from a host that sends no state), `reading` (`Option<Reading>`), `step`, `warn_low`, `warn_high` and `group`, next to
   its `unit`, `exponent`, `min` and `max`, and `real_min`, `real_max` and `real_step` (`Option<f64>`:
-  a float value's range and step in the unit, when the device gives one).
+  a float value's range, step and warning limits (`real_warn_low`, `real_warn_high`) in the unit,
+  when the device gives them).
 
 A value an older host does not describe reads as unknown (`None`, or empty text). `lemnos-ctl show`
 prints exactly these, one panel per device.

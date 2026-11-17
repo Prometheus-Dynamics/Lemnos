@@ -1256,3 +1256,61 @@ fn an_address_outside_the_usable_seven_bit_range_is_refused() {
         );
     }
 }
+
+/// The item as the wire carries it: what a client renders a reply with.
+fn wire_item(item: &lemnos_core::Item) -> lemnos_wire::OwnedItem {
+    lemnos_wire::OwnedItem {
+        kind: lemnos_core::ItemKind::Value,
+        name: item.name.to_string(),
+        unit: item.unit.symbol().to_string(),
+        unit_state: item.unit_state,
+        exponent: item.exponent,
+        min: item.min,
+        max: item.max,
+        real_min: item.real_min,
+        real_max: item.real_max,
+        real_step: item.real_step,
+        real_warn_low: item.real_warn_low,
+        real_warn_high: item.real_warn_high,
+        contract: item.method.contract,
+        method: item.method.method,
+        field: item.field.map(str::to_string),
+        reading: None,
+        step: item.step,
+        warn_low: item.warn_low,
+        warn_high: item.warn_high,
+        group: item.group.map(str::to_string),
+    }
+}
+
+/// One g reads as about 9.81 m/s² through the display path: the reply rendered with the item's
+/// exponent, as a client shows it. Fails before the fix: the exponent was -3 and 1 g showed as
+/// 0.00981 m/s².
+#[test]
+fn one_g_displays_as_about_nine_point_eight_one_metres_per_second_squared() {
+    let (mut board, sim) = chip();
+    let mut dev = bind(&mut board, &[]).unwrap();
+    accel_up(&mut dev);
+    // 6 g full scale: 5461 counts is one g.
+    sim.set_bytes(ACCEL, ACC_DATA, &axes_bytes(5461, 0, 0));
+    let sample = Accelerometer::read(&mut dev).unwrap();
+    // The reply as the dispatch writes it: a record block of its three f32 axes.
+    let mut reply = Vec::new();
+    reply.extend_from_slice(&12u32.to_le_bytes());
+    reply.extend_from_slice(&sample.x.to_le_bytes());
+    reply.extend_from_slice(&sample.y.to_le_bytes());
+    reply.extend_from_slice(&sample.z.to_le_bytes());
+    let shape = lemnos_wire::OwnedShape::Record(std::vec![
+        ("x".to_string(), lemnos_wire::OwnedShape::F32),
+        ("y".to_string(), lemnos_wire::OwnedShape::F32),
+        ("z".to_string(), lemnos_wire::OwnedShape::F32),
+    ]);
+    let mut out = Description::new();
+    Driver::describe(&dev, &mut out);
+    let item = out.find("acceleration.x").unwrap();
+    assert_eq!(item.exponent, 0, "a real value is in base units");
+    let shown = lemnos_wire::text::render(&shape, false, &reply, &wire_item(item)).unwrap();
+    let number: f64 = shown.split(' ').next().unwrap().parse().unwrap();
+    assert!((number - 9.81).abs() < 0.01, "shown as {shown}");
+    assert!(shown.ends_with("m/s²"), "shown as {shown}");
+}

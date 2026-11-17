@@ -216,16 +216,17 @@ impl Lifecycle for PwmChannelFan {
             }
             out.add(rpm);
         }
-        // Duty is per mille: from 0 to FULL, one step is one per mille.
+        // Duty is a count of per mille: exponent 0, so 302 shows as 302. The control has its own
+        // name, so a client's `set` finds it and not the read.
         out.add(
             Item::value("duty", DUTY)
-                .unit(Unit::One, -3)
+                .unit(Unit::One, 0)
                 .range(0, i64::from(FULL))
                 .step(1),
         );
         out.add(
-            Item::control("duty", SET_DUTY)
-                .unit(Unit::One, -3)
+            Item::control("set_duty", SET_DUTY)
+                .unit(Unit::One, 0)
                 .range(0, i64::from(FULL))
                 .step(1),
         );

@@ -128,6 +128,11 @@ pub struct OwnedItem {
     pub real_min: Option<f64>,
     pub real_max: Option<f64>,
     pub real_step: Option<f64>,
+    /// The warning limits as real numbers in the unit (see
+    /// [`lemnos_core::Item::real_warn_below`]). `None` when the device gave none, or from a host
+    /// before them.
+    pub real_warn_low: Option<f64>,
+    pub real_warn_high: Option<f64>,
     pub contract: u8,
     pub method: u16,
     pub field: Option<String>,
@@ -410,6 +415,9 @@ struct DescItemExtra<'a> {
     real_min: Option<f64>,
     real_max: Option<f64>,
     real_step: Option<f64>,
+    /// Appended after the real range: the real warning limits (a host from before them reads none).
+    real_warn_low: Option<f64>,
+    real_warn_high: Option<f64>,
 }
 
 /// The item's extras as a host from before the unit state and the real ranges wrote them: the same
@@ -761,6 +769,8 @@ pub(crate) fn encode_trailer(
             real_min: item.real_min,
             real_max: item.real_max,
             real_step: item.real_step,
+            real_warn_low: item.real_warn_low,
+            real_warn_high: item.real_warn_high,
         }
         .encode(out)?;
     }
@@ -822,6 +832,8 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             real_min: None,
             real_max: None,
             real_step: None,
+            real_warn_low: None,
+            real_warn_high: None,
             contract: item.contract,
             method: item.method,
             field: item.field.map(str::to_string),
@@ -885,6 +897,8 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 item.real_min = extra.real_min;
                 item.real_max = extra.real_max;
                 item.real_step = extra.real_step;
+                item.real_warn_low = extra.real_warn_low;
+                item.real_warn_high = extra.real_warn_high;
             }
         }
     }

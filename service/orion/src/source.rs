@@ -492,6 +492,8 @@ mod tests {
             real_min: None,
             real_max: None,
             real_step: None,
+            real_warn_low: None,
+            real_warn_high: None,
             contract: 0,
             method,
             field: field.map(str::to_owned),

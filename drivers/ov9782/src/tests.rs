@@ -1530,12 +1530,12 @@ fn before_a_mode_is_selected_the_ranges_are_the_envelope_over_every_mode() {
     let described: Vec<_> = MODES.iter().map(|m| m.describe(false)).collect();
     let least = described.iter().map(|m| m.frame_length_min).min().unwrap();
     let greatest = described.iter().map(|m| m.frame_length_max).max().unwrap();
-    let frame = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+    let frame = item_named(&out, "set_frame_length", lemnos_core::ItemKind::Control);
     assert_eq!(
         (frame.min, frame.max, frame.step),
         (Some(i64::from(least)), Some(i64::from(greatest)), Some(1))
     );
-    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    let exposure = item_named(&out, "set_exposure", lemnos_core::ItemKind::Control);
     assert_eq!(
         (exposure.min, exposure.max, exposure.step),
         (
@@ -1555,7 +1555,7 @@ fn before_a_mode_is_selected_the_ranges_are_the_envelope_over_every_mode() {
         }
     );
     // The gain's codes are the same in every mode, so its range is known from the start.
-    let gain = item_named(&out, "analogue_gain", lemnos_core::ItemKind::Control);
+    let gain = item_named(&out, "set_analogue_gain", lemnos_core::ItemKind::Control);
     assert_eq!(
         (gain.min, gain.max, gain.step),
         (Some(0x10), Some(0xff), Some(1))
@@ -1587,7 +1587,7 @@ fn with_a_mode_selected_the_items_carry_its_ranges_and_the_values_in_force() {
     );
     let mut out = Description::new();
     Lifecycle::describe(&s, &mut out);
-    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    let exposure = item_named(&out, "set_exposure", lemnos_core::ItemKind::Control);
     // One line up to the frame length less the margin: the most the register takes.
     assert_eq!(
         (exposure.min, exposure.max, exposure.step),
@@ -1606,7 +1606,7 @@ fn with_a_mode_selected_the_items_carry_its_ranges_and_the_values_in_force() {
             method: 15
         }
     );
-    let length = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+    let length = item_named(&out, "set_frame_length", lemnos_core::ItemKind::Control);
     assert_eq!(
         (length.min, length.max),
         (
@@ -1676,7 +1676,7 @@ fn before_a_mode_every_mode_call_is_a_failed_precondition_and_nothing_is_written
     let (mut s, bus) = sensor();
     let mut out = Description::new();
     Lifecycle::describe(&s, &mut out);
-    let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+    let exposure = item_named(&out, "set_exposure", lemnos_core::ItemKind::Control);
     assert!(exposure.max.is_some(), "the envelope before a mode");
     assert_eq!(s.start(), Err(Status::FAILED_PRECONDITION));
     assert_eq!(
@@ -2104,7 +2104,7 @@ fn each_mode_describes_its_own_frame_length_exposure_and_gain_ranges_once_select
         let mode = entry.describe(false);
         let mut out = Description::new();
         Lifecycle::describe(&s, &mut out);
-        let length = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+        let length = item_named(&out, "set_frame_length", lemnos_core::ItemKind::Control);
         assert_eq!(
             (length.min, length.max),
             (
@@ -2113,7 +2113,7 @@ fn each_mode_describes_its_own_frame_length_exposure_and_gain_ranges_once_select
             ),
             "mode {index}: frame length"
         );
-        let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
+        let exposure = item_named(&out, "set_exposure", lemnos_core::ItemKind::Control);
         assert_eq!(
             exposure.max,
             Some(i64::from(
@@ -2121,7 +2121,7 @@ fn each_mode_describes_its_own_frame_length_exposure_and_gain_ranges_once_select
             )),
             "mode {index}: exposure"
         );
-        let gain = item_named(&out, "analogue_gain", lemnos_core::ItemKind::Control);
+        let gain = item_named(&out, "set_analogue_gain", lemnos_core::ItemKind::Control);
         assert_eq!(
             (gain.min, gain.max),
             (Some(0x10), Some(0xff)),

@@ -613,8 +613,9 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   `warn_high` (each a presence bool, then an i64), and `group` (a presence bool, then a str: the
   items of one group are one vector, each part named by its `field`), and `unit_state` (a presence
   bool, then a u8: 0 known, 1 dimensionless, 2 unknown), and then `real_min`, `real_max` and
-  `real_step` (each a presence bool, then an f64: the range and the step as real numbers in the
-  item's unit, for a float value). Those three are the last fields of the block. A host from before
+  `real_step`, and then `real_warn_low` and `real_warn_high` (each a presence bool, then an f64: the
+  range, the step and the warning limits as real numbers in the item's unit, for a float value).
+  Those five are the last fields of the block. A host from before
   the unit state sends none of them, and its item's state is decided by its unit string: unknown when
   the string is empty, known otherwise. An item with no real range reads the integer one.
 

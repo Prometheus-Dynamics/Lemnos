@@ -122,15 +122,15 @@ pub(crate) struct Setting {
 }
 
 impl Setting {
-    /// The full scale of one axis, in milli-units (m/s² or rad/s): the signed 16-bit count's
-    /// span, `32768` counts of `scale`.
-    pub(crate) fn full_scale_milli(&self) -> i64 {
-        (f64::from(self.scale) * 32_768.0 * 1000.0).round() as i64
+    /// The full scale of one axis, in base units (m/s² or rad/s): the signed 16-bit count's span,
+    /// `32768` counts of `scale`.
+    pub(crate) fn full_scale(&self) -> f64 {
+        f64::from(self.scale) * 32_768.0
     }
 
-    /// One count, in milli-units, at least 1.
-    pub(crate) fn step_milli(&self) -> i64 {
-        ((f64::from(self.scale) * 1000.0).round() as i64).max(1)
+    /// One count, in base units.
+    pub(crate) fn step(&self) -> f64 {
+        f64::from(self.scale)
     }
 }
 

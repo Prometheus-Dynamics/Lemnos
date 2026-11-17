@@ -648,7 +648,7 @@ it knows, one `Item` at a time (`engine/core/src/description.rs`):
 | Bus | the board file's `bus` | the device has none |
 | Address | `out.set_address(addr)`: the 7-bit I2C address | the driver serves several addresses, or none |
 | State and reason | the host | never |
-| Unit | `Item::…().unit(Unit, exponent)` | `One` (dimensionless) is the default |
+| Unit | `Item::…().unit(Unit, exponent)` | `One` (dimensionless) is the default. The exponent is the scale of an integer value only (see [the scale rule](#the-scale-rule)) |
 | Range | `.range(min, max)`, raw, in the item's exponent | left out: no range known |
 | Step | `.step(n)`: one count, in raw units | left out |
 | Limit | `.warn_below(raw)`, `.warn_above(raw)` | left out: no threshold |
@@ -666,6 +666,26 @@ A driver fills in a range only when it knows one: a sensor's full scale from its
 a fan's duty from its per-mille limits. Where it does not know, it leaves the item without one. An
 unknown figure is never a guess. A float value's range, which no integer scale states exactly, is
 given with `real_range(min, max)` and `real_step(step)` in the item's unit.
+
+**The scale rule.** An item's exponent is the scale of an integer value: the value is
+`raw * 10^exponent`, in its unit, so `Unit::Volt` with exponent -3 and a raw 4500 is 4.5 V. A
+**real** value (an `f32` or `f64` reply, already in base units such as volts, m/s² or rad/s) has
+exponent 0. The renderers scale a float reply by the exponent as they do an integer, so a real
+value with a nonzero exponent reads 10^exponent times too small (or large). The host refuses a bind
+whose description gives a real item a nonzero exponent, and says which item, for any item with a
+real range, step or warning limit (`real_range`, `real_step`, `real_warn_below`,
+`real_warn_above`): `item X: a real value carries exponent 0`. Per-mille counts (a fan's duty) are
+integers, so they are exponent 0 too: 302 per mille shows as 302. Use a scaled integer where the
+driver has warning limits or the chip's resolution makes it natural; otherwise use a real value at
+exponent 0.
+
+Two items of one device may not share a name. A client finds an item by its name, so the host
+refuses a bind whose description names two items alike, and says which name. A control with the
+same name as a read takes a name of its own (`set_duty`, `set_exposure`).
+
+Real-valued warning limits are `real_warn_below(value)` and `real_warn_above(value)`, in the item's
+unit. The integer `warn_below` and `warn_above` are for integer values. Packages do not carry the
+real range or the real limits; a packaged real item keeps its integer ones only, as its range does.
 
 Every item declares its unit state. `Item::unit(unit, exponent)` with a unit is known, and `One` (or
 `.dimensionless()`) is dimensionless; a count, a switch, a text and an action are dimensionless. An

@@ -193,17 +193,17 @@ impl Lifecycle for FanController {
     }
 
     fn describe(&self, out: &mut Description) {
-        // Per mille, from 0 to FULL, as the law's duty and demand are.
+        // Per mille, from 0 to FULL, as the law's duty and demand are: a count, exponent 0.
         out.add(
             Item::value("duty", STATE)
-                .unit(Unit::One, -3)
+                .unit(Unit::One, 0)
                 .field("duty")
                 .range(0, i64::from(law::FULL))
                 .step(1),
         );
         out.add(
             Item::value("demand", STATE)
-                .unit(Unit::One, -3)
+                .unit(Unit::One, 0)
                 .field("demand")
                 .range(0, i64::from(law::FULL))
                 .step(1),

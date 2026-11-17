@@ -43,9 +43,10 @@
 //!   this contract, and those records are the ones whose `contract` is `index`.
 //! - `method contract id name params returns out_buffer job`: `params` is each `name:shape`, joined
 //!   by a space, as one quoted text; `out_buffer` and `job` are `true` or `false`.
-//! - `item kind name unit unit_state exponent min max real_min real_max real_step step warn_low
-//!   warn_high contract method field reading group`: `min`, `max`, `real_min`, `real_max`,
-//!   `real_step`, `step`, `warn_low` and `warn_high` are absent when the device gives no such bound;
+//! - `item kind name unit unit_state exponent min max real_min real_max real_step real_warn_low
+//!   real_warn_high step warn_low warn_high contract method field reading group`: `min`, `max`,
+//!   `real_min`, `real_max`, `real_step`, `real_warn_low`, `real_warn_high`, `step`, `warn_low` and
+//!   `warn_high` are absent when the device gives no such bound;
 //!   `field` and `group` are quoted or `none`; `reading` is one of the reading words, or `unknown`.
 //! - `job id state done total percent`: one for each long job open on the device, after the items,
 //!   and none when there is none. It comes from the host's job table, not from the driver, so it is
@@ -309,6 +310,8 @@ fn item_record(item: &OwnedItem) -> Result<String, String> {
     real(&mut out, "real_min", item.real_min);
     real(&mut out, "real_max", item.real_max);
     real(&mut out, "real_step", item.real_step);
+    real(&mut out, "real_warn_low", item.real_warn_low);
+    real(&mut out, "real_warn_high", item.real_warn_high);
     number(&mut out, "step", item.step);
     number(&mut out, "warn_low", item.warn_low);
     number(&mut out, "warn_high", item.warn_high);
@@ -562,6 +565,8 @@ mod tests {
             real_min,
             real_max,
             real_step,
+            real_warn_low: None,
+            real_warn_high: None,
             contract: 0,
             method: 1,
             field: None,

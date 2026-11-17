@@ -128,18 +128,23 @@ fn item_row(item: &OwnedItem) -> String {
     } else if let Some(step) = item.real_step {
         let _ = write!(row, "  step {step}");
     }
-    let limit = match (item.warn_low, item.warn_high) {
-        (None, None) => "none".to_string(),
-        (low, high) => {
-            let mut parts = Vec::new();
-            if let Some(low) = low {
-                parts.push(format!("below {}", scaled(low, item.exponent)));
-            }
-            if let Some(high) = high {
-                parts.push(format!("above {}", scaled(high, item.exponent)));
-            }
-            parts.join(", ")
-        }
+    let mut limits = Vec::new();
+    if let Some(low) = item.warn_low {
+        limits.push(format!("below {}", scaled(low, item.exponent)));
+    }
+    if let Some(high) = item.warn_high {
+        limits.push(format!("above {}", scaled(high, item.exponent)));
+    }
+    if let Some(low) = item.real_warn_low {
+        limits.push(format!("below {low}"));
+    }
+    if let Some(high) = item.real_warn_high {
+        limits.push(format!("above {high}"));
+    }
+    let limit = if limits.is_empty() {
+        "none".to_string()
+    } else {
+        limits.join(", ")
     };
     let _ = write!(row, "  limit {limit}");
     let reading = item.reading.map_or("unknown", |r| reading_name(r));
@@ -247,6 +252,8 @@ mod unit_tests {
             real_min: None,
             real_max: None,
             real_step: None,
+            real_warn_low: None,
+            real_warn_high: None,
             warn_low: None,
             warn_high: None,
             group: None,

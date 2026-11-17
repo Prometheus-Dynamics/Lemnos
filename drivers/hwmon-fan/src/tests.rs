@@ -611,3 +611,68 @@ fn check_config_refuses_a_test_range_that_is_backwards() {
     ];
     assert_eq!(refusal(&equal), None);
 }
+
+/// The item as the wire carries it, for the display path.
+fn wire_item(item: &lemnos_core::Item) -> lemnos_wire::OwnedItem {
+    lemnos_wire::OwnedItem {
+        kind: lemnos_core::ItemKind::Value,
+        name: item.name.to_string(),
+        unit: item.unit.symbol().to_string(),
+        unit_state: item.unit_state,
+        exponent: item.exponent,
+        min: item.min,
+        max: item.max,
+        real_min: item.real_min,
+        real_max: item.real_max,
+        real_step: item.real_step,
+        real_warn_low: item.real_warn_low,
+        real_warn_high: item.real_warn_high,
+        contract: item.method.contract,
+        method: item.method.method,
+        field: item.field.map(str::to_string),
+        reading: None,
+        step: item.step,
+        warn_low: item.warn_low,
+        warn_high: item.warn_high,
+        group: item.group.map(str::to_string),
+    }
+}
+
+/// A duty of 302 per mille shows as 302, through the display path. Fails before the fix: the
+/// item had exponent -3, so it showed 0.302.
+#[test]
+fn a_duty_of_302_per_mille_displays_as_302() {
+    let tree = Tree::new("duty-display");
+    let fan = chip(tree.root());
+    let mut out = Description::new();
+    Driver::describe(&fan, &mut out);
+    let duty = out.find("duty").unwrap();
+    assert_eq!(duty.exponent, 0, "a per-mille count is shown as the count");
+    // The reply of `duty` is a u16, here 302 per mille (77 in pwm counts).
+    let mut fan = fan;
+    write(tree.root(), &format!("{CHIP}/pwm1"), "77");
+    let reply = fan.duty().unwrap().to_le_bytes();
+    let shown = lemnos_wire::text::render(
+        &lemnos_wire::OwnedShape::U16,
+        false,
+        &reply,
+        &wire_item(duty),
+    )
+    .unwrap();
+    assert_eq!(shown, "302");
+}
+
+/// The read and the control have names of their own, so a client finds the control by name.
+/// Fails before the fix: both were named `duty`.
+#[test]
+fn the_duty_read_and_the_duty_control_have_different_names() {
+    let tree = Tree::new("duty-names");
+    let fan = chip(tree.root());
+    let mut out = Description::new();
+    Driver::describe(&fan, &mut out);
+    let read = out.items().find(|item| item.name == "duty").unwrap();
+    assert_eq!(read.kind, lemnos_core::ItemKind::Value);
+    let control = out.find("set_duty").unwrap();
+    assert_eq!(control.kind, lemnos_core::ItemKind::Control);
+    assert_eq!(control.method, SET_DUTY);
+}

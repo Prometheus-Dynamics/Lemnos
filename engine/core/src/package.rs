@@ -841,6 +841,8 @@ pub fn item_with(item: &PackageItem, extra: Option<&PackageExtra>) -> Option<Ite
         real_min: None,
         real_max: None,
         real_step: None,
+        real_warn_low: None,
+        real_warn_high: None,
         reading: has(EXTRA_HAS_READING)
             .then(|| extra.and_then(|e| Reading::from_code(e.reading)))
             .flatten(),

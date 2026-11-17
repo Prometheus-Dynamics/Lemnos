@@ -801,7 +801,9 @@ impl Lifecycle for Bmi088 {
     }
 
     fn describe(&self, out: &mut Description) {
-        // Each axis spans the die's full scale, one count is a step; milli-units.
+        // Real numbers in base units (m/s², rad/s): the values `read` returns are f32 in those, so the
+        // exponent is 0. An exponent of -3 showed 1 g as 0.00981 m/s².
+        // Each axis spans the die's full scale, one count is a step.
         let accel = &self.accel.setting;
         let gyro = &self.gyro.setting;
         for (name, field) in [
@@ -811,10 +813,11 @@ impl Lifecycle for Bmi088 {
         ] {
             out.add(
                 Item::value(name, ACCEL_READ)
-                    .unit(Unit::MetrePerSecondSquared, -3)
+                    .unit(Unit::MetrePerSecondSquared, 0)
                     .field(field)
                     .group("acceleration")
-                    .range_of_scale(accel.full_scale_milli(), accel.step_milli()),
+                    .real_range(-accel.full_scale(), accel.full_scale())
+                    .real_step(accel.step()),
             );
         }
         for (name, field) in [
@@ -824,10 +827,11 @@ impl Lifecycle for Bmi088 {
         ] {
             out.add(
                 Item::value(name, GYRO_READ)
-                    .unit(Unit::RadianPerSecond, -3)
+                    .unit(Unit::RadianPerSecond, 0)
                     .field(field)
                     .group("angular_rate")
-                    .range_of_scale(gyro.full_scale_milli(), gyro.step_milli()),
+                    .real_range(-gyro.full_scale(), gyro.full_scale())
+                    .real_step(gyro.step()),
             );
         }
     }
