@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-unbind-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's unbind check: a block unbound while a buffer is held and the control node is open (CZ-GUEST slice 2 port of lemnos_unbind_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
