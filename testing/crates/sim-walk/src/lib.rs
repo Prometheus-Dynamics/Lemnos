@@ -156,6 +156,10 @@ pub const NOT_SIMULATED: &[(&str, &str)] = &[
 /// fake still to write. They are named, so the set of built-in drivers is always whole.
 pub const NOT_WALKED: &[(&str, &str)] = &[
     (
+        "orion-precheck",
+        "it asks the board's Orion comm core over its socket before the security switch turns on, and the walk has no Orion node: its answers are covered by its own tests",
+    ),
+    (
         "board-self-test",
         "it runs the tests other devices serve, and the walk's board has no device serving `self-test/1` wired to it yet: the fake is a board file section that names its targets",
     ),
