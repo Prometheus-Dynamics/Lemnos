@@ -54,9 +54,6 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   -o "$root/lemnos_pisp_be_version_check" "$work/kernel/test/lemnos_pisp_be_version_check.c"
 "${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
   "$work/kernel/test/lemnos_pisp_fe_check.c"
-# The dma-buf lend check: a real system-heap buffer lent to the back end, with the same fake block.
-"${compiler[@]}" "${flags[@]}" -I"$source" -I"$work/kernel" -I"$work/kernel/test" -pthread \
-  -o "$root/lemnos_lend_check" "$here/lemnos_lend_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
 # The bounce trace of the link check (its comm core's log and each read and write on the link) is off
@@ -65,7 +62,7 @@ link_check_features=()
 if [[ "${LINK_CHECK_TRACE:-0}" == 1 ]]; then
   link_check_features=(--features lemnos-orion-link-check/trace)
 fi
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check -p lemnos-lend-check --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
@@ -98,6 +95,8 @@ cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-regjob-check" "$root/
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-regjob-isp-check" "$root/lemnos_regjob_isp_check"
 # The PIO check is Rust (CZ-GUEST-2); init runs it as /lemnos_pio_check.
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-pio-check" "$root/lemnos_pio_check"
+# The dma-buf lend check is Rust (CZ-GUEST-2); init runs it as /lemnos_lend_check.
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-lend-check" "$root/lemnos_lend_check"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$work/kernel/rust/lemnos_rs.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.
