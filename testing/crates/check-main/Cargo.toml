@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-check-main"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's block check: info, registers, DMA buffers and imports, heap imports, and the interrupt mask (CZ-GUEST-2 port of lemnos_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
