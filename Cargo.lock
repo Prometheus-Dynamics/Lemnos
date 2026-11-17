@@ -1995,6 +1995,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-maskrom-rehearsal"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-flash-stage",
+ "lemnos-flash-wire",
+ "lemnos-rockchip-maskrom-stage",
+]
+
+[[package]]
 name = "lemnos-mcu"
 version = "2.0.1-dev"
 dependencies = [

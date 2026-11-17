@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-maskrom-rehearsal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Rehearsal stand-in for the MR1 maskrom script: a same-rev model of the boot ROM's 471 and 472 entries that the PC-side script runs against before any board contact. Not a product host; never linked into lemnosd"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-flash-wire = { path = "../../../drivers/flash-wire" }
+lemnos-flash-stage = { path = "../../../drivers/flash-stage", features = ["sim"] }
+lemnos-rockchip-maskrom-stage = { path = "../../../drivers/rockchip-maskrom-stage" }
