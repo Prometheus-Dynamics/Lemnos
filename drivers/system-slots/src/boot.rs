@@ -641,6 +641,31 @@ mod tests {
     }
 
     #[test]
+    fn a_board_owned_config_txt_refuses_the_default_by_name_and_the_trial_still_arms() {
+        let dir = TempDir::new("tryboot-board-config");
+        let node = dir.0.join("boot.img");
+        fs::write(&node, crate::bay_fixture::tryboot_board_config_image("a-1")).unwrap();
+        let mut record = tryboot(&dir, Ok(node.clone()));
+        install(&record, "b-2");
+        // The default switch names config.txt: refused before any pointer is written.
+        let why = record.set_default("b-2").unwrap_err().to_string();
+        assert!(why.contains("config.txt is the board's own"), "{why}");
+        // The trial route: arm, read back, clear. Nothing else moves.
+        record.set_trial("b-2", 2).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
+        record.clear_trial().unwrap();
+        let mut raw = RawBoot::open(&node).unwrap();
+        assert_eq!(
+            raw.pointer(Pointer::Default).unwrap().as_deref(),
+            Some("a-1")
+        );
+        assert_eq!(
+            raw.pointer(Pointer::Previous).unwrap().as_deref(),
+            Some("a-1")
+        );
+    }
+
+    #[test]
     fn lemnosd_never_mounts_the_boot_partition() {
         // Grep proof: this file calls no mount. The node is found from the disk's sysfs, never mounted.
         let src = include_str!("boot.rs");

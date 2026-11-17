@@ -822,6 +822,12 @@ pub struct BootSpec {
     pub bay_overlay_bytes: Option<u64>,
     /// The command line's bay (`cmdline`).
     pub bay_cmdline_bytes: Option<u64>,
+    /// Who owns the Raspberry Pi firmware's `config.txt`: `"lemnos"` (the default: Lemnos writes it at
+    /// flash) or `"board"`, the board's own file. With `"board"` Lemnos never writes or reads `config.txt`
+    /// and writes no `config.txt` into the boot partition; the trial route uses `tryboot.txt` and the
+    /// pointers, and a default switch is refused by name. Only the `tryboot` record has one.
+    #[serde(default)]
+    pub config_owner: Option<String>,
     /// Verbatim firmware config lines (config.txt, inside `[all]`). Each is one line; `dtoverlay=NAME`
     /// lines are checked against `firmware_overlays`. Default none.
     #[serde(default)]

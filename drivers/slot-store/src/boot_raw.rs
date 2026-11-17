@@ -506,6 +506,9 @@ impl<D: Sectors + ReadAt> Boot<D> {
         let default_set = self.pointer_set(Pointer::Default)?;
         let previous_set = self.pointer_set(Pointer::Previous)?;
         if previous_set == Some(set) && default_set != Some(set) {
+            if layout.board_config {
+                return Err(bays::BOARD_CONFIG_REFUSAL.to_string());
+            }
             let Some(fallback) = default_set else {
                 return Err(format!(
                     "{slot} is the previous slot and the default names no bay: previous.txt has nowhere to fall back to, so {slot} is kept"
@@ -635,6 +638,11 @@ impl<D: Sectors + ReadAt> BootRaw for Boot<D> {
     /// (the old default's bay, when the default changes), then the default: a cut between the two
     /// leaves the old default and an old previous, both of which hold their records.
     fn set_pointer(&mut self, which: Pointer, slot: &str) -> Result<(), String> {
+        // Default and previous are read only through the board's config.txt when the board owns it:
+        // the trial pointer and the trial record are the only pointers the trial route writes.
+        if which != Pointer::Trial && self.layout.as_ref().is_ok_and(|l| l.board_config) {
+            return Err(bays::BOARD_CONFIG_REFUSAL.to_string());
+        }
         let set = self.set_for(slot)?;
         if which == Pointer::Default {
             let old = self

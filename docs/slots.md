@@ -244,6 +244,62 @@ neither is written exactly as before: no firmware list file, no `boot.config`, f
   failed overlay is named with the tool's status. Nothing here is loaded by firmware: the lines say so. The
   firmware itself applies the overlays at boot and is not checked by this.
 
+### A board's own config.txt
+
+On a Raspberry Pi board, `config.txt` is the firmware's first file. By default Lemnos owns it: flash writes
+the generated `config.txt` and `tryboot.txt` (above). A board whose `config.txt` the board owns sets
+
+```toml
+[boot]
+config_owner = "board"
+```
+
+and then Lemnos never writes, reads or requires that file. This is a per-board mode, not a second Pi form:
+the default boot of a Lemnos-owned board still goes through `config.txt` (`default.txt`, and the count's
+`previous.txt`), and that does not change. The mode exists because a board whose `config.txt` carries the
+board's own settings cannot have Lemnos's text put over them, and the trial route does not need it.
+
+With `config_owner = "board"`:
+
+- **The boot partition.** `lemnos-ctl boot-partition` writes no `config.txt`. It writes `tryboot.txt` (the
+  fixed text, with the board's `gpio=` lines after it, as before), the pointers, the records and the bay sets.
+  The root list `firmware-overlays.txt` holds the line `board-config`, which is how the boot partition says
+  the board owns `config.txt` (`lemnos_slot_store::bays::BOARD_CONFIG_LINE`). The layout carries that flag
+  (`Layout::board_config`), and the image is refused by name when the board file's `config_owner` differs.
+- **The trial route is unchanged and needs no `config.txt`.** A trial arms `trial.txt` and its record (the
+  two pointer and record sectors), and a restart with `0 tryboot` reads `tryboot.txt`, which includes
+  `trial.txt`. The firmware reads `tryboot.txt` in place of `config.txt` on that one boot, so the trial's
+  boot does not depend on the board's file.
+- **A default switch is refused by name.** Every write to `default.txt` or `previous.txt` is refused before
+  any sector is written, with: `this board's config.txt is the board's own, which Lemnos never writes: the
+  default and previous pointers are read only through it, so they can't be switched here; set the default in
+  the board's config.txt`. That covers a default switch, the trial's confirmation (which is a default switch),
+  the count's demotion, the rollback of a boot guard, and removing the previous slot's bay (which repoints
+  `previous.txt`). A trial whose confirmation is refused stays pending, and the state names the refusal.
+- **An install does not change the default.** A board that owns `config.txt` has no default switch, so an
+  install writes the bays and leaves the default pointer where it was.
+- **No config lines and no overlays.** `config_lines` and `firmware_overlays` are written into `config.txt`,
+  which the board owns. Setting either with `config_owner = "board"` is refused at build, by name. The board
+  loads its overlays and its own lines from its own `config.txt`.
+- **A bundle and a boot partition agree on the lines.** Neither carries a digest: both have no config lines,
+  so the install's `boot.config` check is unchanged.
+
+Limits, stated:
+
+- The `gpio=` lines Lemnos generates go in `tryboot.txt` only. The board's default boot gets them only if its
+  own `config.txt` carries them.
+- Flash writes a whole image, so a first flash of a board-owned boot partition replaces its `config.txt` with
+  nothing. A board in this mode gets its `config.txt` from its own image step, not from Lemnos's first flash.
+- A broken default is not demoted by Lemnos on such a board. The slot-init demotion asks for a default switch,
+  which is refused, so the boot goes to the rescue (the kernel log, then a restart) and says why.
+
+Tests: `a_board_owned_config_txt_is_never_written_and_the_trial_route_still_works` (slot-store, against a
+stand-in partition that fails every write into `config.txt`), `the_guard_itself_refuses_a_write_into_config_txt`,
+`a_lemnos_owned_config_still_switches_the_default`, `a_board_owned_config_txt_refuses_the_default_by_name_and_the_trial_still_arms`
+(system-slots), `an_image_built_for_the_other_owner_of_config_txt_is_refused_by_name` (system-slots),
+`a_board_that_owns_config_txt_gets_no_config_txt_and_a_tryboot_txt`, `a_board_that_owns_config_txt_refuses_config_lines_by_name`,
+`an_unknown_config_owner_is_refused_by_name` (ctl). Untested on board: `testing/board-runs/` has no run for this mode yet.
+
 ### The manifest, schema 3
 
 | Key | Format |

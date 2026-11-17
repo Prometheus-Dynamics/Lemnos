@@ -508,6 +508,21 @@ pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), St
             board.config.as_deref().unwrap_or("none")
         ));
     }
+    if image.board_config != board.board_config {
+        return Err(format!(
+            "the boot image's config.txt is {}; the board file's [boot] config_owner says {}: the image was built for another owner of config.txt",
+            if image.board_config {
+                "the board's own"
+            } else {
+                "Lemnos's"
+            },
+            if board.board_config {
+                "\"board\""
+            } else {
+                "\"lemnos\""
+            }
+        ));
+    }
     Ok(())
 }
 
