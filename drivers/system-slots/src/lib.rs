@@ -156,6 +156,10 @@ pub struct SystemSlots {
     /// Whether trial updates are available on this board, as the record last found it (see
     /// [`uboot::TrialUpdates`]); `info` and `health` say it, and `trial` checks it again before it writes.
     trial_updates: TrialUpdates,
+    /// Why the boot partition's `config.txt` cannot select the default, read when the driver is made (the
+    /// record's own check, `BootRecord::config_refusal`). `None` when it can. The driver still runs: its
+    /// health says so, `list` carries it, and the writes that need the file are refused by name.
+    config_refusal: Option<&'static str>,
     /// When the record's trial updates are next looked at (monotonic ns), while the board has a record
     /// that can say no.
     trial_watch_ns: u64,
@@ -461,6 +465,7 @@ impl SystemSlots {
         ubi_write: Option<Arc<dyn UbiWrite>>,
     ) -> Self {
         let layout_has_ubi = layout.ubi.is_some();
+        let config_refusal = record.config_refusal();
         let mut slots = Self {
             layout,
             record,
@@ -506,6 +511,7 @@ impl SystemSlots {
             uncleared: None,
             grow: None,
             trial_updates: TrialUpdates::Available,
+            config_refusal,
             trial_watch_ns: 0,
         };
         slots.clear_interrupted();
@@ -1214,6 +1220,7 @@ impl SystemSlots {
             ("slot_staged", state.staged.as_str()),
             ("state", state.state.as_str()),
             ("error", state.error.as_str()),
+            ("config_refusal", self.config_refusal.unwrap_or("")),
         ] {
             quoted(key, &mut out);
             out.push(':');
@@ -1557,6 +1564,10 @@ impl Lifecycle for SystemSlots {
     /// Down while the firmware refuses to clear the boot count: the words name the wait, and the
     /// driver keeps retrying (see [`count::Uncleared`]). Degraded, not failed: restarts still work.
     fn health(&self) -> Health {
+        // The first word: a config.txt that cannot select the default is the one thing the boot needs.
+        if let Some(why) = self.config_refusal {
+            return Health::Degraded(why);
+        }
         if let Some(pending) = &self.uncleared {
             return Health::Degraded(count::health_text(pending.wait_ns));
         }

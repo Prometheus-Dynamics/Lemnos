@@ -8,7 +8,7 @@ reached on Raze #2 without changing the default slot's boot files, which the no-
 
 The brief offered "a trial slot, or else sim-only". A trial does not go through the path being checked:
 
-- The count rung is `config.txt`: `include default.txt`, then `[boot_count&4]` / `include previous.txt`
+- The count rung is `config.txt`: `include default.txt`, then `[boot_count>3]` / `include previous.txt` (the threshold; `[boot_count&4]` was the earlier form, see I5i3.md's correction)
   (`drivers/slot-store/src/firmware.rs`, `CONFIG_TXT`). It is read on every ordinary boot.
 - A trial is `tryboot.txt`: `include trial.txt` with no count filter (`TRYBOOT_TXT`, and the test
   `pi_firmware_text_is_the_fixed_fallback_text` asserts it has no `boot_count`). It runs only when the

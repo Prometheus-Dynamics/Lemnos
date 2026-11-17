@@ -948,18 +948,38 @@ run time writes it: not the driver, not `lemnosd`, not `slot-init`, not the inst
 
 The fixed text selects the slot through the pointer files it includes:
 
-- `include default.txt`, then `[boot_count&4]` and `include previous.txt`: the default, or the previous
-  when the count has bit 2 set. That is the count-based fallback, and it is written in `config.txt`
-  itself, so it needs no run-time edit. The firmware rule it relies on is the expression filter in the
-  Raspberry Pi documentation (`conditional.adoc`), as cited in `testing/board-runs/I5i3.md`. It is not yet
-  checked on a board.
+- `include default.txt`, then, on the Raspberry Pi 5 family only, `[boot_count>3]` and
+  `include previous.txt`: the default, or the previous when the count is above 3 (`firmware::FALLBACK_AFTER`,
+  the design's trial attempts). That is the count-based fallback, and it is written in `config.txt` itself,
+  so it needs no run-time edit. The firmware rule is the expression filter in the Raspberry Pi documentation,
+  `documentation/asciidoc/computers/config_txt/conditional.adoc` at `raspberrypi/documentation` commit
+  `b01a5c1a`: `[ARG>VALUE]` is selected when ARG > VALUE, and `boot_count` is "Raspberry Pi 5 and newer
+  devices only". The threshold form is used because the mask form `[ARG&MASK]` is selected when
+  `ARG & MASK != 0`: `[boot_count&4]` would be true at counts 4 to 7 and false at 8 to 11, so a board that kept
+  failing would bounce between previous and default. A test over all 256 counts checks the threshold
+  (`the_firmware_picks_default_up_to_the_threshold_and_previous_above_it_for_every_count`), and another shows
+  the mask form disagrees (`the_mask_form_would_bounce_between_the_pointers_and_the_threshold_form_does_not`).
+  On a Pi that is not in the Pi 5 family the text has no filter and no `include previous.txt`
+  (`CONFIG_TXT_NO_COUNT`): the board file's `count_fallback = true` is refused at build by name, and
+  `count_fallback = false` on a Pi 5 writes the same text as the older boards.
+- **The count's life.** The firmware's `boot_count` is an 8-bit value, incremented at each boot and wrapping at
+  256. It is **cleared by power loss**: a board that fails, is power-cycled and fails again starts the next round
+  from 0, so the fallback counts from the last power-on, not from the first failure. It is cleared by a good
+  boot: a confirmed trial (`confirm`) and a default boot that has run its uptime with its boot files matching
+  the manifest (`boot_good`, `count::Fallback::clear_count`, through the firmware mailbox tag `0x0003808d`). A
+  good boot whose boot files do not match keeps its count, and the state says so. The count is read as the
+  device-tree property `/proc/device-tree/chosen/bootloader/count`, a raw big-endian `u32`, not text
+  (`count::Firmware::word`; `the_count_bytes_are_big_endian_and_the_little_endian_order_is_refused`).
 - The pointer files (`default.txt`, `previous.txt`, `trial.txt`) hold the run-time state: two sectors each,
   one `os_prefix` line per sector, the form in "Pointer files" below. A default switch, a confirm, a
   demotion and a trial arm are writes to these files, and to the trial record. `tryboot.txt` includes
   `trial.txt` and is written offline too.
 
-A board's own `config.txt` is not written by Lemnos. If it lacks the three lines above, slot setup is
-refused by name and the file is left as it is: `install`, `set_default` and `trial` on the Tryboot record,
+A board's own `config.txt` is not written by Lemnos. The one line every Pi needs is `include default.txt`, and the
+count's section is required only where the image was built with it. If the line is missing, the driver
+still starts, and it is **degraded**: its health names the reason
+(`config.txt has no \`include default.txt\` line: ...`), `list` carries it as `config_refusal`, and reads still
+work. The writes that need the file are refused by name, and the file is left as it is: `install`, `set_default` and `trial` on the Tryboot record,
 and the first-slot writer (`lemnos-ctl data-partition --boot-image`) all read the file with
 `firmware::check_config_text` first. The refusal names the missing line and says that Lemnos never edits
 `config.txt`.
@@ -978,7 +998,10 @@ checks Lemnos's reader, not the firmware.
 Tests: `the_install_the_default_and_the_trial_never_write_config_txt` (a stand-in partition that fails every
 write into `config.txt`), `a_config_txt_without_the_select_lines_refuses_slot_setup_and_is_never_edited`,
 `a_boot_image_whose_config_txt_has_no_select_lines_is_refused_before_anything_is_written`,
-`a_config_txt_without_a_select_line_is_refused_by_name_and_the_image_text_passes`.
+`a_config_txt_without_the_default_line_is_refused_by_name_and_the_image_texts_pass`,
+`a_config_txt_without_the_select_lines_leaves_the_driver_running_degraded_and_listed` (system-slots: the driver
+starts, health and `list` name the reason, and a write is refused), the Pi 5 gate in
+`boot_partition::count_fallback_tests`, and `the_fixed_text_and_the_slots_reading_of_it_are_one_constant`.
 
 ### The `uboot` record
 
@@ -1361,10 +1384,10 @@ write; the next boot starts the previous.
 
 ### Boot count: the fallback on the Pi firmware
 
-The fixed `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`) reads `default.txt` unless the
-firmware's `boot_count` has bit 2 set (`[boot_count&4]`), when it reads `previous.txt`. Boots 0 to 3
-run the default, 4 to 7 the previous, and so on: the count wraps at 256, a multiple of 8, so the
-pattern never breaks. `tryboot.txt` has no count filter. The filter, the `kernel_watchdog_timeout`
+The fixed `config.txt` (`lemnos_slot_store::firmware::CONFIG_TXT`, on the Pi 5 family) reads `default.txt`
+unless the firmware's `boot_count` is above 3 (`[boot_count>3]`, `conditional.adoc` at `raspberrypi/documentation`
+commit `b01a5c1a`), when it reads `previous.txt`. Boots 0 to 3 run the default and 4 and later the previous, until
+a good boot or a power loss clears the count (see "The count's life" above). `tryboot.txt` has no count filter. The filter, the `kernel_watchdog_timeout`
 keys and the count's read and clear are verified from the Raspberry Pi documentation
 (`conditional.adoc`, `config_txt_boot.adoc`), not yet on a board: `testing/board-runs/I5i6.md`.
 

@@ -4,7 +4,7 @@ use super::*;
 fn pi_firmware_text_is_the_fixed_fallback_text() {
     assert_eq!(
         CONFIG_TXT,
-        "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count&4]\ninclude previous.txt\n[all]\n\
+        "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count>3]\ninclude previous.txt\n[all]\n\
             kernel=kernel8.img\ncmdline=cmdline.txt\ninitramfs initramfs.cpio followkernel\n\
             device_tree=board.dtb\ndtoverlay=lemnos-board\n"
     );
@@ -19,20 +19,58 @@ fn pi_firmware_text_is_the_fixed_fallback_text() {
     );
 }
 
+/// The official expression filter's semantics: `[ARG&MASK]` is selected when `ARG & MASK != 0`, and
+/// `[ARG>VALUE]` when `ARG > VALUE` (conditional.adoc, raspberrypi/documentation commit b01a5c1a).
+fn selected_by_mask(arg: u8, mask: u8) -> bool {
+    arg & mask != 0
+}
+
 #[test]
-fn the_count_pass_picks_default_for_0_to_3_and_previous_for_4_to_7_for_ever() {
+fn the_firmware_picks_default_up_to_the_threshold_and_previous_above_it_for_every_count() {
+    // Over all 256 counts, under the documented `[boot_count>3]`: the default at counts 0 to 3, the
+    // previous from 4 to 255. The count wraps to 0 after 255, so the default comes back there.
     for count in 0..=255u8 {
-        let want = if (count / 4) % 2 == 0 {
+        let want = if count <= FALLBACK_AFTER {
             Pick::Default
         } else {
             Pick::Previous
         };
         assert_eq!(pick(count), want, "count {count}");
     }
-    // The 8-bit count wraps at 256, a multiple of 8: the pattern has no break.
-    assert_eq!(pick(0), pick(8));
-    assert_eq!(pick(4), pick(12));
+    // Two rounds of the same pattern must not depend on the count above the threshold.
+    assert_eq!(pick(4), Pick::Previous);
+    assert_eq!(pick(8), Pick::Previous);
     assert_eq!(pick(255), Pick::Previous);
+}
+
+#[test]
+fn the_mask_form_would_bounce_between_the_pointers_and_the_threshold_form_does_not() {
+    // `[boot_count&4]` is selected at counts 4 to 7 and 12 to 15, and not at 8 to 11: a board that keeps
+    // failing would bounce between previous and default. The threshold form has no such break, and
+    // the test fails if the mask form is used (it disagrees with `pick` at count 8).
+    let mut bounces = 0;
+    for count in 0..=255u8 {
+        let mask_picks_previous = selected_by_mask(count, 4);
+        if mask_picks_previous != (pick(count) == Pick::Previous) {
+            bounces += 1;
+        }
+    }
+    assert!(
+        bounces > 0,
+        "the mask form was expected to disagree with the threshold"
+    );
+    assert!(!selected_by_mask(8, 4) && pick(8) == Pick::Previous);
+    assert!(CONFIG_TXT.contains("[boot_count>3]"));
+    assert!(!CONFIG_TXT.contains("&4"));
+}
+
+#[test]
+fn the_count_fallback_is_on_pi5_family_boards_only_and_the_other_pis_get_no_filter() {
+    assert_eq!(config_for(true), CONFIG_TXT);
+    assert_eq!(config_for(false), CONFIG_TXT_NO_COUNT);
+    assert!(!CONFIG_TXT_NO_COUNT.contains("boot_count"));
+    assert!(!CONFIG_TXT_NO_COUNT.contains("previous.txt"));
+    assert!(CONFIG_TXT_NO_COUNT.contains(SELECT_LINE));
 }
 
 #[test]
@@ -180,18 +218,18 @@ fn a_baseline_of_zero_is_a_kept_baseline_not_an_unknown_one() {
 }
 
 #[test]
-fn a_config_txt_without_a_select_line_is_refused_by_name_and_the_image_text_passes() {
+fn a_config_txt_without_the_default_line_is_refused_by_name_and_the_image_texts_pass() {
     assert!(check_config_text(CONFIG_TXT.as_bytes()).is_ok());
-    for line in SELECT_LINES {
-        let without: String = CONFIG_TXT
-            .lines()
-            .filter(|l| *l != line)
-            .map(|l| format!("{l}\n"))
-            .collect();
-        let why = check_config_text(without.as_bytes()).unwrap_err();
-        assert!(why.contains(line), "{why}");
-        assert!(why.contains("Lemnos never edits config.txt"), "{why}");
-    }
+    assert!(check_config_text(CONFIG_TXT_NO_COUNT.as_bytes()).is_ok());
+    let without: String = CONFIG_TXT
+        .lines()
+        .filter(|l| *l != SELECT_LINE)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_eq!(config_refusal(without.as_bytes()), Some(SELECT_REFUSAL));
+    let why = check_config_text(without.as_bytes()).unwrap_err();
+    assert!(why.contains("include default.txt"), "{why}");
+    assert!(why.contains("Lemnos never edits config.txt"), "{why}");
     assert!(check_config_text(b"kernel_watchdog_timeout=15\n").is_err());
-    assert!(check_config_text(&[0xff, 0xfe]).is_err());
+    assert_eq!(config_refusal(&[0xff, 0xfe]), Some(NOT_TEXT_REFUSAL));
 }

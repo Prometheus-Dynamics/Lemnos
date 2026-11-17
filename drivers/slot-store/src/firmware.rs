@@ -2,10 +2,11 @@
 //! applies to it. Everything here is fixed at image build except the three pointer files, which
 //! change only by a one-sector write ([`pointer_sector`]).
 //!
-//! The firmware reads `config.txt` (or `tryboot.txt` on a tryboot restart). The expression filter
-//! `[boot_count&4]` selects `previous.txt` when bit 2 of the boot count is set. With the count
-//! wrapping at 256 (a multiple of 8), boots 0-3 and 8-11 run the default, 4-7 and 12-15 the
-//! previous, and so on for ever: three attempts on each round before the previous is tried.
+//! The firmware reads `config.txt` (or `tryboot.txt` on a tryboot restart). On a Raspberry Pi 5 family
+//! board, `[boot_count>3]` selects `previous.txt` when the boot count is above 3 (`FALLBACK_AFTER`). The
+//! official filter is `[ARG>VALUE]`, selected when ARG > VALUE (`conditional.adoc` at raspberrypi/documentation
+//! commit b01a5c1a). The count is an 8-bit value that wraps at 256, and it is cleared by power loss and by a
+//! good boot (Lemnos clears it at a confirmed trial and at a good default boot).
 //!
 //! Sources: `config_txt_boot.adoc` (`kernel_watchdog_timeout`), `conditional.adoc` (`boot_count` and
 //! the expression filter), `rn2712.md` (the SoC watchdog's 16.8 s maximum). The firmware's own
@@ -30,11 +31,21 @@ pub const WATCHDOG_SECONDS: u8 = 15;
 /// covers kernels, initramfs, cmdline.txt, .dtbs and overlays); `computers/configuration/reference.adoc`
 /// part 5.3 "Force a specific Device Tree" (`device_tree=<file>` loads that DTB). That part does not
 /// say whether `os_prefix` applies to `device_tree=`: that is an inference from the `.dtbs` line, unverified.
-/// `config.txt`: the default, unless the count's bit 2 is set; then the previous. The slot lines
-/// come after `[all]`, so they apply to both pointers.
+/// The count fallback's threshold: the restarts without a good boot after which the firmware starts the
+/// previous slot. It is the design's trial attempt count (`trial_attempts`, 3 by default): boots 0 to 3
+/// run the default, boot 4 and later (up to the wrap at 256) the previous. The firmware's filter is
+/// `[boot_count>3]`: the official `conditional.adoc` says `[ARG>VALUE]` is selected when ARG > VALUE.
+pub const FALLBACK_AFTER: u8 = 3;
+
+/// The line that selects the default pointer. Every Lemnos config.txt carries it, on every Pi board.
+pub const SELECT_LINE: &str = "include default.txt";
+
+/// `config.txt` for a board whose firmware has the count (Raspberry Pi 5 family, `boot_count`, see
+/// [`FALLBACK_AFTER`]): the default, unless the count is above the threshold; then the previous. The
+/// slot lines come after `[all]`, so they apply to both pointers.
 pub const CONFIG_TXT: &str = "kernel_watchdog_timeout=15\n\
 include default.txt\n\
-[boot_count&4]\n\
+[boot_count>3]\n\
 include previous.txt\n\
 [all]\n\
 kernel=kernel8.img\n\
@@ -42,6 +53,27 @@ cmdline=cmdline.txt\n\
 initramfs initramfs.cpio followkernel\n\
 device_tree=board.dtb\n\
 dtoverlay=lemnos-board\n";
+
+/// `config.txt` for a Raspberry Pi board whose firmware has no `boot_count` (every Pi before the Pi 5
+/// family): the default only, and no filter the firmware may not know. There is no count fallback on
+/// these boards, and the board file may not ask for one (refused at build).
+pub const CONFIG_TXT_NO_COUNT: &str = "kernel_watchdog_timeout=15\n\
+include default.txt\n\
+[all]\n\
+kernel=kernel8.img\n\
+cmdline=cmdline.txt\n\
+initramfs initramfs.cpio followkernel\n\
+device_tree=board.dtb\n\
+dtoverlay=lemnos-board\n";
+
+/// The `config.txt` text for a board: with the count fallback (Pi 5 family) or without it.
+pub const fn config_for(count_fallback: bool) -> &'static str {
+    if count_fallback {
+        CONFIG_TXT
+    } else {
+        CONFIG_TXT_NO_COUNT
+    }
+}
 
 /// `tryboot.txt`: the trial, once, with no count filter.
 pub const TRYBOOT_TXT: &str = "kernel_watchdog_timeout=15\n\
@@ -71,13 +103,13 @@ pub enum Pick {
     Previous,
 }
 
-/// The pointer the firmware picks for a boot whose count is `count`: the expression filter's
-/// `&4`, applied exactly as `config.txt` writes it.
+/// The pointer the firmware picks for a boot whose count is `count`: `[boot_count>3]` in `config.txt`
+/// selects the previous when the count is above [`FALLBACK_AFTER`].
 pub const fn pick(count: u8) -> Pick {
-    if count & 4 == 0 {
-        Pick::Default
-    } else {
+    if count > FALLBACK_AFTER {
         Pick::Previous
+    } else {
+        Pick::Default
     }
 }
 
@@ -208,27 +240,24 @@ pub fn pointer_file_slot(file: &[u8; POINTER_FILE_BYTES]) -> Option<String> {
     pointer_slot(second).or_else(|| pointer_slot(first))
 }
 
-/// The lines of `config.txt` that select the default and the previous pointer. Lemnos never writes
-/// `config.txt` at run time: the board's file must carry these lines, which the image builder writes
-/// (`CONFIG_TXT`). A file without them is refused by name, before any slot is set up.
-pub const SELECT_LINES: [&str; 3] = [
-    "include default.txt",
-    "[boot_count&4]",
-    "include previous.txt",
-];
+/// The refusal for a `config.txt` that lacks [`SELECT_LINE`], and for one that is not text. Static, so
+/// the driver's health can carry it without allocating.
+pub const SELECT_REFUSAL: &str = "config.txt has no `include default.txt` line: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt carries the lines of the image's own text (firmware::CONFIG_TXT)";
+/// The refusal for a `config.txt` that is not text.
+pub const NOT_TEXT_REFUSAL: &str = "config.txt is not text: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt is the image's own text";
 
-/// Checks a `config.txt` read from the boot partition: every line of [`SELECT_LINES`] must be there, as a
-/// whole line. Read only; nothing is edited.
+/// The reason a `config.txt` read from the boot partition cannot select the default, `None` when it can.
+/// Read only; nothing is edited.
+pub fn config_refusal(text: &[u8]) -> Option<&'static str> {
+    let Ok(text) = std::str::from_utf8(text) else {
+        return Some(NOT_TEXT_REFUSAL);
+    };
+    (!text.lines().any(|l| l.trim() == SELECT_LINE)).then_some(SELECT_REFUSAL)
+}
+
+/// [`config_refusal`] as a result.
 pub fn check_config_text(text: &[u8]) -> Result<(), String> {
-    let text = std::str::from_utf8(text).map_err(|_| "config.txt is not text".to_string())?;
-    for line in SELECT_LINES {
-        if !text.lines().any(|l| l.trim() == line) {
-            return Err(format!(
-                "config.txt has no `{line}` line: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt carries the lines of the image's own text (firmware::CONFIG_TXT)"
-            ));
-        }
-    }
-    Ok(())
+    config_refusal(text).map_or(Ok(()), |why| Err(why.to_string()))
 }
 
 #[cfg(test)]

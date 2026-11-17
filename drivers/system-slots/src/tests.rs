@@ -5814,3 +5814,41 @@ fn the_uboot_good_boot_clears_the_count_and_the_episodes_when_the_loader_cannot_
     assert_eq!(board.slots.record.episodes().unwrap(), None);
     assert_eq!(board.state().default, "os-2");
 }
+
+/// A driver built the way `start` builds one, over a boot partition whose config.txt the board owns and
+/// that lacks the select lines: it runs, it is degraded with the reason, `list` says so, and writes that
+/// need the file are refused by name.
+#[test]
+fn a_config_txt_without_the_select_lines_leaves_the_driver_running_degraded_and_listed() {
+    let board = Board::new("os-1");
+    let node = board.dir.0.join("boot.img");
+    fs::write(
+        &node,
+        crate::bay_fixture::tryboot_image_with_config("os-1", b"kernel=board.img\n"),
+    )
+    .unwrap();
+    let record = Box::new(crate::boot::Tryboot {
+        boot: board.layout().boot.clone(),
+        node: Ok(node.clone()),
+        restarter: crate::boot::Restarter {
+            check: None,
+            systemctl: "/bin/true".into(),
+        },
+    });
+    let mut slots = SystemSlots::with_volumes(board.layout().clone(), record, Vec::new(), None);
+    let lemnos_core::Health::Degraded(why) = slots.health() else {
+        panic!("a config.txt without the select lines must leave the driver degraded");
+    };
+    assert!(why.contains("no `include default.txt` line"), "{why}");
+    let mut buf = vec![0u8; 1 << 16];
+    let n = slots.list(&mut buf).unwrap();
+    let list = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(
+        list.contains("\"config_refusal\":\"config.txt has no `include default.txt` line"),
+        "{list}"
+    );
+    // Reads still work, and the write that needs the file is refused by name, with nothing edited.
+    assert!(slots.set_default("os-1", false).is_err());
+    let mut raw = lemnos_slot_store::boot_raw::Boot::open(&node).unwrap();
+    assert_eq!(raw.config_text().unwrap(), b"kernel=board.img\n");
+}
