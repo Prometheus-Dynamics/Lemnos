@@ -1103,45 +1103,7 @@ impl SystemSlots {
         // Appended last: the data partition's grow while it is not finished. `grow_state` is `pending`,
         // `grown-unconfirmed` (the kernel accepted the resize and its view has not shown it after the
         // bound, with the sizes seen in bytes), or `none` (finished, or `grow_data` is false).
-        match self.grow.as_ref() {
-            None => out.push_str(",\"grow_state\":\"none\""),
-            Some(grow) if grow.refused().is_some() => {
-                let refusal = grow.refused().unwrap_or_else(|| unreachable!());
-                out.push_str(&format!(
-                    ",\"grow_state\":\"grow-too-large\",\"grow_target_bytes\":{},\"grow_max_bytes\":{},\"grow_reason\":",
-                    refusal.target_bytes, refusal.max_bytes
-                ));
-                quoted(&refusal.reason, &mut out);
-            }
-            Some(grow) if grow.progress().is_some() => {
-                let progress = grow.progress().unwrap_or_else(|| unreachable!());
-                let state = if progress.overrun {
-                    "resize-overrun"
-                } else {
-                    "resizing"
-                };
-                out.push_str(&format!(
-                    ",\"grow_state\":\"{state}\",\"grow_started_ms\":{},\"grow_elapsed_ms\":{},\"grow_bound_ms\":{},\"grow_target_bytes\":{}",
-                    progress.started_ns / 1_000_000,
-                    progress.elapsed_ns / 1_000_000,
-                    progress.bound_ns / 1_000_000,
-                    progress.target_bytes
-                ));
-            }
-            Some(grow) => match grow.unconfirmed() {
-                None => out.push_str(",\"grow_state\":\"pending\""),
-                Some(unconfirmed) => {
-                    out.push_str(",\"grow_state\":\"grown-unconfirmed\",\"grow_baseline_bytes\":");
-                    match unconfirmed.baseline {
-                        Some(bytes) => out.push_str(&bytes.to_string()),
-                        None => out.push_str("null"),
-                    }
-                    out.push_str(&format!(",\"grow_seen_bytes\":{}", unconfirmed.seen));
-                    out.push_str(",\"grow_reason\":");
-                    quoted(&unconfirmed.reason, &mut out);
-                }
-            },
-        }
+        grow_info(self.grow.as_ref(), &mut out);
         out.push('}');
         out
     }
@@ -2146,6 +2108,52 @@ impl Reboot for SystemReboot {
         let state_dir = self.data.join("board/slots");
         boot::note_request(&state_dir, self.calling.0);
         self.restarter.run(None).map_err(|_| Status::IO)
+    }
+}
+
+/// The data partition's grow for `info`: its state and the words or sizes behind it (see [`grow`]).
+pub(crate) fn grow_info(grow: Option<&grow::Task>, out: &mut String) {
+    match grow {
+        None => out.push_str(",\"grow_state\":\"none\""),
+        Some(grow) if grow.refused().is_some() => {
+            let refusal = grow.refused().unwrap_or_else(|| unreachable!());
+            out.push_str(&format!(",\"grow_state\":\"{}\"", refusal.state));
+            if let Some((target, max)) = refusal.sizes {
+                out.push_str(&format!(
+                    ",\"grow_target_bytes\":{target},\"grow_max_bytes\":{max}"
+                ));
+            }
+            out.push_str(",\"grow_reason\":");
+            quoted(&refusal.reason, out);
+        }
+        Some(grow) if grow.progress().is_some() => {
+            let progress = grow.progress().unwrap_or_else(|| unreachable!());
+            let state = if progress.overrun {
+                "resize-overrun"
+            } else {
+                "resizing"
+            };
+            out.push_str(&format!(
+                ",\"grow_state\":\"{state}\",\"grow_started_ms\":{},\"grow_elapsed_ms\":{},\"grow_bound_ms\":{},\"grow_target_bytes\":{}",
+                progress.started_ns / 1_000_000,
+                progress.elapsed_ns / 1_000_000,
+                progress.bound_ns / 1_000_000,
+                progress.target_bytes
+            ));
+        }
+        Some(grow) => match grow.unconfirmed() {
+            None => out.push_str(",\"grow_state\":\"pending\""),
+            Some(unconfirmed) => {
+                out.push_str(",\"grow_state\":\"grown-unconfirmed\",\"grow_baseline_bytes\":");
+                match unconfirmed.baseline {
+                    Some(bytes) => out.push_str(&bytes.to_string()),
+                    None => out.push_str("null"),
+                }
+                out.push_str(&format!(",\"grow_seen_bytes\":{}", unconfirmed.seen));
+                out.push_str(",\"grow_reason\":");
+                quoted(&unconfirmed.reason, out);
+            }
+        },
     }
 }
 

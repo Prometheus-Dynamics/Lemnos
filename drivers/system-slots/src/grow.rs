@@ -36,7 +36,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use lemnos_slot_store::mbr::{self, Plan, SECTOR};
+use lemnos_slot_store::mbr::{self, MIN_GAIN_SECTORS, Plan, SECTOR};
 use lemnos_slot_store::store;
 
 /// The data partition's entry in the table (0-based: entry 2 is index 1).
@@ -96,6 +96,8 @@ pub trait Disk {
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()>;
     /// The data filesystem's size as the kernel reports it on the mount (`statfs`), in bytes.
     fn fs_bytes(&self) -> io::Result<u64>;
+    /// Whether the data filesystem is mounted read-only (`/proc/mounts`).
+    fn data_read_only(&self) -> io::Result<bool>;
     /// The stored baseline record (`board/slots/grow` on the data partition), `None` when missing.
     fn read_record(&self) -> io::Result<Option<Vec<u8>>>;
     /// Replaces the stored record whole, durably: written, synced and renamed into place.
@@ -109,15 +111,13 @@ pub trait Disk {
 /// The media this runs on is at most about 16 GB, and the bench cards 64 GB.
 pub const MAX_BYTES: u64 = 256 << 30;
 
-/// A grow refused by name, before any write: the target and the limit, in bytes.
+/// A grow refused by name before any write: the named state (`grow-too-large`, `data-read-only`,
+/// `gpt-unavailable`), its words, and the sizes (target and limit, bytes) when there are two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
-    /// The data partition's length the disk's end would give (bytes).
-    pub target_bytes: u64,
-    /// The limit it exceeds (bytes), [`MAX_BYTES`].
-    pub max_bytes: u64,
-    /// The reason in words, starting with the name `grow-too-large`.
+    pub state: &'static str,
     pub reason: String,
+    pub sizes: Option<(u64, u64)>,
 }
 
 /// What one pass did with the filesystem.
@@ -164,12 +164,12 @@ const RECORD_MAGIC: &str = "lemnos-grow 1";
 
 /// The record: the magic, the baseline and the target, and a checksum of the three lines before it.
 /// A torn or foreign file does not decode, and the confirmation names it.
-fn encode_record(baseline: u64, target: u32) -> Vec<u8> {
+fn encode_record(baseline: u64, target: u64) -> Vec<u8> {
     let body = format!("{RECORD_MAGIC}\nbaseline {baseline}\ntarget {target}\n");
     format!("{body}sum {:016x}\n", fnv1a(body.as_bytes())).into_bytes()
 }
 
-fn decode_record(bytes: &[u8]) -> Option<(u64, u32)> {
+fn decode_record(bytes: &[u8]) -> Option<(u64, u64)> {
     let text = std::str::from_utf8(bytes).ok()?;
     let lines: Vec<&str> = text.lines().collect();
     let [magic, baseline, target, _] = lines.as_slice() else {
@@ -195,7 +195,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 enum Found {
     Missing,
     Corrupt,
-    Valid { baseline: u64, target: u32 },
+    Valid { baseline: u64, target: u64 },
 }
 
 fn found(disk: &dyn Disk) -> Result<Found, String> {
@@ -250,20 +250,18 @@ fn sector0(disk: &dyn Disk) -> Result<[u8; SECTOR], String> {
     Ok(sector)
 }
 
-/// One pass: makes the table, the kernel's partition and the filesystem all the disk's end, or
-/// says why it cannot. `Ok` means nothing is left to do.
-///
-/// # Errors
-///
-/// The reason in words, with nothing written past the step that failed. A refusal (a table that is
-/// not the expected layout) writes nothing at all.
-pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
-    let disk_sectors = disk
-        .disk_sectors()
-        .map_err(|e| format!("the disk's size can't be read: {e}"))?;
-    let mut sector = sector0(disk)?;
-    let table = mbr::entries(&sector).map_err(|r| r.to_string())?;
-    let start = u64::from(table[ENTRY].start);
+/// A refusal before any write: the named state, its words, and the sizes when there are two
+/// (the target and the limit, in bytes).
+fn refuse(state: &'static str, reason: String, sizes: Option<(u64, u64)>) -> Pass {
+    Pass::Refused(Refusal {
+        state,
+        reason,
+        sizes,
+    })
+}
+
+/// Partition 2's start as the kernel has it must be the table's.
+fn check_kernel_start(disk: &dyn Disk, start: u64) -> Result<(), String> {
     let kernel_start = disk
         .part_start()
         .map_err(|e| format!("partition 2's start can't be read: {e}"))?;
@@ -272,38 +270,28 @@ pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
             "the kernel has partition 2 at sector {kernel_start} and the table at {start}: nothing changed"
         ));
     }
-    let (_, label) = superblock(disk, start)?;
+    Ok(())
+}
+
+/// The data filesystem on partition 2 must be ext4 labelled [`LABEL`]; returns its size.
+fn check_label(disk: &dyn Disk, start: u64) -> Result<Super, String> {
+    let (sb, label) = superblock(disk, start)?;
     if label != LABEL {
         return Err(format!(
             "partition 2 is labelled {label:?}, not {LABEL:?}: nothing changed"
         ));
     }
+    Ok(sb)
+}
 
-    // 0. The baseline the confirmation compares with. It is stored before the table's first write,
-    // so a grow that has begun always has one: a restart after the resize finds it, and a record
-    // that is missing or does not decode is named by the confirmation, not taken for a new start.
-    let plan = mbr::plan_grow(&sector, ENTRY, disk_sectors).map_err(|r| r.to_string())?;
-    if let Plan::Grow { sectors } = plan {
-        let target_bytes = u64::from(sectors) * SECTOR as u64;
-        if target_bytes > MAX_BYTES {
-            return Ok(Pass::Refused(Refusal {
-                target_bytes,
-                max_bytes: MAX_BYTES,
-                reason: format!(
-                    "grow-too-large: the data partition would be {target_bytes} bytes ({} GiB) and the maximum is {MAX_BYTES} bytes (256 GiB): nothing changed; the boot continues with the partition as it is",
-                    target_bytes >> 30
-                ),
-            }));
-        }
-    }
-    let expected = match plan {
-        Plan::Grow { sectors } => sectors,
-        Plan::Done => mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY].sectors,
-    };
-    let baseline = match (found(disk)?, &plan) {
+/// Step 0, the baseline the confirmation compares with. It is stored before the table's first write,
+/// so a grow that has begun always has one: a restart after the resize finds it, and a record that is
+/// missing or does not decode is named by the confirmation, not taken for a new start.
+fn baseline_step(disk: &mut dyn Disk, expected: u64, grows: bool) -> Result<Baseline, String> {
+    Ok(match (found(disk)?, grows) {
         (Found::Valid { baseline, target }, _) if target == expected => Baseline::Stored(baseline),
         (Found::Valid { .. } | Found::Corrupt, _) => Baseline::Corrupt,
-        (Found::Missing, Plan::Grow { .. }) => {
+        (Found::Missing, true) => {
             let bytes = disk
                 .fs_bytes()
                 .map_err(|e| format!("the filesystem's size can't be read: {e}"))?;
@@ -311,37 +299,18 @@ pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
                 .map_err(|e| format!("the baseline can't be stored: {e}: nothing changed"))?;
             Baseline::Stored(bytes)
         }
-        (Found::Missing, Plan::Done) => Baseline::Missing,
-    };
+        (Found::Missing, false) => Baseline::Missing,
+    })
+}
 
-    // 1. The table.
-    match plan {
-        Plan::Grow { sectors } => {
-            let before = sector;
-            disk.write_at(COUNT_AT, &sectors.to_le_bytes())
-                .map_err(|e| format!("the table can't be written: {e}"))?;
-            disk.sync()
-                .map_err(|e| format!("the table can't be flushed: {e}"))?;
-            // The sector must be the old one with exactly the new count. Comparing the bytes that
-            // changed would refuse a write whose count shares a byte with the old one (the top byte
-            // of any count under 2^24 sectors is 0 both before and after).
-            let mut expect = before;
-            expect[COUNT_AT as usize..COUNT_AT as usize + 4]
-                .copy_from_slice(&sectors.to_le_bytes());
-            sector = sector0(disk)?;
-            if sector != expect {
-                let changed = mbr::changed_bytes(&before, &sector);
-                return Err(format!(
-                    "the table after the write is not the one written ({} bytes changed, at {changed:?}; the count is 4 bytes at {COUNT_AT}): the write is retried; nothing else was changed",
-                    changed.len(),
-                ));
-            }
-        }
-        Plan::Done => {}
-    }
-    let table_sectors = u64::from(mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY].sectors);
-
-    // 2. The kernel's partition.
+/// Step 2 and 3's kernel half: `BLKPG_RESIZE_PARTITION` to the table's length, when the kernel has
+/// less, and the kernel's view must then show it.
+fn kernel_step(
+    disk: &mut dyn Disk,
+    start: u64,
+    table_sectors: u64,
+    disk_sectors: u64,
+) -> Result<(), String> {
     let kernel = disk
         .part_sectors()
         .map_err(|e| format!("partition 2's size can't be read: {e}"))?;
@@ -372,8 +341,17 @@ pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
             ));
         }
     }
+    Ok(())
+}
 
-    // 3. The filesystem.
+/// Step 3, the filesystem, and the end of the pass. `Pass::Resized` when the kernel accepted the
+/// resize; `Pass::Done` (the record cleared) when the filesystem already reaches the table's end.
+fn fs_step(
+    disk: &mut dyn Disk,
+    start: u64,
+    table_sectors: u64,
+    baseline: Baseline,
+) -> Result<Pass, String> {
     let (sb, _) = superblock(disk, start)?;
     let want = table_sectors * SECTOR as u64 / sb.block_size;
     if sb.blocks > want {
@@ -397,6 +375,164 @@ pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
     disk.clear_record()
         .map_err(|e| format!("the stored baseline can't be cleared: {e}"))?;
     Ok(Pass::Done)
+}
+
+/// One pass: makes the table, the kernel's partition and the filesystem all the disk's end, or
+/// says why it cannot. `Ok` means nothing is left to do.
+///
+/// # Errors
+///
+/// The reason in words, with nothing written past the step that failed. A refusal (a table that is
+/// not the expected layout) writes nothing at all.
+pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
+    let disk_sectors = disk
+        .disk_sectors()
+        .map_err(|e| format!("the disk's size can't be read: {e}"))?;
+    if disk
+        .data_read_only()
+        .map_err(|e| format!("the data partition's mount can't be read: {e}"))?
+    {
+        return Ok(refuse(
+            "data-read-only",
+            "data-read-only: /data is mounted read-only, so its baseline can't be stored and its filesystem can't grow: nothing changed"
+                .into(),
+            None,
+        ));
+    }
+    let mut sector = sector0(disk)?;
+    let mut second = [0u8; SECTOR];
+    disk.read_at(SECTOR as u64, &mut second)
+        .map_err(|e| format!("the disk's second sector can't be read: {e}"))?;
+    if &second[..8] == b"EFI PART" {
+        return grow_gpt(disk, disk_sectors);
+    }
+    let table = mbr::entries(&sector).map_err(|r| r.to_string())?;
+    let start = u64::from(table[ENTRY].start);
+    check_kernel_start(disk, start)?;
+    check_label(disk, start)?;
+
+    let plan = mbr::plan_grow(&sector, ENTRY, disk_sectors).map_err(|r| r.to_string())?;
+    let grows = matches!(plan, Plan::Grow { .. });
+    let target = match plan {
+        Plan::Grow { sectors } => u64::from(sectors),
+        Plan::Done => u64::from(table[ENTRY].sectors),
+    };
+    if grows && target * SECTOR as u64 > MAX_BYTES {
+        return Ok(too_large(target * SECTOR as u64));
+    }
+    let baseline = baseline_step(disk, target, grows)?;
+
+    // 1. The table: the four bytes of the entry's count, nothing else.
+    if let Plan::Grow { sectors } = plan {
+        let before = sector;
+        disk.write_at(COUNT_AT, &sectors.to_le_bytes())
+            .map_err(|e| format!("the table can't be written: {e}"))?;
+        disk.sync()
+            .map_err(|e| format!("the table can't be flushed: {e}"))?;
+        // The sector must be the old one with exactly the new count. Comparing the bytes that
+        // changed would refuse a write whose count shares a byte with the old one (the top byte
+        // of any count under 2^24 sectors is 0 both before and after).
+        let mut expect = before;
+        expect[COUNT_AT as usize..COUNT_AT as usize + 4].copy_from_slice(&sectors.to_le_bytes());
+        sector = sector0(disk)?;
+        if sector != expect {
+            let changed = mbr::changed_bytes(&before, &sector);
+            return Err(format!(
+                "the table after the write is not the one written ({} bytes changed, at {changed:?}; the count is 4 bytes at {COUNT_AT}): the write is retried; nothing else was changed",
+                changed.len(),
+            ));
+        }
+    }
+    let table_sectors = u64::from(mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY].sectors);
+    kernel_step(disk, start, table_sectors, disk_sectors)?;
+    fs_step(disk, start, table_sectors, baseline)
+}
+
+/// The refusal for a target above [`MAX_BYTES`].
+fn too_large(target_bytes: u64) -> Pass {
+    refuse(
+        "grow-too-large",
+        format!(
+            "grow-too-large: the data partition would be {target_bytes} bytes ({} GiB) and the maximum is {MAX_BYTES} bytes (256 GiB): nothing changed; the boot continues with the partition as it is",
+            target_bytes >> 30
+        ),
+        Some((target_bytes, MAX_BYTES)),
+    )
+}
+
+/// A GPT disk's grow. The table is read from the primary, or from the backup when the primary is
+/// damaged. A table the grow cannot handle is the named state `gpt-unavailable`, before any write.
+fn grow_gpt(disk: &mut dyn Disk, disk_sectors: u64) -> Result<Pass, String> {
+    let loaded = match gpt::load(disk, disk_sectors) {
+        Ok(loaded) => loaded,
+        Err(why) => {
+            return Ok(refuse(
+                "gpt-unavailable",
+                format!("gpt-unavailable: {why}: nothing changed"),
+                None,
+            ));
+        }
+    };
+    let (start, old_end, type_guid) = gpt::entry(&loaded.array, ENTRY);
+    if type_guid == [0u8; 16] {
+        return Ok(refuse(
+            "gpt-unavailable",
+            "gpt-unavailable: partition 2 is unused in the GPT: nothing changed".into(),
+            None,
+        ));
+    }
+    check_kernel_start(disk, start)?;
+    check_label(disk, start)?;
+    if let Some(why) = gpt::not_last(&loaded.array, ENTRY, start) {
+        return Ok(refuse(
+            "gpt-unavailable",
+            format!("gpt-unavailable: {why}: nothing changed"),
+            None,
+        ));
+    }
+    let target_end = gpt::target_end(disk_sectors);
+    let grows = target_end >= old_end + MIN_GAIN_SECTORS;
+    let target_sectors = if grows {
+        target_end + 1 - start
+    } else {
+        old_end + 1 - start
+    };
+    if grows {
+        if target_sectors * SECTOR as u64 > MAX_BYTES {
+            return Ok(too_large(target_sectors * SECTOR as u64));
+        }
+        if loaded.from_backup {
+            return Ok(refuse(
+                "gpt-unavailable",
+                "gpt-unavailable: the primary GPT is damaged and the backup still holds the old table, so the grow can't start from it: nothing changed".into(),
+                None,
+            ));
+        }
+        if loaded.header.alt_lba <= old_end + gpt::ARRAY_SECTORS
+            || loaded.header.alt_lba >= disk_sectors
+        {
+            return Ok(refuse(
+                "gpt-unavailable",
+                format!(
+                    "gpt-unavailable: the backup GPT is at LBA {}, not past partition 2's end {old_end} inside the disk: nothing changed",
+                    loaded.header.alt_lba
+                ),
+                None,
+            ));
+        }
+    }
+    let baseline = baseline_step(disk, target_sectors, grows)?;
+    let table_sectors = if grows {
+        gpt::grow_table(disk, &loaded, target_end, disk_sectors)?;
+        target_sectors
+    } else {
+        if loaded.from_backup {
+            gpt::repair_primary(disk, &loaded, disk_sectors)?;
+        }
+        old_end + 1 - start
+    };
+    kernel_step(disk, start, table_sectors, disk_sectors)?;
+    fs_step(disk, start, table_sectors, baseline)
 }
 
 /// The driver's retry state for a grow that has not finished.
@@ -845,6 +981,20 @@ impl Disk for Real {
         lemnos_linux_sys::statfs::total_bytes(&self.data)
     }
 
+    fn data_read_only(&self) -> io::Result<bool> {
+        let mounts = fs::read_to_string("/proc/mounts")?;
+        let mount = self.data.to_string_lossy();
+        // The last line for the mount point is the one in force.
+        let mut read_only = false;
+        for line in mounts.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 4 && fields[1] == mount {
+                read_only = fields[3].split(',').any(|option| option == "ro");
+            }
+        }
+        Ok(read_only)
+    }
+
     fn read_record(&self) -> io::Result<Option<Vec<u8>>> {
         match fs::read(self.record()) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -868,6 +1018,8 @@ impl Disk for Real {
         }
     }
 }
+
+mod gpt;
 
 #[cfg(test)]
 mod tests;

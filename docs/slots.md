@@ -1632,6 +1632,81 @@ eMMC's speed and its sector atomicity on a power cut are not measured.
 **Not proved here.** That the card or eMMC writes one sector whole on a power cut, and the board's own timing.
 The board check is not written yet (no file in `testing/board-runs/`), and the test seam shares none of them with the kernel.
 
+**The image-builder contract.** The builder makes the data filesystem with 4 KiB blocks (`mke2fs -b 4096`),
+one inode per 16 KiB (`-i 16384`), `meta_bg` with `resize_inode` off (`-O meta_bg,^resize_inode`: the two cannot both be on), 256-byte inodes (`-I 256`), no reserved blocks
+(`-m 0`), a 4 MiB journal (`-J size=4`) and the label `lemnos-data`. The first boot grows it online through
+meta_bg: groups are added to a meta_bg filesystem without the reserved GDT blocks that cap the non-meta_bg
+shape. The QEMU check builds exactly this shape.
+
+**GPT disks.** The grow reads the table as GPT when sector 1 starts `EFI PART`, and the MBR path is unchanged
+otherwise. The data partition must be entry 2 and the last used entry. The usable area ends 34 sectors before
+the disk's end, and the grown end is the last whole MiB of it. The writes are, in order, each synced before
+the next (`grow/gpt.rs::grow_table`):
+
+1. zero the stale backup (its array and header at the primary's alternate LBA), which lies past the old
+   partition's end: the primary still reads the old table;
+2. the new backup's array at the new end;
+3. the new backup's header: the backup now reads as the new table;
+4. the primary's array: its CRC no longer matches the old header, so the backup is read;
+5. the primary's header, the commit. It is read back and must hold the new end.
+
+Every write is bounded to its own sectors before it is made. A cut after any write leaves the old table or the
+new one readable, never neither, and the next pass finishes the grow from whichever it finds. A primary that is
+damaged with a new backup is repaired from the backup (`repair_primary`). Tests:
+`grow/tests.rs::a_gpt_last_partition_grows_and_both_copies_move_to_the_new_end`,
+`...::a_stale_backup_gpt_past_the_old_end_is_zeroed_before_the_grow_writes`,
+`...::a_gpt_grow_cut_after_any_write_reads_as_the_old_table_or_the_new_one` (cuts after writes 1 to 12, then a
+restart that finishes the grow), `...::a_damaged_primary_is_repaired_from_the_backup_when_the_table_is_already_grown`.
+Not done: the protective MBR's size field is left as it was (readers do not use it for the partition), and a
+stale ext4 superblock elsewhere past the end is not scanned for; only the stale backup is cleared.
+
+**Named states.** A grow that cannot run in this start is named in `info` as `grow_state` with `grow_reason`, is
+noted once, and is not retried until the next start:
+
+- `grow-too-large`: the target is above 256 GiB; `grow_target_bytes` and `grow_max_bytes` are given.
+- `data-read-only`: `/data` is mounted read-only (`/proc/mounts`); nothing is written.
+- `gpt-unavailable`: the GPT is unusable with a reason: neither header reads, partition 2 is unused, a used
+  entry starts after partition 2, the backup is not past partition 2's end, or the primary is damaged while the
+  backup still holds the old table.
+
+Tests: `grow/tests.rs::a_gpt_with_no_readable_copy_is_the_named_unavailable_state_and_nothing_is_written`,
+`...::a_gpt_partition_two_that_is_not_the_last_is_the_named_unavailable_state`,
+`...::a_read_only_data_partition_is_a_named_state_and_nothing_is_written`, and for the `info` keys
+`...::the_grow_too_large_info_keys_name_the_state_the_sizes_and_the_reason`.
+
+**Measured in QEMU (NVMe-backed, not on a board).** The check is `testing/qemu/run-grow-live.py --table mbr|gpt`
+with the guest init `testing/crates/grow-live-init`. Each case copies partition 2 out of the image and passes only
+with `e2fsck -fy` exit 0 after the journal replay, the full partition as the block count, and no baseline record.
+
+| Case | Table | Disk | Result | Resize, driver clock | Probe: calls, max latency, max gap | e2fsck -fn / -fy | Blocks |
+|---|---|---|---|---|---|---|---|
+| refuse | GPT | 2 TiB | `grow-too-large` at 0.38 s, nothing written | none | 5, 1.6 ms, 101.5 ms | 0 / 0 | 9728 (unchanged) |
+| full | GPT | 256 GiB | finished | 0.38 s to 3.43 s (3.05 s) | 33, 9.6 ms, 112.9 ms | 0 / 0 | 67087360 |
+| reset at 0.2 s | GPT | 256 GiB | two boots, finished on the second | cut at 0.22 s | 33, 4.6 ms, 109.9 ms | 0 / 0 | 67087360 |
+| reset at 2.0 s | GPT | 256 GiB | two boots, finished on the second | cut at 2.04 s | not in the summary (see the console log) | 0 / 0 | 67087360 |
+| full | GPT | 64 GiB | finished | 2.43 s to 4.67 s (2.24 s) | 27, 2.4 ms, 102.2 ms | 0 / 0 | 16755712 |
+| full | MBR | 256 GiB | finished | 4.51 s to 7.21 s (2.7 s) | not recorded in this run | 0 / 0 | 67087616 |
+| reset at 2.0 s | MBR | 256 GiB | two boots, finished on the second | second boot 0.30 s to 2.36 s | 23, 2.7 ms, 106.0 ms | 0 / 0 | 67087616 |
+
+Each run is one sample on a shared host, so the times vary (the MBR 256 GiB run took 1.8 s in GROW2 and 2.7 s
+here). In the 64 GiB GPT run the slots device's first bind timed out at start ("bind did not finish in time");
+it retried and the grow still finished, so that run's health reads `Failed("retrying")` at the end. The e2fsck
+output for every case is kept with the run (`e2fsck-fn.txt`, `e2fsck-fy.txt`). The GPT grown end is the last
+whole MiB before the disk's usable end, so its block count is one MiB shorter than the MBR's (67087360 against
+67087616 at 256 GiB).
+
+**Finding for the kernel (parked, not fixed here).** A reset in the middle of an online resize at 2 TiB, on the
+pinned kernel 7.3.3, leaves a journal that replays into an inconsistent filesystem: after replay `e2fsck -fy`
+finds "Last group block bitmap uninitialized" and wrong free block and inode counts, although `e2fsck -fn`
+(which does not replay) calls it clean. On the next resize the kernel hits `kernel BUG at fs/ext4/resize.c:546`
+(a `BUG_ON` in `setup_new_flex_group_blocks`: `group_data[0].group != s_groups_count`), on the calling thread,
+which never returns. This is why the cap stays at 256 GiB. Three mid-resize resets at 256 GiB came back clean;
+that is evidence, not a proof. The evidence is kept with GROW2 (`tmp/GROW2/evidence`): the console log, the
+replayed `e2fsck` output and the kernel's source line.
+
+**Not proved here.** The card or eMMC writes one sector whole on a power cut, and the write order's safety
+depends on it. The board check is `testing/board-runs/GROW.md`, untested on board.
+
 ### The slot layout (Pi firmware form)
 
 `contracts/slot-layout.toml` (version 5) lists every file of a slot's bay set (`slots/bayN/`) on the
