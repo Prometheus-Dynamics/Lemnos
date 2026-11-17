@@ -1254,6 +1254,46 @@ static void test_embedded(int pool_fd, const char *heap)
 	close(epool);
 }
 
+/*
+ * A STOP with nothing in flight: the fake acknowledges the FORCE, and that acknowledgement is the stop's
+ * alone. It counts no frame, and the next start's count and sequence are the same as if no stop had come.
+ */
+static void test_stop_nothing_in_flight(int pool_fd)
+{
+	struct stream s;
+	struct frame f;
+	struct lemnos_rp1_csi2_start a;
+	struct lemnos_rp1_csi2_frame_starts fs;
+	struct lemnos_rp1_csi2_info i;
+
+	CHECK(!stream_open(&s, pool_fd), "stop idle: stream made");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "stop idle: START");
+	CHECK(!stop(), "stop idle: STOP with nothing in flight returns");
+	i = info();
+	CHECK(i.frames == 0 && i.written == 0 && i.errors == 0 && i.dropped == 0,
+	      "stop idle: the stop counts no frame (frames %llu written %llu errors %llu dropped %llu)",
+	      (unsigned long long)i.frames, (unsigned long long)i.written,
+	      (unsigned long long)i.errors, (unsigned long long)i.dropped);
+	stream_close(&s);
+
+	CHECK(!stream_open(&s, pool_fd), "stop idle: stream made again");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "stop idle: START again");
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == 0, "stop idle: the next start's count is empty (frames %llu)",
+	      (unsigned long long)fs.frames);
+	fire(TCSI_FS);
+	fs = frame_starts();
+	CHECK(fs.valid && fs.frames == 1, "stop idle: the first start is counted once (frames %llu)",
+	      (unsigned long long)fs.frames);
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f) && f.sequence == 0, "stop idle: its sequence is 0 (sequence %llu)",
+	      (unsigned long long)f.sequence);
+	CHECK(!stop(), "stop idle: STOP");
+	stream_close(&s);
+}
+
 int main(int argc, char **argv)
 {
 	const char *dev, *heap, *unbind, *block;
@@ -1303,6 +1343,7 @@ int main(int argc, char **argv)
 	test_own_buffers(heap, dev);
 	test_embedded(pool_fd, heap);
 	test_stop_waits(pool_fd);
+	test_stop_nothing_in_flight(pool_fd);
 	test_window(pool_fd);
 	test_close_node(node, pool_fd);
 	test_unbind(node, unbind, dev, pool_fd);
