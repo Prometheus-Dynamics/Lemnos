@@ -82,3 +82,47 @@ stand-in the IMU and power rows and the USB result are not measured, as expected
 - IMU 200 Hz row: needs the IMU running (see above).
 - CPU at 50 Hz and 200 Hz: needs the IMU subscriber, so it waits on the IMU.
 - usb.cycle: needs the port-power cause.
+
+## Rerun 4 (2026-11-17, rev 8642b8e8 + the harness commits to 732cb53e): the load rows are measured
+
+Records: `RAZE/bench-run/` on the HDD scratch (run4.log, board-rows2.tsv, board-logs-all.tar: the whole remote run
+directory, with board-side.sh, the IMU watch output and the daemon log).
+
+What was wrong, and is now fixed:
+- The IMU watch asked for the item `acceleration`. The IMU's items are `acceleration.x`, `.y`, `.z` (its describe
+  output: `value acceleration.x [m/s²]`). The watch failed at once with `no item "acceleration"`, so no IMU row could
+  ever be measured. Fixed in 732cb53e.
+- The USB power lines in the bench board file were on `gpiochip0`, which this board does not have. The board's
+  GPIO chips are 11 to 15; the USB power lines are on `gpiochip15` (the RP1 pinctrl, lines 16 and 20: `gpio-16`,
+  `gpio-20` in /sys/kernel/debug/gpio). Fixed in 732cb53e (`bus = "gpiochip15:16"`, `"gpiochip15:20"`).
+
+Rows:
+- IMU 200 Hz (`lemnos-ctl watch imu acceleration.x --period-ms 5 --count 9000`): delivered 9000 of 9000, misses 0,
+  largest gap 6.17 ms, repeats 273 (readings equal to the one before). Dev: 9000 or 9001 of 9000 delivered, no misses,
+  largest gap 5.1-5.2 ms (TODO.md at ed43ff3, item 8). Delivery and misses agree with dev; the largest gap is about 1 ms
+  longer on next. Read time is not exported on next, so it is not measured.
+- CPU idle (30 s, no subscriber): 0.00 %. Dev: 0.7-0.8 %.
+- CPU at 50 Hz (30 s, a subscriber at 20 ms): 0.53 %. Dev: 1.4-1.5 %.
+- CPU at 200 Hz (45 s, the 200 Hz IMU run): 1.51 %. Dev: 3.1-3.2 % (5 ms and 1 ms subscribers).
+  Next is about half of dev's CPU at each load. The subscribers are the same periods as dev's, but the method is
+  /proc utime+stime over 30 or 45 s windows, not dev's own; the difference is recorded, not explained.
+- Power readings: values only; the power monitor is degraded on this board (chip not verified), not a reading.
+- Threads 13, PSS 2932 kB.
+
+What the startup list showed: at the moment the socket appears (t=0), the IMU reads degraded (gyroscope: waiting
+for the chip to reset) and the power monitor may read degraded (chip not verified). Both are `running ok` within
+0.1 s and stay ok for the 30 s capture. No flip after bind was found (RAZE/flip/, three captures). The bench rows
+above use the state after that start.
+
+USB-A power (usb.cycle): not measured, for the reason below. Step 2 capture (RAZE/flip/usbout/):
+- The line `gpio-20` (usb-a-power) is `out hi`, consumer `lemnos`, before the switch.
+- `lemnos-ctl off usb-a-power` releases the line (no consumer and no level shown in debugfs) for the whole off window.
+- `on` drives it `out hi` again.
+- The sysfs USB device count stays at 2 for the whole 3 s off window (the Creative webcam on bus 3 and the 1a6e:089a
+  device on bus 1 are not removed).
+- VBUS state is not exposed on the board. So whether the port power was cut is NOT verified. Needs a physical check
+  or a VBUS probe before this row can say anything.
+- usb.cycle in the harness stays `not_measured` (devices did not drop).
+
+Restore: both units active, failed 0, helios-engine active, failsafe stopped and removed; the board's remote run
+directory removed. Usb1 profile deleted.
