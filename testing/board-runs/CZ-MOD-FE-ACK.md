@@ -37,6 +37,17 @@ accounting, and no hardware shape reaches the frame path through a stop. The sto
 start's sequence, not the gate. A late FE_ACK after START is not a stop's acknowledgement and is not gated:
 the board check (outcome 4) is what would show it.
 
+## Late FE_ACK after START (a stop wedged, its DMA stopped later)
+No reset of the CSI-2 channel that discards in-flight DMA is documented for this block. START writes CH_CTRL = 0
+and dphy_start resets the host, but neither is specified to abort a running DMA, so this is not relied on.
+What the driver does instead: a wedged receiver (and a wedged PiSP front end on it) refuses every START with
+EIO until it is unbound (lrc START, l->wedged; lpf START, l->wedged). So no START follows a wedge on that
+channel, and a FE_ACK from its DMA can arrive only while the receiver is not streaming, where no frame is
+counted. kernel/test/lemnos_rp1_csi2_check.c "late: the late FE_ACK counts no frame" delivers one such late
+FE_ACK (fake TCSI_IOC_LATE_ACK, FAKE-ONLY) and checks the counts and the refusal. The fake cannot show a count
+before a fix, because the driver never counts it: the test is a regression check, not a fail-before test.
+Whether the board acks a FORCE whose DMA never stopped is outcome 4 above.
+
 ## Recording
 - Put the outcome (A or B, with N and B) in testing/board-runs/CZ-MOD-FE-ACK.md under "Results", with the
   kernel and module revision. Outcome B blocks M1 until the assumption is replaced by a measured one.
