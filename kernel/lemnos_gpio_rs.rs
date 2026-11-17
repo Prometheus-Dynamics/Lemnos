@@ -250,7 +250,7 @@ unsafe extern "C" fn lem_line_edge(_irq: c_int, data: *mut c_void) -> bindings::
     // SAFETY: the caller's contract.
     let l = unsafe { &*(data as *const LemLine) };
     l.stamp.store(ktime_get_ns(), Ordering::Relaxed);
-    bindings::irqreturn_IRQ_WAKE_THREAD
+    bindings::irqreturn::IRQ_WAKE_THREAD
 }
 
 /// The line's edge handler, thread context: queues the edge with its stamp and wakes the readers.
@@ -268,7 +268,7 @@ unsafe extern "C" fn lem_line_thread(_irq: c_int, data: *mut c_void) -> bindings
         ns => ns,
     };
     if level < 0 {
-        return bindings::irqreturn_IRQ_HANDLED;
+        return bindings::irqreturn::IRQ_HANDLED;
     }
     {
         let mut q = l.events.lock();
@@ -285,7 +285,7 @@ unsafe extern "C" fn lem_line_thread(_irq: c_int, data: *mut c_void) -> bindings
         }
     }
     l.wait.notify_all();
-    bindings::irqreturn_IRQ_HANDLED
+    bindings::irqreturn::IRQ_HANDLED
 }
 
 /// Stops the line's edge interrupt, if one is requested. Called with the configuration held.
