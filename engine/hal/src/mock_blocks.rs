@@ -798,8 +798,6 @@ struct UsbDeviceState {
     iso_stream: Option<(u8, u8, u16, u32)>,
     /// Transfers handed over by `iso_in_next`.
     iso_taken: u64,
-    /// Errors the next `iso_in_next` calls return, in order, instead of a transfer.
-    iso_errors: VecDeque<ErrorKind>,
     written: Vec<(u8, Vec<u8>)>,
     controls: Vec<ControlSetup>,
     /// Interfaces a kernel driver holds.
@@ -846,12 +844,6 @@ impl MockUsbDevice {
     /// How many transfers `iso_in_next` has handed over.
     pub fn iso_taken(&self) -> u64 {
         with(&self.state, |s| s.iso_taken)
-    }
-
-    /// The next `iso_in_next` fails with `error` and hands nothing over. Queued errors go in
-    /// order.
-    pub fn fail_next_iso(&self, error: ErrorKind) {
-        with(&self.state, |s| s.iso_errors.push_back(error));
     }
 
     pub fn written(&self) -> Vec<(u8, Vec<u8>)> {
@@ -1088,9 +1080,6 @@ impl UsbDevice for MockUsbDevice {
             let room = usize::from(count) * bytes as usize;
             if packets.len() != usize::from(count) || data.len() < room {
                 return Err(ErrorKind::InvalidInput);
-            }
-            if let Some(error) = s.iso_errors.pop_front() {
-                return Err(error);
             }
             for (packet, slot) in packets.iter_mut().zip(data.chunks_mut(bytes as usize)) {
                 packet.capacity = bytes;
@@ -1974,15 +1963,37 @@ mod tests {
         assert_eq!((packets[1].received, packets[1].ok), (0, false));
         assert_eq!(packets[1].capacity, 2);
         assert_eq!(iso, [7, 7, 0, 0]);
-        probe.fail_next_iso(ErrorKind::Failed);
-        assert_eq!(
-            device.iso_in_next(&mut iso, &mut packets, WAIT),
-            Err(ErrorKind::Failed)
-        );
         assert_eq!(probe.iso_taken(), 1);
         device.iso_in_stop().unwrap();
         assert_eq!(probe.iso_stream(), None);
         device.iso_in_stop().unwrap();
+    }
+
+    /// The mock's isochronous errors are the forms `backends/linux` gives for the same calls. A
+    /// wrong shape or no stream is `InvalidInput` (the usbfs ioctl's EINVAL); a device that has left
+    /// is `Unavailable` (ENODEV). A mock error no real call returns would let a driver handle a
+    /// failure that cannot happen, so the set is pinned to the Linux mapping here.
+    #[test]
+    fn the_iso_errors_the_mock_gives_are_the_ones_the_linux_backend_maps() {
+        assert_eq!(ErrorKind::from_errno(22), ErrorKind::InvalidInput);
+        assert_eq!(ErrorKind::from_errno(19), ErrorKind::Unavailable);
+        let mut device = MockUsbDevice::new(&[]);
+        let mut iso = [0u8; 4];
+        let mut packets = [IsoPacket::default(); 2];
+        assert_eq!(
+            device.iso_in_next(&mut iso, &mut packets, WAIT),
+            Err(ErrorKind::InvalidInput)
+        );
+        device.iso_in_start(4, 4, 2, 2).unwrap();
+        assert_eq!(
+            device.iso_in_next(&mut iso[..3], &mut packets, WAIT),
+            Err(ErrorKind::InvalidInput)
+        );
+        device.unplug();
+        assert_eq!(
+            device.iso_in_next(&mut iso, &mut packets, WAIT),
+            Err(ErrorKind::Unavailable)
+        );
     }
 
     #[test]

@@ -1170,7 +1170,15 @@ fn run(args: &Args) -> Result<bool, String> {
             Some(Ok(done)) if skip_latch => {
                 out(format_args!("sensor latch: exit {} ({why})", done.status))
             }
-            Some(Ok(done)) => check(false, format!("sensor latch failed: exit {}", done.status)),
+            Some(Ok(done)) => check(
+                false,
+                format!(
+                    "sensor latch failed: exit {}: {}{}",
+                    done.status,
+                    String::from_utf8_lossy(&done.stdout).trim(),
+                    String::from_utf8_lossy(&done.stderr).trim()
+                ),
+            ),
             Some(Err(e)) => check(false, format!("sensor latch did not finish: {e}")),
         }
     }
