@@ -1502,6 +1502,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
  "lemnos-sim",
+ "lemnos-wire",
 ]
 
 [[package]]
@@ -1661,6 +1662,7 @@ dependencies = [
  "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-measure",
+ "lemnos-wire",
 ]
 
 [[package]]
