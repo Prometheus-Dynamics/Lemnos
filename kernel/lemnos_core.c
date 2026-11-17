@@ -37,6 +37,23 @@
 
 #include "lemnos.h"
 #include "lemnos_internal.h"
+
+/*
+ * With the Rust owner (kernel/lemnos_entry.rs), the descriptors below are global: the Rust half
+ * registers them. Otherwise they are static, as before.
+ */
+#ifdef LEMNOS_RUST_OWNER
+#define LEM_STATIC
+#else
+#define LEM_STATIC static
+#endif
+#ifdef LEMNOS_RUST_OWNER
+#define LEM_INIT
+#define LEM_EXIT
+#else
+#define LEM_INIT __init
+#define LEM_EXIT __exit
+#endif
 #include "lemnos_pisp_be.h"
 #include "lemnos_gsdma.h"
 #include "lemnos_regjob_priv.h"
@@ -781,7 +798,7 @@ static const struct file_operations lem_fops = {
 	.llseek = noop_llseek,
 };
 
-static struct miscdevice lem_misc = {
+LEM_STATIC struct miscdevice lem_misc = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = LEM_NAME,
 	.fops = &lem_fops,
@@ -946,7 +963,7 @@ static void lem_remove(struct platform_device *pdev)
 }
 
 /* No match table: bound only through driver_override. */
-static struct platform_driver lem_driver = {
+LEM_STATIC struct platform_driver lem_driver = {
 	.probe = lem_probe,
 	.remove = lem_remove,
 	.driver = {
@@ -954,7 +971,8 @@ static struct platform_driver lem_driver = {
 	},
 };
 
-static int __init lem_init(void)
+#ifndef LEMNOS_RUST_OWNER
+static int LEM_INIT lem_init(void)
 {
 	int ret = lem_bus_init();
 
@@ -979,7 +997,7 @@ bus:
 	return ret;
 }
 
-static void __exit lem_exit(void)
+static void LEM_EXIT lem_exit(void)
 {
 	misc_deregister(&lem_misc);
 	lem_rp1_csi2_unregister();
@@ -987,9 +1005,13 @@ static void __exit lem_exit(void)
 	lem_bus_exit();
 }
 
+#endif
+
+#ifndef LEMNOS_RUST_OWNER
 module_init(lem_init);
 module_exit(lem_exit);
 
 MODULE_DESCRIPTION("Lemnos: platform blocks for drivers in user space");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("DMA_BUF");
+#endif
