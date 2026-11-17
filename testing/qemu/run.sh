@@ -17,6 +17,10 @@ KERNEL="${KERNEL:-/boot/vmlinuz-$release}"
 CC="${CC:-gcc}"
 JOBS="${JOBS:-2}"
 
+# A Rust kernel is built with clang, so every module built against it is too (LLVM=1).
+llvm=()
+if grep -q '^CONFIG_RUST=y' "$KDIR/.config" 2>/dev/null; then llvm=(LLVM=1); fi
+
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 
@@ -24,11 +28,13 @@ trap 'rm -rf -- "$work"' EXIT
 cp -r "$repo/kernel" "$work/kernel"
 cp -r "$here/test_block" "$work/test_block"
 cp -r "$here/mock_rp1" "$work/mock_rp1"
-make -s -j"$JOBS" -C "$KDIR" M="$work/test_block" modules
+make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/test_block" modules
 # The real PIO driver only exists on one family of boards, so this guest gets a stand-in for it.
-make -s -j"$JOBS" -C "$KDIR" M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
-make -s -j"$JOBS" -C "$KDIR" M="$work/kernel" CONFIG_RP1_PIO=m \
+make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
+make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel" CONFIG_RP1_PIO=m \
   LEMNOS_EXTRA_CFLAGS="-I$work/mock_rp1" KBUILD_EXTRA_SYMBOLS="$work/mock_rp1/Module.symvers" modules
+# The Rust half's skeleton (kernel/rust): built beside the C module, loaded by init.c.
+make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel/rust" modules
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
@@ -68,7 +74,7 @@ cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-shm-bell-check" "$roo
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-nand-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-orion-link-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-orion" "$root/"
-cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
+cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$work/kernel/rust/lemnos_rs.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.
 # Installed modules only fit this machine's kernel, so they're only looked at when that's what boots.
