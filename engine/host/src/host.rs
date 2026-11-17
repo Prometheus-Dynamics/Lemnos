@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
-    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock, Item,
-    HostOwned, I2c, InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
+    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
+    HostOwned, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
     RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Spi,
     Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,

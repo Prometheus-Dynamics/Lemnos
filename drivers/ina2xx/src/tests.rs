@@ -580,7 +580,10 @@ fn a_bus_reading_below_the_carried_10_8_volt_limit_is_a_warning() {
     let mut driver = bind(&mut board, &config).unwrap();
     let reading = PowerMonitor::read(&mut driver).unwrap();
     close(reading.bus_v, 10.9);
-    assert!(f64::from(reading.bus_v) >= limit, "10.9 V is not below {limit}");
+    assert!(
+        f64::from(reading.bus_v) >= limit,
+        "10.9 V is not below {limit}"
+    );
 }
 
 /// Every electrical item is a real number in its unit: exponent 0, with real limits. Exponent -9
