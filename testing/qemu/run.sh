@@ -41,10 +41,10 @@ mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -pthread -I"$work/test_block")
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_pio_check lemnos_stream_check lemnos_rp1_csi2_check lemnos_gsdma_check lemnos_vip_check lemnos_board_check lemnos_regjob_check lemnos_regjob_isp_check; do
+for check in lemnos_check lemnos_pio_check lemnos_stream_check lemnos_rp1_csi2_check lemnos_gsdma_check lemnos_vip_check lemnos_regjob_check lemnos_regjob_isp_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
-# lemnos_board_check is built so it keeps compiling; it runs only on a board (C6).
+# lemnos_board_check is Rust now (CZ-GUEST-2): built by cargo above so it keeps compiling; it runs only on a board.
 # Its uAPI header is the kernel's own.
 source="$KDIR/source/include/uapi/linux/media/raspberrypi"
 [[ -d "$source" ]] || source="$KDIR/include/uapi/linux/media/raspberrypi"
@@ -65,7 +65,7 @@ link_check_features=()
 if [[ "${LINK_CHECK_TRACE:-0}" == 1 ]]; then
   link_check_features=(--features lemnos-orion-link-check/trace)
 fi
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
@@ -88,6 +88,8 @@ cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-power-check" "$root/l
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-irq-check" "$root/lemnos_irq_check"
 # The bus check is Rust (CZ-GUEST-2); init runs it as /lemnos_bus_check.
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-bus-check" "$root/lemnos_bus_check"
+# The board check is Rust (CZ-GUEST-2). It is built so it keeps compiling; it runs only on a board.
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-board-check" "$root/lemnos_board_check"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$work/kernel/rust/lemnos_rs.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.

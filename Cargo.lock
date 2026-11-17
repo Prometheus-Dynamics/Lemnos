@@ -974,8 +974,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lemnos-allwinner-fel-blob"
+name = "lemnos-board-check"
 version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
 
 [[package]]
 name = "lemnos-bmi088-batch"
@@ -1490,14 +1494,6 @@ name = "lemnos-driver-a733-video-sys"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
- "libc",
-]
-
-[[package]]
-name = "lemnos-driver-allwinner-fel-sys"
-version = "2.0.1-dev"
-dependencies = [
- "lemnos-allwinner-fel-blob",
  "libc",
 ]
 
@@ -2648,9 +2644,6 @@ name = "lemnos-linux-sys"
 version = "2.0.1-dev"
 dependencies = [
  "libc",
- "shm-ring",
- "shm-ring-buffers",
- "shm-ring-holds",
 ]
 
 [[package]]

@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-board-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The board's power and thermal check: a real block's clock, thermal zone and events, changing as little as it can (CZ-GUEST-2 port of lemnos_board_check.c; built, runs on a board only)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
