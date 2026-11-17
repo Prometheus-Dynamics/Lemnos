@@ -183,3 +183,41 @@ fn a_wrong_kind_is_refused_by_the_check() {
     let error = <GpioPowerSwitch as Driver>::check_config(&Config::new(&entries)).unwrap_err();
     assert_eq!(error.key, "active_low");
 }
+
+/// The off path of a switch built into a host is `Lifecycle::off`: it drives the off level and
+/// keeps the line (one configuration, no rebind), and `on` drives the on level the same way.
+/// Fails before the fix: `off` was not implemented, so the host dropped the line and the pin kept
+/// its level (a released mock line keeps its last value).
+/// drivers/gpio-power-switch/src/tests.rs::off_drives_the_line_low_and_holds_it
+#[test]
+fn off_drives_the_line_low_and_holds_it() {
+    let (mut board, line, _) = wired(false);
+    let mut switch = bind(&mut board, &[]).unwrap();
+    assert_eq!(line.level(), Some(true));
+    Lifecycle::off(&mut switch).unwrap();
+    assert_eq!(line.level(), Some(false), "off drives the pin low");
+    assert!(!switch.is_on().unwrap());
+    assert_eq!(
+        line.configs().len(),
+        1,
+        "held: off never reconfigures or rebinds the line"
+    );
+    Lifecycle::on(&mut switch).unwrap();
+    assert_eq!(line.level(), Some(true));
+    assert!(switch.is_on().unwrap());
+    assert_eq!(line.configs().len(), 1, "on uses the held line too");
+}
+
+/// drivers/gpio-power-switch/src/tests.rs::the_held_line_keeps_its_last_level_after_the_driver_is_gone
+#[test]
+fn the_held_line_keeps_its_last_level_after_the_driver_is_gone() {
+    let (mut board, line, _) = wired(false);
+    let mut switch = bind(&mut board, &[]).unwrap();
+    Lifecycle::off(&mut switch).unwrap();
+    drop(switch);
+    assert_eq!(
+        line.level(),
+        Some(false),
+        "a released line keeps its last value"
+    );
+}

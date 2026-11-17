@@ -281,6 +281,16 @@ pub trait Driver: Sized {
     const TRACKS_CALLERS: bool = false;
     /// See [`Lifecycle::caller`].
     fn caller(&mut self, _caller: CallerId) {}
+    /// Whether the driver keeps its hardware across an explicit off. See [`Lifecycle::HOLDS_OFF`].
+    const HOLDS_OFF: bool = false;
+    /// See [`Lifecycle::off`].
+    fn off(&mut self) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// See [`Lifecycle::on`].
+    fn on(&mut self) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// See [`Lifecycle::caller_gone`].
     fn caller_gone(&mut self, _caller: CallerId) {}
     /// See [`Lifecycle::endpoints`].
@@ -386,6 +396,26 @@ pub trait Lifecycle: Sized {
     /// Given the board as it is now, before each tick when [`Lifecycle::WATCHES_BOARD`] is set.
     /// Must not block, and must not keep the view past the call.
     fn board(&mut self, _view: &dyn BoardView) {}
+    /// Set this to `true` for a driver whose [`Lifecycle::off`] keeps its hardware: the host then
+    /// keeps the instance, with every line it claimed, while the device is off, and calls
+    /// [`Lifecycle::on`] on it to switch it back on. Without it, an off drops the instance and an
+    /// on binds a new one, as it always has. Only an explicit off request reaches `off`: a rebind, a
+    /// panic, a device gone and the daemon's shutdown do not.
+    const HOLDS_OFF: bool = false;
+    /// Switches the device off, for a driver whose [`Lifecycle::HOLDS_OFF`] is set: drive the off
+    /// level and hold the hardware, so the device stays off and its lines stay requested. Its
+    /// `tick` and its requests (other than `on` and `describe`) are not called until `on`. An error
+    /// makes the host drop the instance as an off always has, and report the error in the device's
+    /// state. Not called by default.
+    fn off(&mut self) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// Switches the device back on, on the instance that `off` kept (see [`Lifecycle::off`]). It is
+    /// never called on an instance that was dropped. An error drops the instance, and the device is
+    /// bound again under the failure rule.
+    fn on(&mut self) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// Whether this driver can be bound to a device the operating system owns, and how it
     /// keeps from changing it. Left as it is, the driver is never bound to one.
     const HOST_OWNED: HostOwned = HostOwned::Refused;

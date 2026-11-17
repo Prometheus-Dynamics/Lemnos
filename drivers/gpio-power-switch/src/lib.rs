@@ -92,6 +92,21 @@ impl Lifecycle for GpioPowerSwitch {
         })
     }
 
+    /// The switch keeps its line across an off: `off` drives the off level and holds the line, so
+    /// the port stays off while the device is off (see [`Lifecycle::off`]).
+    const HOLDS_OFF: bool = true;
+
+    /// Drives the off level on the line this driver already holds. The line stays requested for
+    /// the whole off period, so nothing releases it to its last level or its default level.
+    fn off(&mut self) -> Result<()> {
+        PowerSwitch::set(self, false)
+    }
+
+    /// Drives the on level on the held line.
+    fn on(&mut self) -> Result<()> {
+        PowerSwitch::set(self, true)
+    }
+
     fn describe(&self, out: &mut Description) {
         out.add(Item::value("power.on", IS_ON).dimensionless());
         if self.fault.is_some() {

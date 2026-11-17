@@ -244,6 +244,16 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             fn caller_gone(&mut self, __caller: ::lemnos_core::CallerId) {
                 <Self as ::lemnos_core::Lifecycle>::caller_gone(self, __caller)
             }
+            const HOLDS_OFF: bool = <Self as ::lemnos_core::Lifecycle>::HOLDS_OFF;
+
+            fn off(&mut self) -> ::lemnos_core::Result<()> {
+                <Self as ::lemnos_core::Lifecycle>::off(self)
+            }
+
+            fn on(&mut self) -> ::lemnos_core::Result<()> {
+                <Self as ::lemnos_core::Lifecycle>::on(self)
+            }
+
 
             fn endpoints(
                 &mut self,
