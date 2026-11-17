@@ -471,23 +471,10 @@ static irqreturn_t lrc_isr(int irq, void *data)
 			wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
 			handled = true;
 		}
-		/*
-		 * A stop's FE_ACK completes the stop and is nothing else: it is not a frame end, so it counts no
-		 * frame, advances no sequence and completes no buffer. After a wedged stop, every FE_ACK is ignored
-		 * until START re-arms.
-		 */
-		if ((status & IRQ_FE_ACK(LRC_CH)) && (l->stop_armed & STOP_ARM_IMAGE)) {
+		if ((status & IRQ_FE_ACK(LRC_CH)) && (l->stop_armed & STOP_ARM_IMAGE))
 			complete(&l->stop_done[0]);
-			l->stop_armed &= ~STOP_ARM_IMAGE;
-			status &= ~IRQ_FE_ACK(LRC_CH);
-		}
-		if ((status & IRQ_FE_ACK(LRC_EMB_CH)) && (l->stop_armed & STOP_ARM_EMB)) {
+		if ((status & IRQ_FE_ACK(LRC_EMB_CH)) && (l->stop_armed & STOP_ARM_EMB))
 			complete(&l->stop_done[1]);
-			l->stop_armed &= ~STOP_ARM_EMB;
-			status &= ~IRQ_FE_ACK(LRC_EMB_CH);
-		}
-		if (l->stop_wedged)
-			status &= ~(IRQ_FE_ACK(LRC_CH) | IRQ_FE_ACK(LRC_EMB_CH));
 		spin_unlock(&l->lock);
 	}
 	sof = status & IRQ_FS(LRC_CH);
@@ -599,7 +586,6 @@ static void lrc_stop_locked(struct lrc_dev *l)
 
 	spin_lock_irqsave(&l->lock, flags);
 	l->stop_armed = 0;
-	l->stop_wedged = !ack;
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	wr(l->cfg, MIPICFG_INTE, 0);
 	spin_unlock_irqrestore(&l->lock, flags);
@@ -771,7 +757,6 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	l->frames = l->written = l->dropped = l->errors = 0;
 	l->fs_ns = 0;
 	l->fs_int = l->fe_int = false;
-	l->stop_wedged = false;
 	l->fe_line = 0;		/* the line count is cleared below */
 	l->emb.stream = emb;
 	l->emb.bytes = emb ? l->emb.req_bytes : 0;
