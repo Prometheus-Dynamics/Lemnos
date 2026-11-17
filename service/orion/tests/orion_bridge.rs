@@ -1943,10 +1943,15 @@ fn a_comm_core_with_a_short_idle_time_is_connected_to_again() {
     drop(board);
     let board = Board::start_with(&dir, options());
     let dashboard = dashboard(board.socket());
-    wait_for("the imu's resource after the comm core came back", || {
-        resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
-    });
-    let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
+    // The counter is the device the call below runs on, so its resource is what is waited for. A
+    // resource the bridge has not said again is `Restoring` (docs/client.md, "When another program is
+    // not back yet"), and the imu's coming back says nothing about the counter's: the bridge says the
+    // devices one after another. Once the counter is `Ready` its actions are registered, so one run.
+    wait_for(
+        "the counter's resource after the comm core came back",
+        || resource(&dashboard, "lemnos.thing").filter(|found| found.state == ResourceState::Ready),
+    );
+    let peek = run(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
 }
 
