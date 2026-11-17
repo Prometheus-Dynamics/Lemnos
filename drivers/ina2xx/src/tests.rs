@@ -4,7 +4,7 @@ use super::*;
 use crate::chip::{ConfigError, Error, INA226_CONFIG, INA238_ADC_CONFIG, INA238_ADCRANGE};
 use lemnos_contract_self_test::{Outcome, Record, SelfTest, reason};
 use lemnos_core::{
-    ConfigValue, Driver, JobState, Lifecycle, Reader, Reply, Resources, Status, Writer,
+    ConfigValue, Driver, JobState, Lifecycle, Reader, Reply, Resources, Status, Unit, Writer,
 };
 use lemnos_hal::HalError;
 use lemnos_hal::register::{AddressWidth, I2cRegisters, RegisterBus};
@@ -515,7 +515,41 @@ fn a_host_owned_ina260_reads_as_it_stands() {
 }
 
 #[test]
-fn the_board_gives_the_rails_warning_limits_in_nano_units() {
+fn the_board_gives_the_rails_whole_unit_warning_limits() {
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
+    let driver = bind(
+        &mut board,
+        &[
+            ("chip", ConfigValue::Str("ina226")),
+            ("shunt_ohms", ConfigValue::Float(0.01)),
+            ("max_current_a", ConfigValue::Float(2.0)),
+            ("bus_warn_below_v", ConfigValue::Float(11.0)),
+            ("bus_warn_above_v", ConfigValue::Float(13.0)),
+            ("current_warn_above_a", ConfigValue::Float(2.0)),
+        ],
+    )
+    .unwrap();
+    let mut out = Description::new();
+    Driver::describe(&driver, &mut out);
+    let bus = out.find("bus_voltage").unwrap();
+    assert_eq!((bus.warn_low, bus.warn_high), (Some(11), Some(13)));
+    let current = out.find("current").unwrap();
+    assert_eq!((current.warn_low, current.warn_high), (None, Some(2)));
+    // Without them, no limit.
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
+    let bare = bind(&mut board, &INA226).unwrap();
+    let mut out = Description::new();
+    Driver::describe(&bare, &mut out);
+    assert_eq!(out.find("bus_voltage").unwrap().warn_high, None);
+}
+
+/// A fractional limit (10.8 V) is not in the descriptor: an item's limit is a whole number of its
+/// unit, and a real-valued limit needs an engine change (`Item`). Until then the limit is absent,
+/// which is recorded in the driver's notes, not a silent pass.
+#[test]
+fn a_fractional_warning_limit_is_not_in_the_descriptor() {
     let (mut board, sim) = board_with_bus();
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let driver = bind(
@@ -525,30 +559,66 @@ fn the_board_gives_the_rails_warning_limits_in_nano_units() {
             ("shunt_ohms", ConfigValue::Float(0.01)),
             ("max_current_a", ConfigValue::Float(2.0)),
             ("bus_warn_below_v", ConfigValue::Float(10.8)),
-            ("bus_warn_above_v", ConfigValue::Float(13.5)),
-            ("current_warn_above_a", ConfigValue::Float(1.5)),
         ],
     )
     .unwrap();
     let mut out = Description::new();
     Driver::describe(&driver, &mut out);
-    let bus = out.find("bus_voltage").unwrap();
-    assert_eq!(
-        (bus.warn_low, bus.warn_high),
-        (Some(10_800_000_000), Some(13_500_000_000))
-    );
-    let current = out.find("current").unwrap();
-    assert_eq!(
-        (current.warn_low, current.warn_high),
-        (None, Some(1_500_000_000))
-    );
-    // Without them, no limit.
+    assert_eq!(out.find("bus_voltage").unwrap().warn_low, None);
+}
+
+/// Every electrical item is a real number in its unit: exponent 0, with real limits. Exponent -9
+/// (the nano-unit scale) made the renderer multiply a volt value by 1e-9, which is the bug the
+/// `read` output showed as 4.5e-9 V. Fails before the fix: the exponent was -9.
+/// drivers/ina2xx/src/tests.rs::the_electrical_items_are_real_numbers_in_their_unit
+#[test]
+fn the_electrical_items_are_real_numbers_in_their_unit() {
     let (mut board, sim) = board_with_bus();
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
-    let bare = bind(&mut board, &INA226).unwrap();
+    let driver = bind(&mut board, &INA226).unwrap();
     let mut out = Description::new();
-    Driver::describe(&bare, &mut out);
-    assert_eq!(out.find("bus_voltage").unwrap().warn_high, None);
+    Driver::describe(&driver, &mut out);
+    for (name, unit) in [
+        ("bus_voltage", Unit::Volt),
+        ("shunt_voltage", Unit::Volt),
+        ("current", Unit::Ampere),
+        ("power", Unit::Watt),
+    ] {
+        let item = out.find(name).unwrap();
+        assert_eq!(
+            item.exponent, 0,
+            "{name}: a float field is scaled by its exponent"
+        );
+        assert_eq!(item.unit, unit, "{name}");
+        assert!(
+            item.real_min.is_some() && item.real_max.is_some(),
+            "{name}: a real range"
+        );
+    }
+}
+
+/// A bus register of 1442 counts (0x05a2) is 1442 x 3.125 mV = 4.50625 V on an INA238. The field the
+/// item shows is 4.50625 V, and with the item's exponent 0 the `read` output prints 4.50625 V, not
+/// 4.5e-9 V.
+/// drivers/ina2xx/src/tests.rs::a_bus_register_of_1442_reads_as_4_50625_volts_with_no_scale
+#[test]
+fn a_bus_register_of_1442_reads_as_4_50625_volts_with_no_scale() {
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0x3e, 0x3f, 0x2381);
+    set16(&sim, 0x04, 0);
+    set16(&sim, 0x05, 1442);
+    set16(&sim, 0x06, 0);
+    set16(&sim, 0x07, 0);
+    sim.set_word(chip::DEFAULT_ADDRESS, 0x08, &[0, 0, 0]);
+    let mut driver = bind(&mut board, &INA238).unwrap();
+    let reading = PowerMonitor::read(&mut driver).unwrap();
+    close(reading.bus_v, 4.50625);
+    let mut out = Description::new();
+    Driver::describe(&driver, &mut out);
+    let item = out.find("bus_voltage").unwrap();
+    // What `lemnos-ctl read` prints: the field times 10^exponent, in the item's unit.
+    let printed = f64::from(reading.bus_v) * 10f64.powi(i32::from(item.exponent));
+    assert!((printed - 4.50625).abs() < 1e-5, "printed {printed} V");
 }
 
 /// The INA226 with a bus-voltage range of 11 V to 13 V, from the board file.

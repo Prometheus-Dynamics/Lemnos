@@ -106,6 +106,19 @@ struct Warnings {
     current_above_na: Option<i64>,
 }
 
+/// A span in nano-units, as the item's real value (volts, amps or watts).
+fn real(nano: i64) -> f64 {
+    nano as f64 * 1e-9
+}
+
+/// A limit in nano-units as a whole number of the item's unit, or `None` when it is not whole. An
+/// item's warning limit is an integer in its raw unit, which is the whole unit here; a fractional
+/// limit (10.8 V, say) has no place in the descriptor yet, and needs a real-valued warning on
+/// `Item`, which is an engine change.
+fn whole_units(nano: i64) -> Option<i64> {
+    (nano % 1_000_000_000 == 0).then_some(nano / 1_000_000_000)
+}
+
 /// A value in volts or amps as nano-units, rounded to the nearest.
 fn nano_units(value: f64) -> i64 {
     let scaled = value * 1e9;
@@ -254,43 +267,49 @@ impl Lifecycle for Ina2xx {
     }
 
     fn describe(&self, out: &mut Description) {
-        // Every span is in nano-units (the register scale of the chip, see `Setup::spans`).
+        // The spans are in nano-units (the register scale of the chip, see `Setup::spans`). The items
+        // are real numbers in volts, amps and watts: their values come from `read`'s f32 fields, and
+        // the renderer scales a float field by the item's exponent, so the exponent is 0 and the
+        // limits are real numbers (`real_range`, `real_step`). Exponent -9 here showed 4.5 V as
+        // 4.5e-9 V.
         let spans = self.chip.setup.spans(self.chip.attached());
         out.set_address(self.chip.address());
         let mut bus = Item::value("bus_voltage", READ)
-            .unit(Unit::Volt, -9)
+            .unit(Unit::Volt, 0)
             .field("bus_v")
-            .range(0, spans.bus_max_nv)
-            .step(spans.bus_lsb_nv);
-        if let Some(low) = self.warn.bus_below_nv {
+            .real_range(0.0, real(spans.bus_max_nv))
+            .real_step(real(spans.bus_lsb_nv));
+        if let Some(low) = self.warn.bus_below_nv.and_then(whole_units) {
             bus = bus.warn_below(low);
         }
-        if let Some(high) = self.warn.bus_above_nv {
+        if let Some(high) = self.warn.bus_above_nv.and_then(whole_units) {
             bus = bus.warn_above(high);
         }
         out.add(bus);
         let shunt = Item::value("shunt_voltage", READ)
-            .unit(Unit::Volt, -9)
+            .unit(Unit::Volt, 0)
             .field("shunt_v");
         out.add(match (spans.shunt_max_nv, spans.shunt_lsb_nv) {
-            (Some(max), Some(step)) => shunt.range(-max, max).step(step),
+            (Some(max), Some(step)) => shunt
+                .real_range(-real(max), real(max))
+                .real_step(real(step)),
             _ => shunt,
         });
         let mut current = Item::value("current", READ)
-            .unit(Unit::Ampere, -9)
+            .unit(Unit::Ampere, 0)
             .field("current_a")
-            .range(-spans.current_max_na, spans.current_max_na)
-            .step(spans.current_lsb_na);
-        if let Some(high) = self.warn.current_above_na {
+            .real_range(-real(spans.current_max_na), real(spans.current_max_na))
+            .real_step(real(spans.current_lsb_na));
+        if let Some(high) = self.warn.current_above_na.and_then(whole_units) {
             current = current.warn_above(high);
         }
         out.add(current);
         out.add(
             Item::value("power", READ)
-                .unit(Unit::Watt, -9)
+                .unit(Unit::Watt, 0)
                 .field("power_w")
-                .range(0, spans.power_max_nw)
-                .step(spans.power_lsb_nw.max(1)),
+                .real_range(0.0, real(spans.power_max_nw))
+                .real_step(real(spans.power_lsb_nw.max(1))),
         );
         out.add(Item::action("self_test", RUN));
     }
