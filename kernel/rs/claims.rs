@@ -12,6 +12,7 @@
 //! is not in the bindings (anon_inodes.h is not in the kernel crate's allowlist), so it is declared
 //! here; it is an exported symbol, not an inline.
 
+use crate::abi::LemClaimOps;
 use core::{
     ffi::c_void,
     ptr,
@@ -34,22 +35,12 @@ const LEMNOS_NAME_MAX: usize = 64;
 
 /// `struct lemnos_claim` of lemnos.h (the LEMNOS_IOC_CLAIM argument).
 #[repr(C)]
-pub struct LemnosClaim {
+pub(crate) struct LemnosClaim {
     resource: [c_char; LEMNOS_NAME_MAX],
     flags: u32,
     fd: i32,
 }
 
-/// `struct lem_claim_ops` of lemnos_internal.h: three function pointers, in this order. An absent
-/// `read` or `poll` is NULL, which is `None`. The layout is checked below.
-#[repr(C)]
-pub struct LemClaimOps {
-    release: Option<unsafe extern "C" fn(*mut c_void)>,
-    read: Option<unsafe extern "C" fn(*mut c_void, *mut bindings::file, *mut c_char, usize) -> isize>,
-    poll: Option<unsafe extern "C" fn(*mut c_void, *mut bindings::file, *mut bindings::poll_table_struct) -> bindings::__poll_t>,
-}
-
-const _: () = assert!(core::mem::size_of::<LemClaimOps>() == 3 * core::mem::size_of::<usize>());
 
 /// One held claim: the file's private data. `ops` and `data` are set once, by `lem_claim_attach`,
 /// under HELD's lock; `ops` is published with release and read with acquire, as the C did.
@@ -195,7 +186,7 @@ unsafe fn is_claim_on(file: *const bindings::file, resource: &CStr) -> bool {
 /// # Safety
 /// `owner` is the module's `THIS_MODULE`, live for the module's life.
 #[no_mangle]
-pub unsafe extern "C" fn lem_claims_init(owner: *mut bindings::module) {
+pub(crate) unsafe extern "C" fn lem_claims_init(owner: *mut bindings::module) {
     // SAFETY: no claim file exists yet, so nothing reads the table; this is the one write.
     unsafe { (*(&raw mut LEM_CLAIM_FOPS)).0.owner = owner };
     // SAFETY: HELD is initialised exactly once, here, before any claim can be made.
@@ -224,7 +215,7 @@ fn insert(h: &LemHeld) -> Result {
 /// # Safety
 /// `c` is a live `struct lemnos_claim` from the ioctl copy.
 #[no_mangle]
-pub unsafe extern "C" fn lem_claim(c: *mut LemnosClaim) -> c_long {
+pub(crate) unsafe extern "C" fn lem_claim(c: *mut LemnosClaim) -> c_long {
     // SAFETY: the caller passes its own argument struct.
     let c = unsafe { &mut *c };
     let resource = &c.resource;
@@ -274,7 +265,7 @@ pub unsafe extern "C" fn lem_claim(c: *mut LemnosClaim) -> c_long {
 /// # Safety
 /// `resource` is a NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool {
+pub(crate) unsafe extern "C" fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool {
     // SAFETY: the C caller passes a NUL-terminated name.
     let resource = unsafe { CStr::from_char_ptr(resource) };
     // SAFETY: fget takes a reference; it is dropped by fput below.
@@ -293,7 +284,7 @@ pub unsafe extern "C" fn lem_claim_held(fd: c_int, resource: *const c_char) -> b
 /// # Safety
 /// `resource` is a NUL-terminated string; `ops` is a static table of the C side.
 #[no_mangle]
-pub unsafe extern "C" fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int {
+pub(crate) unsafe extern "C" fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int {
     // SAFETY: the C caller passes a NUL-terminated name.
     let resource = unsafe { CStr::from_char_ptr(resource) };
     // SAFETY: fget takes a reference; dropped by fput below.
@@ -327,7 +318,7 @@ pub unsafe extern "C" fn lem_claim_attach(fd: c_int, resource: *const c_char, op
 /// # Safety
 /// `file` is null or live; `ops` is a static table of the C side.
 #[no_mangle]
-pub unsafe extern "C" fn lem_claim_attached(file: *mut bindings::file, ops: *const LemClaimOps) -> *mut c_void {
+pub(crate) unsafe extern "C" fn lem_claim_attached(file: *mut bindings::file, ops: *const LemClaimOps) -> *mut c_void {
     // SAFETY: the caller's contract.
     if !unsafe { is_claim(file) } {
         return ptr::null_mut();
