@@ -1,0 +1,3289 @@
+//! The PiSP front end's check, against the fake receiver of the test harness (`/dev/lemnos-test-csi2`,
+//! whose front-end window the module's test path drives): every configuration field the hardware
+//! could act on is refused when it is wrong, what reaches the registers is only the module's checked
+//! copy, the register sequence is the stock driver's, and stopping (STOP, closing either file,
+//! unbinding) waits for the block before anything is released.
+//!
+//! Usage: `lemnos-pisp-fe-check /dev/lemnos <csi2 device> <unbind> <heap>`, or
+//! `lemnos-pisp-fe-check wedge <csi2 device> <unbind> <heap>` (init runs it as
+//! `/lemnos_pisp_fe_check`). Port of `kernel/test/lemnos_pisp_fe_check.c` (CZ-GUEST-3).
+//!
+//! The uAPI structures are laid out in bytes, sized as the C structures are: `lemnos.h`'s
+//! `lemnos_stream_create` (56 bytes), `lemnos_stream_register` (24), `lemnos_stream_unregister` (8),
+//! `lemnos_stream_buffer` (24), `lemnos_stream_status` (40), `lemnos_stream_job` (80);
+//! `lemnos_rp1_csi2.h`'s start (48), claim (8), info (56) and frame starts (24); `lemnos_pisp_fe.h`'s
+//! info (56), start (60) and test trace (16); and `lemnos_test_csi2.h`'s peek (8) and registers (32).
+//! The configuration is `struct pisp_fe_config` (632 bytes) and its statistics are 23200 bytes. Every
+//! offset and size, and every ioctl number, was counted with the C compiler against the kernel tree's
+//! `pisp_fe_config.h` and the Lemnos headers, not typed from memory. The fixture is
+//! `fixture.rs`, generated from `kernel/test/lemnos_pisp_fe_fixture.h`.
+//!
+//! Departures from the C, each on purpose and on failure paths only: where the C would go on with a
+//! stream or a file that never opened (a zeroed descriptor, a -1 one), the Rust gives up that check's
+//! remaining lines and goes on with the next test; a set-up that fails ends the run with the summary.
+
+mod fixture;
+
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
+
+use lemnos_linux_sys::mmap::Mapping;
+use lemnos_linux_sys::{dma_heap, guest, ioc, ior, iow, iowr, time};
+
+use fixture::FIXTURE;
+
+// lemnos.h: the stream's requests, on the stream's file.
+const KICK: u32 = ioc(0, b'L', 0x81, 0);
+const STREAM_REGISTER: u32 = iowr::<[u8; 24]>(b'L', 0x82);
+const STREAM_UNREGISTER: u32 = iow::<[u8; 8]>(b'L', 0x83);
+const STREAM_STATUS: u32 = ior::<[u8; 40]>(b'L', 0x84);
+const STREAM_BUFFER: u32 = iowr::<[u8; 24]>(b'L', 0x86);
+// lemnos_rp1_csi2.h: the receiver's requests, on the receiver's node.
+const RP1_INFO: u32 = ior::<[u8; 56]>(b'L', 0xc0);
+const RP1_START: u32 = iow::<[u8; 48]>(b'L', 0xc2);
+const RP1_STOP: u32 = ioc(0, b'L', 0xc3, 0);
+const RP1_FRAME_STARTS: u32 = ior::<[u8; 24]>(b'L', 0xc4);
+const RP1_CLAIM: u32 = iow::<[u8; 8]>(b'L', 0xc6);
+// lemnos_pisp_fe.h: the front end's requests, on the receiver's node.
+const FE_INFO: u32 = ior::<[u8; 56]>(b'L', 0xc8);
+const FE_START: u32 = iow::<[u8; 60]>(b'L', 0xc9);
+const FE_STOP: u32 = ioc(0, b'L', 0xca, 0);
+const FE_TEST_TRACE: u32 = iowr::<[u8; 16]>(b'L', 0xcb);
+const FE_TEST_SCRIBBLE: u32 = ioc(0, b'L', 0xcc, 0);
+// lemnos_test_csi2.h: the fake receiver's requests, on /dev/lemnos-test-csi2.
+const TCSI_FIRE: u32 = iow::<[u8; 4]>(b'T', 1);
+const TCSI_PEEK: u32 = ior::<[u8; 32]>(b'T', 2);
+const TCSI_FE_FIRE: u32 = iow::<[u8; 4]>(b'T', 4);
+const TCSI_FE_PEEK: u32 = iowr::<[u8; 8]>(b'T', 5);
+const TCSI_FE_STATUS: u32 = iow::<[u8; 4]>(b'T', 6);
+const TCSI_FE_BUSY: u32 = iow::<[u8; 4]>(b'T', 7);
+const TCSI_FE_MIDFRAME: u32 = iow::<[u8; 4]>(b'T', 9);
+const _: () = assert!(
+    KICK == 0x0000_4c81
+        && STREAM_REGISTER == 0xc018_4c82
+        && STREAM_UNREGISTER == 0x4008_4c83
+        && STREAM_STATUS == 0x8028_4c84
+        && STREAM_BUFFER == 0xc018_4c86
+        && RP1_INFO == 0x8038_4cc0
+        && RP1_START == 0x4030_4cc2
+        && RP1_STOP == 0x0000_4cc3
+        && RP1_FRAME_STARTS == 0x8018_4cc4
+        && RP1_CLAIM == 0x4008_4cc6
+        && FE_INFO == 0x8038_4cc8
+        && FE_START == 0x403c_4cc9
+        && FE_STOP == 0x0000_4cca
+        && FE_TEST_TRACE == 0xc010_4ccb
+        && FE_TEST_SCRIBBLE == 0x0000_4ccc
+        && TCSI_FIRE == 0x4004_5401
+        && TCSI_PEEK == 0x8020_5402
+        && TCSI_FE_FIRE == 0x4004_5404
+        && TCSI_FE_PEEK == 0xc008_5405
+        && TCSI_FE_STATUS == 0x4004_5406
+        && TCSI_FE_BUSY == 0x4004_5407
+        && TCSI_FE_MIDFRAME == 0x4004_5409
+);
+
+// lemnos.h: the flags, the stream's sizes, and the ring's words (indices of 64-bit words).
+const CREATE_BUFFERS: u32 = 1;
+const BUFFERS: u32 = 4;
+const BUFFER_BYTES: u64 = 32768;
+const POOL_STRIDE: u64 = BUFFER_BYTES;
+const FRAME_SLOTS: usize = 8;
+const JOB_SLOTS: usize = 4;
+const JOB_BYTES: usize = 80;
+/// One length word, then the job's ten words.
+const JOB_WORDS: usize = 11;
+const FRAME_WORDS: usize = 6;
+const RING_STATE: usize = 8;
+const RING_FRAMES_HEAD: usize = 16;
+const RING_FRAMES_TAIL: usize = 24;
+const RING_RETURNS_HEAD: usize = 32;
+const RING_JOBS_HEAD: usize = 48;
+const RING_FRAMES: usize = 64;
+const RETURNS_AT: usize = RING_FRAMES + FRAME_SLOTS * FRAME_WORDS;
+const JOBS_AT: usize = RETURNS_AT + FRAME_SLOTS;
+const STATE_CLOSED: u64 = 1;
+
+// lemnos_rp1_csi2.h: the receiver's parts, and the start's frame.
+const PART_CSI2: u32 = 1 << 0;
+const PART_FE: u32 = 1 << 1;
+const PARTS_BOTH: u32 = PART_CSI2 | PART_FE;
+
+// lemnos_pisp_fe.h: the info's wedged flag, and the trace's marks.
+const INFO_WEDGED: u32 = 1 << 0;
+const MARK_CHANNEL_START: u32 = 0xf000;
+const MARK_OPEN_RX: u32 = 0xf001;
+const MARK_CHANNEL_STOP: u32 = 0xf002;
+const TRACE_MAX: usize = 4000;
+
+// lemnos_test_csi2.h: the fire statuses, the stop modes, and the channel's control bits.
+const TCSI_FS: u32 = 0x1;
+const TCSI_FE_ACK: u32 = 0x100;
+const TFE_EOF: u32 = 0x1;
+const TFE_SOF: u32 = 0x2;
+const TFE_RESET_ONLY: u32 = 0x1;
+const TFE_ABORT_WHILE_FED: u32 = 0x2;
+const CH_CTRL_FORCE: u32 = 1 << 3;
+const CH_CTRL_AUTO_ARM: u32 = 1 << 4;
+const CH_CTRL_MODE_FE: u32 = 3 << 1;
+
+// The fake front end's registers, relative to its window (lemnos_pisp_fe.c writes them so).
+const FE_CONTROL: u32 = 0x004;
+const FE_STATUS: u32 = 0x008;
+const FE_INT_EN: u32 = 0x018;
+const FE_INT_STATUS: u32 = 0x01c;
+const FE_CONFIG: u32 = 0x040;
+const C_QUEUE: u32 = 1;
+const C_ABORT: u32 = 2;
+const C_RESET: u32 = 4;
+const C_LATCH: u32 = 8;
+const INT_EOF: u32 = 1;
+const INT_SOF: u32 = 2;
+const INT_LINES: u32 = 0x300;
+/// The configuration's register window, in bytes.
+const FE_CONFIG_WINDOW: u32 = 0x270;
+
+// Geometry of the check's job: a 64x4 frame, 16-bit, 128-byte stride, in a pool of four buffers.
+const W: u16 = 64;
+const H: u16 = 4;
+const STRIDE: u32 = 128;
+const OUT0_BYTES: u64 = (STRIDE as u64) * (H as u64);
+const CFG_SIZE: usize = 632;
+const CFG_SLOTS: usize = 8;
+const STATS_SIZE: usize = 23200;
+/// The statistics buffer's size, rounded up to whole pages.
+const STATS_BYTES: u64 = 24576;
+/// The pool, in bytes: BUFFERS buffers of BUFFER_BYTES.
+const POOL_BYTES: usize = 131_072;
+
+// `struct pisp_fe_config`, as bytes. Offsets are from the kernel tree's `pisp_fe_config.h` and
+// `pisp_common.h`, counted with the C compiler.
+const ST_ADDR: usize = 0; // stats_buffer.addr_lo; addr_hi at +4
+const OUT_ADDR: usize = 8; // output_buffer[n] at 8 + 8n: addr_lo, addr_hi at +4
+const IN_ADDR: usize = 24; // input_buffer.addr_lo; addr_hi at +4
+const IN_FRAME_ID: usize = 32;
+const IN_BUF_PAD: usize = 34;
+const G_ENABLES: usize = 36; // global.enables
+const G_BAYER: usize = 40; // global.bayer_order
+const G_PAD2: usize = 43; // global.pad[2]
+const IN_STREAMING: usize = 44; // input.streaming
+const IN_FMT: usize = 48; // input.format: an image format, 16 bytes
+const IN_AXI_QOS: usize = 66; // input.axi.qos
+const IN_HOLDOFF: usize = 68; // input.holdoff
+const IN_PAD2_1: usize = 70; // input.pad2[1]
+const DECOMPAND_PAD: usize = 206; // decompand.pad
+const BLA_PAD0: usize = 218; // bla.pad[0]
+const STATS_CROP: usize = 224; // stats_crop: offset_x; width at +4, height at +6
+const SPARE1: usize = 232; // spare1
+const AGC_SIZE_X: usize = 300; // agc_stats.size_x
+const AGC_SIZE_Y: usize = 302; // agc_stats.size_y
+const AWB_SIZE_X: usize = 448; // awb_stats.size_x
+const AWB_SIZE_Y: usize = 450; // awb_stats.size_y
+const CDAF_SIZE_X: usize = 476; // cdaf_stats.size_x
+const CDAF_SIZE_Y: usize = 478; // cdaf_stats.size_y
+const AGC_ROW_X: usize = 436; // agc_stats.row_size_x
+const AGC_ROW_Y: usize = 438; // agc_stats.row_size_y
+const FLOAT_SIZE_X: usize = 492; // floating_stats.regions[0].size_x
+const OUT_AXI: usize = 520; // output_axi: maxlen_flags, cache_prot, qos, thresh, throttle
+const CH: usize = 528; // ch[0]; each branch is 48 bytes
+
+/// Within an image format (`pisp_image_format_config`, 16 bytes).
+const IMG_W: usize = 0;
+const IMG_H: usize = 2;
+const IMG_FMT: usize = 4;
+const IMG_STRIDE: usize = 8;
+const IMG_STRIDE2: usize = 12;
+/// Within a branch's crop (`pisp_fe_crop_config`).
+const CROP_X: usize = 0;
+const CROP_Y: usize = 2;
+const CROP_W: usize = 4;
+const CROP_H: usize = 6;
+/// Within a branch's downscale (`pisp_fe_downscale_config`).
+const DS_XIN: usize = 0;
+const DS_XOUT: usize = 1;
+const DS_YIN: usize = 2;
+const DS_YOUT: usize = 3;
+const DS_PAD1: usize = 6;
+const DS_OUT_W: usize = 8;
+const DS_OUT_H: usize = 10;
+/// Within a branch's compress (`pisp_compress_config`).
+const CP_OFFSET: usize = 0;
+const CP_MODE: usize = 3;
+/// Within a branch: crop, downscale, compress, output (`pisp_fe_output_config`), and its pad.
+const BR_CROP: usize = 0;
+const BR_DS: usize = 8;
+const BR_COMPRESS: usize = 20;
+const BR_OUTPUT: usize = 24;
+const BR_ILINES: usize = 40;
+const BR_PAD: usize = 44;
+const CH_BYTES: usize = 48;
+
+const fn ch(i: usize) -> usize {
+    CH + i * CH_BYTES
+}
+
+/// Config offset of branch `i`'s crop field `off`.
+const fn ch_crop(i: usize, off: usize) -> usize {
+    ch(i) + BR_CROP + off
+}
+
+/// Config offset of branch `i`'s downscale field `off`.
+const fn ch_ds(i: usize, off: usize) -> usize {
+    ch(i) + BR_DS + off
+}
+
+/// Config offset of branch `i`'s compress field `off`.
+const fn ch_compress(i: usize, off: usize) -> usize {
+    ch(i) + BR_COMPRESS + off
+}
+
+/// Config offset of branch `i`'s output image format field `off`.
+const fn ch_fmt(i: usize, off: usize) -> usize {
+    ch(i) + BR_OUTPUT + off
+}
+
+/// `pisp_fe_enable` bits, from the kernel tree's `pisp_fe_config.h`.
+const EN_INPUT: u32 = 0x1;
+const EN_DECOMPRESS: u32 = 0x2;
+const EN_DECOMPAND: u32 = 0x4;
+const EN_BLA: u32 = 0x8;
+const EN_DPC: u32 = 0x10;
+const EN_STATS_CROP: u32 = 0x20;
+const EN_DECIMATE: u32 = 0x40;
+const EN_BLC: u32 = 0x80;
+const EN_CDAF_STATS: u32 = 0x100;
+const EN_AWB_STATS: u32 = 0x200;
+const EN_RGBY: u32 = 0x400;
+const EN_LSC: u32 = 0x800;
+const EN_AGC_STATS: u32 = 0x1000;
+const EN_CROP0: u32 = 0x1_0000;
+const EN_DOWNSCALE0: u32 = 0x2_0000;
+const EN_COMPRESS0: u32 = 0x4_0000;
+const EN_OUTPUT0: u32 = 0x8_0000;
+const EN_CROP1: u32 = 0x10_0000;
+const EN_DOWNSCALE1: u32 = 0x20_0000;
+const EN_COMPRESS1: u32 = 0x40_0000;
+const EN_OUTPUT1: u32 = 0x80_0000;
+/// The enables of the statistics blocks (`0x1fe0` in the C check).
+const EN_STATS_ALL: u32 = 0x1fe0;
+
+/// `PISP_FE_ENABLE_COMPRESS(i)`.
+const fn en_compress(i: u32) -> u32 {
+    EN_COMPRESS0 << (4 * i)
+}
+
+/// `pisp_image_format` bits and values, from the kernel tree's `pisp_common.h`.
+const BPS_8: u32 = 0x0;
+const BPS_10: u32 = 0x1;
+const BPS_12: u32 = 0x2;
+const BPS_16: u32 = 0x3;
+const PLANARITY_SEMI_PLANAR: u32 = 0x10;
+const PLANARITY_PLANAR: u32 = 0x20;
+const SAMPLING_422: u32 = 0x100;
+const SAMPLING_420: u32 = 0x200;
+const ORDER_SWAPPED: u32 = 0x1000;
+const SHIFT_1: u32 = 0x1_0000;
+const SHIFT_8: u32 = 0x8_0000;
+const BPP_32: u32 = 0x10_0000;
+const HOG_SIGNED: u32 = 0x400_0000;
+const HOG_UNSIGNED: u32 = 0x800_0000;
+const INTEGRAL_IMAGE: u32 = 0x1000_0000;
+const WALLPAPER_ROLL: u32 = 0x2000_0000;
+const THREE_CHANNEL: u32 = 0x4000_0000;
+const COMPRESSION_MODE_1: u32 = 0x100_0000;
+const COMPRESSION_MODE_2: u32 = 0x200_0000;
+const COMPRESSION_MODE_3: u32 = 0x300_0000;
+
+/// Each format bit that changes what a line is, on each output.
+const FORMAT_BITS: [(&str, u32); 14] = [
+    ("semi_planar", PLANARITY_SEMI_PLANAR),
+    ("planar", PLANARITY_PLANAR),
+    ("sampling_422", SAMPLING_422),
+    ("sampling_420", SAMPLING_420),
+    ("order_swapped", ORDER_SWAPPED),
+    ("shift_1", SHIFT_1),
+    ("shift_8", SHIFT_8),
+    ("bpp_32", BPP_32),
+    ("hog_signed", HOG_SIGNED),
+    ("hog_unsigned", HOG_UNSIGNED),
+    ("integral_image", INTEGRAL_IMAGE),
+    ("wallpaper_roll", WALLPAPER_ROLL),
+    ("three_channel", THREE_CHANNEL),
+    ("top_bit", 0x8000_0000),
+];
+
+// `struct lemnos_pisp_fe_start`, 60 bytes.
+const S_STREAM_FD: usize = 0;
+const S_LANES: usize = 4;
+const S_MBPS: usize = 8;
+const S_DT: usize = 16;
+const S_VC: usize = 12;
+const S_WIDTH: usize = 20;
+const S_HEIGHT: usize = 24;
+const S_OUT_WIDTH: usize = 28;
+const S_OUT_HEIGHT: usize = 32;
+const S_OUT_STRIDE: usize = 36;
+const S_OUT_SIZE: usize = 40;
+const S_OUT_FORMAT: usize = 44;
+const S_FLAGS: usize = 48;
+
+const EINVAL: i32 = libc::EINVAL;
+const EFAULT: i32 = libc::EFAULT;
+const EOVERFLOW: i32 = libc::EOVERFLOW;
+const EACCES: i32 = libc::EACCES;
+const EOPNOTSUPP: i32 = libc::EOPNOTSUPP;
+const EBUSY: i32 = libc::EBUSY;
+const EPERM: i32 = libc::EPERM;
+const EIO: i32 = libc::EIO;
+const EBADF: i32 = libc::EBADF;
+
+/// The failures counted so far.
+static FAILURES: AtomicU32 = AtomicU32::new(0);
+
+fn failures() -> u32 {
+    FAILURES.load(Ordering::Relaxed)
+}
+
+/// Prints one line, unbuffered as the C check's `printf` is.
+fn say(line: &str) {
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+/// The first half of a `CHECK`: `ok   ` or `FAIL `, with no line end. The message follows through
+/// `end`. The C macro prints the prefix, then evaluates the message's arguments, which can print
+/// checks of their own (a `fe_info()` in an argument does): this is the same order.
+fn begin(ok: bool) {
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(if ok { b"ok   " } else { b"FAIL " });
+    let _ = out.flush();
+}
+
+/// The second half of a `CHECK`: the message and its line end, counted when it failed.
+fn end(ok: bool, message: &str) {
+    if !ok {
+        FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "{message}");
+    let _ = out.flush();
+}
+
+/// `CHECK(cond, fmt, ...)`: the condition first, then the prefix, then the message.
+macro_rules! check {
+    ($cond:expr, $($arg:tt)+) => {{
+        let ok_ = $cond;
+        begin(ok_);
+        let message_ = format!($($arg)+);
+        end(ok_, &message_);
+    }};
+}
+
+/// `%#llx` and `%#x`: a zero prints as `0`, not `0x0`.
+fn hx(v: u64) -> String {
+    if v == 0 {
+        "0".to_owned()
+    } else {
+        format!("{v:#x}")
+    }
+}
+
+fn errno_of(e: &io::Error) -> i32 {
+    e.raw_os_error().unwrap_or(0)
+}
+
+/// `strerror`: the text of an errno, as the C check prints it on the failure path.
+fn strerror(errno: i32) -> String {
+    let text = io::Error::from_raw_os_error(errno).to_string();
+    match text.rfind(" (os error ") {
+        Some(at) => text[..at].to_owned(),
+        None => text,
+    }
+}
+
+fn put32(b: &mut [u8], at: usize, v: u32) {
+    b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+}
+
+fn put_i32(b: &mut [u8], at: usize, v: i32) {
+    b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+}
+
+fn put64(b: &mut [u8], at: usize, v: u64) {
+    b[at..at + 8].copy_from_slice(&v.to_ne_bytes());
+}
+
+fn get32(b: &[u8], at: usize) -> u32 {
+    let mut v = [0u8; 4];
+    v.copy_from_slice(&b[at..at + 4]);
+    u32::from_ne_bytes(v)
+}
+
+fn get64(b: &[u8], at: usize) -> u64 {
+    let mut v = [0u8; 8];
+    v.copy_from_slice(&b[at..at + 8]);
+    u64::from_ne_bytes(v)
+}
+
+/// The first place `needle` occurs in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `CLOCK_MONOTONIC`, in milliseconds (0 when the clock cannot be read).
+fn now_ms() -> u64 {
+    time::monotonic_ns().map_or(0, |ns| ns / 1_000_000)
+}
+
+fn sleep_ms(ms: u64) {
+    thread::sleep(Duration::from_millis(ms));
+}
+
+fn open_rw(path: &str) -> io::Result<OwnedFd> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(path)
+        .map(OwnedFd::from)
+}
+
+/// Writes `bytes` to the file at `path`: true when it opened and took every byte.
+fn write_node(path: &str, bytes: &[u8]) -> bool {
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(path)
+        .and_then(|mut f| f.write(bytes))
+        .is_ok_and(|n| n == bytes.len())
+}
+
+/// `dma_heap` allocation of `size` bytes from the heap at `heap`, as a descriptor.
+fn make_buf(heap: &str, size: u64) -> Option<OwnedFd> {
+    let h = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(heap)
+        .ok()?;
+    dma_heap::allocate(h.as_fd(), size).ok()
+}
+
+/// How many attachments the debugfs list shows for `dev`; each is one line (`-1` when the list
+/// cannot be read). A line the C check reads whole is 255 bytes at most.
+fn bufinfo_attached(dev: &str) -> i32 {
+    let Ok(bytes) = fs::read("/sys/kernel/debug/dma_buf/bufinfo") else {
+        return -1;
+    };
+    let mut n = 0;
+    let mut rest: &[u8] = &bytes;
+    while !rest.is_empty() {
+        let take = rest
+            .iter()
+            .take(255)
+            .position(|&b| b == b'\n')
+            .map_or(rest.len().min(255), |p| p + 1);
+        let (line, tail) = rest.split_at(take);
+        if find(line, dev.as_bytes()).is_some() {
+            n += 1;
+        }
+        rest = tail;
+    }
+    n
+}
+
+/// A request on a descriptor that may be closed: `EBADF` when it is, as the kernel answers -1.
+fn ioctl_fd<const N: usize>(
+    fd: Option<BorrowedFd<'_>>,
+    req: u32,
+    arg: &mut [u8; N],
+) -> io::Result<()> {
+    match fd {
+        Some(fd) => guest::ioctl_bytes(fd, req, arg),
+        None => Err(io::Error::from_raw_os_error(EBADF)),
+    }
+}
+
+/// The errno of a request, or 0 when it succeeded.
+fn ioctl_errno<const N: usize>(fd: Option<BorrowedFd<'_>>, req: u32, arg: &mut [u8; N]) -> i32 {
+    ioctl_fd(fd, req, arg).err().map_or(0, |e| errno_of(&e))
+}
+
+fn opt_fd(f: &Option<OwnedFd>) -> Option<BorrowedFd<'_>> {
+    f.as_ref().map(AsFd::as_fd)
+}
+
+/// The control node, if it is open.
+fn ctl_fd(env: &Env) -> Option<BorrowedFd<'_>> {
+    opt_fd(&env.ctl)
+}
+
+fn hw_fd(env: &Env) -> BorrowedFd<'_> {
+    env.hw.as_fd()
+}
+
+/// The descriptors the check holds for the whole run: the control node (closed and reopened by
+/// some tests), the fake receiver, and the pins `bufinfo` showed before the run.
+struct Env {
+    ctl: Option<OwnedFd>,
+    hw: OwnedFd,
+    attached_before: i32,
+}
+
+/// `struct pisp_fe_config`, as its bytes.
+#[derive(Clone)]
+struct Config {
+    b: [u8; CFG_SIZE],
+}
+
+impl Config {
+    fn zeroed() -> Self {
+        Self { b: [0; CFG_SIZE] }
+    }
+
+    /// `valid()` of the C check: a configuration the validator accepts, which START then agrees with.
+    fn valid() -> Self {
+        let mut c = Self::zeroed();
+        c.set32(G_ENABLES, EN_INPUT | EN_OUTPUT0 | EN_AWB_STATS | EN_OUTPUT1);
+        c.set8(G_BAYER, 2);
+        c.set8(IN_STREAMING, 1);
+        c.set_image(IN_FMT, W, H, BPS_16, 0, 0);
+        c.set8(OUT_AXI, 0xaf);
+        c.set8(OUT_AXI + 1, 0x32);
+        c.set16(OUT_AXI + 2, 0x8410);
+        c.set16(OUT_AXI + 4, 0x0140);
+        c.set16(OUT_AXI + 6, 0x4100);
+        c.set_image(ch_fmt(0, 0), W, H, BPS_16, STRIDE as i32, 0);
+        c.copy_within(ch_fmt(0, 0), ch_fmt(1, 0), 16);
+        c.set16(AWB_SIZE_X, 2);
+        c.set16(AWB_SIZE_Y, 2);
+        c
+    }
+
+    fn get32(&self, at: usize) -> u32 {
+        get32(&self.b, at)
+    }
+
+    fn set8(&mut self, at: usize, v: u8) {
+        self.b[at] = v;
+    }
+
+    fn set16(&mut self, at: usize, v: u16) {
+        self.b[at..at + 2].copy_from_slice(&v.to_ne_bytes());
+    }
+
+    fn set32(&mut self, at: usize, v: u32) {
+        put32(&mut self.b, at, v);
+    }
+
+    fn set_i32(&mut self, at: usize, v: i32) {
+        put_i32(&mut self.b, at, v);
+    }
+
+    fn or32(&mut self, at: usize, v: u32) {
+        let x = self.get32(at) | v;
+        self.set32(at, x);
+    }
+
+    fn and32(&mut self, at: usize, v: u32) {
+        let x = self.get32(at) & v;
+        self.set32(at, x);
+    }
+
+    /// An image format (`pisp_image_format_config`): width, height, format, stride, stride2.
+    fn set_image(&mut self, at: usize, w: u16, h: u16, fmt: u32, stride: i32, stride2: i32) {
+        self.set16(at + IMG_W, w);
+        self.set16(at + IMG_H, h);
+        self.set32(at + IMG_FMT, fmt);
+        self.set_i32(at + IMG_STRIDE, stride);
+        self.set_i32(at + IMG_STRIDE2, stride2);
+    }
+
+    /// Copies `len` bytes at `from` to `to`.
+    fn copy_within(&mut self, from: usize, to: usize, len: usize) {
+        self.b.copy_within(from..from + len, to);
+    }
+}
+
+/// `enables` with the statistics blocks off, and output 1 too (the C `ONLY_OUT0`, `NO_STATS`).
+fn only_out0(c: &mut Config) {
+    c.and32(G_ENABLES, !EN_OUTPUT1);
+}
+
+fn no_stats(c: &mut Config) {
+    c.and32(G_ENABLES, !EN_AWB_STATS);
+}
+
+/// The C `STATS_ON(bit)`: no white balance statistics, then this block's.
+fn stats_on(c: &mut Config, bit: u32) {
+    no_stats(c);
+    c.or32(G_ENABLES, bit);
+}
+
+fn agc_good(c: &mut Config) {
+    c.or32(G_ENABLES, EN_AGC_STATS);
+    c.set16(AGC_SIZE_X, 2);
+    c.set16(AGC_SIZE_Y, 2);
+    c.set16(AGC_ROW_X, 2);
+    c.set16(AGC_ROW_Y, 2);
+}
+
+fn cdaf_good(c: &mut Config) {
+    c.or32(G_ENABLES, EN_CDAF_STATS);
+    c.set16(CDAF_SIZE_X, 2);
+    c.set16(CDAF_SIZE_Y, 2);
+}
+
+/// The C `COMPRESSED(i, fmt, m)`: the branch's compress block on, its format and mode.
+fn compressed(c: &mut Config, i: usize, fmt: u32, mode: u8) {
+    c.or32(G_ENABLES, en_compress(i as u32));
+    c.set32(ch_fmt(i, IMG_FMT), fmt);
+    c.set8(ch_compress(i, CP_MODE), mode);
+}
+
+/// The simple job: no statistics and no output 1, for the buffer-ownership tests.
+fn simple_cfg(c: &mut Config) {
+    c.and32(G_ENABLES, !(EN_STATS_ALL | EN_OUTPUT1));
+}
+
+fn nop(_: &mut Config) {}
+
+/// A stream the fake front end runs: its file, the ring mapping, and the producer's own counters.
+/// The ring is declared before its file so that dropping the stream unmaps before it closes, as the
+/// C `stream_close` does.
+struct Stream {
+    ring: Mapping,
+    fd: OwnedFd,
+    pool_addr: u64,
+    jobs_head: u64,
+    frames_tail: u64,
+    returns_head: u64,
+}
+
+/// One job: `struct lemnos_stream_job`.
+#[derive(Clone, Copy, Default)]
+struct Range {
+    addr: u64,
+    len: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Job {
+    identity: u64,
+    buffer: u32,
+    count: u32,
+    range: [Range; 4],
+}
+
+impl Job {
+    fn bytes(&self) -> [u8; JOB_BYTES] {
+        let mut b = [0u8; JOB_BYTES];
+        put64(&mut b, 0, self.identity);
+        put32(&mut b, 8, self.buffer);
+        put32(&mut b, 12, self.count);
+        for (i, r) in self.range.iter().enumerate() {
+            put64(&mut b, 16 + 16 * i, r.addr);
+            put64(&mut b, 24 + 16 * i, r.len);
+        }
+        b
+    }
+}
+
+/// `struct lemnos_pisp_fe_start`, 60 bytes.
+#[derive(Clone, Copy)]
+struct Start([u8; 60]);
+
+impl Start {
+    fn set32(&mut self, at: usize, v: u32) {
+        put32(&mut self.0, at, v);
+    }
+
+    fn set_i32(&mut self, at: usize, v: i32) {
+        put_i32(&mut self.0, at, v);
+    }
+}
+
+/// The start the good configuration takes: the receiver's link and frame, output 0 as the job makes it.
+fn good_start(stream_fd: i32) -> Start {
+    let mut a = Start([0; 60]);
+    a.set_i32(S_STREAM_FD, stream_fd);
+    a.set32(S_LANES, 2);
+    a.set32(S_MBPS, 800);
+    a.set32(S_DT, 0x2b);
+    a.set32(S_WIDTH, u32::from(W));
+    a.set32(S_HEIGHT, u32::from(H));
+    a.set32(S_OUT_WIDTH, u32::from(W));
+    a.set32(S_OUT_HEIGHT, u32::from(H));
+    a.set32(S_OUT_STRIDE, STRIDE);
+    a.set32(S_OUT_SIZE, OUT0_BYTES as u32);
+    a.set32(S_OUT_FORMAT, BPS_16);
+    a
+}
+
+/// `struct lemnos_rp1_csi2_start` for the receiver's own stream (the link and frame, not the front end's).
+fn rp1_start(stream_fd: i32) -> [u8; 48] {
+    let mut r = [0u8; 48];
+    put_i32(&mut r, 0, stream_fd);
+    put32(&mut r, 4, 2);
+    put32(&mut r, 8, 800);
+    put32(&mut r, 16, 0x2b);
+    put32(&mut r, 20, u32::from(W));
+    put32(&mut r, 24, u32::from(H));
+    put32(&mut r, 28, STRIDE);
+    put32(&mut r, 32, OUT0_BYTES as u32);
+    r
+}
+
+/// One region of the check's memory, registered with each stream: its descriptor, and the handle
+/// and device address the stream reports.
+struct Region {
+    fd: OwnedFd,
+    handle: u32,
+    addr: u64,
+}
+
+/// The check's buffers and regions: the pool, the configuration slots, the statistics and the
+/// second output. Their mappings are the check's own view of the same memory.
+struct Bufs {
+    pool: OwnedFd,
+    pool_map: Mapping,
+    cfg: Region,
+    cfg_map: Mapping,
+    stats: Region,
+    stats_map: Mapping,
+    out: Region,
+    out_map: Mapping,
+}
+
+impl Bufs {
+    /// Config slot `slot`, as the module reads it.
+    fn cfg_read(&self, slot: usize) -> Config {
+        let mut c = Config::zeroed();
+        let at = slot * CFG_SIZE;
+        c.b.copy_from_slice(&self.cfg_map.as_slice()[at..at + CFG_SIZE]);
+        c
+    }
+
+    fn cfg_write(&self, slot: usize, c: &Config) {
+        let _ = self.cfg_map.write_bytes(slot * CFG_SIZE, &c.b);
+    }
+
+    /// The C `valid(cfg_slot(slot))` followed by `f`.
+    fn put_cfg(&self, slot: usize, f: impl FnOnce(&mut Config)) {
+        let mut c = Config::valid();
+        f(&mut c);
+        self.cfg_write(slot, &c);
+    }
+
+    /// The C edit of a slot in place: read, change, write back.
+    fn cfg_edit(&self, slot: usize, f: impl FnOnce(&mut Config)) {
+        let mut c = self.cfg_read(slot);
+        f(&mut c);
+        self.cfg_write(slot, &c);
+    }
+
+    /// `job_for(slot, buffer)`: the ranges the configuration in `slot` calls for, from its enables.
+    fn job_for(&self, slot: usize, buffer: u32) -> Job {
+        let enables = self.cfg_read(slot).get32(G_ENABLES);
+        let mut j = Job {
+            identity: 0x1000 + slot as u64,
+            buffer,
+            ..Job::default()
+        };
+        let mut n = 0;
+        j.range[n] = Range {
+            addr: self.cfg.addr + (slot * CFG_SIZE) as u64,
+            len: CFG_SIZE as u64,
+        };
+        n += 1;
+        if enables & EN_STATS_ALL != 0 {
+            j.range[n] = Range {
+                addr: self.stats.addr,
+                len: STATS_SIZE as u64,
+            };
+            n += 1;
+        }
+        if enables & EN_OUTPUT1 != 0 {
+            j.range[n] = Range {
+                addr: self.out.addr,
+                len: OUT0_BYTES,
+            };
+            n += 1;
+        }
+        j.count = n as u32;
+        j
+    }
+}
+
+/// Makes the stream on the receiver's node `ctl` (or on any open file of it), with the pool or
+/// buffers of its own, and registers the check's regions with it. None when any step refuses,
+/// after the C's message for a failed registration.
+fn stream_setup(ctl: Option<BorrowedFd<'_>>, own: bool, b: &mut Bufs) -> Option<Stream> {
+    let mut c = [0u8; 56];
+    put32(&mut c, 4, if own { CREATE_BUFFERS } else { 0 });
+    put32(&mut c, 8, BUFFERS);
+    put32(&mut c, 12, BUFFER_BYTES as u32);
+    put32(&mut c, 16, FRAME_SLOTS as u32);
+    put32(&mut c, 20, JOB_SLOTS as u32);
+    put32(&mut c, 24, JOB_BYTES as u32);
+    put_i32(&mut c, 28, if own { -1 } else { b.pool.as_raw_fd() });
+    put_i32(&mut c, 32, -1);
+    let fd = guest::rp1_csi2_stream_create(ctl?, &mut c).ok()?;
+    let ring_bytes = get64(&c, 40) as usize;
+    let pool_addr = get64(&c, 48);
+    let ring = Mapping::new(fd.as_fd(), ring_bytes, 0, true).ok()?;
+    let s = Stream {
+        ring,
+        fd,
+        pool_addr,
+        jobs_head: 0,
+        frames_tail: 0,
+        returns_head: 0,
+    };
+    for region in [&mut b.cfg, &mut b.stats, &mut b.out] {
+        if let Err(e) = reg(&s, region) {
+            say(&format!("register failed: {}", strerror(e)));
+            return None;
+        }
+    }
+    Some(s)
+}
+
+/// `LEMNOS_STREAM_IOC_REGISTER` of `r` on stream `s`: its handle and device address.
+fn reg(s: &Stream, r: &mut Region) -> Result<(), i32> {
+    let mut a = [0u8; 24];
+    put_i32(&mut a, 0, r.fd.as_raw_fd());
+    guest::ioctl_bytes(s.fd.as_fd(), STREAM_REGISTER, &mut a).map_err(|e| errno_of(&e))?;
+    r.handle = get32(&a, 4);
+    r.addr = get64(&a, 8);
+    Ok(())
+}
+
+impl Stream {
+    /// The ring's words, as the module shares them.
+    fn w(&self) -> &[AtomicU64] {
+        self.ring.as_atomic_words().unwrap_or(&[])
+    }
+
+    fn ld(&self, at: usize) -> u64 {
+        self.w()[at].load(Ordering::Acquire)
+    }
+
+    fn st(&self, at: usize, v: u64) {
+        self.w()[at].store(v, Ordering::Release);
+    }
+
+    fn raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
+    }
+
+    /// Posts `job` as the next slot of the ring.
+    fn post(&mut self, job: &Job) {
+        let at = JOBS_AT + (self.jobs_head as usize & (JOB_SLOTS - 1)) * JOB_WORDS;
+        let bytes = job.bytes();
+        self.st(at, JOB_BYTES as u64);
+        for (i, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
+            self.st(at + 1 + i, u64::from_ne_bytes(*chunk));
+        }
+        self.jobs_head += 1;
+        self.st(RING_JOBS_HEAD, self.jobs_head);
+    }
+
+    /// `LEMNOS_STREAM_IOC_KICK`: the negative errno it failed with, or 0.
+    fn kick(&self) -> i32 {
+        ioctl_fd(Some(self.fd.as_fd()), KICK, &mut [0u8; 0])
+            .err()
+            .map_or(0, |e| -errno_of(&e))
+    }
+
+    /// The stream's fault, as `LEMNOS_STREAM_IOC_STATUS` reports it (0 when none).
+    fn status_fault(&self) -> u64 {
+        let mut st = [0u8; 40];
+        let _ = guest::ioctl_bytes(self.fd.as_fd(), STREAM_STATUS, &mut st);
+        u64::from(get32(&st, 4))
+    }
+
+    /// The next published frame: its buffer, its bytes and its identity, if one was published.
+    fn pop_frame(&mut self) -> Option<(u32, u32, u64)> {
+        let head = self.ld(RING_FRAMES_HEAD);
+        if head == self.frames_tail {
+            return None;
+        }
+        let at = RING_FRAMES + (self.frames_tail as usize & (FRAME_SLOTS - 1)) * FRAME_WORDS;
+        let pair = self.ld(at);
+        let identity = self.ld(at + 2);
+        self.frames_tail += 1;
+        self.st(RING_FRAMES_TAIL, self.frames_tail);
+        Some((pair as u32, (pair >> 32) as u32, identity))
+    }
+}
+
+/// `pisp_fe` info, as `LEMNOS_PISP_FE_IOC_INFO` gives it.
+struct FeInfo {
+    flags: u32,
+    streaming: u32,
+    frames: u64,
+    written: u64,
+    dropped: u64,
+    errors: u64,
+    stalled: u64,
+}
+
+/// The info of the front end, and whether the request succeeded. The buffer is 0xff when it did not,
+/// as the C check's `memset`.
+fn fe_info_raw(fd: Option<BorrowedFd<'_>>) -> (bool, FeInfo) {
+    let mut b = [0xffu8; 56];
+    let ok = ioctl_fd(fd, FE_INFO, &mut b).is_ok();
+    (
+        ok,
+        FeInfo {
+            flags: get32(&b, 8),
+            streaming: get32(&b, 12),
+            frames: get64(&b, 16),
+            written: get64(&b, 24),
+            dropped: get64(&b, 32),
+            errors: get64(&b, 40),
+            stalled: get64(&b, 48),
+        },
+    )
+}
+
+/// The C `fe_info()`: a check of its own, then the info.
+fn fe_info(fd: Option<BorrowedFd<'_>>) -> FeInfo {
+    let (ok, i) = fe_info_raw(fd);
+    check!(ok, "INFO");
+    i
+}
+
+/// `LEMNOS_PISP_FE_IOC_START` of `a`: 0, or the negative errno.
+fn start(fd: Option<BorrowedFd<'_>>, a: &Start) -> i32 {
+    let mut b = a.0;
+    ioctl_fd(fd, FE_START, &mut b)
+        .err()
+        .map_or(0, |e| -errno_of(&e))
+}
+
+/// `LEMNOS_PISP_FE_IOC_STOP`: 0, or the negative errno.
+fn stop(fd: Option<BorrowedFd<'_>>) -> i32 {
+    ioctl_fd(fd, FE_STOP, &mut [0u8; 0])
+        .err()
+        .map_or(0, |e| -errno_of(&e))
+}
+
+/// `LEMNOS_RP1_CSI2_IOC_CLAIM` of `parts`: 0, or the negative errno.
+fn claim_parts(fd: Option<BorrowedFd<'_>>, parts: u32) -> i32 {
+    let mut c = [0u8; 8];
+    put32(&mut c, 0, parts);
+    ioctl_fd(fd, RP1_CLAIM, &mut c)
+        .err()
+        .map_or(0, |e| -errno_of(&e))
+}
+
+/// A register of the fake front end, read through its window.
+fn peek(hw: BorrowedFd<'_>, off: u32) -> u32 {
+    let mut p = [0u8; 8];
+    put32(&mut p, 0, off);
+    let _ = guest::ioctl_bytes(hw, TCSI_FE_PEEK, &mut p);
+    get32(&p, 4)
+}
+
+/// The register offset of a configuration field, in the front end's window (the C `OFF`).
+fn off(field: usize) -> u32 {
+    FE_CONFIG + field as u32
+}
+
+/// The fake receiver's word request (`TCSI_IOC_*` with a `__u32`): the result is ignored, as the C does.
+fn hw_word(hw: BorrowedFd<'_>, req: u32, v: u32) {
+    let mut b = v.to_ne_bytes();
+    let _ = guest::ioctl_bytes(hw, req, &mut b);
+}
+
+/// The front end's interrupt with `status`, a check of its own, then the 4 ms the C waits.
+fn fe_fire(hw: BorrowedFd<'_>, status: u32) {
+    let mut b = status.to_ne_bytes();
+    let ok = guest::ioctl_bytes(hw, TCSI_FE_FIRE, &mut b).is_ok();
+    check!(ok, "fire {status:x}");
+    sleep_ms(4);
+}
+
+/// The receiver's interrupt with `status`, as the channel feeding the front end raises it.
+fn csi_fire(hw: BorrowedFd<'_>, status: u32) {
+    let mut b = status.to_ne_bytes();
+    let ok = guest::ioctl_bytes(hw, TCSI_FIRE, &mut b).is_ok();
+    check!(ok, "receiver fire {status:x}");
+    sleep_ms(4);
+}
+
+/// The module's write log: the (offset, value) of each write, in order.
+type Trace = Vec<(u32, u32)>;
+
+/// Reads the module's write log into `trace`: the count of writes it holds.
+fn read_trace(fd: Option<BorrowedFd<'_>>, trace: &mut Trace) -> u32 {
+    let mut buf = vec![0u8; TRACE_MAX * 8];
+    let mut t = [0u8; 16];
+    put64(&mut t, 0, buf.as_mut_ptr() as usize as u64);
+    put32(&mut t, 8, TRACE_MAX as u32);
+    let ok = ioctl_fd(fd, FE_TEST_TRACE, &mut t).is_ok();
+    check!(ok, "trace read");
+    let n = get32(&t, 12);
+    trace.clear();
+    for e in buf.as_chunks::<8>().0.iter().take(n as usize) {
+        trace.push((get32(e, 0), get32(e, 4)));
+    }
+    n
+}
+
+/// The index of the first write of `offset` with `value` among the first `n`, or -1.
+fn contains_write(trace: &Trace, n: u32, offset: u32, value: u32) -> i32 {
+    trace
+        .iter()
+        .take(n as usize)
+        .position(|e| e.0 == offset && e.1 == value)
+        .map_or(-1, |i| i as i32)
+}
+
+/// The index of the first write to `offset` among the first `n`, or -1.
+fn contains_offset(trace: &Trace, n: u32, offset: u32) -> i32 {
+    trace
+        .iter()
+        .take(n as usize)
+        .position(|e| e.0 == offset)
+        .map_or(-1, |i| i as i32)
+}
+
+/// The entry at `index` of the log, as its value (0 past its end, as the C check reads nothing there).
+fn value_at(trace: &Trace, index: i32) -> u32 {
+    trace.get(index as u32 as usize).map_or(0, |e| e.1)
+}
+
+/// The check of a stream's set-up: its label, then the stream, or None when it did not make one.
+fn setup(ctl: Option<BorrowedFd<'_>>, own: bool, b: &mut Bufs, label: &str) -> Option<Stream> {
+    let s = stream_setup(ctl, own, b);
+    check!(s.is_some(), "{label}");
+    s
+}
+
+/// Reads the address the register pair at `reg` holds, and checks it.
+fn expect_addr(hw: BorrowedFd<'_>, what: &str, reg: u32, want: u64) {
+    let got = (u64::from(peek(hw, reg + 4)) << 32) | u64::from(peek(hw, reg));
+    check!(
+        got == want,
+        "{what}: register holds {} (want {})",
+        hx(got),
+        hx(want)
+    );
+}
+
+/// A bad configuration and the errno START must refuse it with.
+struct Bad {
+    name: &'static str,
+    err: i32,
+    delta: i32,
+    f: Box<dyn Fn(&mut Config)>,
+}
+
+fn bad(name: &'static str, f: impl Fn(&mut Config) + 'static) -> Bad {
+    Bad {
+        name,
+        err: EINVAL,
+        delta: 0,
+        f: Box::new(f),
+    }
+}
+
+/// The validator's bad configurations, in the C table's order.
+fn bad_cases() -> Vec<Bad> {
+    let v = vec![
+        bad("addr_stats_lo", |c| c.set32(ST_ADDR, 0x1000)),
+        bad("addr_stats_hi", |c| c.set32(ST_ADDR + 4, 1)),
+        bad("addr_out0_lo", |c| c.set32(OUT_ADDR, 0x1000)),
+        bad("addr_out0_hi", |c| c.set32(OUT_ADDR + 4, 1)),
+        bad("addr_out1_lo", |c| c.set32(OUT_ADDR + 8, 0x1000)),
+        bad("addr_out1_hi", |c| c.set32(OUT_ADDR + 12, 1)),
+        bad("addr_input_lo", |c| c.set32(IN_ADDR, 0x1000)),
+        bad("addr_input_hi", |c| c.set32(IN_ADDR + 4, 1)),
+        bad("input_frame_id", |c| c.set16(IN_FRAME_ID, 7)),
+        bad("input_buf_pad", |c| c.set16(IN_BUF_PAD, 1)),
+        bad("ilines0", |c| c.set16(ch(0) + BR_ILINES, 100)),
+        bad("ilines1", |c| c.set16(ch(1) + BR_ILINES, 100)),
+        bad("disabled_output1_addr", |c| {
+            c.and32(G_ENABLES, !EN_OUTPUT1);
+            c.set32(OUT_ADDR + 8, 0x4000);
+        }),
+        bad("disabled_stats_addr", |c| {
+            c.and32(G_ENABLES, !EN_AWB_STATS);
+            c.set32(ST_ADDR, 0x4000);
+        }),
+        bad("disabled_block_left_on", |c| {
+            c.and32(G_ENABLES, !EN_OUTPUT1);
+            c.or32(G_ENABLES, EN_DOWNSCALE1);
+        }),
+        bad("unknown_enable_bit", |c| c.or32(G_ENABLES, 0x2000)),
+        bad("no_input", |c| c.and32(G_ENABLES, !EN_INPUT)),
+        bad("no_output0", |c| c.and32(G_ENABLES, !EN_OUTPUT0)),
+        bad("not_streaming", |c| c.set8(IN_STREAMING, 0)),
+        bad("input_format_not_16", |c| c.set32(IN_FMT + IMG_FMT, BPS_8)),
+        bad("input_width_differs", |c| c.set16(IN_FMT + IMG_W, W + 2)),
+        bad("input_height_differs", |c| c.set16(IN_FMT + IMG_H, H + 2)),
+        bad("input_wider_than_start_cropped_back", |c| {
+            c.set16(IN_FMT + IMG_W, W + 16);
+            c.and32(G_ENABLES, !EN_OUTPUT1);
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_W), W);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("input_taller_than_start_cropped_back", |c| {
+            c.set16(IN_FMT + IMG_H, H + 2);
+            c.and32(G_ENABLES, !EN_OUTPUT1);
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_W), W);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("input_stride", |c| c.set_i32(IN_FMT + IMG_STRIDE, 16)),
+        bad("input_axi", |c| c.set16(IN_AXI_QOS, 1)),
+        bad("input_holdoff", |c| c.set8(IN_HOLDOFF, 1)),
+        bad("input_pad", |c| c.set8(IN_PAD2_1, 1)),
+        bad("global_pad", |c| c.set8(G_PAD2, 1)),
+        bad("bad_bayer", |c| c.set8(G_BAYER, 7)),
+        bad("decompand_pad", |c| c.set16(DECOMPAND_PAD, 1)),
+        bad("spare1", |c| c.set32(SPARE1, 1)),
+        bad("bla_pad", |c| c.set8(BLA_PAD0, 1)),
+        bad("ch_pad", |c| c.set32(ch(0) + BR_PAD, 1)),
+        bad("ch_downscale_pad", |c| c.set8(ch_ds(0, DS_PAD1), 1)),
+        bad("output_axi_qos", |c| c.set16(OUT_AXI + 2, 1)),
+        bad("output_axi_thresh", |c| c.set16(OUT_AXI + 4, 1)),
+        bad("out0_width", |c| c.set16(ch_fmt(0, IMG_W), W - 2)),
+        bad("out0_height", |c| c.set16(ch_fmt(0, IMG_H), H + 2)),
+        bad("out0_stride_small", |c| {
+            c.set_i32(ch_fmt(0, IMG_STRIDE), STRIDE as i32 - 16)
+        }),
+        bad("out0_stride_unaligned", |c| {
+            c.set_i32(ch_fmt(0, IMG_STRIDE), STRIDE as i32 + 4)
+        }),
+        bad("out0_stride_negative", |c| {
+            c.set_i32(ch_fmt(0, IMG_STRIDE), -(STRIDE as i32))
+        }),
+        bad("out0_stride2", |c| c.set_i32(ch_fmt(0, IMG_STRIDE2), 4)),
+        bad("out0_format_extra", |c| {
+            c.or32(ch_fmt(0, IMG_FMT), PLANARITY_PLANAR)
+        }),
+        bad("out0_format_10bit", |c| c.set32(ch_fmt(0, IMG_FMT), BPS_10)),
+        bad("out0_compress_no_format", |c| {
+            c.or32(G_ENABLES, EN_COMPRESS0)
+        }),
+        bad("out0_format_no_compress", |c| {
+            c.set32(ch_fmt(0, IMG_FMT), COMPRESSION_MODE_1)
+        }),
+        bad("out1_width", |c| c.set16(ch_fmt(1, IMG_W), W + 2)),
+        bad("out1_stride_short", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 16)
+        }),
+        bad("out1_stride_negative", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), -16)
+        }),
+        bad("out1_huge", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 0x7fff_fff0)
+        }),
+        bad("out1_stride_wraps_32", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 0x4000_0000)
+        }),
+        bad("out0_smaller_than_start", |c| {
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_W), W - 8);
+            c.set16(ch_crop(0, CROP_H), H);
+            c.set16(ch_fmt(0, IMG_W), W - 8);
+        }),
+        bad("out0_stride_not_start", |c| {
+            c.set_i32(ch_fmt(0, IMG_STRIDE), STRIDE as i32 + 16)
+        }),
+        bad("out0_format_not_start", |c| {
+            c.or32(G_ENABLES, EN_COMPRESS0);
+            c.set8(ch_compress(0, CP_MODE), 1);
+            c.set32(ch_fmt(0, IMG_FMT), COMPRESSION_MODE_1);
+        }),
+        bad("out1_stride_below_16bit", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 96)
+        }),
+        Bad {
+            name: "decompress",
+            err: EOPNOTSUPP,
+            delta: 0,
+            f: Box::new(|c| c.or32(G_ENABLES, EN_DECOMPRESS)),
+        },
+        bad("out1_compress_no_format", |c| {
+            c.or32(G_ENABLES, EN_COMPRESS1);
+            c.set8(ch_compress(1, CP_MODE), 1);
+        }),
+        bad("out1_format_no_compress", |c| {
+            c.set32(ch_fmt(1, IMG_FMT), COMPRESSION_MODE_1)
+        }),
+        bad("compress_mode_zero", |c| {
+            compressed(c, 1, COMPRESSION_MODE_1, 0)
+        }),
+        bad("compress_mode_mismatch", |c| {
+            compressed(c, 1, COMPRESSION_MODE_2, 1)
+        }),
+        bad("compress_mode_too_big", |c| {
+            compressed(c, 1, COMPRESSION_MODE_3, 4)
+        }),
+        bad("compressed_at_16bit", |c| {
+            compressed(c, 1, COMPRESSION_MODE_1 | BPS_16, 1)
+        }),
+        bad("compressed_at_10bit", |c| {
+            compressed(c, 1, COMPRESSION_MODE_1 | BPS_10, 1)
+        }),
+        bad("compressed_stride_short", |c| {
+            compressed(c, 1, COMPRESSION_MODE_1, 1);
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 48);
+        }),
+        bad("out1_8bit", |c| c.set32(ch_fmt(1, IMG_FMT), BPS_8)),
+        bad("out1_10bit", |c| c.set32(ch_fmt(1, IMG_FMT), BPS_10)),
+        bad("out1_12bit", |c| c.set32(ch_fmt(1, IMG_FMT), BPS_12)),
+        bad("decimate_crop_narrow", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP | EN_DECIMATE);
+            c.set16(STATS_CROP + CROP_W, 2);
+            c.set16(STATS_CROP + CROP_H, H);
+        }),
+        bad("decimate_crop_short", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP | EN_DECIMATE);
+            c.set16(STATS_CROP + CROP_W, W);
+            c.set16(STATS_CROP + CROP_H, 2);
+        }),
+        bad("agc_size_x", |c| {
+            agc_good(c);
+            c.set16(AGC_SIZE_X, 0);
+        }),
+        bad("agc_size_y", |c| {
+            agc_good(c);
+            c.set16(AGC_SIZE_Y, 0);
+        }),
+        bad("agc_row_size_x", |c| {
+            agc_good(c);
+            c.set16(AGC_ROW_X, 0);
+        }),
+        bad("agc_row_size_y", |c| {
+            agc_good(c);
+            c.set16(AGC_ROW_Y, 1);
+        }),
+        bad("awb_size_x", |c| c.set16(AWB_SIZE_X, 0)),
+        bad("awb_size_y", |c| c.set16(AWB_SIZE_Y, 1)),
+        bad("cdaf_size_x", |c| {
+            cdaf_good(c);
+            c.set16(CDAF_SIZE_X, 0);
+        }),
+        bad("cdaf_size_y", |c| {
+            cdaf_good(c);
+            c.set16(CDAF_SIZE_Y, 1);
+        }),
+        bad("crop_zero_width", |c| {
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_W), 0);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("crop_offset_outside", |c| {
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_X), W);
+            c.set16(ch_crop(0, CROP_W), W);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("crop_end_outside", |c| {
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_Y), 2);
+            c.set16(ch_crop(0, CROP_W), W);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("crop_size_vs_output", |c| {
+            c.or32(G_ENABLES, EN_CROP0);
+            c.set16(ch_crop(0, CROP_W), W - 8);
+            c.set16(ch_crop(0, CROP_H), H);
+        }),
+        bad("downscale_ratio", |c| {
+            c.or32(G_ENABLES, EN_DOWNSCALE0);
+            c.set8(ch_ds(0, DS_XIN), 1);
+            c.set8(ch_ds(0, DS_XOUT), 2);
+            c.set8(ch_ds(0, DS_YIN), 1);
+            c.set8(ch_ds(0, DS_YOUT), 1);
+        }),
+        bad("downscale_output_width", |c| {
+            c.or32(G_ENABLES, EN_DOWNSCALE0);
+            c.set8(ch_ds(0, DS_XIN), 2);
+            c.set8(ch_ds(0, DS_XOUT), 1);
+            c.set8(ch_ds(0, DS_YIN), 1);
+            c.set8(ch_ds(0, DS_YOUT), 1);
+            c.set16(ch_ds(0, DS_OUT_W), 8);
+            c.set16(ch_ds(0, DS_OUT_H), H);
+        }),
+        bad("downscale_zero_input", |c| {
+            c.or32(G_ENABLES, EN_DOWNSCALE0);
+            c.set8(ch_ds(0, DS_XIN), 0);
+            c.set8(ch_ds(0, DS_XOUT), 1);
+            c.set8(ch_ds(0, DS_YIN), 1);
+            c.set8(ch_ds(0, DS_YOUT), 1);
+        }),
+        bad("stats_crop_zero", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP);
+            c.set16(STATS_CROP + CROP_W, 0);
+            c.set16(STATS_CROP + CROP_H, H);
+        }),
+        bad("stats_crop_outside", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP);
+            c.set16(STATS_CROP + CROP_X, W - 2);
+            c.set16(STATS_CROP + CROP_W, W);
+            c.set16(STATS_CROP + CROP_H, H);
+        }),
+    ];
+    v
+}
+
+/// A variant the validator allows, and START's agreeing fix for it.
+struct Good {
+    name: &'static str,
+    f: Box<dyn Fn(&mut Config)>,
+    fix: Option<fn(&mut Start)>,
+}
+
+fn good(name: &'static str, f: impl Fn(&mut Config) + 'static) -> Good {
+    Good {
+        name,
+        f: Box::new(f),
+        fix: None,
+    }
+}
+
+fn good_fix(name: &'static str, f: impl Fn(&mut Config) + 'static, fix: fn(&mut Start)) -> Good {
+    Good {
+        name,
+        f: Box::new(f),
+        fix: Some(fix),
+    }
+}
+
+fn good_cases() -> Vec<Good> {
+    vec![
+        good("plain_16bit", |c| {
+            only_out0(c);
+            no_stats(c);
+        }),
+        good("two_outputs_16bit", nop_c),
+        good_fix(
+            "out0_mode1",
+            |c| {
+                only_out0(c);
+                compressed(c, 0, COMPRESSION_MODE_1, 1);
+            },
+            |a| a.set32(S_OUT_FORMAT, COMPRESSION_MODE_1),
+        ),
+        good_fix(
+            "out0_mode2",
+            |c| {
+                only_out0(c);
+                compressed(c, 0, COMPRESSION_MODE_2, 2);
+            },
+            |a| a.set32(S_OUT_FORMAT, COMPRESSION_MODE_2),
+        ),
+        good_fix(
+            "out0_mode3",
+            |c| {
+                only_out0(c);
+                compressed(c, 0, COMPRESSION_MODE_3, 3);
+            },
+            |a| a.set32(S_OUT_FORMAT, COMPRESSION_MODE_3),
+        ),
+        good("out1_mode1", |c| compressed(c, 1, COMPRESSION_MODE_1, 1)),
+        good("out1_mode2", |c| compressed(c, 1, COMPRESSION_MODE_2, 2)),
+        good("out1_mode3", |c| compressed(c, 1, COMPRESSION_MODE_3, 3)),
+        good("out1_compressed_tightest_stride", |c| {
+            compressed(c, 1, COMPRESSION_MODE_1, 1);
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 64);
+        }),
+        good("crop_both_full", |c| {
+            c.or32(G_ENABLES, EN_CROP0 | EN_CROP1);
+            c.set16(ch_crop(0, CROP_W), W);
+            c.set16(ch_crop(0, CROP_H), H);
+            c.set16(ch_crop(1, CROP_W), W);
+            c.set16(ch_crop(1, CROP_H), H);
+        }),
+        good("crop1_smaller_offset", |c| {
+            c.or32(G_ENABLES, EN_CROP1);
+            c.set16(ch_crop(1, CROP_X), 8);
+            c.set16(ch_crop(1, CROP_Y), 2);
+            c.set16(ch_crop(1, CROP_W), W - 8);
+            c.set16(ch_crop(1, CROP_H), H - 2);
+            c.set16(ch_fmt(1, IMG_W), W - 8);
+            c.set16(ch_fmt(1, IMG_H), H - 2);
+        }),
+        good_fix(
+            "crop0_smaller",
+            |c| {
+                only_out0(c);
+                c.or32(G_ENABLES, EN_CROP0);
+                c.set16(ch_crop(0, CROP_W), W - 8);
+                c.set16(ch_crop(0, CROP_H), H);
+                c.set16(ch_fmt(0, IMG_W), W - 8);
+            },
+            |a| a.set32(S_OUT_WIDTH, u32::from(W) - 8),
+        ),
+        good("downscale1", |c| {
+            c.or32(G_ENABLES, EN_DOWNSCALE1);
+            c.set8(ch_ds(1, DS_XIN), 2);
+            c.set8(ch_ds(1, DS_XOUT), 1);
+            c.set8(ch_ds(1, DS_YIN), 1);
+            c.set8(ch_ds(1, DS_YOUT), 1);
+            c.set16(ch_ds(1, DS_OUT_W), W / 2);
+            c.set16(ch_ds(1, DS_OUT_H), H);
+            c.set16(ch_fmt(1, IMG_W), W / 2);
+        }),
+        good_fix(
+            "downscale0",
+            |c| {
+                only_out0(c);
+                c.or32(G_ENABLES, EN_DOWNSCALE0);
+                c.set8(ch_ds(0, DS_XIN), 2);
+                c.set8(ch_ds(0, DS_XOUT), 1);
+                c.set8(ch_ds(0, DS_YIN), 1);
+                c.set8(ch_ds(0, DS_YOUT), 1);
+                c.set16(ch_ds(0, DS_OUT_W), W / 2);
+                c.set16(ch_ds(0, DS_OUT_H), H);
+                c.set16(ch_fmt(0, IMG_W), W / 2);
+            },
+            |a| a.set32(S_OUT_WIDTH, u32::from(W / 2)),
+        ),
+        good("stats_crop_smallest", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP);
+            c.set16(STATS_CROP + CROP_W, 2);
+            c.set16(STATS_CROP + CROP_H, 2);
+        }),
+        good("stats_crop_decimate_smallest", |c| {
+            c.or32(G_ENABLES, EN_STATS_CROP | EN_DECIMATE);
+            c.set16(STATS_CROP + CROP_W, 4);
+            c.set16(STATS_CROP + CROP_H, 4);
+        }),
+        good("decimate_no_crop", |c| c.or32(G_ENABLES, EN_DECIMATE)),
+        good("bayer_0", |c| c.set8(G_BAYER, 0)),
+        good("bayer_1", |c| c.set8(G_BAYER, 1)),
+        good("bayer_3", |c| c.set8(G_BAYER, 3)),
+        good("bayer_mono", |c| c.set8(G_BAYER, 128)),
+        good("decompand", |c| c.or32(G_ENABLES, EN_DECOMPAND)),
+        good("bla", |c| c.or32(G_ENABLES, EN_BLA)),
+        good("dpc", |c| c.or32(G_ENABLES, EN_DPC)),
+        good("stats_blc", |c| stats_on(c, EN_BLC)),
+        good("stats_rgby", |c| stats_on(c, EN_RGBY)),
+        good("stats_lsc", |c| stats_on(c, EN_LSC)),
+        good("stats_awb", nop_c),
+        good("stats_cdaf", |c| {
+            no_stats(c);
+            cdaf_good(c);
+        }),
+        good("stats_agc", |c| {
+            no_stats(c);
+            agc_good(c);
+        }),
+        good_fix(
+            "larger_stride",
+            |c| {
+                only_out0(c);
+                c.set_i32(ch_fmt(0, IMG_STRIDE), STRIDE as i32 + 16);
+            },
+            |a| {
+                a.set_i32(S_OUT_STRIDE, STRIDE as i32 + 16);
+                a.set32(S_OUT_SIZE, (STRIDE + 16) * u32::from(H));
+            },
+        ),
+        good("tightest_stride_out1", |c| {
+            c.set_i32(ch_fmt(1, IMG_STRIDE), 128)
+        }),
+    ]
+}
+
+fn nop_c(_: &mut Config) {}
+
+/// One good configuration, started for real: accepted, queued, its enables reached the block.
+fn one_good(env: &Env, b: &mut Bufs, g: &Good) {
+    let Some(mut s) = setup(ctl_fd(env), false, b, &format!("{}: stream", g.name)) else {
+        return;
+    };
+    b.put_cfg(0, |c| (g.f)(c));
+    let enables = b.cfg_read(0).get32(G_ENABLES);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "{}: job accepted", g.name);
+    let mut a = good_start(s.raw_fd());
+    if let Some(fix) = g.fix {
+        fix(&mut a);
+    }
+    let ret = start(ctl_fd(env), &a);
+    check!(ret == 0, "{}: accepted (got {ret})", g.name);
+    check!(
+        peek(hw_fd(env), FE_CONTROL) == C_QUEUE,
+        "{}: queued",
+        g.name
+    );
+    check!(
+        peek(hw_fd(env), off(G_ENABLES)) == enables,
+        "{}: its enables reached the block",
+        g.name
+    );
+    check!(
+        s.status_fault() == 0,
+        "{}: the stream carries no fault",
+        g.name
+    );
+    check!(stop(ctl_fd(env)) == 0, "{}: stopped", g.name);
+    drop(s);
+}
+
+/// One bad configuration, in a fresh stream: refused by START, no register touched.
+fn one_bad(env: &Env, b: &mut Bufs, name: &str, f: &dyn Fn(&mut Config), err: i32, delta: i32) {
+    let Some(mut s) = setup(ctl_fd(env), false, b, &format!("{name}: stream")) else {
+        return;
+    };
+    b.put_cfg(0, f);
+    let mut j = b.job_for(0, 0);
+    if delta > 0 {
+        // A range the configuration has no use for.
+        j.range[j.count as usize] = Range {
+            addr: b.out.addr,
+            len: OUT0_BYTES,
+        };
+        j.count += 1;
+    } else if delta < 0 {
+        // The ring refuses a non-zero range past the count, so this one is blanked.
+        j.count -= 1;
+        j.range[j.count as usize] = Range::default();
+    }
+    s.post(&j);
+    let ret = s.kick();
+    check!(ret == 0, "{name}: the ring's checks pass ({ret})");
+    check!(
+        peek(hw_fd(env), FE_CONTROL) == 0,
+        "{name}: not written before"
+    );
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(ret == -err, "{name}: refused with -{err} (got {ret})");
+    check!(
+        peek(hw_fd(env), FE_CONTROL) == 0 && peek(hw_fd(env), off(G_ENABLES)) == 0,
+        "{name}: no register touched by a refused configuration"
+    );
+    check!(
+        s.status_fault() == err as u64,
+        "{name}: the stream ended with the errno"
+    );
+    drop(s);
+}
+
+/// The validator, against crafted configurations, then the formats of each output.
+fn test_validator(env: &Env, b: &mut Bufs) {
+    for c in bad_cases() {
+        one_bad(env, b, c.name, &*c.f, c.err, c.delta);
+    }
+    // A job whose ranges don't match what the enables need.
+    one_bad(env, b, "count_too_few", &nop, EINVAL, -1);
+    one_bad(env, b, "count_too_many", &only_out0, EINVAL, 1);
+    for (name, bit) in FORMAT_BITS {
+        for branch in 0..2usize {
+            let f = move |c: &mut Config| c.or32(ch_fmt(branch, IMG_FMT), bit);
+            one_bad(env, b, &format!("out{branch}_{name}"), &f, EINVAL, 0);
+        }
+    }
+}
+
+/// A job the front end reads whole, with a configuration its ranges name, where the ring agrees.
+fn test_allowed_variants(env: &Env, b: &mut Bufs) {
+    for g in good_cases() {
+        one_good(env, b, &g);
+    }
+    let short_input = Good {
+        name: "short_input",
+        f: Box::new(|c| {
+            c.set16(IN_FMT + IMG_H, 2);
+            c.set16(ch_fmt(0, IMG_H), 2);
+            c.set16(ch_fmt(1, IMG_H), 2);
+        }),
+        fix: Some(|a| {
+            a.set32(S_HEIGHT, 2);
+            a.set32(S_OUT_HEIGHT, 2);
+            a.set32(S_OUT_SIZE, STRIDE * 2);
+        }),
+    };
+    one_good(env, b, &short_input);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "short input decimated: stream") else {
+        return;
+    };
+    b.put_cfg(0, |c| {
+        c.set16(IN_FMT + IMG_H, 2);
+        c.set16(ch_fmt(0, IMG_H), 2);
+        c.set16(ch_fmt(1, IMG_H), 2);
+        c.or32(G_ENABLES, EN_DECIMATE);
+    });
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "short input decimated: job accepted");
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_HEIGHT, 2);
+    a.set32(S_OUT_HEIGHT, 2);
+    a.set32(S_OUT_SIZE, STRIDE * 2);
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "an input that decimates to nothing is refused (got {ret})"
+    );
+    drop(s);
+
+    // Windows of a block that's off aren't live: only its enable makes them count.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "stale sub-blocks: stream") else {
+        return;
+    };
+    b.put_cfg(0, |c| {
+        for i in 0..2usize {
+            c.set16(ch_crop(i, CROP_X), 0xbeef);
+            c.set16(ch_crop(i, CROP_W), 999);
+            c.set8(ch_ds(i, DS_XIN), 9);
+            c.set16(ch_ds(i, DS_OUT_W), 777);
+            c.set16(ch_compress(i, CP_OFFSET), 0x5555);
+            c.set8(ch_compress(i, CP_MODE), 3);
+        }
+    });
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "stale sub-blocks: job accepted");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == 0,
+        "stale fields in disabled sub-blocks don't refuse it (got {ret})"
+    );
+    let hw = hw_fd(env);
+    for i in 0..2usize {
+        check!(
+            peek(hw, off(ch_crop(i, CROP_X))) == 0 && peek(hw, off(ch_crop(i, CROP_W))) == 0,
+            "branch {i}: a disabled crop doesn't reach the registers"
+        );
+        check!(
+            peek(hw, off(ch_ds(i, DS_XIN))) == 0 && peek(hw, off(ch_ds(i, DS_OUT_W))) == 0,
+            "branch {i}: a disabled downscale doesn't reach the registers"
+        );
+        check!(
+            peek(hw, off(ch(i) + BR_COMPRESS)) == 0,
+            "branch {i}: a disabled compress doesn't reach the registers"
+        );
+    }
+    check!(stop(ctl_fd(env)) == 0, "stale sub-blocks: stopped");
+    drop(s);
+}
+
+/// START's own format: refused before the stream or the job is looked at.
+fn test_start_format(env: &Env, b: &mut Bufs) {
+    const FORMATS: [(&str, u32); 7] = [
+        ("8-bit", BPS_8),
+        ("10-bit", BPS_10),
+        ("12-bit", BPS_12),
+        ("compressed at 16", COMPRESSION_MODE_1 | BPS_16),
+        ("swapped", BPS_16 | ORDER_SWAPPED),
+        ("planar", BPS_16 | PLANARITY_PLANAR),
+        ("wallpaper", BPS_16 | WALLPAPER_ROLL),
+    ];
+    let Some(mut s) = setup(ctl_fd(env), false, b, "START formats: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "START formats: job accepted");
+    for (name, format) in FORMATS {
+        let hw = hw_fd(env);
+        let control = peek(hw, FE_CONTROL);
+        let enables = peek(hw, off(G_ENABLES));
+        let mut a = good_start(s.raw_fd());
+        a.set32(S_OUT_FORMAT, format);
+        let ret = start(ctl_fd(env), &a);
+        check!(
+            ret == -EINVAL,
+            "START {name}: refused with -EINVAL (got {ret})"
+        );
+        check!(
+            peek(hw, FE_CONTROL) == control && peek(hw, off(G_ENABLES)) == enables,
+            "START {name}: no register touched"
+        );
+        check!(
+            s.status_fault() == 0,
+            "START {name}: the stream is untouched"
+        );
+    }
+    drop(s);
+}
+
+/// A job with one range the ring refuses: its own stream, its own refusal.
+fn one_bad_range(env: &Env, b: &mut Bufs, name: &str, i: usize, range: (u64, u64), err: i32) {
+    let Some(mut s) = setup(ctl_fd(env), false, b, &format!("{name}: stream")) else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[i] = Range {
+        addr: range.0,
+        len: range.1,
+    };
+    s.post(&j);
+    let ret = s.kick();
+    check!(
+        ret == -err,
+        "{name}: the ring refuses it with -{err} (got {ret})"
+    );
+    drop(s);
+}
+
+/// The range checks of the stream, on the job ranges, and the refusals START makes of them.
+fn test_ranges(env: &Env, b: &mut Bufs) {
+    let wrap = u64::MAX - 4;
+    one_bad_range(
+        env,
+        b,
+        "config_out_of_bounds",
+        0,
+        (0x1000, CFG_SIZE as u64),
+        EFAULT,
+    );
+    one_bad_range(
+        env,
+        b,
+        "config_overflow",
+        0,
+        (wrap, CFG_SIZE as u64),
+        EOVERFLOW,
+    );
+    one_bad_range(
+        env,
+        b,
+        "stats_out_of_bounds",
+        1,
+        (0x1000, STATS_SIZE as u64),
+        EFAULT,
+    );
+    one_bad_range(
+        env,
+        b,
+        "stats_overflow",
+        1,
+        (wrap, STATS_SIZE as u64),
+        EOVERFLOW,
+    );
+    one_bad_range(
+        env,
+        b,
+        "output1_out_of_bounds",
+        2,
+        (0x1000, OUT0_BYTES),
+        EFAULT,
+    );
+    one_bad_range(env, b, "output1_overflow", 2, (wrap, OUT0_BYTES), EOVERFLOW);
+
+    // The statistics range: must be in a registered buffer, not the pool.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "stats in the pool: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[1] = Range {
+        addr: s.pool_addr,
+        len: STATS_SIZE as u64,
+    };
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts the range");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EACCES,
+        "statistics in the pool is refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "output 1 in the pool: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[2].addr = s.pool_addr;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts the range");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EACCES,
+        "output 1 in the pool is refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "unaligned output 1: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[2].addr = b.out.addr + 8;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts the range");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "unaligned output 1 address refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "bad buffer index: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.buffer = BUFFERS;
+    s.post(&j);
+    check!(
+        s.kick() == -EINVAL,
+        "a pool buffer index past the pool is refused by the ring"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "wrong stats size: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[1].len = STATS_SIZE as u64 - 16;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts the range");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "statistics buffer of the wrong size refused (got {ret})"
+    );
+    check!(peek(hw_fd(env), FE_CONTROL) == 0, "nothing touched");
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "config in the pool: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[0].addr = s.pool_addr;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts it");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EFAULT,
+        "configuration in the pool refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "wrong config size: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[0].len = CFG_SIZE as u64 - 8;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts it");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "configuration of the wrong size refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "short output 1: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[2].len = OUT0_BYTES - 16;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts it");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "output 1 buffer too small refused (got {ret})"
+    );
+    drop(s);
+
+    let Some(mut s) = setup(ctl_fd(env), false, b, "unaligned stats: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let mut j = b.job_for(0, 0);
+    j.range[1].addr = b.stats.addr + 4;
+    s.post(&j);
+    check!(s.kick() == 0, "the ring accepts it");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EINVAL,
+        "unaligned statistics address refused (got {ret})"
+    );
+    drop(s);
+
+    // Unrelated START arguments, refused before the stream is touched.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "bad starts: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    let _ = s.kick();
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_OUT_STRIDE, 8);
+    check!(
+        start(ctl_fd(env), &a) == -EINVAL,
+        "START: stride not a multiple of 16"
+    );
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_OUT_SIZE, STRIDE);
+    check!(
+        start(ctl_fd(env), &a) == -EINVAL,
+        "START: size below stride * height"
+    );
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_LANES, 9);
+    check!(start(ctl_fd(env), &a) == -EINVAL, "START: too many lanes");
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_VC, 4);
+    check!(
+        start(ctl_fd(env), &a) == -EINVAL,
+        "START: bad virtual channel"
+    );
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_FLAGS, 1);
+    check!(start(ctl_fd(env), &a) == -EINVAL, "START: nonzero flags");
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_OUT_SIZE, 0x7fff_fff0);
+    check!(
+        start(ctl_fd(env), &a) == -EINVAL,
+        "START: frame bigger than a buffer"
+    );
+    let mut a = good_start(s.raw_fd());
+    a.set_i32(S_STREAM_FD, b.pool.as_raw_fd());
+    check!(
+        start(ctl_fd(env), &a) == -EINVAL,
+        "START: a descriptor that isn't a stream"
+    );
+    drop(s);
+}
+
+/// A zero-filled span of a mapping (the C `memset`).
+fn zero(m: &Mapping, len: usize) {
+    let _ = m.write_bytes(0, &vec![0u8; len]);
+}
+
+/// The good configuration starts, reaches the registers as the module checked it, and frames.
+fn test_good_and_addresses(env: &Env, b: &mut Bufs) {
+    let hw = hw_fd(env);
+    let Some(mut s) = setup(ctl_fd(env), false, b, "good config: stream") else {
+        return;
+    };
+    b.put_cfg(0, |c| {
+        // Garbage in a disabled branch's configuration, which the kernel must blank.
+        c.and32(G_ENABLES, !EN_OUTPUT1);
+        c.set16(ch_crop(1, CROP_W), 999);
+        c.set_i32(ch_fmt(1, IMG_STRIDE), 9999);
+    });
+    let j = b.job_for(0, 1);
+    s.post(&j);
+    check!(s.kick() == 0, "job accepted");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(ret == 0, "a valid configuration starts (got {ret})");
+    check!(peek(hw, FE_CONTROL) == C_QUEUE, "the first job was queued");
+    expect_addr(hw, "stats", off(ST_ADDR), b.stats.addr);
+    expect_addr(hw, "output 0", off(OUT_ADDR), s.pool_addr + POOL_STRIDE);
+    expect_addr(hw, "output 1", off(OUT_ADDR + 8), 0);
+    check!(
+        peek(hw, off(ch_crop(1, CROP_W))) == 0 && peek(hw, off(ch_fmt(1, IMG_STRIDE))) == 0,
+        "a disabled branch doesn't reach the registers"
+    );
+    check!(
+        peek(hw, off(ch(0) + BR_ILINES)) == 0x80,
+        "ilines is the module's own value"
+    );
+    // Frame path: start of frame latches, end publishes the pool buffer.
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    let got = s.pop_frame();
+    check!(got.is_some(), "a frame was published");
+    let (buf, bytes, ident) = got.unwrap_or((0, 0, 0));
+    check!(
+        buf == 1 && bytes == OUT0_BYTES as u32 && ident == 0x1000,
+        "buffer {buf}, {bytes} bytes, identity {}",
+        hx(ident)
+    );
+    check!(fe_info(ctl_fd(env)).written == 1, "one frame written");
+    check!(stop(ctl_fd(env)) == 0, "stopped");
+    drop(s);
+
+    // Full job: statistics and output 1 both named, addresses from the ranges.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "full job: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job accepted");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "full job starts");
+    expect_addr(hw, "stats (full)", off(ST_ADDR), b.stats.addr);
+    expect_addr(hw, "output 0 (full)", off(OUT_ADDR), s.pool_addr);
+    expect_addr(hw, "output 1 (full)", off(OUT_ADDR + 8), b.out.addr);
+    zero(&b.pool_map, BUFFERS as usize * POOL_STRIDE as usize);
+    zero(&b.stats_map, STATS_BYTES as usize);
+    zero(&b.out_map, 8192);
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    let got = s.pop_frame();
+    let (buf, bytes, _) = got.unwrap_or((0, 0, 0));
+    check!(
+        got.is_some() && buf == 0 && bytes == OUT0_BYTES as u32,
+        "the frame was published"
+    );
+    let pool = b.pool_map.as_slice();
+    let out0 = OUT0_BYTES as usize;
+    check!(
+        pool[0] != 0 && pool[out0 - 1] != 0 && pool[out0] == 0,
+        "the mock's output 0 filled exactly the frame's bytes of the job's pool buffer"
+    );
+    check!(
+        pool[POOL_STRIDE as usize] == 0,
+        "the next pool buffer was not written"
+    );
+    let stats = b.stats_map.as_slice();
+    check!(
+        stats[0] != 0 && stats[STATS_SIZE - 1] != 0,
+        "statistics landed in the registered buffer"
+    );
+    let out = b.out_map.as_slice();
+    check!(
+        out[0] != 0 && out[out0 - 1] != 0 && out[out0] == 0,
+        "output 1 filled exactly stride times height"
+    );
+    check!(stop(ctl_fd(env)) == 0, "stopped");
+    drop(s);
+
+    // No statistics: no buffer, so a floating region must not reach the block.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "no stats: stream") else {
+        return;
+    };
+    b.put_cfg(0, |c| {
+        c.and32(G_ENABLES, !(EN_STATS_ALL | EN_OUTPUT1));
+        c.set16(FLOAT_SIZE_X, 64);
+    });
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job accepted");
+    let a = good_start(s.raw_fd());
+    check!(
+        start(ctl_fd(env), &a) == 0,
+        "a job without statistics starts"
+    );
+    expect_addr(hw, "stats (none)", off(ST_ADDR), 0);
+    check!(
+        peek(hw, off(FLOAT_SIZE_X)) == 0,
+        "with no statistics a floating region doesn't reach the registers"
+    );
+    check!(stop(ctl_fd(env)) == 0, "stopped");
+    drop(s);
+
+    // A compressed output 0 and an enabled crop: the validator's other paths.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "compressed: stream") else {
+        return;
+    };
+    b.put_cfg(0, |c| {
+        only_out0(c);
+        c.or32(G_ENABLES, EN_COMPRESS0);
+        c.set32(ch_fmt(0, IMG_FMT), COMPRESSION_MODE_1);
+        c.set8(ch_compress(0, CP_MODE), 1);
+    });
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job accepted");
+    let mut a = good_start(s.raw_fd());
+    a.set32(S_OUT_FORMAT, COMPRESSION_MODE_1);
+    let ret = start(ctl_fd(env), &a);
+    check!(ret == 0, "a compressed output starts (got {ret})");
+    check!(stop(ctl_fd(env)) == 0, "stopped");
+    drop(s);
+}
+
+/// The library's own configuration (the fixture, built by `drivers/pisp`) gets through the checks.
+fn test_library_config(env: &Env, b: &mut Bufs) {
+    check!(
+        FIXTURE.len() == CFG_SIZE,
+        "the fixture is one configuration"
+    );
+    let Some(mut s) = setup(ctl_fd(env), false, b, "library config: stream") else {
+        return;
+    };
+    let _ = b.cfg_map.write_bytes(0, &FIXTURE);
+    let j = b.job_for(0, 0);
+    check!(j.count == 2, "it asks for the statistics buffer");
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(ret == 0, "the library's configuration starts (got {ret})");
+    expect_addr(
+        hw_fd(env),
+        "library config's stats",
+        off(ST_ADDR),
+        b.stats.addr,
+    );
+    check!(stop(ctl_fd(env)) == 0, "stopped");
+    drop(s);
+}
+
+/// The receiver's START, the request as the C check issues it: 0, or the negative errno.
+fn rp1_start_call(fd: Option<BorrowedFd<'_>>, r: &mut [u8; 48]) -> i32 {
+    ioctl_fd(fd, RP1_START, r)
+        .err()
+        .map_or(0, |e| -errno_of(&e))
+}
+
+/// The receiver and the front end share one channel: never both.
+fn test_exclusive(env: &Env, b: &mut Bufs) {
+    let Some(mut s) = setup(ctl_fd(env), false, b, "exclusive: stream") else {
+        return;
+    };
+    let Some(s2) = setup(ctl_fd(env), false, b, "exclusive: second stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "front end started");
+    let mut r = rp1_start(s2.raw_fd());
+    let ret = rp1_start_call(ctl_fd(env), &mut r);
+    check!(
+        ret == -EBUSY,
+        "the receiver is refused while the front end runs ({ret})"
+    );
+    check!(stop(ctl_fd(env)) == 0, "front end stopped");
+    drop(s);
+
+    let ret = rp1_start_call(ctl_fd(env), &mut r);
+    check!(ret == 0, "the receiver starts once it is free ({ret})");
+    let Some(mut s) = setup(ctl_fd(env), false, b, "exclusive: third stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl_fd(env), &a);
+    check!(
+        ret == -EBUSY,
+        "the front end is refused while the receiver runs ({ret})"
+    );
+    check!(
+        ioctl_fd(ctl_fd(env), RP1_STOP, &mut [0u8; 0]).is_ok(),
+        "receiver stopped"
+    );
+    drop(s);
+    drop(s2);
+}
+
+/// Parts: three files on one block. `fa` claims the receiver, `fb` the front end, and `obs` claims
+/// nothing. Each file drives only what it claimed, `obs` observes while `fb` drives, closing `obs`
+/// stops nothing, and closing `fb` releases the front end's part only.
+fn test_parts(env: &mut Env, b: &mut Bufs, node: &str) {
+    env.ctl = None;
+    let mut fa = open_rw(node).ok();
+    let mut fb = open_rw(node).ok();
+    let mut obs = open_rw(node).ok();
+    let num = |f: &Option<OwnedFd>| f.as_ref().map_or(-1, AsRawFd::as_raw_fd);
+    check!(
+        fa.is_some() && fb.is_some() && obs.is_some(),
+        "three files open the node at once (fa {} fb {} obs {})",
+        num(&fa),
+        num(&fb),
+        num(&obs)
+    );
+    if fa.is_none() || fb.is_none() || obs.is_none() {
+        return;
+    }
+
+    check!(
+        claim_parts(opt_fd(&fa), PART_CSI2) == 0,
+        "fa claims the receiver"
+    );
+    check!(
+        claim_parts(opt_fd(&fb), PART_FE) == 0,
+        "fb claims the front end"
+    );
+    check!(
+        claim_parts(opt_fd(&fa), PART_CSI2) == -EBUSY,
+        "fa's second claim of the receiver is EBUSY"
+    );
+    check!(
+        claim_parts(opt_fd(&fb), PART_FE) == -EBUSY,
+        "fb's second claim of the front end is EBUSY"
+    );
+    check!(
+        claim_parts(opt_fd(&obs), PART_CSI2) == -EBUSY,
+        "obs cannot claim the receiver fa holds"
+    );
+    check!(
+        claim_parts(opt_fd(&obs), PART_FE) == -EBUSY,
+        "obs cannot claim the front end fb holds"
+    );
+    check!(
+        claim_parts(opt_fd(&obs), PARTS_BOTH) == -EBUSY,
+        "a claim of held parts claims nothing"
+    );
+    check!(
+        claim_parts(opt_fd(&fa), 0) == -EINVAL,
+        "an empty claim is EINVAL"
+    );
+    check!(
+        claim_parts(opt_fd(&fa), 1 << 2) == -EINVAL,
+        "an unknown part is EINVAL"
+    );
+
+    // fb drives the front end through its own stream.
+    let Some(mut s) = setup(opt_fd(&fb), false, b, "fb makes the front end's stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(opt_fd(&fb), &a) == 0, "fb starts the front end");
+
+    // Observing while fb drives: no claim needed.
+    let (ok, i) = fe_info_raw(opt_fd(&obs));
+    check!(
+        ok && i.streaming != 0,
+        "obs reads the front end's INFO while fb drives it"
+    );
+    let mut ri = [0u8; 56];
+    check!(
+        ioctl_fd(opt_fd(&obs), RP1_INFO, &mut ri).is_ok(),
+        "obs reads the receiver's INFO"
+    );
+    let mut fs = [0u8; 24];
+    check!(
+        ioctl_fd(opt_fd(&obs), RP1_FRAME_STARTS, &mut fs).is_ok(),
+        "obs reads the frame-start count"
+    );
+
+    // Driving without the claim is refused.
+    check!(
+        ioctl_errno(opt_fd(&obs), FE_STOP, &mut [0u8; 0]) == EPERM,
+        "obs cannot stop the front end (EPERM)"
+    );
+    let mut a_obs = a;
+    check!(
+        ioctl_errno(opt_fd(&obs), FE_START, &mut a_obs.0) == EPERM,
+        "obs cannot start the front end (EPERM)"
+    );
+    let mut r0 = [0u8; 48];
+    check!(
+        ioctl_errno(opt_fd(&obs), RP1_START, &mut r0) == EPERM,
+        "obs cannot start the receiver (EPERM)"
+    );
+    check!(
+        ioctl_errno(opt_fd(&obs), RP1_STOP, &mut [0u8; 0]) == EPERM,
+        "obs cannot stop the receiver (EPERM)"
+    );
+    let mut none = [0u8; 8];
+    check!(
+        ioctl_errno(opt_fd(&obs), RP1_CLAIM, &mut none) == EINVAL,
+        "obs's empty claim is EINVAL, not a claim"
+    );
+
+    // fa drives the receiver: refused while the front end runs (the module's rule).
+    let Some(s2) = setup(opt_fd(&fa), false, b, "fa makes the receiver's stream") else {
+        return;
+    };
+    let mut r = rp1_start(s2.raw_fd());
+    let ret = rp1_start_call(opt_fd(&fa), &mut r);
+    check!(
+        ret == -EBUSY,
+        "fa's receiver START is refused while fb's front end runs ({ret})"
+    );
+
+    // obs closing stops nothing.
+    drop(obs.take());
+    let (ok, i) = fe_info_raw(opt_fd(&fb));
+    check!(ok && i.streaming != 0, "closing an observer stops nothing");
+
+    // fb closing releases the front end only: fa keeps the receiver, and the front end is free.
+    drop(s);
+    drop(fb.take());
+    obs = open_rw(node).ok();
+    check!(obs.is_some(), "obs reopens the node");
+    check!(
+        claim_parts(opt_fd(&obs), PART_CSI2) == -EBUSY,
+        "closing fb leaves fa's receiver claim"
+    );
+    check!(
+        claim_parts(opt_fd(&obs), PART_FE) == 0,
+        "closing fb frees the front end's claim"
+    );
+    let (ok, i) = fe_info_raw(opt_fd(&obs));
+    check!(ok && i.streaming == 0, "closing fb stopped the front end");
+    let ret = rp1_start_call(opt_fd(&fa), &mut r);
+    check!(
+        ret == 0,
+        "fa's receiver starts once the front end is stopped ({ret})"
+    );
+    check!(
+        ioctl_fd(opt_fd(&fa), RP1_STOP, &mut [0u8; 0]).is_ok(),
+        "fa stops the receiver"
+    );
+    drop(s2);
+
+    // fa closing frees the receiver's part for the next claimant.
+    drop(fa.take());
+    check!(
+        claim_parts(opt_fd(&obs), PART_CSI2) == 0,
+        "closing fa frees the receiver's claim"
+    );
+
+    // The global file again, holding both parts, for the tests after this one.
+    drop(obs.take());
+    env.ctl = open_rw(node).ok();
+    check!(
+        env.ctl.is_some() && claim_parts(ctl_fd(env), PARTS_BOTH) == 0,
+        "the global file claims both parts again"
+    );
+}
+
+/// The module's write log of the front end's first start, then its interrupt paths and its stop.
+fn test_sequence(env: &Env, b: &mut Bufs) {
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+    let Some(mut s) = setup(ctl, false, b, "sequence: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    b.put_cfg(1, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "first job");
+    let a = good_start(s.raw_fd());
+    let mut trace: Trace = Vec::new();
+    let _ = read_trace(ctl, &mut trace);
+    check!(start(ctl, &a) == 0, "started");
+    let n = read_trace(ctl, &mut trace);
+    check!(n > 160, "the start's writes were logged ({n})");
+    let ch = contains_write(&trace, n, MARK_CHANNEL_START, 0);
+    let reset = contains_write(&trace, n, FE_CONTROL, C_RESET);
+    let ints = contains_write(&trace, n, FE_INT_STATUS, 0xffff_ffff);
+    let en = contains_offset(&trace, n, FE_INT_EN);
+    let first = contains_offset(&trace, n, FE_CONFIG);
+    let last = contains_offset(&trace, n, FE_CONFIG + FE_CONFIG_WINDOW - 4);
+    let queue = contains_write(&trace, n, FE_CONTROL, C_QUEUE);
+    let open_rx = contains_write(&trace, n, MARK_OPEN_RX, 0);
+    check!(
+        ch >= 0
+            && ch < reset
+            && reset < ints
+            && ints < en
+            && en < first
+            && first < last
+            && last < queue
+            && queue < open_rx,
+        "order: channel {ch}, reset {reset}, int clear {ints}, int en {en}, config {first}..{last}, queue {queue}, open {open_rx}"
+    );
+    check!(
+        open_rx == n as i32 - 1,
+        "the link is opened last ({open_rx} of {n})"
+    );
+    {
+        let mut regs = [0u8; 32];
+        check!(
+            guest::ioctl_bytes(hw, TCSI_PEEK, &mut regs).is_ok(),
+            "channel registers read"
+        );
+        let ctrl = get32(&regs, 16);
+        let frame_size = get32(&regs, 20);
+        check!(
+            (ctrl & CH_CTRL_MODE_FE) == CH_CTRL_MODE_FE && (ctrl & CH_CTRL_AUTO_ARM) != 0,
+            "the channel hands its frames to the front end ({})",
+            hx(u64::from(ctrl))
+        );
+        check!(
+            frame_size == (u32::from(H) << 16) | u32::from(W),
+            "the channel's frame is START's ({})",
+            hx(u64::from(frame_size))
+        );
+    }
+    check!(
+        value_at(&trace, en) == (INT_EOF | INT_SOF | INT_LINES),
+        "INT_EN is what the stock driver enables ({})",
+        hx(u64::from(value_at(&trace, en)))
+    );
+    // Every configuration register exactly once, in order, up to the dirty flags.
+    {
+        let mut expect = FE_CONFIG;
+        let mut words = 0u32;
+        let mut i = first as u32;
+        let last_u = last as u32;
+        while i <= last_u {
+            match trace.get(i as usize) {
+                Some(e) if e.0 == expect => {}
+                _ => break,
+            }
+            expect += 4;
+            words += 1;
+            i += 1;
+        }
+        check!(
+            words == FE_CONFIG_WINDOW / 4,
+            "{words} words written, expected {}",
+            FE_CONFIG_WINDOW / 4
+        );
+        check!(
+            value_at(&trace, first) == b.stats.addr as u32,
+            "a config word is the validated value"
+        );
+    }
+
+    // A second job armed in the interrupt: latch, ack, config, queue.
+    {
+        let j2 = b.job_for(1, 1);
+        s.post(&j2);
+        check!(s.kick() == 0, "second job posted");
+        fe_fire(hw, TFE_SOF);
+        let m = read_trace(ctl, &mut trace);
+        let l = contains_write(&trace, m, FE_CONTROL, C_LATCH);
+        let q = contains_write(&trace, m, FE_CONTROL, C_QUEUE);
+        check!(l >= 0 && q > l, "interrupt: latch {l} then queue {q}");
+        check!(
+            contains_write(&trace, m, FE_INT_STATUS, TFE_SOF) > l,
+            "the interrupt is acknowledged"
+        );
+        expect_addr(
+            hw,
+            "second job's output",
+            off(OUT_ADDR),
+            s.pool_addr + POOL_STRIDE,
+        );
+    }
+
+    // A previous job not yet consumed: nothing is queued over it.
+    {
+        let st0 = fe_info(ctl).stalled;
+        b.put_cfg(2, only_out0);
+        let j3 = b.job_for(2, 2);
+        s.post(&j3);
+        check!(s.kick() == 0, "third job posted");
+        hw_word(hw, TCSI_FE_STATUS, 1);
+        fe_fire(hw, TFE_SOF);
+        let m = read_trace(ctl, &mut trace);
+        check!(
+            contains_write(&trace, m, FE_CONTROL, C_QUEUE) < 0,
+            "a queued job isn't overwritten ({m} writes)"
+        );
+        check!(fe_info(ctl).stalled > st0, "reported as a stall");
+        hw_word(hw, TCSI_FE_STATUS, 0);
+        fe_fire(hw, TFE_EOF);
+        let m = read_trace(ctl, &mut trace);
+        check!(
+            contains_write(&trace, m, FE_CONTROL, C_QUEUE) >= 0,
+            "armed once the block is ready"
+        );
+    }
+
+    // Stop order: INT_EN 0, then ABORT while the channel still feeds the block, then the channel.
+    {
+        let _ = read_trace(ctl, &mut trace);
+        check!(stop(ctl) == 0, "stopped");
+        let m = read_trace(ctl, &mut trace);
+        let c = contains_write(&trace, m, MARK_CHANNEL_STOP, 0);
+        let ie = contains_write(&trace, m, FE_INT_EN, 0);
+        let ab = contains_write(&trace, m, FE_CONTROL, C_ABORT);
+        check!(
+            ie >= 0 && ie < ab && ab < c,
+            "stop: ints off {ie}, abort {ab}, channel {c}"
+        );
+        check!(
+            contains_write(&trace, m, FE_CONTROL, C_RESET) < 0,
+            "an idle block is not reset"
+        );
+        let mut regs = [0u8; 32];
+        check!(
+            guest::ioctl_bytes(hw, TCSI_PEEK, &mut regs).is_ok(),
+            "channel registers read"
+        );
+        let ctrl = get32(&regs, 16);
+        check!(
+            (ctrl & CH_CTRL_FORCE) != 0,
+            "the channel really was forced ({})",
+            hx(u64::from(ctrl))
+        );
+    }
+    drop(s);
+}
+
+/// The consumer's copy changes after submission: the module's copy doesn't.
+fn test_toctou(env: &Env, b: &mut Bufs) {
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+
+    // Overwritten by the kernel at the exact moment after the copy.
+    let Some(mut s) = setup(ctl, false, b, "scribble: stream") else {
+        return;
+    };
+    b.put_cfg(0, nop);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let ret = match ioctl_fd(ctl, FE_TEST_SCRIBBLE, &mut [0u8; 0]) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    };
+    check!(ret == 0, "scribble armed ({ret})");
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl, &a);
+    check!(
+        ret == 0,
+        "validated the copy, not the scribbled memory (got {ret})"
+    );
+    check!(
+        b.cfg_read(0).get32(ch_fmt(0, IMG_STRIDE)) == 0x7fff_fff0,
+        "the consumer's memory was changed after the copy"
+    );
+    check!(
+        peek(hw, off(ch_fmt(0, IMG_STRIDE))) == STRIDE,
+        "the block got the module's copy ({})",
+        peek(hw, off(ch_fmt(0, IMG_STRIDE)))
+    );
+    check!(stop(ctl) == 0, "stopped");
+    drop(s);
+
+    // The consumer changes a job already armed: nothing reaches the registers.
+    let Some(mut s) = setup(ctl, false, b, "after arm: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started");
+    b.cfg_edit(0, |c| {
+        c.set32(ch_fmt(0, IMG_STRIDE), 0x7fff_fff0);
+        c.set32(ST_ADDR, 0xdead_0000);
+    });
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    check!(
+        peek(hw, off(ch_fmt(0, IMG_STRIDE))) == STRIDE,
+        "the armed job kept its stride"
+    );
+    expect_addr(
+        hw,
+        "stats after a change in memory",
+        off(ST_ADDR),
+        b.stats.addr,
+    );
+    check!(fe_info(ctl).written == 1, "the frame completed");
+    check!(stop(ctl) == 0, "stopped");
+    drop(s);
+
+    // The consumer changes a job not yet read: refused when read, not after.
+    let Some(mut s) = setup(ctl, false, b, "before arm: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    b.put_cfg(1, only_out0);
+    let mut j1 = Job {
+        identity: 1,
+        buffer: 0,
+        count: 1,
+        ..Job::default()
+    };
+    j1.range[0] = Range {
+        addr: b.cfg.addr,
+        len: CFG_SIZE as u64,
+    };
+    s.post(&j1);
+    // A second job, with no statistics or output 1 asked for.
+    b.cfg_edit(1, |c| c.and32(G_ENABLES, !EN_AWB_STATS));
+    b.cfg_edit(0, |c| c.and32(G_ENABLES, !EN_AWB_STATS));
+    let mut j2 = Job {
+        identity: 2,
+        buffer: 1,
+        count: 1,
+        ..Job::default()
+    };
+    j2.range[0] = Range {
+        addr: b.cfg.addr + CFG_SIZE as u64,
+        len: CFG_SIZE as u64,
+    };
+    s.post(&j2);
+    check!(s.kick() == 0, "jobs");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started");
+    // The second job's memory goes bad before the frame start reads it.
+    b.cfg_edit(1, |c| c.set_i32(ch_fmt(0, IMG_STRIDE), -16));
+    fe_fire(hw, TFE_SOF);
+    check!(
+        s.status_fault() == EINVAL as u64,
+        "the change is seen by the one read and refused"
+    );
+    expect_addr(
+        hw,
+        "the bad job reached no register",
+        off(OUT_ADDR),
+        s.pool_addr,
+    );
+    check!(stop(ctl) == 0, "stopped");
+    drop(s);
+}
+
+/// A hostile interrupt status: nothing beyond the known bits is ever acted on.
+fn test_hostile_hw(env: &Env, b: &mut Bufs) {
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+    let Some(mut s) = setup(ctl, false, b, "hostile: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started");
+    let f0 = fe_info(ctl).frames;
+    fe_fire(hw, 0xffff_ffff);
+    check!(
+        fe_info(ctl).frames == f0 + 1,
+        "all bits set: one frame start counted"
+    );
+    fe_fire(hw, 0xffff_fffc);
+    check!(fe_info(ctl).frames == f0 + 1, "unknown bits ignored");
+    fe_fire(hw, TFE_SOF);
+    check!(
+        fe_info(ctl).errors == 0 && fe_info(ctl).frames == f0 + 2,
+        "next frame, nothing armed"
+    );
+    fe_fire(hw, TFE_SOF);
+    check!(
+        fe_info(ctl).errors == 0 && fe_info(ctl).dropped >= 1,
+        "start with no frame end is dropped"
+    );
+    check!(stop(ctl) == 0, "stopped");
+    drop(s);
+}
+
+/// A front end with no job queued starts no frame and raises nothing (as the board shows): the
+/// receiver's frame start is what counts the frame it let go by, at the next one, and a frame the
+/// front end did start is no drop.
+fn test_frames_with_no_job(env: &Env, b: &mut Bufs) {
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+    let Some(mut s) = setup(ctl, false, b, "no job: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started");
+    let d0 = fe_info(ctl).dropped;
+    csi_fire(hw, TCSI_FS);
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    csi_fire(hw, TCSI_FS);
+    check!(
+        fe_info(ctl).dropped == d0,
+        "a frame the front end started is no drop ({})",
+        fe_info(ctl).dropped.wrapping_sub(d0)
+    );
+    csi_fire(hw, TCSI_FS);
+    check!(
+        fe_info(ctl).dropped == d0 + 1,
+        "the receiver's next start counts the frame with no job"
+    );
+    csi_fire(hw, TCSI_FS | TCSI_FE_ACK);
+    check!(fe_info(ctl).dropped == d0 + 2, "and every one after it");
+    check!(
+        fe_info(ctl).errors == 0 && fe_info(ctl).written == 1,
+        "nothing else counted"
+    );
+    check!(stop(ctl) == 0, "stopped");
+    csi_fire(hw, TCSI_FS);
+    csi_fire(hw, TCSI_FS);
+    drop(s);
+
+    // Stopped, the receiver's frame starts count nothing; a start begins again from none.
+    let Some(mut s) = setup(ctl, false, b, "no job: stream again") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job again");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started again");
+    csi_fire(hw, TCSI_FS);
+    fe_fire(hw, TFE_SOF);
+    check!(fe_info(ctl).dropped == 0, "a start counts from none");
+    check!(stop(ctl) == 0, "stopped again");
+    drop(s);
+}
+
+/// A stop that finds the block mid-frame. Cut off from its input mid-frame, the block stays queued
+/// and active for good (as the board showed): the abort goes in while the channel still feeds it,
+/// and a block still busy once the channel is stopped is reset. Either way nothing is wedged and
+/// the next start runs.
+fn test_stop_mid_frame(env: &Env, b: &mut Bufs) {
+    const CASES: [(u32, &str, bool); 2] = [
+        (TFE_ABORT_WHILE_FED, "abort works while fed", false),
+        (TFE_RESET_ONLY, "only a reset ends the frame", true),
+    ];
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+    for (mode, what, reset) in CASES {
+        let Some(mut s) = setup(ctl, false, b, "mid-frame: stream") else {
+            continue;
+        };
+        b.put_cfg(0, only_out0);
+        let j = b.job_for(0, 0);
+        s.post(&j);
+        check!(s.kick() == 0, "mid-frame: job");
+        let a = good_start(s.raw_fd());
+        check!(start(ctl, &a) == 0, "mid-frame: started");
+        csi_fire(hw, TCSI_FS);
+        fe_fire(hw, TFE_SOF);
+        let ok = guest::ioctl_bytes(hw, TCSI_FE_MIDFRAME, &mut mode.to_ne_bytes()).is_ok();
+        check!(ok, "mid-frame: {what}");
+        let mut trace: Trace = Vec::new();
+        let _ = read_trace(ctl, &mut trace);
+        check!(stop(ctl) == 0, "mid-frame: stopped ({what})");
+        let m = read_trace(ctl, &mut trace);
+        check!(
+            (fe_info(ctl).flags & INFO_WEDGED) == 0,
+            "not wedged ({what})"
+        );
+        check!(
+            (contains_write(&trace, m, FE_CONTROL, C_RESET) >= 0) == reset,
+            "reset only when the abort did not end it ({what})"
+        );
+        check!(peek(hw, FE_STATUS) == 0, "idle after the stop ({what})");
+        hw_word(hw, TCSI_FE_MIDFRAME, 0);
+        drop(s);
+
+        let Some(mut s) = setup(ctl, false, b, "mid-frame: stream after") else {
+            continue;
+        };
+        b.put_cfg(0, only_out0);
+        let j = b.job_for(0, 0);
+        s.post(&j);
+        check!(s.kick() == 0, "mid-frame: job after");
+        let a = good_start(s.raw_fd());
+        check!(start(ctl, &a) == 0, "the next start runs ({what})");
+        fe_fire(hw, TFE_SOF);
+        fe_fire(hw, TFE_EOF);
+        check!(fe_info(ctl).written == 1, "and completes a frame ({what})");
+        check!(stop(ctl) == 0, "stopped after");
+        drop(s);
+    }
+}
+
+/// A buffer of a stream made with `LEMNOS_STREAM_CREATE_BUFFERS`: its dma-buf and its mapping.
+struct Own {
+    fd: Option<OwnedFd>,
+    addr: u64,
+    cpu: Option<Mapping>,
+}
+
+fn own_make(heap: &str) -> Own {
+    let fd = make_buf(heap, BUFFER_BYTES);
+    let cpu = fd.as_ref().and_then(|f| {
+        let mut m = Mapping::new(f.as_fd(), BUFFER_BYTES as usize, 0, true).ok()?;
+        m.as_mut_slice().fill(0);
+        Some(m)
+    });
+    let fd = if cpu.is_some() { fd } else { None };
+    Own { fd, addr: 0, cpu }
+}
+
+/// `LEMNOS_STREAM_IOC_BUFFER`: gives buffer `b` of stream `s` the dma-buf of `o`. The kernel answers
+/// a -1 descriptor with EBADF, as the C check's did.
+fn own_set(s: &Stream, b: u32, o: &mut Own) -> i32 {
+    let mut a = [0u8; 24];
+    put32(&mut a, 0, b);
+    put_i32(&mut a, 4, o.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd));
+    match guest::ioctl_bytes(s.fd.as_fd(), STREAM_BUFFER, &mut a) {
+        Ok(()) => {
+            o.addr = get64(&a, 8);
+            0
+        }
+        Err(e) => -errno_of(&e),
+    }
+}
+
+/// Byte `i` of a buffer's mapping, or 0 when it has none.
+fn byte(m: &Option<Mapping>, i: usize) -> u8 {
+    m.as_ref().map_or(0, |m| m.as_slice()[i])
+}
+
+/// Output 0 into a buffer's own dma-buf (`LEMNOS_STREAM_CREATE_BUFFERS`), and its pins.
+fn test_own_buffers(env: &Env, b: &mut Bufs, heap: &str, dev: &str) {
+    let ctl = ctl_fd(env);
+    let hw = hw_fd(env);
+    let before = bufinfo_attached(dev);
+    let mut o0 = own_make(heap);
+    let mut o1 = own_make(heap);
+    let mut fresh = own_make(heap);
+    let out0 = OUT0_BYTES as usize;
+    check!(
+        o0.fd.is_some() && o1.fd.is_some() && fresh.fd.is_some(),
+        "own buffers: three dma-bufs"
+    );
+
+    // A job whose buffer has no memory never reaches the block.
+    let s0 = stream_setup(ctl, true, b);
+    check!(
+        s0.as_ref().is_some_and(|s| s.pool_addr == 0),
+        "own buffers: a stream with no pool"
+    );
+    let Some(mut s) = s0 else {
+        return;
+    };
+    b.put_cfg(0, simple_cfg);
+    let j = b.job_for(0, 1);
+    s.post(&j);
+    let ret = s.kick();
+    check!(
+        ret == -EFAULT,
+        "a job on a buffer with no memory is refused by the ring (got {ret})"
+    );
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl, &a);
+    check!(
+        ret == -EFAULT && fe_info(ctl).streaming == 0,
+        "and START on that stream is refused (got {ret})"
+    );
+    drop(s);
+
+    let s0 = stream_setup(ctl, true, b);
+    check!(s0.is_some(), "own buffers: stream");
+    let Some(mut s) = s0 else {
+        return;
+    };
+    check!(
+        own_set(&s, 0, &mut o0) == 0 && own_set(&s, 1, &mut o1) == 0 && o0.addr != o1.addr,
+        "buffers 0 and 1 get memory of their own"
+    );
+    b.put_cfg(0, simple_cfg);
+    let j = b.job_for(0, 1);
+    s.post(&j);
+    check!(s.kick() == 0, "job on buffer 1 accepted");
+    check!(
+        own_set(&s, 1, &mut fresh) == -EBUSY,
+        "a buffer a job names can't change memory: EBUSY"
+    );
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl, &a);
+    check!(ret == 0, "it starts (got {ret})");
+    expect_addr(
+        hw,
+        "output 0 is buffer 1's own dma-buf",
+        off(OUT_ADDR),
+        o1.addr,
+    );
+    check!(
+        own_set(&s, 1, &mut fresh) == -EBUSY,
+        "nor once the block has it: EBUSY"
+    );
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    let got = s.pop_frame();
+    let (buf, bytes, _) = got.unwrap_or((0, 0, 0));
+    check!(
+        got.is_some() && buf == 1 && bytes == OUT0_BYTES as u32,
+        "the frame was published on buffer 1"
+    );
+    check!(
+        byte(&o1.cpu, 0) != 0 && byte(&o1.cpu, out0 - 1) != 0 && byte(&o1.cpu, out0) == 0,
+        "the block's output 0 filled exactly the frame's bytes of buffer 1's own dma-buf"
+    );
+    check!(
+        byte(&o0.cpu, 0) == 0 && byte(&fresh.cpu, 0) == 0,
+        "and nothing else"
+    );
+
+    // The consumer holds buffer 1: it may be given new memory, and the next job writes there.
+    check!(
+        own_set(&s, 1, &mut fresh) == 0 && fresh.addr != o1.addr,
+        "a held buffer is given new memory"
+    );
+    if let Some(m) = &o1.cpu {
+        zero(m, BUFFER_BYTES as usize);
+    }
+    {
+        let at = RETURNS_AT + (s.returns_head as usize & (FRAME_SLOTS - 1));
+        let fence = s.ld(RING_FRAMES + 4);
+        s.st(at, 1 | (fence << 32));
+        s.returns_head += 1;
+        s.st(RING_RETURNS_HEAD, s.returns_head);
+    }
+    b.put_cfg(1, simple_cfg);
+    let j = b.job_for(1, 1);
+    s.post(&j);
+    check!(s.kick() == 0, "the next job on buffer 1 accepted");
+    // This frame start has no job latched; it queues the new one for the next.
+    fe_fire(hw, TFE_SOF);
+    expect_addr(hw, "output 0 follows the swap", off(OUT_ADDR), fresh.addr);
+    fe_fire(hw, TFE_SOF);
+    fe_fire(hw, TFE_EOF);
+    let got = s.pop_frame();
+    let (buf, _, _) = got.unwrap_or((0, 0, 0));
+    check!(
+        got.is_some() && buf == 1 && byte(&fresh.cpu, 0) != 0 && byte(&fresh.cpu, out0 - 1) != 0,
+        "its frame is in the new memory"
+    );
+    check!(
+        byte(&o1.cpu, 0) == 0 && byte(&o1.cpu, out0 - 1) == 0,
+        "and the memory it had is not written again"
+    );
+
+    // Statistics may not be a buffer's memory any more than the pool.
+    drop(s);
+    let s0 = stream_setup(ctl, true, b);
+    let ok = s0.as_ref().is_some_and(|st| own_set(st, 0, &mut o0) == 0);
+    check!(ok, "stats in a buffer: stream");
+    let Some(mut s) = s0 else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let mut j = b.job_for(0, 0);
+    j.range[1] = Range {
+        addr: o0.addr,
+        len: STATS_SIZE as u64,
+    };
+    s.post(&j);
+    check!(
+        s.kick() == 0,
+        "the ring accepts the range in the job's own buffer"
+    );
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl, &a);
+    check!(
+        ret == -EACCES,
+        "statistics in a buffer's own dma-buf is refused (got {ret})"
+    );
+    drop(s);
+
+    // Stopping with a frame in flight waits, and the pins end with the stream.
+    let s0 = stream_setup(ctl, true, b);
+    let ok = s0.as_ref().is_some_and(|st| own_set(st, 0, &mut o0) == 0);
+    check!(ok, "stop in flight: stream");
+    let Some(mut s) = s0 else {
+        return;
+    };
+    b.put_cfg(0, simple_cfg);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    let a = good_start(s.raw_fd());
+    check!(s.kick() == 0 && start(ctl, &a) == 0, "started");
+    fe_fire(hw, TFE_SOF);
+    hw_word(hw, TCSI_FE_BUSY, 40);
+    let t = now_ms();
+    drop(s);
+    let el = now_ms() - t;
+    check!(
+        el >= 30,
+        "closing it with a frame in flight waits for the block ({el} ms)"
+    );
+    hw_word(hw, TCSI_FE_BUSY, 0);
+    check!(fe_info(ctl).streaming == 0, "and stops it");
+    sleep_ms(5);
+    check!(
+        bufinfo_attached(dev) == before,
+        "every pin released ({} left)",
+        bufinfo_attached(dev) - before
+    );
+}
+
+/// Stops with a frame in flight and the block busy a while: every path waits.
+fn test_stop_in_flight(env: &mut Env, b: &mut Bufs, node: &str, unbind: &str, dev: &str) {
+    let ms: u64 = 60;
+    let hw = env.hw.as_fd();
+
+    // STOP.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "stop: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "started");
+    fe_fire(hw, TFE_SOF); // frame in flight
+    hw_word(hw, TCSI_FE_BUSY, ms as u32);
+    let t = now_ms();
+    check!(stop(ctl_fd(env)) == 0, "STOP with a frame in flight");
+    let el = now_ms() - t;
+    check!(el >= ms - 20, "STOP waited for the block ({el} ms)");
+    drop(s);
+
+    // Closing the stream's file.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "close stream: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "started");
+    fe_fire(hw, TFE_SOF);
+    hw_word(hw, TCSI_FE_BUSY, ms as u32);
+    let t = now_ms();
+    // The stream's file closes first, then its mapping; the stream ends on the last reference.
+    let Stream { ring, fd, .. } = s;
+    drop(fd);
+    drop(ring);
+    let el = now_ms() - t;
+    check!(el >= ms - 20, "closing the stream waited ({el} ms)");
+    check!(fe_info(ctl_fd(env)).streaming == 0, "not streaming");
+
+    // Closing the node.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "close node: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "started");
+    fe_fire(hw, TFE_SOF);
+    hw_word(hw, TCSI_FE_BUSY, ms as u32);
+    let t = now_ms();
+    env.ctl = None;
+    let el = now_ms() - t;
+    check!(el >= ms - 20, "closing the node waited ({el} ms)");
+    env.ctl = open_rw(node).ok();
+    check!(env.ctl.is_some(), "node reopened");
+    check!(
+        claim_parts(ctl_fd(env), PARTS_BOTH) == 0,
+        "reopened node claims both parts"
+    );
+    drop(s);
+
+    // Unbinding with a frame in flight.
+    let Some(mut s) = setup(ctl_fd(env), false, b, "unbind: stream") else {
+        return;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl_fd(env), &a) == 0, "started");
+    fe_fire(hw, TFE_SOF);
+    hw_word(hw, TCSI_FE_BUSY, ms as u32);
+    let t = now_ms();
+    check!(
+        write_node(unbind, dev.as_bytes()),
+        "unbound with a frame in flight"
+    );
+    let el = now_ms() - t;
+    check!(el >= ms - 20, "unbinding waited ({el} ms)");
+    check!(s.ld(RING_STATE) == STATE_CLOSED, "the stream ended closed");
+    drop(s);
+    sleep_ms(5);
+    check!(
+        bufinfo_attached(dev) == env.attached_before,
+        "every mapping released after the unbind"
+    );
+}
+
+/// Opens the check's descriptors and buffers, claims both parts, and maps the buffers. None when a
+/// descriptor or a mapping cannot be made (the failure path, where the C check goes on regardless).
+fn open_all(node: &str, heap: &str, dev: &str) -> Option<(Env, Bufs)> {
+    let attached_before = bufinfo_attached(dev);
+    let ctl = open_rw(node).ok();
+    let hw = open_rw("/dev/lemnos-test-csi2").ok();
+    let pool = make_buf(heap, POOL_BYTES as u64);
+    let cfg = make_buf(heap, (CFG_SLOTS * CFG_SIZE + 4096) as u64);
+    let stats = make_buf(heap, STATS_BYTES);
+    let out = make_buf(heap, 8192);
+    let (Some(ctl), Some(hw), Some(pool), Some(cfg), Some(stats), Some(out)) =
+        (ctl, hw, pool, cfg, stats, out)
+    else {
+        return None;
+    };
+    let env = Env {
+        ctl: Some(ctl),
+        hw,
+        attached_before,
+    };
+    check!(
+        claim_parts(ctl_fd(&env), PARTS_BOTH) == 0,
+        "claimed both parts"
+    );
+    let cfg_map = Mapping::new(cfg.as_fd(), CFG_SLOTS * CFG_SIZE + 4096, 0, true);
+    let stats_map = Mapping::new(stats.as_fd(), STATS_BYTES as usize, 0, true);
+    let out_map = Mapping::new(out.as_fd(), 8192, 0, true);
+    let pool_map = Mapping::new(pool.as_fd(), POOL_BYTES, 0, true);
+    let (Ok(cfg_map), Ok(stats_map), Ok(out_map), Ok(pool_map)) =
+        (cfg_map, stats_map, out_map, pool_map)
+    else {
+        return None;
+    };
+    let b = Bufs {
+        pool,
+        pool_map,
+        cfg: Region {
+            fd: cfg,
+            handle: 0,
+            addr: 0,
+        },
+        cfg_map,
+        stats: Region {
+            fd: stats,
+            handle: 0,
+            addr: 0,
+        },
+        stats_map,
+        out: Region {
+            fd: out,
+            handle: 0,
+            addr: 0,
+        },
+        out_map,
+    };
+    Some((env, b))
+}
+
+/// DMA that never stops: buffers stay pinned for good and START is refused.
+fn wedge(dev: &str, unbind: &str, heap: &str) -> ExitCode {
+    let node = format!("/dev/lemnos-rp1-csi2-{dev}");
+    let opened = open_all(&node, heap, dev);
+    check!(opened.is_some(), "wedge: set up");
+    let Some((env, mut b)) = opened else {
+        say(&format!(
+            "lemnos_pisp_fe_check wedge: {} failures",
+            failures()
+        ));
+        return ExitCode::FAILURE;
+    };
+    let ctl = ctl_fd(&env);
+    let hw = hw_fd(&env);
+    let Some(mut s) = setup(ctl, false, &mut b, "wedge: stream") else {
+        say(&format!(
+            "lemnos_pisp_fe_check wedge: {} failures",
+            failures()
+        ));
+        return ExitCode::FAILURE;
+    };
+    b.put_cfg(0, only_out0);
+    let j = b.job_for(0, 0);
+    s.post(&j);
+    check!(s.kick() == 0, "job");
+    let a = good_start(s.raw_fd());
+    check!(start(ctl, &a) == 0, "started");
+    fe_fire(hw, TFE_SOF);
+    hw_word(hw, TCSI_FE_BUSY, u32::MAX);
+    let ret = stop(ctl);
+    check!(
+        ret == 0,
+        "STOP returns even when the block never goes idle ({ret})"
+    );
+    hw_word(hw, TCSI_FE_BUSY, 0);
+    check!(
+        (fe_info(ctl).flags & INFO_WEDGED) != 0,
+        "wedged is reported"
+    );
+    {
+        let mut u = [0u8; 8];
+        put32(&mut u, 0, b.cfg.handle);
+        let ret = guest::ioctl_bytes(s.fd.as_fd(), STREAM_UNREGISTER, &mut u)
+            .err()
+            .map_or(0, |e| -errno_of(&e));
+        check!(ret == -EBUSY, "the job's buffers stay held ({ret})");
+    }
+    let a = good_start(s.raw_fd());
+    let ret = start(ctl, &a);
+    check!(ret == -EIO, "START refused while wedged ({ret})");
+    // Every buffer the DMA could reach stays pinned, even with nobody holding it.
+    drop(s);
+    drop(b);
+    sleep_ms(5);
+    let ret = bufinfo_attached(dev);
+    check!(
+        ret == env.attached_before + 4,
+        "pool, configuration, statistics and output 1 stay attached ({} more)",
+        ret - env.attached_before
+    );
+    check!(write_node(unbind, dev.as_bytes()), "unbound while wedged");
+    say(&format!(
+        "lemnos_pisp_fe_check wedge: {} failures",
+        failures()
+    ));
+    if failures() == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 5 && args[1] == "wedge" {
+        return wedge(&args[2], &args[3], &args[4]);
+    }
+    if args.len() != 5 {
+        return ExitCode::from(2);
+    }
+    let dev = args[2].as_str();
+    let unbind = args[3].as_str();
+    let heap = args[4].as_str();
+    let node = format!("/dev/lemnos-rp1-csi2-{dev}");
+    let opened = open_all(&node, heap, dev);
+    check!(opened.is_some(), "set up");
+    let Some((mut env, mut b)) = opened else {
+        say(&format!("lemnos_pisp_fe_check: {} failures", failures()));
+        return ExitCode::FAILURE;
+    };
+    test_validator(&env, &mut b);
+    test_ranges(&env, &mut b);
+    test_allowed_variants(&env, &mut b);
+    test_start_format(&env, &mut b);
+    test_good_and_addresses(&env, &mut b);
+    test_library_config(&env, &mut b);
+    test_exclusive(&env, &mut b);
+    test_parts(&mut env, &mut b, &node);
+    test_sequence(&env, &mut b);
+    test_toctou(&env, &mut b);
+    test_hostile_hw(&env, &mut b);
+    test_frames_with_no_job(&env, &mut b);
+    test_stop_mid_frame(&env, &mut b);
+    test_own_buffers(&env, &mut b, heap, dev);
+    test_stop_in_flight(&mut env, &mut b, &node, unbind, dev);
+    say(&format!("lemnos_pisp_fe_check: {} failures", failures()));
+    if failures() == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
