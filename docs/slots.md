@@ -1491,6 +1491,13 @@ the Lemnos layout, so any other table is refused with words and nothing is writt
 The steps, in order. Each reads the state it finds, so the pass is the same whether it runs once, is cut, or
 runs again:
 
+0. **The baseline.** Before anything is written, the pass reads the stored baseline: the file
+   `board/slots/grow` on the data partition (`lemnos-slot-store`'s `store::replace`: written to a temporary
+   file, synced, renamed over it, the directory synced). When the table is to grow and no record exists, the
+   filesystem's size on the mount (`statfs`, bytes) and the target partition length (sectors) are stored
+   first, so a grow that has begun always has a baseline. The record is two numbers and a checksum; a record
+   that does not decode, or that is for another length, is named by the confirmation as corrupt. A record
+   that is missing although the table already holds the grown length is named as missing.
 1. **The table.** The MBR is validated (its signature; entry 2 is `0x83`; no entry follows it; the kernel's
    start of partition 2 equals the table's; the partition's superblock is ext4 with the label `lemnos-data`;
    the table's end is at or before the disk's end). The new length is the start to the last whole MiB
@@ -1499,7 +1506,18 @@ runs again:
 2. **The kernel's partition.** `BLKPG_RESIZE_PARTITION` on partition 2 to the table's length
    (`lemnos-linux-sys`, `blockdev.rs`), then `/sys/class/block/<p2>/size` must say that length.
 3. **The filesystem.** `EXT4_IOC_RESIZE_FS` on `/data` to the table's length in blocks
-   (`lemnos-linux-sys`, `ext4.rs`), then the superblock's block count must say that count.
+   (`lemnos-linux-sys`, `ext4.rs`). The superblock is not read back after it: while the filesystem is
+   mounted its new block count is held by the journal until a checkpoint, so a read of the device still
+   shows the old count after a resize that succeeded. The kernel's size of the mount (`statfs`, the
+   filesystem's total bytes) must grow past the stored baseline. It is checked on each pass that resized,
+   up to 6 checks (`CONFIRM_TRIES`, 31 s on the backoff). When the view confirms the growth the stored
+   record is cleared. When six checks do not show it, the state is `grown-unconfirmed`: `info` gives
+   `grow_state`, `grow_baseline_bytes`, `grow_seen_bytes` and `grow_reason`, and `health` is degraded with
+   that name. The passes go on on the same backoff, and the state stays until the view shows the growth.
+   A baseline that is missing or corrupt cannot confirm anything: the state is `grown-unconfirmed` at once,
+   and `grow_reason` says it is missing or corrupt. A restart after the resize and before the confirmation
+   reads the stored baseline and confirms against it, so it does not report a grown disk as unconfirmed.
+   The six checks count from the start of each daemon run, so a restart starts them again.
 
 Nothing else is written. Partition 1 is never touched; sector 0 changes in four bytes; the kernel's view
 and the filesystem only grow.
@@ -1529,13 +1547,21 @@ seam, for all six cases in `drivers/system-slots/src/grow/tests.rs`:
 | before 3 | new | new | old | grows the filesystem only |
 | after 3 | new | new | new | nothing: the pass is a no-op and writes nothing |
 
-A torn table write (the count's top byte lands wrong) is caught by the read back: the pass fails with only
-the four bytes changed, and the next start refuses the value as past the disk.
+A torn table write (the count's top byte lands wrong) is caught by the read back: the sector must be the old
+one with exactly the four count bytes replaced, and the pass fails otherwise, naming the bytes that changed.
+A new count whose byte equals the old one is not a refusal.
 
-**Not proved here.** That the kernel accepts `BLKPG_RESIZE_PARTITION` on a partition that is mounted, that
-the filesystem grows past its reserved group descriptors, and that the card or eMMC writes one sector whole
-on a power cut. These are the board check in `testing/board-runs/` (not yet written), and the QEMU guest
-case (not yet written); the test seam shares none of them with the kernel.
+**Measured in QEMU (not on a board).** With the kernel's own partition resize and online resize on an NVMe
+disk, mounted `/data`, the builder's shape (9728 4 KiB blocks, 112 inodes per group, 4 reserved GDT blocks):
+a 15 GiB disk grows partition 2 to 16,019,095,552 bytes and the filesystem to 3910912 blocks in one pass of
+about 0.58 s (the resize itself 0.52 s); a 64 GiB disk grows it to 16755968 blocks in one pass of about
+0.74 s (the resize 0.66 s). The kernel converts the filesystem to `meta_bg` online at 64 GiB, so the 4
+reserved GDT blocks do not cap it. Inodes after the grow: 13440 at 15 GiB, 57344 at 64 GiB (112 per group).
+A second boot finds nothing to do and writes nothing, in 13 to 18 ms. Those are the only claims; the card or
+eMMC's speed and its sector atomicity on a power cut are not measured.
+
+**Not proved here.** That the card or eMMC writes one sector whole on a power cut, and the board's own timing.
+The board check is not written yet (no file in `testing/board-runs/`), and the test seam shares none of them with the kernel.
 
 ### The slot layout (Pi firmware form)
 

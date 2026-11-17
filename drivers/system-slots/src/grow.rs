@@ -5,13 +5,17 @@
 //! from the state it finds, so the whole pass is safe to repeat and a cut at any point is
 //! finished by the next pass:
 //!
+//! 0. The baseline. The filesystem's size on the mount and the target length are stored in
+//!    `board/slots/grow` before the table's first write, and the record is cleared when the
+//!    resize is confirmed (see [`Task::confirm`]).
 //! 1. The table. [`lemnos_slot_store::mbr::plan_grow`] validates it and gives the new length; the
 //!    only write is the four bytes of that entry's sector count (474 to 477 of sector 0). The
 //!    sector is read back and must differ from the old one in those four bytes and nowhere else.
 //! 2. The kernel's view. `BLKPG_RESIZE_PARTITION` on partition 2 to the table's length, then
 //!    `/sys/class/block/<p2>/size` must say the new length.
-//! 3. The filesystem. `EXT4_IOC_RESIZE_FS` on `/data` to the table's length in blocks, then the
-//!    superblock must say the new count.
+//! 3. The filesystem. `EXT4_IOC_RESIZE_FS` on `/data` to the table's length in blocks. The kernel's
+//!    return is the check: the superblock on the device may still show the old count while the
+//!    filesystem is mounted, because the journal holds the new one until a checkpoint.
 //!
 //! A pass that finds nothing to do writes nothing. It refuses a table that is not the expected
 //! layout, by name, and writes nothing then. It never touches partition 1 or any byte of sector 0
@@ -31,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lemnos_slot_store::mbr::{self, Plan, SECTOR};
+use lemnos_slot_store::store;
 
 /// The data partition's entry in the table (0-based: entry 2 is index 1).
 pub const ENTRY: usize = 1;
@@ -87,6 +92,103 @@ pub trait Disk {
     fn resize_partition(&mut self, start_bytes: u64, length_bytes: u64) -> io::Result<()>;
     /// `EXT4_IOC_RESIZE_FS` on the mounted data filesystem, to `blocks` blocks.
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()>;
+    /// The data filesystem's size as the kernel reports it on the mount (`statfs`), in bytes.
+    fn fs_bytes(&self) -> io::Result<u64>;
+    /// The stored baseline record (`board/slots/grow` on the data partition), `None` when missing.
+    fn read_record(&self) -> io::Result<Option<Vec<u8>>>;
+    /// Replaces the stored record whole, durably: written, synced and renamed into place.
+    fn write_record(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Removes the stored record; a missing one is not an error.
+    fn clear_record(&mut self) -> io::Result<()>;
+}
+
+/// What one pass did with the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pass {
+    /// Nothing was resized: the table, the kernel and the filesystem already reach the disk's end.
+    /// The stored baseline has been cleared.
+    Done,
+    /// The filesystem was resized (the kernel accepted it). `baseline` is what the confirmation
+    /// compares the kernel's view with.
+    Resized { baseline: Baseline },
+}
+
+/// The kernel's size of the filesystem before the resize, as stored before the grow's first write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    /// The stored size (bytes) before the resize.
+    Stored(u64),
+    /// No record, although the table already holds the grown length: the record was lost.
+    Missing,
+    /// The record does not decode, or is for another size.
+    Corrupt,
+}
+
+/// How many tries the kernel's view gets to show a resize that the kernel accepted. The tries
+/// follow the retry backoff (1, 2, 4, 8, 8, 8 s), so the view is checked for 31 s after the resize.
+pub const CONFIRM_TRIES: u32 = 6;
+
+/// A resize the kernel accepted and its view has not confirmed: the named state `grown-unconfirmed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unconfirmed {
+    /// The stored size before the resize (bytes), `None` when there is no valid record.
+    pub baseline: Option<u64>,
+    /// The kernel's size of the filesystem when it was last checked (bytes).
+    pub seen: u64,
+    /// The reason in words.
+    pub reason: String,
+}
+
+/// The stored baseline record's first line, and the fixed words of its format.
+const RECORD_MAGIC: &str = "lemnos-grow 1";
+
+/// The record: the magic, the baseline and the target, and a checksum of the three lines before it.
+/// A torn or foreign file does not decode, and the confirmation names it.
+fn encode_record(baseline: u64, target: u32) -> Vec<u8> {
+    let body = format!("{RECORD_MAGIC}\nbaseline {baseline}\ntarget {target}\n");
+    format!("{body}sum {:016x}\n", fnv1a(body.as_bytes())).into_bytes()
+}
+
+fn decode_record(bytes: &[u8]) -> Option<(u64, u32)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    let [magic, baseline, target, _] = lines.as_slice() else {
+        return None;
+    };
+    let body = format!("{magic}\n{baseline}\n{target}\n");
+    if *magic != RECORD_MAGIC || text != format!("{body}sum {:016x}\n", fnv1a(body.as_bytes())) {
+        return None;
+    }
+    let baseline = baseline.strip_prefix("baseline ")?.parse().ok()?;
+    let target = target.strip_prefix("target ")?.parse().ok()?;
+    Some((baseline, target))
+}
+
+/// FNV-1a, 64 bits: a checksum against torn and damaged records, not against an adversary.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// What the stored record says.
+enum Found {
+    Missing,
+    Corrupt,
+    Valid { baseline: u64, target: u32 },
+}
+
+fn found(disk: &dyn Disk) -> Result<Found, String> {
+    match disk
+        .read_record()
+        .map_err(|e| format!("the stored baseline can't be read: {e}"))?
+    {
+        None => Ok(Found::Missing),
+        Some(bytes) => Ok(match decode_record(&bytes) {
+            Some((baseline, target)) => Found::Valid { baseline, target },
+            None => Found::Corrupt,
+        }),
+    }
 }
 
 /// The block size and block count of an ext4 superblock.
@@ -135,7 +237,7 @@ fn sector0(disk: &dyn Disk) -> Result<[u8; SECTOR], String> {
 ///
 /// The reason in words, with nothing written past the step that failed. A refusal (a table that is
 /// not the expected layout) writes nothing at all.
-pub fn grow(disk: &mut dyn Disk) -> Result<(), String> {
+pub fn grow(disk: &mut dyn Disk) -> Result<Pass, String> {
     let disk_sectors = disk
         .disk_sectors()
         .map_err(|e| format!("the disk's size can't be read: {e}"))?;
@@ -157,23 +259,48 @@ pub fn grow(disk: &mut dyn Disk) -> Result<(), String> {
         ));
     }
 
+    // 0. The baseline the confirmation compares with. It is stored before the table's first write,
+    // so a grow that has begun always has one: a restart after the resize finds it, and a record
+    // that is missing or does not decode is named by the confirmation, not taken for a new start.
+    let plan = mbr::plan_grow(&sector, ENTRY, disk_sectors).map_err(|r| r.to_string())?;
+    let expected = match plan {
+        Plan::Grow { sectors } => sectors,
+        Plan::Done => mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY].sectors,
+    };
+    let baseline = match (found(disk)?, &plan) {
+        (Found::Valid { baseline, target }, _) if target == expected => Baseline::Stored(baseline),
+        (Found::Valid { .. } | Found::Corrupt, _) => Baseline::Corrupt,
+        (Found::Missing, Plan::Grow { .. }) => {
+            let bytes = disk
+                .fs_bytes()
+                .map_err(|e| format!("the filesystem's size can't be read: {e}"))?;
+            disk.write_record(&encode_record(bytes, expected))
+                .map_err(|e| format!("the baseline can't be stored: {e}: nothing changed"))?;
+            Baseline::Stored(bytes)
+        }
+        (Found::Missing, Plan::Done) => Baseline::Missing,
+    };
+
     // 1. The table.
-    match mbr::plan_grow(&sector, ENTRY, disk_sectors).map_err(|r| r.to_string())? {
+    match plan {
         Plan::Grow { sectors } => {
             let before = sector;
             disk.write_at(COUNT_AT, &sectors.to_le_bytes())
                 .map_err(|e| format!("the table can't be written: {e}"))?;
             disk.sync()
                 .map_err(|e| format!("the table can't be flushed: {e}"))?;
+            // The sector must be the old one with exactly the new count. Comparing the bytes that
+            // changed would refuse a write whose count shares a byte with the old one (the top byte
+            // of any count under 2^24 sectors is 0 both before and after).
+            let mut expect = before;
+            expect[COUNT_AT as usize..COUNT_AT as usize + 4]
+                .copy_from_slice(&sectors.to_le_bytes());
             sector = sector0(disk)?;
-            let written = mbr::changed_bytes(&before, &sector);
-            let expect: Vec<usize> = (COUNT_AT as usize..COUNT_AT as usize + 4).collect();
-            let entry = mbr::entries(&sector).map_err(|r| r.to_string())?[ENTRY];
-            if written != expect || entry.sectors != sectors {
+            if sector != expect {
+                let changed = mbr::changed_bytes(&before, &sector);
                 return Err(format!(
-                    "the table after the write is not the one written ({} bytes changed, {} sectors read back for {sectors}): the write is retried; nothing else was changed",
-                    written.len(),
-                    entry.sectors
+                    "the table after the write is not the one written ({} bytes changed, at {changed:?}; the count is 4 bytes at {COUNT_AT}): the write is retried; nothing else was changed",
+                    changed.len(),
                 ));
             }
         }
@@ -223,17 +350,20 @@ pub fn grow(disk: &mut dyn Disk) -> Result<(), String> {
         ));
     }
     if sb.blocks < want {
+        // The kernel's answer is the first check: EXT4_IOC_RESIZE_FS returns 0 only once the mounted
+        // filesystem has `want` blocks. The superblock is not read back here. While the filesystem
+        // is mounted its new count is held by the journal until a checkpoint, so a read of the
+        // device can still show the old count after a resize that succeeded (QEMU, GROW stage 0:
+        // every retry showed the old count for 48 s). The kernel's view is checked by
+        // [`Task::confirm`], for a bounded number of tries.
         disk.resize_fs(want)
             .map_err(|e| format!("the filesystem refused to grow to {want} blocks: {e}"))?;
-        let (after, _) = superblock(disk, start)?;
-        if after.blocks != want {
-            return Err(format!(
-                "the filesystem has {} blocks after the grow to {want}: retried",
-                after.blocks
-            ));
-        }
+        return Ok(Pass::Resized { baseline });
     }
-    Ok(())
+    // Finished: the stored baseline has nothing left to confirm.
+    disk.clear_record()
+        .map_err(|e| format!("the stored baseline can't be cleared: {e}"))?;
+    Ok(Pass::Done)
 }
 
 /// The driver's retry state for a grow that has not finished.
@@ -284,6 +414,10 @@ pub struct Task {
     pub data: PathBuf,
     /// The retry state.
     pub retry: Retry,
+    /// Checks of the kernel's view since this start (or since the last confirmed resize).
+    checks: u32,
+    /// Set while the kernel's view has not shown an accepted resize.
+    unconfirmed: Option<Unconfirmed>,
 }
 
 impl Task {
@@ -293,7 +427,15 @@ impl Task {
             source,
             data,
             retry: Retry::new(),
+            checks: 0,
+            unconfirmed: None,
         }
+    }
+
+    /// The grow's state for `info`: set when the kernel accepted a resize and its view has not
+    /// confirmed it (`grown-unconfirmed`).
+    pub fn unconfirmed(&self) -> Option<&Unconfirmed> {
+        self.unconfirmed.as_ref()
     }
 
     /// Partition 2's length in MiB as the kernel has it now, `None` when the boot disk is not known
@@ -304,14 +446,82 @@ impl Task {
         Some((sectors * SECTOR as u64) >> 20)
     }
 
-    /// One pass against the real disk.
+    /// One pass against the real disk, and its confirmation.
     ///
     /// # Errors
     ///
-    /// The reason, from [`grow`], or that the boot disk is not known.
-    pub fn attempt(&self) -> Result<(), String> {
-        let disk = self.source.as_ref().map_err(|why| why.clone())?;
-        grow(&mut Real::new(disk, &self.data))
+    /// The reason, from [`grow`], from [`Task::confirm`], or that the boot disk is not known.
+    pub fn attempt(&mut self) -> Result<(), String> {
+        let disk = self.source.as_ref().map_err(|why| why.clone())?.clone();
+        let mut real = Real::new(&disk, &self.data);
+        let pass = grow(&mut real)?;
+        self.confirm(&mut real, pass)
+    }
+
+    /// Checks the kernel's view after a pass. A resize the kernel accepted is confirmed when the
+    /// filesystem's size on the mount is larger than the stored baseline; the stored record is then
+    /// cleared. A baseline that is missing or corrupt cannot confirm anything, and is named as the
+    /// `grown-unconfirmed` state at once. A view that has not shown the resize after
+    /// [`CONFIRM_TRIES`] checks is `grown-unconfirmed` with the sizes seen; the checks go on, on the
+    /// retry backoff, and the state stays until the view shows the grow.
+    ///
+    /// # Errors
+    ///
+    /// The reason in words, when the resize is not confirmed yet, or the record cannot be cleared.
+    pub fn confirm(&mut self, disk: &mut dyn Disk, pass: Pass) -> Result<(), String> {
+        let baseline = match pass {
+            // A finished pass cleared its record in `grow`; nothing is left to confirm.
+            Pass::Done => {
+                self.unconfirmed = None;
+                self.checks = 0;
+                return Ok(());
+            }
+            Pass::Resized { baseline } => baseline,
+        };
+        let seen = disk
+            .fs_bytes()
+            .map_err(|e| format!("the filesystem's size can't be read after the grow: {e}"))?;
+        let stored = match baseline {
+            Baseline::Stored(stored) => stored,
+            Baseline::Missing | Baseline::Corrupt => {
+                let reason = match baseline {
+                    Baseline::Missing => {
+                        "grown-unconfirmed: the stored baseline is missing, so the resize cannot be confirmed"
+                    }
+                    _ => {
+                        "grown-unconfirmed: the stored baseline is corrupt or for another size, so the resize cannot be confirmed"
+                    }
+                };
+                self.unconfirmed = Some(Unconfirmed {
+                    baseline: None,
+                    seen,
+                    reason: reason.to_string(),
+                });
+                return Err(reason.to_string());
+            }
+        };
+        if seen > stored {
+            disk.clear_record()
+                .map_err(|e| format!("the stored baseline can't be cleared: {e}"))?;
+            self.checks = 0;
+            self.unconfirmed = None;
+            return Ok(());
+        }
+        self.checks += 1;
+        if self.checks < CONFIRM_TRIES {
+            return Err(format!(
+                "the kernel's view has not shown the grow yet ({seen} bytes, was {stored}): checked again"
+            ));
+        }
+        let reason = format!(
+            "grown-unconfirmed: the kernel's view shows {seen} bytes, was {stored}, after {CONFIRM_TRIES} checks: the grow is retried"
+        );
+        self.unconfirmed = Some(Unconfirmed {
+            baseline: Some(stored),
+            seen,
+            reason: reason.clone(),
+        });
+        Err(reason)
     }
 }
 
@@ -358,6 +568,11 @@ impl Real {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, path.display().to_string()))
     }
 
+    /// The stored baseline record: the state directory's `grow` file (`Layout::state_dir`).
+    fn record(&self) -> PathBuf {
+        self.data.join("board").join("slots").join("grow")
+    }
+
     fn open_rw(&self) -> io::Result<File> {
         OpenOptions::new().read(true).write(true).open(&self.disk)
     }
@@ -400,6 +615,33 @@ impl Disk for Real {
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()> {
         let dir = File::open(&self.data)?;
         lemnos_linux_sys::ext4::resize_fs(dir.as_fd(), blocks)
+    }
+
+    fn fs_bytes(&self) -> io::Result<u64> {
+        lemnos_linux_sys::statfs::total_bytes(&self.data)
+    }
+
+    fn read_record(&self) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(self.record()) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_record(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let path = self.record();
+        fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+        store::replace(&path, bytes)
+    }
+
+    fn clear_record(&mut self) -> io::Result<()> {
+        let path = self.record();
+        match fs::remove_file(&path) {
+            Ok(()) => store::sync_dir(path.parent().unwrap_or(Path::new("."))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 

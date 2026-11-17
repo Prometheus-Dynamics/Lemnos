@@ -142,6 +142,13 @@ struct Fake {
     blkpg_fails: u32,
     /// The filesystem resize is refused this many times, `ENOSPC`.
     fs_fails: u32,
+    /// A mounted ext4 keeps its new block count in the journal: a resize that succeeds leaves the
+    /// superblock on the device at the old count until a checkpoint.
+    journal_holds_count: bool,
+    /// The filesystem's block count as the kernel's view (statfs) has it.
+    view_blocks: u64,
+    /// The kernel's view never shows a resize (the size it reports stays what it was at boot).
+    view_frozen: bool,
 }
 
 impl Fake {
@@ -157,6 +164,7 @@ impl Fake {
             disk_sectors,
             kernel_start,
             kernel_sectors,
+            view_blocks: fs_blocks(file),
             ..Self::idle(file)
         }
     }
@@ -167,6 +175,8 @@ impl Fake {
             disk_sectors: of.disk_sectors,
             kernel_start: of.kernel_start,
             kernel_sectors: of.kernel_sectors,
+            view_blocks: of.view_blocks,
+            view_frozen: of.view_frozen,
             ..Self::idle(&of.file)
         }
     }
@@ -184,11 +194,19 @@ impl Fake {
             tear: false,
             blkpg_fails: 0,
             fs_fails: 0,
+            journal_holds_count: false,
+            view_blocks: 0,
+            view_frozen: false,
         }
     }
 
     fn open_rw(&self) -> io::Result<File> {
         OpenOptions::new().read(true).write(true).open(&self.file)
+    }
+
+    /// The stored baseline record, beside the image: it survives a power cut and a restart.
+    fn record(&self) -> PathBuf {
+        self.file.with_extension("grow")
     }
 
     fn alive(&self) -> io::Result<()> {
@@ -271,6 +289,34 @@ impl Disk for Fake {
         })
     }
 
+    fn fs_bytes(&self) -> io::Result<u64> {
+        self.alive()?;
+        Ok(self.view_blocks * BLOCK)
+    }
+
+    fn read_record(&self) -> io::Result<Option<Vec<u8>>> {
+        self.alive()?;
+        match fs::read(self.record()) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_record(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.alive()?;
+        fs::write(self.record(), bytes)
+    }
+
+    fn clear_record(&mut self) -> io::Result<()> {
+        self.alive()?;
+        match fs::remove_file(self.record()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()> {
         self.alive()?;
         if self.fs_fails > 0 {
@@ -281,6 +327,12 @@ impl Disk for Fake {
             // The filesystem cannot grow past its partition.
             if blocks * BLOCK > s.kernel_sectors * SECT {
                 return Err(io::Error::from_raw_os_error(ENOSPC));
+            }
+            if !s.view_frozen {
+                s.view_blocks = blocks;
+            }
+            if s.journal_holds_count {
+                return Ok(());
             }
             let at = s.kernel_start * SECT + 1024 + 4;
             s.open_rw()?
@@ -571,6 +623,217 @@ fn a_torn_table_write_is_refused_on_the_next_start_and_only_the_count_bytes_diff
 }
 
 #[test]
+fn a_new_count_whose_top_byte_is_the_old_one_is_written_and_not_refused() {
+    // A disk under 2^24 sectors (8 GB): the count's top byte is 0 before and after, so only three
+    // bytes of the sector change. The write is right and must not be refused for that.
+    let disk = 8_000_000u64;
+    let img = make_custom(
+        &dir("top-byte").join("disk.img"),
+        disk,
+        P2_OLD,
+        0x83,
+        false,
+        LABEL,
+        true,
+        true,
+    );
+    let target = mbr::grow_target(u64::from(P2_START), disk).unwrap();
+    assert!(
+        target < 1 << 24,
+        "the test needs a count with a zero top byte"
+    );
+    assert_eq!(sector0_of(&img)[477], 0, "the old count's top byte");
+    let mut fake = Fake::boot(&img);
+    grow(&mut fake).unwrap_or_else(|why| panic!("refused: {why}"));
+    assert_eq!(
+        fake.mutations, 3,
+        "the table, the kernel and the filesystem, once each"
+    );
+    let t = mbr::entries(&sector0_of(&img)).unwrap();
+    assert_eq!(u64::from(t[ENTRY].sectors), target);
+}
+
+#[test]
+fn a_resize_the_kernel_accepted_is_finished_without_reading_the_superblock_back() {
+    // The mounted filesystem's count is not on the device until a checkpoint: the pass must end on
+    // the kernel's answer, not on a superblock read that still shows the old count.
+    let img = make(&dir("journal-held").join("disk.img"));
+    let mut fake = Fake::boot(&img);
+    fake.journal_holds_count = true;
+    let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
+    let pass = grow(&mut fake).unwrap();
+    task.confirm(&mut fake, pass)
+        .unwrap_or_else(|why| panic!("retried on a stale superblock: {why}"));
+    assert_eq!(fake.mutations, 3, "one pass, each step once");
+    assert_eq!(fake.kernel_sectors, TARGET);
+    assert_eq!(
+        fs_blocks(&img),
+        100_000 * SECT / BLOCK,
+        "the device still holds the old count"
+    );
+    assert!(task.unconfirmed().is_none());
+}
+
+#[test]
+fn a_kernel_view_that_never_grows_reaches_grown_unconfirmed_after_the_bound_and_keeps_trying() {
+    // The superblock never updates and the kernel's view never shows the resize: the pass must
+    // name `grown-unconfirmed` with the sizes it saw after CONFIRM_TRIES checks, and keep trying.
+    let img = make(&dir("never-grows").join("disk.img"));
+    let mut fake = Fake::boot(&img);
+    fake.journal_holds_count = true;
+    fake.view_frozen = true;
+    let old = 100_000 * SECT;
+    let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
+    for n in 1..=CONFIRM_TRIES {
+        let pass = grow(&mut fake).unwrap();
+        assert_eq!(
+            pass,
+            Pass::Resized {
+                baseline: Baseline::Stored(old)
+            },
+            "the superblock says the old size, so each pass resizes again"
+        );
+        let why = task.confirm(&mut fake, pass).unwrap_err();
+        if n < CONFIRM_TRIES {
+            assert!(!why.contains("grown-unconfirmed"), "check {n}: {why}");
+            assert!(task.unconfirmed().is_none(), "check {n}");
+        } else {
+            assert!(why.starts_with("grown-unconfirmed"), "{why}");
+            assert!(why.contains(&format!("{old} bytes")), "{why}");
+            let u = task.unconfirmed().expect("the state is set at the bound");
+            assert_eq!((u.baseline, u.seen), (Some(old), old), "the sizes seen");
+        }
+    }
+    // Still not given up: later passes keep retrying and keep the state.
+    for _ in 0..5 {
+        let pass = grow(&mut fake).unwrap();
+        let why = task.confirm(&mut fake, pass).unwrap_err();
+        assert!(why.starts_with("grown-unconfirmed"), "{why}");
+    }
+    let u = task.unconfirmed().expect("the state is kept");
+    assert_eq!((u.baseline, u.seen), (Some(old), old));
+}
+
+#[test]
+fn a_view_that_shows_the_grow_clears_the_unconfirmed_state() {
+    let img = make(&dir("view-clears").join("disk.img"));
+    let mut fake = Fake::boot(&img);
+    fake.journal_holds_count = true;
+    fake.view_frozen = true;
+    let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
+    for _ in 0..CONFIRM_TRIES {
+        let pass = grow(&mut fake).unwrap();
+        let _ = task.confirm(&mut fake, pass);
+    }
+    assert!(task.unconfirmed().is_some());
+    fake.view_frozen = false;
+    let pass = grow(&mut fake).unwrap();
+    task.confirm(&mut fake, pass).unwrap();
+    assert!(task.unconfirmed().is_none());
+}
+
+#[test]
+fn a_driver_restarted_after_the_resize_before_the_confirmation_reads_ok() {
+    // The first start resized, and stopped before it confirmed. The view had already grown, and the
+    // superblock on the device still shows the old count (the journal holds it). The restarted
+    // driver reads the stored baseline and confirms against it: ok, and the record is cleared.
+    let old = 100_000 * SECT;
+    let img = make(&dir("restart-after").join("disk.img"));
+    let mut first = Fake::boot(&img);
+    first.journal_holds_count = true;
+    let pass = grow(&mut first).unwrap();
+    assert_eq!(
+        pass,
+        Pass::Resized {
+            baseline: Baseline::Stored(old)
+        }
+    );
+    // The driver stops here, before the confirmation.
+    assert_eq!(
+        first.view_blocks * BLOCK,
+        TARGET * SECT / BLOCK * BLOCK,
+        "the view has grown"
+    );
+    assert!(
+        first.record().exists(),
+        "the baseline is stored while the resize is unconfirmed"
+    );
+
+    let mut restarted = Fake::restarted(&first);
+    restarted.journal_holds_count = true;
+    let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
+    let pass = grow(&mut restarted).unwrap();
+    assert_eq!(
+        pass,
+        Pass::Resized {
+            baseline: Baseline::Stored(old)
+        },
+        "the restart reads the stored size, not the grown one"
+    );
+    task.confirm(&mut restarted, pass)
+        .unwrap_or_else(|why| panic!("restarted after the resize: {why}"));
+    assert!(task.unconfirmed().is_none(), "not grown-unconfirmed");
+    assert!(
+        !restarted.record().exists(),
+        "confirmed: the baseline is cleared"
+    );
+}
+
+#[test]
+fn a_missing_or_corrupt_stored_baseline_reaches_grown_unconfirmed_and_names_it() {
+    let cases: [(&str, Option<Vec<u8>>, &str); 2] = [
+        ("missing", None, "missing"),
+        (
+            "corrupt",
+            Some(b"lemnos-grow 1\nbaseline 9\n".to_vec()),
+            "corrupt",
+        ),
+    ];
+    for (case, damage, words) in cases {
+        let img = make(&dir(&format!("baseline-{case}")).join("disk.img"));
+        let mut first = Fake::boot(&img);
+        first.journal_holds_count = true;
+        grow(&mut first).unwrap_or_else(|why| panic!("{case}: {why}"));
+        match damage {
+            None => fs::remove_file(first.record()).unwrap(),
+            Some(bytes) => fs::write(first.record(), bytes).unwrap(),
+        }
+        let mut restarted = Fake::restarted(&first);
+        restarted.journal_holds_count = true;
+        let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
+        let pass = grow(&mut restarted).unwrap_or_else(|why| panic!("{case}: {why}"));
+        let why = task
+            .confirm(&mut restarted, pass)
+            .expect_err("a resize with no usable baseline is not confirmed");
+        assert!(why.starts_with("grown-unconfirmed"), "{case}: {why}");
+        assert!(why.contains(words), "{case} must be named: {why}");
+        let u = task.unconfirmed().expect("the state is set at once");
+        assert_eq!(u.baseline, None, "{case}");
+        assert_eq!(u.reason, why, "{case}: the reason is the state's");
+    }
+}
+
+#[test]
+fn a_record_round_trips_and_a_damaged_one_does_not_decode() {
+    let bytes = encode_record(51_200_000, 31_830_016);
+    assert_eq!(decode_record(&bytes), Some((51_200_000, 31_830_016)));
+    let mut flipped = bytes.clone();
+    let at = flipped.iter().position(|b| *b == b'2').unwrap();
+    flipped[at] = b'3';
+    assert_eq!(
+        decode_record(&flipped),
+        None,
+        "a changed digit fails the checksum"
+    );
+    assert_eq!(
+        decode_record(&bytes[..bytes.len() - 3]),
+        None,
+        "a torn record"
+    );
+    assert_eq!(decode_record(b""), None);
+}
+
+#[test]
 fn a_refused_partition_resize_is_finished_by_the_next_pass() {
     let (want, want_kernel, want_blocks) = reference("busy");
     let img = make(&dir("busy").join("d.img"));
@@ -621,7 +884,7 @@ fn a_failed_step_is_retried_with_a_backoff_capped_at_eight_seconds_and_never_giv
 
 #[test]
 fn a_boot_disk_that_is_not_known_is_reported_in_words_on_each_try() {
-    let task = Task::new(
+    let mut task = Task::new(
         Err("the boot disk is not known".into()),
         PathBuf::from("/data"),
     );
