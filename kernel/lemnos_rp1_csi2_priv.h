@@ -67,6 +67,7 @@ struct lrc_dev {
 	bool gone;			/* unbound: every register access is off */
 	bool wedged;			/* a stop couldn't be confirmed */
 	u8 stop_armed;			/* STOP_ARM_*: the FE_ACKs a stop waits for, set under lock */
+	bool stop_wedged;		/* a stop timed out: its FE_ACKs are ignored until START */
 	struct completion stop_done[2];	/* the stop's FE_ACK after its FORCE: image, then embedded */
 
 	struct lem_pisp_fe *fe;		/* the front end, when the block has one; NULL otherwise */

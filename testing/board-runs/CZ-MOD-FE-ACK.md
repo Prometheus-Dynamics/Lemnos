@@ -20,7 +20,13 @@ compatible, as M34's load line does).
 3. Outcome B, the failure this check must catch: STOP returns wedged. Then every stop on this board wedges, and
    the check prints `STOP never confirmed: FE_ACK after FORCE did not arrive within <B> us`. If that line
    appears on the first stop, the assumption is wrong: stop and report before M1.
-4. Stop a second time with the DMA idle: STOP returns success with no wait longer than N.
+4. Stop a second time with nothing in flight (no frame started since the START). Two outcomes are both
+   expected to be safe, and the driver must be right either way:
+   - 4a, the board acks: STOP returns success, the log shows the frame end after FORCE, and the next START
+     reports the same frame count and sequence as before the stop (the stop's ack counts no frame).
+   - 4b, the board does not ack: STOP returns wedged after the bound and the pool stays attached. That is safe
+     and is recorded as a result, not a failure of the driver; the next START re-arms the receiver. Whether the
+     board acks an idle FORCE is a board fact to record, not a guess the driver depends on.
 
 ## Recording
 - Put the outcome (A or B, with N and B) in testing/board-runs/CZ-MOD-FE-ACK.md under "Results", with the

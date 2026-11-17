@@ -11,6 +11,7 @@
  * Copyright (c) 2026 the Lemnos authors.
  */
 #include <linux/dma-mapping.h>
+#include <linux/irq.h>
 #include <linux/err.h>
 #include <linux/gfp.h>
 #include <linux/interrupt.h>
@@ -99,7 +100,7 @@ static u64 tcsi_cur_addr;
 static u32 tcsi_cur_len;
 static u32 tcsi_busy;		/* lines the channel still writes after FORCE; ~0: forever */
 static u32 tcsi_blank;		/* of those, the lines the counter does not move for (TCSI_IOC_BLANK) */
-static bool tcsi_watch;		/* a frame is streaming: the tick watches for a FORCE to acknowledge */
+static bool tcsi_acked;		/* this FORCE has had its frame end; cleared when FORCE is seen low */
 #define TCSI_IRQ_EN_FE_ACK	BIT(15)	/* CH_CTRL: the channel's FE_ACK interrupt enable, as the driver writes it */
 #define TCSI_R_INT_CSI_DMA	BIT(0)	/* MIPI cfg INTS: the DMA's interrupt, which the driver reads */
 static u8 tcsi_pattern;
@@ -167,12 +168,48 @@ static u32 tcsi_emb_lines = 1;	/* the next embedded frame end's lines; 0: no lin
  * period the timer ran past it. Only counted while the channel is forced; a gap
  * while it isn't is dropped.
  */
+/*
+ * Delivers a frame start or end to the driver, in the fake's own context, the way the hardware's interrupt
+ * would be taken. FAKE-ONLY ASSUMPTION (CZ-MOD FE_ACK): the bits go into status and the DMA's interrupt into
+ * the MIPI cfg, the driver's handler (devm_request_irq, a hard handler) runs to completion here, and then the
+ * fake clears what it set, plus every frame bit the driver left behind. On hardware the driver's write-1-to-
+ * clear does that; this fake's status is ordinary memory, so the clear is the fake's. A status bit therefore
+ * exists only while the handler runs: no stale bit outlives it, and the stop can't count an old one.
+ */
+static void tcsi_deliver(u32 status_bits, u32 ints_bits)
+{
+	void __iomem *dma = tcsi_regs[0], *cfg = tcsi_regs[2];
+	unsigned long flags;
+	u32 saved;
+
+	/*
+	 * The status starts empty: the driver's write-to-clear (START, the stop, the handler's write-back) is a
+	 * no-op on this memory and leaves what it wrote behind, so whatever is there is cleared first.
+	 */
+	writel(status_bits, dma + R_STATUS);
+	/*
+	 * The handler sees only this delivery's bits: a PiSP front-end interrupt pending from TCSI_IOC_FE_FIRE is
+	 * taken by its own IRQ, once, and is put back as it was.
+	 */
+	saved = readl(cfg + R_INTS);
+	writel(ints_bits, cfg + R_INTS);
+	local_irq_save(flags);
+	generic_handle_irq(tcsi_irq);
+	local_irq_restore(flags);
+	writel(0, dma + R_STATUS);
+	writel(saved, cfg + R_INTS);
+}
+
 static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 {
 	void __iomem *dma = tcsi_regs[0];
 	enum hrtimer_restart next = HRTIMER_NORESTART;
 	unsigned long flags;
 	u64 lines = 1 + hrtimer_forward_now(t, ns_to_ktime(TCSI_LINE_NS));
+	bool ack = false;
+
+	if (!dma)
+		return HRTIMER_NORESTART;
 
 	raw_spin_lock_irqsave(&tcsi_lock, flags);
 	if (tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
@@ -190,17 +227,27 @@ static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 	 * The stop's frame end: once the busy window is over (or there was none), a FORCE with the FE_ACK
 	 * interrupt enabled gets its frame end, once. A FORCE with it disabled gets none, as the board showed.
 	 */
-	if (tcsi_watch && !tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
-		tcsi_watch = false;
-		if (readl(dma + R_CTRL) & TCSI_IRQ_EN_FE_ACK) {
-			writel(readl(dma + R_STATUS) | TCSI_FE_ACK, dma + R_STATUS);
-			writel(readl(tcsi_regs[2] + R_INTS) | TCSI_R_INT_CSI_DMA, tcsi_regs[2] + R_INTS);
-			irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
-		}
+	/*
+	 * Every FORCE gets its frame end once the busy window is over, with or without a frame started: the stop
+	 * after a START with no frame is acknowledged too. The tick runs for the module's life, so a FORCE is seen.
+	 */
+	if (!(readl(dma + R_CTRL) & R_FORCE)) {
+		tcsi_acked = false;
+	} else if (!tcsi_busy && !tcsi_acked) {
+		tcsi_acked = true;
+		ack = readl(dma + R_CTRL) & TCSI_IRQ_EN_FE_ACK;
 	}
-	if (tcsi_busy || tcsi_watch)
-		next = HRTIMER_RESTART;
+	next = HRTIMER_RESTART;
 	raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+	/* The stop's frame end, delivered with the lock released: the driver's handler may run to completion. */
+	if (ack) {
+		u32 emb = 0;
+
+		if ((readl(tcsi_regs[0] + R_EMB(R_CTRL)) & (R_FORCE | TCSI_IRQ_EN_FE_ACK)) ==
+		    (R_FORCE | TCSI_IRQ_EN_FE_ACK))
+			emb = TCSI_EMB_FE_ACK;
+		tcsi_deliver(TCSI_FE_ACK | emb, TCSI_R_INT_CSI_DMA);
+	}
 	return next;
 }
 
@@ -323,8 +370,13 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&lines, uarg, sizeof(lines)))
 			return -EFAULT;
 		raw_spin_lock_irqsave(&tcsi_lock, flags);
+		/*
+		 * A release of a wedged window (busy forever) ends a stop that already returned wedged, with no frame
+		 * end: the FORCE it left set is settled here, so the tick never acks it. FAKE-ONLY ASSUMPTION.
+		 */
+		if (tcsi_busy == U32_MAX && lines == 0 && (readl(tcsi_regs[0] + R_CTRL) & R_FORCE))
+			tcsi_acked = true;
 		tcsi_busy = lines;
-		tcsi_watch = true;
 		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
 		if (lines)
 			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS),
@@ -362,9 +414,7 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 					(u64)readl(dma + R_ADDR0) << 4;
 			tcsi_cur_len = readl(dma + R_LENGTH) << 4;
 			raw_spin_lock_irqsave(&tcsi_lock, flags);
-			tcsi_watch = true;
 			raw_spin_unlock_irqrestore(&tcsi_lock, flags);
-			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS), HRTIMER_MODE_REL_PINNED_HARD);
 		}
 		if (status & TCSI_EMB_FS) {
 			tcsi_emb_addr = (u64)readl(dma + R_EMB(R_ADDR1)) << 36 |
@@ -391,9 +441,8 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			/* Frames in the high half, lines in the low, each wrapping. */
 			writel(((dbg >> 16) + 1) << 16 | ((dbg + lines) & 0xffff), dma + R_DEBUG);
 		}
-		writel(status, dma + R_STATUS);
-		writel(R_INT_DMA, cfg + R_INTS);
-		return irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
+		tcsi_deliver(status, R_INT_DMA);
+		return 0;
 	}
 	return -ENOTTY;
 }
@@ -1119,6 +1168,7 @@ static struct resource vip_res[2] __initdata;
 static int __init tb_init(void)
 {
 	hrtimer_setup(&tcsi_timer, tcsi_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED_HARD);
+	/* The tick runs for the module's life: it is what sees every FORCE. */
 	struct resource res[1 + TB_BLOCK_IRQS];
 	struct platform_device_info pisp = {
 		.name = "lemnos-test-pisp",
@@ -1233,6 +1283,8 @@ static int __init tb_init(void)
 			}
 			memset_io(tcsi_regs[i], 0, SZ_4K);
 		}
+		/* The tick reads the windows, so it starts only once they are mapped. */
+		hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS), HRTIMER_MODE_REL_PINNED_HARD);
 		tcsi_irq = tb_irq[TB_TCSI_IRQ];
 		cr[4] = (struct resource)DEFINE_RES_IRQ(tcsi_irq);
 		tcsi_pdev = platform_device_register_full(&csi);
