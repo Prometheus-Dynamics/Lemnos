@@ -1052,6 +1052,37 @@ fn a_count_picked_uboot_previous_is_a_trial_as_the_pi_previous_is() {
     assert_ne!(board.meta("os-2").get("FAILED"), "yes");
 }
 
+/// R2-PREV: the Pi form's count rung. The firmware reads `previous.txt` for a count with bit 2 set
+/// (`[boot_count&4]` in `config.txt`), so it boots the previous slot's own cmdline. That cmdline is not
+/// the board's default, so slot-init starts it as a trial: `trial-init` is written, the default is not
+/// marked failed (only the loader's own `files` mark does that), and no flashing mode is asked for at
+/// a count below [`FLASH_AFTER`]. The firmware's pick itself is tested in `drivers/slot-store`.
+#[test]
+fn a_pi_count_picked_previous_starts_as_a_trial_and_asks_for_no_flashing_mode() {
+    // `Board::new` is the default `os-2` with the previous `os-1`: the firmware's count rung boots `os-1`.
+    for count in [4u32, 5, 6, 7] {
+        let board = Board::new();
+        set_baseline(&board, 0);
+        boot_count(&board, count);
+        // The firmware boots the previous slot: the kernel command line is the previous slot's own.
+        board.cmdline("os-1", &hash("os-1"));
+        let (fake, why) = board.boot(&[]);
+        assert_eq!(why, "", "count {count}: {:?}", fake.logs.borrow());
+        assert!(
+            !fake.called("flash mode"),
+            "count {count}: {:?}",
+            fake.calls()
+        );
+        assert_eq!(fake.last(), "switch_root newroot", "count {count}");
+        assert_eq!(
+            board.read("data/board/slots/trial-init"),
+            "os-1\n",
+            "count {count}"
+        );
+        assert_ne!(board.meta("os-2").get("FAILED"), "yes", "count {count}");
+    }
+}
+
 /// Falls back from the default to the previous slot on trial, recorded: the common end of every
 /// refusal.
 fn assert_fell_back(board: &Board, fake: &Fake, reason: &str) {
