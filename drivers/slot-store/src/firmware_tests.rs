@@ -178,3 +178,20 @@ fn a_count_below_the_baseline_is_a_power_loss_and_the_baseline_goes_to_zero() {
 fn a_baseline_of_zero_is_a_kept_baseline_not_an_unknown_one() {
     assert_eq!(since_good(8, Some(0)).restarts(), 8);
 }
+
+#[test]
+fn a_config_txt_without_a_select_line_is_refused_by_name_and_the_image_text_passes() {
+    assert!(check_config_text(CONFIG_TXT.as_bytes()).is_ok());
+    for line in SELECT_LINES {
+        let without: String = CONFIG_TXT
+            .lines()
+            .filter(|l| *l != line)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let why = check_config_text(without.as_bytes()).unwrap_err();
+        assert!(why.contains(line), "{why}");
+        assert!(why.contains("Lemnos never edits config.txt"), "{why}");
+    }
+    assert!(check_config_text(b"kernel_watchdog_timeout=15\n").is_err());
+    assert!(check_config_text(&[0xff, 0xfe]).is_err());
+}

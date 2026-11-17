@@ -244,62 +244,6 @@ neither is written exactly as before: no firmware list file, no `boot.config`, f
   failed overlay is named with the tool's status. Nothing here is loaded by firmware: the lines say so. The
   firmware itself applies the overlays at boot and is not checked by this.
 
-### A board's own config.txt
-
-On a Raspberry Pi board, `config.txt` is the firmware's first file. By default Lemnos owns it: flash writes
-the generated `config.txt` and `tryboot.txt` (above). A board whose `config.txt` the board owns sets
-
-```toml
-[boot]
-config_owner = "board"
-```
-
-and then Lemnos never writes, reads or requires that file. This is a per-board mode, not a second Pi form:
-the default boot of a Lemnos-owned board still goes through `config.txt` (`default.txt`, and the count's
-`previous.txt`), and that does not change. The mode exists because a board whose `config.txt` carries the
-board's own settings cannot have Lemnos's text put over them, and the trial route does not need it.
-
-With `config_owner = "board"`:
-
-- **The boot partition.** `lemnos-ctl boot-partition` writes no `config.txt`. It writes `tryboot.txt` (the
-  fixed text, with the board's `gpio=` lines after it, as before), the pointers, the records and the bay sets.
-  The root list `firmware-overlays.txt` holds the line `board-config`, which is how the boot partition says
-  the board owns `config.txt` (`lemnos_slot_store::bays::BOARD_CONFIG_LINE`). The layout carries that flag
-  (`Layout::board_config`), and the image is refused by name when the board file's `config_owner` differs.
-- **The trial route is unchanged and needs no `config.txt`.** A trial arms `trial.txt` and its record (the
-  two pointer and record sectors), and a restart with `0 tryboot` reads `tryboot.txt`, which includes
-  `trial.txt`. The firmware reads `tryboot.txt` in place of `config.txt` on that one boot, so the trial's
-  boot does not depend on the board's file.
-- **A default switch is refused by name.** Every write to `default.txt` or `previous.txt` is refused before
-  any sector is written, with: `this board's config.txt is the board's own, which Lemnos never writes: the
-  default and previous pointers are read only through it, so they can't be switched here; set the default in
-  the board's config.txt`. That covers a default switch, the trial's confirmation (which is a default switch),
-  the count's demotion, the rollback of a boot guard, and removing the previous slot's bay (which repoints
-  `previous.txt`). A trial whose confirmation is refused stays pending, and the state names the refusal.
-- **An install does not change the default.** A board that owns `config.txt` has no default switch, so an
-  install writes the bays and leaves the default pointer where it was.
-- **No config lines and no overlays.** `config_lines` and `firmware_overlays` are written into `config.txt`,
-  which the board owns. Setting either with `config_owner = "board"` is refused at build, by name. The board
-  loads its overlays and its own lines from its own `config.txt`.
-- **A bundle and a boot partition agree on the lines.** Neither carries a digest: both have no config lines,
-  so the install's `boot.config` check is unchanged.
-
-Limits, stated:
-
-- The `gpio=` lines Lemnos generates go in `tryboot.txt` only. The board's default boot gets them only if its
-  own `config.txt` carries them.
-- Flash writes a whole image, so a first flash of a board-owned boot partition replaces its `config.txt` with
-  nothing. A board in this mode gets its `config.txt` from its own image step, not from Lemnos's first flash.
-- A broken default is not demoted by Lemnos on such a board. The slot-init demotion asks for a default switch,
-  which is refused, so the boot goes to the rescue (the kernel log, then a restart) and says why.
-
-Tests: `a_board_owned_config_txt_is_never_written_and_the_trial_route_still_works` (slot-store, against a
-stand-in partition that fails every write into `config.txt`), `the_guard_itself_refuses_a_write_into_config_txt`,
-`a_lemnos_owned_config_still_switches_the_default`, `a_board_owned_config_txt_refuses_the_default_by_name_and_the_trial_still_arms`
-(system-slots), `an_image_built_for_the_other_owner_of_config_txt_is_refused_by_name` (system-slots),
-`a_board_that_owns_config_txt_gets_no_config_txt_and_a_tryboot_txt`, `a_board_that_owns_config_txt_refuses_config_lines_by_name`,
-`an_unknown_config_owner_is_refused_by_name` (ctl). Untested on board: `testing/board-runs/` has no run for this mode yet.
-
 ### The manifest, schema 3
 
 | Key | Format |
@@ -994,6 +938,47 @@ This uses the board firmware's one-shot boot:
   firmware didn't boot the trial, and its attempts are above 0, it writes one fewer and restarts
   with `0 tryboot`, which boots the trial. With 0, it clears the record and boots the default. See
   "The extra pass on tryboot", below.
+
+### `config.txt` is written once, offline
+
+On every Raspberry Pi board, `config.txt` is the firmware's first file, and it is written in one place
+only: `lemnos-ctl boot-partition`, when the boot partition is made. It holds the fixed text
+(`lemnos_slot_store::firmware::CONFIG_TXT`), the board's `gpio=` lines and its `config_lines`. Nothing at
+run time writes it: not the driver, not `lemnosd`, not `slot-init`, not the install.
+
+The fixed text selects the slot through the pointer files it includes:
+
+- `include default.txt`, then `[boot_count&4]` and `include previous.txt`: the default, or the previous
+  when the count has bit 2 set. That is the count-based fallback, and it is written in `config.txt`
+  itself, so it needs no run-time edit. The firmware rule it relies on is the expression filter in the
+  Raspberry Pi documentation (`conditional.adoc`), as cited in `testing/board-runs/I5i3.md`. It is not yet
+  checked on a board.
+- The pointer files (`default.txt`, `previous.txt`, `trial.txt`) hold the run-time state: two sectors each,
+  one `os_prefix` line per sector, the form in "Pointer files" below. A default switch, a confirm, a
+  demotion and a trial arm are writes to these files, and to the trial record. `tryboot.txt` includes
+  `trial.txt` and is written offline too.
+
+A board's own `config.txt` is not written by Lemnos. If it lacks the three lines above, slot setup is
+refused by name and the file is left as it is: `install`, `set_default` and `trial` on the Tryboot record,
+and the first-slot writer (`lemnos-ctl data-partition --boot-image`) all read the file with
+`firmware::check_config_text` first. The refusal names the missing line and says that Lemnos never edits
+`config.txt`.
+
+**What a power cut leaves (the firmware's view).** The firmware applies the `os_prefix` lines of a pointer
+file in turn, so the last whole line is the slot it boots. Lemnos writes sector 1 first, then sector 0,
+and reads sector 1 first. With a single-sector write that completes or does not start (the storage contract
+this design already relies on), the firmware's view and Lemnos's view are, at every cut between sector
+writes, both the old slot or both the new one: `at_every_sector_cut_the_firmware_and_lemnos_agree_and_see_old_or_new`.
+A completed switch lands as the new slot. The check is against a naive single-sector update, which reports
+success and leaves the firmware on the old line: `a_naive_single_sector_switch_breaks_the_agreement_at_a_cut`.
+A tear inside the one sector the firmware reads last is not covered by the layout alone; it is covered only
+by the single-sector contract above. The byte-level cut test (`a_pointer_cut_at_every_byte_is_the_old_slot_the_new_slot_or_refused`)
+checks Lemnos's reader, not the firmware.
+
+Tests: `the_install_the_default_and_the_trial_never_write_config_txt` (a stand-in partition that fails every
+write into `config.txt`), `a_config_txt_without_the_select_lines_refuses_slot_setup_and_is_never_edited`,
+`a_boot_image_whose_config_txt_has_no_select_lines_is_refused_before_anything_is_written`,
+`a_config_txt_without_a_select_line_is_refused_by_name_and_the_image_text_passes`.
 
 ### The `uboot` record
 

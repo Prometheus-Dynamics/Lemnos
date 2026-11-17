@@ -164,8 +164,15 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
     check_signing(&input)?;
     // The boot image as the board has it. The writer's copy is the one its record writes into;
     // this one is the reference the result is compared with.
-    let reference =
+    let mut reference =
         Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?;
+    // The image's config.txt must carry the select lines: Lemnos never edits it, so a file without them
+    // would leave the default unselectable. Refused before anything is written.
+    let config = reference
+        .config_text()
+        .map_err(|e| format!("the boot image: {e}"))?;
+    lemnos_slot_store::firmware::check_config_text(&config)
+        .map_err(|e| format!("the boot image: {e}"))?;
     let image_layout = reference
         .bay_layout()
         .map_err(|e| format!("the boot image's bays: {e}"))?;
@@ -506,21 +513,6 @@ pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), St
             "the boot image's firmware config lines are {}; the board file's [boot] config_lines are {}: the image was built for other lines",
             image.config.as_deref().unwrap_or("none"),
             board.config.as_deref().unwrap_or("none")
-        ));
-    }
-    if image.board_config != board.board_config {
-        return Err(format!(
-            "the boot image's config.txt is {}; the board file's [boot] config_owner says {}: the image was built for another owner of config.txt",
-            if image.board_config {
-                "the board's own"
-            } else {
-                "Lemnos's"
-            },
-            if board.board_config {
-                "\"board\""
-            } else {
-                "\"lemnos\""
-            }
         ));
     }
     Ok(())

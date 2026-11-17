@@ -130,35 +130,6 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     };
     let boot = &board.boot;
     check_boot_keys(boot)?;
-    let board_config = match boot.config_owner.as_deref() {
-        None | Some("lemnos") => false,
-        Some("board") => true,
-        Some(other) => {
-            return Err(format!(
-                "[boot] config_owner is {other:?}: it is \"lemnos\" (Lemnos writes config.txt) or \"board\" (the board's own config.txt, which Lemnos never writes)"
-            ));
-        }
-    };
-    if board_config {
-        if family == Family::UbootBlock {
-            return Err(
-                "[boot] config_owner = \"board\" is for the Raspberry Pi firmware's config.txt: this board's record is \"uboot\", which has none"
-                    .to_string(),
-            );
-        }
-        if !boot.config_lines.is_empty() {
-            return Err(
-                "[boot] config_owner = \"board\" and config_lines both set: config_lines are written into config.txt, which the board owns, so Lemnos can't put them there; move them into the board's config.txt"
-                    .to_string(),
-            );
-        }
-        if !boot.firmware_overlays.is_empty() {
-            return Err(
-                "[boot] config_owner = \"board\" and firmware_overlays both set: an overlay is loaded by a dtoverlay= line in config.txt, which the board owns; load them from the board's config.txt and remove firmware_overlays"
-                    .to_string(),
-            );
-        }
-    }
     if family == Family::UbootBlock && !boot.config_lines.is_empty() {
         return Err(
             "[boot] config_lines are firmware lines in config.txt: this board's record is \"uboot\", which has no config.txt"
@@ -190,40 +161,38 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     // The bay order of ROLES is kernel, initramfs, device-tree, cmdline, board-overlay.
     let names: Vec<String> = boot.firmware_overlays.clone();
     let layout = Layout::new([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]])?
-        .with_firmware(&names, config.clone())
-        .with_board_config(board_config);
+        .with_firmware(&names, config.clone());
     let layout_file = boot_dir::LAYOUT.as_bytes().to_vec();
     // The root list of the declared set: written only when the board declares overlays or lines.
     let mut list_file = Vec::new();
-    if let Some(text) = bays::firmware_list_text(&names, config.as_deref(), board_config) {
+    if let Some(text) = bays::firmware_list_text(&names, config.as_deref()) {
         list_file.push((bays::FIRMWARE_LIST, text.into_bytes()));
     }
     match family {
-        Family::Tryboot => {
-            // A board that owns config.txt gets none from Lemnos. tryboot.txt is Lemnos's in both cases:
-            // it is the file a tryboot restart reads.
-            let mut root = vec![("slot-layout.toml", layout_file)];
-            if !board_config {
-                root.push((
-                    "config.txt",
-                    with_fragment(boot_dir::HEADER, CONFIG_TXT, &lines),
-                ));
-            }
-            root.push((
-                "tryboot.txt",
-                with_fragment(boot_dir::HEADER, TRYBOOT_TXT, &lines),
-            ));
-            Ok(Parts {
-                family,
-                layout,
-                root: root.into_iter().chain(list_file).collect(),
-                fixed: vec![Fixed {
-                    path: OVERLAY_README,
-                    bytes: boot_dir::OVERLAY_README_TEXT.as_bytes().to_vec(),
-                    size: boot_dir::OVERLAY_README_TEXT.len() as u64,
-                }],
-            })
-        }
+        Family::Tryboot => Ok(Parts {
+            family,
+            layout,
+            root: [
+                vec![
+                    ("slot-layout.toml", layout_file),
+                    (
+                        "config.txt",
+                        with_fragment(boot_dir::HEADER, CONFIG_TXT, &lines),
+                    ),
+                    (
+                        "tryboot.txt",
+                        with_fragment(boot_dir::HEADER, TRYBOOT_TXT, &lines),
+                    ),
+                ],
+                list_file,
+            ]
+            .concat(),
+            fixed: vec![Fixed {
+                path: OVERLAY_README,
+                bytes: boot_dir::OVERLAY_README_TEXT.as_bytes().to_vec(),
+                size: boot_dir::OVERLAY_README_TEXT.len() as u64,
+            }],
+        }),
         Family::UbootBlock => Ok(Parts {
             family,
             layout,

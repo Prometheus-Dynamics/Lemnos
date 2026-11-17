@@ -243,14 +243,25 @@ impl Tryboot {
     }
 }
 
+impl Tryboot {
+    /// Refuses slot setup on a boot partition whose `config.txt` lacks the select lines (see
+    /// `firmware::check_config_text`). Read only: a board's config.txt is never edited here.
+    fn config_ready(&self) -> io::Result<()> {
+        let text = self.raw()?.config_text().map_err(io::Error::other)?;
+        lemnos_slot_store::firmware::check_config_text(&text).map_err(io::Error::other)
+    }
+}
+
 impl BootRecord for Tryboot {
     fn set_default(&mut self, id: &str) -> io::Result<()> {
+        self.config_ready()?;
         self.raw()?
             .set_pointer(Pointer::Default, id)
             .map_err(io::Error::other)
     }
 
     fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
+        self.config_ready()?;
         // The record first, then the trial pointer: a trial never names a slot without its attempts.
         self.raw()?
             .arm_trial(id, attempts)
@@ -307,6 +318,7 @@ impl BootRecord for Tryboot {
     }
 
     fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()> {
+        self.config_ready()?;
         self.raw()?
             .install_slot(slot, payloads)
             .map(|_| ())
@@ -641,28 +653,35 @@ mod tests {
     }
 
     #[test]
-    fn a_board_owned_config_txt_refuses_the_default_by_name_and_the_trial_still_arms() {
-        let dir = TempDir::new("tryboot-board-config");
+    fn a_config_txt_without_the_select_lines_refuses_slot_setup_and_is_never_edited() {
+        let dir = TempDir::new("tryboot-config");
         let node = dir.0.join("boot.img");
-        fs::write(&node, crate::bay_fixture::tryboot_board_config_image("a-1")).unwrap();
+        // A board's own config.txt, with no include lines: no slot can be selected through it.
+        let own: &[u8] = b"# the board's own config.txt\nkernel=board.img\n";
+        fs::write(
+            &node,
+            crate::bay_fixture::tryboot_image_with_config("a-1", own),
+        )
+        .unwrap();
         let mut record = tryboot(&dir, Ok(node.clone()));
-        install(&record, "b-2");
-        // The default switch names config.txt: refused before any pointer is written.
-        let why = record.set_default("b-2").unwrap_err().to_string();
-        assert!(why.contains("config.txt is the board's own"), "{why}");
-        // The trial route: arm, read back, clear. Nothing else moves.
-        record.set_trial("b-2", 2).unwrap();
-        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
-        record.clear_trial().unwrap();
+        let p = crate::bay_fixture::payloads("b-2");
+        let why = record
+            .install("b-2", &crate::bay_fixture::refs(&p))
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("no `include default.txt` line"), "{why}");
+        let why = record.set_default("a-1").unwrap_err().to_string();
+        assert!(why.contains("Lemnos never edits config.txt"), "{why}");
+        let why = record.set_trial("a-1", 2).unwrap_err().to_string();
+        assert!(why.contains("config.txt"), "{why}");
+        // Nothing was written: the file is the board's, and the pointers are the image's.
         let mut raw = RawBoot::open(&node).unwrap();
+        assert_eq!(raw.config_text().unwrap(), own);
         assert_eq!(
             raw.pointer(Pointer::Default).unwrap().as_deref(),
             Some("a-1")
         );
-        assert_eq!(
-            raw.pointer(Pointer::Previous).unwrap().as_deref(),
-            Some("a-1")
-        );
+        assert_eq!(raw.trial().unwrap(), None);
     }
 
     #[test]

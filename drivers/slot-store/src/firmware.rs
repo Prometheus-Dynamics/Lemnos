@@ -208,6 +208,29 @@ pub fn pointer_file_slot(file: &[u8; POINTER_FILE_BYTES]) -> Option<String> {
     pointer_slot(second).or_else(|| pointer_slot(first))
 }
 
+/// The lines of `config.txt` that select the default and the previous pointer. Lemnos never writes
+/// `config.txt` at run time: the board's file must carry these lines, which the image builder writes
+/// (`CONFIG_TXT`). A file without them is refused by name, before any slot is set up.
+pub const SELECT_LINES: [&str; 3] = [
+    "include default.txt",
+    "[boot_count&4]",
+    "include previous.txt",
+];
+
+/// Checks a `config.txt` read from the boot partition: every line of [`SELECT_LINES`] must be there, as a
+/// whole line. Read only; nothing is edited.
+pub fn check_config_text(text: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(text).map_err(|_| "config.txt is not text".to_string())?;
+    for line in SELECT_LINES {
+        if !text.lines().any(|l| l.trim() == line) {
+            return Err(format!(
+                "config.txt has no `{line}` line: Lemnos never edits config.txt, so no slot is set up on this boot partition until its config.txt carries the lines of the image's own text (firmware::CONFIG_TXT)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "firmware_tests.rs"]
 mod tests;
