@@ -292,6 +292,117 @@ the run record at run time, with the bytes at the old trap address 0x80360006 (t
 - **Open question (arm stamp):** the `W` marker's capture batch time is the cheap arm stamp, with about 16 ms of CH342
   batching error. This run's markers arrived in one batch, so the arm stamp is not better than that.
 
+**Provenance for the UART write (this supersedes the R1d USR wait).** The K230 RT-Smart UART driver
+(`src/big/rt-smart/kernel/bsp/maix3/board/interdrv/uart_canaan/drv_uart.c`, SDK clone `7e302f733`) defines
+`UART_IER_PTIME` as IER bit 7 (line 101) and writes IER `0x81` at init (line 277), and it waits on LSR.TEMT
+(bit 6, line 373) before a transmit completes. It never polls THRE, and it never reads the USR status bits for FIFO
+room. The DesignWare USR TFNF/TFE bits exist only when the FIFO-status option is built in; R1d read USR as `0x01`
+(BUSY only), so on this instance they read 0 and cannot say the FIFO has room. The stage therefore waits on LSR.TEMT
+per byte, as the vendor's driver does, and clears PTIME (a known state, harmless to clear).
+
+**Fail-before (the stand-in).** The PTIME stand-in (`ier` 0x81, LSR 0x41, USR 0) fails on the R1d wait (USR.TFNF,
+`uart.rs:204`: `Err(Stuck)`), and the banner test fails too (USR 0, so no TFNF). Both pass with the TEMT wait.
+
+**R1e: the banner and records appear (hypothesis, written before the run).**
+- *Changes since R1d:* the write waits on LSR.TEMT, not USR.TFNF; PTIME is still cleared; the probe counts absence in
+  the record window (sysfs `idVendor` gone, with a failed read) and ends the record loop at that instant, so a
+  disappearance at any point is timestamped.
+- *Hypothesis A (the fix works):* the markers `!BWKC`, `PL...`, `I00000080`, `S...`, `C00000001`, then `U`, then the
+  banner `lemnos stage: report` and its step lines print; records arrive while the probe reads (the probe logs the first
+  three), before the watchdog's window ends.
+- *Hypothesis B (a different stop):* the banner prints and the step lines stop (the reset comes in the pad dump or the
+  gate), or the banner prints and no records arrive.
+- *Hypothesis C (silent again):* `U` appears and no banner, with `T` printed once: the TEMT wait gave up, so the UART's
+  transmitter never empties on this state.
+- *Pass of the run:* the banner, and at least one record packet. `T` absent.
+- *Open questions, unchanged:* the 0.93 s R1 detection; the arm-time stamp (the `W` marker's capture batch time, with
+  about 16 ms of CH342 batching error).
+
+**R1e result and the cause found in it.** Identify `K230`, load 51,232 bytes, start at t0 = +0.244 s. Console:
+`!BWKCPL00000041`, `I00000080`, `S00000001`, `C00000001`, `U`, then the pad dump rows, then `boot failed with exit
+code 19`. The probe logged the board gone at +0.775 s (seen in the record window: the absence is counted now) and back
+as `K230` at +1.295 s; 0 record packets, 674 read errors. No banner, no step lines, no diagnostic lines, and no `T`.
+- *Cause (established by the code and the capture):* `say` and `say_hex` check `GAVE_UP` before they write; the pad rows
+  call `write_line` directly, and they printed. `GAVE_UP` is set only on the Err branch, which prints a raw `T` first.
+  No `T` was printed, so the flag was already set when the run began. `.bss` is `NOLOAD`: the ROM copies only the file,
+  so the flag held the value SRAM had before the load (a previous run's). The entry never zeroed `.bss`.
+- *Fix (R1f):* the entry zeroes `.bss` from `lemnos_bss_start` to `lemnos_bss_end` (both defined in `image.ld`) before the
+  first static is read. `testing/crates/k230-usbboot-stage/tests/bss_zeroed.rs` fails on the R1e source and passes with the fix.
+
+**R1f: the report's lines appear (hypothesis, written before the run).**
+- *Hypothesis A (the cause was the stale flag):* after `U`, the step lines, the banner `lemnos stage: report`, and the diagnostic
+  lines (`diag wdt0 before arm CR` and the rest) print, then the pad dump and the gate. Records appear while the probe reads.
+- *Hypothesis B (a different stop):* the lines print and the reset comes later (in the gate or the records).
+- *Hypothesis C (the flag is not the cause):* no lines after `U`, and a `T` appears (a real give-up in the TEMT wait).
+- *Pass of the run:* the banner and the diagnostic lines printed, and at least one record packet; `T` absent.
+- *Standing authority (per the coordinator):* further diagnostic runs on this path (R1g and later) keep these conditions,
+  and each is reported. New things (a card insert, a hands action, anything beyond USB-boot loads) need a new ok.
+
+**R1f, the run (2026-11-17 00:53; card in the PC's reader; one run; lock held; no RST).**
+- Image: build `9aa6f18a…`; sent (patched report) **`fa15e659f6e0cf2112dd471b7ad4ffb95cd88a0a7df9ca1e16ee4b367bdc7dca`**,
+  51,264 bytes. Identify `K230` at +0.244 s; start at t0 = +0.252 s (CLOCK_REALTIME 1794902016.979).
+- Console (`R1f-console.log`, one batch per line on `if02`): `!BWKC`, `PL00000041`, `I00000080`, `S00000001`, `C00000001`,
+  `U`, the diagnostic lines (`diag wdt0 before arm CR 0000000c`, TORR `00000000`, CCVR `0000ffff`; WDT1 the same;
+  `diag wdt0 after arm TORR 0000000b`, `TOP 0000000b`, `CR 00000001`), the banner
+  `lemnos stage: report (no writes; watchdog armed before this line)`, `step 1: boot mode soc_boot_ctl 0000000f`,
+  `step 2: pad dump read`, the pad dump rows, `step 3: no SD controller given; the card is not read`,
+  `step 3: no card report`, `step 4: report printed on the console only; USB untouched; SoC reset now`,
+  `lemnos stage: end`, then `boot failed with exit code 19`.
+- **Hypothesis A confirmed:** the stale `.bss` flag was the cause. Every Rust report line printed, with no `T`.
+- **Records:** none, by design. The report writes to the console only (bench ruling of 2026-11-16, commit `eb25445c`).
+  The probe's record expectation does not apply to this image.
+- **The 0.93 s question:** the board left at +0.884 s and returned as `K230` at +1.183 s. The reset is the report's own
+  SoC reset at `lemnos stage: end`, not the watchdog. The probe's `STOP` verdict comes from its old watchdog bound (100 s
+  lower bound), not from a failed return. The R1 0.93 s detections were the same kind of reset, taken on paths that
+  reached their end.
+- Board at the end: `29f1:0230` at Dev 067, download mode. Capture stopped by name. Lock released.
+
+**R2: the report-and-reset return (hypothesis, written before the run; 2026-11-17; no card; one run).**
+- *Image:* the R1f report image (build `9aa6f18a…`), sent patched as R1f (`fa15e659…`, 51,264 bytes). It prints its
+  cause and its end on the console (`lemnos stage: end`), then takes its own SoC reset. This is the approved R2
+  definition: report, then SoC reset, with no card.
+- *Hypothesis:* the board prints `lemnos stage: end` on the console, leaves the bus within 5 s of that line (the SoC
+  reset), and returns as `29f1:0230` answering `K230` within 10 s of the line.
+- *Pass:* the probe's verdict (which reads both consoles read only) reports PASS: the end line present, the departure
+  in `[end-0.5, end+5]` s, the return K230 by `end+10` s.
+- *Stop:* no end line, a departure outside the window, a return that is not K230, or no return. Report; no further step.
+- *Conditions:* the k230d lock (`/run/user/1000/lemnos-k230d.lock`), the read-only capture on both ports, the probe's one
+  identify and one load, and the board left in download mode.
+
+**R2, the run (2026-11-17 00:56; no card; one run; lock held; no RST).** Identify `K230` at +0.300 s; load of 51,264
+bytes (`fa15e659…`); start at t0 = +0.307 s. The report printed its end on the console at +0.383 s, the board left the bus at
++0.763 s, and came back as `K230` at +1.277 s. The probe's verdict, with both consoles read only, is **PASS**. Board in
+download mode (`29f1:0230`, Dev 068 at the end) at the end; capture stopped by name; lock released. The report's own
+reset (the R2 path) returned the board; no watchdog was involved.
+- **Capture gap, recorded:** `R2-console.log` holds only 3 lines. The probe opened the same two ports with its own
+  read-only reader, so the bytes were split between the two readers and the capture unit did not get the report's
+  output. The PASS rests on the probe's reader (its end line at 0.383 s). Capture and probe must not both read a port in
+  a later run: the probe's `--console` should be the only reader, or the capture should be the only one.
+
+**R3 readiness: the controller and the no-card path (hypothesis, written before the run).**
+- *Controller:* the slot's SD card is on SDIO1 (MMC1), per Gaia's K230D AI-CAM device tree (`tmp/K230-USB/aicam/k230d_canmv_junroc_ai_cam.dts`,
+  lines 43 and 46: "SD: SDIO1 (MMC1, GPIO26-GPIO31)", "Boot: SD card boot via SDIO1"). The stage's parameter 1 is `sdhci1`.
+  The run tries controller 1 first, then 0, read only.
+- *Reader ownership:* one reader per port: the probe is the only reader, and it writes every console line to the record,
+  stamped on CLOCK_REALTIME. No separate capture runs during R3.
+- *Hypothesis (no card, the path that must end cleanly):* on controller 1 the report finds no card, prints that, and ends
+  (`lemnos stage: end`); its own SoC reset returns the board to `29f1:0230` answering `K230`. The second run (controller 0)
+  then does the same. The verdict for each: PASS by the end rule.
+- *Stop:* a run without its end line (the watchdog cut it, so the no-card SD wait is longer than the watchdog window),
+  or a return that is not K230. Report, and no further step.
+- *Stand-in (the rehearsal):* `testing/crates/k230-usbboot-stage` `sd` tests: `a_card_that_stops_answering_mid_check_is_an_error_to_report_as_a_card_fault_candidate`
+  and `a_write_the_card_never_finishes_is_an_error_not_a_hang` (a card that does not answer fails, it does not hang).
+
+**R3 with no card (2026-11-17 01:03; the card is not in the board; one script run; lock held; no RST).**
+- The script (`bench/run-R3.sh`) ran the report with controller 1 then 0, each one probe invocation, sole reader of the
+  consoles. Identify `K230` before each load; the image is the R1f/R2 report image (`fa15e659…`).
+- Controller 1 (SDIO1, the slot): card read attempted, `step 3: the card did not answer or a read failed`, `no card report`,
+  `lemnos stage: end` at +0.697 s, the board left at +1.236 s and came back as `K230` at +1.687 s. **PASS.**
+- Controller 0: the same lines; end at +0.697 s, left at +1.133 s, back as `K230` at +1.493 s. **PASS.**
+- Board at the end: `29f1:0230` at Dev 073, download mode. Lock released.
+- The records (`R3-sd1.txt`, `R3-sd0.txt`) carry every console line with CLOCK_REALTIME stamps.
+- Earlier, a failed script run (exit 127) made no USB contact: the probe binary was missing, not the board.
+
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 
 **The capture (read only).** A separate unit reads both CH342 ports from before R0 to the end and writes no byte to

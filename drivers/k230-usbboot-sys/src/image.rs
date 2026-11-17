@@ -105,6 +105,14 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
         "202:",
         "addi t3, t3, -1",
         "bnez t3, 202b",
+        // R1f: .bss is NOLOAD and the ROM copies only the file, so zero it before any static is read. A stale give-up
+        // flag in .bss (GAVE_UP) silenced every report line in R1e, with no T printed.
+        "la t0, lemnos_bss_start",
+        "la t1, lemnos_bss_end",
+        "301:",
+        "sw zero, 0(t0)",
+        "addi t0, t0, 4",
+        "bltu t0, t1, 301b",
         "la t6, lemnos_diag",
         "li t0, 0x91106000",
         "lw t1, 0x00(t0)",

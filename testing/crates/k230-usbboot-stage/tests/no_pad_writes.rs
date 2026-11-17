@@ -19,9 +19,8 @@ impl RegAccess for Bus {
         if (uart::BASE..uart::BASE + 0x100).contains(&addr) {
             return match addr - uart::BASE {
                 0x0c => 0x03,
-                0x14 => 0x20,
-                // The transmit FIFO has room (USR.TFNF, bit 1): the write waits on this, not on LSR.THRE.
-                0x7c => 0x02,
+                // The transmitter is empty (TEMT, bit 6), THRE clear, as the board reads it: the write waits on TEMT.
+                0x14 => 0x60,
                 _ => 0,
             };
         }
