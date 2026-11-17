@@ -279,9 +279,13 @@ is optional. The image builder copies the file verbatim as the manifest's `boot`
 `lemnos-ctl tree BOARD --slot ID --cmdline-slot FILE` writes the slot's kernel command-line words as one
 line with one trailing LF: `<prefix>.slot=ID <prefix>.roothash=@roothash@ <prefix>.src.<source>=<path> ... panic=5`.
 `<prefix>` is the system-slots `boot_args` of this board file (`os` in the reference board, which writes
-`os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 panic=5`). There is one
+`os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 os.serial.kind=device-tree panic=5`). There is one
 `.src.` word per `boot_sources` entry, in the table's order, with the entry itself after `.src.` (its source keeps
-its `/` and `@`); there is no `.disk=` word. The install refuses a bundle whose command line lacks one. The words: slot-init takes the prefix from the line, as
+its `/` and `@`); there is no `.disk=` word. After them come the identity device's serial settings as
+`<prefix>.serial.<name>=<value>` words (`kind`, and `path`, `offset`, `length`, `byte_order`, `key` as the board
+file names them; the serial itself is never written). A board with no `system-identity` device that names a
+`serial` writes none. They are checked at build time by the same parse slot-init makes, and `docs/slots.md`
+("The machine id") says what slot-init does with them. The install refuses a bundle whose command line lacks one. The words: slot-init takes the prefix from the line, as
 whatever stands before `.slot=`; `@roothash@` is the one hole the installer fills with the manifest's root
 hash; `panic=5` is required and fixed, because the fallback depends on a panic restarting the board. Word
 order is free, unknown words are ignored, and a key given twice takes its last value. The file is refused by
@@ -1077,8 +1081,8 @@ config = { vendor = 0x1209, product = 0x0001, identity = "identity", interfaces 
   the daemon starts without the gadget, which shows failed with the reason. The board file may not set
   `board_serial` or `board_serial_error` itself: the daemon writes them.
 - `serial` (optional string) is the USB serial string the host shows. It defaults to the board
-  serial. With neither, the device has no serial string and its health is `Degraded` with the
-  reason. Nothing is invented.
+  serial. With neither, the device has no serial string and its health is `Ok`: no serial source is a
+  normal state, not a fault. Nothing is invented.
 - `function ncm derive` needs the board serial. Without one, the gadget does not set up. A serial that
   cannot be read yet is retried under the failure rule (the gadget's state reads `the board serial the
   gadget's addresses come from is not readable yet: retrying`, with the helper's reason on the daemon's

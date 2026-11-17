@@ -431,8 +431,80 @@ mod cmdline_slot {
         let board = board::parse(&text).unwrap();
         assert_eq!(
             cmdline_slot(&board, "os-1").unwrap(),
-            "os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 panic=5\n"
+            "os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 os.serial.kind=device-tree panic=5\n"
         );
+    }
+
+    /// The reference board with one piece of its text replaced.
+    fn reference_replacing(old: &str, new: &str) -> lemnos_host::board::BoardFile {
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testing/boards/reference.toml"),
+        )
+        .unwrap();
+        assert!(text.contains(old), "the reference board has {old:?}");
+        board::parse(&text.replace(old, new)).unwrap()
+    }
+
+    /// The serial words of a line, as slot-init reads them back: the one parse both sides share.
+    fn serial_of(line: &str) -> lemnos_identity::Settings<'_> {
+        lemnos_identity::settings_from_words(line, "os").unwrap()
+    }
+
+    /// A device-tree board: the identity device's `serial` is written, with no path (the default).
+    #[test]
+    fn a_device_tree_board_writes_its_kind_and_no_path() {
+        let board = super::reference();
+        let line = cmdline_slot(&board, "os-1").unwrap();
+        assert_eq!(
+            line,
+            "os.slot=os-1 os.roothash=@roothash@ os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 os.serial.kind=device-tree panic=5\n"
+        );
+        let settings = serial_of(&line);
+        assert_eq!(settings.kind, Some("device-tree"));
+        assert_eq!(settings.path, None, "the default path is not written");
+        assert!(settings.source().unwrap().is_some());
+    }
+
+    /// An nvmem board: the source, its path, offset, length and byte order are written, never the
+    /// serial's value, and the words read back to the same source the driver names.
+    #[test]
+    fn an_nvmem_board_writes_its_source_parameters_and_never_the_value() {
+        let board = reference_replacing(
+            "config = { serial = \"device-tree\" }",
+            "config = { serial = \"nvmem\", serial_path = \"/sys/bus/nvmem/devices/otp0/nvmem\", serial_offset = 4, serial_length = 8, serial_byte_order = \"little\" }",
+        );
+        let line = cmdline_slot(&board, "os-1").unwrap();
+        assert!(line.contains(" os.serial.kind=nvmem os.serial.path=/sys/bus/nvmem/devices/otp0/nvmem os.serial.offset=4 os.serial.length=8 os.serial.byte_order=little panic=5\n"), "{line}");
+        let settings = serial_of(&line);
+        assert_eq!(settings.offset, Some(4));
+        assert_eq!(settings.length, Some(8));
+        assert_eq!(settings.byte_order, Some("little"));
+        assert!(settings.source().unwrap().is_some());
+    }
+
+    /// A board with no system-identity device writes no serial word, and slot-init then refuses the
+    /// machine id by name.
+    #[test]
+    fn a_board_with_no_identity_device_writes_no_serial_word() {
+        let board = reference_replacing(
+            "[[devices]]\nid = \"identity\"\ndriver = \"system-identity\"\nconfig = { serial = \"device-tree\" }\n\n",
+            "",
+        );
+        let line = cmdline_slot(&board, "os-1").unwrap();
+        assert!(!line.contains("serial"), "{line}");
+        assert!(serial_of(&line).kind.is_none());
+    }
+
+    /// An nvmem source with no length is refused at build time, by name, as slot-init would refuse it.
+    #[test]
+    fn an_nvmem_source_with_no_length_is_refused_at_build_time_by_name() {
+        let board = reference_replacing(
+            "config = { serial = \"device-tree\" }",
+            "config = { serial = \"nvmem\", serial_path = \"/sys/x\" }",
+        );
+        let error = cmdline_slot(&board, "os-1").unwrap_err();
+        assert!(error.contains("serial_length"), "{error}");
     }
 
     /// The reference board's `system-slots` text with its `boot_sources` list replaced.
@@ -455,7 +527,7 @@ mod cmdline_slot {
         let line = cmdline_slot(&board, "os-1").unwrap();
         assert_eq!(
             line,
-            "os.slot=os-1 os.roothash=@roothash@ os.src./soc/mmc@7e202000=/soc/mmc@7e202000 os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 panic=5\n"
+            "os.slot=os-1 os.roothash=@roothash@ os.src./soc/mmc@7e202000=/soc/mmc@7e202000 os.src.rpi-boot-mode-1=/soc@107c000000/mmc@fff000 os.serial.kind=device-tree panic=5\n"
         );
         assert!(!line.contains(".disk="));
         assert_eq!(line.matches('\n').count(), 1);

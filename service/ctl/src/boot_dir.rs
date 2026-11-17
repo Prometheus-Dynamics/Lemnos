@@ -403,11 +403,69 @@ pub fn cmdline_slot(board: &BoardFile, slot: &str) -> Result<String, String> {
     if !lemnos_slot_store::store::valid_id(slot) {
         return Err(format!("{slot:?} is not a slot id"));
     }
+    let serial = serial_words(board, &prefix)?;
     let mut words = format!("{prefix}.slot={slot} {prefix}.roothash=@roothash@");
     for item in sources {
         words.push_str(&format!(" {prefix}.src.{item}"));
     }
+    for word in serial {
+        words.push(' ');
+        words.push_str(&word);
+    }
     words.push_str(" panic=5\n");
+    Ok(words)
+}
+
+/// The identity device's serial settings as `<prefix>.serial.<name>=<value>` words, beside the
+/// `.src.` words, so slot-init can read the board serial the way the daemon does (`docs/slots.md`,
+/// "The machine id"). Only the source and its parameters are written, never the serial itself. A
+/// board with no `system-identity` device, or one that names no `serial` source, writes none, and
+/// slot-init then refuses the machine id by name. The words are read back through the same parse
+/// slot-init makes ([`lemnos_identity::settings_from_words`]) and checked by the same rule the
+/// driver applies, so a wrong setting is refused at build time, by name.
+pub fn serial_words(board: &BoardFile, prefix: &str) -> Result<Vec<String>, String> {
+    let Some(device) = board
+        .devices
+        .iter()
+        .find(|device| device.driver == "system-identity")
+    else {
+        return Ok(Vec::new());
+    };
+    if device.config.get("serial").is_none() {
+        return Ok(Vec::new());
+    }
+    // The config keys, in the order the words are written: the `serial_` prefix is dropped.
+    let keys = [
+        "serial",
+        "serial_path",
+        "serial_offset",
+        "serial_length",
+        "serial_byte_order",
+        "serial_key",
+    ];
+    let mut words = Vec::new();
+    for (key, name) in keys.iter().zip(lemnos_identity::WORD_NAMES) {
+        let Some(value) = device.config.get(*key) else {
+            continue;
+        };
+        let text = value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| value.as_integer().map(|n| n.to_string()))
+            .ok_or_else(|| format!("system-identity: {key} must be a string or a whole number"))?;
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "system-identity: {key} {text:?} must be a word with no spaces"
+            ));
+        }
+        words.push(format!("{prefix}.serial.{name}={text}"));
+    }
+    let line = words.join(" ");
+    let settings = lemnos_identity::settings_from_words(&line, prefix)
+        .map_err(|error| format!("system-identity: {error}"))?;
+    settings
+        .source()
+        .map_err(|error| format!("system-identity: {error}"))?;
     Ok(words)
 }
 

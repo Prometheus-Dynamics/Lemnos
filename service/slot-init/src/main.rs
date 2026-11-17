@@ -10,6 +10,7 @@ mod cmdline;
 mod decide;
 mod dog;
 mod kernel;
+mod machine_id;
 mod ops;
 mod partition;
 mod sys;

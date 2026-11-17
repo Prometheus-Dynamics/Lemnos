@@ -36,7 +36,7 @@ use lemnos_core::{
     Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, RefusalKind,
     Result, Status, driver,
 };
-use lemnos_identity::{ByteOrder, Facts, SerialError, SerialSource};
+use lemnos_identity::{Facts, SerialError, SerialSource, Settings};
 use lemnos_slot_store::manifest::Manifest;
 
 /// A setting read, or the key it is refused on.
@@ -58,6 +58,16 @@ const FACTS: MethodId = MethodId {
     contract: 0,
     method: 4,
 };
+const MACHINE_ID: MethodId = MethodId {
+    contract: 0,
+    method: 5,
+};
+
+/// Where the machine id is read: `/etc/machine-id`, which slot-init binds read-only over the slot's
+/// own file at boot (`docs/slots.md`, "The machine id"). It is read on each call, so a driver bound
+/// before the bind answers `NOT_FOUND` until it does. The id is not read from `/run/lemnos`: that is
+/// the initramfs's directory, and it is gone once `switch_root` has run.
+pub const MACHINE_ID_PATH: &str = "/etc/machine-id";
 
 #[driver("system-identity", provides = [SystemIdentity])]
 pub struct Identity {
@@ -66,6 +76,8 @@ pub struct Identity {
     data: PathBuf,
     /// No serial could be read or fit its format: the device is `Degraded`.
     missing_serial: bool,
+    /// The file the machine id is read from (`MACHINE_ID_PATH`; a test's own file).
+    machine_id: PathBuf,
 }
 
 /// Every setting the driver reads. All are optional: with no `serial` source the device is
@@ -111,7 +123,8 @@ impl Lifecycle for Identity {
             )
         })?;
         match source {
-            None => missing_serial = true,
+            // No serial source configured: a normal, healthy state. No machine id is expected.
+            None => {}
             Some(source) => match source.read() {
                 Ok(serial) => set(&mut facts, "serial", &serial),
                 Err(SerialError::Read {
@@ -160,6 +173,7 @@ impl Lifecycle for Identity {
             facts,
             data,
             missing_serial,
+            machine_id: PathBuf::from(MACHINE_ID_PATH),
         })
     }
 
@@ -174,14 +188,39 @@ impl Lifecycle for Identity {
             out.add(Item::value("model", MODEL).dimensionless());
         }
         out.add(Item::value("facts", FACTS).dimensionless());
+        // Not a fact: the machine id is answered to local callers only, so it is never in `facts`.
+        out.add(Item::value("machine_id", MACHINE_ID).dimensionless());
     }
 
+    /// Degraded only for a fault: a configured serial that does not fit, or an id on the node that is
+    /// not this board's (`TRANSIENT`). No id on the node is a normal state (a boot that is not a slot's,
+    /// or slot-init refused its bind with a logged reason), and so is no serial source configured.
     fn health(&self) -> Health {
         if self.missing_serial {
             Health::Degraded("no serial")
+        } else if self.facts.get("serial").is_some()
+            && read_machine_id(&self.machine_id).is_some()
+            && self.bound_id().is_none()
+        {
+            Health::Degraded(TRANSIENT)
         } else {
             Health::Ok
         }
+    }
+}
+
+/// Why the node's id is refused: it is not the derivation of this board's serial, so it is systemd's
+/// transient id (slot-init's bind failed or never ran), not the one slot-init bound.
+const TRANSIENT: &str = "transient: slot-init did not bind (see machine-id-* in the kernel log)";
+
+impl Identity {
+    /// The id on the node, when it is the derivation of this board's serial (the same derivation
+    /// slot-init binds with). `None` when the node holds none, when the serial is absent (the id then
+    /// cannot be checked), or when the id is not the board's: systemd's transient id is never answered.
+    fn bound_id(&self) -> Option<String> {
+        let id = read_machine_id(&self.machine_id)?;
+        let serial = self.facts.get("serial")?;
+        (lemnos_identity::machine_id::derive(serial) == id).then_some(id)
     }
 }
 
@@ -196,6 +235,15 @@ impl SystemIdentity for Identity {
 
     fn model(&mut self, into: &mut [u8]) -> Result<usize> {
         copy(self.facts.get("model"), into)
+    }
+
+    /// The machine id slot-init bound over `/etc/machine-id`, read again on each call. `NOT_FOUND`
+    /// when the file is absent, empty, or holds no 32 lowercase hex digits: the root ships an empty
+    /// file, so an unbound one is absent. Served to local programs and operators only (the bridge's
+    /// `call` policy), so it is never published as a fact.
+    fn machine_id(&mut self, into: &mut [u8]) -> Result<usize> {
+        let id = self.bound_id();
+        copy(id.as_deref(), into)
     }
 
     /// The running slot is read again on every call: its boot marker moves when the board
@@ -234,76 +282,34 @@ fn copy(text: Option<&str>, into: &mut [u8]) -> Result<usize> {
 /// The board's serial as this device's config names its source, read and normalised. The daemon
 /// reads it once, at setup, and gives it to a gadget that names this device as its `identity`
 /// (`docs/identity.md`, `docs/boards.md`). The reason is text: it is what the board log says.
+/// The parse and the read are `lemnos_identity::read_serial`, which slot-init also calls.
 ///
 /// # Errors
 ///
 /// When the config names no source, names one wrongly, or the source cannot be read or does not
 /// fit the serial format.
 pub fn board_serial(cfg: &Config<'_>) -> core::result::Result<String, String> {
-    match serial_source(cfg) {
-        Err(error) => Err(format!("the serial settings are wrong: {error}")),
-        Ok(None) => Err("the identity device names no `serial` source".into()),
-        Ok(Some(source)) => source.read().map_err(|error| error.to_string()),
+    lemnos_identity::read_serial(&serial_settings(cfg))
+}
+
+/// The serial settings of this device's config, as the shared parse takes them.
+fn serial_settings<'a>(cfg: &'a Config<'_>) -> Settings<'a> {
+    Settings {
+        kind: cfg.str("serial"),
+        path: cfg.str("serial_path"),
+        offset: cfg.int("serial_offset"),
+        length: cfg.int("serial_length"),
+        byte_order: cfg.str("serial_byte_order"),
+        key: cfg.str("serial_key"),
     }
 }
 
 /// The serial source the config names, or `None` when it names none. Only the settings are read
 /// here, so this is also the serial part of the settings check; a refusal names its key.
 fn serial_source(cfg: &Config<'_>) -> Checked<Option<SerialSource>> {
-    let Some(kind) = cfg.str("serial") else {
-        return Ok(None);
-    };
-    let path = cfg.str("serial_path");
-    let source = match kind {
-        "device-tree" => SerialSource::DeviceTree {
-            path: path.unwrap_or(lemnos_identity::serial::DEVICE_TREE).into(),
-        },
-        "cpuinfo" => SerialSource::Cpuinfo {
-            path: path.unwrap_or(lemnos_identity::serial::CPUINFO).into(),
-        },
-        "cmdline" => SerialSource::Cmdline {
-            key: cfg
-                .str("serial_key")
-                .ok_or(ConfigError::new(
-                    "serial_key",
-                    "is required for serial = cmdline",
-                ))?
-                .to_string(),
-            path: path.unwrap_or(lemnos_identity::serial::CMDLINE).into(),
-        },
-        "nvmem" => SerialSource::Nvmem {
-            path: path
-                .ok_or(ConfigError::new(
-                    "serial_path",
-                    "is required for serial = nvmem",
-                ))?
-                .into(),
-            offset: u64::try_from(cfg.int("serial_offset").unwrap_or(0))
-                .map_err(|_| ConfigError::new("serial_offset", "must not be negative"))?,
-            length: usize::try_from(cfg.int("serial_length").ok_or(ConfigError::new(
-                "serial_length",
-                "is required for serial = nvmem",
-            ))?)
-            .map_err(|_| ConfigError::new("serial_length", "must not be negative"))?,
-            byte_order: match cfg.str("serial_byte_order").unwrap_or("big") {
-                "big" => ByteOrder::Big,
-                "little" => ByteOrder::Little,
-                _ => {
-                    return Err(ConfigError::new(
-                        "serial_byte_order",
-                        "must be big or little",
-                    ));
-                }
-            },
-        },
-        _ => {
-            return Err(ConfigError::new(
-                "serial",
-                "must be device-tree, cpuinfo, cmdline or nvmem",
-            ));
-        }
-    };
-    Ok(Some(source))
+    serial_settings(cfg)
+        .source()
+        .map_err(|error| ConfigError::new(error.key, error.reason))
 }
 
 /// The running slot's `version.slot`, `version.product` and `version.os`, from its manifest.
@@ -361,6 +367,18 @@ fn read(path: &Path) -> Result<Option<String>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io_status(&e)),
     }
+}
+
+/// The machine id in `path`, as [`SystemIdentity::machine_id`] answers it: 32 lowercase hex digits
+/// and a newline. `None` when the file is absent, unreadable, empty, or not an id.
+fn read_machine_id(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let id = text.strip_suffix('\n').unwrap_or(&text);
+    let fits = id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    fits.then(|| format!("{id}\n"))
 }
 
 fn io_status(error: &io::Error) -> Status {

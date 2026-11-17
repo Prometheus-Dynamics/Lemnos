@@ -6,7 +6,11 @@
 //! checked. A fact that cannot be known is never set, so it is absent.
 
 pub mod facts;
+pub mod machine_id;
 pub mod serial;
 
 pub use facts::{Facts, MAX_FACTS, MAX_VALUE_BYTES, NAMES};
-pub use serial::{ByteOrder, SerialError, SerialSource, normalise};
+pub use serial::{
+    ByteOrder, SerialError, SerialSource, SettingError, Settings, WORD_NAMES, normalise,
+    read_serial, settings_from_words,
+};

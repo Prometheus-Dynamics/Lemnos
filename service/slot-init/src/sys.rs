@@ -134,6 +134,15 @@ impl Ops for System {
         rootfs::move_mount(source, target).map_err(|e| e.to_string())
     }
 
+    fn bind_read_only(&self, source: &Path, target: &Path) -> Result<(), String> {
+        rootfs::bind(source, target).map_err(|e| format!("bind mount: {e}"))?;
+        if let Err(error) = rootfs::remount_read_only(target) {
+            let _ = rootfs::umount(target);
+            return Err(format!("read-only remount: {error}"));
+        }
+        Ok(())
+    }
+
     fn umount(&self, target: &Path) {
         if let Err(error) = rootfs::umount(target) {
             self.log(&format!(

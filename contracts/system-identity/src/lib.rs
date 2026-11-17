@@ -11,6 +11,8 @@ use lemnos_core::{Result, contract};
 
 /// The most bytes one fact's value may take, and the buffer size its method needs.
 pub const MAX_TEXT: usize = 256;
+/// The buffer `machine_id` needs: 32 digits and a newline.
+pub const MAX_MACHINE_ID: usize = 33;
 /// The buffer `facts` needs: every fact of the node, one line each.
 pub const MAX_FACTS_TEXT: usize = 2048;
 
@@ -28,4 +30,12 @@ pub trait SystemIdentity {
     /// Every fact the driver knows, as `name=value` lines. `into` holds [`MAX_FACTS_TEXT`] bytes.
     #[method(4)]
     fn facts(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// The board's machine id: 32 lowercase hex digits and a newline. slot-init derives it at boot from
+    /// the serial and binds it over `/etc/machine-id` (`docs/slots.md`, "The machine id"). `into` holds
+    /// [`MAX_MACHINE_ID`] bytes. `NOT_FOUND` when the node holds none: slot-init refused it (its kernel
+    /// log line names why), or this is not a slot boot. It is not a fact: it is answered to local
+    /// programs and operators only (the bridge's `call` policy), never in `facts`.
+    #[added]
+    #[method(5, reading = text)]
+    fn machine_id(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }
