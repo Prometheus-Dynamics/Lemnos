@@ -4,6 +4,18 @@
 platform block: register regions, DMA buffers as dma-bufs, dma-bufs mapped to device addresses, and
 interrupts as reads. The interface is `lemnos.h`.
 
+## Requirements
+
+The module is Rust. It builds only against a kernel with `CONFIG_RUST=y`; there is no C fallback.
+
+- Kernel: 7.3.3 with `CONFIG_RUST=y`, built with clang and `LLVM=1` (`ld.lld` as the linker). KASAN, if
+  wanted, needs clang too.
+- Toolchain: rustc 1.99.0 with `rust-src` (`rust-toolchain.toml`), bindgen-cli 0.73.2 (the kernel needs
+  0.71.1 or later).
+- Build: `make -C <kernel build> M=<this directory> LLVM=1 modules`.
+- Arch: x86_64 is built and tested in QEMU. arm64 and riscv64 are cross-built (see the PR that states
+  it); riscv64 needs clang, and a riscv64 kernel with Rust is a named limit until it is booted on a board.
+
 The node has one opener at a time. Closing it, however the process ended, masks every interrupt and
 releases every import.
 
