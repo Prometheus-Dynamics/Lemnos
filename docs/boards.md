@@ -136,13 +136,45 @@ U-Boot chain line by line.
 | Radxa ROCK 5C | RK3588S | U-Boot | microSD | `/mmc@fe2c0000=/mmc@fe2c0000` | kernel path from `rk3588-base.dtsi`; U-Boot path unverified |
 | Radxa ROCK 5C | RK3588S | U-Boot | eMMC | `/mmc@fe2e0000=/mmc@fe2e0000` | kernel path; U-Boot path unverified |
 | Radxa ROCK 4D | RK3576 | U-Boot | microSD | `/soc/mmc@2a310000=/soc/mmc@2a310000` | the RK3576 node sits under `/soc`; the U-Boot path is unverified |
-| Radxa CUBIE A7A, A7S, A7Z | A733 (sun60i) | U-Boot | microSD, eMMC | `/soc@0/mmc@4020000=…`, `/soc@0/mmc@4022000=…` | from the patch series; the Radxa U-Boot tree is not read; UNVERIFIED |
+| Radxa CUBIE A7A, A7S, A7Z | A733 (sun60i) | U-Boot | microSD, eMMC | `/soc@0/mmc@4020000=…`, `/soc@0/mmc@4022000=…` | from the patch series; the Radxa U-Boot tree is not read; UNVERIFIED. The A7A and A7Z boards are in the paragraph below the table |
 | Kendryte K230 (K230D board) | K230 | U-Boot | microSD (`mmc1`, SD slot) | `/soc/mmc1@91581000=/soc/mmc@91581000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 163-172, kernel name the mainline `mmc@` form (`socs/k230.toml`); UNVERIFIED on board, and the K230D boot host is not stated by the board file |
 | Kendryte K230 (K230D board) | K230 | U-Boot | the SDIO0/eMMC host (`mmc0`) | `/soc/mmc0@91580000=/soc/mmc@91580000` | U-Boot path from the SDK U-Boot `k230.dtsi` lines 150-161, kernel name the mainline `mmc@` form (`socs/k230.toml`); what sits on the host is a board fact; UNVERIFIED on board |
 | Raspberry Pi compute module with the BCM2712 (the reference board) | BCM2712 | Pi firmware, no U-Boot | on-board eMMC | `rpi-boot-mode-1=/soc@107c000000/mmc@fff000` | code 1 is the SD card or the eMMC on the Pi family (measured on the reference board); other codes are from documentation, unverified |
 
 Unsupported: a scsi or UFS boot device on a U-Boot board is refused by name (the path form cannot
 name it). A raw NAND board (`record = "ubi"`) has no disk and no `boot_sources`.
+
+**Board facts from PC-side repo and Gaia (BB-FACTS, read only, nothing run on a board).** The PC-side repo is at
+`79e0c8ff` (`origin/next`); Gaia is `Gaia-Image-Builder` at `d1993f1d` (`b8-k230d`, the K230D branch).
+
+- **K230D AI-CAM (the Canaan junroc board, Gaia's `k230d-ai-cam`).** The boot source is the microSD only. Gaia's product says so
+  (`examples/products/k230d-ai-cam/product.toml:4`, "an SD card ONLY"), the family gives `medium = "sd"` (`examples/boards/k230/family.toml:110-111`),
+  and the environment's `bootcmd` is `mmc dev 1 ... ext4load mmc 1:1 /boot/Image` (`examples/boards/k230d-ai-cam/assets/u-boot-env.txt:2`).
+  So the boot-source key is `/soc/mmc1@91581000=/soc/mmc@91581000`: U-Boot's `mmc1` is the SD slot (SDIO1), and the kernel node is
+  the one Gaia's dts adds, `mmc_sd1: mmc@91581000` (`examples/boards/k230d-ai-cam/assets/dts/canaan/k230d-ai-cam.dts:85-87`, `status = "okay"`).
+  The kernel's `mmc0` alias is that node (dts:40), so the root is `/dev/mmcblk0p1` (dts:45).
+- **The host at `/soc/mmc0@91580000` is not the AI-CAM's eMMC.** The vendor's junroc patch puts a WiFi module (RTL8189FTV) on
+  SDIO0 (dts:12 and :19), and Gaia's first image leaves it off. The eMMC row above is from the SDK's generic K230D (`k230d.dts`), not from this board.
+- **USB0 (`/soc/usb@91500000`, UDC `91500000.usb`):** `dr_mode = "peripheral"` by the bench's decision, present and
+  `status = "disabled"` in Gaia's first image (dts:69-72). A board that enables it takes the device-mode facts from this node.
+- **The K230 environment is raw, not GPT:** copy 1 at 0x300000 (3 MiB) and copy 2 at 0x320000 (3.125 MiB), each in a 128 KiB
+  slot, `CONFIG_ENV_SIZE=0x2000`, `CONFIG_SYS_MMC_ENV_DEV=1` (`examples/boards/k230/assets/u-boot.fragment:6-17`; the AI-CAM's
+  partitions at `examples/boards/k230d-ai-cam/board.toml:53-69`). A board whose environment is at fixed offsets states the device and the
+  offsets (the form in `drivers/slot-store/src/uboot_env.rs`, module comment lines 35-36). No K230 slot file is written here.
+- **The rk35xx environment rev (GPT form):** Gaia's PR #150, merge `2f3c7058`, carries `CONFIG_ENV_MMC_DEVICE_INDEX=1`, the GPT
+  `uboot-env` and the two copies (`examples/boards/rk35xx/assets/u-boot.fragment:9-13` at `2f3c7058`). It is in `d1993f1d` and in
+  `c0d084fa` (Gaia `next` at PR G12, as PC-side repo names it in `devices/README.md:277`). At the time read it was not an ancestor of
+  Gaia's local `next` (`b3c3b9ce`). The two RK slot boards (`testing/boards/rk3566-slots.toml`, `rk3588-slots.toml`) name this rev.
+- **Radxa CUBIE A7A and A7Z (PC-side repo, candidate, never booted).** The A7A's board file (`devices/boards/radxa-cubie-a7a/board.toml:22-27`)
+  gives one Type-C OTG/power port as the only device-capable port, with its PHY index and VBUS unknown. The A7Z's
+  (`devices/boards/radxa-cubie-a7z/board.toml:16-18`) says no dts and no U-Boot defconfig exist in any public source it read. PC-side repo's
+  `kernel/post-patch-facts.txt` for each names a Radxa vendor `linux-6.6/board.dts` by sha256 (A7A `633a4e72...`, A7Z `26088e86...`), which
+  contradicts the A7Z's "no dts"; not resolved here. Neither board is added to the map or to a board file.
+- **Radxa CUBIE A7S** (PC-side repo `devices/boards/radxa-cubie-a7s/board.toml:31-35`): the device port is USB-C 1, on the MUSB controller at PHY 0,
+  with no VBUS; see the VBUS note in `socs/sun60i-a733.toml`.
+- **Luckfox Aura (RV1126B).** PC-side repo has only the Aura's app record (`devices/boards/waveshare-luckfox-aura/app/app.json`: the maskrom
+  USB ID, marked unconfirmed). Its family `devices/families/rv11xx` is not on PC-side repo's `next`. Still blocked: no Aura board facts are
+  in either repository's `next`.
 
 ## Trials of a slot (`system-slots`)
 

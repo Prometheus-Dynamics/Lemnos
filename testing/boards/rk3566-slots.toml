@@ -38,10 +38,10 @@ driver = "system-slots"
 # The eMMC is not declared: `&sdhci` at rk356x-base.dtsi:1101-1111 is `status = "disabled"` (:1111), and no board dts enables it (image-builder report, DERIVED).
 config = { data = "/data", boot = "/boot", record = "uboot", boot_args = "os", boot_sources = ["/mmc@fe2b0000=/mmc@fe2b0000"], uboot_env_size = 0x10000, uboot_env_mmc_index = 1, uboot_usb_vendor = 0x1209, uboot_usb_product = 0x0001 }
 
-# The U-Boot environment is on the SD: device 1. Gaia's rk35xx U-Boot (rev to follow) sets `CONFIG_ENV_MMC_DEVICE_INDEX=1`.
+# The U-Boot environment is on the SD: device 1. Gaia's rk35xx U-Boot (rev 2f3c7058, PR #150, Gaia `rk35xx/assets/u-boot.fragment:9-13`) sets `CONFIG_ENV_MMC_DEVICE_INDEX=1`.
 # U-Boot's device 0 names the disabled eMMC (no node bound), so a lookup on 0 fails as the build is now (DERIVED, not run).
 # The environment size: `uboot_env_size = 0x10000`, the whole copy with its 5-byte header (`CONFIG_ENV_SIZE`, include/env_internal.h:57-62).
-# Gaia's rk35xx fragment (rev to follow): the GPT partition `uboot-env` (16 MiB, 128 KiB), redundant, copy 0 at 16 MiB + 64 KiB and
+# Gaia's rk35xx fragment (rev 2f3c7058, the same PR): the GPT partition `uboot-env` (16 MiB, 128 KiB), redundant, copy 0 at 16 MiB + 64 KiB and
 # copy 1 at 16 MiB, each 0x10000 bytes; the raw-offset fallback is off. The layout is checked by the test
 # the_rk_layout_writes_... (drivers/slot-store).
 #

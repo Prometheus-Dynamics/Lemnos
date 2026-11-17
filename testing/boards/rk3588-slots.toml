@@ -41,10 +41,10 @@ driver = "system-slots"
 # UNVERIFIED: whether the boot ROM loads from the eMMC on this board.
 config = { data = "/data", boot = "/boot", record = "uboot", boot_args = "os", boot_sources = ["/mmc@fe2c0000=/mmc@fe2c0000", "/mmc@fe2e0000=/mmc@fe2e0000"], uboot_env_size = 0x10000, uboot_env_mmc_index = 1, uboot_usb_vendor = 0x1209, uboot_usb_product = 0x0001 }
 
-# The U-Boot environment: the MMC device it lives on is the SD (device 1). Gaia's rk35xx U-Boot (rev to follow) sets
+# The U-Boot environment: the MMC device it lives on is the SD (device 1). Gaia's rk35xx U-Boot (rev 2f3c7058, PR #150, Gaia `rk35xx/assets/u-boot.fragment:9-13`) sets
 # `CONFIG_ENV_MMC_DEVICE_INDEX=1`, so the environment moves from the eMMC (device 0, as the U-Boot build is now) to the SD.
 # The environment size: `uboot_env_size = 0x10000`, the whole copy with its 5-byte header (`CONFIG_ENV_SIZE`,
-# include/env_internal.h:57-62). Gaia's rk35xx fragment (rev to follow): a redundant environment in the GPT partition
+# include/env_internal.h:57-62). Gaia's rk35xx fragment (rev 2f3c7058, the same PR): a redundant environment in the GPT partition
 # `uboot-env` (16 MiB, 128 KiB), copy 0 at 16 MiB + 64 KiB and copy 1 at 16 MiB, each 0x10000 bytes; the raw-offset fallback is off.
 # The layout is checked against U-Boot's selection and save rule by the test the_rk_layout_writes_... (drivers/slot-store).
 #

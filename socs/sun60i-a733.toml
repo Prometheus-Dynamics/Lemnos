@@ -89,6 +89,11 @@ reason = "the image signal processor on the A733 (allwinner,sun60i-a733-isp)"
 # `usb_otg: usb@4100000`, compatible `allwinner,sun60i-a733-musb`, `allwinner,sun8i-a33-musb`, reg 0x04100000,
 # status disabled in the SoC file (the board patch enables it, `dr_mode = "peripheral"`). The path is the series'
 # bus node renamed `soc@0` (the rename is a later patch). UNCONFIRMED: from the series, not a built dtb.
+# VBUS (PC-side repo 79e0c8ff, docs/prs/B19.md:120 and devices/boards/radxa-cubie-a7s/board.toml:31-35, the board that names this
+# port): the PHY's VBUS supply is named per index (`usb0_vbus` for PHY 0, phy-sun4i-usb.c:819), and the series' A7S dts sets only
+# `usb1_vbus`, so device mode on this port sources no 5 V. The compiled bring-up dtb shows `usb@4100000` with
+# `dr_mode = "peripheral"` and no supply (PC-side repo's B19 record; not checked here). A board file that gives this port states
+# `vbus_undriven` with that reason (BB1, docs/device-tree.md).
 # The UDC name is not fixed: the kernel names the controller `musb-hdrc.N.auto` (N is not fixed), under the platform
 # device `4100000.usb`, which is the name the port is given here (UNVERIFIED: to confirm on board). A gadget names it
 # as `udc:4100000.usb`; the backend resolves it to the controller's own entry (lemnos-linux `resolve_udc`).
@@ -105,6 +110,16 @@ reason = "the USB OTG controller (MUSB) on the A733, port 0; device mode (allwin
 # `r_ccu`). The series' bus node is renamed `soc@0` by a later patch (name-the-bus-node-soc-0), so the path is written that way.
 # UNCONFIRMED: the path is from the series patch, not from a built dtb. The mainline driver caps the timeout at 16 s
 # (drivers/watchdog/sunxi_wdt.c:25); slot-init uses 15 s, which fits.
+# PC-side repo's read of the same series (PC-side repo 79e0c8ff, docs/prs/B31.md:34, and devices/families/sun60i/assets/linux.fragment:69-74)
+# gives the same node: `r_wdt@7021000`, from the series patch `a733-soc-kern/...add-the-watchdogs.patch`, enabled, WDT0 disabled.
+# It is still one read of the series, not a built dtb. CONFIG_SUNXI_WATCHDOG is =y for the family: the family fragment
+# (PC-side repo devices/families/sun60i/assets/linux.fragment:74, at 79e0c8ff) sets it, overriding the defconfig's =m (defconfig:816),
+# with the reason at :69-73 (a module is loaded from the root, too late for PID 1's open).
+# A request above 16 s is served only with the series' patch `sunxi-wdt-heartbeat`. It is carried by the family's whole series
+# (family.toml:108, `patches = [{ source = "a733-kernel-series", path = "patches" }]`): the series file at its pinned rev fe0a8ed3
+# lists it at patches/series:543 (`sunxi-wdt-heartbeat/watchdog-sunxi_wdt-let-the-watchdog-core-serve-timeouts-above-16-s.patch`, the file
+# present at that rev). Without it the mainline driver returns -EINVAL. The OPEN_TIMEOUT=30 that the watchdog contract needs for sun60i is in
+# the PC-side repo's pr/C1 (linux.fragment:83), not yet on its next.
 # Not used: WDT0 (`watchdog@2050000`, series status disabled: "does not reliably reset the SoC").
 [controllers.watchdog]
 kind = "watchdog"

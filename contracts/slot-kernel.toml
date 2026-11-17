@@ -150,7 +150,9 @@ socs = ["rk3566", "rk3588"]
 driver = ["DW_WATCHDOG"]
 
 [watchdog.family.sun60i]
-# Allwinner A733 (sun60i): the always-on watchdog (sunxi_wdt; its maximum is 16 s).
+# Allwinner A733 (sun60i): the always-on watchdog (sunxi_wdt; its maximum is 16 s). A longer period is served only with the
+# family's series patch sunxi-wdt-heartbeat, carried by the whole series at its pinned rev fe0a8ed3 (patches/series:543;
+# PC-side repo family.toml:108). The sun60i OPEN_TIMEOUT=30 is in the PC-side repo's pr/C1 (linux.fragment:83), not on its next.
 socs = ["sun60i-a733"]
 driver = ["SUNXI_WATCHDOG"]
 

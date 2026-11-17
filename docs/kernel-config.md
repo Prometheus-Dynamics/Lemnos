@@ -404,7 +404,7 @@ The family drivers (the contract's `[watchdog.family.*]`):
 | --- | --- | --- | --- | --- |
 | `bcm2712` | `bcm2712-rp1` | `CONFIG_BCM2835_WDT` (see the SoC drivers table) | at most 15 s | the driver's maximum is 15 s (the reference SoC row below) |
 | `rk35xx` | `rk3566`, `rk3588` | `CONFIG_DW_WATCHDOG` | the first power-of-two period at or above 15 s: below 30 s on any clock (`slot-init`'s bound) | the Synopsys driver's symbol (the K230 row below); the Rockchip rows are not read on this tree |
-| `sun60i` | `sun60i-a733` | `CONFIG_SUNXI_WATCHDOG` | at most 16 s (the driver's maximum) | not read on this tree: the symbol is the mainline driver's (`drivers/watchdog/sunxi_wdt.c`); to be checked on the board |
+| `sun60i` | `sun60i-a733` | `CONFIG_SUNXI_WATCHDOG` | at most 16 s (the driver's maximum); longer only with the series patch `sunxi-wdt-heartbeat`, carried by the family's whole series at its pinned rev `fe0a8ed3` (`patches/series:543`) | not read on this tree: the symbol is the mainline driver's (`drivers/watchdog/sunxi_wdt.c`). The PC-side repo's family fragment sets `CONFIG_SUNXI_WATCHDOG=y` at `linux.fragment:74`, overriding the defconfig's `=m` (`defconfig:816`, the reason at `:69-73`); to be checked on the board |
 
 ### hwmon and thermal
 
@@ -493,7 +493,7 @@ not a claim.
 | k230 | GPIO | `CONFIG_GPIO_DWAPB` | `gpio-dwapb.c` | `snps,dw-apb-gpio` only | not verified (mainline v7.3.3, riscv): `gpio-dwapb.c` matches `snps,dw-apb-gpio` only, not a K230 string |
 | k230 | PWM | none | none | the map's `pwm` is kind `block` | not applicable (no stock route) |
 | k230 | watchdog | `CONFIG_DW_WATCHDOG` | `drivers/watchdog/dw_wdt.c` | `snps,dw-wdt` | verified (mainline v7.3.3, riscv): `dw_wdt.c` matches `snps,dw-wdt` |
-| sun60i-a733 | watchdog | `CONFIG_SUNXI_WATCHDOG` | `drivers/watchdog/sunxi_wdt.c` | `allwinner,sun55i-a523-wdt` (fallback) | not verified in this tree: the symbol is the mainline driver's, the A733 node is `socs/sun60i-a733.toml` (unconfirmed) |
+| sun60i-a733 | watchdog | `CONFIG_SUNXI_WATCHDOG` | `drivers/watchdog/sunxi_wdt.c` | `allwinner,sun55i-a523-wdt` (fallback) | not verified in this tree: the symbol is the mainline driver's. The node `r_wdt@7021000` is PC-side repo's read of the same series (`docs/prs/B31.md:34`), not a built dtb; the A733 node is `socs/sun60i-a733.toml` |
 | rk3566 | I2C | `CONFIG_I2C_RK3X` | `i2c-rk3x.c` | `rockchip,rk3399-i2c` (fallback) | fallback only (mainline v7.3.3, arm64): `i2c-rk3x.c` matches `rockchip,rk3399-i2c`; no rk3566 string |
 | rk3566 | SPI | `CONFIG_SPI_ROCKCHIP` | `spi-rockchip.c` | `rockchip,rk3066-spi` (fallback) | fallback only (mainline v7.3.3, arm64): `spi-rockchip.c` matches `rockchip,rk3066-spi` and the other listed strings; no rk3566 string |
 | rk3566 | GPIO | `CONFIG_GPIO_ROCKCHIP` | `gpio-rockchip.c` | not read | generic only (mainline v7.3.3, arm64): `gpio-rockchip.c` matches the generic `rockchip,gpio-bank`; the SoC's own compatible is not read: not verified for rk3566 |
