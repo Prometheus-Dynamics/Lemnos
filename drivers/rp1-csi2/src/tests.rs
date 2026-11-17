@@ -730,8 +730,10 @@ fn a_block_that_stops_is_restarted_with_capped_backoff() {
     assert_eq!(d.health(), Health::Ok);
 }
 
-/// The configured mode's bound: raw10 is 1280 x 800 at 80 MHz, so four active-picture periods are
-/// 51.2 ms, and the 200 ms floor applies. The check that judges it is the one-second check.
+/// No frame has ever come, so no period is measured and the bound is the first-frame allowance,
+/// `max(4 x the nominal period, 3 s)`: 3 s for raw10 (1280 x 800 at 80 MHz). The one-second check
+/// past it judges the stop. (Was 200 ms before the bound followed the measured period; that
+/// expectation changed with the rule.)
 #[test]
 fn a_frame_that_does_not_come_within_the_bound_restarts_the_receiver_with_a_named_reason() {
     let (mut d, hw) = driver();
@@ -744,9 +746,16 @@ fn a_frame_that_does_not_come_within_the_bound_restarts_the_receiver_with_a_name
     );
     assert_eq!(d.health(), Health::Ok);
 
-    // Armed, and no frame moved: the one-second check past the bound judges a stop.
-    let at = d.tick(1_000_000_000).unwrap();
-    assert_eq!(at, 1_000_000_000 + 250_000_000, "the first recovery delay");
+    // Within the 3 s first-frame allowance: the checks run, and it is no stop.
+    d.tick(2_000_000_000).unwrap();
+    assert_eq!(
+        d.health(),
+        Health::Ok,
+        "2 s with no frame is inside the 3 s allowance"
+    );
+    // Armed, and no frame moved past the allowance: the one-second check judges a stop.
+    let at = d.tick(3_000_000_001).unwrap();
+    assert_eq!(at, 3_000_000_001 + 250_000_000, "the first recovery delay");
     match d.health() {
         Health::Failed(reason) => assert!(
             reason.contains("no frame arrived within the bound"),
@@ -759,7 +768,7 @@ fn a_frame_that_does_not_come_within_the_bound_restarts_the_receiver_with_a_name
     let at = d.tick(at).unwrap();
     assert_eq!(
         at,
-        1_250_000_000 + 1_000_000,
+        3_250_000_001 + 1_000_000,
         "back to streaming on the first poll"
     );
     assert_eq!(d.health(), Health::Ok);
@@ -776,6 +785,107 @@ fn no_frame_stop_is_judged_while_no_buffer_is_armed() {
     hw.with(|m| m.receiving = false);
     d.tick(1_000_000_000).unwrap();
     assert_eq!(d.health(), Health::Ok);
+}
+
+/// Ticks every 10 ms from `from` to `to` (exclusive of `from`), with a frame whenever `frame_at`
+/// says so. Each frame is pushed with its start time and published, read and returned. Returns the
+/// last time ticked. The 10 ms steps put the module's one-second checks on ticks with no frame, as
+/// a real stream does.
+fn stream_frames_every(
+    d: &mut Rp1Csi2,
+    hw: &Hw,
+    frames: &MockStream,
+    from: u64,
+    to: u64,
+    period_ns: u64,
+    first_sequence: u64,
+) -> u64 {
+    let mut sequence = first_sequence;
+    let mut t = from;
+    while t < to {
+        t += 10_000_000;
+        let frame_due = t.is_multiple_of(period_ns);
+        if frame_due {
+            let buffer = (sequence % 4) as u32;
+            hw.with(|m| {
+                m.finished.push(Finished {
+                    timestamp_ns: t,
+                    ..frame(buffer, sequence, sequence as u32)
+                })
+            });
+            d.tick(t).unwrap();
+            let got = frames.take_frame().expect("published");
+            assert_eq!(got.sequence, sequence);
+            frames.return_buffer(buffer);
+            sequence += 1;
+        } else {
+            d.tick(t).unwrap();
+        }
+    }
+    t
+}
+
+/// A long exposure stretches the frame: 350 ms frames, where the mode's nominal period is 12.8 ms
+/// (1280 x 800 at 80 MHz). The bound follows the frame period the block reports, so a stream at
+/// its real period is not a stop. Fails on the nominal bound (200 ms): the one-second check at 1.0 s
+/// finds the last frame 300 ms before, and that is a stop.
+#[test]
+fn a_long_exposure_frame_period_does_not_restart_the_receiver() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    d.tick(0).unwrap();
+    let end = stream_frames_every(&mut d, &hw, &frames, 0, 3_000_000_000, 350_000_000, 1);
+    assert_eq!(end, 3_000_000_000);
+    assert_eq!(
+        d.health(),
+        Health::Ok,
+        "a stream at its 350 ms period is healthy"
+    );
+}
+
+/// After a long exposure, a real stop is still judged: the bound is four of the measured 300 ms
+/// period, 1.2 s. No frame for 1.1 s is inside it; no frame for 2.3 s is past it and a one-second
+/// check has run since.
+#[test]
+fn a_stop_at_a_long_exposure_period_is_judged_at_its_own_bound() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    d.tick(0).unwrap();
+    let last = stream_frames_every(&mut d, &hw, &frames, 0, 900_000_000, 300_000_000, 1);
+    assert_eq!(last, 900_000_000);
+    // Frames stop: no frame at 1.1 s after the last, so the bound (1.2 s) has not passed.
+    stream_frames_every(
+        &mut d,
+        &hw,
+        &frames,
+        last,
+        last + 1_100_000_000,
+        u64::MAX,
+        4,
+    );
+    assert_eq!(
+        d.health(),
+        Health::Ok,
+        "1.1 s with no frame is inside the 1.2 s bound"
+    );
+    stream_frames_every(
+        &mut d,
+        &hw,
+        &frames,
+        last + 1_100_000_000,
+        last + 2_300_000_000,
+        u64::MAX,
+        4,
+    );
+    assert!(
+        matches!(d.health(), Health::Failed(reason) if reason.contains("no frame arrived")),
+        "2.3 s with no frame is a stop: {:?}",
+        d.health()
+    );
 }
 
 #[test]
@@ -828,9 +938,14 @@ fn the_steady_state_allocates_nothing() {
     // module's state read every second of them.
     let mut cycle = |d: &mut Rp1Csi2, now: &mut u64| {
         let buffer = (sequence % 4) as u32;
+        // The frame's start time is the cycle's time, so the receiver measures a 500 ms frame period.
+        let at = *now;
         hw.with(|m| {
             m.counters.frames += 1;
-            m.finished.push(frame(buffer, sequence, sequence as u32));
+            m.finished.push(Finished {
+                timestamp_ns: at,
+                ..frame(buffer, sequence, sequence as u32)
+            });
             m.set.clear();
             m.given_back.clear();
         });
@@ -838,9 +953,10 @@ fn the_steady_state_allocates_nothing() {
         let got = frames.take_frame().expect("published");
         assert_eq!((got.buffer, got.sequence), (buffer, sequence));
         frames.return_buffer(buffer);
-        // One frame period at 60 fps later: a gap of 500 ms with no frame is a frame stop under the
-        // bound for this mode (`frame_stop_bound_ns`, 200 ms), so the cycle's gap is a real period.
-        *now = d.tick(*now + 16_666_667).unwrap();
+        // The cycle's frame period is 500 ms, which the receiver measures. With no frame for 500 ms
+        // the stop bound is `max(4 x 500 ms, 200 ms)` = 2 s, so the gap is not a stop: the bound
+        // follows the period the frames show. The original test expectation (500 ms) is restored.
+        *now = d.tick(*now + 500_000_000).unwrap();
         assert_eq!(d.counters().unwrap().dropped, 0);
         sequence += 1;
     };
