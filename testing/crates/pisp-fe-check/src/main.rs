@@ -89,7 +89,7 @@ const _: () = assert!(
         && TCSI_FE_MIDFRAME == 0x4004_5409
 );
 
-// lemnos.h: the flags, the stream's sizes, and the ring's words (indices of 64-bit words).
+// lemnos.h: the flags and the stream's sizes; the ring's words are below.
 const CREATE_BUFFERS: u32 = 1;
 const BUFFERS: u32 = 4;
 const BUFFER_BYTES: u64 = 32768;
@@ -99,16 +99,82 @@ const JOB_SLOTS: usize = 4;
 const JOB_BYTES: usize = 80;
 /// One length word, then the job's ten words.
 const JOB_WORDS: usize = 11;
-const FRAME_WORDS: usize = 6;
-const RING_STATE: usize = 8;
-const RING_FRAMES_HEAD: usize = 16;
-const RING_FRAMES_TAIL: usize = 24;
-const RING_RETURNS_HEAD: usize = 32;
-const RING_JOBS_HEAD: usize = 48;
-const RING_FRAMES: usize = 64;
-const RETURNS_AT: usize = RING_FRAMES + FRAME_SLOTS * FRAME_WORDS;
-const JOBS_AT: usize = RETURNS_AT + FRAME_SLOTS;
 const STATE_CLOSED: u64 = 1;
+
+// kernel/test/shm_ring.h (layout 2): the word numbers of the shared-memory ring, as word indices into
+// the ring (the module's ring is read as 64-bit words). The frame index holds, for each frame slot,
+// the lane slot the frame was published in (from bit 16). A lane slot is SHM_SLOT_WORDS words: the
+// stamp, the time, the meta, then the 48-byte entry from SHM_ENTRY on (the buffer in the pair word,
+// the bytes in the low half of the fence word, the identity at SHM_ENTRY + 3, the end at SHM_ENTRY
+// + 5). The job block follows the pool page: its control block, then the job slots.
+const SHM_W_HEAD: usize = 8;
+const SHM_W_END: usize = 10;
+const SHM_INDEX: usize = 17;
+const SHM_SLOT_WORDS: usize = 10;
+const SHM_ENTRY: usize = 4;
+const SHM_TICKETS: usize = 8;
+const SHM_READERS: usize = 64;
+const SHM_JOB_HEAD: usize = 2;
+const SHM_JOB_SLOTS: usize = 4;
+
+/// `shm_page_at`: the pool page's first word, after the frame ring.
+const fn shm_page_at(frame_slots: usize) -> usize {
+    SHM_INDEX + frame_slots + frame_slots * SHM_SLOT_WORDS
+}
+
+/// `shm_control`: the control block's first word, after the pool page's tickets and cut-off words.
+const fn shm_control(frame_slots: usize, buffers: usize) -> usize {
+    shm_page_at(frame_slots) + SHM_TICKETS + buffers + SHM_READERS
+}
+
+/// The control block: the job head is at `CONTROL + SHM_JOB_HEAD`.
+const CONTROL: usize = shm_control(FRAME_SLOTS, BUFFERS as usize);
+/// The first job slot: each is one length word then the job's words.
+const JOBS_AT: usize = CONTROL + SHM_JOB_SLOTS;
+
+/// What `shm_frame_read` found for one frame sequence number.
+enum FrameRead {
+    /// The module has not published it yet (the frame head has not passed it).
+    NotYet,
+    /// Its slot holds another frame, or its stamp moved while it was read: the consumer was too
+    /// slow.
+    Reused,
+    /// The frame, read once and checked against its stamp.
+    Frame(ShmFrame),
+}
+
+/// The fields of a published frame that the check uses.
+struct ShmFrame {
+    buffer: u32,
+    bytes: u32,
+    identity: u64,
+}
+
+/// Frame `seq` through the index, as `shm_frame_read` reads it (`kernel/test/shm_ring.h`). The
+/// pair, fence and identity words are read between two reads of the stamp.
+fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead {
+    if ring[SHM_W_HEAD].load(Ordering::Acquire) <= seq {
+        return FrameRead::NotYet;
+    }
+    let index = SHM_INDEX + (seq & (frame_slots as u64 - 1)) as usize;
+    let slot = (ring[index].load(Ordering::Acquire) >> 16) as usize;
+    let at = SHM_INDEX + frame_slots + slot * SHM_SLOT_WORDS;
+    let stamp = ring[at].load(Ordering::Acquire);
+    if stamp != (seq + 1) << 1 {
+        return FrameRead::Reused;
+    }
+    let pair = ring[at + SHM_ENTRY + 1].load(Ordering::Acquire);
+    let fence = ring[at + SHM_ENTRY + 4].load(Ordering::Acquire);
+    let identity = ring[at + SHM_ENTRY + 3].load(Ordering::Acquire);
+    if ring[at].load(Ordering::Acquire) != stamp {
+        return FrameRead::Reused;
+    }
+    FrameRead::Frame(ShmFrame {
+        buffer: pair as u32,
+        bytes: fence as u32,
+        identity,
+    })
+}
 
 // lemnos_rp1_csi2.h: the receiver's parts, and the start's frame.
 const PART_CSI2: u32 = 1 << 0;
@@ -663,7 +729,6 @@ struct Stream {
     pool_addr: u64,
     jobs_head: u64,
     frames_tail: u64,
-    returns_head: u64,
 }
 
 /// One job: `struct lemnos_stream_job`.
@@ -844,7 +909,6 @@ fn stream_setup(ctl: Option<BorrowedFd<'_>>, own: bool, b: &mut Bufs) -> Option<
         pool_addr,
         jobs_head: 0,
         frames_tail: 0,
-        returns_head: 0,
     };
     for region in [&mut b.cfg, &mut b.stats, &mut b.out] {
         if let Err(e) = reg(&s, region) {
@@ -892,7 +956,7 @@ impl Stream {
             self.st(at + 1 + i, u64::from_ne_bytes(*chunk));
         }
         self.jobs_head += 1;
-        self.st(RING_JOBS_HEAD, self.jobs_head);
+        self.st(CONTROL + SHM_JOB_HEAD, self.jobs_head);
     }
 
     /// `LEMNOS_STREAM_IOC_KICK`: the negative errno it failed with, or 0.
@@ -909,18 +973,17 @@ impl Stream {
         u64::from(get32(&st, 4))
     }
 
-    /// The next published frame: its buffer, its bytes and its identity, if one was published.
+    /// The next published frame: its buffer, its bytes and its identity, if one was published. A
+    /// buffer needs no giving back: with no reader marking it, the module takes it back when it needs
+    /// it. A frame whose slot was reused is not taken (as the C's `pop_frame` returns 0 for it).
     fn pop_frame(&mut self) -> Option<(u32, u32, u64)> {
-        let head = self.ld(RING_FRAMES_HEAD);
-        if head == self.frames_tail {
-            return None;
+        match shm_frame_read(self.w(), FRAME_SLOTS, self.frames_tail) {
+            FrameRead::Frame(f) => {
+                self.frames_tail += 1;
+                Some((f.buffer, f.bytes, f.identity))
+            }
+            FrameRead::NotYet | FrameRead::Reused => None,
         }
-        let at = RING_FRAMES + (self.frames_tail as usize & (FRAME_SLOTS - 1)) * FRAME_WORDS;
-        let pair = self.ld(at);
-        let identity = self.ld(at + 2);
-        self.frames_tail += 1;
-        self.st(RING_FRAMES_TAIL, self.frames_tail);
-        Some((pair as u32, (pair >> 32) as u32, identity))
     }
 }
 
@@ -2936,13 +2999,7 @@ fn test_own_buffers(env: &Env, b: &mut Bufs, heap: &str, dev: &str) {
     if let Some(m) = &o1.cpu {
         zero(m, BUFFER_BYTES as usize);
     }
-    {
-        let at = RETURNS_AT + (s.returns_head as usize & (FRAME_SLOTS - 1));
-        let fence = s.ld(RING_FRAMES + 4);
-        s.st(at, 1 | (fence << 32));
-        s.returns_head += 1;
-        s.st(RING_RETURNS_HEAD, s.returns_head);
-    }
+    // The consumer lets go of the frame's buffer: nothing to write, as no reader marks it here.
     b.put_cfg(1, simple_cfg);
     let j = b.job_for(1, 1);
     s.post(&j);
@@ -3108,7 +3165,7 @@ fn test_stop_in_flight(env: &mut Env, b: &mut Bufs, node: &str, unbind: &str, de
     );
     let el = now_ms() - t;
     check!(el >= ms - 20, "unbinding waited ({el} ms)");
-    check!(s.ld(RING_STATE) == STATE_CLOSED, "the stream ended closed");
+    check!(s.ld(SHM_W_END) == STATE_CLOSED, "the stream ended closed");
     drop(s);
     sleep_ms(5);
     check!(
