@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-irq-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's interrupt check: registers through unconfined=, and injected interrupts with their latency (CZ-GUEST-2 port of lemnos_irq_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true

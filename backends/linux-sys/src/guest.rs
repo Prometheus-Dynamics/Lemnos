@@ -300,6 +300,17 @@ pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n as usize)
 }
 
+/// Moves the calling thread to `SCHED_FIFO` at `priority`. `true` when the kernel allowed it;
+/// a refusal (no privilege) is not an error for the caller, who runs on as `SCHED_OTHER`.
+pub fn set_fifo(priority: i32) -> bool {
+    // SAFETY: an all-zero `sched_param` is valid: its fields are plain integers.
+    let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+    param.sched_priority = priority;
+    // SAFETY: `param` is a live `sched_param` for the call, which only reads it; pid 0 is the
+    // calling thread.
+    unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) == 0 }
+}
+
 fn c_string(text: &str) -> io::Result<std::ffi::CString> {
     std::ffi::CString::new(text.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a name holds a NUL"))
