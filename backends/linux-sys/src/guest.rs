@@ -152,6 +152,25 @@ pub fn claim_raw(node: BorrowedFd<'_>, resource: &[u8], flags: u32) -> io::Resul
     Ok(unsafe { OwnedFd::from_raw_fd(arg.fd) })
 }
 
+/// `LEMNOS_IOC_REGJOB_OPEN`, `_IOWR('L', 0xf0, struct lemnos_regjob_open)`: 24 bytes.
+const LEMNOS_IOC_REGJOB_OPEN: u32 = iowr::<[u8; 24]>(b'L', 0xf0);
+
+/// Opens a register-job session on `block` of the control node, with `flags`. `arg` is the request's
+/// 24 bytes as the kernel reads and writes them: block and flags in, and out the session's
+/// descriptor (at byte 8), profile, window and ABI. The session's file is returned owned; the
+/// descriptor number left in `arg` is then only a number, not a second owner.
+///
+/// # Errors
+///
+/// The kernel refuses the session, with its errno (EBUSY for a second opener, EINVAL for a role the
+/// profile does not have).
+pub fn regjob_open(node: BorrowedFd<'_>, arg: &mut [u8; 24]) -> io::Result<OwnedFd> {
+    ioctl_bytes(node, LEMNOS_IOC_REGJOB_OPEN, arg)?;
+    let fd = i32::from_ne_bytes([arg[8], arg[9], arg[10], arg[11]]);
+    // SAFETY: the kernel just made `fd` for this process, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// Sets the open-descriptor limit, soft and hard, to `limit`.
 ///
 /// # Errors
@@ -325,5 +344,11 @@ mod tests {
     fn the_claim_request_is_the_kernels_number() {
         assert_eq!(size_of::<RawClaim>(), 72);
         assert_eq!(LEMNOS_IOC_CLAIM, 0xC048_4CCE);
+    }
+
+    /// `_IOWR('L', 0xf0, struct lemnos_regjob_open)` with the header's 24-byte structure.
+    #[test]
+    fn the_regjob_open_request_is_the_kernels_number() {
+        assert_eq!(LEMNOS_IOC_REGJOB_OPEN, 0xC018_4CF0);
     }
 }
