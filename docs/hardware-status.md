@@ -119,6 +119,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 
 | Check | What a board has to show |
 |---|---|
+| [`BENCHREF.md`](../testing/board-runs/BENCHREF.md) | `bench.sh --real` reference set on the reference board against dev's figures: IMU 200 Hz stamps and gaps, CPU at 50 and 200 Hz, USB cycle |
 | [`B8.md`](../testing/board-runs/B8.md) | `bmi088`: bring-up, 200 Hz batches, stamp gaps, read times, an outage |
 | [`B9.md`](../testing/board-runs/B9.md) | `bmm150`: field magnitude, rotation, an outage |
 | [`B10.md`](../testing/board-runs/B10.md) | `orientation`: angles against a reference, rate dependence |
