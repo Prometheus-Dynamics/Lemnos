@@ -778,6 +778,28 @@ fn a_device_error_is_retried_with_capped_backoff() {
     assert_eq!(stream.contents(frame.buffer), pattern(9, FRAME));
 }
 
+/// The bound for raw10 here (64 x 64 at 80 MHz) is the 200 ms floor: four active-picture periods
+/// are 3.3 ms. A frame end that does not come within it restarts the frame path, with a reason that
+/// names the stop, and the first delay of the failure rule.
+#[test]
+fn a_frame_end_that_does_not_come_within_the_bound_restarts_the_frame_path_with_a_named_reason() {
+    let stream = MockStream::with_bytes(4, FRAME);
+    let (mut d, _block) = streaming(&stream);
+    d.tick(0).unwrap();
+    assert_eq!(d.health(), Health::Ok);
+    d.tick(199_000_000).unwrap();
+    assert_eq!(d.health(), Health::Ok, "inside the bound");
+    let at = d.tick(201_000_000).unwrap();
+    assert_eq!(at, 201_000_000 + 250_000_000, "the first recovery delay");
+    match d.health() {
+        Health::Failed(reason) => assert!(
+            reason.contains("no frame end arrived within the bound"),
+            "the reason names the stop: {reason}"
+        ),
+        other => panic!("a frame stop is a failure, not {other:?}"),
+    }
+}
+
 #[test]
 fn stop_ends_streaming_and_recovery() {
     let stream = MockStream::with_bytes(4, FRAME);

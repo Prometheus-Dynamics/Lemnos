@@ -532,8 +532,15 @@ frames come on demand, a stream that has shown no frame since its start, or a co
 consumer that holds every buffer of the receiver leaves `rp1-csi2` with nothing armed, so it makes no
 frame start; the receiver then answers `frame_starts` with `None` ("cannot say now"), which is no
 judgement, and counts again once a buffer is armed.
-The other frame sources do not watch for this yet: `k230-capture`, `rkcif` and `sunxi-vin` cannot
-count frame starts (`NOT_SUPPORTED`), and `rp1-csi2` reads the count but does not judge it.
+The frame stop. `rp1-csi2` and `k230-capture` watch their own frames: when no frame moves for
+`max(4 x the active picture's period, 200 ms)` while streaming, the frame path restarts under the same
+backoff (capped at 8 s, never gives up), with health failed and the reason "no frame arrived within the
+bound for the configured mode". The period is `width x height` at the link's pixel rate (the mode as
+configured, not a board measurement), so the bound is a little shorter than four real frame periods.
+`rp1-csi2` judges only while a buffer is armed (its frame count is known); `k230-capture` counts frame
+ends whether or not a consumer holds a buffer. Unmeasured on a board. Named limit: `rkcif` and
+`sunxi-vin` cannot count frame starts (`NOT_SUPPORTED`), so they do not watch yet; that needs a
+kernel-side frame count, which belongs to the CZ-MOD port.
 
 In Rust: `FrameStream::producer()` is `ProducerState::Running`, `Retrying { since_ns }` or
 `Unknown(n)` (atomic loads). `next_or_end` returns `Next::Stalled(state)` once for each failure the
