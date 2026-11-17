@@ -30,7 +30,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 cpio flex bison bc libelf-dev libssl-dev dwarves
+      # apt packages from a cache of their .debs, keyed on the version below (only what is missing is downloaded).
+      - uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: qemu-system-x86 cpio flex bison bc libelf-dev libssl-dev dwarves clang lld llvm libclang-dev
+          version: kernel-qemu-v1
+      # The rustup toolchain (1.99.0 with rust-src, from rust-toolchain.toml), keyed on that file.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.rustup
+          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+      # The Rust kernel's toolchain: rustc and rust-src from rust-toolchain.toml (rustup installs it here),
+      # bindgen-cli at the tested version (cached), and clang, lld and libclang for LLVM=1 and bindgen.
+      - run: rustup show active-toolchain
+      # The kernel build runs from the kernel's directory, where rust-toolchain.toml does not apply: pin the
+      # toolchain (and so its rust-src) for every command in this job.
+      - run: echo "RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_ENV"
+      - run: rustc -vV && rustup component list --installed | grep rust-src
+      # bindgen loads libclang from the clang package's directory: name it.
+      - run: echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -1)")" >> "$GITHUB_ENV"
+      # bindgen-cli is cached as the binary, keyed on its version: no cargo install on a warm run.
+      - uses: actions/cache@v4
+        id: bindgen
+        with:
+          path: ~/.cargo/bin/bindgen
+          key: bindgen-cli-0.73.2-${{ runner.os }}
+      - if: steps.bindgen.outputs.cache-hit != 'true'
+        run: cargo install --locked bindgen-cli --version 0.73.2
+      - run: bindgen --version
       - name: Let the job use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
@@ -66,7 +93,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 cpio flex bison bc libelf-dev libssl-dev dwarves
+      # apt packages from a cache of their .debs, keyed on the version below (only what is missing is downloaded).
+      - uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: qemu-system-x86 cpio flex bison bc libelf-dev libssl-dev dwarves clang lld llvm libclang-dev
+          version: kernel-qemu-v1
+      # The rustup toolchain (1.99.0 with rust-src, from rust-toolchain.toml), keyed on that file.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.rustup
+          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+      # The Rust kernel's toolchain: rustc and rust-src from rust-toolchain.toml (rustup installs it here),
+      # bindgen-cli at the tested version (cached), and clang, lld and libclang for LLVM=1 and bindgen.
+      - run: rustup show active-toolchain
+      # The kernel build runs from the kernel's directory, where rust-toolchain.toml does not apply: pin the
+      # toolchain (and so its rust-src) for every command in this job.
+      - run: echo "RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_ENV"
+      - run: rustc -vV && rustup component list --installed | grep rust-src
+      # bindgen loads libclang from the clang package's directory: name it.
+      - run: echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -1)")" >> "$GITHUB_ENV"
+      # bindgen-cli is cached as the binary, keyed on its version: no cargo install on a warm run.
+      - uses: actions/cache@v4
+        id: bindgen
+        with:
+          path: ~/.cargo/bin/bindgen
+          key: bindgen-cli-0.73.2-${{ runner.os }}
+      - if: steps.bindgen.outputs.cache-hit != 'true'
+        run: cargo install --locked bindgen-cli --version 0.73.2
+      - run: bindgen --version
       - name: Let the job use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
