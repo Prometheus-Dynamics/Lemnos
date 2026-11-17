@@ -93,6 +93,21 @@ impl Run {
         if let Some(word) = args.strip_prefix("-z ") {
             return self.word(word).is_empty();
         }
+        // The numeric comparisons (U-Boot cmd/test.c): each side is read as a decimal number, and text
+        // that is not one reads as 0, as simple_strtol leaves it.
+        for (op, cmp) in [
+            (" -eq ", i64::eq as fn(&i64, &i64) -> bool),
+            (" -ne ", i64::ne),
+            (" -lt ", i64::lt),
+            (" -le ", i64::le),
+            (" -gt ", i64::gt),
+            (" -ge ", i64::ge),
+        ] {
+            if let Some((a, b)) = args.split_once(op) {
+                let number = |w: String| w.trim().parse::<i64>().unwrap_or(0);
+                return cmp(&number(self.word(a)), &number(self.word(b)));
+            }
+        }
         if let Some((a, b)) = args.split_once(" != ") {
             return self.word(a) != self.word(b);
         }
