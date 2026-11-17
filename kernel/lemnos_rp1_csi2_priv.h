@@ -6,6 +6,7 @@
 #ifndef LEMNOS_RP1_CSI2_PRIV_H
 #define LEMNOS_RP1_CSI2_PRIV_H
 
+#include <linux/completion.h>
 #include <linux/io.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
@@ -65,7 +66,8 @@ struct lrc_dev {
 	struct mutex ctl;		/* START, STOP, close, unbind */
 	bool gone;			/* unbound: every register access is off */
 	bool wedged;			/* a stop couldn't be confirmed */
-	unsigned int stop_still;	/* reads the line counter must hold still for, set at START */
+	u8 stop_armed;			/* STOP_ARM_*: the FE_ACKs a stop waits for, set under lock */
+	struct completion stop_done[2];	/* the stop's FE_ACK after its FORCE: image, then embedded */
 
 	struct lem_pisp_fe *fe;		/* the front end, when the block has one; NULL otherwise */
 	spinlock_t lock;		/* the frame path, everything below */

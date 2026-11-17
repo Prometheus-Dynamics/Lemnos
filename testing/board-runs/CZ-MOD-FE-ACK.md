@@ -1,0 +1,30 @@
+# CZ-MOD-FE-ACK: the rp1-csi2 stop is confirmed by the frame end after FORCE
+
+Status: **untested on board.** The design is in the commit "CZ-MOD FE_ACK stop"; this file is the board
+check. It is run by the RAZE runner, after the module is loaded the way M34 loads it: through modprobe with
+`options lemnos`, never insmod (docs/device-tree.md), with the receiver owned (`owned=` names the receiver's
+compatible, as M34's load line does).
+
+## What is assumed about the hardware (why this check exists)
+- After FORCE is written to the channel's CH_CTRL with the FE_ACK interrupt enable kept set (`FORCE | IRQ_EN_FE_ACK`),
+  the channel raises its FE_ACK interrupt (CSI2_STATUS bit `IRQ_FE_ACK(0)` = BIT(8)) once the DMA has stopped.
+- Neither the stock driver (rpi-7.2.y rp1_cfe csi2.c, which writes FORCE alone and never waits) nor our
+  documents show this. It is an assumption, so it is checked here.
+- Failure mode is safe: if FE_ACK never arrives, STOP reports the receiver wedged and keeps the pool attached.
+
+## Steps (each prints one line; the RAZE runner keeps the console)
+1. Load lemnos.ko through modprobe with the receiver owned, bind the receiver, start a stream, run one frame
+   (`lemnos-rp1-csi2-check` mode `stop-ack`).
+2. Outcome A, expected: STOP returns success, the receiver is not wedged, and the log has
+   `stop: frame end after FORCE in <N> us (bound <B> us)`. Record N.
+3. Outcome B, the failure this check must catch: STOP returns wedged. Then every stop on this board wedges, and
+   the check prints `STOP never confirmed: FE_ACK after FORCE did not arrive within <B> us`. If that line
+   appears on the first stop, the assumption is wrong: stop and report before M1.
+4. Stop a second time with the DMA idle: STOP returns success with no wait longer than N.
+
+## Recording
+- Put the outcome (A or B, with N and B) in testing/board-runs/CZ-MOD-FE-ACK.md under "Results", with the
+  kernel and module revision. Outcome B blocks M1 until the assumption is replaced by a measured one.
+
+## Results
+(none yet)
