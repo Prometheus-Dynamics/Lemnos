@@ -2342,13 +2342,15 @@ impl Inner {
             // A real-valued item must carry exponent 0: the renderer scales a float by the exponent,
             // so a nonzero one shows the value wrong. Refused by name, before the device runs.
             let built = match built {
-                Ok(Ok(instance)) => match describe_fault(instance.as_ref(), entry.manifest()) {
-                    Some(reason) => {
-                        *lock(&target.bind_refusal) = Some((RefusalKind::Failed, reason));
-                        Ok(Err(Status::INVALID_ARGUMENT))
+                Ok(Ok((instance, kept))) => {
+                    match describe_fault(instance.as_ref(), entry.manifest()) {
+                        Some(reason) => {
+                            *lock(&target.bind_refusal) = Some((RefusalKind::Failed, reason));
+                            Ok(Err(Status::INVALID_ARGUMENT))
+                        }
+                        None => Ok(Ok((instance, kept))),
                     }
-                    None => Ok(Ok(instance)),
-                },
+                }
                 other => other,
             };
             match built {
