@@ -515,8 +515,8 @@ mod tests {
     use super::*;
     use std::mem::offset_of;
 
-    /// The same numbers are asserted in C against the header, in
-    /// `kernel/test/lemnos_vip_check.c`, so the two sides are pinned to each other.
+    /// The same numbers are asserted against the header by the Rust check
+    /// `testing/crates/vip-check` (the port of `lemnos_vip_check.c`), so the two sides are pinned to each other.
     #[test]
     fn layouts_and_requests_match_the_kernel_headers() {
         assert_eq!(size_of::<Range>(), 16);
