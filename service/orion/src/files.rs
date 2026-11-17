@@ -315,12 +315,25 @@ pub fn run(config: &Config, shared: &Shared) {
     let mut backoff = Backoff::new();
     let mut lemnosd: Option<Client> = None;
     while !shared.stopping() {
-        let orion = match Orion::connect_with(&config.orion, FILES_CLIENT_NAME, Options::default())
-        {
+        // Orion's patience keeps trying while nobody answers, so this only sees a refusal.
+        let orion = match Orion::connect_watching(
+            &config.orion,
+            FILES_CLIENT_NAME,
+            Options::default(),
+            |status| {
+                if status.failures == 1 {
+                    log(&format!(
+                        "files: Orion not available at {}: waiting for it",
+                        config.orion
+                    ));
+                }
+                !shared.stopping()
+            },
+        ) {
             Ok(orion) => orion,
             Err(error) => {
                 log(&format!(
-                    "files: Orion not available at {}: {error}",
+                    "files: Orion at {} refused the session: {error}",
                     config.orion
                 ));
                 std::thread::sleep(backoff.next_delay());
