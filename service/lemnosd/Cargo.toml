@@ -55,6 +55,7 @@ lemnos-driver-m2m-decode = { path = "../../drivers/m2m-decode" }
 lemnos-driver-named-files = { path = "../../drivers/named-files" }
 lemnos-driver-nonai2d = { path = "../../drivers/nonai2d" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
+lemnos-driver-orion-precheck = { path = "../../drivers/orion-precheck" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
 lemnos-driver-pwm-channel-fan = { path = "../../drivers/pwm-channel-fan" }

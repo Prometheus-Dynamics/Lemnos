@@ -39,6 +39,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_named_files::NamedFilesDriver>(),
         entry::<lemnos_driver_nonai2d::Nonai2dDriver>(),
         entry::<lemnos_driver_orientation::Orientation>(),
+        entry::<lemnos_driver_orion_precheck::OrionPrecheck>(),
         entry::<lemnos_driver_ov9782::Ov9782>(),
         entry::<lemnos_driver_pisp::PispBe>(),
         entry::<lemnos_driver_pisp::PispFe>(),

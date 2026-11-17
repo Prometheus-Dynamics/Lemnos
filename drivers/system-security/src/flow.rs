@@ -83,17 +83,13 @@ pub fn judge(on: bool, orion: bool, answers: &[Answer]) -> std::result::Result<(
     if !on {
         return Ok(());
     }
-    // ORION-R3: the contact point Orion's side builds to (designed here, not wired; see
-    // docs/slots.md, "The Orion precheck"). The driver asks the Orion bridge's device, bound as
-    // `uses = { orion = "<device>" }`, through the same contract the slots and flash answer:
-    //   contract `system.security-precondition/1`, method 1 `precondition(on: bool, into: &mut [u8])`.
-    // Answers: a text of `missing: ...` / `busy: ...` lines, which refuse (busy either way); no such
-    // line, the empty text, is a yes; a status error (no answer, a deadline, `NOT_SUPPORTED`) is a
-    // refusal, `missing: it did not answer`. Nothing is assumed about Orion, and a refusal here never
-    // changes the switch. Until the device is bound, with Orion on the board, ON is refused by name.
+    // Orion on this board with no `orion` device bound: nothing asks it, so ON is refused by name. Bound,
+    // Orion's answer comes in `answers` like the other stakeholders' (see `docs/slots.md`, "The Orion
+    // precheck"): a text of `missing:` / `busy:` lines, with the empty text a yes, and a status error
+    // a refusal, `missing: it did not answer`.
     if orion {
         missing.push(
-            "missing: Orion cannot be asked at this revision: the switch cannot be turned on while Orion is on this board"
+            "missing: orion: the board has Orion, and no orion device is bound to ask it: name one as uses = { orion = \"<device>\" }"
                 .into(),
         );
     }
@@ -230,6 +226,8 @@ pub struct Flow {
     record: SwitchRecord,
     render_dir: PathBuf,
     orion: bool,
+    /// Whether the board's `orion` device is bound (`uses = { orion = ... }`): Orion is then asked.
+    orion_bound: bool,
     switch: Switch,
     /// The record could not be read as a value (corrupt or unreadable): the switch reads on.
     corrupt: bool,
@@ -292,6 +290,7 @@ impl Flow {
             record,
             render_dir: render_dir.into(),
             orion,
+            orion_bound: false,
             switch,
             corrupt,
             view_pending: false,
@@ -319,6 +318,18 @@ impl Flow {
     #[must_use]
     pub const fn orion(&self) -> bool {
         self.orion
+    }
+
+    /// Records whether the board's `orion` device is bound. Bound, Orion's answer is asked and is
+    /// the one Orion gives; unbound, a change to on is refused by name.
+    pub const fn bind_orion(&mut self, bound: bool) {
+        self.orion_bound = bound;
+    }
+
+    /// Whether Orion is on this board and nothing asks it: the change to on is refused for that.
+    #[must_use]
+    pub const fn orion_unasked(&self) -> bool {
+        self.orion && !self.orion_bound
     }
 
     /// Records the last check's lines (the precheck's reply, or a refusal's text).
@@ -374,7 +385,7 @@ impl Flow {
         authorization: &[u8],
         boot: Boot<'_>,
     ) -> Result<Vec<String>, Refusal> {
-        judge(on, self.orion, answers)?;
+        judge(on, self.orion_unasked(), answers)?;
         let mut notes = Vec::new();
         if on {
             if !authorization.is_empty() {

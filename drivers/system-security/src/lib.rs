@@ -4,10 +4,14 @@
 //!
 //! # Wiring
 //!
-//! - `uses = { slots = "<id>", flash = "<id>", identity = "<id>" }` names the stakeholders: the
-//!   `system-slots` and `system-flash` devices, which serve `system.security-precondition/1`. Each
-//!   answers only for itself. A board with neither bound judges on the trust root alone. `identity`
-//!   is the `system-identity` device: its serial names this board in an off's authorization.
+//! - `uses = { slots = "<id>", flash = "<id>", identity = "<id>", orion = "<id>" }` names the stakeholders:
+//!   the `system-slots`, `system-flash` and `orion-precheck` devices, which serve
+//!   `system.security-precondition/1`. Each answers only for itself. A board with neither slots nor flash
+//!   bound judges on the trust root alone. `identity` is the `system-identity` device: its serial names
+//!   this board in an off's authorization. `orion` is the `orion-precheck` device (`docs/drivers.md`): on
+//!   a board whose `[security]` says `orion = true` it is asked for a change to on and off, and on such a
+//!   board a change to on is refused by name while it is not bound. A board that says `orion = false` is
+//!   not asked.
 //!
 //! `slots` and `flash` are optional. A board with slots and no flash device names `slots` only: `precheck`
 //! and `set` ask `slots` alone, `flash` is not asked and is not a fault, and the switch adds no trust-root
@@ -67,6 +71,9 @@ pub struct SystemSecurity {
     /// The `system-identity` device, when the board has one: its serial names the board.
     #[needs(optional)]
     identity: Option<Dev<dyn SystemIdentity>>,
+    /// The `orion-precheck` device, when the board has one: Orion's answer for the switch.
+    #[needs(optional)]
+    orion: Option<Dev<dyn SecurityPrecondition>>,
     flow: Flow,
     keys: Option<PathBuf>,
 }
@@ -93,7 +100,7 @@ impl Lifecycle for SystemSecurity {
         if cfg.get("run").is_some() || cfg.get("security_view").is_some() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let orion = cfg.bool("orion").unwrap_or(false);
+        let board_orion = cfg.bool("orion").unwrap_or(false);
         // `record = "boot"`: the boot partition's `SECURE.REC`, on the node the slots driver finds from
         // the same `boot_sources` (`docs/slots.md`, "The security switch"). A node that cannot be found
         // is kept as the record's reason: the switch then reads on, reported.
@@ -111,11 +118,14 @@ impl Lifecycle for SystemSecurity {
         } else {
             SwitchRecord::File(PlainFile::new(record))
         };
+        let mut flow = Flow::open_record(record, RUN_DIR, board_orion);
+        flow.bind_orion(needs.orion.is_some());
         let mut dev = Self {
             slots: needs.slots,
             flash: needs.flash,
             identity: needs.identity,
-            flow: Flow::open_record(record, RUN_DIR, orion),
+            orion: needs.orion,
+            flow,
             keys: cfg.str("keys").map(PathBuf::from),
         };
         // The start-up repair: the boot side's marks follow the record, whatever a crash left.
@@ -147,6 +157,12 @@ impl SystemSecurity {
         }
         if let Some(dev) = self.flash.as_mut() {
             answers.push(ask("flash", dev, on));
+        }
+        // Asked only on a board whose file says Orion ships: a board without it is not asked.
+        if self.flow.orion()
+            && let Some(dev) = self.orion.as_mut()
+        {
+            answers.push(ask("orion", dev, on));
         }
         if on && self.slots.is_none() && self.flash.is_none() && !trust_root(self.keys.as_deref()) {
             answers.push(Answer {
@@ -216,7 +232,7 @@ impl Security for SystemSecurity {
 
     fn precheck(&mut self, on: bool, into: &mut [u8]) -> Result<usize> {
         let answers = self.answers(on);
-        let mut lines = lines_of(&judge(on, self.flow.orion(), &answers));
+        let mut lines = lines_of(&judge(on, self.flow.orion_unasked(), &answers));
         if !on && trust_root(self.keys.as_deref()) {
             lines.push(
                 "note: off needs an authorization made for the current generation (request_off says what it signs)"

@@ -10,6 +10,7 @@ fn start(entries: &[(&str, ConfigValue<'_>)]) -> bool {
         slots: None,
         flash: None,
         identity: None,
+        orion: None,
     };
     <SystemSecurity as Lifecycle>::start(needs, &cfg).is_ok()
 }

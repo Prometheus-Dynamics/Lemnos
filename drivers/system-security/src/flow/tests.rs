@@ -133,11 +133,11 @@ fn on_names_each_missing_fact_and_busy_refuses_either_way() {
 }
 
 #[test]
-fn on_with_orion_on_the_board_is_refused_by_name_until_orion_can_be_asked() {
+fn on_with_orion_on_the_board_is_refused_by_name_until_an_orion_device_is_bound() {
     let (status, text) = judge(true, true, &[ok("slots")]).unwrap_err();
     assert_eq!(status, Status::NOT_PERMITTED);
     assert!(
-        text.contains("Orion cannot be asked at this revision"),
+        text.contains("no orion device is bound to ask it"),
         "{text}"
     );
     assert!(
