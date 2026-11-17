@@ -88,7 +88,7 @@ fn refused(body: &str, reason: &str) {
 fn an_unconsumed_uses_key_is_refused_by_name_and_lists_what_the_driver_takes() {
     refused(
         "[[devices]]\nid = \"d\"\ndriver = \"system-security\"\nuses = { zzz = \"lease\" }\n",
-        "device \"d\": `uses` key \"zzz\" is not a resource this driver takes (it takes: \"slots\", \"flash\", \"identity\")",
+        "device \"d\": `uses` key \"zzz\" is not a resource this driver takes (it takes: \"slots\", \"flash\", \"identity\", \"orion\")",
     );
     refused(
         "[[devices]]\nid = \"d\"\ndriver = \"gpu-lease\"\nuses = { zzz = \"lease\" }\n",
