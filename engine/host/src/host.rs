@@ -807,6 +807,21 @@ impl Slot {
             .map(|m| m.job)
     }
 
+    /// The stall bound a job method declares, in seconds; `None` for a method the driver's
+    /// contracts don't have. Zero for a method that is not a job.
+    fn job_stall_secs(&self, method: MethodId) -> Option<u32> {
+        let contract = self
+            .entry?
+            .manifest
+            .provides
+            .get(usize::from(method.contract))?;
+        contract
+            .methods
+            .iter()
+            .find(|m| m.id == method.method)
+            .map(|m| m.stall_secs)
+    }
+
     /// Whether the board entry names `name` as its bus or as something it uses.
     fn names(&self, name: &str) -> bool {
         self.spec.bus.as_deref() == Some(name) || self.spec.uses.values().any(|used| used == name)
@@ -911,6 +926,11 @@ struct OpenJob {
     owner: CallerId,
     /// The last progress passed on, if any was.
     told: Option<(u64, u64)>,
+    /// How long the job may go without progress, in nanoseconds: the bound its method declares.
+    stall_ns: u64,
+    /// When the job is over its bound, on the host's clock, unless progress renews it first. Each
+    /// progress report moves it to a stall bound after that report.
+    due_ns: u64,
 }
 
 struct Jobs {
@@ -1195,18 +1215,24 @@ impl Inner {
     }
 
     /// Takes a job `instance` has just started on `caller`'s behalf, and returns its number.
-    fn open_job(&self, slot: &Slot, driver_job: JobId, caller: CallerId) -> u64 {
+    fn open_job(&self, slot: &Slot, driver_job: JobId, caller: CallerId, stall_ns: u64) -> u64 {
         let mut jobs = self.jobs();
         jobs.next = jobs.next.wrapping_add(1).max(1);
         let id = (u64::from(jobs.epoch) << 32) | u64::from(jobs.next);
+        let due_ns = self.clock.now_ns().saturating_add(stall_ns);
         jobs.open.push(OpenJob {
             id,
             device: slot.index,
             driver_job,
             owner: caller,
             told: None,
+            stall_ns,
+            due_ns,
         });
         slot.open_jobs.fetch_add(1, Ordering::AcqRel);
+        drop(jobs);
+        // The device's next look may be later than this job's bound: wake whoever sleeps until it.
+        self.wake();
         id
     }
 
@@ -1314,18 +1340,40 @@ impl Inner {
             };
             let mut writer = Reply::new(&mut result);
             let state = instance.job(driver_job, &mut writer);
+            let now = self.clock.now_ns();
             let mut jobs = self.jobs();
             let Some(at) = jobs.open.iter().position(|job| job.id == id) else {
                 continue;
             };
             match state {
                 JobState::Running { done, total } => {
-                    position += 1;
                     let job = &mut jobs.open[at];
                     if job.told == Some((done, total)) {
+                        if now < job.due_ns {
+                            position += 1;
+                            continue;
+                        }
+                        // Silent past its bound: the host ends it as timed out, and the driver is
+                        // told to stop it once the table is let go. The next job takes this position.
+                        let job = jobs.open.remove(at);
+                        slot.open_jobs.fetch_sub(1, Ordering::AcqRel);
+                        jobs.push(JobUpdate {
+                            job: id,
+                            device: job.device,
+                            owner: job.owner,
+                            event: JobEvent::Finished {
+                                status: Status::TIMED_OUT,
+                                result: Vec::new(),
+                            },
+                        });
+                        drop(jobs);
+                        let _ = catch_unwind(AssertUnwindSafe(|| instance.job_cancel(driver_job)));
+                        changed = true;
                         continue;
                     }
+                    // Progress: told, and the bound starts again from now.
                     job.told = Some((done, total));
+                    job.due_ns = now.saturating_add(job.stall_ns);
                     let (device, owner) = (job.device, job.owner);
                     jobs.push(JobUpdate {
                         job: id,
@@ -1333,6 +1381,7 @@ impl Inner {
                         owner,
                         event: JobEvent::Progress { done, total },
                     });
+                    position += 1;
                 }
                 JobState::Finished(status) => {
                     // In order: another lane may be going through its own jobs by position.
@@ -1356,6 +1405,22 @@ impl Inner {
         if changed {
             self.wake();
         }
+    }
+
+    /// When the earliest open job of `slot` is over its bound, if it has one the host must look
+    /// at. Read from the job table alone. None for a device that is not ticked now (see
+    /// [`Inner::may_tick`]): its jobs are looked at when it is.
+    fn job_due(&self, slot: &Slot) -> Option<u64> {
+        if !slot.runs_jobs() || slot.open_jobs.load(Ordering::Acquire) == 0 || !self.may_tick(slot)
+        {
+            return None;
+        }
+        self.jobs()
+            .open
+            .iter()
+            .filter(|job| job.device == slot.index)
+            .map(|job| job.due_ns)
+            .min()
     }
 
     fn slot(&self, index: u32) -> Option<Arc<Slot>> {
@@ -1794,6 +1859,10 @@ impl Inner {
             (Some(true), false) => return Err(Status::NOT_SUPPORTED),
             (Some(false) | None, true) => return Err(Status::INVALID_ARGUMENT),
             (Some(true), true) if !slot.runs_jobs() => return Err(Status::NOT_SUPPORTED),
+            // The contract declares every job's bound; a job with none is not one the host will run.
+            (Some(true), true) if slot.job_stall_secs(method).unwrap_or(0) == 0 => {
+                return Err(Status::INVALID_ARGUMENT);
+            }
             (Some(true), true) if self.jobs().open.len() >= MAX_JOBS => {
                 return Err(Status::BUSY);
             }
@@ -1824,7 +1893,9 @@ impl Inner {
             if as_job && status.is_ok() {
                 status = match JobId::decode(&mut Reader::new(writer.written())) {
                     Ok(job) if writer.len() == 8 => {
-                        let id = self.open_job(slot, job, caller);
+                        let stall_ns = u64::from(slot.job_stall_secs(method).unwrap_or(0))
+                            .saturating_mul(1_000_000_000);
+                        let id = self.open_job(slot, job, caller, stall_ns);
                         writer.clear();
                         id.encode(&mut writer)
                             .map_or_else(|status| status, |()| Status::OK)
@@ -3290,7 +3361,13 @@ impl Host {
         let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {
             index += 1;
-            if slot.next_tick_ns.load(Ordering::Acquire) <= now && slot.is_running() {
+            // A job over its bound is due too, so a silent job ends on time whether or not its
+            // driver ticks.
+            let next = slot
+                .next_tick_ns
+                .load(Ordering::Acquire)
+                .min(self.inner.job_due(&slot).unwrap_or(NO_TICK));
+            if next <= now && slot.is_running() {
                 self.inner.tick(slot);
             }
         }
@@ -3303,9 +3380,13 @@ impl Host {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|slot| slot.next_tick_ns.load(Ordering::Acquire) != NO_TICK)
             .filter(|slot| slot.is_running())
-            .map(|slot| slot.next_tick_ns.load(Ordering::Acquire))
+            .map(|slot| {
+                slot.next_tick_ns
+                    .load(Ordering::Acquire)
+                    .min(self.inner.job_due(slot).unwrap_or(NO_TICK))
+            })
+            .filter(|next| *next != NO_TICK)
             .min()
     }
 

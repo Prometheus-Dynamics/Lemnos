@@ -16,7 +16,7 @@ use lemnosd::{Config, Service};
 #[contract("copier", version = 1)]
 pub trait Copying {
     /// Copies `steps` steps, one per millisecond, and ends with `steps`.
-    #[method(1, job)]
+    #[method(1, job, stall = 60)]
     fn copy(&mut self, steps: u32) -> Result<JobId>;
     /// How many cancels the driver has been asked for.
     #[method(2)]

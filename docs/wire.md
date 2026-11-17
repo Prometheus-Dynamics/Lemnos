@@ -230,6 +230,15 @@ sends this connection, and no other:
   a job whose driver was lost (a panic, a rebind, the device switched off) with `EINTR` (-4).
   JobDone is never dropped.
 
+A job that goes longer than its method's stall bound without a progress report ends with JobDone and
+`ETIMEDOUT` (-110); its driver is told to stop it. The bound is declared in the contract (`docs/daemon.md`, "The stall bound
+of each job method"). The bound is not part of any hash: a host with a different bound for a method is the same wire.
+
+A packaged driver carries the bound in its package's method flags: `METHOD_JOB` (bit 0) and, from bit 8 up
+(`METHOD_STALL_SHIFT`), the bound in seconds. This is a change to the package ABI, not to the wire: a package built
+before it has no bound on its job methods, and the host refuses such a package by name: `job method N declares no stall bound: rebuild the package
+with #[method(N, job, stall = SECS)]`. No contract hash moved: the bound is left out of `method_hash`, and the wire's hashes are unchanged.
+
 JobProgress and JobDone for a job may come before its JobStarted, since the job runs on while the
 answer is on its way: a client keeps them by job number until it knows the number.
 

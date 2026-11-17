@@ -23,6 +23,7 @@ const INFO: ContractInfo = ContractInfo {
         returns: Shape::U8,
         has_out_buffer: false,
         job: false,
+        stall_secs: 0,
         reading: None,
         added: false,
     }],
@@ -269,6 +270,7 @@ mod package {
                     returns: Shape::Bytes,
                     has_out_buffer: true,
                     job: false,
+                    stall_secs: 0,
                     reading: None,
                     added: false,
                 }],
@@ -288,12 +290,65 @@ mod package {
         );
     }
 
+    /// A job method and a plain one: the job's stall bound is what the package must carry.
+    const STALLS: Manifest = Manifest {
+        name: "stalls",
+        needs: &[],
+        provides: &[ContractInfo {
+            tag: Tag::new("example.stalls/1"),
+            kind: "other",
+            methods: &[
+                MethodInfo {
+                    id: 1,
+                    name: "go",
+                    params: &[],
+                    returns: Shape::Unit,
+                    has_out_buffer: false,
+                    job: true,
+                    stall_secs: 90,
+                    reading: None,
+                    added: false,
+                },
+                MethodInfo {
+                    id: 2,
+                    name: "read",
+                    params: &[],
+                    returns: Shape::U32,
+                    has_out_buffer: false,
+                    job: false,
+                    stall_secs: 0,
+                    reading: None,
+                    added: false,
+                },
+            ],
+        }],
+    };
+
+    #[test]
+    fn a_job_methods_stall_bound_crosses_the_package_boundary() {
+        let crossed = manifest_out(&STALLS);
+        let methods = crossed.provides.as_slice()[0].methods.as_slice();
+        assert_eq!(
+            methods[0].flags & lemnos_abi::package::METHOD_JOB,
+            lemnos_abi::package::METHOD_JOB
+        );
+        assert_eq!(
+            methods[0].flags >> lemnos_abi::package::METHOD_STALL_SHIFT,
+            90
+        );
+        assert_eq!(methods[1].flags, 0);
+        assert_eq!(manifest_in(&crossed, &[]), Ok(STALLS));
+    }
+
     #[test]
     fn a_manifest_the_host_cannot_use_is_refused_with_a_reason() {
         let good = manifest_out(&MANIFEST);
         let mut nameless = good;
         nameless.name = Str::new("");
-        assert_eq!(manifest_in(&nameless, &[]), Err("the driver has no name"));
+        assert_eq!(
+            manifest_in(&nameless, &[]),
+            Err("the driver has no name".into())
+        );
 
         let mut needs = good.needs.as_slice().to_vec();
         needs[1].tag = Str::new("no-major");
@@ -301,7 +356,7 @@ mod package {
         bad_tag.needs = Slice::new(std::vec::Vec::leak(needs.clone()));
         assert_eq!(
             manifest_in(&bad_tag, &[]),
-            Err("a contract tag is not name/major")
+            Err("a contract tag is not name/major".into())
         );
 
         needs[0].kind = 99;
@@ -310,7 +365,7 @@ mod package {
         bad_bus.needs = Slice::new(std::vec::Vec::leak(needs));
         assert_eq!(
             manifest_in(&bad_bus, &[]),
-            Err("a need of a kind this host does not know")
+            Err("a need of a kind this host does not know".into())
         );
 
         let mut contracts = good.provides.as_slice().to_vec();
@@ -321,7 +376,7 @@ mod package {
         bad_shape.provides = Slice::new(std::vec::Vec::leak(contracts));
         assert_eq!(
             manifest_in(&bad_shape, &[]),
-            Err("a shape of a kind this host does not know")
+            Err("a shape of a kind this host does not know".into())
         );
     }
 

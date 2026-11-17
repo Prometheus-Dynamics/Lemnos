@@ -139,3 +139,29 @@ fn a_file_that_stops_arriving_and_leftovers_from_before_are_deleted() {
     assert_eq!(r.open(), 0);
     assert_eq!(names(&dir), ["kept"]);
 }
+
+/// A transfer that stops arriving is answered as having run out of time, with the bytes it had, and
+/// its file deleted: the sender is not left in silence.
+#[test]
+fn a_transfer_that_stops_arriving_is_answered_as_timed_out() {
+    let dir = dir();
+    let mut r = Receiver::new(&dir);
+    r.begin(9, "f", 4, sha(b"abcd"), &mut yes);
+    r.chunk(9, 0, b"ab");
+    assert!(
+        r.expire(Duration::from_secs(3600)).is_empty(),
+        "not yet idle"
+    );
+    let ended = r.expire(Duration::ZERO);
+    assert_eq!(ended.len(), 1);
+    let (transfer, answer) = &ended[0];
+    assert_eq!(*transfer, 9);
+    assert_eq!(answer.received, 2);
+    assert_eq!(answer.state, FileState::Rejected);
+    assert!(
+        answer.detail.starts_with("ran out of time"),
+        "{}",
+        answer.detail
+    );
+    assert_eq!(names(&dir), Vec::<String>::new());
+}

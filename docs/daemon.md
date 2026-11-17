@@ -936,17 +936,51 @@ run in flight is never dropped for silence (see "Only silence expires a lease").
 |---|---|---|---|
 | `call`, `set`, `power` | lemnosd's call deadline, 2 s by default, per board with `call_deadline_ms` | lemnosd | `TimedOut`, code 110 |
 | a long job, its start | the same call deadline | lemnosd | `TimedOut`, code 110 |
-| a long job, once started | a deadline the caller states on its run (`Run.deadline_ms`), enforced by Orion's node: `TimedOut`, code 110 (`DEADLINE_CODE`), words `it ran out of time`. The bridge does not pass its own deadline to lemnosd | Orion's node | `TimedOut`, code 0 |
+| a long job, once started: its stall bound | the bound its method declares (see "The stall bound of each job method"), renewed by each progress report. lemnosd ends a job silent past it as `TIMED_OUT`, and its driver is told to stop it | lemnosd host | `TimedOut`, code 110, words `it went too long without progress` |
+| a long job, its caller's deadline | `Run.deadline_ms`: the bridge cancels the job when it passes, and so does Orion's node. The earlier of the deadline and the stall bound ends the run | the bridge (and Orion's node) | `TimedOut`, code 110, words `it ran out of time` |
 | a long job, cancelled | the caller's cancel, or its session ending (Orion cancels its attached runs) | caller, Orion | `Cancelled`, code 0 |
-| file install | a partial file is deleted after 600 s with no chunk | the bridge | nothing is sent at expiry: the sender sees silence |
-| flash stream | the stream is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the transfer stops |
+| file install | a partial file is deleted after 600 s with no chunk | the bridge | the sender is answered `Rejected` with words `ran out of time` (see below) |
+| flash stream | the stream's write is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the sender is answered `Rejected` with words `ran out of time` |
 
-**Known gap: a stalled attached run with no deadline is not bounded.** A long job started with no deadline
-(`deadline_ms` zero) on a local session that stays open and quiet is not bounded by anything: lemnosd has no job timer,
-the driver decides when a job ends, the bridge keeps the run while its caller is alive, and a quiet local session
-is kept. A network session is bounded by the comm core's idle time, since the comm core drops it. Nothing in this
-repository bounds the local case today; a per-job bound declared by the driver is the proposed fix, not in this
-change.
+**The stall bound of each job method.** A job method declares how long it may go without progress, in the
+contract: `#[method(N, job, stall = SECS)]`. A job method with no bound does not build, and a packaged driver
+carries its bound in the method's flags (`METHOD_STALL_SHIFT`). The host ends a job silent past its bound as
+`TIMED_OUT`, with no result, and tells its driver to stop it. Each progress report restarts the bound. The host
+looks at a job when its bound passes, even when its driver does not tick and nothing calls it, so a silent job
+ends on time. A progress report the host has not yet seen counts from the look that sees it, so a job is never
+ended sooner than its declared bound, and may be ended up to one look after it. The bound is host policy and is
+not in the contract's hash.
+
+| contract | job method | stall bound |
+|---|---|---|
+| `system.flash` (1) | `write` (the flash image, streamed) | 900 s |
+| `system.flash` (1) | `verify` | 600 s |
+| `self-test` (1) | `run` | 600 s |
+| `system.slots` (1) | `install` (streamed or a file in `.incoming`) | 600 s |
+| `system.slots` (1) | `install_file` | 600 s |
+
+The stream and file bounds above (600 s with no chunk) end a transfer before the write's own bound of 900 s, so
+a silent sender is answered first. A test-only contract in the repository declares 60 s and does not ship.
+
+**Files and streams that run out of time.** Orion's file states have no timed-out state, so a transfer whose
+bound passes is answered to its sender as `Rejected`, with the words `ran out of time: nothing came for N seconds,
+so the file was deleted` (or `... the write is cancelled` for a stream), and its file or device job is ended. The
+code 110 is not sent: `FileStatus` has no code, and at the pinned Orion revision it has no additive section to
+carry one (see "The session note" below).
+
+**The session note: typed in the bridge, not yet on the wire.** The bridge's reply to a run carries the lease's
+end as a typed `SessionNote` (`HoldsReleased` or `None`), present on every run's reply whatever its outcome. The
+code is the outcome's, never the note's. Orion's reply frames at the pinned revision cannot carry the note yet:
+`ActionResult` has an additive section, but none for it, and `FileStatus` has no additive section at all. So the
+note still reaches a client only as the prefix `lease-ended:` in `detail` (above), and file and stream answers
+carry no note. Carrying it needs an additive field on Orion's `ActionResult` and `FileStatus`, which is Orion's to make.
+
+**A push whose sender is gone.** A file or stream push is not ended when its sender goes away. Orion's file events
+name no session (`ORION-R2 (C33)`), so the bridge cannot tell that a sender is gone, and each chunk it accepts renews
+every caller's lease. The push ends by its idle bound: nothing arrives for 600 s, the write is cancelled, and the
+sender is answered as above. So a stream's write can run for up to that long with no sender. The write runs on the
+bridge's own lemnosd connection, not on a caller's, so a caller's lease ending and its release do not touch it; the
+device is not released before the bound passes. Ending it sooner needs Orion to name the sending session.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:
@@ -989,7 +1023,7 @@ resumes from where it stopped.
 
 A transfer or stream that gets no chunk for the files' idle bound (600 seconds, the same bound after which
 the receiver deletes a partial file) is dropped with its device job, so a sender that went quiet does not
-hold the device. The bound is not set by the environment. The bridge sees chunks, not reads: Orion's
+hold the device, and the sender is answered `Rejected` with the words `ran out of time`. The bound is not set by the environment. The bridge sees chunks, not reads: Orion's
 sender packs its reads into 32 KiB chunks, so a sender keeps its stream alive by sending a chunk within
 the bound, and each chunk restarts it. The bridge does not tell the sender; the same bound applies whether
 the sender is alive or gone, because Orion says nothing when a session ends except for a run in progress.

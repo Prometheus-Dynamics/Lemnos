@@ -126,18 +126,23 @@ impl Streamer {
     }
 
     /// Drops the stream being received when no chunk has come for `idle`: the job it feeds would
-    /// otherwise hold the device for ever. The receiver expires the file at the same time, so the
-    /// sender could not send on either way. Nothing says a sender went; a quiet one is dropped the same.
+    /// otherwise hold the device for ever, and its write is cancelled with it. The receiver expires
+    /// the file at the same time. Says how the stream ended, for the sender, as the receiver does.
+    /// Nothing says a sender went; a quiet one is dropped the same.
     // ORION-R2 (C33): the sender's session end (Orion's Cancel with its reason) would say the stream is
     // over at once; until then the bound is the one `idle` gives.
-    pub fn expire(&mut self, idle: Duration) {
-        if self
+    pub fn expire(&mut self, idle: Duration) -> Option<(u64, Answer)> {
+        if !self
             .active
             .as_ref()
             .is_some_and(|a| a.seen.elapsed() >= idle)
         {
-            self.drop_active();
+            return None;
         }
+        let received = self.active.as_ref().map_or(0, |a| a.got);
+        let transfer = self.active.as_ref().map_or(0, |a| a.transfer);
+        self.drop_active();
+        Some((transfer, Answer::timed_out(received, idle)))
     }
 
     /// A stream begins: its manifest goes to the device and its job starts. A stream begun while

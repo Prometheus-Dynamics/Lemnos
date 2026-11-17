@@ -109,6 +109,10 @@ pub struct Job {
     /// Who asked for the run, as Orion names the caller (`local:<uid>`, `operator:<key>`,
     /// `peer:<node>`, `device:<name>` or `anonymous`). Empty when Orion did not say.
     pub caller: String,
+    /// The run's deadline in milliseconds from when the bridge takes it (`Request::Run`'s
+    /// `deadline_ms`): a run still going when it passes is cancelled and ends `TimedOut`, the
+    /// caller's deadline honoured here as well as by Orion's node. Zero for none.
+    pub deadline_ms: u64,
 }
 
 /// What the publisher hands the call thread.
@@ -164,6 +168,8 @@ struct Running {
     job: u64,
     /// The caller the run came from: the key of its lemnosd connection.
     caller: String,
+    /// When the run's deadline passes, if it has one ([`Job::deadline_ms`]).
+    due: Option<Instant>,
 }
 
 /// A session's lemnosd connection, and when its session last had a request: a run, a run's end or a
@@ -192,6 +198,16 @@ type Callers = HashMap<CallerKey, Lemnosd>;
 const JOB_WAIT: Duration = Duration::from_millis(50);
 /// How often the call thread looks for a caller whose lease has run out, when no run is going.
 const LEASE_TICK: Duration = Duration::from_millis(200);
+
+/// The fact about a run's session that a reply carries, as a typed value: the code means the fact,
+/// never words. Present on every run's reply, whatever its outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionNote {
+    /// Nothing about the session.
+    None,
+    /// The caller's lease ended before this reply, and its holds were released (see [`expire`]).
+    HoldsReleased,
+}
 
 /// How a run ended, as the bridge says it to Orion: Orion's outcome, and the action's status code a
 /// caller branches on. The code is the magnitude of the lemnosd status the ending names (the Linux
@@ -222,6 +238,12 @@ impl Ending {
     pub const CANCELLED: Self = Self {
         outcome: Outcome::Cancelled,
         code: 0,
+    };
+    /// Ran out of time: the run's deadline passed, or its job went too long without progress. The
+    /// code is lemnosd's `TIMED_OUT` (110), the same as Orion's node gives a deadline.
+    pub const TIMED_OUT: Self = Self {
+        outcome: Outcome::TimedOut,
+        code: 110,
     };
 }
 
@@ -265,6 +287,8 @@ pub struct Done {
     pub output: String,
     /// Why, when it did not succeed.
     pub detail: String,
+    /// The session's fact about this run, typed (see [`SessionNote`]).
+    pub session_note: SessionNote,
 }
 
 /// Runs what the publisher hands over until it stops sending.
@@ -288,6 +312,9 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             shared,
         );
         release_departed(&mut clients, &running, &mut ended, &mut departed, shared);
+        for done in expire_runs(&mut clients, &mut running, &mut ended, Instant::now()) {
+            shared.finished(done);
+        }
         let message = if !running.is_empty() {
             match messages.try_recv() {
                 Ok(message) => Some(message),
@@ -426,17 +453,18 @@ fn remember(ended: &mut Vec<CallerKey>, caller: &str) {
 }
 
 /// `detail` with the note in front when `caller`'s lease ended and it has had no reply since; the
-/// note is given once.
-fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> String {
+/// note is given once. The second value is the typed fact for the same reply.
+fn noted(ended: &mut Vec<CallerKey>, caller: &str, detail: String) -> (String, SessionNote) {
     let Some(at) = ended.iter().position(|c| c == caller) else {
-        return detail;
+        return (detail, SessionNote::None);
     };
     ended.remove(at);
-    if detail.is_empty() {
+    let text = if detail.is_empty() {
         LEASE_ENDED_NOTE.to_owned()
     } else {
         format!("{LEASE_ENDED_NOTE}; {detail}")
-    }
+    };
+    (text, SessionNote::HoldsReleased)
 }
 
 // Dropping the connection closes it on lemnosd, which tells the drivers the caller is gone. This is the
@@ -495,14 +523,51 @@ fn cancel(
         let _ = lemnosd.client.cancel_job(r.job);
         lemnosd.seen = Instant::now();
     }
-    let detail = noted(ended, &r.caller, "cancelled".to_owned());
+    let (detail, session_note) = noted(ended, &r.caller, "cancelled".to_owned());
     shared.finished(Done {
         session: r.session,
         call: r.call,
         ending: Ending::CANCELLED,
         output: String::new(),
         detail,
+        session_note,
     });
+}
+
+/// Ends the runs whose deadline has passed at `now`: each is cancelled on lemnosd and ends
+/// `TimedOut` with code 110, as Orion's node ends a deadline. A run that is still going is never ended
+/// here before its deadline; a run that ends first is taken off `running` by its own end, so its
+/// deadline has nothing to act on.
+fn expire_runs(
+    clients: &mut Callers,
+    running: &mut Vec<Running>,
+    ended: &mut Vec<CallerKey>,
+    now: Instant,
+) -> Vec<Done> {
+    let mut replies = Vec::new();
+    let mut at = 0;
+    while at < running.len() {
+        if !running[at].due.is_some_and(|due| due <= now) {
+            at += 1;
+            continue;
+        }
+        let r = running.remove(at);
+        log(&format!("run {} ran out of time", r.call));
+        if let Some(lemnosd) = clients.get_mut(&r.caller) {
+            let _ = lemnosd.client.cancel_job(r.job);
+            lemnosd.seen = now;
+        }
+        let (detail, session_note) = noted(ended, &r.caller, "it ran out of time".to_owned());
+        replies.push(Done {
+            session: r.session,
+            call: r.call,
+            ending: Ending::TIMED_OUT,
+            output: String::new(),
+            detail,
+            session_note,
+        });
+    }
+    replies
 }
 
 /// Connects the caller's connection to lemnosd, when it can be made.
@@ -560,6 +625,8 @@ fn run_one(
                 call: job.call,
                 job: started,
                 caller: caller.to_owned(),
+                due: (job.deadline_ms != 0)
+                    .then(|| Instant::now() + Duration::from_millis(job.deadline_ms)),
             });
             return;
         }
@@ -568,13 +635,14 @@ fn run_one(
         Err(Failure::Status(status, why)) => (ending_of_status(status), String::new(), why),
         Err(Failure::Failed(why)) => (Ending::FAILED, String::new(), why),
     };
-    let detail = noted(ended, caller, detail);
+    let (detail, session_note) = noted(ended, caller, detail);
     shared.finished(Done {
         session: job.session,
         call: job.call,
         ending,
         output,
         detail,
+        session_note,
     });
 }
 
@@ -635,7 +703,7 @@ fn follow(
                     lemnosd.seen = Instant::now();
                 }
                 let mut done = job_done(&r, status, &result);
-                done.detail = noted(ended, &r.caller, done.detail);
+                (done.detail, done.session_note) = noted(ended, &r.caller, done.detail);
                 shared.finished(done);
             }
         }
@@ -656,6 +724,9 @@ fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
         };
         let detail = if status == Status::CANCELLED {
             "cancelled".to_owned()
+        } else if status == Status::TIMED_OUT {
+            // Lemnosd ends a job as timed out only when it goes too long without progress.
+            "it went too long without progress".to_owned()
         } else {
             format!("the job ended with status {}", status.0)
         };
@@ -667,6 +738,7 @@ fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
         ending,
         output,
         detail,
+        session_note: SessionNote::None,
     }
 }
 
@@ -736,13 +808,14 @@ fn end_attached(
             let _ = lemnosd.client.cancel_job(r.job);
             lemnosd.seen = Instant::now();
         }
-        let detail = noted(ended, &r.caller, "cancelled".to_owned());
+        let (detail, session_note) = noted(ended, &r.caller, "cancelled".to_owned());
         shared.finished(Done {
             session: r.session,
             call: r.call,
             ending: Ending::CANCELLED,
             output: String::new(),
             detail,
+            session_note,
         });
     }
     *running = kept;
@@ -805,6 +878,7 @@ fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail:
             ending: Ending::FAILED,
             output: String::new(),
             detail: detail.to_owned(),
+            session_note: SessionNote::None,
         });
     }
     *running = kept;
@@ -1019,6 +1093,7 @@ mod departure_tests {
             call,
             job: call,
             caller: caller.to_owned(),
+            due: None,
         }
     }
 
@@ -1051,6 +1126,67 @@ mod departure_tests {
 }
 
 #[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    fn run(call: u64, due: Option<Instant>) -> Running {
+        Running {
+            session: 1,
+            token: 2,
+            detached: false,
+            call,
+            job: call + 100,
+            caller: caller_key(2),
+            due,
+        }
+    }
+
+    /// A run whose deadline has passed ends `TimedOut` with code 110, and is off the books; a run whose
+    /// deadline has not passed, or that has none, is still running.
+    #[test]
+    fn a_run_past_its_deadline_ends_timed_out_and_the_others_keep_going() {
+        let now = Instant::now();
+        let mut running = vec![
+            run(1, Some(now - Duration::from_millis(1))),
+            run(2, Some(now + Duration::from_secs(60))),
+            run(3, None),
+        ];
+        let replies = expire_runs(&mut Callers::new(), &mut running, &mut Vec::new(), now);
+        assert_eq!(replies.len(), 1, "only the run past its deadline ends");
+        assert_eq!(replies[0].call, 1);
+        assert_eq!(replies[0].ending, Ending::TIMED_OUT);
+        assert_eq!(replies[0].ending.code, 110);
+        assert_eq!(replies[0].detail, "it ran out of time");
+        assert_eq!(running.iter().map(|r| r.call).collect::<Vec<_>>(), [2, 3]);
+    }
+
+    /// The typed fact is given on the reply after a lease ended, whatever the outcome, and the code
+    /// stays the outcome's: the words only say it for people.
+    #[test]
+    fn a_reply_after_a_lease_ended_carries_the_fact_as_a_typed_value() {
+        let now = Instant::now();
+        let mut ended = vec![caller_key(2)];
+        let mut running = vec![run(1, Some(now))];
+        let replies = expire_runs(&mut Callers::new(), &mut running, &mut ended, now);
+        assert_eq!(replies[0].session_note, SessionNote::HoldsReleased);
+        assert_eq!(
+            replies[0].ending,
+            Ending::TIMED_OUT,
+            "the outcome is not changed by the note"
+        );
+        assert!(ended.is_empty(), "the note is given once");
+
+        let mut running = vec![run(2, Some(now))];
+        let replies = expire_runs(&mut Callers::new(), &mut running, &mut ended, now);
+        assert_eq!(
+            replies[0].session_note,
+            SessionNote::None,
+            "given once, then gone"
+        );
+    }
+}
+
+#[cfg(test)]
 mod ending_tests {
     use super::*;
 
@@ -1062,6 +1198,7 @@ mod ending_tests {
             job: 4,
             detached: false,
             caller: caller_key(2),
+            due: None,
         }
     }
 

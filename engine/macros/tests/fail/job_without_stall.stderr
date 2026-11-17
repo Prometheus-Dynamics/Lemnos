@@ -1,0 +1,5 @@
+error: a job method declares how long it may go without progress: #[method(N, job, stall = SECS)]
+ --> tests/fail/job_without_stall.rs:2:24
+  |
+2 | pub trait T { #[method(1, job)] fn a(&mut self) -> lemnos_core::Result<lemnos_core::JobId>; }
+  |                        ^

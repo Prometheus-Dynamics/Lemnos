@@ -22,6 +22,12 @@ pub struct MethodInfo {
     /// The method starts a long job and returns its [`JobId`](crate::JobId): it is started with
     /// the host's job form, not called.
     pub job: bool,
+    /// For a job: the longest it may go without progress, in seconds. The host ends a job that goes
+    /// longer as `TIMED_OUT`, and progress renews the bound (see `docs/daemon.md`, "What bounds a
+    /// run"). Zero for a method that is not a job. Declared with `#[method(N, job, stall = SECS)]`;
+    /// a job method with no bound does not build. Not part of the method's hash: it is host policy,
+    /// not what a caller and a device must agree on.
+    pub stall_secs: u32,
     /// How the value this method reads or sets shows, when the contract says. Not part of the
     /// method's layout: see [`Description`](crate::Description) for how a device's items use it.
     pub reading: Option<Reading>,

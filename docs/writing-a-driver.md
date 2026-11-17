@@ -301,8 +301,10 @@ a device the bind found present still answers nothing new until `start` runs.
 
 ### Long jobs
 
-A method that runs longer than a call is marked `#[method(N, job)]` in its contract and returns
-`Result<JobId>`. The driver starts the work, returns a number of its choosing, and goes on with the
+A method that runs longer than a call is marked `#[method(N, job, stall = SECS)]` in its contract and returns
+`Result<JobId>`. `stall` is the longest the job may go without a progress report: a job silent past it is ended by
+the host as timed out, and each progress report restarts the count. A job method without a `stall` does not build.
+The contract's job methods and their bounds are listed in `docs/daemon.md`, "The stall bound of each job method". The driver starts the work, returns a number of its choosing, and goes on with the
 work in `tick` (set `TICKS`). It sets `JOBS` and answers two more methods. `job(id, result)` says
 how a job stands: `JobState::Running { done, total }` (in the contract's unit; `total` 0 when not
 known yet), or `JobState::Finished(status)` with the result encoded into `result` on success. The

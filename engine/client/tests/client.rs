@@ -217,6 +217,7 @@ fn a_typed_contract_whose_encoding_differs_on_the_device_is_refused() {
             returns: Shape::U32,
             has_out_buffer: false,
             job: false,
+            stall_secs: 0,
             reading: None,
             added: false,
         }],
@@ -454,7 +455,7 @@ fn a_polled_call_on_an_old_handle_is_stale() {
 
 #[contract("example.counter", version = 1)]
 pub trait Jobbing {
-    #[method(2, job)]
+    #[method(2, job, stall = 60)]
     fn run(&mut self, how: u8) -> Result<lemnos_core::JobId>;
 }
 

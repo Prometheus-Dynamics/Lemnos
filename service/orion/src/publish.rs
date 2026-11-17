@@ -682,7 +682,7 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args, caller, token, detached) = match request {
+            let (call, name, target, args, caller, token, detached, deadline_ms) = match request {
                 Request::Run {
                     call,
                     name,
@@ -691,8 +691,18 @@ impl Session {
                     caller,
                     session,
                     detached,
+                    deadline_ms,
                     ..
-                } => (call, name, target, args, caller, session, detached),
+                } => (
+                    call,
+                    name,
+                    target,
+                    args,
+                    caller,
+                    session,
+                    detached,
+                    deadline_ms,
+                ),
                 // The session with this token ended: whatever its callers hold is released
                 // (see `calls::caller_gone`).
                 Request::CallerGone { session } => {
@@ -716,6 +726,7 @@ impl Session {
             let job = self.job(call, &name, &target, args, caller).map(|job| Job {
                 token,
                 detached,
+                deadline_ms,
                 ..job
             });
             match job {
@@ -781,6 +792,7 @@ impl Session {
             verb,
             args,
             caller,
+            deadline_ms: 0,
         })
     }
 

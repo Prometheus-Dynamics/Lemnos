@@ -17,8 +17,9 @@ use proc_macro::TokenStream;
 ///     fn read(&mut self) -> Result<u32>;
 ///     #[method(2)]
 ///     fn dump(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
-///     /// Starts a long job: the host carries its progress and result to the caller.
-///     #[method(3, job)]
+///     /// Starts a long job: the host carries its progress and result to the caller. It ends as
+///     /// timed out if it goes 60 seconds without progress.
+///     #[method(3, job, stall = 60)]
 ///     fn rebuild(&mut self, from: u32) -> Result<JobId>;
 /// }
 /// ```

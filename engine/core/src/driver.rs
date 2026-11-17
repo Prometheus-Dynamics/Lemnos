@@ -323,7 +323,7 @@ pub trait Lifecycle: Sized {
         false
     }
     /// Set this to `true` for a driver with long jobs: methods its contracts mark
-    /// `#[method(N, job)]`, which start work and return a [`JobId`] at once. The work itself is
+    /// `#[method(N, job, stall = SECS)]`, which start work and return a [`JobId`] at once. The work itself is
     /// done a step at a time from [`Lifecycle::tick`], so such a driver ticks too.
     const JOBS: bool = false;
     /// How job `job` stands. The host asks after every method, tick and cancel on this driver,
@@ -342,7 +342,7 @@ pub trait Lifecycle: Sized {
 
 /// A long job, by the number its driver gave it when it started.
 ///
-/// A contract method marked `#[method(N, job)]` returns one. The host keeps the job on the books
+/// A contract method marked `#[method(N, job, stall = SECS)]` returns one. The host keeps the job on the books
 /// for whoever started it, asks the driver how it stands ([`Driver::job`]), and carries its
 /// progress and its result to that caller. A driver's numbers are its own: it may reuse one once
 /// it has answered [`JobState::Finished`] for it. A client sees the host's number for the job

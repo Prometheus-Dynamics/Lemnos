@@ -79,7 +79,7 @@ pub trait Slots {
     /// old slots. One install at a time: `BUSY` while another runs. Never over the running or
     /// the default slot. `NOT_PERMITTED` when the signature policy refuses the bundle (`info`
     /// then says why); `INVALID_ARGUMENT` for a malformed signature.
-    #[method(2, job)]
+    #[method(2, job, stall = 600)]
     fn install(&mut self, size: u64, pin: bool, keep_old: bool) -> Result<JobId>;
     /// The running install's bytes from `offset`, which must be where the last write ended.
     /// Only its starter may write.
@@ -118,7 +118,7 @@ pub trait Slots {
     /// `[A-Za-z0-9._-]`, and the file must be a regular file there, not a link. The driver owns
     /// the file: it is deleted when the job ends, however it ends, and `.incoming` is emptied
     /// when the driver starts. `BUSY` while another install runs.
-    #[method(11, job)]
+    #[method(11, job, stall = 600)]
     fn install_file(&mut self, name: &str, pin: bool, keep_old: bool) -> Result<JobId>;
     /// The boot history, one line per boot kept (`n utc slot outcome reset requested boot`,
     /// oldest first; see `lemnos-slot-store`'s `boots`). Returns its length; `BUFFER_TOO_SMALL`

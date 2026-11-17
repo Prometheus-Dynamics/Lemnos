@@ -11,6 +11,8 @@
 //! host's table for its kind, so the driver's own code is the same either way.
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -23,10 +25,10 @@ use lemnos_abi::package::{
     EXTRA_HAS_WARN_HIGH, EXTRA_HAS_WARN_LOW, EXTRA_ITEM, EXTRA_METHOD, EXTRA_UNIT_DIMENSIONLESS,
     EXTRA_UNIT_UNKNOWN, Fd, HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable,
     ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, METHOD_JOB,
-    NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageContract, PackageControlSetup,
-    PackageDmaBuffer, PackageDriver, PackageEdge, PackageExtra, PackageField, PackageFrame,
-    PackageHealth, PackageInstance, PackageInterruptEvent, PackageIsoPacket, PackageItem,
-    PackageJobState, PackageLineConfig, PackageManifest, PackageMethod, PackageNeed,
+    METHOD_STALL_SHIFT, NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageContract,
+    PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge, PackageExtra, PackageField,
+    PackageFrame, PackageHealth, PackageInstance, PackageInterruptEvent, PackageIsoPacket,
+    PackageItem, PackageJobState, PackageLineConfig, PackageManifest, PackageMethod, PackageNeed,
     PackagePwmConfig, PackageSetting, PackageShape, PackageSpiSegment, PackageTransfer,
     PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT, SETTING_TEXT, Slice, SliceMut, Str,
     TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI,
@@ -471,7 +473,11 @@ fn method_out(method: &MethodInfo) -> PackageMethod {
     PackageMethod {
         id: method.id,
         has_out_buffer: u16::from(method.has_out_buffer),
-        flags: if method.job { METHOD_JOB } else { 0 },
+        flags: if method.job {
+            METHOD_JOB | (method.stall_secs << METHOD_STALL_SHIFT)
+        } else {
+            0
+        },
         name: Str::new(method.name),
         params: kept(params.collect()),
         returns: shape_out(&method.returns),
@@ -657,6 +663,25 @@ fn shape_in(shape: &PackageShape, depth: u32) -> core::result::Result<Shape, &'s
     })
 }
 
+/// The stall bound of a method's flags, refused unless it is what a job method carries: a job has
+/// one of at least a second, and a method that is not a job has none.
+fn stall_in(id: u16, flags: u32) -> core::result::Result<u32, String> {
+    let stall = flags >> METHOD_STALL_SHIFT;
+    let job = flags & METHOD_JOB != 0;
+    if job && stall == 0 {
+        return Err(format!(
+            "job method {id} declares no stall bound: rebuild the package with #[method({id}, job, stall = SECS)]"
+        ));
+    }
+    if !job && stall != 0 {
+        return Err("a method that is not a job has a stall bound".into());
+    }
+    if flags & !(METHOD_JOB | (u32::MAX << METHOD_STALL_SHIFT)) != 0 {
+        return Err("a method has flags this host does not know".into());
+    }
+    Ok(stall)
+}
+
 fn tag_in(tag: &'static str) -> core::result::Result<Tag, &'static str> {
     let well_formed = tag.split_once('/').is_some_and(|(name, major)| {
         !name.is_empty() && !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit())
@@ -677,10 +702,10 @@ fn tag_in(tag: &'static str) -> core::result::Result<Tag, &'static str> {
 pub fn manifest_in(
     manifest: &PackageManifest,
     extras: &[PackageExtra],
-) -> core::result::Result<Manifest, &'static str> {
+) -> core::result::Result<Manifest, String> {
     let name = manifest.name.as_str();
     if name.is_empty() {
-        return Err("the driver has no name");
+        return Err("the driver has no name".into());
     }
     let mut needs = Vec::new();
     for need in manifest.needs.as_slice() {
@@ -690,7 +715,7 @@ pub fn manifest_in(
             NeedKind::Bus(bus_of(need.kind).ok_or("a need of a kind this host does not know")?)
         };
         if need.name.as_str().is_empty() {
-            return Err("a need has no name");
+            return Err("a need has no name".into());
         }
         // A packaged driver's stream kind is not in its package table yet: a stream it serves
         // without one is refused by name when the board file is checked (`engine/host`).
@@ -702,7 +727,7 @@ pub fn manifest_in(
         });
     }
     if manifest.provides.as_slice().len() > usize::from(u8::MAX) {
-        return Err("too many contracts");
+        return Err("too many contracts".into());
     }
     let mut provides = Vec::new();
     for (position, contract) in manifest.provides.as_slice().iter().enumerate() {
@@ -733,6 +758,7 @@ pub fn manifest_in(
                 returns: shape_in(&method.returns, MAX_SHAPE_DEPTH)?,
                 has_out_buffer: method.has_out_buffer != 0,
                 job: method.flags & METHOD_JOB != 0,
+                stall_secs: stall_in(method.id, method.flags)?,
                 reading: extras
                     .iter()
                     .find(|e| {
@@ -2045,6 +2071,23 @@ mod tests {
             host: &LIAR,
             handle: Handle::new(1, 1),
         }
+    }
+
+    #[test]
+    fn a_job_without_a_stall_bound_is_refused_and_a_bound_on_a_plain_method_is_too() {
+        assert_eq!(
+            stall_in(7, METHOD_JOB),
+            Err("job method 7 declares no stall bound: rebuild the package with #[method(7, job, stall = SECS)]".into())
+        );
+        assert_eq!(
+            stall_in(7, 60 << METHOD_STALL_SHIFT),
+            Err("a method that is not a job has a stall bound".into())
+        );
+        assert_eq!(stall_in(7, METHOD_JOB | (60 << METHOD_STALL_SHIFT)), Ok(60));
+        assert_eq!(
+            stall_in(7, METHOD_JOB | (60 << METHOD_STALL_SHIFT) | 2),
+            Err("a method has flags this host does not know".into())
+        );
     }
 
     #[test]
