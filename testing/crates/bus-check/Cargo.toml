@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-bus-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's bus check: SMBus, I2C and SPI transfers through the kernel's cores (CZ-GUEST-2 port of lemnos_bus_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
