@@ -73,7 +73,7 @@ fn main() {
     let (period_ms, expect) = match parse_args(&args) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("{e}");
+            let _ = writeln!(io::stderr(), "{e}");
             std::process::exit(2);
         }
     };
