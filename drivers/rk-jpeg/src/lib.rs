@@ -44,6 +44,7 @@ pub mod address;
 mod device;
 pub mod encoder;
 pub mod mpp;
+pub mod probe;
 pub mod regs;
 mod session;
 pub mod status;
