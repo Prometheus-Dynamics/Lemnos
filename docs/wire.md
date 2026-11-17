@@ -64,6 +64,8 @@ closes the connection on a larger length, without reading it.
 | 32 | EndpointsOpen | id u32, device u32 | to host |
 | 33 | Endpoints | id u32 | to client, with two descriptors |
 | 34 | EndpointsClose | id u32, device u32 | to host |
+| 40 | EndpointsOpenEnd | id u32, device u32 | to host |
+| 41 | EndpointsEnd | id u32, with three descriptors | to client |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -96,7 +98,7 @@ closes the connection on a kind it doesn't know (rule 3).
 | 1 | 2 | takes Packages |
 | 2 | 4 | takes CallJob and JobCancel |
 | 4 | 16 | takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints |
-| 4 | 8 | frame streams are the shm rings of [`docs/ring.md`](ring.md), with the descriptors of this page's stream answers |
+| 3 | 8 | frame streams are the shm rings of [`docs/ring.md`](ring.md), with the descriptors of this page's stream answers |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -376,7 +378,7 @@ around its own accesses.
 
 `stride` is `buffer_bytes` rounded up to a multiple of 4096: a shared pool holds buffer `b` at
 `b × stride`. A frame is an entry naming the pool buffers it occupies (one per plane), with a
-20-byte metadata payload: sequence, identity and length, little-endian. Its time is the frame's
+32-byte metadata payload (`FrameInfo`): sequence, identity, length, job-end reason (0 for a frame) and end time, little-endian. Its time is the frame's
 `CLOCK_MONOTONIC` time. A job is one sample of the job ring, whose bytes are the job.
 
 The job acks word is the number of jobs the host has collected. The consumer posts a job only
@@ -415,7 +417,7 @@ crates, which check every index, length and stamp against the shape they read on
 trust a word twice.
 
 - A frame's entry must name pool buffers the consumer's pool has, and its metadata must be exactly
-  the 20 bytes. A frame's length must be at most the stream's frame size.
+  the 32 bytes. A frame's length must be at most the stream's frame size.
 - The host reads the consumer's holds at one instant and cuts off a consumer whose marks are stuck
   past the hold time. A cut-off consumer's stream faults.
 - A job is one sample of the job ring. A job the reader lost because the consumer published past
@@ -530,12 +532,12 @@ A controller that lets go of the gadget does not end the hold, as the daemon see
 ep0 and the endpoint files open and binds the gadget again by writing `UDC`, END stays open, and the
 holder's copies are the same open files and work again once the gadget is up (case 4 above). While the
 gadget is down the daemon lends no new copies (`NO_DEVICE`). What a holder does about that is its own
-choice, and the Orion bridge (`service/orion/src/links.rs`) keeps its hold through it: when the function's
+choice, and the bridge (`service/orion/src/links.rs`) keeps its hold through it: when the function's
 `up` or the host's configuration goes, the bridge keeps the pair and its offer on the comm core, and
 logs the change. It offers the pair again only when END says the hold is over, because only then are the
 endpoints new. The comm core's reader retries an endpoint that is down (`ESHUTDOWN`, `EAGAIN`), and a
 host that comes back and says hello again on the same stream is welcomed in a new session (the comm core's
-rule that a hello on a link always begins a session, Orion C57). The check on a board is in
+rule that a hello on a link always begins a session). The check on a board is in
 `testing/board-runs/R1.md`, and the QEMU check `testing/crates/orion-link-check` makes the let-go with the
 pinned comm core and a host session on the emulated bus.
 
@@ -700,7 +702,7 @@ for a client built at L1a against a service at L1; nothing was called. `camera.r
 `inputs` and `input` (methods 13 and 14), and kept its base hash because both are marked `#[added]`. Fields
 and methods marked `#[added]` leave the base hash alone (the test `an_added_field_does_not_move_the_base_or_the_method_hash`
 in `engine/core/src/layout.rs`). A tool that learns a device from its description (`lemnos-ctl`, the
-Orion bridge) and the C API's `lemnos_open` run no bind check, and are not refused by a base hash.
+the bridge) and the C API's `lemnos_open` run no bind check, and are not refused by a base hash.
 
 ## Events
 

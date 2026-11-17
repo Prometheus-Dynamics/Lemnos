@@ -460,8 +460,12 @@ impl<N: Node, F: FnMut() -> io::Result<N>> StatelessBlock<N, F> {
         }
 
         // The request: the picture, the controls, the source, then run it.
+        // Set once the first buffer is queued with the device: from then on the session holds
+        // buffers, and a failure is the device's, not a refusal of the caller's buffers.
+        let mut queued = false;
         let run = (|| -> io::Result<Option<usize>> {
             session.queue_capture(index, &queue[..planes])?;
+            queued = true;
             session.set_request_controls(request, &mut controls[..count])?;
             let from = [QueuePlane {
                 memory: PlaneMemory::Dmabuf(source_fd.fd()),
@@ -514,7 +518,7 @@ impl<N: Node, F: FnMut() -> io::Result<N>> StatelessBlock<N, F> {
             }
             // The device ran the request and flagged the picture: the stream's, not its.
             Ok(None) => Start::Failed,
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput && !queued => {
                 // The session refused a buffer before anything was queued with the device.
                 Start::Refused
             }

@@ -180,8 +180,8 @@ SoC driver for each. Its `lemnos.ko` table is checked against the sources by
 A kernel with no loadable modules needs the module built in: `CONFIG_LEMNOS=y` with the kernel tree
 described in that page, not `make -C kernel`.
 
-Module parameters (`modinfo lemnos.ko`; set at load with `insmod lemnos.ko name=value` or from the
-image's modprobe.d). All are read-only at runtime (mode 0444). Empty means none:
+Module parameters (`modinfo lemnos.ko`; set at load by `modprobe lemnos name=value`, or from the
+image's modprobe.d with `options lemnos`; not by `insmod`, which reads no modprobe.d file). All are read-only at runtime (mode 0444). Empty means none:
 
 - `owned=` (compatibles the module may claim; required for any binding)
 - `confined=` (compatibles whose IOMMU really confines their DMA)
@@ -204,7 +204,7 @@ The module claims a platform device only when two things agree: the module was l
 device's compatible in `owned`, and the device's `driver_override` names `lemnos`.
 
 ```sh needs:root-and-a-board
-insmod lemnos.ko owned=vendor,block
+modprobe lemnos owned=vendor,block
 echo lemnos > /sys/bus/platform/devices/$DEVICE/driver_override
 echo $DEVICE > /sys/bus/platform/drivers/lemnos/bind
 ```

@@ -743,7 +743,6 @@ fn the_board_publishes_its_identity_facts_and_what_it_offers() {
     let _bridge = start_bridge(&lemnosd, board.socket(), None);
     let dashboard = dashboard(board.socket());
 
-    let facts = hello_with(&dashboard, "offers");
     let expected: BTreeMap<String, String> = [
         ("family", "reference"),
         ("lease.seconds", "60"),
@@ -759,6 +758,12 @@ fn the_board_publishes_its_identity_facts_and_what_it_offers() {
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
+    // Each fact is its own topic, declared one after another: `offers` comes before the lease facts
+    // in the publisher's order. So wait for every expected name, not for one of them, and compare
+    // the whole set once it is there.
+    let facts = wait_for("every identity fact, the offers and the lease", || {
+        hello(&dashboard).filter(|facts| expected.keys().all(|name| facts.contains_key(name)))
+    });
     assert_eq!(facts, expected);
 }
 
@@ -774,18 +779,22 @@ fn a_fact_that_cannot_be_read_is_absent() {
     let _bridge = start_bridge(&lemnosd, board.socket(), None);
     let dashboard = dashboard(board.socket());
 
-    let facts = hello_with(&dashboard, "offers");
+    // The facts arrive as the board's identity and the lease come in, one topic at a time: wait
+    // until the names are the whole expected set, not until one of them is there.
+    const NAMES: [&str; 6] = [
+        "family",
+        "lease.seconds",
+        "leases.ended",
+        "model",
+        "offers",
+        "version.lemnos",
+    ];
+    let facts = wait_for("the facts the board has", || {
+        hello(&dashboard).filter(|facts| facts.keys().map(String::as_str).eq(NAMES))
+    });
     let names: Vec<&str> = facts.keys().map(String::as_str).collect();
     assert_eq!(
-        names,
-        [
-            "family",
-            "lease.seconds",
-            "leases.ended",
-            "model",
-            "offers",
-            "version.lemnos"
-        ],
+        names, NAMES,
         "no serial and no running slot: absent, not guessed"
     );
 }

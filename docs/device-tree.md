@@ -26,8 +26,17 @@ lemnos-ctl validate --no-live --socs socs testing/boards/reference.toml
   `pisp_be=`, `unconfined=`, `confined=`, `gsdma=`, `a733_ve=`, `k230_isp=`, `vip9000=`), and a
   `blacklist` line for each stock module that binds one of those nodes. Each node has its reason
   beside it. Which driver binds an enabled node is not a fact of the tree, so the module
-  configuration is what keeps the stock driver off it. A blacklist stops the module loading; a
-  driver built into the kernel is not stopped, and the start check reports it.
+  configuration is what keeps the stock driver off it. A blacklist stops automatic loading only:
+  an explicit `modprobe` of the stock module still loads it, and so does any loader that names it.
+  A driver built into the kernel is not stopped by a blacklist at all, and the start check reports it.
+
+  The file needs a modprobe that honours `blacklist` and `options` from `/etc/modprobe.d`. BusyBox's
+  modprobe honours `blacklist` only when built with `FEATURE_MODPROBE_BLACKLIST`; without it the stock
+  driver loads and binds the node. `lemnos.ko` must be loaded by that modprobe, not by `insmod`:
+  `insmod` reads no modprobe.d file, so the `options lemnos` line (the owned nodes and the roles) is
+  ignored and the module claims nothing. Ordering: nothing loads a blacklisted stock module before
+  `lemnos.ko`. A stock driver that binds its node first leaves the module nothing to claim, and the
+  start check reports it as a stock driver bound to a node the board gives to the module.
 
 Every device in the board file must be traceable to one of those outputs, or be a device whose
 driver needs no hardware. What a driver needs is in its own manifest: the tool reads the manifests of

@@ -2176,6 +2176,35 @@ fn on_nand_room_is_the_ubi_devices() {
 }
 
 #[test]
+fn on_nand_a_device_with_no_room_left_at_the_volume_refuses_the_install_by_name() {
+    let (mut board, fake) = Board::on_nand("os-1", 64 << 20);
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    // The room goes after the install was accepted: the volume's make is then refused as full.
+    let avail = fake.ubi.sys.join("class/ubi").join(&fake.ubi.device);
+    fs::write(avail.join("avail_eraseblocks"), "0\n").unwrap();
+    let _ = board.slots.write(0, &bundle);
+    let mut out = [0u8; 128];
+    let end = match board.slots.job(job, &mut Reply::new(&mut out)) {
+        JobState::Finished(status) => status,
+        JobState::Running { .. } => panic!("the install never ended"),
+    };
+    assert_eq!(end, Status::IO, "{}", board.state().error);
+    assert!(
+        board.state().error.contains("the image's volume"),
+        "{}",
+        board.state().error
+    );
+    assert_eq!(volumes(&fake), [image_volume("os-1")]);
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+#[test]
 fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
     let dir = TempDir::new("nand-record");
     let fake = Arc::new(Fake::new(nand(&dir.0), 1 << 20));

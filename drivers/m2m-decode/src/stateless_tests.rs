@@ -440,6 +440,27 @@ fn a_device_that_fails_is_closed_and_opened_again_after_a_backoff() {
 }
 
 #[test]
+fn a_request_the_device_refuses_after_its_buffers_are_queued_closes_the_session() {
+    let mut rig = Rig::new();
+    // The picture and the source are queued with the device, and then the request is refused
+    // (EINVAL). Those buffers stay queued on the session, so the job is a failure of the device:
+    // the session closes and is opened again after its backoff. It is not a refusal of the caller.
+    rig.mock.with(|d| d.faults.queue_request = true);
+    assert_eq!(rig.usual().0, JobStatus::Failed);
+    assert!(
+        !rig.block.is_open(),
+        "a session with queued buffers is closed"
+    );
+    rig.mock.with(|d| d.faults.queue_request = false);
+    rig.now += 250_000_000;
+    assert_eq!(
+        rig.usual().0,
+        JobStatus::Done,
+        "the device is opened again and runs"
+    );
+}
+
+#[test]
 fn decoding_allocates_nothing_once_the_session_is_open() {
     let mut rig = Rig::new();
     assert_eq!(rig.usual().0, JobStatus::Done);
