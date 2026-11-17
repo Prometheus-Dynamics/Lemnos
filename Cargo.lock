@@ -369,6 +369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-builtin-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-camera-proof"
 version = "2.0.1-dev"
 dependencies = [
@@ -432,6 +440,14 @@ dependencies = [
  "lemnos-sim",
  "lemnos-wire",
  "lemnosd",
+]
+
+[[package]]
+name = "lemnos-claim-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
 ]
 
 [[package]]
@@ -715,6 +731,14 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
  "lemnos-macros",
+]
+
+[[package]]
+name = "lemnos-crash-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
 ]
 
 [[package]]
@@ -2244,6 +2268,22 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "libc",
+]
+
+[[package]]
+name = "lemnos-watchdog-init"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-hw-watchdog-sys",
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
+name = "lemnos-watchdog-user"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
 ]
 
 [[package]]

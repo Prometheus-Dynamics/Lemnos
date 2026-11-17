@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
 # Boots a kernel with no loadable modules and lemnos built in (build-kernel.sh --modules-off),
 # once per parameter set, each set on the kernel command line. Each boot must pass the guest's
-# checks (testing/qemu/init-builtin.c): the parameters read back as given, the claims work, and
+# checks (crates/builtin-init, the port of init-builtin.c): the parameters read back as given, the claims work, and
 # the kernel reports nothing wrong.
 #
 #   KERNEL  the bootable image of such a kernel (required: set KERNEL to its bzImage)
-#   CC      a compiler that can link static binaries (default: gcc)
+#   CARGO   the cargo that builds the guests for musl (default: cargo; the group's e-cargo.sh)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of the modules-off kernel}"
-CC="${CC:-gcc}"
+CARGO="${CARGO:-cargo}"
+target=x86_64-unknown-linux-musl
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
-flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter)
-read -r -a compiler <<<"$CC"
-"${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init-builtin.c"
-"${compiler[@]}" "${flags[@]}" -o "$root/lemnos_claim_check" "$repo/kernel/test/lemnos_claim_check.c"
+# The guests are Rust (CZ-GUEST): static musl binaries, the init and the claim check.
+(cd "$repo" && "$CARGO" build -q -p lemnos-builtin-init -p lemnos-claim-check --target "$target")
+guests="${CARGO_TARGET_DIR:-$repo/target}/$target/debug"
+cp "$guests/lemnos-builtin-init" "$root/init"
+cp "$guests/lemnos-claim-check" "$root/lemnos_claim_check"
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 
 accel=tcg

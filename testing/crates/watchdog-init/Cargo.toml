@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-watchdog-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's watchdog hook: arms the watchdog, feeds it, and hands PID 1 to the stand-in (CZ-GUEST port of watchdog-init.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-driver-hw-watchdog-sys = { path = "../../../drivers/hw-watchdog-sys" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true

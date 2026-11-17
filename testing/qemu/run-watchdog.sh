@@ -6,8 +6,8 @@
 #              slot, so its refusal goes to the rescue: it waits 30 s, feeding the watchdog, and restarts.
 #              Passes when it is armed at 15 s, the rescue's restart is what ends the guest, and the
 #              guest was up past the 15 s timeout.
-#   normal     the hook (watchdog-init.c) arms the watchdog as slot-init does and hands PID 1 to the
-#              userspace stand-in (watchdog-user.c), which opens /dev/watchdog and feeds it for 45 s.
+#   normal     the hook (crates/watchdog-init) arms the watchdog as slot-init does and hands PID 1 to the
+#              userspace stand-in (crates/watchdog-user), which opens /dev/watchdog and feeds it for 45 s.
 #              Passes when the stand-in feeds for the whole 45 s and powers off, and the hand-over gap
 #              (the hook's last feed, made right before its exec, to the stand-in's first feed) is at
 #              most a third of the applied period (HANDOVER_GAP_DIVISOR).
@@ -35,8 +35,7 @@
 #
 #   KERNEL  the bootable image of a kernel with CONFIG_I6300ESB_WDT=y (required), e.g. the pinned
 #           modules-off bzImage (tmp/pinned-2026-11-14-d/k-modules-off/build/arch/x86/boot/bzImage)
-#   CC      a compiler that can link static binaries (default: gcc, as run.sh and run-builtin.sh use)
-#   CARGO   the cargo to build lemnos-slot-init for musl with (default: cargo; the group's e-cargo.sh)
+#   CARGO   the cargo to build the guests for musl with (default: cargo; the group's e-cargo.sh)
 #   MODES   the modes to run (default: "slot-init normal stall")
 #   LOGS    where the console logs are kept (default: qemu-watchdog under TMPDIR, or /tmp)
 set -euo pipefail
@@ -44,7 +43,6 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_I6300ESB_WDT=y}"
-CC="${CC:-gcc}"
 CARGO="${CARGO:-cargo}"
 MODES="${MODES:-slot-init normal stall}"
 LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-watchdog}"
@@ -59,17 +57,15 @@ HANDOVER_GAP_DIVISOR=3
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
-read -r -a compiler <<<"$CC"
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
 
-# The real slot-init, static musl for the initramfs, built the way run.sh builds its musl binaries (the
-# rustup target's own linking, with the system cc), and the two stand-ins, static with CC.
-(cd "$repo" && "$CARGO" build -q -p lemnos-slot-init --target "$target")
-slot_init="${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-slot-init"
-flags=(-static -O2 -Wall -Wextra)
-"${compiler[@]}" "${flags[@]}" -o "$work/watchdog-init" "$here/watchdog-init.c"
-"${compiler[@]}" "${flags[@]}" -o "$work/watchdog-user" "$here/watchdog-user.c"
+# The real slot-init, and the hook and the stand-in: all Rust, static musl for the initramfs (CZ-GUEST).
+(cd "$repo" && "$CARGO" build -q -p lemnos-slot-init -p lemnos-watchdog-init -p lemnos-watchdog-user --target "$target")
+guests="${CARGO_TARGET_DIR:-$repo/target}/$target/debug"
+slot_init="$guests/lemnos-slot-init"
+cp "$guests/lemnos-watchdog-init" "$work/watchdog-init"
+cp "$guests/lemnos-watchdog-user" "$work/watchdog-user"
 
 fail() { echo "qemu-watchdog: $*" >&2; exit 1; }
 

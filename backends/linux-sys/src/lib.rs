@@ -18,6 +18,7 @@ pub mod eventfd;
 pub mod ext4;
 pub mod functionfs;
 pub mod gpio;
+pub mod guest;
 pub mod i2c;
 pub mod inotify;
 pub mod media;

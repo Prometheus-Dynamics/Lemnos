@@ -150,7 +150,7 @@ into the tree as `drivers/misc/lemnos`, adds the Kconfig source and the `obj-$(C
 The copy is made each time, so with a warm cache only `kernel/` recompiles.
 
 `run-builtin.sh` boots that image three times, each with a different command line, and each boot
-must pass the guest's checks (`testing/qemu/init-builtin.c`):
+must pass the guest's checks (`testing/crates/builtin-init`):
 
 | Boot | Command line (`lemnos.` parameters) |
 |---|---|
