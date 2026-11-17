@@ -164,6 +164,8 @@ struct Pending {
 }
 
 struct Block {
+    /// Frames taken and not yet given back, per buffer (the real ring's hold).
+    holds: Vec<u32>,
     /// The pool, then what was registered; a slot let go of is `None` and is used again.
     regions: Vec<Option<Region>>,
     pending: Vec<Pending>,
@@ -185,6 +187,7 @@ struct Block {
 impl Default for Block {
     fn default() -> Self {
         Self {
+            holds: Vec::new(),
             regions: Vec::with_capacity(16),
             pending: Vec::with_capacity(16),
             configs: (0..16).map(|_| Box::new([0; CONFIG_BYTES])).collect(),
@@ -371,13 +374,18 @@ impl Hardware for Hw {
             if b.finished.is_empty() {
                 None
             } else {
-                Some(b.finished.remove(0))
+                let frame = b.finished.remove(0);
+                hold_take(&mut b.holds, frame.buffer);
+                Some(frame)
             }
         }))
     }
 
-    fn give_back(&mut self, _buffer: u32) -> Result<()> {
-        Ok(())
+    fn give_back(&mut self, buffer: u32) -> Result<()> {
+        self.with(|b| {
+            hold_release(&mut b.holds, buffer)?;
+            Ok(())
+        })
     }
 
     fn check(&mut self) -> Result<()> {
@@ -942,4 +950,24 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
     let counters = CameraIsp::counters(&mut be).unwrap();
     assert_eq!((counters.jobs, counters.dropped), (3, 0));
     assert_eq!(hw.registered(), 0);
+}
+
+/// The real ring's hold, per buffer: a frame taken from the stream holds its buffer until it is
+/// given back, and a release with no hold is refused (`INVALID_ARGUMENT`), as `Ring::release` is.
+fn hold_take(holds: &mut Vec<u32>, buffer: u32) {
+    let at = buffer as usize;
+    if holds.len() <= at {
+        holds.resize(at + 1, 0);
+    }
+    holds[at] += 1;
+}
+
+fn hold_release(holds: &mut [u32], buffer: u32) -> Result<()> {
+    match holds.get_mut(buffer as usize) {
+        Some(held) if *held > 0 => {
+            *held -= 1;
+            Ok(())
+        }
+        _ => Err(Status::INVALID_ARGUMENT),
+    }
 }

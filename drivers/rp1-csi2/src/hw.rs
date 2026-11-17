@@ -229,6 +229,13 @@ fn node_is_gone(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc_errno::ENODEV)
 }
 
+/// Frames a consumer may hold at once, from the margin rule (docs/streams.md): `B >= W + held + 2`,
+/// with the producer's working set `W` of one buffer. Below four buffers no hold count meets the
+/// rule; one hold is kept anyway, and the module counts the frames a short pool loses.
+fn held_limit(buffers: u32) -> u32 {
+    buffers.saturating_sub(3).max(1)
+}
+
 fn status(error: io::Error) -> Status {
     match error.kind() {
         io::ErrorKind::NotFound => Status::NO_DEVICE,
@@ -267,7 +274,8 @@ impl Hardware for LinuxHardware {
             },
             doorbell.as_deref().map(AsFd::as_fd),
         );
-        let stream = made.map_err(|e| self.node_error(e))?;
+        let mut stream = made.map_err(|e| self.node_error(e))?;
+        stream.add_marks(params.buffers, held_limit(params.buffers)).map_err(status)?;
         let embedded = if params.embedded_buffers > 0 {
             let made = self.driving()?.stream_create(
                 &StreamParams {
@@ -278,7 +286,11 @@ impl Hardware for LinuxHardware {
                 },
                 doorbell.as_deref().map(AsFd::as_fd),
             );
-            Some(made.map_err(|e| self.node_error(e))?)
+            let mut embedded = made.map_err(|e| self.node_error(e))?;
+            embedded
+                .add_marks(params.embedded_buffers, held_limit(params.embedded_buffers))
+                .map_err(status)?;
+            Some(embedded)
         } else {
             None
         };
@@ -377,8 +389,11 @@ impl Hardware for LinuxHardware {
     }
 
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
+        // The fence is the frame's return token in the old ring; under the shm ring a release
+        // needs only the buffer, so it is not passed on.
+        let _ = fence;
         let stream = self.stream_mut(channel)?;
-        stream.return_buffer(buffer, fence).map_err(status)
+        stream.release(buffer).map_err(status)
     }
 
     fn counters(&mut self) -> Result<Counters> {

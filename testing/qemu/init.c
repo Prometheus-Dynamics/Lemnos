@@ -269,6 +269,14 @@ int main(void)
 	mount("sysfs", "/sys", "sysfs", 0, NULL);
 	mount("proc", "/proc", "proc", 0, NULL);
 	mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
+	/*
+	 * /work holds the images the checks write (nand-check's 7.5 MB UBI image). The root is a tmpfs
+	 * that the initramfs fills (about 188 MB of check binaries in a 191 MB root), so it has no room
+	 * for them: give /work its own tmpfs, sized for the largest image.
+	 */
+	mkdir("/work", 0755);
+	if (mount("tmpfs", "/work", "tmpfs", 0, "size=64M") && errno != EBUSY)
+		printf("lemnos-qemu: /work tmpfs not mounted: %s\n", strerror(errno));
 	int con = open("/dev/console", O_RDWR);
 
 	if (con >= 0) {

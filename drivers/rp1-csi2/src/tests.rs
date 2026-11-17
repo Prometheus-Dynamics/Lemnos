@@ -40,6 +40,8 @@ struct Mock {
     answer: Option<(u32, Set)>,
     finished: Vec<Finished>,
     given_back: Vec<(u32, u32)>,
+    /// Buffers taken by `next_frame` and not yet given back: the stream's holds, as the shm ring keeps them.
+    held: Vec<u32>,
     /// Whether the block is receiving, and the frame starts it has counted since it went.
     receiving: bool,
     starts: FrameStarts,
@@ -49,6 +51,7 @@ struct Mock {
     emb_answer: Option<(u32, Set)>,
     emb_finished: Vec<Finished>,
     emb_given_back: Vec<(u32, u32)>,
+    emb_held: Vec<u32>,
 }
 
 impl Mock {
@@ -132,17 +135,29 @@ impl Hardware for Hw {
             if finished.is_empty() {
                 None
             } else {
-                Some(finished.remove(0))
+                let f = finished.remove(0);
+                match channel {
+                    Channel::Image => m.held.push(f.buffer),
+                    Channel::Embedded => m.emb_held.push(f.buffer),
+                }
+                Some(f)
             }
         }))
     }
 
+    /// A release of a buffer the channel does not hold is refused, as the real ring refuses it:
+    /// a double release, or a buffer never taken.
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
-        self.with(|m| match channel {
-            Channel::Image => m.given_back.push((buffer, fence)),
-            Channel::Embedded => m.emb_given_back.push((buffer, fence)),
-        });
-        Ok(())
+        self.with(|m| {
+            let (held, given) = match channel {
+                Channel::Image => (&mut m.held, &mut m.given_back),
+                Channel::Embedded => (&mut m.emb_held, &mut m.emb_given_back),
+            };
+            let at = held.iter().position(|&b| b == buffer).ok_or(Status::INVALID_ARGUMENT)?;
+            held.swap_remove(at);
+            given.push((buffer, fence));
+            Ok(())
+        })
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -508,7 +523,7 @@ fn a_finished_frame_is_published_and_its_buffer_goes_back_when_returned() {
         "the consumer has it: the block doesn't"
     );
 
-    frames.return_buffer(2);
+    frames.return_buffer(2).expect("the consumer holds this buffer");
     d.tick(now).unwrap();
     assert_eq!(
         hw.with(|m| m.given_back.clone()),
@@ -816,7 +831,7 @@ fn stream_frames_every(
             d.tick(t).unwrap();
             let got = frames.take_frame().expect("published");
             assert_eq!(got.sequence, sequence);
-            frames.return_buffer(buffer);
+            frames.return_buffer(buffer).expect("the consumer holds this buffer");
             sequence += 1;
         } else {
             d.tick(t).unwrap();
@@ -952,7 +967,7 @@ fn the_steady_state_allocates_nothing() {
         *now = d.tick(*now).unwrap();
         let got = frames.take_frame().expect("published");
         assert_eq!((got.buffer, got.sequence), (buffer, sequence));
-        frames.return_buffer(buffer);
+        frames.return_buffer(buffer).expect("the consumer holds this buffer");
         // The cycle's frame period is 500 ms, which the receiver measures. With no frame for 500 ms
         // the stop bound is `max(4 x 500 ms, 200 ms)` = 2 s, so the gap is not a stop: the bound
         // follows the period the frames show. The original test expectation (500 ms) is restored.
@@ -1203,8 +1218,8 @@ fn a_streaming_receiver_resumes_streaming_with_its_link_packing_owner_and_number
     assert_eq!(frames.take_frame().map(|f| f.sequence), Some(0));
     assert_eq!(frames.take_frame().map(|f| f.sequence), Some(1));
     // The consumer gives its two frames back: the stream's buffers are its own again.
-    frames.return_buffer(0);
-    frames.return_buffer(1);
+    frames.return_buffer(0).expect("the consumer holds this buffer");
+    frames.return_buffer(1).expect("the consumer holds this buffer");
     let record = Lifecycle::resume_record(&d).expect("a receiver keeps a record");
     drop(d);
 
@@ -1306,4 +1321,95 @@ fn a_record_that_does_not_decode_is_not_restored() {
             "nothing is restored from a record it refuses"
         );
     }
+}
+/// A finished frame of `buffer`, as the block publishes one.
+fn finished(buffer: u32) -> Finished {
+    Finished {
+        buffer,
+        bytes: 1,
+        sequence: 0,
+        timestamp_ns: 0,
+        fence: 1,
+    }
+}
+
+#[test]
+fn a_taken_frame_is_held_until_it_is_given_back_once() {
+    let hw = Hw::default();
+    let mut h = hw.clone();
+    hw.with(|m| m.finished.push(finished(3)));
+    assert!(h.next_frame(Channel::Image).unwrap().is_some());
+    assert_eq!(hw.with(|m| m.held.clone()), [3], "taking a frame holds its buffer");
+    h.give_back(Channel::Image, 3, 1).unwrap();
+    assert_eq!(hw.with(|m| (m.held.len(), m.given_back.clone())), (0, vec![(3, 1)]));
+}
+
+#[test]
+fn a_double_release_and_a_release_of_a_buffer_never_taken_are_refused() {
+    let hw = Hw::default();
+    let mut h = hw.clone();
+    hw.with(|m| m.finished.push(finished(5)));
+    h.next_frame(Channel::Image).unwrap();
+    h.give_back(Channel::Image, 5, 1).unwrap();
+    assert_eq!(
+        h.give_back(Channel::Image, 5, 1).unwrap_err(),
+        Status::INVALID_ARGUMENT,
+        "a second release of the same buffer is refused, as the shm ring refuses it"
+    );
+    assert_eq!(
+        h.give_back(Channel::Image, 6, 1).unwrap_err(),
+        Status::INVALID_ARGUMENT,
+        "a release of a buffer the stream never took is refused"
+    );
+    assert_eq!(hw.with(|m| m.given_back.len()), 1, "only the valid release reached the block");
+}
+
+#[test]
+fn a_frame_whose_buffer_wait_ends_after_a_newer_frame_is_dropped_not_published_late() {
+    use crate::relay::Relay;
+    let mut frames = stream(2);
+    let hw = Hw::default();
+    let mut h = hw.clone();
+    // Buffer 0 is the block's until its wait ends; buffer 1 settles at once.
+    hw.with(|m| m.answer = Some((0, Set::Busy)));
+    let mut relay = Relay::new(Channel::Image);
+    relay.restart(2);
+    relay.take(&mut frames, &mut h).unwrap();
+    let frame = |buffer, sequence| Finished {
+        buffer,
+        bytes: 1,
+        sequence,
+        timestamp_ns: 0,
+        fence: 1,
+    };
+    // Each finished frame is taken from the block's stream first, as the driver takes it.
+    let taken = |h: &mut Hw, f: Finished| {
+        h.with(|m| m.finished.push(f));
+        h.next_frame(Channel::Image).unwrap().unwrap()
+    };
+    let f5 = taken(&mut h, frame(0, 5));
+    assert!(
+        !relay.finished(&f5, &mut frames, &mut h).unwrap(),
+        "frame 5's buffer is still the block's, so it waits"
+    );
+    let f6 = taken(&mut h, frame(1, 6));
+    assert!(
+        relay.finished(&f6, &mut frames, &mut h).unwrap(),
+        "frame 6 is ready and published first"
+    );
+    hw.with(|m| m.answer = Some((0, Set::Done)));
+    relay.settle(0, &mut frames, &mut h).unwrap();
+    assert!(
+        !relay.finished(&f5, &mut frames, &mut h).unwrap(),
+        "frame 5 finished after frame 6 was published: dropped, never published late"
+    );
+    let published: Vec<u64> = std::iter::from_fn(|| frames.take_frame())
+        .map(|f| f.sequence)
+        .collect();
+    assert_eq!(published, [6], "published sequence numbers never go backwards");
+    assert_eq!(
+        relay.lost(),
+        2,
+        "each finish that reaches no one is counted: frame 5's first finish, and its late one"
+    );
 }

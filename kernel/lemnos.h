@@ -40,18 +40,21 @@
  * Frame streams. LEMNOS_IOC_STREAM_CREATE sets one up on a block and returns a
  * file: the stream lasts as long as that file, or until the block is unbound.
  * mmap() it at offset 0, shared, for the ring (see below); its size is
- * ring_bytes. poll() is readable while frames wait and on the end of the
- * stream, and the eventfd given at creation is signalled for each frame.
+ * ring_bytes. poll() is readable on the end of the stream. The eventfd given
+ * at creation is signalled for each frame (and the consumer's doorbell, once
+ * LEMNOS_STREAM_IOC_BELL is set, rings when it sleeps).
  *
- * The ring is the shared-memory protocol of the socket interface's streams,
- * word for word (LEMNOS_RING_*): the module is the producer and the file's
- * mapper the consumer. Everything in it is untrusted, so each word is read
- * once and checked against what the module holds. Buffers are at multiples of
- * the stride in the pool, the dma-buf named at creation, and consumers map
- * that dma-buf to read them; or, for a stream made with
- * LEMNOS_STREAM_CREATE_BUFFERS, each buffer is a dma-buf of its own (see
- * "Buffers of their own" below). The module publishes frames, takes returned
- * buffers (their fence must match), and takes jobs: a job says which buffer
+ * The ring is the shared-memory ring of shm/README.md (layout 2), the one form
+ * of frame stream: the module is the producer and the file's mapper the
+ * consumer. Everything in it is untrusted, so each word is read once and
+ * checked against what the module holds. Buffers are at multiples of the
+ * stride in the pool, the dma-buf named at creation, and consumers map that
+ * dma-buf to read them; or, for a stream made with LEMNOS_STREAM_CREATE_BUFFERS,
+ * each buffer is a dma-buf of its own (see "Buffers of their own" below). The
+ * module publishes frames and takes jobs. A buffer goes back by its marks: a
+ * reader holds a buffer by marking it in its marks page (LEMNOS_STREAM_IOC_READER)
+ * and the module reuses it only when no reader marks it. Jobs are the words
+ * after the pool page (see LEMNOS_STREAM_JOB_*). A job says which buffer
  * the next frame fills and which device-address ranges the block may use for
  * it, as struct lemnos_stream_job. Any range outside the job's buffer or the
  * registered dma-bufs is refused, and any consumer breaking the rules ends the
@@ -59,7 +62,7 @@
  *
  * A consumer that never posts a job gets a frame on each free buffer. Once one
  * job has been accepted the stream is job-driven for the rest of its life: no
- * frame is made without a queued job, so a buffer returned and then named by
+ * frame is made without a queued job, so a buffer let go of and then named by
  * the next job can't be taken in between. Until then the source may take any
  * free buffer, so a job on a particular buffer can lose it and be refused: a
  * consumer that uses jobs posts (and KICKs) its first before frames start.
@@ -110,7 +113,6 @@
  *   EFAULT     a range outside every registered region; a buffer with no memory yet
  *   EACCES     a range in another buffer of the pool, or a buffer the consumer holds
  *   EBUSY      the buffer is already posted (double posting)
- *   EPERM      a returned buffer that isn't out, or with the wrong fence
  * A malformed consumer faults only its own stream.
  *
  * Buses go through the kernel's own I2C and SPI cores. Every transfer names a
@@ -242,53 +244,36 @@ struct lemnos_claim {
 #define LEMNOS_STREAM_MAX_JOB_SLOTS	64u
 #define LEMNOS_STREAM_MAX_JOB_BYTES	4096u
 #define LEMNOS_STREAM_BUFFER_ALIGN	4096u
-/*
- * A frame's words in the frame ring: buffer and bytes, sequence, identity, start time, fence, and
- * the end time (word 5: CLOCK_MONOTONIC ns of the frame's end, 0 when the block stamps none).
- */
-#define LEMNOS_STREAM_FRAME_WORDS	6
 /* Buffers a stream made with LEMNOS_STREAM_CREATE_BUFFERS may have. */
 #define LEMNOS_STREAM_MAX_OWN_BUFFERS	64u
 #define LEMNOS_STREAM_JOB_RANGES	4
 
-/* Words from the start of the ring. Host-endian on every target, which is little. */
-#define LEMNOS_RING_MAGIC		0
-#define LEMNOS_RING_VERSION		1
-#define LEMNOS_RING_BUFFERS		2
-#define LEMNOS_RING_BUFFER_BYTES	3
-#define LEMNOS_RING_FRAME_SLOTS		4
-#define LEMNOS_RING_JOB_SLOTS		5
-#define LEMNOS_RING_JOB_BYTES		6
-#define LEMNOS_RING_STATE		8
-#define LEMNOS_RING_FRAMES_HEAD		16
-#define LEMNOS_RING_FRAMES_TAIL		24
-#define LEMNOS_RING_RETURNS_HEAD	32
-#define LEMNOS_RING_RETURNS_TAIL	40
-#define LEMNOS_RING_JOBS_HEAD		48
-#define LEMNOS_RING_JOBS_TAIL		56
-#define LEMNOS_RING_FRAMES		64
-
-#define LEMNOS_RING_MAGIC_VALUE		0x474e4952534e4d4cull	/* "LMNSRING" */
-#define LEMNOS_RING_LAYOUT_VERSION	1ull
+/*
+ * The end word of the frame ring (word 10 of the ring header, shm/README.md): the
+ * module stores one of these once the stream has ended. Host-endian, which is little.
+ */
 #define LEMNOS_RING_STATE_OPEN		0ull
 #define LEMNOS_RING_STATE_CLOSED	1ull
 #define LEMNOS_RING_STATE_FAULT		2ull
 
 /*
+ * The job block, after the pool page (control = the page's end + 8 + buffers + 64 words, see
+ * LEMNOS_STREAM_JOB_*). Its words, from control: 2 the jobs posted (the consumer's), 3 the jobs
+ * taken (the module's), then LEMNOS_STREAM_JOB_SLOTS slots, each 1 + job_bytes/8 words: the
+ * job's length in bytes, then the struct lemnos_stream_job.
+ */
+#define LEMNOS_STREAM_JOB_HEAD		2
+#define LEMNOS_STREAM_JOB_TAIL		3
+#define LEMNOS_STREAM_JOB_SLOTS		4
+
+/*
  * lemnos_stream_create.flags: no pool. Each buffer is a dma-buf of its own,
  * given with LEMNOS_STREAM_IOC_BUFFER; pool_fd must be -1 and pool_addr reads 0.
+ * Any other flag is EINVAL. The frame ring is always the shared-memory ring
+ * (shm/ring-buffers/src/entry.rs for an entry, shm/ring-buffers/src/page.rs for the
+ * pool page), and frame_slots is at least 2.
  */
 #define LEMNOS_STREAM_CREATE_BUFFERS	(1u << 0)
-/*
- * The frame ring is the shared-memory ring of shm/README.md (layout 2), not the
- * LEMNOS_RING_* layout: one field, one sample per frame, each sample's entry
- * naming its buffer and ticket (shm/ring-buffers/src/entry.rs). The pool page
- * (shm/ring-buffers/src/page.rs) follows the ring in the mapping, then the
- * returns and jobs words. Returns are not read in this form: a buffer goes back
- * when no reader holds it, from the reader's marks page (LEMNOS_STREAM_IOC_READER).
- * Jobs are still the old words for now. Needs frame_slots of at least 2.
- */
-#define LEMNOS_STREAM_CREATE_SHM	(1u << 1)
 
 struct lemnos_stream_create {
 	__u32 block;		/* in */
@@ -355,7 +340,7 @@ struct lemnos_stream_buffer {
 };
 
 /*
- * LEMNOS_STREAM_IOC_READER, on a stream made with LEMNOS_STREAM_CREATE_SHM: gives
+ * LEMNOS_STREAM_IOC_READER, on any stream: gives
  * the module a reader's marks page (shm/ring-holds/src/marks.rs). The module
  * pins the page and reads it read-only; it never writes it. A buffer is held
  * while any reader marks it, and the module reuses it only when none does. A reader
@@ -380,7 +365,7 @@ struct lemnos_stream_buffer {
 /* The layout of a shared structure is not the one this module reads: which, found, expected. */
 #define LEMNOS_REFUSED_LAYOUT		1u
 /* Which structure a LEMNOS_REFUSED_LAYOUT names. */
-#define LEMNOS_LAYOUT_RING		0u	/* the frame ring's header (the module writes it, never refuses it) */
+#define LEMNOS_LAYOUT_RING		0u	/* the frame ring's header */
 #define LEMNOS_LAYOUT_MARKS		1u	/* a reader's marks page */
 
 /*
@@ -417,7 +402,7 @@ struct lemnos_stream_status {
 	__s32 fault;		/* the errno that ended it, or 0 */
 	__u64 frames;		/* published */
 	__u64 dropped;		/* no room on the ring */
-	__u64 returned;		/* buffers given back */
+	__u64 returned;		/* buffers taken back, once no reader held them */
 	__u64 jobs;		/* jobs accepted */
 };
 
@@ -454,7 +439,7 @@ struct lemnos_stream_test_source {
 #define LEMNOS_READER_IOC_UNREGISTER   _IO('L', 0x88)
 
 /*
- * LEMNOS_STREAM_IOC_BELL, on a stream made with LEMNOS_STREAM_CREATE_SHM: the consumer's doorbell
+ * LEMNOS_STREAM_IOC_BELL, on any stream: the consumer's doorbell
  * (shm/ring-doorbell's Doorbell::bell_fds: an eventfd it sleeps on, and its page, read-only). The
  * page's word 0 is sleeps << 1 | asleep, and only the consumer writes it. After each publish the
  * module reads it, and when the consumer is asleep, signals the eventfd once for that sleep. Once

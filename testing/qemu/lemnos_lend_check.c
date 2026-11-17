@@ -37,6 +37,7 @@
 #include "lemnos.h"
 #include "lemnos_pisp_be.h"
 #include "find_block.h"
+#include "shm_ring.h"
 
 #define BUFFERS 4u
 #define BUFFER_BYTES (256u * 1024)
@@ -133,8 +134,8 @@ struct stream {
 	void *configs;
 	size_t config_bytes;
 	uint64_t pool_addr;
-	size_t returns_at, jobs_at, job_words;
-	uint64_t jobs_head, frames_tail, returns_head;
+	size_t control, jobs_at, job_words;
+	uint64_t jobs_head, frames_tail;
 	/* What the fake hardware says it has done. */
 	uint8_t hw_started, hw_done;
 };
@@ -216,8 +217,8 @@ static int stream_open(struct stream *st)
 			   c.config_mmap_offset);
 	if (st->ring == MAP_FAILED || st->configs == MAP_FAILED)
 		return -1;
-	st->returns_at = LEMNOS_RING_FRAMES + FRAME_SLOTS * LEMNOS_STREAM_FRAME_WORDS;
-	st->jobs_at = st->returns_at + FRAME_SLOTS;
+	st->control = shm_control(FRAME_SLOTS, BUFFERS);
+	st->jobs_at = st->control + SHM_JOB_SLOTS;
 	st->job_words = 1 + (JOB_BYTES + 7) / 8;
 	{
 		/* The fake block's counters carry on across streams, as a real one's do. */
@@ -260,7 +261,7 @@ static void post(struct stream *st, const struct lemnos_pisp_be_job *job)
 		st->ring[at + 1 + i] = words[i];
 	st->jobs_head++;
 	__atomic_thread_fence(__ATOMIC_RELEASE);
-	st->ring[LEMNOS_RING_JOBS_HEAD] = st->jobs_head;
+	st->ring[st->control + SHM_JOB_HEAD] = st->jobs_head;
 }
 
 static int kick(struct stream *st)
@@ -278,31 +279,17 @@ static void complete_job(struct stream *st, int started, int done)
 	raise_irq();
 }
 
-/* The next frame's buffer, or -1 if none arrives in time; gives the buffer back. */
+/* The next frame's buffer, or -1 if none arrives in time. A buffer needs no giving back here. */
 static int wait_frame(struct stream *st, uint64_t *identity)
 {
 	for (int tries = 0; tries < 1000; tries++) {
-		uint64_t head = __atomic_load_n(&st->ring[LEMNOS_RING_FRAMES_HEAD], __ATOMIC_ACQUIRE);
+		struct shm_frame f;
 
-		if (head != st->frames_tail) {
-			size_t at = LEMNOS_RING_FRAMES +
-				    (st->frames_tail & (FRAME_SLOTS - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-			uint64_t word = st->ring[at];
-			uint64_t fence = st->ring[at + 4];
-
+		if (shm_frame_read(st->ring, FRAME_SLOTS, st->frames_tail, &f) == 1) {
 			if (identity)
-				*identity = st->ring[at + 2];
+				*identity = f.identity;
 			st->frames_tail++;
-			__atomic_store_n(&st->ring[LEMNOS_RING_FRAMES_TAIL], st->frames_tail,
-					 __ATOMIC_RELEASE);
-			uint32_t buffer = (uint32_t)word;
-			size_t ret_at = st->returns_at + (st->returns_head & (FRAME_SLOTS - 1));
-
-			st->ring[ret_at] = (uint64_t)buffer | fence << 32;
-			st->returns_head++;
-			__atomic_store_n(&st->ring[LEMNOS_RING_RETURNS_HEAD], st->returns_head,
-					 __ATOMIC_RELEASE);
-			return (int)buffer;
+			return (int)f.buffer;
 		}
 		usleep(2000);
 	}
