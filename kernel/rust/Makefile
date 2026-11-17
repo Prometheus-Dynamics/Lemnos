@@ -7,5 +7,7 @@
 obj-m := lemnos_rs.o
 lemnos_rs-y := lemnos_rs_main.o lemnos_helpers.o
 
-# The one C file (lemnos_helpers.c): one-line shims for static inline kernel APIs with no Rust path.
+# The module's one C file, kernel/lemnos_helpers.c, is shared with lemnos.ko: this builds it here too.
 ccflags-y := -Werror
+$(obj)/lemnos_helpers.o: $(src)/../lemnos_helpers.c FORCE
+	$(call if_changed_rule,cc_o_c)

@@ -124,6 +124,8 @@ step shipped scripts/check-shipped.sh
 step products scripts/check-products.sh
 # The module's CONFIG_ symbols are all in docs/kernel-config.md, and the QEMU harness enables the required ones.
 step kernel-config scripts/check-kernel-config.py
+# The module's C is one capped file of one-line shims (kernel/lemnos_helpers.c); nothing else.
+step kernel-helpers scripts/check-kernel-helpers.py
 # The generated overlays compile with the dtc the contract names (built from its pinned release) with
 # every warning class an error, and apply to a base built from their SoC map (testing/devtree/check.sh).
 step devtree testing/devtree/check.sh

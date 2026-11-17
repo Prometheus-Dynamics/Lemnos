@@ -95,5 +95,5 @@ module! {
     authors: ["Lemnos"],
     description: "Lemnos: platform blocks for drivers in user space",
     license: "GPL",
-    imports_ns: ["DMA_BUF"],
+    imports_ns: ["DMA_BUF", "PWM"],
 }
