@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use lemnos_core::{
-    Config, Description, Driver, Item, Manifest, MethodId, Reply, Resources, Result,
-    Status, Unit,
+    Config, Description, Driver, Item, Manifest, MethodId, Reply, Resources, Result, Status, Unit,
 };
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
@@ -154,7 +153,6 @@ fn an_integer_item_with_a_scale_still_binds() {
     let host = bind_one("scaled-int", &[entry::<ScaledInt>()]);
     assert_eq!(reason_of(&host), None);
 }
-
 
 #[test]
 fn two_items_with_one_name_are_refused_by_name() {
