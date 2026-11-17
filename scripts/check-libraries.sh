@@ -25,6 +25,24 @@ libraries=(
 # backends that carry the driver model.
 forbidden='^(lemnosd|lemnos-ctl|lemnos-orion|lemnos-host|lemnos-host-static|lemnos-core|lemnos-macros|lemnos-hal|lemnos-client|lemnos-linux|lemnos-usb|lemnos-sim|lemnos-contract-.*)$'
 
+# The shm crates (shm/README.md, "What it gives"): their direct normal dependencies are libc, serde
+# (optional) and each other, nothing else, so another project can take them at a locked revision.
+# Direct edges only: each crate answers for the ones it names.
+shm_direct='^(libc|serde|shm-[a-z-]+)$'
+for crate in "${libraries[@]}"; do
+  [[ $crate == shm-* ]] || continue
+  direct=$(cargo tree -q -e normal --depth 1 -p "$crate" --no-default-features --prefix none --format '{p}' |
+    awk '{print $1}' | grep -v "^$crate\$" | sort -u || true)
+  outside=$(grep -Ev "$shm_direct" <<<"$direct" || true)
+  if [ -n "$outside" ]; then
+    echo "$crate has a direct normal dependency outside libc, serde and the shm crates:" $outside >&2
+    exit 1
+  fi
+done
+echo "    shm direct dependencies: libc, serde and shm crates only"
+# DEPS_ONLY=1 stops after the dependency checks (the lint and test runs follow below).
+if [ "${DEPS_ONLY:-}" = 1 ]; then exit 0; fi
+
 for crate in "${libraries[@]}"; do
   tree=$(cargo tree -q -e normal -p "$crate" --no-default-features --prefix none --format '{p}' |
     awk '{print $1}' | sort -u)
