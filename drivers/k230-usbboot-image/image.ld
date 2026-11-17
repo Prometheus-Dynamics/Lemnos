@@ -23,6 +23,9 @@ SECTIONS
     }
 
     .bss (NOLOAD) : {
+        /* NOLOAD: the ROM copies only the file, so the entry zeroes this range before any static is read. */
+        . = ALIGN(16);
+        lemnos_bss_start = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         . = ALIGN(16);
@@ -30,6 +33,7 @@ SECTIONS
         . += 0x10000;
         . = ALIGN(16);
         lemnos_stack_top = .;
+        lemnos_bss_end = .;
     }
 
     /DISCARD/ : {

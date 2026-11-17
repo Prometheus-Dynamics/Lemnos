@@ -25,21 +25,19 @@ const DLL: usize = 0x00;
 const DLM: usize = 0x04;
 const LCR: usize = 0x0c;
 const IER: usize = 0x04;
-#[cfg(test)]
 const LSR: usize = 0x14;
-const USR: usize = 0x7c;
 /// Line control: 8 data bits, no parity, one stop bit (8N1), and DLAB (bit 7) to reach the divisor.
 const LCR_8N1: u32 = 0x03;
 const LCR_DLAB: u32 = 0x80;
-/// Interrupt enable: bit 7 is PTIME, the programmable-THRE mode of a DesignWare UART. In that mode LSR.THRE means
-/// "transmit FIFO full", not "holding register empty", so a write waits on USR.TFNF instead, and PTIME is cleared.
-/// Provenance: the K230 RT-Smart UART driver defines `UART_IER_PTIME` as bit 7 and writes IER `0x81` at init
-/// (`src/big/rt-smart/kernel/bsp/maix3/board/interdrv/uart_canaan/drv_uart.c`, lines 101 and 277); the DesignWare
-/// register map (USR at `0x7c`, TFNF at bit 1) is the vendor IP's, not in the SDK clone.
+/// Line status: transmitter empty (TEMT, bit 6). A write waits on this, the way the vendor's own UART driver does
+/// (`src/big/rt-smart/kernel/bsp/maix3/board/interdrv/uart_canaan/drv_uart.c`, the TEMT wait, line 373). THRE is not
+/// used: with PTIME set it means "FIFO full", and the USR status bits are not implemented on this instance (R1d read
+/// USR as 0x01, BUSY only), so they cannot say the FIFO has room.
+const LSR_TEMT: u32 = 0x40;
+/// Interrupt enable: bit 7 is PTIME, the programmable-THRE mode of a DesignWare UART, which the ROM leaves set (the
+/// vendor driver writes IER `0x81` at init: lines 101 and 277 of the same file). It is cleared here.
 const IER_PTIME: u32 = 0x80;
-/// Status: transmit FIFO not full (TFNF, bit 1 of USR).
-const USR_TFNF: u32 = 0x02;
-/// The bounded wait for TFNF per byte, in reads.
+/// The bounded wait for TEMT per byte, in reads.
 const SPIN: u32 = 100_000;
 
 /// Whether the stage programmed the UART itself (true) or found it as the ROM left it (false).
@@ -55,8 +53,8 @@ pub fn configure_if_unset<R: RegAccess>(regs: &mut R) -> bool {
 }
 
 /// Clears PTIME, so LSR.THRE means "holding register empty" again. Done only while DLAB (LCR bit 7) is clear: with
-/// DLAB set, offset 0x04 is the divisor's high byte, not IER. Returns whether IER was written. ROM-independent: it
-/// reads the bit and clears it, whatever the ROM left.
+/// DLAB set, offset 0x04 is the divisor's high byte, not IER. Returns whether IER was written. It reads the bit and
+/// clears it, whatever the ROM left.
 pub fn clear_programmable_thre<R: RegAccess>(regs: &mut R) -> bool {
     if regs.read32(BASE + LCR) & LCR_DLAB != 0 {
         return false;
@@ -70,11 +68,11 @@ pub fn clear_programmable_thre<R: RegAccess>(regs: &mut R) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stuck;
 
-/// Writes one byte, once the transmit FIFO has room (USR.TFNF). An error when it never has room (a UART the ROM left
-/// unusable, or unclocked): the caller reports it and prints nothing more.
+/// Writes one byte, after the transmitter has emptied (LSR.TEMT, as the vendor driver waits). An error when it never
+/// empties (a UART the ROM left unusable, or unclocked): the caller reports it and prints nothing more.
 pub fn write_byte<R: RegAccess>(regs: &mut R, byte: u8) -> Result<(), Stuck> {
     for _ in 0..SPIN {
-        if regs.read32(BASE + USR) & USR_TFNF != 0 {
+        if regs.read32(BASE + LSR) & LSR_TEMT != 0 {
             regs.write32(BASE + THR, u32::from(byte));
             return Ok(());
         }
@@ -106,9 +104,9 @@ pub fn write_line<R: RegAccess>(regs: &mut R, line: &str) -> Result<(), Stuck> {
 mod tests {
     use super::*;
 
-    /// A UART model with the registers the stage reads. `lsr` and `usr` are what the device reports; the
-    /// PTIME case is `ier` with bit 7 set and `lsr` with THRE (bit 5) clear and TEMT (bit 6) set, as LSR 0x41
-    /// read on the board.
+    /// A UART model with the registers the stage reads. The device's USR status bits read 0 (not implemented on this
+    /// instance: R1d read USR as 0x01 with BUSY only), so the model keeps `usr` at 0. The PTIME case is `ier` with bit 7
+    /// set, `lsr` 0x41 (THRE clear, TEMT set), as read on the board.
     struct Uart {
         lcr: u32,
         ier: u32,
@@ -122,19 +120,19 @@ mod tests {
             Uart {
                 lcr: 0x03,
                 ier: 0x00,
-                lsr: 0x20,
-                usr: USR_TFNF,
+                lsr: 0x60,
+                usr: 0,
                 writes: Vec::new(),
             }
         }
 
-        /// The ROM's state on the board: PTIME set, THRE reading 0 with TEMT set, the FIFO with room.
+        /// The ROM's state on the board: PTIME set, THRE reading 0 with TEMT set (LSR 0x41), USR 0 (no FIFO status).
         fn ptime() -> Self {
             Uart {
                 lcr: 0x03,
                 ier: 0x81,
                 lsr: 0x41,
-                usr: USR_TFNF,
+                usr: 0,
                 writes: Vec::new(),
             }
         }
@@ -154,7 +152,7 @@ mod tests {
                 LCR => self.lcr,
                 IER => self.ier,
                 LSR => self.lsr,
-                USR => self.usr,
+                0x7c => self.usr,
                 _ => 0,
             }
         }
@@ -200,8 +198,8 @@ mod tests {
 
     #[test]
     fn a_programmable_thre_uart_takes_its_bytes_when_thre_reads_zero() {
-        // The board's state: LSR.THRE is 0 (it means "FIFO full" under PTIME), but the FIFO has room (TFNF).
-        // Before the fix this write waited on THRE and gave up: `Err(Stuck)`, and nothing was sent.
+        // The board's state: PTIME set, LSR.THRE 0, TEMT 1 (LSR 0x41), and USR 0 (no FIFO status). The TEMT wait sends.
+        // A wait on USR.TFNF, which reads 0 here, would give up: `Err(Stuck)`. The R1d code waited on TFNF.
         let mut uart = Uart::ptime();
         write_line(&mut uart, "ok").expect("the FIFO has room, so the write must not give up");
         assert_eq!(
@@ -230,11 +228,13 @@ mod tests {
     }
 
     #[test]
-    fn a_transmit_fifo_that_never_has_room_is_a_stuck_error_not_a_hang() {
+    fn a_transmitter_that_never_empties_is_a_stuck_error_not_a_hang() {
+        // The transmitter never empties: TEMT stays clear, so no byte is sent and the wait gives up.
         let mut uart = Uart {
-            usr: 0,
+            lsr: 0x20,
             ..Uart::ptime()
         };
         assert_eq!(write_byte(&mut uart, b'x'), Err(Stuck));
+        assert!(uart.sent().is_empty());
     }
 }
