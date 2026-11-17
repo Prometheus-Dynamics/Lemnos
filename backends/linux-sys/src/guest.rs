@@ -8,6 +8,7 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use crate::ioctl::iowr;
+use crate::privilege::ChildEnd;
 
 /// `NAME_MAX` of the control node's claim: the resource is at most this many bytes.
 pub const CLAIM_NAME_MAX: usize = 64;
@@ -199,6 +200,68 @@ pub fn kill(pid: libc::pid_t, signal: i32) -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
+}
+
+/// Asks for a private (copy-on-write) mapping of `len` bytes of `fd` at `offset`. The kernel's
+/// refusal is the error; a granted mapping is unmapped again at once.
+///
+/// # Errors
+///
+/// `mmap(2)` refuses the mapping, for instance with `EINVAL` for a private one of a device.
+pub fn private_mapping(fd: BorrowedFd<'_>, len: usize, offset: u64) -> io::Result<()> {
+    // SAFETY: a null hint lets the kernel choose the address; `fd` is live for the call; the
+    // result is compared with MAP_FAILED before it is used.
+    let raw = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            fd.as_raw_fd(),
+            offset as libc::off_t,
+        )
+    };
+    if raw == libc::MAP_FAILED {
+        return Err(last_error());
+    }
+    // SAFETY: `raw` is the mapping `mmap` just returned, of `len` bytes, and nothing else uses it.
+    unsafe { libc::munmap(raw, len) };
+    Ok(())
+}
+
+/// Whether child `pid` has ended, without waiting: `None` while it runs.
+///
+/// # Errors
+///
+/// `waitpid(2)` fails other than by interruption.
+pub fn try_wait(pid: libc::pid_t) -> io::Result<Option<ChildEnd>> {
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` is a writable c_int for the call; WNOHANG returns at once.
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if rc == 0 {
+            return Ok(None);
+        }
+        if rc == pid {
+            break;
+        }
+        let err = last_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+    Ok(Some(if libc::WIFSIGNALED(status) {
+        ChildEnd::Signal(libc::WTERMSIG(status))
+    } else {
+        ChildEnd::Exit(libc::WEXITSTATUS(status))
+    }))
+}
+
+/// Ends the calling process with `code` at once, without running its exit handlers: what a
+/// forked child does instead of returning into the parent's code.
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: `_exit` takes an integer and never returns.
+    unsafe { libc::_exit(code) }
 }
 
 fn c_string(text: &str) -> io::Result<std::ffi::CString> {
