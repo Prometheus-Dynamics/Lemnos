@@ -211,3 +211,98 @@ impl Counter for FakeCounter {
         Ok(n)
     }
 }
+
+/// A fake accelerometer with a FIFO, as the bmi088 driver's batches are shaped: one record per
+/// sample, stamped with the host's clock, the sample period 5 ms, and the value from `config`.
+/// `torn = true` answers every batch one byte too long, so a batch is never whole records: the
+/// fault a capture must report. For the B8 tool's rehearsal (`testing/crates/bmi088-batch`).
+#[driver("fake-fifo-accelerometer", provides = [Accelerometer])]
+pub struct FakeFifoAccelerometer {
+    value: Vector3,
+    torn: bool,
+    next_at: Option<u64>,
+    queue: std::collections::VecDeque<lemnos_contract_accelerometer::Sample>,
+}
+
+const FIFO_PERIOD_NS: u64 = 5_000_000;
+/// The accelerometer contract's `read` (method 1).
+const ACCEL_READ: MethodId = MethodId {
+    contract: 0,
+    method: 1,
+};
+const FIFO_DEPTH: usize = 256;
+
+impl Lifecycle for FakeFifoAccelerometer {
+    type Needs = FakeFifoAccelerometerNeeds;
+    const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("x", Kind::Float),
+            Key::optional("y", Kind::Float),
+            Key::optional("z", Kind::Float),
+            Key::optional("torn", Kind::Bool),
+        ])
+    }
+
+    fn start(_needs: FakeFifoAccelerometerNeeds, cfg: &Config<'_>) -> Result<Self> {
+        Ok(Self {
+            value: vector(cfg, 1.0),
+            torn: cfg.bool("torn").unwrap_or(false),
+            next_at: None,
+            queue: std::collections::VecDeque::new(),
+        })
+    }
+
+    fn describe(&self, out: &mut Description) {
+        out.add(
+            Item::value("acceleration.x", ACCEL_READ)
+                .unit(Unit::MetrePerSecondSquared, 0)
+                .field("x"),
+        );
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let mut at = self.next_at.unwrap_or(now_ns);
+        while at <= now_ns {
+            if self.queue.len() == FIFO_DEPTH {
+                self.queue.pop_front();
+            }
+            self.queue.push_back(lemnos_contract_accelerometer::Sample {
+                at_ns: at,
+                value: self.value,
+            });
+            at += FIFO_PERIOD_NS;
+        }
+        self.next_at = Some(at);
+        Some(at)
+    }
+}
+
+impl Accelerometer for FakeFifoAccelerometer {
+    fn read(&mut self) -> Result<Vector3> {
+        Ok(self.value)
+    }
+
+    fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
+        use lemnos_core::{Encode, Writer};
+        let record = lemnos_contract_accelerometer::RECORD_LEN;
+        let mut used = 0;
+        while let Some(sample) = self.queue.front().copied() {
+            if used + record > into.len() {
+                break;
+            }
+            let mut writer = Writer::new(&mut into[used..used + record]);
+            sample
+                .encode(&mut writer)
+                .map_err(|_| Status::INVALID_ARGUMENT)?;
+            self.queue.pop_front();
+            used += record;
+        }
+        if self.torn && used > 0 {
+            // One byte more than whole records: the batch is not whole records, and a capture refuses it.
+            used += 1;
+        }
+        Ok(used)
+    }
+}
