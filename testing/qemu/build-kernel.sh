@@ -24,6 +24,18 @@ esac
 config="$here/kernel.config"
 if [[ "$mode" == --modules-off ]]; then config="$here/kernel-modules-off.config"; fi
 jobs="${JOBS:-$(nproc)}"
+# CONFIG_RUST needs clang (LLVM=1, and KASAN is only allowed with clang): a Rust kernel is built with
+# LLVM=1 and needs ld.lld. A system without ld.lld gets rustc's own gcc-ld/ld.lld, which is the same linker.
+llvm=()
+if grep -q '^CONFIG_RUST=y' "$config"; then
+  llvm=(LLVM=1)
+  if ! command -v ld.lld >/dev/null; then
+    lld_dir="$(mkdir -p "$out/lld" && cd "$out/lld" && pwd)"
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    ln -sf "$(rustc --print sysroot)/lib/rustlib/$host/bin/gcc-ld/ld.lld" "$lld_dir/ld.lld"
+    export PATH="$lld_dir:$PATH"
+  fi
+fi
 
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
@@ -49,9 +61,9 @@ if [[ "$mode" == --modules-off ]]; then
   grep -q 'obj-$(CONFIG_LEMNOS)' "$src/drivers/misc/Makefile" ||
     printf 'obj-$(CONFIG_LEMNOS)\t\t+= lemnos/\n' >>"$src/drivers/misc/Makefile"
 fi
-make -s -C "$src" O="$out/build" ARCH=x86_64 defconfig
+make -s -C "$src" O="$out/build" ARCH=x86_64 ${llvm[@]+"${llvm[@]}"} defconfig
 "$src/scripts/kconfig/merge_config.sh" -m -O "$out/build" "$out/build/.config" "$config"
-make -s -C "$src" O="$out/build" ARCH=x86_64 olddefconfig
+make -s -C "$src" O="$out/build" ARCH=x86_64 ${llvm[@]+"${llvm[@]}"} olddefconfig
 # merge_config.sh only warns: a line that did not take must fail here.
 while read -r line; do
   [[ "$line" == CONFIG_* ]] || continue
@@ -65,7 +77,7 @@ if [[ "$mode" == --modules-off ]]; then
     echo "modules-off: CONFIG_MODULES did not take" >&2
     exit 1
   }
-  make -s -j"$jobs" -C "$src" O="$out/build" ARCH=x86_64 bzImage
+  make -s -j"$jobs" -C "$src" O="$out/build" ARCH=x86_64 ${llvm[@]+"${llvm[@]}"} bzImage
 else
-  make -s -j"$jobs" -C "$src" O="$out/build" ARCH=x86_64 bzImage modules
+  make -s -j"$jobs" -C "$src" O="$out/build" ARCH=x86_64 ${llvm[@]+"${llvm[@]}"} bzImage modules
 fi
