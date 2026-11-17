@@ -1111,13 +1111,21 @@ fn run(args: &Args) -> Result<bool, String> {
             Some(e) => format!("frame rate {fps:.3} fps is not within 2% of {e}"),
         },
     );
-    check(
-        front.age_bad == 0 && back.age_bad == 0,
-        format!(
-            "frames taken more than 1 s after their start: front end {} of {}, back end {} of {}",
-            front.age_bad, fe_track.frames, back.age_bad, be_track.frames
-        ),
-    );
+    let clock_failure = CLOCK_ERROR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    // Frame ages are judged against the clock. A refused clock has no time to judge them by, so the
+    // age check is not made, and the clock's refusal is the failure that is reported.
+    if clock_failure.is_none() {
+        check(
+            front.age_bad == 0 && back.age_bad == 0,
+            format!(
+                "frames taken more than 1 s after their start: front end {} of {}, back end {} of {}",
+                front.age_bad, fe_track.frames, back.age_bad, be_track.frames
+            ),
+        );
+    }
     check(
         front.placeholders == 0 && back.placeholders == 0,
         format!(
@@ -1125,10 +1133,6 @@ fn run(args: &Args) -> Result<bool, String> {
             front.placeholders, back.placeholders
         ),
     );
-    let clock_failure = CLOCK_ERROR
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     check(
         clock_failure.is_none(),
         format!(
