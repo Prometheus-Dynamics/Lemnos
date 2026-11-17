@@ -174,7 +174,7 @@ simulation/QEMU" (none here), or "computed, not run". The configuration and stat
 (front end 8 × 632 and 8 × 23200, back end 2 × 16720, the sensor's values 2 × 64) do not depend on the
 mode.
 
-| Mode | `frames` (8) | FE `output0` (4) | FE `output1` (4) | BE `input` (2) | BE `output0` (4) | BE `output1` (4) | Status |
+| Mode | `frames` (8) | FE `output0` (6) | FE `output1` (4) | BE `input` (2) | BE `output0` (4) | BE `output1` (4) | Status |
 |---|---|---|---|---|---|---|---|
 | 0: 1280×800 RAW10 | 1,280,000 | 2,052,096 | 516,096 | 2,048,000 | 1,536,000 | 384,000 | `frames`: run on a board; the rest computed, not run |
 | 1: 1280×800 RAW8 | 1,024,000 | 2,052,096 | 516,096 | 2,048,000 | 1,536,000 | 384,000 | computed, not run |
@@ -750,8 +750,8 @@ descriptors come in this order (`lemnos_wire::ring::fds`):
 
 Then `shm_ring_buffers::BufferReader::new(reader, FieldId(0), pool_view, marks)` gives frames:
 `next()` returns a batch whose `held` keeps its buffers until dropped, and whose `meta` is the
-frame's metadata (sequence, identity and length, 20 little-endian bytes: see
-`lemnos_wire::ring::FrameInfo`). The frame's time is the batch's time (`CLOCK_MONOTONIC`). The
+frame's metadata (sequence, identity, length, job-end reason and end time: 32 little-endian
+bytes, see `lemnos_wire::ring::FrameInfo`). The frame's time is the batch's time (`CLOCK_MONOTONIC`). The
 ring's end word (`Reader::end`) is 0 while the stream runs, 1 once it closed, 2 once it faulted, 3 once the
 device producing it failed (see [Why a stream ended](#why-a-stream-ended)). Any other nonzero value is an
 end of unknown kind.

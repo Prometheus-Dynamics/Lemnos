@@ -1,9 +1,10 @@
 # The shm crates: a shared-memory ring
 
 One writer, many readers, in shared memory, with buffer topics, hold marks, doorbells and lookup
-by time on top. These crates depend on nothing but `libc` (and `serde`, optionally, for
-[`SampleTime`](sample-time/src/lib.rs)). Nothing else in this repository is a dependency of theirs,
-so another project can depend on them at a locked revision and get exactly this.
+by time on top. These crates depend on `libc`, on `serde` (optionally, for
+[`SampleTime`](sample-time/src/lib.rs)), and on each other. `loom` is a test-only dependency of
+some of them. Nothing else in this repository is a dependency of theirs, so another project can
+depend on them at a locked revision and get exactly this.
 
 | Crate | Folder | What it is |
 | --- | --- | --- |
@@ -19,9 +20,12 @@ so another project can depend on them at a locked revision and get exactly this.
 | `shm-ring-model` | [`ring-model`](ring-model) | The `loom` models and the hostile-ring check; [`fuzz`](ring-model/fuzz) drives it |
 | `shm-ring-bench` | [`ring-bench`](ring-bench) | What the ring costs, on a real machine |
 
-Little-endian only. Linux first: every crate builds to nothing off Linux except three, which the
-gate checks for Windows and macOS (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
-`x86_64-apple-darwin`), with their Linux-only parts behind `cfg`:
+Little-endian only. Linux first. Three crates are portable, and the gate checks them for Windows and
+macOS (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, `x86_64-apple-darwin`), with their Linux-only
+parts behind `cfg`: `shm-sample-time`, `shm-ring` and `shm-ring-time`. `shm-ring-buffers`,
+`shm-ring-doorbell` and `shm-ring-holds` are Linux only, and build to nothing elsewhere (the whole
+crate is behind `cfg(target_os = "linux")`). `shm-fdpass` uses Unix descriptors, so it is Unix only.
+The others have no `cfg` of their own: they build wherever the crates they use do.
 
 - `shm-sample-time`: `SampleTime::now()` on every platform. Linux and macOS read `CLOCK_MONOTONIC`
   through `clock_gettime`; Windows reads `QueryPerformanceCounter`. Times from different machines
@@ -80,7 +84,7 @@ the same way by every party, so there is no stored offset to point somewhere els
 | 5 to 7 | Reserved, zero | |
 | 8 | Head: how many samples were ever published | Writer |
 | 9 | Subscriber count (low 32) | Owner |
-| 10 | End: 0 while the topic runs; the owner stores a nonzero code once it has ended (Lemnos's streams: 1 closed, 2 faulted). Written by the owner only. Layout 1 kept it reserved and zero, so a layout 1 reader would take an ended topic for a running one: that is why the layout is 2 | Owner |
+| 10 | End: 0 while the topic runs; the owner stores a nonzero code once it has ended (Lemnos's streams: 1 closed, 2 faulted, 3 device failed). Written by the owner only. Layout 1 kept it reserved and zero, so a layout 1 reader would take an ended topic for a running one: that is why the layout is 2 | Owner |
 | 11 to 15 | Reserved, zero | |
 | 16 | Lane heads: one word per field, how many samples that field ever had | Writer |
 | 16 + fields | Index: `index_slots` words | Writer |
@@ -365,7 +369,8 @@ turning a checked word index into an `&AtomicU64`. The rest of the crate denies 
 doorbell's is in `ring-doorbell/src/eventfd.rs`: `eventfd`, `read`, `write` and `poll` on it. The buffer
 topics' is in `ring-buffers/src/map.rs`: mapping a pool's descriptors and making slices of the
 mapping. Hold marks have none. `shm-fdpass` is a thin layer over `sendmsg` and `recvmsg`, and
-`shm-sample-time` has one `clock_gettime`. Every block holds one operation and says why it is
+`shm-sample-time` has one `clock_gettime` on Unix, and two `QueryPerformanceCounter` and
+`QueryPerformanceFrequency` calls on Windows. Every block holds one operation and says why it is
 sound; the crates deny `unsafe` outside those modules.
 
 A frame's bytes are handed out as a plain slice of memory the publisher owns. While the frame is
@@ -390,11 +395,17 @@ cargo test -p shm-sample-time -p shm-ring -p shm-ring-latest -p shm-ring-time -p
 
 The bench, on a quiet machine with two free cores (`--cpus` pins publisher and subscriber):
 
-```sh needs:a quiet machine with two free cores
+```sh needs:a-quiet-machine-with-two-free-cores
 cargo run --release -p shm-ring-bench -- --cpus 2,3
 ```
 
 Measured figures are in [`testing/board-runs/I1.md`](../testing/board-runs/I1.md).
+
+`scripts/check-libraries.sh` builds, lints and tests the eight crates a program takes as a library
+(`shm-sample-time`, `shm-ring`, `shm-ring-latest`, `shm-ring-time`, `shm-ring-doorbell`,
+`shm-ring-buffers`, `shm-ring-holds`, `shm-fdpass`) with no default features. It fails if any of
+their normal dependencies is a `lemnos` crate. It does not check the external crate list: that is
+the `[dependencies]` table of each `Cargo.toml`.
 
 ## Layout values
 
