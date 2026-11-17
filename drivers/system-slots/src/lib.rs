@@ -1100,6 +1100,25 @@ impl SystemSlots {
                 quoted(&why.detail, &mut out);
             }
         }
+        // Appended last: the data partition's grow while it is not finished. `grow_state` is `pending`,
+        // `grown-unconfirmed` (the kernel accepted the resize and its view has not shown it after the
+        // bound, with the sizes seen in bytes), or `none` (finished, or `grow_data` is false).
+        match self.grow.as_ref() {
+            None => out.push_str(",\"grow_state\":\"none\""),
+            Some(grow) => match grow.unconfirmed() {
+                None => out.push_str(",\"grow_state\":\"pending\""),
+                Some(unconfirmed) => {
+                    out.push_str(",\"grow_state\":\"grown-unconfirmed\",\"grow_baseline_bytes\":");
+                    match unconfirmed.baseline {
+                        Some(bytes) => out.push_str(&bytes.to_string()),
+                        None => out.push_str("null"),
+                    }
+                    out.push_str(&format!(",\"grow_seen_bytes\":{}", unconfirmed.seen));
+                    out.push_str(",\"grow_reason\":");
+                    quoted(&unconfirmed.reason, &mut out);
+                }
+            },
+        }
         out.push('}');
         out
     }
@@ -1555,6 +1574,13 @@ impl Lifecycle for SystemSlots {
     fn health(&self) -> Health {
         if let Some(pending) = &self.uncleared {
             return Health::Degraded(count::health_text(pending.wait_ns));
+        }
+        if let Some(unconfirmed) = self.grow.as_ref().and_then(|grow| grow.unconfirmed()) {
+            // The words and the sizes are in `info` (grow_reason, grow_baseline_bytes, grow_seen_bytes).
+            let _ = unconfirmed;
+            return Health::Degraded(
+                "grown-unconfirmed: the kernel accepted the data partition's grow but its view has not confirmed it; the grow is retried",
+            );
         }
         match &self.trial_updates {
             TrialUpdates::Available => Health::Ok,

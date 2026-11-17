@@ -4514,7 +4514,7 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
     let mut out = vec![0u8; 4096];
     let len = slots.info(&mut out).unwrap();
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
-    // Appended after `key_ids`, which is after everything `info` said before; the trial updates are last.
+    // Appended after `key_ids`, which is after everything `info` said before; the trial updates and the grow are last.
     let keys: Vec<&str> = json.members().iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         keys,
@@ -4529,7 +4529,8 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "trial_updates",
             "trial_block",
             "trial_block_text",
-            "trial_block_detail"
+            "trial_block_detail",
+            "grow_state"
         ]
     );
     let a = json.get("last_attempt").unwrap();
