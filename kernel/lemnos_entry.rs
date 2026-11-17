@@ -21,6 +21,8 @@ mod pwm;
 mod gpio;
 #[path = "rs/power.rs"]
 mod power;
+#[path = "rs/irq.rs"]
+mod irq;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
@@ -48,6 +50,8 @@ struct LemnosEntry;
 
 impl kernel::Module for LemnosEntry {
     fn init(module: &'static ThisModule) -> Result<Self> {
+        // SAFETY: called once, before any block can be bound or any interrupt requested.
+        unsafe { irq::lem_irq_setup() };
         // The descriptors are statics the C module defines (LEM_STATIC, lemnos_core.c). Only their
         // addresses are taken; the C side never frees them.
         let (driver, misc) = (addr_of!(lem_driver) as *mut c_void, addr_of!(lem_misc) as *mut c_void);

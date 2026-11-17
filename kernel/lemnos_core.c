@@ -11,8 +11,8 @@
  *
  * Locking: lem_blocks_sem is held for reading across each request and for
  * writing while a block goes away or the file closes, so a request never sees
- * half a block. User memory is only touched outside it. lem_lock guards the
- * interrupt state and is the only lock taken in the handler.
+ * half a block. User memory is only touched outside it. The interrupt state is
+ * Rust's (rs/irq.rs, IRQ_LOCK), the only lock taken in the handler.
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -109,14 +109,41 @@ MODULE_PARM_DESC(test_irq_inject,
 
 struct lem_block;
 
+/*
+ * The record of one interrupt. Its fields are Rust's (rs/irq.rs, LemIrq): read and written under IRQ_LOCK, and
+ * laid out as the mirror there, which asserts the same size.
+ */
 struct lem_irq {
-	struct list_head ready;		/* on lem_ready while fired and unread */
-	struct lem_block *l;
+	struct lem_irq *next;		/* the ready queue, in fire order */
 	int irq;
 	bool masked;
+	bool queued;
+	u32 block_id;			/* the block's number, once numbered */
+	u32 index;
 	u32 count;
 	u64 ns;
 };
+_Static_assert(sizeof(struct lem_irq) == 40, "struct lem_irq mirrors LemIrq in rs/irq.rs");
+
+/* One fired interrupt, as a read reports it: the mirror of LemIrqEvent. */
+struct lem_irq_event {
+	u32 block_id;
+	u32 index;
+	u32 count;
+	u64 ns;
+};
+_Static_assert(sizeof(struct lem_irq_event) == 24, "struct lem_irq_event mirrors LemIrqEvent in rs/irq.rs");
+
+/* The Rust side (rs/irq.rs): the lock, the ready queue and each interrupt's mask state. */
+void lem_irq_setup(void);
+void lem_irq_init(struct lem_irq *q, int irq, u32 index);
+void lem_irq_set_block(struct lem_irq *q, u32 block_id);
+void lem_irq_fired(struct lem_irq *q, u64 ns);
+bool lem_irq_unmask(struct lem_irq *q);
+bool lem_irq_mask(struct lem_irq *q);
+void lem_irq_forget(struct lem_irq *q);
+bool lem_irq_pop(struct lem_irq_event *e);
+bool lem_irq_any(void);
 
 struct lem_block {
 	struct device *dev;
@@ -148,8 +175,6 @@ static DEFINE_XARRAY_ALLOC1(lem_blocks);	/* number -> struct lem_block */
 static u32 lem_next_id;
 static struct address_space *lem_mapping;	/* the open file's; NULL when closed */
 static atomic_t lem_opened = ATOMIC_INIT(0);
-static DEFINE_SPINLOCK(lem_lock);		/* lem_ready, and every lem_irq */
-static LIST_HEAD(lem_ready);
 DECLARE_WAIT_QUEUE_HEAD(lem_wait);
 /* Global: the last buffer's free may race the block being freed. */
 static DECLARE_WAIT_QUEUE_HEAD(lem_drained);
@@ -195,48 +220,25 @@ bool lem_block_owned(struct device *dev)
 
 static irqreturn_t lem_isr(int irq, void *data)
 {
-	struct lem_irq *q = data;
-
-	/* Level interrupts stay masked until the driver has cleared the cause. */
-	disable_irq_nosync(irq);
-	spin_lock(&lem_lock);
-	q->masked = true;
-	q->count++;
-	q->ns = ktime_get_ns();
-	if (list_empty(&q->ready))
-		list_add_tail(&q->ready, &lem_ready);
-	spin_unlock(&lem_lock);
+	(void)irq;
+	lem_irq_fired(data, ktime_get_ns());
 	wake_up_interruptible(&lem_wait);
 	return IRQ_HANDLED;
 }
 
 static bool lem_any_ready(void)
 {
-	unsigned long flags;
-	bool any;
-
-	spin_lock_irqsave(&lem_lock, flags);
-	any = !list_empty(&lem_ready);
-	spin_unlock_irqrestore(&lem_lock, flags);
-	return any || lem_event_pending();
+	return lem_irq_any() || lem_event_pending();
 }
 
 static long lem_irq_enable(struct lem_block *l, u32 index)
 {
 	struct lem_irq *q;
-	unsigned long flags;
-	bool unmask = false;
 
 	if (index >= l->nirqs)
 		return -EINVAL;
 	q = &l->irq[index];
-	spin_lock_irqsave(&lem_lock, flags);
-	if (q->masked) {
-		q->masked = false;
-		unmask = true;
-	}
-	spin_unlock_irqrestore(&lem_lock, flags);
-	if (unmask)
+	if (lem_irq_unmask(q))
 		enable_irq(q->irq);
 	return 0;
 }
@@ -246,15 +248,8 @@ static void lem_irq_mask_all(struct lem_block *l)
 {
 	for (u32 i = 0; i < l->nirqs; i++) {
 		struct lem_irq *q = &l->irq[i];
-		unsigned long flags;
-		bool mask;
 
-		spin_lock_irqsave(&lem_lock, flags);
-		mask = !q->masked;
-		q->masked = true;
-		list_del_init(&q->ready);
-		spin_unlock_irqrestore(&lem_lock, flags);
-		if (mask)
+		if (lem_irq_mask(q))
 			disable_irq(q->irq);
 	}
 }
@@ -264,27 +259,22 @@ static ssize_t lem_read(struct file *file, char __user *ubuf, size_t len, loff_t
 	struct lemnos_event ev[LEM_READ_BATCH];
 	size_t want = min_t(size_t, len / sizeof(ev[0]), ARRAY_SIZE(ev));
 	size_t n = 0;
-	unsigned long flags;
 	int ret;
 
 	if (!want)
 		return -EINVAL;
 	for (;;) {
-		struct lem_irq *q;
+		struct lem_irq_event e;
 
-		spin_lock_irqsave(&lem_lock, flags);
-		while (n < want &&
-		       (q = list_first_entry_or_null(&lem_ready, struct lem_irq, ready))) {
-			list_del_init(&q->ready);
+		while (n < want && lem_irq_pop(&e)) {
 			ev[n++] = (struct lemnos_event){
-				.block = q->l->id,
-				.index = q - q->l->irq,
-				.count = q->count,
+				.block = e.block_id,
+				.index = e.index,
+				.count = e.count,
 				.kind = LEMNOS_EVENT_IRQ,
-				.ns = q->ns,
+				.ns = e.ns,
 			};
 		}
-		spin_unlock_irqrestore(&lem_lock, flags);
 		while (n < want && lem_event_take(&ev[n]))
 			n++;
 		if (n)
@@ -885,10 +875,7 @@ static int lem_probe(struct platform_device *pdev)
 
 		if (irq <= 0)
 			break;
-		INIT_LIST_HEAD(&q->ready);
-		q->l = l;
-		q->irq = irq;
-		q->masked = true;
+		lem_irq_init(q, irq, l->nirqs);
 		/* Not shared: a forwarded interrupt is masked until user space clears it. */
 		ret = devm_request_irq(dev, irq, lem_isr, IRQF_NO_AUTOEN, dev_name(dev), q);
 		if (ret)
@@ -908,6 +895,8 @@ ready:
 		lem_power_destroy(l->power);
 		goto unwind;
 	}
+	for (u32 i = 0; i < l->nirqs; i++)
+		lem_irq_set_block(&l->irq[i], l->id);
 	lem_power_set_block(l->power, l->id);
 	lem_event_post(LEMNOS_EVENT_BLOCK_BOUND, l->id, 0, 0);
 	dev_info(dev, "block %u: %u regions, %u interrupts, %u-bit DMA, registers %smappable%s\n",
@@ -933,12 +922,9 @@ static void lem_remove(struct platform_device *pdev)
 				    (loff_t)BIT(LEM_REGION_BITS) << PAGE_SHIFT, 1);
 	for (u32 i = 0; i < l->nirqs; i++) {
 		struct lem_irq *q = &l->irq[i];
-		unsigned long flags;
 
 		devm_free_irq(dev, q->irq, q);
-		spin_lock_irqsave(&lem_lock, flags);
-		list_del_init(&q->ready);
-		spin_unlock_irqrestore(&lem_lock, flags);
+		lem_irq_forget(q);
 	}
 	lem_imports_free_all(l);
 	xa_destroy(&l->imports);
