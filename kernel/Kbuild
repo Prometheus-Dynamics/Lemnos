@@ -11,7 +11,7 @@ obj-m += lemnos.o
 else
 obj-$(CONFIG_LEMNOS) += lemnos.o
 endif
-lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_regjob_k230isp.o lemnos_bus.o lemnos_gpio.o lemnos_power.o lemnos_events.o
+lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_regjob_k230isp.o lemnos_bus.o lemnos_power.o lemnos_events.o
 # With a Rust kernel (CONFIG_RUST, kernel/lemnos_entry.rs), the Rust half owns the module entry and
 # lemnos_core.c keeps its init and exit as lem_core_init and lem_core_exit (LEMNOS_RUST_OWNER). Without
 # one, lemnos_core.c keeps module_init and module_exit, as before.
@@ -21,7 +21,7 @@ ifeq ($(CONFIG_RUST),)
 $(error lemnos needs CONFIG_RUST=y: the module entry and the claims are Rust, see docs/kernel-config.md)
 endif
 ccflags-y += -DLEMNOS_RUST_OWNER
-lemnos-y += lemnos_entry.o lemnos_claims_rs.o lemnos_pwm_rs.o lemnos_helpers.o
+lemnos-y += lemnos_entry.o lemnos_claims_rs.o lemnos_pwm_rs.o lemnos_gpio_rs.o lemnos_helpers.o
 # The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
 # A built-in lemnos needs RP1_PIO=y as well: a built-in object cannot link to a module's symbols.
 ifneq ($(CONFIG_RP1_PIO),)
