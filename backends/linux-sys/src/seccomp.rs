@@ -294,13 +294,26 @@ pub fn run_forked(body: impl FnOnce() -> i32) -> io::Result<Exit> {
         if started.elapsed() >= FORKED_WAIT {
             // The child is ours, and it has not ended within the bound: kill it and reap it, so a
             // child stuck in a lock another thread held at the fork is a failure, not a hang.
+            // What the child is blocked on, read before it is killed: its kernel wait channel, the
+            // system call it is in, and its kernel stack when the kernel lets us read it.
+            let proc = |name: &str| {
+                std::fs::read_to_string(format!("/proc/{pid}/{name}"))
+                    .map(|text| text.trim().to_owned())
+                    .unwrap_or_else(|e| format!("unreadable ({e})"))
+            };
+            let state = format!(
+                "wchan={} syscall={} stack={:?}",
+                proc("wchan"),
+                proc("syscall"),
+                proc("stack")
+            );
             // SAFETY: `pid` is our child; SIGKILL is the only call here.
             unsafe { libc::kill(pid, libc::SIGKILL) };
             // SAFETY: the same child, reaped with a blocking wait; `status` is writable.
             unsafe { libc::waitpid(pid, &mut status, 0) };
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("forked child {pid} did not end within {FORKED_WAIT:?}"),
+                format!("forked child {pid} did not end within {FORKED_WAIT:?}: {state}"),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -329,6 +342,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("did not end within"), "{error}");
+        assert!(error.to_string().contains("wchan="), "{error}");
         assert!(started.elapsed() >= FORKED_WAIT);
     }
 
