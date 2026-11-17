@@ -59,6 +59,11 @@ pub trait BootRecord: Send {
     fn clear_trial(&mut self) -> io::Result<()>;
     /// Restarts the board, into whatever the loader starts first.
     fn restart(&mut self) -> io::Result<()>;
+    /// Why the boot partition's `config.txt` cannot select the default, `None` when it can (or the record
+    /// keeps none). Read only: the driver shows it in its health and `list`.
+    fn config_refusal(&self) -> Option<&'static str> {
+        None
+    }
     /// Whether a trial can be recorded and started on this board (see [`crate::uboot::TrialUpdates`]).
     /// Only the `uboot` record can say no; the others always can.
     fn trial_updates(&self) -> crate::uboot::TrialUpdates {
@@ -246,13 +251,28 @@ impl Tryboot {
 impl Tryboot {
     /// Refuses slot setup on a boot partition whose `config.txt` lacks the select lines (see
     /// `firmware::check_config_text`). Read only: a board's config.txt is never edited here.
+    fn config_refusal_now(&self) -> Option<&'static str> {
+        let mut raw = self.raw().ok()?;
+        match raw.config_text() {
+            Ok(text) => lemnos_slot_store::firmware::config_refusal(&text),
+            Err(_) => Some(CONFIG_UNREADABLE),
+        }
+    }
+
     fn config_ready(&self) -> io::Result<()> {
         let text = self.raw()?.config_text().map_err(io::Error::other)?;
         lemnos_slot_store::firmware::check_config_text(&text).map_err(io::Error::other)
     }
 }
 
+/// Why `config.txt` cannot be read from the boot partition (static: the driver's health carries it).
+const CONFIG_UNREADABLE: &str = "config.txt cannot be read from the boot partition: Lemnos never edits it, so no slot is set up until it can be read";
+
 impl BootRecord for Tryboot {
+    fn config_refusal(&self) -> Option<&'static str> {
+        self.config_refusal_now()
+    }
+
     fn set_default(&mut self, id: &str) -> io::Result<()> {
         self.config_ready()?;
         self.raw()?

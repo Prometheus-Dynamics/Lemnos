@@ -679,6 +679,12 @@ pub struct BootSpec {
     /// lines are checked against `firmware_overlays`. Default none.
     #[serde(default)]
     pub config_lines: Vec<String>,
+    /// Whether the Pi firmware's count fallback is written: `[boot_count>3]` selects the previous slot
+    /// after four restarts without a good boot. Default: on for the Raspberry Pi 5 family (the SoC name
+    /// starts with `bcm2712`), where `boot_count` exists. Set `true` on any other Pi and the build refuses it
+    /// by name; `false` on a Pi 5 writes config.txt without the filter. Only the `tryboot` record has one.
+    #[serde(default)]
+    pub count_fallback: Option<bool>,
     /// Firmware overlay names (without `.dtbo`) the boot partition carries in each bay's `overlays/`:
     /// each is copied from `--firmware DIR`. Default none.
     #[serde(default)]

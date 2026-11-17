@@ -18,7 +18,7 @@ use crate::boot_dir::{self, with_fragment};
 use lemnos_host::board::{BoardFile, BootSpec};
 use lemnos_slot_store::bays::{self, Layout, ROLES};
 use lemnos_slot_store::bootimage::{self, Committed, Family, Finding, Fixed, Parts};
-use lemnos_slot_store::firmware::{CONFIG_TXT, TRYBOOT_TXT};
+use lemnos_slot_store::firmware::{TRYBOOT_TXT, config_for};
 use lemnos_slot_store::layout::OVERLAY_README;
 use std::io::Write;
 use std::path::Path;
@@ -138,6 +138,22 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     }
     // The firmware config digest and the firmware text: the board's lines follow the fixed text of
     // both config files, inside `[all]`, so they apply to every boot of either pointer.
+    // The count fallback (`[boot_count>3]`) is the Raspberry Pi 5 family's: `boot_count` exists there and
+    // nowhere else. A board that asks for it elsewhere is refused by name, and no other Pi gets the filter.
+    let soc = board.board.soc.clone().unwrap_or_default();
+    let pi5 = soc.starts_with("bcm2712");
+    let count_fallback = boot.count_fallback.unwrap_or(pi5);
+    if count_fallback && !pi5 {
+        return Err(format!(
+            "[boot] count_fallback = true: the firmware's boot_count exists on the Raspberry Pi 5 family only, and this board's soc is {soc:?}: remove count_fallback, or set it to false"
+        ));
+    }
+    if family == Family::UbootBlock && boot.count_fallback.is_some() {
+        return Err(
+            "[boot] count_fallback is a Raspberry Pi firmware setting: this board's record is \"uboot\""
+                .to_string(),
+        );
+    }
     let config = bays::config_digest(&boot.config_lines);
     let mut lines = fragment.to_string();
     for line in &boot.config_lines {
@@ -177,7 +193,7 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
                     ("slot-layout.toml", layout_file),
                     (
                         "config.txt",
-                        with_fragment(boot_dir::HEADER, CONFIG_TXT, &lines),
+                        with_fragment(boot_dir::HEADER, config_for(count_fallback), &lines),
                     ),
                     (
                         "tryboot.txt",
@@ -461,5 +477,61 @@ fn verify_file(o: &Options, file: &str, out: &mut dyn Write) -> Result<(), Strin
         Ok(())
     } else {
         Err(format!("{file}: {bad} finding(s) failed"))
+    }
+}
+
+#[cfg(test)]
+mod count_fallback_tests {
+    use super::*;
+
+    /// The reference board's `[boot]` table with `count_fallback` (if any) written, its soc replaced.
+    fn board(soc: &str, count: &str) -> BoardFile {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testing/boards/reference.toml"),
+        )
+        .unwrap();
+        let text = text
+            .replace("soc = \"bcm2712-rp1\"", &format!("soc = \"{soc}\""))
+            .replacen("[boot]\n", &format!("[boot]\n{count}\n"), 1);
+        lemnos_host::board::parse(&text).unwrap()
+    }
+
+    fn config_of(parts: &Parts) -> String {
+        let (_, text) = parts
+            .root
+            .iter()
+            .find(|(name, _)| *name == "config.txt")
+            .expect("a Pi board has config.txt");
+        String::from_utf8(text.clone()).unwrap()
+    }
+
+    #[test]
+    fn the_pi5_family_gets_the_count_fallback_and_refuses_a_fallback_anywhere_else() {
+        let pi5 = board("bcm2712-rp1", "");
+        let parts = board_parts(&pi5, "").unwrap();
+        assert!(config_of(&parts).contains("[boot_count>3]"));
+        assert!(config_of(&parts).contains("include previous.txt"));
+
+        // Asked for elsewhere: refused by name, before any image is made.
+        let rk = board("rk3566", "count_fallback = true");
+        let why = board_parts(&rk, "").expect_err("refused");
+        assert!(why.contains("count_fallback = true"), "{why}");
+        assert!(why.contains("Raspberry Pi 5 family only"), "{why}");
+    }
+
+    #[test]
+    fn a_pi_outside_the_pi5_family_gets_no_filter_and_no_previous_include() {
+        // A Pi 5 with the fallback switched off writes no filter either.
+        let pi5_off = board("bcm2712-rp1", "count_fallback = false");
+        let config = config_of(&board_parts(&pi5_off, "").unwrap());
+        // Whole lines only: the generated header comment names the filter in words.
+        let lines: Vec<&str> = config.lines().collect();
+        assert!(
+            !lines.iter().any(|l| l.starts_with("[boot_count")),
+            "{config}"
+        );
+        assert!(!lines.contains(&"include previous.txt"), "{config}");
+        assert!(lines.contains(&"include default.txt"), "{config}");
     }
 }

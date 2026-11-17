@@ -50,24 +50,29 @@ fn with_no_board_lines_the_files_are_the_fixed_text() {
     );
 }
 
-/// The one constant: the `[boot_count&4]` filter the generated config.txt carries selects the
-/// previous pointer for exactly the counts `pick` says, for every count the 8-bit register holds.
+/// The one constant: the `[boot_count>N]` filter the generated config.txt carries selects the previous
+/// pointer for exactly the counts `pick` says, for every count the 8-bit register holds. `[ARG>VALUE]` is
+/// selected when ARG > VALUE (conditional.adoc, raspberrypi/documentation commit b01a5c1a).
 #[test]
 fn the_fixed_text_and_the_slots_reading_of_it_are_one_constant() {
-    let filter = CONFIG_TXT
+    let threshold: u8 = CONFIG_TXT
         .lines()
-        .find_map(|line| line.strip_prefix("[boot_count&"))
+        .find_map(|line| line.strip_prefix("[boot_count>"))
         .and_then(|rest| rest.strip_suffix(']'))
-        .expect("the config.txt filter line");
-    let mask: u8 = filter.parse().expect("a decimal mask");
+        .expect("the config.txt filter line")
+        .parse()
+        .expect("a decimal threshold");
+    assert_eq!(threshold, firmware::FALLBACK_AFTER);
     for count in 0..=255u8 {
-        let firmware_picks = if count & mask != 0 {
+        let firmware_picks = if count > threshold {
             Pick::Previous
         } else {
             Pick::Default
         };
         assert_eq!(firmware::pick(count), firmware_picks, "count {count}");
     }
+    // The Pi 5 text carries the filter, and the other Pi text carries none.
+    assert!(!firmware::CONFIG_TXT_NO_COUNT.contains("boot_count"));
     // The file the slots write the pointers to is the one the fixed text includes.
     assert!(
         CONFIG_TXT.contains("include default.txt") && CONFIG_TXT.contains("include previous.txt")

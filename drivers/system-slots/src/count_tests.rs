@@ -689,3 +689,20 @@ fn a_baseline_the_record_cannot_keep_is_named_and_not_taken() {
     assert!(why.contains("cut"), "{why}");
     assert_eq!(rec.baseline, None);
 }
+
+/// The firmware's count is a raw big-endian u32 (`chosen/bootloader/count`), not text. The bytes of 3 in
+/// little-endian order are `03 00 00 00`: read as big-endian that is 0x03000000, which is not a count, so
+/// the reading is refused rather than taken for 3. A little-endian reader would take 3 and pass this test
+/// only if it still refused the big-endian bytes of 3 (`00 00 00 03`): both halves are checked.
+#[test]
+fn the_count_bytes_are_big_endian_and_the_little_endian_order_is_refused() {
+    let dir = Dir::new("count-endian");
+    let be = device_tree(&dir, &[0, 0, 0, 3], &[0, 0, 0, 0]);
+    assert_eq!(be.count().unwrap(), 3, "big-endian 3 is the count 3");
+    let le = device_tree(&dir, &[3, 0, 0, 0], &[0, 0, 0, 0]);
+    assert!(
+        le.count().is_err(),
+        "little-endian bytes of 3 read as 0x03000000, which is not an 8-bit count"
+    );
+    assert_eq!(le.count_word().unwrap(), 0x0300_0000);
+}
