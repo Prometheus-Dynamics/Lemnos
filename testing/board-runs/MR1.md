@@ -1,5 +1,49 @@
 # MR1: maskrom flasher, board facts (ZERO 3E)
 
+## Status (2026-11-17): rehearsal on the PC, board not contacted
+
+Nothing has run on the board in this session. No USB, network or ssh contact with the board was made for this record.
+The board steps are not run: step E waits for the PC rehearsal to pass against the stand-in, and steps 2 and 3 wait for a
+reviewer's word. The PC rehearsal is `testing/crates/maskrom-rehearsal` (crate `lemnos-maskrom-rehearsal`): a same-rev stand-in
+for the boot ROM's 471 and 472 entries, with the stage's own regions and build id, and the script in plan order
+(E, 1a, 1b, 2, 3, 4, 5). It is not a product host and is not linked into anything. The stand-in's timing is the plan's
+numbers, not a measurement.
+
+### Rehearsal results (PC, same rev as this commit)
+
+| Check | Command | Result |
+|---|---|---|
+| Faithful script, all steps | `cargo test -p lemnos-maskrom-rehearsal` | `rehearsal_faithful_script_passes_every_step ... ok` |
+| Failing ROM: 471 spin never resets | same | `rehearsal_no_reset_after_spin_fails_at_step_1a ... ok` (script reports step 1a) |
+| Failing ROM: 472 refused | same | `rehearsal_refused_472_fails_at_step_2 ... ok` (script reports step 2) |
+| Refusals outside maskrom, before a returned 471 | same | `rehearsal_471_is_refused_outside_maskrom ... ok`, `rehearsal_472_is_refused_without_a_returned_471 ... ok` |
+| Watchdog periods (TOP 15, TOP 12 at 24 MHz) | same | `rehearsal_watchdog_periods_match_the_plan ... ok` |
+| 471 return keeps the watchdog and resets inside 90 s | same | `rehearsal_watchdog_survives_a_471_return_and_resets_inside_the_window ... ok` |
+
+Fail-before: with the spin's reset removed from the stand's failing mode (the stand resets anyway), the test
+`rehearsal_no_reset_after_spin_fails_at_step_1a` fails with `panicked at tests/rehearsal.rs:17` and the stand is restored
+after. The stand must fail where the ROM is said to fail: that case is the one named.
+
+Steps as rehearsed (sim only):
+- E: running system to maskrom. 1a: 471 spin resets within 90 s, system boots. 1b: 471 return, the watchdog survives the
+  return and resets. 2: 471 return, 472 accepted, no frame, reset with zero feeds. 3: baseline read of 4 sectors past the
+  boot area, same bytes written back, read again and compared byte for byte, feeds 12 (4 baseline reads, 4 writes, 4
+  verify reads), then END and reset. 4: a cut after the write request, reset, re-entry reads the baseline unchanged.
+  5: a wrong-CRC chunk is refused with status 1, does not feed, and does not reach storage.
+
+Deviation from the plan, stated: the same-bytes check compares bytes; it does not compute sha256 (no hash dependency
+added). Board runs of the same check use the sha256 of the whole region, as the plan's step 3.3 says.
+
+### Board steps (unrun)
+
+| Step | State |
+|---|---|
+| E (enter maskrom) | not run. Waits for the PC rehearsal to pass against the sender, as the coordinator ruled |
+| 1a, 1b | not run. After E |
+| 2 (472 hang, no write) | not run. Waits for a reviewer's word (plan step 2) |
+| 3 (same-bytes round trip) | not run. Waits for a reviewer's word (plan step 3) |
+| 4, 5 | not run. After 3 |
+
 Status: untested on board. This record holds what was read or attempted on the bench. Nothing was
 written to the board, and it was not rebooted.
 
