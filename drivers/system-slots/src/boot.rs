@@ -705,6 +705,30 @@ mod tests {
     }
 
     #[test]
+    fn a_config_txt_with_the_old_mask_filter_is_degraded_and_refuses_a_trial() {
+        let dir = TempDir::new("tryboot-old-filter");
+        let node = dir.0.join("boot.img");
+        let old: &[u8] = b"kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count&4]\ninclude previous.txt\n[all]\nkernel=kernel8.img\n";
+        fs::write(
+            &node,
+            crate::bay_fixture::tryboot_image_with_config("a-1", old),
+        )
+        .unwrap();
+        let mut record = tryboot(&dir, Ok(node.clone()));
+        // The driver reads the reason at start: degraded, naming the old filter.
+        let why = record
+            .config_refusal()
+            .expect("the old filter is a refusal");
+        assert!(why.contains("`[boot_count&4]`"), "{why}");
+        // A trial is refused by name, and nothing is written.
+        let why = record.set_trial("a-1", 2).unwrap_err().to_string();
+        assert!(why.contains("`[boot_count&4]`"), "{why}");
+        let mut raw = RawBoot::open(&node).unwrap();
+        assert_eq!(raw.config_text().unwrap(), old);
+        assert_eq!(raw.trial().unwrap(), None);
+    }
+
+    #[test]
     fn lemnosd_never_mounts_the_boot_partition() {
         // Grep proof: this file calls no mount. The node is found from the disk's sysfs, never mounted.
         let src = include_str!("boot.rs");

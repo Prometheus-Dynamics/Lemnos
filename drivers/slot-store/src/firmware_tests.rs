@@ -233,3 +233,22 @@ fn a_config_txt_without_the_default_line_is_refused_by_name_and_the_image_texts_
     assert!(check_config_text(b"kernel_watchdog_timeout=15\n").is_err());
     assert_eq!(config_refusal(&[0xff, 0xfe]), Some(NOT_TEXT_REFUSAL));
 }
+
+/// The text every Pi 5 board carried before the threshold: its `ARG&MASK` filter is a refusal now.
+const OLD_TEXT: &str = "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count&4]\ninclude previous.txt\n[all]\n\
+kernel=kernel8.img\ncmdline=cmdline.txt\ninitramfs initramfs.cpio followkernel\ndevice_tree=board.dtb\ndtoverlay=lemnos-board\n";
+
+#[test]
+fn a_config_txt_with_the_old_mask_filter_is_refused_by_name_and_the_threshold_text_is_not() {
+    // The old text has the default line, so only the filter can refuse it: the refusal names the filter.
+    assert_eq!(
+        config_refusal(OLD_TEXT.as_bytes()),
+        Some(OLD_FILTER_REFUSAL)
+    );
+    let why = check_config_text(OLD_TEXT.as_bytes()).unwrap_err();
+    assert!(why.contains("`[boot_count&4]`"), "{why}");
+    assert!(why.contains("rebuild the boot partition offline"), "{why}");
+    // The threshold text, and the Pi text with no filter, are accepted.
+    assert_eq!(config_refusal(CONFIG_TXT.as_bytes()), None);
+    assert_eq!(config_refusal(CONFIG_TXT_NO_COUNT.as_bytes()), None);
+}
