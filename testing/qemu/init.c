@@ -283,6 +283,12 @@ int main(void)
 	check(!load("/lemnos_test_block.ko", CSI2_PHYS), "test block module loaded");
 	check(!load("/lemnos.ko", OWNED), "module loaded");
 	check(!access("/dev/lemnos", R_OK), "control node exists");
+	/*
+	 * The Rust half's skeleton (kernel/rust, stage 0 of the port): it loads and unloads beside the C
+	 * module, under its own names, and the kernel reports nothing wrong while it does.
+	 */
+	check(!load("/lemnos_rs.ko", ""), "Rust skeleton loaded");
+	check(!unload("lemnos_rs"), "Rust skeleton unloaded");
 	check(bind_block(OTHER) == ENODEV, "a block not listed is refused (ENODEV)");
 	check(bind_csi2() == ENODEV, "the receiver not in owned= is refused (ENODEV)");
 	check(!forget_override(CSI2), "receiver override cleared");
