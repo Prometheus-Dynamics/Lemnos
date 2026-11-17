@@ -1857,6 +1857,54 @@ fn a_detached_run_outlives_its_session_and_attach_finds_it() {
     });
 }
 
+/// A detached run is re-attached from a session that did not start it, and that session is connected
+/// only after the starter's session has ended. The starter starts a detached run and drops its run and
+/// session. A new session connects, attaches to the run by its number, and sees its progress (the run
+/// went on past its starter). Its cancel ends the run, and the end reaches the new session as
+/// `Cancelled`. Mutation: with the bridge cancelling a detached run at `CallerGone` (as an attached one
+/// is), the attach finds no progress and this fails.
+#[test]
+fn a_detached_run_is_re_attached_from_a_session_connected_after_its_starter_ended() {
+    let dir = dir("reattach");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let starter = second_session(&board);
+    let mut detached = starter
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: b"count_until_cancelled",
+            // A detached run needs a deadline at this revision (`NoDeadline` otherwise): a minute.
+            deadline_ms: 60_000,
+            detached: true,
+        })
+        .expect("run");
+    let call = detached.call();
+    wait_for("the detached run reports progress", || {
+        match detached.wait(Duration::from_millis(100)) {
+            Ok(Some(Update::Doing(_))) => Some(()),
+            _ => None,
+        }
+    });
+    drop(detached);
+    drop(starter);
+    // The starter's session has ended (Orion says so to the bridge with `CallerGone`); the run goes on.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // A session connected after that end attaches by the run's number, and sees the run still going.
+    let newcomer = second_session(&board);
+    let mut attached = newcomer.attach(call).expect("attach");
+    wait_for(
+        "a session connected after the starter's end sees the run's progress",
+        || match attached.wait(Duration::from_millis(100)) {
+            Ok(Some(Update::Doing(_))) => Some(()),
+            _ => None,
+        },
+    );
+    attached.cancel().expect("cancel");
+    let finished = attached.finish(WAIT).expect("the cancelled run ends");
+    assert_eq!(finished.outcome, Outcome::Cancelled, "{finished:?}");
+}
+
 #[test]
 fn values_keep_the_time_the_driver_read_them_on_the_monotonic_clock() {
     let dir = dir("stamps");
