@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-vip-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's VIP9000 check: the fake block's programs, refused jobs, MMU faults, the stuck job and the wedged block (CZ-GUEST-4 port of lemnos_vip_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
