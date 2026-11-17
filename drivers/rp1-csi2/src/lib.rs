@@ -85,6 +85,16 @@
 //! refused with `BUSY`. A failed `start` or `stop` is reported to its caller, who retries it.
 //! A node that answers `ENODEV` (its block was unbound) is dropped, and the next attempt opens
 //! the path again, so the driver comes back once the block is bound again.
+//!
+//! Frame stop. While streaming, a frame that does not come is a failure too. The bound is taken
+//! from the configured mode, not measured on a board: the frame period is the active picture
+//! (width times height) at the link's pixel rate, and the receiver counts a stop at the first
+//! one-second check after no frame has moved for `max(4 x that period, 200 ms)`. The active picture leaves out blanking, so the period
+//! is shorter than a real frame's; the bound is four of those, which stays above a real frame period
+//! while blanking is less than three times the active picture. The judgement is made only while the
+//! block has a buffer armed (`frame_starts` is `Some`): with every buffer held by the consumer no
+//! frame can reach it, and that is no stop. A stop restarts the receiver under the failure rule
+//! above, and health is failed with a reason that names the stop. Unmeasured on a board.
 
 mod hw;
 pub mod relay;
@@ -135,6 +145,10 @@ const POLL_NS: u64 = 1_000_000;
 /// one frame period at 30 fps. A frame the doorbell failed to announce is found by the tick after
 /// this, and counted (see [`Rp1Csi2::lost_wakes`]).
 const FALLBACK_NS: u64 = 33_000_000;
+/// The shortest no-frame bound, while armed: frame stop is judged after this much at least.
+const FRAME_STOP_MIN_NS: u64 = 200_000_000;
+/// Frame periods a stop waits for before it is judged.
+const FRAME_STOP_PERIODS: u64 = 4;
 /// The stream the board declares on the device, and the name its consumer opens it by.
 const STREAM: &str = "frames";
 /// The stream of the embedded data, when the board declares one on the device.
@@ -194,6 +208,23 @@ pub struct Rp1Csi2 {
     /// Frames a deadline tick found: the doorbell should have woken the driver for them. Counted,
     /// so a lost bell is visible.
     lost_wakes: u64,
+    /// When a frame last moved while streaming, or the first tick after a start. `None` until then.
+    last_frame_ns: Option<u64>,
+    /// Set while recovering from a frame stop, so health names it.
+    frame_stopped: bool,
+}
+
+/// The no-frame bound for a link: `max(4 x active-picture period, 200 ms)`, where the active
+/// picture is width times height at the pixel rate. `None` for a link with no pixel rate.
+fn frame_stop_bound_ns(link: &LinkConfig) -> Option<u64> {
+    if link.pixel_rate_hz == 0 {
+        return None;
+    }
+    let period = u128::from(link.width) * u128::from(link.height) * 1_000_000_000
+        / u128::from(link.pixel_rate_hz);
+    let four =
+        u64::try_from(period.saturating_mul(u128::from(FRAME_STOP_PERIODS))).unwrap_or(u64::MAX);
+    Some(four.max(FRAME_STOP_MIN_NS))
 }
 
 /// The smallest ring holding `buffers` frames, a power of two.
@@ -366,6 +397,10 @@ impl Lifecycle for Rp1Csi2 {
 
     fn health(&self) -> Health {
         match self.state {
+            State::Recovering { .. } if self.frame_stopped => Health::Failed(
+                "no frame arrived within the bound for the configured mode while buffers were armed: \
+                 restarting the receiver",
+            ),
             State::Recovering { .. } => {
                 Health::Failed("the receiver stopped while streaming: restarting it")
             }
@@ -389,6 +424,17 @@ impl Lifecycle for Rp1Csi2 {
                 let at_deadline = self.wake_at.is_some_and(|at| now_ns >= at);
                 let moved = self.frames_moved;
                 if self.pump().is_err() || (due && self.hw.check().is_err()) {
+                    self.state = State::Recovering {
+                        attempt: 0,
+                        due: None,
+                    };
+                    return self.tick(now_ns);
+                }
+                if self.frames_moved != moved || self.last_frame_ns.is_none() {
+                    self.last_frame_ns = Some(now_ns);
+                }
+                if due && self.frame_stop_judged(now_ns) {
+                    self.frame_stopped = true;
                     self.state = State::Recovering {
                         attempt: 0,
                         due: None,
@@ -427,6 +473,8 @@ impl Lifecycle for Rp1Csi2 {
             State::Recovering { due: Some(at), .. } if now_ns < at => Some(at),
             State::Recovering { attempt, .. } => match self.begin() {
                 Ok(()) => {
+                    self.frame_stopped = false;
+                    self.last_frame_ns = Some(now_ns);
                     self.state = State::Streaming {
                         next_check: Some(now_ns.saturating_add(CHECK_NS)),
                     };
@@ -447,6 +495,22 @@ impl Lifecycle for Rp1Csi2 {
 }
 
 impl Rp1Csi2 {
+    /// Whether no frame has moved for the bound of the configured mode, while the block has a
+    /// buffer armed. Asks the block's count only past the bound, so a streaming tick costs nothing
+    /// extra. An unknown count (`None`, or an error) is no judgement.
+    fn frame_stop_judged(&mut self, now_ns: u64) -> bool {
+        let (Some(link), Some(since)) = (self.link, self.last_frame_ns) else {
+            return false;
+        };
+        let Some(bound) = frame_stop_bound_ns(&link) else {
+            return false;
+        };
+        if now_ns.saturating_sub(since) <= bound {
+            return false;
+        }
+        matches!(self.hw.frame_starts(), Ok(Some(_)))
+    }
+
     /// A driver over `hw`, for a simulated board or a test.
     #[must_use]
     pub fn with_hardware(hw: Box<dyn Hardware>, frames: Option<StreamHandle>) -> Self {
@@ -467,6 +531,8 @@ impl Rp1Csi2 {
             wake_at: None,
             frames_moved: 0,
             lost_wakes: 0,
+            last_frame_ns: None,
+            frame_stopped: false,
         }
     }
 
@@ -677,6 +743,8 @@ impl CameraReceiver for Rp1Csi2 {
         // Stop means stop, whatever the driver was doing. Recovery is over either way.
         self.owner = None;
         self.state = State::Stopped;
+        self.last_frame_ns = None;
+        self.frame_stopped = false;
         self.hw.stop()
     }
 

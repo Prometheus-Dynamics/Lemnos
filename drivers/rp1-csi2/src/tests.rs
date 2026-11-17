@@ -730,6 +730,54 @@ fn a_block_that_stops_is_restarted_with_capped_backoff() {
     assert_eq!(d.health(), Health::Ok);
 }
 
+/// The configured mode's bound: raw10 is 1280 x 800 at 80 MHz, so four active-picture periods are
+/// 51.2 ms, and the 200 ms floor applies. The check that judges it is the one-second check.
+#[test]
+fn a_frame_that_does_not_come_within_the_bound_restarts_the_receiver_with_a_named_reason() {
+    let (mut d, hw) = driver();
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    assert_eq!(
+        d.tick(0).unwrap(),
+        1_000_000,
+        "the first tick takes the clock"
+    );
+    assert_eq!(d.health(), Health::Ok);
+
+    // Armed, and no frame moved: the one-second check past the bound judges a stop.
+    let at = d.tick(1_000_000_000).unwrap();
+    assert_eq!(at, 1_000_000_000 + 250_000_000, "the first recovery delay");
+    match d.health() {
+        Health::Failed(reason) => assert!(
+            reason.contains("no frame arrived within the bound"),
+            "the reason names the stop: {reason}"
+        ),
+        other => panic!("a frame stop is a failure, not {other:?}"),
+    }
+    // It is a restart, not a stop: recovery goes on and the stream comes back.
+    hw.with(|m| m.fail_start = None);
+    let at = d.tick(at).unwrap();
+    assert_eq!(
+        at,
+        1_250_000_000 + 1_000_000,
+        "back to streaming on the first poll"
+    );
+    assert_eq!(d.health(), Health::Ok);
+}
+
+/// With no buffer armed the block makes no frame start, so no frame is expected: the count is
+/// `None`, and that is no stop.
+#[test]
+fn no_frame_stop_is_judged_while_no_buffer_is_armed() {
+    let (mut d, hw) = driver();
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    d.tick(0).unwrap();
+    hw.with(|m| m.receiving = false);
+    d.tick(1_000_000_000).unwrap();
+    assert_eq!(d.health(), Health::Ok);
+}
+
 #[test]
 fn stop_ends_recovery() {
     let (mut d, hw) = driver();
@@ -790,7 +838,9 @@ fn the_steady_state_allocates_nothing() {
         let got = frames.take_frame().expect("published");
         assert_eq!((got.buffer, got.sequence), (buffer, sequence));
         frames.return_buffer(buffer);
-        *now = d.tick(*now + 500_000_000).unwrap();
+        // One frame period at 60 fps later: a gap of 500 ms with no frame is a frame stop under the
+        // bound for this mode (`frame_stop_bound_ns`, 200 ms), so the cycle's gap is a real period.
+        *now = d.tick(*now + 16_666_667).unwrap();
         assert_eq!(d.counters().unwrap().dropped, 0);
         sequence += 1;
     };

@@ -81,6 +81,12 @@
 //! frame end after which the block names none of the ring, is counted in `errors` and is not a
 //! reason to restart.
 //!
+//! Frame stop. On either way, a frame end that does not come for `max(4 x the active picture's
+//! period, 200 ms)` restarts the frame path under the same backoff, with health failed and a reason
+//! that names the stop. The period is the configured mode's (width times height at the link's pixel
+//! rate, as `rp1-csi2` takes it), not a board measurement. Frame ends count whether or not the
+//! consumer holds a buffer, so a consumer holding every buffer is no stop here. Unmeasured on a board.
+//!
 //! On the module's way a frame that doesn't come within
 //! [`FRAME_TIMEOUT_MS`](module::FRAME_TIMEOUT_MS) has the module reset the block, which is a
 //! device error here: recovery starts it again.
@@ -279,6 +285,31 @@ pub struct K230Capture {
     sequence: u64,
     /// Where a frame passes on its way to the stream: made once.
     chunk: Vec<u8>,
+    /// Frame ends the block raised, delivered or not: the frame-stop watch counts these.
+    frame_ends: u64,
+    /// When a frame end last came while streaming, or the first tick after a start. `None` until then.
+    last_frame_ns: Option<u64>,
+    /// Set while recovering from a frame stop, so health names it.
+    frame_stopped: bool,
+}
+
+/// The shortest no-frame bound: frame stop is judged after this much at least.
+const FRAME_STOP_MIN_NS: u64 = 200_000_000;
+/// Frame periods a stop waits for before it is judged.
+const FRAME_STOP_PERIODS: u64 = 4;
+
+/// The no-frame bound for a link: `max(4 x active-picture period, 200 ms)`, where the active
+/// picture is width times height at the pixel rate. `None` for a link with no pixel rate. The
+/// same bound as `rp1-csi2`, from the configured mode and not measured on a board.
+fn frame_stop_bound_ns(link: &LinkConfig) -> Option<u64> {
+    if link.pixel_rate_hz == 0 {
+        return None;
+    }
+    let period = u128::from(link.width) * u128::from(link.height) * 1_000_000_000
+        / u128::from(link.pixel_rate_hz);
+    let four =
+        u64::try_from(period.saturating_mul(u128::from(FRAME_STOP_PERIODS))).unwrap_or(u64::MAX);
+    Some(four.max(FRAME_STOP_MIN_NS))
 }
 
 /// The settings this driver reads from its board file config.
@@ -364,6 +395,9 @@ impl Lifecycle for K230Capture {
 
     fn health(&self) -> Health {
         match self.state {
+            State::Recovering { .. } if self.frame_stopped => Health::Failed(
+                "no frame end arrived within the bound for the configured mode: restarting the frame path",
+            ),
             State::Recovering { .. } => {
                 Health::Failed("the frame path failed while streaming: restarting it")
             }
@@ -377,7 +411,19 @@ impl Lifecycle for K230Capture {
         match self.state {
             State::Stopped => None,
             State::Streaming => {
+                let ends = self.frame_ends;
                 if self.pump().is_err() {
+                    self.state = State::Recovering {
+                        attempt: 0,
+                        due: None,
+                    };
+                    return self.tick(now_ns);
+                }
+                if self.frame_ends != ends || self.last_frame_ns.is_none() {
+                    self.last_frame_ns = Some(now_ns);
+                }
+                if self.frame_stop_judged(now_ns) {
+                    self.frame_stopped = true;
                     self.state = State::Recovering {
                         attempt: 0,
                         due: None,
@@ -397,6 +443,8 @@ impl Lifecycle for K230Capture {
             State::Recovering { due: Some(at), .. } if now_ns < at => Some(at),
             State::Recovering { attempt, .. } => match self.begin() {
                 Ok(()) => {
+                    self.frame_stopped = false;
+                    self.last_frame_ns = Some(now_ns);
                     self.state = State::Streaming;
                     Some(now_ns.saturating_add(POLL_NS))
                 }
@@ -415,6 +463,19 @@ impl Lifecycle for K230Capture {
 }
 
 impl K230Capture {
+    /// Whether no frame end has come for the bound of the configured mode. Frame ends are counted
+    /// whether or not the consumer holds a buffer (a frame it cannot take is dropped, and still a
+    /// frame end), so a consumer holding every buffer is not a stop here.
+    fn frame_stop_judged(&self, now_ns: u64) -> bool {
+        let (Some(link), Some(since)) = (self.link, self.last_frame_ns) else {
+            return false;
+        };
+        let Some(bound) = frame_stop_bound_ns(&link) else {
+            return false;
+        };
+        now_ns.saturating_sub(since) > bound
+    }
+
     /// A driver over `hw` producing into `frames`, for a simulated board or a test. `hw` owns
     /// the DMA memory.
     #[must_use]
@@ -431,6 +492,9 @@ impl K230Capture {
             ring: Ring::START,
             sequence: 0,
             chunk: vec![0; COPY_CHUNK],
+            frame_ends: 0,
+            last_frame_ns: None,
+            frame_stopped: false,
         }
     }
 
@@ -495,6 +559,7 @@ impl K230Capture {
             if event.status & MIS_MP_FRAME_END == 0 {
                 continue;
             }
+            self.frame_ends = self.frame_ends.wrapping_add(1);
             self.sequence = self.sequence.wrapping_add(1);
             let counter = match self.frame_end(&event)? {
                 Delivery::Published => &mut self.counters.frames,
@@ -657,6 +722,8 @@ impl CameraReceiver for K230Capture {
     fn stop(&mut self) -> Result<()> {
         // Stop means stop, whatever the driver was doing. Recovery is over either way.
         self.state = State::Stopped;
+        self.last_frame_ns = None;
+        self.frame_stopped = false;
         self.halt()
     }
 
