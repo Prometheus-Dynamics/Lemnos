@@ -31,6 +31,10 @@ row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
 # board whose date has no %N prints a literal N, and the arithmetic on it fails (`N: unbound variable`).
 now_ms() { awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime; }
 
+# guard PID SECONDS: kills PID (a process this script started) if it is still running after SECONDS. The board
+# has no `timeout` command, so the bound is this background kill, which names our own PID only.
+guard() { ( sleep "$2"; kill "$1" 2>/dev/null ) >/dev/null 2>&1 & echo $!; }
+
 # put KEY VALUE NOTE: a measured row when there is a value, otherwise not measured.
 put() {
   if [ -n "$2" ]; then
@@ -90,7 +94,8 @@ window() {
   s1=$(now_ms)
   ms=$((s1 - s0))
   [ "$ms" -gt 0 ] || ms=1
-  awk -v d="$((t1 - t0))" -v ms="$ms" -v hz="$(getconf CLK_TCK)" \
+  # USER_HZ is 100 on Linux (the unit of /proc/PID/stat); the board has no getconf.
+  awk -v d="$((t1 - t0))" -v ms="$ms" -v hz=100 \
     'BEGIN { printf "%.2f", d / hz / (ms / 1000) * 100 }'
 }
 
@@ -141,17 +146,21 @@ usb_cycle() {
 if [ "$mode" = board ]; then
   put cpu.idle_pct "$(window 30)" "board, 30 s, no subscriber"
 
-  timeout 60 "$ctl" --socket "$sock" watch imu acceleration --period-ms 20 --count 1500 \
+  "$ctl" --socket "$sock" watch imu acceleration --period-ms 20 --count 1500 \
     >/dev/null 2>&1 &
   sub=$!
+  g=$(guard "$sub" 90)
   put cpu.50hz_pct "$(window 30)" "board, 30 s, a subscriber at 20 ms"
   wait "$sub" 2>/dev/null || true
+  kill "$g" 2>/dev/null
 
-  timeout 120 "$ctl" --socket "$sock" watch imu acceleration --period-ms 5 --count 9000 \
+  "$ctl" --socket "$sock" watch imu acceleration --period-ms 5 --count 9000 \
     2>"$work/imu.err" | "$work/lemnos-bench-stamp" --period-ms 5 --expect 9000 >"$work/imu.tsv" &
   imu=$!
+  g=$(guard "$imu" 150)
   put cpu.200hz_pct "$(window 45)" "board, 45 s, the 200 Hz IMU run below"
   wait "$imu" || true
+  kill "$g" 2>/dev/null
   cat "$work/imu.tsv"
 
   if "$ctl" --socket "$sock" read power0 >"$work/power.txt" 2>&1; then
