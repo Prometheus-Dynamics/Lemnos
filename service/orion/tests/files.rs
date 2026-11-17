@@ -279,7 +279,12 @@ fn setup(test: &str, reserve_mb: u64) -> Setup {
     let incoming = dir.join("data/slots/.incoming");
     let bridge = start_bridge(&socket, board.socket(), &incoming);
     let dashboard = wait_for("a dashboard session", || {
-        Orion::connect(&Address::Local(board.socket().to_path_buf()), "dashboard").ok()
+        Orion::connect_once(
+            &Address::Local(board.socket().to_path_buf()),
+            "dashboard",
+            orion::Options::default(),
+        )
+        .ok()
     });
     wait_for("the slots resource", || {
         let found = dashboard.resources("lemnos.slots").ok()?;

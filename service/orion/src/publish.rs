@@ -293,33 +293,33 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             continue;
         }
         number += 1;
-        let mut session = match Session::open(config, number, &devices, &facts, set, held.as_ref())
-        {
-            Ok(session) => session,
-            Err(Opening::StillHeld(message)) => {
-                // The old session is still closing on the comm core. Said once per loss, then
-                // retried on the short interval, with the backoff left where it is.
-                if let Some(held) = held.as_mut()
-                    && !held.told
-                {
-                    held.told = true;
-                    log(&message);
+        let mut session =
+            match Session::open(config, shared, number, &devices, &facts, set, held.as_ref()) {
+                Ok(session) => session,
+                Err(Opening::StillHeld(message)) => {
+                    // The old session is still closing on the comm core. Said once per loss, then
+                    // retried on the short interval, with the backoff left where it is.
+                    if let Some(held) = held.as_mut()
+                        && !held.told
+                    {
+                        held.told = true;
+                        log(&message);
+                    }
+                    pause(shared, held.as_ref().map_or(RECONNECT, |held| held.every));
+                    continue;
                 }
-                pause(shared, held.as_ref().map_or(RECONNECT, |held| held.every));
-                continue;
-            }
-            Err(Opening::Failed(message)) => {
-                said.say(&message);
-                pause(shared, backoff.next_delay());
-                continue;
-            }
-            Err(Opening::Refused(message)) => {
-                log(&message);
-                shared.refuse(message);
-                shared.stop();
-                return;
-            }
-        };
+                Err(Opening::Failed(message)) => {
+                    said.say(&message);
+                    pause(shared, backoff.next_delay());
+                    continue;
+                }
+                Err(Opening::Refused(message)) => {
+                    log(&message);
+                    shared.refuse(message);
+                    shared.stop();
+                    return;
+                }
+            };
         held = None;
         said = Said::default();
         log(&format!(
@@ -480,6 +480,7 @@ impl Session {
     /// names one.
     fn open(
         config: &Config,
+        shared: &Shared,
         number: u64,
         devices: &[(u64, DeviceSpec)],
         facts: &[(String, String)],
@@ -490,7 +491,20 @@ impl Session {
             roles: Roles::CLIENT.and(Roles::PROVIDER),
             ..Options::default()
         };
-        let orion = Orion::connect_with(&config.orion, CLIENT_NAME, options).map_err(|error| {
+        // Orion's patience keeps trying while nobody answers, paced by Orion (never longer than 8 s
+        // between tries), so the bridge needs no loop of its own for a comm core that is not up yet.
+        // The first failure is said; the rest are not. The trying stops when the service is stopping:
+        // a stop is an answer, so the session ends and the service's own loop sees the stop.
+        let orion = Orion::connect_watching(&config.orion, CLIENT_NAME, options, |status| {
+            if status.failures == 1 {
+                log(&format!(
+                    "Orion not available at {}: waiting for it",
+                    config.orion
+                ));
+            }
+            !shared.stopping()
+        })
+        .map_err(|error| {
             match error {
                 // The reason is `RoleNotOffered`: the carrier does not offer the provider role. The
                 // reason type is not re-exported, so it is matched by its name.
@@ -509,7 +523,9 @@ impl Session {
                     "Orion's socket path {} is {len} bytes, too long for a Unix socket. Stopping; a configuration error is not retried",
                     path.display()
                 )),
-                error => Opening::Failed(format!("Orion not available at {}: {error}", config.orion)),
+                // Not a transient: the connect keeps trying through those (see above). What is left is
+                // a refusal, which is retried on the backoff like any other failure.
+                error => Opening::Failed(format!("Orion at {} refused the session: {error}", config.orion)),
             }
         })?;
         let node = orion.welcomed().node.as_str().to_owned();
@@ -1092,6 +1108,19 @@ fn fact_refused(error: Error) -> Refused {
     }
 }
 
+/// A device's topic as its class says it is declared: a state takes [`Class::on_subscribe`] (its newest
+/// value for a late subscriber), and not the resource's shorthand, which starts it from now.
+fn class_topic<'a>(class: &Class, fields: &'a [Field<'a>], max_payload: u32) -> TopicDecl<'a> {
+    TopicDecl {
+        name: class.name,
+        fields,
+        history: class.history,
+        expiry_ms: class.expiry_ms,
+        max_payload,
+        on_subscribe: class.on_subscribe(),
+    }
+}
+
 /// Describes one device to Orion: its topics and actions, then its resource, which is published
 /// last so that it is never listed before its actions are there (see the module's notes).
 fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Verb>), Refused> {
@@ -1124,20 +1153,15 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
             .collect();
         Some(
             describing
-                .topic(VALUES.name, &fields, VALUES.history, 8)
+                .topic_with(&class_topic(&VALUES, &fields, 8))
                 .map_err(topic_refused)?,
         )
     };
     let status = describing
-        .topic(
-            STATUS.name,
-            &STATUS_FIELDS,
-            STATUS.history,
-            STATUS_MAX as u32,
-        )
+        .topic_with(&class_topic(&STATUS, &STATUS_FIELDS, STATUS_MAX as u32))
         .map_err(topic_refused)?;
     let description = describing
-        .topic(DESCRIPTION.name, &GENERATION_FIELDS, DESCRIPTION.history, 8)
+        .topic_with(&class_topic(&DESCRIPTION, &GENERATION_FIELDS, 8))
         .map_err(topic_refused)?;
     let verbs: Vec<Verb> = Verb::ALL
         .into_iter()

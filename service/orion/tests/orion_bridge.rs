@@ -30,8 +30,10 @@ use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, SampleTime, Status, Subscriber};
 use orion::types::Error as Refusal;
 use orion::{Address, ClientError, Orion};
+use orion_msg_topics::{Declare, OnSubscribe};
 use orion_node_app::{Node, NodeSettings};
 use orion_stubs::{Board, Options as BoardOptions};
+use orion_wire::Decode;
 use tokio::sync::oneshot;
 
 const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -209,7 +211,12 @@ fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 
 fn dashboard(orion: &Path) -> Orion {
     wait_for("a dashboard session", || {
-        Orion::connect(&Address::Local(orion.to_path_buf()), "dashboard").ok()
+        Orion::connect_once(
+            &Address::Local(orion.to_path_buf()),
+            "dashboard",
+            orion::Options::default(),
+        )
+        .ok()
     })
 }
 
@@ -373,6 +380,75 @@ fn devices_are_resources_their_values_and_status_are_topics() {
             .and_then(|b| float(&b))
             .filter(|value| *value > first + 2.0)
     });
+}
+
+/// A device's topics are state, so each is declared `OnSubscribe::Latest`: a subscriber sent samples as
+/// messages (one on another board, or a browser) is given the newest value when it starts. The bridge
+/// declares them through the resource's shorthand, which starts from now unless it is told otherwise.
+#[test]
+fn a_device_state_topic_is_declared_latest_so_a_late_subscriber_is_given_it() {
+    let dir = dir("latest");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the imu's resource", || resource(&dashboard, "lemnos.imu"));
+    for topic in [
+        "lemnos.imu.values",
+        "lemnos.imu.status",
+        "lemnos.imu.description",
+    ] {
+        let subscriber = dashboard.subscribe(topic).expect("subscribe");
+        let mode = subscriber.with_declaration(|declaration| {
+            Declare::decode(declaration.expect("declared"))
+                .expect("a declaration")
+                .on_subscribe
+        });
+        assert_eq!(mode, OnSubscribe::Latest, "{topic}");
+    }
+}
+
+/// A bridge started while its comm core is down keeps trying (Orion's patience, paced by Orion) and
+/// publishes once the comm core is up again: it does not give up, and it needs no loop of its own.
+#[test]
+fn a_bridge_started_before_its_comm_core_waits_for_it() {
+    let dir = dir("waits");
+    let lemnosd = dir.join("lemnosd.sock");
+    let mut board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let socket = board.socket().to_path_buf();
+    drop(board);
+    let _bridge = start_bridge(&lemnosd, &socket, None);
+    // Several tries fail while the comm core is down.
+    std::thread::sleep(Duration::from_secs(2));
+    board = Board::start_for_node(&dir);
+    let dashboard = dashboard(board.socket());
+    wait_for("the imu's resource once the comm core is up", || {
+        resource(&dashboard, "lemnos.imu").filter(|found| found.state == ResourceState::Ready)
+    });
+}
+
+/// A bridge still waiting for a comm core that is not there stops when it is asked to: its trying to
+/// connect ends with the stop, so the service's threads are joined. Before the stop was checked there,
+/// the connect waited for ever and the stop never came (the join in `Bridge::drop` hung).
+#[test]
+fn a_bridge_waiting_for_its_comm_core_stops_when_asked() {
+    let dir = dir("stop-wait");
+    let lemnosd = dir.join("lemnosd.sock");
+    let _service = start_lemnosd(&lemnosd);
+    let bridge = start_bridge(&lemnosd, &dir.join("no-comm-core.sock"), None);
+    std::thread::sleep(Duration::from_secs(1));
+    let (done, stopped) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(bridge);
+        let _ = done.send(());
+    });
+    stopped
+        .recv_timeout(WAIT)
+        .expect("the bridge stops while its comm core is still down");
 }
 
 #[test]
@@ -1385,7 +1461,12 @@ const TEST_LEASE: Duration = Duration::from_secs(1);
 /// A second Orion session of this user: it runs long jobs, and it is the one a test ends.
 fn second_session(board: &Board) -> Orion {
     wait_for("a second Orion session", || {
-        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
+        Orion::connect_once(
+            &Address::Local(board.socket().to_path_buf()),
+            "caller",
+            orion::Options::default(),
+        )
+        .ok()
     })
 }
 
@@ -1597,7 +1678,12 @@ fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
     // The caller is still there: it cancels its own long job. Only the run ends: the caller's
     // driver holds stay, and the driver's own connection is not told the caller is gone.
     let caller = wait_for("a second Orion session", || {
-        Orion::connect(&Address::Local(board.socket().to_path_buf()), "caller").ok()
+        Orion::connect_once(
+            &Address::Local(board.socket().to_path_buf()),
+            "caller",
+            orion::Options::default(),
+        )
+        .ok()
     });
     let mut long = caller
         .run(&ActionCall {

@@ -593,6 +593,10 @@ read in the background; each name is read when it is opened.
 Orion node, through Orion's one client crate, `orion`, pinned to a revision of its `next` branch.
 It is a client of lemnosd like any other and knows no device: everything below comes from a
 device's entry and its description.
+The bridge connects to the comm core with Orion's default patience: it keeps trying, paced by Orion
+(never longer than 250 ms between tries), until the comm core welcomes it or refuses it, so it needs
+no loop of its own for a comm core that starts later. The first failure is logged, and a refusal is
+retried on the bridge's backoff (1 s, doubling, capped at 8 s). A stop of the service ends the trying.
 The bridge is untyped by design, like `lemnos-ctl`: it holds no contract traits and runs no bind
 check. Its connection is checked at connect like any client's (the core and the parts, see
 [the wire](wire.md#core-and-parts)); beyond that it checks no contract, and calls the methods the
@@ -620,7 +624,9 @@ connects the offer to these snapshots is not compiled: the marked `ORION-OFFER` 
 | `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. `.call describe` with no arguments gives the device's description (below). Programs on the board and operators granted them may run them |
 
 **Topics and how each is read.** Every topic the bridge publishes is a state: its newest sample is what
-matters, and it is current until the bridge publishes a change or withdraws the topic. None is an
+matters, and it is current until the bridge publishes a change or withdraws the topic. Each is declared
+`OnSubscribe::Latest` (the mode `publish::on_subscribe_for` gives a state), so a subscriber sent samples
+as messages, on another board or in a browser, is given the newest sample when it starts. None is an
 event today (no topic carries each job progress or frame; progress goes with the run). Each
 state is a latest-value topic (history 2). The table is in code as `publish::CLASSES`.
 
@@ -793,7 +799,7 @@ releases only its own holds. A token of zero (a node that does not say) is one s
 cancels its run and nothing else: the job is cancelled on lemnosd, and the caller's connection and the
 driver's holds for it stay.
 
-**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision bfff313). Each run
+**Session ends.** Orion says when a session ends (`CallerGone`, at the pinned revision 8e37a8a). Each run
 says whether it is detached: `Request::Run` carries `detached` (`Claim.detached` on the wire, false from a node
 too old to say), and the bridge takes it as written. There is no inference from the order of messages. Orion
 cancels an attached run of an ending session with reason 2 before `CallerGone` (Orion's `gone()` in

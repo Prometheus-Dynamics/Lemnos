@@ -161,7 +161,12 @@ fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 
 fn dashboard(orion: &Path) -> Orion {
     wait_for("a dashboard session", || {
-        Orion::connect(&Address::Local(orion.to_path_buf()), "dashboard").ok()
+        Orion::connect_once(
+            &Address::Local(orion.to_path_buf()),
+            "dashboard",
+            orion::Options::default(),
+        )
+        .ok()
     })
 }
 

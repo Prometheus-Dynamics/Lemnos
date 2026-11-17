@@ -228,7 +228,12 @@ fn setup_with(test: &str, target_bytes: u64, stall: Duration, lease: Option<Dura
     std::fs::create_dir_all(&incoming).expect("incoming");
     let bridge = start_bridge_stalled(&socket, board.socket(), &incoming, stall, lease);
     let dashboard = wait_for("a dashboard session", || {
-        Orion::connect(&Address::Local(board.socket().to_path_buf()), "dashboard").ok()
+        Orion::connect_once(
+            &Address::Local(board.socket().to_path_buf()),
+            "dashboard",
+            orion::Options::default(),
+        )
+        .ok()
     });
     wait_for("the flash device", || {
         let found = dashboard.resources("lemnos.flash").ok()?;
@@ -412,7 +417,12 @@ fn a_stream_whose_sender_keeps_sending_is_not_dropped_by_the_stall_rule() {
     let socket = s._board.socket().to_path_buf();
     let pushing = std::thread::spawn(move || {
         let sender = wait_for("a steady sender", || {
-            Orion::connect(&Address::Local(socket.clone()), "steady").ok()
+            Orion::connect_once(
+                &Address::Local(socket.clone()),
+                "steady",
+                orion::Options::default(),
+            )
+            .ok()
         });
         let mut quiet = quiet;
         let _ = sender
@@ -488,7 +498,12 @@ fn a_push_lasting_three_leases_keeps_a_held_device_hold() {
     let (ended, how) = mpsc::channel();
     let pushing = std::thread::spawn(move || {
         let sender = wait_for("a steady sender", || {
-            Orion::connect(&Address::Local(socket.clone()), "steady").ok()
+            Orion::connect_once(
+                &Address::Local(socket.clone()),
+                "steady",
+                orion::Options::default(),
+            )
+            .ok()
         });
         let mut quiet = quiet;
         let result = sender
@@ -554,7 +569,12 @@ fn a_stalled_push_lets_the_lease_expire() {
     let socket = s._board.socket().to_path_buf();
     let pushing = std::thread::spawn(move || {
         let sender = wait_for("a stalled sender", || {
-            Orion::connect(&Address::Local(socket.clone()), "stalled").ok()
+            Orion::connect_once(
+                &Address::Local(socket.clone()),
+                "stalled",
+                orion::Options::default(),
+            )
+            .ok()
         });
         let mut quiet = quiet;
         let _ = sender
@@ -625,7 +645,12 @@ fn a_stream_whose_sender_goes_quiet_frees_its_device_after_the_stall_bound() {
     let socket = s._board.socket().to_path_buf();
     let pushing = std::thread::spawn(move || {
         let sender = wait_for("a quiet sender", || {
-            Orion::connect(&Address::Local(socket.clone()), "quiet").ok()
+            Orion::connect_once(
+                &Address::Local(socket.clone()),
+                "quiet",
+                orion::Options::default(),
+            )
+            .ok()
         });
         let mut quiet = quiet;
         let _ = sender
