@@ -108,6 +108,7 @@ static bool tcsi_acked;		/* this FORCE has had its frame end; cleared when FORCE
 static u32 tcsi_lines;		/* the next armed frame end's lines; 0: the height */
 
 static struct hrtimer tcsi_timer;
+static u32 tcsi_last_ctrl;	/* the control register at the last tick: a write since then is seen */
 static enum hrtimer_restart tcsi_tick(struct hrtimer *t);
 static u64 tfe_stats, tfe_out[2];
 static u32 tfe_out_bytes[2];
@@ -214,6 +215,8 @@ static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 		return HRTIMER_NORESTART;
 
 	raw_spin_lock_irqsave(&tcsi_lock, flags);
+	u32 ctrl = readl(dma + R_CTRL);
+
 	if (tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
 		u32 step = tcsi_busy == U32_MAX ? (u32)min_t(u64, lines, U32_MAX)
 						: (u32)min_t(u64, lines, tcsi_busy);
@@ -233,11 +236,22 @@ static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 	 * Every FORCE gets its frame end once the busy window is over, with or without a frame started: the stop
 	 * after a START with no frame is acknowledged too. The tick runs for the module's life, so a FORCE is seen.
 	 */
-	if (!(readl(dma + R_CTRL) & R_FORCE)) {
+	/*
+	 * The latch is per acknowledgement, not per FORCE state. A control write that changed the register since the
+	 * last tick (a START clears FORCE, then a stop raises it) starts a new one, so a stale latch from a stop that
+	 * got no acknowledgement (FORCE alone drops the enable) can't swallow the next stop's. A stop with nothing
+	 * in flight is acknowledged; the latch is set only when an acknowledgement is actually delivered.
+	 * FAKE-ONLY ASSUMPTION.
+	 */
+	if (ctrl != tcsi_last_ctrl) {
+		tcsi_last_ctrl = ctrl;
 		tcsi_acked = false;
-	} else if (!tcsi_busy && !tcsi_acked) {
+	}
+	if (!(ctrl & R_FORCE)) {
+		tcsi_acked = false;
+	} else if (!tcsi_busy && !tcsi_acked && (ctrl & TCSI_IRQ_EN_FE_ACK)) {
 		tcsi_acked = true;
-		ack = readl(dma + R_CTRL) & TCSI_IRQ_EN_FE_ACK;
+		ack = true;
 	}
 	next = HRTIMER_RESTART;
 	raw_spin_unlock_irqrestore(&tcsi_lock, flags);
