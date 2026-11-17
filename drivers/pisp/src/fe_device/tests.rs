@@ -489,7 +489,9 @@ fn statistics_and_output1_are_published_with_the_jobs_identity_and_let_go_of() {
         0,
         "what was registered for it was let go"
     );
-    r.stats.return_buffer(1).expect("the consumer holds this buffer");
+    r.stats
+        .return_buffer(1)
+        .expect("the consumer holds this buffer");
     r.post(&job(0x79, 1, 0, 3));
     r.fe.tick(4);
     assert_eq!(r.hw.with(|m| m.posted.len()), 2);
@@ -826,7 +828,9 @@ fn a_finished_job_is_published_and_its_buffer_goes_back_when_returned() {
     assert_eq!(r.hw.with(|m| m.posted.len()), 1);
     assert_eq!(r.fe.counters.dropped, 1);
 
-    r.frames.return_buffer(2).expect("the consumer holds this buffer");
+    r.frames
+        .return_buffer(2)
+        .expect("the consumer holds this buffer");
     r.fe.tick(4);
     assert_eq!(r.hw.with(|m| m.given_back.clone()), [2]);
     assert_eq!(
@@ -1119,9 +1123,15 @@ fn the_steady_state_allocates_nothing() {
         assert_eq!(r.frames.take_frame().map(|f| f.identity), Some(now));
         assert_eq!(r.stats.take_frame().map(|f| f.identity), Some(now));
         assert_eq!(r.out1.take_frame().map(|f| f.identity), Some(now));
-        r.frames.return_buffer(0).expect("the consumer holds this buffer");
-        r.stats.return_buffer(0).expect("the consumer holds this buffer");
-        r.out1.return_buffer(1).expect("the consumer holds this buffer");
+        r.frames
+            .return_buffer(0)
+            .expect("the consumer holds this buffer");
+        r.stats
+            .return_buffer(0)
+            .expect("the consumer holds this buffer");
+        r.out1
+            .return_buffer(1)
+            .expect("the consumer holds this buffer");
         tick(&mut r.fe, now + 2);
         assert!(r.hw.with(|m| m.given_back == [0]));
         now += 3;

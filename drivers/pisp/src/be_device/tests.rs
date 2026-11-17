@@ -784,7 +784,10 @@ fn temporal_denoise_alternates_its_averages_and_resets_when_told() {
         }
         run_once(be, identity * 2 + 1);
         if let Some(frame) = streams.output0.take_frame() {
-            streams.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+            streams
+                .output0
+                .return_buffer(frame.buffer)
+                .expect("the consumer holds this buffer");
         }
     };
     // Reading an average before one exists is dropped.
@@ -1023,7 +1026,10 @@ fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
     // The consumer reads the completion and gives the output back, then rewrites config 1.
     let frame = streams.output0.take_frame().expect("job 1's frame");
     assert_eq!(frame.identity, 1);
-    streams.output0.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+    streams
+        .output0
+        .return_buffer(frame.buffer)
+        .expect("the consumer holds this buffer");
     let mut second = config();
     second.config.wbg.gain_r = 0x2222;
     streams.configure(&second);

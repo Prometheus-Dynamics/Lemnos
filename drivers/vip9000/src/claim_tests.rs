@@ -224,7 +224,9 @@ fn completion(stream: &MockStream) -> (u64, RunStatus) {
     ))
     .unwrap()
     .status;
-    stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+    stream
+        .return_buffer(frame.buffer)
+        .expect("the consumer holds this buffer");
     (frame.identity, status)
 }
 
@@ -585,7 +587,9 @@ fn runs_in_a_row_allocate_nothing() {
         let (served, allocated) = allocations(|| claim.serve(&mut stream, n));
         assert_eq!(served, Ok(1));
         let frame = stream.take_frame().unwrap();
-        stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+        stream
+            .return_buffer(frame.buffer)
+            .expect("the consumer holds this buffer");
         // The first rounds warm the played stream's queues up.
         if n >= 10 {
             count += allocated;

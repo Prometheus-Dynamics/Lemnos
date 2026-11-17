@@ -182,7 +182,9 @@ impl StreamEndpoint for Racing {
 
     fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
         if let Some(buffer) = self.hands_over.take() {
-            self.inner.return_buffer(buffer).expect("the consumer holds this buffer");
+            self.inner
+                .return_buffer(buffer)
+                .expect("the consumer holds this buffer");
         }
         self.inner.next_job(out)
     }
@@ -511,7 +513,10 @@ fn a_config_buffer_the_driver_does_not_hold_drops_the_job() {
         taken.push(buffer);
     }
     for buffer in taken.into_iter().filter(|&x| x != 3) {
-        streams.config.return_buffer(buffer).expect("the consumer holds this buffer");
+        streams
+            .config
+            .return_buffer(buffer)
+            .expect("the consumer holds this buffer");
     }
     d.start().unwrap();
     d.tick(0);
@@ -540,7 +545,10 @@ fn a_config_buffer_handed_over_and_named_while_a_tick_runs_is_held_for_that_job(
         taken.push(buffer);
     }
     for buffer in taken.into_iter().filter(|&x| x != 3) {
-        streams.config.return_buffer(buffer).expect("the consumer holds this buffer");
+        streams
+            .config
+            .return_buffer(buffer)
+            .expect("the consumer holds this buffer");
     }
     d.start().unwrap();
     streams.config.fill(3, &good);
@@ -855,7 +863,10 @@ fn the_steady_state_allocates_nothing() {
         d.tick(now + 1);
         now += 2;
         let f = streams.statistics.take_frame().unwrap();
-        streams.statistics.return_buffer(f.buffer).expect("the consumer holds this buffer");
+        streams
+            .statistics
+            .return_buffer(f.buffer)
+            .expect("the consumer holds this buffer");
         b.with(|b| b.writes.clear());
     };
     for i in 0..WARM {

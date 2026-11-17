@@ -735,7 +735,9 @@ fn completion(stream: &MockStream) -> (u64, RunStatus) {
     ))
     .unwrap()
     .status;
-    stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+    stream
+        .return_buffer(frame.buffer)
+        .expect("the consumer holds this buffer");
     (frame.identity, status)
 }
 
@@ -1428,7 +1430,9 @@ fn runs_in_a_row_allocate_nothing() {
         assert_eq!(claim.serve(stream, n), Ok(results.len() as u32));
         for _ in results {
             let frame = stream.take_frame().unwrap();
-            stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+            stream
+                .return_buffer(frame.buffer)
+                .expect("the consumer holds this buffer");
         }
     };
     let mut jobs = 0;
