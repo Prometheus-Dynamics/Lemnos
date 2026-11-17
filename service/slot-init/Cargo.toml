@@ -23,6 +23,8 @@ lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
 lemnos-driver-hw-watchdog-sys = { path = "../../drivers/hw-watchdog-sys" }
+# The serial settings the command line names, and their one reader (the driver reads them the same way).
+lemnos-identity = { path = "../../engine/identity" }
 
 [dev-dependencies]
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }

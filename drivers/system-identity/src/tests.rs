@@ -1,5 +1,5 @@
 use super::*;
-use lemnos_contract_system_identity::MAX_FACTS_TEXT;
+use lemnos_contract_system_identity::{MAX_FACTS_TEXT, MAX_MACHINE_ID};
 use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle, RefusalKind, RefusalSink};
 use std::fs;
 
@@ -83,6 +83,12 @@ fn every_fact_comes_from_the_board_and_the_running_slot() {
         "2.0.1",
     )
     .unwrap();
+    // The board's own bound id, so the health check does not read the host's /etc/machine-id.
+    tree.write(
+        "etc/machine-id",
+        lemnos_identity::machine_id::derive("0000000000abcdef").as_bytes(),
+    );
+    id.machine_id = tree.0.join("etc/machine-id");
     assert!(matches!(id.health(), Health::Ok));
 
     let mut buf = [0u8; MAX_FACTS_TEXT];
@@ -97,11 +103,12 @@ fn every_fact_comes_from_the_board_and_the_running_slot() {
 }
 
 #[test]
-fn an_absent_fact_answers_not_found_and_the_device_is_degraded() {
+fn an_absent_fact_answers_not_found_and_the_device_is_healthy() {
     let tree = Tree::new("absent");
     let data = tree.path("data");
     let mut id = start(&[("data", ConfigValue::Str(&data))], "").unwrap();
-    assert!(matches!(id.health(), Health::Degraded(_)));
+    // No serial source is configured: that is a normal state, not a fault.
+    assert!(matches!(id.health(), Health::Ok));
     let mut buf = [0u8; MAX_FACTS_TEXT];
     assert_eq!(id.serial(&mut buf), Err(Status::NOT_FOUND));
     assert_eq!(id.family(&mut buf), Err(Status::NOT_FOUND));
@@ -404,4 +411,116 @@ fn a_serial_source_that_cannot_be_read_is_refused_as_failed_and_names_its_path()
     let (kind, reason) = refusal.expect("a refused bind gives its reason");
     assert_eq!(kind, RefusalKind::Failed);
     assert!(reason.contains(&dir_text), "{reason}");
+}
+
+/// The id slot-init bound answers `machine_id`, and no fact carries it: `facts` is what the bridge
+/// publishes as `hello.*`, and it never holds the id (the answer is for local callers only).
+#[test]
+fn the_machine_id_answers_the_bound_id_and_no_fact_carries_it() {
+    let tree = Tree::new("machine-id");
+    tree.write("cmdline", b"serialno=0000000000ABCDEF\n");
+    let cmdline = tree.path("cmdline");
+    let mut id = start(
+        &[
+            ("serial", ConfigValue::Str("cmdline")),
+            ("serial_key", ConfigValue::Str("serialno")),
+            ("serial_path", ConfigValue::Str(&cmdline)),
+        ],
+        "alpha-1",
+    )
+    .unwrap();
+    let bound = lemnos_identity::machine_id::derive("0000000000abcdef");
+    tree.write("etc/machine-id", bound.as_bytes());
+    id.machine_id = tree.0.join("etc/machine-id");
+    let mut buf = [0u8; MAX_MACHINE_ID];
+    assert_eq!(text(id.machine_id(&mut buf), &buf), bound);
+    assert!(matches!(id.health(), Health::Ok));
+    let mut facts_buf = [0u8; MAX_FACTS_TEXT];
+    let facts = text(id.facts(&mut facts_buf), &facts_buf);
+    assert!(!facts.contains("0123456789abcdef"), "{facts}");
+    assert!(!facts.contains("machine"), "{facts}");
+}
+
+/// A root ships an empty `/etc/machine-id`, and an unbound one is absent: `machine_id` answers
+/// `NOT_FOUND`, and so does a file that is not an id. The device stays healthy.
+#[test]
+fn an_unbound_machine_id_answers_not_found_and_the_device_is_healthy() {
+    let tree = Tree::new("machine-id-absent");
+    tree.write("cmdline", b"serialno=0000000000ABCDEF\n");
+    let cmdline = tree.path("cmdline");
+    let mut id = start(
+        &[
+            ("serial", ConfigValue::Str("cmdline")),
+            ("serial_key", ConfigValue::Str("serialno")),
+            ("serial_path", ConfigValue::Str(&cmdline)),
+        ],
+        "alpha-1",
+    )
+    .unwrap();
+    id.machine_id = tree.0.join("etc/machine-id");
+    let mut buf = [0u8; MAX_MACHINE_ID];
+    assert_eq!(id.machine_id(&mut buf).err(), Some(Status::NOT_FOUND));
+    // No id on the node is a normal state: a boot that is not a slot's (the QEMU guest, a dev host),
+    // or a bind slot-init refused with a logged reason. The device stays healthy.
+    assert!(matches!(id.health(), Health::Ok));
+    for not_an_id in [
+        &b""[..],
+        b"0123\n",
+        b"0123456789ABCDEF0123456789abcdef\n",
+        b"0123456789abcdef0123456789abcdef0\n",
+    ] {
+        tree.write("etc/machine-id", not_an_id);
+        assert_eq!(
+            id.machine_id(&mut buf).err(),
+            Some(Status::NOT_FOUND),
+            "{not_an_id:?}"
+        );
+    }
+    tree.write(
+        "etc/machine-id",
+        lemnos_identity::machine_id::derive("0000000000abcdef").as_bytes(),
+    );
+    assert!(id.machine_id(&mut buf).is_ok());
+    assert!(matches!(id.health(), Health::Ok));
+}
+
+/// systemd's transient id is a valid id in the file's shape, but it is not the derivation of this
+/// board's serial, so it is refused: `machine_id` answers `NOT_FOUND` and the device is degraded with
+/// the reason. Before the check this id was answered as if it were slot-init's.
+#[test]
+fn a_mismatching_id_on_the_node_is_refused_as_transient() {
+    let tree = Tree::new("machine-id-transient");
+    tree.write("cmdline", b"serialno=0000000000ABCDEF\n");
+    let cmdline = tree.path("cmdline");
+    let mut id = start(
+        &[
+            ("serial", ConfigValue::Str("cmdline")),
+            ("serial_key", ConfigValue::Str("serialno")),
+            ("serial_path", ConfigValue::Str(&cmdline)),
+        ],
+        "alpha-1",
+    )
+    .unwrap();
+    // A well-formed id that is not this board's: the one a transient boot gives.
+    tree.write("etc/machine-id", b"5a1c0ffee5a1c0ffee5a1c0ffee5a1c0\n");
+    id.machine_id = tree.0.join("etc/machine-id");
+    let mut buf = [0u8; MAX_MACHINE_ID];
+    assert_eq!(id.machine_id(&mut buf).err(), Some(Status::NOT_FOUND));
+    let Health::Degraded(reason) = id.health() else {
+        panic!("a transient id leaves the device degraded");
+    };
+    assert_eq!(reason, TRANSIENT);
+}
+
+/// With no serial source configured there is nothing to check an id against, so `machine_id` answers
+/// `NOT_FOUND` for any id on the node, and the device is healthy: "no serial source" is not a fault.
+#[test]
+fn an_id_with_no_serial_source_configured_is_not_answered_and_not_degraded() {
+    let tree = Tree::new("machine-id-no-serial");
+    let mut id = start(&[], "alpha-1").unwrap();
+    tree.write("etc/machine-id", b"0123456789abcdef0123456789abcdef\n");
+    id.machine_id = tree.0.join("etc/machine-id");
+    let mut buf = [0u8; MAX_MACHINE_ID];
+    assert_eq!(id.machine_id(&mut buf).err(), Some(Status::NOT_FOUND));
+    assert!(matches!(id.health(), Health::Ok));
 }

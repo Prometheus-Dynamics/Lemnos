@@ -18,6 +18,9 @@ pub trait Ops {
     fn mount(&self, fstype: &str, opts: &str, source: &Path, target: &Path) -> Result<(), String>;
     /// Moves the mount at `source` to `target`.
     fn move_mount(&self, source: &Path, target: &Path) -> Result<(), String>;
+    /// Binds the file `source` over the file `target`, read-only: a bind mount, then a read-only
+    /// remount of it. On failure nothing stays mounted over `target`.
+    fn bind_read_only(&self, source: &Path, target: &Path) -> Result<(), String>;
     fn umount(&self, target: &Path);
     /// The device-mapper targets the running kernel has, by name (`verity`). Built in or loaded:
     /// an error when there is no device-mapper control node.

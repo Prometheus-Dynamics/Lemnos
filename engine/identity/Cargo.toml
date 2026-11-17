@@ -13,3 +13,5 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true, features = ["std"] }
+# The machine id's SHA-256 (`machine_id::derive`): the crate slot-store already links.
+sha2 = { version = "0.10", default-features = false }

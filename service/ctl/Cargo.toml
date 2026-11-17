@@ -26,6 +26,8 @@ lemnos-host = { path = "../../engine/host" }
 lemnos-devtree = { path = "../devtree" }
 # For `security render` and `tree --boot-dir`: the switch record and its view, the Pi firmware's fixed files and the slot records.
 lemnos-slot-store = { path = "../../drivers/slot-store" }
+# For the identity device's serial settings on the slot command line (`serial_words`): the one parse.
+lemnos-identity = { path = "../../engine/identity" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
 # For the slot layout contract (`contracts/slot-layout.toml`), read by `tree --boot-dir`.

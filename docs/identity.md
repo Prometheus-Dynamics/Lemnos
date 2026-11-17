@@ -72,6 +72,10 @@ The daemon reads the serial once, when it starts, through the same settings as t
 gives the result to the gadget's setup and driver as `board_serial`. The serial is read by this
 device's source only. A gadget does not carry a second copy of these settings.
 
+The same settings are written onto a slot's command line as `<boot_args>.serial.<name>` words, so that
+slot-init derives the slot's machine id from the same serial (`docs/slots.md`, "The machine id"). The machine id
+is not a fact: it is a method, served to local programs and operators only.
+
 One source per board file: the device names exactly one `serial` kind. A source that cannot be read
 fails the bind and is retried. A value that does not fit the format leaves `serial` absent and the
 device `Degraded`.

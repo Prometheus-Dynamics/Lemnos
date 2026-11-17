@@ -95,6 +95,18 @@ pub fn bind(source: &Path, target: &Path) -> io::Result<()> {
     mount_raw(Some(source), target, None, libc::MS_BIND, "")
 }
 
+/// Remounts the bind mount at `target` read-only (`MS_BIND | MS_REMOUNT | MS_RDONLY`): the file under
+/// it can be read and not written through this mount.
+pub fn remount_read_only(target: &Path) -> io::Result<()> {
+    mount_raw(
+        None,
+        target,
+        None,
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+        "",
+    )
+}
+
 /// Moves the mount at `source` to `target`.
 pub fn move_mount(source: &Path, target: &Path) -> io::Result<()> {
     mount_raw(Some(source), target, None, libc::MS_MOVE, "")

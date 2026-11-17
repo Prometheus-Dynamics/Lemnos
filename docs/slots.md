@@ -32,7 +32,9 @@ from the bundle's manifest, and the slot's kernel command line carries it:
 bundle's `boot/cmdline.txt`, byte for byte: nothing is appended at install. Its hash is in the
 signed manifest's `boot.files`, so every boot file, the command line included, is checked against
 one signed manifest. A bundle whose line does not name its own slot and root hash is refused by
-name. The data partition is not on the command line (see `lemnos-slot-init`, below).
+name. The data partition is not on the command line (see `lemnos-slot-init`, below). The identity device's serial
+settings follow as `<boot_args>.serial.<name>=<value>` words, never the serial itself, for the machine id (see
+"The machine id").
 
 **Breaking, declared (I5i4):** the bundle's command line is not edited at install, and the
 `<boot_args>.data=` argument is gone. A bundle built for an earlier layout is refused.
@@ -1865,7 +1867,8 @@ Nothing in the initramfs makes up for it.
 6. It opens the image through a read-only loop device and dm-verity with the table above, and
    mounts it read-only as EROFS.
 7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
-   trial. Then it feeds the watchdog once more and `switch_root`s into `/sbin/init` (window 4 of "The
+   trial. It binds the machine id over the new root's `/etc/machine-id` (see "The machine id"; a refusal is
+   logged and never stops the boot). Then it feeds the watchdog once more and `switch_root`s into `/sbin/init` (window 4 of "The
    watchdog chain").
 
 ### The kernel self-check
@@ -1962,6 +1965,64 @@ it, but the trial is still written to the boot partition.
 
 **Untested on board.** The tests run the whole flow over a temporary directory that stands in
 for `/`, with a fake for every system call. `testing/board-runs/I5d.md` is the board run.
+
+## The machine id
+
+A slot's root is read-only, so systemd on it cannot write `/etc/machine-id` and takes a random id on every
+boot. The persistent journal lives under that id, so on `/data` it would scatter over a new directory each boot.
+slot-init gives every boot of a slot the same id, before `switch_root`.
+
+**Derivation.** The id is the first 16 bytes of SHA-256 over the bytes `lemnos-machine-id:` followed by the
+board serial, in the normalised form the driver reads (`docs/identity.md`). It is written as 32 lowercase hex
+digits and a newline. An all-zero id has its last bit flipped, because systemd reads all zeros as no id. The
+same serial gives the same id on every boot, and the known vector is pinned by a test
+(`machine_id::tests::the_known_vector_is_the_first_sixteen_bytes_of_the_digest`).
+
+**Where the serial comes from.** The slot's kernel command line carries the identity device's serial settings,
+never the serial itself: `<boot_args>.serial.kind=<kind>`, then `path`, `offset`, `length`, `byte_order` and
+`key` as the board file names them (`lemnos-ctl tree BOARD --slot ID --cmdline-slot FILE` writes them, after
+the `.src.` words; `docs/boards.md`). slot-init reads them with the parse the driver makes
+(`lemnos_identity::settings_from_words`) and the same reader (`lemnos_identity::read_serial`). A board with no
+`system-identity` device that names a `serial` writes none. The line is part of the signed bundle, so the
+serial source is the bundle's own.
+
+**What slot-init does.** Once the data partition is in the new root, and before `switch_root`:
+
+1. It needs `<newroot>/etc/machine-id` to be a plain file. It creates nothing there.
+2. It writes the id to `/run/lemnos/machine-id` in the initramfs, mode 0444.
+3. It bind-mounts that file read-only over `<newroot>/etc/machine-id`. The bind keeps the staged file alive
+   after `switch_root`.
+
+**Refusals.** A refusal never blocks the boot. Its line goes to the kernel log, in the form
+`slot-init: MACHINE-ID REFUSED (<reason>): <detail>`, and the boot goes on with no id. journald keeps a transient
+id that boot. The line stays in the kernel log, which journald imports, so `journalctl -k` shows it after the
+boot. The reasons:
+
+| Reason | When |
+|---|---|
+| `machine-id-serial-absent` | The command line names no serial source, or the source cannot be read or does not fit the format. |
+| `machine-id-target-missing` | `<newroot>/etc/machine-id` is absent or not a plain file. Nothing is created. |
+| `machine-id-bind-failed` | Staging the id, the bind mount or its read-only remount failed. A failed bind leaves nothing mounted and no staged file. |
+
+**The image contract.** The root ships an EMPTY `/etc/machine-id` (zero bytes, a plain file). That file is the
+bind target. An unbound boot therefore has no id, and the driver answers it as absent (below). A root with no
+such file is refused by name.
+
+**Who reads it.** The `system.identity/1` contract's `machine_id` method answers the bound id (`docs/wire.md`).
+It reads `/etc/machine-id`, not `/run/lemnos/machine-id`: the staging path belongs to the initramfs, and
+`switch_root` takes it out of view. The method answers `NOT_FOUND` when the file is absent, empty or not an id.
+It also checks the id against the board's serial: the driver recomputes the derivation from its own serial with the
+same code slot-init uses. An id that does not match (a bind that failed, so the file holds systemd's transient id) is
+refused the same way, and the device is `Degraded` with `transient: slot-init did not bind (see machine-id-* in the
+kernel log)`. With no serial source configured there is nothing to check against: `machine_id` answers `NOT_FOUND`
+and the device stays `Ok`. An absent or empty file (a boot that is not a slot's, or a refused bind with its logged
+reason) is also a normal state: `NOT_FOUND`, and `Ok`.
+It is a method, not a fact: the bridge's `call` policy admits it to local programs and operators only, and
+`hello.*` never carries it.
+
+**Consumers.** The id is derivable from the serial. That is acceptable because the serial is not secret on these
+boards. Consumers use app-specific ids (`sd_id128_get_machine_app_specific`, or their own derivation from the
+id) and never expose the raw machine id: what leaves the board is always the app-specific value.
 
 ## Boot-file checks
 

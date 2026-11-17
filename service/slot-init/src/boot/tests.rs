@@ -24,6 +24,7 @@ use lemnos_slot_store::uboot_env::{self, EnvDev, FileEnv, Geometry, Place};
 use super::{DATA_LOG, Env, boot};
 use crate::boot::{BOOT_COUNT, FLASH_AFTER};
 use crate::decide::MAX_FALLBACKS;
+use crate::machine_id;
 use crate::ops::Ops;
 
 struct Root(PathBuf);
@@ -212,6 +213,14 @@ impl Ops for Fake {
     fn move_mount(&self, source: &Path, target: &Path) -> Result<(), String> {
         self.call(format!(
             "move {} {}",
+            self.short(source),
+            self.short(target)
+        ))
+    }
+
+    fn bind_read_only(&self, source: &Path, target: &Path) -> Result<(), String> {
+        self.call(format!(
+            "bind ro {} {}",
             self.short(source),
             self.short(target)
         ))
@@ -2659,4 +2668,146 @@ fn the_default_started_with_the_property_set_marks_nothing() {
     assert_eq!(board.meta("os-2").get("FAILED"), "");
     assert_eq!(board.state().trial, "");
     assert_eq!(board.read("data/board/slots/trial-init"), "");
+}
+
+/// The command line with the identity device's serial named as a device-tree serial read from a
+/// file under the test root (`serial`), holding `serial`.
+fn named_serial(board: &Board, serial: &str) {
+    board.write("serial", format!("{serial}\n").as_bytes());
+    let path = board.env.at("serial");
+    board.write(
+        "proc/cmdline",
+        format!(
+            "console=tty1 rootwait os.slot=os-2 os.roothash={} os.src./soc/mmc@7e202000=/soc/mmc@7e202000 os.serial.kind=device-tree os.serial.path={} panic=5\n",
+            hash("os-2"),
+            path.display()
+        )
+        .as_bytes(),
+    );
+}
+
+/// Whether the boot logged the refusal `reason` by name, in the form the docs give.
+fn refused_by(fake: &Fake, reason: &str) -> bool {
+    let want = format!("slot-init: MACHINE-ID REFUSED ({reason}): ");
+    fake.logs
+        .borrow()
+        .iter()
+        .any(|line| line.starts_with(&want))
+}
+
+#[test]
+fn the_machine_id_is_derived_from_the_serial_and_bound_before_switch_root() {
+    let board = Board::new();
+    named_serial(&board, "0123456789abcdef");
+    board.write("newroot/etc/machine-id", b"");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    let calls = fake.calls();
+    assert!(
+        calls.contains(&"bind ro run/lemnos/machine-id newroot/etc/machine-id".to_string()),
+        "{calls:?}"
+    );
+    let at = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
+    assert!(at("bind ro") < at("switch_root"));
+    assert!(
+        at("move ") < at("bind ro"),
+        "the data partition is in place first"
+    );
+    assert_eq!(fake.last(), "switch_root newroot");
+    let staged = board.env.at("run/lemnos/machine-id");
+    assert_eq!(
+        fs::read_to_string(&staged).unwrap(),
+        machine_id::derive("0123456789abcdef")
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    assert!(
+        !fake
+            .logs
+            .borrow()
+            .iter()
+            .any(|line| line.contains("REFUSED"))
+    );
+}
+
+/// A board with no serial named: the boot completes, the refusal is named, and nothing is bound.
+#[test]
+fn no_serial_is_refused_by_name_and_the_boot_completes() {
+    let board = Board::new();
+    board.write("newroot/etc/machine-id", b"");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(
+        refused_by(&fake, "machine-id-serial-absent"),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    assert!(!fake.called("bind"));
+    assert!(!board.env.at("run/lemnos/machine-id").exists());
+    assert_eq!(fake.last(), "switch_root newroot");
+}
+
+/// A serial source that cannot be read is the same refusal, with the reason in its text.
+#[test]
+fn a_serial_that_cannot_be_read_is_refused_as_absent() {
+    let board = Board::new();
+    named_serial(&board, "0123456789abcdef");
+    fs::remove_file(board.env.at("serial")).unwrap();
+    board.write("newroot/etc/machine-id", b"");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "");
+    assert!(
+        refused_by(&fake, "machine-id-serial-absent"),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    assert!(!fake.called("bind"));
+    assert_eq!(fake.last(), "switch_root newroot");
+}
+
+/// No `/etc/machine-id` in the new root: nothing is created there, and the boot goes on.
+#[test]
+fn a_root_with_no_machine_id_file_is_refused_and_nothing_is_created() {
+    let board = Board::new();
+    named_serial(&board, "0123456789abcdef");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "");
+    assert!(
+        refused_by(&fake, "machine-id-target-missing"),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    assert!(
+        !board.env.at("newroot/etc/machine-id").exists(),
+        "nothing is created"
+    );
+    assert!(
+        !board.env.at("run/lemnos/machine-id").exists(),
+        "nothing is staged"
+    );
+    assert!(!fake.called("bind"));
+    assert_eq!(fake.last(), "switch_root newroot");
+}
+
+/// A bind that fails is refused by name, the staged id is taken back, and the boot goes on.
+#[test]
+fn a_bind_that_fails_is_refused_by_name_and_the_boot_completes() {
+    let board = Board::new();
+    named_serial(&board, "0123456789abcdef");
+    board.write("newroot/etc/machine-id", b"");
+    let (fake, why) = board.boot(&["bind"]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(
+        refused_by(&fake, "machine-id-bind-failed"),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    assert!(
+        !board.env.at("run/lemnos/machine-id").exists(),
+        "a failed bind leaves no staged id"
+    );
+    assert_eq!(fake.last(), "switch_root newroot");
 }

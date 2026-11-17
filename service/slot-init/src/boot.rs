@@ -56,6 +56,7 @@ use crate::decide::{
     Candidate, Failure, FilePick, Next, TryPass, after_failure, file_pick, tryboot_pass,
 };
 use crate::kernel::{self, Route};
+use crate::machine_id;
 use crate::ops::Ops;
 use crate::partition::{self, Part};
 
@@ -149,6 +150,8 @@ struct Boot<'a> {
     data_writable: Cell<bool>,
     boot_mounted: Cell<bool>,
     log_saved: Cell<bool>,
+    /// The board serial the command line names, read once in `run` (see [`crate::machine_id`]).
+    serial: OnceCell<Result<String, String>>,
 }
 
 /// A file of the mounted boot volume: `None` when it is not there. Only the raw NAND reads use it.
@@ -196,6 +199,7 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
         data_writable: Cell::new(false),
         boot_mounted: Cell::new(false),
         log_saved: Cell::new(false),
+        serial: OnceCell::new(),
     };
     let cmdline = fs::read_to_string(env.at("proc/cmdline")).unwrap_or_default();
     boot.run(&cmdline)
@@ -276,6 +280,27 @@ impl Boot<'_> {
             }
         }
         self.ops.sync();
+    }
+
+    /// Binds the machine id over the new root's `/etc/machine-id`, read-only, before `switch_root`.
+    /// A refusal never blocks the boot: it is named in the kernel log, and the boot goes on without
+    /// an id (journald then keeps a transient one this boot).
+    fn bind_machine_id(&self, new_root: &Path) {
+        let serial = self
+            .serial
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Err("the serial was not read".into()));
+        let staged = self.env.at(machine_id::STAGED);
+        let target = new_root.join(machine_id::TARGET);
+        match machine_id::bind(&staged, &target, &serial, |source, target| {
+            self.ops.bind_read_only(source, target)
+        }) {
+            Ok(()) => self.log("machine id bound read-only over /etc/machine-id"),
+            Err(refusal) => self.ops.log(&format!(
+                "slot-init: MACHINE-ID REFUSED {refusal}: the boot goes on with no machine id, so journald keeps a transient id this boot; this line stays in the kernel log (journalctl -k) after boot"
+            )),
+        }
     }
 
     /// Unmounts both partitions, syncs, and restarts.
@@ -1194,6 +1219,9 @@ impl Boot<'_> {
             Err(error) => return self.rescue(&error),
         };
         self.slot = args.slot.clone();
+        let _ = self
+            .serial
+            .set(machine_id::serial_from_cmdline(cmdline, &args.prefix));
         let on_nand = Ubi {
             sys: self.env.sys.clone(),
             dev: self.env.dev.clone(),
@@ -1421,6 +1449,7 @@ impl Boot<'_> {
             manifest.version,
             if self.trial { ", on trial" } else { "" }
         ));
+        self.bind_machine_id(&new_root);
         match self.ops.switch_root(&new_root) {
             Ok(()) => String::new(),
             Err(error) => self.rescue(&format!("switch_root: {error}")),
