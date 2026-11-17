@@ -515,41 +515,7 @@ fn a_host_owned_ina260_reads_as_it_stands() {
 }
 
 #[test]
-fn the_board_gives_the_rails_whole_unit_warning_limits() {
-    let (mut board, sim) = board_with_bus();
-    chip_bus(&sim, 0xfe, 0xff, 0x2260);
-    let driver = bind(
-        &mut board,
-        &[
-            ("chip", ConfigValue::Str("ina226")),
-            ("shunt_ohms", ConfigValue::Float(0.01)),
-            ("max_current_a", ConfigValue::Float(2.0)),
-            ("bus_warn_below_v", ConfigValue::Float(11.0)),
-            ("bus_warn_above_v", ConfigValue::Float(13.0)),
-            ("current_warn_above_a", ConfigValue::Float(2.0)),
-        ],
-    )
-    .unwrap();
-    let mut out = Description::new();
-    Driver::describe(&driver, &mut out);
-    let bus = out.find("bus_voltage").unwrap();
-    assert_eq!((bus.warn_low, bus.warn_high), (Some(11), Some(13)));
-    let current = out.find("current").unwrap();
-    assert_eq!((current.warn_low, current.warn_high), (None, Some(2)));
-    // Without them, no limit.
-    let (mut board, sim) = board_with_bus();
-    chip_bus(&sim, 0xfe, 0xff, 0x2260);
-    let bare = bind(&mut board, &INA226).unwrap();
-    let mut out = Description::new();
-    Driver::describe(&bare, &mut out);
-    assert_eq!(out.find("bus_voltage").unwrap().warn_high, None);
-}
-
-/// A fractional limit (10.8 V) is not in the descriptor: an item's limit is a whole number of its
-/// unit, and a real-valued limit needs an engine change (`Item`). Until then the limit is absent,
-/// which is recorded in the driver's notes, not a silent pass.
-#[test]
-fn a_fractional_warning_limit_is_not_in_the_descriptor() {
+fn the_board_gives_the_rails_real_warning_limits_in_volts_and_amps() {
     let (mut board, sim) = board_with_bus();
     chip_bus(&sim, 0xfe, 0xff, 0x2260);
     let driver = bind(
@@ -559,12 +525,62 @@ fn a_fractional_warning_limit_is_not_in_the_descriptor() {
             ("shunt_ohms", ConfigValue::Float(0.01)),
             ("max_current_a", ConfigValue::Float(2.0)),
             ("bus_warn_below_v", ConfigValue::Float(10.8)),
+            ("bus_warn_above_v", ConfigValue::Float(13.0)),
+            ("current_warn_above_a", ConfigValue::Float(2.0)),
         ],
     )
     .unwrap();
     let mut out = Description::new();
     Driver::describe(&driver, &mut out);
-    assert_eq!(out.find("bus_voltage").unwrap().warn_low, None);
+    let bus = out.find("bus_voltage").unwrap();
+    assert_eq!(bus.exponent, 0);
+    // 10.8 V is carried exactly as a real limit, not rounded to a whole volt.
+    let low = bus.real_warn_low.expect("the 10.8 V limit is carried");
+    assert!((low - 10.8).abs() < 1e-9, "carried {low}");
+    assert!((bus.real_warn_high.unwrap() - 13.0).abs() < 1e-9);
+    assert_eq!((bus.warn_low, bus.warn_high), (None, None));
+    let current = out.find("current").unwrap();
+    assert_eq!(current.real_warn_low, None);
+    assert!((current.real_warn_high.unwrap() - 2.0).abs() < 1e-9);
+    // Without them, no limit.
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
+    let bare = bind(&mut board, &INA226).unwrap();
+    let mut out = Description::new();
+    Driver::describe(&bare, &mut out);
+    assert_eq!(out.find("bus_voltage").unwrap().real_warn_high, None);
+}
+
+/// A bus reading below the 10.8 V limit is a warning, and one above it is not. The limit the
+/// description carries is the one the driver checks against: 10.7 V is under it, 10.9 V is not.
+/// Fails before the change: the 10.8 V limit was dropped from the description.
+#[test]
+fn a_bus_reading_below_the_carried_10_8_volt_limit_is_a_warning() {
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
+    let config: [(&str, ConfigValue<'static>); 4] = [
+        ("chip", ConfigValue::Str("ina226")),
+        ("shunt_ohms", ConfigValue::Float(0.01)),
+        ("max_current_a", ConfigValue::Float(2.0)),
+        ("bus_warn_below_v", ConfigValue::Float(10.8)),
+    ];
+    // The INA226 bus register is 1.25 mV per count: 10.7 V is 8560, 10.9 V is 8720.
+    set16(&sim, 0x02, 8560);
+    let mut driver = bind(&mut board, &config).unwrap();
+    let mut out = Description::new();
+    Driver::describe(&driver, &mut out);
+    let limit = out.find("bus_voltage").unwrap().real_warn_low.unwrap();
+    let reading = PowerMonitor::read(&mut driver).unwrap();
+    close(reading.bus_v, 10.7);
+    assert!(f64::from(reading.bus_v) < limit, "10.7 V is below {limit}");
+
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2260);
+    set16(&sim, 0x02, 8720);
+    let mut driver = bind(&mut board, &config).unwrap();
+    let reading = PowerMonitor::read(&mut driver).unwrap();
+    close(reading.bus_v, 10.9);
+    assert!(f64::from(reading.bus_v) >= limit, "10.9 V is not below {limit}");
 }
 
 /// Every electrical item is a real number in its unit: exponent 0, with real limits. Exponent -9

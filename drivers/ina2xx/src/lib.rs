@@ -111,14 +111,6 @@ fn real(nano: i64) -> f64 {
     nano as f64 * 1e-9
 }
 
-/// A limit in nano-units as a whole number of the item's unit, or `None` when it is not whole. An
-/// item's warning limit is an integer in its raw unit, which is the whole unit here; a fractional
-/// limit (10.8 V, say) has no place in the descriptor yet, and needs a real-valued warning on
-/// `Item`, which is an engine change.
-fn whole_units(nano: i64) -> Option<i64> {
-    (nano % 1_000_000_000 == 0).then_some(nano / 1_000_000_000)
-}
-
 /// A value in volts or amps as nano-units, rounded to the nearest.
 fn nano_units(value: f64) -> i64 {
     let scaled = value * 1e9;
@@ -279,11 +271,11 @@ impl Lifecycle for Ina2xx {
             .field("bus_v")
             .real_range(0.0, real(spans.bus_max_nv))
             .real_step(real(spans.bus_lsb_nv));
-        if let Some(low) = self.warn.bus_below_nv.and_then(whole_units) {
-            bus = bus.warn_below(low);
+        if let Some(low) = self.warn.bus_below_nv {
+            bus = bus.real_warn_below(real(low));
         }
-        if let Some(high) = self.warn.bus_above_nv.and_then(whole_units) {
-            bus = bus.warn_above(high);
+        if let Some(high) = self.warn.bus_above_nv {
+            bus = bus.real_warn_above(real(high));
         }
         out.add(bus);
         let shunt = Item::value("shunt_voltage", READ)
@@ -300,8 +292,8 @@ impl Lifecycle for Ina2xx {
             .field("current_a")
             .real_range(-real(spans.current_max_na), real(spans.current_max_na))
             .real_step(real(spans.current_lsb_na));
-        if let Some(high) = self.warn.current_above_na.and_then(whole_units) {
-            current = current.warn_above(high);
+        if let Some(high) = self.warn.current_above_na {
+            current = current.real_warn_above(real(high));
         }
         out.add(current);
         out.add(
