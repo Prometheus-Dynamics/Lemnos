@@ -28,6 +28,15 @@ compatible, as M34's load line does).
      and is recorded as a result, not a failure of the driver; the next START re-arms the receiver. Whether the
      board acks an idle FORCE is a board fact to record, not a guess the driver depends on.
 
+## Why the driver has no FE_ACK gate
+The receiver counts frame ends only while it is streaming (lrc_isr reads l->streaming under the frame lock).
+A stop sets streaming false before it writes FORCE, and START sets it true only after it has cleared the
+channel and the status. So a stop's FE_ACK, armed or late, is read while not streaming and reaches no frame
+accounting, and no hardware shape reaches the frame path through a stop. The stop-with-nothing-in-flight case
+(kernel/test/lemnos_rp1_csi2_check.c) therefore passes with or without a gate; it checks the count and the next
+start's sequence, not the gate. A late FE_ACK after START is not a stop's acknowledgement and is not gated:
+the board check (outcome 4) is what would show it.
+
 ## Recording
 - Put the outcome (A or B, with N and B) in testing/board-runs/CZ-MOD-FE-ACK.md under "Results", with the
   kernel and module revision. Outcome B blocks M1 until the assumption is replaced by a measured one.
