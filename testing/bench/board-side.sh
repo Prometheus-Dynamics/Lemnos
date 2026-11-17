@@ -8,7 +8,7 @@
 #
 #   board-side.sh sim|board WORKDIR
 #
-# WORKDIR holds lemnosd, lemnos-ctl, board.toml and stamp.py.
+# WORKDIR holds lemnosd, lemnos-ctl, lemnos-bench-stamp, board.toml and board-side.sh.
 set -u
 
 mode=${1:?sim or board}
@@ -26,6 +26,10 @@ usb_off=0
 pid=
 
 row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
+
+# now_ms: milliseconds on the monotonic clock, from /proc/uptime (10 ms resolution). Not `date +%s%N`: a
+# board whose date has no %N prints a literal N, and the arithmetic on it fails (`N: unbound variable`).
+now_ms() { awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime; }
 
 # put KEY VALUE NOTE: a measured row when there is a value, otherwise not measured.
 put() {
@@ -80,12 +84,14 @@ ticks() { awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null; }
 window() {
   local t0 t1 s0 s1
   t0=$(ticks)
-  s0=$(date +%s%N)
+  s0=$(now_ms)
   sleep "$1"
   t1=$(ticks)
-  s1=$(date +%s%N)
-  awk -v d="$((t1 - t0))" -v ns="$((s1 - s0))" -v hz="$(getconf CLK_TCK)" \
-    'BEGIN { printf "%.2f", d / hz / (ns / 1e9) * 100 }'
+  s1=$(now_ms)
+  ms=$((s1 - s0))
+  [ "$ms" -gt 0 ] || ms=1
+  awk -v d="$((t1 - t0))" -v ms="$ms" -v hz="$(getconf CLK_TCK)" \
+    'BEGIN { printf "%.2f", d / hz / (ms / 1000) * 100 }'
 }
 
 usb_count() { ls /sys/bus/usb/devices | grep -c -E '^[0-9]+-[0-9.]+$' || true; }
@@ -94,20 +100,20 @@ usb_count() { ls /sys/bus/usb/devices | grep -c -E '^[0-9]+-[0-9.]+$' || true; }
 # COUNT. Prints the wait in milliseconds. Gives up after 15 s.
 settle() {
   local start now n
-  start=$(date +%s%N)
+  start=$(now_ms)
   while :; do
     n=$(usb_count)
     if { [ "$1" = lt ] && [ "$n" -lt "$2" ]; } || { [ "$1" = ge ] && [ "$n" -ge "$2" ]; }; then
       break
     fi
-    now=$(date +%s%N)
-    if [ $(((now - start) / 1000000)) -ge 15000 ]; then
+    now=$(now_ms)
+    if [ $((now - start)) -ge 15000 ]; then
       return 1
     fi
     sleep 0.05
   done
-  now=$(date +%s%N)
-  echo $(((now - start) / 1000000))
+  now=$(now_ms)
+  echo $((now - start))
 }
 
 usb_cycle() {
@@ -142,7 +148,7 @@ if [ "$mode" = board ]; then
   wait "$sub" 2>/dev/null || true
 
   timeout 120 "$ctl" --socket "$sock" watch imu acceleration --period-ms 5 --count 9000 \
-    2>"$work/imu.err" | python3 -I "$work/stamp.py" --period-ms 5 --expect 9000 >"$work/imu.tsv" &
+    2>"$work/imu.err" | "$work/lemnos-bench-stamp" --period-ms 5 --expect 9000 >"$work/imu.tsv" &
   imu=$!
   put cpu.200hz_pct "$(window 45)" "board, 45 s, the 200 Hz IMU run below"
   wait "$imu" || true
