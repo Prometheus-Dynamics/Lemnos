@@ -39,7 +39,6 @@ pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
 const CREATE_BUFFERS: u32 = 1;
 
-
 /// `struct lemnos_rp1_csi2_info`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -384,7 +383,8 @@ impl Stream {
     pub fn add_marks(&mut self, buffers: u32, max_held: u32) -> io::Result<()> {
         let marks = Marks::create(buffers, 0, max_held)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("marks: {e:?}")))?;
-        self.ring.add_marks(self.fd.as_fd(), marks, buffers, max_held)
+        self.ring
+            .add_marks(self.fd.as_fd(), marks, buffers, max_held)
     }
 
     /// The next frame published, if any. With holds on, the frame's buffer is held until

@@ -674,7 +674,9 @@ fn a_frame_comes_out_when_the_next_job_takes_the_path() {
     rig.tick();
     assert_eq!(rig.counters(), (1, 1, 0));
     // The buffer handed back is taken again.
-    rig.output.return_buffer(0).expect("the consumer holds this buffer");
+    rig.output
+        .return_buffer(0)
+        .expect("the consumer holds this buffer");
     rig.post(73, 3, &[], 0);
     rig.tick();
     assert_eq!(rig.played.log().starts, 3);
@@ -943,7 +945,9 @@ fn a_refused_job_is_dropped_and_the_session_stays() {
     ] {
         rig.played.log().start_answer = Some(errno);
         rig.post(1, 0, &[], 0);
-        rig.config.return_buffer(0).expect("the consumer holds this buffer");
+        rig.config
+            .return_buffer(0)
+            .expect("the consumer holds this buffer");
         rig.tick();
     }
     assert_eq!(rig.counters(), (0, 5, 0));
@@ -1088,7 +1092,9 @@ fn a_buffer_named_again_is_not_imported_again() {
     rig.post(3, 2, &[], 2);
     rig.tick();
     assert_eq!(rig.output.take_frame().unwrap().buffer, 0);
-    rig.output.return_buffer(0).expect("the consumer holds this buffer");
+    rig.output
+        .return_buffer(0)
+        .expect("the consumer holds this buffer");
     rig.post(4, 3, &[], 0);
     rig.played.end(Ok(FRAME_END));
     rig.tick();
@@ -1134,9 +1140,13 @@ fn the_steady_state_allocates_nothing() {
         }
         let image = rig.output.take_frame().unwrap();
         assert_eq!(image.identity, u64::from(n - 2));
-        rig.output.return_buffer(image.buffer).expect("the consumer holds this buffer");
+        rig.output
+            .return_buffer(image.buffer)
+            .expect("the consumer holds this buffer");
         let stats = rig.statistics.take_frame().unwrap();
-        rig.statistics.return_buffer(stats.buffer).expect("the consumer holds this buffer");
+        rig.statistics
+            .return_buffer(stats.buffer)
+            .expect("the consumer holds this buffer");
     }
     assert_eq!(rig.counters(), (10, 0, 0));
     assert_eq!(rig.played.log().imports.len(), OUTPUTS as usize);

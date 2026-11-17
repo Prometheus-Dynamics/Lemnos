@@ -103,7 +103,9 @@ fn a_job_runs_on_the_buffers_it_names_and_completes_on_its_output() {
     );
     assert_eq!(scaler.counters(), Counters { jobs: 1, errors: 0 });
     assert!(scaler.holds(1) && !scaler.holds(2));
-    consumer.return_buffer(2).expect("the consumer holds this buffer");
+    consumer
+        .return_buffer(2)
+        .expect("the consumer holds this buffer");
     assert_eq!(scaler.serve(&mut stream, 78), Ok(0));
     assert!(scaler.holds(2));
 }
@@ -123,7 +125,9 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
         }
         let done = acting.take_frame().expect("a completion");
         assert_eq!((done.buffer, done.identity), (1, 1));
-        acting.return_buffer(done.buffer).expect("the consumer holds this buffer");
+        acting
+            .return_buffer(done.buffer)
+            .expect("the consumer holds this buffer");
         post(&acting, &job(3, 0, 1));
     }));
     post(&consumer, &job(1, 0, 1));
@@ -260,7 +264,9 @@ fn a_block_that_fails_completes_the_job_as_failed_and_is_tried_again() {
     assert_eq!(scaler.serve(&mut stream, 1), Ok(1));
     failed_on(consumer.take_frame(), 2, 2);
     assert_eq!(plan.opens.get(), 1);
-    consumer.return_buffer(1).expect("the consumer holds this buffer");
+    consumer
+        .return_buffer(1)
+        .expect("the consumer holds this buffer");
     post(&consumer, &job(3, 0, 1));
     assert_eq!(scaler.serve(&mut stream, 250_000_000), Ok(1));
     assert_eq!(
@@ -291,7 +297,9 @@ fn bytes_that_are_not_a_job_fault_the_consumer_and_the_next_one_is_served() {
     assert_eq!(scaler.serve(&mut stream, 0), Ok(1));
     assert_eq!(consumer.take_frame().expect("a completion").identity, 5);
     // A job longer than any the contract has is no job either.
-    consumer.return_buffer(1).expect("the consumer holds this buffer");
+    consumer
+        .return_buffer(1)
+        .expect("the consumer holds this buffer");
     consumer.post_job(&[0; JOB_BYTES + 1]);
     assert_eq!(scaler.serve(&mut stream, 0), Ok(1));
     assert_eq!(consumer.faults(), 2);
@@ -321,7 +329,9 @@ fn serving_jobs_allocates_nothing_in_the_driver() {
         }
         let frame = consumer.take_frame().expect("a completion");
         assert_eq!((frame.identity, frame.bytes), (n, 32 * 32 * 3));
-        consumer.return_buffer(output).expect("the consumer holds this buffer");
+        consumer
+            .return_buffer(output)
+            .expect("the consumer holds this buffer");
     }
     assert_eq!(counted, 0, "allocations serving 1000 jobs");
     assert_eq!(plan.runs.get(), 1010);

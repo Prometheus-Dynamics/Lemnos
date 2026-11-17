@@ -250,10 +250,7 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         let seqs: Vec<u64> = frames.iter().map(|f| f.sequence).collect();
         let _ = writeln!(std::io::stdout(), "sequences read: {seqs:?}");
     }
-    report.check(
-        ordered,
-        "the sequence numbers only go up",
-    );
+    report.check(ordered, "the sequence numbers only go up");
     let stamped = frames
         .iter()
         .all(|f| f.timestamp_ns >= started && f.timestamp_ns <= finished);

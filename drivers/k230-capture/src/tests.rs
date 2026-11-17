@@ -550,7 +550,9 @@ fn frames_rotate_through_the_ring_and_carry_the_drivers_own_numbers() {
         assert_eq!(frame.timestamp_ns, 1_000 + i as u64, "the interrupt's time");
         assert_eq!(frame.identity, 0);
         assert!(stream.contents(frame.buffer) == *bytes, "frame {i}");
-        stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+        stream
+            .return_buffer(frame.buffer)
+            .expect("the consumer holds this buffer");
     }
     // Memory 1 was armed at start; each frame end arms the memory left free.
     assert_eq!(block.rearms(), [2, 0, 1, 2, 0, 1, 2, 0, 1]);
@@ -682,7 +684,9 @@ fn a_stalled_consumer_drops_frames_and_the_sequence_shows_it() {
     );
     assert_eq!(block.rearms(), [2, 0, 1]);
     let first = stream.take_frame().unwrap();
-    stream.return_buffer(first.buffer).expect("the consumer holds this buffer");
+    stream
+        .return_buffer(first.buffer)
+        .expect("the consumer holds this buffer");
     block.frame(&pattern(3, FRAME), 3);
     d.tick(0).unwrap();
     assert_eq!(stream.take_frame().unwrap().sequence, 4, "a gap of two");
@@ -697,7 +701,9 @@ fn a_frame_that_cannot_be_copied_is_counted_and_its_buffer_given_back_empty() {
     d.tick(0).unwrap();
     let given_back = stream.take_frame().unwrap();
     assert_eq!(given_back.bytes, 0);
-    stream.return_buffer(given_back.buffer).expect("the consumer holds this buffer");
+    stream
+        .return_buffer(given_back.buffer)
+        .expect("the consumer holds this buffer");
     assert_eq!(d.counters().unwrap().errors, 1);
     assert_eq!(d.health(), Health::Ok);
     // The only stream buffer carries the next one.
@@ -824,7 +830,9 @@ fn frame_ends_every(
             d.tick(t).unwrap();
             let frame = stream.take_frame().expect("published");
             assert!(stream.contents(frame.buffer) == bytes);
-            stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+            stream
+                .return_buffer(frame.buffer)
+                .expect("the consumer holds this buffer");
         } else {
             d.tick(t).unwrap();
         }
@@ -926,7 +934,9 @@ fn the_steady_state_allocates_nothing() {
         block.frame(bytes, 0);
         now = d.tick(now).unwrap();
         let frame = stream.take_frame().unwrap();
-        stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+        stream
+            .return_buffer(frame.buffer)
+            .expect("the consumer holds this buffer");
     }
     block.with(|b| {
         b.calls.reserve(4000);
@@ -937,7 +947,9 @@ fn the_steady_state_allocates_nothing() {
             block.frame(&frames[i as usize % 4], i);
             now = d.tick(now).unwrap();
             let frame = stream.take_frame().unwrap();
-            stream.return_buffer(frame.buffer).expect("the consumer holds this buffer");
+            stream
+                .return_buffer(frame.buffer)
+                .expect("the consumer holds this buffer");
         }
     });
     assert_eq!(allocated, 0, "event, rearm, copy, publish and the poll");

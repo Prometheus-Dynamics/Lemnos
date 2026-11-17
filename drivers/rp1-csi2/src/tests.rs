@@ -153,7 +153,10 @@ impl Hardware for Hw {
                 Channel::Image => (&mut m.held, &mut m.given_back),
                 Channel::Embedded => (&mut m.emb_held, &mut m.emb_given_back),
             };
-            let at = held.iter().position(|&b| b == buffer).ok_or(Status::INVALID_ARGUMENT)?;
+            let at = held
+                .iter()
+                .position(|&b| b == buffer)
+                .ok_or(Status::INVALID_ARGUMENT)?;
             held.swap_remove(at);
             given.push((buffer, fence));
             Ok(())
@@ -523,7 +526,9 @@ fn a_finished_frame_is_published_and_its_buffer_goes_back_when_returned() {
         "the consumer has it: the block doesn't"
     );
 
-    frames.return_buffer(2).expect("the consumer holds this buffer");
+    frames
+        .return_buffer(2)
+        .expect("the consumer holds this buffer");
     d.tick(now).unwrap();
     assert_eq!(
         hw.with(|m| m.given_back.clone()),
@@ -831,7 +836,9 @@ fn stream_frames_every(
             d.tick(t).unwrap();
             let got = frames.take_frame().expect("published");
             assert_eq!(got.sequence, sequence);
-            frames.return_buffer(buffer).expect("the consumer holds this buffer");
+            frames
+                .return_buffer(buffer)
+                .expect("the consumer holds this buffer");
             sequence += 1;
         } else {
             d.tick(t).unwrap();
@@ -967,7 +974,9 @@ fn the_steady_state_allocates_nothing() {
         *now = d.tick(*now).unwrap();
         let got = frames.take_frame().expect("published");
         assert_eq!((got.buffer, got.sequence), (buffer, sequence));
-        frames.return_buffer(buffer).expect("the consumer holds this buffer");
+        frames
+            .return_buffer(buffer)
+            .expect("the consumer holds this buffer");
         // The cycle's frame period is 500 ms, which the receiver measures. With no frame for 500 ms
         // the stop bound is `max(4 x 500 ms, 200 ms)` = 2 s, so the gap is not a stop: the bound
         // follows the period the frames show. The original test expectation (500 ms) is restored.
@@ -1218,8 +1227,12 @@ fn a_streaming_receiver_resumes_streaming_with_its_link_packing_owner_and_number
     assert_eq!(frames.take_frame().map(|f| f.sequence), Some(0));
     assert_eq!(frames.take_frame().map(|f| f.sequence), Some(1));
     // The consumer gives its two frames back: the stream's buffers are its own again.
-    frames.return_buffer(0).expect("the consumer holds this buffer");
-    frames.return_buffer(1).expect("the consumer holds this buffer");
+    frames
+        .return_buffer(0)
+        .expect("the consumer holds this buffer");
+    frames
+        .return_buffer(1)
+        .expect("the consumer holds this buffer");
     let record = Lifecycle::resume_record(&d).expect("a receiver keeps a record");
     drop(d);
 
@@ -1339,9 +1352,16 @@ fn a_taken_frame_is_held_until_it_is_given_back_once() {
     let mut h = hw.clone();
     hw.with(|m| m.finished.push(finished(3)));
     assert!(h.next_frame(Channel::Image).unwrap().is_some());
-    assert_eq!(hw.with(|m| m.held.clone()), [3], "taking a frame holds its buffer");
+    assert_eq!(
+        hw.with(|m| m.held.clone()),
+        [3],
+        "taking a frame holds its buffer"
+    );
     h.give_back(Channel::Image, 3, 1).unwrap();
-    assert_eq!(hw.with(|m| (m.held.len(), m.given_back.clone())), (0, vec![(3, 1)]));
+    assert_eq!(
+        hw.with(|m| (m.held.len(), m.given_back.clone())),
+        (0, vec![(3, 1)])
+    );
 }
 
 #[test]
@@ -1361,7 +1381,11 @@ fn a_double_release_and_a_release_of_a_buffer_never_taken_are_refused() {
         Status::INVALID_ARGUMENT,
         "a release of a buffer the stream never took is refused"
     );
-    assert_eq!(hw.with(|m| m.given_back.len()), 1, "only the valid release reached the block");
+    assert_eq!(
+        hw.with(|m| m.given_back.len()),
+        1,
+        "only the valid release reached the block"
+    );
 }
 
 #[test]
@@ -1406,7 +1430,11 @@ fn a_frame_whose_buffer_wait_ends_after_a_newer_frame_is_dropped_not_published_l
     let published: Vec<u64> = std::iter::from_fn(|| frames.take_frame())
         .map(|f| f.sequence)
         .collect();
-    assert_eq!(published, [6], "published sequence numbers never go backwards");
+    assert_eq!(
+        published,
+        [6],
+        "published sequence numbers never go backwards"
+    );
     assert_eq!(
         relay.lost(),
         2,

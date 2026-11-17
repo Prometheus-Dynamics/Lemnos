@@ -275,7 +275,9 @@ impl Hardware for LinuxHardware {
             doorbell.as_deref().map(AsFd::as_fd),
         );
         let mut stream = made.map_err(|e| self.node_error(e))?;
-        stream.add_marks(params.buffers, held_limit(params.buffers)).map_err(status)?;
+        stream
+            .add_marks(params.buffers, held_limit(params.buffers))
+            .map_err(status)?;
         let embedded = if params.embedded_buffers > 0 {
             let made = self.driving()?.stream_create(
                 &StreamParams {

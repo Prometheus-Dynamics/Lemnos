@@ -244,7 +244,10 @@ impl Ring {
         max_held: u32,
     ) -> io::Result<()> {
         if self.holds.is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "marks already given"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "marks already given",
+            ));
         }
         self.holds = Some(Holds {
             marks,
@@ -450,7 +453,10 @@ impl Ring {
             .get_mut(buffer as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "outside the pool"))?;
         if !holds.marks.mark(BufferIndex(buffer)) {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "at the hold limit"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "at the hold limit",
+            ));
         }
         *count += 1;
         holds.held += 1;
@@ -468,14 +474,20 @@ mod tests {
     /// A ring of `frame_slots` frames and `buffers` buffers in an in-memory region, with the words
     /// the module writes at make time (`kernel/lemnos_stream.c` `lem_stream_init_ring`): no frame.
     fn module_ring(frame_slots: u32, buffers: u32) -> (OwnedFd, usize, Layout) {
-        let layout = Layout { frame_slots, buffers, job_slots: 2, job_bytes: 8 };
+        let layout = Layout {
+            frame_slots,
+            buffers,
+            job_slots: 2,
+            job_bytes: 8,
+        };
         let fd = crate::dma_buf::memfd(c"lemnos-ring-test").expect("memfd");
         let bytes = 4096;
         let file = File::from(fd);
         file.set_len(bytes as u64).expect("size the region");
         let page_at = INDEX_AT + frame_slots as usize + frame_slots as usize * SLOT_WORDS;
         let put = |word: usize, value: u64| {
-            file.write_all_at(&value.to_le_bytes(), (word * 8) as u64).expect("write a word");
+            file.write_all_at(&value.to_le_bytes(), (word * 8) as u64)
+                .expect("write a word");
         };
         put(0, SHM_MAGIC);
         put(RING_LAYOUT, RING_LAYOUT_VALUE);
@@ -517,7 +529,10 @@ mod tests {
     #[test]
     fn a_region_not_laid_out_like_the_module_is_refused() {
         let (fd, bytes, layout) = module_ring(2, 2);
-        let wrong = Layout { buffers: 3, ..layout };
+        let wrong = Layout {
+            buffers: 3,
+            ..layout
+        };
         assert_eq!(
             Ring::map(fd.as_fd(), bytes, &wrong).unwrap_err().kind(),
             io::ErrorKind::InvalidData
