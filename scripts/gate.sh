@@ -72,6 +72,9 @@ step packaging-files scripts/check-packaging-files.py
 # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
 # Also checks that docs/building.md lists each of them.
 step shipped scripts/check-shipped.sh
+# The four shipped programs agree: built in one cargo run they are byte-identical to each built alone, and
+# every crate they share resolves to the same features in both (service/shipped-features).
+step products scripts/check-products.sh
 # The module's CONFIG_ symbols are all in docs/kernel-config.md, and the QEMU harness enables the required ones.
 step kernel-config scripts/check-kernel-config.py
 # The generated overlays compile with the dtc the contract names (built from its pinned release) with

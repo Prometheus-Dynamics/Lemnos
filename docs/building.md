@@ -95,6 +95,21 @@ tool. Each result is `stripped` and of the right word size (`file`).
 
 Not run: the glibc targets; the vendored build of `lemnos-slot-init`; a board.
 
+## One build, the same programs
+
+`lemnosd`, `lemnos-ctl`, `lemnos-orion` and `lemnos-slot-init` must not depend on which of them are built
+together. Cargo unifies a crate's features across one build, so a feature one program asks for would
+reach the others in a merged build and not when they are built alone. Each shipped program therefore
+depends on `service/shipped-features`, a crate with no code: its manifest lists every feature the
+shipped programs ask of the crates they share, and a program that needs one the others do not still
+lists it there. A test-only feature (`fake`, `alloc-count`) is for dev-dependencies, and does not
+belong in that list.
+
+`scripts/check-products.sh`, run by the gate, builds the four together and alone on the `service`
+profile. Each compiled unit must resolve to the same features in both, and each binary must be
+byte-identical to its solo build (`cmp`). A shared crate or feature added to a shipped program goes in
+`service/shipped-features/Cargo.toml`.
+
 ## No C in the shipped programs
 
 `scripts/check-shipped.sh` (run by the gate) takes each program's normal and build dependency tree.
