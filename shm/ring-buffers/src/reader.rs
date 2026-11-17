@@ -60,6 +60,14 @@ impl<K: Marker> Held<K> {
         self.buffers[..self.count].get(index).copied()
     }
 
+    /// The ticket buffer `index` had when the frame was published into it, as the entry carries it.
+    /// A reader that re-checks it after reading the bytes learns whether the buffer was reused
+    /// meanwhile (see `shm_ring_buffers::page::still`).
+    #[must_use]
+    pub fn ticket(&self, index: usize) -> Option<u32> {
+        self.tickets[..self.count].get(index).copied()
+    }
+
     /// The bytes of the frame's buffer `index`, in place.
     ///
     /// **Unchecked.** Nothing here says whether the buffer was reused while the caller reads

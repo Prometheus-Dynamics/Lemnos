@@ -619,8 +619,8 @@ own), `index` (the pool index, `buffer * planes + plane`, which is the number th
 name), `offset` (where the plane starts in `fd`), `payload_bytes` (what the contract may use: the
 buffer's length, or the plane's), `allocated_bytes` (what exists from `offset`: a shared pool's
 stride, up to the next buffer, or a dma-buf's whole size, which a heap may round up), `tail_bytes`
-(slack past the payload that an importer must be given; always 0 today, and it will come from the
-board's per-stream `tail_bytes` key for dma-bufs, in I2d), and `writable`. `pool_page()` gives a
+(slack past the payload that an importer must be given: the board's per-stream `tail_bytes` key for
+dma-bufs, 0 when it is left out; see [Reader tickets](#reader-tickets)), and `writable`. `pool_page()` gives a
 read-only descriptor of the pool page, and `generation()` the pool's generation.
 
 `writable` is what the descriptor allows, decided when the stream opens: a sealed memfd (a shared pool) by
@@ -630,8 +630,8 @@ descriptor instead, as [Unmapped streams](#unmapped-streams) says. The consumer 
 are read-only") when any buffer's descriptor allows only read-only mappings, so the mismatch shows
 at the open and not at the first write. A stream taken with `open_stream` maps read-only even where
 the descriptors allow writes. Today the host hands out read-write descriptors for every stream. The
-outside-reader work (I2d) will make a stream whose buffers a block fills read-only from allocation;
-the same probe reports it, with no change to the client.
+outside readers (see [Reader tickets](#reader-tickets)) make a stream whose buffers a block fills
+read-only from allocation; the same probe reports it, with no change to the client.
 
 The stream's answer carries no image layout (width, height, packing, stride). The stream layer
 moves buffers and does not know what a frame is. A frame's layout comes only from the contract: the
@@ -653,7 +653,7 @@ buffer, and `plane(frame, p)` the bytes of plane `p` that the frame holds.
   buffers (`shm_ring_buffers::PoolView::attach`). That process holds no reader slot: it must read
   frames it is given only while the first process holds them, and it must not mark the hold table
   itself. Its protection against reuse is only what the first process's hold gives. Giving another
-  process its own reader slot is I2d.
+  process its own reader slot is a ticket: see [Reader tickets](#reader-tickets).
 - The publisher can cut a reader off by hand (`HoldTable::cut_off`). Its buffers come back at once,
   and it is told on its next call. A value it was reading when its buffer was reused is not returned
   as good: `Held::read` drops it as `Torn` and counts it. The client's checked reads are
@@ -759,6 +759,90 @@ end of unknown kind.
 The descriptors of a stream of planes name each plane as its own pool buffer: buffer `b`'s plane `p`
 is pool buffer `b × planes + p`, and a frame names all of them in its entry. `FrameInfo` and the
 frame's first pool buffer are the whole frame as far as the shm crates are concerned.
+
+## Reader tickets
+
+A process that is not the stream's consumer can read its frames without talking to `lemnosd`. The
+service that has the stream open asks the daemon, on its own connection, for a **ticket**: a reader
+slot. The daemon grants it, and the service passes the descriptors to the reader process, which reads
+the ring and the buffers and never sends the daemon a frame. The frames are kinds 35 to 39 (part
+`shared-rings`, added after the base; see [Wire](wire.md)).
+
+- **Slots.** Slot 0 is the consumer. Slots 1 to `readers` are for readers. When every slot is taken the
+  refusal is `BUSY` and names the stream and the limit. A slot comes back when its reader goes or the
+  service gives it back (`StreamUnticket`).
+- **Descriptors**, in this order (`lemnos_wire::ring::ticket::fds`): the frame ring, read-only; the pool
+  page, read-only; the reader's own bell eventfd; the reader's own bell page; the reader's own marks
+  page; the write end of its liveness pipe; then the buffers, read-only: one shared memfd, or one
+  dma-buf per buffer (per plane when `planes` is set). A reader posts no jobs.
+- **Rights.** A ticket carries two separate rights. *Read* is a CPU mapping, and the kernel enforces it:
+  for shared memory the host seals the memfds against future writes and sets them to `0444`, and a
+  reader's read-write reopen is refused. *Import* is being handed a dma-buf fd a device can open. A
+  device import writes through it, and that write is seen by every other reader. So an importing
+  reader is trusted with the frame's content for all the other readers; the daemon records that trust
+  and does not check it. Requested with `import` on the ticket; granted in the answer as `rights` (bit 0
+  read, bit 1 import). Shared memory has only read. A dma-buf ticket without the import right is refused
+  by name: the service then copies for that reader from its own ring. Lemnos never copies frames for a
+  reader.
+- **Who may import.** Under package mode `signed` (the daemon's default) the import right needs
+  `reader_import = true` on the stream. Under package mode `open` every ticket gets both rights.
+- **Limits.** A ticket asks for `held` buffers at once and `hold_ms` for each; 0 asks for 2 and 500.
+  The grant is the request clamped to `reader_held_max` and `reader_hold_ms_max`. A grant that would
+  leave the producer fewer than two buffers after the consumer's one is refused by name (`BUSY`).
+- **Cut-off.** A reader that holds more than its grant, or one buffer longer than its `hold_ms`, or
+  whose marks stay mid-change, or whose liveness pipe hangs up, is cut off. Its marks stop counting and
+  its buffers go back to the producer. The stream is **not** faulted. The reason is in the pool page
+  and reads as: 1 held too many at one instant, 2 held one buffer too long, 3 stuck mid-change, 4 its
+  liveness pipe hung up, 5 the service released it. The count breach (1) is the reason when a count and
+  a hold time both break in the same pass.
+- **What the service sees.** `StreamTicketState` answers with whether the slot is still live, the
+  reason, when it was cut (`CLOCK_MONOTONIC` nanoseconds) and how many cut-offs the stream has had. The
+  service keeps its own per-frame record, keyed by the frame's identity: nothing in the ring pairs a frame
+  with it.
+- **Dead reader.** The daemon checks each liveness pipe once per pass of its loop (at most 250 ms apart),
+  and frees the slot and its holds when the pipe hangs up. `hold_ms` is the backstop.
+- **Tickets die with the stream.** When the consumer detaches, every ticket is cut off. A camera that
+  leaves and comes back asks for new tickets.
+- **Reading.** `TicketReader` (`lemnos_wire::ring`) gives each frame its sequence, identity, bytes, and
+  its capture time (the ring entry's time). `validate` returns the cut-off reason first, then `Recycled`
+  if a buffer changed its ticket. Bytes count only if validation passes after the read.
+
+Refusals, by status: `NOT_FOUND` (no such stream, or no consumer attached to it); `NOT_PERMITTED` (the
+connection is not the consumer, or a dma-buf ticket without the import right, or import asked with
+security on and `reader_import` false); `BUSY` (every slot taken, or a grant that would starve the
+producer); `NOT_SUPPORTED` (`readers` is 0, or a dma-buf stream whose buffers were allocated writable).
+
+### Which buffers can have readers
+
+Who writes the buffers decides the allocation, and the allocation decides whether readers are possible.
+
+| Stream | Who writes on the CPU | Allocation | Readers | Rights |
+|---|---|---|---|---|
+| dma-buf, `writer = "consumer"` | the consumer | writable | no (refused at board check) | none |
+| dma-buf, `writer = "hardware"`, `readers = 0` (default) | nobody | writable | no | none |
+| dma-buf, `writer = "hardware"`, `readers > 0` | nobody | read-only | yes | read; import if granted |
+| shared memory (memfd) | the host, in software | writable, sealed for readers | yes | read only |
+
+The daemon never writes a dma-buf on the CPU, so a dma-buf stream has no host writer. A `writer = "consumer"`
+stream is mapped writable for the consumer, and a read-only one refuses that mapping (`EACCES`), which
+is correct. A hardware-written stream with readers is allocated read-only, so the CPU cannot write through
+a reader's descriptor. Its `tail_bytes` slack is added after each plane this stream allocates.
+
+### Measured on the reference board
+
+Read and import are separate rights, and read-only does not stop a device write. Measured by another team
+(on a desktop GPU and on the reference board's GPU):
+
+| GPU | Imports a read-only heap dma-buf | A device write is seen through the host's read-only mapping |
+|---|---|---|
+| RADV (desktop) | yes | yes |
+| V3D on the reference board (7.1.10.2, kernel 7.2.9-v8-16k, as root) | yes, bytes read back correctly | yes |
+| NVIDIA | refused for any heap dma-buf (writable too) | not applicable |
+| llvmpipe | refuses a read-only fd; imports a writable one | a software renderer must copy |
+
+On that board every dma-heap node is `root:root 600`, so no non-root process can allocate from a heap. The
+reader processes are handed fds and never allocate, which is fine. The heap's group and mode are a
+generated board-file fact (PR Q2i).
 
 ## Streams made by the kernel module
 

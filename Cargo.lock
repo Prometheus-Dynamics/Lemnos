@@ -1886,6 +1886,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-wire",
  "serde",
+ "shm-measure",
  "shm-ring",
  "shm-ring-buffers",
  "shm-ring-doorbell",

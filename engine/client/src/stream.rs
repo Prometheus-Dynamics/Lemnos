@@ -59,8 +59,8 @@ pub struct Region<'a> {
     /// The memory from `offset` that really exists: a shared pool's stride (up to the next buffer)
     /// or a dma-buf's whole size, which a heap may round up. At least `payload_bytes`.
     pub allocated_bytes: u64,
-    /// Slack past the payload that a device importing the buffer must be given. Always 0 today:
-    /// it will come from the board's per-stream `tail_bytes` key, dma-bufs only (I2d).
+    /// Slack past the payload that a device importing the buffer must be given: the board's
+    /// per-stream `tail_bytes` key, dma-bufs only, 0 when it is left out.
     pub tail_bytes: u64,
     /// Whether `fd` allows a writable mapping. On a mapped stream this is probed at open; on a
     /// stream taken with [`Session::open_stream_unmapped`](crate::Session::open_stream_unmapped)

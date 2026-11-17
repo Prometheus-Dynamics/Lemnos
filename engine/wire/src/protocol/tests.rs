@@ -1206,6 +1206,12 @@ mod layout {
         assert_eq!(PART_BITS, [1, 2, 4, 8, 16]);
         assert_eq!(feature::EVERY, 31);
         assert_eq!(PARTS, 5);
+        // The shared-rings part folds the ticket's descriptor order and rights too, not only the rings'.
+        assert_ne!(
+            crate::ring::fold_shared_rings(0),
+            crate::ring::fds::fold_constants(0),
+            "the ticket's descriptors and rights are folded into the shared-rings part"
+        );
     }
 
     /// The shared-rings part's hash is the value `docs/wire.md` and `shm/README.md` record. It
@@ -1219,7 +1225,7 @@ mod layout {
             .position(|name| *name == "shared-rings")
             .expect("the shared-rings part");
         assert_eq!(
-            PART_HASHES[index], 0x81a5_753a_1c95_76e6,
+            PART_HASHES[index], 0x981c_6833_e833_0a91,
             "the shared-rings part hash moved: {:#018x}",
             PART_HASHES[index]
         );

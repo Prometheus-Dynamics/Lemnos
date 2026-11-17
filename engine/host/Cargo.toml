@@ -26,6 +26,7 @@ thiserror = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 lemnos-sim = { path = "../../backends/sim" }
+shm-measure = { path = "../../shm/measure" }
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }

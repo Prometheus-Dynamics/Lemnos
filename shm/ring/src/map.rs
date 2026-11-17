@@ -8,8 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{Mem, MemMut, RingError};
 
-/// The seals a ring's memory carries: its size can never change again.
-const SEALS: libc::c_int = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+/// The seals a ring's memory carries: its size can never change. `F_SEAL_SEAL` is left off on
+/// purpose: when the owner hands the memory to readers it adds `F_SEAL_FUTURE_WRITE` with
+/// [`share_read_only`], and a seal can only be added before `F_SEAL_SEAL`. Nothing else can add
+/// one: a reader holds only read-only descriptors, and those cannot.
+const SEALS: libc::c_int = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
 
 /// A shared mapping of a descriptor, as 64-bit words.
 #[derive(Debug)]
@@ -198,6 +201,82 @@ pub fn sealed_memfd(bytes: usize) -> Result<OwnedFd, RingError> {
         return Err(io::Error::last_os_error().into());
     }
     Ok(fd)
+}
+
+/// Makes a sealed memfd something outside readers can hold and nothing can write through, once its
+/// owner has its own writable mapping. Adds `F_SEAL_FUTURE_WRITE` (no `write(2)` and no new
+/// writable mapping, whichever descriptor asks) and sets the mode to `0444` (a read-write reopen
+/// through `/proc` is refused to an unprivileged process). Existing writable mappings, the
+/// owner's among them, keep working. Idempotent. Refused for a descriptor that can't be sealed,
+/// such as a dma-buf, before anything changes.
+///
+/// # Errors
+///
+/// [`RingError::Io`] if the seal or the mode can't be set.
+pub fn share_read_only(fd: BorrowedFd<'_>) -> Result<(), RingError> {
+    // SAFETY: `fd` is open, and F_ADD_SEALS takes one integer seal set.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_FUTURE_WRITE) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `fd` is open, and fchmod takes only the mode.
+    if unsafe { libc::fchmod(fd.as_raw_fd(), 0o444) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// A pipe for a reader's liveness: the read end is the host's, the write end goes to the reader,
+/// and nothing is ever written to it. The read end reports `POLLHUP` once every write end is
+/// closed, which is how the host sees that the reader has gone.
+///
+/// # Errors
+///
+/// [`RingError::Io`] if the pipe can't be made.
+pub fn liveness_pipe() -> Result<(OwnedFd, OwnedFd), RingError> {
+    let mut fds = [-1_i32; 2];
+    // SAFETY: `fds` has room for the two descriptors `pipe2` writes.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `fds[0]` was just made by `pipe2` and nothing else owns it.
+    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    // SAFETY: `fds[1]` was just made by `pipe2` and nothing else owns it.
+    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    Ok((read, write))
+}
+
+/// Whether `fd` was opened read-only, as its file mode says: a dma-buf allocated read-only stays
+/// so, and the only way to a writable mapping of it is a writable descriptor.
+///
+/// # Errors
+///
+/// [`RingError::Io`] if the descriptor's flags can't be read.
+pub fn is_read_only(fd: BorrowedFd<'_>) -> Result<bool, RingError> {
+    // SAFETY: `fd` is open, and F_GETFL takes no argument.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(flags & libc::O_ACCMODE == libc::O_RDONLY)
+}
+
+/// Whether every write end of the pipe `fd` is closed. Never waits.
+///
+/// # Errors
+///
+/// [`RingError::Io`] if the poll fails.
+pub fn hung_up(fd: BorrowedFd<'_>) -> Result<bool, RingError> {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, and a zero timeout, so the call returns at once.
+    let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(poll.revents & libc::POLLHUP != 0)
 }
 
 /// A second descriptor for the same memory that can only be read and only be mapped read-only.
