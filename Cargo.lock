@@ -2788,6 +2788,7 @@ dependencies = [
  "lemnos-driver-usb-gadget",
  "lemnos-hal",
  "lemnos-slot-store",
+ "orion",
  "serde",
  "shm-sample-time",
  "subtle",
