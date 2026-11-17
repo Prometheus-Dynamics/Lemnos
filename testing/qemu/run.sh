@@ -124,6 +124,12 @@ case "$nandsim" in
   *.xz) xz -d -c "$nandsim" >"$root/nandsim.ko" ;;
   *) cp "$nandsim" "$root/nandsim.ko" ;;
 esac
+# The Rust checks (CZ-GUEST-2) are static binaries with debug info, about 5 MB each unstripped. No check reads
+# their symbols or line tables (they compare output lines), so they are stripped here to keep the initramfs
+# within the guest's memory. The workspace's debug profile is unchanged.
+for guest in lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check; do
+  strip "$root/$guest"
+done
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 
 accel=tcg
