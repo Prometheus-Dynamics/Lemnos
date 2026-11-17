@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-power-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The QEMU guest's power check: a block's clocks, supplies and resets, its thermal zone and the event stream (CZ-GUEST-2 port of lemnos_power_check.c)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true
