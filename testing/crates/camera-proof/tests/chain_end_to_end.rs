@@ -105,6 +105,14 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     ] {
         assert!(text.contains(&line), "missing {line:?} in:\n{text}");
     }
+    // The back end's luma is made once for the sim's scene: the front end sends the same frame every
+    // time, so the conversion runs on the first job and a job whose input is unchanged reuses it.
+    // Before the change it ran once a job (`frames` times), which is most of the sim's cost.
+    assert_eq!(
+        lemnos_camera_sim::pisp::LUMA_CONVERSIONS.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the back end converted its luma more than once for an unchanged input"
+    );
     // What a board run must show before it claims the path: both stages bound, the streams as
     // the host made them, and frames end to end. Which path ran depends on the host's buffers, and
     // the proof says which: a dma-buf host lends each frame; a host without a dma-heap copies them
