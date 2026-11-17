@@ -50,3 +50,5 @@ from user space.
    back, and confirm a display rotation still works.
 
 Record each result here.
+
+> Historical note. The C check named above is now `testing/crates/gsdma-check (lemnos-gsdma-check)` (the Rust port).

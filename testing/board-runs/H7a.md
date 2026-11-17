@@ -67,3 +67,5 @@ report each. Never write the block's registers from user space.
    confirm the vendor's demo still runs.
 
 Record each result here.
+
+> Historical note. The C check named above is now `testing/crates/vip-check (lemnos-vip-check)` (the Rust port).
