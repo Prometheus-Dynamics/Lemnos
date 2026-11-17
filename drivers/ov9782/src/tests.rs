@@ -1210,6 +1210,37 @@ fn manifest_names_the_driver_and_its_tag() {
     assert_eq!(Ov9782::MANIFEST.provides[0].tag.as_str(), "camera.sensor/1");
 }
 
+/// The bind check a typed `camera.sensor/1` client runs (`engine/client/src/bind.rs`), against the
+/// offer the driver's manifest makes: the base hash must equal the client's, and every method the
+/// client has must be offered with the same number, name and method hash. A layout change in one
+/// of them is refused at bind by name, so this is the check that keeps the offer and the contract
+/// in step.
+#[test]
+fn the_manifest_offers_camera_sensor_at_the_clients_hash_and_methods() {
+    let offered = &Ov9782::MANIFEST.provides[0];
+    let client = <dyn CameraSensor as Contract>::INFO;
+    assert_eq!(offered.tag.as_str(), client.tag.as_str());
+    assert_eq!(
+        lemnos_core::layout::contract_hash(offered),
+        <dyn CameraSensor as Contract>::HASH,
+        "the offered base hash must equal the client's"
+    );
+    for method in client.methods {
+        let found = offered
+            .methods
+            .iter()
+            .find(|found| found.id == method.id && found.name == method.name)
+            .unwrap_or_else(|| panic!("the offer lacks method {} {}", method.id, method.name));
+        assert_eq!(
+            lemnos_core::layout::method_hash(found),
+            lemnos_core::layout::method_hash(method),
+            "method {} {} is laid out differently",
+            method.id,
+            method.name
+        );
+    }
+}
+
 #[test]
 fn the_sensor_reports_a_linear_gain_law_and_no_embedded_data() {
     // Gain is sixteenths: code 0x20 is gain two. The sensor carries no register values per frame.
