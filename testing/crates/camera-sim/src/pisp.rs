@@ -577,6 +577,10 @@ impl BeBlock {
 }
 
 impl be::Hardware for BeBlock {
+    fn present(&mut self) -> std::result::Result<u32, lemnos_core::Status> {
+        Ok(0x0225_2700)
+    }
+
     fn hw_version(&self) -> u32 {
         0x0225_2700
     }

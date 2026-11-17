@@ -548,6 +548,7 @@ error numbers, and Lemnos's own codes below -4095:
 | -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
 | -4100 | `LAYOUT_MISMATCH` | A frame stream's shared memory (its ring header or its marks page) is of another layout than this build reads. The message names the structure and both values; the C surface reports them with `lemnos_layout_refusal` |
 | -4101 | `TORN` | A frame's buffer was reused while the frame was being read, so the bytes read were dropped and nothing was returned as the frame. Only a reader the producer cut off can see it; its next call on the stream says so. Comes from a frame stream's read, never from an action: no action ending carries it |
+| -4102 | `FAILED_PRECONDITION` | The call is valid, but the device is not in the state it needs first: a step it depends on has not been taken (a mode not selected before a start or a setter). Nothing was changed. Not `INVALID_ARGUMENT` (a bad value) and not `BUSY` (in use). Added with DEBT-A2; an older peer sees the number and carries it as unknown. |
 
 ## Named files (`lemnos/`)
 

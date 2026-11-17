@@ -568,3 +568,26 @@ fn a_timeout_set_late_feeds_at_once_when_the_set_succeeds() {
     );
     assert_eq!(next, Some(250 * MS + 15 * S / 2));
 }
+
+/// A failing feed names how many feeds have failed in a row and the period the device applied, as
+/// figures that go with the reason. A feed that works again has none.
+#[test]
+fn a_failing_feed_names_its_failed_count_and_the_applied_period() {
+    let fake = Fake::new(15);
+    fake.with(|d| d.feed_fails_from = Some(0));
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    tick_at(&fake, &mut dog, 250 * MS);
+    assert_eq!(
+        lemnos_core::Lifecycle::figures(&dog)
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![("failed_feeds", 2), ("timeout_s", 15)]
+    );
+    fake.with(|d| d.feed_fails_from = None);
+    tick_at(&fake, &mut dog, 3 * S);
+    assert_eq!(
+        lemnos_core::Lifecycle::figures(&dog),
+        lemnos_core::Figures::NONE
+    );
+}

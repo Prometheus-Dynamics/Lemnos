@@ -1056,6 +1056,21 @@ static long lpb_ioctl(void *priv, unsigned int cmd, void __user *arg)
 }
 
 
+/*
+ * The version the probe read and accepted: the block is bound only when it is a known version, so
+ * this is the version of the bound block, read once and never changed.
+ */
+long lem_pb_version(struct lem_pb *l, void *args)
+{
+	struct lemnos_pisp_be_version *a = args;
+	unsigned long flags;
+
+	spin_lock_irqsave(&l->lock, flags);
+	a->hw_version = l->hw_version;
+	spin_unlock_irqrestore(&l->lock, flags);
+	return 0;
+}
+
 long lem_pb_create(struct lem_pb *l, struct device *dev, void *args)
 {
 	struct lemnos_pisp_be_create *a = args;

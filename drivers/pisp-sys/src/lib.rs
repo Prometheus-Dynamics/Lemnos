@@ -90,6 +90,16 @@ pub struct Job {
     pub addr: [u64; JOB_ADDRS],
 }
 
+/// `struct lemnos_pisp_be_version`: read on `/dev/lemnos` for one block, before any stream.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BeVersion {
+    /// The block, as `find_block` numbers it.
+    block: u32,
+    /// Out: the version register the module read at probe.
+    hw_version: u32,
+}
+
 /// `struct lemnos_pisp_be_status`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -166,6 +176,7 @@ pub struct Region {
 const IOC_NEXT: u32 = iowr::<Next>(b'L', 0xcf);
 const IOC_BE_CREATE: u32 = iowr::<BeCreate>(b'L', 0xb0);
 const IOC_BE_STATUS: u32 = ior::<BeStatus>(b'L', 0xb1);
+const IOC_BE_VERSION: u32 = iowr::<BeVersion>(b'L', 0xb2);
 const IOC_KICK: u32 = lemnos_linux_sys::ioc(0, b'L', 0x81, 0);
 const IOC_REGISTER: u32 = iowr::<Register>(b'L', 0x82);
 const IOC_REGISTER_LENT: u32 = iowr::<RegisterLent>(b'L', 0x8a);
@@ -235,6 +246,17 @@ impl Control {
             next.after = next.block;
         }
         Err(io::ErrorKind::NotFound.into())
+    }
+
+    /// The version register of block `block`, as the module read it at probe. Read-only: nothing is
+    /// claimed, and no stream is needed.
+    pub fn block_version(&self, block: u32) -> io::Result<u32> {
+        let mut version = BeVersion {
+            block,
+            hw_version: 0,
+        };
+        ioctl(self.fd.as_fd(), IOC_BE_VERSION, (&raw mut version).cast())?;
+        Ok(version.hw_version)
     }
 
     /// Makes the back end's stream on block `block`, its buffers in `pool`.
@@ -550,6 +572,8 @@ mod tests {
         assert_eq!(size_of::<Next>(), 72);
         assert_eq!(IOC_BE_CREATE, 0xc050_4cb0);
         assert_eq!(IOC_BE_STATUS, 0x8018_4cb1);
+        assert_eq!(size_of::<BeVersion>(), 8);
+        assert_eq!(IOC_BE_VERSION, 0xc008_4cb2);
         assert_eq!(IOC_KICK, 0x0000_4c81);
         assert_eq!(IOC_REGISTER, 0xc018_4c82);
         assert_eq!(IOC_UNREGISTER, 0x4008_4c83);

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
-    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock,
+    ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
     HostOwned, I2c, InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
     RegistersHandle, Reply, ResetHandle, Resources, Result, Retry, Router, Spi, Status,
@@ -31,6 +31,10 @@ use crate::{Options, guest};
 pub trait Instance: Send {
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health;
+    /// See [`Driver::figures`].
+    fn figures(&self) -> Figures {
+        Figures::NONE
+    }
     /// See [`Driver::retrying`].
     fn retrying(&self) -> Option<Retry> {
         None
@@ -72,6 +76,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn health(&self) -> Health {
         Driver::health(self)
+    }
+
+    fn figures(&self) -> Figures {
+        Driver::figures(self)
     }
 
     fn retrying(&self) -> Option<Retry> {
@@ -455,6 +463,9 @@ pub struct DeviceInfo {
     pub tags: Vec<Tag>,
     pub state: DeviceState,
     pub health: Health,
+    /// The figures the driver measured for its health reason, shown after it (see [`Figures`]).
+    /// Empty unless the device is failed or degraded and its driver is not in a call.
+    pub figures: Figures,
     /// Set while a running driver retries a failed step itself (see [`Retry`]). A device the host
     /// backs off keeps its attempts in [`DeviceState::Backoff`] instead.
     pub retry: Option<Retry>,
@@ -2310,6 +2321,23 @@ impl Inner {
     /// A device's health, and whether it is settled: `false` when its driver is in a call right
     /// now, so its own health is not known until the call returns. An unsettled device reads as
     /// [`Health::Ok`], as it always has, and its needs are read as they are. Allocates nothing.
+    /// The figures of a device's driver, read only while it is running and not in a call. A driver
+    /// that panics, or is in a call, has none to give, so it has none.
+    fn device_figures(&self, slot: &Slot) -> Figures {
+        if !matches!(*lock(&slot.state), DeviceState::Running) {
+            return Figures::NONE;
+        }
+        match slot.instance.try_lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(instance) => {
+                    catch_unwind(AssertUnwindSafe(|| instance.figures())).unwrap_or(Figures::NONE)
+                }
+                None => Figures::NONE,
+            },
+            Err(_) => Figures::NONE,
+        }
+    }
+
     fn health_of(&self, slot: &Slot, depth: u32) -> (Health, bool) {
         // Read under the state's lock only, which is released before the driver is asked.
         let fixed = match &*lock(&slot.state) {
@@ -2554,6 +2582,7 @@ fn status_words(status: Status) -> &'static str {
         Status::PANIC => "the driver panicked",
         Status::LAYOUT_MISMATCH => "layout mismatch",
         Status::TORN => "a frame's buffer was reused while it was read",
+        Status::FAILED_PRECONDITION => "a step the device needs first has not been taken",
         _ => "failed with an unnamed error",
     }
 }
@@ -2921,6 +2950,7 @@ impl Host {
                 .unwrap_or_default(),
             state,
             health: self.inner.device_health(slot, MAX_DEPTH),
+            figures: self.inner.device_figures(slot),
             retry: self.inner.device_retry(slot),
             link: slot.spec.link.clone(),
         }

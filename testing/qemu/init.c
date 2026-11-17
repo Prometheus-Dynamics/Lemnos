@@ -508,9 +508,24 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
 				    (char *)cma_heap(), "lifetime", NULL }),
 	      "lemnos_pisp_be_check lifetime");
+	check(!run((char *const[]){ "/lemnos_pisp_be_version_check", "/dev/lemnos", PISP, "0x02252700",
+				    NULL }),
+	      "PiSP back end version read back through the control node");
 	check(!put(UNBIND, PISP), "PiSP block unbound");
 	check(!forget_override(PISP), "PiSP override cleared");
 	check(!unload("lemnos"), "module unloaded with the back end idle");
+
+	/* A block whose version register is a foreign version is refused at probe: it does not bind. */
+	check(!unload("lemnos_test_block"), "test block module unloaded before the foreign version");
+	check(!load("/lemnos_test_block.ko", "pisp_version=0x01146666"),
+	      "test block module loaded with a foreign PiSP back end version");
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
+	      "module loaded with the PiSP back end on the foreign version");
+	check(bind_block(PISP) != 0, "a foreign PiSP back end version does not bind");
+	check(!forget_override(PISP), "PiSP override cleared after the refusal");
+	check(!unload("lemnos"), "module unloaded after the foreign version");
+	check(!unload("lemnos_test_block"), "test block module unloaded after the foreign version");
+	check(!load("/lemnos_test_block.ko", ""), "test block module reloaded with the family's version");
 
 	/* Register jobs on a fake video engine and a fake ISP. The first check unbinds its block. */
 	check(!load("/lemnos_test_regjob.ko", ""), "fake register-job blocks loaded");

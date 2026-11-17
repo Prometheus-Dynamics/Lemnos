@@ -276,6 +276,10 @@ impl Hw {
 }
 
 impl Hardware for Hw {
+    fn present(&mut self) -> lemnos_core::Result<u32> {
+        Ok(0x0225_2700)
+    }
+
     fn hw_version(&self) -> u32 {
         0x0225_2700
     }

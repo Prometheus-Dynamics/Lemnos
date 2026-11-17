@@ -38,8 +38,8 @@ pub use description::{
     Description, Item, ItemKind, MAX_ITEMS, MAX_LOCATION, Reading, Unit, UnitState,
 };
 pub use driver::{
-    BoardDevice, BoardView, CallerId, Driver, Health, HostClock, HostOwned, JobId, JobState,
-    Lifecycle, Manifest, MethodId, Origin, Reply, Retry,
+    BoardDevice, BoardView, CallerId, Driver, FIGURES, Figures, Health, HostClock, HostOwned,
+    JobId, JobState, Lifecycle, Manifest, MethodId, Origin, Reply, Retry,
 };
 #[cfg(feature = "float")]
 pub use fixed::to_f32;

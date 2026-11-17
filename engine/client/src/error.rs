@@ -207,6 +207,7 @@ fn named(status: Status) -> bool {
             Status::PANIC,
             Status::LAYOUT_MISMATCH,
             Status::TORN,
+            Status::FAILED_PRECONDITION,
         ]
         .contains(&status)
 }
@@ -273,12 +274,26 @@ mod tests {
         assert_eq!(errno.to_string(), "refused (-16): x");
     }
 
+    /// A precondition refusal names its own code, so a caller reads "not yet" from the number alone
+    /// and the client carries it as a refusal, not as an unknown status.
+    #[test]
+    fn a_failed_precondition_is_named_by_its_code() {
+        assert_eq!(Status::FAILED_PRECONDITION.0, -4102);
+        assert!(named(Status::FAILED_PRECONDITION));
+        let refused = Error::Refused {
+            status: Status::FAILED_PRECONDITION,
+            text: "x".to_string(),
+        };
+        assert_eq!(refused.to_string(), "refused (-4102): x");
+        assert_eq!(Status::from(refused), Status::FAILED_PRECONDITION);
+    }
+
     /// A torn frame is its own status for a C caller, and an older client, which does not name
     /// TORN, sees the same number and reads it as unknown.
     #[test]
     fn a_torn_frame_is_torn_and_an_older_reader_sees_an_unknown_status() {
         assert_eq!(Status::from(Error::StreamTorn { buffer: 2 }), Status::TORN);
         assert_eq!(Status::TORN.0, -4101);
-        assert!(!named(Status(-4101 - 1)));
+        assert!(!named(Status(-4101 - 2)));
     }
 }

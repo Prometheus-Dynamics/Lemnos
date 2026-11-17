@@ -572,6 +572,7 @@ union lem_args {
 	struct lemnos_claim claim;
 	struct lemnos_stream_create stream;
 	struct lemnos_pisp_be_create pisp_be;
+	struct lemnos_pisp_be_version pisp_be_version;
 	struct lemnos_gsdma_create gsdma;
 	struct lemnos_regjob_open regjob;
 	struct lemnos_vip_create vip;
@@ -635,6 +636,10 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		if (!l->pb)
 			return -ENOTTY;
 		return lem_pb_create(l->pb, l->dev, &u->pisp_be);
+	case LEMNOS_IOC_PISP_BE_VERSION:
+		if (!l->pb)
+			return -ENOTTY;
+		return lem_pb_version(l->pb, &u->pisp_be_version);
 	case LEMNOS_IOC_GSDMA_CREATE:
 		if (!l->gd)
 			return -ENOTTY;

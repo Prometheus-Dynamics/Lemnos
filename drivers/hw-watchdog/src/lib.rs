@@ -78,8 +78,9 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    CallerId, Config, ConfigError, ConfigValue, Description, Health, Held, Item, JobId, JobState,
-    Key, Kind, Lifecycle, MethodId, RefusalKind, Reply, Result, Status, Unit, Watchdog, driver,
+    CallerId, Config, ConfigError, ConfigValue, Description, Figures, Health, Held, Item, JobId,
+    JobState, Key, Kind, Lifecycle, MethodId, RefusalKind, Reply, Result, Status, Unit, Watchdog,
+    driver,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::raw::RawWatchdog;
@@ -398,6 +399,18 @@ impl Lifecycle for HwWatchdog {
             out.add(item);
         }
         out.add(Item::action("self_test", RUN));
+    }
+
+    fn figures(&self) -> Figures {
+        // A failing feed says how many feeds have failed in a row, and the period the device applied.
+        if self.feed_attempts == 0 {
+            return Figures::NONE;
+        }
+        let figures = Figures::NONE.with("failed_feeds", i64::from(self.feed_attempts));
+        match self.applied_s {
+            Some(timeout) => figures.with("timeout_s", i64::from(timeout)),
+            None => figures,
+        }
     }
 
     fn health(&self) -> Health {

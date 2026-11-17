@@ -387,14 +387,16 @@ pub trait CameraSensor {
     /// The selected mode, or `None` before one is selected.
     #[method(4)]
     fn selected(&mut self) -> Result<Option<u16>>;
-    /// Starts the frames. `INVALID_ARGUMENT` before a mode is selected.
+    /// Starts the frames. `FAILED_PRECONDITION` before a mode is selected: selecting one is the step
+    /// the caller takes first.
     #[method(5)]
     fn start(&mut self) -> Result<()>;
     #[method(6)]
     fn stop(&mut self) -> Result<()>;
     /// Writes `controls` at once. A value outside the selected mode's limits is applied at the nearest
-    /// limit and reported by `in_force` (its `clamped` bits), not refused. `INVALID_ARGUMENT` only
-    /// when no mode is selected or a control the sensor does not have (digital gain) is set.
+    /// limit and reported by `in_force` (its `clamped` bits), not refused. `FAILED_PRECONDITION` when no
+    /// mode is selected (nothing is written); `INVALID_ARGUMENT` when a control the sensor does not have
+    /// (digital gain) is set.
     #[method(7)]
     fn set_controls(&mut self, controls: Controls) -> Result<()>;
     /// Posts values as one group, with group hold where the sensor has it. Each control shows on

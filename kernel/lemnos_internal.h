@@ -227,6 +227,7 @@ struct lem_pb;
 struct lem_pb *lem_pb_probe(struct platform_device *pdev);
 void lem_pb_remove(struct lem_pb *l);
 long lem_pb_create(struct lem_pb *l, struct device *dev, void *args);
+long lem_pb_version(struct lem_pb *l, void *args);
 
 struct lem_gd;
 struct lem_gd *lem_gd_probe(struct platform_device *pdev);

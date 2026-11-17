@@ -197,9 +197,13 @@ fn a_count_frozen_past_the_bound_restarts_the_sensor_with_its_reason() {
     assert!(r.recovering(), "{:?}", r.s.state);
     assert_eq!(
         Driver::health(&r.s),
-        Health::Failed(
-            "no frame start for over 250 ms at the frame length in force: restarting the sensor"
-        )
+        Health::Failed("no frame start: restarting the sensor")
+    );
+    // The figures say how long the count stood still, and the frame length it stood at: 720 lines and
+    // the default blanking, for the 720-line mode this test selects.
+    assert_eq!(
+        Driver::figures(&r.s).iter().collect::<Vec<_>>(),
+        vec![("silent_ms", 300), ("frame_length", 1742)]
     );
     // The first attempt is the bottom of the backoff; the second tick is due then.
     let due = Lifecycle::tick(&mut r.s, r.now).unwrap();
@@ -335,7 +339,7 @@ fn a_restart_without_frames_is_judged_again_at_the_next_backoff_step() {
     let due = Lifecycle::tick(&mut r.s, r.now).unwrap();
     assert_eq!(due - r.now, 500 * MS);
     assert!(
-        matches!(Driver::health(&r.s), Health::Failed(reason) if reason.starts_with("no frame start for over"))
+        matches!(Driver::health(&r.s), Health::Failed(reason) if reason.starts_with("no frame start:"))
     );
     // Never a rebind: the driver never asks for one however long this goes on.
     for _ in 0..40 {

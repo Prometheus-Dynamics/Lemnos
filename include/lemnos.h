@@ -275,6 +275,8 @@ LemnosStatus lemnos_package_text(LemnosHandle client, uint32_t package, uint32_t
  * -EINVAL. */
 LemnosStatus lemnos_stream_open(LemnosHandle client, uint32_t device, const char *name,
                                 uint32_t flags, LemnosHandle *stream, LemnosMessageSink sink);
+/* LEMNOS_E_FAILED_PRECONDITION: the call is valid but the device is not yet in the state it needs (for a
+ * camera sensor, no mode selected). Nothing was changed; take the step it names, then call again. */
 /* After a lemnos_stream_open that returned LEMNOS_E_LAYOUT_MISMATCH: which shared structure refused
  * (LEMNOS_LAYOUT_RING or LEMNOS_LAYOUT_MARKS), the value it found and the value this build reads.
  * -ENOENT when the client's last open refused no layout. The next open on the client replaces it.

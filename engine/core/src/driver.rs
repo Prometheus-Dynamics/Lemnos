@@ -130,6 +130,55 @@ pub trait BoardView {
     fn each(&self, f: &mut dyn FnMut(BoardDevice<'_>));
 }
 
+/// The most measured figures one health reason carries (see [`Figures`]).
+pub const FIGURES: usize = 4;
+
+/// Measured figures a driver names with its health: up to [`FIGURES`] `(name, value)` pairs in a
+/// fixed array, so a driver says what it measured without allocating. The host shows them after the
+/// reason, as `reason (name value, name value)`. A figure is a whole number, so a unit goes in the
+/// name (`silent_ms`, not `silent`). A driver with nothing measured reports [`Figures::NONE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Figures {
+    items: [(&'static str, i64); FIGURES],
+    len: usize,
+}
+
+impl Figures {
+    /// No figures.
+    pub const NONE: Self = Self {
+        items: [("", 0); FIGURES],
+        len: 0,
+    };
+
+    /// This list with one more figure. A figure past [`FIGURES`] is dropped: a driver names at most
+    /// that many, and says the most important first.
+    #[must_use]
+    pub const fn with(mut self, name: &'static str, value: i64) -> Self {
+        if self.len < FIGURES {
+            self.items[self.len] = (name, value);
+            self.len += 1;
+        }
+        self
+    }
+
+    /// Whether there is no figure.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The figures, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, i64)> + '_ {
+        self.items[..self.len].iter().copied()
+    }
+}
+
+impl Default for Figures {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// A driver as the host sees it. `#[driver]` writes this; handwritten
 /// implementations are for tests.
 pub trait Driver: Sized {
@@ -155,6 +204,10 @@ pub trait Driver: Sized {
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health {
         Health::Ok
+    }
+    /// See [`Lifecycle::figures`].
+    fn figures(&self) -> Figures {
+        Figures::NONE
     }
     /// See [`Lifecycle::retrying`].
     fn retrying(&self) -> Option<Retry> {
@@ -231,6 +284,12 @@ pub trait Lifecycle: Sized {
     fn describe(&self, _out: &mut Description) {}
     fn health(&self) -> Health {
         Health::Ok
+    }
+    /// The figures measured for the health reason, shown after it by the host as `reason (name
+    /// value, ...)`. Read with [`Lifecycle::health`]: a figure is for the reason it goes with, and
+    /// none is shown for a device that is `Ok`. [`Figures::NONE`] by default.
+    fn figures(&self) -> Figures {
+        Figures::NONE
     }
     /// Whether the driver is retrying a failed step itself, and how far it has got. See [`Retry`].
     /// `None` by default: a driver the host retries (a failed bind) says nothing here.

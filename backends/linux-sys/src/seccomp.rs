@@ -14,6 +14,9 @@ use libc::{sock_filter, sock_fprog};
 const AUDIT_ARCH: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH: u32 = 0xc000_00b7;
+/// `AUDIT_ARCH_ARM`: EM_ARM (40) with the little-endian flag.
+#[cfg(target_arch = "arm")]
+const AUDIT_ARCH: u32 = 0x4000_0028;
 
 const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JEQ_K: u16 = 0x15;
@@ -36,7 +39,11 @@ pub mod nr {
     pub const UNLINKAT: i64 = libc::SYS_unlinkat as i64;
     pub const SYMLINKAT: i64 = libc::SYS_symlinkat as i64;
     pub const READLINKAT: i64 = libc::SYS_readlinkat as i64;
+    /// 32-bit ARM has `fstatat64` where the others have `newfstatat`.
+    #[cfg(not(target_arch = "arm"))]
     pub const NEWFSTATAT: i64 = libc::SYS_newfstatat as i64;
+    #[cfg(target_arch = "arm")]
+    pub const NEWFSTATAT: i64 = libc::SYS_fstatat64 as i64;
     pub const FSTAT: i64 = libc::SYS_fstat as i64;
     pub const STATX: i64 = libc::SYS_statx as i64;
     pub const GETDENTS64: i64 = libc::SYS_getdents64 as i64;
@@ -46,7 +53,11 @@ pub mod nr {
     pub const FCHMODAT: i64 = libc::SYS_fchmodat as i64;
     pub const MOUNT: i64 = libc::SYS_mount as i64;
     pub const UMOUNT2: i64 = libc::SYS_umount2 as i64;
+    /// 32-bit ARM has `mmap2` (the offset in pages) where the others have `mmap`.
+    #[cfg(not(target_arch = "arm"))]
     pub const MMAP: i64 = libc::SYS_mmap as i64;
+    #[cfg(target_arch = "arm")]
+    pub const MMAP: i64 = libc::SYS_mmap2 as i64;
     pub const MUNMAP: i64 = libc::SYS_munmap as i64;
     pub const MREMAP: i64 = libc::SYS_mremap as i64;
     pub const MPROTECT: i64 = libc::SYS_mprotect as i64;
@@ -94,7 +105,11 @@ pub mod nr {
     pub const TGKILL: i64 = libc::SYS_tgkill as i64;
     pub const GETTID: i64 = libc::SYS_gettid as i64;
     pub const SET_ROBUST_LIST: i64 = libc::SYS_set_robust_list as i64;
+    /// `libc` has no `SYS_rseq` for 32-bit ARM; the number is the kernel's (`arch/arm/tools/syscall.tbl`).
+    #[cfg(not(target_arch = "arm"))]
     pub const RSEQ: i64 = libc::SYS_rseq as i64;
+    #[cfg(target_arch = "arm")]
+    pub const RSEQ: i64 = 398;
     pub const SET_TID_ADDRESS: i64 = libc::SYS_set_tid_address as i64;
     pub const POLL: i64 = libc::SYS_ppoll as i64;
     /// The calls libc makes under their own names on x86_64 (glibc's `mkdir`, `unlink`, `chown`
