@@ -246,6 +246,10 @@ pub fn install(allowed: &[i64]) -> io::Result<()> {
     Ok(())
 }
 
+/// How long [`run_forked`] waits for its child. A test child runs in milliseconds; past this it is
+/// stuck, and the wait ends with the child killed and an error that names it.
+const FORKED_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How a forked child ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
@@ -276,15 +280,30 @@ pub fn run_forked(body: impl FnOnce() -> i32) -> io::Result<Exit> {
         unsafe { libc::_exit(code) }
     }
     let mut status = 0;
+    let started = std::time::Instant::now();
     loop {
-        // SAFETY: `status` is a valid, writable c_int for the duration of the call.
-        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        // SAFETY: `status` is a valid, writable c_int for the duration of the call; WNOHANG never
+        // blocks.
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if rc == pid {
             break;
         }
         if rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             return Err(io::Error::last_os_error());
         }
+        if started.elapsed() >= FORKED_WAIT {
+            // The child is ours, and it has not ended within the bound: kill it and reap it, so a
+            // child stuck in a lock another thread held at the fork is a failure, not a hang.
+            // SAFETY: `pid` is our child; SIGKILL is the only call here.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            // SAFETY: the same child, reaped with a blocking wait; `status` is writable.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("forked child {pid} did not end within {FORKED_WAIT:?}"),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     if libc::WIFSIGNALED(status) {
         Ok(Exit::Signal(libc::WTERMSIG(status)))
@@ -296,6 +315,22 @@ pub fn run_forked(body: impl FnOnce() -> i32) -> io::Result<Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forked_child_that_never_ends_is_killed_and_named_at_the_bound() {
+        // The child blocks forever (as one stuck in a lock another thread held at the fork would).
+        // The wait ends at the bound with the child killed, and the error names it.
+        let started = std::time::Instant::now();
+        let error = run_forked(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("did not end within"), "{error}");
+        assert!(started.elapsed() >= FORKED_WAIT);
+    }
 
     #[test]
     fn the_program_checks_the_architecture_then_each_call_then_kills() {
