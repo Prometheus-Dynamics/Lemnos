@@ -29,8 +29,13 @@ struct tcsi_regs {
 /* FIRE: sets the status word the handler will read, and raises the interrupt. */
 #define TCSI_IOC_FIRE	_IOW('T', 1, __u32)
 #define TCSI_IOC_PEEK	_IOR('T', 2, struct tcsi_regs)
-/* After FORCE, the channel's line counter moves for this many ms. ~0: never stops. */
+/*
+ * After FORCE, the channel's line counter moves once per line, a line every
+ * 50 us, for this many lines. ~0: never stops.
+ */
 #define TCSI_IOC_BUSY	_IOW('T', 3, __u32)
+/* The lines still to come after FORCE (what TCSI_IOC_BUSY set, less those written). */
+#define TCSI_IOC_BUSY_LEFT	_IOR('T', 13, __u32)
 
 /* The embedded channel's registers, read as the image channel's (TCSI_IOC_PEEK). */
 #define TCSI_IOC_PEEK_EMB	_IOR('T', 11, struct tcsi_regs)

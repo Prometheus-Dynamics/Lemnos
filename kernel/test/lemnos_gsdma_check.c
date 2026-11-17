@@ -21,7 +21,9 @@
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
+#define _GNU_SOURCE
 #include <errno.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
 #include <stddef.h>
@@ -665,9 +667,18 @@ static void run_wedge(void)
 
 int main(int argc, char **argv)
 {
+	cpu_set_t set;
+
 	if (argc != 5) {
 		fprintf(stderr, "usage: %s /dev/lemnos <device> <heap> <run|board|reach|wedge>\n",
 			argv[0]);
+		return 2;
+	}
+	/* The fake engine's tick runs on CPU 0; the driver's progress reads share its vCPU (see the fake). */
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	if (sched_setaffinity(0, sizeof(set), &set)) {
+		perror("sched_setaffinity");
 		return 2;
 	}
 	ctl_fd = open(argv[1], O_RDWR | O_CLOEXEC);

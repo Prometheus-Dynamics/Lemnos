@@ -40,6 +40,8 @@
  * code while holding its list lock.
  */
 #include <linux/atomic.h>
+#include <linux/build_bug.h>
+#include <linux/math.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -66,6 +68,7 @@
 #include "lemnos_pisp_fe.h"
 #include "lemnos_rp1_csi2.h"
 #include "lemnos_rp1_csi2_priv.h"
+#include "lemnos_rp1_csi2_window.h"
 
 #define LRC_NAME	"lemnos-rp1-csi2"
 #define LRC_CH		0
@@ -138,11 +141,13 @@
 #define LRC_MAX_DIMENSION	0xffff
 
 /*
- * Waiting for the channel to stop: its line counter must hold still for this
- * many reads in a row, a read every 200-400 us, at most LRC_STOP_POLLS reads.
- * The slowest line at the slowest link is far under 200 us.
+ * Waiting for the channel to stop: its line counter must hold still for the
+ * stop window (lemnos_rp1_csi2_window.h: three line times, at least 1.6 ms),
+ * counted in reads a read apart at 200-400 us. The window is worked out at START
+ * from the stride and the link, and the poll budget is LRC_STOP_POLLS plus the
+ * window's reads, so the wait is bounded whatever the mode. Not measured on a
+ * board: see testing/board-runs/FLAKE-CSI2.md.
  */
-#define LRC_STOP_STILL_READS	8
 #define LRC_STOP_POLLS		250
 
 /* How often a channel with nothing armed looks for a free buffer again. */
@@ -516,12 +521,17 @@ static irqreturn_t lrc_isr(int irq, void *data)
 static bool lrc_dma_stopped(struct lrc_dev *l, bool emb)
 {
 	unsigned int chans = emb ? 2 : 1;
+	/* Never below the minimum: a stop with no START behind it still waits a full window. */
+	unsigned int need = max(l->stop_still, lrc_still_reads(0));
+	unsigned int polls = LRC_STOP_POLLS + need;
 	u32 last[2] = { 0, 0 };
 	unsigned int still[2] = { 0, 0 };
 
+	/* The window is at least the minimum: the reads are at least the shortest gap apart. */
+	BUILD_BUG_ON(LRC_WINDOW_READ_GAP_US * 8 != LRC_WINDOW_MIN_US);
 	for (unsigned int c = 0; c < chans; c++)
 		last[c] = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
-	for (unsigned int i = 0; i < LRC_STOP_POLLS; i++) {
+	for (unsigned int i = 0; i < polls; i++) {
 		bool done = true;
 
 		usleep_range(200, 400);
@@ -529,13 +539,13 @@ static bool lrc_dma_stopped(struct lrc_dev *l, bool emb)
 			u32 now = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
 
 			if (now == last[c]) {
-				if (still[c] < LRC_STOP_STILL_READS)
+				if (still[c] < need)
 					still[c]++;
 			} else {
 				still[c] = 0;
 				last[c] = now;
 			}
-			done = done && still[c] >= LRC_STOP_STILL_READS;
+			done = done && still[c] >= need;
 		}
 		if (done)
 			return true;
@@ -656,6 +666,8 @@ static int lrc_check_start(const struct lrc_dev *l, const struct lemnos_rp1_csi2
 		return -EINVAL;
 	if ((s->flags & LEMNOS_RP1_CSI2_UNPACK16) && s->stride < 2 * s->width)
 		return -EINVAL;
+	if (!lrc_window_fits(lrc_line_us(s->stride, s->lanes, s->mbps)))
+		return -EINVAL;
 	return 0;
 }
 
@@ -698,16 +710,27 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	struct lem_stream *stream, *emb = NULL;
 	unsigned long flags;
 	int req_fd;
+	unsigned long long line;
 	long ret;
 	u32 ctrl;
 
 	ret = lrc_check_start(l, s);
 	if (ret)
 		return ret;
+	/* The stop window is the longer of the image's line and the embedded line on this link. */
+	line = lrc_line_us(s->stride, s->lanes, s->mbps);
+	if (l->emb.req_fd >= 0) {
+		unsigned long long emb = lrc_line_us(l->emb.req_bytes, s->lanes, s->mbps);
+
+		if (!lrc_window_fits(emb))
+			return -EINVAL;
+		line = max(line, emb);
+	}
 	if (l->wedged)
 		return -EIO;
 	if (l->stream || (l->fe && lem_pisp_fe_streaming(l->fe)))
 		return -EBUSY;
+	l->stop_still = lrc_still_reads(line);
 
 	ret = lrc_attach(l, s->stream_fd, s->size, lrc_stream_stop, &stream);
 	if (ret)
