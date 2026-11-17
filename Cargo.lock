@@ -978,6 +978,10 @@ name = "lemnos-allwinner-fel-blob"
 version = "2.0.1-dev"
 
 [[package]]
+name = "lemnos-bench-stamp"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-bmi088-batch"
 version = "2.0.1-dev"
 dependencies = [
