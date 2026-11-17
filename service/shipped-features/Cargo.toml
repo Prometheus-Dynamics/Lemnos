@@ -1,0 +1,35 @@
+[package]
+name = "lemnos-shipped-features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "The feature baseline of the shipped programs: every program requests the same features of the crates they share, so a build's features never depend on which programs it builds with"
+
+[lints]
+workspace = true
+
+# Only shipped programs depend on this crate, and it has no code. Cargo unifies features across the
+# packages of one build, so a crate that one program needs with a feature the others do not request
+# would give the others that feature when they are built together (and not when built alone). Each
+# entry below is the union of what the shipped programs request of that crate. A program needs
+# some of them itself (lemnosd reads the gadget's interfaces file; the simulated board is in
+# lemnosd); the rest are there so the programs agree. scripts/check-products.sh compares the merged
+# and solo builds of every shipped program byte for byte.
+[dependencies]
+# lemnosd's simulated board (`--sim`) is built on the hardware doubles of this crate.
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-abi = { path = "../../engine/abi", features = ["alloc", "load", "std"] }
+lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux"] }
+# lemnosd reads the gadget's `interfaces_file` (lemnos-ctl reads it too): std is the filesystem.
+lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget", features = ["std"] }
+shm-sample-time = { path = "../../shm/sample-time", features = ["serde"] }
+serde = { workspace = true, features = ["alloc", "derive", "std"] }
+thiserror = { workspace = true, features = ["std"] }
+# Requested by Orion's crates (through digest and curve25519-dalek); the shipped programs share them.
+typenum = { version = "1.20", default-features = false, features = ["const-generics"] }
+subtle = { version = "2.6", default-features = false, features = ["const-generics"] }

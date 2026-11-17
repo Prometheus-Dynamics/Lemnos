@@ -17,6 +17,8 @@ default = []
 fake-devices = ["dep:lemnos-fake-devices"]
 
 [dependencies]
+# The shipped programs' feature baseline (service/shipped-features): the same features whichever programs are built together.
+lemnos-shipped-features = { path = "../shipped-features" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-devtree = { path = "../devtree" }

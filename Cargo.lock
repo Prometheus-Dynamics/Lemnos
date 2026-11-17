@@ -767,6 +767,7 @@ dependencies = [
  "lemnos-fake-devices",
  "lemnos-host",
  "lemnos-linux",
+ "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-sim-walk",
  "lemnos-slot-store",
@@ -1995,6 +1996,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
+ "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-sim-walk",
  "lemnos-slot-store",
@@ -2076,6 +2078,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-shipped-features"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-abi",
+ "lemnos-core",
+ "lemnos-driver-usb-gadget",
+ "lemnos-hal",
+ "lemnos-slot-store",
+ "serde",
+ "shm-sample-time",
+ "subtle",
+ "thiserror",
+ "typenum",
+]
+
+[[package]]
 name = "lemnos-shm-bell-check"
 version = "2.0.1-dev"
 dependencies = [
@@ -2131,6 +2149,7 @@ dependencies = [
  "lemnos-driver-rpi-firmware-sys",
  "lemnos-driver-system-slots",
  "lemnos-linux-sys",
+ "lemnos-shipped-features",
  "lemnos-slot-store",
  "toml",
 ]
@@ -2269,6 +2288,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-package",
+ "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-wire",
  "shm-ring",
