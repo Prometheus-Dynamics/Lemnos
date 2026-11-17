@@ -33,6 +33,7 @@
 #include "find_block.h"
 #include "lemnos_test_csi2.h"
 #include "../lemnos_rp1_csi2_window.h"
+#include "shm_ring.h"
 
 #define BUFFERS 4u
 #define BUFFER_BYTES 8192u
@@ -61,8 +62,10 @@ struct stream {
 	int fd;
 	volatile uint64_t *r;
 	uint64_t ring_bytes, pool_addr;
-	size_t returns_at, jobs_at, job_words;
-	uint64_t frames_tail, returns_head, jobs_head;
+	size_t control, jobs_at, job_words;
+	uint64_t frames_tail, jobs_head;
+	/* The consumer's marks: a frame is held from pop_frame until give_back. */
+	struct shm_marks marks;
 };
 
 struct frame {
@@ -172,13 +175,14 @@ static int stream_open(struct stream *s, int pool_fd)
 	};
 
 	memset(s, 0, sizeof(*s));
+	shm_marks_init(&s->marks);
 	if (ioctl(ctl, LEMNOS_RP1_CSI2_IOC_STREAM_CREATE, &c))
 		return -errno;
 	s->fd = c.fd;
 	s->ring_bytes = c.ring_bytes;
 	s->pool_addr = c.pool_addr;
-	s->returns_at = LEMNOS_RING_FRAMES + FRAME_SLOTS * LEMNOS_STREAM_FRAME_WORDS;
-	s->jobs_at = s->returns_at + FRAME_SLOTS;
+	s->control = shm_control(FRAME_SLOTS, BUFFERS);
+	s->jobs_at = s->control + SHM_JOB_SLOTS;
 	s->job_words = 1 + (JOB_BYTES + 7) / 8;
 	s->r = mmap(NULL, s->ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, c.fd, 0);
 	if (s->r == MAP_FAILED)
@@ -189,6 +193,7 @@ static int stream_open(struct stream *s, int pool_fd)
 static void stream_close(struct stream *s)
 {
 	munmap((void *)s->r, s->ring_bytes);
+	shm_marks_close(&s->marks);
 	close(s->fd);
 	s->fd = -1;
 }
@@ -217,32 +222,38 @@ static int stop(void)
 	return ioctl(ctl, LEMNOS_RP1_CSI2_IOC_STOP) ? -errno : 0;
 }
 
+static int hold_buffer(struct stream *s, uint32_t buffer)
+{
+	if (!s->marks.page && shm_marks_open(&s->marks, s->fd, BUFFERS))
+		return -1;
+	shm_marks_set(&s->marks, buffer, 1);
+	return 0;
+}
+
+/* The next frame, if one is out: it is the consumer's until give_back, so its buffer is held. */
 static int pop_frame(struct stream *s, struct frame *f)
 {
-	uint64_t head = load(s, LEMNOS_RING_FRAMES_HEAD);
-	size_t at;
-	uint64_t pair;
+	struct shm_frame sf;
 
-	if (head == s->frames_tail)
+	if (shm_frame_read(s->r, FRAME_SLOTS, s->frames_tail, &sf) != 1)
 		return 0;
-	at = LEMNOS_RING_FRAMES + (s->frames_tail & (FRAME_SLOTS - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-	pair = load(s, at);
-	f->buffer = (uint32_t)pair;
-	f->bytes = pair >> 32;
-	f->sequence = load(s, at + 1);
-	f->identity = load(s, at + 2);
-	f->fence = (uint32_t)load(s, at + 4);
+	f->buffer = sf.buffer;
+	f->bytes = sf.bytes;
+	f->sequence = sf.sequence;
+	f->identity = sf.identity;
+	f->fence = sf.fence;
 	s->frames_tail++;
-	store(s, LEMNOS_RING_FRAMES_TAIL, s->frames_tail);
+	if (hold_buffer(s, f->buffer))
+		printf("FAIL the consumer could not mark buffer %u\n", f->buffer);
 	return 1;
 }
 
+/* The consumer is done with a frame's buffer: its mark comes off, so a job may name it. */
 static void give_back(struct stream *s, uint32_t buffer, uint32_t fence)
 {
-	store(s, s->returns_at + (s->returns_head & (FRAME_SLOTS - 1)),
-	      (uint64_t)buffer | (uint64_t)fence << 32);
-	s->returns_head++;
-	store(s, LEMNOS_RING_RETURNS_HEAD, s->returns_head);
+	(void)fence;
+	if (s->marks.page)
+		shm_marks_set(&s->marks, buffer, 0);
 }
 
 static void post(struct stream *s, const struct lemnos_stream_job *job)
@@ -255,7 +266,7 @@ static void post(struct stream *s, const struct lemnos_stream_job *job)
 	for (size_t i = 0; i < sizeof(*job) / 8; i++)
 		store(s, at + 1 + i, words[i]);
 	s->jobs_head++;
-	store(s, LEMNOS_RING_JOBS_HEAD, s->jobs_head);
+	store(s, s->control + SHM_JOB_HEAD, s->jobs_head);
 }
 
 static uint64_t buffer_addr(const struct stream *s, uint32_t b)
@@ -810,7 +821,7 @@ static void test_close_node(const char *node, int pool_fd)
 	CHECK(!claim_csi2(ctl), "the reopened node claims the receiver again");
 	CHECK(!info().streaming, "not streaming after the close");
 	busy(0);
-	CHECK(load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_OPEN, "the stream stays open");
+	CHECK(load(&s, SHM_W_END) == LEMNOS_RING_STATE_OPEN, "the stream stays open");
 	CHECK(!start(&a), "START works again after the node closed");
 	CHECK(!stop(), "STOP");
 	stream_close(&s);
@@ -829,7 +840,7 @@ static void test_unbind(const char *node, const char *unbind, const char *dev, i
 	fire(TCSI_FS);
 	drained_by("unbinding with a frame in flight waits for DMA", act_unbind, &u, 700);
 	busy(0);
-	CHECK(load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_CLOSED, "the stream ended");
+	CHECK(load(&s, SHM_W_END) == LEMNOS_RING_STATE_CLOSED, "the stream ended");
 	CHECK(access(node, F_OK), "the node went away");
 	CHECK(ioctl(ctl, LEMNOS_RP1_CSI2_IOC_STOP) == -1 && errno == ENODEV,
 	      "an open file now gets ENODEV");
@@ -972,8 +983,12 @@ static void test_own_buffers(const char *heap, const char *dev)
 	memset(o[0].cpu, 0, BUFFER_BYTES);
 	give_back(&s, f.buffer, f.fence);
 	fire(TCSI_FS);
-	CHECK(armed_addr() == fresh.addr, "the returned buffer is armed at its new address (%llx, its %llx)",
-	      (unsigned long long)armed_addr(), (unsigned long long)fresh.addr);
+	/*
+	 * Buffer 0 holds the newest frame, which the module never takes back (lem_stream_take), so it is
+	 * not re-armed yet: buffer 1, armed before, stays the one the channel writes next.
+	 */
+	CHECK(armed_addr() == o[1].addr, "the newest frame's buffer is not re-armed; buffer 1 stays armed (%llx, its %llx)",
+	      (unsigned long long)armed_addr(), (unsigned long long)o[1].addr);
 	fire(TCSI_FE_ACK);
 	CHECK(pop_frame(&s, &f1) && f1.buffer == 1 && o[1].cpu[0], "buffer 1's frame in its own memory");
 	fire(TCSI_FS);

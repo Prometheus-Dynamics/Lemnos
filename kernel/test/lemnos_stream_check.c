@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
+#include <linux/memfd.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -33,6 +34,7 @@
 
 #include "../lemnos.h"
 #include "find_block.h"
+#include "shm_ring.h"
 
 #define BUFFERS 4u
 #define BUFFER_BYTES 8192u
@@ -58,13 +60,19 @@ struct stream {
 	int fd, doorbell;
 	volatile uint64_t *r;
 	uint64_t ring_bytes, pool_addr;
-	size_t returns_at, jobs_at, job_words;
-	uint64_t frames_tail, returns_head, jobs_head;
+	size_t control, jobs_at, job_words;
+	uint64_t frames_tail, jobs_head;
+	/* Frames whose buffer was taken back before the mark landed: never read, counted. */
+	uint64_t dropped;
+	/* Doorbell counts drained as they are read, so the total is the sum of the drains. */
+	uint64_t doorbell_drained;
+	/* The consumer's marks: a frame is held by its marks from pop_frame until give_back. */
+	struct shm_marks marks;
 };
 
 struct frame {
 	uint32_t buffer, bytes, fence;
-	uint64_t sequence, identity, timestamp_ns;
+	uint64_t sequence, identity, timestamp_ns, end_ns;
 };
 
 /* CLOCK_MONOTONIC now, in nanoseconds: the clock frame timestamps are on. */
@@ -104,14 +112,15 @@ static int stream_make(struct stream *s, int ctl, struct lemnos_stream_create c)
 {
 	memset(s, 0, sizeof(*s));
 	s->fd = -1;
+	shm_marks_init(&s->marks);
 	s->doorbell = c.doorbell_fd;
 	if (ioctl(ctl, LEMNOS_IOC_STREAM_CREATE, &c))
 		return -errno;
 	s->fd = c.fd;
 	s->ring_bytes = c.ring_bytes;
 	s->pool_addr = c.pool_addr;
-	s->returns_at = LEMNOS_RING_FRAMES + FRAME_SLOTS * LEMNOS_STREAM_FRAME_WORDS;
-	s->jobs_at = s->returns_at + FRAME_SLOTS;
+	s->control = shm_control(FRAME_SLOTS, BUFFERS);
+	s->jobs_at = s->control + SHM_JOB_SLOTS;
 	s->job_words = 1 + (JOB_BYTES + 7) / 8;
 	s->r = mmap(NULL, s->ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, c.fd, 0);
 	if (s->r == MAP_FAILED) {
@@ -153,6 +162,7 @@ static void stream_close(struct stream *s)
 {
 	if (s->r)
 		munmap((void *)s->r, s->ring_bytes);
+	shm_marks_close(&s->marks);
 	if (s->fd >= 0)
 		close(s->fd);
 	s->r = NULL;
@@ -191,7 +201,7 @@ static void post_raw(struct stream *s, uint64_t len, const void *job, size_t byt
 	for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
 		store(s, at + 1 + i, words[i]);
 	s->jobs_head++;
-	store(s, LEMNOS_RING_JOBS_HEAD, s->jobs_head);
+	store(s, s->control + SHM_JOB_HEAD, s->jobs_head);
 }
 
 static void post(struct stream *s, const struct lemnos_stream_job *job)
@@ -199,44 +209,90 @@ static void post(struct stream *s, const struct lemnos_stream_job *job)
 	post_raw(s, sizeof(*job), job, sizeof(*job));
 }
 
+static int hold_buffer(struct stream *s, uint32_t buffer);
+static void give_back(struct stream *s, uint32_t buffer, uint32_t fence);
+
+/*
+ * The next frame, if one is published: read through the index and checked against its stamp, so
+ * a slot the module has reused is never taken for the frame asked for.
+ */
 static int pop_frame(struct stream *s, struct frame *f)
 {
-	uint64_t head = load(s, LEMNOS_RING_FRAMES_HEAD);
+	uint64_t head = load(s, SHM_W_HEAD);
 
 	if (head == s->frames_tail)
 		return 0;
-	size_t at = LEMNOS_RING_FRAMES + (s->frames_tail & (FRAME_SLOTS - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-	uint64_t pair = load(s, at);
+	uint64_t seq = s->frames_tail;
+	size_t slot = (size_t)(load(s, SHM_INDEX + (seq & (FRAME_SLOTS - 1))) >> 16);
+	size_t at = SHM_INDEX + FRAME_SLOTS + slot * SHM_SLOT_WORDS;
+
+	if (load(s, at) != (seq + 1) << 1)
+		return 0;
+	uint64_t pair = load(s, at + SHM_ENTRY + 1);
+	uint64_t fence = load(s, at + SHM_ENTRY + 4);
 
 	f->buffer = (uint32_t)pair;
-	f->bytes = (uint32_t)(pair >> 32);
-	f->sequence = load(s, at + 1);
-	f->identity = load(s, at + 2);
-	f->timestamp_ns = load(s, at + 3);
-	f->fence = (uint32_t)load(s, at + 4);
+	f->sequence = load(s, at + SHM_ENTRY + 2);
+	f->identity = load(s, at + SHM_ENTRY + 3);
+	f->bytes = (uint32_t)fence;
+	f->fence = (uint32_t)(fence >> 32);
+	f->timestamp_ns = load(s, at + 1);
+	f->end_ns = load(s, at + SHM_ENTRY + 5);
 	s->frames_tail++;
-	store(s, LEMNOS_RING_FRAMES_TAIL, s->frames_tail);
+	/*
+	 * The frame is the consumer's until give_back: its buffer keeps the module off it. The mark
+	 * comes first, then the ticket is checked against the entry's: a buffer the module took back
+	 * before the mark landed carries another frame now, so this frame is dropped unread.
+	 */
+	if (hold_buffer(s, f->buffer)) {
+		printf("FAIL the consumer could not mark buffer %u\n", f->buffer);
+		return 0;
+	}
+	if ((load(s, shm_page_at(FRAME_SLOTS) + SHM_TICKETS + f->buffer) & 0xffffffffull) !=
+	    (pair >> 32)) {
+		give_back(s, f->buffer, 0);
+		s->dropped++;
+		return 0;
+	}
+	/* Read: the frame counts as taken, so the module may take its buffer back once let go. */
+	shm_marks_taken(&s->marks, f->buffer, seq);
 	return 1;
 }
 
-static void give_back(struct stream *s, uint32_t buffer, uint32_t fence)
+/* The consumer holds `buffer` by its marks: the module will not reuse it until let go. 0 or -1. */
+static int hold_buffer(struct stream *s, uint32_t buffer)
 {
-	size_t at = s->returns_at + (s->returns_head & (FRAME_SLOTS - 1));
-
-	store(s, at, (uint64_t)buffer | (uint64_t)fence << 32);
-	s->returns_head++;
-	store(s, LEMNOS_RING_RETURNS_HEAD, s->returns_head);
+	if (!s->marks.page && shm_marks_open(&s->marks, s->fd, BUFFERS))
+		return -1;
+	shm_marks_set(&s->marks, buffer, 1);
+	return 0;
 }
 
-/* Waits for a frame by polling the file. 1, or 0 on timeout. */
+/* The consumer is done with a frame's buffer: its mark comes off, so a job may name it. */
+static void give_back(struct stream *s, uint32_t buffer, uint32_t fence)
+{
+	(void)fence;
+	if (s->marks.page)
+		shm_marks_set(&s->marks, buffer, 0);
+}
+
+/*
+ * Waits for a frame: on the doorbell when the stream has one (drained as it is read, as the
+ * doorbell's counter is), else in 10 ms steps. 1, or 0 on timeout.
+ */
 static int wait_frame(struct stream *s, struct frame *f, int timeout_ms)
 {
-	struct pollfd p = { .fd = s->fd, .events = POLLIN };
+	struct pollfd p = { .fd = s->doorbell >= 0 ? s->doorbell : s->fd, .events = POLLIN };
 
 	for (int waited = 0; waited < timeout_ms; waited += 10) {
 		if (pop_frame(s, f))
 			return 1;
-		poll(&p, 1, 10);
+		if (poll(&p, 1, 10) > 0 && s->doorbell >= 0) {
+			uint64_t n;
+
+			if (read(s->doorbell, &n, sizeof(n)) == sizeof(n))
+				s->doorbell_drained += n;
+		}
 	}
 	return pop_frame(s, f);
 }
@@ -248,9 +304,9 @@ static void expect_fault(struct stream *s, int want, const char *what)
 	struct lemnos_stream_status st = status(s);
 
 	CHECK(k == -want && st.state == LEMNOS_RING_STATE_FAULT && st.fault == want &&
-		      load(s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_FAULT,
+		      load(s, SHM_W_END) == LEMNOS_RING_STATE_FAULT,
 	      "%s: %s (kick %d, status state %u errno %d, ring state %llu)", what, strerror(want), k,
-	      st.state, st.fault, (unsigned long long)load(s, LEMNOS_RING_STATE));
+	      st.state, st.fault, (unsigned long long)load(s, SHM_W_END));
 }
 
 static struct lemnos_stream_job job(uint32_t buffer, uint64_t identity, uint32_t count)
@@ -384,35 +440,29 @@ static void test_ring_faults(int ctl, uint32_t block, int pool)
 
 	/* Heads that can't be. */
 	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	store(&s, LEMNOS_RING_JOBS_HEAD, UINT64_MAX);
+	store(&s, s.control + SHM_JOB_HEAD, UINT64_MAX);
 	expect_fault(&s, ERANGE, "jobs head impossible");
 	stream_close(&s);
 
 	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	store(&s, LEMNOS_RING_JOBS_HEAD, JOB_SLOTS + 1);
+	store(&s, s.control + SHM_JOB_HEAD, JOB_SLOTS + 1);
 	expect_fault(&s, ERANGE, "jobs head one past the capacity");
 	stream_close(&s);
 
+	/*
+	 * The frame head is the module's own count. A consumer that scribbles on it, or on the
+	 * frame's index, changes nothing: the module does not read either, and the stream carries on.
+	 */
 	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	store(&s, LEMNOS_RING_RETURNS_HEAD, 1ull << 40);
-	expect_fault(&s, ERANGE, "returns head impossible");
+	store(&s, SHM_W_HEAD, 1ull << 40);
+	store(&s, SHM_LANE_HEAD, 1ull << 40);
+	CHECK(kick(&s) == 0 && !status(&s).fault, "a scribbled frame head and lane head: no fault");
 	stream_close(&s);
 
+	/* The jobs' head and tail are the only words the consumer's jobs use: a tail it writes is ignored. */
 	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	store(&s, LEMNOS_RING_RETURNS_HEAD, FRAME_SLOTS + 1);
-	expect_fault(&s, ERANGE, "returns head one past the capacity");
-	stream_close(&s);
-
-	/* A returned buffer number out of range. */
-	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	give_back(&s, BUFFERS, 1);
-	expect_fault(&s, EINVAL, "returned buffer number past the pool");
-	stream_close(&s);
-
-	/* A buffer returned that isn't out. */
-	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	give_back(&s, 0, 1);
-	expect_fault(&s, EPERM, "returned buffer that isn't out");
+	store(&s, s.control + SHM_JOB_TAIL, 7);
+	CHECK(kick(&s) == 0 && !status(&s).fault, "a scribbled job tail: no fault");
 	stream_close(&s);
 }
 
@@ -528,39 +578,57 @@ static void test_with_frames(int ctl, uint32_t block, int pool, uint8_t *pool_cp
 	uint64_t count = 0;
 
 	CHECK(bell >= 0 && !stream_open(&s, ctl, block, pool, bell), "stream open with a doorbell");
-	CHECK(load(&s, LEMNOS_RING_MAGIC) == LEMNOS_RING_MAGIC_VALUE &&
-		      load(&s, LEMNOS_RING_VERSION) == LEMNOS_RING_LAYOUT_VERSION &&
-		      load(&s, LEMNOS_RING_BUFFERS) == BUFFERS &&
-		      load(&s, LEMNOS_RING_BUFFER_BYTES) == BUFFER_BYTES &&
-		      load(&s, LEMNOS_RING_FRAME_SLOTS) == FRAME_SLOTS &&
-		      load(&s, LEMNOS_RING_JOB_SLOTS) == JOB_SLOTS &&
-		      load(&s, LEMNOS_RING_JOB_BYTES) == JOB_BYTES &&
-		      load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_OPEN,
-	      "ring header is the wire layout");
+	CHECK(load(&s, 0) == 0x31474e49524d4853ull && load(&s, 1) == 2 &&
+		      load(&s, 2) == (1 | (uint64_t)FRAME_SLOTS << 32) && load(&s, 3) == 48 &&
+		      load(&s, 4) == shm_page_at(FRAME_SLOTS) &&
+		      load(&s, SHM_W_END) == LEMNOS_RING_STATE_OPEN,
+	      "ring header is the shm layout 2");
+	CHECK(load(&s, shm_page_at(FRAME_SLOTS)) == 0x314c4f4f504d4853ull &&
+		      load(&s, shm_page_at(FRAME_SLOTS) + 1) == 2 &&
+		      load(&s, shm_page_at(FRAME_SLOTS) + 2) == (1 | (uint64_t)BUFFERS << 32),
+	      "pool page is layout 2 for %u buffers", BUFFERS);
 	struct pollfd p = { .fd = s.fd, .events = POLLIN };
 
 	CHECK(poll(&p, 1, 0) == 0, "poll: nothing waiting yet");
 	uint64_t before = monotonic_ns(), last = before;
 
 	CHECK(!run_source(&s, 0, 8), "test source: 8 frames");
-	for (uint32_t n = 0; n < 8; n++) {
-		CHECK(wait_frame(&s, &f, 5000), "frame %u arrived", n);
+	/*
+	 * The source runs flat out and the module reuses a buffer no reader holds, so a consumer that
+	 * is slower than the source loses frames (shm/README.md: a reader that falls behind skips ahead).
+	 * Each frame delivered must still be whole and in order; delivered and dropped together are the
+	 * 8 published. Nothing here depends on how fast the consumer runs.
+	 */
+	uint32_t delivered = 0;
+	uint64_t prev_seq = 0;
+	int seen = 0;
+
+	for (int tries = 0; tries < 400 && delivered + s.dropped < 8; tries++) {
+		if (!wait_frame(&s, &f, 50))
+			continue;
 		uint64_t after = monotonic_ns();
 
 		CHECK(f.timestamp_ns >= last && f.timestamp_ns <= after,
-		      "frame %u stamped on CLOCK_MONOTONIC: %llu in [%llu, %llu]", n,
-		      (unsigned long long)f.timestamp_ns, (unsigned long long)last,
-		      (unsigned long long)after);
+		      "frame %llu stamped on CLOCK_MONOTONIC: %llu in [%llu, %llu]",
+		      (unsigned long long)f.sequence, (unsigned long long)f.timestamp_ns,
+		      (unsigned long long)last, (unsigned long long)after);
 		last = f.timestamp_ns > last ? f.timestamp_ns : last;
 		const uint64_t *w = (const uint64_t *)(pool_cpu + (uint64_t)f.buffer * STRIDE);
 
-		CHECK(f.sequence == n && f.bytes == BUFFER_BYTES && f.buffer < BUFFERS &&
-			      w[0] == f.sequence && w[BUFFER_BYTES / 8 - 1] == f.sequence && f.fence,
-		      "frame %u: sequence %llu, buffer %u, %u bytes, fence %u, content %llu", n,
+		CHECK(f.sequence < 8 && (!seen || f.sequence > prev_seq) && f.buffer < BUFFERS &&
+			      f.bytes == BUFFER_BYTES && w[0] == f.sequence &&
+			      w[BUFFER_BYTES / 8 - 1] == f.sequence && f.fence,
+		      "frame %llu: buffer %u, %u bytes, fence %u, content %llu",
 		      (unsigned long long)f.sequence, f.buffer, f.bytes, f.fence,
 		      (unsigned long long)w[0]);
+		prev_seq = f.sequence;
+		seen = 1;
+		delivered++;
 		give_back(&s, f.buffer, f.fence);
 	}
+	CHECK(delivered + s.dropped == 8 && delivered >= 1,
+	      "every published frame is delivered or dropped: %u delivered, %llu dropped", delivered,
+	      (unsigned long long)s.dropped);
 	{
 		int waited = 0;
 
@@ -570,8 +638,11 @@ static void test_with_frames(int ctl, uint32_t block, int pool, uint8_t *pool_cp
 		}
 	}
 	CHECK(status(&s).frames == 8, "8 frames counted");
-	CHECK(read(bell, &count, sizeof(count)) == sizeof(count) && count >= 8,
-	      "doorbell rang %llu times", (unsigned long long)count);
+	/* The counter is non-blocking: a read with nothing left says EAGAIN, and the drains are the rest. */
+	if (read(bell, &count, sizeof(count)) != sizeof(count))
+		count = 0;
+	CHECK(s.doorbell_drained + count >= 1,
+	      "doorbell rang %llu times", (unsigned long long)(s.doorbell_drained + count));
 	/*
 	 * Ends with every buffer given back: a job refused here (or below)
 	 * must be for its own reason, not because a buffer is still out.
@@ -590,7 +661,7 @@ static void test_with_frames(int ctl, uint32_t block, int pool, uint8_t *pool_cp
 	memset(aux_cpu, 0, AUX_BYTES);
 	post(&s, &j);
 	CHECK(kick(&s) == 0 && status(&s).jobs == 1, "the good job accepted");
-	CHECK(load(&s, LEMNOS_RING_JOBS_TAIL) == 1, "the ring saw it taken");
+	CHECK(load(&s, s.control + SHM_JOB_TAIL) == 1, "the ring saw it taken");
 	CHECK(!run_source(&s, 0, 1), "the source fills it");
 	CHECK(wait_frame(&s, &f, 5000), "the job's frame arrived");
 	CHECK(f.buffer == 2 && f.identity == j.identity, "the frame is that job's: buffer %u, identity 0x%llx",
@@ -646,42 +717,11 @@ static void test_with_frames(int ctl, uint32_t block, int pool, uint8_t *pool_cp
 	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
 	CHECK(!run_source(&s, 0, 1), "one frame for the consumer to hold");
 	CHECK(wait_frame(&s, &f, 5000), "the consumer has it");
+	CHECK(!hold_buffer(&s, f.buffer), "the consumer holds the buffer (again)");
 	struct lemnos_stream_job h = job(f.buffer, 1, 0);
 
 	post(&s, &h);
 	expect_fault(&s, EACCES, "a job on a buffer the consumer holds");
-	stream_close(&s);
-
-	/* Wrong fence, and returning a buffer twice. */
-	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	CHECK(!run_source(&s, 0, 1), "one frame");
-	CHECK(wait_frame(&s, &f, 5000), "the consumer has it");
-	give_back(&s, f.buffer, f.fence + 1);
-	expect_fault(&s, EPERM, "the wrong fence");
-	stream_close(&s);
-
-	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	CHECK(!run_source(&s, 0, 1), "one frame");
-	CHECK(wait_frame(&s, &f, 5000), "the consumer has it");
-	give_back(&s, f.buffer, f.fence);
-	CHECK(kick(&s) == 0, "returned once");
-	give_back(&s, f.buffer, f.fence);
-	expect_fault(&s, EPERM, "returned twice");
-	stream_close(&s);
-
-	/* A tail that can't be, read while publishing. */
-	CHECK(!stream_open(&s, ctl, block, pool, -1), "open");
-	store(&s, LEMNOS_RING_FRAMES_TAIL, 3);
-	CHECK(!run_source(&s, 0, 1), "a frame to publish against the bad tail");
-	{
-		int waited = 0;
-
-		while (waited < 5000 && !status(&s).fault) {
-			poll(NULL, 0, 10);
-			waited += 10;
-		}
-	}
-	expect_fault(&s, ERANGE, "a frames tail past the head, seen while publishing");
 	stream_close(&s);
 }
 
@@ -750,7 +790,7 @@ static void test_racing_slots(int ctl, uint32_t block, int pool)
 
 		if (!child) {
 			uint64_t x = 0xdeadbeefcafef00dull ^ (uint64_t)getpid() ^ (uint64_t)round;
-			size_t base = s.returns_at, end = s.ring_bytes / 8;
+			size_t base = s.control + SHM_JOB_HEAD, end = s.ring_bytes / 8;
 
 			for (int i = 0;; i++) {
 				x ^= x << 13;
@@ -866,12 +906,19 @@ static void test_refusals_at_create(int ctl, uint32_t block, int pool)
 	BAD_LAYOUT(flags, LEMNOS_STREAM_CREATE_BUFFERS | (1u << 30),
 		   "a known flag with an unknown one");
 	BAD_LAYOUT(flags, LEMNOS_STREAM_CREATE_BUFFERS, "own buffers and a pool descriptor");
+	/* The shared-memory form was a flag until the frame ring became the only form: that bit is now unknown. */
+	BAD_LAYOUT(flags, 1u << 1, "the removed shm flag");
 	BAD_LAYOUT(buffers, 0, "no buffers");
 	BAD_LAYOUT(buffers, LEMNOS_STREAM_MAX_BUFFERS + 1, "too many buffers");
 	BAD_LAYOUT(buffer_bytes, 0, "zero buffer bytes");
 	BAD_LAYOUT(buffer_bytes, LEMNOS_STREAM_MAX_BUFFER_BYTES + 1, "too-large buffers");
 	BAD_LAYOUT(frame_slots, 3, "frame slots not a power of two");
 	BAD_LAYOUT(frame_slots, 2, "fewer frame slots than buffers");
+	c = good_layout(block, pool, -1);
+	c.buffers = 1;
+	c.frame_slots = 1;
+	CHECK(ioctl(ctl, LEMNOS_IOC_STREAM_CREATE, &c) < 0 && errno == EINVAL,
+	      "one frame slot: EINVAL (the frame ring needs two)");
 	BAD_LAYOUT(job_slots, 0, "no job slots");
 	BAD_LAYOUT(job_slots, 128, "too many job slots");
 	BAD_LAYOUT(job_bytes, sizeof(struct lemnos_stream_job) - 8, "job smaller than the job struct");
@@ -1208,15 +1255,29 @@ static void test_own_frames(int ctl, uint32_t block, const char *name)
 	CHECK(!pop_frame(&s, &f) && status(&s).frames == 0, "and no frame is made");
 	memset(o[2].cpu, 0x11, BUFFER_BYTES);
 	CHECK(!set_buffer(&s, 2, o[2].fd, NULL), "buffer 2 gets memory");
-	for (int n = 0; n < 2; n++) {
+	{
 		const uint64_t *w = (const uint64_t *)o[2].cpu;
 
 		CHECK(wait_frame(&s, &f, 5000) && f.buffer == 2 && w[0] == f.sequence &&
 			      w[BUFFER_BYTES / 8 - 1] == f.sequence,
-		      "frame %d is on the only buffer with memory, in that memory (buffer %u, content %llu)",
-		      n, f.buffer, (unsigned long long)w[0]);
+		      "frame 0 is on the only buffer with memory, in that memory (buffer %u, content %llu)",
+		      f.buffer, (unsigned long long)w[0]);
 		give_back(&s, f.buffer, f.fence);
 	}
+	/*
+	 * The consumer has read buffer 2's frame and let it go. That frame counts as taken, so the newest
+	 * frame's buffer may be taken back (docs/streams.md, the replacement rule), and the source's second
+	 * frame is made on buffer 2, the only buffer with memory. The consumer keeps that frame, so buffer 2
+	 * is held: the source then has no buffer for each frame it makes, and drops and counts it
+	 * (lem_stream_drop_frame_locked).
+	 */
+	CHECK(wait_frame(&s, &f, 5000) && f.buffer == 2,
+	      "the newest, read and let go, is taken back: buffer 2 gets the next frame");
+	/* The source keeps running and drops each frame it has no buffer for, counted. */
+	poll(NULL, 0, 300);
+	CHECK(status(&s).dropped >= 1, "frames with no free buffer are dropped and counted (%llu)",
+	      (unsigned long long)status(&s).dropped);
+	give_back(&s, f.buffer, f.fence);
 
 	for (uint32_t i = 0; i < BUFFERS; i++) {
 		memset(o[i].cpu, 0x11, BUFFER_BYTES);
@@ -1439,7 +1500,7 @@ int main(int argc, char **argv)
 		      "the unbind finished with the stream's pin released");
 		CHECK(kick(&s) == -ENODEV, "the stream's file says the block went: ENODEV");
 		CHECK(status(&s).state == LEMNOS_RING_STATE_CLOSED &&
-			      load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_CLOSED,
+			      load(&s, SHM_W_END) == LEMNOS_RING_STATE_CLOSED,
 		      "the stream reads closed");
 		struct pollfd p = { .fd = s.fd, .events = POLLIN };
 

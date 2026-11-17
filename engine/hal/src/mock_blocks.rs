@@ -485,6 +485,10 @@ struct StreamState {
     /// its bytes behind the handle, and only its length here.
     contents: Vec<Vec<u8>>,
     held: Vec<bool>,
+    /// The consumer's holds per buffer: a frame taken from `take_frame` holds its buffer until the
+    /// consumer returns it. The buffer goes back to the producer only when no hold is left, as a
+    /// reader's marks keep a buffer from reuse in the shared ring.
+    consumer: Vec<u32>,
     /// Held since before the consumer changed: nothing is behind it until it is taken again.
     stale: Vec<bool>,
     /// Times the producer faulted its consumer.
@@ -518,6 +522,7 @@ impl MockStream {
             s.contents = vec![vec![0; buffer_bytes]; buffers as usize];
             s.held = vec![false; buffers as usize];
             s.stale = vec![false; buffers as usize];
+            s.consumer = vec![0; buffers as usize];
         });
         mock
     }
@@ -543,6 +548,7 @@ impl MockStream {
             s.contents = lengths.map(|bytes| vec![0; bytes]).collect();
             s.held = vec![false; files.len()];
             s.stale = vec![false; files.len()];
+            s.consumer = vec![0; files.len()];
         });
         mock.files = Some(files);
         mock
@@ -596,6 +602,7 @@ impl MockStream {
         with(&self.state, |s| {
             s.published.clear();
             s.jobs.clear();
+            s.consumer.iter_mut().for_each(|c| *c = 0);
             for buffer in 0..s.buffers {
                 let held = s.held.get(buffer as usize) == Some(&true);
                 if let Some(stale) = s.stale.get_mut(buffer as usize) {
@@ -636,8 +643,15 @@ impl MockStream {
         contents
     }
 
+    /// The next published frame. Taking it holds its buffer until [`return_buffer`](Self::return_buffer).
     pub fn take_frame(&self) -> Option<StreamFrame> {
-        with(&self.state, |s| s.published.pop_front())
+        with(&self.state, |s| {
+            let frame = s.published.pop_front()?;
+            if let Some(c) = s.consumer.get_mut(frame.buffer as usize) {
+                *c += 1;
+            }
+            Some(frame)
+        })
     }
 
     /// The next job end the producer published, as (identity, reason, end time).
@@ -645,8 +659,29 @@ impl MockStream {
         with(&self.state, |s| s.job_ends.pop_front())
     }
 
-    pub fn return_buffer(&self, buffer: u32) {
-        with(&self.state, |s| s.returned.push_back(buffer));
+    /// Lets go of one hold on `buffer`: a consumer's (a frame taken with `take_frame`), or the
+    /// producer's own (a buffer taken with `next_buffer` and given back unpublished, as the shared
+    /// ring's writer reclaims one). The buffer goes back to the producer when its last hold is let
+    /// go. `InvalidInput` when neither holds it: a double release, or a buffer never taken, as the
+    /// shared ring refuses.
+    pub fn return_buffer(&self, buffer: u32) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            if let Some(count) = s.consumer.get_mut(buffer as usize).filter(|c| **c > 0) {
+                *count -= 1;
+                if *count == 0 {
+                    s.returned.push_back(buffer);
+                }
+                return Ok(());
+            }
+            match s.held.get_mut(buffer as usize) {
+                Some(held) if *held => {
+                    *held = false;
+                    s.returned.push_back(buffer);
+                    Ok(())
+                }
+                _ => Err(ErrorKind::InvalidInput),
+            }
+        })
     }
 
     pub fn post_job(&self, job: &[u8]) {

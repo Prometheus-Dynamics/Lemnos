@@ -112,7 +112,7 @@ impl Rig {
             .iter()
             .map(|four| u32::from_le_bytes(*four))
             .collect();
-        self.consumer.return_buffer(1);
+        self.consumer.return_buffer(1).expect("the consumer holds this buffer");
         (record.status, back)
     }
 

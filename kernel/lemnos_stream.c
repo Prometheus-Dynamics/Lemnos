@@ -2,7 +2,7 @@
 /*
  * Frame streams: the module is the producer of a stream, on the ring the
  * socket protocol's streams already use (lemnos.h; docs/wire.md). It publishes
- * frames, wakes the consumer, collects returned buffers and jobs, and checks
+ * frames, wakes the consumer, takes back buffers no reader holds and collects jobs, and checks
  * every address a job names against dma-bufs it has mapped and pinned.
  *
  * Everything the consumer can touch is hostile: the ring is mapped into its
@@ -16,8 +16,8 @@
  *
  * A stream is jobless until the first job is accepted: frames take free
  * buffers. From then on it is job-driven for good: a frame needs a queued job,
- * and nothing else takes a buffer, so a consumer can return a buffer and post
- * a job on it without losing it in between. The window before that first job
+ * and nothing else takes a buffer, so a consumer can let go of a buffer's marks
+ * and post a job on it without losing it in between. The window before that first job
  * is the consumer's to close, by posting it before frames start (lemnos.h).
  *
  * Only a block's own memory is ever named: the pool and dma-bufs registered
@@ -189,7 +189,7 @@ struct lem_stream {
 
 	/* The module's copies. The ring's header is for the consumer only. */
 	u32 buffers, buffer_bytes, frame_slots, job_slots, job_bytes;
-	size_t returns_at, jobs_at, job_words;
+	size_t jobs_at, job_words;
 	u64 stride;
 
 	struct lem_stream_buf *buf;
@@ -203,7 +203,7 @@ struct lem_stream {
 	u32 pin_next;			/* the pin a full cache gives up next */
 
 	/* The producer's own counts, never read back from the ring. */
-	u64 frames_head, frames_seen, returns_tail, jobs_tail, sequence;
+	u64 frames_head, jobs_tail, sequence;
 	u64 published, dropped, returned, jobs;
 
 	int fault;			/* errno that ended it; the ring is left alone after */
@@ -218,14 +218,13 @@ struct lem_stream {
 	u32 frame_bytes;		/* what the producer may write per buffer */
 	bool wedged;			/* a block's DMA could not be seen to stop: nothing is unpinned */
 
-	/* Where the control words are: the LEMNOS_RING_* ones, or the shm form's. */
-	bool shm;			/* LEMNOS_STREAM_CREATE_SHM */
 	size_t shm_total;		/* words of the shm ring */
 	size_t shm_slots_at;		/* its slots */
 	size_t page_at;			/* the pool page's first word (shm form) */
-	size_t w_state, w_returns_head, w_returns_tail, w_jobs_head, w_jobs_tail;
-	struct lem_reader reader[LEMNOS_STREAM_MAX_READERS];	/* shm form: the consumers' marks */
-	u32 newest;			/* shm form: the buffer of the newest frame, kept for the frame path */
+	size_t w_state, w_jobs_head, w_jobs_tail;
+	struct lem_reader reader[LEMNOS_STREAM_MAX_READERS];	/* the consumers' marks */
+	u32 newest;			/* the buffer of the newest frame, kept for the frame path */
+	u64 newest_seq;			/* that frame's sequence */
 	u64 reader_ids;			/* the last registration id given out */
 	struct lem_bell bell;		/* shm form: the consumer's doorbell, LEMNOS_STREAM_IOC_BELL */
 	refcount_t refs;		/* the stream's file, and each reader file that holds the stream */
@@ -323,7 +322,7 @@ static void lem_stream_wake(struct lem_stream *s)
 }
 
 /*
- * The shm form (LEMNOS_STREAM_CREATE_SHM): shm/README.md's ring (layout 2),
+ * The frame ring: shm/README.md's ring (layout 2),
  * one field, one sample per frame, and the pool page of
  * shm/ring-buffers/src/page.rs after it. Every number here is what the Rust
  * crates say (testing/crates/shm-ring-check reads what this writes, and its
@@ -350,6 +349,10 @@ static void lem_stream_wake(struct lem_stream *s)
 #define LEM_POOL_SHAPE_WORD	2
 #define LEM_POOL_TICKETS	8	/* one word per buffer, from here */
 #define LEM_POOL_READERS	64	/* shm-ring-buffers' MAX_READERS: cut-off words after the tickets */
+/* The job block, from the control words (control = page_at + LEM_POOL_TICKETS + buffers + LEM_POOL_READERS). */
+#define LEM_JOB_HEAD		2	/* jobs posted: the consumer's */
+#define LEM_JOB_TAIL		3	/* jobs taken: the module's */
+#define LEM_JOB_SLOTS		4	/* job slots from here, each 1 + job_bytes/8 words: the length, then the job */
 #define LEM_MARKS_AT		1	/* a marks page's first mark: word 0 is its layout and version (marks.rs) */
 #define LEM_MARKS_LAYOUT	2ull	/* shm-ring-holds' LAYOUT: a marks page of another layout is refused */
 #define LEM_MARKS_LAYOUT_SHIFT	56	/* the layout is word 0's top byte; a layout 1 page has zero there */
@@ -423,6 +426,29 @@ static bool lem_stream_held(const struct lem_stream *s, u32 buffer)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * Whether the newest frame has been read by every reader that has a marks page: each reader's
+ * taken stamp (1 + buffers + b) is one more than the sequence it last read from b, so it is past
+ * newest_seq once the reader has read the frame. docs/streams.md, the replacement rule: a frame the
+ * consumer has read and let go counts as taken, and the newest frame may then be taken back. No
+ * reader at all means nothing has read it. Lock held.
+ */
+static bool lem_stream_newest_read(const struct lem_stream *s, u32 buffer)
+{
+	bool any = false;
+
+	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++) {
+		const u64 *marks = s->reader[r].marks;
+
+		if (!marks || s->reader[r].cut_off)
+			continue;
+		if (READ_ONCE(marks[LEM_MARKS_AT + s->buffers + buffer]) <= s->newest_seq)
+			return false;
+		any = true;
+	}
+	return any;
 }
 
 /*
@@ -527,41 +553,6 @@ static bool lem_stream_reclaim(struct lem_stream *s, u32 buffer)
 	return true;
 }
 
-/* Takes back buffers the consumer returned. Lock held; bounded by the kernel's capacity. */
-static int lem_stream_collect_returns(struct lem_stream *s)
-{
-	u32 slots = s->frame_slots;
-
-	/* The shm form has no returns queue: a buffer goes back when no reader holds it. */
-	if (s->shm)
-		return 0;
-	for (u32 n = 0; n < slots; n++) {
-		u64 head = lem_ring_read_acquire(s, s->w_returns_head);
-		u64 count = head - s->returns_tail;
-		u64 word;
-		u32 buffer, fence;
-		struct lem_stream_buf *b;
-
-		if (!count)
-			return 0;
-		if (count > slots)
-			return -ERANGE;
-		word = lem_ring_read(s, s->returns_at + (s->returns_tail & (slots - 1)));
-		buffer = lower_32_bits(word);
-		fence = upper_32_bits(word);
-		if (buffer >= s->buffers)
-			return -EINVAL;
-		b = &s->buf[buffer];
-		if (b->state != LEM_BUF_CONSUMER || b->fence != fence)
-			return -EPERM;
-		b->state = LEM_BUF_FREE;
-		s->returned++;
-		s->returns_tail++;
-		lem_ring_write_release(s, s->w_returns_tail, s->returns_tail);
-	}
-	return 0;
-}
-
 /* The region a resolved range names: the table, or a buffer's own dma-buf. Lock held. */
 static struct lem_stream_region *lem_stream_region_at(struct lem_stream *s, u32 region)
 {
@@ -657,10 +648,8 @@ static int lem_stream_accept(struct lem_stream *s, const struct lemnos_stream_jo
 	if (in->buffer >= s->buffers)
 		return -EINVAL;
 	/* A consumer that let go of the buffer's marks gets it back to post a job on it. */
-	if (s->shm) {
-		lem_stream_enforce(s, ktime_get_ns());
-		lem_stream_reclaim(s, in->buffer);
-	}
+	lem_stream_enforce(s, ktime_get_ns());
+	lem_stream_reclaim(s, in->buffer);
 	b = &s->buf[in->buffer];
 	if (b->state == LEM_BUF_ABSENT)
 		return -EFAULT;
@@ -712,16 +701,6 @@ static int lem_stream_collect_jobs(struct lem_stream *s)
 		/* Full here: wait for one to finish rather than refuse it. */
 		if (s->queue_head - s->queue_tail == slots)
 			return 0;
-		/*
-		 * A consumer returns a buffer and then posts a job on it, and
-		 * the head just read may be newer than the look at the returns
-		 * before this loop. Each return moves a buffer out of
-		 * LEM_BUF_CONSUMER, so this stays bounded by the buffers.
-		 */
-		ret = lem_stream_collect_returns(s);
-		if (ret)
-			return ret;
-
 		at = s->jobs_at + (s->jobs_tail & (slots - 1)) * s->job_words;
 		len = lem_ring_read(s, at);
 		if (len != sizeof(struct lemnos_stream_job))
@@ -740,10 +719,8 @@ static int lem_stream_collect_jobs(struct lem_stream *s)
 /* Everything the consumer has posted, bounded. A refusal ends the stream. Lock held. */
 static int lem_stream_drain(struct lem_stream *s)
 {
-	int ret = lem_stream_collect_returns(s);
+	int ret = lem_stream_collect_jobs(s);
 
-	if (!ret)
-		ret = lem_stream_collect_jobs(s);
 	if (ret)
 		lem_stream_fault_locked(s, ret);
 	return ret;
@@ -753,31 +730,9 @@ static int lem_stream_drain(struct lem_stream *s)
 static int lem_stream_push_frame(struct lem_stream *s, u32 buffer, u32 bytes, u64 sequence,
 				 u64 identity, u32 fence, u64 timestamp_ns, u64 end_ns, bool *pushed)
 {
-	u64 slots = s->frame_slots;
-	u64 tail = lem_ring_read_acquire(s, LEMNOS_RING_FRAMES_TAIL);
-	size_t at;
-
 	*pushed = false;
-	if (s->shm) {
-		lem_shm_publish(s, buffer, bytes, sequence, identity, fence, timestamp_ns, end_ns);
-		*pushed = true;
-		return 0;
-	}
-	if (tail - s->frames_seen > s->frames_head - s->frames_seen ||
-	    s->frames_head - tail > slots)
-		return -ERANGE;
-	s->frames_seen = tail;
-	if (s->frames_head - tail == slots)
-		return 0;
-	at = LEMNOS_RING_FRAMES + (s->frames_head & (slots - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-	lem_ring_write(s, at, (u64)buffer | (u64)bytes << 32);
-	lem_ring_write(s, at + 1, sequence);
-	lem_ring_write(s, at + 2, identity);
-	lem_ring_write(s, at + 3, timestamp_ns);
-	lem_ring_write(s, at + 4, fence);
-	lem_ring_write(s, at + 5, end_ns);
-	s->frames_head++;
-	lem_ring_write_release(s, LEMNOS_RING_FRAMES_HEAD, s->frames_head);
+	/* A publish always fits: a reader that falls behind skips ahead, and buffers are taken back by their marks. */
+	lem_shm_publish(s, buffer, bytes, sequence, identity, fence, timestamp_ns, end_ns);
 	*pushed = true;
 	return 0;
 }
@@ -785,7 +740,7 @@ static int lem_stream_push_frame(struct lem_stream *s, u32 buffer, u32 bytes, u6
 /*
  * The next job. With none queued, a stream that has never had a job takes the
  * next free buffer; one that has is job-driven and takes nothing, or a frame
- * could take the buffer its consumer just returned to post a job on. Lock held.
+ * could take the buffer its consumer just let go of to post a job on. Lock held.
  */
 static bool lem_stream_take(struct lem_stream *s, struct lem_job *job)
 {
@@ -808,21 +763,19 @@ static bool lem_stream_take(struct lem_stream *s, struct lem_job *job)
 			return true;
 		}
 	}
-	/* Shm: take back one no reader holds, but never the newest frame's, so a reader always has one. */
-	if (s->shm) {
-		lem_stream_enforce(s, ktime_get_ns());
-		for (u32 i = 0; i < s->buffers; i++) {
-			u32 b = (s->cursor + i) % s->buffers;
+	/* Take back one no reader holds; the newest frame's buffer only once every reader has read it. */
+	lem_stream_enforce(s, ktime_get_ns());
+	for (u32 i = 0; i < s->buffers; i++) {
+		u32 b = (s->cursor + i) % s->buffers;
 
-			if (b == s->newest || s->buf[b].state != LEM_BUF_CONSUMER ||
-			    !lem_stream_reclaim(s, b))
-				continue;
-			s->cursor = (b + 1) % s->buffers;
-			s->buf[b].state = LEM_BUF_ACTIVE;
-			memset(job, 0, sizeof(*job));
-			job->buffer = b;
-			return true;
-		}
+		if ((b == s->newest && !lem_stream_newest_read(s, b)) ||
+		    s->buf[b].state != LEM_BUF_CONSUMER || !lem_stream_reclaim(s, b))
+			continue;
+		s->cursor = (b + 1) % s->buffers;
+		s->buf[b].state = LEM_BUF_ACTIVE;
+		memset(job, 0, sizeof(*job));
+		job->buffer = b;
+		return true;
 	}
 	return false;
 }
@@ -885,11 +838,31 @@ static void lem_stream_finish_locked(struct lem_stream *s, const struct lem_job 
 	} else if (pushed) {
 		b->state = LEM_BUF_CONSUMER;
 		s->newest = job->buffer;
+		s->newest_seq = sequence;
 		s->published++;
 	} else {
 		b->state = LEM_BUF_FREE;
 		s->dropped++;
 	}
+}
+
+/*
+ * A free-running stream with no free buffer for its next frame drops that frame and counts it
+ * (docs/streams.md, "The replacement rule"; shm/README.md, "When there is none, it drops the frame").
+ * Only when a published frame's buffer is held or is the newest one: a stream whose buffers have no
+ * memory yet makes no frame, and a job-driven stream refuses the job instead. Lock held.
+ */
+static bool lem_stream_drop_frame_locked(struct lem_stream *s)
+{
+	if (s->jobs)
+		return false;
+	for (u32 b = 0; b < s->buffers; b++) {
+		if (s->buf[b].state == LEM_BUF_CONSUMER) {
+			s->dropped++;
+			return true;
+		}
+	}
+	return false;
 }
 
 static void lem_stream_source(struct work_struct *work)
@@ -909,6 +882,9 @@ static void lem_stream_source(struct work_struct *work)
 	have = lem_stream_take(s, &job);
 	if (have)
 		sequence = s->sequence++;
+	else if (lem_stream_drop_frame_locked(s))
+		/* A frame with no free buffer is dropped and counted; the source keeps running (docs/streams.md). */
+		s->sequence++;
 	spin_unlock_irqrestore(&s->lock, flags);
 
 	if (have)
@@ -1189,10 +1165,6 @@ int lem_stream_job_peek(struct lem_stream *s, void *job, size_t bytes)
 		ret = s->dead ? -ENODEV : s->fault;
 		goto out;
 	}
-	/* First, so a buffer returned just before its job was posted is usable. */
-	ret = lem_stream_collect_returns(s);
-	if (ret)
-		goto out;
 	head = lem_ring_read_acquire(s, s->w_jobs_head);
 	count = head - s->jobs_tail;
 	if (!count) {
@@ -1238,10 +1210,8 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 		ret = -EINVAL;
 		goto out;
 	}
-	if (s->shm) {
-		lem_stream_enforce(s, ktime_get_ns());
-		lem_stream_reclaim(s, buffer);
-	}
+	lem_stream_enforce(s, ktime_get_ns());
+	lem_stream_reclaim(s, buffer);
 	for (u32 i = 0; i < count; i++) {
 		ret = lem_stream_resolve(s, buffer, range[i].addr, range[i].len, &slot->job.range[i]);
 		if (ret)
@@ -1694,8 +1664,6 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	int fd;
 	long ret = -EINVAL;
 
-	if (!s->shm)
-		return -EINVAL;
 	for (slot = 0; slot < LEMNOS_STREAM_MAX_READERS; slot++)
 		if (!s->reader[slot].marks)
 			break;
@@ -1872,8 +1840,6 @@ static long lem_stream_bell_set(struct lem_stream *s, const struct lemnos_stream
 	u64 *map;
 	long ret = -EINVAL;
 
-	if (!s->shm)
-		return -EINVAL;
 	if (s->bell.map)
 		return -EBUSY;
 	efd = eventfd_ctx_fdget(a->eventfd);
@@ -2076,11 +2042,9 @@ static __poll_t lem_stream_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &s->wait, wait);
 	spin_lock_irqsave(&s->lock, flags);
-	/* A tail the consumer scribbled on only wakes the consumer. */
+	/* Frames come on the doorbell (lem_stream_wake), not on this file: only the end is readable here. */
 	if (s->dead || s->fault)
 		mask = EPOLLIN | EPOLLRDNORM | EPOLLHUP;
-	else if (!s->shm && s->frames_head != READ_ONCE(s->ring[LEMNOS_RING_FRAMES_TAIL]))
-		mask = EPOLLIN | EPOLLRDNORM;
 	spin_unlock_irqrestore(&s->lock, flags);
 	return mask;
 }
@@ -2228,9 +2192,10 @@ static int lem_stream_check_layout(const struct lemnos_stream_create *c)
 {
 	u64 stride;
 
-	if (c->flags & ~(LEMNOS_STREAM_CREATE_BUFFERS | LEMNOS_STREAM_CREATE_SHM))
+	if (c->flags & ~LEMNOS_STREAM_CREATE_BUFFERS)
 		return -EINVAL;
-	if ((c->flags & LEMNOS_STREAM_CREATE_SHM) && c->frame_slots < 2)
+	/* The frame ring is the shared-memory ring, which needs a slot per frame in flight and a second for the reader. */
+	if (c->frame_slots < 2)
 		return -EINVAL;
 	if (!c->buffers || c->buffers > LEMNOS_STREAM_MAX_BUFFERS)
 		return -EINVAL;
@@ -2256,26 +2221,15 @@ static int lem_stream_check_layout(const struct lemnos_stream_create *c)
 
 static void lem_stream_init_ring(struct lem_stream *s)
 {
-	if (s->shm) {
-		/* The pool page's layout and shape, then its magic, then the ring's header: each magic last. */
-		lem_ring_write(s, s->page_at + LEM_POOL_LAYOUT_WORD, LEM_POOL_LAYOUT);
-		lem_ring_write(s, s->page_at + LEM_POOL_SHAPE_WORD, 1ull | (u64)s->buffers << 32);
-		lem_ring_write_release(s, s->page_at, LEM_POOL_MAGIC);
-		lem_ring_write(s, LEM_SHM_W_LAYOUT, LEM_SHM_LAYOUT);
-		lem_ring_write(s, LEM_SHM_W_SHAPE, 1ull | (u64)s->frame_slots << 32);
-		lem_ring_write(s, LEM_SHM_W_SIZES, LEM_SHM_ENTRY_BYTES);
-		lem_ring_write(s, LEM_SHM_W_TOTAL, s->shm_total);
-		lem_ring_write_release(s, LEM_SHM_W_MAGIC, LEM_SHM_MAGIC);
-		return;
-	}
-	lem_ring_write(s, LEMNOS_RING_VERSION, LEMNOS_RING_LAYOUT_VERSION);
-	lem_ring_write(s, LEMNOS_RING_BUFFERS, s->buffers);
-	lem_ring_write(s, LEMNOS_RING_BUFFER_BYTES, s->buffer_bytes);
-	lem_ring_write(s, LEMNOS_RING_FRAME_SLOTS, s->frame_slots);
-	lem_ring_write(s, LEMNOS_RING_JOB_SLOTS, s->job_slots);
-	lem_ring_write(s, LEMNOS_RING_JOB_BYTES, s->job_bytes);
-	lem_ring_write(s, LEMNOS_RING_STATE, LEMNOS_RING_STATE_OPEN);
-	lem_ring_write_release(s, LEMNOS_RING_MAGIC, LEMNOS_RING_MAGIC_VALUE);
+	/* The pool page's layout and shape, then its magic, then the ring's header: each magic last. */
+	lem_ring_write(s, s->page_at + LEM_POOL_LAYOUT_WORD, LEM_POOL_LAYOUT);
+	lem_ring_write(s, s->page_at + LEM_POOL_SHAPE_WORD, 1ull | (u64)s->buffers << 32);
+	lem_ring_write_release(s, s->page_at, LEM_POOL_MAGIC);
+	lem_ring_write(s, LEM_SHM_W_LAYOUT, LEM_SHM_LAYOUT);
+	lem_ring_write(s, LEM_SHM_W_SHAPE, 1ull | (u64)s->frame_slots << 32);
+	lem_ring_write(s, LEM_SHM_W_SIZES, LEM_SHM_ENTRY_BYTES);
+	lem_ring_write(s, LEM_SHM_W_TOTAL, s->shm_total);
+	lem_ring_write_release(s, LEM_SHM_W_MAGIC, LEM_SHM_MAGIC);
 }
 
 /* Called under lem_blocks_sem for reading: the block can't go while this runs. */
@@ -2285,7 +2239,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 {
 	struct lem_stream *s;
 	struct file *file;
-	size_t ring_words;
+	size_t control, ring_words;
 	u64 pool_bytes;
 	int fd, ret;
 
@@ -2329,34 +2283,22 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	s->job_slots = c->job_slots;
 	s->job_bytes = c->job_bytes;
 	s->stride = ALIGN((u64)c->buffer_bytes, LEMNOS_STREAM_BUFFER_ALIGN);
-	s->shm = c->flags & LEMNOS_STREAM_CREATE_SHM;
 	s->newest = U32_MAX;
 	s->job_words = 1 + DIV_ROUND_UP(s->job_bytes, 8);
-	if (s->shm) {
-		size_t control;
-
-		s->shm_slots_at = LEM_SHM_INDEX + s->frame_slots;
-		s->shm_total = s->shm_slots_at + (size_t)s->frame_slots * LEM_SHM_SLOT_WORDS;
-		s->page_at = s->shm_total;
-		control = s->page_at + LEM_POOL_TICKETS + s->buffers + LEM_POOL_READERS;
-		s->w_state = LEM_SHM_W_END;
-		s->w_returns_head = control;
-		s->w_returns_tail = control + 1;
-		s->w_jobs_head = control + 2;
-		s->w_jobs_tail = control + 3;
-		s->returns_at = control + 4;
-		s->jobs_at = s->returns_at + s->frame_slots;
-		ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
-	} else {
-		s->w_state = LEMNOS_RING_STATE;
-		s->w_returns_head = LEMNOS_RING_RETURNS_HEAD;
-		s->w_returns_tail = LEMNOS_RING_RETURNS_TAIL;
-		s->w_jobs_head = LEMNOS_RING_JOBS_HEAD;
-		s->w_jobs_tail = LEMNOS_RING_JOBS_TAIL;
-		s->returns_at = LEMNOS_RING_FRAMES + (size_t)s->frame_slots * LEMNOS_STREAM_FRAME_WORDS;
-		s->jobs_at = s->returns_at + s->frame_slots;
-		ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
-	}
+	/*
+	 * The words, in order: the frame ring (header, lane head, index, slots), the pool page
+	 * (magic and shape, tickets, cut-off words), then the job block: its head and tail, and the
+	 * job slots. A buffer goes back by its marks, so nothing returns through the ring.
+	 */
+	s->shm_slots_at = LEM_SHM_INDEX + s->frame_slots;
+	s->shm_total = s->shm_slots_at + (size_t)s->frame_slots * LEM_SHM_SLOT_WORDS;
+	s->page_at = s->shm_total;
+	control = s->page_at + LEM_POOL_TICKETS + s->buffers + LEM_POOL_READERS;
+	s->w_state = LEM_SHM_W_END;
+	s->w_jobs_head = control + LEM_JOB_HEAD;
+	s->w_jobs_tail = control + LEM_JOB_TAIL;
+	s->jobs_at = control + LEM_JOB_SLOTS;
+	ring_words = s->jobs_at + (size_t)s->job_slots * s->job_words;
 	s->ring_bytes = ring_words * sizeof(u64);
 	pool_bytes = (u64)s->buffers * s->stride;
 

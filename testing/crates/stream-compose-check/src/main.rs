@@ -280,8 +280,14 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         frames.iter().all(|f| f.bytes == size),
         format_args!("every frame is {size} bytes"),
     );
+    let ordered = frames.windows(2).all(|w| w[0].sequence < w[1].sequence);
+    if !ordered {
+        // What the client read, in order: the sequence numbers the module and the driver gave.
+        let seqs: Vec<u64> = frames.iter().map(|f| f.sequence).collect();
+        let _ = writeln!(std::io::stdout(), "sequences read: {seqs:?}");
+    }
     report.check(
-        frames.windows(2).all(|w| w[0].sequence < w[1].sequence),
+        ordered,
         "the sequence numbers only go up",
     );
     let stamped = frames

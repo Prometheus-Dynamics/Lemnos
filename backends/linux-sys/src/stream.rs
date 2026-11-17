@@ -8,12 +8,12 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use crate::ioctl::{Ioctl, ioc, ioctl_ptr, iow, iowr, pod, zeroed};
 
+pub mod ring;
+
 const TYPE: u8 = b'L';
 
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: each buffer a dma-buf of its own, no pool.
 pub const CREATE_BUFFERS: u32 = 1 << 0;
-/// `LEMNOS_STREAM_CREATE_SHM`: the frame ring is the shared-memory ring of `shm/README.md`.
-pub const CREATE_SHM: u32 = 1 << 1;
 
 /// `struct lemnos_stream_create`.
 #[repr(C)]

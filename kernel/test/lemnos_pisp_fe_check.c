@@ -30,6 +30,7 @@
 #include "../lemnos_rp1_csi2.h"
 #include "lemnos_test_csi2.h"
 #include "lemnos_pisp_fe_fixture.h"
+#include "shm_ring.h"
 #include <pisp_fe_config.h>
 
 #define BUFFERS 4u
@@ -78,8 +79,8 @@ struct stream {
 	int fd;
 	volatile uint64_t *r;
 	uint64_t ring_bytes, pool_addr;
-	size_t returns_at, jobs_at, job_words;
-	uint64_t frames_tail, returns_head, jobs_head;
+	size_t control, jobs_at, job_words;
+	uint64_t frames_tail, jobs_head;
 };
 
 struct region {
@@ -200,8 +201,8 @@ static int stream_open(struct stream *s)
 	s->fd = c.fd;
 	s->ring_bytes = c.ring_bytes;
 	s->pool_addr = c.pool_addr;
-	s->returns_at = LEMNOS_RING_FRAMES + FRAME_SLOTS * LEMNOS_STREAM_FRAME_WORDS;
-	s->jobs_at = s->returns_at + FRAME_SLOTS;
+	s->control = shm_control(FRAME_SLOTS, BUFFERS);
+	s->jobs_at = s->control + SHM_JOB_SLOTS;
 	s->job_words = 1 + (JOB_BYTES + 7) / 8;
 	s->r = mmap(NULL, s->ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, c.fd, 0);
 	return s->r == MAP_FAILED ? -errno : 0;
@@ -334,24 +335,20 @@ static void post(struct stream *s, const struct lemnos_stream_job *job)
 	for (size_t i = 0; i < sizeof(*job) / 8; i++)
 		store(s, at + 1 + i, words[i]);
 	s->jobs_head++;
-	store(s, LEMNOS_RING_JOBS_HEAD, s->jobs_head);
+	store(s, s->control + SHM_JOB_HEAD, s->jobs_head);
 }
 
+/* The next frame, if one is out: its buffer, bytes and identity. A buffer needs no giving back here. */
 static int pop_frame(struct stream *s, uint32_t *buffer, uint32_t *bytes, uint64_t *identity)
 {
-	uint64_t head = load(s, LEMNOS_RING_FRAMES_HEAD);
-	size_t at;
-	uint64_t pair;
+	struct shm_frame f;
 
-	if (head == s->frames_tail)
+	if (shm_frame_read(s->r, FRAME_SLOTS, s->frames_tail, &f) != 1)
 		return 0;
-	at = LEMNOS_RING_FRAMES + (s->frames_tail & (FRAME_SLOTS - 1)) * LEMNOS_STREAM_FRAME_WORDS;
-	pair = load(s, at);
-	*buffer = (uint32_t)pair;
-	*bytes = (uint32_t)(pair >> 32);
-	*identity = load(s, at + 2);
+	*buffer = f.buffer;
+	*bytes = f.bytes;
+	*identity = f.identity;
 	s->frames_tail++;
-	store(s, LEMNOS_RING_FRAMES_TAIL, s->frames_tail);
 	return 1;
 }
 
@@ -1973,11 +1970,7 @@ static void test_own_buffers(const char *heap, const char *dev)
 	CHECK(!own_set(&s, 1, &fresh) && fresh.addr != o[1].addr, "a held buffer is given new memory");
 	memset(o[1].cpu, 0, BUFFER_BYTES);
 	{
-		size_t at = s.returns_at + (s.returns_head & (FRAME_SLOTS - 1));
-
-		store(&s, at, 1ull | (uint64_t)load(&s, LEMNOS_RING_FRAMES + 4) << 32);
-		s.returns_head++;
-		store(&s, LEMNOS_RING_RETURNS_HEAD, s.returns_head);
+		/* The consumer lets go of the frame's buffer: nothing to write, as no reader marks it here. */
 	}
 	simple(cfg_slot(1));
 	j = job_for(1, 1);
@@ -2118,7 +2111,7 @@ static void test_stop_in_flight(const char *node, const char *unbind, const char
 	}
 	CHECK(now_ms() - t >= ms - 20, "unbinding waited (%llu ms)",
 	      (unsigned long long)(now_ms() - t));
-	CHECK(load(&s, LEMNOS_RING_STATE) == LEMNOS_RING_STATE_CLOSED,
+	CHECK(load(&s, SHM_W_END) == LEMNOS_RING_STATE_CLOSED,
 	      "the stream ended closed");
 	stream_close(&s);
 	sleep_ms(5);

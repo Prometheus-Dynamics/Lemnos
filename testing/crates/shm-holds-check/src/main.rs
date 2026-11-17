@@ -4,7 +4,7 @@
 //! lemnos-shm-holds-check <control node> <block name> <heap node>
 //! ```
 //!
-//! Makes a stream on the test block with `LEMNOS_STREAM_CREATE_SHM`, gives the module a reader's
+//! Makes a stream on the test block with the shm ring (no create flag), gives the module a reader's
 //! marks page (`shm_ring_holds::Marks`) through `LEMNOS_STREAM_IOC_READER`, and starts the test
 //! source. The ring is read with the shm crates, and each buffer through a read-only mapping of
 //! the pool. Each frame's payload is its sequence number, so a buffer's first word says which
@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::module;
-use lemnos_linux_sys::stream::{self, CREATE_SHM, LayoutRefusal, ReaderError, Structure};
+use lemnos_linux_sys::stream::{self, LayoutRefusal, ReaderError, Structure};
 use shm_ring::{Mem, Next, Reader};
 use shm_ring_buffers::Marker;
 use shm_ring_buffers::{BufferIndex, entry, page};
@@ -182,7 +182,7 @@ fn run_with(
             node.as_fd(),
             &stream::Spec {
                 block,
-                flags: CREATE_SHM,
+                flags: 0,
                 buffers: BUFFERS,
                 buffer_bytes: BUFFER_BYTES,
                 frame_slots: FRAME_SLOTS,
@@ -417,7 +417,7 @@ fn scenario(
             node.as_fd(),
             &stream::Spec {
                 block,
-                flags: CREATE_SHM,
+                flags: 0,
                 buffers: BUFFERS,
                 buffer_bytes: BUFFER_BYTES,
                 frame_slots: FRAME_SLOTS,
@@ -591,7 +591,7 @@ fn fixture(node_path: &str, block_name: &str, heap_path: &str) -> Result<Fixture
             node.as_fd(),
             &stream::Spec {
                 block,
-                flags: CREATE_SHM,
+                flags: 0,
                 buffers: BUFFERS,
                 buffer_bytes: BUFFER_BYTES,
                 frame_slots: FRAME_SLOTS,

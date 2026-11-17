@@ -149,12 +149,11 @@ impl LinuxSession {
         Ok(region.addr + span.start)
     }
 
-    /// The job's end, if published, with its buffer given back.
+    /// The job's end, if published.
     fn take(&mut self) -> io::Result<Option<Finished>> {
         let Some(frame) = self.stream.next_frame()? else {
             return Ok(None);
         };
-        self.stream.return_buffer(frame.buffer, frame.fence)?;
         Ok(Some(if frame.bytes == 0 {
             Finished::Stopped
         } else {

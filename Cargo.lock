@@ -2635,6 +2635,9 @@ name = "lemnos-linux-sys"
 version = "2.0.1-dev"
 dependencies = [
  "libc",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-holds",
 ]
 
 [[package]]

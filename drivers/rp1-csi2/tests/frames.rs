@@ -127,6 +127,8 @@ struct Buffer {
     memory: Option<Pinned>,
     at: Where,
     fence: u32,
+    /// Taken by `next_frame` and not yet released: the consumer's hold, as the shm ring keeps it.
+    held: bool,
 }
 
 #[derive(Default)]
@@ -267,6 +269,7 @@ impl Hardware for Hw {
                 .map(|_| Buffer {
                     memory: None,
                     at: Where::Free,
+                    held: false,
                     fence: 0,
                 })
                 .collect();
@@ -350,18 +353,32 @@ impl Hardware for Hw {
         if channel == Channel::Embedded {
             return Ok(None);
         }
-        Ok(self.with(|b| b.finished.pop_front()))
+        Ok(self.with(|b| {
+            let f = b.finished.pop_front()?;
+            if let Some(slot) = b.buffers.get_mut(f.buffer as usize) {
+                slot.held = true;
+            }
+            Some(f)
+        }))
     }
 
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
         if channel == Channel::Embedded {
             return Ok(());
         }
+        // A release needs the hold `next_frame` took and the fence the frame carried. Anything
+        // else is refused, as the shm ring refuses it: a double release, or a buffer never taken.
         self.with(|b| match b.buffers.get_mut(buffer as usize) {
-            Some(slot) if slot.at == Where::Out(fence) => slot.at = Where::Free,
-            _ => b.bad_returns += 1,
-        });
-        Ok(())
+            Some(slot) if slot.at == Where::Out(fence) && slot.held => {
+                slot.at = Where::Free;
+                slot.held = false;
+                Ok(())
+            }
+            _ => {
+                b.bad_returns += 1;
+                Err(Status::INVALID_ARGUMENT)
+            }
+        })
     }
 }
 

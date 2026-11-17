@@ -113,7 +113,7 @@ fn a_job_runs_on_the_handles_of_the_buffers_it_names_and_completes_on_its_output
     // The input stays the driver's; the output is the consumer's until it comes back.
     assert!(converter.holds(1));
     assert!(!converter.holds(2));
-    consumer.return_buffer(2);
+    consumer.return_buffer(2).expect("the consumer holds this buffer");
     assert_eq!(converter.serve(&mut stream, 78), Ok(0));
     assert!(converter.holds(2));
 }
@@ -303,7 +303,7 @@ fn buffers_held_from_before_a_new_consumer_are_given_up_and_taken_again() {
     );
     assert!(converter.holds(0) && converter.holds(2));
     // A job that fails still completes to the consumer that posted it.
-    consumer.return_buffer(1);
+    consumer.return_buffer(1).expect("the consumer holds this buffer");
     assert_eq!(converter.serve(&mut stream, 0), Ok(0));
     consumer.change_consumer();
     let mut odd = job(8, 0, 1);
@@ -333,14 +333,14 @@ fn an_engine_that_fails_completes_the_job_as_failed_and_is_tried_again() {
     failed_on(consumer.take_frame(), 2, 2);
     assert_eq!(plan.opens.get(), 1);
     // Due: it reopens and the next job runs.
-    consumer.return_buffer(1);
+    consumer.return_buffer(1).expect("the consumer holds this buffer");
     post(&consumer, &job(3, 0, 1));
     assert_eq!(converter.serve(&mut stream, 250_000_000), Ok(1));
     assert_eq!(consumer.take_frame().expect("a completion").bytes, 4096);
     assert_eq!(converter.counters(), Counters { jobs: 1, errors: 2 });
     assert_eq!(plan.opens.get(), 2);
     // A conversion the device refuses fails the job and starts no backoff.
-    consumer.return_buffer(1);
+    consumer.return_buffer(1).expect("the consumer holds this buffer");
     plan.open_refused.set(true);
     let mut swapped = job(4, 0, 1);
     (swapped.input.fourcc, swapped.output.fourcc) = (XRGB, ARGB);
@@ -348,7 +348,7 @@ fn an_engine_that_fails_completes_the_job_as_failed_and_is_tried_again() {
     assert_eq!(converter.serve(&mut stream, 250_000_001), Ok(1));
     assert_eq!(converter.last_failure(), Some(Failure::Refused));
     failed_on(consumer.take_frame(), 1, 4);
-    consumer.return_buffer(1);
+    consumer.return_buffer(1).expect("the consumer holds this buffer");
     plan.open_refused.set(false);
     post(&consumer, &job(5, 0, 1));
     assert_eq!(converter.serve(&mut stream, 250_000_002), Ok(1));
@@ -375,7 +375,7 @@ fn bytes_that_are_not_a_job_fault_the_consumer_and_the_next_one_is_served() {
     assert_eq!(converter.serve(&mut stream, 0), Ok(1));
     assert_eq!(consumer.take_frame().expect("a completion").identity, 5);
     // A job longer than any the contract has is no job either.
-    consumer.return_buffer(1);
+    consumer.return_buffer(1).expect("the consumer holds this buffer");
     consumer.post_job(&[0; JOB_BYTES + 1]);
     assert_eq!(converter.serve(&mut stream, 0), Ok(1));
     assert_eq!(consumer.faults(), 2);
