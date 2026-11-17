@@ -10,6 +10,18 @@
 //! The order and the unwinding are those of the C `lem_init` and `lem_exit` it replaces.
 
 use core::ptr::addr_of;
+// The Rust half is one crate: the ports are its modules (kernel/rs/), and the ABI helpers are shared (rs/abi.rs).
+#[path = "rs/abi.rs"]
+mod abi;
+#[path = "rs/claims.rs"]
+mod claims;
+#[path = "rs/pwm.rs"]
+mod pwm;
+#[path = "rs/gpio.rs"]
+mod gpio;
+#[path = "rs/power.rs"]
+mod power;
+
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
 // Opaque: the C descriptors are passed by address only. Their types are struct platform_driver and
@@ -28,7 +40,7 @@ unsafe extern "C" {
     fn platform_driver_unregister(drv: *mut c_void);
     fn misc_register(misc: *mut c_void) -> c_int;
     fn misc_deregister(misc: *mut c_void);
-    /// lemnos_claims_rs.rs: the claim table and the claim files' owner. Built with CONFIG_RUST.
+    /// rs/claims.rs: the claim table and the claim files' owner. Built with CONFIG_RUST.
     fn lem_claims_init(owner: *mut c_void);
 }
 

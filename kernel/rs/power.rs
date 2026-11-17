@@ -12,11 +12,12 @@
 //! exclusive is an inline over the exported __reset_control_get with the same flags. lem_event_post stays C
 //! until the events stage.
 
+use crate::abi::{c_result, err_ptr, ret};
 use core::{ffi::c_void, mem::offset_of, ptr};
 use kernel::{
     alloc::KBox,
     bindings,
-    error::{code::*, from_err_ptr, Error},
+    error::{code::*, from_err_ptr},
     ffi::{c_char, c_int, c_long, c_ulong},
     prelude::*,
     sync::Mutex,
@@ -45,7 +46,7 @@ const RESET_CONTROL_EXCLUSIVE: c_int = 1 << 2;
 
 /// `struct lemnos_power` of lemnos.h (LEMNOS_IOC_POWER).
 #[repr(C)]
-pub struct LemnosPower {
+pub(crate) struct LemnosPower {
     block: u32,
     kind: u32,
     op: u32,
@@ -126,27 +127,6 @@ unsafe extern "C" {
 
 /// IS_ERR of linux/err.h: an error pointer is an errno in the top 4095 addresses. Kernel pointers are high,
 /// so they are tested as unsigned, never as signed.
-/// The C return of a Result: the value, or the kernel's own errno, which is already negative.
-fn ret(r: Result<c_long>) -> c_long {
-    match r {
-        Ok(v) => v,
-        Err(e) => e.to_errno() as c_long,
-    }
-}
-
-/// A Result from a C return that is a value or a negative errno.
-fn c_result(v: c_long) -> Result<c_long> {
-    if v < 0 {
-        Err(Error::from_errno(v as c_int))
-    } else {
-        Ok(v)
-    }
-}
-
-/// An error pointer of an errno, as ERR_PTR makes it.
-fn err_ptr(e: Error) -> *mut c_void {
-    (e.to_errno() as isize) as *mut c_void
-}
 
 /// The notifier of a supply: the fault bits of a supply's event become a supply-fault event.
 ///
@@ -254,7 +234,7 @@ fn cstr_eq(stored: &[u8], name: &[u8]) -> bool {
 /// # Safety
 /// `dev` is the block's device, live for the state's life.
 #[no_mangle]
-pub unsafe extern "C" fn lem_power_create(dev: *mut c_void) -> *mut c_void {
+pub(crate) unsafe extern "C" fn lem_power_create(dev: *mut c_void) -> *mut c_void {
     let init = try_pin_init!(LemPower {
         dev: dev.cast(),
         block: 0,
@@ -273,7 +253,7 @@ pub unsafe extern "C" fn lem_power_create(dev: *mut c_void) -> *mut c_void {
 /// # Safety
 /// `p` is a live power state from lem_power_create.
 #[no_mangle]
-pub unsafe extern "C" fn lem_power_set_block(p: *mut c_void, block: u32) {
+pub(crate) unsafe extern "C" fn lem_power_set_block(p: *mut c_void, block: u32) {
     // SAFETY: the caller's contract.
     unsafe { (*(p as *mut LemPower)).block = block };
 }
@@ -283,7 +263,7 @@ pub unsafe extern "C" fn lem_power_set_block(p: *mut c_void, block: u32) {
 /// # Safety
 /// `p` is a live power state; `r` is the ioctl's argument.
 #[no_mangle]
-pub unsafe extern "C" fn lem_power_request(p: *mut c_void, r: *mut LemnosPower) -> c_long {
+pub(crate) unsafe extern "C" fn lem_power_request(p: *mut c_void, r: *mut LemnosPower) -> c_long {
     // SAFETY: the caller's contract.
     ret(unsafe { power_request(p as *mut LemPower, r) })
 }
@@ -504,7 +484,7 @@ unsafe fn lem_reset(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
 /// # Safety
 /// `p` is a live power state from lem_power_create, not used after this call.
 #[no_mangle]
-pub unsafe extern "C" fn lem_power_destroy(p: *mut c_void) {
+pub(crate) unsafe extern "C" fn lem_power_destroy(p: *mut c_void) {
     let p = p as *mut LemPower;
     // SAFETY: the caller's contract; the lock is not contended once the state is being destroyed.
     let n = unsafe { *(*p).lock.lock() };

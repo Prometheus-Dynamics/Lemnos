@@ -7,6 +7,7 @@
 //! through the bindings, exactly as the C called them; the two inline helpers (bus_find_device_by_name,
 //! pwm_get_state) are one-line shims in lemnos_helpers.c.
 
+use crate::abi::LemClaimOps;
 use core::{ffi::c_void, mem::offset_of, ptr};
 use kernel::{
     alloc::KBox,
@@ -24,7 +25,7 @@ const LEM_PWM_RESOURCE_MAX: usize = LEMNOS_NAME_MAX;
 
 /// `struct lemnos_pwm_request` of lemnos.h (LEMNOS_IOC_PWM_REQUEST).
 #[repr(C)]
-pub struct LemnosPwmRequest {
+pub(crate) struct LemnosPwmRequest {
     claim: i32,
     channel: u32,
     provider: [c_char; LEMNOS_NAME_MAX - 16],
@@ -32,7 +33,7 @@ pub struct LemnosPwmRequest {
 
 /// `struct lemnos_pwm_state` of lemnos.h (LEMNOS_IOC_PWM_APPLY and LEMNOS_IOC_PWM_GET).
 #[repr(C)]
-pub struct LemnosPwmState {
+pub(crate) struct LemnosPwmState {
     claim: i32,
     enabled: u32,
     inverted: u32,
@@ -44,16 +45,6 @@ pub struct LemnosPwmState {
 const _: () = assert!(core::mem::size_of::<LemnosPwmRequest>() == 56);
 const _: () = assert!(core::mem::size_of::<LemnosPwmState>() == 32);
 
-/// The claim's operations table, as lemnos_claims_rs.rs reads it (`struct lem_claim_ops`): three pointers.
-/// Only `release` is set for a channel; `read` and `poll` are NULL.
-#[repr(C)]
-struct LemClaimOps {
-    release: Option<unsafe extern "C" fn(*mut c_void)>,
-    read: Option<unsafe extern "C" fn()>,
-    poll: Option<unsafe extern "C" fn()>,
-}
-
-const _: () = assert!(core::mem::size_of::<LemClaimOps>() == 3 * core::mem::size_of::<usize>());
 
 /// One channel, the claim's private data: the PWM device, held until the claim ends.
 #[repr(C)]
@@ -74,7 +65,7 @@ static LEM_CHANNEL_OPS: OpsCell = OpsCell(LemClaimOps {
 });
 
 unsafe extern "C" {
-    /// lemnos_claims_rs.rs: the claim functions the C subsystems use, exported with the C signatures.
+    /// rs/claims.rs: the claim functions the C subsystems use, exported with the C signatures.
     fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
     fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int;
     fn lem_claim_attached(file: *mut c_void, ops: *const LemClaimOps) -> *mut c_void;
@@ -186,7 +177,7 @@ unsafe extern "C" fn lem_channel_release(data: *mut c_void) {
 /// # Safety
 /// `r` is the ioctl's argument, from the copy.
 #[no_mangle]
-pub unsafe extern "C" fn lem_pwm_request(r: *mut LemnosPwmRequest) -> c_long {
+pub(crate) unsafe extern "C" fn lem_pwm_request(r: *mut LemnosPwmRequest) -> c_long {
     // SAFETY: the caller's argument.
     let r = unsafe { &*r };
     let provider = &r.provider;
@@ -240,7 +231,7 @@ unsafe fn channel_of(fd: i32) -> (*mut bindings::file, *mut LemChannel) {
 /// # Safety
 /// `s` is the ioctl's argument, from the copy.
 #[no_mangle]
-pub unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_long {
+pub(crate) unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_long {
     // SAFETY: the caller's argument.
     let s = unsafe { &*s };
     // SAFETY: the claim is an fd from the ioctl; the reference is dropped below.
@@ -276,7 +267,7 @@ pub unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_long {
 /// # Safety
 /// `s` is the ioctl's argument, from the copy.
 #[no_mangle]
-pub unsafe extern "C" fn lem_pwm_get(s: *mut LemnosPwmState) -> c_long {
+pub(crate) unsafe extern "C" fn lem_pwm_get(s: *mut LemnosPwmState) -> c_long {
     // SAFETY: the caller's argument.
     let s = unsafe { &mut *s };
     // SAFETY: as lem_pwm_apply.

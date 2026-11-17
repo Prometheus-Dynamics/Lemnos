@@ -3,7 +3,7 @@
 //!
 //! A line is taken the way any module outside a device tree takes one: gpio_request() on the chip's
 //! base plus the offset, since gpiod_request() is not exported. gpiolib refuses a line someone holds.
-//! The line belongs to a claim (lemnos_claims_rs.rs): the claim's file reads the line's edges, polls,
+//! The line belongs to a claim (rs/claims.rs): the claim's file reads the line's edges, polls,
 //! configures, gets and sets it. The four C entry points keep their signatures (lemnos_internal.h):
 //! lem_gpio_request, lem_gpio_config, lem_gpio_get and lem_gpio_set.
 //!
@@ -11,6 +11,7 @@
 //! header makes them a formula: ktime_get_ns() over ktime_get(), pinconf_to_config_packed() and
 //! dev_name() (see the comments on each).
 
+use crate::abi::LemClaimOps;
 use core::{
     fmt::Write,
     mem::size_of,
@@ -53,7 +54,7 @@ const LEM_GPIO_FLAGS: u32 = OUTPUT | ACTIVE_LOW | LEM_GPIO_BIAS | LEM_GPIO_DRIVE
 
 /// `struct lemnos_gpio_request` of lemnos.h (LEMNOS_IOC_GPIO_REQUEST).
 #[repr(C)]
-pub struct LemnosGpioRequest {
+pub(crate) struct LemnosGpioRequest {
     claim: c_int,
     chip: u32,
     offset: u32,
@@ -62,7 +63,7 @@ pub struct LemnosGpioRequest {
 
 /// `struct lemnos_gpio_config` of lemnos.h (LEMNOS_IOC_GPIO_CONFIG).
 #[repr(C)]
-pub struct LemnosGpioConfig {
+pub(crate) struct LemnosGpioConfig {
     claim: c_int,
     flags: u32,
     value: u32,
@@ -71,7 +72,7 @@ pub struct LemnosGpioConfig {
 
 /// `struct lemnos_gpio_value` of lemnos.h (LEMNOS_IOC_GPIO_GET and _SET).
 #[repr(C)]
-pub struct LemnosGpioValue {
+pub(crate) struct LemnosGpioValue {
     claim: c_int,
     value: u32,
 }
@@ -87,24 +88,9 @@ struct LemnosGpioEvent {
 
 const _: () = assert!(size_of::<LemnosGpioEvent>() == 16);
 
-/// `struct lem_claim_ops` of lemnos_internal.h, as lemnos_claims_rs.rs declares it: three pointers.
-#[repr(C)]
-struct LemClaimOps {
-    release: Option<unsafe extern "C" fn(*mut c_void)>,
-    read: Option<unsafe extern "C" fn(*mut c_void, *mut bindings::file, *mut c_char, usize) -> isize>,
-    poll: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *mut bindings::file,
-            *mut bindings::poll_table_struct,
-        ) -> bindings::__poll_t,
-    >,
-}
-
-const _: () = assert!(size_of::<LemClaimOps>() == 3 * size_of::<usize>());
 
 unsafe extern "C" {
-    /// lemnos_claims_rs.rs: the claim API (lemnos_internal.h).
+    /// rs/claims.rs: the claim API (lemnos_internal.h).
     fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
     fn lem_claim_attach(
         fd: c_int,
@@ -541,7 +527,7 @@ fn attached(file: &FileRef) -> *const LemLine {
 /// # Safety
 /// `r` is the caller's own copy of the ioctl argument.
 #[no_mangle]
-pub unsafe extern "C" fn lem_gpio_request(r: *const LemnosGpioRequest) -> c_long {
+pub(crate) unsafe extern "C" fn lem_gpio_request(r: *const LemnosGpioRequest) -> c_long {
     // SAFETY: the caller's contract.
     let r = unsafe { &*r };
     if r.reserved != 0 {
@@ -597,7 +583,7 @@ pub unsafe extern "C" fn lem_gpio_request(r: *const LemnosGpioRequest) -> c_long
 /// # Safety
 /// `c` is the caller's own copy of the ioctl argument.
 #[no_mangle]
-pub unsafe extern "C" fn lem_gpio_config(c: *const LemnosGpioConfig) -> c_long {
+pub(crate) unsafe extern "C" fn lem_gpio_config(c: *const LemnosGpioConfig) -> c_long {
     // SAFETY: the caller's contract.
     let c = unsafe { &*c };
     let file = FileRef::get(c.claim);
@@ -628,7 +614,7 @@ pub unsafe extern "C" fn lem_gpio_config(c: *const LemnosGpioConfig) -> c_long {
 /// # Safety
 /// `v` is the caller's own copy of the ioctl argument.
 #[no_mangle]
-pub unsafe extern "C" fn lem_gpio_get(v: *mut LemnosGpioValue) -> c_long {
+pub(crate) unsafe extern "C" fn lem_gpio_get(v: *mut LemnosGpioValue) -> c_long {
     // SAFETY: the caller's contract.
     let v = unsafe { &mut *v };
     let file = FileRef::get(v.claim);
@@ -653,7 +639,7 @@ pub unsafe extern "C" fn lem_gpio_get(v: *mut LemnosGpioValue) -> c_long {
 /// # Safety
 /// `v` is the caller's own copy of the ioctl argument.
 #[no_mangle]
-pub unsafe extern "C" fn lem_gpio_set(v: *const LemnosGpioValue) -> c_long {
+pub(crate) unsafe extern "C" fn lem_gpio_set(v: *const LemnosGpioValue) -> c_long {
     // SAFETY: the caller's contract.
     let v = unsafe { &*v };
     let file = FileRef::get(v.claim);
