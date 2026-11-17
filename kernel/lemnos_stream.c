@@ -87,6 +87,20 @@
 
 #include "lemnos_internal.h"
 
+/*
+ * shmem_file() is an inline in the header through 7.3.3 and an unexported function from 7.3.5 on,
+ * so the module cannot link it there (modpost: symbol 'shmem_file' undefined). Its body through
+ * 7.3.3 was this test, and shmem_mapping() is exported in both, so the module keeps the test here.
+ */
+static bool lemnos_shmem_file(struct file *file)
+{
+	if (!IS_ENABLED(CONFIG_SHMEM))
+		return false;
+	if (!file || !file->f_mapping)
+		return false;
+	return shmem_mapping(file->f_mapping);
+}
+
 /* Each stream is kernel memory, so their number has an end. */
 #define LEM_STREAM_MAX 64
 /*
@@ -1692,7 +1706,7 @@ static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_rea
 	if (!marks)
 		return -EBADF;
 	/* The page's size is checked after its layout: a page of an older layout is smaller. */
-	if (!shmem_file(marks) ||
+	if (!lemnos_shmem_file(marks) ||
 	    (READ_ONCE(SHMEM_I(file_inode(marks))->seals) & want) != want ||
 	    i_size_read(file_inode(marks)) < (loff_t)sizeof(u64))
 		goto put;
@@ -1870,7 +1884,7 @@ static long lem_stream_bell_set(struct lem_stream *s, const struct lemnos_stream
 		eventfd_ctx_put(efd);
 		return -EBADF;
 	}
-	if (!shmem_file(file) || i_size_read(file_inode(file)) < (loff_t)sizeof(u64))
+	if (!lemnos_shmem_file(file) || i_size_read(file_inode(file)) < (loff_t)sizeof(u64))
 		goto put;
 	page = shmem_read_mapping_page(file->f_mapping, 0);
 	if (IS_ERR(page)) {
