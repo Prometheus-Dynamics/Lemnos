@@ -264,6 +264,42 @@ pub fn exit_now(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
+/// Issues `request` with a uAPI structure the caller laid out in `arg`, `N` bytes, as the request
+/// was made from `[u8; N]` (`_IOW`/`_IOWR` of that size), so the kernel reads and writes exactly
+/// those bytes. For requests whose arguments a typed wrapper would not pass as given (a claim of
+/// -1, a value outside 0 and 1): the kernel's answer is the error.
+///
+/// # Errors
+///
+/// The kernel refuses the request; its errno is the error's.
+pub fn ioctl_bytes<const N: usize>(
+    node: BorrowedFd<'_>,
+    request: u32,
+    arg: &mut [u8; N],
+) -> io::Result<()> {
+    // SAFETY: `arg` is a live, exclusive array of `N` bytes, which the request's size field says
+    // is the structure the kernel reads (and writes back, for `_IOWR`); `node` is live.
+    let rc = unsafe { libc::ioctl(node.as_raw_fd(), request as _, arg.as_mut_ptr()) };
+    if rc < 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Reads up to `buf.len()` bytes from `fd`, as `read(2)`.
+///
+/// # Errors
+///
+/// `read(2)` fails, for instance with `EINVAL` for a buffer too short for an event.
+pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is a live, writable slice of `buf.len()` bytes for the call.
+    let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        return Err(last_error());
+    }
+    Ok(n as usize)
+}
+
 fn c_string(text: &str) -> io::Result<std::ffi::CString> {
     std::ffi::CString::new(text.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a name holds a NUL"))
