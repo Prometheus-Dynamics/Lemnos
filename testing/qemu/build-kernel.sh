@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the kernel the guest boots: a pinned stable release, the default
+# Builds the kernel the guest boots: a pinned stable release (7.3.5, sha256 from kernel.org sha256sums.asc), the default
 # configuration plus kernel.config, with lock and memory checking on.
 #
 #   build-kernel.sh <directory> [--modules-off]
@@ -12,8 +12,8 @@
 # <directory>/build/arch/x86/boot/bzImage, ready for KERNEL.
 set -euo pipefail
 
-version=7.3.3
-sha256=79c66dde66cd96877fcde8f7d36aec946b1f423d2b97b5a7b1751b75c764f3d1
+version=7.3.5
+sha256=8f293f83d54f0b7b9be56863ebc5e4ea79d73e530b4ae55c572be97ef39f0990
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="${1:?usage: build-kernel.sh <directory> [--modules-off]}"
 mode="${2:-}"
