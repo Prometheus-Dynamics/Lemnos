@@ -40,7 +40,10 @@ use std::io;
 
 pub use layout::{Geometry, LAYOUT, MAX_FIELDS, MAX_HISTORY, MAX_PAYLOAD, Spec, format};
 #[cfg(target_os = "linux")]
-pub use map::{ReadMap, WriteMap, read_only, sealed_memfd};
+pub use map::{
+    ReadMap, WriteMap, hung_up, is_read_only, liveness_pipe, read_only, sealed_memfd,
+    share_read_only,
+};
 pub use mem::{Heap, Mem, MemMut};
 pub use reader::{Next, Reader, Sample};
 #[cfg(target_os = "linux")]

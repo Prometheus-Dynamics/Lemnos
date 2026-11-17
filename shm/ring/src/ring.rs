@@ -72,6 +72,16 @@ impl Ring {
         Ok(map::read_only(self.map.fd())?)
     }
 
+    /// Makes the ring something readers can be handed and nothing can write through: see
+    /// [`map::share_read_only`]. The owner's own write end keeps working.
+    ///
+    /// # Errors
+    ///
+    /// As [`map::share_read_only`].
+    pub fn share_read_only(&self) -> Result<(), RingError> {
+        map::share_read_only(self.map.fd())
+    }
+
     /// A writer in this process.
     ///
     /// # Errors
