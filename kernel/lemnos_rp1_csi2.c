@@ -114,6 +114,9 @@
 #define CSI2_MODE_FE_STREAMING	3
 #define IRQ_EN_FS		BIT(13)
 #define IRQ_EN_FE_ACK		BIT(15)
+/* stop_armed: which channel's FE_ACK after its FORCE is the stop's acknowledgement. */
+#define STOP_ARM_IMAGE		BIT(0)
+#define STOP_ARM_EMB		BIT(1)
 #define PACK_LINE		BIT(29)
 #define PACK_BYTES		BIT(30)
 #define CH_MODE_SHIFT		1
@@ -142,13 +145,12 @@
 
 /*
  * Waiting for the channel to stop: its line counter must hold still for the
- * stop window (lemnos_rp1_csi2_window.h: three line times, at least 1.6 ms),
+ * stop bound (max 4 frame periods, 250 ms),
  * counted in reads a read apart at 200-400 us. The window is worked out at START
  * from the stride and the link, and the poll budget is LRC_STOP_POLLS plus the
  * window's reads, so the wait is bounded whatever the mode. Not measured on a
  * board: see testing/board-runs/FLAKE-CSI2.md.
  */
-#define LRC_STOP_POLLS		250
 
 /* How often a channel with nothing armed looks for a free buffer again. */
 #define LRC_RETRY_MS		1
@@ -458,11 +460,22 @@ static irqreturn_t lrc_isr(int irq, void *data)
 
 	sts = rd(l->cfg, MIPICFG_INTS);
 	if (sts & MIPICFG_INT_CSI_DMA) {
+		/*
+		 * Read and cleared under the frame lock, with the stop's arming: a frame end this
+		 * reads was latched after the stop cleared the status, so it follows the stop's FORCE
+		 * or it isn't counted at all.
+		 */
+		spin_lock(&l->lock);
 		status = rd(l->dma, CSI2_STATUS);
 		if (status) {
 			wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
 			handled = true;
 		}
+		if ((status & IRQ_FE_ACK(LRC_CH)) && (l->stop_armed & STOP_ARM_IMAGE))
+			complete(&l->stop_done[0]);
+		if ((status & IRQ_FE_ACK(LRC_EMB_CH)) && (l->stop_armed & STOP_ARM_EMB))
+			complete(&l->stop_done[1]);
+		spin_unlock(&l->lock);
 	}
 	sof = status & IRQ_FS(LRC_CH);
 	eof = status & IRQ_FE_ACK(LRC_CH);
@@ -512,45 +525,20 @@ static irqreturn_t lrc_isr(int irq, void *data)
 }
 
 /*
- * Whether the channels are seen to have stopped. The FORCE and the ADDR0
- * writes have gone out and the read flushed them; what remains is what was
- * already in flight on the bus, and each line counter moves until that's done.
- * Bounded. Sleeps: never on the frame path. `emb` also watches the embedded
- * channel.
+ * Whether the stop's FE_ACK arrived: after its FORCE, for each channel stopped, within the stop bound.
+ * The bound is max(4 frame periods, 250 ms) (docs/streams.md). The frame period is the START layout's,
+ * height x line time: the contract period. DEBT-C's measured period replaces it when it lands (B7).
+ * A still line counter is not evidence of a stop and is not used. Sleeps: never on the frame path.
  */
-static bool lrc_dma_stopped(struct lrc_dev *l, bool emb)
+static bool lrc_fe_ack_wait(struct lrc_dev *l, bool emb)
 {
-	unsigned int chans = emb ? 2 : 1;
-	/* Never below the minimum: a stop with no START behind it still waits a full window. */
-	unsigned int need = max(l->stop_still, lrc_still_reads(0));
-	unsigned int polls = LRC_STOP_POLLS + need;
-	u32 last[2] = { 0, 0 };
-	unsigned int still[2] = { 0, 0 };
+	const struct lemnos_rp1_csi2_start *st = &l->start;
+	u64 frame_us = lrc_line_us(st->stride, st->lanes, st->mbps) * st->height;
+	unsigned long bound = usecs_to_jiffies(max(4 * frame_us, 250000ULL));
 
-	/* The window is at least the minimum: the reads are at least the shortest gap apart. */
-	BUILD_BUG_ON(LRC_WINDOW_READ_GAP_US * 8 != LRC_WINDOW_MIN_US);
-	for (unsigned int c = 0; c < chans; c++)
-		last[c] = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
-	for (unsigned int i = 0; i < polls; i++) {
-		bool done = true;
-
-		usleep_range(200, 400);
-		for (unsigned int c = 0; c < chans; c++) {
-			u32 now = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
-
-			if (now == last[c]) {
-				if (still[c] < need)
-					still[c]++;
-			} else {
-				still[c] = 0;
-				last[c] = now;
-			}
-			done = done && still[c] >= need;
-		}
-		if (done)
-			return true;
-	}
-	return false;
+	if (!wait_for_completion_timeout(&l->stop_done[0], bound))
+		return false;
+	return !emb || wait_for_completion_timeout(&l->stop_done[1], bound);
 }
 
 /*
@@ -565,30 +553,49 @@ static void lrc_stop_locked(struct lrc_dev *l)
 {
 	struct lem_stream *s = l->stream, *e = l->emb.stream;
 	unsigned long flags;
+	bool ack;
 
 	spin_lock_irqsave(&l->lock, flags);
 	l->streaming = false;
-	/* csi2_stop_channel: FORCE stops mid-frame; ADDR0 latches it, twice. */
-	wr(l->dma, CSI2_CH_CTRL(LRC_CH), FORCE);
+	reinit_completion(&l->stop_done[0]);
+	reinit_completion(&l->stop_done[1]);
+	/*
+	 * Only a frame end after the FORCE below is the stop's acknowledgement. An FE_ACK still in the status
+	 * is from before the stop, so it is cleared here; the ISR counts one only while the stop is armed.
+	 */
+	wr(l->dma, CSI2_STATUS, IRQ_FE_ACK(LRC_CH) | (e ? IRQ_FE_ACK(LRC_EMB_CH) : 0));
+	l->stop_armed = STOP_ARM_IMAGE | (e ? STOP_ARM_EMB : 0);
+	/*
+	 * csi2_stop_channel writes FORCE alone, which drops the channel's IRQ enables. This keeps the FE_ACK
+	 * enable set, so the frame end that follows FORCE is delivered.
+	 */
+	wr(l->dma, CSI2_CH_CTRL(LRC_CH), FORCE | IRQ_EN_FE_ACK);
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
 	if (e) {
-		wr(l->dma, CSI2_CH_CTRL(LRC_EMB_CH), FORCE);
+		wr(l->dma, CSI2_CH_CTRL(LRC_EMB_CH), FORCE | IRQ_EN_FE_ACK);
 		wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
 		wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
 	}
+	spin_unlock_irqrestore(&l->lock, flags);
+	/* Everything written above is posted across a bus: a read makes it land first. */
+	(void)rd(l->dma, CSI2_CH_CTRL(LRC_CH));
+
+	/* Confirmed by the frame end after FORCE, or not at all, within the bound. */
+	ack = lrc_fe_ack_wait(l, e != NULL);
+
+	spin_lock_irqsave(&l->lock, flags);
+	l->stop_armed = 0;
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	wr(l->cfg, MIPICFG_INTE, 0);
 	spin_unlock_irqrestore(&l->lock, flags);
 	/* Not streaming, so a retry finds nothing to do and doesn't come again. */
 	cancel_delayed_work_sync(&l->retry);
 
-	/* Everything written above is posted across a bus: a read makes it land first. */
-	(void)rd(l->dma, CSI2_CH_CTRL(LRC_CH));
 	/* No handler still holds cur/next, and none will start. */
 	synchronize_irq(l->irq);
 
-	if (lrc_dma_stopped(l, e != NULL)) {
+	if (ack) {
 		if (l->cur.valid)
 			lem_stream_cancel(s, &l->cur.slot);
 		if (l->next.valid)
@@ -666,8 +673,6 @@ static int lrc_check_start(const struct lrc_dev *l, const struct lemnos_rp1_csi2
 		return -EINVAL;
 	if ((s->flags & LEMNOS_RP1_CSI2_UNPACK16) && s->stride < 2 * s->width)
 		return -EINVAL;
-	if (!lrc_window_fits(lrc_line_us(s->stride, s->lanes, s->mbps)))
-		return -EINVAL;
 	return 0;
 }
 
@@ -722,15 +727,12 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	if (l->emb.req_fd >= 0) {
 		unsigned long long emb = lrc_line_us(l->emb.req_bytes, s->lanes, s->mbps);
 
-		if (!lrc_window_fits(emb))
-			return -EINVAL;
 		line = max(line, emb);
 	}
 	if (l->wedged)
 		return -EIO;
 	if (l->stream || (l->fe && lem_pisp_fe_streaming(l->fe)))
 		return -EBUSY;
-	l->stop_still = lrc_still_reads(line);
 
 	ret = lrc_attach(l, s->stream_fd, s->size, lrc_stream_stop, &stream);
 	if (ret)
@@ -1151,6 +1153,8 @@ static int lrc_probe(struct platform_device *pdev)
 	mutex_init(&l->ctl);
 	init_rwsem(&l->going);
 	spin_lock_init(&l->lock);
+	init_completion(&l->stop_done[0]);
+	init_completion(&l->stop_done[1]);
 	INIT_DELAYED_WORK(&l->retry, lrc_retry);
 	platform_set_drvdata(pdev, l);
 

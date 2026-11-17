@@ -36,6 +36,8 @@ struct tcsi_regs {
 #define TCSI_IOC_BUSY	_IOW('T', 3, __u32)
 /* The lines still to come after FORCE (what TCSI_IOC_BUSY set, less those written). */
 #define TCSI_IOC_BUSY_LEFT	_IOR('T', 13, __u32)
+/* Freezes the line counter for that many lines of the busy window: the DMA is still busy, the counter is not moving. */
+#define TCSI_IOC_BLANK	_IOW('T', 14, __u32)
 
 /* The embedded channel's registers, read as the image channel's (TCSI_IOC_PEEK). */
 #define TCSI_IOC_PEEK_EMB	_IOR('T', 11, struct tcsi_regs)

@@ -98,6 +98,10 @@ static DEFINE_RAW_SPINLOCK(tcsi_lock);
 static u64 tcsi_cur_addr;
 static u32 tcsi_cur_len;
 static u32 tcsi_busy;		/* lines the channel still writes after FORCE; ~0: forever */
+static u32 tcsi_blank;		/* of those, the lines the counter does not move for (TCSI_IOC_BLANK) */
+static bool tcsi_watch;		/* a frame is streaming: the tick watches for a FORCE to acknowledge */
+#define TCSI_IRQ_EN_FE_ACK	BIT(15)	/* CH_CTRL: the channel's FE_ACK interrupt enable, as the driver writes it */
+#define TCSI_R_INT_CSI_DMA	BIT(0)	/* MIPI cfg INTS: the DMA's interrupt, which the driver reads */
 static u8 tcsi_pattern;
 static u32 tcsi_lines;		/* the next armed frame end's lines; 0: the height */
 
@@ -174,12 +178,27 @@ static enum hrtimer_restart tcsi_tick(struct hrtimer *t)
 	if (tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
 		u32 step = tcsi_busy == U32_MAX ? (u32)min_t(u64, lines, U32_MAX)
 						: (u32)min_t(u64, lines, tcsi_busy);
+		u32 blank = min(step, tcsi_blank);
 
-		writel(readl(dma + R_DEBUG) + step, dma + R_DEBUG);
+		/* The counter holds still for the blanking lines; the DMA is busy through them all. */
+		tcsi_blank -= blank;
+		writel(readl(dma + R_DEBUG) + step - blank, dma + R_DEBUG);
 		if (tcsi_busy != U32_MAX)
 			tcsi_busy -= step;
 	}
-	if (tcsi_busy)
+	/*
+	 * The stop's frame end: once the busy window is over (or there was none), a FORCE with the FE_ACK
+	 * interrupt enabled gets its frame end, once. A FORCE with it disabled gets none, as the board showed.
+	 */
+	if (tcsi_watch && !tcsi_busy && (readl(dma + R_CTRL) & R_FORCE)) {
+		tcsi_watch = false;
+		if (readl(dma + R_CTRL) & TCSI_IRQ_EN_FE_ACK) {
+			writel(readl(dma + R_STATUS) | TCSI_FE_ACK, dma + R_STATUS);
+			writel(readl(tcsi_regs[2] + R_INTS) | TCSI_R_INT_CSI_DMA, tcsi_regs[2] + R_INTS);
+			irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
+		}
+	}
+	if (tcsi_busy || tcsi_watch)
 		next = HRTIMER_RESTART;
 	raw_spin_unlock_irqrestore(&tcsi_lock, flags);
 	return next;
@@ -305,10 +324,22 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		raw_spin_lock_irqsave(&tcsi_lock, flags);
 		tcsi_busy = lines;
+		tcsi_watch = true;
 		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
 		if (lines)
 			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS),
 				      HRTIMER_MODE_REL_PINNED_HARD);
+		return 0;
+	}
+	if (cmd == TCSI_IOC_BLANK) {
+		u32 lines;
+		unsigned long flags;
+
+		if (copy_from_user(&lines, uarg, sizeof(lines)))
+			return -EFAULT;
+		raw_spin_lock_irqsave(&tcsi_lock, flags);
+		tcsi_blank = lines;
+		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
 		return 0;
 	}
 	if (cmd == TCSI_IOC_BUSY_LEFT) {
@@ -322,6 +353,7 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	if (cmd == TCSI_IOC_FIRE) {
 		u32 status;
+		unsigned long flags;
 
 		if (copy_from_user(&status, uarg, sizeof(status)))
 			return -EFAULT;
@@ -329,6 +361,10 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			tcsi_cur_addr = (u64)readl(dma + R_ADDR1) << 36 |
 					(u64)readl(dma + R_ADDR0) << 4;
 			tcsi_cur_len = readl(dma + R_LENGTH) << 4;
+			raw_spin_lock_irqsave(&tcsi_lock, flags);
+			tcsi_watch = true;
+			raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS), HRTIMER_MODE_REL_PINNED_HARD);
 		}
 		if (status & TCSI_EMB_FS) {
 			tcsi_emb_addr = (u64)readl(dma + R_EMB(R_ADDR1)) << 36 |
