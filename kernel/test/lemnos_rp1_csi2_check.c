@@ -30,9 +30,9 @@
 
 #include "../lemnos.h"
 #include "../lemnos_rp1_csi2.h"
-#include "../lemnos_rp1_csi2_window.h"
 #include "find_block.h"
 #include "lemnos_test_csi2.h"
+#include "../lemnos_rp1_csi2_window.h"
 
 #define BUFFERS 4u
 #define BUFFER_BYTES 8192u
@@ -130,6 +130,12 @@ static struct tcsi_regs peek(void)
 	memset(&r, 0xff, sizeof(r));
 	ioctl(hw, TCSI_IOC_PEEK, &r);
 	return r;
+}
+
+/* Freezes the counter for `lines` of the busy window: a blanking gap, the DMA still busy. */
+static void blank(uint32_t lines)
+{
+	ioctl(hw, TCSI_IOC_BLANK, &lines);
 }
 
 static void busy(uint32_t lines)
@@ -706,8 +712,6 @@ static void test_window(int pool_fd)
 	unsigned long long line = lrc_line_us(6144, 1, 80);
 
 	CHECK(line == 615, "a 4096 px RAW12 line on one lane at 80 Mbit/s takes %llu us", line);
-	CHECK(lrc_window_fits(line), "that line's window fits the poll budget");
-	CHECK(lrc_still_reads(line) == 10, "that line's window is %u reads", lrc_still_reads(line));
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	a = good_start(s.fd);
 	a.lanes = 1;
@@ -718,7 +722,7 @@ static void test_window(int pool_fd)
 	a.size = 6144;
 	CHECK(!start(&a), "START takes the 4096 px RAW12 line at one lane, 80 Mbit/s");
 	fire(TCSI_FS);
-	drained_by("STOP waits the window of the slow link", act_stop, NULL, 100);
+	drained_by("STOP waits for the frame end after FORCE, slow link", act_stop, NULL, 100);
 	CHECK(!info().streaming, "stopped");
 	busy(0);
 	stream_close(&s);
@@ -1040,6 +1044,24 @@ static int run_wedge(const char *node, const char *dev, const char *heap)
 	pool_fd = make_pool(heap);
 	pool2_fd = make_pool(heap);
 	CHECK(ctl >= 0 && hw >= 0 && pool_fd >= 0 && pool2_fd >= 0, "wedge: set up");
+
+	/*
+	 * A blanking gap while the DMA is busy: the line counter holds still for the blanking lines, and the DMA
+	 * is still writing. STOP must not return until the frame end after FORCE, so no busy line is left when it
+	 * returns. A still counter alone, which the old stop read as stopped, returned here with the DMA busy.
+	 */
+	CHECK(!stream_open(&s, pool_fd), "blank: stream made");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "blank: START");
+	fire(TCSI_FS);
+	blank(400);
+	busy(600);
+	CHECK(!stop(), "blank: STOP returns");
+	CHECK(busy_left() == 0, "STOP did not return while the DMA was busy across a blanking gap (%u lines left)",
+	      busy_left());
+	blank(0);
+	busy(0);
+	stream_close(&s);
 
 	CHECK(!stream_open(&s, pool_fd), "stream made");
 	a = good_start(s.fd);
