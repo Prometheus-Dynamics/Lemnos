@@ -69,16 +69,84 @@ const JOB_WORDS: usize = 16;
 const W: u16 = 64;
 const H: u16 = 32;
 
-// lemnos.h: the ring's header words, as word indices into the ring (the module's ring is read as
-// 64-bit words), and the frame and state values.
-const RING_FRAMES_HEAD: usize = 16;
-const RING_FRAMES_TAIL: usize = 24;
-const RING_RETURNS_HEAD: usize = 32;
-const RING_JOBS_HEAD: usize = 48;
-const RING_FRAMES: usize = 64;
-const FRAME_WORDS: usize = 6;
-const RETURNS_AT: usize = RING_FRAMES + FRAME_SLOTS * FRAME_WORDS;
-const JOBS_AT: usize = RETURNS_AT + FRAME_SLOTS;
+// kernel/test/shm_ring.h (layout 2): the word numbers of the shared-memory ring, as word indices
+// into the ring (the module's ring is read as 64-bit words). The frame index holds, for each frame
+// slot, the lane slot the frame was published in (from bit 16). A lane slot is SHM_SLOT_WORDS
+// words: the stamp, the time, the meta, then the 48-byte entry from SHM_ENTRY on (the buffer in the
+// pair word, the identity at SHM_ENTRY + 3, the end at SHM_ENTRY + 5). The job block follows the
+// pool page: its control block, then the job slots.
+const SHM_W_HEAD: usize = 8;
+const SHM_INDEX: usize = 17;
+const SHM_SLOT_WORDS: usize = 10;
+const SHM_ENTRY: usize = 4;
+const SHM_TICKETS: usize = 8;
+const SHM_READERS: usize = 64;
+const SHM_JOB_HEAD: usize = 2;
+const SHM_JOB_SLOTS: usize = 4;
+
+/// `shm_page_at`: the pool page's first word, after the frame ring.
+const fn shm_page_at(frame_slots: usize) -> usize {
+    SHM_INDEX + frame_slots + frame_slots * SHM_SLOT_WORDS
+}
+
+/// `shm_control`: the control block's first word, after the pool page's tickets and cut-off words.
+const fn shm_control(frame_slots: usize, buffers: usize) -> usize {
+    shm_page_at(frame_slots) + SHM_TICKETS + buffers + SHM_READERS
+}
+
+/// The control block: the job head is at `CONTROL + SHM_JOB_HEAD`.
+const CONTROL: usize = shm_control(FRAME_SLOTS, BUFFERS as usize);
+/// The first job slot: each is one length word then the job's words.
+const JOBS_AT: usize = CONTROL + SHM_JOB_SLOTS;
+
+/// What `shm_frame_read` found for one frame sequence number.
+enum FrameRead {
+    /// The module has not published it yet (the frame head has not passed it).
+    NotYet,
+    /// Its slot holds another frame, or its stamp moved while it was read: the consumer was too
+    /// slow.
+    Reused,
+    /// The frame, read once and checked against its stamp.
+    Frame(ShmFrame),
+}
+
+/// The fields of a published frame that the check uses.
+struct ShmFrame {
+    buffer: u32,
+    identity: u64,
+    timestamp_ns: u64,
+    end_ns: u64,
+}
+
+/// Frame `seq` through the index, as `shm_frame_read` reads it (`kernel/test/shm_ring.h`). The
+/// time, pair, identity and end words are read between two reads of the stamp.
+fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead {
+    if ring[SHM_W_HEAD].load(Ordering::Acquire) <= seq {
+        return FrameRead::NotYet;
+    }
+    let index = SHM_INDEX + (seq & (frame_slots as u64 - 1)) as usize;
+    let slot = (ring[index].load(Ordering::Acquire) >> 16) as usize;
+    let at = SHM_INDEX + frame_slots + slot * SHM_SLOT_WORDS;
+    let stamp = ring[at].load(Ordering::Acquire);
+    if stamp != (seq + 1) << 1 {
+        return FrameRead::Reused;
+    }
+    let timestamp_ns = ring[at + 1].load(Ordering::Acquire);
+    let pair = ring[at + SHM_ENTRY + 1].load(Ordering::Acquire);
+    let identity = ring[at + SHM_ENTRY + 3].load(Ordering::Acquire);
+    let end_ns = ring[at + SHM_ENTRY + 5].load(Ordering::Acquire);
+    if ring[at].load(Ordering::Acquire) != stamp {
+        return FrameRead::Reused;
+    }
+    FrameRead::Frame(ShmFrame {
+        buffer: pair as u32,
+        identity,
+        timestamp_ns,
+        end_ns,
+    })
+}
+
+// lemnos.h: the state values.
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_FAULT: u32 = 2;
@@ -510,7 +578,6 @@ struct Stream {
     region: u32,
     jobs_head: Cell<u64>,
     frames_tail: Cell<u64>,
-    returns_head: Cell<u64>,
     last_start: Cell<u64>,
     last_end: Cell<u64>,
     /// What the fake hardware says it has done.
@@ -595,7 +662,6 @@ impl Stream {
             region: get32(&reg, 4),
             jobs_head: Cell::new(0),
             frames_tail: Cell::new(0),
-            returns_head: Cell::new(0),
             last_start: Cell::new(0),
             last_end: Cell::new(0),
             hw_done: Cell::new(batch as u8),
@@ -633,7 +699,7 @@ impl Stream {
         }
         self.jobs_head.set(head + 1);
         fence(Ordering::Release);
-        w[RING_JOBS_HEAD].store(head + 1, Ordering::Relaxed);
+        w[CONTROL + SHM_JOB_HEAD].store(head + 1, Ordering::Relaxed);
     }
 
     /// `LEMNOS_STREAM_IOC_KICK`: the errno it failed with, or 0.
@@ -692,30 +758,19 @@ impl Stream {
         raise_irq();
     }
 
-    /// The next frame: its buffer (-1 if none arrives in time) and its identity.
+    /// The next frame: its buffer (-1 if none arrives in time) and its identity. A buffer needs no
+    /// giving back: with no reader marking it, the module takes it back when it needs it.
     fn wait_frame(&self) -> (i64, u64) {
-        let w = self.words();
         for _ in 0..1000 {
-            let head = w[RING_FRAMES_HEAD].load(Ordering::Acquire);
-            let tail = self.frames_tail.get();
-            if head != tail {
-                let at = RING_FRAMES + (tail as usize & (FRAME_SLOTS - 1)) * FRAME_WORDS;
-                let word = w[at].load(Ordering::Relaxed);
-                let identity = w[at + 2].load(Ordering::Relaxed);
-                let fence_word = w[at + 4].load(Ordering::Relaxed);
-                self.last_start.set(w[at + 3].load(Ordering::Relaxed));
-                self.last_end.set(w[at + 5].load(Ordering::Relaxed));
-                self.frames_tail.set(tail + 1);
-                w[RING_FRAMES_TAIL].store(tail + 1, Ordering::Release);
-                // Give it back so the next job can have it.
-                let buffer = word as u32;
-                let ret_at = RETURNS_AT + (self.returns_head.get() as usize & (FRAME_SLOTS - 1));
-                w[ret_at].store(u64::from(buffer) | (fence_word << 32), Ordering::Relaxed);
-                self.returns_head.set(self.returns_head.get() + 1);
-                w[RING_RETURNS_HEAD].store(self.returns_head.get(), Ordering::Release);
-                return (i64::from(buffer), identity);
+            match shm_frame_read(self.words(), FRAME_SLOTS, self.frames_tail.get()) {
+                FrameRead::Frame(f) => {
+                    self.last_start.set(f.timestamp_ns);
+                    self.last_end.set(f.end_ns);
+                    self.frames_tail.set(self.frames_tail.get() + 1);
+                    return (i64::from(f.buffer), f.identity);
+                }
+                FrameRead::NotYet | FrameRead::Reused => thread::sleep(Duration::from_millis(2)),
             }
-            thread::sleep(Duration::from_millis(2));
         }
         (-1, 0)
     }
@@ -1464,7 +1519,7 @@ fn refuse_ring(env: &Env) {
     let Some(st) = open_stream(env, "!stream_open(&st)") else {
         return;
     };
-    st.ring_store(RING_JOBS_HEAD, 1000);
+    st.ring_store(CONTROL + SHM_JOB_HEAD, 1000);
     check(st.kick() == ERANGE, "got == ERANGE");
     drop(st);
 
@@ -2362,10 +2417,7 @@ fn test_wedge_counters(env: &Env) {
         st.pisp_wedged().is_ok_and(|w| w == 1),
         "!ioctl(st.fd, LEMNOS_PISP_BE_IOC_STATUS, &pb) && pb.wedged == 1",
     );
-    check(
-        st.ring_word(RING_FRAMES_HEAD) == 0,
-        "st.ring[LEMNOS_RING_FRAMES_HEAD] == 0",
-    );
+    check(st.ring_word(SHM_W_HEAD) == 0, "st.ring[SHM_W_HEAD] == 0");
     close_and_expect_pinned(st, "wedged by counters");
 }
 
