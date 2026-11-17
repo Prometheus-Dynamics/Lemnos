@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use lemnos_core::{
-    Config, Description, Driver, Item, Manifest, MethodId, Reply, Resources, Result, Status, Unit,
+    Config, ContractInfo, Description, Driver, Field, Item, Manifest, MethodId, MethodInfo, Reply,
+    Resources, Result, Shape, Status, Tag, Unit,
 };
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
@@ -96,6 +97,78 @@ impl Driver for TwoNamed {
     }
 }
 
+/// A contract with one method that returns `$returns` (id 1), so the manifest says what an item
+/// reading it reads, with no real declaration in the description.
+macro_rules! contract_returning {
+    ($returns:expr) => {
+        ContractInfo {
+            tag: Tag::new("probe/1"),
+            kind: "sensor",
+            methods: &[MethodInfo {
+                id: 1,
+                name: "read",
+                params: &[],
+                returns: $returns,
+                has_out_buffer: false,
+                job: false,
+                stall_secs: 0,
+                reading: None,
+                added: false,
+            }],
+        }
+    };
+}
+
+/// A driver that provides one contract and declares one item of it at exponent -3.
+macro_rules! providing {
+    ($ty:ident, $name:literal, $contract:expr, $item:expr) => {
+        struct $ty;
+
+        impl Driver for $ty {
+            const MANIFEST: Manifest = Manifest {
+                name: $name,
+                needs: &[],
+                provides: &[$contract],
+            };
+
+            fn bind(_: &mut Resources<'_>, _: &Config<'_>) -> Result<Self> {
+                Ok(Self)
+            }
+
+            fn describe(&self, out: &mut Description) {
+                out.add($item);
+            }
+
+            fn dispatch(&mut self, _: MethodId, _: &[u8], _: &mut Reply<'_>) -> Status {
+                Status::NOT_SUPPORTED
+            }
+        }
+    };
+}
+
+providing!(
+    FloatReturn,
+    "float-return",
+    contract_returning!(Shape::F32),
+    Item::value("volts", READ).unit(Unit::Volt, -3)
+);
+providing!(
+    IntegerReturn,
+    "integer-return",
+    contract_returning!(Shape::I32),
+    Item::value("millivolts", READ).unit(Unit::Volt, -3)
+);
+providing!(
+    RecordFloatField,
+    "record-float-field",
+    contract_returning!(Shape::Record(&[Field {
+        name: "x",
+        shape: Shape::F32,
+        added: false,
+    }])),
+    Item::value("axis", READ).unit(Unit::Volt, -3).field("x")
+);
+
 fn bind_one(driver: &str, entry_of: &[lemnos_host::DriverEntry]) -> Host {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -162,4 +235,34 @@ fn two_items_with_one_name_are_refused_by_name() {
         reason.contains("item duty: two items have this name"),
         "{reason}"
     );
+}
+
+/// A float reply, declared by the contract and not by the description, at a nonzero exponent: the
+/// bind refuses it by name. Fails before the change: no real declaration, so the bind was accepted.
+#[test]
+fn a_float_reply_at_a_nonzero_exponent_is_refused_even_without_a_real_declaration() {
+    let host = bind_one("float-return", &[entry::<FloatReturn>()]);
+    let reason = reason_of(&host).expect("the bind is refused");
+    assert!(
+        reason.contains("item volts: a real value carries exponent 0"),
+        "{reason}"
+    );
+}
+
+/// A float field of a record reply counts too: the field the item names is the float.
+#[test]
+fn a_float_field_of_a_record_reply_at_a_nonzero_exponent_is_refused() {
+    let host = bind_one("record-float-field", &[entry::<RecordFloatField>()]);
+    let reason = reason_of(&host).expect("the bind is refused");
+    assert!(
+        reason.contains("item axis: a real value carries exponent 0"),
+        "{reason}"
+    );
+}
+
+/// An integer reply at the same exponent is a scaled integer, and binds.
+#[test]
+fn an_integer_reply_at_a_nonzero_exponent_still_binds() {
+    let host = bind_one("integer-return", &[entry::<IntegerReturn>()]);
+    assert_eq!(reason_of(&host), None);
 }

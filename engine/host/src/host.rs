@@ -12,7 +12,7 @@ use lemnos_core::{
     ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
     HostOwned, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
     MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Spi,
+    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Shape, Spi,
     Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 
@@ -1148,7 +1148,12 @@ fn is_off(slot: &Slot) -> bool {
 /// an item by its name, so the second could never be reached), or a real value with a nonzero
 /// exponent. A real value is already in its unit, so its exponent is 0; an integer item's exponent
 /// is its scale (`raw * 10^exponent`).
-fn describe_fault(instance: &dyn Instance) -> Option<String> {
+///
+/// A value is real when the description says so (a real range, step or limit), or when the contract
+/// says its method returns a float: the manifest's contracts carry every method's return shape, so
+/// the host knows at bind, before any read, what an item reads. An item whose contract the manifest
+/// does not provide is judged by its description alone.
+fn describe_fault(instance: &dyn Instance, manifest: &Manifest) -> Option<String> {
     let mut description = Description::new();
     instance.describe(&mut description);
     let items: Vec<&Item> = description.items().collect();
@@ -1165,7 +1170,8 @@ fn describe_fault(instance: &dyn Instance) -> Option<String> {
                     || item.real_max.is_some()
                     || item.real_step.is_some()
                     || item.real_warn_low.is_some()
-                    || item.real_warn_high.is_some())
+                    || item.real_warn_high.is_some()
+                    || reads_a_float(manifest, item))
         })
         .map(|item| {
             format!(
@@ -1173,6 +1179,35 @@ fn describe_fault(instance: &dyn Instance) -> Option<String> {
                 item.name, item.exponent
             )
         })
+}
+
+/// Whether the item's value is a float, by the shape its contract gives its method: the whole reply
+/// when the item has no field, else the named field of the reply record. Looks through an option or
+/// an array to its element.
+fn reads_a_float(manifest: &Manifest, item: &Item) -> bool {
+    let Some(contract) = manifest.provides.get(usize::from(item.method.contract)) else {
+        return false;
+    };
+    let Some(method) = contract
+        .methods
+        .iter()
+        .find(|method| method.id == item.method.method)
+    else {
+        return false;
+    };
+    shape_is_float(&method.returns, item.field)
+}
+
+fn shape_is_float(shape: &Shape, field: Option<&str>) -> bool {
+    match (shape, field) {
+        (Shape::Record(fields), Some(name)) => fields
+            .iter()
+            .find(|found| found.name == name)
+            .is_some_and(|found| shape_is_float(&found.shape, None)),
+        (Shape::F32 | Shape::F64, None) => true,
+        (Shape::Option(inner) | Shape::Array(inner, _), None) => shape_is_float(inner, None),
+        _ => false,
+    }
 }
 
 fn only_reads(instance: &dyn Instance, method: MethodId) -> bool {
@@ -2307,7 +2342,7 @@ impl Inner {
             // A real-valued item must carry exponent 0: the renderer scales a float by the exponent,
             // so a nonzero one shows the value wrong. Refused by name, before the device runs.
             let built = match built {
-                Ok(Ok(instance)) => match describe_fault(instance.as_ref()) {
+                Ok(Ok(instance)) => match describe_fault(instance.as_ref(), entry.manifest()) {
                     Some(reason) => {
                         *lock(&target.bind_refusal) = Some((RefusalKind::Failed, reason));
                         Ok(Err(Status::INVALID_ARGUMENT))
