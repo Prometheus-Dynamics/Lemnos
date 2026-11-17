@@ -369,6 +369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-board-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-builtin-init"
 version = "2.0.1-dev"
 dependencies = [
