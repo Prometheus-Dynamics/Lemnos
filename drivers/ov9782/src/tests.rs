@@ -1517,15 +1517,34 @@ fn item_named<'a>(
         .expect("the item the sensor describes")
 }
 
+/// Before a mode is selected, exposure and frame length carry the envelope over every mode: the
+/// frame length from the least minimum to the greatest maximum, and exposure up to the most the
+/// greatest frame length allows (`exposure_max` grows with the frame length). The setters still
+/// refuse until a mode is selected, so the envelope is what a mode may take. The reason it is
+/// stated here and not as unknown: a client chooses a mode knowing its bounds.
 #[test]
-fn before_a_mode_is_selected_the_ranges_of_exposure_and_frame_length_are_unknown() {
+fn before_a_mode_is_selected_the_ranges_are_the_envelope_over_every_mode() {
     let (mut s, _bus) = sensor();
     let mut out = Description::new();
     Lifecycle::describe(&s, &mut out);
+    let described: Vec<_> = MODES.iter().map(|m| m.describe(false)).collect();
+    let least = described.iter().map(|m| m.frame_length_min).min().unwrap();
+    let greatest = described.iter().map(|m| m.frame_length_max).max().unwrap();
+    let frame = item_named(&out, "frame_length", lemnos_core::ItemKind::Control);
+    assert_eq!(
+        (frame.min, frame.max, frame.step),
+        (Some(i64::from(least)), Some(i64::from(greatest)), Some(1))
+    );
     let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
     assert_eq!(
         (exposure.min, exposure.max, exposure.step),
-        (None, None, None)
+        (
+            Some(i64::from(EXPOSURE_MIN >> EXPOSURE_FRACTION_BITS)),
+            Some(i64::from(
+                chip::exposure_max(greatest) >> EXPOSURE_FRACTION_BITS
+            )),
+            Some(1)
+        )
     );
     assert_eq!(exposure.unit, Unit::Line);
     assert_eq!(
@@ -1646,20 +1665,19 @@ fn the_gain_and_frame_length_setters_land_as_their_posts_do() {
     assert_eq!(by_item.in_force().unwrap().frame_length, Some(1000));
 }
 
-/// Before a mode is selected the ranges are unset (the describe carries none), and every call that
-/// needs a mode is refused with `FAILED_PRECONDITION` (a step the caller takes first), not with
-/// `INVALID_ARGUMENT`: the code is the message, and nothing is written.
+/// Before a mode is selected every call that needs a mode is refused with `FAILED_PRECONDITION`
+/// (a step the caller takes first), not with `INVALID_ARGUMENT`: the code is the message, and
+/// nothing is written. The describe carries the envelope over every mode for the exposure and
+/// frame length ranges (the OV-RANGES ruling; checked in
+/// `before_a_mode_is_selected_the_ranges_are_the_envelope_over_every_mode`), so the range is
+/// checked there, not here.
 #[test]
 fn before_a_mode_every_mode_call_is_a_failed_precondition_and_nothing_is_written() {
     let (mut s, bus) = sensor();
     let mut out = Description::new();
     Lifecycle::describe(&s, &mut out);
     let exposure = item_named(&out, "exposure", lemnos_core::ItemKind::Control);
-    assert_eq!(
-        (exposure.min, exposure.max),
-        (None, None),
-        "no range before a mode"
-    );
+    assert!(exposure.max.is_some(), "the envelope before a mode");
     assert_eq!(s.start(), Err(Status::FAILED_PRECONDITION));
     assert_eq!(
         s.set_controls(Controls {

@@ -567,8 +567,12 @@ impl Lifecycle for Ov9782 {
         out.add(Item::action("start", START));
         out.add(Item::action("stop", STOP));
         // The controls in force, and their setters. Exposure and frame length take their ranges
-        // from the selected mode, so they have none before a mode is selected. Analogue gain's
-        // codes are the same in every mode.
+        // from the selected mode. Before a mode is selected they carry the envelope over every mode:
+        // the frame length from the least minimum to the greatest maximum, and the exposure up to
+        // the most the greatest frame length allows. A client can read the bounds any mode can take
+        // before it chooses one. The setters still refuse until a mode is selected (nothing is
+        // written), so the envelope is what a mode may take, not what the setter accepts now.
+        // Analogue gain's codes are the same in every mode.
         let gain = chip::ANALOGUE_GAIN_RANGE;
         let (exposure_max, frame) = match self.selected {
             Some((index, current)) => {
@@ -583,7 +587,16 @@ impl Lifecycle for Ov9782 {
                     )),
                 )
             }
-            None => (None, None),
+            None => {
+                let (min, max) = MODES.iter().fold((u32::MAX, 0), |(lo, hi), entry| {
+                    let mode = entry.describe(self.continuous_clock);
+                    (lo.min(mode.frame_length_min), hi.max(mode.frame_length_max))
+                });
+                (
+                    Some(i64::from(chip::exposure_max(max) >> EXPOSURE_FRACTION_BITS)),
+                    Some((i64::from(min), i64::from(max))),
+                )
+            }
         };
         let lines = i64::from(EXPOSURE_MIN >> EXPOSURE_FRACTION_BITS);
         let mut exposure = Item::value("exposure", IN_FORCE)
