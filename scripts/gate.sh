@@ -24,9 +24,56 @@ lockfile() {
 }
 step lockfile lockfile
 
+# GATE_PART picks a part of the gate, so CI can run the parts side by side (.github/workflows/next.yml):
+#   unset or "all"   everything, in order (what to run locally)
+#   "checks"         everything except the workspace tests
+#   "tests:K/N"      the workspace tests of shard K of N
+# The shards are balanced by measured test time (CI-SPLIT, 2026-11-17). Shard 1 holds lemnos-ctl,
+# whose host-merge tests need the real dtmerge (CI builds it in that shard only), and lemnos-slot-init,
+# the longest by far. The other long ones (`slow`, longest first) are dealt out over shards 2..N, then
+# every other package, sorted by name. A package missing from these lists still lands in a shard: the
+# lists only order them. A shard with no package in it fails: a part that tests nothing is never a pass.
+part="${GATE_PART:-all}"
+case "$part" in
+  all | checks) ;;
+  tests:[1-9]*/[1-9]*)
+    k="${part#tests:}"; n="${k#*/}"; k="${k%/*}"
+    if [ "$k" -gt "$n" ]; then echo "GATE_PART=$part: shard $k of $n does not exist" >&2; exit 1; fi
+    first=(lemnos-ctl lemnos-slot-init)
+    slow=(lemnos-slot-store lemnos-driver-system-slots lemnos-package lemnos-driver-system-flash lemnos-orion
+      shm-ring-model lemnos-macros lemnos-driver-system-security shm-ring-doorbell lemnos-camera-proof lemnos-host
+      lemnos-linux lemnos-client)
+    mapfile -t packages < <(cargo metadata --locked --no-deps --format-version 1 |
+      python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')
+    declare -A known=()
+    for pkg in "${packages[@]}"; do known[$pkg]=1; done
+    ordered=()
+    for pkg in "${slow[@]}"; do [ -n "${known[$pkg]:-}" ] && ordered+=("$pkg"); done
+    for pkg in "${packages[@]}"; do
+      case " ${first[*]} ${slow[*]} " in *" $pkg "*) ;; *) ordered+=("$pkg") ;; esac
+    done
+    shard=()
+    if [ "$k" -eq 1 ]; then
+      for pkg in "${first[@]}"; do [ -n "${known[$pkg]:-}" ] && shard+=(-p "$pkg"); done
+    fi
+    rest=$((n > 1 ? n - 1 : 1)); i=0
+    for pkg in "${ordered[@]}"; do
+      want=$((n > 1 ? i % rest + 2 : 1))
+      [ "$want" -eq "$k" ] && shard+=(-p "$pkg")
+      i=$((i + 1))
+    done
+    if [ "${#shard[@]}" -eq 0 ]; then echo "GATE_PART=$part: the shard has no package" >&2; exit 1; fi
+    echo "shard $k of $n: $((${#shard[@]} / 2)) of ${#packages[@]} packages"
+    step "tests, shard $k of $n" cargo test "${shard[@]}"
+    echo "gate part $part passed"
+    exit 0
+    ;;
+  *) echo "GATE_PART=$part: expected all, checks or tests:K/N" >&2; exit 1 ;;
+esac
+
 step format cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets -- -D warnings
-step tests cargo test --workspace
+[ "$part" = checks ] || step tests cargo test --workspace
 
 # What must still build without std, on the targets a microcontroller host uses.
 no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
@@ -84,4 +131,4 @@ step documents scripts/check-docs.py
 # are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
 step mdev testing/mdev/check.sh
 
-echo "gate passed"
+echo "gate passed${GATE_PART:+ (part $GATE_PART)}"
