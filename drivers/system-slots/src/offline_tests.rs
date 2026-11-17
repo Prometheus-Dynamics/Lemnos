@@ -505,3 +505,12 @@ fn a_default_that_would_change_to_another_bay_is_refused() {
     );
     assert!(!root.0.join("out").exists());
 }
+
+#[test]
+fn an_image_built_for_the_other_owner_of_config_txt_is_refused_by_name() {
+    let board = crate::bay_fixture::layout();
+    let image = crate::bay_fixture::layout().with_board_config(true);
+    assert!(crate::offline::check_layout(&board, &board).is_ok());
+    let why = crate::offline::check_layout(&image, &board).unwrap_err();
+    assert!(why.contains("config_owner"), "{why}");
+}

@@ -128,13 +128,26 @@ pub fn config_digest(lines: &[String]) -> Option<String> {
     Some(crate::bundle::hex(&sha(text.as_bytes())))
 }
 
+/// The [`FIRMWARE_LIST`] line that says `config.txt` is the board's own: Lemnos never writes or reads it,
+/// and the trial route uses only `tryboot.txt`, the pointers and the trial record (see `docs/slots.md`,
+/// "A board's own config.txt").
+pub const BOARD_CONFIG_LINE: &str = "board-config";
+
 /// The [`FIRMWARE_LIST`] text for a board: a `config <sha256>` line when it declares config lines, then
 /// one `overlay <name>` line per firmware overlay in the board's order. `None` when it declares neither.
-pub fn firmware_list_text(names: &[String], config: Option<&str>) -> Option<String> {
-    if names.is_empty() && config.is_none() {
+pub fn firmware_list_text(
+    names: &[String],
+    config: Option<&str>,
+    board_config: bool,
+) -> Option<String> {
+    if names.is_empty() && config.is_none() && !board_config {
         return None;
     }
     let mut out = String::new();
+    if board_config {
+        out.push_str(BOARD_CONFIG_LINE);
+        out.push('\n');
+    }
     if let Some(digest) = config {
         out.push_str(&format!("config {digest}\n"));
     }
@@ -144,13 +157,20 @@ pub fn firmware_list_text(names: &[String], config: Option<&str>) -> Option<Stri
     Some(out)
 }
 
-/// Reads [`FIRMWARE_LIST`]'s text: the overlay names in order and the config digest. A line that is
-/// neither form, a repeated `config`, a bad name or a repeated overlay is refused by name.
-pub fn parse_firmware_list(text: &str) -> Result<(Vec<String>, Option<String>), String> {
+/// Reads [`FIRMWARE_LIST`]'s text: the overlay names in order, the config digest and whether the board
+/// owns `config.txt` ([`BOARD_CONFIG_LINE`]). A line that is none of these forms, a repeated `config`
+/// or `board-config`, a bad name or a repeated overlay is refused by name.
+pub fn parse_firmware_list(text: &str) -> Result<(Vec<String>, Option<String>, bool), String> {
     let mut names: Vec<String> = Vec::new();
     let mut config = None;
+    let mut board_config = false;
     for line in text.lines() {
-        if let Some(digest) = line.strip_prefix("config ") {
+        if line == BOARD_CONFIG_LINE {
+            if board_config {
+                return Err(format!("{FIRMWARE_LIST}: {line:?} is repeated"));
+            }
+            board_config = true;
+        } else if let Some(digest) = line.strip_prefix("config ") {
             if config.is_some() || !crate::manifest::is_hex(digest, 64) {
                 return Err(format!(
                     "{FIRMWARE_LIST}: the config line {line:?} is not one digest"
@@ -170,7 +190,7 @@ pub fn parse_firmware_list(text: &str) -> Result<(Vec<String>, Option<String>), 
             ));
         }
     }
-    Ok((names, config))
+    Ok((names, config, board_config))
 }
 
 /// The `boot.files` entries that the declared set `declared` (member paths) does not name, in the
@@ -227,6 +247,10 @@ pub struct Layout {
     /// The digest of the firmware config lines the boot partition's text carries (see
     /// [`config_digest`]), `None` for a board that declares none.
     pub config: Option<String>,
+    /// Whether the board owns `config.txt` (the root list's [`BOARD_CONFIG_LINE`]): Lemnos then writes
+    /// no `config.txt`, and nothing that a `config.txt` may include (`default.txt`, `previous.txt`) is
+    /// written. False for every board Lemnos owns the file of.
+    pub board_config: bool,
 }
 
 impl Layout {
@@ -244,11 +268,18 @@ impl Layout {
             bytes,
             firmware: Vec::new(),
             config: None,
+            board_config: false,
         })
     }
 
     /// The layout with the board's firmware overlays `names` (each bay the board overlay's size) and
     /// its config digest.
+    /// The layout with `config.txt` owned by the board (see [`Layout::board_config`]).
+    pub fn with_board_config(mut self, on: bool) -> Self {
+        self.board_config = on;
+        self
+    }
+
     pub fn with_firmware(mut self, names: &[String], config: Option<String>) -> Self {
         let size = self.bytes[4];
         self.firmware = names.iter().map(|n| (firmware_path(n), size)).collect();
@@ -781,7 +812,8 @@ pub fn install<D: Sectors + ReadAt>(
 ) -> Result<Done, Error> {
     let protected = Protected::from_volume(dev, layout)?;
     let done = stage_with(dev, layout, set, slot, payloads, None, &protected)?;
-    if done == Done::Installed {
+    // A board that owns its config.txt has no default switch: the install leaves the default where it is.
+    if done == Done::Installed && !layout.board_config {
         make_default(dev, layout, set, &protected)?;
     }
     Ok(done)
@@ -887,6 +919,11 @@ pub fn stage_with<D: Sectors + ReadAt>(
     Ok(Done::Installed)
 }
 
+/// The sentence every default or previous pointer write gets on a board that owns its `config.txt`:
+/// those pointers are read only through that file, so writing them would change nothing the board boots,
+/// or it would change a file the board's own `config.txt` may include.
+pub const BOARD_CONFIG_REFUSAL: &str = "this board's config.txt is the board's own, which Lemnos never writes: the default and previous pointers are read only through it, so they can't be switched here; set the default in the board's config.txt";
+
 /// Makes `set` the default and the old default (`protected.default`) the previous: previous first, then
 /// default (the pointer switch, step 5). The set must hold a committed record for the slot it is to boot.
 pub fn make_default<D: Sectors + ReadAt>(
@@ -900,6 +937,9 @@ pub fn make_default<D: Sectors + ReadAt>(
         return Err(Error::Refused(format!(
             "bay{set} holds no committed record: nothing was pointed at it"
         )));
+    }
+    if layout.board_config {
+        return Err(Error::Refused(BOARD_CONFIG_REFUSAL.to_string()));
     }
     let placed = place(dev, layout).map_err(Error::Refused)?;
     if let Some(d) = protected.default
@@ -976,13 +1016,13 @@ pub fn discover<D: ReadAt>(dev: &mut D) -> Result<Layout, String> {
     }
     // The firmware overlays the board declares: the root list, when there is one. Each has a bay in
     // every set, the same size in each.
-    let (names, config) = match bootfat::read_file(dev, FIRMWARE_LIST, 4096) {
+    let (names, config, board_config) = match bootfat::read_file(dev, FIRMWARE_LIST, 4096) {
         Ok(text) => {
             let text =
                 String::from_utf8(text).map_err(|_| format!("{FIRMWARE_LIST} is not text"))?;
             parse_firmware_list(&text)?
         }
-        Err(bootfat::Refusal::Missing) => (Vec::new(), None),
+        Err(bootfat::Refusal::Missing) => (Vec::new(), None, false),
         Err(e) => return Err(format!("{FIRMWARE_LIST}: {e}")),
     };
     let mut layout = Layout::new(bytes)?;
@@ -1018,6 +1058,7 @@ pub fn discover<D: ReadAt>(dev: &mut D) -> Result<Layout, String> {
         }
     }
     layout.config = config;
+    layout.board_config = board_config;
     Ok(layout)
 }
 
