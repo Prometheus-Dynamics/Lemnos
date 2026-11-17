@@ -2791,6 +2791,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-power-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-rockchip-maskrom-stage"
 version = "2.0.1-dev"
 dependencies = [
