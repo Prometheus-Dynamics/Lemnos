@@ -177,6 +177,7 @@ static u32 tcsi_emb_lines = 1;	/* the next embedded frame end's lines; 0: no lin
  * clear does that; this fake's status is ordinary memory, so the clear is the fake's. A status bit therefore
  * exists only while the handler runs: no stale bit outlives it, and the stop can't count an old one.
  */
+static u32 tcsi_late;	/* TCSI_IOC_LATE_ACK: one FE_ACK when a wedged DMA stops */
 static void tcsi_deliver(u32 status_bits, u32 ints_bits)
 {
 	void __iomem *dma = tcsi_regs[0], *cfg = tcsi_regs[2];
@@ -360,6 +361,8 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		writel(R_INT_FE, cfg + R_INTS);
 		return irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
 	}
+	if (cmd == TCSI_IOC_LATE_ACK)
+		return get_user(tcsi_late, (u32 __user *)uarg) ? -EFAULT : 0;
 	if (cmd == TCSI_IOC_LINES)
 		return get_user(tcsi_lines, (u32 __user *)uarg);
 	if (cmd == TCSI_IOC_EMB_LINES)
@@ -367,6 +370,7 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == TCSI_IOC_BUSY) {
 		u32 lines;
 		unsigned long flags;
+		bool late_ack = false;
 
 		if (copy_from_user(&lines, uarg, sizeof(lines)))
 			return -EFAULT;
@@ -375,10 +379,23 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		 * A release of a wedged window (busy forever) ends a stop that already returned wedged, with no frame
 		 * end: the FORCE it left set is settled here, so the tick never acks it. FAKE-ONLY ASSUMPTION.
 		 */
-		if (tcsi_busy == U32_MAX && lines == 0 && (readl(tcsi_regs[0] + R_CTRL) & R_FORCE))
-			tcsi_acked = true;
+		if (tcsi_busy == U32_MAX && lines == 0 && (readl(tcsi_regs[0] + R_CTRL) & R_FORCE)) {
+			if (tcsi_late) {
+				/*
+				 * LATE: the wedged DMA stops only now, after its stop gave up. One FE_ACK is delivered, as
+				 * the hardware would raise it for the FORCE that is still set. FAKE-ONLY ASSUMPTION.
+				 */
+				tcsi_late = 0;
+				late_ack = true;
+				tcsi_acked = true;
+			} else {
+				tcsi_acked = true;
+			}
+		}
 		tcsi_busy = lines;
 		raw_spin_unlock_irqrestore(&tcsi_lock, flags);
+		if (late_ack)
+			tcsi_deliver(TCSI_FE_ACK, TCSI_R_INT_CSI_DMA);
 		if (lines)
 			hrtimer_start(&tcsi_timer, ns_to_ktime(TCSI_LINE_NS),
 				      HRTIMER_MODE_REL_PINNED_HARD);

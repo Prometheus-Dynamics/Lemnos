@@ -1069,7 +1069,19 @@ static int run_wedge(const char *node, const char *dev, const char *heap)
 	fire(TCSI_FS);
 	busy(forever);
 	CHECK(!stop(), "STOP returns, DMA never seen to stop");
+	/*
+	 * A late FE_ACK: the wedged DMA stops only as the window is released, after the stop gave up. It must count
+	 * no frame, and the wedge still refuses START. FAKE-ONLY ASSUMPTION (TCSI_IOC_LATE_ACK).
+	 */
+	struct lemnos_rp1_csi2_info before = info();
+	uint32_t one = 1;
+	CHECK(!ioctl(hw, TCSI_IOC_LATE_ACK, &one), "late: one late FE_ACK armed");
 	busy(0);
+	CHECK(info().frames == before.frames && info().written == before.written &&
+	      info().errors == before.errors && info().dropped == before.dropped,
+	      "late: the late FE_ACK counts no frame (frames %llu written %llu errors %llu)",
+	      (unsigned long long)info().frames, (unsigned long long)info().written,
+	      (unsigned long long)info().errors);
 	CHECK(info().flags & LEMNOS_RP1_CSI2_INFO_WEDGED, "wedged is reported");
 	CHECK(!stream_open(&s2, pool2_fd), "a new stream can be made");
 	a = good_start(s2.fd);
