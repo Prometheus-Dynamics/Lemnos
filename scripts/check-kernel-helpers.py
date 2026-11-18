@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Checks kernel/lemnos_helpers.c, the Lemnos module's only C.
+"""Checks kernel/lemnos_helpers.c, the Lemnos module's only C, and
+testing/qemu/test_block/lemnos_test_helpers.c, the only C of the test fixtures built beside it.
 
-The file may hold comments, #include lines, one-line prototypes and one-line shims. A shim is a function
+Each file may hold comments, #include lines, one-line prototypes and one-line shims. A shim is a function
 whose whole body is one line (`{ ... }`), with a comment line directly above it that names the kernel API it
 wraps and why there is no Rust path. A prototype is accepted only when a shim of the same name is defined in
-the same file; a prototype with no shim is a problem. Nothing else is allowed. The file stays within a size
-cap, so C does not grow back into the module.
+the same file; a prototype with no shim is a problem. Nothing else is allowed. Each file stays within a size
+cap, so C does not grow back into the module or its fixtures.
 
-    scripts/check-kernel-helpers.py [--file PATH] [--max-lines N]
+    scripts/check-kernel-helpers.py                           both files, each against its own cap
+    scripts/check-kernel-helpers.py --file PATH [--max-lines N]   one file
 """
 
 import argparse
@@ -16,8 +18,12 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_FILE = REPO / "kernel" / "lemnos_helpers.c"
 DEFAULT_MAX_LINES = 120
+# The files checked when none is named, each with its cap.
+FILES = [
+    (REPO / "kernel" / "lemnos_helpers.c", DEFAULT_MAX_LINES),
+    (REPO / "testing" / "qemu" / "test_block" / "lemnos_test_helpers.c", 40),
+]
 
 # A one-line prototype: a return type, a name, a parameter list, and a semicolon.
 PROTOTYPE = re.compile(r"^[A-Za-z_][A-Za-z_0-9 \t\*]*\b([A-Za-z_][A-Za-z_0-9]*)\s*\([^;{}]*\)\s*;\s*$")
@@ -74,10 +80,11 @@ def check(path: pathlib.Path, max_lines: int) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--file", type=pathlib.Path, default=DEFAULT_FILE)
+    parser.add_argument("--file", type=pathlib.Path)
     parser.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
     args = parser.parse_args()
-    problems = check(args.file, args.max_lines)
+    files = [(args.file, args.max_lines)] if args.file else FILES
+    problems = [problem for path, max_lines in files for problem in check(path, max_lines)]
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
