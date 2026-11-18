@@ -2,8 +2,8 @@
 //! RP1 PIO state machines and their DMA, Rust (CZ-MOD stage 1j of the port; replaces lemnos_pio.c under
 //! CONFIG_RUST).
 //!
-//! A claim on "pio-0" holds one client of the RP1 PIO driver. The four C entry points keep their
-//! signatures (lemnos_internal.h): lem_pio_open, lem_pio_call, lem_pio_config_xfer and lem_pio_xfer.
+//! A claim on "pio-0" holds one client of the RP1 PIO driver. The core (rs/dev.rs) calls its four
+//! entry points: lem_pio_open, lem_pio_call, lem_pio_config_xfer and lem_pio_xfer.
 //!
 //! The driver's calls exist only on a kernel that has the RP1 PIO driver. Kbuild passes `--cfg
 //! lemnos_have_pio` then (CONFIG_RP1_PIO); without it the four entry points answer -ENOTTY, as the C
@@ -72,9 +72,8 @@ const _: () = assert!(size_of::<LemnosPioXfer>() == 32);
 #[cfg(lemnos_have_pio)]
 use crate::abi::ret;
 
-/// The C entry points (lemnos_internal.h). Built with the driver: the port in `port`.
+/// The entry points the core calls. Built with the driver: the port in `port`.
 #[cfg(lemnos_have_pio)]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_open(o: *const LemnosPioOpen) -> c_long {
     // SAFETY: the C caller passes its own copy of the ioctl argument.
     ret(port::open(unsafe { &*o }))
@@ -82,7 +81,6 @@ pub(crate) unsafe extern "C" fn lem_pio_open(o: *const LemnosPioOpen) -> c_long 
 
 /// See the note above: an index the driver is never asked about.
 #[cfg(lemnos_have_pio)]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_call(c: *mut LemnosPioCall) -> c_long {
     // SAFETY: the C caller passes its own copy of the ioctl argument.
     ret(port::call(unsafe { &mut *c }))
@@ -90,7 +88,6 @@ pub(crate) unsafe extern "C" fn lem_pio_call(c: *mut LemnosPioCall) -> c_long {
 
 /// See the note above.
 #[cfg(lemnos_have_pio)]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_config_xfer(c: *const LemnosPioConfigXfer) -> c_long {
     // SAFETY: the C caller passes its own copy of the ioctl argument.
     ret(port::config_xfer(unsafe { &*c }))
@@ -98,7 +95,6 @@ pub(crate) unsafe extern "C" fn lem_pio_config_xfer(c: *const LemnosPioConfigXfe
 
 /// See the note above.
 #[cfg(lemnos_have_pio)]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_xfer(x: *const LemnosPioXfer) -> c_long {
     // SAFETY: the C caller passes its own copy of the ioctl argument.
     ret(port::xfer(unsafe { &*x }))
@@ -106,28 +102,24 @@ pub(crate) unsafe extern "C" fn lem_pio_xfer(x: *const LemnosPioXfer) -> c_long 
 
 /// Without the RP1 PIO driver the part is absent: every call answers -ENOTTY, as the C stubs did.
 #[cfg(not(lemnos_have_pio))]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_open(_o: *const LemnosPioOpen) -> c_long {
     ENOTTY.to_errno() as c_long
 }
 
 /// See the note above.
 #[cfg(not(lemnos_have_pio))]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_call(_c: *mut LemnosPioCall) -> c_long {
     ENOTTY.to_errno() as c_long
 }
 
 /// See the note above.
 #[cfg(not(lemnos_have_pio))]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_config_xfer(_c: *const LemnosPioConfigXfer) -> c_long {
     ENOTTY.to_errno() as c_long
 }
 
 /// See the note above.
 #[cfg(not(lemnos_have_pio))]
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pio_xfer(_x: *const LemnosPioXfer) -> c_long {
     ENOTTY.to_errno() as c_long
 }
@@ -145,7 +137,7 @@ mod port {
         alloc::{KBox, KVVec},
         bindings,
         error::from_err_ptr,
-        ffi::{c_char, c_uint, c_ulong, c_void},
+        ffi::{c_uint, c_ulong, c_void},
         prelude::*,
         sync::Mutex,
         time::msecs_to_jiffies,
@@ -193,12 +185,10 @@ mod port {
         fn rp1_pio_gpio_set_input_enabled(client: *mut c_void, param: *mut c_void) -> c_int;
     }
 
-    // rs/claims.rs: the claim API (lemnos_internal.h).
-    unsafe extern "C" {
-        fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
-        fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int;
-        fn lem_claim_attached(file: *mut c_void, ops: *const LemClaimOps) -> *mut c_void;
-    }
+    // rs/claims.rs: the claim API.
+    use crate::claims::lem_claim_held;
+    use crate::claims::lem_claim_attach;
+    use crate::claims::lem_claim_attached;
 
     /// The claim's resource name (NUL-terminated).
     const RESOURCE: &core::ffi::CStr = c"pio-0";

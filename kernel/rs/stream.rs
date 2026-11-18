@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-//! What the frame stream shares with the blocks: the types its interface (lemnos_internal.h) names,
+//! What the frame stream shares with the blocks: the types its interface names,
 //! the calls the block ports make on it (`Handle`), and the kernel's waitqueue, delayed work and
 //! workqueue that the stream and the blocks run their work on.
 //!
 //! The stream itself is rs/stream_file.rs (the stream and its file), rs/stream_ring.rs (the frame
-//! ring and the hold table), rs/stream_frame.rs (the frame path), rs/stream_producer.rs (the calls of
-//! lemnos_internal.h), rs/stream_region.rs (dma-bufs on the block, and the lend) and
+//! ring and the hold table), rs/stream_frame.rs (the frame path), rs/stream_producer.rs (the calls a
+//! block makes), rs/stream_region.rs (dma-bufs on the block, and the lend) and
 //! rs/stream_reader.rs (the readers' marks pages and the doorbell).
 //!
-//! The layouts of `struct lem_job_range`, `struct lem_job`, `struct lem_stream_slot` and
-//! `struct lem_stream_producer` are the C ones the blocks still in C use, checked below. Everything
-//! else is the kernel's.
+//! `JobRange`, `Job`, `Slot` and `Producer` keep the layouts the C interface gave them (their sizes
+//! are checked below). Everything else is the kernel's.
 
 use crate::bindings as lb;
 /// The stream's calls a block makes by the stream's pointer (the receiver and the front end): one
@@ -40,7 +39,8 @@ use kernel::{
     types::Opaque,
 };
 
-/// LEM_JOB_HOLDS of lemnos_internal.h: the ranges one job may hold at once.
+/// The ranges one job may hold at once: more than a posted job can name, for a block whose jobs name
+/// more memory (the PiSP back end: 13 images).
 pub(crate) const JOB_HOLDS: usize = 13;
 
 /// `struct lem_job_range`: a range a job names, resolved by the stream.
@@ -106,16 +106,6 @@ const _: () = assert!(core::mem::size_of::<JobRange>() == 24);
 const _: () = assert!(core::mem::size_of::<Job>() == 328);
 const _: () = assert!(core::mem::size_of::<Slot>() == 344);
 const _: () = assert!(core::mem::size_of::<Producer>() == 56);
-// The same three layouts as the compiler has them (the bindings made from lemnos_internal.h).
-const _: () =
-    assert!(core::mem::size_of::<JobRange>() == core::mem::size_of::<lb::lem_job_range>());
-const _: () = assert!(core::mem::size_of::<Job>() == core::mem::size_of::<lb::lem_job>());
-const _: () = assert!(core::mem::size_of::<Slot>() == core::mem::size_of::<lb::lem_stream_slot>());
-const _: () =
-    assert!(core::mem::offset_of!(Slot, addr) == core::mem::offset_of!(lb::lem_stream_slot, addr));
-const _: () = assert!(
-    core::mem::offset_of!(Slot, bytes) == core::mem::offset_of!(lb::lem_stream_slot, bytes)
-);
 
 /// A stream the block drives: the pointer the stream's calls take. Valid while the stream exists, and
 /// the block calls it only inside the producer's callbacks, which the stream makes while it is alive.

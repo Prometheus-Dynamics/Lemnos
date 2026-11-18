@@ -3,7 +3,7 @@
 //!
 //! A handle is taken on first use and kept, so later calls allocate nothing. What the caller turns on stays
 //! on across a close: only an unbind, which must leave the frameworks balanced, turns off what was turned on
-//! here. The entry points keep their C signatures (lemnos_internal.h): lem_power_create, lem_power_set_block,
+//! here. The core (rs/dev.rs) calls its entry points: lem_power_create, lem_power_set_block,
 //! lem_power_request, lem_power_destroy.
 //!
 //! The kernel calls are the ones the C made. Two are static inline in the headers, so they are composed from
@@ -230,7 +230,6 @@ fn cstr_eq(stored: &[u8], name: &[u8]) -> bool {
 ///
 /// # Safety
 /// `dev` is the block's device, live for the state's life.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_power_create(dev: *mut c_void) -> *mut c_void {
     let init = try_pin_init!(LemPower {
         dev: dev.cast(),
@@ -249,7 +248,6 @@ pub(crate) unsafe extern "C" fn lem_power_create(dev: *mut c_void) -> *mut c_voi
 ///
 /// # Safety
 /// `p` is a live power state from lem_power_create.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_power_set_block(p: *mut c_void, block: u32) {
     // SAFETY: the caller's contract.
     unsafe { (*(p as *mut LemPower)).block = block };
@@ -259,7 +257,6 @@ pub(crate) unsafe extern "C" fn lem_power_set_block(p: *mut c_void, block: u32) 
 ///
 /// # Safety
 /// `p` is a live power state; `r` is the ioctl's argument.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_power_request(p: *mut c_void, r: *mut LemnosPower) -> c_long {
     // SAFETY: the caller's contract.
     ret(unsafe { power_request(p as *mut LemPower, r) })
@@ -480,7 +477,6 @@ unsafe fn lem_reset(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
 ///
 /// # Safety
 /// `p` is a live power state from lem_power_create, not used after this call.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_power_destroy(p: *mut c_void) {
     let p = p as *mut LemPower;
     // SAFETY: the caller's contract; the lock is not contended once the state is being destroyed.

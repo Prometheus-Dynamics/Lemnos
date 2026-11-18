@@ -2,9 +2,8 @@
 //! Claims, Rust (stage 1b of the port; replaces lemnos_claims.c under CONFIG_RUST).
 //!
 //! A claim is a file, from `anon_inode_getfd`, that holds one resource name for as long as it is
-//! open. A second claim on the name is refused (EBUSY); at most LEM_MAX_CLAIMS exist. The C
-//! subsystems reach it through four functions, exported below with the C signatures in
-//! lemnos_internal.h: `lem_claim`, `lem_claim_held`, `lem_claim_attach` and `lem_claim_attached`.
+//! open. A second claim on the name is refused (EBUSY); at most LEM_MAX_CLAIMS exist. The
+//! other parts reach it through four functions: `lem_claim`, `lem_claim_held`, `lem_claim_attach` and `lem_claim_attached`.
 //! The names are kept in an RBTree (the C kept them in a hash table, looked up by the same name), so
 //! a duplicate name, a full table and a name found are the same results as before.
 //!
@@ -185,7 +184,6 @@ unsafe fn is_claim_on(file: *const bindings::file, resource: &CStr) -> bool {
 ///
 /// # Safety
 /// `owner` is the module's `THIS_MODULE`, live for the module's life.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_claims_init(owner: *mut bindings::module) {
     // SAFETY: no claim file exists yet, so nothing reads the table; this is the one write.
     unsafe { (*(&raw mut LEM_CLAIM_FOPS)).0.owner = owner };
@@ -214,7 +212,6 @@ fn insert(h: &LemHeld) -> Result {
 ///
 /// # Safety
 /// `c` is a live `struct lemnos_claim` from the ioctl copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_claim(c: *mut LemnosClaim) -> c_long {
     // SAFETY: the caller passes its own argument struct.
     let c = unsafe { &mut *c };
@@ -264,7 +261,6 @@ pub(crate) unsafe extern "C" fn lem_claim(c: *mut LemnosClaim) -> c_long {
 ///
 /// # Safety
 /// `resource` is a NUL-terminated string.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool {
     // SAFETY: the C caller passes a NUL-terminated name.
     let resource = unsafe { CStr::from_char_ptr(resource) };
@@ -283,7 +279,6 @@ pub(crate) unsafe extern "C" fn lem_claim_held(fd: c_int, resource: *const c_cha
 ///
 /// # Safety
 /// `resource` is a NUL-terminated string; `ops` is a static table of the C side.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int {
     // SAFETY: the C caller passes a NUL-terminated name.
     let resource = unsafe { CStr::from_char_ptr(resource) };
@@ -317,7 +312,6 @@ pub(crate) unsafe extern "C" fn lem_claim_attach(fd: c_int, resource: *const c_c
 ///
 /// # Safety
 /// `file` is null or live; `ops` is a static table of the C side.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_claim_attached(file: *mut bindings::file, ops: *const LemClaimOps) -> *mut c_void {
     // SAFETY: the caller's contract.
     if !unsafe { is_claim(file) } {

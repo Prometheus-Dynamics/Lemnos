@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-//! A block as the producer of a stream (the stream port): the calls of lemnos_internal.h, with their C
-//! names and signatures, for the blocks still in C and for the ports (rs/stream.rs's `Handle`).
+//! A block as the producer of a stream (the stream port): the calls a block makes on its
+//! stream, by the stream's pointer or through rs/stream.rs's `Handle`.
 //!
 //! A block attaches as the stream's producer and calls `lem_stream_next()` for the buffer it arms and
 //! `lem_stream_complete()` when the block is finished with it. Everything those touch is the kernel's

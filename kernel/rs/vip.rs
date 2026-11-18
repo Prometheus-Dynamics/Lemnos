@@ -1108,7 +1108,6 @@ impl LvipStream {
 /// # Safety
 /// `l` is a block from `lem_vip_probe` that has not been removed; `dev` is its device; `args` is a
 /// `struct lemnos_vip_create` the caller owns.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_vip_create(
     l: *const LemVip,
     dev: *mut bindings::device,
@@ -1224,7 +1223,6 @@ fn free_tables(dev: *mut bindings::device, t: &Tables) {
 ///
 /// # Safety
 /// `l` is from `lem_vip_probe`, and the device is being unbound.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_vip_remove(l: *const LemVip) {
     // SAFETY: the caller's contract: the block is alive until the device's release.
     let l = unsafe { &*l };
@@ -1499,7 +1497,6 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
 ///
 /// # Safety
 /// `pdev` is the platform device being probed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_vip_probe(
     pdev: *mut bindings::platform_device,
 ) -> *const LemVip {

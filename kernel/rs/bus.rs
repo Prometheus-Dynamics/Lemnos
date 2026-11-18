@@ -6,7 +6,7 @@
 //! nothing. The adapter is looked up on each transfer and not held between them, so one can go away
 //! while the module is loaded. The check for addresses a kernel driver holds is i2c-dev's.
 //!
-//! The four ioctls keep their C signatures (lemnos_internal.h); the entry calls `lem_bus_init` and
+//! The core (rs/dev.rs) calls the four ioctls; the entry calls `lem_bus_init` and
 //! `lem_bus_exit` directly. The SPI core and the uAPI structs come from the module's generated bindings
 //! (rs/bindings.rs). The inline kernel helpers the C used are composed from their exported parts:
 //! i2c_check_functionality and i2c_parent_is_i2c_adapter from the adapter's fields,
@@ -140,10 +140,7 @@ fn bus_buffer() -> usize {
 
 // --- Shared ---
 
-unsafe extern "C" {
-    /// rs/claims.rs: whether `fd` is a claim on exactly `resource`. Allocates nothing.
-    fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
-}
+use crate::claims::lem_claim_held;
 
 /// A resource name, written in place: no allocation.
 struct Resource {
@@ -419,7 +416,6 @@ fn i2c_transfer(t: &lb::lemnos_i2c_transfer) -> Result {
 ///
 /// # Safety
 /// `t` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_i2c_transfer(t: *const lb::lemnos_i2c_transfer) -> c_long {
     // SAFETY: the caller's argument.
     ret(i2c_transfer(unsafe { &*t }))
@@ -474,7 +470,6 @@ fn i2c_smbus(s: &mut lb::lemnos_i2c_smbus) -> Result {
 ///
 /// # Safety
 /// `s` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_i2c_smbus(s: *mut lb::lemnos_i2c_smbus) -> c_long {
     // SAFETY: the caller's argument.
     ret(i2c_smbus(unsafe { &mut *s }))
@@ -630,7 +625,6 @@ fn spi_transfer(t: &lb::lemnos_spi_transfer) -> Result {
 ///
 /// # Safety
 /// `t` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_spi_transfer(t: *const lb::lemnos_spi_transfer) -> c_long {
     // SAFETY: the caller's argument.
     ret(spi_transfer(unsafe { &*t }))
@@ -653,7 +647,6 @@ fn spi_info(t: &mut lb::lemnos_spi_info) -> Result {
 ///
 /// # Safety
 /// `t` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_spi_info(t: *mut lb::lemnos_spi_info) -> c_long {
     // SAFETY: the caller's argument.
     ret(spi_info(unsafe { &mut *t }))

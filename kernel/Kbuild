@@ -26,8 +26,7 @@ lemnos-y := lemnos_entry.o lemnos_helpers.o
 # generated; every type they name otherwise is the kernel crate's (rs/bindings.rs imports it).
 # Types the generated structs name only through pointers, and the kernel crate's bindings lack: opaque.
 lem_bindgen_opaque := spi_statistics spi_device_id spi_controller_mem_ops spi_controller_mem_caps \
-	spi_offload_config spi_offload dma_chan ptp_system_timestamp thermal_zone_device \
-	lem_pisp_fe lem_stream
+	spi_offload_config spi_offload dma_chan ptp_system_timestamp thermal_zone_device
 lem_bindgen_items := \
 	--allowlist-type 'spi_(device|controller|transfer|message|driver|delay)' \
 	--allowlist-type 'spi_(device|controller|transfer|message|driver)__bindgen_.*' \
@@ -44,9 +43,7 @@ lem_bindgen_items := \
 	--allowlist-type 'pisp_.*' --allowlist-var 'PISP_.*' \
 	--allowlist-type 'lemnos_pisp_fe_.*' --allowlist-var 'LEMNOS_PISP_FE_.*' \
 	--allowlist-type 'lemnos_pisp_be_.*' --allowlist-var 'LEMNOS_PISP_BE_.*' \
-	--allowlist-type 'lrc_(dev|frame|emb|file)' --allowlist-type 'lem_(job_range|job|stream_slot)' \
 	--allowlist-type 'lemnos_rp1_csi2_(info|start|frame_starts|embedded|claim)' --allowlist-var 'LEMNOS_RP1_CSI2_.*' \
-	--allowlist-var 'LEM_PISP_FE_WINDOW' \
 	--allowlist-var 'LEMNOS_(MAX_THERMAL_WATCHES|EVENT_TEMPERATURE)' \
 	--allowlist-type 'lemnos_regjob_.*' \
 	--allowlist-type 'lemnos_stream_.*' \

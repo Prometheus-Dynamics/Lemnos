@@ -134,11 +134,10 @@ fn listed(list: &[u8], compatible: &[u8]) -> bool {
 }
 
 /// Whether any of the device's compatibles is in `list`, from any firmware description
-/// (lemnos_internal.h; the C blocks and rs/regjob.rs call it).
+/// (rs/regjob.rs calls it).
 ///
 /// # Safety
 /// `dev` is a live device; `list` is a NUL-terminated string.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_device_listed(
     dev: *mut bindings::device,
     list: *const c_char,
@@ -163,11 +162,10 @@ pub(crate) unsafe extern "C" fn lem_device_listed(
         .any(|&s| listed(list, unsafe { bytes(s) }))
 }
 
-/// Whether `dev` is one of the blocks the owned= parameter lists (lemnos_internal.h).
+/// Whether `dev` is one of the blocks the owned= parameter lists.
 ///
 /// # Safety
 /// `dev` is a live device.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_block_owned(dev: *mut bindings::device) -> bool {
     // SAFETY: the caller's device.
     unsafe { List::Owned.has(dev) }

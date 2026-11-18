@@ -38,8 +38,7 @@
 //! is the frame path's, nesting the stream's lock. The stream's ctl is taken only before the receiver's
 //! (START enables the stream's CPU mapping first) or by the stream's own stop callback, in that order.
 //!
-//! The receiver stays C in this stage. Its `struct lrc_dev` is read through the bindings made from
-//! lemnos_rp1_csi2_priv.h, so its layout is the compiler's; this file touches only `ctl`, `gone`,
+//! The receiver's state is rs/rp1_csi2.rs's `LrcDev`; this file touches only `ctl`, `gone`,
 //! `wedged`, `stream`, `max_lanes`, `irq` and `dev` of it, as the C did.
 
 use crate::abi::{err_ptr, ret};
@@ -48,7 +47,7 @@ use crate::param::param;
 // The receiver on the same block: its reference count, and the link with the channel feeding the front
 // end. The last three are called holding the receiver's ctl.
 use crate::rp1_csi2::{
-    lrc_fe_channel_start, lrc_fe_channel_stop, lrc_fe_open_rx, lrc_ref_get, lrc_ref_put,
+    LrcDev, lrc_fe_channel_start, lrc_fe_channel_stop, lrc_fe_open_rx, lrc_ref_get, lrc_ref_put,
 };
 use crate::stream::{
     DelayedWork, Handle, JobRange, Producer, Slot, Stream, dev_warn_ratelimited,
@@ -106,7 +105,9 @@ const OUTPUTS: usize = 2;
 /// The configuration registers: everything up to the non-register dirty flags.
 const FE_CONFIG_BYTES: usize = offset_of!(lb::pisp_fe_config, dirty_flags);
 const _: () = assert!(FE_CONFIG_BYTES % 4 == 0);
-const _: () = assert!(FE_CONFIG_BASE + FE_CONFIG_BYTES == lb::LEM_PISP_FE_WINDOW as usize);
+/// The front end's register window, from its configuration block's end.
+pub(crate) const FE_WINDOW: usize = FE_CONFIG_BASE + FE_CONFIG_BYTES;
+const _: () = assert!(FE_WINDOW == 0x40 + 0x270);
 const _: () = assert!(
     FE_CONFIG_BYTES
         == offset_of!(lb::pisp_fe_config, ch)
@@ -180,7 +181,7 @@ const AXI_QOS: u16 = 0x8410;
 const AXI_THRESH: u16 = 0x0140;
 const AXI_THROTTLE: u16 = 0x4100;
 
-/// LEM_STREAM_DMA_ALIGN of lemnos_internal.h: a device address a block is programmed with is aligned this much.
+/// A device address a block is programmed with is aligned this much.
 const DMA_ALIGN: u64 = 16;
 
 // Waiting for the block to go idle after ABORT: STATUS must read zero this many times in a row, a read
@@ -249,7 +250,7 @@ struct FeState {
 #[pin_data]
 pub(crate) struct LemPispFe {
     /// Our receiver; holds us for its life.
-    l: *mut lb::lrc_dev,
+    l: *mut LrcDev,
     /// Our window, checked at the receiver's probe.
     base: *mut c_void,
     hw_version: u32,
@@ -277,7 +278,7 @@ unsafe impl Sync for LemPispFe {}
 struct Ctl(*mut bindings::mutex);
 
 impl Ctl {
-    fn lock(l: *mut lb::lrc_dev) -> Self {
+    fn lock(l: *mut LrcDev) -> Self {
         // SAFETY: the receiver outlives its front end (see LemPispFe); only the field's address is taken.
         let m = unsafe { &raw mut (*l).ctl };
         // SAFETY: the receiver's mutex, initialised at its probe; process context.
@@ -1268,7 +1269,7 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_ioctl(
     ret(fe.ioctl(cmd, arg).map(|()| 0))
 }
 
-fn create(l: *mut lb::lrc_dev, window: *mut c_void) -> Result<*mut LemPispFe> {
+fn create(l: *mut LrcDev, window: *mut c_void) -> Result<*mut LemPispFe> {
     let test = TEST_PISP_FE.get();
     let trace = if test {
         let mut log = KVec::with_capacity(TRACE_ENTRIES, GFP_KERNEL)?;
@@ -1317,7 +1318,7 @@ fn create(l: *mut lb::lrc_dev, window: *mut c_void) -> Result<*mut LemPispFe> {
 /// `l` is the receiver being probed, which outlives the front end; `window` is LEM_PISP_FE_WINDOW bytes
 /// of the block's registers, mapped for as long.
 pub(crate) unsafe extern "C" fn lem_pisp_fe_create(
-    l: *mut lb::lrc_dev,
+    l: *mut LrcDev,
     window: *mut c_void,
 ) -> *mut c_void {
     match create(l, window) {
