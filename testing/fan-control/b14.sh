@@ -405,6 +405,11 @@ phase_file() {
   expect "$ZL 7 after the restart the board file's curve is in force at $MID mC" wait_until 10 at_expected_mid
   expect "$ZL 7 after the restart the controller is not held" state_not_held
 
+  # 11 write failure and its retry schedule. It runs in this service start, before the stop: a refused write
+  # must not cost the controller its record of the fan, so check 12 is expected to pass after it. On the board
+  # check 11 is the hand step (B14.md), so the script says so and carries on to the stop.
+  check11
+
   # 12 stop
   if [ "$mode" = sim ]; then
     stop_service
@@ -412,20 +417,12 @@ phase_file() {
     "$stop_hook" || die "the stop hook failed"
   fi
   expect "$ZL 12 stop: the fan is back at its baseline once the service has exited" at_baseline
-
-  # 11 write failure and its retry schedule. It runs on its own service start, after 12: in the sim, the refused
-  # writes of check 11 left the controller in a state that broke the baseline return of check 12 when they ran
-  # before it (not isolated; B14-CURVE). On the board, check 11 is the hand step, so the start is the operator's.
-  if [ "$mode" = sim ]; then
-    start_service "$work/board.toml"
-    check11
-    stop_service
-  else
-    check11
-  fi
 }
 
 at_expected_mid() { EXP=$(expected "$MID"); at_expected; }
+
+# no_zero_while_refused: no sample of check 11 reads a duty of zero (the safe state is full, never zero).
+no_zero_while_refused() { ! awk -F'\t' '$2 == "11 fault" && $3 == 0 { found = 1 } END { exit !found }' "$samples"; }
 
 # check 11: the fan's writes are refused for a while, and the retries are timed. The controller waits 1, 2, 4
 # and 8 s between attempts and then stays at 8 s (law.rs, RETRY_FIRST_NS and RETRY_CAP_NS); each wait ends at the
@@ -439,15 +436,24 @@ check11() {
   rm -f "$failures"
   set_temp "$MID"
   chmod 444 "$fan_file"
-  local t0 reason_seen=false end
+  local t0 reason_seen=false end row=""
   t0=$(now_ms)
   ctl call fan-control hold 900 30000 > /dev/null || bad "$ZL 11 hold refused"
   end=$((t0 + 26000))
   while [ "$(now_ms)" -lt "$end" ]; do
     sample "11 fault" || break
-    ctl list | grep -q "fan write failed" && reason_seen=true
+    local now_row
+    now_row=$(ctl list | grep "^fan-control " | head -1)
+    [[ "$now_row" == *"fan write failed"* ]] && reason_seen=true
+    [ -n "$now_row" ] && row=$now_row
     sleep 0.25
   done
+  say "b14: $ZL 11 health row at the end of the fault: ${row:-none}"
+  local seen_duty
+  seen_duty=$(awk -F'\t' '$2 == "11 fault" { print $3 }' "$samples" | sort -u | tr '\n' ' ')
+  say "b14: $ZL 11 duty values seen while refused (per mille): ${seen_duty:-none}"
+  expect "$ZL 11 the duty while writes are refused is never zero" no_zero_while_refused
+  
   chmod 644 "$fan_file"
   local attempts=()
   [ -f "$failures" ] && mapfile -t attempts < "$failures"

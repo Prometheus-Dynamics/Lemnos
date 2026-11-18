@@ -461,16 +461,26 @@ impl Control {
         self.attempts = 0;
     }
 
-    /// The fan write failed. The fan is released (the driver does that) and the next attempt
-    /// waits 1 s, then 2, 4 and 8 s, and stays at 8 s.
+    /// The fan write failed. The fan is asked for its safe state (full duty: the driver releases
+    /// it), and the next attempt waits 1 s, then 2, 4 and 8 s, and stays at 8 s. Every failure
+    /// asks again, so the duty reported while writes are refused is the safe state, never zero.
     pub fn write_failed(&mut self, now_ns: u64) {
         self.attempts = self.attempts.saturating_add(1);
         let shift = (self.attempts - 1).min(3);
         let wait = (RETRY_FIRST_NS << shift).min(RETRY_CAP_NS);
         self.retry_at_ns = Some(now_ns.saturating_add(wait));
         self.fault = true;
-        self.duty = 0;
+        self.duty = FULL;
         self.kick_until_ms = None;
+    }
+
+    /// While writes are refused: the failed attempts in a row, and when the next attempt is due
+    /// (ns). `None` when no write is failing.
+    pub fn retry(&self) -> Option<(u32, u64)> {
+        if !self.fault {
+            return None;
+        }
+        self.retry_at_ns.map(|at| (self.attempts, at))
     }
 
     /// Whether the controller is running and completing its steps: true while it is disabled

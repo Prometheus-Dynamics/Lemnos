@@ -40,8 +40,10 @@
 //! - A temperature read that fails keeps the last good reading for `max_age_ms`, then the input is
 //!   stale and the fan runs at full duty and the driver reports `Degraded`. A reading comes back
 //!   and the curves take over again.
-//! - A failed fan write puts the fan at full duty (`release`), and the next attempt waits 1 s, then 2 s,
-//!   4 s, then 8 s, and stays at 8 s. The driver reports `Degraded` meanwhile. It never gives up.
+//! - A failed fan write asks the fan for its safe state (`release`, full duty), and the next attempt waits
+//!   1 s, then 2 s, 4 s, then 8 s, and stays at 8 s. Each failure asks for the safe state again, so the
+//!   duty is full, never zero, while writes are refused. The driver reports `Degraded` with the attempt
+//!   count (`retrying`) meanwhile. It never gives up.
 //! - A disabled controller hands the fan back (`hand_back`) to the duty and mode it had before the
 //!   controller took it, and makes no writes until it is enabled. A failed hand-back is tried again
 //!   each second.
@@ -74,7 +76,7 @@ use lemnos_contract_fan_control::{FanControl, MAX_POINTS, Point, Settings, State
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Dev, Health, Item, Key, Kind, Lifecycle,
-    MethodId, Result, Status, Unit, driver,
+    MethodId, Result, Retry, Status, Unit, driver,
 };
 
 /// The method that reads `State`, for a description.
@@ -214,6 +216,14 @@ impl Lifecycle for FanController {
 
     fn health(&self) -> Health {
         self.control.health()
+    }
+
+    fn retrying(&self) -> Option<Retry> {
+        self.control.retry().map(|(attempts, next_ns)| Retry {
+            attempts,
+            next_ns,
+            reason: law::WRITE_FAILED,
+        })
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {

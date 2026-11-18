@@ -368,7 +368,16 @@ fn a_failed_write_releases_the_fan_and_retries_on_a_backoff_capped_at_8_seconds(
     // Five writes fail, each followed by a release. The waits are 1, 2, 4, 8, 8 seconds.
     assert_eq!(attempts, [0, 1, 3, 7, 15, 23]);
     assert_eq!(rig.releases(), 5);
-    assert_eq!(rig.duty(), 400);
+    // The fan was at full duty while its writes were refused, so the first write that works falls from
+    // full at the slew limit (50 per mille a second, over the 8 s since the last step): 1000 - 400.
+    assert_eq!(rig.duty(), 600);
+    for _ in 0..12 {
+        if rig.duty() == 400 {
+            break;
+        }
+        rig.second();
+    }
+    assert_eq!(rig.duty(), 400, "the curve is reached by falling");
     assert_eq!(rig.health(), Health::Ok);
 }
 
