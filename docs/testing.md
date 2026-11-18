@@ -22,7 +22,11 @@ What it runs, in order:
 1. `cargo metadata --locked`: `Cargo.lock` matches the manifests (docs/building.md, "The lock file").
 2. `cargo fmt --all --check`.
 3. `cargo clippy --workspace --all-targets -- -D warnings`.
-4. `cargo test --workspace`.
+4. The workspace tests. With `cargo-nextest` installed they run as `cargo nextest run --workspace` (every test in
+   its own process, all cores at once) and then `cargo test --workspace --doc`; without it, or with
+   `GATE_TESTS=cargo`, as `cargo test --workspace`. The tests are the same either way. `GATE_TEST_JOBS` caps how
+   many run at once. Tests may therefore run as separate processes side by side: a test that builds or writes a
+   shared file takes a file lock, not a lock in its own process.
 5. `cargo check` of the `no_std` crates for three targets: a Cortex-M, a RISC-V microcontroller and
    32-bit ARM Linux.
 6. A few feature combinations: the measurement counters, the client on tokio, the C API as a shared

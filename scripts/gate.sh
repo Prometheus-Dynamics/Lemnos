@@ -73,7 +73,20 @@ esac
 
 step format cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets -- -D warnings
-[ "$part" = checks ] || step tests cargo test --workspace
+# The workspace tests. `cargo test` runs the test programs one after another, so most cores sit idle;
+# cargo-nextest runs every test in its own process, across all programs at once. It does not run doc
+# tests, so those follow. Without cargo-nextest (or with GATE_TESTS=cargo) the plain form runs: the
+# same tests, slower. GATE_TEST_JOBS caps how many tests run at once (default: every core this
+# process may use).
+workspace_tests() {
+  if [ "${GATE_TESTS:-nextest}" = nextest ] && cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(nproc)}"
+    cargo test --workspace --doc
+  else
+    cargo test --workspace
+  fi
+}
+[ "$part" = checks ] || step tests workspace_tests
 
 # What must still build without std, on the targets a microcontroller host uses.
 no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
