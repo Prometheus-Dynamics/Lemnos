@@ -909,6 +909,40 @@ fn the_list_says_what_is_installed_and_which_is_which() {
     let _ = &board.dir;
 }
 
+/// Removes the files a test planted in the temp directory when it goes, even on a panic.
+struct Planted(Vec<PathBuf>);
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// A leftover file at the name the next scratch directory would take (an earlier run, or another
+/// process sharing the temp directory, can leave one) must not stop the test: the directory is made
+/// anyway. The planted names are the ones the scheme gave before: label, process id and counter.
+#[test]
+fn a_leftover_file_at_the_next_scratch_name_does_not_stop_a_test() {
+    let probe = TempDir::new("plant");
+    let last = probe.0.file_name().unwrap().to_str().unwrap().to_string();
+    let counter: u32 = last.rsplit('-').next().unwrap().parse().unwrap();
+    drop(probe);
+    let temp = std::env::temp_dir();
+    let planted = Planted(
+        (counter + 1..=counter + 64)
+            .map(|n| temp.join(format!("lemnos-slots-plant-{}-{n}", std::process::id())))
+            .collect(),
+    );
+    for path in &planted.0 {
+        fs::write(path, b"left behind").unwrap();
+    }
+    let dir = TempDir::new("plant");
+    fs::write(dir.0.join("probe"), b"ok").unwrap();
+    assert_eq!(fs::read(dir.0.join("probe")).unwrap(), b"ok");
+}
+
 /// The security switch's view file in `dir`: `on` or `off`, generation 1.
 fn view_file(dir: &std::path::Path, on: bool) -> std::path::PathBuf {
     let path = dir.join("security");
