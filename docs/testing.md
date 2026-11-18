@@ -101,6 +101,50 @@ scripts/check-docs.py
 scripts/check-docs.py --slow
 ```
 
+## Fresh worktrees: the seed
+
+A fresh worktree's first gate compiles every dependency. `scripts/seed-target.sh` fills a new
+target directory with the third-party build artifacts from a seed instead.
+
+```sh needs:a-seed-directory
+LEMNOS_CARGO_SEED_DIR=<seed-dir> scripts/seed-target.sh save <target-dir>
+LEMNOS_CARGO_SEED_DIR=<seed-dir> scripts/seed-target.sh load <target-dir>
+scripts/seed-target.sh key <target-dir>
+```
+
+- `save` runs the workspace's clippy and test builds on `<target-dir>` (it builds only what is
+  missing), then writes the seed. `load` fills an empty `<target-dir>/debug` from it. `key` prints
+  the key the checkout would use.
+- The seed directory has no default: the script writes nowhere unless `LEMNOS_CARGO_SEED_DIR` is
+  set. Each seed is one directory named by its key: the hash of `Cargo.lock`, `rustc -vV`,
+  `cargo -V`, the profile (`debug`, for dev and test builds) and the host triple. `load` refuses a
+  seed whose key does not match, and a target that is not empty.
+- A loaded target records its key in `<target-dir>/.lemnos-seed`.
+- `save` and `load` hold `flock` on `<seed-dir>/.lock`. Loads share the lock, so worktrees can load
+  at once. A save copies into a private directory and holds the lock only for the swap, so a load
+  never reads a seed being replaced.
+- Copies use `cp --reflink=auto`: a reflink on btrfs and xfs, a plain copy elsewhere.
+
+What a seed holds, and why:
+
+- **Registry and git dependency artifacts only.** A workspace member's artifacts carry the
+  checkout's absolute paths (`CARGO_MANIFEST_DIR`, `file!()`, the build script's `OUT_DIR`), so
+  cargo would reuse them as fresh while they read another checkout's files. `save` takes an
+  artifact only from a unit whose package is registry or git, by the hash in its file names. It
+  refuses to write a seed in which a hash also belongs to a path package. `MANIFEST` lists the
+  packages seeded, one per line, and none of them is a workspace member.
+- **Build-script outputs are re-pointed on load.** cargo replays a build script's `output` into
+  rustc, and it names the `OUT_DIR` of the target it was saved from. `load` rewrites that path to
+  the new target, keeping each file's mtime.
+- **Git dependencies that depend on workspace crates are rebuilt.** A git package that depends on a
+  workspace crate (through a `[patch]`) is dirty whenever that crate is rebuilt, and in a fresh
+  worktree it always is. The seed still holds its artifacts, and cargo recompiles them. Check which
+  crates are rebuilt with `cargo clippy -vv`, which names the dependency that made each unit dirty.
+
+The seed is only useful where the filesystem has reflinks: btrfs and xfs here. On tmpfs
+(`/dev/shm`) the copy is a plain one, about 1.5 s for the seed of this lock. Targets need about 15 to
+25 GB each; the seed is about 0.7 GB.
+
 ## The QEMU harness
 
 The kernel module is tested in a virtual machine. `testing/qemu/run.sh` builds the module, a test
