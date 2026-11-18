@@ -8,7 +8,7 @@ interrupts as reads. The interface is `lemnos.h`.
 
 The module is Rust. It builds only against a kernel with `CONFIG_RUST=y`; there is no C fallback.
 
-- Kernel: 7.3.3 with `CONFIG_RUST=y`, built with clang and `LLVM=1` (`ld.lld` as the linker). KASAN, if
+- Kernel: 7.3.5 with `CONFIG_RUST=y`, built with clang and `LLVM=1` (`ld.lld` as the linker). KASAN, if
   wanted, needs clang too.
 - Toolchain: rustc 1.99.0 with `rust-src` (`rust-toolchain.toml`), bindgen-cli 0.73.2 (the kernel needs
   0.71.1 or later).

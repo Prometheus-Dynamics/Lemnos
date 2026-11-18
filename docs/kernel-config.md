@@ -29,7 +29,7 @@ symbol in an `always.all`, `kind.disk.all` or `kind.mtd.all` row must be built i
 
 Tree each row was resolved against: the reference board's kernel (raspberrypi/linux at
 `53679a5788f7912272b412fd78029bccae6f2b1a`, `bcm2712_defconfig`, see Dependencies) or mainline
-v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`, the tag the harness pins), with the arm64
+v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`; the harness pins 7.3.5 now), with the arm64
 or riscv defconfig for the architecture of the SoC. Rows marked `mainline` were resolved there.
 
 | Symbol | Needed for | When | Checked at boot | Tree resolved against |
