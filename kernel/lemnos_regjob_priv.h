@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Register jobs inside the module: the engine (lemnos_regjob.c) and what a
- * block's profile gives it (lemnos_regjob_<block>.c).
+ * block's profile gives it (rs/regjob_profile.rs; the profiles are Rust and export these tables).
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -37,12 +37,6 @@ struct lrj_ctx {
 	u64 addr[LEMNOS_REGJOB_MAX_ADDRS];
 	u64 bytes[LEMNOS_REGJOB_MAX_ADDRS];
 };
-
-/*
- * The one value the job writes to `offset`, for a geometry check: -EINVAL when
- * the job doesn't write it or writes it more than once.
- */
-int lrj_value(const struct lrj_ctx *c, u32 offset, u32 *value);
 
 u32 lrj_rd(struct lem_rj *rj, u32 offset);
 void lrj_wr(struct lem_rj *rj, u32 offset, u32 value);

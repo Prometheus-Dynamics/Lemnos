@@ -7,7 +7,7 @@ read the shadow registers back. It also gained a second role on one block: a con
 session (`LEMNOS_REGJOB_OPEN_CONFIG`) beside the frames session, with its own write table, checked
 writes and reads at once (`LEMNOS_IOC_REGJOB_WRITE`), the ISP core's frame-out events
 (`LEMNOS_IOC_REGJOB_EVENT`), and `isp_ctrl`'s bits merged between the two roles under the
-module's lock. The ISP's profile (`kernel/lemnos_regjob_k230isp.c`) passes the QEMU harness on a
+module's lock. The ISP's profile (`kernel/rs/regjob_isp.rs`) passes the QEMU harness on a
 fake register block that runs continuously: the switch on an idle block and at a frame's end, the
 previous job's buffer let go when the next job's addresses are taken, the raw output's address and
 its JPEG-path pair, a block whose shadows don't show the job's buffers keeping both held, 19

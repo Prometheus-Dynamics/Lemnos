@@ -1,7 +1,7 @@
 # H8a board run: the A733 video engine's encoder through `lemnos.ko`
 
 Status: untested on board. The module's register-job engine (`kernel/lemnos_regjob.c`) and the
-encoder's profile (`kernel/lemnos_regjob_a733.c`) pass the QEMU harness on a fake register block:
+encoder's profile (`kernel/rs/regjob_ve.rs`) pass the QEMU harness on a fake register block:
 a job's writes, the address registers the module writes, the derived bitstream end and size, the
 read-back, 41 refusals that leave every register as it was, a timeout recovered by a reset, and
 an unbind with a session open. The `a733-video` driver's module route passes its tests over a
@@ -34,7 +34,7 @@ on the Github HDD. Module loads, unbinds and reboots are allowed; report each.
    the module wrote (the import's `addr` plus the job's offset).
 3. **An encode.** Encode one 64 by 64 NV12 frame of a known pattern as an intra picture: the
    input planes, a bitstream buffer of 64 KiB, and the reference, reconstruction, sub-sampled
-   luma, macroblock-info and extra buffers sized as `ve_check` in `lemnos_regjob_a733.c` computes
+   luma, macroblock-info and extra buffers sized as `check` in `rs/regjob_ve.rs` computes
    them, all from `/dev/dma_heap/system`. Pass: status bit 0 (encode done) within 100 ms, a
    nonzero bitstream length in `0xb90`, the bitstream decodes (prefix SPS/PPS headers) to a
    picture within a few levels of the input, and `dmesg` shows no IOMMU fault or bus error.

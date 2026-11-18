@@ -60,7 +60,7 @@ _Static_assert(LEMNOS_REGJOB_IOC_WAIT == 0xc0184cf5u, "wait request");
 _Static_assert(LEMNOS_REGJOB_IOC_WRITE == 0x40204cf6u, "write request");
 _Static_assert(LEMNOS_REGJOB_IOC_EVENT == 0x80104cf7u, "event request");
 
-/* The encoder's registers (kernel/lemnos_regjob_a733.c). */
+/* The encoder's registers (kernel/rs/regjob_ve.rs). */
 #define MODE 0x800
 #define TOP_RESET 0x804
 #define IN_SIZE 0xa00
