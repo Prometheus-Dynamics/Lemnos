@@ -85,16 +85,32 @@
 //! the overflow keeps its own message. The stamps keep going forward: nothing
 //! is published between the restart and the next convergence.
 //!
-//! The gyroscope has no sensor time, so it is stamped from the host clock at
-//! the tick, as before: the newest sample at the tick's time, each older one
-//! back by the measured period. Its error is the tick's own jitter (`Timing`).
-//! Stamping it from its own clock is a follow-up.
+//! The gyroscope has no sensor time, so its clock is its own FIFO's fill
+//! (`gyro_clock.rs`). Each tick's drain reads the fill between two host clock
+//! readings, and a bracket wider than 2 ms gives no host time. The count of
+//! samples made is then exact, and the phase is bounded by the two readings: a
+//! read's window, one sample wide, is intersected with the windows of the last
+//! 16 reads, each recomputed against the current line, so it narrows to about
+//! the bracket. The rate is a least-squares line from the counts to the
+//! brackets' midpoints. The drains are spread by a golden-ratio offset that does
+//! not accumulate, so their fractions of a sample spread out. The model
+//! publishes after 64 reads (about 16 s at 200 Hz) and once a window exists, and
+//! stays published. A read whose window disagrees with the others (its host
+//! reading was off) is left out of the fit and the windows; 16 disagreeing reads
+//! in a row restart the windows from the newest.
 //!
-//! A read's drain has no time of its own, and reads no sensor time. The
-//! accelerometer's samples from a read are stamped by the same model once it
-//! has converged, and the gyroscope's from the last tick's
-//! stamp on its grid. A gyroscope sample drained before any tick has no stamp,
-//! and is not queued for a batch.
+//! On the simulated gyroscope, 2 % fast at 200 Hz with the board's jitter and
+//! outliers, 45 s gave a worst error of 0.31 ms, a span within 0.18 ms of the
+//! true span, and a largest gap of 5.17 ms. A sweep from 4 % slow to 4 % fast
+//! gave at most 0.56 ms, and an hour with 0.1 % per hour of drift stayed under
+//! 1 ms. Under 9 ms of host error on every reading (12 runs of 45 s) the worst
+//! error was 14.9 ms and the largest gap 24.6 ms: that error is the host
+//! clock's, and under it tick-time stamping (4.8 ms and 9.7 ms on the same runs)
+//! is the better of the two (`clock_tests.rs`).
+//!
+//! A read's drain has no time of its own, and reads no clock. Its samples are
+//! stamped by the die's model once it has converged, as a tick's are, and a
+//! sample drained before the model converges waits for it, as a tick's do.
 //!
 //! A loss (a FIFO overflow, or a batch that the ring overwrote before it was
 //! read) is reported in health from the call that found it, and until the read
@@ -102,10 +118,10 @@
 //! reported to the next read. The loss messages are `FIFO overflowed, samples
 //! lost` and `batch missed samples`.
 //!
-//! Not in this driver: the gyroscope alignment, which needs the sensor time of
-//! the gyroscope (it has none) and a host clock read around each of its
-//! transactions, and the auto-calibration, which the caller does (the chip does
-//! not calibrate itself).
+//! Not in this driver: the alignment of the gyroscope to the accelerometer,
+//! which the two clocks make possible but which is not built here (board check
+//! 7 in `testing/board-runs/B8.md`), and the auto-calibration, which the caller
+//! does (the chip does not calibrate itself).
 //!
 //! Retries of a failed die are its own ticks, under the backoff above. Reads never
 //! step a die: a read that comes before the die is ready returns `AGAIN`.
@@ -115,11 +131,13 @@
 mod chip;
 #[cfg(test)]
 mod clock_tests;
+mod gyro_clock;
 mod sensor_clock;
 #[cfg(test)]
 mod tests;
 
 use chip::{Failure, Frame, Kind, Setting};
+use gyro_clock::GyroClock;
 use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample};
 use lemnos_contract_gyroscope::{Gyroscope, Sample as GyroSample};
 use lemnos_core::{
@@ -234,7 +252,9 @@ fn text(kind: Kind, note: Note) -> &'static str {
         }
         (Kind::Gyro, Note::WrongId) => "gyroscope: wrong chip id, retrying",
         (Kind::Gyro, Note::Transfer) => "gyroscope: transfer failed, retrying",
-        (Kind::Gyro, Note::Overflow) => "gyroscope: FIFO overflowed, samples lost",
+        (Kind::Gyro, Note::Overflow) => {
+            "gyroscope: FIFO overflowed, samples lost; its sample clock was re-anchored"
+        }
         (Kind::Gyro, Note::Batch) => "gyroscope: batch missed samples",
         (Kind::Gyro, Note::Reset) => "gyroscope: its clock went back",
         (Kind::Gyro, Note::Jump) => "gyroscope: its clock jumped",
@@ -259,47 +279,6 @@ const EMPTY: Entry = Entry {
     ready: false,
 };
 
-/// A die's clock: where its samples fall on the host's clock. Both fields are
-/// set by tick drains, which are the only ones with a time.
-#[derive(Debug, Clone, Copy, Default)]
-struct Timing {
-    /// The newest sample's number and the host time of the tick that drained
-    /// it.
-    anchor: Option<(u64, u64)>,
-    /// The first tick drain that had samples: the same pair. The period is
-    /// measured from it.
-    first: Option<(u64, u64)>,
-    /// The period measured from `first`, once it spans enough samples and is
-    /// within 5 % of nominal.
-    measured: Option<u64>,
-}
-
-/// The samples that span a measurement, at least.
-const MIN_SPAN: u64 = 32;
-
-impl Timing {
-    /// A tick drain saw newest sample `newest` at host time `now`.
-    fn measure(&mut self, newest: u64, now: u64, nominal: u64) {
-        match self.first {
-            None => self.first = Some((newest, now)),
-            Some((first, t0)) => {
-                let span = newest.saturating_sub(first);
-                if span >= MIN_SPAN && now > t0 {
-                    let period = (now - t0) / span;
-                    if period.abs_diff(nominal) * 20 <= nominal {
-                        self.measured = Some(period);
-                    }
-                }
-            }
-        }
-        self.anchor = Some((newest, now));
-    }
-
-    fn period(&self, nominal: u64) -> u64 {
-        self.measured.unwrap_or(nominal)
-    }
-}
-
 /// One die: its address, settings, power-up phase, FIFO ring and newest sample.
 struct Die<const RING: usize> {
     kind: Kind,
@@ -316,9 +295,10 @@ struct Die<const RING: usize> {
     ring: [Entry; RING],
     /// The next sample a batch takes.
     batch_next: u64,
-    timing: Timing,
-    /// The accelerometer's sample clock (the gyroscope keeps `timing`).
+    /// The accelerometer's sample clock.
     clock: SensorClock,
+    /// The gyroscope's sample clock, from its FIFO's fill.
+    gyro_clock: GyroClock,
     /// The next sample to stamp. Samples before it are stamped, or dropped unstamped.
     stamped: u64,
     /// When the next tick drain is due, host ns (`None`: not draining).
@@ -326,6 +306,8 @@ struct Die<const RING: usize> {
     /// The accelerometer's last extra wait before a drain, in 2^-32 of a sample period (see
     /// `spread`).
     spread: u32,
+    /// The gyroscope's offset of its last drain, in ns, which the next drain takes back (see `tick`).
+    spread_applied: u64,
     /// A loss a drain or batch found, not yet shown to a read.
     pending: Option<Note>,
     /// The loss a read shows in health.
@@ -353,11 +335,12 @@ impl<const RING: usize> Die<RING> {
             seq: 0,
             ring: [EMPTY; RING],
             batch_next: 0,
-            timing: Timing::default(),
             clock: SensorClock::new(setting.period_ns),
+            gyro_clock: GyroClock::default(),
             stamped: 0,
             due: None,
             spread: 0,
+            spread_applied: 0,
             pending: None,
             shown: None,
             up_due: None,
@@ -480,57 +463,70 @@ impl<const RING: usize> Die<RING> {
             return Ok(None);
         }
         if self.fifo {
-            self.drain(bus, None, None)?;
+            self.drain(bus, None)?;
             Ok(self.last)
         } else {
             chip::read_axes(bus, self.address, self.kind).map(Some)
         }
     }
 
-    /// Drains the FIFO into the ring, stamps what it took, and records any loss.
-    /// `now` is the tick's time, for the gyroscope's stamps; `clock` is the host clock a tick
-    /// reads the accelerometer's sensor time against. Both are `None` for a read's drain, which has
-    /// no time of its own.
-    fn drain(
-        &mut self,
-        bus: &mut I2c,
-        now: Option<u64>,
-        clock: Option<&dyn HostClock>,
-    ) -> chip::Step<()> {
+    /// Drains the FIFO into the ring, stamps what it took, and records any loss. `clock` is the
+    /// host clock a tick reads the die's count against: a tick's drain reads the count between two
+    /// host clock readings (the accelerometer's sensor time, the gyroscope's FIFO fill). A read's
+    /// drain has no clock, and its samples wait for the model.
+    fn drain(&mut self, bus: &mut I2c, clock: Option<&dyn HostClock>) -> chip::Step<()> {
         let first = self.seq;
-        // A tick's accelerometer drain is timed: the sensor time is read just before the FIFO's
-        // length and again just after it, the second time between two host clock readings, and
-        // only then is the FIFO read (see `sensor_clock.rs`).
-        let timed = match clock {
-            Some(clock) if self.kind == Kind::Accel => Some(clock),
-            _ => None,
-        };
         let mut sensed = None;
         let mut counted = None;
-        if let Some(clock) = timed {
-            let raw = chip::accel_sensortime(bus, self.address)?;
-            let event = self.clock.before(raw);
-            self.note_event(event);
-            counted = Some(chip::accel_fifo_bytes(bus, self.address)?);
-            sensed = Some(sense(bus, self.address, clock)?);
+        let mut bracket = None;
+        if let Some(clock) = clock {
+            match self.kind {
+                Kind::Accel => {
+                    // The sensor time is read just before the FIFO's length and again just after it,
+                    // the second time between two host clock readings, and only then is the FIFO read
+                    // (see `sensor_clock.rs`).
+                    let raw = chip::accel_sensortime(bus, self.address)?;
+                    let event = self.clock.before(raw);
+                    self.note_event(event);
+                    counted = Some(chip::accel_fifo_bytes(bus, self.address)?);
+                    sensed = Some(sense(bus, self.address, clock)?);
+                }
+                Kind::Gyro => {
+                    // The FIFO's fill is read between two host clock readings (see `gyro_clock.rs`).
+                    let (frames, host) = gyro_fill(bus, self.address, clock)?;
+                    counted = Some(frames);
+                    bracket = host;
+                }
+            }
         }
         let (overflow, result) = self.pull(bus, counted);
         if overflow {
             self.pending = Some(Note::Overflow);
             // The skipped frames keep their numbers, but the sample clock is not trusted across a
             // loss: it is restarted, and its samples wait for it (see `publish`).
-            if self.kind == Kind::Accel {
-                self.clock.restart();
+            match self.kind {
+                Kind::Accel => self.clock.restart(),
+                Kind::Gyro => self.gyro_clock.restart(),
             }
         }
-        if self.kind != Kind::Accel {
-            self.stamp(first, now);
-            return result;
-        }
-        if let Some((raw, host)) = sensed {
-            let newest = self.seq.checked_sub(1);
-            let event = self.clock.after(raw, newest, result.is_ok(), host);
-            self.note_event(event);
+        match self.kind {
+            Kind::Accel => {
+                if let Some((raw, host)) = sensed {
+                    let newest = self.seq.checked_sub(1);
+                    let event = self.clock.after(raw, newest, result.is_ok(), host);
+                    self.note_event(event);
+                }
+            }
+            Kind::Gyro => {
+                // The count at the read is what the FIFO held plus what was drained before it. A
+                // loss or a failed transfer makes the read's count unusable, so it is not observed.
+                if let (Some((h0, h1)), Some(frames)) = (bracket, counted)
+                    && !overflow
+                    && result.is_ok()
+                {
+                    self.gyro_clock.observe(first + frames as u64, h0, h1);
+                }
+            }
         }
         // A read's drain has no time of its own: its samples wait for the model, or take it.
         self.publish();
@@ -563,7 +559,11 @@ impl<const RING: usize> Die<RING> {
         }
         let mut n = self.stamped;
         while n < self.seq {
-            match self.clock.publish(n) {
+            let stamp = match self.kind {
+                Kind::Accel => self.clock.publish(n),
+                Kind::Gyro => self.gyro_clock.publish(n),
+            };
+            match stamp {
                 Some(at_ns) => self.set_stamp(n, at_ns),
                 None => break,
             }
@@ -594,12 +594,12 @@ impl<const RING: usize> Die<RING> {
                     Frame::Sample(raw) => self.push(raw),
                 })
             }),
-            Kind::Gyro => chip::gyro_fifo_frames(bus, address).and_then(|frames| {
+            Kind::Gyro => match counted {
+                Some(frames) => Ok(frames),
+                None => chip::gyro_fifo_frames(bus, address),
+            }
+            .and_then(|frames| {
                 overflow = frames >= chip::GYRO_FIFO_FRAMES;
-                if overflow {
-                    // The frames lost are not counted, so the grid is gone.
-                    self.timing = Timing::default();
-                }
                 chip::drain_gyro(bus, address, frames, &mut |raw| self.push(raw))
             }),
         };
@@ -616,39 +616,6 @@ impl<const RING: usize> Die<RING> {
             ready: false,
         };
         self.seq = self.seq.saturating_add(1);
-    }
-
-    /// Gives the samples numbered `first..seq` their stamps: from the tick's
-    /// time when a tick took them, otherwise on the grid from the last tick.
-    fn stamp(&mut self, first: u64, now: Option<u64>) {
-        if self.seq == first {
-            return;
-        }
-        let nominal = self.setting.period_ns;
-        let newest = self.seq - 1;
-        match now {
-            Some(now) => {
-                self.timing.measure(newest, now, nominal);
-                let period = self.timing.period(nominal);
-                for n in first..self.seq {
-                    let back = newest - n;
-                    self.set_stamp(n, now.saturating_sub(back.saturating_mul(period)));
-                }
-            }
-            None => {
-                let period = self.timing.period(nominal);
-                for n in first..self.seq {
-                    match self.timing.anchor {
-                        Some((at_n, at_ns)) => {
-                            let ahead = n.saturating_sub(at_n).saturating_mul(period);
-                            self.set_stamp(n, at_ns.saturating_add(ahead));
-                        }
-                        // No tick yet: no time to give it. Not queued.
-                        None => self.set_stamp(n, u64::MAX),
-                    }
-                }
-            }
-        }
     }
 
     /// Sets sample `n`'s stamp, or unqueues it when `at_ns` is `u64::MAX`.
@@ -708,7 +675,7 @@ impl<const RING: usize> Die<RING> {
             return None;
         }
         if self.due.is_none_or(|due| now >= due) {
-            if let Err(failure) = self.drain(bus, Some(now), Some(clock)) {
+            if let Err(failure) = self.drain(bus, Some(clock)) {
                 self.fail(&failure);
                 return self.retry_at(now);
             }
@@ -721,24 +688,25 @@ impl<const RING: usize> Die<RING> {
                     .clock
                     .aim(earliest)
                     .unwrap_or(earliest.saturating_add(spread)),
-                Kind::Gyro => earliest,
+                // Not aimed: the fill's bounds close on the spread of the drains' fractions.
+                // The offset is not carried into the next drain: each drain's offset replaces the
+                // last one, so the drains' fractions of a sample spread over the period without
+                // drifting with the drain count (see `gyro_clock.rs`).
+                Kind::Gyro => earliest
+                    .saturating_add(spread)
+                    .saturating_sub(core::mem::replace(&mut self.spread_applied, spread)),
             };
             self.due = Some(next);
         }
         self.due
     }
 
-    /// The accelerometer's extra wait before its next drain, in `[0, period)`, until the sample
-    /// clock has the bounds to aim its drains with; none for the gyroscope. The first bounds come
-    /// from drains at any point of the sample grid, and drains a fixed time apart cycle through a
-    /// few points when that time is close to a simple fraction of periods. Drain `j` waits `j * golden`
-    /// (mod one period) more, so after `k` drains the offset on the grid has moved by
-    /// `golden * k * (k + 1) / 2` periods plus the beat: a quadratic with an irrational step,
-    /// spread evenly over the period whatever the chip's rate is.
+    /// The extra wait before the next drain, in `[0, period)`: the drain's offset on the sample grid.
+    /// The accelerometer uses it until its sample clock has the bounds to aim its drains with. The
+    /// gyroscope always uses it, and takes back the last offset before it adds the next (see `tick`),
+    /// so the offsets do not accumulate into the drains' count. The offsets are a golden-ratio
+    /// sequence, spread evenly over the period whatever the chip's rate is.
     fn spread(&mut self) -> u64 {
-        if self.kind != Kind::Accel {
-            return 0;
-        }
         /// 2^32 / the golden ratio.
         const GOLDEN: u32 = 2_654_435_769;
         self.spread = self.spread.wrapping_add(GOLDEN);
@@ -762,7 +730,9 @@ impl<const RING: usize> Die<RING> {
         if wrong_id || self.phase == Phase::Ready {
             self.phase = Phase::Off;
             self.last = None;
-            self.timing = Timing::default();
+            if self.kind == Kind::Gyro {
+                self.gyro_clock.restart();
+            }
             self.due = None;
             self.up_due = None;
             self.pending = None;
@@ -787,6 +757,20 @@ impl<const RING: usize> Die<RING> {
                 .map(|note| text(self.kind, note))
         }
     }
+}
+
+/// The gyroscope's FIFO fill, and the host times of the read: the two host clock readings around it.
+/// A bracket wider than `MAX_BRACKET_NS` (the host was preempted inside the read) gives none.
+fn gyro_fill(
+    bus: &mut I2c,
+    address: u8,
+    clock: &dyn HostClock,
+) -> chip::Step<(usize, Option<(u64, u64)>)> {
+    let before = clock.now_ns();
+    let frames = chip::gyro_fifo_frames(bus, address)?;
+    let after = clock.now_ns();
+    let bracket = (after >= before && after - before <= MAX_BRACKET_NS).then_some((before, after));
+    Ok((frames, bracket))
 }
 
 /// The accelerometer's sensor time, and the host time of the read: the middle of the two host clock
@@ -828,7 +812,7 @@ fn batch_die<const RING: usize>(
         if die.phase != Phase::Ready {
             Err(die.not_ready())
         } else {
-            match die.drain(bus, None, None) {
+            match die.drain(bus, None) {
                 Err(failure) => Err(die.fail(&failure)),
                 Ok(()) => Ok(die.deliver(into, record)),
             }
