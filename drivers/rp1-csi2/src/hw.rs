@@ -414,9 +414,15 @@ impl Hardware for LinuxHardware {
 
     fn counters(&mut self) -> Result<Counters> {
         let info = self.node()?.info().map_err(status)?;
+        // Frames the block wrote that the driver's reader let go by (at its in-hand limit, or
+        // because it was late and the module had moved on) reached no one either.
+        let passed_by = self
+            .running
+            .as_ref()
+            .map_or(0, |(stream, _)| stream.dropped());
         Ok(Counters {
             frames: info.written,
-            dropped: info.dropped,
+            dropped: info.dropped.saturating_add(passed_by),
             errors: info.errors,
         })
     }
