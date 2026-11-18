@@ -58,46 +58,10 @@
 #define LEM_REGION_BITS 8
 #define LEM_MAX_BLOCK ((u32)min_t(u64, U32_MAX, BIT_ULL(BITS_PER_LONG - PAGE_SHIFT - LEM_REGION_BITS) - 1))
 
-static char *owned = "";
-module_param(owned, charp, 0444);
-MODULE_PARM_DESC(owned,
-		 "Compatibles of the blocks Lemnos owns, comma-separated in pairs "
-		 "(vendor,name); no other device is claimed");
-
-static char *confined = "";
-module_param(confined, charp, 0444);
-MODULE_PARM_DESC(confined,
-		 "Compatibles of the blocks whose DMA their IOMMU really confines; "
-		 "no other block's registers can be mapped, except those in unconfined=");
-
-static char *pisp_be = "";
-module_param(pisp_be, charp, 0444);
-MODULE_PARM_DESC(pisp_be,
-		 "Compatibles of the blocks driven by the PiSP back end code; their "
-		 "registers and interrupts never reach user space");
-
-static char *gsdma = "";
-module_param(gsdma, charp, 0444);
-MODULE_PARM_DESC(gsdma,
-		 "Compatibles of the blocks driven as the K230 graphics DMA engine; their "
-		 "registers and interrupts never reach user space");
-
-static char *unconfined = "";
-module_param(unconfined, charp, 0444);
-MODULE_PARM_DESC(unconfined,
-		 "Compatibles of the blocks whose registers may be mapped though no IOMMU "
-		 "confines their DMA: the driver in user space alone keeps that DMA in bounds");
-
-static char *vip9000 = "";
-module_param(vip9000, charp, 0444);
-MODULE_PARM_DESC(vip9000,
-		 "Compatibles of the blocks driven as the VIP9000 neural accelerator; their "
-		 "registers, interrupts and MMU never reach user space");
-
-static bool test_irq_inject;
-module_param(test_irq_inject, bool, 0444);
-MODULE_PARM_DESC(test_irq_inject,
-		 "Test only: LEMNOS_IOC_TEST_IRQ sets an interrupt pending at its controller");
+/* The lists and the test switch are Rust's (rs/lists.rs): a device's place in one, by its number there. */
+enum { LEM_LIST_OWNED, LEM_LIST_CONFINED, LEM_LIST_UNCONFINED, LEM_LIST_PISP_BE, LEM_LIST_GSDMA, LEM_LIST_VIP9000 };
+bool lem_list_has(struct device *dev, u32 which);
+bool lem_test_irq_inject(void);
 
 struct lem_block;
 
@@ -170,43 +134,6 @@ static atomic_t lem_opened = ATOMIC_INIT(0);
 DECLARE_WAIT_QUEUE_HEAD(lem_wait);
 /* Global: the last buffer's free may race the block being freed. */
 static DECLARE_WAIT_QUEUE_HEAD(lem_drained);
-
-/* --- which blocks --- */
-
-/* Whether `compatible` is one of the comma-separated pairs in `list`. */
-static bool lem_listed(const char *list, const char *compatible)
-{
-	size_t n = strlen(compatible);
-	const char *p = list;
-
-	while (p && *p) {
-		const char *comma = strchr(p, ',');
-		const char *end = comma ? strchr(comma + 1, ',') : NULL;
-		size_t len = end ? (size_t)(end - p) : strlen(p);
-
-		if (len == n && !strncmp(p, compatible, n))
-			return true;
-		p = end ? end + 1 : NULL;
-	}
-	return false;
-}
-
-/* Whether any of the device's compatibles is in `list`, from any firmware description. */
-bool lem_device_listed(struct device *dev, const char *list)
-{
-	const char *c[LEM_MAX_COMPATIBLE];
-	int n = device_property_read_string_array(dev, "compatible", c, ARRAY_SIZE(c));
-
-	for (int i = 0; i < n; i++)
-		if (lem_listed(list, c[i]))
-			return true;
-	return false;
-}
-
-bool lem_block_owned(struct device *dev)
-{
-	return lem_device_listed(dev, owned);
-}
 
 /* --- interrupts --- */
 
@@ -657,7 +584,7 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 			return -ENOTTY;
 		return lem_power_request(l->power, &u->power);
 	case LEMNOS_IOC_TEST_IRQ:
-		if (!test_irq_inject)
+		if (!lem_test_irq_inject())
 			return -EPERM;
 		if (u->irq.index >= l->nirqs)
 			return -EINVAL;
@@ -814,15 +741,15 @@ static int lem_probe(struct platform_device *pdev)
 	while (l->regions < LEMNOS_MAX_REGIONS &&
 	       platform_get_resource(pdev, IORESOURCE_MEM, l->regions))
 		l->regions++;
-	l->mappable = device_iommu_mapped(dev) && lem_device_listed(dev, confined);
-	if (!l->mappable && lem_device_listed(dev, unconfined)) {
+	l->mappable = device_iommu_mapped(dev) && lem_list_has(dev, LEM_LIST_CONFINED);
+	if (!l->mappable && lem_list_has(dev, LEM_LIST_UNCONFINED)) {
 		dev_warn(dev, "unconfined: registers mappable though no IOMMU confines this block's DMA\n");
 		l->mappable = true;
 		l->unconfined = true;
 	}
 
 	/* The module drives this block itself: nothing of it reaches user space. */
-	if (lem_device_listed(dev, pisp_be)) {
+	if (lem_list_has(dev, LEM_LIST_PISP_BE)) {
 		l->mappable = false;
 		l->unconfined = false;
 		l->pb = lem_pb_probe(pdev);
@@ -830,7 +757,7 @@ static int lem_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(l->pb), "PiSP back end\n");
 		goto ready;
 	}
-	if (lem_device_listed(dev, gsdma)) {
+	if (lem_list_has(dev, LEM_LIST_GSDMA)) {
 		l->mappable = false;
 		l->unconfined = false;
 		l->gd = lem_gd_probe(pdev);
@@ -838,7 +765,7 @@ static int lem_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(l->gd), "K230 graphics DMA engine\n");
 		goto ready;
 	}
-	if (lem_device_listed(dev, vip9000)) {
+	if (lem_list_has(dev, LEM_LIST_VIP9000)) {
 		l->mappable = false;
 		l->unconfined = false;
 		l->vip = lem_vip_probe(pdev);
@@ -853,7 +780,7 @@ static int lem_probe(struct platform_device *pdev)
 		l->mappable = false;
 		goto ready;
 	}
-	if (test_irq_inject)
+	if (lem_test_irq_inject())
 		dev_warn(dev, "test_irq_inject: interrupts can be raised from user space\n");
 
 	/* Clocked while bound, as the stock driver keeps it. */
