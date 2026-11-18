@@ -53,6 +53,11 @@ lem_bindgen_items := \
 	--allowlist-var 'LEM_PISP_FE_WINDOW' \
 	--allowlist-var 'LEMNOS_(MAX_THERMAL_WATCHES|EVENT_TEMPERATURE)' \
 	--allowlist-type 'lemnos_regjob_.*' \
+	--allowlist-type 'lemnos_stream_.*' \
+	--allowlist-var 'LEMNOS_(STREAM|RING_STATE|REFUSED|LAYOUT)_.*' \
+	--allowlist-type 'lem_(stream|geom|frame|stream_region|reader|bell|stream_buf|reader_handle)' \
+	--allowlist-var 'LEM_STREAM_.*' \
+	--with-derive-custom-struct 'lem_(stream_region|reader|stream_buf)=Copy,Clone' \
 	--allowlist-var 'LEMNOS_REGJOB_.*' \
 	--with-derive-custom-struct 'lemnos_.*=Copy,Clone' \
 	--with-derive-custom-struct 'pisp_.*=Copy,Clone' \
@@ -63,7 +68,7 @@ quiet_cmd_lem_bindgen = BINDGEN $@
 		--no-layout-tests --no-debug '.*' --no-doc-comments --enable-function-attribute-detection \
 		--no-recursive-allowlist $(lem_bindgen_items) \
 		-o $@ -- $(filter-out $(CC_FLAGS_LTO),$(c_flags)) -fno-builtin -D__BINDGEN__ -DMODULE
-$(obj)/lemnos_bindings_generated.rs: $(src)/rs/bindings.h $(src)/lemnos.h FORCE
+$(obj)/lemnos_bindings_generated.rs: $(src)/rs/bindings.h $(src)/lemnos.h $(src)/lemnos_stream_priv.h FORCE
 	$(call if_changed_dep,lem_bindgen)
 targets += lemnos_bindings_generated.rs
 clean-files += lemnos_bindings_generated.rs
