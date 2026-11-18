@@ -233,8 +233,10 @@ fn main() {
         image_path.display(),
         bytes.len()
     ));
+    // The controller as sent, not a fixed word: R3's records said "sd none" for runs that did name one.
+    let sd_text = sd_controller.map_or_else(|| "none".to_string(), |c| format!("controller {c}"));
     rec.note(format!(
-        "mode {mode} = {mode_bits:#x}, sd none, load {LOAD_ADDRESS:#010x}, port {port}"
+        "mode {mode} = {mode_bits:#x}, sd {sd_text}, load {LOAD_ADDRESS:#010x}, port {port}"
     ));
 
     let mut io =
