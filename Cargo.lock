@@ -2910,6 +2910,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-rp1-csi2-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-sensor-power-up"
 version = "2.0.1-dev"
 dependencies = [
