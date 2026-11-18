@@ -156,7 +156,7 @@ consumer's; it is not measured on the board. The F2 runs fed the back end from a
 itself (`lemnos-isp-proof`, `lemnos-be-raw`).
 
 **The receiver's raw frames beside the front end.** The module refuses a receiver stream while the
-front end streams (`lemnos_rp1_csi2.c`, `EBUSY`), and the kernel README says why: in front-end mode the
+front end streams (`rs/rp1_csi2.rs`, `EBUSY`), and the kernel README says why: in front-end mode the
 CSI-2 channel feeds the front end instead of memory. The stock driver takes the same channel out of
 raw mode in that mode (`fe_csi2_channel`). A consumer that wants packed raw frames and the ISP at once
 does not get them from this block at this commit. The front end's `output0` is the raw frame

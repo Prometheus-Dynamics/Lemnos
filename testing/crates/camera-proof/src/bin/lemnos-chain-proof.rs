@@ -22,7 +22,7 @@
 //! reference lines. The others are never skipped.
 //!
 //! The latch cannot run beside the chain on a board: the receiver's raw `frames` stream and the
-//! front end are exclusive in the kernel module (`kernel/lemnos_rp1_csi2.c`, `lrc_start`: `EBUSY`
+//! front end are exclusive in the kernel module (`kernel/rs/rp1_csi2.rs`, `start`: `EBUSY`
 //! while the front end streams), and the latch takes that stream. So a board run starts the latch
 //! on its own first (`lemnos-sensor-proof latch`) and gives this tool `--allow-skip latch`;
 //! `--latch-trials` is for a chain whose receiver can share its stream.

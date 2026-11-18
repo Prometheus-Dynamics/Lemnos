@@ -1601,7 +1601,7 @@ fn test_own_buffers(c: &mut Ctx, heap: &str, dev: &str) {
     fire(c, TCSI_FS);
     // Buffer 0 is the newest frame, and no reader has read it (none has a marks page), so the module
     // does not take it back yet (lem_stream_newest_read). Nothing else is free: the channel has no
-    // buffer to arm, so its address is zero, as lrc_arm leaves it (kernel/lemnos_rp1_csi2.c,
+    // buffer to arm, so its address is zero, as Frame::arm leaves it (kernel/rs/rp1_csi2.rs,
     // FLAKE-COMPOSE). It is not left at buffer 1's, the buffer this frame start used.
     check!(
         armed_addr(c) == 0,

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * What the receiver (lemnos_rp1_csi2.c) and the front end on the same block
+ * What the receiver (rs/rp1_csi2.rs) and the front end on the same block
  * (rs/pisp_fe.rs) share. Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef LEMNOS_RP1_CSI2_PRIV_H
@@ -29,7 +29,7 @@ struct lrc_frame {
 /*
  * The embedded data channel (CSI-2 data type 0x12 on the image's virtual
  * channel): its own stream, its own buffers, its own frame accounting. See
- * lemnos_rp1_csi2.c, "Embedded data".
+ * rs/rp1_csi2.rs (START, and the emb_ functions of the frame path).
  */
 struct lrc_emb {
 	int req_fd;			/* asked for before START; -1: none */
@@ -79,33 +79,15 @@ struct lrc_dev {
 	struct lemnos_rp1_csi2_start start;
 	struct lrc_emb emb;
 	u64 frames, written, dropped, errors;
-	/* Arms again while nothing is armed and no buffer was free; see lrc_arm(). */
+	/* Arms again while nothing is armed and no buffer was free; see Frame::arm (rs/rp1_csi2.rs). */
 	struct delayed_work retry;
 };
 
-
-void lrc_ref_get(struct lrc_dev *l);
-void lrc_ref_put(struct lrc_dev *l);
-
 /*
- * The link with the channel feeding the front end instead of memory: the
- * channel in its streaming mode, then the D-PHY and host once the front end is
- * ready for frames. Called holding l->ctl with nothing streaming. See cfe.c.
+ * The receiver and the front end are both Rust and call each other there (rs/rp1_csi2.rs,
+ * rs/pisp_fe.rs); this header is only the layout they share, for the bindings.
  */
-void lrc_fe_channel_start(struct lrc_dev *l, u32 width, u32 height, u32 vc, u32 dt);
-void lrc_fe_open_rx(struct lrc_dev *l, u32 lanes, u32 mbps);
-void lrc_fe_channel_stop(struct lrc_dev *l);
-
-/* rs/pisp_fe.rs */
 /* The front end's register window, from its configuration block's end. */
 #define LEM_PISP_FE_WINDOW	(0x40 + 0x270)
-struct lem_pisp_fe *lem_pisp_fe_create(struct lrc_dev *l, void __iomem *window);
-void lem_pisp_fe_destroy(struct lem_pisp_fe *fe);
-long lem_pisp_fe_ioctl(struct lem_pisp_fe *fe, unsigned int cmd, void __user *arg);
-/* l->ctl held; nothing streaming afterwards, or the block is wedged. */
-void lem_pisp_fe_stop(struct lem_pisp_fe *fe);
-void lem_pisp_fe_isr(struct lem_pisp_fe *fe, u64 now);
-void lem_pisp_fe_csi_fs(struct lem_pisp_fe *fe);
-bool lem_pisp_fe_streaming(struct lem_pisp_fe *fe);
 
 #endif

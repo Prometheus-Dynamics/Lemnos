@@ -49,6 +49,8 @@ mod gsdma;
 mod vip;
 #[path = "rs/pisp_fe.rs"]
 mod pisp_fe;
+#[path = "rs/rp1_csi2.rs"]
+mod rp1_csi2;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
@@ -57,9 +59,6 @@ use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 unsafe extern "C" {
     static lem_driver: [u8; 0];
     static lem_misc: [u8; 0];
-    /// lemnos_rp1_csi2.c: the csi2 receiver's platform driver and its node.
-    fn lem_rp1_csi2_register() -> c_int;
-    fn lem_rp1_csi2_unregister();
     /// `platform_driver_register` is a macro over this, with THIS_MODULE and KBUILD_MODNAME.
     fn __platform_driver_register(drv: *mut c_void, owner: *mut c_void, name: *const c_char) -> c_int;
     fn platform_driver_unregister(drv: *mut c_void);
@@ -92,8 +91,8 @@ impl kernel::Module for LemnosEntry {
             bus::lem_bus_exit();
             return Err(e);
         }
-        // SAFETY: registers the csi2 receiver; undone in the error path below and in Drop.
-        if let Err(e) = to_result(unsafe { lem_rp1_csi2_register() }) {
+        // The csi2 receiver's platform driver (rs/rp1_csi2.rs); undone in the error path below and in Drop.
+        if let Err(e) = to_result(rp1_csi2::lem_rp1_csi2_register()) {
             // SAFETY: undoes the platform driver, registered above; then the bus.
             unsafe { platform_driver_unregister(driver) };
             bus::lem_bus_exit();
@@ -101,11 +100,9 @@ impl kernel::Module for LemnosEntry {
         }
         // SAFETY: registers /dev/lemnos from the C descriptor; undone in the error path and in Drop.
         if let Err(e) = to_result(unsafe { misc_register(misc) }) {
-            // SAFETY: undoes the csi2 receiver and the platform driver, registered above; then the bus.
-            unsafe {
-                lem_rp1_csi2_unregister();
-                platform_driver_unregister(driver);
-            }
+            rp1_csi2::lem_rp1_csi2_unregister();
+            // SAFETY: undoes the platform driver, registered above; then the bus.
+            unsafe { platform_driver_unregister(driver) };
             bus::lem_bus_exit();
             return Err(e);
         }
@@ -117,12 +114,11 @@ impl Drop for LemnosEntry {
     fn drop(&mut self) {
         // The reverse of init, as lem_exit does it.
         let (driver, misc) = (addr_of!(lem_driver) as *mut c_void, addr_of!(lem_misc) as *mut c_void);
-        // SAFETY: called once, at unload, after a successful init; each call undoes one init step.
-        unsafe {
-            misc_deregister(misc);
-            lem_rp1_csi2_unregister();
-            platform_driver_unregister(driver);
-        }
+        // SAFETY: called once, at unload, after a successful init; undoes misc_register.
+        unsafe { misc_deregister(misc) };
+        rp1_csi2::lem_rp1_csi2_unregister();
+        // SAFETY: as above; undoes the platform driver's registration.
+        unsafe { platform_driver_unregister(driver) };
         bus::lem_bus_exit();
     }
 }

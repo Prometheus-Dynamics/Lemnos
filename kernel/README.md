@@ -109,7 +109,7 @@ Refusals and what they mean are listed in `lemnos.h`.
 
 ## The rp1-csi2 receiver
 
-`lemnos_rp1_csi2.c` is the camera receiver: the block's D-PHY, CSI-2 host and one DMA channel,
+`rs/rp1_csi2.rs` is the camera receiver: the block's D-PHY, CSI-2 host and one DMA channel,
 delivering into a frame stream. It's a second platform driver in this module, `lemnos-rp1-csi2`,
 bound the same way as a block (`driver_override`, and a compatible in `owned`). It has its own node
 for each bound device, `/dev/lemnos-rp1-csi2-<device>`. Several files may open it; each drives one
@@ -141,11 +141,12 @@ board, the first frame after a quick restart can arrive with frame start and end
 line written) is counted as an error and never published.
 
 Stopping is one path, whichever of `STOP`, closing the stream's file, closing this node or unbinding
-gets there first. It writes FORCE, flushes it with a read, waits out any running handler, and then
-polls the channel's line counter until it holds still, up to a bounded time. Only then do the buffers
-go back. If the counter never holds still, the DMA can't be shown to have stopped: nothing is
-released, every pin the stream holds is kept until reboot, and the receiver refuses `START` until it
-is bound again (`LEMNOS_RP1_CSI2_INFO_WEDGED`).
+gets there first. It writes FORCE with the frame-end interrupt kept on, flushes it with a read, and
+waits for the frame end that follows the FORCE, up to a bound (four frame periods of the layout
+`START` was given, 250 ms at least). Only then do the buffers go back. If that frame end never comes,
+the DMA can't be shown to have stopped: nothing is released, every pin the stream holds is kept until
+reboot, and the receiver refuses `START` until it is bound again (`LEMNOS_RP1_CSI2_INFO_WEDGED`). A
+frame end seen while the receiver is not streaming counts no frame.
 
 Interrupt status bits are only tested, never trusted as counts or lengths: a frame's bytes on the
 ring are what `START` fixed, and a frame the block didn't finish (a frame start with no frame end
