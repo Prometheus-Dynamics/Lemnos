@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fake blocks for lemnos.ko's register jobs (kernel/lemnos_regjob.c), so the
+ * Fake blocks for lemnos.ko's register jobs (kernel/rs/regjob.rs), so the
  * engine can be tested in a guest with no hardware: a register window of
  * ordinary memory (the module is loaded with test_rj_fake_regs), an interrupt
  * from a simulated controller and a reset line this module provides and

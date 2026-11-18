@@ -49,7 +49,6 @@
 #endif
 #include "lemnos_pisp_be.h"
 #include "lemnos_gsdma.h"
-#include "lemnos_regjob_priv.h"
 #include "lemnos_vip.h"
 
 #define LEM_NAME "lemnos"

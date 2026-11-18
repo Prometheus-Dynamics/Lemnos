@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The register-job profile of the K230's ISP (an ISP8000 with a version 2 memory interface), in two
-//! roles (lemnos_regjob.h), Rust (stage 1i of the port; replaces lemnos_regjob_k230isp.c). The frames
+//! roles (lemnos_regjob.h), Rust (stage 1i of the port). The frames
 //! role sets up the input, the windows and the main path and points the path at the caller's buffers (a
 //! job is one frame's buffers; the path keeps running between jobs), and the configuration role writes
 //! the tuning registers and takes the ISP core's interrupt, for statistics. The frame path and the
@@ -226,7 +226,7 @@ fn size(bytes: u64) -> u32 {
     (bytes.min(u64::from(MI_SIZE_MASK)) as u32) & MI_SIZE_MASK
 }
 
-fn check(_c: &Ctx<'_>, need: &mut [u64]) -> Result {
+fn check(_c: &Ctx<'_>, need: &mut [u64; rp::MAX_ADDRS]) -> Result {
     // The block wraps inside the size the module writes: one grain is all it needs.
     for n in need[..P_COUNT].iter_mut() {
         *n = u64::from(MI_ALIGN);
@@ -249,7 +249,7 @@ fn derive(r: &Regs, c: &Ctx<'_>) {
     r.wr(MI_MP_JDP_BASE + 8, 0);
 }
 
-fn latch(r: &Regs, c: &Ctx<'_>) -> u32 {
+fn latch(r: &Regs, c: &rp::Addrs) -> u32 {
     r.wr(MI_MP_CTRL, MP_CTRL_UPDATE);
     for k in P_Y..=P_CR {
         let shd = MI_MP_Y_BASE_SHD + 12 * k as u32;
@@ -305,7 +305,7 @@ fn event_arm(r: &Regs, on: bool) {
     r.wr(ISP_IMSC, if on { MIS_FRAME_OUT } else { 0 });
 }
 
-pub(crate) const PROFILE: rp::Profile = rp::Profile {
+pub(crate) static PROFILE: rp::Profile = rp::Profile {
     id: lb::LEMNOS_REGJOB_PROFILE_K230_ISP,
     name: c"the K230 ISP's main path and configuration",
     window: ISP_WINDOW,
@@ -329,6 +329,3 @@ pub(crate) const PROFILE: rp::Profile = rp::Profile {
     event: Some(event),
     event_arm: Some(event_arm),
 };
-
-// The C engine's table (lemnos_regjob_priv.h's lrj_k230_isp).
-rp::c_profile!(lrj_k230_isp, PROFILE);

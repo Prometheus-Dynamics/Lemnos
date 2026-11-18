@@ -11,7 +11,7 @@ obj-m += lemnos.o
 else
 obj-$(CONFIG_LEMNOS) += lemnos.o
 endif
-lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o
+lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o
 # With a Rust kernel (CONFIG_RUST, kernel/lemnos_entry.rs), the Rust half owns the module entry and
 # lemnos_core.c keeps its init and exit as lem_core_init and lem_core_exit (LEMNOS_RUST_OWNER). Without
 # one, lemnos_core.c keeps module_init and module_exit, as before.
@@ -31,7 +31,7 @@ lemnos-y += lemnos_entry.o lemnos_helpers.o
 # generated; every type they name otherwise is the kernel crate's (rs/bindings.rs imports it).
 # Types the generated structs name only through pointers, and the kernel crate's bindings lack: opaque.
 lem_bindgen_opaque := spi_statistics spi_device_id spi_controller_mem_ops spi_controller_mem_caps \
-	spi_offload_config spi_offload dma_chan ptp_system_timestamp thermal_zone_device lem_rj
+	spi_offload_config spi_offload dma_chan ptp_system_timestamp thermal_zone_device
 lem_bindgen_items := \
 	--allowlist-type 'spi_(device|controller|transfer|message|driver|delay)' \
 	--allowlist-type 'spi_(device|controller|transfer|message|driver)__bindgen_.*' \
@@ -42,9 +42,8 @@ lem_bindgen_items := \
 	--allowlist-function 'thermal_zone_get_zone_by_name|thermal_zone_get_temp' \
 	--allowlist-type 'lemnos_(event|thermal|thermal_watch)' \
 	--allowlist-var 'LEMNOS_(MAX_THERMAL_WATCHES|EVENT_TEMPERATURE)' \
-	--allowlist-type 'lrj_(plain|slot|ctx|profile)|lemnos_regjob_write' \
-	--allowlist-function 'lrj_rd|lrj_wr' \
-	--allowlist-var 'LEMNOS_REGJOB_(MAX_ADDRS|PROFILE_A733_VE|PROFILE_K230_ISP|STATUS_UNLATCHED)' \
+	--allowlist-type 'lemnos_regjob_.*' \
+	--allowlist-var 'LEMNOS_REGJOB_.*' \
 	--with-derive-custom-struct 'lemnos_.*=Copy,Clone' \
 	$(foreach t,$(lem_bindgen_opaque),--allowlist-type '$(t)' --opaque-type '$(t)')
 quiet_cmd_lem_bindgen = BINDGEN $@
@@ -62,6 +61,10 @@ $(obj)/lemnos_entry.o: $(obj)/lemnos_bindings_generated.rs
 export LEMNOS_BINDINGS := $(abspath $(obj)/lemnos_bindings_generated.rs)
 # The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
 # A built-in lemnos needs RP1_PIO=y as well: a built-in object cannot link to a module's symbols.
+# A module holds a reference to itself while a register job is wedged (rs/regjob.rs); without modules there is none.
+ifneq ($(CONFIG_MODULES),)
+rustflags-y += --cfg lemnos_modules
+endif
 ifneq ($(CONFIG_RP1_PIO),)
 ccflags-y += -DLEMNOS_HAVE_PIO
 lemnos-y += lemnos_pio.o
