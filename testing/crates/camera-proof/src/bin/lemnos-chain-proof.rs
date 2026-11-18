@@ -532,6 +532,8 @@ fn pump(
     front: &mut FrontStage,
     back: &mut BackStage,
     reference: Option<&[u8]>,
+    latch: &mut Option<Child>,
+    sensor: &str,
 ) -> Result<Option<usize>, String> {
     let fe_slots = u64::from(front.out.layout().buffers);
     // The back end's buffers that hold a job: its configurations, and on the copy path its input too.
@@ -565,6 +567,9 @@ fn pump(
             posted += 1;
         }
         if k == 0 {
+            // The latch starts once the chain has delivered a frame, so it is started beside a chain
+            // that runs.
+            *latch = spawn_latch(args, sensor)?;
             matched =
                 reference.map(|raw| matched_lines(raw, front.out.bytes(&frame), front.stride));
         }
@@ -711,6 +716,11 @@ fn run(args: &Args) -> Result<bool, String> {
         .set(clock)
         .map_err(|_| "clock already installed".to_string())?;
     out(format_args!("clock: {clock_name}"));
+    if args.latch_trials.is_some() && args.frames == 0 {
+        return Err(
+            "--latch-trials needs at least one frame: the latch starts at the first".into(),
+        );
+    }
     if !(1..=3).contains(&args.jobs_queued) {
         return Err("--jobs-queued takes 1 to 3".into());
     }
@@ -885,9 +895,21 @@ fn run(args: &Args) -> Result<bool, String> {
         None => None,
     };
 
-    let latch = spawn_latch(args, sensor_name)?;
+    // The latch's raw start is refused while the front end is started, so the latch must attempt
+    // while the chain is still linked. It is started at the chain's first frame (`pump`), and the
+    // chain stays started until the latch has exited (below). Started before the chain, or
+    // stopped with the frames, the latch could attempt after the chain has stopped and succeed
+    // where a board refuses it.
+    let mut latch = None;
     let started = Instant::now();
-    let pumped = pump(args, &mut front, &mut back, reference.as_deref());
+    let pumped = pump(
+        args,
+        &mut front,
+        &mut back,
+        reference.as_deref(),
+        &mut latch,
+        sensor_name,
+    );
     out(format_args!(
         "{} back-end frames in {:.1} s",
         back.track.frames,
@@ -909,6 +931,8 @@ fn run(args: &Args) -> Result<bool, String> {
     } else {
         Some(probe_refusal(&mut front, &mut back))
     };
+    // The chain stays started until the latch is done (or the cap passes).
+    let latch = latch.map(|child| wait_latch(child, LATCH_CAP));
     // Back end first, then the front end. The sensor and the receiver are left running.
     let mut stop_errors = Vec::new();
     if let Err(s) = be.stop() {
@@ -967,7 +991,6 @@ fn run(args: &Args) -> Result<bool, String> {
         out(format_args!("{e}"));
         failed.push(e.clone());
     }
-    let latch = latch.map(Child::wait_with_output);
     if let Some(Ok(done)) = &latch {
         for line in String::from_utf8_lossy(&done.stdout).lines() {
             out(format_args!("sensor latch: {line}"));
@@ -1244,6 +1267,27 @@ fn run(args: &Args) -> Result<bool, String> {
         out(format_args!("chain proof: FAILED: {}", failed.join("; ")));
         Ok(false)
     }
+}
+
+/// How long the chain waits for the latch to exit before it is killed.
+const LATCH_CAP: Duration = Duration::from_secs(30);
+
+/// Waits for the latch to exit and returns its output. A latch still running at the cap is killed,
+/// and its wait is an error.
+fn wait_latch(mut child: Child, cap: Duration) -> std::io::Result<std::process::Output> {
+    let deadline = Instant::now() + cap;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("still running after {} s; killed", cap.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.wait_with_output()
 }
 
 /// Starts `lemnos-sensor-proof latch` beside this tool, with the same socket. Its output is read

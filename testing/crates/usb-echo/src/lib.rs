@@ -129,19 +129,31 @@ pub fn serve(socket: &str, name: &str) -> Result<(), Stop> {
         entry.name
     );
 
-    let receive = |stream: &mut FrameStream| -> Result<(), Error> {
+    // At most one receive is outstanding. The configuration can be seen twice (the state at
+    // start-up, and the event that announces it), and a second receive while the first still
+    // waits on its buffer is a broken consumer to the driver, which ends the stream. So a receive
+    // is posted only when none is, and the flag clears when the receive completes or ends.
+    let mut outstanding = false;
+    let receive = |stream: &mut FrameStream, outstanding: &mut bool| -> Result<(), Error> {
+        if *outstanding {
+            return Ok(());
+        }
         match from_host {
-            Some(endpoint) if most > 0 => post(
-                stream,
-                job(RECEIVE, JobKind::Receive, endpoint, RECEIVE_BUFFER, most),
-            ),
+            Some(endpoint) if most > 0 => {
+                post(
+                    stream,
+                    job(RECEIVE, JobKind::Receive, endpoint, RECEIVE_BUFFER, most),
+                )?;
+                *outstanding = true;
+                Ok(())
+            }
             _ => Ok(()),
         }
     };
     post(&mut stream, job(EVENT, JobKind::Event, 0, EVENT_BUFFER, 0))?;
     // A receive posted with no configuration fails; one is posted when the host configures.
     if device.state()?.configured {
-        receive(&mut stream)?;
+        receive(&mut stream, &mut outstanding)?;
     }
     let mut echoed = 0u64;
     while stream.is_open() {
@@ -161,7 +173,7 @@ pub fn serve(socket: &str, name: &str) -> Result<(), Stop> {
                 let event = Event::decode(&mut Reader::new(&data)).unwrap_or_default();
                 say!("event {:?}", event.kind);
                 match event.kind {
-                    EventKind::Configured => receive(&mut stream)?,
+                    EventKind::Configured => receive(&mut stream, &mut outstanding)?,
                     EventKind::Setup => {
                         let request = event.request;
                         let answer = match request.request_type {
@@ -181,6 +193,7 @@ pub fn serve(socket: &str, name: &str) -> Result<(), Stop> {
                 post(&mut stream, job(EVENT, JobKind::Event, 0, EVENT_BUFFER, 0))?;
             }
             (RECEIVE, JobStatus::Done) => {
+                outstanding = false;
                 if let Some(endpoint) = to_host {
                     stream.write(SEND_BUFFER, DATA_OFFSET, &data)?;
                     let length = data.len() as u32;
@@ -189,13 +202,18 @@ pub fn serve(socket: &str, name: &str) -> Result<(), Stop> {
                         job(SEND, JobKind::Send, endpoint, SEND_BUFFER, length),
                     )?;
                 } else {
-                    receive(&mut stream)?;
+                    receive(&mut stream, &mut outstanding)?;
                 }
             }
             (SEND, JobStatus::Done) => {
                 echoed += u64::from(record.count);
                 say!("echoed {} bytes, {echoed} so far", record.count);
-                receive(&mut stream)?;
+                receive(&mut stream, &mut outstanding)?;
+            }
+            // A receive that ended without its data: the next Configured event posts it again.
+            (RECEIVE, status) => {
+                outstanding = false;
+                say!("job {RECEIVE} ended {status:?}");
             }
             // A transfer that failed because the configuration went is posted again when the
             // host configures the device.
