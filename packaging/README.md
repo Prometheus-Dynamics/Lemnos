@@ -85,18 +85,28 @@ image installs no new file. A board with no BusyBox `S50lemnosd` change needs no
 runs the daemon's privileged start and reads the capability sets after it. The sandbox itself has not run
 on a board (`testing/board-runs/R1d.md`).
 
+A `tcp:` health source has its own optional drop-in, `packaging/systemd/lemnosd.service.d/health-tcp.conf`.
+Install it as `/etc/systemd/system/lemnosd.service.d/health-tcp.conf` on a board whose board file names a
+`tcp:<address>:<port>` source in the `system-slots` device's `health` list, and only then (its `when` in
+`files.txt` is `health-tcp`). Its one setting, `RestrictAddressFamilies=AF_INET AF_INET6`, is added to the
+base unit's two families: the source is a TCP connect the daemon makes to a port on the board at each look
+of a trial, and without the families the socket is refused, the source is never good and every trial falls
+back at its deadline. The daemon listens on nothing. A BusyBox image has no such limit and installs nothing.
+The drop-in under systemd has not run on a board (`testing/board-runs/HEALTH-TCP.md`).
+
 **The exposure limit.** `scripts/check-packaging.sh` reads each unit's score from `systemd-analyze security`.
-The base units stay at 2.5 with nothing added. The gadget fragment is checked on top of the base unit, and
-may add exactly the items in the script's `additions` list, each at the score it has:
+The base units stay at 2.5 with nothing added. Each fragment is checked on top of the base unit, and
+may add exactly its items in the script's `additions` list, each at the score it has:
 
-| Addition | Score | Why |
-|---|---|---|
-| `CapabilityBoundingSet=~CAP_SYS_ADMIN` | 0.3 | the root phase's FunctionFS mount needs it; dropped after the root phase |
-| `SystemCallFilter=~@mount` | 0.2 | the mount and its unmount; without the capability they fail with `EPERM` |
+| Fragment | Addition | Score | Why |
+|---|---|---|---|
+| `gadget.conf` | `CapabilityBoundingSet=~CAP_SYS_ADMIN` | 0.3 | the root phase's FunctionFS mount needs it; dropped after the root phase |
+| `gadget.conf` | `SystemCallFilter=~@mount` | 0.2 | the mount and its unmount; without the capability they fail with `EPERM` |
+| `health-tcp.conf` | `RestrictAddressFamilies=~AF_(INET\|INET6)` | 0.3 | a `tcp:` health source's connect to a port on the board |
 
-The check fails if the fragment's combined score is above 2.5 plus the listed scores, if a listed addition is
-not in the unit (remove it from the list), if a listed score is not what the unit gives, or if a base unit
-has an addition. Other exposure is not allowed. Candidate hardenings that are not in the unit are in
+The check fails if a fragment's combined score is above 2.5 plus its listed scores, if a listed addition is
+not in its unit (remove it from the list), if a listed score is not what the unit gives, or if a unit
+has another unit's addition (a base unit has none). Other exposure is not allowed. Candidate hardenings that are not in the unit are in
 `testing/board-runs/R1d.md`.
 
 The bridge uses the same drop, from its environment: `LEMNOS_ORION_USER`, `LEMNOS_ORION_GROUP` and
