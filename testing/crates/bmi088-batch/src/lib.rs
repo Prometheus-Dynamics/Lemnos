@@ -91,6 +91,9 @@ pub struct Report {
     last_mode: Option<Stamp>,
     /// Each non-empty batch's newest record, for checks (a) and (b).
     points: Vec<Point>,
+    /// Each record's batch (counted from 0 over the non-empty batches) and that batch's read, in order: the
+    /// capture file's `batch`, `read_start_ns` and `read_end_ns` columns.
+    pub record_reads: Vec<(u64, ReadSpan)>,
 }
 
 /// One batch read that could not be decoded.
@@ -130,6 +133,22 @@ pub struct CheckB {
     pub rate_ppm: f64,
     /// The bound on that rate, in ppm, from the points' record numbers and the widest band.
     pub bound_ppm: f64,
+}
+
+/// Check (d)'s figures and verdict: the stamps' span against the run's wall window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckD {
+    pub span_ns: u64,
+    pub elapsed_ns: u64,
+    pub bound_ns: u64,
+    /// The span minus the elapsed time: negative when the stamps cover less than the run.
+    pub diff_ns: i64,
+    pub pass: bool,
+}
+
+/// Check (d)'s bound in nanoseconds: 2 poll periods plus 1 sample period.
+pub fn check_d_bound_ns(poll_ns: u64, sample_ns: u64) -> u64 {
+    2 * poll_ns + sample_ns
 }
 
 /// Check (c)'s figures and verdict.
@@ -181,25 +200,7 @@ impl Report {
                 self.repeats += 1;
             }
             self.last = Some(value);
-            if self.last_mode != Some(stamped.stamp) {
-                // The first record of this batch that differs from the one before it.
-                self.mode_changes.push((batch_no, stamped.stamp));
-                self.last_mode = Some(stamped.stamp);
-            }
-            match stamped.stamp {
-                Stamp::TickTime => self.tick_records += 1,
-                Stamp::Model => self.model_records += 1,
-            }
-            if self
-                .stamps
-                .last()
-                .is_some_and(|&previous| sample.at_ns < previous)
-            {
-                self.backwards += 1;
-            }
-            self.stamps.push(sample.at_ns);
-            self.modes.push(stamped.stamp);
-            self.records += 1;
+            self.count_stamp(batch_no, sample.at_ns, Some(stamped.stamp), read);
             newest = Some((self.records - 1, sample.at_ns, stamped.stamp));
         }
         if let Some((index, stamp, mode)) = newest {
@@ -211,6 +212,29 @@ impl Report {
             });
         }
         Ok(())
+    }
+
+    /// Counts one record: its stamp and, when known, its mode, in order, with the batch and read it came in.
+    /// Used by `add_batch` (live) and `from_tsv` (a capture file), so both count the same way.
+    fn count_stamp(&mut self, batch_no: u64, at_ns: u64, mode: Option<Stamp>, read: ReadSpan) {
+        if let Some(mode) = mode {
+            if self.last_mode != Some(mode) {
+                // The first record of this batch that differs from the one before it.
+                self.mode_changes.push((batch_no, mode));
+                self.last_mode = Some(mode);
+            }
+            match mode {
+                Stamp::TickTime => self.tick_records += 1,
+                Stamp::Model => self.model_records += 1,
+            }
+            self.modes.push(mode);
+        }
+        if self.stamps.last().is_some_and(|&previous| at_ns < previous) {
+            self.backwards += 1;
+        }
+        self.stamps.push(at_ns);
+        self.record_reads.push((batch_no, read));
+        self.records += 1;
     }
 
     /// The average time between consecutive stamps, in nanoseconds (`None` with fewer than two).
@@ -309,6 +333,23 @@ impl Report {
         }
     }
 
+    /// Check (d): the span of the stamps against the run's wall window `elapsed_ns`. The first stamp is taken
+    /// within one poll period of the run's start and the last within one poll period of its end, and each
+    /// stamp is taken to within one sample period, so `|span - elapsed| <= 2 * poll + sample`. This needs no read
+    /// times: it is the whole-run drift that a 1 ms bound used to call a fail on any run.
+    pub fn check_d(&self, elapsed_ns: u64, poll_ns: u64, sample_ns: u64) -> CheckD {
+        let span = self.span_ns();
+        let bound = check_d_bound_ns(poll_ns, sample_ns);
+        let diff = span as i128 - elapsed_ns as i128;
+        CheckD {
+            span_ns: span,
+            elapsed_ns,
+            bound_ns: bound,
+            diff_ns: diff as i64,
+            pass: self.records > 0 && diff.unsigned_abs() <= u128::from(bound),
+        }
+    }
+
     /// Gaps longer than `1.5` periods at `period_ns`: the records the chip did not deliver.
     pub fn misses(&self, period_ns: u64) -> u64 {
         let limit = period_ns + period_ns / 2;
@@ -381,6 +422,405 @@ pub fn check_7(gyro: &[u64], accel: &[u64]) -> Option<Check7> {
     })
 }
 
+/// A capture file read back: the report, and which of its columns the file had.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replay {
+    pub report: Report,
+    /// The file has a `mode` column, so each record's stamping mode is known.
+    pub has_modes: bool,
+    /// The file has the `batch`, `read_start_ns` and `read_end_ns` columns: checks (a) and (b) can run.
+    pub has_read_times: bool,
+}
+
+/// How a replayed capture came out. `Fail`: an evaluated check failed. `Incomplete`: none failed, but a
+/// check could not be evaluated from the file, which is not a pass. `Pass`: every check ran and passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayOutcome {
+    Pass,
+    Incomplete,
+    Fail,
+}
+
+/// A capture file as the live tool writes it: one row per record, with its stamp, its mode, and the batch
+/// and read it came in. `from_tsv` reads it back.
+pub fn stamps_tsv(report: &Report) -> String {
+    let mut out = String::from("at_ns\tmode\tbatch\tread_start_ns\tread_end_ns\n");
+    for ((stamp, mode), (batch, read)) in report
+        .stamps
+        .iter()
+        .zip(&report.modes)
+        .zip(&report.record_reads)
+    {
+        let mode = match mode {
+            Stamp::TickTime => "tick",
+            Stamp::Model => "model",
+        };
+        out.push_str(&format!(
+            "{stamp}\t{mode}\t{batch}\t{}\t{}\n",
+            read.start_ns, read.end_ns
+        ));
+    }
+    out
+}
+
+/// One row of a capture file.
+struct Row {
+    at_ns: u64,
+    mode: Option<Stamp>,
+    batch: u64,
+    read: ReadSpan,
+}
+
+/// Reads a capture file into a report. The `at_ns` column is required. A `mode` column gives the tick and
+/// model counts and the model points of check (b). The `batch`, `read_start_ns` and `read_end_ns` columns
+/// give each batch's newest record and its read, for checks (a) and (b). A file without those columns (the
+/// first board run's, for one) still has its stamps counted, so check (c) runs on it. A file that is not a
+/// capture is an error, never a partial report.
+pub fn from_tsv(text: &str) -> Result<Replay, String> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or("the file is empty")?
+        .split('\t')
+        .collect();
+    let column = |name: &str| header.iter().position(|h| *h == name);
+    let at = column("at_ns").ok_or("no at_ns column")?;
+    let mode_col = column("mode");
+    let read_cols = match (
+        column("batch"),
+        column("read_start_ns"),
+        column("read_end_ns"),
+    ) {
+        (Some(batch), Some(start), Some(end)) => Some((batch, start, end)),
+        _ => None,
+    };
+    let mut rows = Vec::new();
+    for (i, line) in lines.enumerate() {
+        let line_no = i + 2;
+        let fields: Vec<&str> = line.split('\t').collect();
+        let number = |col: usize| -> Result<u64, String> {
+            let text = fields
+                .get(col)
+                .ok_or_else(|| format!("line {line_no}: too few fields"))?;
+            text.parse::<u64>()
+                .map_err(|_| format!("line {line_no}: {text:?} is not a number"))
+        };
+        let at_ns = number(at)?;
+        let mode = match mode_col {
+            None => None,
+            Some(col) => match fields.get(col).copied() {
+                Some("tick") => Some(Stamp::TickTime),
+                Some("model") => Some(Stamp::Model),
+                other => {
+                    return Err(format!(
+                        "line {line_no}: mode {other:?} is not tick or model"
+                    ));
+                }
+            },
+        };
+        let (batch, read) = match read_cols {
+            None => (
+                0,
+                ReadSpan {
+                    start_ns: 0,
+                    end_ns: 0,
+                },
+            ),
+            Some((b, s, e)) => (
+                number(b)?,
+                ReadSpan {
+                    start_ns: number(s)?,
+                    end_ns: number(e)?,
+                },
+            ),
+        };
+        rows.push(Row {
+            at_ns,
+            mode,
+            batch,
+            read,
+        });
+    }
+    if rows.is_empty() {
+        return Err("no records".into());
+    }
+    let mut report = Report::default();
+    for row in &rows {
+        report.count_stamp(row.batch, row.at_ns, row.mode, row.read);
+    }
+    if read_cols.is_some() {
+        // One point per batch: its newest record, with the batch's read, as `add_batch` makes them.
+        let mut start = 0;
+        while start < rows.len() {
+            let batch = rows[start].batch;
+            let end = rows[start..]
+                .iter()
+                .position(|r| r.batch != batch)
+                .map_or(rows.len(), |p| start + p);
+            report.max_per_read = report.max_per_read.max(end - start);
+            let newest = &rows[end - 1];
+            report.points.push(Point {
+                index: (end - 1) as u64,
+                stamp: newest.at_ns,
+                // Without a mode column the mode is not known, and check (b) is not run.
+                mode: newest.mode.unwrap_or(Stamp::Model),
+                read: newest.read,
+            });
+            start = end;
+        }
+    }
+    Ok(Replay {
+        report,
+        has_modes: mode_col.is_some(),
+        has_read_times: read_cols.is_some(),
+    })
+}
+
+/// The replay's rows and outcome. Checks the file cannot support are rows with status `not_evaluated`, and
+/// the run is `Incomplete`, never a pass. `elapsed_ns` is the capture's duration when the operator gives it.
+pub fn replay_rows(
+    replay: &Replay,
+    period_ns: u64,
+    timing: Option<(u64, u64)>,
+) -> (String, ReplayOutcome) {
+    let report = &replay.report;
+    let mut out = String::new();
+    let mut row = |key: &str, status: &str, value: String, note: &str| {
+        out.push_str(&format!("{key}\t{status}\t{value}\t{note}\n"));
+    };
+    let mut failed = false;
+    let mut incomplete = false;
+
+    row(
+        "b8.records",
+        "measured",
+        report.records.to_string(),
+        "records in the capture file",
+    );
+    row(
+        "b8.not_in_file",
+        "info",
+        String::new(),
+        "reads, empty reads, repeats and refused bytes are not in a capture file, so they are not shown",
+    );
+    if replay.has_modes {
+        row(
+            "b8.tick_records",
+            "measured",
+            report.tick_records.to_string(),
+            "records stamped from the host's tick time",
+        );
+        row(
+            "b8.model_records",
+            "measured",
+            report.model_records.to_string(),
+            "records stamped from the sample clock's model",
+        );
+        row(
+            "b8.mode_changes",
+            "measured",
+            mode_changes(report),
+            "batch:mode at which each stamping mode began",
+        );
+    } else {
+        row(
+            "b8.mode",
+            "not_evaluated",
+            String::new(),
+            "the capture has no mode column: tick and model records are not told apart",
+        );
+    }
+    if let Some(period) = report.mean_period_ns() {
+        row(
+            "b8.mean_period_us",
+            "measured",
+            format!("{:.2}", period / 1e3),
+            "average between consecutive stamps",
+        );
+    }
+    // Check (d) needs the run's wall time and poll period, which the captures do not carry: they are options.
+    let mut timing_known = false;
+    if let Some((elapsed, poll)) = timing {
+        timing_known = true;
+        let d = report.check_d(elapsed, poll, period_ns);
+        row(
+            "b8.d.span_ms",
+            "measured",
+            format!("{:.3}", d.span_ns as f64 / 1e6),
+            "first to last stamp",
+        );
+        row(
+            "b8.d.elapsed_ms",
+            "measured",
+            format!("{:.3}", d.elapsed_ns as f64 / 1e6),
+            "the run's wall time (--elapsed-s)",
+        );
+        row(
+            "b8.d.span_vs_elapsed_ms",
+            "measured",
+            format!("{:.3}", d.diff_ns as f64 / 1e6),
+            "span minus elapsed",
+        );
+        row(
+            "b8.d.bound_ms",
+            "measured",
+            format!("{:.3}", d.bound_ns as f64 / 1e6),
+            "2 poll periods plus 1 sample period (--poll-ms, --sample-period-ms)",
+        );
+        row("b8.d.verdict", verdict(d.pass), String::new(), "check (d)");
+        failed |= !d.pass;
+    }
+
+    if replay.has_read_times {
+        let a = report.check_a(period_ns);
+        row(
+            "b8.a.batches",
+            "measured",
+            a.batches.to_string(),
+            "non-empty batches, each checked on its newest record",
+        );
+        row(
+            "b8.a.violations",
+            "measured",
+            a.violations.to_string(),
+            "batches whose newest stamp is outside [read start - P - 1 ms, read end + 1 ms]",
+        );
+        let pass = a.batches > 0 && a.violations == 0;
+        row("b8.a.verdict", verdict(pass), String::new(), "check (a)");
+        failed |= !pass;
+    } else {
+        row(
+            "b8.a.verdict",
+            "not_evaluated",
+            String::new(),
+            "check (a) not evaluated: the capture has no read times",
+        );
+        incomplete = true;
+    }
+
+    if !replay.has_read_times {
+        row(
+            "b8.b.verdict",
+            "not_evaluated",
+            String::new(),
+            "check (b) not evaluated: the capture has no read times",
+        );
+        incomplete = true;
+    } else if !replay.has_modes {
+        row(
+            "b8.b.verdict",
+            "not_evaluated",
+            String::new(),
+            "check (b) not evaluated: it fits the model's records, and the capture has no mode column",
+        );
+        incomplete = true;
+    } else {
+        match report.check_b(period_ns) {
+            Some(b) => {
+                row(
+                    "b8.b.points",
+                    "measured",
+                    b.points.to_string(),
+                    "model batches in the rate fit",
+                );
+                row(
+                    "b8.b.rate_ppm",
+                    "measured",
+                    format!("{:.1}", b.rate_ppm),
+                    "stamps' fitted rate against the host's, over the same records (positive: stamps fast)",
+                );
+                row(
+                    "b8.b.bound_ppm",
+                    "measured",
+                    format!("{:.1}", b.bound_ppm),
+                    "bound on that rate from the record numbers and the widest read band",
+                );
+                let pass = b.rate_ppm.abs() <= b.bound_ppm;
+                row("b8.b.verdict", verdict(pass), String::new(), "check (b)");
+                failed |= !pass;
+            }
+            // The same as the live tool: no rate measured is a fail, never a pass.
+            None => {
+                row(
+                    "b8.b.verdict",
+                    "fail",
+                    String::new(),
+                    "check (b): fewer than two model batches, so no rate was measured",
+                );
+                failed = true;
+            }
+        }
+    }
+
+    let c = report.check_c(period_ns);
+    row(
+        "b8.c.backwards",
+        "measured",
+        c.backwards.to_string(),
+        "records stamped earlier than the record before them",
+    );
+    row(
+        "b8.c.misses",
+        "measured",
+        c.misses.to_string(),
+        "gaps between consecutive stamps over 1.5 sample periods",
+    );
+    row(
+        "b8.c.largest_gap_ms",
+        "measured",
+        format!("{:.3}", c.largest_gap_ns as f64 / 1e6),
+        "largest gap between two stamps",
+    );
+    let c_pass = c.backwards == 0 && c.misses == 0 && report.records > 0;
+    row("b8.c.verdict", verdict(c_pass), String::new(), "check (c)");
+    failed |= !c_pass;
+    if !timing_known {
+        row(
+            "b8.d.verdict",
+            "not_evaluated",
+            String::new(),
+            "check (d) not evaluated: give --elapsed-s and --poll-ms (the run's wall time and poll period)",
+        );
+        incomplete = true;
+    }
+
+    let (verdict_text, status, note, outcome) = if failed {
+        (
+            "fail",
+            "checks_failed",
+            "one or more evaluated checks failed",
+            ReplayOutcome::Fail,
+        )
+    } else if incomplete {
+        (
+            "not_evaluated",
+            "not_fully_measured",
+            "no check failed, but one or more could not be evaluated from this file: not a pass",
+            ReplayOutcome::Incomplete,
+        )
+    } else {
+        (
+            "pass",
+            "measured",
+            "every check ran and passed",
+            ReplayOutcome::Pass,
+        )
+    };
+    row(
+        "b8.verdict",
+        verdict_text,
+        String::new(),
+        "checks (a), (b), (c) and (d)",
+    );
+    row(
+        "b8.status",
+        status,
+        format!("{} records", report.records),
+        note,
+    );
+    (out, outcome)
+}
+
 /// The mode changes as `batch:mode` pairs, separated by spaces, or `none` when no record came.
 pub fn mode_changes(report: &Report) -> String {
     if report.mode_changes.is_empty() {
@@ -406,20 +846,22 @@ fn verdict(pass: bool) -> &'static str {
 
 /// Whether every check passes on this capture. A capture with no batches, or a model fit that could not
 /// be made, does not pass.
-pub fn all_pass(report: &Report, period_ns: u64) -> bool {
+pub fn all_pass(report: &Report, period_ns: u64, elapsed_ns: u64, poll_ns: u64) -> bool {
     let a = report.check_a(period_ns);
     let b = report.check_b(period_ns);
     let c = report.check_c(period_ns);
+    let d = report.check_d(elapsed_ns, poll_ns, period_ns);
     a.batches > 0
         && a.violations == 0
         && b.as_ref().is_some_and(|b| b.rate_ppm.abs() <= b.bound_ppm)
         && c.backwards == 0
         && c.misses == 0
+        && d.pass
         && report.records > 0
 }
 
 /// The TSV rows of the report, as the record's checks read them (key, status, value, note).
-pub fn rows(report: &Report, period_ns: u64, elapsed_ns: u64) -> String {
+pub fn rows(report: &Report, period_ns: u64, poll_ns: u64, elapsed_ns: u64) -> String {
     let mut out = String::new();
     let mut row = |key: &str, value: String, note: &str| {
         out.push_str(&format!("{key}\tmeasured\t{value}\t{note}\n"));
@@ -561,10 +1003,22 @@ pub fn rows(report: &Report, period_ns: u64, elapsed_ns: u64) -> String {
         verdict(c.backwards == 0 && c.misses == 0 && report.records > 0).to_string(),
         "check (c)",
     );
+    let d = report.check_d(elapsed_ns, poll_ns, period_ns);
+    row(
+        "b8.d.span_vs_elapsed_ms",
+        format!("{:.3}", d.diff_ns as f64 / 1e6),
+        "check (d): span minus elapsed",
+    );
+    row(
+        "b8.d.bound_ms",
+        format!("{:.3}", d.bound_ns as f64 / 1e6),
+        "check (d): 2 poll periods plus 1 sample period",
+    );
+    row("b8.d.verdict", verdict(d.pass).to_string(), "check (d)");
     row(
         "b8.verdict",
-        verdict(all_pass(report, period_ns)).to_string(),
-        "all of checks (a), (b) and (c)",
+        verdict(all_pass(report, period_ns, elapsed_ns, poll_ns)).to_string(),
+        "all of checks (a), (b), (c) and (d)",
     );
     out
 }
@@ -833,7 +1287,7 @@ mod tests {
         assert_eq!(a.violations, 0, "{a:?}");
         let b = report.check_b(P).expect("model points");
         assert!(b.rate_ppm.abs() <= b.bound_ppm, "{b:?}");
-        assert!(all_pass(&report, P));
+        assert!(all_pass(&report, P, report.span_ns(), 50_000_000));
     }
 
     /// Fails on tick-time stamping, the pre-fix behaviour: a newest stamp taken at the previous tick,
@@ -878,7 +1332,7 @@ mod tests {
         let b = report.check_b(P).expect("model points");
         assert!((b.rate_ppm - 15_000.0).abs() < 200.0, "{b:?}");
         assert!(b.rate_ppm.abs() > b.bound_ppm, "{b:?}");
-        assert!(!all_pass(&report, P));
+        assert!(!all_pass(&report, P, report.span_ns(), 50_000_000));
     }
 
     /// The bound in check (b) is a bound on what the record numbers alone allow: a sub-bound error passes.
@@ -887,6 +1341,110 @@ mod tests {
         let report = clean_report(4000, 10, 600_000);
         let b = report.check_b(P).unwrap();
         assert!(b.bound_ppm > 0.0 && b.bound_ppm < 1_000.0, "{b:?}");
+    }
+
+    /// A capture file written from a live report reads back to the same checks: the same (a) and (b)
+    /// figures, and the same outcome.
+    #[test]
+    fn a_capture_file_replays_to_the_same_checks() {
+        let report = clean_report(4000, 10, 600_000);
+        let replay = from_tsv(&stamps_tsv(&report)).unwrap();
+        assert!(replay.has_modes && replay.has_read_times);
+        assert_eq!(replay.report.check_a(P), report.check_a(P));
+        let b0 = report.check_b(P).unwrap();
+        let b1 = replay.report.check_b(P).unwrap();
+        assert_eq!(b0.points, b1.points);
+        assert!((b0.rate_ppm - b1.rate_ppm).abs() < 1e-6, "{b0:?} {b1:?}");
+        let timing = Some((replay.report.span_ns(), 50_000_000));
+        assert_eq!(replay_rows(&replay, P, timing).1, ReplayOutcome::Pass);
+    }
+
+    /// A file with stamps only evaluates check (c) and no more: a clean stream is not a pass (checks (a) and
+    /// (b) were not run), and a missed sample fails.
+    #[test]
+    fn a_stamps_only_file_evaluates_check_c_and_no_more() {
+        let clean = format!(
+            "at_ns\n{}",
+            (0..100u64)
+                .map(|i| (i * P).to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let replay = from_tsv(&clean).unwrap();
+        assert!(!replay.has_modes && !replay.has_read_times);
+        let (text, outcome) = replay_rows(&replay, P, None);
+        assert_eq!(outcome, ReplayOutcome::Incomplete, "{text}");
+        assert!(text.contains("b8.a.verdict\tnot_evaluated"), "{text}");
+        assert!(text.contains("b8.b.verdict\tnot_evaluated"), "{text}");
+        assert!(text.contains("b8.c.verdict\tpass"), "{text}");
+        assert!(text.contains("b8.d.verdict\tnot_evaluated"), "{text}");
+        // A 20 ms gap between two stamps is a missed run of samples: check (c) fails.
+        let missed = "at_ns\n0\n5000000\n30000000\n35000000";
+        let (text, outcome) = replay_rows(&from_tsv(missed).unwrap(), P, None);
+        assert_eq!(outcome, ReplayOutcome::Fail, "{text}");
+        assert!(text.contains("b8.c.misses\tmeasured\t1"), "{text}");
+    }
+
+    /// Check (d): the span against the wall window, within 2 poll periods plus 1 sample period (105 ms at a
+    /// 50 ms poll and 5 ms samples). The first board capture's +668 ms is red; a 100 ms difference is green.
+    #[test]
+    fn check_d_bounds_the_span_against_the_wall_window() {
+        let report = clean_report(4000, 10, 600_000);
+        let span = report.span_ns();
+        let poll = 50_000_000;
+        assert_eq!(check_d_bound_ns(poll, P), 105_000_000);
+        assert!(report.check_d(span + 100_000_000, poll, P).pass);
+        assert!(report.check_d(span - 100_000_000, poll, P).pass);
+        let red = report.check_d(span + 668_490_000, poll, P);
+        assert!(!red.pass, "{red:?}");
+        assert_eq!(red.diff_ns, -668_490_000);
+        assert!(!report.check_d(span + 106_000_000, poll, P).pass);
+    }
+
+    /// Without the run's wall time and poll period, check (d) is not evaluated and the replay is not a pass.
+    #[test]
+    fn a_replay_without_timing_leaves_check_d_not_evaluated() {
+        let report = clean_report(4000, 10, 600_000);
+        let replay = from_tsv(&stamps_tsv(&report)).unwrap();
+        let (text, outcome) = replay_rows(&replay, P, None);
+        assert_eq!(outcome, ReplayOutcome::Incomplete, "{text}");
+        assert!(text.contains("b8.d.verdict\tnot_evaluated"), "{text}");
+    }
+
+    /// Check (b) needs two model batches. A file with one is a fail, as the live tool reports it.
+    #[test]
+    fn check_b_with_one_model_batch_fails_as_the_live_tool_does() {
+        let text = "at_ns\tmode\tbatch\tread_start_ns\tread_end_ns\n\
+                    0\tmodel\t0\t0\t10\n\
+                    5000000\tmodel\t0\t0\t10";
+        let (text, outcome) = replay_rows(&from_tsv(text).unwrap(), P, None);
+        assert_eq!(outcome, ReplayOutcome::Fail, "{text}");
+        assert!(text.contains("b8.b.verdict\tfail"), "{text}");
+    }
+
+    /// The mode column gives the tick and model counts.
+    #[test]
+    fn a_mode_column_counts_the_modes() {
+        let replay = from_tsv("at_ns\tmode\n0\ttick\n5000000\tmodel\n10000000\tmodel").unwrap();
+        assert!(replay.has_modes && !replay.has_read_times);
+        assert_eq!(
+            (replay.report.tick_records, replay.report.model_records),
+            (1, 2)
+        );
+    }
+
+    /// A file that is not a capture is refused, not read as a partial one.
+    #[test]
+    fn a_file_that_is_not_a_capture_is_refused() {
+        assert!(from_tsv("").is_err());
+        assert!(from_tsv("stamp\n1").is_err(), "no at_ns column");
+        assert!(from_tsv("at_ns\nabc").is_err(), "not a number");
+        assert!(
+            from_tsv("at_ns\tmode\n1").is_err(),
+            "a row with too few fields"
+        );
+        assert!(from_tsv("at_ns\tmode\n1\tfoo").is_err(), "an unknown mode");
+        assert!(from_tsv("at_ns\n").is_err(), "no records");
     }
 
     /// Check 7: the spread of the offset to the nearest accelerometer stamp.
