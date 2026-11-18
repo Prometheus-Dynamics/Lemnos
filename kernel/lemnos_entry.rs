@@ -49,6 +49,8 @@ mod gsdma;
 mod vip;
 #[path = "rs/pisp_fe.rs"]
 mod pisp_fe;
+#[path = "rs/pisp_be.rs"]
+mod pisp_be;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 

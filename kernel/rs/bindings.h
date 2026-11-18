@@ -7,11 +7,14 @@
  */
 #include <linux/spi/spi.h>
 #include <linux/thermal.h>
+#include <linux/vmalloc.h>
+#include <uapi/linux/media/raspberrypi/pisp_be_config.h>
 #include <uapi/linux/media/raspberrypi/pisp_fe_config.h>
 
 #include "../lemnos.h"
 #include "../lemnos_regjob.h"
 #include "../lemnos_gsdma.h"
 #include "../lemnos_vip.h"
+#include "../lemnos_pisp_be.h"
 #include "../lemnos_pisp_fe.h"
 #include "../lemnos_rp1_csi2_priv.h"
