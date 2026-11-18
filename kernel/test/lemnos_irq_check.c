@@ -122,10 +122,10 @@ int main(int argc, char **argv)
 	CHECK(!ioctl(fd, LEMNOS_IOC_TEST_IRQ, &zero), "inject while masked");
 	CHECK(poll(&p, 1, 200) == 0, "no event while masked (200 ms)");
 	CHECK(!ioctl(fd, LEMNOS_IOC_IRQ_ENABLE, &zero), "enable");
-	if (poll(&p, 1, 200) == 1 && read(fd, &ev, sizeof(ev)) == sizeof(ev))
-		printf("     the masked one was resent on enable (an edge interrupt), count %u\n", ev.count);
-	else
-		printf("     the masked one was not resent (a level interrupt, its line not held)\n");
+	/* The test interrupt is an edge: an injection latched while masked is delivered on enable. */
+	CHECK(poll(&p, 1, 200) == 1 && read(fd, &ev, sizeof(ev)) == sizeof(ev),
+	      "the masked edge is resent on enable (none within 200 ms)");
+	printf("     the masked edge was resent on enable, count %u\n", ev.count);
 	/*
 	 * An injection that reaches the line while its handler is still running on another CPU is
 	 * dropped by the kernel, not by the module: the test interrupt is a simple-flow simulated
