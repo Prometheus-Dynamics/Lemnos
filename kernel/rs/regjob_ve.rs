@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The register-job profile of the A733's second video engine, its H.264 encoder and the input stage in
-//! front of it (lemnos_regjob.h), Rust (stage 1i of the port; replaces lemnos_regjob_a733.c).
+//! front of it (lemnos_regjob.h), Rust (stage 1i of the port).
 //!
 //! Facts, not code, from public sources:
 //!
@@ -133,7 +133,7 @@ const fn align(v: u64, a: u64) -> u64 {
 
 /// The bytes the block reaches from each address, from the job's geometry. Every term is at most 16
 /// bits wide, so nothing here can wrap a u64.
-fn check(c: &Ctx<'_>, need: &mut [u64]) -> Result {
+fn check(c: &Ctx<'_>, need: &mut [u64; rp::MAX_ADDRS]) -> Result {
     let mode = c.value(VE_ENC_TOP_MODE)?;
     let size = c.value(VE_ISP_INPUT_SIZE)?;
     let stride = c.value(VE_ISP_INPUT_STRIDE)?;
@@ -212,7 +212,7 @@ fn reset_regs(r: &Regs) {
     r.wr(VE_ENC_TOP_RESET, r.rd(VE_ENC_TOP_RESET) & !(1 | 1 << 4));
 }
 
-pub(crate) const PROFILE: rp::Profile = rp::Profile {
+pub(crate) static PROFILE: rp::Profile = rp::Profile {
     id: lb::LEMNOS_REGJOB_PROFILE_A733_VE,
     name: c"the A733 video engine's encoder",
     window: VE_WINDOW,
@@ -236,6 +236,3 @@ pub(crate) const PROFILE: rp::Profile = rp::Profile {
     event: None,
     event_arm: None,
 };
-
-// The C engine's table (lemnos_regjob_priv.h's lrj_a733_ve).
-rp::c_profile!(lrj_a733_ve, PROFILE);

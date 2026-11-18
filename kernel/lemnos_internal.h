@@ -9,6 +9,7 @@
 #include <linux/wait.h>
 
 #include "lemnos.h"
+#include "lemnos_regjob.h"
 
 struct device;
 
@@ -237,6 +238,15 @@ struct lem_vip;
 struct lem_vip *lem_vip_probe(struct platform_device *pdev);
 void lem_vip_remove(struct lem_vip *l);
 long lem_vip_create(struct lem_vip *l, struct device *dev, void *args);
+
+/* Register jobs (rs/regjob.rs): NULL when the device is not listed, else the block or an ERR_PTR. */
+/* lemnos_core.c: whether any of the device's compatibles is in the comma-separated pairs. */
+bool lem_device_listed(struct device *dev, const char *list);
+
+struct lem_rj;
+struct lem_rj *lem_rj_probe(struct platform_device *pdev);
+void lem_rj_remove(struct lem_rj *rj);
+long lem_rj_open(struct lem_rj *rj, struct lemnos_regjob_open *o);
 
 int lem_rp1_csi2_register(void);
 void lem_rp1_csi2_unregister(void);

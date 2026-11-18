@@ -29,6 +29,10 @@ mod bindings;
 mod bus;
 #[path = "rs/events.rs"]
 mod events;
+#[path = "rs/param.rs"]
+mod param;
+#[path = "rs/regjob.rs"]
+mod regjob;
 #[path = "rs/regjob_profile.rs"]
 mod regjob_profile;
 #[path = "rs/regjob_ve.rs"]

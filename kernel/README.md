@@ -291,7 +291,7 @@ notice is kept in the file header. The driver is `drivers/pisp/` (`PispFe`, the 
 
 Some blocks are programmed by writing registers, and some of those registers take bus addresses or
 decide how far past one the block reaches. A block listed in a register-job parameter (`a733_ve`
-or `k230_isp`) is driven that way by the module (`lemnos_regjob.c`), with a profile per block that says which
+or `k230_isp`) is driven that way by the module (`rs/regjob.rs`), with a profile per block that says which
 registers a caller may write, which take addresses, and what a job's geometry makes the block
 reach. Its registers can't be mapped, its interrupt isn't forwarded and its power isn't the
 caller's (`LEMNOS_IOC_POWER` gets `ENOTTY`).

@@ -220,7 +220,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_THERMAL` | `y` | required | `thermal_zone_get_temp`, `thermal_zone_get_zone_by_name` (`rs/events.rs`) |
 | `CONFIG_RESET_CONTROLLER` | `y` | required | `reset_control_*`, `__devm_reset_control_get` (`lemnos_power.c`, register jobs, VIP) |
 | `CONFIG_COMMON_CLK` | `y` | required | `clk_prepare`, `clk_unprepare`, `clk_bulk_*`, `devm_clk_*` (`lemnos_power.c`, register jobs, CSI-2). `HAVE_CLK` is selected by it |
-| `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `lemnos_regjob.c`) |
+| `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `rs/regjob.rs`) |
 | `CONFIG_SHMEM` | `y` | required | `shmem_mapping`: the memfd behind a stream's buffers (`lemnos_stream.c`; 7.3.5 no longer inlines `shmem_file`, so the module reads the mapping itself) |
 | `CONFIG_EVENTFD` | `y` | required | `eventfd_ctx_fdget`, `eventfd_ctx_put`, `eventfd_signal_mask` (stream completion) |
 | `CONFIG_RUST` | `y` | required | The Rust half of the module: the entry (`kernel/lemnos_entry.rs`) and the claims (`kernel/rs/claims.rs`), built with the kernel's Rust support and clang (`LLVM=1`). Not a symbol of the C objects: the Kbuild refuses a build without it |
