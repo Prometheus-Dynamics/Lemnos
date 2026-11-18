@@ -413,7 +413,7 @@ mod tests {
     };
     use std::io;
 
-    /// The C struct is 8 bytes; `kernel/lemnos_stream.c` asserts its size.
+    /// The C struct is 8 bytes; `kernel/rs/stream_file.rs` asserts its size.
     #[test]
     fn the_bell_struct_is_the_modules() {
         assert_eq!(std::mem::size_of::<Bell>(), 8);
@@ -421,7 +421,7 @@ mod tests {
     }
 
     /// The C struct is 48 bytes with the same offsets, and its first 24 are the old struct;
-    /// `kernel/lemnos_stream.c` asserts both sizes.
+    /// `kernel/rs/stream_file.rs` asserts both sizes.
     #[test]
     fn the_reader_struct_is_the_modules() {
         assert_eq!(std::mem::size_of::<Reader>(), 48);

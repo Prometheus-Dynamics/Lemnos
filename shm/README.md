@@ -423,7 +423,7 @@ value; an additive change that an older side ignores does not, and says so here.
 | Doorbell page | word 0, `sleeps << 1 \| asleep` | none of its own | Unnumbered; the same since the first publish | No |
 | Sample time | the 8 bytes of a sample's time | none of its own | `CLOCK_MONOTONIC` nanoseconds on Linux and macOS. Windows reads `QueryPerformanceCounter`, which is a different clock, so Linux and Windows rings do not compare | No change on Linux |
 | Descriptor messages (`shm-fdpass`) | the message's ancillary data | none of its own | Unnumbered; the same since the first publish | No |
-| Kernel module's copies | `kernel/lemnos_stream.c`: `LEM_SHM_LAYOUT`, `LEM_MARKS_LAYOUT` | 2, 2 | The same values as the rows above | Carried, and checked: a reader's marks page of another layout is refused with a log line naming both |
+| Kernel module's copies | `kernel/rs/stream_ring.rs`: `SHM_LAYOUT`, `MARKS_LAYOUT` | 2, 2 | The same values as the rows above | Carried, and checked: a reader's marks page of another layout is refused with a log line naming both |
 | Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x81a5753a1c9576e6` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before. Moved again by M34 (`0x8b6a280430008fea` to `0x81a5753a1c9576e6`): the ring's frame metadata and job end |
 
 A reader refuses a value it does not implement, with `RingError::Layout`. Readers built from 0aa30510 do not

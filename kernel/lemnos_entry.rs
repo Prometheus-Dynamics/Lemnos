@@ -51,6 +51,10 @@ mod stream_frame;
 mod stream_producer;
 #[path = "rs/stream_region.rs"]
 mod stream_region;
+#[path = "rs/stream_reader.rs"]
+mod stream_reader;
+#[path = "rs/stream_file.rs"]
+mod stream_file;
 #[path = "rs/gsdma.rs"]
 mod gsdma;
 #[path = "rs/vip.rs"]
@@ -82,6 +86,8 @@ impl kernel::Module for LemnosEntry {
     fn init(module: &'static ThisModule) -> Result<Self> {
         // The event queue and the watches' locks (rs/events.rs), first: binding a block posts an event.
         events::lem_events_init();
+        // The table of streams (rs/stream_file.rs), before any block can be bound.
+        stream_file::init();
         // SAFETY: called once, before any block can be bound or any interrupt requested.
         unsafe { irq::lem_irq_setup() };
         // The descriptors are statics the C module defines (LEM_STATIC, lemnos_core.c). Only their
