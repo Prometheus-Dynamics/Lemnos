@@ -385,6 +385,15 @@ lemnos-ctl show accel
 
 Reads one value, or every value the device has. A value is printed in its unit.
 
+A device that is not running has no values to read: it is off, or retrying its bind or its
+start-up. Then `read` (and `watch`) prints nothing and fails with the device's state and reason on
+stderr, and exits non-zero:
+
+```sh
+lemnos-ctl read mag
+# mag is retrying: attempt 3, last reason: bind failed: fake refusal: absent, next try in 1982 ms
+```
+
 ```sh
 lemnos-ctl read accel
 lemnos-ctl read counter count
