@@ -1,22 +1,31 @@
-//! B8's capture tool: reads the accelerometer's FIFO batches through the daemon, every 50 ms with a
-//! 4 KiB buffer, for a fixed time, and prints the rows the record's checks read.
+//! B8's capture tool: reads the FIFO's batches through the daemon, every 50 ms with a 4 KiB buffer, for
+//! a fixed time, and prints the rows the record's checks read.
 //!
 //! ```text
 //! lemnos-bmi088-batch --socket SOCK --device imu --contract accel --seconds 45 --period-ms 50 --out records.tsv
+//! lemnos-bmi088-batch --socket SOCK --device imu-gyro --contract gyro --accel-device imu --seconds 45
 //! ```
 //!
-//! `--contract` picks the die: `accel` (the default, `accelerometer/1`) or `gyro` (`gyroscope/1`). Each
-//! die is measured on its own run, and the rows say which die they are for. Batches are read with
-//! `read_batch_stamped`, so the rows also say how many records were stamped from tick time and the batch
-//! at which the stamping mode changed.
+//! `--contract` picks the die: `accel` (the default, `accelerometer/1`) or `gyro` (`gyroscope/1`). A gyro
+//! run also reads the accelerometer (`--accel-device`, default `imu`) on the same poll, which is what
+//! check 7 (the offset between the two dies' stamps) needs. Each batch is read with `read_batch_stamped`,
+//! and its host read span is taken on `CLOCK_MONOTONIC` (the clock the stamps are on), before and after
+//! the read.
 //!
-//! Exit codes: 0 measured; 2 usage; 3 NOT MEASURED (the daemon is not reachable, the device is not an
-//! accelerometer, or it refuses batches: a device with `fifo = false` answers `NOT_SUPPORTED`, as the
-//! real board does without the FIFO); 4 a data fault (a batch that is not whole records, or a record
-//! that does not decode). Nothing is made up: a refused or failed read is counted, and a run with a
-//! fault exits 4 rather than printing a pass.
+//! Exit codes: 0 measured, every check passes; 2 usage; 3 NOT MEASURED (the daemon is not reachable, the
+//! device is not the die it should be, or it refuses batches: a device with `fifo = false` answers
+//! `NOT_SUPPORTED`, as the real board does without the FIFO); 4 a data fault (a batch that is not whole
+//! records, or a record that does not decode, or a read that failed); 5 measured, and a check FAILED. A
+//! failed check is printed as `fail`, never as a pass.
 
 use std::io::Write;
+use std::time::{Duration, Instant};
+
+use lemnos_bmi088_batch::{BatchError, ReadSpan, Report, all_pass, check7_rows, rows};
+use lemnos_client::Client;
+use lemnos_contract_accelerometer::Accelerometer;
+use lemnos_contract_gyroscope::Gyroscope;
+use lemnos_core::Status;
 
 /// Writes one line to stdout (the rows) or stderr (the usage and the refusals).
 fn out(text: &str) {
@@ -25,13 +34,6 @@ fn out(text: &str) {
 fn err(text: &str) {
     let _ = writeln!(std::io::stderr(), "{text}");
 }
-use std::time::{Duration, Instant};
-
-use lemnos_bmi088_batch::{BatchError, Report, rows};
-use lemnos_client::Client;
-use lemnos_contract_accelerometer::Accelerometer;
-use lemnos_contract_gyroscope::Gyroscope;
-use lemnos_core::Status;
 
 /// Which die to read: the accelerometer's `read_batch_stamped`, or the gyroscope's.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +48,7 @@ type BatchRead = Box<dyn FnMut(&mut [u8]) -> Result<usize, Status>>;
 struct Args {
     socket: String,
     device: String,
+    accel_device: String,
     die: Die,
     seconds: u64,
     period_ms: u64,
@@ -55,7 +58,7 @@ struct Args {
 
 fn usage() -> ! {
     err(
-        "usage: lemnos-bmi088-batch --socket SOCK [--device imu] [--contract accel|gyro] [--seconds 45] [--period-ms 50] [--out FILE]",
+        "usage: lemnos-bmi088-batch --socket SOCK [--device imu] [--contract accel|gyro] [--accel-device imu] [--seconds 45] [--period-ms 50] [--sample-period-ms 5] [--out FILE]",
     );
     std::process::exit(2);
 }
@@ -64,6 +67,7 @@ fn parse() -> Args {
     let mut args = Args {
         socket: String::new(),
         device: "imu".into(),
+        accel_device: "imu".into(),
         die: Die::Accel,
         seconds: 45,
         period_ms: 50,
@@ -76,6 +80,7 @@ fn parse() -> Args {
         match flag.as_str() {
             "--socket" => args.socket = value,
             "--device" => args.device = value,
+            "--accel-device" => args.accel_device = value,
             "--contract" => {
                 args.die = match value.as_str() {
                     "accel" => Die::Accel,
@@ -108,9 +113,53 @@ fn sample_period_ns(args: &Args) -> u64 {
     args.sample_period_ms * 1_000_000
 }
 
+/// The host's `CLOCK_MONOTONIC` now, in nanoseconds: the clock the daemon stamps on.
+fn host_ns() -> u64 {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+}
+
 fn not_measured(why: &str) -> ! {
     out(&format!("b8.status\tnot_measured\t\t{why}"));
     std::process::exit(3);
+}
+
+/// Opens the die's stamped batch reader on `device`, or stops with NOT MEASURED.
+fn open(client: &Client, die: Die, device: &str) -> BatchRead {
+    match die {
+        Die::Accel => {
+            let mut accel = client
+                .open::<dyn Accelerometer>(device)
+                .unwrap_or_else(|e| {
+                    not_measured(&format!(
+                        "{device:?} is not an accelerometer the daemon serves: {e}"
+                    ))
+                });
+            Box::new(move |buf| accel.read_batch_stamped(buf))
+        }
+        Die::Gyro => {
+            let mut gyro = client.open::<dyn Gyroscope>(device).unwrap_or_else(|e| {
+                not_measured(&format!(
+                    "{device:?} is not a gyroscope the daemon serves: {e}"
+                ))
+            });
+            Box::new(move |buf| gyro.read_batch_stamped(buf))
+        }
+    }
+}
+
+/// Records one read's batch into `report`, or names the fault in `fault` (the first one kept).
+fn record(report: &mut Report, fault: &mut Option<String>, buf: &[u8], span: ReadSpan) {
+    if let Err(e) = report.add_batch(buf, span) {
+        fault.get_or_insert(match e {
+            BatchError::Partial { bytes } => {
+                format!("a batch of {bytes} bytes is not whole records")
+            }
+            BatchError::Undecodable { index } => {
+                format!("record {index} of a batch did not decode")
+            }
+        });
+    }
 }
 
 fn main() {
@@ -121,53 +170,30 @@ fn main() {
             args.socket
         ))
     });
-    // Each die's client reads its stamped batches into the same buffer shape.
-    let mut read: BatchRead = match args.die {
-        Die::Accel => {
-            let mut accel = client
-                .open::<dyn Accelerometer>(&args.device)
-                .unwrap_or_else(|e| {
-                    not_measured(&format!(
-                        "{:?} is not an accelerometer the daemon serves: {e}",
-                        args.device
-                    ))
-                });
-            Box::new(move |buf| accel.read_batch_stamped(buf))
-        }
-        Die::Gyro => {
-            let mut gyro = client
-                .open::<dyn Gyroscope>(&args.device)
-                .unwrap_or_else(|e| {
-                    not_measured(&format!(
-                        "{:?} is not a gyroscope the daemon serves: {e}",
-                        args.device
-                    ))
-                });
-            Box::new(move |buf| gyro.read_batch_stamped(buf))
-        }
-    };
+    let mut read = open(&client, args.die, &args.device);
+    // A gyro run also reads the accelerometer, for check 7.
+    let mut accel_read =
+        (args.die == Die::Gyro).then(|| open(&client, Die::Accel, &args.accel_device));
 
     let period = Duration::from_millis(args.period_ms);
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let started = Instant::now();
     let mut report = Report::default();
+    let mut accel_report = Report::default();
     let mut buf = vec![0u8; 4096];
     let mut fault: Option<String> = None;
     let mut next = started;
     while Instant::now() < deadline {
-        match read(&mut buf) {
-            Ok(bytes) => {
-                if let Err(e) = report.add_batch(&buf[..bytes]) {
-                    fault.get_or_insert(match e {
-                        BatchError::Partial { bytes } => {
-                            format!("a batch of {bytes} bytes is not whole records")
-                        }
-                        BatchError::Undecodable { index } => {
-                            format!("record {index} of a batch did not decode")
-                        }
-                    });
-                }
-            }
+        let start_ns = host_ns();
+        let result = read(&mut buf);
+        let end_ns = host_ns();
+        match result {
+            Ok(bytes) => record(
+                &mut report,
+                &mut fault,
+                &buf[..bytes],
+                ReadSpan { start_ns, end_ns },
+            ),
             Err(status) if status == Status::NOT_SUPPORTED && report.reads == 0 => {
                 not_measured(
                     "the device refuses batches (NOT_SUPPORTED): fifo = false, or no FIFO on this chip",
@@ -177,6 +203,22 @@ fn main() {
                 fault.get_or_insert(format!("read_batch failed: {status:?}"));
             }
         }
+        if let Some(accel) = accel_read.as_mut() {
+            let start_ns = host_ns();
+            let result = accel(&mut buf);
+            let end_ns = host_ns();
+            match result {
+                Ok(bytes) => record(
+                    &mut accel_report,
+                    &mut fault,
+                    &buf[..bytes],
+                    ReadSpan { start_ns, end_ns },
+                ),
+                Err(status) => {
+                    fault.get_or_insert(format!("accelerometer read_batch failed: {status:?}"));
+                }
+            }
+        }
         next += period;
         let now = Instant::now();
         if next > now {
@@ -184,24 +226,47 @@ fn main() {
         }
     }
     let elapsed = started.elapsed();
-    let text = rows(&report, sample_period_ns(&args), elapsed.as_nanos() as u64);
+    let period_ns = sample_period_ns(&args);
+    let mut text = rows(&report, period_ns, elapsed.as_nanos() as u64);
+    let mut pass = all_pass(&report, period_ns);
+    if args.die == Die::Gyro {
+        text.push_str(&check7_rows(&report, &accel_report));
+        let accel_pass = all_pass(&accel_report, period_ns);
+        text.push_str(&format!(
+            "b8.accel.verdict\t{}\t\tchecks (a), (b) and (c) on the accelerometer's records in this run\n",
+            if accel_pass { "pass" } else { "fail" }
+        ));
+        pass &= accel_pass;
+    }
     let _ = write!(std::io::stdout(), "{text}");
     if let Some(path) = &args.out {
         let mut file = std::fs::File::create(path).unwrap_or_else(|e| {
             err(&format!("cannot write {path}: {e}"));
             std::process::exit(4);
         });
-        let _ = writeln!(file, "at_ns");
-        for stamp in &report.stamps {
-            let _ = writeln!(file, "{stamp}");
+        let _ = writeln!(file, "at_ns\tmode");
+        for (stamp, mode) in report.stamps.iter().zip(&report.modes) {
+            let mode = match mode {
+                lemnos_contract_accelerometer::Stamp::TickTime => "tick",
+                lemnos_contract_accelerometer::Stamp::Model => "model",
+            };
+            let _ = writeln!(file, "{stamp}\t{mode}");
         }
     }
     if let Some(why) = fault {
         out(&format!("b8.status\tfault\t\t{why}"));
         std::process::exit(4);
     }
+    if !pass {
+        out(&format!(
+            "b8.status\tchecks_failed\t{} records in {:.2} s\tone or more checks failed: see the verdict rows",
+            report.records,
+            elapsed.as_secs_f64()
+        ));
+        std::process::exit(5);
+    }
     out(&format!(
-        "b8.status	measured	{} records in {:.2} s	",
+        "b8.status\tmeasured\t{} records in {:.2} s\tall checks pass",
         report.records,
         elapsed.as_secs_f64()
     ));
@@ -219,6 +284,7 @@ mod tests {
         let args = Args {
             socket: String::new(),
             device: String::new(),
+            accel_device: String::new(),
             die: Die::Accel,
             seconds: 1,
             period_ms: 50,
@@ -241,5 +307,13 @@ mod tests {
             lemnos_contract_accelerometer::RECORD_LEN,
             lemnos_contract_gyroscope::RECORD_LEN
         );
+    }
+
+    /// The host clock is `CLOCK_MONOTONIC`: it never goes back between two reads.
+    #[test]
+    fn the_host_clock_never_goes_back() {
+        let a = host_ns();
+        let b = host_ns();
+        assert!(b >= a && a > 0);
     }
 }
