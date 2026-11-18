@@ -213,11 +213,11 @@ unsafe extern "C" fn buf_mmap(
 unsafe extern "C" fn buf_vmap(buf: *mut bindings::dma_buf, map: *mut bindings::iosys_map) -> c_int {
     // SAFETY: the dma-buf core calls this with one of our dma-bufs.
     let b = unsafe { buf_of(buf) };
-    // SAFETY: the map is the caller's to fill (iosys_map_set_vaddr: the address, not I/O memory).
-    unsafe {
-        (*map).__bindgen_anon_1.vaddr = b.cpu;
-        (*map).is_iomem = false;
-    }
+    // iosys_map_set_vaddr: the address, not I/O memory.
+    // SAFETY: the map is the caller's to fill.
+    unsafe { (*map).__bindgen_anon_1.vaddr = b.cpu };
+    // SAFETY: as above.
+    unsafe { (*map).is_iomem = false };
     0
 }
 
@@ -462,12 +462,12 @@ pub(crate) unsafe fn lem_import(
         Ok(im) => KBox::into_raw(im),
         Err(_) => {
             // A box that could not be made: undo the mapping by hand, as import_free does.
-            // SAFETY: the mapping, the attachment and the reference import_map made.
-            unsafe {
-                bindings::dma_buf_unmap_attachment_unlocked(att, sgt, BIDIRECTIONAL);
-                bindings::dma_buf_detach(buf, att);
-                bindings::dma_buf_put(buf);
-            }
+            // SAFETY: the mapping import_map made, unmapped once.
+            unsafe { bindings::dma_buf_unmap_attachment_unlocked(att, sgt, BIDIRECTIONAL) };
+            // SAFETY: the attachment import_map made, with nothing mapped through it any more.
+            unsafe { bindings::dma_buf_detach(buf, att) };
+            // SAFETY: the reference import_map took.
+            unsafe { bindings::dma_buf_put(buf) };
             return ENOMEM.to_errno() as c_long;
         }
     };
@@ -496,19 +496,21 @@ pub(crate) unsafe fn lem_import(
         max: u32::MAX,
         min: 0,
     };
-    // SAFETY: the caller's table; its lock is held across __xa_alloc, which may drop it to allocate.
+    // The table's lock is held across __xa_alloc, which may drop it to allocate.
+    // SAFETY: the caller's table, initialised.
+    unsafe { bindings::xa_lock(imports) };
+    // SAFETY: the table's lock is held; the handle and the limit are valid for the call.
     let ret = unsafe {
-        bindings::xa_lock(imports);
-        let ret = bindings::__xa_alloc(
+        bindings::__xa_alloc(
             imports,
             &raw mut handle,
             im.cast(),
             limit,
             bindings::GFP_KERNEL,
-        );
-        bindings::xa_unlock(imports);
-        ret
+        )
     };
+    // SAFETY: the lock taken above.
+    unsafe { bindings::xa_unlock(imports) };
     if let Err(e) = to_result(ret) {
         // SAFETY: never put in the table, so still ours.
         unsafe { import_free(im) };

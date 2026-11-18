@@ -286,8 +286,7 @@ impl DelayedWork {
     ) -> impl PinInit<Self> {
         pin_init!(Self {
             dw <- Opaque::ffi_init(move |p: *mut bindings::delayed_work| {
-                // SAFETY: the work and its timer are initialised in place, before any queueing; the
-                // timer is the work's own, so delayed_work_timer_fn is its function.
+                // SAFETY: the work is initialised in place, before any queueing.
                 unsafe {
                     bindings::init_work_with_key(
                         &raw mut (*p).work,
@@ -295,15 +294,19 @@ impl DelayedWork {
                         false,
                         name.as_char_ptr(),
                         kernel::static_lock_class!().as_ptr(),
-                    );
+                    )
+                };
+                // SAFETY: the timer is initialised in place, before any queueing; it is the work's
+                // own, so delayed_work_timer_fn is its function.
+                unsafe {
                     bindings::timer_init_key(
                         &raw mut (*p).timer,
                         Some(bindings::delayed_work_timer_fn),
                         bindings::TIMER_IRQSAFE,
                         name.as_char_ptr(),
                         kernel::static_lock_class!().as_ptr(),
-                    );
-                }
+                    )
+                };
             }),
         })
     }

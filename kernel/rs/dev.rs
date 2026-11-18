@@ -490,15 +490,14 @@ fn region(l: &Block, r: &mut lb::lemnos_region) -> c_long {
 /// # Safety
 /// `vma` is the mapping being made, as the VFS gives it to mmap.
 unsafe fn map_region(l: &Block, index: u32, vma: *mut bindings::vm_area_struct) -> c_int {
-    // SAFETY: the caller's mapping.
-    let (start, end, flags) = unsafe {
-        let v = &*vma;
-        (
-            v.__bindgen_anon_1.__bindgen_anon_1.vm_start,
-            v.__bindgen_anon_1.__bindgen_anon_1.vm_end,
-            v.__bindgen_anon_2.vm_flags,
-        )
-    };
+    // SAFETY: the caller's mapping, live for this call.
+    let v = unsafe { &*vma };
+    // SAFETY: a VMA's range is plain data in the first arm of its union.
+    let start = unsafe { v.__bindgen_anon_1.__bindgen_anon_1.vm_start };
+    // SAFETY: as start.
+    let end = unsafe { v.__bindgen_anon_1.__bindgen_anon_1.vm_end };
+    // SAFETY: the flags are plain data, readable through this arm of their union.
+    let flags = unsafe { v.__bindgen_anon_2.vm_flags };
     let len = end - start;
     // SAFETY: asks about the calling task.
     if !l.mappable || !unsafe { bindings::capable(bindings::CAP_SYS_RAWIO as c_int) } {
@@ -663,29 +662,45 @@ fn block_request(l: &Block, cmd: u32, u: &mut Args) -> c_long {
 /// Requests that don't name a block; -ENOIOCTLCMD for one that does.
 fn unit_request(cmd: u32, u: &mut Args) -> c_long {
     let args: *mut c_void = ptr::from_mut(u).cast();
-    // SAFETY: each callee is given the request as the core copied it in, which is that command's struct.
-    unsafe {
-        match cmd {
-            IOC_CLAIM => lem_claim(args.cast()),
-            IOC_I2C_TRANSFER => lem_i2c_transfer(args.cast()),
-            IOC_I2C_SMBUS => lem_i2c_smbus(args.cast()),
-            IOC_SPI_TRANSFER => lem_spi_transfer(args.cast()),
-            IOC_SPI_INFO => lem_spi_info(args.cast()),
-            IOC_GPIO_REQUEST => lem_gpio_request(args.cast()),
-            IOC_GPIO_CONFIG => lem_gpio_config(args.cast()),
-            IOC_GPIO_GET => lem_gpio_get(args.cast()),
-            IOC_GPIO_SET => lem_gpio_set(args.cast()),
-            IOC_PWM_REQUEST => lem_pwm_request(args.cast()),
-            IOC_PWM_APPLY => lem_pwm_apply(args.cast()),
-            IOC_PWM_GET => lem_pwm_get(args.cast()),
-            IOC_PIO_OPEN => lem_pio_open(args.cast()),
-            IOC_PIO_CALL => lem_pio_call(args.cast()),
-            IOC_PIO_CONFIG_XFER => lem_pio_config_xfer(args.cast()),
-            IOC_PIO_XFER => lem_pio_xfer(args.cast()),
-            IOC_THERMAL_READ => lem_thermal_read(args.cast()),
-            IOC_THERMAL_WATCH => lem_thermal_watch(args.cast()),
-            _ => -(bindings::ENOIOCTLCMD as c_long),
-        }
+    // Each callee is given the request as the core copied it in, which is that command's struct.
+    match cmd {
+        // SAFETY: the request is this command's struct, copied in whole.
+        IOC_CLAIM => unsafe { lem_claim(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_I2C_TRANSFER => unsafe { lem_i2c_transfer(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_I2C_SMBUS => unsafe { lem_i2c_smbus(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_SPI_TRANSFER => unsafe { lem_spi_transfer(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_SPI_INFO => unsafe { lem_spi_info(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_GPIO_REQUEST => unsafe { lem_gpio_request(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_GPIO_CONFIG => unsafe { lem_gpio_config(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_GPIO_GET => unsafe { lem_gpio_get(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_GPIO_SET => unsafe { lem_gpio_set(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PWM_REQUEST => unsafe { lem_pwm_request(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PWM_APPLY => unsafe { lem_pwm_apply(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PWM_GET => unsafe { lem_pwm_get(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PIO_OPEN => unsafe { lem_pio_open(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PIO_CALL => unsafe { lem_pio_call(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PIO_CONFIG_XFER => unsafe { lem_pio_config_xfer(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_PIO_XFER => unsafe { lem_pio_xfer(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_THERMAL_READ => unsafe { lem_thermal_read(args.cast()) },
+        // SAFETY: as IOC_CLAIM.
+        IOC_THERMAL_WATCH => unsafe { lem_thermal_watch(args.cast()) },
+        _ => -(bindings::ENOIOCTLCMD as c_long),
     }
 }
 
@@ -944,21 +959,23 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
             max: MAX_BLOCK,
             min: 1,
         };
-        // SAFETY: the table is initialised; its lock is held across __xa_alloc_cyclic, which may drop it
-        // to allocate (xa_alloc_cyclic). NEXT_ID is only used here, under that lock.
+        // The table's lock is held across __xa_alloc_cyclic, which may drop it to allocate
+        // (xa_alloc_cyclic). NEXT_ID is only used here, under that lock.
+        // SAFETY: the table is initialised.
+        unsafe { bindings::xa_lock(BLOCKS.0.get()) };
+        // SAFETY: the table's lock is held; the id and the limit are valid for the call.
         ret = unsafe {
-            bindings::xa_lock(BLOCKS.0.get());
-            let ret = bindings::__xa_alloc_cyclic(
+            bindings::__xa_alloc_cyclic(
                 BLOCKS.0.get(),
                 &raw mut b.id,
                 l.cast(),
                 limit,
                 NEXT_ID.as_ptr(),
                 bindings::GFP_KERNEL,
-            );
-            bindings::xa_unlock(BLOCKS.0.get());
-            ret
+            )
         };
+        // SAFETY: the lock taken above.
+        unsafe { bindings::xa_unlock(BLOCKS.0.get()) };
         if ret < 0 {
             // SAFETY: the power state made above, which nothing else has seen.
             unsafe { lem_power_destroy(b.power) };
