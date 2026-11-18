@@ -2,5 +2,38 @@
 
 obj-m += lemnos_test_block.o
 ccflags-y += -I$(src)
+# Rust: each fixture is one crate, its file here; fixture.rs is the module they share.
 obj-m += lemnos_test_bus.o
 obj-m += lemnos_test_regjob.o
+
+# Bindings for what the kernel crate's own bindings leave out (bindings.h), made the way kernel/Kbuild
+# makes the module's: the kernel's bindgen with this directory's C flags, only the listed items, every
+# other type the kernel crate's (fixture.rs imports it).
+# Types the generated structs name only through pointers, and the kernel crate's bindings lack: opaque.
+fix_bindgen_opaque := spi_statistics spi_device_id spi_controller_mem_ops spi_controller_mem_caps \
+	spi_offload_config spi_offload dma_chan ptp_system_timestamp thermal_zone_device thermal_zone_params \
+	linear_range thermal_trip cooling_spec regulator_enable_gpio clk_hw clk_lookup clk_parent_data
+fix_bindgen_items := \
+	--allowlist-type 'spi_(device|controller|transfer|message|delay|board_info)' \
+	--allowlist-type 'spi_(device|controller|transfer|message)__bindgen_.*' \
+	--allowlist-function '__spi_alloc_controller|spi_register_controller|spi_unregister_controller|spi_new_device|spi_unregister_device' \
+	--allowlist-type 'regulator_(desc|ops|config|init_data|consumer_supply|type|state)|regulation_constraints|notification_limit|regulator_.*__bindgen_.*' \
+	--allowlist-function 'regulator_(register|unregister|notifier_call_chain|list_voltage_linear|map_voltage_linear)' \
+	--allowlist-var 'REGULATOR_(EVENT_OVER_CURRENT|CHANGE_VOLTAGE|CHANGE_STATUS)' \
+	--allowlist-function '__clk_hw_register_fixed_rate|clk_hw_unregister_fixed_rate|clkdev_hw_create|clkdev_drop' \
+	--allowlist-type 'thermal_zone_device_ops|thermal_device_mode|thermal_trend' \
+	--allowlist-function 'thermal_tripless_zone_device_register|thermal_zone_device_unregister|thermal_zone_device_enable' \
+	$(foreach t,$(fix_bindgen_opaque),--allowlist-type '$(t)' --opaque-type '$(t)')
+quiet_cmd_fix_bindgen = BINDGEN $@
+      cmd_fix_bindgen = \
+	$(BINDGEN) $< --rust-target 1.85 --use-core --with-derive-default --ctypes-prefix ffi \
+		--no-layout-tests --no-debug '.*' --no-doc-comments --enable-function-attribute-detection \
+		--no-recursive-allowlist $(fix_bindgen_items) \
+		-o $@ -- $(filter-out $(CC_FLAGS_LTO),$(c_flags)) -fno-builtin -D__BINDGEN__ -DMODULE
+$(obj)/fixture_bindings_generated.rs: $(src)/bindings.h FORCE
+	$(call if_changed_dep,fix_bindgen)
+targets += fixture_bindings_generated.rs
+clean-files += fixture_bindings_generated.rs
+$(obj)/lemnos_test_bus.o: $(obj)/fixture_bindings_generated.rs
+# fixture.rs includes the generated file by this path: the object directory.
+export LEMNOS_FIXTURE_BINDINGS := $(abspath $(obj)/fixture_bindings_generated.rs)
