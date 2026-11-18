@@ -115,7 +115,12 @@ fn listed(list: &[u8], compatible: &[u8]) -> bool {
     let mut rest = list;
     while !rest.is_empty() {
         let comma = rest.iter().position(|&b| b == b',');
-        let end = comma.and_then(|c| rest[c + 1..].iter().position(|&b| b == b',').map(|e| c + 1 + e));
+        let end = comma.and_then(|c| {
+            rest[c + 1..]
+                .iter()
+                .position(|&b| b == b',')
+                .map(|e| c + 1 + e)
+        });
         let pair = &rest[..end.unwrap_or(rest.len())];
         if pair == compatible {
             return true;
@@ -134,18 +139,28 @@ fn listed(list: &[u8], compatible: &[u8]) -> bool {
 /// # Safety
 /// `dev` is a live device; `list` is a NUL-terminated string.
 #[no_mangle]
-pub(crate) unsafe extern "C" fn lem_device_listed(dev: *mut bindings::device, list: *const c_char) -> bool {
+pub(crate) unsafe extern "C" fn lem_device_listed(
+    dev: *mut bindings::device,
+    list: *const c_char,
+) -> bool {
     let mut c = [core::ptr::null::<c_char>(); MAX_COMPATIBLE];
     // SAFETY: the caller's device; the array takes up to MAX_COMPATIBLE strings, which the device's
     // firmware node owns for as long as the device lives.
     let n = unsafe {
-        bindings::device_property_read_string_array(dev, c"compatible".as_ptr().cast(), c.as_mut_ptr(), c.len())
+        bindings::device_property_read_string_array(
+            dev,
+            c"compatible".as_ptr().cast(),
+            c.as_mut_ptr(),
+            c.len(),
+        )
     };
     // SAFETY: the caller's list.
     let list = unsafe { bytes(list) };
     // A negative count (no such property) lists nothing.
     // SAFETY: the first `n` entries were filled with the node's strings.
-    c.iter().take(usize::try_from(n).unwrap_or(0)).any(|&s| listed(list, unsafe { bytes(s) }))
+    c.iter()
+        .take(usize::try_from(n).unwrap_or(0))
+        .any(|&s| listed(list, unsafe { bytes(s) }))
 }
 
 /// Whether `dev` is one of the blocks the owned= parameter lists (lemnos_internal.h).
