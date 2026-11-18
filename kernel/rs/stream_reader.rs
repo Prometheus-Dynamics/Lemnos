@@ -226,15 +226,16 @@ pub(crate) fn add(st: ArcBorrow<'_, Stream>, a: &mut lb::lemnos_stream_reader) -
 
     // A new slot's cut-off word says nothing about the reader it is given to.
     g.write_release(g.cut_off_at(slot), 0);
-    {
+    // The slot was empty (found above, and the control mutex is held); what was in it is dropped
+    // with the lock let go all the same.
+    let _empty = {
         let mut f = st.lock();
         f.reader_ids += 1;
         rd.id = f.reader_ids;
         // SAFETY: the handle is the new file's, which nothing else can reach before fd_install below.
         unsafe { &*handle }.id.store(rd.id, Ordering::Relaxed);
-        // The slot was empty (found above, and the control mutex is held), so nothing is dropped here.
-        f.reader[slot] = rd;
-    }
+        core::mem::replace(&mut f.reader[slot], rd)
+    };
     a.slot = slot as u32;
     a.reader_fd = fd;
     // SAFETY: the descriptor and the file made above; the file is the descriptor's from here.

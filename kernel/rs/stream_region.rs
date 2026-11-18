@@ -141,7 +141,9 @@ impl Region {
         // SAFETY: the attachment just made, mapped once for the region's direction.
         self.sgt = from_err_ptr(unsafe { bindings::dma_buf_map_attachment_unlocked(self.att, self.dir) })?;
         // SAFETY: the table the exporter returned, live until it is unmapped.
-        let (mut sg, nents) = unsafe { ((*self.sgt).sgl, (*self.sgt).nents) };
+        let mut sg = unsafe { (*self.sgt).sgl };
+        // SAFETY: as above.
+        let nents = unsafe { (*self.sgt).nents };
         if nents == 0 {
             return Err(EINVAL);
         }
@@ -151,7 +153,9 @@ impl Region {
         let mut size = 0u64;
         for _ in 0..nents {
             // SAFETY: `sg` is one of the table's `nents` mapped entries.
-            let (addr, len) = unsafe { (bindings::sg_dma_address(sg), bindings::sg_dma_len(sg)) };
+            let addr = unsafe { bindings::sg_dma_address(sg) };
+            // SAFETY: as above.
+            let len = unsafe { bindings::sg_dma_len(sg) };
             if addr != next {
                 return Err(EINVAL);
             }
