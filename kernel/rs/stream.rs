@@ -36,7 +36,7 @@ pub(crate) struct JobRange {
 
 /// `struct lem_job`: what a held job names.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Job {
     pub(crate) identity: u64,
     pub(crate) buffer: u32,

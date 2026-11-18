@@ -12,3 +12,4 @@
 #include "../lemnos_regjob.h"
 #include "../lemnos_gsdma.h"
 #include "../lemnos_vip.h"
+#include "../lemnos_stream_priv.h"
