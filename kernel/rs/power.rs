@@ -135,8 +135,12 @@ unsafe extern "C" fn lem_supply_event(nb: *mut bindings::notifier_block, event: 
     let h = unsafe { (nb as *mut u8).sub(offset_of!(LemHandle, nb)) as *mut LemHandle };
     let faults = event & LEM_SUPPLY_FAULTS;
     if faults != 0 {
+        // SAFETY: the handle is live while its notifier is registered.
+        let power = unsafe { (*h).power };
         // SAFETY: the handle's power outlives its notifier (unregistered before the power is freed).
-        let (block, index) = unsafe { ((*(*h).power).block, (*h).index) };
+        let block = unsafe { (*power).block };
+        // SAFETY: as power.
+        let index = unsafe { (*h).index };
         crate::events::post(EVENT_SUPPLY_FAULT, block, index, faults as i64);
     }
     1 // NOTIFY_OK
@@ -166,12 +170,15 @@ unsafe fn lem_handle_open(p: *mut LemPower, h: *mut LemHandle) -> Result {
             }
             // SAFETY: the device and name are valid.
             let supply = from_err_ptr(unsafe { regulator_get_optional(dev.cast(), name_ptr) })?;
-            // SAFETY: the handle is live and stays at its address (it is in p.h, which is not moved).
-            unsafe {
-                (*h).res = supply;
-                (*h).nb.notifier_call = Some(lem_supply_event);
-                regulator_register_notifier(supply, ptr::addr_of_mut!((*h).nb).cast());
-            }
+            // SAFETY: the handle is live.
+            unsafe { (*h).res = supply };
+            // SAFETY: as above; the notifier is not registered yet, so nothing else reads it.
+            unsafe { (*h).nb.notifier_call = Some(lem_supply_event) };
+            // SAFETY: the handle is live, so its notifier block is in bounds.
+            let nb = unsafe { ptr::addr_of_mut!((*h).nb) };
+            // SAFETY: the supply just got; the notifier block stays at its address (the handle is
+            // in p.h, which is not moved) until lem_power_destroy unregisters it.
+            unsafe { regulator_register_notifier(supply, nb.cast()) };
             Ok(())
         }
         POWER_RESET => {
@@ -205,15 +212,18 @@ unsafe fn lem_handle_find(p: *mut LemPower, n: &mut u32, kind: u32, name: &[u8])
     let i = *n as usize;
     // SAFETY: slot `i` is free; `p` is live.
     let h = unsafe { ptr::addr_of_mut!((*p).h[i]) };
-    // SAFETY: the slot is written in full before use.
-    unsafe {
-        h.write(LemHandle::empty());
-        let len = name.len().min(LEMNOS_POWER_NAME - 1);
-        (&mut (*h).name)[..len].copy_from_slice(&name[..len]);
-        (*h).kind = kind;
-        (*h).index = i as u32;
-        (*h).power = p;
-    }
+    // SAFETY: the slot is free, and is written in full here, before use.
+    unsafe { h.write(LemHandle::empty()) };
+    let len = name.len().min(LEMNOS_POWER_NAME - 1);
+    // SAFETY: the slot was written just above, and nothing else refers to it until `n` counts it.
+    let stored = unsafe { &mut (*h).name };
+    stored[..len].copy_from_slice(&name[..len]);
+    // SAFETY: the slot is initialised and still ours alone.
+    unsafe { (*h).kind = kind };
+    // SAFETY: as above.
+    unsafe { (*h).index = i as u32 };
+    // SAFETY: as above.
+    unsafe { (*h).power = p };
     // SAFETY: the handle is in place, at its final address.
     unsafe { lem_handle_open(p, h)? };
     *n += 1;
@@ -294,12 +304,14 @@ unsafe fn power_request_c(p: *mut LemPower, r: *mut LemnosPower) -> c_long {
         Err(e) => return e.to_errno() as c_long,
     };
     // SAFETY: the handle is live under the lock.
-    let status = unsafe {
-        match (*h).kind {
-            POWER_CLOCK => lem_clock(h, r),
-            POWER_SUPPLY => lem_supply(h, r),
-            _ => lem_reset(h, r),
-        }
+    let kind = unsafe { (*h).kind };
+    let status = match kind {
+        // SAFETY: a live clock handle, under the power's lock.
+        POWER_CLOCK => unsafe { lem_clock(h, r) },
+        // SAFETY: a live supply handle, under the power's lock.
+        POWER_SUPPLY => unsafe { lem_supply(h, r) },
+        // SAFETY: lem_handle_open makes no other kind, so a live reset handle, under the lock.
+        _ => unsafe { lem_reset(h, r) },
     };
     // SAFETY: the handle is live under the lock.
     r.handle = unsafe { (*h).index };
@@ -328,6 +340,7 @@ unsafe fn lem_clock(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
             // SAFETY: the clock is live.
             let ret = unsafe { clk_prepare(clk) };
             if ret != 0 {
+                // SAFETY: the handle is live under the power's lock (the caller's contract).
                 unsafe { (*h).on = false };
                 return ret as c_long;
             }
@@ -337,21 +350,24 @@ unsafe fn lem_clock(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
                 // SAFETY: undoes the prepare just made.
                 unsafe { clk_unprepare(clk) };
             }
+            // SAFETY: the handle is live under the power's lock (the caller's contract).
             unsafe { (*h).on = ret == 0 };
             ret as c_long
         }
         OP_DISABLE => {
             // SAFETY: the clock is live; clk_disable_unprepare, as the inline composes it.
             if unsafe { (*h).on } {
-                unsafe {
-                    clk_disable(clk);
-                    clk_unprepare(clk);
-                }
+                // SAFETY: the clock is on, so it is enabled.
+                unsafe { clk_disable(clk) };
+                // SAFETY: the clock is on, so it is prepared, and it was disabled just above.
+                unsafe { clk_unprepare(clk) };
             }
+            // SAFETY: the handle is live under the power's lock (the caller's contract).
             unsafe { (*h).on = false };
             0
         }
         OP_STATUS => {
+            // SAFETY: the handle is live under the power's lock (the caller's contract).
             r.value = unsafe { (*h).on } as u64;
             0
         }
@@ -371,6 +387,7 @@ unsafe fn lem_clock(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
             if ret != 0 {
                 return ret as c_long;
             }
+            // SAFETY: the clock is live.
             r.value = unsafe { clk_get_rate(clk) } as u64;
             0
         }
@@ -393,6 +410,7 @@ unsafe fn lem_supply(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
             }
             // SAFETY: the regulator is live.
             let ret = unsafe { regulator_enable(s) };
+            // SAFETY: the handle is live under the power's lock (the caller's contract).
             unsafe { (*h).on = ret == 0 };
             ret as c_long
         }
@@ -403,6 +421,7 @@ unsafe fn lem_supply(h: *mut LemHandle, r: &mut LemnosPower) -> c_long {
             }
             // SAFETY: the regulator is live.
             let ret = unsafe { regulator_disable(s) };
+            // SAFETY: the handle is live under the power's lock (the caller's contract).
             unsafe { (*h).on = ret != 0 };
             ret as c_long
         }
@@ -484,24 +503,49 @@ pub(crate) unsafe extern "C" fn lem_power_destroy(p: *mut c_void) {
     for i in 0..n as usize {
         // SAFETY: `i < n` handles are open.
         let h = unsafe { ptr::addr_of_mut!((*p).h[i]) };
-        // SAFETY: the handle is live.
-        unsafe {
-            match (*h).kind {
-                POWER_CLOCK => {
-                    if (*h).on {
-                        clk_disable((*h).res);
-                        clk_unprepare((*h).res);
-                    }
-                    clk_put((*h).res);
+        // SAFETY: the handle is live until the state is freed below, and nothing else uses it now.
+        match unsafe { (*h).kind } {
+            POWER_CLOCK => {
+                // SAFETY: the handle is live.
+                if unsafe { (*h).on } {
+                    // SAFETY: the handle is live.
+                    let clk = unsafe { (*h).res };
+                    // SAFETY: the handle's clock, which is on, so it is enabled.
+                    unsafe { clk_disable(clk) };
+                    // SAFETY: the handle is live.
+                    let clk = unsafe { (*h).res };
+                    // SAFETY: the handle's clock, prepared and disabled just above.
+                    unsafe { clk_unprepare(clk) };
                 }
-                POWER_SUPPLY => {
-                    regulator_unregister_notifier((*h).res, ptr::addr_of_mut!((*h).nb).cast());
-                    if (*h).on {
-                        regulator_disable((*h).res);
-                    }
-                    regulator_put((*h).res);
+                // SAFETY: the handle is live.
+                let clk = unsafe { (*h).res };
+                // SAFETY: the clock lem_handle_open got, put once.
+                unsafe { clk_put(clk) };
+            }
+            POWER_SUPPLY => {
+                // SAFETY: the handle is live.
+                let supply = unsafe { (*h).res };
+                // SAFETY: the handle is live, so its notifier block is in bounds.
+                let nb = unsafe { ptr::addr_of_mut!((*h).nb) };
+                // SAFETY: the notifier lem_handle_open registered with this supply.
+                unsafe { regulator_unregister_notifier(supply, nb.cast()) };
+                // SAFETY: the handle is live.
+                if unsafe { (*h).on } {
+                    // SAFETY: the handle is live.
+                    let supply = unsafe { (*h).res };
+                    // SAFETY: the handle's supply, which is on, so this drops its one enable.
+                    unsafe { regulator_disable(supply) };
                 }
-                _ => reset_control_put((*h).res),
+                // SAFETY: the handle is live.
+                let supply = unsafe { (*h).res };
+                // SAFETY: the supply lem_handle_open got, put once, its notifier gone.
+                unsafe { regulator_put(supply) };
+            }
+            _ => {
+                // SAFETY: the handle is live.
+                let rst = unsafe { (*h).res };
+                // SAFETY: the reset control lem_handle_open got, put once.
+                unsafe { reset_control_put(rst) };
             }
         }
     }

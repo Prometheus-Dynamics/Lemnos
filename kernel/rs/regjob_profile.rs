@@ -51,8 +51,10 @@ impl Regs {
         if !self.inside(offset) {
             return 0;
         }
-        // SAFETY: inside the mapped window (new's contract), on a register boundary.
-        unsafe { bindings::readl(self.base.add(offset as usize).cast()) }
+        // SAFETY: inside the mapped window (new's contract).
+        let reg = unsafe { self.base.add(offset as usize) };
+        // SAFETY: a register of the mapped window, on a register boundary.
+        unsafe { bindings::readl(reg.cast()) }
     }
 
     pub(crate) fn wr(&self, offset: u32, value: u32) {
@@ -60,7 +62,9 @@ impl Regs {
             return;
         }
         // SAFETY: as rd.
-        unsafe { bindings::writel(value, self.base.add(offset as usize).cast()) }
+        let reg = unsafe { self.base.add(offset as usize) };
+        // SAFETY: as rd.
+        unsafe { bindings::writel(value, reg.cast()) }
     }
 }
 

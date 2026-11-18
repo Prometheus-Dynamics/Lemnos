@@ -300,12 +300,16 @@ struct LvipStream {
 /// A register of the block's window (mapped for VR_WINDOW bytes, probe checked the resource's size).
 fn rd_reg(regs: *mut c_void, off: usize) -> u32 {
     // SAFETY: the register window is mapped for VR_WINDOW bytes, and every offset read is below it.
-    unsafe { bindings::readl(regs.cast::<u8>().add(off).cast()) }
+    let reg = unsafe { regs.cast::<u8>().add(off) };
+    // SAFETY: a register inside the mapped window.
+    unsafe { bindings::readl(reg.cast()) }
 }
 
 fn wr_reg(regs: *mut c_void, off: usize, val: u32) {
     // SAFETY: as rd_reg.
-    unsafe { bindings::writel(val, regs.cast::<u8>().add(off).cast()) };
+    let reg = unsafe { regs.cast::<u8>().add(off) };
+    // SAFETY: a register inside the mapped window.
+    unsafe { bindings::writel(val, reg.cast()) };
 }
 
 impl LemVip {
@@ -509,7 +513,9 @@ fn tables_idle(l: &LemVip) {
     }
     for i in 1..LVIP_MTLB_ENTRIES {
         // SAFETY: the root table holds LVIP_MTLB_ENTRIES entries.
-        unsafe { ptr::write_volatile(t.mtlb.add(i), 0) };
+        let entry = unsafe { t.mtlb.add(i) };
+        // SAFETY: an entry of the root table, which is the block's own coherent memory.
+        unsafe { ptr::write_volatile(entry, 0) };
     }
     // SAFETY: the root table's first entry, as above.
     unsafe { ptr::write_volatile(t.mtlb, (t.stlb0_dma as u32 | LVIP_MTLB_PRESENT).to_le()) };
@@ -548,21 +554,17 @@ fn map_slot(l: &LemVip, s: usize, addr: u64, len: u64) -> Result {
         }
         // SAFETY: the root table's entry for this table; `first + k` is below the root's size, since the
         // slot's span fits its MTLB range (checked by the build).
+        let entry = unsafe { t.mtlb.add(first + k) };
+        // SAFETY: an entry of the root table, which is the block's own coherent memory.
         unsafe {
-            ptr::write_volatile(
-                t.mtlb.add(first + k),
-                (t.stlb_dma[s][k] as u32 | LVIP_MTLB_PRESENT).to_le(),
-            )
+            ptr::write_volatile(entry, (t.stlb_dma[s][k] as u32 | LVIP_MTLB_PRESENT).to_le())
         };
     }
     for p in 0..pages {
         // SAFETY: the table holds one entry per page the slot maps (`p` is below `pages`, which fits).
-        unsafe {
-            ptr::write_volatile(
-                t.stlb[s][p / LVIP_STLB_ENTRIES].add(p % LVIP_STLB_ENTRIES),
-                pte(addr + p as u64 * PAGE, true).to_le(),
-            )
-        };
+        let entry = unsafe { t.stlb[s][p / LVIP_STLB_ENTRIES].add(p % LVIP_STLB_ENTRIES) };
+        // SAFETY: an entry of the slot's table, made above in the block's own coherent memory.
+        unsafe { ptr::write_volatile(entry, pte(addr + p as u64 * PAGE, true).to_le()) };
     }
     t.mapped[s] = pages as u32;
     Ok(())
@@ -596,17 +598,23 @@ fn fill_command(l: &LemVip, prog: &[u8]) -> u32 {
     for w in pre {
         // SAFETY: the command buffer holds LVIP_CMD_BYTES / 4 words; the preamble is first, and the program
         // and the tail are checked to fit (the build's assertion and load's limit).
-        unsafe { ptr::write_volatile(t.cmd.add(i), w.to_le()) };
+        let at = unsafe { t.cmd.add(i) };
+        // SAFETY: a word of the command buffer, which is the block's own coherent memory.
+        unsafe { ptr::write_volatile(at, w.to_le()) };
         i += 1;
     }
     for j in 0..n {
-        // SAFETY: as above.
-        unsafe { ptr::write_volatile(t.cmd.add(i + j), word(prog, j).to_le()) };
+        // SAFETY: as the preamble: the program is checked to fit the command buffer.
+        let at = unsafe { t.cmd.add(i + j) };
+        // SAFETY: a word of the command buffer.
+        unsafe { ptr::write_volatile(at, word(prog, j).to_le()) };
     }
     i += n;
     for w in tail {
-        // SAFETY: as above.
-        unsafe { ptr::write_volatile(t.cmd.add(i), w.to_le()) };
+        // SAFETY: as the preamble: the tail is checked to fit the command buffer.
+        let at = unsafe { t.cmd.add(i) };
+        // SAFETY: a word of the command buffer.
+        unsafe { ptr::write_volatile(at, w.to_le()) };
         i += 1;
     }
     i as u32
@@ -685,11 +693,12 @@ fn mmu_on(l: &LemVip) -> Result {
         return Ok(());
     }
     // The array's entry, then a command (run with the MMU off: addresses physical) selecting it.
-    // SAFETY: the page table array's one entry, in its coherent page.
-    unsafe {
-        ptr::write_volatile(t.pta, (t.mtlb_dma as u32 | LVIP_PD_MODE_1K).to_le());
-        ptr::write_volatile(t.pta.add(1), ((t.mtlb_dma >> 32) as u32).to_le());
-    }
+    // SAFETY: the low word of the page table array's one entry, in its coherent page.
+    unsafe { ptr::write_volatile(t.pta, (t.mtlb_dma as u32 | LVIP_PD_MODE_1K).to_le()) };
+    // SAFETY: the entry is two words, so its second is inside the array's page.
+    let high = unsafe { t.pta.add(1) };
+    // SAFETY: the high word of the same entry, in the same coherent page.
+    unsafe { ptr::write_volatile(high, ((t.mtlb_dma >> 32) as u32).to_le()) };
     l.wr(VR_PTA_LOW, t.pta_dma as u32);
     l.wr(VR_PTA_HIGH, (t.pta_dma >> 32) as u32);
     l.wr(VR_PTA_LOAD, 1);
@@ -707,7 +716,9 @@ fn mmu_on(l: &LemVip) -> Result {
     ];
     for (i, w) in setup.iter().enumerate() {
         // SAFETY: the command buffer's first words, which hold the set-up (ten words of LVIP_CMD_BYTES).
-        unsafe { ptr::write_volatile(t.cmd.add(i), w.to_le()) };
+        let at = unsafe { t.cmd.add(i) };
+        // SAFETY: a word of the command buffer, which is the block's own coherent memory.
+        unsafe { ptr::write_volatile(at, w.to_le()) };
     }
     core::sync::atomic::fence(Ordering::Release);
     l.wr(VR_FE_ADDRESS, t.cmd_dma as u32);
@@ -775,12 +786,9 @@ unsafe extern "C" fn lvip_isr(_irq: c_int, data: *mut c_void) -> bindings::irqre
 /// A job outstanding too long, or a stream ending under one: its end is queued, which stops the block.
 unsafe extern "C" fn lvip_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: the work is the watchdog's, and the block is the container of the watchdog.
-    let l = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LemVip, watchdog))
-            .cast::<LemVip>())
-    };
+    let l = unsafe { work.cast::<u8>().sub(offset_of!(LemVip, watchdog)) }.cast::<LemVip>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let l = unsafe { &*l };
     let mut s = l.state.lock();
     if s.running && !s.ending && !s.wedged {
         s.timed_out = true;
@@ -794,12 +802,9 @@ unsafe extern "C" fn lvip_watchdog(work: *mut bindings::work_struct) {
 /// and only a block seen reset lets go of the job's memory.
 unsafe extern "C" fn lvip_end(work: *mut bindings::work_struct) {
     // SAFETY: the work is the block's end, and the block is its container.
-    let l = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LemVip, end))
-            .cast::<LemVip>())
-    };
+    let l = unsafe { work.cast::<u8>().sub(offset_of!(LemVip, end)) }.cast::<LemVip>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let l = unsafe { &*l };
     let s = l.state.lock();
     if !s.running || !s.ending || s.wedged {
         return;
@@ -984,12 +989,9 @@ unsafe extern "C" fn lvip_kick(priv_: *mut c_void) -> c_long {
 /// After a job ends: pick up what the consumer posted since, without a kick.
 unsafe extern "C" fn lvip_collect_work(work: *mut bindings::work_struct) {
     // SAFETY: the work is the stream's collect work, which lives in its stream.
-    let ps = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LvipStream, collect))
-            .cast::<LvipStream>())
-    };
+    let ps = unsafe { work.cast::<u8>().sub(offset_of!(LvipStream, collect)) }.cast::<LvipStream>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let ps = unsafe { &*ps };
     let stopped = ps.collect_lock.lock();
     let ret = collect_locked(ps, *stopped);
     drop(stopped);
@@ -1272,8 +1274,10 @@ fn resume_and_get(dev: *mut bindings::device) -> Result {
     // SAFETY: the device being probed.
     let r = unsafe { __pm_runtime_resume(dev.cast(), RPM_GET_PUT) };
     if r < 0 {
+        // SAFETY: the device being probed, so its usage count is in bounds.
+        let usage = unsafe { &raw mut (*dev).power.usage_count };
         // SAFETY: the device's usage count, which the failed get has just raised; dropped unless 0.
-        unsafe { bindings::atomic_add_unless(&raw mut (*dev).power.usage_count, -1, 0) };
+        unsafe { bindings::atomic_add_unless(usage, -1, 0) };
         return Err(Error::from_errno(r));
     }
     Ok(())
@@ -1303,12 +1307,9 @@ fn alloc_tables(dev: *mut bindings::device, t: &mut Tables) -> Result {
         let idx = (lb::LEMNOS_VIP_PROGRAM_ADDR as u64 >> 12) + p;
         // SAFETY: the window's table has LVIP_STLB_ENTRIES entries, and the command buffer's pages index
         // within them (the program address is below 16 MiB, checked by the build).
-        unsafe {
-            ptr::write(
-                t.stlb0.add(idx as usize),
-                pte(t.cmd_dma + p * PAGE, false).to_le(),
-            )
-        };
+        let entry = unsafe { t.stlb0.add(idx as usize) };
+        // SAFETY: an entry of the window's table, which is the block's own coherent memory.
+        unsafe { ptr::write(entry, pte(t.cmd_dma + p * PAGE, false).to_le()) };
     }
     Ok(())
 }
@@ -1325,7 +1326,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
         return Err(EINVAL);
     }
     // SAFETY: as above.
-    let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
+    let start = unsafe { (*res).start };
+    // SAFETY: as above.
+    let size = unsafe { bindings::resource_size(res) };
     let regs: *mut c_void = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
         let mem = from_err_ptr(unsafe {
@@ -1466,6 +1469,8 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
         free_tables(dev, block_ref.tables());
         return Err(e);
     }
+    // SAFETY: the device being probed, whose name lives as long as it.
+    let name = unsafe { bindings::dev_name(dev) };
     // SAFETY: the device being probed; the block is the handler's data, released after the handler.
     if let Err(e) = to_result(unsafe {
         bindings::devm_request_threaded_irq(
@@ -1474,7 +1479,7 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
             Some(lvip_isr),
             None,
             0,
-            bindings::dev_name(dev),
+            name,
             raw as *mut c_void,
         )
     }) {

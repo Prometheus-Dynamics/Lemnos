@@ -262,8 +262,10 @@ fn drop_registration(h: &ReaderHandle) -> bool {
 }
 
 unsafe extern "C" fn reader_file_release(_inode: *mut bindings::inode, file: *mut bindings::file) -> c_int {
+    // SAFETY: the VFS calls this with the file being released, still live.
+    let h = unsafe { (*file).private_data }.cast::<ReaderHandle>();
     // SAFETY: the handle `add` gave this file, taken back once, when its last reference closes.
-    let h = unsafe { KBox::from_raw((*file).private_data.cast::<ReaderHandle>()) };
+    let h = unsafe { KBox::from_raw(h) };
     drop_registration(&h);
     // Dropping the handle drops its reference on the stream.
     0
@@ -274,8 +276,10 @@ unsafe extern "C" fn reader_file_ioctl(file: *mut bindings::file, cmd: c_uint, _
     if cmd != LEMNOS_READER_IOC_UNREGISTER {
         return ENOTTY.to_errno() as c_long;
     }
+    // SAFETY: the VFS calls this with a live, open file.
+    let h = unsafe { (*file).private_data }.cast::<ReaderHandle>();
     // SAFETY: the handle `add` gave this file, live while the file is open.
-    let h = unsafe { &*(*file).private_data.cast::<ReaderHandle>() };
+    let h = unsafe { &*h };
     if drop_registration(h) { 0 } else { ENOENT.to_errno() as c_long }
 }
 

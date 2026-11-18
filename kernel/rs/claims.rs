@@ -74,6 +74,7 @@ static mut LEM_CLAIM_FOPS: FopsCell = FopsCell(bindings::file_operations {
     read: Some(lem_claim_read),
     poll: Some(lem_claim_poll),
     release: Some(lem_claim_release),
+    // SAFETY: a file_operations of zeros is one with every other operation absent.
     ..unsafe { core::mem::zeroed() }
 });
 
@@ -106,8 +107,10 @@ unsafe fn is_claim(file: *const bindings::file) -> bool {
 /// # Safety
 /// `file` is a claim file (`is_claim`) and is live.
 unsafe fn held_of<'a>(file: *const bindings::file) -> &'a LemHeld {
+    // SAFETY: the caller's contract: the file is live.
+    let held = unsafe { (*file).private_data } as *const LemHeld;
     // SAFETY: a claim file's private data is its `LemHeld`, set by `lem_claim` and freed on release.
-    unsafe { &*((*file).private_data as *const LemHeld) }
+    unsafe { &*held }
 }
 
 /// The name a claim holds, as a C string.
@@ -123,8 +126,10 @@ unsafe extern "C" fn lem_claim_release(_inode: *mut bindings::inode, file: *mut 
     if !ops.is_null() {
         // SAFETY: `ops` was attached and points at the module's static table.
         if let Some(release) = unsafe { (*ops).release } {
+            // SAFETY: `h` is live until freed just below.
+            let data = unsafe { (*h).data.load(Ordering::Relaxed) };
             // SAFETY: `data` is what the attacher gave, and the attach stored it before `ops`.
-            unsafe { release((*h).data.load(Ordering::Relaxed)) };
+            unsafe { release(data) };
         }
     }
     // Ended before the name comes free, so the next holder finds it let go.
@@ -175,8 +180,12 @@ unsafe extern "C" fn lem_claim_poll(file: *mut bindings::file, wait: *mut bindin
 /// # Safety
 /// `file` is null or live; `resource` is a NUL-terminated string.
 unsafe fn is_claim_on(file: *const bindings::file, resource: &CStr) -> bool {
-    // SAFETY: the caller's contract.
-    unsafe { is_claim(file) && name_of(held_of(file)) == resource }
+    // SAFETY: the caller's contract: null or live.
+    if !unsafe { is_claim(file) } {
+        return false;
+    }
+    // SAFETY: a claim file, found so just above, and live by the caller's contract.
+    name_of(unsafe { held_of(file) }) == resource
 }
 
 /// Sets the module that owns the claim files' operations, and initialises the claim table. Called

@@ -140,8 +140,10 @@ struct Buf {
 /// # Safety
 /// `buf` is a dma-buf exported by `alloc`, not yet released.
 unsafe fn buf_of<'a>(buf: *mut bindings::dma_buf) -> &'a Buf {
-    // SAFETY: the caller's dma-buf, whose priv is the Buf `alloc` gave it, live until its release.
-    unsafe { &*((*buf).priv_ as *const Buf) }
+    // SAFETY: the caller's dma-buf, not yet released.
+    let b = unsafe { (*buf).priv_ } as *const Buf;
+    // SAFETY: the dma-buf's priv is the Buf `alloc` gave it, live until its release.
+    unsafe { &*b }
 }
 
 /// Frees a table made by `buf_map`.
@@ -157,8 +159,10 @@ unsafe extern "C" fn buf_map(
     att: *mut bindings::dma_buf_attachment,
     dir: bindings::dma_data_direction,
 ) -> *mut bindings::sg_table {
-    // SAFETY: the dma-buf core calls this with a live attachment of one of our dma-bufs.
-    let b = unsafe { buf_of((*att).dmabuf) };
+    // SAFETY: the dma-buf core calls this with a live attachment.
+    let buf = unsafe { (*att).dmabuf };
+    // SAFETY: the attachment is of one of our dma-bufs.
+    let b = unsafe { buf_of(buf) };
     // SAFETY: a struct sg_table of zeroes is an empty table.
     let sgt = match KBox::new(
         unsafe { core::mem::zeroed::<bindings::sg_table>() },
@@ -174,8 +178,10 @@ unsafe extern "C" fn buf_map(
         unsafe { table_free(sgt) };
         return Error::from_errno(ret).to_ptr();
     }
+    // SAFETY: the live attachment, as above.
+    let dev = unsafe { (*att).dev };
     // SAFETY: the attachment's device is live for the attachment's life; the table was filled above.
-    let ret = unsafe { bindings::dma_map_sgtable((*att).dev, sgt, dir, 0) };
+    let ret = unsafe { bindings::dma_map_sgtable(dev, sgt, dir, 0) };
     if ret != 0 {
         // SAFETY: the table filled above, not mapped.
         unsafe { bindings::sg_free_table(sgt) };
@@ -191,8 +197,10 @@ unsafe extern "C" fn buf_unmap(
     sgt: *mut bindings::sg_table,
     dir: bindings::dma_data_direction,
 ) {
+    // SAFETY: the dma-buf core calls this with the live attachment `buf_map` mapped for.
+    let dev = unsafe { (*att).dev };
     // SAFETY: the table `buf_map` mapped for this attachment's device, in this direction.
-    unsafe { bindings::dma_unmap_sgtable((*att).dev, sgt, dir, 0) };
+    unsafe { bindings::dma_unmap_sgtable(dev, sgt, dir, 0) };
     // SAFETY: the table `buf_map` filled.
     unsafe { bindings::sg_free_table(sgt) };
     // SAFETY: the table `buf_map` made; the dma-buf core gives it back exactly once.
@@ -242,8 +250,10 @@ unsafe fn buf_free(b: *mut Buf) {
 }
 
 unsafe extern "C" fn buf_release(buf: *mut bindings::dma_buf) {
+    // SAFETY: the dma-buf being released, still live for this call.
+    let b = unsafe { (*buf).priv_ };
     // SAFETY: the dma-buf's last reference is gone; its priv is the Buf `alloc` gave it.
-    unsafe { buf_free((*buf).priv_.cast()) };
+    unsafe { buf_free(b.cast()) };
 }
 
 /// `struct dma_buf_ops` of the buffers.
@@ -294,10 +304,10 @@ pub(crate) unsafe fn lem_alloc(
     };
     // SAFETY: the caller's device; the reference is put by buf_free, or below.
     unsafe { bindings::get_device(dev) };
-    // SAFETY: the device is bound, so its DMA is set up; `b` is ours (dma_alloc_coherent).
-    let cpu = unsafe {
-        bindings::dma_alloc_attrs(dev, size, &raw mut (*b).addr, bindings::GFP_KERNEL, 0)
-    };
+    // SAFETY: `b` is ours, so its `addr` is in bounds.
+    let addr = unsafe { &raw mut (*b).addr };
+    // SAFETY: the device is bound, so its DMA is set up; `addr` is ours to fill (dma_alloc_coherent).
+    let cpu = unsafe { bindings::dma_alloc_attrs(dev, size, addr, bindings::GFP_KERNEL, 0) };
     if cpu.is_null() {
         // SAFETY: the reference taken above.
         unsafe { bindings::put_device(dev) };
@@ -473,13 +483,17 @@ pub(crate) unsafe fn lem_import(
     };
     // One contiguous range in the block's address space, or refused.
     // SAFETY: the mapped table: `nents` entries from `sgl` carry device addresses.
-    let (first, nents) = unsafe { ((*sgt).sgl, (*sgt).nents) };
+    let first = unsafe { (*sgt).sgl };
+    // SAFETY: as above.
+    let nents = unsafe { (*sgt).nents };
     // SAFETY: a mapped table has a first entry.
     let start = unsafe { bindings::sg_dma_address(first) };
     let (mut next, mut size, mut sg) = (start, 0u64, first);
     for _ in 0..nents {
         // SAFETY: `sg` is one of the table's mapped entries.
-        let (addr, len) = unsafe { (bindings::sg_dma_address(sg), bindings::sg_dma_len(sg)) };
+        let addr = unsafe { bindings::sg_dma_address(sg) };
+        // SAFETY: as above.
+        let len = unsafe { bindings::sg_dma_len(sg) };
         if addr != next {
             // SAFETY: never put in the table, so still ours.
             unsafe { import_free(im) };

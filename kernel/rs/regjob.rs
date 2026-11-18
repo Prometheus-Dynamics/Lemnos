@@ -503,14 +503,18 @@ impl Rj {
         let mut b = Buf { buf, att, sgt, addr: 0, bytes: 0 };
         // One contiguous range in the block's address space, or refused.
         // SAFETY: the mapping just made, live until freed.
-        let (mut sg, nents) = unsafe { ((*sgt).sgl, (*sgt).nents) };
+        let mut sg = unsafe { (*sgt).sgl };
+        // SAFETY: as above.
+        let nents = unsafe { (*sgt).nents };
         // SAFETY: a mapped table has at least one entry.
         let start = unsafe { bindings::sg_dma_address(sg) };
         let mut next = start;
         let mut bytes = 0u64;
         for _ in 0..nents {
             // SAFETY: an entry of the mapped table, within its nents.
-            let (addr, len) = unsafe { (bindings::sg_dma_address(sg), bindings::sg_dma_len(sg) as u64) };
+            let addr = unsafe { bindings::sg_dma_address(sg) };
+            // SAFETY: as above.
+            let len = unsafe { bindings::sg_dma_len(sg) } as u64;
             if addr != next {
                 b.free();
                 return Err(EINVAL);
@@ -980,8 +984,10 @@ static LRJ_FOPS: Fops = Fops(bindings::file_operations {
 });
 
 unsafe extern "C" fn lrj_ioctl(file: *mut bindings::file, cmd: c_uint, arg: c_ulong) -> c_long {
-    // SAFETY: the VFS calls this with a session file, whose private data is its Session until release.
-    let s = unsafe { &*((*file).private_data as *const Session) };
+    // SAFETY: the VFS calls this with a live session file.
+    let s = unsafe { (*file).private_data } as *const Session;
+    // SAFETY: a session file's private data is its Session until release.
+    let s = unsafe { &*s };
     match s.ioctl(cmd, arg) {
         Ok(()) => 0,
         Err(e) => e.to_errno() as c_long,
@@ -989,8 +995,10 @@ unsafe extern "C" fn lrj_ioctl(file: *mut bindings::file, cmd: c_uint, arg: c_ul
 }
 
 unsafe extern "C" fn lrj_release(_inode: *mut bindings::inode, file: *mut bindings::file) -> c_int {
+    // SAFETY: the VFS calls this with the session file being released, still live.
+    let s = unsafe { (*file).private_data } as *mut Session;
     // SAFETY: the session file's private data, from KBox::into_raw in `lem_rj_open`; released once.
-    let s = unsafe { KBox::from_raw((*file).private_data as *mut Session) };
+    let s = unsafe { KBox::from_raw(s) };
     let rj = &*s.rj;
     let mut st = rj.state.lock();
     if st.session == s.id {
@@ -1138,9 +1146,19 @@ fn get_irq(pdev: *mut bindings::platform_device, index: u32) -> Result<c_int> {
 }
 
 fn request_irq(dev: *mut bindings::device, irq: c_int, handler: bindings::irq_handler_t, data: *const Rj) -> Result {
+    // SAFETY: the device being probed, whose name lives as long as it.
+    let name = unsafe { bindings::dev_name(dev) };
     // SAFETY: the device being probed; the block outlives the interrupt (lem_rj_remove frees it first).
     kernel::error::to_result(unsafe {
-        bindings::devm_request_threaded_irq(dev, irq as c_uint, handler, None, 0, bindings::dev_name(dev), data as *mut c_void)
+        bindings::devm_request_threaded_irq(
+            dev,
+            irq as c_uint,
+            handler,
+            None,
+            0,
+            name,
+            data as *mut c_void,
+        )
     })
 }
 
@@ -1155,7 +1173,9 @@ fn probe(pdev: *mut bindings::platform_device, p: &'static Profile) -> Result<*c
         return Err(EINVAL);
     }
     // SAFETY: as above.
-    let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
+    let start = unsafe { (*res).start };
+    // SAFETY: as above.
+    let size = unsafe { bindings::resource_size(res) };
     let base: *mut u8 = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
         let mem = from_err_ptr(unsafe { bindings::devm_memremap(dev, start, size as usize, bindings::MEMREMAP_WB as c_ulong) })?;

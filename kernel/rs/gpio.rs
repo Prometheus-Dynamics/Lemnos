@@ -380,18 +380,22 @@ static LEM_LINE_OPS: LemClaimOps = LemClaimOps {
 /// # Safety
 /// `gc` is a registered chip, and `data` is a NUL-terminated name.
 unsafe extern "C" fn lem_chip_match(gc: *mut bindings::gpio_chip, data: *const c_void) -> c_int {
-    // SAFETY: gpiolib passes a registered chip, whose device is live.
-    let dev = unsafe { bindings::gpio_device_to_device((*gc).gpiodev) };
+    // SAFETY: gpiolib passes a registered chip.
+    let gdev = unsafe { (*gc).gpiodev };
+    // SAFETY: a registered chip's GPIO device, whose device is live.
+    let dev = unsafe { bindings::gpio_device_to_device(gdev) };
     // SAFETY: the device is live while the chip is registered.
-    let name = unsafe {
-        if (*dev).init_name.is_null() {
-            (*dev).kobj.name
-        } else {
-            (*dev).init_name
-        }
+    let name = if unsafe { (*dev).init_name }.is_null() {
+        // SAFETY: as above.
+        unsafe { (*dev).kobj.name }
+    } else {
+        // SAFETY: as above.
+        unsafe { (*dev).init_name }
     };
-    // SAFETY: both are NUL-terminated.
-    let same = unsafe { CStr::from_char_ptr(name) == CStr::from_char_ptr(data.cast()) };
+    // SAFETY: the device's name is NUL-terminated and lives as long as the device.
+    let name = unsafe { CStr::from_char_ptr(name) };
+    // SAFETY: the caller's contract: `data` is a NUL-terminated name.
+    let same = name == unsafe { CStr::from_char_ptr(data.cast()) };
     same as c_int
 }
 
@@ -481,13 +485,17 @@ fn lem_line_configure(l: &LemLine, cfg: &mut LineConfig, c: &LemnosGpioConfig) -
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the line's descriptor is held for the line's life.
-    let ret = unsafe {
-        if output {
-            gpiod_direction_output_raw((l.desc).cast(), ((c.value != 0) as c_int) ^ active_low as c_int)
-        } else {
-            gpiod_direction_input((l.desc).cast())
+    let ret = if output {
+        // SAFETY: the line's descriptor is held for the line's life.
+        unsafe {
+            gpiod_direction_output_raw(
+                (l.desc).cast(),
+                ((c.value != 0) as c_int) ^ active_low as c_int,
+            )
         }
+    } else {
+        // SAFETY: as above.
+        unsafe { gpiod_direction_input((l.desc).cast()) }
     };
     if ret != 0 {
         return ret as c_long;

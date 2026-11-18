@@ -117,14 +117,17 @@ fn resource_name(out: &mut [u8; LEM_PWM_RESOURCE_MAX], provider: &[u8], channel:
 /// # Safety
 /// `dev` is a live device under the parent device_find_child walks.
 unsafe extern "C" fn lem_is_pwm_chip(dev: *mut bindings::device, _data: *const c_void) -> c_int {
-    // SAFETY: the caller's contract; reads the class and its name.
-    unsafe {
-        let class = (*dev).class;
-        if class.is_null() || (*class).name.is_null() {
-            return 0;
-        }
-        (CStr::from_char_ptr((*class).name) == c"pwm") as c_int
+    // SAFETY: the caller's contract: the device is live.
+    let class = unsafe { (*dev).class };
+    // SAFETY: the class of a live device, checked non-null first; it outlives its devices.
+    if class.is_null() || unsafe { (*class).name }.is_null() {
+        return 0;
     }
+    // SAFETY: as above.
+    let name = unsafe { (*class).name };
+    // SAFETY: a class's name, checked non-null above, is a NUL-terminated string that lives as
+    // long as the class.
+    (unsafe { CStr::from_char_ptr(name) } == c"pwm") as c_int
 }
 
 /// The PWM device for `provider`'s channel `channel`, found through its chip; an errno if it is not.
@@ -166,7 +169,9 @@ fn lem_pwm_find(provider: &[u8], channel: u32) -> Result<*mut bindings::pwm_devi
 unsafe extern "C" fn lem_channel_release(data: *mut c_void) {
     let c = data as *mut LemChannel;
     // SAFETY: `c` is a channel made by lem_pwm_request, freed only here.
-    unsafe { bindings::pwm_put((*c).pwm) };
+    let pwm = unsafe { (*c).pwm };
+    // SAFETY: the PWM device the channel got, put once.
+    unsafe { bindings::pwm_put(pwm) };
     // SAFETY: `c` came from KBox::into_raw in lem_pwm_request.
     drop(unsafe { KBox::from_raw(c) });
 }
@@ -249,8 +254,10 @@ pub(crate) unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_lon
             enabled: s.enabled != 0,
             usage_power: false,
         };
-        // SAFETY: `c` is the held channel, live until the claim's file is put below; `state` is a full state.
-        unsafe { bindings::pwm_apply_might_sleep((*c).pwm, &state) as c_long }
+        // SAFETY: `c` is the held channel, live until the claim's file is put below.
+        let pwm = unsafe { (*c).pwm };
+        // SAFETY: the channel's PWM device, held as long as the channel; `state` is a full state.
+        unsafe { bindings::pwm_apply_might_sleep(pwm, &state) as c_long }
     };
     if !file.is_null() {
         // SAFETY: drops the reference channel_of took.
@@ -278,8 +285,12 @@ pub(crate) unsafe extern "C" fn lem_pwm_get(s: *mut LemnosPwmState) -> c_long {
             enabled: false,
             usage_power: false,
         };
-        // SAFETY: `c` is the held channel; `state` is written in full by the shim.
-        unsafe { lemnos_pwm_get_state((*c).pwm.cast(), (&mut state as *mut bindings::pwm_state).cast()) };
+        // SAFETY: `c` is the held channel.
+        let pwm = unsafe { (*c).pwm };
+        // SAFETY: the channel's PWM device; `state` is written in full by the shim.
+        unsafe {
+            lemnos_pwm_get_state(pwm.cast(), (&mut state as *mut bindings::pwm_state).cast())
+        };
         s.enabled = state.enabled as u32;
         s.inverted = (state.polarity == bindings::pwm_polarity_PWM_POLARITY_INVERSED) as u32;
         s.period_ns = state.period;

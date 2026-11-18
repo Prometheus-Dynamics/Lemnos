@@ -341,9 +341,10 @@ impl PinnedDrop for Stream {
 
 /// The test source's work: one frame, or one drop.
 unsafe extern "C" fn source_work(work: *mut bindings::work_struct) {
-    // SAFETY: `work` is the work of the delayed work at `source` of a stream, which teardown cancels
-    // and waits for before the stream can be freed.
-    let st = unsafe { &*work.cast::<u8>().sub(offset_of!(Stream, source)).cast::<Stream>() };
+    // SAFETY: `work` is the work of the delayed work at `source` of a stream.
+    let st = unsafe { work.cast::<u8>().sub(offset_of!(Stream, source)) }.cast::<Stream>();
+    // SAFETY: teardown cancels the work and waits for it before the stream can be freed.
+    let st = unsafe { &*st };
     let g = st.geom();
     let (job, sequence) = {
         let mut f = st.lock();
@@ -384,9 +385,11 @@ unsafe extern "C" fn source_work(work: *mut bindings::work_struct) {
 
 /// The block going away: the stream ends from a worker, see `lem_streams_block_gone`.
 unsafe extern "C" fn gone_work(work: *mut bindings::work_struct) {
-    // SAFETY: `work` is the work at `gone` of a stream in the table, which `lem_streams_block_gone`
-    // waits for with the table's lock held, so the stream is live.
-    let st = unsafe { &*work.cast::<u8>().sub(offset_of!(Stream, gone)).cast::<Stream>() };
+    // SAFETY: `work` is the work at `gone` of a stream in the table.
+    let st = unsafe { work.cast::<u8>().sub(offset_of!(Stream, gone)) }.cast::<Stream>();
+    // SAFETY: `lem_streams_block_gone` waits for the work with the table's lock held, so the stream
+    // is live.
+    let st = unsafe { &*st };
     st.shutdown(u64::from(lb::LEMNOS_RING_STATE_CLOSED));
 }
 
@@ -407,9 +410,11 @@ fn errno(r: Result) -> c_long {
 /// # Safety
 /// `file` is a live file whose operations are STREAM_FOPS.
 unsafe fn stream_of<'a>(file: *mut bindings::file) -> ArcBorrow<'a, Stream> {
+    // SAFETY: the caller's contract: the file is live.
+    let st = unsafe { (*file).private_data }.cast::<Stream>();
     // SAFETY: the caller's contract: the file's private data is the reference creation gave it,
     // which it keeps until its release.
-    unsafe { ArcBorrow::from_raw((*file).private_data.cast::<Stream>()) }
+    unsafe { ArcBorrow::from_raw(st) }
 }
 
 unsafe extern "C" fn stream_ioctl(file: *mut bindings::file, cmd: c_uint, arg: c_ulong) -> c_long {
@@ -597,8 +602,12 @@ unsafe extern "C" fn stream_mmap(file: *mut bindings::file, vma: *mut bindings::
 }
 
 unsafe extern "C" fn stream_release(_inode: *mut bindings::inode, file: *mut bindings::file) -> c_int {
+    // SAFETY: the VFS calls this with the file being released, still live.
+    let st = unsafe { (*file).private_data }
+        .cast::<Stream>()
+        .cast_const();
     // SAFETY: the reference creation gave this file, taken back once, when its last reference closes.
-    let st = unsafe { Arc::from_raw((*file).private_data.cast::<Stream>().cast_const()) };
+    let st = unsafe { Arc::from_raw(st) };
     {
         let mut all = STREAMS.lock();
         if let Some(at) = all.streams.iter_mut().find(|p| ptr::eq(**p, Arc::as_ptr(&st))) {
