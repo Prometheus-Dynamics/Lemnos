@@ -1041,7 +1041,10 @@ fn a_consumer_holding_every_buffer_is_no_stop_and_health_names_the_drops() {
         let at = u64::from(i + 1) * 33_000_000;
         block.frame(&pattern(i, FRAME), at);
         d.tick(at).unwrap();
-        assert!(stream.take_frame().is_some(), "the consumer keeps frame {i}");
+        assert!(
+            stream.take_frame().is_some(),
+            "the consumer keeps frame {i}"
+        );
     }
     for k in 1..=40u64 {
         let at = 66_000_000 + k * 100_000_000;
@@ -1090,7 +1093,10 @@ fn a_recovery_restart_goes_on_numbering_the_frames() {
         t += 10_000_000;
         d.tick(t).unwrap();
     }
-    assert!(matches!(d.health(), Health::Failed(_)), "a real stall is judged");
+    assert!(
+        matches!(d.health(), Health::Failed(_)),
+        "a real stall is judged"
+    );
     for _ in 0..1_000 {
         if d.health() == Health::Ok {
             break;

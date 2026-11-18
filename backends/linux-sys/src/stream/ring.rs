@@ -127,13 +127,25 @@ pub struct Ring {
 }
 
 /// A consumer's holds on the pool's buffers: its marks page, the module's registration of it, how
-/// many frames it holds in each buffer, and how many it may hold at once.
+/// many frames it holds in each buffer, and how many it may have in hand at once.
 struct Holds {
     marks: Marks,
     _registration: Registration,
     counts: Vec<u32>,
+    /// Of `counts`, the frames passed on ([`Ring::pass_on`]): still held, no longer in hand.
+    passed: Vec<u32>,
     held: u32,
+    /// Of `held`, the frames passed on.
+    passed_on: u32,
+    /// The frames this consumer may have in hand: held and not passed on.
     max_held: u32,
+}
+
+impl Holds {
+    /// Whether taking another frame would put more in hand than the limit allows.
+    fn at_limit(&self) -> bool {
+        self.held - self.passed_on >= self.max_held
+    }
 }
 
 fn invalid(what: &str) -> io::Error {
@@ -211,8 +223,8 @@ impl Ring {
     /// Gives the module this consumer's marks page, so buffers it holds are not reused, and
     /// starts holding: from now on every frame taken is marked, and [`release`](Self::release)
     /// lets its buffer go. `max_held` frames at most may be held at once; past that
-    /// [`next_frame`](Self::next_frame) waits, and the frame stays on the ring. `stream` is the
-    /// stream's descriptor.
+    /// [`next_frame`](Self::next_frame) takes none, and the frames that go by are dropped and
+    /// counted. `stream` is the stream's descriptor.
     pub fn add_marks(
         &mut self,
         stream: BorrowedFd<'_>,
@@ -235,6 +247,38 @@ impl Ring {
         self.attach_holds(marks, registration, buffers, max_held)
     }
 
+    /// Starts holding for a consumer that passes its frames on ([`pass_on`](Self::pass_on)): a
+    /// relay, whose frame goes to a reader of its own and is held here until that reader is done
+    /// with it. `max_in_hand` bounds only the frames taken and not yet passed on. The module is
+    /// told this consumer may hold every buffer, because how many frames stay held after they are
+    /// passed on is up to that reader, and holding all of them stops the block without a fault.
+    pub fn hold_passing(
+        &mut self,
+        stream: BorrowedFd<'_>,
+        buffers: u32,
+        max_in_hand: u32,
+    ) -> io::Result<()> {
+        if self.holds.is_some() || max_in_hand == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "marks already given, or no hold",
+            ));
+        }
+        let marks = Marks::create(buffers, 0, buffers).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("make the marks page: {e:?}"),
+            )
+        })?;
+        let page = marks.page_fd().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("the marks page: {e:?}"))
+        })?;
+        let registration = crate::stream::add_reader(stream, page.as_fd(), buffers, 0)
+            .map_err(|e| io::Error::other(format!("give the module the marks page: {e}")))?;
+        marks.set_slot(registration.slot);
+        self.attach_holds(marks, registration, buffers, max_in_hand)
+    }
+
     /// Starts holding with `marks` already given to the module as `registration`.
     fn attach_holds(
         &mut self,
@@ -244,15 +288,44 @@ impl Ring {
         max_held: u32,
     ) -> io::Result<()> {
         if self.holds.is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "marks already given"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "marks already given",
+            ));
         }
         self.holds = Some(Holds {
             marks,
             _registration: registration,
             counts: vec![0; buffers as usize],
+            passed: vec![0; buffers as usize],
             held: 0,
+            passed_on: 0,
             max_held,
         });
+        Ok(())
+    }
+
+    /// The frame held in `buffer` went on to this consumer's own reader. Its buffer stays held, so
+    /// the module does not reuse it, until [`release`](Self::release); it no longer counts against
+    /// the frames this consumer may have in hand, so the reader keeping it does not stop the next
+    /// frame from being taken. `InvalidInput` when no frame held in `buffer` is still in hand.
+    pub fn pass_on(&mut self, buffer: u32) -> io::Result<()> {
+        let holds = self.holds.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "no holds on this stream")
+        })?;
+        let in_hand = holds
+            .counts
+            .get(buffer as usize)
+            .zip(holds.passed.get(buffer as usize))
+            .is_some_and(|(count, passed)| count > passed);
+        if !in_hand {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("buffer {buffer} holds no frame in hand"),
+            ));
+        }
+        holds.passed[buffer as usize] += 1;
+        holds.passed_on += 1;
         Ok(())
     }
 
@@ -289,6 +362,13 @@ impl Ring {
         }
         *count -= 1;
         holds.held -= 1;
+        // A frame passed on is the one that comes back first.
+        if let Some(passed) = holds.passed.get_mut(buffer as usize)
+            && *passed > 0
+        {
+            *passed -= 1;
+            holds.passed_on -= 1;
+        }
         holds.marks.unmark(BufferIndex(buffer));
         Ok(())
     }
@@ -339,7 +419,7 @@ impl Ring {
     /// The next frame published, or `None` when there is none yet. `InvalidData` for an entry
     /// that is not a buffer entry, or when the reader fell behind and skipped frames.
     pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        if self.holds.as_ref().is_some_and(|h| h.held >= h.max_held) {
+        if self.holds.as_ref().is_some_and(Holds::at_limit) {
             // Taking another would exceed the limit. The frames go by unheld and are counted as
             // dropped: left on the ring they would be lapped, and a lapped reader fails.
             self.drop_frames();
@@ -450,7 +530,10 @@ impl Ring {
             .get_mut(buffer as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "outside the pool"))?;
         if !holds.marks.mark(BufferIndex(buffer)) {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "at the hold limit"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "at the hold limit",
+            ));
         }
         *count += 1;
         holds.held += 1;
@@ -468,14 +551,20 @@ mod tests {
     /// A ring of `frame_slots` frames and `buffers` buffers in an in-memory region, with the words
     /// the module writes at make time (`kernel/lemnos_stream.c` `lem_stream_init_ring`): no frame.
     fn module_ring(frame_slots: u32, buffers: u32) -> (OwnedFd, usize, Layout) {
-        let layout = Layout { frame_slots, buffers, job_slots: 2, job_bytes: 8 };
+        let layout = Layout {
+            frame_slots,
+            buffers,
+            job_slots: 2,
+            job_bytes: 8,
+        };
         let fd = crate::dma_buf::memfd(c"lemnos-ring-test").expect("memfd");
         let bytes = 4096;
         let file = File::from(fd);
         file.set_len(bytes as u64).expect("size the region");
         let page_at = INDEX_AT + frame_slots as usize + frame_slots as usize * SLOT_WORDS;
         let put = |word: usize, value: u64| {
-            file.write_all_at(&value.to_le_bytes(), (word * 8) as u64).expect("write a word");
+            file.write_all_at(&value.to_le_bytes(), (word * 8) as u64)
+                .expect("write a word");
         };
         put(0, SHM_MAGIC);
         put(RING_LAYOUT, RING_LAYOUT_VALUE);
@@ -513,11 +602,131 @@ mod tests {
         );
     }
 
+    /// Publishes one frame in `buffer` on the in-memory ring, as the module does: a buffer entry
+    /// with the buffer's ticket and the module's 32 bytes of metadata.
+    fn publish(ring: &Ring, buffer: u32, sequence: u64) {
+        /// The test's mapping of the region, written as the module writes its own.
+        struct Module(Words);
+        impl Mem for Module {
+            fn words(&self) -> usize {
+                self.0.words()
+            }
+            fn load(&self, index: usize, order: Ordering) -> u64 {
+                self.0.load(index, order)
+            }
+        }
+        impl shm_ring::MemMut for Module {
+            fn store(&self, index: usize, value: u64, order: Ordering) {
+                if let Some(word) = self.0.map.as_atomic_words().and_then(|w| w.get(index)) {
+                    word.store(value, order);
+                }
+            }
+        }
+        let module = Module(Words {
+            map: Arc::clone(&ring.map),
+            base: 0,
+        });
+        let mut writer = shm_ring::Writer::over(module).expect("the frame ring");
+        let mut meta = [0u8; META_BYTES];
+        meta[..8].copy_from_slice(&sequence.to_le_bytes());
+        let mut payload = [0u8; 48];
+        let len =
+            entry::write(&mut payload, 1, &[(BufferIndex(buffer), 0)], &meta).expect("an entry");
+        writer
+            .publish(
+                shm_ring::FieldId(0),
+                shm_ring::SampleTime::from_nanos(sequence),
+                shm_ring::Flags::NONE,
+                &payload[..len],
+            )
+            .expect("published");
+    }
+
+    /// A reader allowed one frame in hand, on a pool of four, with its marks as `hold_passing`
+    /// makes them: the page allows every buffer, the limit is on what is in hand.
+    fn passing_ring() -> (OwnedFd, Ring) {
+        let (fd, bytes, layout) = module_ring(8, 4);
+        let mut ring = Ring::map(fd.as_fd(), bytes, &layout).expect("the ring maps");
+        let marks = Marks::create(4, 0, 4).expect("marks");
+        let dummy = Registration {
+            slot: 0,
+            file: crate::dma_buf::memfd(c"lemnos-registration-test").expect("memfd"),
+        };
+        ring.attach_holds(marks, dummy, 4, 1).expect("holds attach");
+        (fd, ring)
+    }
+
+    /// A relay's reader hands each frame on to its own consumer and keeps the buffer held until
+    /// that consumer is done. Frames handed on do not count against the limit: with one frame in
+    /// hand allowed and two handed on and still held, the third frame is taken, not dropped.
+    /// Before `pass_on`, the first held frame was the limit and every later frame was dropped for
+    /// as long as the consumer kept it.
+    #[test]
+    fn a_frame_passed_on_stays_held_and_does_not_count_against_the_limit() {
+        let (_fd, mut ring) = passing_ring();
+        for (buffer, sequence) in [(0, 10), (1, 11), (2, 12)] {
+            publish(&ring, buffer, sequence);
+            let frame = ring
+                .next_frame()
+                .expect("the ring reads")
+                .unwrap_or_else(|| panic!("frame {sequence} is taken, not dropped at the limit"));
+            assert_eq!((frame.buffer, frame.sequence), (buffer, sequence));
+            ring.pass_on(buffer).expect("the frame goes on");
+        }
+        assert_eq!(ring.dropped(), 0);
+        // All three are still held: the module may not reuse them.
+        let holds = ring.holds.as_ref().expect("holds");
+        assert_eq!((holds.held, holds.passed_on), (3, 3));
+        // Each comes back once, and only once.
+        for buffer in 0..3 {
+            ring.release(buffer).expect("its consumer is done with it");
+        }
+        assert_eq!(
+            ring.release(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let holds = ring.holds.as_ref().expect("holds");
+        assert_eq!((holds.held, holds.passed_on), (0, 0));
+    }
+
+    /// A frame in hand, not passed on, is still the limit: the next frames go by and are counted,
+    /// and once it is passed on (or released) the reader takes frames again.
+    #[test]
+    fn a_frame_in_hand_is_the_limit_until_it_is_passed_on() {
+        let (_fd, mut ring) = passing_ring();
+        publish(&ring, 0, 10);
+        assert!(ring.next_frame().expect("reads").is_some());
+        publish(&ring, 1, 11);
+        publish(&ring, 2, 12);
+        assert!(
+            ring.next_frame().expect("reads").is_none(),
+            "one in hand is the limit"
+        );
+        assert_eq!(ring.dropped(), 2, "the frames that went by are counted");
+        ring.pass_on(0).expect("the frame goes on");
+        assert_eq!(
+            ring.pass_on(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "it can go on once"
+        );
+        assert_eq!(
+            ring.pass_on(3).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "a buffer with no frame in hand"
+        );
+        publish(&ring, 3, 13);
+        let frame = ring.next_frame().expect("reads").expect("taken again");
+        assert_eq!((frame.buffer, frame.sequence), (3, 13));
+    }
+
     /// A ring the module did not lay out, or laid out for other sizes, is refused at map time.
     #[test]
     fn a_region_not_laid_out_like_the_module_is_refused() {
         let (fd, bytes, layout) = module_ring(2, 2);
-        let wrong = Layout { buffers: 3, ..layout };
+        let wrong = Layout {
+            buffers: 3,
+            ..layout
+        };
         assert_eq!(
             Ring::map(fd.as_fd(), bytes, &wrong).unwrap_err().kind(),
             io::ErrorKind::InvalidData

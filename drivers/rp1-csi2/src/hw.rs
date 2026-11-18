@@ -84,6 +84,11 @@ pub trait Hardware: Send {
     fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>>;
     /// Gives a finished frame's buffer of `channel`'s stream back to the block.
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()>;
+    /// The finished frame in `buffer` of `channel`'s stream was published to the stream's consumer.
+    /// The buffer is still held from the block until [`give_back`](Self::give_back), which comes
+    /// when the consumer has returned it; it no longer counts against the frames the driver may
+    /// have in hand, so a consumer that keeps frames does not stop the driver taking the next one.
+    fn handed_on(&mut self, channel: Channel, buffer: u32) -> Result<()>;
     /// Whether the stream is still running.
     fn check(&mut self) -> Result<()>;
     /// The module's counters since the last start.
@@ -229,9 +234,13 @@ fn node_is_gone(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc_errno::ENODEV)
 }
 
-/// Frames a consumer may hold at once, from the margin rule (docs/streams.md): `B >= W + held + 2`,
-/// with the producer's working set `W` of one buffer. Below four buffers no hold count meets the
-/// rule; one hold is kept anyway, and the module counts the frames a short pool loses.
+/// Frames the driver may have in hand at once: taken from the module's stream and not yet handed on
+/// to the `frames` stream's consumer. From the margin rule (docs/streams.md): `B >= W + held + 2`,
+/// with the producer's working set `W` of one buffer. Below four buffers no count meets the rule;
+/// one is kept anyway, and the module counts the frames a short pool loses. A frame handed on is
+/// still held from the module until its buffer comes back, and is not counted here: how many of
+/// those there are is the consumer's doing, and a consumer keeping frames is not a reason to stop
+/// taking the block's next one.
 fn held_limit(buffers: u32) -> u32 {
     buffers.saturating_sub(3).max(1)
 }
@@ -275,7 +284,9 @@ impl Hardware for LinuxHardware {
             doorbell.as_deref().map(AsFd::as_fd),
         );
         let mut stream = made.map_err(|e| self.node_error(e))?;
-        stream.add_marks(params.buffers, held_limit(params.buffers)).map_err(status)?;
+        stream
+            .add_marks(params.buffers, held_limit(params.buffers))
+            .map_err(status)?;
         let embedded = if params.embedded_buffers > 0 {
             let made = self.driving()?.stream_create(
                 &StreamParams {
@@ -394,6 +405,11 @@ impl Hardware for LinuxHardware {
         let _ = fence;
         let stream = self.stream_mut(channel)?;
         stream.release(buffer).map_err(status)
+    }
+
+    fn handed_on(&mut self, channel: Channel, buffer: u32) -> Result<()> {
+        let stream = self.stream_mut(channel)?;
+        stream.pass_on(buffer).map_err(status)
     }
 
     fn counters(&mut self) -> Result<Counters> {

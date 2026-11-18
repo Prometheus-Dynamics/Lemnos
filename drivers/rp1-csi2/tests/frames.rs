@@ -129,6 +129,8 @@ struct Buffer {
     fence: u32,
     /// Taken by `next_frame` and not yet released: the consumer's hold, as the shm ring keeps it.
     held: bool,
+    /// Held, and handed on to the stream's consumer: no longer in the driver's hand.
+    handed: bool,
 }
 
 #[derive(Default)]
@@ -156,6 +158,9 @@ struct Block {
     stray: u32,
     /// Returns of a buffer that wasn't out, or with the wrong fence.
     bad_returns: u32,
+    /// Frames the module's ring let go by because the driver had its limit in hand, as
+    /// `lemnos_linux_sys::stream::ring::Ring::next_frame` drops them.
+    dropped_at_limit: u64,
     /// Every dma-buf ever unpinned, kept so a test can see nothing was written to it after.
     unpinned: Vec<File>,
 }
@@ -235,6 +240,16 @@ impl Block {
     fn with_memory(&self) -> usize {
         self.buffers.iter().filter(|b| b.memory.is_some()).count()
     }
+
+    /// Frames the driver may have in hand, as `LinuxHardware` asks of the module's ring: taken and
+    /// not handed on, `max(B - 3, 1)`.
+    fn in_hand_limit(&self) -> usize {
+        self.buffers.len().saturating_sub(3).max(1)
+    }
+
+    fn in_hand(&self) -> usize {
+        self.buffers.iter().filter(|b| b.held && !b.handed).count()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -270,6 +285,7 @@ impl Hardware for Hw {
                     memory: None,
                     at: Where::Free,
                     held: false,
+                    handed: false,
                     fence: 0,
                 })
                 .collect();
@@ -354,12 +370,41 @@ impl Hardware for Hw {
             return Ok(None);
         }
         Ok(self.with(|b| {
+            if b.in_hand() >= b.in_hand_limit() {
+                // At the limit the ring takes nothing: every frame on it goes by unheld and is
+                // counted, and an unheld frame's buffer is the module's to fill again.
+                while let Some(f) = b.finished.pop_front() {
+                    b.dropped_at_limit += 1;
+                    if let Some(slot) = b.buffers.get_mut(f.buffer as usize) {
+                        slot.at = Where::Free;
+                    }
+                }
+                return None;
+            }
             let f = b.finished.pop_front()?;
             if let Some(slot) = b.buffers.get_mut(f.buffer as usize) {
                 slot.held = true;
+                slot.handed = false;
             }
             Some(f)
         }))
+    }
+
+    fn handed_on(&mut self, channel: Channel, buffer: u32) -> Result<()> {
+        if channel == Channel::Embedded {
+            return Ok(());
+        }
+        // Only a frame in hand can be handed on, as the ring refuses any other.
+        self.with(|b| match b.buffers.get_mut(buffer as usize) {
+            Some(slot) if slot.held && !slot.handed => {
+                slot.handed = true;
+                Ok(())
+            }
+            _ => {
+                b.bad_returns += 1;
+                Err(Status::INVALID_ARGUMENT)
+            }
+        })
     }
 
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
@@ -372,6 +417,7 @@ impl Hardware for Hw {
             Some(slot) if slot.at == Where::Out(fence) && slot.held => {
                 slot.at = Where::Free;
                 slot.held = false;
+                slot.handed = false;
                 Ok(())
             }
             _ => {
@@ -540,6 +586,200 @@ fn a_buffer_the_consumer_holds_is_not_filled_again() {
     // Five starts so far, the dropped one among them: this frame's start is the sixth.
     assert_eq!((frame.buffer, frame.sequence), (back.buffer, 5));
     assert!(frames.read(frame.buffer) == image(5));
+    assert_eq!(hw.with(|b| (b.stray, b.bad_returns)), (0, 0));
+}
+
+/// Ten milliseconds, the step the tests below tick at.
+const STEP: u64 = 10_000_000;
+
+fn pop(frames: &mut Client) -> Option<lemnos_wire::ring::FrameSlot> {
+    frames
+        .ring
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+}
+
+/// A frame the consumer keeps: its buffer and sequence, and its bytes as they were at the take.
+struct Kept {
+    buffer: u32,
+    sequence: u64,
+    bytes: Vec<u8>,
+}
+
+/// The block makes a frame, the driver moves it, and the consumer takes it and keeps it.
+fn keep(frames: &mut Client, receiver: &mut Rp1Csi2, hw: &Hw, now: &mut u64) -> Kept {
+    hw.with(Block::frame).expect("a buffer for the frame");
+    *now += STEP;
+    receiver.tick(*now).unwrap();
+    let frame = pop(frames).expect("a frame for the consumer to keep");
+    Kept {
+        buffer: frame.buffer,
+        sequence: frame.sequence,
+        bytes: frames.read(frame.buffer),
+    }
+}
+
+fn assert_intact(frames: &Client, kept: &[Kept], when: &str) {
+    for frame in kept {
+        assert!(
+            frames.read(frame.buffer) == frame.bytes,
+            "{when}: kept frame {} in buffer {} changed",
+            frame.sequence,
+            frame.buffer
+        );
+    }
+}
+
+/// A consumer that keeps two of the four frames does not stop the stream: the driver goes on
+/// taking the block's frames and publishing them in the two buffers left, for five seconds, far
+/// past the frame-stop bound. Nothing is restarted and health never fails.
+///
+/// Fails before the in-hand rule: a frame the consumer kept counted against the one frame the
+/// driver may hold from the module, so every later frame was dropped at the module's ring, the
+/// second frame never came, and after the bound the driver restarted the receiver.
+#[test]
+fn a_consumer_keeping_frames_does_not_stop_the_frames_or_restart_the_receiver() {
+    let host = host();
+    let hw = Hw::default();
+    let mut frames = Client::attach(&host);
+    let mut receiver = driver(&host, &hw);
+    receiver.start().unwrap();
+    let mut now = 0;
+    let kept = [
+        keep(&mut frames, &mut receiver, &hw, &mut now),
+        keep(&mut frames, &mut receiver, &hw, &mut now),
+    ];
+    let mut delivered = 0;
+    while now < 5_000_000_000 {
+        hw.with(Block::frame);
+        now += STEP;
+        receiver.tick(now).unwrap();
+        if let Some(frame) = pop(&mut frames) {
+            assert!(
+                kept.iter().all(|k| k.buffer != frame.buffer),
+                "frame {} came in a buffer the consumer holds",
+                frame.sequence
+            );
+            delivered += 1;
+            assert!(frames.ring.release(frame.buffer));
+        }
+        assert!(
+            !matches!(receiver.health(), Health::Failed(_)),
+            "at {now} ns: the consumer keeping frames is no stop: {:?}",
+            receiver.health()
+        );
+    }
+    assert_eq!(hw.with(|b| b.made), 1, "the receiver was never restarted");
+    assert!(
+        delivered >= 400,
+        "frames kept coming in the two buffers left: {delivered}"
+    );
+    assert_eq!(
+        hw.with(|b| b.dropped_at_limit),
+        0,
+        "no frame went by at the ring"
+    );
+    assert_intact(&frames, &kept, "after five seconds of frames");
+    assert_eq!(hw.with(|b| (b.stray, b.bad_returns)), (0, 0));
+}
+
+/// No frame comes until the driver has judged the stop and restarted the receiver: ticks until the
+/// block's stream has been made `made` times.
+fn stall_until_restarted(receiver: &mut Rp1Csi2, hw: &Hw, now: &mut u64, made: u32) {
+    let give_up = *now + 20_000_000_000;
+    let mut failed = false;
+    while hw.with(|b| b.made) < made {
+        assert!(*now < give_up, "the stall was never judged a stop");
+        *now += STEP;
+        receiver.tick(*now).unwrap();
+        failed |= matches!(receiver.health(), Health::Failed(_));
+    }
+    assert!(failed, "the stop was reported before the restart");
+}
+
+/// A frame the consumer holds stays as it was taken through a recovery restart of the receiver:
+/// one frame kept, a real stall and the restart, a second frame kept, another stall and restart,
+/// then a hundred frames. The new module stream is never given the memory of a kept buffer, no
+/// frame is published in one, and each kept frame reads back byte for byte; given back, the
+/// buffers are filled again.
+#[test]
+fn frames_held_through_frame_stop_restarts_keep_their_bytes_and_their_buffers() {
+    let host = host();
+    let hw = Hw::default();
+    let mut frames = Client::attach(&host);
+    let mut receiver = driver(&host, &hw);
+    receiver.start().unwrap();
+    let mut now = 0;
+    let mut kept = vec![keep(&mut frames, &mut receiver, &hw, &mut now)];
+    // The block has buffers to fill and makes no frame: a real stall, and the restart.
+    stall_until_restarted(&mut receiver, &hw, &mut now, 2);
+    now += STEP;
+    receiver.tick(now).unwrap();
+    assert!(
+        hw.with(|b| b.buffers[kept[0].buffer as usize].memory.is_none()),
+        "the new module stream was not given the kept buffer's memory"
+    );
+    assert_eq!(hw.with(|b| b.with_memory()), BUFFERS as usize - 1);
+    assert_intact(&frames, &kept, "after the first restart");
+
+    kept.push(keep(&mut frames, &mut receiver, &hw, &mut now));
+    assert!(
+        kept[1].sequence > kept[0].sequence && kept[1].buffer != kept[0].buffer,
+        "the frame after the restart is numbered on, in another buffer"
+    );
+    stall_until_restarted(&mut receiver, &hw, &mut now, 3);
+    now += STEP;
+    receiver.tick(now).unwrap();
+    assert!(
+        hw.with(|b| kept
+            .iter()
+            .all(|k| b.buffers[k.buffer as usize].memory.is_none())),
+        "the new module stream was given neither kept buffer's memory"
+    );
+    assert_intact(&frames, &kept, "after the second restart");
+
+    let mut delivered = 0;
+    for _ in 0..100 {
+        hw.with(Block::frame);
+        now += STEP;
+        receiver.tick(now).unwrap();
+        if let Some(frame) = pop(&mut frames) {
+            assert!(
+                kept.iter().all(|k| k.buffer != frame.buffer),
+                "frame {} came in a buffer the consumer holds",
+                frame.sequence
+            );
+            assert!(frame.sequence > kept[1].sequence);
+            delivered += 1;
+            assert!(frames.ring.release(frame.buffer));
+        }
+        assert_intact(&frames, &kept, "while frames go on");
+    }
+    assert!(
+        delivered >= 90,
+        "frames went on after the restarts: {delivered}"
+    );
+    assert_eq!(hw.with(|b| b.made), 3, "no restart but the two stalls");
+
+    // Given back, both buffers are filled again.
+    for frame in &kept {
+        assert!(frames.ring.release(frame.buffer));
+    }
+    let mut filled = [false; BUFFERS as usize];
+    for _ in 0..16 {
+        hw.with(Block::frame);
+        now += STEP;
+        receiver.tick(now).unwrap();
+        if let Some(frame) = pop(&mut frames) {
+            filled[frame.buffer as usize] = true;
+            assert!(frames.ring.release(frame.buffer));
+        }
+    }
+    assert!(
+        kept.iter().all(|k| filled[k.buffer as usize]),
+        "the released buffers were filled again: {filled:?}"
+    );
     assert_eq!(hw.with(|b| (b.stray, b.bad_returns)), (0, 0));
 }
 
