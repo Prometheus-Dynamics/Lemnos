@@ -1,4 +1,4 @@
-//! A module stream's shared ring, read and written the way `kernel/lemnos_stream.c` lays it out
+//! A module stream's shared ring, read and written the way `kernel/rs/stream_ring.rs` lays it out
 //! (`shm/README.md`, layout 2): the frame ring and the pool page are read with the shm crates, and
 //! the job block is written word by word with its head and tail.
 //!
@@ -549,7 +549,7 @@ mod tests {
     use std::os::unix::fs::FileExt;
 
     /// A ring of `frame_slots` frames and `buffers` buffers in an in-memory region, with the words
-    /// the module writes at make time (`kernel/lemnos_stream.c` `lem_stream_init_ring`): no frame.
+    /// the module writes at make time (`kernel/rs/stream_ring.rs`, `init_ring`): no frame.
     fn module_ring(frame_slots: u32, buffers: u32) -> (OwnedFd, usize, Layout) {
         let layout = Layout {
             frame_slots,

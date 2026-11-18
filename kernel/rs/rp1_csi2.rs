@@ -42,7 +42,8 @@ use crate::pisp_fe::{
 };
 use crate::stream::{
     Handle, Producer, Slot, Stream, lem_stream_attach, lem_stream_complete_at, lem_stream_detach,
-    lem_stream_from_file, lem_stream_next, msecs_to_jiffies, usleep_range,
+    lem_stream_create, lem_stream_from_file, lem_stream_next, lem_streams_block_gone,
+    msecs_to_jiffies, usleep_range,
 };
 use core::{
     cell::UnsafeCell,
@@ -228,15 +229,11 @@ unsafe impl FromBytes for StreamCreate {}
 // SAFETY: as above.
 unsafe impl AsBytes for StreamCreate {}
 
-// What is still C. The stream's calls a producer makes are declared once, in rs/stream.rs, and the
-// front end on the same block is Rust (rs/pisp_fe.rs): both are imported above.
+// What is still C. The stream's calls are declared once, in rs/stream.rs, and the front end on the
+// same block is Rust (rs/pisp_fe.rs): both are imported above.
 unsafe extern "C" {
     /// lemnos_core.c: whether one of the device's compatibles is in owned=.
     fn lem_block_owned(dev: *mut c_void) -> bool;
-    /// lemnos_stream.c: a stream on `dev` and its file, for LEMNOS_RP1_CSI2_IOC_STREAM_CREATE.
-    fn lem_stream_create(dev: *mut c_void, c: *mut lb::lemnos_stream_create) -> c_long;
-    /// lemnos_stream.c: every stream on `dev` is ended and its mappings on the device are gone.
-    fn lem_streams_block_gone(dev: *mut c_void);
 }
 
 /// Time for one line of `bytes` on `lanes` lanes at `mbps` each, rounded up, in us. Lanes and rate

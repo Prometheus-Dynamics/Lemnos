@@ -15,21 +15,173 @@
 //!
 //! Nothing here allocates or sleeps: every function runs under the stream's lock, on the frame path.
 
-// Until the stream's file and readers are ported, some of this is still read only from lemnos_stream.c.
-#![allow(dead_code)]
-
 use crate::bindings as lb;
-use core::ptr;
-use kernel::bindings;
+use crate::stream::{Job, Producer};
+use crate::stream_region::Region;
+use core::{ffi::c_int, ptr};
+use kernel::{
+    alloc::{KVVec, KVec},
+    bindings,
+};
 
 /// What creation fixes: the ring and every size. Never written after; read without a lock.
-pub(crate) type Geom = lb::lem_geom;
-/// The frame path's state: everything in it is under the stream's lock.
-pub(crate) type Frame = lb::lem_frame;
-/// A reader's marks page, pinned for the stream's life.
-pub(crate) type Reader = lb::lem_reader;
+pub(crate) struct Geom {
+    /// vmalloc_user: mapped by the consumer.
+    pub(crate) ring: *mut u64,
+    pub(crate) ring_bytes: usize,
+    // The module's copies. The ring's header is for the consumer only.
+    pub(crate) buffers: u32,
+    pub(crate) buffer_bytes: u32,
+    pub(crate) frame_slots: u32,
+    pub(crate) job_slots: u32,
+    pub(crate) job_bytes: u32,
+    pub(crate) jobs_at: usize,
+    pub(crate) job_words: usize,
+    pub(crate) stride: u64,
+    /// Words of the shm ring.
+    pub(crate) shm_total: usize,
+    /// Its slots.
+    pub(crate) shm_slots_at: usize,
+    /// The pool page's first word.
+    pub(crate) page_at: usize,
+    pub(crate) w_state: usize,
+    pub(crate) w_jobs_head: usize,
+    pub(crate) w_jobs_tail: usize,
+}
+
 /// One buffer's state, in kernel memory only.
-pub(crate) type Buf = lb::lem_stream_buf;
+#[derive(Clone, Copy)]
+pub(crate) struct Buf {
+    /// Its current generation.
+    pub(crate) fence: u32,
+    /// BUF_*.
+    pub(crate) state: u8,
+}
+
+/// A reader's marks page, pinned for the stream's life: the reader's own memfd, mapped read-only
+/// here. Its words are shm/ring-holds' layout 2 (marks.rs): the layout and version in word 0, one
+/// mark per buffer, nonzero while the reader holds it, then one taken stamp per buffer.
+pub(crate) struct Reader {
+    /// The pinned pages; rs/stream_reader.rs pins and unpins them.
+    pub(crate) pages: KVec<*mut bindings::page>,
+    /// vmap of the pages, read-only; null: no reader in this slot.
+    pub(crate) marks: *mut u64,
+    /// What the reader may hold at once; 0 for no limit.
+    pub(crate) max_held: u32,
+    /// How long one hold may last; 0 for no limit.
+    pub(crate) max_hold_ns: u64,
+    /// Over a limit: its marks hold nothing, and the pool page says so.
+    pub(crate) cut_off: bool,
+    /// When its marks last could not be counted at one instant; 0 if they can.
+    pub(crate) uncounted_since: u64,
+    /// Per buffer: the use it was first seen marked in (+1), and when.
+    pub(crate) seen: KVVec<u64>,
+    /// The registration's id; 0 when the slot is free.
+    pub(crate) id: u64,
+}
+
+/// The frame path's state: everything in it is under the stream's lock.
+pub(crate) struct Frame {
+    buf: KVVec<Buf>,
+    /// `job_slots` validated jobs.
+    queue: KVVec<Job>,
+    pub(crate) queue_head: u64,
+    pub(crate) queue_tail: u64,
+    pub(crate) region: [Region; crate::stream_frame::REGIONS],
+    /// Without a pool: each buffer's dma-buf; empty with one.
+    own: KVVec<Region>,
+    /// Where the next jobless frame looks.
+    pub(crate) cursor: u32,
+
+    // The producer's own counts, never read back from the ring.
+    pub(crate) frames_head: u64,
+    pub(crate) jobs_tail: u64,
+    pub(crate) sequence: u64,
+    pub(crate) published: u64,
+    pub(crate) dropped: u64,
+    pub(crate) returned: u64,
+    pub(crate) jobs: u64,
+
+    /// The errno that ended it; the ring is left alone after.
+    pub(crate) fault: c_int,
+    /// Over: the block went or the file closed.
+    pub(crate) dead: bool,
+    /// The test source: frames still to make.
+    pub(crate) left: u32,
+
+    /// The block feeding this stream, or `stop` None.
+    pub(crate) producer: Producer,
+    /// What the producer may write per buffer.
+    pub(crate) frame_bytes: u32,
+    /// A block's DMA could not be seen to stop: nothing is unpinned.
+    pub(crate) wedged: bool,
+
+    /// The consumers' marks: POOL_READERS slots, on the heap (they are most of the state's size).
+    pub(crate) reader: KVec<Reader>,
+    /// The buffer of the newest frame, kept for the frame path.
+    pub(crate) newest: u32,
+    /// That frame's sequence.
+    pub(crate) newest_seq: u64,
+    /// The last registration id given out.
+    pub(crate) reader_ids: u64,
+}
+
+// SAFETY: the raw pointers in it are to dma-bufs and pages the stream holds references on, and to
+// callbacks' private data their owner made for any context; nothing in it is tied to a thread.
+unsafe impl Send for Frame {}
+
+impl Frame {
+    /// A new stream's frame state: the buffers' states, an empty job queue, and each buffer's own
+    /// dma-buf slot on a stream without a pool (`own` empty with one), and the reader slots, all empty.
+    pub(crate) fn new(buf: KVVec<Buf>, queue: KVVec<Job>, own: KVVec<Region>, reader: KVec<Reader>) -> Self {
+        Self {
+            buf,
+            queue,
+            queue_head: 0,
+            queue_tail: 0,
+            region: [Region::default(); crate::stream_frame::REGIONS],
+            own,
+            cursor: 0,
+            frames_head: 0,
+            jobs_tail: 0,
+            sequence: 0,
+            published: 0,
+            dropped: 0,
+            returned: 0,
+            jobs: 0,
+            fault: 0,
+            dead: false,
+            left: 0,
+            producer: Producer::NONE,
+            frame_bytes: 0,
+            wedged: false,
+            reader,
+            newest: u32::MAX,
+            newest_seq: 0,
+            reader_ids: 0,
+        }
+    }
+
+    /// The state of `buffer`, which is below the stream's buffers.
+    pub(crate) fn buf(&mut self, buffer: u32) -> &mut Buf {
+        &mut self.buf[buffer as usize]
+    }
+
+    /// Whether each buffer has a dma-buf of its own (a stream made without a pool).
+    pub(crate) fn own_mode(&self) -> bool {
+        !self.own.is_empty()
+    }
+
+    /// The dma-buf of `buffer` on a stream without a pool; `buffer` is below the stream's buffers.
+    pub(crate) fn own_at(&mut self, buffer: u32) -> &mut Region {
+        &mut self.own[buffer as usize]
+    }
+
+    /// Slot `at` of the job queue, which has `job_slots` (a power of two) entries.
+    pub(crate) fn queue_slot(&mut self, at: u64, job_slots: u32) -> &mut Job {
+        &mut self.queue[(at & (u64::from(job_slots) - 1)) as usize]
+    }
+}
 
 pub(crate) const SHM_MAGIC: u64 = 0x3147_4e49_524d_4853; // "SHMRING1"
 /// shm-ring's LAYOUT: a reader of another layout refuses the ring.
@@ -76,6 +228,8 @@ const UNCOUNTED_NS: u64 = 10 * 1_000_000_000;
 
 const _: () = assert!(SHM_ENTRY_BYTES % 8 == 0 && SHM_SLOT_WORDS == 10);
 const _: () = assert!(lb::LEMNOS_STREAM_MAX_READERS as usize == POOL_READERS);
+const _: () = assert!(lb::LEMNOS_STREAM_JOB_HEAD as usize == JOB_HEAD && lb::LEMNOS_STREAM_JOB_TAIL as usize == JOB_TAIL);
+const _: () = assert!(lb::LEMNOS_STREAM_JOB_SLOTS as usize == JOB_SLOTS);
 const _: () = assert!(cfg!(target_endian = "little"));
 
 /// The kernel has it, nobody asked for it.
@@ -172,6 +326,20 @@ impl Geom {
 
 impl Reader {
     /// Whether this slot's marks hold anything: a reader is registered in it and is not cut off.
+    /// A slot with no reader in it.
+    pub(crate) const fn empty() -> Self {
+        Self {
+            pages: KVec::new(),
+            marks: ptr::null_mut(),
+            max_held: 0,
+            max_hold_ns: 0,
+            cut_off: false,
+            uncounted_since: 0,
+            seen: KVVec::new(),
+            id: 0,
+        }
+    }
+
     fn holds(&self) -> bool {
         !self.marks.is_null() && !self.cut_off
     }
@@ -179,10 +347,10 @@ impl Reader {
     /// Word `i` of the marks page, read once. The page is the reader's own memory, mapped read-only
     /// here: it may change at any moment. A word past what is pinned reads 0.
     pub(crate) fn word(&self, i: usize) -> u64 {
-        if self.marks.is_null() || i >= self.npages as usize * (bindings::PAGE_SIZE / 8) {
+        if self.marks.is_null() || i >= self.pages.len() * (bindings::PAGE_SIZE / 8) {
             return 0;
         }
-        // SAFETY: `marks` is the vmap of `npages` pinned pages, live while the slot holds it (it is
+        // SAFETY: `marks` is the vmap of the pinned pages, live while the slot holds it (it is
         // freed only after the slot is cleared under the lock), and `i` is inside it (checked above).
         unsafe { ptr::read_volatile(self.marks.wrapping_add(i)) }
     }
@@ -195,12 +363,10 @@ impl Reader {
         }
     }
 
-    /// For `buffer`: the use it was first seen marked in (+1), and when.
-    fn seen(&mut self, buffer: u32) -> &mut [u64; 2] {
-        // SAFETY: `seen` holds two words per buffer of the stream, allocated with the registration and
-        // freed only after the slot is cleared; `buffer` is below the stream's buffers (the callers'
-        // loops), and the lock the caller holds makes this the only reference.
-        unsafe { &mut *self.seen.wrapping_add(2 * buffer as usize).cast::<[u64; 2]>() }
+    /// For `buffer`, below the stream's buffers: the use it was first seen marked in (+1), and when.
+    fn seen(&mut self, buffer: u32) -> &mut [u64] {
+        let at = 2 * buffer as usize;
+        &mut self.seen[at..at + 2]
     }
 
     /// How many buffers the marks hold, counted at one instant (table.rs's count): the version must be
@@ -376,7 +542,7 @@ pub(crate) fn reclaim(g: &Geom, f: &mut Frame, buffer: u32) -> bool {
 }
 
 /// The consumer sees an end once. It may scribble on this word; the kernel's copy is what counts.
-pub(crate) fn fault_locked(g: &Geom, f: &mut Frame, err: i32) {
+pub(crate) fn fault_locked(g: &Geom, f: &mut Frame, err: c_int) {
     if f.fault != 0 {
         return;
     }

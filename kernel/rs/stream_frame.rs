@@ -14,14 +14,12 @@
 
 use crate::bindings as lb;
 use crate::stream::{Job, JobRange, ktime_now};
+use crate::stream_region::Region;
 use crate::stream_ring::{
-    BUF_ABSENT, BUF_ACTIVE, BUF_CONSUMER, BUF_FREE, BUF_QUEUED, Buf, Frame, Geom, enforce,
+    BUF_ABSENT, BUF_ACTIVE, BUF_CONSUMER, BUF_FREE, BUF_QUEUED, Frame, Geom, enforce,
     fault_locked, newest_read, publish, reclaim,
 };
 use kernel::{error::code::*, prelude::*};
-
-/// A dma-buf pinned and mapped for the block: the pool, a registered region, or a buffer's own memory.
-pub(crate) type Region = lb::lem_stream_region;
 
 /// The pool, then the dma-bufs the consumer registers. A range's region at or past REGIONS is a
 /// buffer's own dma-buf: `own[region - REGIONS]`.
@@ -34,7 +32,6 @@ const JOB_WORDS: usize = core::mem::size_of::<lb::lemnos_stream_job>() / 8;
 const JOB_RANGES: usize = lb::LEMNOS_STREAM_JOB_RANGES as usize;
 
 const _: () = assert!(core::mem::size_of::<lb::lemnos_stream_job>() % 8 == 0);
-const _: () = assert!(REGIONS == lb::LEM_STREAM_REGIONS as usize);
 
 /// The monotonic clock, in ns (ktime_get_ns).
 pub(crate) fn now_ns() -> u64 {
@@ -42,25 +39,6 @@ pub(crate) fn now_ns() -> u64 {
 }
 
 impl Frame {
-    /// The state of `buffer`, which is below the stream's buffers.
-    pub(crate) fn buf(&mut self, buffer: u32) -> &mut Buf {
-        // SAFETY: `buf` holds one entry per buffer for the stream's life, every caller has checked
-        // `buffer` against the stream's buffers, and the lock makes this the only reference.
-        unsafe { &mut *self.buf.wrapping_add(buffer as usize) }
-    }
-
-    /// Whether each buffer has a dma-buf of its own (a stream made without a pool).
-    pub(crate) fn own_mode(&self) -> bool {
-        !self.own.is_null()
-    }
-
-    /// The dma-buf of `buffer` on a stream without a pool; `buffer` is below the stream's buffers.
-    pub(crate) fn own_at(&mut self, buffer: u32) -> &mut Region {
-        // SAFETY: on such a stream `own` holds one region per buffer for the stream's life, the
-        // callers check `own_mode` and `buffer`, and the lock makes this the only reference.
-        unsafe { &mut *self.own.wrapping_add(buffer as usize) }
-    }
-
     /// The region a resolved range names: the table, or a buffer's own dma-buf.
     pub(crate) fn region_at(&mut self, region: u32) -> &mut Region {
         if (region as usize) < REGIONS {
@@ -68,14 +46,6 @@ impl Frame {
         } else {
             self.own_at(region - REGIONS as u32)
         }
-    }
-
-    /// Slot `at` of the job queue, which has `job_slots` (a power of two) entries.
-    fn queue_slot(&mut self, at: u64, job_slots: u32) -> &mut Job {
-        let i = (at & (u64::from(job_slots) - 1)) as usize;
-        // SAFETY: `queue` holds `job_slots` jobs for the stream's life, `i` is below that, and the
-        // lock makes this the only reference. `struct lem_job` is `Job` (rs/stream.rs).
-        unsafe { &mut *self.queue.wrapping_add(i) }
     }
 }
 
@@ -327,151 +297,4 @@ pub(crate) fn check_frame(g: &Geom, f: &Frame, bytes: u32) -> Result {
         Some(end) if end <= pool.end => Ok(()),
         _ => Err(EFAULT),
     }
-}
-
-// What lemnos_stream.c still calls, under its lock, until its callers are ported: the C names and
-// signatures of the functions above (lemnos_stream_priv.h).
-
-use core::ffi::c_int;
-
-fn errno(r: Result) -> c_int {
-    r.err().map_or(0, |e| e.to_errno())
-}
-
-/// The frame path's two halves of a stream.
-///
-/// # Safety
-/// `s` is a live stream whose lock the caller holds (or that nothing else can reach yet).
-unsafe fn parts<'a>(s: *mut lb::lem_stream) -> (&'a Geom, &'a mut Frame) {
-    // SAFETY: the caller's contract: the geometry is never written after creation, and the frame
-    // state is the lock holder's alone.
-    unsafe { (&(*s).g, &mut (*s).f) }
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_fault_locked(s: *mut lb::lem_stream, err: c_int) {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    fault_locked(g, f, err);
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_drain(s: *mut lb::lem_stream) -> c_int {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    errno(drain(g, f))
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds; `job` is the caller's to write.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_take(s: *mut lb::lem_stream, job: *mut Job) -> bool {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    match take(g, f) {
-        Some(taken) => {
-            // SAFETY: the caller's contract: `job` is valid for a write.
-            unsafe { job.write(taken) };
-            true
-        }
-        None => false,
-    }
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds; `job` is a job `lem_stream_take` gave.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_finish_locked(
-    s: *mut lb::lem_stream,
-    job: *const Job,
-    bytes: u32,
-    sequence: u64,
-    timestamp_ns: u64,
-    end_ns: u64,
-) {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    // SAFETY: the caller's contract: a held job, valid for the call.
-    finish_locked(g, f, unsafe { &*job }, bytes, sequence, timestamp_ns, end_ns);
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_drop_frame_locked(s: *mut lb::lem_stream) -> bool {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    drop_frame_locked(g, f)
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds, or one nothing else can reach yet.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_check_frame(s: *mut lb::lem_stream, bytes: u32) -> c_int {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    errno(check_frame(g, f, bytes))
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds; `addr` is the caller's to write.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_buffer_addr(s: *mut lb::lem_stream, buffer: u32, bytes: u64, addr: *mut u64) -> c_int {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    match buffer_addr(g, f, buffer, bytes) {
-        Ok(a) => {
-            // SAFETY: the caller's contract: `addr` is valid for a write.
-            unsafe { addr.write(a) };
-            0
-        }
-        Err(e) => e.to_errno(),
-    }
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_enforce(s: *mut lb::lem_stream, now: u64) {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    enforce(g, f, now);
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds; `buffer` is below its buffers.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_reclaim(s: *mut lb::lem_stream, buffer: u32) -> bool {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    reclaim(g, f, buffer)
-}
-
-/// # Safety
-/// `s` is a live stream whose lock the caller holds; `out` is the caller's to write.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_resolve(s: *mut lb::lem_stream, buffer: u32, addr: u64, len: u64, out: *mut JobRange) -> c_int {
-    // SAFETY: the caller's contract.
-    let (g, f) = unsafe { parts(s) };
-    match resolve(g, f, buffer, addr, len) {
-        Ok(r) => {
-            // SAFETY: the caller's contract: `out` is valid for a write.
-            unsafe { out.write(r) };
-            0
-        }
-        Err(e) => e.to_errno(),
-    }
-}
-
-/// # Safety
-/// `s` is a stream being created: nothing else can reach it yet, and its ring is allocated.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_init_ring(s: *mut lb::lem_stream) {
-    // SAFETY: the caller's contract.
-    let (g, _) = unsafe { parts(s) };
-    g.init_ring();
 }

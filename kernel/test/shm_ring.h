@@ -2,7 +2,7 @@
 /*
  * The consumer's side of a module frame stream, for the module checks: the word numbers of the
  * shared-memory ring (shm/README.md, layout 2) and of the job block that follows the pool page.
- * Every number here is the module's (kernel/lemnos_stream.c), and the Rust crates pin the same
+ * Every number here is the module's (kernel/rs/stream_ring.rs), and the Rust crates pin the same
  * ring. A frame is found through the index, read once and checked against its stamp; a buffer is
  * given back by its marks, not by a ring word, so a consumer that holds nothing gets its buffer
  * back as soon as the module takes it.

@@ -5,8 +5,11 @@
  * over this file with the kernel's own C flags; rs/bindings.rs includes the result. Only the items
  * the Kbuild allowlists are generated: every other type they name is the kernel crate's.
  */
+#include <linux/anon_inodes.h>
+#include <linux/shmem_fs.h>
 #include <linux/spi/spi.h>
 #include <linux/thermal.h>
+#include <linux/vmalloc.h>
 #include <uapi/linux/media/raspberrypi/pisp_fe_config.h>
 
 #include "../lemnos.h"
@@ -15,4 +18,3 @@
 #include "../lemnos_vip.h"
 #include "../lemnos_pisp_fe.h"
 #include "../lemnos_rp1_csi2_priv.h"
-#include "../lemnos_stream_priv.h"
