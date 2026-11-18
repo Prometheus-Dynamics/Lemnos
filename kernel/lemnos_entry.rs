@@ -47,6 +47,8 @@ mod stream;
 mod gsdma;
 #[path = "rs/vip.rs"]
 mod vip;
+#[path = "rs/pisp_fe.rs"]
+mod pisp_fe;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 

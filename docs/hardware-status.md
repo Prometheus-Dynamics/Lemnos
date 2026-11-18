@@ -40,7 +40,7 @@ with the board's own software stopped only for each test and put back afterwards
 | [`GROW.md`](../testing/board-runs/GROW.md) | Not run yet: the data partition's first-boot grow on a card, MBR or GPT: `info` states, `e2fsck` after a clean power-off, a second boot that does nothing, the watchdog through the resize |
 
 Each file says which of its checks ran and which did not, and why. The fixes the run made are in
-the kernel module (`lemnos_pio.c`, `lemnos_rp1_csi2.c`, `lemnos_pisp_fe.c`), the `rp1-csi2` and
+the kernel module (`rs/pio.rs`, `lemnos_rp1_csi2.c`, `rs/pisp_fe.rs`), the `rp1-csi2` and
 `pisp` drivers and the Linux backend, each with a test that fails without it. The second run (PR
 F2b) also gave the PIO I2C bus a module route.
 
@@ -54,6 +54,7 @@ F2b) also gave the PIO I2C bus a module route.
 | [`F2g1.md`](../testing/board-runs/F2g1.md) | The chain proof's checks (not checked is a failure; timestamps; rate; the latch beside the chain) and the isp proof's 640x400 luma readout: not run, untested on board |
 | [`M34.md`](../testing/board-runs/M34.md) | Not run on the board. A front end's output0 lent to the back end's job with no copy: the chain proof end to end, the pool page's layout word and the lend's release on the board |
 | [`CZ-MOD-FE-ACK.md`](../testing/board-runs/CZ-MOD-FE-ACK.md) | Not run on the board. The `rp1-csi2` stop confirmed by the frame end after FORCE; a wedged receiver refuses START until unbind; what an ack on an idle FORCE does |
+| [`CZ-MOD-PISP.md`](../testing/board-runs/CZ-MOD-PISP.md) | Not run on the board. The PiSP front end of the kernel module in Rust: the chain run, the register write log against the C module's, fifty stops and starts with no wedge, a consumer keeping frames, an unbind while streaming |
 | [`F2e1.md`](../testing/board-runs/F2e1.md) | Not run yet: a receiver unbound mid-stream stops the OV9782 (host tests only: the watch and the check in `select_mode`, two tests fail with the check off); five unbind and rebind cycles on the board are the check |
 | [`F2f2.md`](../testing/board-runs/F2f2.md) | Not run on the board. A client that goes away while its sensor streams stops the sensor (host check only) |
 | [`L1-chain.md`](../testing/board-runs/L1-chain.md) | Not run. The steps of the camera chain run (sensor, receiver, front end, back end, 600+ frames, recovery), for the next board session |

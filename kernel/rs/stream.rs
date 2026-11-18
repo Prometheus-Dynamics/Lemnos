@@ -36,7 +36,7 @@ pub(crate) struct JobRange {
 
 /// `struct lem_job`: what a held job names.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Job {
     pub(crate) identity: u64,
     pub(crate) buffer: u32,
@@ -46,7 +46,7 @@ pub(crate) struct Job {
 
 /// `struct lem_stream_slot`: one frame a block holds, from the stream until it is completed or cancelled.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Slot {
     pub(crate) job: Job,
     pub(crate) addr: u64,
@@ -74,6 +74,16 @@ const _: () = assert!(core::mem::size_of::<JobRange>() == 24);
 const _: () = assert!(core::mem::size_of::<Job>() == 328);
 const _: () = assert!(core::mem::size_of::<Slot>() == 344);
 const _: () = assert!(core::mem::size_of::<Producer>() == 56);
+// The same three layouts as the compiler has them (the bindings made from lemnos_internal.h).
+const _: () =
+    assert!(core::mem::size_of::<JobRange>() == core::mem::size_of::<lb::lem_job_range>());
+const _: () = assert!(core::mem::size_of::<Job>() == core::mem::size_of::<lb::lem_job>());
+const _: () = assert!(core::mem::size_of::<Slot>() == core::mem::size_of::<lb::lem_stream_slot>());
+const _: () =
+    assert!(core::mem::offset_of!(Slot, addr) == core::mem::offset_of!(lb::lem_stream_slot, addr));
+const _: () = assert!(
+    core::mem::offset_of!(Slot, bytes) == core::mem::offset_of!(lb::lem_stream_slot, bytes)
+);
 
 unsafe extern "C" {
     /// lemnos_stream.c: makes the stream the producer drives, and the file for it (`out`).
@@ -83,6 +93,28 @@ unsafe extern "C" {
         producer: *const Producer,
         out: *mut *mut Stream,
     ) -> c_long;
+    /// lemnos_stream.c: the stream open as `file`, if it was made on `dev`; an ERR_PTR otherwise.
+    pub(crate) fn lem_stream_from_file(file: *mut c_void, dev: *mut c_void) -> *mut Stream;
+    /// lemnos_stream.c: enables reads of a job's ranges through the kernel's mapping. Takes the stream's ctl.
+    pub(crate) fn lem_stream_cpu_read_enable(s: *mut Stream) -> c_int;
+    fn lem_stream_attach(s: *mut Stream, producer: *const Producer, bytes: u32) -> c_int;
+    fn lem_stream_detach(s: *mut Stream) -> bool;
+    fn lem_stream_next(s: *mut Stream, slot: *mut Slot) -> c_int;
+    fn lem_stream_complete_at(
+        s: *mut Stream,
+        slot: *const Slot,
+        bytes: u32,
+        sequence: u64,
+        timestamp_ns: u64,
+        end_ns: u64,
+    );
+    fn lem_stream_range_read(
+        s: *mut Stream,
+        r: *const JobRange,
+        dst: *mut c_void,
+        bytes: usize,
+    ) -> c_int;
+    fn lem_stream_range_poke(s: *mut Stream, r: *const JobRange, offset: usize, val: u32);
     fn lem_stream_fault(s: *mut Stream, err: c_int);
     fn lem_stream_complete(
         s: *mut Stream,
@@ -115,6 +147,51 @@ impl Handle {
     pub(crate) fn complete(self, slot: &Slot, bytes: u32, sequence: u64, timestamp_ns: u64) {
         // SAFETY: the stream is alive (see Handle), and the slot is the one the stream holds.
         unsafe { lem_stream_complete(self.0, slot, bytes, sequence, timestamp_ns) };
+    }
+
+    /// As complete, with the frame's end time.
+    pub(crate) fn complete_at(
+        self,
+        slot: &Slot,
+        bytes: u32,
+        sequence: u64,
+        timestamp_ns: u64,
+        end_ns: u64,
+    ) {
+        // SAFETY: as complete.
+        unsafe { lem_stream_complete_at(self.0, slot, bytes, sequence, timestamp_ns, end_ns) };
+    }
+
+    /// One producer per stream: `producer` is copied, and may write `bytes` of each buffer.
+    pub(crate) fn attach(self, producer: &Producer, bytes: u32) -> Result {
+        // SAFETY: the stream is alive (the caller holds its file); the producer is read during the call.
+        to_result(unsafe { lem_stream_attach(self.0, producer, bytes) })
+    }
+
+    /// Removes the producer; true when it was there and this call took it off.
+    pub(crate) fn detach(self) -> bool {
+        // SAFETY: the stream is alive: the producer's own reference to it is given up only after this.
+        unsafe { lem_stream_detach(self.0) }
+    }
+
+    /// The next frame's buffer, any context: ENOBUFS when none is free.
+    pub(crate) fn next(self, slot: &mut Slot) -> Result {
+        // SAFETY: as complete; `slot` is written whole.
+        to_result(unsafe { lem_stream_next(self.0, slot) })
+    }
+
+    /// Reads a held job's range into `dst`, whole, through the kernel's mapping of its region.
+    pub(crate) fn range_read<T>(self, r: &JobRange, dst: &mut T) -> Result {
+        // SAFETY: as complete; `dst` is `size_of::<T>()` bytes, which the stream writes whole or not at all.
+        to_result(unsafe {
+            lem_stream_range_read(self.0, r, (dst as *mut T).cast(), core::mem::size_of::<T>())
+        })
+    }
+
+    /// Test only: writes a word through a held range's kernel mapping.
+    pub(crate) fn range_poke(self, r: &JobRange, offset: usize, val: u32) {
+        // SAFETY: as complete; the stream checks the offset against the range.
+        unsafe { lem_stream_range_poke(self.0, r, offset, val) };
     }
 
     /// A held slot that was never written: given back unpublished.
@@ -285,6 +362,13 @@ impl DelayedWork {
                 delay,
             )
         };
+    }
+
+    /// queue_delayed_work(system_highpri_wq, this, delay): unless already queued.
+    pub(crate) fn queue_highpri(&self, delay: c_ulong) {
+        // SAFETY: the kernel's own queue, set before any module runs and never changed.
+        let wq = unsafe { bindings::system_highpri_wq };
+        self.queue(Wq(wq), delay);
     }
 
     /// cancel_delayed_work(this): true when it was pending and is now off the queue.

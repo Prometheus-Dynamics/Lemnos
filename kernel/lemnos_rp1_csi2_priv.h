@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * What the receiver (lemnos_rp1_csi2.c) and the front end on the same block
- * (lemnos_pisp_fe.c) share. Copyright (c) 2026 the Lemnos authors.
+ * (rs/pisp_fe.rs) share. Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef LEMNOS_RP1_CSI2_PRIV_H
 #define LEMNOS_RP1_CSI2_PRIV_H
@@ -96,7 +96,7 @@ void lrc_fe_channel_start(struct lrc_dev *l, u32 width, u32 height, u32 vc, u32 
 void lrc_fe_open_rx(struct lrc_dev *l, u32 lanes, u32 mbps);
 void lrc_fe_channel_stop(struct lrc_dev *l);
 
-/* lemnos_pisp_fe.c */
+/* rs/pisp_fe.rs */
 /* The front end's register window, from its configuration block's end. */
 #define LEM_PISP_FE_WINDOW	(0x40 + 0x270)
 struct lem_pisp_fe *lem_pisp_fe_create(struct lrc_dev *l, void __iomem *window);
