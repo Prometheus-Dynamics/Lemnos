@@ -217,5 +217,7 @@ void lem_stream_enforce(struct lem_stream *s, u64 now);
 bool lem_stream_reclaim(struct lem_stream *s, u32 buffer);
 int lem_stream_resolve(struct lem_stream *s, u32 buffer, u64 addr, u64 len, struct lem_job_range *out);
 void lem_stream_init_ring(struct lem_stream *s);
+/* rs/stream_producer.rs, beside the calls of lemnos_internal.h. Never with s->lock held. */
+void lem_stream_wake(struct lem_stream *s);
 
 #endif
