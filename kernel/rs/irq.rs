@@ -127,7 +127,6 @@ pub(crate) unsafe extern "C" fn lem_irq_setup() {
 ///
 /// # Safety
 /// `q` is the block's own record, and nothing else refers to it.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_init(q: *mut LemIrq, irq: c_int, index: u32) {
     // SAFETY: the caller passes its own record, before the line is requested.
     unsafe {
@@ -148,7 +147,6 @@ pub(crate) unsafe extern "C" fn lem_irq_init(q: *mut LemIrq, irq: c_int, index: 
 ///
 /// # Safety
 /// `q` is the block's own record and its line is still masked.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_set_block(q: *mut LemIrq, block_id: u32) {
     // SAFETY: the caller's guarantee: nothing else reads or writes the record yet.
     unsafe { (*q).block_id = block_id };
@@ -159,7 +157,6 @@ pub(crate) unsafe extern "C" fn lem_irq_set_block(q: *mut LemIrq, block_id: u32)
 ///
 /// # Safety
 /// `q` is a requested record of a bound block, live for the request's life.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_fired(q: *mut LemIrq, ns: u64) {
     // SAFETY: the record is live for the request's life, and its irq number never changes after init.
     unsafe {
@@ -180,7 +177,6 @@ pub(crate) unsafe extern "C" fn lem_irq_fired(q: *mut LemIrq, ns: u64) {
 ///
 /// # Safety
 /// `q` is a live record of a bound block.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_unmask(q: *mut LemIrq) -> bool {
     let _queue = IRQ_LOCK.lock();
     // SAFETY: the record is live, and the lock makes this the only use of its fields.
@@ -198,7 +194,6 @@ pub(crate) unsafe extern "C" fn lem_irq_unmask(q: *mut LemIrq) -> bool {
 ///
 /// # Safety
 /// `q` is a live record of a bound block.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_mask(q: *mut LemIrq) -> bool {
     let mut queue = IRQ_LOCK.lock();
     // SAFETY: the record is live, and the lock covers its fields and the queue.
@@ -214,7 +209,6 @@ pub(crate) unsafe extern "C" fn lem_irq_mask(q: *mut LemIrq) -> bool {
 ///
 /// # Safety
 /// `q` is a live record of a block being removed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_forget(q: *mut LemIrq) {
     let mut queue = IRQ_LOCK.lock();
     // SAFETY: the record is live, and the lock covers the queue.
@@ -225,7 +219,6 @@ pub(crate) unsafe extern "C" fn lem_irq_forget(q: *mut LemIrq) {
 ///
 /// # Safety
 /// `e` is a valid, writable event.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_irq_pop(e: *mut LemIrqEvent) -> bool {
     let mut queue = IRQ_LOCK.lock();
     let q = queue.head;
@@ -246,7 +239,6 @@ pub(crate) unsafe extern "C" fn lem_irq_pop(e: *mut LemIrqEvent) -> bool {
 }
 
 /// True when a record is queued.
-#[no_mangle]
 pub(crate) extern "C" fn lem_irq_any() -> bool {
     !IRQ_LOCK.lock().head.is_null()
 }

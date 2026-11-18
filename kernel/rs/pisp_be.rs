@@ -25,7 +25,7 @@
 //! idle after that, it is wedged: the job's regions are never released and the stream's memory is never
 //! freed, for the life of the system, because the block may still be using it.
 //!
-//! The stream side is the producer interface of lemnos_stream.c: a job is taken with job_take, which
+//! The stream side is the producer interface of rs/stream_producer.rs: a job is taken with job_take, which
 //! resolves its addresses and holds what they name in one step, and ends with complete or cancel.
 //!
 //! Locking: the stream's ctl (held by the stream across `lpb_stop`), the stream's `collect_lock` (one
@@ -1484,7 +1484,6 @@ unsafe extern "C" fn lpb_ioctl(priv_: *mut c_void, cmd: c_uint, arg: *mut c_void
 /// # Safety
 /// `l` is a block from `lem_pb_probe` that has not been removed; `args` is a
 /// `struct lemnos_pisp_be_version` the caller owns.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pb_version(l: *const LemPb, args: *mut c_void) -> c_long {
     // SAFETY: the caller's contract: a `struct lemnos_pisp_be_version` in memory the core owns.
     let a = unsafe { &mut *(args as *mut lb::lemnos_pisp_be_version) };
@@ -1543,7 +1542,6 @@ fn new_stream(
 /// # Safety
 /// `l` is a block from `lem_pb_probe` that has not been removed; `dev` is its device; `args` is a
 /// `struct lemnos_pisp_be_create` the caller owns.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pb_create(
     l: *const LemPb,
     dev: *mut bindings::device,
@@ -1635,7 +1633,6 @@ pub(crate) unsafe extern "C" fn lem_pb_create(
 ///
 /// # Safety
 /// `l` is from `lem_pb_probe`, and the device is being unbound.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pb_remove(l: *const LemPb) {
     // SAFETY: the caller's contract: the block is alive until the device's release.
     let l = unsafe { &*l };
@@ -1804,7 +1801,6 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
 ///
 /// # Safety
 /// `pdev` is the platform device being probed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pb_probe(pdev: *mut bindings::platform_device) -> *const LemPb {
     match probe(pdev) {
         Ok(l) => l,

@@ -1017,7 +1017,6 @@ unsafe extern "C" fn lrj_release(_inode: *mut bindings::inode, file: *mut bindin
 ///
 /// # Safety
 /// `rj` is a block from `lem_rj_probe`, not yet removed; `o` is valid.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_rj_open(rj: *const Rj, o: *mut lb::lemnos_regjob_open) -> c_long {
     // SAFETY: the caller's contract: the probe's reference is held, so the block is live.
     let rj: Arc<Rj> = unsafe { ArcBorrow::from_raw(rj) }.into();
@@ -1279,7 +1278,6 @@ fn probe(pdev: *mut bindings::platform_device, p: &'static Profile) -> Result<*c
 ///
 /// # Safety
 /// `pdev` is the platform device being probed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_rj_probe(pdev: *mut bindings::platform_device) -> *const Rj {
     // SAFETY: the caller's contract.
     let Some(p) = profile_for(unsafe { &raw mut (*pdev).dev }) else {
@@ -1298,7 +1296,6 @@ pub(crate) unsafe extern "C" fn lem_rj_probe(pdev: *mut bindings::platform_devic
 ///
 /// # Safety
 /// `raw` is from `lem_rj_probe`, and is not used after.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_rj_remove(raw: *const Rj) {
     // SAFETY: the caller's contract: the probe's reference, given back once.
     let rj = unsafe { Arc::from_raw(raw) };

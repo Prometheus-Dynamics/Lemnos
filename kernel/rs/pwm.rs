@@ -3,7 +3,7 @@
 //!
 //! A channel is a PWM device held by a claim: `lem_pwm_request` finds the chip (the "pwm" class child of
 //! the named platform device) through of_pwm_xlate_with_flags, and attaches it to the claim. The three
-//! entry points keep their C signatures (lemnos_internal.h). The kernel's own PWM functions are called
+//! entry points are called by the core (rs/dev.rs). The kernel's own PWM functions are called
 //! through the bindings, exactly as the C called them; the two inline helpers (bus_find_device_by_name,
 //! pwm_get_state) are one-line shims in lemnos_helpers.c.
 
@@ -64,11 +64,10 @@ static LEM_CHANNEL_OPS: OpsCell = OpsCell(LemClaimOps {
     poll: None,
 });
 
+use crate::claims::lem_claim_held;
+use crate::claims::lem_claim_attach;
+use crate::claims::lem_claim_attached;
 unsafe extern "C" {
-    /// rs/claims.rs: the claim functions the C subsystems use, exported with the C signatures.
-    fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
-    fn lem_claim_attach(fd: c_int, resource: *const c_char, ops: *const LemClaimOps, data: *mut c_void) -> c_int;
-    fn lem_claim_attached(file: *mut c_void, ops: *const LemClaimOps) -> *mut c_void;
     /// lemnos_helpers.c: one-line shims for the two inline kernel helpers (see the file).
     fn lemnos_bus_find_device_by_name(bus: *const c_void, name: *const c_char) -> *mut c_void;
     fn lemnos_pwm_get_state(pwm: *const c_void, state: *mut c_void);
@@ -176,7 +175,6 @@ unsafe extern "C" fn lem_channel_release(data: *mut c_void) {
 ///
 /// # Safety
 /// `r` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pwm_request(r: *mut LemnosPwmRequest) -> c_long {
     // SAFETY: the caller's argument.
     let r = unsafe { &*r };
@@ -230,7 +228,6 @@ unsafe fn channel_of(fd: i32) -> (*mut bindings::file, *mut LemChannel) {
 ///
 /// # Safety
 /// `s` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_long {
     // SAFETY: the caller's argument.
     let s = unsafe { &*s };
@@ -266,7 +263,6 @@ pub(crate) unsafe extern "C" fn lem_pwm_apply(s: *const LemnosPwmState) -> c_lon
 ///
 /// # Safety
 /// `s` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pwm_get(s: *mut LemnosPwmState) -> c_long {
     // SAFETY: the caller's argument.
     let s = unsafe { &mut *s };

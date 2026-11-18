@@ -19,4 +19,4 @@
 #include "../lemnos_vip.h"
 #include "../lemnos_pisp_be.h"
 #include "../lemnos_pisp_fe.h"
-#include "../lemnos_rp1_csi2_priv.h"
+#include "../lemnos_rp1_csi2.h"

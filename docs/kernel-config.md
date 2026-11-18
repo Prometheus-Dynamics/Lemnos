@@ -211,11 +211,11 @@ the sources and the QEMU harness's configuration.
 | --- | --- | --- | --- |
 | `CONFIG_MODULES` | `y` | optional | Building and loading `lemnos.ko` as a module. Not needed for the in-tree route |
 | `CONFIG_PM` | `y` | required | `devm_pm_runtime_enable`, `__pm_runtime_idle`, `__pm_runtime_resume` (`rs/vip.rs`, `rs/power.rs`) |
-| `CONFIG_OF` | `y` | required | Every block is a device tree node: CSI-2 endpoint lookup (`fwnode_graph_get_endpoint_by_id`, `rs/rp1_csi2.rs`) and PWM xlate (`of_pwm_xlate_with_flags`, `lemnos_pwm.c`) |
+| `CONFIG_OF` | `y` | required | Every block is a device tree node: CSI-2 endpoint lookup (`fwnode_graph_get_endpoint_by_id`, `rs/rp1_csi2.rs`) and PWM xlate (`of_pwm_xlate_with_flags`, `rs/pwm.rs`) |
 | `CONFIG_I2C` | `y` | required | `i2c_transfer`, `i2c_smbus_xfer`, `i2c_get_adapter` (`rs/bus.rs`) |
 | `CONFIG_SPI` | `y` | required | `spi_sync`, `spi_setup`, `__spi_register_driver` (`rs/bus.rs`). `SPI_MASTER` follows from it (`default SPI`) |
-| `CONFIG_GPIOLIB` | `y` | required | `gpiod_*`, `gpio_device_*` (`lemnos_gpio.c`), and `gpio_request` and `gpio_free`, which are in `gpiolib-legacy.c`; `GPIOLIB_LEGACY` is `def_bool y` in this tree |
-| `CONFIG_PWM` | `y` | required | `pwm_apply_might_sleep`, `pwm_put`, `of_pwm_xlate_with_flags` (`lemnos_pwm.c`) |
+| `CONFIG_GPIOLIB` | `y` | required | `gpiod_*`, `gpio_device_*` (`rs/gpio.rs`), and `gpio_request` and `gpio_free`, which are in `gpiolib-legacy.c`; `GPIOLIB_LEGACY` is `def_bool y` in this tree |
+| `CONFIG_PWM` | `y` | required | `pwm_apply_might_sleep`, `pwm_put`, `of_pwm_xlate_with_flags` (`rs/pwm.rs`) |
 | `CONFIG_REGULATOR` | `y` | required | `regulator_*` (`rs/power.rs`) |
 | `CONFIG_THERMAL` | `y` | required | `thermal_zone_get_temp`, `thermal_zone_get_zone_by_name` (`rs/events.rs`) |
 | `CONFIG_RESET_CONTROLLER` | `y` | required | `reset_control_*`, `__devm_reset_control_get` (`rs/power.rs`, register jobs, VIP) |
@@ -226,7 +226,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_RUST` | `y` | required | The Rust half of the module: the entry (`kernel/lemnos_entry.rs`) and the claims (`kernel/rs/claims.rs`), built with the kernel's Rust support and clang (`LLVM=1`). Not a symbol of the C objects: the Kbuild refuses a build without it |
 | `CONFIG_CPU_BIG_ENDIAN` | unset | must be unset | A constant assertion on `target_endian` in `rs/stream_ring.rs`. The module builds only for little-endian kernels |
 | `CONFIG_LEMNOS` | `y` or `m` | optional | The in-tree switch in `kernel/Kbuild`; set by the image builder for the built-in route. Not in the out-of-tree build |
-| `CONFIG_RP1_PIO` | `m` or `y` | optional | The RP1 PIO part (`lemnos_pio.c`, claim `pio-0`), compiled when set. Needs `<linux/pio_rp1.h>` from the board kernel. Must be `y` when lemnos is built in |
+| `CONFIG_RP1_PIO` | `m` or `y` | optional | The RP1 PIO part (`rs/pio.rs`, claim `pio-0`), compiled when set. Needs `<linux/pio_rp1.h>` from the board kernel. Must be `y` when lemnos is built in |
 | `CONFIG_IOMMU_SUPPORT` | `y` | optional | the IOMMU group test (`device_iommu_mapped()`) in `rs/dev.rs`: without an IOMMU the `confined=` list maps nothing, and only `unconfined=` blocks can be mapped |
 | `CONFIG_CMA` | `y` | optional | Large contiguous allocations that `dma_alloc_attrs` serves from CMA |
 | `CONFIG_DMA_CMA` | `y` | optional | As `CONFIG_CMA`, for the DMA allocator |

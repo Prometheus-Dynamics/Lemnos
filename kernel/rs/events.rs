@@ -65,14 +65,12 @@ pub(crate) fn post(kind: u32, block: u32, index: u32, value: i64) {
     unsafe { bindings::__wake_up(crate::dev::WAIT.get(), bindings::TASK_INTERRUPTIBLE, 1, ptr::null_mut()) };
 }
 
-/// `lem_event_post` of lemnos_internal.h, for the C still calling it.
-#[no_mangle]
+/// Posts one event: the core (rs/dev.rs) calls it when a block is bound or unbound.
 pub(crate) extern "C" fn lem_event_post(kind: u32, block: u32, index: u32, value: i64) {
     post(kind, block, index, value);
 }
 
 /// Whether an event is queued.
-#[no_mangle]
 pub(crate) extern "C" fn lem_event_pending() -> bool {
     QUEUE.lock().count != 0
 }
@@ -81,7 +79,6 @@ pub(crate) extern "C" fn lem_event_pending() -> bool {
 ///
 /// # Safety
 /// `e` points at a writable `struct lemnos_event`.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_event_take(e: *mut lb::lemnos_event) -> bool {
     let mut q = QUEUE.lock();
     if q.count == 0 {
@@ -164,7 +161,6 @@ fn thermal_read(t: &mut lb::lemnos_thermal) -> Result {
 ///
 /// # Safety
 /// `t` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_thermal_read(t: *mut lb::lemnos_thermal) -> c_long {
     // SAFETY: the caller's argument.
     match thermal_read(unsafe { &mut *t }) {
@@ -274,7 +270,6 @@ fn thermal_watch(r: &mut lb::lemnos_thermal_watch) -> Result {
 ///
 /// # Safety
 /// `r` is the ioctl's argument, from the copy.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_thermal_watch(r: *mut lb::lemnos_thermal_watch) -> c_long {
     // SAFETY: the caller's argument.
     match thermal_watch(unsafe { &mut *r }) {
@@ -284,7 +279,6 @@ pub(crate) unsafe extern "C" fn lem_thermal_watch(r: *mut lb::lemnos_thermal_wat
 }
 
 /// Ends the watches and empties the queue: the file closed.
-#[no_mangle]
 pub(crate) extern "C" fn lem_events_reset() {
     {
         let mut used = WATCHES_USED.lock();

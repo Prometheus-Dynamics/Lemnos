@@ -3,7 +3,7 @@
 //! (stage 1m of the port; replaces lemnos_rp1_csi2.c). The front end proper is rs/pisp_fe.rs's.
 //!
 //! Bound only through driver_override and only for compatibles in the owned= parameter (see
-//! lemnos_core.c); it never replaces or patches a stock driver.
+//! rs/lists.rs); it never replaces or patches a stock driver.
 //!
 //! The D-PHY bring-up, the CSI-2 DMA channel's registers and the frame start and end accounting are
 //! ported from the stock driver, drivers/media/platform/raspberrypi/rp1_cfe/{dphy,csi2,cfe}.c:
@@ -26,8 +26,8 @@
 //!    if that frame end never comes the buffers stay pinned for good. Closing the stream, STOP,
 //!    closing this node and unbinding all come through here.
 //!
-//! The receiver is `struct lrc_dev` (lemnos_rp1_csi2_priv.h), read through the bindings made from that
-//! header, because the front end on the same block shares it: its layout is the compiler's.
+//! The receiver's state is `LrcDev`, below: the front end on the same block (rs/pisp_fe.rs) reads a
+//! few fields of it.
 //!
 //! Locking: `ctl` orders START, STOP, close and unbind. `lock` is the frame path's, taken from the
 //! handler, and nests the stream's lock. The stream's ctl nests `ctl` through the stop callback, so
@@ -37,8 +37,8 @@
 
 use crate::bindings as lb;
 use crate::pisp_fe::{
-    lem_pisp_fe_create, lem_pisp_fe_csi_fs, lem_pisp_fe_destroy, lem_pisp_fe_ioctl,
-    lem_pisp_fe_isr, lem_pisp_fe_stop, lem_pisp_fe_streaming,
+    FE_WINDOW, LemPispFe, lem_pisp_fe_create, lem_pisp_fe_csi_fs, lem_pisp_fe_destroy,
+    lem_pisp_fe_ioctl, lem_pisp_fe_isr, lem_pisp_fe_stop, lem_pisp_fe_streaming,
 };
 use crate::stream::{
     Handle, Producer, Slot, Stream, lem_stream_attach, lem_stream_complete_at, lem_stream_create,
@@ -199,12 +199,6 @@ const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_frame_starts>() == 24);
 const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_embedded>() == 16);
 const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_claim>() == 8);
 const _: () = assert!(size_of::<lb::lemnos_stream_create>() == 56);
-// A frame's slot in `struct lrc_dev` is the stream's `struct lem_stream_slot`: the layout rs/stream.rs
-// passes to the stream is the one the header gives it.
-const _: () = assert!(size_of::<lb::lem_stream_slot>() == size_of::<Slot>());
-const _: () = assert!(align_of::<lb::lem_stream_slot>() == align_of::<Slot>());
-const _: () = assert!(offset_of!(lb::lem_stream_slot, addr) == offset_of!(Slot, addr));
-const _: () = assert!(offset_of!(lb::lem_stream_slot, bytes) == offset_of!(Slot, bytes));
 const _: () =
     assert!(lb::LEMNOS_RP1_CSI2_PART_CSI2 == 1 << 0 && lb::LEMNOS_RP1_CSI2_PART_FE == 1 << 1);
 
@@ -229,12 +223,8 @@ unsafe impl FromBytes for StreamCreate {}
 // SAFETY: as above.
 unsafe impl AsBytes for StreamCreate {}
 
-// What is still C. The stream's calls are declared once, in rs/stream.rs, and the front end on the
-// same block is Rust (rs/pisp_fe.rs): both are imported above.
-unsafe extern "C" {
-    /// lemnos_core.c: whether one of the device's compatibles is in owned=.
-    fn lem_block_owned(dev: *mut c_void) -> bool;
-}
+// The owned= list (rs/lists.rs).
+use crate::lists::lem_block_owned;
 
 /// Time for one line of `bytes` on `lanes` lanes at `mbps` each, rounded up, in us. Lanes and rate
 /// are at least 1 (START checked them).
@@ -261,11 +251,109 @@ fn now_ns() -> u64 {
     (unsafe { bindings::ktime_get() }) as u64
 }
 
-/// The receiver: `struct lrc_dev`, by address. One is only made from a pointer whose holder has a
+/// One frame's buffer on a channel: the stream's slot, and whether it is held.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LrcFrame {
+    pub(crate) slot: Slot,
+    pub(crate) valid: bool,
+}
+
+/// The embedded data channel (CSI-2 data type 0x12 on the image's virtual channel): its own stream,
+/// its own buffers, its own frame accounting. See START, and the emb_ functions of the frame path.
+#[repr(C)]
+pub(crate) struct LrcEmb {
+    /// Asked for before START; -1: none.
+    pub(crate) req_fd: c_int,
+    pub(crate) req_bytes: u32,
+    /// Non-null while streaming.
+    pub(crate) stream: *mut Stream,
+    /// The line's length, from START.
+    pub(crate) bytes: u32,
+    /// cur: a line being written; next: armed.
+    pub(crate) cur: LrcFrame,
+    pub(crate) next: LrcFrame,
+    /// cur's frame, and its start.
+    pub(crate) seq: u64,
+    pub(crate) fs_ns: u64,
+    /// The channel's line count at the last frame end.
+    pub(crate) fe_line: u16,
+}
+
+/// One open file of the node: the parts it has claimed (LEMNOS_RP1_CSI2_PART_*). `parts` is written
+/// only by this file's own CLAIM, under the receiver's `ctl`; the file's own calls read it.
+#[repr(C)]
+pub(crate) struct LrcOpen {
+    pub(crate) l: *mut LrcDev,
+    pub(crate) parts: u32,
+}
+
+/// The receiver's state. The front end on the same block (rs/pisp_fe.rs) reads `ctl`, `gone`,
+/// `wedged`, `stream`, `max_lanes`, `irq` and `dev` of it. Zeroed memory is a valid start: probe
+/// initialises the locks, the completions and the work in place.
+#[repr(C)]
+pub(crate) struct LrcDev {
+    /// The block, each open file, each attached stream.
+    pub(crate) ref_: bindings::kref,
+    /// Held until freed.
+    pub(crate) dev: *mut bindings::device,
+    pub(crate) dma: *mut c_void,
+    pub(crate) host: *mut c_void,
+    pub(crate) cfg: *mut c_void,
+    pub(crate) irq: c_int,
+    pub(crate) host_version: u32,
+    pub(crate) max_lanes: u32,
+    /// Clock, then data lanes 0-3.
+    pub(crate) polarity: [u8; 5],
+    pub(crate) misc: bindings::miscdevice,
+    pub(crate) name: [c_char; 64],
+    /// The file that claims each part (index: the part's bit, LEMNOS_RP1_CSI2_PART_*); under ctl.
+    pub(crate) owner: [*mut LrcOpen; 2],
+
+    /// Stream creation against unbinding.
+    pub(crate) going: bindings::rw_semaphore,
+    /// START, STOP, close, unbind.
+    pub(crate) ctl: bindings::mutex,
+    /// Unbound: every register access is off.
+    pub(crate) gone: bool,
+    /// A stop couldn't be confirmed.
+    pub(crate) wedged: bool,
+    /// STOP_ARM_*: the FE_ACKs a stop waits for, set under lock.
+    pub(crate) stop_armed: u8,
+    /// The stop's FE_ACK after its FORCE: image, then embedded.
+    pub(crate) stop_done: [bindings::completion; 2],
+
+    /// The front end, when the block has one; null otherwise.
+    pub(crate) fe: *mut LemPispFe,
+    /// The frame path, everything below.
+    pub(crate) lock: bindings::spinlock_t,
+    /// Non-null while streaming.
+    pub(crate) stream: *mut Stream,
+    pub(crate) streaming: bool,
+    pub(crate) fs_int: bool,
+    pub(crate) fe_int: bool,
+    /// Being written; in the channel's shadow registers.
+    pub(crate) cur: LrcFrame,
+    pub(crate) next: LrcFrame,
+    /// The latest frame start, armed or not (0 before one).
+    pub(crate) fs_ns: u64,
+    /// The channel's line count at the last frame end.
+    pub(crate) fe_line: u16,
+    pub(crate) start: lb::lemnos_rp1_csi2_start,
+    pub(crate) emb: LrcEmb,
+    pub(crate) frames: u64,
+    pub(crate) written: u64,
+    pub(crate) dropped: u64,
+    pub(crate) errors: u64,
+    /// Arms again while nothing is armed and no buffer was free; see Frame::arm.
+    pub(crate) retry: bindings::delayed_work,
+}
+
+/// The receiver, by address. One is only made from a pointer whose holder has a
 /// reference (the block's, an open file's, an attached stream's) or from the handler, which is freed
 /// before the block's reference is given up; so the receiver is alive wherever one is used.
 #[derive(Clone, Copy)]
-struct Lrc(*mut lb::lrc_dev);
+struct Lrc(*mut LrcDev);
 
 /// `ctl`, held: START, STOP, close and unbind. Unlocked when dropped.
 struct Ctl {
@@ -328,7 +416,7 @@ impl Lrc {
     }
 
     /// The front end, when the block has one; null otherwise.
-    fn fe(self) -> *mut lb::lem_pisp_fe {
+    fn fe(self) -> *mut LemPispFe {
         // SAFETY: as dma.
         unsafe { (*self.0).fe }
     }
@@ -589,7 +677,7 @@ impl Ctl {
     }
 
     /// The file that claims the part whose bit is `part`.
-    fn owner(&mut self, part: usize) -> &mut *mut lb::lrc_file {
+    fn owner(&mut self, part: usize) -> &mut *mut LrcOpen {
         // SAFETY: `ctl` is held (`self`), and it guards the array; `part` is below PARTS, its length.
         unsafe { &mut (*self.l.0).owner[part] }
     }
@@ -655,8 +743,8 @@ frame_fields! {
     stop_armed: u8 => stop_armed;
     fs_int: bool => fs_int;
     fe_int: bool => fe_int;
-    cur: lb::lrc_frame => cur;
-    next: lb::lrc_frame => next;
+    cur: LrcFrame => cur;
+    next: LrcFrame => next;
     fs_ns: u64 => fs_ns;
     fe_line: u16 => fe_line;
     frames: u64 => frames;
@@ -664,17 +752,16 @@ frame_fields! {
     dropped: u64 => dropped;
     errors: u64 => errors;
     emb_bytes: u32 => emb.bytes;
-    emb_cur: lb::lrc_frame => emb.cur;
-    emb_next: lb::lrc_frame => emb.next;
+    emb_cur: LrcFrame => emb.cur;
+    emb_next: LrcFrame => emb.next;
     emb_seq: u64 => emb.seq;
     emb_fs_ns: u64 => emb.fs_ns;
     emb_fe_line: u16 => emb.fe_line;
 }
 
-/// A frame's slot as the stream's calls take it (the layouts are one: asserted above).
-fn slot_of(frame: &lb::lrc_frame) -> &Slot {
-    // SAFETY: `struct lem_stream_slot` and Slot are the same layout, and the borrow is the frame's.
-    unsafe { &*(&raw const frame.slot).cast::<Slot>() }
+/// A frame's slot as the stream's calls take it.
+fn slot_of(frame: &LrcFrame) -> &Slot {
+    &frame.slot
 }
 
 impl Frame {
@@ -813,7 +900,7 @@ impl Frame {
             *self.errors() += 1;
             self.cur().valid = false;
         }
-        let (next, cur): (*const lb::lrc_frame, *mut lb::lrc_frame) = (self.next(), self.cur());
+        let (next, cur): (*const LrcFrame, *mut LrcFrame) = (self.next(), self.cur());
         // SAFETY: two fields of the receiver, both the frame lock's (held); plain data, so the copy
         // is `l->cur = l->next`.
         unsafe { ptr::copy_nonoverlapping(next, cur, 1) };
@@ -839,8 +926,7 @@ impl Frame {
             // None armed: the line has nowhere to go.
             return;
         }
-        let (next, cur): (*const lb::lrc_frame, *mut lb::lrc_frame) =
-            (self.emb_next(), self.emb_cur());
+        let (next, cur): (*const LrcFrame, *mut LrcFrame) = (self.emb_next(), self.emb_cur());
         // SAFETY: as sof's copy: `l->emb.cur = l->emb.next`.
         unsafe { ptr::copy_nonoverlapping(next, cur, 1) };
         self.emb_next().valid = false;
@@ -905,7 +991,7 @@ impl Frame {
 unsafe extern "C" fn lrc_retry(work: *mut bindings::work_struct) {
     // The work is the delayed work's, which is the receiver's `retry`; it is cancelled before the
     // receiver stops streaming for good, so the receiver is alive.
-    let off = offset_of!(bindings::delayed_work, work) + offset_of!(lb::lrc_dev, retry);
+    let off = offset_of!(bindings::delayed_work, work) + offset_of!(LrcDev, retry);
     let l = Lrc(work.wrapping_byte_sub(off).cast());
     let mut f = l.frame();
     f.arm();
@@ -1350,7 +1436,7 @@ fn start(ctl: &mut Ctl, s: &lb::lemnos_rp1_csi2_start) -> Result {
 /// # Safety
 /// `l` is the front end's receiver, alive, with its `ctl` held and nothing streaming.
 pub(crate) unsafe extern "C" fn lrc_fe_channel_start(
-    l: *mut lb::lrc_dev,
+    l: *mut LrcDev,
     width: u32,
     height: u32,
     vc: u32,
@@ -1375,7 +1461,7 @@ pub(crate) unsafe extern "C" fn lrc_fe_channel_start(
 ///
 /// # Safety
 /// As lrc_fe_channel_start.
-pub(crate) unsafe extern "C" fn lrc_fe_open_rx(l: *mut lb::lrc_dev, lanes: u32, mbps: u32) {
+pub(crate) unsafe extern "C" fn lrc_fe_open_rx(l: *mut LrcDev, lanes: u32, mbps: u32) {
     let l = Lrc(l);
     wr(l.cfg(), MIPICFG_CFG, MIPICFG_CFG_SEL_CSI);
     wr(
@@ -1392,7 +1478,7 @@ pub(crate) unsafe extern "C" fn lrc_fe_open_rx(l: *mut lb::lrc_dev, lanes: u32, 
 ///
 /// # Safety
 /// `l` is the front end's receiver, alive, with its `ctl` held.
-pub(crate) unsafe extern "C" fn lrc_fe_channel_stop(l: *mut lb::lrc_dev) {
+pub(crate) unsafe extern "C" fn lrc_fe_channel_stop(l: *mut LrcDev) {
     let l = Lrc(l);
     wr(l.dma(), csi2_ch_ctrl(LRC_CH), FORCE);
     wr(l.dma(), csi2_ch_addr0(LRC_CH), 0);
@@ -1405,7 +1491,7 @@ pub(crate) unsafe extern "C" fn lrc_fe_channel_stop(l: *mut lb::lrc_dev) {
 ///
 /// # Safety
 /// `l` is a receiver the caller holds a reference to.
-pub(crate) unsafe extern "C" fn lrc_ref_get(l: *mut lb::lrc_dev) {
+pub(crate) unsafe extern "C" fn lrc_ref_get(l: *mut LrcDev) {
     Lrc(l).ref_get();
 }
 
@@ -1413,7 +1499,7 @@ pub(crate) unsafe extern "C" fn lrc_ref_get(l: *mut lb::lrc_dev) {
 ///
 /// # Safety
 /// `l` is a receiver the caller holds a reference to, and gives up here.
-pub(crate) unsafe extern "C" fn lrc_ref_put(l: *mut lb::lrc_dev) {
+pub(crate) unsafe extern "C" fn lrc_ref_put(l: *mut LrcDev) {
     Lrc(l).ref_put();
 }
 
@@ -1526,7 +1612,7 @@ fn stream_create(l: Lrc, arg: c_ulong) -> Result {
 
 /// One open file of the node: `struct lrc_file`, by address, valid from open to release.
 #[derive(Clone, Copy)]
-struct LrcFile(*mut lb::lrc_file);
+struct LrcFile(*mut LrcOpen);
 
 impl LrcFile {
     fn l(self) -> Lrc {
@@ -1658,8 +1744,8 @@ unsafe extern "C" fn lrc_open(_inode: *mut bindings::inode, file: *mut bindings:
     let misc = unsafe { (*file).private_data };
     // The miscdevice is the receiver's `misc`; the node is deregistered before the block's reference
     // is given up, so the receiver is alive.
-    let l = Lrc(misc.wrapping_byte_sub(offset_of!(lb::lrc_dev, misc)).cast());
-    let lf = match KBox::new(lb::lrc_file { l: l.0, parts: 0 }, GFP_KERNEL) {
+    let l = Lrc(misc.wrapping_byte_sub(offset_of!(LrcDev, misc)).cast());
+    let lf = match KBox::new(LrcOpen { l: l.0, parts: 0 }, GFP_KERNEL) {
         Ok(lf) => lf,
         Err(_) => return ENOMEM.to_errno(),
     };
@@ -1729,7 +1815,7 @@ static LRC_FOPS: Fops = Fops(bindings::file_operations {
 
 /// The lanes wired and their polarities, from the device tree's endpoint: the first endpoint of port
 /// 0, whatever its far end is.
-fn read_dt(d: &mut lb::lrc_dev) {
+fn read_dt(d: &mut LrcDev) {
     d.max_lanes = 2;
     // SAFETY: the device is bound; its firmware node, or null with none.
     let node = unsafe { bindings::__dev_fwnode(d.dev) };
@@ -1810,7 +1896,7 @@ fn probe(pdev: *mut bindings::platform_device, dev: *mut bindings::device, l: Lr
     // The front end's own registers, when the block has them (cfe.c, resource 3).
     // SAFETY: the platform device being probed.
     if !unsafe { bindings::platform_get_resource(pdev, bindings::IORESOURCE_MEM, 3) }.is_null() {
-        let fe_window = window(pdev, 3, u64::from(lb::LEM_PISP_FE_WINDOW))?;
+        let fe_window = window(pdev, 3, FE_WINDOW as u64)?;
         // SAFETY: the receiver is initialised as far as the front end reads it at creation, and
         // outlives the front end; the window is mapped and covers LEM_PISP_FE_WINDOW.
         let fe = from_err_ptr(unsafe { lem_pisp_fe_create(l.0, fe_window) })?.cast();
@@ -1912,7 +1998,7 @@ unsafe extern "C" fn lrc_probe(pdev: *mut bindings::platform_device) -> c_int {
             )
         };
     }
-    let mut b = match KBox::<lb::lrc_dev>::new_uninit(GFP_KERNEL | __GFP_ZERO) {
+    let mut b = match KBox::<LrcDev>::new_uninit(GFP_KERNEL | __GFP_ZERO) {
         // SAFETY: zeroed, and zero is a value of every field: null pointers, zero counts, false, no
         // function, and locks that are initialised in place below before any use.
         Ok(b) => unsafe { b.assume_init() },

@@ -73,14 +73,13 @@ use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
 // The descriptors (rs/dev.rs) are passed by address only: struct platform_driver and struct miscdevice,
 // which this file never reads.
+use crate::claims::lem_claims_init;
 unsafe extern "C" {
     /// `platform_driver_register` is a macro over this, with THIS_MODULE and KBUILD_MODNAME.
     fn __platform_driver_register(drv: *mut c_void, owner: *mut c_void, name: *const c_char) -> c_int;
     fn platform_driver_unregister(drv: *mut c_void);
     fn misc_register(misc: *mut c_void) -> c_int;
     fn misc_deregister(misc: *mut c_void);
-    /// rs/claims.rs: the claim table and the claim files' owner. Built with CONFIG_RUST.
-    fn lem_claims_init(owner: *mut c_void);
 }
 
 struct LemnosEntry;

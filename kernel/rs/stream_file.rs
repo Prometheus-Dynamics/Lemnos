@@ -850,7 +850,6 @@ fn create_counted(dev: *mut bindings::device, c: &mut lb::lemnos_stream_create, 
 ///
 /// # Safety
 /// `dev` is a live block the caller keeps from going for the call; `c` is the caller's copy of the request.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_create(dev: *mut bindings::device, c: *mut lb::lemnos_stream_create) -> core::ffi::c_long {
     // SAFETY: the caller's contract.
     errno(create(dev, unsafe { &mut *c }, None, ptr::null_mut())) as core::ffi::c_long
@@ -911,7 +910,6 @@ pub(crate) unsafe extern "C" fn lem_stream_cpu_read_enable(s: *mut Stream) -> c_
 ///
 /// # Safety
 /// `dev` is the block being unbound.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_streams_block_gone(dev: *mut bindings::device) {
     let all = STREAMS.lock();
     for s in all.streams.iter().filter(|s| !s.is_null()) {

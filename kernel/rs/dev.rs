@@ -128,55 +128,51 @@ union Args {
     pio_xfer: lb::lemnos_pio_xfer,
 }
 
-// The parts of the module the requests go to, each by its symbol (lemnos_internal.h). They take the
-// request where the core copied it. Rust's are in rs/; the stream and the PiSP back end are still C.
-// improper_ctypes: the kernel's own structs (a platform device, a VMA) hold members that are empty in
-// this configuration; they are only passed by address.
+// The parts of the module the requests go to (rs/). They take the request where the core copied it.
+use crate::bus::lem_i2c_smbus;
+use crate::bus::lem_i2c_transfer;
+use crate::bus::lem_spi_info;
+use crate::bus::lem_spi_transfer;
+use crate::claims::lem_claim;
+use crate::events::lem_event_pending;
+use crate::events::lem_event_post;
+use crate::events::lem_event_take;
+use crate::events::lem_events_reset;
+use crate::events::lem_thermal_read;
+use crate::events::lem_thermal_watch;
+use crate::gpio::lem_gpio_config;
+use crate::gpio::lem_gpio_get;
+use crate::gpio::lem_gpio_request;
+use crate::gpio::lem_gpio_set;
+use crate::gsdma::lem_gd_create;
+use crate::gsdma::lem_gd_probe;
+use crate::gsdma::lem_gd_remove;
+use crate::pio::lem_pio_call;
+use crate::pio::lem_pio_config_xfer;
+use crate::pio::lem_pio_open;
+use crate::pio::lem_pio_xfer;
+use crate::pisp_be::lem_pb_create;
+use crate::pisp_be::lem_pb_probe;
+use crate::pisp_be::lem_pb_remove;
+use crate::pisp_be::lem_pb_version;
+use crate::power::lem_power_create;
+use crate::power::lem_power_destroy;
+use crate::power::lem_power_request;
+use crate::power::lem_power_set_block;
+use crate::pwm::lem_pwm_apply;
+use crate::pwm::lem_pwm_get;
+use crate::pwm::lem_pwm_request;
+use crate::regjob::lem_rj_open;
+use crate::regjob::lem_rj_probe;
+use crate::regjob::lem_rj_remove;
+use crate::stream_file::lem_stream_create;
+use crate::stream_file::lem_streams_block_gone;
+use crate::vip::lem_vip_create;
+use crate::vip::lem_vip_probe;
+use crate::vip::lem_vip_remove;
+// improper_ctypes: a VMA holds members that are empty in this configuration; it is only passed by address.
 #[allow(improper_ctypes)]
 unsafe extern "C" {
-    fn lem_claim(c: *mut c_void) -> c_long;
-    fn lem_i2c_transfer(t: *const c_void) -> c_long;
-    fn lem_i2c_smbus(s: *mut c_void) -> c_long;
-    fn lem_spi_transfer(t: *const c_void) -> c_long;
-    fn lem_spi_info(t: *mut c_void) -> c_long;
-    fn lem_gpio_request(r: *const c_void) -> c_long;
-    fn lem_gpio_config(c: *const c_void) -> c_long;
-    fn lem_gpio_get(v: *mut c_void) -> c_long;
-    fn lem_gpio_set(v: *const c_void) -> c_long;
-    fn lem_pwm_request(r: *mut c_void) -> c_long;
-    fn lem_pwm_apply(s: *const c_void) -> c_long;
-    fn lem_pwm_get(s: *mut c_void) -> c_long;
-    fn lem_pio_open(o: *const c_void) -> c_long;
-    fn lem_pio_call(c: *mut c_void) -> c_long;
-    fn lem_pio_config_xfer(c: *const c_void) -> c_long;
-    fn lem_pio_xfer(x: *const c_void) -> c_long;
-    fn lem_thermal_read(t: *mut c_void) -> c_long;
-    fn lem_thermal_watch(w: *mut c_void) -> c_long;
-    fn lem_event_post(kind: u32, block: u32, index: u32, value: i64);
-    fn lem_event_pending() -> bool;
-    fn lem_event_take(e: *mut lb::lemnos_event) -> bool;
-    fn lem_events_reset();
-    fn lem_power_create(dev: *mut c_void) -> *mut c_void;
-    fn lem_power_set_block(p: *mut c_void, block: u32);
-    fn lem_power_request(p: *mut c_void, r: *mut c_void) -> c_long;
-    fn lem_power_destroy(p: *mut c_void);
-    fn lem_gd_probe(pdev: *mut bindings::platform_device) -> *mut c_void;
-    fn lem_gd_remove(g: *mut c_void);
-    fn lem_gd_create(g: *mut c_void, dev: *mut bindings::device, args: *mut c_void) -> c_long;
-    fn lem_vip_probe(pdev: *mut bindings::platform_device) -> *mut c_void;
-    fn lem_vip_remove(l: *mut c_void);
-    fn lem_vip_create(l: *mut c_void, dev: *mut bindings::device, args: *mut c_void) -> c_long;
-    fn lem_rj_probe(pdev: *mut bindings::platform_device) -> *mut c_void;
-    fn lem_rj_remove(rj: *mut c_void);
-    fn lem_rj_open(rj: *mut c_void, o: *mut c_void) -> c_long;
-    /// lemnos_stream.c (stage: stream).
-    fn lem_stream_create(dev: *mut bindings::device, c: *mut c_void) -> c_long;
-    fn lem_streams_block_gone(dev: *mut bindings::device);
-    /// lemnos_pisp_be.c (stage: pisp_be).
-    fn lem_pb_probe(pdev: *mut bindings::platform_device) -> *mut c_void;
-    fn lem_pb_remove(l: *mut c_void);
-    fn lem_pb_create(l: *mut c_void, dev: *mut bindings::device, args: *mut c_void) -> c_long;
-    fn lem_pb_version(l: *mut c_void, args: *mut c_void) -> c_long;
     /// lemnos_helpers.c: the three static inlines and macros of a register mapping.
     fn lemnos_vm_flags_set(vma: *mut bindings::vm_area_struct, flags: bindings::vm_flags_t);
     fn lemnos_vma_noncached(vma: *mut bindings::vm_area_struct);
@@ -328,8 +324,8 @@ unsafe extern "C" fn isr(_irq: c_int, data: *mut c_void) -> bindings::irqreturn_
 }
 
 fn any_ready() -> bool {
-    // SAFETY: the event queue is initialised at load, before the node exists.
-    irq::lem_irq_any() || unsafe { lem_event_pending() }
+    // The event queue is initialised at load, before the node exists.
+    irq::lem_irq_any() || lem_event_pending()
 }
 
 fn irq_enable(l: &Block, index: u32) -> c_long {
@@ -620,28 +616,28 @@ fn block_request(l: &Block, cmd: u32, u: &mut Args) -> c_long {
         // SAFETY: the request is this command's struct.
         IOC_IRQ_ENABLE => irq_enable(l, unsafe { u.irq.index }),
         // SAFETY: the bound block's device; the request is this command's struct.
-        IOC_STREAM_CREATE => unsafe { lem_stream_create(l.dev, args) },
+        IOC_STREAM_CREATE => unsafe { lem_stream_create(l.dev, args.cast()) as c_long },
         IOC_PISP_BE_CREATE if l.pb.is_null() => errno(ENOTTY),
         // SAFETY: the block's PiSP back end, live while the block is bound.
-        IOC_PISP_BE_CREATE => unsafe { lem_pb_create(l.pb, l.dev, args) },
+        IOC_PISP_BE_CREATE => unsafe { lem_pb_create(l.pb.cast(), l.dev, args) as c_long },
         IOC_PISP_BE_VERSION if l.pb.is_null() => errno(ENOTTY),
         // SAFETY: as above.
-        IOC_PISP_BE_VERSION => unsafe { lem_pb_version(l.pb, args) },
+        IOC_PISP_BE_VERSION => unsafe { lem_pb_version(l.pb.cast(), args) as c_long },
         IOC_GSDMA_CREATE if l.gd.is_null() => errno(ENOTTY),
         // SAFETY: the block's engine, live while the block is bound.
-        IOC_GSDMA_CREATE => unsafe { lem_gd_create(l.gd, l.dev, args) },
+        IOC_GSDMA_CREATE => unsafe { lem_gd_create(l.gd.cast(), l.dev, args) as c_long },
         IOC_REGJOB_OPEN if l.rj.is_null() => errno(ENOTTY),
         // SAFETY: the block's register jobs, live while the block is bound.
-        IOC_REGJOB_OPEN => unsafe { lem_rj_open(l.rj, args) },
+        IOC_REGJOB_OPEN => unsafe { lem_rj_open(l.rj.cast(), args.cast()) },
         IOC_VIP_CREATE if l.vip.is_null() => errno(ENOTTY),
         // SAFETY: the block's accelerator, live while the block is bound.
-        IOC_VIP_CREATE => unsafe { lem_vip_create(l.vip, l.dev, args) },
+        IOC_VIP_CREATE => unsafe { lem_vip_create(l.vip.cast(), l.dev, args) as c_long },
         // A block the module drives keeps its own clocks.
         IOC_POWER if !(l.pb.is_null() && l.gd.is_null() && l.rj.is_null() && l.vip.is_null()) => {
             errno(ENOTTY)
         }
         // SAFETY: the block's power state, live while the block is bound.
-        IOC_POWER => unsafe { lem_power_request(l.power, args) },
+        IOC_POWER => unsafe { lem_power_request(l.power.cast(), args.cast()) },
         IOC_TEST_IRQ => {
             // SAFETY: the request is this command's struct.
             let index = unsafe { u.irq.index };
@@ -670,24 +666,24 @@ fn unit_request(cmd: u32, u: &mut Args) -> c_long {
     // SAFETY: each callee is given the request as the core copied it in, which is that command's struct.
     unsafe {
         match cmd {
-            IOC_CLAIM => lem_claim(args),
-            IOC_I2C_TRANSFER => lem_i2c_transfer(args),
-            IOC_I2C_SMBUS => lem_i2c_smbus(args),
-            IOC_SPI_TRANSFER => lem_spi_transfer(args),
-            IOC_SPI_INFO => lem_spi_info(args),
-            IOC_GPIO_REQUEST => lem_gpio_request(args),
-            IOC_GPIO_CONFIG => lem_gpio_config(args),
-            IOC_GPIO_GET => lem_gpio_get(args),
-            IOC_GPIO_SET => lem_gpio_set(args),
-            IOC_PWM_REQUEST => lem_pwm_request(args),
-            IOC_PWM_APPLY => lem_pwm_apply(args),
-            IOC_PWM_GET => lem_pwm_get(args),
-            IOC_PIO_OPEN => lem_pio_open(args),
-            IOC_PIO_CALL => lem_pio_call(args),
-            IOC_PIO_CONFIG_XFER => lem_pio_config_xfer(args),
-            IOC_PIO_XFER => lem_pio_xfer(args),
-            IOC_THERMAL_READ => lem_thermal_read(args),
-            IOC_THERMAL_WATCH => lem_thermal_watch(args),
+            IOC_CLAIM => lem_claim(args.cast()),
+            IOC_I2C_TRANSFER => lem_i2c_transfer(args.cast()),
+            IOC_I2C_SMBUS => lem_i2c_smbus(args.cast()),
+            IOC_SPI_TRANSFER => lem_spi_transfer(args.cast()),
+            IOC_SPI_INFO => lem_spi_info(args.cast()),
+            IOC_GPIO_REQUEST => lem_gpio_request(args.cast()),
+            IOC_GPIO_CONFIG => lem_gpio_config(args.cast()),
+            IOC_GPIO_GET => lem_gpio_get(args.cast()),
+            IOC_GPIO_SET => lem_gpio_set(args.cast()),
+            IOC_PWM_REQUEST => lem_pwm_request(args.cast()),
+            IOC_PWM_APPLY => lem_pwm_apply(args.cast()),
+            IOC_PWM_GET => lem_pwm_get(args.cast()),
+            IOC_PIO_OPEN => lem_pio_open(args.cast()),
+            IOC_PIO_CALL => lem_pio_call(args.cast()),
+            IOC_PIO_CONFIG_XFER => lem_pio_config_xfer(args.cast()),
+            IOC_PIO_XFER => lem_pio_xfer(args.cast()),
+            IOC_THERMAL_READ => lem_thermal_read(args.cast()),
+            IOC_THERMAL_WATCH => lem_thermal_watch(args.cast()),
             _ => -(bindings::ENOIOCTLCMD as c_long),
         }
     }
@@ -748,8 +744,8 @@ unsafe extern "C" fn open(_inode: *mut bindings::inode, file: *mut bindings::fil
     if OPENED.swap(true, Ordering::AcqRel) {
         return EBUSY.to_errno();
     }
-    // SAFETY: the event queue is initialised at load.
-    unsafe { lem_events_reset() };
+    // The event queue is initialised at load.
+    lem_events_reset();
     let _held = Writing::new();
     // SAFETY: the VFS's file, live until its release.
     MAPPING.store(unsafe { (*file).f_mapping }, Ordering::Release);
@@ -787,8 +783,8 @@ unsafe extern "C" fn release(_inode: *mut bindings::inode, _file: *mut bindings:
             };
         }
     }
-    // SAFETY: the event queue is initialised at load.
-    unsafe { lem_events_reset() };
+    // The event queue is initialised at load.
+    lem_events_reset();
     OPENED.store(false, Ordering::Release);
     0
 }
@@ -972,7 +968,7 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
         // No session can exist yet: the block was never published.
         if !b.rj.is_null() {
             // SAFETY: the register jobs probed above.
-            unsafe { lem_rj_remove(b.rj) };
+            unsafe { lem_rj_remove(b.rj.cast()) };
         }
         return ret;
     }
@@ -982,8 +978,8 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
     }
     // SAFETY: the power state made above.
     unsafe { lem_power_set_block(b.power, b.id) };
-    // SAFETY: the event queue is initialised at load.
-    unsafe { lem_event_post(lb::LEMNOS_EVENT_BLOCK_BOUND, b.id, 0, 0) };
+    // The event queue is initialised at load.
+    lem_event_post(lb::LEMNOS_EVENT_BLOCK_BOUND, b.id, 0, 0);
     // SAFETY: the device being probed, live across the call.
     let d: &Device = unsafe { Device::from_raw(dev) };
     dev_info!(
@@ -1016,7 +1012,7 @@ unsafe fn probe_kind(
         b.mappable = false;
         b.unconfined = false;
         // SAFETY: the device being probed.
-        b.pb = unsafe { lem_pb_probe(pdev) };
+        b.pb = unsafe { lem_pb_probe(pdev) as *mut c_void };
         return match ptr_err(b.pb) {
             0 => 0,
             // SAFETY: the device being probed.
@@ -1028,7 +1024,7 @@ unsafe fn probe_kind(
         b.mappable = false;
         b.unconfined = false;
         // SAFETY: the device being probed.
-        b.gd = unsafe { lem_gd_probe(pdev) };
+        b.gd = unsafe { lem_gd_probe(pdev) as *mut c_void };
         return match ptr_err(b.gd) {
             0 => 0,
             // SAFETY: the device being probed.
@@ -1040,7 +1036,7 @@ unsafe fn probe_kind(
         b.mappable = false;
         b.unconfined = false;
         // SAFETY: the device being probed.
-        b.vip = unsafe { lem_vip_probe(pdev) };
+        b.vip = unsafe { lem_vip_probe(pdev) as *mut c_void };
         return match ptr_err(b.vip) {
             0 => 0,
             // SAFETY: the device being probed.
@@ -1048,7 +1044,7 @@ unsafe fn probe_kind(
         };
     }
     // SAFETY: the device being probed.
-    b.rj = unsafe { lem_rj_probe(pdev) };
+    b.rj = unsafe { lem_rj_probe(pdev) as *mut c_void };
     let e = ptr_err(b.rj);
     if e != 0 {
         // SAFETY: the device being probed.
@@ -1147,25 +1143,25 @@ unsafe extern "C" fn remove(pdev: *mut bindings::platform_device) {
         // After the streams: every job has stopped or the block is wedged.
         if !l.pb.is_null() {
             // SAFETY: the block's PiSP back end.
-            unsafe { lem_pb_remove(l.pb) };
+            unsafe { lem_pb_remove(l.pb.cast()) };
         }
         if !l.gd.is_null() {
             // SAFETY: the block's engine.
-            unsafe { lem_gd_remove(l.gd) };
+            unsafe { lem_gd_remove(l.gd.cast()) };
         }
         if !l.rj.is_null() {
             // SAFETY: the block's register jobs.
-            unsafe { lem_rj_remove(l.rj) };
+            unsafe { lem_rj_remove(l.rj.cast()) };
         }
         if !l.vip.is_null() {
             // SAFETY: the block's accelerator.
-            unsafe { lem_vip_remove(l.vip) };
+            unsafe { lem_vip_remove(l.vip.cast()) };
         }
         // SAFETY: the block's power state.
         unsafe { lem_power_destroy(l.power) };
     }
-    // SAFETY: the event queue is initialised at load.
-    unsafe { lem_event_post(lb::LEMNOS_EVENT_BLOCK_UNBOUND, l.id, 0, 0) };
+    // The event queue is initialised at load.
+    lem_event_post(lb::LEMNOS_EVENT_BLOCK_UNBOUND, l.id, 0, 0);
 
     // A buffer can only be freed while the device still has its DMA setup, and mappings of it may exist
     // in user space, so the unbind waits for them. Killing their holder ends the wait.

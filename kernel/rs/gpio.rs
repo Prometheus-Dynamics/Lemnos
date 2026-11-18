@@ -4,7 +4,7 @@
 //! A line is taken the way any module outside a device tree takes one: gpio_request() on the chip's
 //! base plus the offset, since gpiod_request() is not exported. gpiolib refuses a line someone holds.
 //! The line belongs to a claim (rs/claims.rs): the claim's file reads the line's edges, polls,
-//! configures, gets and sets it. The four C entry points keep their signatures (lemnos_internal.h):
+//! configures, gets and sets it. The core (rs/dev.rs) calls its four entry points:
 //! lem_gpio_request, lem_gpio_config, lem_gpio_get and lem_gpio_set.
 //!
 //! No C is needed for this file. The inline kernel APIs the C used are computed here where their
@@ -89,16 +89,10 @@ struct LemnosGpioEvent {
 const _: () = assert!(size_of::<LemnosGpioEvent>() == 16);
 
 
+use crate::claims::lem_claim_held;
+use crate::claims::lem_claim_attach;
+use crate::claims::lem_claim_attached;
 unsafe extern "C" {
-    /// rs/claims.rs: the claim API (lemnos_internal.h).
-    fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
-    fn lem_claim_attach(
-        fd: c_int,
-        resource: *const c_char,
-        ops: *const LemClaimOps,
-        data: *mut c_void,
-    ) -> c_int;
-    fn lem_claim_attached(file: *mut c_void, ops: *const LemClaimOps) -> *mut c_void;
 
     /// gpiolib's legacy numbering (gpio/legacy.h, exported under CONFIG_GPIOLIB), and the consumer
     /// calls that are exported symbols (gpio/consumer.h).
@@ -526,7 +520,6 @@ fn attached(file: &FileRef) -> *const LemLine {
 ///
 /// # Safety
 /// `r` is the caller's own copy of the ioctl argument.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gpio_request(r: *const LemnosGpioRequest) -> c_long {
     // SAFETY: the caller's contract.
     let r = unsafe { &*r };
@@ -582,7 +575,6 @@ pub(crate) unsafe extern "C" fn lem_gpio_request(r: *const LemnosGpioRequest) ->
 ///
 /// # Safety
 /// `c` is the caller's own copy of the ioctl argument.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gpio_config(c: *const LemnosGpioConfig) -> c_long {
     // SAFETY: the caller's contract.
     let c = unsafe { &*c };
@@ -613,7 +605,6 @@ pub(crate) unsafe extern "C" fn lem_gpio_config(c: *const LemnosGpioConfig) -> c
 ///
 /// # Safety
 /// `v` is the caller's own copy of the ioctl argument.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gpio_get(v: *mut LemnosGpioValue) -> c_long {
     // SAFETY: the caller's contract.
     let v = unsafe { &mut *v };
@@ -638,7 +629,6 @@ pub(crate) unsafe extern "C" fn lem_gpio_get(v: *mut LemnosGpioValue) -> c_long 
 ///
 /// # Safety
 /// `v` is the caller's own copy of the ioctl argument.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gpio_set(v: *const LemnosGpioValue) -> c_long {
     // SAFETY: the caller's contract.
     let v = unsafe { &*v };

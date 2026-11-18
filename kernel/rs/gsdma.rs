@@ -772,7 +772,6 @@ impl LgdStream {
 /// # Safety
 /// `g` is a block from `lem_gd_probe` that has not been removed; `dev` is its device; `args` is a
 /// `struct lemnos_gsdma_create` the caller owns.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gd_create(
     g: *const LemGd,
     dev: *mut bindings::device,
@@ -849,7 +848,6 @@ pub(crate) unsafe extern "C" fn lem_gd_create(
 ///
 /// # Safety
 /// `g` is from `lem_gd_probe`, and the device is being unbound.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gd_remove(g: *const LemGd) {
     // SAFETY: the caller's contract: the block is alive until the device's release.
     let g = unsafe { &*g };
@@ -1039,7 +1037,6 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
 ///
 /// # Safety
 /// `pdev` is the platform device being probed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_gd_probe(pdev: *mut bindings::platform_device) -> *const LemGd {
     match probe(pdev) {
         Ok(g) => g,

@@ -34,7 +34,7 @@ pub(crate) fn err_ptr(e: Error) -> *mut c_void {
     (e.to_errno() as isize) as *mut c_void
 }
 
-/// `struct lem_claim_ops` of lemnos_internal.h: three function pointers, in this order. An absent `read`
+/// What a claim's owner provides (the C `struct lem_claim_ops`): three function pointers, in this order. An absent `read`
 /// or `poll` is NULL, which is `None`.
 #[repr(C)]
 pub(crate) struct LemClaimOps {
