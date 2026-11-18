@@ -2384,8 +2384,23 @@ fn a_trial_fallback_on_the_uboot_form_arms_the_trial_in_the_environment() {
 
 /// A power cut at every byte of the environment write: U-Boot's rule must find the old or the new
 /// environment, never neither, and only a whole write changes it.
-#[test]
-fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment() {
+///
+/// The cuts are the two environment writes' `0..=1024` each (a write with a trial, and one without), split
+/// into 8 contiguous parts, one test each, so nextest runs them side by side. Each part runs the same cut
+/// points the single test ran; `uboot_cut_parts_cover_every_cut` checks that the parts tile all of them.
+const UBOOT_CUT_PARTS: usize = 8;
+const UBOOT_CUT_POINTS: usize = 1025;
+
+/// The cut points `from..to` of a part, as indices into the two writes' cut list (write `i / 1025`, cut `i % 1025`).
+fn uboot_cut_part_range(part: usize) -> (usize, usize) {
+    let total = 2 * UBOOT_CUT_POINTS;
+    (
+        part * total / UBOOT_CUT_PARTS,
+        (part + 1) * total / UBOOT_CUT_PARTS,
+    )
+}
+
+fn uboot_cut_part(part: usize) {
     let old = sorted(&[("default", "os-2")]);
     let moved = sorted(&[
         ("default", "os-1"),
@@ -2397,39 +2412,99 @@ fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environme
         ("trial", "os-1"),
         ("trial_attempts", "3"),
     ]);
-    for trial in [false, true] {
+    let (from, to) = uboot_cut_part_range(part);
+    for i in from..to {
+        let trial = i >= UBOOT_CUT_POINTS;
+        let cut = i % UBOOT_CUT_POINTS;
         let (new, cases) = if trial {
             (&armed, "dm-verity")
         } else {
             (&moved, "mismatch")
         };
-        for cut in 0..=1024usize {
-            let board = Board::uboot(&uboot_locator(), 64);
-            let refuse: &[&'static str] = if trial { &["verity "] } else { &[] };
-            if !trial {
-                append_argument(&board, "os-2");
-            }
-            let (fake, why) = board.boot_cut(refuse, Some(cut));
-            let got = board.uboot_vars();
+        let board = Board::uboot(&uboot_locator(), 64);
+        let refuse: &[&'static str] = if trial { &["verity "] } else { &[] };
+        if !trial {
+            append_argument(&board, "os-2");
+        }
+        let (fake, why) = board.boot_cut(refuse, Some(cut));
+        let got = board.uboot_vars();
+        assert!(
+            got == old || got == *new,
+            "{cases} cut {cut} left {got:?} ({why})"
+        );
+        if cut == 1024 {
+            assert_eq!(got, *new, "a whole write is the new environment");
+            assert!(fake.called("restart"), "{:?}", fake.calls());
+        } else {
+            // A cut keeps the old environment, or the new one when the bytes that were cut
+            // off already equal the new copy's (the torn copy is then whole, and its CRC holds).
+            // The log shows the write was refused.
             assert!(
-                got == old || got == *new,
-                "{cases} cut {cut} left {got:?} ({why})"
+                fake.logs.borrow().iter().any(|l| l.contains("power cut")),
+                "{cases} cut {cut}: the write was not refused: {:?}",
+                fake.logs.borrow()
             );
-            if cut == 1024 {
-                assert_eq!(got, *new, "a whole write is the new environment");
-                assert!(fake.called("restart"), "{:?}", fake.calls());
-            } else {
-                // A cut keeps the old environment, or the new one when the bytes that were cut
-                // off already equal the new copy's (the torn copy is then whole, and its CRC holds).
-                // The log shows the write was refused.
-                assert!(
-                    fake.logs.borrow().iter().any(|l| l.contains("power cut")),
-                    "{cases} cut {cut}: the write was not refused: {:?}",
-                    fake.logs.borrow()
-                );
-            }
         }
     }
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_1_of_8() {
+    uboot_cut_part(0);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_2_of_8() {
+    uboot_cut_part(1);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_3_of_8() {
+    uboot_cut_part(2);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_4_of_8() {
+    uboot_cut_part(3);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_5_of_8() {
+    uboot_cut_part(4);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_6_of_8() {
+    uboot_cut_part(5);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_7_of_8() {
+    uboot_cut_part(6);
+}
+
+#[test]
+fn a_cut_at_every_byte_of_the_uboot_fallback_leaves_the_old_or_the_new_environment_part_8_of_8() {
+    uboot_cut_part(7);
+}
+
+/// The parts tile every cut point of both writes, in order and once each.
+#[test]
+fn uboot_cut_parts_cover_every_cut() {
+    let mut next = 0;
+    for part in 0..UBOOT_CUT_PARTS {
+        let (from, to) = uboot_cut_part_range(part);
+        assert_eq!(
+            from, next,
+            "part {part} starts where the one before it stops"
+        );
+        next = to;
+    }
+    assert_eq!(
+        next,
+        2 * UBOOT_CUT_POINTS,
+        "the parts cover every cut point"
+    );
 }
 
 /// An environment partition too small for two copies is refused by name (U-Boot's own refusal),
