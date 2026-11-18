@@ -29,9 +29,25 @@ fi
 echo "${sha256[$version]}  $tarball" | sha256sum -c - >&2
 
 src="$out/busybox-$version"
-if [[ ! -d "$src" ]]; then
-  bzip2 -dc "$tarball" | tar -C "$out" -xf -
+# One build at a time in a directory: two gates given the same directory would otherwise run make in
+# the same tree. The lock is held until this script exits.
+exec 9>"$out/.build-$version.lock"
+flock 9
+# A finished build is kept and used again. The stamp is written last, after the applet answered, and
+# names the tarball's hash and this script's, so a new pin or a new configuration builds again.
+stamp="$out/built-$version"
+want="${sha256[$version]} $(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1) ${ZIG_CC:-zig cc}"
+if [[ -x "$src/busybox" && -f "$stamp" && "$(cat "$stamp")" == "$want" ]]; then
+  probe="$("$src/busybox" mdev -h 2>&1 || true)"
+  if [[ "$probe" == *"unrecognized option"* ]]; then
+    echo "$src/busybox"
+    exit 0
+  fi
 fi
+# Anything else is built from the tarball again: a tree a stopped build left is never built on.
+rm -f "$stamp"
+rm -rf "$src"
+bzip2 -dc "$tarball" | tar -C "$out" -xf -
 # The configuration: no applets, then the mdev applet with its config file, its rename and its
 # command options (the forms the generated file uses), built static. `oldconfig` resolves the rest.
 cd "$src"
@@ -64,4 +80,6 @@ make -s -j"$jobs" HOSTCC="${HOSTCC:-gcc}" CC="$zig_cc -target x86_64-linux-musl"
 # message names the option it was given.
 probe="$("$src/busybox" mdev -h 2>&1 || true)"
 [[ "$probe" == *"unrecognized option"* ]] || { echo "build-busybox.sh: the mdev applet did not run" >&2; exit 1; }
+printf '%s\n' "$want" > "$stamp.part"
+mv "$stamp.part" "$stamp"
 echo "$src/busybox"
