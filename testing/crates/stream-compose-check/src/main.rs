@@ -364,6 +364,27 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         .chain(held.iter().map(|h| (h.sequence, h.first)))
         .collect();
     let held_follow = pattern_follows_sequence(&all);
+    if held_follow.is_err() {
+        // What the client read for each held frame: its buffer, sequence, identity, length and first byte.
+        for h in &held {
+            let _ = writeln!(
+                std::io::stdout(),
+                "held: sequence {} first {} uniform {}",
+                h.sequence,
+                h.first,
+                h.uniform
+            );
+        }
+        for f in &frames {
+            let _ = writeln!(
+                std::io::stdout(),
+                "taken: sequence {} first {} bytes {}",
+                f.sequence,
+                f.first,
+                f.bytes
+            );
+        }
+    }
     report.check(
         held_follow.is_ok(),
         format_args!(
