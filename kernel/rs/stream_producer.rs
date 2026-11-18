@@ -44,7 +44,6 @@ pub(crate) fn over(f: &Frame) -> Option<c_int> {
 ///
 /// # Safety
 /// `s` is a live stream; `producer` is valid for the call.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_attach(s: *mut Stream, producer: *const Producer, bytes: u32) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -72,7 +71,6 @@ pub(crate) unsafe extern "C" fn lem_stream_attach(s: *mut Stream, producer: *con
 ///
 /// # Safety
 /// `s` is a live stream.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_detach(s: *mut Stream) -> bool {
     // SAFETY: the caller's contract.
     let mut f = unsafe { &*s }.lock();
@@ -83,7 +81,6 @@ pub(crate) unsafe extern "C" fn lem_stream_detach(s: *mut Stream) -> bool {
 ///
 /// # Safety
 /// `s` is a live stream; `slot` is the caller's to write.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_next(s: *mut Stream, slot: *mut Slot) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -196,7 +193,6 @@ fn range_region<'a>(f: &'a Frame, r: &JobRange) -> Option<&'a Region> {
 ///
 /// # Safety
 /// `s` is a live stream; `r` is valid for the call; `dst` is valid for `bytes` bytes.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_read(s: *mut Stream, r: *const JobRange, dst: *mut c_void, bytes: usize) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -219,7 +215,6 @@ pub(crate) unsafe extern "C" fn lem_stream_range_read(s: *mut Stream, r: *const 
 ///
 /// # Safety
 /// `s` is a live stream; `r` is valid for the call; `addr` is the caller's to write.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_addr(s: *mut Stream, r: *const JobRange, addr: *mut u64) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -240,7 +235,6 @@ pub(crate) unsafe extern "C" fn lem_stream_range_addr(s: *mut Stream, r: *const 
 ///
 /// # Safety
 /// `s` is a live stream; `r` is valid for the call.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_poke(s: *mut Stream, r: *const JobRange, offset: usize, val: u32) {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };

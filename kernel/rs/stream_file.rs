@@ -881,7 +881,6 @@ pub(crate) unsafe extern "C" fn lem_stream_create_producer(
 ///
 /// # Safety
 /// `file` is a live file; the stream answered is live while the caller holds the file.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_from_file(file: *mut bindings::file, dev: *mut bindings::device) -> *mut Stream {
     // SAFETY: the caller's contract; reads one field.
     if !ptr::eq(unsafe { (*file).f_op }, &raw const STREAM_FOPS.0) {
@@ -900,7 +899,6 @@ pub(crate) unsafe extern "C" fn lem_stream_from_file(file: *mut bindings::file, 
 ///
 /// # Safety
 /// `s` is a live stream.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_cpu_read_enable(s: *mut Stream) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
