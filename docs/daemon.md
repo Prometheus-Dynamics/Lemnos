@@ -400,13 +400,25 @@ lemnos-ctl read accel
 lemnos-ctl read counter count
 ```
 
-### watch DEVICE ITEM [--period-ms N] [--count N]
+### watch DEVICE ITEM [--period-ms N] [--count N] [--wait-ms N | --wait-forever]
 
 Subscribes to a value and prints each one as it arrives. The period is 100 ms unless given. It runs
 until stopped unless `--count` says how many to print.
 
+A device that answers "try again" (AGAIN) has no value yet: it is powering up, or it has stopped
+answering. `watch` then says so once on stderr, with the device, the item and the wait, and prints
+nothing on stdout. It stops once the device has answered "try again" for the wait with no value,
+and exits non-zero: `DEVICE ITEM: no value in N ms; the device kept answering "try again"`, with
+`after K values` in it when some were printed first. Without `--wait-ms` the wait is 10 s, or 50
+periods of `--period-ms` when that is longer: 10 s covers a device that comes up on the sixth retry
+of the drivers' own schedule (the first at 100 ms, doubling, capped at 8 s). `--wait-ms N` sets the
+wait instead, and `--wait-forever` waits without one, for a device that may take longer. Each wait
+that starts after a value is announced again. A device that answers "try again" for less than the
+wait and then gives values prints exactly those values.
+
 ```sh
 lemnos-ctl watch accel z --period-ms 50 --count 3
+lemnos-ctl watch accel z --wait-ms 2000 --count 3
 ```
 
 ### set DEVICE ITEM [VALUE...]

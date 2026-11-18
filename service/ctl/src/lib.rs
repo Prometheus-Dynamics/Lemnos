@@ -2,7 +2,7 @@
 //! description, so it works on devices nobody has written tooling for.
 
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::{ItemKind, Status};
@@ -30,7 +30,10 @@ lemnos-ctl [--socket PATH] COMMAND
   show DEVICE                    the device as a panel: name, kind, bus, state, each value's
                                  unit, range, limit and reading type
   read DEVICE [ITEM]             one value, or all of them
-  watch DEVICE ITEM [--period-ms N] [--count N]
+  watch DEVICE ITEM [--period-ms N] [--count N] [--wait-ms N | --wait-forever]
+                                 each value as it comes. While the device answers `try again`,
+                                 say so on stderr, and stop once it has answered for the wait
+                                 (see below); --wait-ms sets that wait, --wait-forever has none
   set DEVICE ITEM [VALUE...]     a control or an action
   call DEVICE METHOD [ARG...]    any method, as NAME or TAG:NAME; a job method runs as a
                                  long job, its progress printed until it ends (interrupting
@@ -103,11 +106,28 @@ mod files;
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
 const WATCH_WAIT: Duration = Duration::from_secs(2);
+/// The least `watch` waits, without `--wait-ms`, while a device answers `try again`. A device
+/// that powers up, or is retried after a failed step, can take this long to give its first value:
+/// the drivers' own retry schedule (`lemnos-drivers-bmi088`, a first retry at 100 ms, doubling, to
+/// the 8 s cap) reaches its sixth retry at 6.3 s and the seventh at 12.7 s, so 10 s covers the
+/// first six. The power-up steps themselves are milliseconds (3 ms for the magnetometer, 10 ms
+/// for the OV9782's first read).
+const WAIT_FLOOR: Duration = Duration::from_secs(10);
+/// Without `--wait-ms`, `watch` waits this many sampling periods of silence, or [`WAIT_FLOOR`] if
+/// that is longer. Fifty periods of silence mean the device is not sampling at all.
+const WAIT_PERIODS: u64 = 50;
 /// How long `call` waits for a long job between looks at its progress. It waits as long as
 /// the job runs.
 const JOB_WAIT: Duration = Duration::from_secs(1);
 
 type Outcome = Result<(), String>;
+
+/// What a device answers to a read while a subscription is silent (see `Tool::watch`).
+enum Answer {
+    Value(Vec<u8>),
+    Again,
+    Other,
+}
 
 fn text(error: Error) -> String {
     error.to_string()
@@ -147,10 +167,40 @@ const fn health_name(health: DeviceHealth) -> &'static str {
 struct Tool<'a> {
     client: Client,
     out: &'a mut dyn Write,
+    err: &'a mut dyn Write,
 }
 
-/// Runs one command. `args` excludes the program's name.
+/// How long `watch` waits while the device answers `try again`, before it gives up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Patience {
+    /// Not given: [`WAIT_FLOOR`] or [`WAIT_PERIODS`] periods, whichever is longer.
+    Derived,
+    /// `--wait-ms N`.
+    Bound(Duration),
+    /// `--wait-forever`: never gives up.
+    Forever,
+}
+
+/// The longest `watch` waits in silence for a device with a sampling period of `period_ms`, or
+/// `None` for no bound.
+fn patience_bound(period_ms: u64, patience: Patience) -> Option<Duration> {
+    match patience {
+        Patience::Derived => Some(WAIT_FLOOR.max(Duration::from_millis(
+            WAIT_PERIODS.saturating_mul(period_ms),
+        ))),
+        Patience::Bound(bound) => Some(bound),
+        Patience::Forever => None,
+    }
+}
+
+/// Runs one command. `args` excludes the program's name. Messages that are not the result go to
+/// stderr.
 pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
+    run_with_stderr(args, out, &mut std::io::stderr())
+}
+
+/// [`run`], with the stream the notices go to given.
+pub fn run_with_stderr(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Outcome {
     let mut socket = std::env::var("LEMNOSD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
     let mut rest = args;
     if let [flag, path, tail @ ..] = rest
@@ -205,7 +255,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         return data_partition::run(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
-    let mut tool = Tool { client, out };
+    let mut tool = Tool { client, out, err };
     match (command.as_str(), tail) {
         ("list", []) => tool.list(),
         ("chain", [device]) => tool.chain(device),
@@ -1024,19 +1074,53 @@ impl Tool<'_> {
         self.read_item(name, &description, item)
     }
 
+    /// Prints each value of `wanted` as it comes, `count` of them. While the device answers
+    /// `try again` (`AGAIN`) the subscription has no value to give, so `watch` asks the device
+    /// itself once per silent slice: a value it gives is printed, `AGAIN` is waited on, and any
+    /// other answer keeps waiting as it always did. Once `AGAIN` has gone on for the
+    /// [`patience_bound`] since the last value, `watch` fails, with the values it printed counted
+    /// in the message.
     fn watch(&mut self, name: &str, wanted: &str, options: &[String]) -> Outcome {
         let mut period_ms = 100u64;
         let mut count = u64::MAX;
-        let mut options = options.iter();
-        while let Some(option) = options.next() {
-            let value = options.next().ok_or_else(|| USAGE.to_string())?;
-            let number = value.parse().map_err(|_| format!("{value:?}: a number"))?;
-            match option.as_str() {
-                "--period-ms" => period_ms = number,
-                "--count" => count = number,
+        let mut explicit = None;
+        let mut forever = false;
+        let mut i = 0;
+        while i < options.len() {
+            match options[i].as_str() {
+                "--wait-forever" => {
+                    forever = true;
+                    i += 1;
+                    continue;
+                }
+                option @ ("--period-ms" | "--count" | "--wait-ms") => {
+                    let value = options.get(i + 1).ok_or_else(|| USAGE.to_string())?;
+                    let number: u64 = value.parse().map_err(|_| format!("{value:?}: a number"))?;
+                    match option {
+                        "--period-ms" => period_ms = number,
+                        "--count" => count = number,
+                        _ => explicit = Some(number),
+                    }
+                    i += 2;
+                }
                 _ => return Err(USAGE.to_string()),
             }
         }
+        let patience = match (explicit, forever) {
+            (Some(_), true) => {
+                return Err("--wait-ms and --wait-forever: give one of them".to_string());
+            }
+            (Some(0), false) => {
+                return Err(
+                    "--wait-ms 0: a wait must be above 0 (--wait-forever waits without one)"
+                        .to_string(),
+                );
+            }
+            (Some(ms), false) => Patience::Bound(Duration::from_millis(ms)),
+            (None, true) => Patience::Forever,
+            (None, false) => Patience::Derived,
+        };
+        let bound = patience_bound(period_ms, patience);
         self.must_run(name)?;
         let (_, description) = self.description(name)?;
         let item = find_item(&description, wanted)?;
@@ -1048,19 +1132,92 @@ impl Tool<'_> {
             .subscribe(&mut handle, method.id, period_ms * 1000, false)
             .map_err(text)?;
         let mut into = vec![0; REPLY_MAX];
-        let mut seen = 0;
+        let mut seen = 0u64;
+        // The start of the silence: the subscription, or the last value.
+        let mut silent_since = Instant::now();
+        let mut waiting = false;
         while seen < count {
-            let Some(value) = self
-                .client
-                .next_value(&mut into, WATCH_WAIT)
-                .map_err(text)?
-            else {
-                continue;
+            let left = bound.map(|bound| bound.saturating_sub(silent_since.elapsed()));
+            // The slice ends at the bound, so a bound is met on time; past it (or with none) the
+            // slice is WATCH_WAIT, and a device that is not answering `try again` keeps waiting.
+            let slice = match left {
+                Some(left) if !left.is_zero() => left.min(WATCH_WAIT),
+                _ => WATCH_WAIT,
             };
-            self.print_value(item, method, &into[..value.len])?;
-            seen += 1;
+            if let Some(value) = self.client.next_value(&mut into, slice).map_err(text)? {
+                self.print_value(item, method, &into[..value.len])?;
+                seen += 1;
+                silent_since = Instant::now();
+                waiting = false;
+                continue;
+            }
+            match self.ask(name, &description, contract, method)? {
+                Answer::Value(reply) => {
+                    self.print_value(item, method, &reply)?;
+                    seen += 1;
+                    silent_since = Instant::now();
+                    waiting = false;
+                }
+                Answer::Again => {
+                    if !waiting {
+                        waiting = true;
+                        let wait = match bound {
+                            Some(bound) => format!(
+                                "waiting up to {} ms (--wait-ms N sets the wait, --wait-forever waits without one)",
+                                bound.as_millis()
+                            ),
+                            None => "waiting without a bound (--wait-forever)".to_string(),
+                        };
+                        line(
+                            self.err,
+                            format_args!(
+                                "{name} {wanted}: the device answered \"try again\"; {wait}"
+                            ),
+                        )?;
+                    }
+                    if bound.is_some_and(|bound| silent_since.elapsed() >= bound) {
+                        let after = if seen == 0 {
+                            String::new()
+                        } else {
+                            format!(" after {seen} value{}", if seen == 1 { "" } else { "s" })
+                        };
+                        return Err(format!(
+                            "{name} {wanted}: no value in {} ms{after}; the device kept answering \"try again\"",
+                            bound.map_or(0, |bound| bound.as_millis())
+                        ));
+                    }
+                }
+                Answer::Other => waiting = false,
+            }
         }
         Ok(())
+    }
+
+    /// One read of `method`, asked while a subscription is silent: what the device answers now.
+    fn ask(
+        &self,
+        device: &str,
+        description: &DeviceDescription,
+        contract: usize,
+        method: &OwnedMethod,
+    ) -> Result<Answer, String> {
+        let call = encode_call(method, &[] as &[&str])?;
+        let tag = &description.contracts[contract].tag;
+        let mut handle = self.client.open_tag(device, tag).map_err(text)?;
+        let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
+        Ok(
+            match self
+                .client
+                .call(&mut handle, method.id, &call.args, &mut reply)
+            {
+                Ok(n) => {
+                    reply.truncate(n);
+                    Answer::Value(reply)
+                }
+                Err(Error::Refused { status, .. }) if status == Status::AGAIN => Answer::Again,
+                Err(_) => Answer::Other,
+            },
+        )
     }
 
     /// Runs a job method as a long job: prints its number, its progress as it comes, and its
@@ -1252,5 +1409,28 @@ mod watchdog_bound_tests {
             .unwrap();
         let max = file["watchdog"]["max_applied_s"].as_integer().unwrap();
         assert_eq!(max, WATCHDOG_MAX_APPLIED_S);
+    }
+}
+
+#[cfg(test)]
+mod watch_wait_tests {
+    use super::*;
+
+    #[test]
+    fn the_derived_bound_is_the_floor_or_fifty_periods_whichever_is_longer() {
+        let derived = |period_ms| patience_bound(period_ms, Patience::Derived);
+        // At the default 100 ms, fifty periods are 5 s: the floor of 10 s is what waits.
+        assert_eq!(derived(100), Some(Duration::from_secs(10)));
+        assert_eq!(derived(0), Some(Duration::from_secs(10)));
+        // At 1 s, fifty periods are 50 s, past the floor.
+        assert_eq!(derived(1000), Some(Duration::from_secs(50)));
+    }
+
+    #[test]
+    fn an_explicit_bound_replaces_the_derived_one_and_forever_has_none() {
+        let bound = Duration::from_millis(250);
+        assert_eq!(patience_bound(100, Patience::Bound(bound)), Some(bound));
+        assert_eq!(patience_bound(1000, Patience::Bound(bound)), Some(bound));
+        assert_eq!(patience_bound(100, Patience::Forever), None);
     }
 }
