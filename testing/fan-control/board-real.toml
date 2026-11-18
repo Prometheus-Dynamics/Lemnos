@@ -1,0 +1,23 @@
+# The B14 fan-control board on the bench board, the REAL phase: the controller reads the board's real thermal
+# zone (thermal_zone0), under a bounded CPU load. The same fan and curve as board.toml.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "bench-fan-real"
+
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+config = { name = "pwmfan" }
+
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+config = { path = "/sys/class/thermal/thermal_zone0" }
+
+[[devices]]
+id = "fan-control"
+driver = "fan-control"
+uses = { fan = "fan", t0 = "cpu-thermal" }
+config = { curve_t0 = "42000:300,50000:600,58000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }

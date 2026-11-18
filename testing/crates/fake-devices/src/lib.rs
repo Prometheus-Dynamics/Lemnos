@@ -578,6 +578,24 @@ impl FakeFan {
     }
 }
 
+impl FakeFan {
+    /// A refused duty write is logged beside the file, with its time in unix milliseconds, so a run can read
+    /// the controller's retry schedule (B14 check 11) after the fact. Only the controller's writes are logged,
+    /// not the release or hand-back writes.
+    fn log_refused(&self) {
+        use std::io::Write;
+        let Some(path) = &self.file else { return };
+        let log = format!("{}.failures", path.display());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(f, "{ms}");
+        }
+    }
+}
+
 impl Lifecycle for FakeFan {
     type Needs = FakeFanNeeds;
 
@@ -642,7 +660,11 @@ impl Fan for FakeFan {
             return Err(Status::IO);
         }
         self.baseline.get_or_insert(self.duty);
-        self.put(per_mille)
+        let written = self.put(per_mille);
+        if written.is_err() {
+            self.log_refused();
+        }
+        written
     }
 
     fn duty(&mut self) -> Result<u16> {

@@ -1,5 +1,6 @@
-# The B14 fan-control board on the bench board, as testing/board-runs/B14.md gives it. The run takes the
-# board lock first and reads the thermal zone and the fan through the kernel's files.
+# The B14 fan-control board on the bench board, the FILE phase: the curve, slew, hold and fault checks run
+# against a file-backed thermal zone. The script writes `temp` in /run/lemnos-b14/zone, in millidegrees, so the
+# temperatures are exact. The real zone is checked in the REAL phase (board-real.toml).
 #
 # The curve is 42 to 58 C (FAN-RELEASE, B14.md): the board idles at 39 to 40 C and four cores of load
 # plateau at 58 to 60 C, so the record's 20, 30, 61, 70 and 75 C points cannot be reached here.
@@ -7,7 +8,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "bench-fan"
+id = "bench-fan-file"
 
 [[devices]]
 id = "fan"
@@ -17,7 +18,7 @@ config = { name = "pwmfan" }
 [[devices]]
 id = "cpu-thermal"
 driver = "thermal-zone"
-config = { path = "/sys/class/thermal/thermal_zone0" }
+config = { path = "/run/lemnos-b14/zone" }
 
 [[devices]]
 id = "fan-control"
