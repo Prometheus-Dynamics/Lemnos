@@ -1,8 +1,12 @@
 //! Drivers with no hardware behind them, for testing the host and the tools
 //! built on it. Each reads its value from `config`.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+
+use lemnos_contract_fan::Fan;
+use lemnos_contract_temperature::Temperature;
 
 use lemnos_contract_accelerometer::Accelerometer;
 use lemnos_contract_gyroscope::Gyroscope;
@@ -304,5 +308,160 @@ impl Accelerometer for FakeFifoAccelerometer {
             used += 1;
         }
         Ok(used)
+    }
+}
+
+/// Duty is per mille, as `fan/1` takes it.
+const FAN_MAX: u16 = 1000;
+/// The fan contract's `set_duty` (method 1) and `duty` (method 2), and `release` (method 4).
+const FAN_SET_DUTY: MethodId = MethodId {
+    contract: 0,
+    method: 1,
+};
+const FAN_DUTY: MethodId = MethodId {
+    contract: 0,
+    method: 2,
+};
+const FAN_RELEASE: MethodId = MethodId {
+    contract: 0,
+    method: 4,
+};
+
+/// A fan on `fan/1` that takes a duty per mille and reports it back, the way `pwm-channel-fan`
+/// and `hwmon-fan` do. It starts at full duty, its safe state, unless `duty` says otherwise, and
+/// `release` puts it back there. `fail = true` refuses every write (`set_duty` and `release`)
+/// with `IO`, as a hwmon attribute refuses one when the kernel says no, and the duty stays where
+/// it was. For the B14 fan-control rehearsal (`testing/fan-control`) and its daemon test.
+#[driver("fake-fan", provides = [Fan])]
+pub struct FakeFan {
+    duty: u16,
+    fail: bool,
+}
+
+impl Lifecycle for FakeFan {
+    type Needs = FakeFanNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("duty", Kind::Int),
+            Key::optional("fail", Kind::Bool),
+        ])?;
+        if let Some(duty) = cfg.int("duty")
+            && !(0..=i64::from(FAN_MAX)).contains(&duty)
+        {
+            return Err(ConfigError::new("duty", "must be 0 to 1000"));
+        }
+        Ok(())
+    }
+
+    fn start(_needs: FakeFanNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let duty = cfg.int("duty").unwrap_or(i64::from(FAN_MAX)) as u16;
+        Ok(Self {
+            duty,
+            fail: cfg.bool("fail").unwrap_or(false),
+        })
+    }
+
+    fn describe(&self, out: &mut Description) {
+        // Duty is a count of per mille: exponent 0. The control has its own name, so a `set`
+        // finds it and not the read.
+        out.add(
+            Item::value("duty", FAN_DUTY)
+                .unit(Unit::One, 0)
+                .range(0, i64::from(FAN_MAX))
+                .step(1),
+        );
+        out.add(
+            Item::control("set_duty", FAN_SET_DUTY)
+                .unit(Unit::One, 0)
+                .range(0, i64::from(FAN_MAX))
+                .step(1),
+        );
+        out.add(Item::action("release", FAN_RELEASE));
+    }
+}
+
+impl Fan for FakeFan {
+    fn set_duty(&mut self, per_mille: u16) -> Result<()> {
+        if per_mille > FAN_MAX {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        if self.fail {
+            return Err(Status::IO);
+        }
+        self.duty = per_mille;
+        Ok(())
+    }
+
+    fn duty(&mut self) -> Result<u16> {
+        Ok(self.duty)
+    }
+
+    fn rpm(&mut self) -> Result<Option<u32>> {
+        // No tachometer on a stand-in.
+        Ok(None)
+    }
+
+    fn release(&mut self) -> Result<()> {
+        if self.fail {
+            return Err(Status::IO);
+        }
+        self.duty = FAN_MAX;
+        Ok(())
+    }
+}
+
+/// A thermal zone on `temperature/1`, read the way a sysfs zone is: `path` is a directory with a
+/// `temp` file in millidegrees Celsius, and each read opens it. A test or a rehearsal sets the
+/// temperature by writing that file, and steps it by writing again. A missing file fails the read
+/// with `NOT_FOUND`, which is what a missing `thermal_zoneN` gives. `fail = true` fails every read
+/// with `IO`, as a zone that will not give a number does.
+#[driver("fake-thermal-zone", provides = [Temperature])]
+pub struct FakeThermalZone {
+    temp: PathBuf,
+    fail: bool,
+}
+
+/// The temperature attribute's read (`temperature/1`'s `read`, method 1).
+const ZONE_READ: MethodId = MethodId {
+    contract: 0,
+    method: 1,
+};
+
+impl Lifecycle for FakeThermalZone {
+    type Needs = FakeThermalZoneNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::required("path", Kind::Str),
+            Key::optional("fail", Kind::Bool),
+        ])
+    }
+
+    fn start(_needs: FakeThermalZoneNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let dir = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
+        Ok(Self {
+            temp: PathBuf::from(dir).join("temp"),
+            fail: cfg.bool("fail").unwrap_or(false),
+        })
+    }
+
+    fn describe(&self, out: &mut Description) {
+        out.add(Item::value("temperature", ZONE_READ).unit(Unit::DegreeCelsius, 0));
+    }
+}
+
+impl Temperature for FakeThermalZone {
+    fn read(&mut self) -> Result<f32> {
+        if self.fail {
+            return Err(Status::IO);
+        }
+        let text = std::fs::read_to_string(&self.temp).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Status::NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => Status::ACCESS,
+            _ => Status::IO,
+        })?;
+        let milli: i32 = text.trim().parse().map_err(|_| Status::IO)?;
+        Ok(milli as f32 / 1000.0)
     }
 }

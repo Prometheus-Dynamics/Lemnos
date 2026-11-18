@@ -1,0 +1,23 @@
+# The B14 fan-control board on the bench board, as testing/board-runs/B14.md gives it. The run takes the
+# board lock first and reads the thermal zone and the fan through the kernel's files.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "bench-fan"
+
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+config = { name = "pwmfan" }
+
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+config = { path = "/sys/class/thermal/thermal_zone0" }
+
+[[devices]]
+id = "fan-control"
+driver = "fan-control"
+uses = { fan = "fan", t0 = "cpu-thermal" }
+config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }
