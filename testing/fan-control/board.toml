@@ -1,5 +1,8 @@
 # The B14 fan-control board on the bench board, as testing/board-runs/B14.md gives it. The run takes the
 # board lock first and reads the thermal zone and the fan through the kernel's files.
+#
+# The curve is 42 to 58 C (FAN-RELEASE, B14.md): the board idles at 39 to 40 C and four cores of load
+# plateau at 58 to 60 C, so the record's 20, 30, 61, 70 and 75 C points cannot be reached here.
 format = "lemnos.board"
 schema_version = 1
 
@@ -20,4 +23,4 @@ config = { path = "/sys/class/thermal/thermal_zone0" }
 id = "fan-control"
 driver = "fan-control"
 uses = { fan = "fan", t0 = "cpu-thermal" }
-config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }
+config = { curve_t0 = "42000:300,50000:600,58000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }

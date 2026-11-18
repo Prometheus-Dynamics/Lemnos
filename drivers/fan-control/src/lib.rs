@@ -40,16 +40,18 @@
 //! - A temperature read that fails keeps the last good reading for `max_age_ms`, then the input is
 //!   stale and the fan runs at full duty and the driver reports `Degraded`. A reading comes back
 //!   and the curves take over again.
-//! - A failed fan write releases the fan (`release`, which puts it at full duty), and the next
-//!   attempt waits 1 s, 2 s, 4 s, then 8 s, and stays at 8 s. The driver reports `Degraded`
-//!   meanwhile. It never gives up.
-//! - A disabled controller releases the fan and makes no writes until it is enabled. A failed
-//!   release is tried again each second.
-//! - Dropping the driver (its device stops, is rebound, or a call into it panics) releases the fan.
+//! - A failed fan write puts the fan at full duty (`release`), and the next attempt waits 1 s, then 2 s,
+//!   4 s, then 8 s, and stays at 8 s. The driver reports `Degraded` meanwhile. It never gives up.
+//! - A disabled controller hands the fan back (`hand_back`) to the duty and mode it had before the
+//!   controller took it, and makes no writes until it is enabled. A failed hand-back is tried again
+//!   each second.
+//! - Dropping the driver (the daemon stops, its device stops or is rebound, or a call into it panics)
+//!   hands the fan back the same way. A killed process runs no code, so the fan keeps its last duty.
 //!
-//! The fan's safe state is full duty, and it is the fan driver's to keep: `pwm-channel-fan` starts
-//! there and goes there on release. This controller only decides when it asks for less. Nothing
-//! outside the daemon is relied on to cool the board when the daemon's view fails.
+//! The fan's safe state is full duty, the state a failure leaves it in: the fan driver keeps it
+//! (`release`). A controller that is stopped or disabled gives the fan back as it found it, and that is
+//! the baseline the fan driver recorded when it took the fan. This controller only decides when it asks
+//! for less. Nothing outside the daemon is relied on to cool the board when the daemon's view fails.
 //!
 //! # State
 //!
@@ -217,7 +219,7 @@ impl Lifecycle for FanController {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         self.control.begin(now_ns);
         if self.control.release_due(now_ns) {
-            self.release_fan(now_ns);
+            self.hand_back_fan(now_ns);
         }
         if self.control.step_due(now_ns) {
             for slot in 0..SLOTS {
@@ -233,7 +235,9 @@ impl Lifecycle for FanController {
                 match written {
                     Ok(()) => self.control.wrote(),
                     Err(_) => {
-                        self.release_fan(now_ns);
+                        // The safe state for a failure: full duty. The next attempt is the write's own
+                        // retry, below, so a failed release is not kept as a retry of its own.
+                        let _ = self.fan.release();
                         self.control.write_failed(now_ns);
                     }
                 }
@@ -255,9 +259,10 @@ impl FanController {
         }
     }
 
-    /// Releases the fan (its safe state). If that fails, the control law tries again in a second.
-    fn release_fan(&mut self, now_ns: u64) {
-        match self.fan.release() {
+    /// Hands the fan back to the state it had before this controller took it. If that fails, the
+    /// control law tries again in a second.
+    fn hand_back_fan(&mut self, now_ns: u64) {
+        match self.fan.hand_back() {
             Ok(()) => self.control.released(),
             Err(_) => self.control.release_failed(now_ns),
         }
@@ -266,9 +271,9 @@ impl FanController {
 
 impl Drop for FanController {
     fn drop(&mut self) {
-        // Nothing can report an error from here. A release is the fan's safe state, so it is
-        // harmless on a fan this controller never drove.
-        let _ = self.fan.release();
+        // Stopping hands the fan back to its baseline. Nothing can report an error from here: a
+        // hand-back that fails leaves the fan's own drop to put it at full duty.
+        let _ = self.fan.hand_back();
     }
 }
 

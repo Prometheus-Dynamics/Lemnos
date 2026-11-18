@@ -165,6 +165,63 @@ fn the_first_write_takes_the_fan_to_manual_and_release_puts_it_at_full_duty() {
 }
 
 #[test]
+fn hand_back_puts_back_the_value_then_the_mode_the_take_over_found() {
+    // The baseline is pwm1 77 in automatic mode (2). The take-over sets manual mode and a duty.
+    let tree = Tree::new("handback");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    fan.set_duty(900).unwrap();
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "230");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "1");
+
+    fan.hand_back().unwrap();
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "the value the take-over found, not full duty"
+    );
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1_enable")),
+        "2",
+        "the mode the take-over found"
+    );
+    assert!(matches!(Driver::health(&fan), Health::Ok));
+    // Given back, the driver writes nothing more when it is dropped.
+    drop(fan);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+}
+
+#[test]
+fn a_failed_hand_back_keeps_the_baseline_and_is_tried_again() {
+    let tree = Tree::new("handback-retry");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    fan.set_duty(900).unwrap();
+
+    let pwm = root.join(PWM_FAN).join("pwm1");
+    fs::remove_file(&pwm).unwrap();
+    assert!(fan.hand_back().is_err());
+    assert!(matches!(Driver::health(&fan), Health::Degraded(_)));
+    // Still taken: the next write is a duty, not a take-over.
+    write(root, &format!("{PWM_FAN}/pwm1"), "1");
+    fan.hand_back().unwrap();
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+    assert!(matches!(Driver::health(&fan), Health::Ok));
+}
+
+#[test]
+fn a_hand_back_with_nothing_taken_writes_nothing() {
+    let tree = Tree::new("handback-untaken");
+    let mut fan = chip(tree.root());
+    fan.hand_back().unwrap();
+    drop(fan);
+    assert_eq!(read(tree.root(), &format!("{CHIP}/pwm1")), "100");
+    assert_eq!(read(tree.root(), &format!("{CHIP}/pwm1_enable")), "5");
+}
+
+#[test]
 fn dropping_a_driver_that_took_its_fan_leaves_it_at_full_duty_and_the_other_alone() {
     let tree = Tree::new("drop");
     let root = tree.root();

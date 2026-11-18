@@ -3,8 +3,9 @@
 //!
 //! Use this for a fan the kernel exposes through a hwmon device, such as one behind an embedded
 //! controller. A fan on a PWM channel of the board is `pwm-channel-fan`, which needs no kernel
-//! driver in between. The fan's safe state is full duty, set by the controller (`fan-control` runs it
-//! at full duty on a stale input) and by this driver when it lets the fan go.
+//! driver in between. The fan's safe state is full duty: a controller runs it there on a stale input or
+//! a failed write, and this driver puts it there when it lets go on a failure. A controller that stops
+//! hands the fan back to its baseline instead (`hand_back`).
 //!
 //! Settings come from the device's `config` in the board file:
 //!
@@ -21,12 +22,24 @@
 //! duty and the `pwm1_enable` mode it found, on every end, and refuses a duty change or a
 //! release while it runs. The fan must be free to spin.
 //!
-//! The first `set_duty` takes the fan over: it sets manual mode and writes `pwm1`. The kernel applies
-//! the duty only in manual mode. `release`, and dropping the driver, put the fan at full duty and
-//! leave it in manual mode. The fan is not handed back to the kernel's thermal governor: a driver
-//! that stops leaves the hardware in its safe state, not under another controller. The host drops a
-//! driver when its device stops or is rebound, and when a call into the driver panics. A process
-//! killed with `SIGKILL` runs no code, so the fan keeps the duty it was last given.
+//! The first `set_duty` takes the fan over. Before it writes anything it records the fan's baseline:
+//! `pwm1` and `pwm1_enable` as they are. Then it sets manual mode and writes `pwm1`; the kernel applies
+//! the duty only in manual mode.
+//!
+//! Two ways to let the fan go:
+//!
+//! - `hand_back` puts the baseline back: `pwm1` first, in manual mode, then `pwm1_enable`, and the
+//!   driver forgets the fan. A controller calls it when it is stopped or disabled, so the fan is as it
+//!   was before the take-over. Nothing is written if this driver never took the fan. A failed write
+//!   fails the call, and the baseline is kept until the write works.
+//! - `release` puts the fan at full duty and leaves it in manual mode. It is the safe state for a
+//!   failure (a write that will not go, a controller that cannot run).
+//!
+//! Dropping the driver puts the fan at full duty if it still holds it, as a device that stops or is
+//! rebound, or a call that panics, leaves it. A controller that is dropped in an orderly way hands the
+//! fan back first, so the drop then finds nothing held. The fan is not handed to the kernel's thermal
+//! governor, except that the baseline mode is restored, which is the mode the fan had. A process killed
+//! with `SIGKILL` runs no code, so the fan keeps the duty it was last given.
 //!
 //! Failure rule: an attribute that cannot be read or written fails that call and is tried again
 //! on the next one. The driver never switches itself off.
@@ -126,6 +139,8 @@ pub struct HwmonFan {
     rpm: PathBuf,
     /// Whether this driver has taken the fan: `pwm1_enable` is manual since its first write.
     manual: bool,
+    /// The fan as the take-over found it, which `hand_back` puts back. `None` until the take-over.
+    baseline: Option<Baseline>,
     /// Whether the last call failed.
     failing: bool,
     /// The operating system owns this fan: nothing is ever opened for writing.
@@ -138,6 +153,13 @@ pub struct HwmonFan {
     runner: Runner,
     /// Who the method being run is for (see [`Lifecycle::caller`]).
     calling: CallerId,
+}
+
+/// The fan's `pwm1` and `pwm1_enable` before this driver took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Baseline {
+    pwm: u32,
+    mode: i64,
 }
 
 /// The board file's settings for the `spin` test.
@@ -432,6 +454,7 @@ impl HwmonFan {
             enable: fan.join("pwm1_enable"),
             rpm: fan.join("fan1_input"),
             manual: false,
+            baseline: None,
             failing: false,
             reads_only: false,
             rpm_limits: RpmLimits::default(),
@@ -457,10 +480,32 @@ impl HwmonFan {
             return Err(Status::NOT_PERMITTED);
         }
         if !self.manual {
+            // The take-over records what the fan is at now, before its first write.
+            let mode = sysfs::read_number::<i64>(&self.enable)?;
+            let pwm = sysfs::read_number::<u32>(&self.pwm)?;
+            self.baseline = Some(Baseline { pwm, mode });
             sysfs::write_number(&self.enable, MODE_MANUAL)?;
             self.manual = true;
         }
         sysfs::write_number(&self.pwm, duty_to_pwm(per_mille))
+    }
+
+    /// Puts the fan back as the take-over found it: `pwm1` in manual mode first, then the mode. The
+    /// baseline is kept until both writes have worked, so a failed one is tried again on the next call.
+    fn hand_back_fan(&mut self) -> Result<()> {
+        if !self.manual {
+            return Ok(());
+        }
+        let Some(base) = self.baseline else {
+            return self.put_at_safe_state();
+        };
+        sysfs::write_number(&self.pwm, base.pwm)?;
+        if base.mode != i64::from(MODE_MANUAL) {
+            sysfs::write_number(&self.enable, base.mode)?;
+        }
+        self.manual = false;
+        self.baseline = None;
+        Ok(())
     }
 
     /// Puts the fan at full duty, its safe state, if this driver has taken it. It stays in manual
@@ -502,6 +547,14 @@ impl Fan for HwmonFan {
             return Err(Status::BUSY);
         }
         let result = self.put_at_safe_state();
+        self.note(result)
+    }
+
+    fn hand_back(&mut self) -> Result<()> {
+        if self.runner.busy() {
+            return Err(Status::BUSY);
+        }
+        let result = self.hand_back_fan();
         self.note(result)
     }
 }

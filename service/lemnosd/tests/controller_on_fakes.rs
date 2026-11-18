@@ -26,12 +26,19 @@ fn drivers() -> Vec<DriverEntry> {
     ]
 }
 
+/// The fan's duty before the controller takes it: pwm1 179 on the B14 board, which is 702 per mille.
+const BASELINE: u16 = 702;
+
 /// The board file of the rehearsal's shape: a fan, a zone at `zone`, and the controller wired to
-/// both with the B14 curve. `fan_extra` and `zone_extra` add settings to the two fakes.
+/// both with the B14 curve. The fan starts at [`BASELINE`] and keeps its duty in `fan` beside the
+/// zone's directory, so a test can read it once the daemon has stopped. `fan_extra` and `zone_extra`
+/// add settings to the two fakes.
 fn board(zone: &Path, fan_extra: &str, zone_extra: &str, max_age_ms: u32) -> String {
+    let fan = zone.parent().unwrap().join("fan");
+    let fan = fan.display();
     let zone = zone.display();
     format!(
-        "[[devices]]\nid = \"fan\"\ndriver = \"fake-fan\"\nconfig = {{ duty = 1000{fan_extra} }}\n\
+        "[[devices]]\nid = \"fan\"\ndriver = \"fake-fan\"\nconfig = {{ duty = {BASELINE}, file = \"{fan}\"{fan_extra} }}\n\
          [[devices]]\nid = \"cpu-thermal\"\ndriver = \"fake-thermal-zone\"\n\
          config = {{ path = \"{zone}\"{zone_extra} }}\n\
          [[devices]]\nid = \"fan-control\"\ndriver = \"fan-control\"\n\
@@ -217,7 +224,7 @@ fn switching_the_zone_off_on_the_host_is_a_failed_sensor_until_it_is_back() {
 #[test]
 fn a_fan_that_refuses_its_writes_is_degraded_and_keeps_its_duty() {
     // The fan refuses every write with IO, as hwmon does when the kernel says no. The controller
-    // wants 300 for 30 C, and the fan stays where it was.
+    // wants 300 for 30 C, and the fan stays where it was: at its baseline.
     let dir = scratch("refuse");
     let zone = dir.join("zone");
     set_temp(&zone, 30_000);
@@ -235,8 +242,69 @@ fn a_fan_that_refuses_its_writes_is_degraded_and_keeps_its_duty() {
     });
     assert_eq!(
         fan.duty().unwrap(),
-        1000,
+        BASELINE,
         "a refused write leaves the fan's duty alone"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn disabling_the_controller_hands_the_fan_back_to_its_baseline() {
+    let dir = scratch("disable");
+    let zone = dir.join("zone");
+    set_temp(&zone, 45_000);
+    let running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    let mut fan = client.open::<dyn Fan>("fan").unwrap();
+    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    assert_eq!(fan.duty().unwrap(), 450);
+
+    control.set_enabled(false).unwrap();
+    wait_for("the fan is handed back", || fan.duty().unwrap() != 450);
+    assert_eq!(
+        fan.duty().unwrap(),
+        BASELINE,
+        "set_enabled(false) hands the fan back to the duty it had before the take-over"
+    );
+    // A disabled controller writes nothing: the fan stays at the baseline.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        fan.duty().unwrap(),
+        BASELINE,
+        "nothing is written while disabled"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stopping_the_daemon_hands_the_fan_back_to_its_baseline() {
+    let dir = scratch("stop");
+    let zone = dir.join("zone");
+    set_temp(&zone, 45_000);
+    let mut running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+
+    // A SIGTERM does one thing in lemnosd: `Service::stop`, after which the host drops every
+    // driver. The fan's duty is then read from its file, as the daemon is gone.
+    running.service.take().unwrap().stop();
+    let left = fs::read_to_string(dir.join("fan")).unwrap();
+    assert_eq!(
+        left.trim(),
+        BASELINE.to_string(),
+        "a stopped daemon hands the fan back to its baseline"
     );
     let _ = fs::remove_dir_all(&dir);
 }
