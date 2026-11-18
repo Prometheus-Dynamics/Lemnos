@@ -31,6 +31,8 @@ mod bus;
 mod events;
 #[path = "rs/param.rs"]
 mod param;
+#[path = "rs/lists.rs"]
+mod lists;
 #[path = "rs/regjob.rs"]
 mod regjob;
 #[path = "rs/regjob_profile.rs"]

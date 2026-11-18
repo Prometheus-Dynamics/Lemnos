@@ -143,8 +143,6 @@ fn bus_buffer() -> usize {
 unsafe extern "C" {
     /// rs/claims.rs: whether `fd` is a claim on exactly `resource`. Allocates nothing.
     fn lem_claim_held(fd: c_int, resource: *const c_char) -> bool;
-    /// lemnos_core.c: whether `dev`'s compatible is in owned=.
-    fn lem_block_owned(dev: *mut c_void) -> bool;
 }
 
 /// A resource name, written in place: no allocation.
@@ -704,7 +702,7 @@ unsafe extern "C" fn lem_spi_probe(spi: *mut lb::spi_device) -> c_int {
     // SAFETY: the caller's contract; the device is the spi device's first field.
     let dev = unsafe { &raw mut (*spi).dev };
     // SAFETY: as above.
-    if !unsafe { lem_block_owned(dev.cast()) } {
+    if !unsafe { crate::lists::lem_block_owned(dev) } {
         // SAFETY: `dev` is live; the format has no arguments.
         return unsafe { bindings::dev_err_probe(dev, ENODEV.to_errno(), c"not a device Lemnos owns (see owned=)\n".as_ptr().cast()) };
     }
