@@ -352,3 +352,51 @@ fn this_module() -> *mut bindings::module {
     }
 }
 
+
+/// `struct work_struct`, initialised as INIT_WORK does: its function, on the kernel's name and class.
+#[pin_data]
+pub(crate) struct Work {
+    #[pin]
+    w: Opaque<bindings::work_struct>,
+}
+
+impl Work {
+    /// INIT_WORK(work, func), with a static name and class.
+    pub(crate) fn new(
+        name: &'static core::ffi::CStr,
+        func: unsafe extern "C" fn(*mut bindings::work_struct),
+    ) -> impl PinInit<Self> {
+        pin_init!(Self {
+            w <- Opaque::ffi_init(move |p: *mut bindings::work_struct| {
+                // SAFETY: the work is initialised in place, before any queueing; name and class are static.
+                unsafe {
+                    bindings::init_work_with_key(
+                        p,
+                        Some(func),
+                        false,
+                        name.as_char_ptr(),
+                        kernel::static_lock_class!().as_ptr(),
+                    )
+                }
+            }),
+        })
+    }
+
+    /// queue_work(wq, this): on the ordered queue, unless already queued.
+    pub(crate) fn queue(&self, wq: Wq) {
+        // SAFETY: initialised (new), and lives as long as its owner; WORK_CPU_UNBOUND is the kernel's.
+        unsafe { bindings::queue_work_on(bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int, wq.0, self.w.get()) };
+    }
+
+    /// cancel_work_sync(this): off the queue, and not running, when it returns.
+    pub(crate) fn cancel_sync(&self) {
+        // SAFETY: as queue.
+        unsafe { bindings::cancel_work_sync(self.w.get()) };
+    }
+}
+
+/// A busy wait of `us` microseconds, for the reset's steps.
+pub(crate) fn udelay(us: u64) {
+    // SAFETY: the kernel's delay: a busy wait, valid in process and interrupt context.
+    unsafe { bindings::udelay(us as c_ulong) };
+}

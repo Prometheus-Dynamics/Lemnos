@@ -55,7 +55,7 @@ as soon as the module loads.
 | `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`rs/regjob_ve.rs`). Must also be in `owned`. Empty by default. |
 | `k230_isp` | Compatibles driven as the K230 ISP through register jobs (`rs/regjob_isp.rs`): its main path's frames, and its configuration and statistics beside them. Must also be in `owned`. Empty by default. |
 | `test_rj_fake_regs` | Test only. A register-job block's window is ordinary memory, for the fake blocks in QEMU. |
-| `vip9000` | Compatibles driven as the VIP9000 neural accelerator (`lemnos_vip.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
+| `vip9000` | Compatibles driven as the VIP9000 neural accelerator (`rs/vip.rs`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_vip_fake_regs` | Test only. The VIP9000's register window is ordinary memory, for the fake block in QEMU. |
 | `test_vip_timeout_ms` | Test only. A job's time on the VIP9000 before it is stopped, in ms (5000 when unset), for the hang check in QEMU. |
 
@@ -250,7 +250,7 @@ a reboot, `lemnos.ko` can't be unloaded, new streams are refused with `EIO`, and
 says so. `LEMNOS_VIP_IOC_STATUS` on the stream reports `wedged`, the chip, `finished`, `refused`,
 `faults`, `timeouts`, the last fault's interrupt status and the resets.
 
-`lemnos_vip.c` holds no vendor code; the register offsets and values, the reset, set-up and trigger
+`rs/vip.rs` holds no vendor code; the register offsets and values, the reset, set-up and trigger
 sequences, the command encodings, the table entry formats and the chips it uses are facts, with
 their source in its header.
 

@@ -11,3 +11,4 @@
 #include "../lemnos.h"
 #include "../lemnos_regjob.h"
 #include "../lemnos_gsdma.h"
+#include "../lemnos_vip.h"
