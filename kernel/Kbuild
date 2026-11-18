@@ -57,6 +57,8 @@ lem_bindgen_items := \
 	--allowlist-type 'lemnos_stream_.*' \
 	--allowlist-var 'LEMNOS_(STREAM|RING_STATE|REFUSED|LAYOUT)_.*' \
 	--allowlist-function 'anon_inode_getfile|vmalloc_user_noprof|remap_vmalloc_range|vfree|vunmap|shmem_mapping' \
+	--allowlist-type 'lemnos_(next|info|region|alloc|import|release|irq|claim|power|pisp_be_(create|version)|gpio_(request|config|value)|pwm_(request|state)|pio_(open|call|config_xfer|xfer))' \
+	--allowlist-var 'LEMNOS_(ABI|MAX_REGIONS|MAX_IRQS|INFO_MMIO_.*|EVENT_(IRQ|BLOCK_BOUND|BLOCK_UNBOUND))' \
 	--allowlist-var 'LEMNOS_REGJOB_.*' \
 	--with-derive-custom-struct 'lemnos_.*=Copy,Clone' \
 	--with-derive-custom-struct 'pisp_.*=Copy,Clone' \

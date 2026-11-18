@@ -33,6 +33,8 @@ mod events;
 mod param;
 #[path = "rs/lists.rs"]
 mod lists;
+#[path = "rs/dmabuf.rs"]
+mod dmabuf;
 #[path = "rs/regjob.rs"]
 mod regjob;
 #[path = "rs/regjob_profile.rs"]
@@ -88,6 +90,8 @@ struct LemnosEntry;
 
 impl kernel::Module for LemnosEntry {
     fn init(module: &'static ThisModule) -> Result<Self> {
+        // SAFETY: called once, here, before any block can be bound.
+        unsafe { dmabuf::init() };
         // The event queue and the watches' locks (rs/events.rs), first: binding a block posts an event.
         events::lem_events_init();
         // The table of streams (rs/stream_file.rs), before any block can be bound.
