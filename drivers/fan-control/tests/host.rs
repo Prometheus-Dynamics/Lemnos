@@ -816,3 +816,341 @@ fn stopping_the_controller_hands_the_fan_back() {
     assert_eq!(rig.hand_backs(), 1);
     assert_eq!(rig.releases(), 0);
 }
+
+// --- the flap: a fan the real host binds out and binds again while its writes stay refused ---
+
+/// What a flap fan has been asked, kept outside the driver: the host makes a new driver each time it binds the
+/// fan again, and the fan itself (its duty, and what it refuses) is the same fan.
+#[derive(Debug, Default, Clone)]
+struct Flap {
+    duty: u16,
+    refusing: bool,
+    /// Duty writes asked for, refused ones included.
+    writes: u32,
+    /// Releases asked for (the safe state's write), refused ones included.
+    releases: u32,
+    /// Hand-backs asked for, refused ones included.
+    hand_backs: u32,
+    /// Full-duty writes the driver's drop made, refused ones included.
+    drop_writes: u32,
+    reads: u32,
+    binds: u32,
+}
+
+static FLAPS: std::sync::Mutex<Vec<(String, Flap)>> = std::sync::Mutex::new(Vec::new());
+
+/// Runs `f` on the flap fan named `key`, making it at duty 0 if it is not there.
+fn flap<R>(key: &str, f: impl FnOnce(&mut Flap) -> R) -> R {
+    let mut all = FLAPS.lock().unwrap_or_else(|e| e.into_inner());
+    if !all.iter().any(|(k, _)| k == key) {
+        all.push((key.to_string(), Flap::default()));
+    }
+    let (_, fan) = all.iter_mut().find(|(k, _)| k == key).unwrap();
+    f(fan)
+}
+
+/// A fan that fails the way the board's hwmon fan does when the kernel refuses its writes. Its bind makes no
+/// write, so it succeeds whatever the fan refuses. A refused fan refuses the duty write, the release, the
+/// hand-back and its drop's full-duty write with `IO`, and still reads its duty. The real host counts those
+/// `IO`s, binds the fan out after five in a row, and binds it again on its own schedule.
+#[driver("sim-flap-fan", provides = [Fan])]
+pub struct FlapFan {
+    key: String,
+    /// This driver took the fan (wrote to it), so its drop leaves full duty, as hwmon-fan's does.
+    taken: bool,
+}
+
+impl Lifecycle for FlapFan {
+    type Needs = FlapFanNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[Key::required("key", Kind::Str)])
+    }
+
+    fn start(_: FlapFanNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let key = cfg.str("key").ok_or(Status::INVALID_ARGUMENT)?.to_string();
+        flap(&key, |fan| fan.binds += 1);
+        Ok(Self { key, taken: false })
+    }
+}
+
+impl Fan for FlapFan {
+    fn set_duty(&mut self, per_mille: u16) -> Result<()> {
+        // A driver that tried to take the fan leaves it at full duty when it goes, refused or not.
+        self.taken = true;
+        flap(&self.key, |fan| {
+            fan.writes += 1;
+            if fan.refusing {
+                return Err(Status::IO);
+            }
+            fan.duty = per_mille;
+            Ok(())
+        })
+    }
+
+    fn duty(&mut self) -> Result<u16> {
+        flap(&self.key, |fan| {
+            fan.reads += 1;
+            Ok(fan.duty)
+        })
+    }
+
+    fn rpm(&mut self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
+    fn release(&mut self) -> Result<()> {
+        flap(&self.key, |fan| {
+            fan.releases += 1;
+            if fan.refusing {
+                return Err(Status::IO);
+            }
+            fan.duty = 1000;
+            Ok(())
+        })
+    }
+
+    fn hand_back(&mut self) -> Result<()> {
+        flap(&self.key, |fan| {
+            fan.hand_backs += 1;
+            if fan.refusing {
+                return Err(Status::IO);
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Drop for FlapFan {
+    fn drop(&mut self) {
+        if !self.taken {
+            return;
+        }
+        flap(&self.key, |fan| {
+            fan.drop_writes += 1;
+            if !fan.refusing {
+                fan.duty = 1000;
+            }
+        });
+    }
+}
+
+/// The controller on a flap fan named `key`, at 40 C (duty 400), on a host that binds a device out after five
+/// failures in a row, as lemnosd's does.
+fn start_flap(key: &str) -> Rig {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"fan-flap\"\n\
+         [[devices]]\nid = \"fan\"\ndriver = \"sim-flap-fan\"\nconfig = {{ key = \"{key}\" }}\n\
+         [[devices]]\nid = \"cpu\"\ndriver = \"sim-temperature\"\nconfig = {{ milli = 40000 }}\n\
+         [[devices]]\nid = \"ctl\"\ndriver = \"fan-control\"\nuses = {{ fan = \"fan\", t0 = \"cpu\" }}\n\
+         config = {{ curve_t0 = \"30000:300,60000:600,75000:1000\" }}\n"
+    );
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    let host = Host::start(
+        &parse(&text).unwrap(),
+        &[
+            entry::<FanController>(),
+            entry::<FlapFan>(),
+            entry::<SimTemperature>(),
+        ],
+        Box::new(sim),
+        Arc::new(clock.clone()),
+        Options::default(),
+    )
+    .unwrap();
+    Rig { host, clock }
+}
+
+/// One second of a flap, as the test saw it at the end of that second.
+#[derive(Debug, Clone)]
+struct FlapSecond {
+    t: u32,
+    /// Duty writes the controller made in this second.
+    writes: u32,
+    /// The fan's own state on the host: running, or the host's wait before it binds the fan again.
+    fan_running: bool,
+    /// The duty the controller reports, or `None` while it is unknown.
+    reported: Option<i32>,
+    /// The duty the fan is at.
+    fan_duty: u16,
+    health: Health,
+}
+
+/// Runs `seconds` seconds, one tick a second, and says what each second showed.
+fn run_flap(rig: &mut Rig, key: &str, from: u32, seconds: u32) -> Vec<FlapSecond> {
+    let mut out = Vec::new();
+    let mut writes = flap(key, |fan| fan.writes);
+    for t in from + 1..=from + seconds {
+        rig.second();
+        let now = flap(key, |fan| fan.clone());
+        out.push(FlapSecond {
+            t,
+            writes: now.writes - writes,
+            fan_running: matches!(
+                rig.host.device("fan").unwrap().state,
+                lemnos_host::DeviceState::Running
+            ),
+            reported: rig.state_if_known().map(|s| s.duty),
+            fan_duty: now.duty,
+            health: rig.health(),
+        });
+        writes = now.writes;
+    }
+    out
+}
+
+/// The board's flap (B14 check 11, BOARD-4): the fan's writes are refused, the host binds the fan out after five
+/// refusals, and binds it again about a second later, because binding a hwmon fan makes no write. The fan is in
+/// again while its writes are still refused, the controller's writes are refused again, the host binds it out
+/// again, and so on for as long as the refusal lasts.
+///
+/// Who retries when. The controller's wait sets the pace of the writes: 1, 2, 4 and then 8 s. The host only
+/// decides when the fan is in: it binds the fan out at the fifth refusal in a row (each attempt is two, the duty
+/// write and the safe-state release), and binds it again one second later, its own first wait, because the fan
+/// had run longer than the host's 8 s cap. Bound out, the controller's attempt is a read; the first read that
+/// works is the fan bound again, and the write follows at the next step, one second later. So a flap is 25 s:
+/// writes at 8 s, 8 s (bound out at the third), a read 8 s later, a write 1 s after that.
+///
+/// What must hold across every flap:
+/// - The controller's backoff carries. Its waits are 1, 2, 4 and then 8 s, and stay at 8 s: a rebind does not put
+///   the wait back to 1 s. Once the cap is reached no two duty writes are less than 8 s apart.
+/// - The fan is not hammered: at most 4 duty writes in the first 8 s (the waits of 1, 2 and 4 s), then at most one
+///   for each further 8 s, so at most 4 + 52 / 8 = 10 in the first 60 s and at most 60 / 8 + 1 = 8 in any later
+///   60 s. Every write of any kind is two for each attempt: the duty write, and then the release, or, at the
+///   attempt that gets the fan bound out, the drop's write (the host answers that release itself). So at most
+///   2 x 10 = 20 in the first 60 s, and 2 x 8 = 16 in any later 60 s.
+/// - The duty the controller reports is the fan's read-back or is absent, never zero and never a duty the fan is
+///   not at.
+/// - Health names the state in every second: refused, bound out, bound again, or, in the second the host has the
+///   fan out, the host's own "a required device failed".
+/// - When the writes work again, control resumes on the curve and health is ok.
+#[test]
+fn a_fan_that_flaps_while_its_writes_are_refused_is_retried_on_a_backoff_that_carries_across_the_rebinds()
+ {
+    use lemnos_driver_fan_control::law::{BOUND_OUT, REBOUND, REFUSED};
+    let key = "flap-backoff";
+    let mut rig = start_flap(key);
+    rig.host.tick();
+    assert_eq!(flap(key, |fan| fan.duty), 400, "on the curve at 40 C");
+    let before = flap(key, |fan| {
+        fan.refusing = true;
+        fan.clone()
+    });
+    let binds_before = before.binds;
+
+    let seconds = run_flap(&mut rig, key, 0, 180);
+    let write_times: Vec<u32> = seconds
+        .iter()
+        .flat_map(|s| std::iter::repeat_n(s.t, s.writes as usize))
+        .collect();
+    let binds = flap(key, |fan| fan.binds) - binds_before;
+    assert!(
+        binds >= 4,
+        "the fan flapped: the host bound it again {binds} times in 180 s (duty writes at {write_times:?})"
+    );
+    let outs = seconds
+        .windows(2)
+        .filter(|w| w[0].fan_running && !w[1].fan_running)
+        .count();
+    assert!(outs >= 4, "the host bound the fan out {outs} times");
+
+    // The backoff: 1, 2, 4 s, then 8 s or more for good, across every rebind.
+    let gaps: Vec<u32> = write_times.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(&gaps[..3], &[1, 2, 4], "the first waits: {write_times:?}");
+    assert!(
+        gaps[3..].iter().all(|&gap| gap >= 8),
+        "a duty write came less than 8 s after the one before it, past the cap: gaps {gaps:?}, writes at {write_times:?}"
+    );
+    // The count: the fan is not hammered.
+    let in_window =
+        |from: u32, to: u32| write_times.iter().filter(|&&t| t > from && t <= to).count();
+    assert!(
+        in_window(0, 60) <= 10,
+        "{} duty writes in the first 60 s: {write_times:?}",
+        in_window(0, 60)
+    );
+    for from in [60, 120] {
+        assert!(
+            in_window(from, from + 60) <= 8,
+            "{} duty writes in seconds {from} to {}: {write_times:?}",
+            in_window(from, from + 60),
+            from + 60
+        );
+    }
+    // What this run gave, so a change of the schedule is seen: the waits of 1, 2 and 4 s, then every 8 s, with
+    // 9 s across each rebind (the read that finds the fan in, then the write at the next step).
+    assert_eq!(
+        write_times,
+        [
+            1, 2, 4, 8, 17, 25, 33, 42, 50, 58, 67, 75, 83, 92, 100, 108, 117, 125, 133, 142, 150,
+            158, 167, 175
+        ]
+    );
+    // Every write of any kind in the whole run: the duty write and the release of each attempt, and the drop's
+    // write at each bind-out.
+    let now = flap(key, |fan| fan.clone());
+    assert_eq!(now.writes - before.writes, 24);
+    assert_eq!(
+        now.releases - before.releases,
+        24 - outs as u32,
+        "one release for each refused write the fan answered"
+    );
+    assert_eq!(
+        now.drop_writes - before.drop_writes,
+        outs as u32,
+        "one drop for each bind-out"
+    );
+    assert_eq!(outs, 7, "bound out every 25 s");
+    assert_eq!(now.hand_backs - before.hand_backs, 0);
+
+    // The reported duty and the health, in every second.
+    for s in &seconds {
+        match s.reported {
+            Some(duty) => {
+                assert_ne!(duty, 0, "second {}: the controller reports zero", s.t);
+                assert_eq!(
+                    duty,
+                    i32::from(s.fan_duty),
+                    "second {}: the reported duty is not the fan's",
+                    s.t
+                );
+            }
+            None => assert!(
+                s.health == Health::Degraded(BOUND_OUT) || !s.fan_running,
+                "second {}: the duty is absent and health does not say bound out: {:?}",
+                s.t,
+                s.health
+            ),
+        }
+        let named = if s.fan_running {
+            [REFUSED, BOUND_OUT, REBOUND]
+                .iter()
+                .any(|reason| s.health == Health::Degraded(reason))
+        } else {
+            // The host has the fan out, and says so for the controller that needs it.
+            s.health == Health::Failed("a required device failed")
+        };
+        assert!(
+            named,
+            "second {}: health does not name the state: {:?}",
+            s.t, s.health
+        );
+    }
+    assert_eq!(
+        flap(key, |fan| fan.duty),
+        400,
+        "the refused fan never moved"
+    );
+
+    // The writes work again: control resumes on the curve.
+    flap(key, |fan| fan.refusing = false);
+    let after = run_flap(&mut rig, key, 180, 30);
+    let resumed = after
+        .iter()
+        .find(|s| s.health == Health::Ok && s.fan_duty == 400 && s.reported == Some(400));
+    assert!(
+        resumed.is_some(),
+        "control did not resume on the curve within 30 s: {after:?}"
+    );
+}

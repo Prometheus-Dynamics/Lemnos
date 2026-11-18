@@ -754,3 +754,25 @@ fn the_duty_read_and_the_duty_control_have_different_names() {
     assert_eq!(control.kind, lemnos_core::ItemKind::Control);
     assert_eq!(control.method, SET_DUTY);
 }
+
+/// The duty item's step is the fan's own resolution, and the read-back is within half of it of the duty asked
+/// for, for every duty: `pwm1` has 255 levels, so two duties it can hold are at most 4 per mille apart, and a duty
+/// reads back at most 2 away. 300 reads back 302 and 900 reads back 902, as on the board (B14, BOARD-4).
+/// The driver before this change gave no such figure: its duty item said a step of 1, the unit.
+#[test]
+fn the_duty_step_is_the_fans_resolution_and_every_duty_reads_back_within_half_of_it() {
+    assert_eq!(DUTY_STEP, 4);
+    for duty in 0..=MAX_DUTY {
+        let back = pwm_to_duty(duty_to_pwm(duty));
+        assert!(
+            u32::from(back.abs_diff(duty)) <= DUTY_STEP / 2,
+            "{duty} reads back {back}"
+        );
+    }
+    assert_eq!(pwm_to_duty(duty_to_pwm(300)), 302);
+    assert_eq!(pwm_to_duty(duty_to_pwm(900)), 902);
+    // Two neighbouring levels are never further apart than the step.
+    for pwm in 0..PWM_MAX {
+        assert!(u32::from(pwm_to_duty(pwm + 1) - pwm_to_duty(pwm)) <= DUTY_STEP);
+    }
+}

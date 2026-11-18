@@ -11,7 +11,7 @@ id = "b14-sim-real"
 [[devices]]
 id = "fan"
 driver = "fake-fan"
-config = { duty = 702, file = "@FAN@" }
+config = { duty = 702, levels = 255, file = "@FAN@" }
 
 [[devices]]
 id = "cpu-thermal"

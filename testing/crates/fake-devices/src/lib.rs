@@ -561,6 +561,13 @@ fn drop_refusal_marker(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.refuse-drop", path.display()))
 }
 
+/// The marker file that makes the fan's bind fail while it is there: `<file>.refuse-bind`. A hwmon fan's bind makes
+/// no write, so the board's fan is bound again while its writes are still refused; this is for a fan whose bind
+/// does fail, which the host then holds out.
+fn bind_refusal_marker(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.refuse-bind", path.display()))
+}
+
 /// The marker file that makes the fan's reads fail while it is there: `<file>.unreadable`.
 fn unreadable_marker(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.unreadable", path.display()))
@@ -602,13 +609,24 @@ fn forget_baseline(path: &Path) {
 /// host counts five `IO`s in a row as a device gone and binds the fan out: its drop leaves full duty on the fan,
 /// and a bind takes the fan again. `fail = true` refuses every write; a file named `<file>.refuse` makes the fan
 /// refuse its writes while it is there (its drop still lands, unless `<file>.refuse-drop` is there too). A refused write
-/// refuses the release and the hand-back as well, and the bind, so a test can refuse and then let the writes work
-/// again. `<file>.refuse-drop` makes the drop's full-duty write refused as well, as hwmon's is when the kernel refuses
+/// refuses the release and the hand-back as well. It does not refuse the bind: a hwmon fan's bind makes no write,
+/// so the host binds the board's fan again about a second after it bound it out, while its writes are still
+/// refused, and the fan flaps (bound out, bound again, refused again) for as long as the refusal lasts (B14 check
+/// 11, BOARD-4). `<file>.refuse-bind` refuses the bind while it is there, for a fan the host holds out.
+/// `<file>.refuse-drop` makes the drop's full-duty write refused as well, as hwmon's is when the kernel refuses
 /// the writes: the duty then stays where it was. `<file>.unreadable` makes the duty read fail with `IO` while it is
 /// there, which is a fan whose attribute will not read. A read is never refused by `fail` or `<file>.refuse`: a
 /// refused fan still reads its duty, as hwmon does. The first write takes the fan over and records its baseline,
-/// per file, so a bind after a drop keeps the first baseline. For the B14 fan-control rehearsal
-/// (`testing/fan-control`) and its daemon tests.
+/// per file, so a bind after a drop keeps the first baseline.
+///
+/// `levels`, when given, is the fan's resolution: the number of steps of its full scale, 255 for a hwmon `pwm1`.
+/// A duty is then kept as the nearest level and read back from it, with hwmon-fan's rounding
+/// (`level = round(duty * levels / 1000)`, `duty = round(level * 1000 / levels)`), so 300 reads back 302 and 900
+/// reads back 902, as on the board. The duty item's step is the largest distance between two levels, in per mille,
+/// `ceil(1000 / levels)`: 4. Without `levels` the fan keeps any per-mille duty, and its step is 1.
+/// `read_offset` is a planted fault: the duty read back is that much above where the fan is.
+///
+/// For the B14 fan-control rehearsal (`testing/fan-control`) and its daemon tests.
 #[driver("fake-fan", provides = [Fan])]
 pub struct FakeFan {
     duty: u16,
@@ -616,12 +634,27 @@ pub struct FakeFan {
     baseline: Option<u16>,
     file: Option<PathBuf>,
     fail: bool,
+    /// The steps of the fan's full scale, when it has a resolution (`levels`).
+    levels: Option<u32>,
+    /// A planted error on the duty read back (`read_offset`).
+    read_offset: u16,
+}
+
+/// The duty a fan of `levels` steps holds for `per_mille`: the nearest level, read back in per mille, with
+/// hwmon-fan's rounding both ways.
+fn quantised(per_mille: u16, levels: u32) -> u16 {
+    let level = (u32::from(per_mille) * levels + 500) / 1000;
+    ((level * 1000 + levels / 2) / levels) as u16
 }
 
 impl FakeFan {
     /// Sets the duty, and the file that keeps it. The file is written first, so a refused write
-    /// leaves the duty where it was.
+    /// leaves the duty where it was. A fan with a resolution keeps the nearest level.
     fn put(&mut self, per_mille: u16) -> Result<()> {
+        let per_mille = match self.levels {
+            Some(levels) => quantised(per_mille, levels),
+            None => per_mille,
+        };
         if let Some(path) = &self.file {
             std::fs::write(path, format!("{per_mille}\n")).map_err(|_| Status::IO)?;
         }
@@ -696,11 +729,23 @@ impl Lifecycle for FakeFan {
             Key::optional("duty", Kind::Int),
             Key::optional("fail", Kind::Bool),
             Key::optional("file", Kind::Str),
+            Key::optional("levels", Kind::Int),
+            Key::optional("read_offset", Kind::Int),
         ])?;
         if let Some(duty) = cfg.int("duty")
             && !(0..=i64::from(FAN_MAX)).contains(&duty)
         {
             return Err(ConfigError::new("duty", "must be 0 to 1000"));
+        }
+        if let Some(levels) = cfg.int("levels")
+            && !(1..=i64::from(FAN_MAX)).contains(&levels)
+        {
+            return Err(ConfigError::new("levels", "must be 1 to 1000"));
+        }
+        if let Some(offset) = cfg.int("read_offset")
+            && !(0..=i64::from(FAN_MAX)).contains(&offset)
+        {
+            return Err(ConfigError::new("read_offset", "must be 0 to 1000"));
         }
         Ok(())
     }
@@ -713,11 +758,11 @@ impl Lifecycle for FakeFan {
             Some(Ok(text)) => text.trim().parse().unwrap_or(configured),
             _ => configured,
         };
-        // A bind writes the duty as well: while the marker is there the bind is refused, as the writes are, so a
-        // fan the host has bound out is not bound again until its writes work.
+        // A bind makes no write to the fan, as hwmon-fan's does not: it binds while the fan's writes are refused.
+        // Only `<file>.refuse-bind` refuses it.
         if file
             .as_ref()
-            .is_some_and(|path| refusal_marker(path).exists())
+            .is_some_and(|path| bind_refusal_marker(path).exists())
         {
             return Err(Status::IO);
         }
@@ -726,9 +771,15 @@ impl Lifecycle for FakeFan {
             baseline: None,
             file,
             fail: cfg.bool("fail").unwrap_or(false),
+            levels: cfg.int("levels").map(|levels| levels as u32),
+            read_offset: cfg.int("read_offset").unwrap_or(0) as u16,
         };
-        let at = fan.duty;
-        fan.put(at)?;
+        // The file is the stand-in for the attribute: it is made when it is not there yet, and what it holds is
+        // left alone, so the duty the fan had before this bind is the duty it has after it.
+        if fan.file.as_ref().is_some_and(|path| !path.exists()) {
+            let at = fan.duty;
+            fan.put(at)?;
+        }
         Ok(fan)
     }
 
@@ -739,7 +790,10 @@ impl Lifecycle for FakeFan {
             Item::value("duty", FAN_DUTY)
                 .unit(Unit::One, 0)
                 .range(0, i64::from(FAN_MAX))
-                .step(1),
+                .step(
+                    self.levels
+                        .map_or(1, |levels| i64::from(1000u32.div_ceil(levels))),
+                ),
         );
         out.add(
             Item::control("set_duty", FAN_SET_DUTY)
@@ -776,7 +830,7 @@ impl Fan for FakeFan {
         {
             return Err(Status::IO);
         }
-        Ok(self.duty)
+        Ok(self.duty.saturating_add(self.read_offset).min(FAN_MAX))
     }
 
     fn rpm(&mut self) -> Result<Option<u32>> {
@@ -875,5 +929,25 @@ impl Temperature for FakeThermalZone {
         })?;
         let milli: i32 = text.trim().parse().map_err(|_| Status::IO)?;
         Ok(milli as f32 / 1000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quantised;
+
+    /// The fake fan's resolution is hwmon-fan's: with 255 levels a duty is kept as the nearest level and read
+    /// back from it, so 300 reads back 302, 900 reads back 902, and the board's baseline of 702 (pwm1 179) stays.
+    /// No duty reads back more than 2 from the one asked for.
+    #[test]
+    fn a_fan_of_255_levels_reads_back_as_the_boards_pwm1_does() {
+        assert_eq!(quantised(300, 255), 302);
+        assert_eq!(quantised(900, 255), 902);
+        assert_eq!(quantised(702, 255), 702);
+        assert_eq!(quantised(450, 255), 451);
+        assert_eq!((quantised(0, 255), quantised(1000, 255)), (0, 1000));
+        for duty in 0..=1000u16 {
+            assert!(quantised(duty, 255).abs_diff(duty) <= 2, "{duty}");
+        }
     }
 }

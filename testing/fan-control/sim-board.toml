@@ -14,7 +14,7 @@ id = "b14-sim-file"
 [[devices]]
 id = "fan"
 driver = "fake-fan"
-config = { duty = 702, file = "@FAN@" }
+config = { duty = 702, levels = 255, file = "@FAN@" }
 
 # The curve's zone: a directory with a `temp` file, written by the script (the file-backed zone).
 [[devices]]

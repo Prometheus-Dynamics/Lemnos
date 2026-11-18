@@ -61,6 +61,10 @@ use std::path::{Path, PathBuf};
 
 /// The largest raw `pwm1` value.
 pub const PWM_MAX: u32 = 255;
+/// The largest distance between two duties `pwm1` can hold, in per mille: `ceil(1000 / 255)`. A duty is written
+/// as the nearest raw value and read back from it ([`duty_to_pwm`], [`pwm_to_duty`]), so the duty read back is
+/// within half of this of the duty asked for: 300 reads back 302.
+pub const DUTY_STEP: u32 = 1000u32.div_ceil(PWM_MAX);
 
 /// The board's limits on the fan's speed, in rpm: the fastest the fan turns (`max_rpm`), and the
 /// speed below which it has stalled (`warn_below_rpm`). Unset means unknown.
@@ -324,12 +328,14 @@ impl Lifecycle for HwmonFan {
         }
         out.add(rpm);
         // Duty is a count of per mille: exponent 0, so 302 shows as 302. The control has its own
-        // name, so a client's `set` finds it and not the read.
+        // name, so a client's `set` finds it and not the read. The read's step is the fan's own: `pwm1`
+        // has 255 levels, so two duties it can hold are up to `ceil(1000 / 255)` = 4 per mille apart, and
+        // a duty reads back within half of that of the one asked for. The control takes any per mille.
         out.add(
             Item::value("duty", DUTY)
                 .unit(Unit::One, 0)
                 .range(0, i64::from(MAX_DUTY))
-                .step(1),
+                .step(i64::from(DUTY_STEP)),
         );
         out.add(
             Item::control("set_duty", SET_DUTY)
