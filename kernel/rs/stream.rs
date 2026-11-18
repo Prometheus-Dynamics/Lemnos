@@ -97,10 +97,10 @@ unsafe extern "C" {
     pub(crate) fn lem_stream_from_file(file: *mut c_void, dev: *mut c_void) -> *mut Stream;
     /// lemnos_stream.c: enables reads of a job's ranges through the kernel's mapping. Takes the stream's ctl.
     pub(crate) fn lem_stream_cpu_read_enable(s: *mut Stream) -> c_int;
-    fn lem_stream_attach(s: *mut Stream, producer: *const Producer, bytes: u32) -> c_int;
-    fn lem_stream_detach(s: *mut Stream) -> bool;
-    fn lem_stream_next(s: *mut Stream, slot: *mut Slot) -> c_int;
-    fn lem_stream_complete_at(
+    pub(crate) fn lem_stream_attach(s: *mut Stream, producer: *const Producer, bytes: u32) -> c_int;
+    pub(crate) fn lem_stream_detach(s: *mut Stream) -> bool;
+    pub(crate) fn lem_stream_next(s: *mut Stream, slot: *mut Slot) -> c_int;
+    pub(crate) fn lem_stream_complete_at(
         s: *mut Stream,
         slot: *const Slot,
         bytes: u32,

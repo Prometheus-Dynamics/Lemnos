@@ -76,7 +76,7 @@ pub struct World {
 
 pub static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
-/// The module's exclusion, as `kernel/lemnos_rp1_csi2.c` and `kernel/rs/pisp_fe.rs` make it: the
+/// The module's exclusion, as `kernel/rs/rp1_csi2.rs` and `kernel/rs/pisp_fe.rs` make it: the
 /// receiver's raw `frames` stream and the front end are never running together (the receiver's
 /// `START` is refused with `EBUSY` while the front end streams, the front end's while a raw stream
 /// runs), because in front-end mode the CSI-2 channel feeds the front end instead of memory. The

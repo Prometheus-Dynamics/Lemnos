@@ -2,7 +2,7 @@
 //! The PiSP front end of the camera front-end block, feeding a frame stream (stage 1l of the port;
 //! replaces lemnos_pisp_fe.c).
 //!
-//! Bound through the receiver (lemnos_rp1_csi2.c): both are one platform device and one interrupt, so
+//! Bound through the receiver (rs/rp1_csi2.rs): both are one platform device and one interrupt, so
 //! this file is reached through the receiver's node and uses the receiver's channel to hand frames to
 //! the block's own stream input.
 //!
@@ -34,7 +34,7 @@
 //! If it never does, nothing it could reach is released: the stream is wedged, its pins kept for good,
 //! and START is refused until the block is bound again.
 //!
-//! Locking: the receiver's `ctl` orders START, STOP, close and unbind (see lemnos_rp1_csi2.c). `state`
+//! Locking: the receiver's `ctl` orders START, STOP, close and unbind (see rs/rp1_csi2.rs). `state`
 //! is the frame path's, nesting the stream's lock. The stream's ctl is taken only before the receiver's
 //! (START enables the stream's CPU mapping first) or by the stream's own stop callback, in that order.
 //!
@@ -45,6 +45,11 @@
 use crate::abi::{err_ptr, ret};
 use crate::bindings as lb;
 use crate::param::param;
+// The receiver on the same block: its reference count, and the link with the channel feeding the front
+// end. The last three are called holding the receiver's ctl.
+use crate::rp1_csi2::{
+    lrc_fe_channel_start, lrc_fe_channel_stop, lrc_fe_open_rx, lrc_ref_get, lrc_ref_put,
+};
 use crate::stream::{
     DelayedWork, Handle, JobRange, Producer, Slot, Stream, dev_warn_ratelimited,
     lem_stream_cpu_read_enable, lem_stream_from_file, msecs_to_jiffies, usleep_range,
@@ -208,19 +213,6 @@ unsafe impl FromBytes for lb::lemnos_pisp_fe_start {}
 unsafe impl FromBytes for lb::lemnos_pisp_fe_test_trace {}
 // SAFETY: as above.
 unsafe impl AsBytes for lb::lemnos_pisp_fe_test_trace {}
-
-// Only the receiver's address crosses here; its struct names kernel types that have no fields in some
-// configurations, which the lint would refuse by value.
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    // lemnos_rp1_csi2.c (lemnos_rp1_csi2_priv.h): the receiver's reference count, and the link with the
-    // channel feeding the front end. The last three are called holding the receiver's ctl.
-    fn lrc_ref_get(l: *mut lb::lrc_dev);
-    fn lrc_ref_put(l: *mut lb::lrc_dev);
-    fn lrc_fe_channel_start(l: *mut lb::lrc_dev, width: u32, height: u32, vc: u32, dt: u32);
-    fn lrc_fe_open_rx(l: *mut lb::lrc_dev, lanes: u32, mbps: u32);
-    fn lrc_fe_channel_stop(l: *mut lb::lrc_dev);
-}
 
 /// A frame the front end holds (`struct lpf_frame`).
 #[derive(Clone, Copy, Default)]
@@ -1199,7 +1191,6 @@ unsafe extern "C" fn lpf_stream_stop(priv_: *mut c_void, s: *mut Stream) {
 ///
 /// # Safety
 /// `fe` is the receiver's front end, from `lem_pisp_fe_create`, not yet destroyed.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_isr(fe: *const LemPispFe, now: u64) {
     // SAFETY: the caller's contract.
     let fe = unsafe { &*fe };
@@ -1231,7 +1222,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_isr(fe: *const LemPispFe, now: u64) 
 ///
 /// # Safety
 /// As `lem_pisp_fe_isr`.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_csi_fs(fe: *const LemPispFe) {
     // SAFETY: the caller's contract.
     let fe = unsafe { &*fe };
@@ -1248,7 +1238,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_csi_fs(fe: *const LemPispFe) {
 ///
 /// # Safety
 /// As `lem_pisp_fe_isr`.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_streaming(fe: *const LemPispFe) -> bool {
     // SAFETY: the caller's contract.
     let fe = unsafe { &*fe };
@@ -1259,7 +1248,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_streaming(fe: *const LemPispFe) -> b
 ///
 /// # Safety
 /// As `lem_pisp_fe_isr`, with the receiver's ctl held.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_stop(fe: *const LemPispFe) {
     // SAFETY: the caller's contract.
     let fe = unsafe { &*fe };
@@ -1270,7 +1258,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_stop(fe: *const LemPispFe) {
 ///
 /// # Safety
 /// As `lem_pisp_fe_isr`; `arg` is the ioctl's argument, a user address.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_ioctl(
     fe: *const LemPispFe,
     cmd: c_uint,
@@ -1329,7 +1316,6 @@ fn create(l: *mut lb::lrc_dev, window: *mut c_void) -> Result<*mut LemPispFe> {
 /// # Safety
 /// `l` is the receiver being probed, which outlives the front end; `window` is LEM_PISP_FE_WINDOW bytes
 /// of the block's registers, mapped for as long.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_create(
     l: *mut lb::lrc_dev,
     window: *mut c_void,
@@ -1344,7 +1330,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_create(
 ///
 /// # Safety
 /// `fe` is from `lem_pisp_fe_create`, and is not used after this.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_pisp_fe_destroy(fe: *mut LemPispFe) {
     // SAFETY: the caller's contract: the pointer `create` leaked, given back once.
     let fe = unsafe { KBox::from_raw(fe) };

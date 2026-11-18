@@ -241,7 +241,4 @@ struct lem_rj *lem_rj_probe(struct platform_device *pdev);
 void lem_rj_remove(struct lem_rj *rj);
 long lem_rj_open(struct lem_rj *rj, struct lemnos_regjob_open *o);
 
-int lem_rp1_csi2_register(void);
-void lem_rp1_csi2_unregister(void);
-
 #endif

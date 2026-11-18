@@ -40,7 +40,7 @@ with the board's own software stopped only for each test and put back afterwards
 | [`GROW.md`](../testing/board-runs/GROW.md) | Not run yet: the data partition's first-boot grow on a card, MBR or GPT: `info` states, `e2fsck` after a clean power-off, a second boot that does nothing, the watchdog through the resize |
 
 Each file says which of its checks ran and which did not, and why. The fixes the run made are in
-the kernel module (`rs/pio.rs`, `lemnos_rp1_csi2.c`, `rs/pisp_fe.rs`), the `rp1-csi2` and
+the kernel module (`rs/pio.rs`, `rs/rp1_csi2.rs`, `rs/pisp_fe.rs`), the `rp1-csi2` and
 `pisp` drivers and the Linux backend, each with a test that fails without it. The second run (PR
 F2b) also gave the PIO I2C bus a module route.
 
@@ -52,6 +52,7 @@ F2b) also gave the PIO I2C bus a module route.
 | [`F2f1.md`](../testing/board-runs/F2f1.md) | Not run on the board. The receiver and the front end claim their parts, observers read counters while another file drives; the chain run that needs it is the next board session |
 | [`Q2i.md`](../testing/board-runs/Q2i.md) | Untested on board. The daemon's device permissions from the generated udev fragment (`lemnos-ctl tree --udev`): the module's nodes and the board's dma-heaps given to group `lemnos`, the start check that names a node it cannot open, and the steps to run on the board |
 | [`F2g1.md`](../testing/board-runs/F2g1.md) | The chain proof's checks (not checked is a failure; timestamps; rate; the latch beside the chain) and the isp proof's 640x400 luma readout: not run, untested on board |
+| [`CZ-MOD-CSI2.md`](../testing/board-runs/CZ-MOD-CSI2.md) | Not run on the board. The `rp1-csi2` receiver of the kernel module in Rust: the bind line and lane count, the raw run's counts and sequences, the frame-end stop, fifty stops and starts with no wedge, a consumer holding every buffer, an unbind while streaming |
 | [`M34.md`](../testing/board-runs/M34.md) | Not run on the board. A front end's output0 lent to the back end's job with no copy: the chain proof end to end, the pool page's layout word and the lend's release on the board |
 | [`CZ-MOD-FE-ACK.md`](../testing/board-runs/CZ-MOD-FE-ACK.md) | Not run on the board. The `rp1-csi2` stop confirmed by the frame end after FORCE; a wedged receiver refuses START until unbind; what an ack on an idle FORCE does |
 | [`CZ-MOD-PISP.md`](../testing/board-runs/CZ-MOD-PISP.md) | Not run on the board. The PiSP front end of the kernel module in Rust: the chain run, the register write log against the C module's, fifty stops and starts with no wedge, a consumer keeping frames, an unbind while streaming |

@@ -3,7 +3,7 @@
 Status: untested on board. Nothing here has been run on hardware. The QEMU fake's line period (50 us)
 and the driver's window (at least 1.6 ms) are the only evidence so far, and the fake is ours.
 
-What it checks: the assumption in kernel/lemnos_rp1_csi2.c and kernel/lemnos_rp1_csi2_window.h. While
+What it checks: the assumption in kernel/rs/rp1_csi2.rs (`lrc_line_us`, the line time). While
 the channel writes, `CSI2_CH_DEBUG` (low 16 bits: the line count) moves at least once per line time. A
 stop waits for the counter to hold still for three line times (at least 1.6 ms), counted in reads
 200 to 400 us apart, so a line longer than the window's share of that would let the stop return with a
@@ -31,5 +31,5 @@ Build on NVMe or SSD, never on the Github HDD. Report CM5 timings only.
    the result as the window's margin.
 
 Report: the sample times, the line count changes, the per-line period seen, and the STOP timings.
-If step 4 fails, the window's factor (lemnos_rp1_csi2_window.h) is wrong for this hardware: stop and
+If step 4 fails, the window's factor (kernel/rs/rp1_csi2.rs) is wrong for this hardware: stop and
 report before changing it.

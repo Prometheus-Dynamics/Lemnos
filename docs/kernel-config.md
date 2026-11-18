@@ -211,7 +211,7 @@ the sources and the QEMU harness's configuration.
 | --- | --- | --- | --- |
 | `CONFIG_MODULES` | `y` | optional | Building and loading `lemnos.ko` as a module. Not needed for the in-tree route |
 | `CONFIG_PM` | `y` | required | `devm_pm_runtime_enable`, `__pm_runtime_idle`, `__pm_runtime_resume` (`rs/vip.rs`, `rs/power.rs`) |
-| `CONFIG_OF` | `y` | required | Every block is a device tree node: CSI-2 endpoint lookup (`of_graph_get_endpoint_by_regs`, `lemnos_rp1_csi2.c`) and PWM xlate (`of_pwm_xlate_with_flags`, `lemnos_pwm.c`) |
+| `CONFIG_OF` | `y` | required | Every block is a device tree node: CSI-2 endpoint lookup (`fwnode_graph_get_endpoint_by_id`, `rs/rp1_csi2.rs`) and PWM xlate (`of_pwm_xlate_with_flags`, `lemnos_pwm.c`) |
 | `CONFIG_I2C` | `y` | required | `i2c_transfer`, `i2c_smbus_xfer`, `i2c_get_adapter` (`rs/bus.rs`) |
 | `CONFIG_SPI` | `y` | required | `spi_sync`, `spi_setup`, `__spi_register_driver` (`rs/bus.rs`). `SPI_MASTER` follows from it (`default SPI`) |
 | `CONFIG_GPIOLIB` | `y` | required | `gpiod_*`, `gpio_device_*` (`lemnos_gpio.c`), and `gpio_request` and `gpio_free`, which are in `gpiolib-legacy.c`; `GPIOLIB_LEGACY` is `def_bool y` in this tree |
