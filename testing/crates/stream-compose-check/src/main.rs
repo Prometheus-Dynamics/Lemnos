@@ -44,6 +44,10 @@ const DEVICE: &str = "receiver";
 const FRAMES: usize = 12;
 /// How long the whole take may run.
 const DEADLINE: Duration = Duration::from_secs(20);
+/// The stream's buffers (`buffers` in the board): all of them are held in the hold phase.
+const BUFFERS: usize = 4;
+/// How long the held buffers stay held while the fake keeps firing frames.
+const HOLD: Duration = Duration::from_millis(300);
 /// How long lemnosd has to make its socket.
 const SOCKET_WAIT: Duration = Duration::from_secs(10);
 /// The fake receiver's node, made by the test module.
@@ -165,8 +169,19 @@ fn fire_frames(stop: Arc<AtomicBool>) -> JoinHandle<Result<u64, String>> {
     })
 }
 
-/// The frames the client takes, in order.
-fn take(client: &Client, index: u32, name: &str) -> Result<Vec<Taken>, String> {
+/// A frame the client kept while the camera ran on: its sequence, its first byte, and whether
+/// every byte is that one value, all read after the hold.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    sequence: u64,
+    first: u8,
+    uniform: bool,
+}
+
+/// The frames the client takes, in order, then the frames it holds through a run of frames: every
+/// buffer is kept while the fake keeps firing, so the driver finds none free at a frame end. Each
+/// held buffer must still carry its own frame's pattern when it is read again.
+fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held>), String> {
     let mut stream = step(
         "open the frame stream",
         client.open_stream(index, name, Arc::new(LinuxStreams)),
@@ -190,7 +205,28 @@ fn take(client: &Client, index: u32, name: &str) -> Result<Vec<Taken>, String> {
         });
         step("release a frame", stream.release(frame))?;
     }
-    Ok(taken)
+    let mut kept = Vec::new();
+    let deadline = Instant::now() + DEADLINE;
+    while kept.len() < BUFFERS && Instant::now() < deadline {
+        if let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? {
+            kept.push(frame);
+        }
+    }
+    std::thread::sleep(HOLD);
+    let mut held = Vec::new();
+    for frame in &kept {
+        let bytes = stream.bytes(frame);
+        let first = bytes.first().copied().unwrap_or(0);
+        held.push(Held {
+            sequence: frame.sequence(),
+            first,
+            uniform: bytes.iter().all(|b| *b == first),
+        });
+    }
+    for frame in kept {
+        step("release a held frame", stream.release(frame))?;
+    }
+    Ok((taken, held))
 }
 
 fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Result<(), String> {
@@ -230,7 +266,7 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     let taken = take(&client, index, &name);
     stop.store(true, Ordering::Release);
     let fired = firing.join().map_err(|_| "the fire thread panicked")?;
-    let frames = taken?;
+    let (frames, held) = taken?;
     let size = layout.size as usize;
     let fired = fired?;
     step("stop", camera.stop())?;
@@ -302,6 +338,31 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
             "each frame carries the pattern its sequence names ({})",
             match &follows {
                 Ok(base) => format!("base {base}, {} frames", frames.len()),
+                Err(why) => why.clone(),
+            }
+        ),
+    );
+    // The held buffers, read after the fake fired on through the hold: each still carries its
+    // own frame's pattern, and the pattern follows the sequence on from the frames before it.
+    report.check(
+        held.len() == BUFFERS && held.iter().all(|h| h.uniform),
+        format_args!(
+            "{} frames held through a run of frames each keep one pattern value",
+            held.len()
+        ),
+    );
+    let all: Vec<(u64, u8)> = frames
+        .iter()
+        .map(|f| (f.sequence, f.first))
+        .chain(held.iter().map(|h| (h.sequence, h.first)))
+        .collect();
+    let held_follow = pattern_follows_sequence(&all);
+    report.check(
+        held_follow.is_ok(),
+        format_args!(
+            "the held frames still carry the pattern their sequence names ({})",
+            match &held_follow {
+                Ok(base) => format!("base {base}, {} frames held", held.len()),
                 Err(why) => why.clone(),
             }
         ),

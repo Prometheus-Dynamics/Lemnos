@@ -299,6 +299,12 @@ static void lrc_arm(struct lrc_dev *l)
 		return;
 	ret = lem_stream_next(l->stream, &l->next.slot);
 	if (ret) {
+		/*
+		 * Nothing to arm: ADDR0 goes to zero, as lrc_emb_arm does. Left alone it would still
+		 * hold the buffer the last frame end gave away, and the next frame start would latch
+		 * it, so the frame after would be written into a buffer the client already holds.
+		 */
+		wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
 		if (ret == -ENOBUFS)
 			queue_delayed_work(system_highpri_wq, &l->retry,
 					   msecs_to_jiffies(LRC_RETRY_MS));
