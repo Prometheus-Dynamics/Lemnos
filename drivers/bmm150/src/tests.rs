@@ -520,3 +520,18 @@ fn a_value_the_chip_cannot_use_is_refused_and_its_edges_pass() {
         Ok(())
     );
 }
+
+#[test]
+fn first_read_is_again_until_the_start_up_tick_then_reads_values() {
+    // The host ticks from bind: the first tick powers the chip on, and the tick 3 ms later starts
+    // it. A read before that second tick is AGAIN; one after it reads the field.
+    let (mut board, sim) = chip();
+    sim.set_bytes(ADDRESS, reg(REG_DATA), &data(160, -320, 1000, XYZ1));
+    let mut mag = bind(&mut board, &[]).unwrap();
+    Lifecycle::tick(&mut mag, 0);
+    assert_eq!(mag.read(), Err(Status::AGAIN));
+    Lifecycle::tick(&mut mag, POWER_ON_NS - 1);
+    assert_eq!(mag.read(), Err(Status::AGAIN));
+    Lifecycle::tick(&mut mag, POWER_ON_NS);
+    assert!(mag.read().is_ok());
+}

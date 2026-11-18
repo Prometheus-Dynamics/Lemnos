@@ -792,6 +792,23 @@ impl Tool<'_> {
             .ok_or_else(|| format!("no device {name:?}"))
     }
 
+    /// Refuses to read or watch a device that is not running: it has no items, and the host
+    /// answers a call to it with NO_DEVICE. The error says its state and reason, so the empty list
+    /// is never printed as if the device had nothing to read.
+    fn must_run(&self, name: &str) -> Outcome {
+        let device = self.device(name)?;
+        if device.state == DeviceState::Running {
+            return Ok(());
+        }
+        let state = state_name(device.state);
+        Err(match device.reason.as_str() {
+            "" => format!("{name} is {state}"),
+            // The host's reason for a retry already starts with the state, as `retrying: attempt 1,`.
+            reason if reason.starts_with(state) => format!("{name} is {reason}"),
+            reason => format!("{name} is {state}: {reason}"),
+        })
+    }
+
     fn description(&self, name: &str) -> Result<(DeviceEntry, DeviceDescription), String> {
         let device = self.device(name)?;
         let description = self.client.describe(device.index).map_err(text)?;
@@ -988,6 +1005,7 @@ impl Tool<'_> {
     }
 
     fn read_all(&mut self, name: &str) -> Outcome {
+        self.must_run(name)?;
         let (_, description) = self.description(name)?;
         for item in description
             .items
@@ -1000,6 +1018,7 @@ impl Tool<'_> {
     }
 
     fn read_one(&mut self, name: &str, wanted: &str) -> Outcome {
+        self.must_run(name)?;
         let (_, description) = self.description(name)?;
         let item = find_item(&description, wanted)?;
         self.read_item(name, &description, item)
@@ -1018,6 +1037,7 @@ impl Tool<'_> {
                 _ => return Err(USAGE.to_string()),
             }
         }
+        self.must_run(name)?;
         let (_, description) = self.description(name)?;
         let item = find_item(&description, wanted)?;
         let (contract, method) = method_of(&description, item)?;

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use lemnos_fake_devices::FakeCounter;
+use lemnos_fake_devices::{FakeCounter, FakeMagnetometer};
 use lemnos_host::board::{parse, parse_lenient};
 use lemnos_host::{Options, entry};
 use lemnos_sim::SimBoard;
@@ -36,14 +36,15 @@ fn start_with(packages: PackageReport) -> Running {
         [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
         [[devices]]\nid = \"stray\"\ndriver = \"fake-counter\"\nlink = \"nowhere\"\n\
         [[devices]]\nid = \"round\"\ndriver = \"fake-counter\"\nlink = \"about\"\n\
-        [[devices]]\nid = \"about\"\ndriver = \"fake-counter\"\nlink = \"round\"\n";
+        [[devices]]\nid = \"about\"\ndriver = \"fake-counter\"\nlink = \"round\"\n\
+        [[devices]]\nid = \"mag\"\ndriver = \"fake-magnetometer\"\n[devices.config]\nrefusal = \"absent\"\n";
     let config = Config {
         socket: socket.clone(),
         name: "t".to_string(),
         // Lenient: the two devices that link to each other are a loop, which the strict reader
         // refuses and the daemon starts without (the device that closes it is refused).
         board: parse_lenient(text).unwrap(),
-        drivers: vec![entry::<FakeCounter>()],
+        drivers: vec![entry::<FakeCounter>(), entry::<FakeMagnetometer>()],
         backend: Box::new(SimBoard::new()),
         options: Options::default(),
     };
@@ -69,7 +70,7 @@ fn list_shows_every_device_and_why_one_is_down() {
     let running = start();
     let text = ctl(&running, &["list"]).unwrap();
     let rows: Vec<&str> = text.lines().collect();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 9);
     assert!(rows[0].starts_with("thing "));
     assert!(rows[0].contains("running"));
     assert!(rows[0].contains("example.counter/1"));
@@ -207,6 +208,34 @@ fn unknown_things_are_explained() {
         ctl(&running, &["nonsense"])
             .unwrap_err()
             .contains("lemnos-ctl")
+    );
+}
+
+#[test]
+fn read_and_watch_of_a_device_that_is_not_running_say_its_state_and_reason() {
+    // `mag` is absent at bind: nothing is bound, so it has no items. Its read is an error that
+    // names the state and the reason, and the exit is non-zero (the error is what `main` prints).
+    let running = start();
+    let err = ctl(&running, &["read", "mag"]).unwrap_err();
+    assert!(err.starts_with("mag is retrying: "), "{err}");
+    assert!(err.contains("fake refusal: absent"), "{err}");
+    let err = ctl(&running, &["read", "mag", "count"]).unwrap_err();
+    assert!(err.starts_with("mag is retrying: "), "{err}");
+    let err = ctl(&running, &["watch", "mag", "count", "--count", "1"]).unwrap_err();
+    assert!(err.starts_with("mag is retrying: "), "{err}");
+    // A device the board names with no driver says that: its state is the host's reason.
+    let err = ctl(&running, &["read", "broken"]).unwrap_err();
+    assert!(err.starts_with("broken is retrying: "), "{err}");
+    assert!(err.contains("no driver named"), "{err}");
+    // A device that is off says so.
+    ctl(&running, &["off", "thing"]).unwrap();
+    let err = ctl(&running, &["read", "thing"]).unwrap_err();
+    assert!(err.starts_with("thing is off"), "{err}");
+    // A running device still reads.
+    ctl(&running, &["on", "thing"]).unwrap();
+    assert_eq!(
+        ctl(&running, &["read", "thing", "count"]).unwrap(),
+        "count = 42\n"
     );
 }
 
