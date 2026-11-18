@@ -41,6 +41,10 @@ mod regjob_ve;
 mod regjob_isp;
 #[path = "rs/pio.rs"]
 mod pio;
+#[path = "rs/stream.rs"]
+mod stream;
+#[path = "rs/gsdma.rs"]
+mod gsdma;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
