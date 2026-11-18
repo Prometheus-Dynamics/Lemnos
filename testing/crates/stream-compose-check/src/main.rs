@@ -44,8 +44,12 @@ const DEVICE: &str = "receiver";
 const FRAMES: usize = 12;
 /// How long the whole take may run.
 const DEADLINE: Duration = Duration::from_secs(20);
-/// The stream's buffers (`buffers` in the board): all of them are held in the hold phase.
-const BUFFERS: usize = 4;
+/// The frames the hold phase keeps: one reader's grant, `DEFAULT_HELD` in engine/host/src/stream/
+/// endpoint.rs (2). The shm form cuts a reader off past its granted count (docs/streams.md, the
+/// module's max_held), and a cut-off reader's buffers are reused, so the phase holds what it is
+/// granted and no more. With the producer's two buffers kept free, a reader can never hold every
+/// buffer, so the earlier "hold all four" phase is not a state this form reaches.
+const HELD: usize = 2;
 /// How long the held buffers stay held while the fake keeps firing frames.
 const HOLD: Duration = Duration::from_millis(300);
 /// How long lemnosd has to make its socket.
@@ -178,9 +182,9 @@ struct Held {
     uniform: bool,
 }
 
-/// The frames the client takes, in order, then the frames it holds through a run of frames: every
-/// buffer is kept while the fake keeps firing, so the driver finds none free at a frame end. Each
-/// held buffer must still carry its own frame's pattern when it is read again.
+/// The frames the client takes, in order, then the frames it holds (`HELD`, its grant) through a run
+/// of frames while the fake keeps firing. Each held buffer must still carry its own frame's pattern
+/// when it is read again: the module may not reuse a buffer its reader holds within the grant.
 fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held>), String> {
     let mut stream = step(
         "open the frame stream",
@@ -207,7 +211,7 @@ fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held
     }
     let mut kept = Vec::new();
     let deadline = Instant::now() + DEADLINE;
-    while kept.len() < BUFFERS && Instant::now() < deadline {
+    while kept.len() < HELD && Instant::now() < deadline {
         if let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? {
             kept.push(frame);
         }
@@ -348,7 +352,7 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     // The held buffers, read after the fake fired on through the hold: each still carries its
     // own frame's pattern, and the pattern follows the sequence on from the frames before it.
     report.check(
-        held.len() == BUFFERS && held.iter().all(|h| h.uniform),
+        held.len() == HELD && held.iter().all(|h| h.uniform),
         format_args!(
             "{} frames held through a run of frames each keep one pattern value",
             held.len()
