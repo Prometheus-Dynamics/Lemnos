@@ -373,6 +373,13 @@ impl<R: SdhciRegs> SdHost for SdhciHost<R> {
         self.wait_inhibit_clear(DAT_INHIBIT, 17)
     }
 
+    /// Resets the controller's command and data lines (`SOFTWARE_RESET` bits 1 and 2), the standard's
+    /// recovery after a command or data error. The clock and the card's state are not touched.
+    fn recover(&mut self) -> Result<(), SdError> {
+        self.set8(SOFTWARE_RESET, 0x06)?;
+        self.wait_clear8(SOFTWARE_RESET, 0x06)
+    }
+
     fn write_block(&mut self, data: &[u8; BLOCK]) -> Result<(), SdError> {
         self.wait_int(INT_WRITE_READY, 24)?;
         for word in 0..BLOCK / 4 {
@@ -422,6 +429,12 @@ mod tests {
         drops_writes: bool,
         /// The card never leaves the busy state after a write.
         stays_busy: bool,
+        /// Writes to this sector fail their data CRC this many times (the block is dropped, the data
+        /// line stays held until the controller's data line is reset).
+        crc_fails: Option<(usize, u32)>,
+        /// After a failed data phase the card waits for the transfer to be stopped (CMD12) and answers
+        /// no data command until then.
+        waits_for_stop: bool,
         writes: u32,
     }
 
@@ -442,6 +455,8 @@ mod tests {
                 busy_left: 0,
                 drops_writes: false,
                 stays_busy: false,
+                crc_fails: None,
+                waits_for_stop: false,
                 writes: 0,
             }
         }
@@ -529,6 +544,12 @@ mod tests {
                 return;
             };
             let index = (value >> 24) & 0x3f;
+            if (index == 17 || index == 24)
+                && self.words[PRESENT_STATE / 4].get() & DAT_INHIBIT != 0
+            {
+                self.words[PRESENT_STATE / 4].set(CMD_INHIBIT | DAT_INHIBIT);
+                return;
+            }
             let data_flag = (value >> 16) & 0x20 != 0;
             let reads = value & 0x10 != 0;
             let one_block = self.words[BLOCK_SIZE / 4].get() == (1 << 16) | BLOCK as u32;
@@ -536,6 +557,11 @@ mod tests {
             let acmd = core::mem::replace(&mut card.acmd, false);
             match index {
                 0 => self.raise(INT_CMD_DONE),
+                12 => {
+                    card.waits_for_stop = false;
+                    self.reply(0x900);
+                }
+                17 | 24 if card.waits_for_stop => self.raise(1 << 16),
                 8 => self.reply(arg),
                 55 => {
                     card.acmd = true;
@@ -613,6 +639,10 @@ mod tests {
                     if value & (1 << 24) != 0 {
                         self.words[MSHC_CTRL / 4].set(1);
                     }
+                    // A reset of the data line lets go of it.
+                    if value & (1 << 26) != 0 {
+                        self.words[PRESENT_STATE / 4].set(0);
+                    }
                     let was = self.words[offset / 4].get();
                     if value & !was & u32::from(CLOCK_PROG) != 0 {
                         self.divider_in_effect.set((value >> 8) & 0xff);
@@ -633,6 +663,16 @@ mod tests {
                     };
                     words.push(value);
                     if words.len() == BLOCK / 4 {
+                        if let Some((bad, left)) = card.crc_fails.as_mut()
+                            && *bad == *sector
+                            && *left > 0
+                        {
+                            *left -= 1;
+                            card.writing = None;
+                            card.waits_for_stop = true;
+                            self.raise(1 << 21);
+                            return;
+                        }
                         let at = *sector * BLOCK;
                         if !card.drops_writes {
                             for (i, word) in words.iter().enumerate() {
@@ -793,6 +833,35 @@ mod tests {
         let data: Vec<u8> = (0..2 * BLOCK).map(|i| (i * 5 + 1) as u8).collect();
         run(&mut card, &job(Op::Write, 40, 2, &data), &data, &mut |_| {}).unwrap();
         assert_eq!(held(&mut card, 40, 2), data);
+    }
+
+    #[test]
+    fn a_write_whose_data_fails_its_crc_is_sent_again_and_counted() {
+        // FLASH on the bench, piece 15: CMD24's data ended with the data CRC and end-bit errors.
+        let model = Model::with_card();
+        model.card.borrow_mut().as_mut().unwrap().crc_fails = Some((41, 2));
+        let mut card = model_card(model);
+        let data: Vec<u8> = (0..3 * BLOCK).map(|i| (i * 3 + 9) as u8).collect();
+        let done = run(&mut card, &job(Op::Write, 40, 3, &data), &data, &mut |_| {}).unwrap();
+        assert_eq!(done.retries, 2);
+        assert_eq!(held(&mut card, 40, 3), data);
+        // A sector that fails every try ends the piece with the card's error.
+        card.host_mut()
+            .regs
+            .card
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .crc_fails = Some((50, 9));
+        assert!(matches!(
+            run(
+                &mut card,
+                &job(Op::Write, 50, 1, &data[..BLOCK]),
+                &data[..BLOCK],
+                &mut |_| {}
+            ),
+            Err(PieceError::Card(50, _))
+        ));
     }
 
     #[test]

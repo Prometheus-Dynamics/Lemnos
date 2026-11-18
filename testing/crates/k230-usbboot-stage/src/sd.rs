@@ -190,6 +190,11 @@ pub trait SdHost {
     fn read_block(&mut self, out: &mut [u8; BLOCK]) -> Result<(), SdError>;
     /// Writes one block after a CMD24.
     fn write_block(&mut self, data: &[u8; BLOCK]) -> Result<(), SdError>;
+    /// Puts the command and data lines back in order after an error, so a command can be tried again.
+    /// A host with nothing to put back does nothing.
+    fn recover(&mut self) -> Result<(), SdError> {
+        Ok(())
+    }
 }
 
 /// A bit range of a 128-bit R2 value: bit `n` is `bytes[15 - n / 8] >> (n % 8)`.
@@ -309,6 +314,29 @@ impl<H: SdHost> Card<H> {
     /// The host under the card, for a setting the card protocol does not carry (the data clock).
     pub fn host_mut(&mut self) -> &mut H {
         &mut self.host
+    }
+
+    /// Brings the host and the card back to where a command can be tried again after a failed transfer:
+    /// the host's lines are put in order, the card is told to stop (CMD12; a card that was not in a
+    /// transfer does not answer it, which is not an error here), and its status is polled until it is
+    /// ready. Bench, 2026-11-18 (the resumed flash): after a write whose data failed, the card did not
+    /// answer the next CMD24 until it had been stopped.
+    pub fn recover(&mut self) -> Result<(), SdError> {
+        self.host.recover()?;
+        if command(&mut self.host, 12, 0, Expect::Short).is_err() {
+            self.host.recover()?;
+        }
+        for _ in 0..BUSY_POLLS {
+            match command(&mut self.host, 13, self.rca << 16, Expect::Short) {
+                Ok(Reply::Short(status)) if status & STATUS_READY != 0 => return Ok(()),
+                Ok(_) => {}
+                Err(_) => self.host.recover()?,
+            }
+        }
+        Err(SdError::Reply(
+            13,
+            "the card did not become ready after a failed transfer",
+        ))
     }
 
     /// Reads block `lba`.
