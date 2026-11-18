@@ -1599,11 +1599,13 @@ fn test_own_buffers(c: &mut Ctx, heap: &str, dev: &str) {
     own_fill(&mut o[0]);
     give_back(&mut s, f.buffer);
     fire(c, TCSI_FS);
-    // Buffer 0 holds the newest frame, which the module never takes back (lem_stream_take), so it is
-    // not re-armed yet: buffer 1, armed before, stays the one the channel writes next.
+    // Buffer 0 is the newest frame, and no reader has read it (none has a marks page), so the module
+    // does not take it back yet (lem_stream_newest_read). Nothing else is free: the channel has no
+    // buffer to arm, so its address is zero, as lrc_arm leaves it (kernel/lemnos_rp1_csi2.c,
+    // FLAKE-COMPOSE). It is not left at buffer 1's, the buffer this frame start used.
     check!(
-        armed_addr(c) == o[1].addr,
-        "the newest frame's buffer is not re-armed; buffer 1 stays armed ({:x}, its {:x})",
+        armed_addr(c) == 0,
+        "the newest frame's buffer is not re-armed and nothing is armed; the address is zero ({:x}, buffer 1 was {:x})",
         armed_addr(c),
         o[1].addr
     );
