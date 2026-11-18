@@ -12,6 +12,10 @@ The module is Rust. It builds only against a kernel with `CONFIG_RUST=y`; there 
   wanted, needs clang too.
 - Toolchain: rustc 1.99.0 with `rust-src` (`rust-toolchain.toml`), bindgen-cli 0.73.2 (the kernel needs
   0.71.1 or later).
+- The module build runs bindgen itself: `rs/bindings.h` names the kernel headers the kernel crate's bindings
+  leave out (the SPI core) and the module's own uAPI structs. The Kbuild generates
+  `lemnos_bindings_generated.rs` from it with the kernel's `BINDGEN` and this directory's C flags, as
+  `rust/Makefile` makes the kernel's own, so no layout is written by hand. `rs/bindings.rs` includes it.
 - Build: `make -C <kernel build> M=<this directory> LLVM=1 modules`.
 - Arch: x86_64 is built and tested in QEMU. arm64 and riscv64 are cross-built (see the PR that states
   it); riscv64 needs clang, and a riscv64 kernel with Rust is a named limit until it is booted on a board.
