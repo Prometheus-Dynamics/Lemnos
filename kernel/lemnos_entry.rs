@@ -63,6 +63,8 @@ mod vip;
 mod pisp_fe;
 #[path = "rs/rp1_csi2.rs"]
 mod rp1_csi2;
+#[path = "rs/pisp_be.rs"]
+mod pisp_be;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
