@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-line-hold"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check tool: a second process that claims one GPIO line and holds it, leaving its direction and level alone, until it is ended (B15 check 6)"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux = { path = "../../../backends/linux" }

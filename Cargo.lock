@@ -2663,6 +2663,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-line-hold"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux",
+]
+
+[[package]]
 name = "lemnos-linux"
 version = "2.0.1-dev"
 dependencies = [
