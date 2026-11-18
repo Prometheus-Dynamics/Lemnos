@@ -210,16 +210,16 @@ the sources and the QEMU harness's configuration.
 | Symbol | Value | Requirement | Needed for |
 | --- | --- | --- | --- |
 | `CONFIG_MODULES` | `y` | optional | Building and loading `lemnos.ko` as a module. Not needed for the in-tree route |
-| `CONFIG_PM` | `y` | required | `devm_pm_runtime_enable`, `__pm_runtime_idle`, `__pm_runtime_resume` (`lemnos_vip.c`, `lemnos_power.c`) |
+| `CONFIG_PM` | `y` | required | `devm_pm_runtime_enable`, `__pm_runtime_idle`, `__pm_runtime_resume` (`rs/vip.rs`, `rs/power.rs`) |
 | `CONFIG_OF` | `y` | required | Every block is a device tree node: CSI-2 endpoint lookup (`of_graph_get_endpoint_by_regs`, `lemnos_rp1_csi2.c`) and PWM xlate (`of_pwm_xlate_with_flags`, `lemnos_pwm.c`) |
 | `CONFIG_I2C` | `y` | required | `i2c_transfer`, `i2c_smbus_xfer`, `i2c_get_adapter` (`rs/bus.rs`) |
 | `CONFIG_SPI` | `y` | required | `spi_sync`, `spi_setup`, `__spi_register_driver` (`rs/bus.rs`). `SPI_MASTER` follows from it (`default SPI`) |
 | `CONFIG_GPIOLIB` | `y` | required | `gpiod_*`, `gpio_device_*` (`lemnos_gpio.c`), and `gpio_request` and `gpio_free`, which are in `gpiolib-legacy.c`; `GPIOLIB_LEGACY` is `def_bool y` in this tree |
 | `CONFIG_PWM` | `y` | required | `pwm_apply_might_sleep`, `pwm_put`, `of_pwm_xlate_with_flags` (`lemnos_pwm.c`) |
-| `CONFIG_REGULATOR` | `y` | required | `regulator_*` (`lemnos_power.c`) |
+| `CONFIG_REGULATOR` | `y` | required | `regulator_*` (`rs/power.rs`) |
 | `CONFIG_THERMAL` | `y` | required | `thermal_zone_get_temp`, `thermal_zone_get_zone_by_name` (`rs/events.rs`) |
-| `CONFIG_RESET_CONTROLLER` | `y` | required | `reset_control_*`, `__devm_reset_control_get` (`lemnos_power.c`, register jobs, VIP) |
-| `CONFIG_COMMON_CLK` | `y` | required | `clk_prepare`, `clk_unprepare`, `clk_bulk_*`, `devm_clk_*` (`lemnos_power.c`, register jobs, CSI-2). `HAVE_CLK` is selected by it |
+| `CONFIG_RESET_CONTROLLER` | `y` | required | `reset_control_*`, `__devm_reset_control_get` (`rs/power.rs`, register jobs, VIP) |
+| `CONFIG_COMMON_CLK` | `y` | required | `clk_prepare`, `clk_unprepare`, `clk_bulk_*`, `devm_clk_*` (`rs/power.rs`, register jobs, CSI-2). `HAVE_CLK` is selected by it |
 | `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `rs/regjob.rs`) |
 | `CONFIG_SHMEM` | `y` | required | `shmem_mapping`: the memfd behind a stream's buffers (`lemnos_stream.c`; 7.3.5 no longer inlines `shmem_file`, so the module reads the mapping itself) |
 | `CONFIG_EVENTFD` | `y` | required | `eventfd_ctx_fdget`, `eventfd_ctx_put`, `eventfd_signal_mask` (stream completion) |

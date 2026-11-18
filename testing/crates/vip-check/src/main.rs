@@ -85,7 +85,7 @@ const fn vip_slot_addr(n: u32) -> u32 {
 }
 const _: () = assert!(vip_slot_addr(12) == 0xd000_0000);
 
-// lemnos_vip.h: the commands (the encodings lemnos_vip.c cites) and the fake's own states.
+// lemnos_vip.h: the commands (the encodings rs/vip.rs cites) and the fake's own states.
 const fn state(addr: u32, n: u32) -> u32 {
     (1 << 27) | (n << 16) | addr
 }

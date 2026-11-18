@@ -45,7 +45,7 @@
 //! # What closes it: the block in `lemnos.ko`
 //!
 //! With the block named in the module's `vip9000` parameter, the module drives it
-//! (`kernel/lemnos_vip.c`): (1) one root table, whose entries while a job runs lead to the module's
+//! (`kernel/rs/vip.rs`): (1) one root table, whose entries while a job runs lead to the module's
 //! copy of the job's program (read-only) and to the job's slots, each from a dma-buf registered on
 //! the stream, and are cleared when the job ends; (2) the register window, interrupt and MMU
 //! stay in the kernel, and a program is checked at load to hold no command that reaches the
