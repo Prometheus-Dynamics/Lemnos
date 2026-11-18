@@ -39,6 +39,8 @@ mod regjob_profile;
 mod regjob_ve;
 #[path = "rs/regjob_isp.rs"]
 mod regjob_isp;
+#[path = "rs/pio.rs"]
+mod pio;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
