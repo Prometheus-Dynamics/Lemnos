@@ -360,7 +360,7 @@ fn a_gap_within_the_bound_integrates_its_whole_length() {
 }
 
 #[test]
-fn a_gap_beyond_the_bound_is_held_and_steps_resume_after_it() {
+fn a_gap_beyond_the_bound_integrates_nothing_and_steps_resume_after_it() {
     // A 2 s gap at 0.2 rad/s: the gap is not integrated, so the heading does not move on the read
     // that ends it. The reads after it integrate again, from that read on.
     let b = level_bench();
@@ -395,48 +395,6 @@ fn a_gap_beyond_the_bound_is_held_and_steps_resume_after_it() {
         (next.z - before - 0.002).abs() < TURN_TOL,
         "yaw {} after one 10 ms step",
         next.z - before
-    );
-}
-
-#[test]
-fn after_a_gap_the_tilt_reconverges_from_the_accelerometer_without_a_jump() {
-    // Level and still, then the board is rolled by 0.4 rad during a 2 s gap. The read that ends
-    // the gap does not move the attitude. Reads at 50 Hz after it pull the tilt to the accelerometer
-    // (0.4 rad): within 0.01 rad by 3 s, and within 0.02 rad by 10 s. The integral term (ki) makes
-    // the approach overshoot by about 0.015 rad for a step this size, and that tail settles slowly;
-    // the measured curve is 0.004 rad at 3 s, -0.0145 at 5 s, -0.014 at 10 s.
-    let b = level_bench();
-    let mut o = driver(b, false, &[]);
-    for t in regular(10 * MS, 1_000 * MS) {
-        b.move_to(t);
-        o.read().expect("reads");
-    }
-    let at_gap = read_at(b, &mut o, 3_000 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
-    assert!(
-        at_gap.x.abs() < 1e-6,
-        "the gap moved the roll to {}",
-        at_gap.x
-    );
-    let mut at_3s = None;
-    let mut r = at_gap;
-    for t in regular(20 * MS, 10_000 * MS)
-        .into_iter()
-        .filter(|&t| t > 3_000 * MS)
-    {
-        r = read_at(b, &mut o, t, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
-        if t == 6_000 * MS {
-            at_3s = Some(r.x);
-        }
-    }
-    let at_3s = at_3s.expect("a read at 6 s");
-    assert!(
-        (at_3s - 0.4).abs() < 0.01,
-        "roll {at_3s} at 3 s after the gap, want 0.4"
-    );
-    assert!(
-        (r.x - 0.4).abs() < 0.02,
-        "roll {} at 10 s after the gap, want 0.4",
-        r.x
     );
 }
 
@@ -612,4 +570,184 @@ fn describes_roll_pitch_and_yaw_in_radians() {
     let names: Vec<&str> = d.items().map(|i| i.name).collect();
     assert_eq!(names, ["roll", "pitch", "yaw"]);
     let _ = format!("{names:?}");
+}
+
+/// The field a board at (roll, pitch, yaw) sees, in tesla: the Earth's field, turned into the board.
+fn field_body(roll: f32, pitch: f32, yaw: f32) -> Vector3 {
+    let (h, v) = (FIELD_UT * DIP.cos(), FIELD_UT * DIP.sin());
+    let m = Quat::from_euler_rad(roll, pitch, yaw)
+        .conj()
+        .rotate([h, 0.0, -v]);
+    vec3(m[0] * 1e-6, m[1] * 1e-6, m[2] * 1e-6)
+}
+
+/// Attitudes (roll, pitch, yaw) a board is held at, one per read, rad.
+const STEPS: [(f32, f32, f32); 5] = [
+    (0.1, 0.0, 0.3),
+    (0.3, -0.1, -0.5),
+    (-0.2, 0.2, 1.0),
+    (0.0, 0.0, 2.0),
+    (0.4, 0.1, 2.5),
+];
+
+#[test]
+fn a_one_hertz_client_sees_each_new_tilt_on_the_next_read() {
+    // One read a second, the board tilted to a new attitude before each read. Each read is a
+    // gap of 1 s, so each must show the tilt the accelerometer shows at that read.
+    let b = bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 0.0)));
+    let mut o = driver(b, false, &[]);
+    for (k, &(r, p, _)) in STEPS.iter().enumerate() {
+        let out = read_at(
+            b,
+            &mut o,
+            k as u64 * 1_000 * MS,
+            posed(r, p),
+            vec3(0.0, 0.0, 0.0),
+        );
+        assert!(
+            (out.x - r).abs() < TURN_TOL,
+            "step {k}: roll {} want {r}",
+            out.x
+        );
+        assert!(
+            (out.y - p).abs() < TURN_TOL,
+            "step {k}: pitch {} want {p}",
+            out.y
+        );
+    }
+}
+
+#[test]
+fn a_one_hertz_nine_axis_client_sees_each_new_tilt_and_heading_on_the_next_read() {
+    let b = bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 0.0)));
+    let mut o = driver(b, true, &[("mode", ConfigValue::Str("9axis"))]);
+    for (k, &(r, p, y)) in STEPS.iter().enumerate() {
+        b.set(MAG, Some(field_body(r, p, y)));
+        let out = read_at(
+            b,
+            &mut o,
+            k as u64 * 1_000 * MS,
+            posed(r, p),
+            vec3(0.0, 0.0, 0.0),
+        );
+        assert!(
+            (out.x - r).abs() < TURN_TOL,
+            "step {k}: roll {} want {r}",
+            out.x
+        );
+        assert!(
+            (out.y - p).abs() < TURN_TOL,
+            "step {k}: pitch {} want {p}",
+            out.y
+        );
+        assert!((out.z - y).abs() < 1e-3, "step {k}: yaw {} want {y}", out.z);
+    }
+}
+
+#[test]
+fn a_long_gap_then_fast_reads_gives_the_new_tilt_on_the_first_read_after_it() {
+    // Level at 100 Hz for 1 s, then nothing read for 3 s while the board rolls to 0.4 rad. The
+    // read that ends the gap shows 0.4 rad, and the fast reads after it keep it.
+    let b = level_bench();
+    let mut o = driver(b, false, &[]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        o.read().expect("reads");
+    }
+    let first = read_at(b, &mut o, 4_000 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    assert!(
+        (first.x - 0.4).abs() < TURN_TOL,
+        "roll {} on the first read after the gap",
+        first.x
+    );
+    let mut last = first;
+    for t in regular(10 * MS, 500 * MS).into_iter().skip(1) {
+        last = read_at(
+            b,
+            &mut o,
+            4_000 * MS + t,
+            posed(0.4, 0.0),
+            vec3(0.0, 0.0, 0.0),
+        );
+    }
+    assert!(
+        (last.x - 0.4).abs() < TURN_TOL,
+        "roll {} half a second later",
+        last.x
+    );
+}
+
+#[test]
+fn six_axis_yaw_is_kept_across_a_gap_and_the_tilt_is_not() {
+    // Yaw from the gyroscope for 1 s, then a 3 s gap with the board rolled to 0.4 rad. Nothing can
+    // restore yaw without a magnetometer, so the gap keeps it; the tilt comes from gravity at once.
+    let b = level_bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 0.2)));
+    let mut o = driver(b, false, &[]);
+    let mut before = vec3(0.0, 0.0, 0.0);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        before = o.read().expect("reads");
+    }
+    assert!(
+        (before.z - 0.2).abs() < TURN_TOL,
+        "yaw {} before the gap",
+        before.z
+    );
+    let after = read_at(b, &mut o, 4_000 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    assert!(
+        (after.z - before.z).abs() < 1e-5,
+        "yaw {} after, {} before",
+        after.z,
+        before.z
+    );
+    assert!(
+        (after.x - 0.4).abs() < TURN_TOL,
+        "roll {} after the gap",
+        after.x
+    );
+}
+
+#[test]
+fn a_gap_read_with_an_unusable_accelerometer_says_again_until_a_usable_sample() {
+    // The same gap, but the board is being shaken at the gap read (2 g) and reads AGAIN, as the
+    // first read does for an unusable sample. The next usable sample re-seeds the tilt.
+    let b = level_bench();
+    let mut o = driver(b, false, &[]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        o.read().expect("reads");
+    }
+    b.move_to(4_000 * MS);
+    b.set(ACCEL, Some(vec3(0.0, 0.0, 2.0 * G)));
+    assert_eq!(o.read(), Err(Status::AGAIN));
+    let next = read_at(b, &mut o, 4_500 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    assert!(
+        (next.x - 0.4).abs() < TURN_TOL,
+        "roll {} after a usable sample",
+        next.x
+    );
+}
+
+#[test]
+fn a_reseed_after_a_gap_is_a_health_note_until_the_next_read() {
+    let b = level_bench();
+    b.set(MAG, Some(field_body(0.0, 0.0, 0.0)));
+    let mut o = driver(b, true, &[("mode", ConfigValue::Str("9axis"))]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        b.set(MAG, Some(field_body(0.0, 0.0, 0.0)));
+        o.read().expect("reads");
+    }
+    b.set(MAG, Some(field_body(0.4, 0.0, 0.0)));
+    read_at(b, &mut o, 4_000 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    match o.health() {
+        Health::Degraded(note) => assert!(note.contains("re-seeded"), "health says {note}"),
+        other => panic!("after a re-seed, health is {other:?}"),
+    }
+    b.set(MAG, Some(field_body(0.4, 0.0, 0.0)));
+    read_at(b, &mut o, 4_010 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    assert_eq!(o.health(), Health::Ok);
 }

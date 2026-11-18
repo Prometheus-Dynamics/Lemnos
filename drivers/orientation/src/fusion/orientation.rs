@@ -109,8 +109,8 @@ pub struct Output {
 
 /// A magnetometer sample is fresh for this long (µs).
 const MAG_FRESH_US: u64 = 500_000;
-/// The longest step integrated as one step (µs). A longer gap between IMU samples holds the attitude
-/// for that sample and integrates nothing across it: its rate is unknown.
+/// The longest step integrated as one step (µs). A longer gap between IMU samples integrates nothing
+/// across it (its rate is unknown): the sample re-seeds the attitude from the sensors instead.
 const GAP_US: u64 = 500_000;
 /// Integral term limit (rad/s).
 const INTEGRAL_MAX: f32 = 0.5;
@@ -126,6 +126,14 @@ const FIELD_TOL: f32 = 0.15;
 const DIP_TOL: f32 = 0.174_532_93;
 /// EMA weight for the learned field magnitude and dip reference.
 const LEARN_ALPHA: f32 = 0.02;
+
+/// The heading (yaw) of a board at `roll` and `pitch` whose magnetometer reads `m` (sensor frame, µT).
+fn heading(roll: f32, pitch: f32, m: Vec3) -> f32 {
+    // The field in the body, turned by the tilt, is horizontal in the level frame: its direction is the heading.
+    let level = Quat::from_euler_rad(roll, pitch, 0.0);
+    let u = level.rotate(m);
+    -atan2(u[1], u[0])
+}
 
 /// The orientation filter. Feed it with [`Orientation::update_imu`] and
 /// [`Orientation::update_mag`]; read [`Orientation::output`].
@@ -149,6 +157,10 @@ pub struct Orientation {
     mag_pending: Option<Vec3>,
     field_ref: Option<f32>,
     dip_ref: Option<f32>,
+    /// A gap was seen and its sample had no usable accelerometer: the next usable sample re-seeds.
+    waiting: bool,
+    /// The last sample re-seeded the attitude after a gap (cleared by the next normal step).
+    reseeded: bool,
     out: Output,
 }
 
@@ -172,6 +184,8 @@ impl Orientation {
             mag_pending: None,
             field_ref: None,
             dip_ref: None,
+            waiting: false,
+            reseeded: false,
             out: Output::default(),
         }
     }
@@ -189,17 +203,7 @@ impl Orientation {
     /// One IMU sample at `t_us`: calibrated gyroscope (rad/s) and
     /// accelerometer (m/s²), sensor frame.
     pub fn update_imu(&mut self, t_us: u64, gyro: Vec3, accel: Vec3) {
-        let a_mag = norm(accel);
-        let (dir, w) = if a_mag > 1e-6 {
-            (scale(accel, 1.0 / a_mag), accel_trust(a_mag))
-        } else {
-            ([0.0; 3], 0.0)
-        };
-        self.accel = accel;
-        self.accel_dir = dir;
-        self.accel_w = w;
-        self.accel_dip_ok = w >= 0.9;
-        self.still = norm(gyro) < STILL_GYRO && w >= 0.99;
+        self.take_inputs(gyro, accel);
 
         if !self.valid {
             // Start from the first usable accelerometer sample: an unusable one
@@ -214,12 +218,29 @@ impl Orientation {
         }
 
         let dt_us = t_us.saturating_sub(self.last_t);
-        self.last_t = t_us;
-        if dt_us == 0 || dt_us > GAP_US {
-            // No time since the last sample, or a gap: keep the attitude and do not integrate across it.
+        if dt_us == 0 {
+            // No time since the last sample: nothing to integrate.
             self.refresh_output();
             return;
         }
+        if dt_us > GAP_US {
+            // A gap. Nothing is integrated across it: the gyroscope's rate over it is unknown. The
+            // sensors give the attitude directly, so this sample re-seeds it, as the first usable
+            // sample does. An accelerometer with no usable tilt (shaken, or far from 1 g) cannot seed
+            // it: as the first read does, this read says AGAIN, and last_t stays put so that the next
+            // usable sample is still a gap and re-seeds.
+            if self.accel_w > 0.0 {
+                self.reseed(t_us);
+                self.waiting = false;
+                self.reseeded = true;
+            } else {
+                self.waiting = true;
+            }
+            self.refresh_output();
+            return;
+        }
+        self.last_t = t_us;
+        self.reseeded = false;
         let dt = dt_us as f32 * 1e-6;
 
         let mag_fresh = self.mag_fresh();
@@ -235,8 +256,39 @@ impl Orientation {
         self.refresh_output();
     }
 
+    /// The inputs of this sample, for the checks a magnetometer sample makes against them (the dip).
+    fn take_inputs(&mut self, gyro: Vec3, accel: Vec3) {
+        let a_mag = norm(accel);
+        let (dir, w) = if a_mag > 1e-6 {
+            (scale(accel, 1.0 / a_mag), accel_trust(a_mag))
+        } else {
+            ([0.0; 3], 0.0)
+        };
+        self.accel = accel;
+        self.accel_dir = dir;
+        self.accel_w = w;
+        self.accel_dip_ok = w >= 0.9;
+        self.still = norm(gyro) < STILL_GYRO && w >= 0.99;
+    }
+
+    /// A magnetometer sample taken with the IMU sample `gyro`, `accel` of the same time. The dip check
+    /// uses this sample's gravity, so the caller passes the IMU sample before the field (see `update_mag`).
+    pub fn update_mag_with_imu(
+        &mut self,
+        t_us: u64,
+        field_ut: Vec3,
+        trusted: bool,
+        gyro: Vec3,
+        accel: Vec3,
+    ) {
+        self.take_inputs(gyro, accel);
+        self.update_mag(t_us, field_ut, trusted);
+    }
+
     /// One magnetometer sample at `t_us`: calibrated field (µT, sensor frame).
-    /// `trusted` is false while the magnetometer's calibration is not applied.
+    /// `trusted` is false while the magnetometer's calibration is not applied. The dip check uses the
+    /// gravity of the last IMU sample; use `update_mag_with_imu` when the field and the IMU sample are
+    /// taken together.
     pub fn update_mag(&mut self, t_us: u64, field_ut: Vec3, trusted: bool) {
         self.mag_seen = true;
         self.mag_t = t_us;
@@ -295,12 +347,42 @@ impl Orientation {
         self.out
     }
 
+    /// Whether a gap's sample had no usable accelerometer, so the attitude is not re-seeded yet.
+    pub fn waiting_for_accel(&self) -> bool {
+        self.waiting
+    }
+
+    /// Whether the last sample re-seeded the attitude after a gap.
+    pub fn reseeded(&self) -> bool {
+        self.reseeded
+    }
+
     fn mag_fresh(&self) -> bool {
         self.mag_seen && self.last_t.saturating_sub(self.mag_t) <= MAG_FRESH_US
     }
 
     fn disturbance_flag(&self) -> bool {
         self.config.mode == Mode::NineAxis && !(self.mag_fresh() && self.mag_ok)
+    }
+
+    /// Re-seeds the attitude at `t_us` from the sensors, as the first usable sample does: the tilt
+    /// from gravity, and in nine-axis the heading from a fresh usable magnetometer sample. Otherwise
+    /// the heading is kept as it was (nothing measures it). The integral term restarts.
+    fn reseed(&mut self, t_us: u64) {
+        let a = self.accel;
+        let roll = atan2(a[1], a[2]);
+        let pitch = atan2(-a[0], sqrt(a[1] * a[1] + a[2] * a[2]));
+        let fresh_mag = self.config.mode == Mode::NineAxis
+            && self.mag_seen
+            && self.mag_ok
+            && t_us.saturating_sub(self.mag_t) <= MAG_FRESH_US;
+        let yaw = match self.mag_pending {
+            Some(m) if fresh_mag => heading(roll, pitch, m),
+            _ => self.q.euler().2,
+        };
+        self.q = Quat::from_euler_rad(roll, pitch, yaw);
+        self.integral = [0.0; 3];
+        self.last_t = t_us;
     }
 
     /// Starts from the accelerometer's tilt. In nine-axis mode, a fresh
@@ -319,9 +401,7 @@ impl Orientation {
             && self.mag_ok
             && let Some(m) = self.mag_pending
         {
-            let level = Quat::from_euler_rad(roll, pitch, 0.0);
-            let u = level.conj().rotate(m);
-            yaw = -atan2(u[1], u[0]);
+            yaw = heading(roll, pitch, m);
         }
         self.q = Quat::from_euler_rad(roll, pitch, yaw);
         self.integral = [0.0; 3];
