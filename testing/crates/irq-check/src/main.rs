@@ -188,9 +188,8 @@ fn main() -> ExitCode {
     );
     let first = ev.count;
 
-    // Masked since it fired: an injection is not delivered. A level interrupt is not resent on
-    // enable (a real device still holds its line, so it fires again); an injected one is gone once
-    // the controller took it. Either way the next one after enable arrives.
+    // Masked since it fired: an injection is not delivered. The test interrupt is an edge: an
+    // injection latched while masked is delivered on enable.
     check(
         &mut failures,
         module::test_irq(fd.as_fd(), block, 0).is_ok(),
@@ -209,33 +208,50 @@ fn main() -> ExitCode {
         module::irq_enable(fd.as_fd(), block, 0).is_ok(),
         "enable",
     );
-    if ready_within(&fd, 200) {
-        if let Some(e) = read_event(&fd) {
-            ev = e;
-            say(&format!(
-                "     the masked one was resent on enable (an edge interrupt), count {}",
-                ev.count
-            ));
-        } else {
-            say("     the masked one was not resent (a level interrupt, its line not held)");
-        }
+    let resent = if ready_within(&fd, 200) {
+        read_event(&fd)
     } else {
-        say("     the masked one was not resent (a level interrupt, its line not held)");
-    }
-    let next = module::irq_enable(fd.as_fd(), block, 0).is_ok()
-        && module::test_irq(fd.as_fd(), block, 0).is_ok()
-        && ready_within(&fd, 1000)
-        && match read_event(&fd) {
-            Some(e) => {
-                ev = e;
-                true
-            }
-            None => false,
-        }
-        && ev.count > first;
+        None
+    };
     check(
         &mut failures,
-        next,
+        resent.is_some(),
+        "the masked edge is resent on enable (none within 200 ms)",
+    );
+    if let Some(e) = resent {
+        ev = e;
+    }
+    say(&format!(
+        "     the masked edge was resent on enable, count {}",
+        ev.count
+    ));
+    // An injection that reaches the line while its handler is still running on another CPU is
+    // dropped by the kernel, not by the module: the test interrupt is a simple-flow simulated line,
+    // which does not replay an interrupt that arrives in progress (kernel/irq/chip.c,
+    // handle_simple_irq; irq_sim does not set IRQD_RESEND_WHEN_IN_PROGRESS). The module's handler
+    // never ran for it, so nothing is pending to replay. A dropped one leaves nothing behind, so
+    // the check injects again until one is delivered.
+    check(
+        &mut failures,
+        module::irq_enable(fd.as_fd(), block, 0).is_ok(),
+        "enable again",
+    );
+    let mut got = false;
+    for _ in 0..20 {
+        if module::test_irq(fd.as_fd(), block, 0).is_err() {
+            break;
+        }
+        if ready_within(&fd, 50)
+            && let Some(e) = read_event(&fd)
+        {
+            ev = e;
+            got = true;
+            break;
+        }
+    }
+    check(
+        &mut failures,
+        got && ev.count > first,
         &format!("the next one after enable arrives (count {})", ev.count),
     );
     check(
