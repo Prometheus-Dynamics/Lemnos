@@ -57,17 +57,10 @@ void lem_power_set_block(struct lem_power *p, u32 block);
 long lem_power_request(struct lem_power *p, struct lemnos_power *r);
 void lem_power_destroy(struct lem_power *p);
 
-#ifdef LEMNOS_HAVE_PIO
 long lem_pio_open(const struct lemnos_pio_open *o);
 long lem_pio_call(struct lemnos_pio_call *c);
 long lem_pio_config_xfer(const struct lemnos_pio_config_xfer *c);
 long lem_pio_xfer(const struct lemnos_pio_xfer *x);
-#else
-static inline long lem_pio_open(const struct lemnos_pio_open *o) { return -ENOTTY; }
-static inline long lem_pio_call(struct lemnos_pio_call *c) { return -ENOTTY; }
-static inline long lem_pio_config_xfer(const struct lemnos_pio_config_xfer *c) { return -ENOTTY; }
-static inline long lem_pio_xfer(const struct lemnos_pio_xfer *x) { return -ENOTTY; }
-#endif
 
 /* rs/bus.rs */
 long lem_i2c_transfer(const struct lemnos_i2c_transfer *t);

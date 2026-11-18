@@ -59,13 +59,12 @@ clean-files += lemnos_bindings_generated.rs
 $(obj)/lemnos_entry.o: $(obj)/lemnos_bindings_generated.rs
 # rs/bindings.rs includes the generated file by this path: the object directory, in tree or out of it.
 export LEMNOS_BINDINGS := $(abspath $(obj)/lemnos_bindings_generated.rs)
-# The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
+# The PIO part (rs/pio.rs) calls the RP1 PIO driver only for a kernel that has it, built in or as a module.
 # A built-in lemnos needs RP1_PIO=y as well: a built-in object cannot link to a module's symbols.
 # A module holds a reference to itself while a register job is wedged (rs/regjob.rs); without modules there is none.
 ifneq ($(CONFIG_MODULES),)
 rustflags-y += --cfg lemnos_modules
 endif
 ifneq ($(CONFIG_RP1_PIO),)
-ccflags-y += -DLEMNOS_HAVE_PIO
-lemnos-y += lemnos_pio.o
+rustflags-y += --cfg lemnos_have_pio
 endif
