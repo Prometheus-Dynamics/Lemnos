@@ -239,7 +239,8 @@ pub struct Stamper {
 The need is `BusKind::HostClock`. It is not hardware: no board file names it, and a board's `bus` or
 `uses` never reaches it. The backend supplies it through `Provider::host_clock`: a sim board hands
 over its simulated clock, so a test moves time by hand; a Linux board hands over `CLOCK_MONOTONIC`,
-the clock `tick(now_ns)` and every stream stamp is on. A backend with no clock refuses the bind,
+the clock `tick(now_ns)` and every stream stamp is on; a static table (`lemnos-host-static`) hands
+over the clock it was made with. A backend with no clock refuses the bind,
 and the refusal names the need (`this backend has no host clock for "clock"`). Declared `Option`,
 the need is `None` on such a backend, and the driver says what it does without a clock.
 
