@@ -9,3 +9,4 @@
 #include <linux/thermal.h>
 
 #include "../lemnos.h"
+#include "../lemnos_regjob_priv.h"

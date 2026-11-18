@@ -332,7 +332,7 @@ pub const ADDRESS_REGISTERS: [u32; 6] = [
 ];
 
 // The frame path, as the `k230isp-frames` driver programs it through `lemnos.ko` (which writes
-// the main path's addresses itself; see `kernel/lemnos_regjob_k230isp.c`). From
+// the main path's addresses itself; see `kernel/rs/regjob_isp.rs`). From
 // `vvcam/isp/mrv_all_regs.h` and `mrv_all_bits.h` (VeriSilicon, MIT) as published in
 // `nxp-imx/isp-vvcam` at `e6453233e67f5d2f180d6ec277158dd54fa67a25`, and how
 // `vvcam/isp/isp_miv2.c` there sets the main path up.

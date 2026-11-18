@@ -4,7 +4,7 @@
  * reach memory is run by the module from a list of register values and the
  * caller's dma-bufs. What a caller may write, which registers take addresses
  * and how far the block reaches from each are the block's profile
- * (lemnos_regjob_<block>.c); this file is the part every profile shares.
+ * (rs/regjob_ve.rs, rs/regjob_isp.rs); this file is the part every profile shares.
  *
  * A job is copied into kernel memory once and only the copy is checked and
  * written. The module writes every address register itself, from a buffer
@@ -160,20 +160,6 @@ u32 lrj_rd(struct lem_rj *rj, u32 offset)
 void lrj_wr(struct lem_rj *rj, u32 offset, u32 value)
 {
 	writel(value, rj->regs + offset);
-}
-
-int lrj_value(const struct lrj_ctx *c, u32 offset, u32 *value)
-{
-	u32 seen = 0;
-
-	for (u32 i = 0; i < c->nw; i++) {
-		if (c->w[i].offset != offset)
-			continue;
-		if (seen++)
-			return -EINVAL;
-		*value = c->w[i].value;
-	}
-	return seen ? 0 : -EINVAL;
 }
 
 static void lrj_free(struct kref *ref)

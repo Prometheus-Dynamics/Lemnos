@@ -52,8 +52,8 @@ as soon as the module loads.
 | `gsdma` | Compatibles driven as the graphics DMA engine (`lemnos_gsdma.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_gsdma_fake_regs` | Test only. The graphics DMA engine's register window is ordinary memory, for the fake engine in QEMU. |
 | `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
-| `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`lemnos_regjob_a733.c`). Must also be in `owned`. Empty by default. |
-| `k230_isp` | Compatibles driven as the K230 ISP through register jobs (`lemnos_regjob_k230isp.c`): its main path's frames, and its configuration and statistics beside them. Must also be in `owned`. Empty by default. |
+| `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`rs/regjob_ve.rs`). Must also be in `owned`. Empty by default. |
+| `k230_isp` | Compatibles driven as the K230 ISP through register jobs (`rs/regjob_isp.rs`): its main path's frames, and its configuration and statistics beside them. Must also be in `owned`. Empty by default. |
 | `test_rj_fake_regs` | Test only. A register-job block's window is ordinary memory, for the fake blocks in QEMU. |
 | `vip9000` | Compatibles driven as the VIP9000 neural accelerator (`lemnos_vip.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_vip_fake_regs` | Test only. The VIP9000's register window is ordinary memory, for the fake block in QEMU. |
@@ -365,10 +365,10 @@ event.
 
 The A733 profile's register facts come from the vendor kernel (window, top register, reset bits,
 interrupt registers) and from the mainline Cedrus register list and a public reverse-engineered
-H.264 encoder (the encoder's address and geometry registers); `lemnos_regjob_a733.c` names each
+H.264 encoder (the encoder's address and geometry registers); `rs/regjob_ve.rs` names each
 source. The K230 profile's come from the VeriSilicon ISP register headers published under the MIT
 licence in `nxp-imx/isp-vvcam` and from the K230 SDK's device tree (`k230_linux_sdk` at
-`fc6cc21`); `lemnos_regjob_k230isp.c` names each. No code of theirs is copied.
+`fc6cc21`); `rs/regjob_isp.rs` names each. No code of theirs is copied.
 
 ## Buses
 

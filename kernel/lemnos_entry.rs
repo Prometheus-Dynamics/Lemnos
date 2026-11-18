@@ -29,6 +29,12 @@ mod bindings;
 mod bus;
 #[path = "rs/events.rs"]
 mod events;
+#[path = "rs/regjob_profile.rs"]
+mod regjob_profile;
+#[path = "rs/regjob_ve.rs"]
+mod regjob_ve;
+#[path = "rs/regjob_isp.rs"]
+mod regjob_isp;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
