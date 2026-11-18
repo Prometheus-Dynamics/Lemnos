@@ -17,8 +17,8 @@
 use crate::bindings as lb;
 use crate::param::param;
 use crate::stream::{
-    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Wq, ktime_add_ms, ktime_now,
-    module_hold, msecs_to_jiffies, usleep_range,
+    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Wq, dev_warn_ratelimited, ktime_add_ms,
+    ktime_now, module_hold, msecs_to_jiffies, usleep_range,
 };
 use core::{
     ffi::{c_int, c_long, c_void},
@@ -431,10 +431,9 @@ unsafe extern "C" fn lgd_watchdog(work: *mut bindings::work_struct) {
     if still {
         g.channel(true);
         st.timeouts += 1;
-        // The C rate-limits this warning; the kernel crate has no ratelimit, so it is printed each time.
         // SAFETY: the device is live while the block is.
         let d: &Device = unsafe { Device::from_raw(g.dev) };
-        dev_warn!(d, "job timed out; engine stopped and ready again\n");
+        dev_warn_ratelimited!(d, "job timed out; engine stopped and ready again\n");
         if !ps.is_null() {
             g.finish(&mut st, ps, 0);
         } else {
