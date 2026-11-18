@@ -155,6 +155,73 @@ struct Block {
     /// Jobs whose output 0 address was in no memory the module holds.
     stray: u32,
     bad_returns: u32,
+    /// Frames taken and not yet given back, and which of them were handed on (the real ring's holds).
+    holds: Holds,
+}
+
+/// The real ring's holds, as `LinuxHardware` asks for them (`Ring::hold_passing`): a frame taken from
+/// the stream holds its buffer until it is given back; one handed on to the consumer stays held and
+/// is no longer in the driver's hand; and while the driver has its limit in hand (`max(B - 2, 1)`),
+/// nothing is taken: the frames go by and are counted. A release or a hand-on with no hold is refused
+/// (`INVALID_ARGUMENT`), as `Ring::release` and `Ring::pass_on` refuse it.
+struct Holds {
+    held: Vec<u32>,
+    handed: Vec<u32>,
+    dropped_at_limit: u64,
+}
+
+impl Default for Holds {
+    fn default() -> Self {
+        Self {
+            held: vec![0; 64],
+            handed: vec![0; 64],
+            dropped_at_limit: 0,
+        }
+    }
+}
+
+impl Holds {
+    /// A new module stream has a new marks page: nothing is held on it.
+    fn clear(&mut self) {
+        self.held.fill(0);
+        self.handed.fill(0);
+    }
+
+    fn at_limit(&self, buffers: u32) -> bool {
+        let in_hand = self.held.iter().sum::<u32>() - self.handed.iter().sum::<u32>();
+        in_hand >= buffers.saturating_sub(2).max(1)
+    }
+
+    fn take(&mut self, buffer: u32) {
+        if let Some(held) = self.held.get_mut(buffer as usize) {
+            *held += 1;
+        }
+    }
+
+    fn hand_on(&mut self, buffer: u32) -> Result<()> {
+        let at = buffer as usize;
+        match (self.held.get(at), self.handed.get_mut(at)) {
+            (Some(held), Some(handed)) if *held > *handed => {
+                *handed += 1;
+                Ok(())
+            }
+            _ => Err(Status::INVALID_ARGUMENT),
+        }
+    }
+
+    fn release(&mut self, buffer: u32) -> Result<()> {
+        let at = buffer as usize;
+        match self.held.get_mut(at) {
+            Some(held) if *held > 0 => {
+                *held -= 1;
+                if let Some(handed) = self.handed.get_mut(at) {
+                    *handed = handed.saturating_sub(1);
+                }
+                Ok(())
+            }
+            _ => Err(Status::INVALID_ARGUMENT),
+        }
+    }
 }
 
 impl Block {
@@ -218,6 +285,7 @@ impl Hardware for Hw {
             b.output0_bytes = plan.output0_bytes;
             b.queue.clear();
             b.finished.clear();
+            b.holds.clear();
             b.buffers = (0..plan.buffers)
                 .map(|_| Buffer {
                     memory: None,
@@ -303,18 +371,40 @@ impl Hardware for Hw {
     }
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {
-        Ok(self.with(|b| b.finished.pop_front()))
+        Ok(self.with(|b| {
+            // The driver's limit in hand: nothing is taken, the frames go by, and their buffers are
+            // the module's again.
+            if b.holds.at_limit(b.buffers.len() as u32) {
+                while let Some(frame) = b.finished.pop_front() {
+                    b.holds.dropped_at_limit += 1;
+                    if let Some(slot) = b.buffers.get_mut(frame.buffer as usize) {
+                        slot.at = Where::Free;
+                    }
+                }
+                return None;
+            }
+            let frame = b.finished.pop_front()?;
+            b.holds.take(frame.buffer);
+            Some(frame)
+        }))
+    }
+
+    fn handed_on(&mut self, buffer: u32) -> Result<()> {
+        self.with(|b| b.holds.hand_on(buffer))
     }
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {
-        self.with(|b| match b.buffers.get_mut(buffer as usize) {
-            Some(slot) if slot.at == Where::Out => {
-                slot.at = Where::Free;
-                Ok(())
-            }
-            _ => {
-                b.bad_returns += 1;
-                Err(Status::INVALID_ARGUMENT)
+        self.with(|b| {
+            let held = b.holds.release(buffer);
+            match b.buffers.get_mut(buffer as usize) {
+                Some(slot) if slot.at == Where::Out && held.is_ok() => {
+                    slot.at = Where::Free;
+                    Ok(())
+                }
+                _ => {
+                    b.bad_returns += 1;
+                    Err(Status::INVALID_ARGUMENT)
+                }
             }
         })
     }
@@ -523,6 +613,61 @@ fn a_job_on_a_buffer_the_consumer_holds_or_a_job_has_is_dropped() {
     fe.tick(now).unwrap();
     assert!(frames.read(1) == image(4));
     assert_eq!(hw.with(|b| (b.stray, b.refused, b.bad_returns)), (0, 0, 0));
+}
+
+/// The driver reads the module's stream as a relay: a frame it published to the consumer stays held
+/// from the module until the consumer gives it back. Those are the consumer's doing, not frames the
+/// driver has in hand, and they must not count against the driver's own limit on the module's ring
+/// (two in hand for four buffers): counted, a consumer keeping two frames would be the limit, every
+/// later job's frame would go by at the ring unseen, and its job would never complete.
+#[test]
+fn a_consumer_keeping_frames_does_not_stop_delivery_or_restart_the_front_end() {
+    let host = host();
+    let hw = Hw::default();
+    let mut frames = Client::attach(&host, "output0");
+    let mut jobs = Client::attach(&host, "config");
+    let mut fe = driver(&host, &hw);
+    CameraIsp::start(&mut fe).unwrap();
+    let mut now = 1;
+    let mut deliver = |fe: &mut PispFe, frames: &mut Client, identity: u64, buffer: u32| {
+        jobs.post(identity, buffer);
+        now = fe.tick(now).unwrap();
+        assert_eq!(
+            hw.with(Block::run),
+            Some(buffer),
+            "job {identity:#x} reached the block"
+        );
+        now = fe.tick(now).unwrap();
+        let frame = frames
+            .ring
+            .pop_entry()
+            .unwrap()
+            .and_then(|entry| entry.frame())
+            .unwrap_or_else(|| panic!("no frame for job {identity:#x} in buffer {buffer}"));
+        assert_eq!((frame.buffer, frame.identity), (buffer, identity));
+        assert!(frames.read(buffer) == image(identity));
+    };
+    // The consumer keeps the first two frames: half the pool, and the driver's whole limit if they counted.
+    deliver(&mut fe, &mut frames, 0x61, 0);
+    deliver(&mut fe, &mut frames, 0x62, 1);
+    // Frames go on in the two buffers left, each given back before the next.
+    for round in 0..8u64 {
+        let buffer = 2 + (round % 2) as u32;
+        deliver(&mut fe, &mut frames, 0x70 + round, buffer);
+        assert!(frames.ring.release(buffer));
+    }
+    // The kept frames were never written again, and nothing was lost, refused or made anew.
+    assert!(frames.read(0) == image(0x61));
+    assert!(frames.read(1) == image(0x62));
+    assert_eq!(
+        hw.with(|b| b.holds.dropped_at_limit),
+        0,
+        "no frame went by at the ring"
+    );
+    assert_eq!(hw.with(|b| (b.stray, b.refused, b.bad_returns)), (0, 0, 0));
+    assert_eq!(hw.with(|b| (b.made, b.started)), (1, 1), "never restarted");
+    assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 0);
+    assert!(matches!(fe.health(), Health::Ok));
 }
 
 #[test]

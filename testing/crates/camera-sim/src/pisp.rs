@@ -446,6 +446,11 @@ impl fe::Hardware for FeBlock {
         }))
     }
 
+    /// The simulated block keeps no holds: every frame it finishes is taken.
+    fn handed_on(&mut self, _buffer: u32) -> Result<()> {
+        Ok(())
+    }
+
     fn give_back(&mut self, _buffer: u32) -> Result<()> {
         Ok(())
     }

@@ -262,6 +262,9 @@ impl Relay {
                 if published {
                     slot.held = false;
                     slot.matched = false;
+                    // With the consumer now: held from the block until it comes back, and no
+                    // longer one of the frames the driver has in hand.
+                    hw.handed_on(done.buffer)?;
                     return Ok(true);
                 }
                 // Not taken: the driver still holds it, and the module can have it again.
