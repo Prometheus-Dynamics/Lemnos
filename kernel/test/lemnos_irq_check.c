@@ -126,10 +126,23 @@ int main(int argc, char **argv)
 		printf("     the masked one was resent on enable (an edge interrupt), count %u\n", ev.count);
 	else
 		printf("     the masked one was not resent (a level interrupt, its line not held)\n");
-	CHECK(!ioctl(fd, LEMNOS_IOC_IRQ_ENABLE, &zero) && !ioctl(fd, LEMNOS_IOC_TEST_IRQ, &zero) &&
-		      poll(&p, 1, 1000) == 1 && read(fd, &ev, sizeof(ev)) == sizeof(ev) &&
-		      ev.count > first,
-	      "the next one after enable arrives (count %u)", ev.count);
+	/*
+	 * An injection that reaches the line while its handler is still running on another CPU is
+	 * dropped by the kernel, not by the module: the test interrupt is a simple-flow simulated
+	 * line, which does not replay an interrupt that arrives in progress (kernel/irq/chip.c,
+	 * handle_simple_irq; irq_sim does not set IRQD_RESEND_WHEN_IN_PROGRESS). The module's handler
+	 * never ran for it, so nothing is pending to replay. A dropped one leaves nothing behind, so
+	 * the check injects again until one is delivered.
+	 */
+	CHECK(!ioctl(fd, LEMNOS_IOC_IRQ_ENABLE, &zero), "enable again");
+	int got = 0;
+	for (int tries = 0; tries < 20 && !got; tries++) {
+		if (ioctl(fd, LEMNOS_IOC_TEST_IRQ, &zero))
+			break;
+		if (poll(&p, 1, 50) == 1 && read(fd, &ev, sizeof(ev)) == sizeof(ev))
+			got = 1;
+	}
+	CHECK(got && ev.count > first, "the next one after enable arrives (count %u)", ev.count);
 	struct lemnos_irq past = { .block = block, .index = info.irqs };
 
 	CHECK(ioctl(fd, LEMNOS_IOC_TEST_IRQ, &past) < 0 && errno == EINVAL, "inject past the end: EINVAL");
