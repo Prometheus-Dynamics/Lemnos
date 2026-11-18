@@ -72,7 +72,7 @@ const RUN_START: usize = 44;
 const RUN_TIMEOUT: usize = 48;
 const RUN_FLAGS: usize = 56;
 
-// The ISP's registers (kernel/lemnos_regjob_k230isp.c).
+// The ISP's registers (kernel/rs/regjob_isp.rs).
 const ISP_CTRL: u32 = 0x0400;
 const ISP_ACQ_PROP: u32 = 0x0404;
 const ISP_ACQ_H_SIZE: u32 = 0x0410;
@@ -1119,7 +1119,7 @@ impl Harness {
 
         // Lens shading, the configuration role's: the enable, a table address, two 12-bit
         // samples to a word, a sector size, and the table select, each with its field bits (the
-        // masks of lemnos_regjob_k230isp.c). A value past a field is refused, as the masks say.
+        // masks of rs/regjob_isp.rs). A value past a field is refused, as the masks say.
         let shade = write1(self.cfd(), LSC_CTRL, 1) == 0 && self.reg(LSC_CTRL) == 1;
         self.check(shade, "lens shading: the enable is written");
         let table =
