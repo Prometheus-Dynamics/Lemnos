@@ -174,7 +174,7 @@ fn status(e: &io::Error) -> Status {
 }
 
 /// The version register family this driver knows: `BE_VERSION_BLOCK` in the module
-/// (`kernel/lemnos_pisp_be.c`), whose low four bits are the minor revision.
+/// (`kernel/rs/pisp_be.rs`), whose low four bits are the minor revision.
 pub const BE_VERSION_FAMILY: u32 = 0x0225_2700;
 const BE_VERSION_MINOR_MASK: u32 = 0xf;
 
