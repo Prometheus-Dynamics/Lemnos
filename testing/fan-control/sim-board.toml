@@ -1,25 +1,25 @@
-# The B14 fan-control rehearsal's board for `lemnosd --sim`. The fakes stand in for the board's fan and
-# thermal zone (testing/fan-control/board.toml): the same contracts, the same device ids, the same
-# controller wiring, so the same checks run on both. testing/fan-control/b14.sh replaces @ZONE@ with the
-# zone's directory. The zone's temperature is the `temp` file in it, in millidegrees Celsius.
+# The B14 fan-control rehearsal's board for `lemnosd --sim`, the FILE phase: the curve is checked against a
+# file-backed thermal zone. testing/fan-control/b14.sh replaces @FAN@ and @ZONE@ with its scratch paths. The
+# fan is a fake (testing/crates/fake-devices, fake-fan) on the same contract and device id as the board's.
+# The zone is the thermal-zone driver on a directory the script writes: `temp` in millidegrees, exact.
 format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "b14-sim"
+id = "b14-sim-file"
 
 # A fan that takes a duty per mille and reports it back. It starts at its baseline, 702 per mille (pwm1
-# 179 on the board), the duty the controller's take-over records. Its duty is kept in the file @FAN@,
-# which b14.sh replaces, so the run can read it after the service has stopped.
+# 179 on the board), the duty the controller's take-over records. Its duty is kept in the file @FAN@, and a
+# refused write is logged beside it (`@FAN@.failures`): check 11 reads that.
 [[devices]]
 id = "fan"
 driver = "fake-fan"
 config = { duty = 702, file = "@FAN@" }
 
-# A thermal zone read from the `temp` file in @ZONE@. A missing file fails its reads, as a missing zone does.
+# The curve's zone: a directory with a `temp` file, written by the script (the file-backed zone).
 [[devices]]
 id = "cpu-thermal"
-driver = "fake-thermal-zone"
+driver = "thermal-zone"
 config = { path = "@ZONE@" }
 
 [[devices]]

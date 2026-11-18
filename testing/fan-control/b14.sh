@@ -1,37 +1,43 @@
 #!/usr/bin/env bash
-# The B14 fan-control rehearsal: the checks of testing/board-runs/B14.md that drive the controller
-# through its curve, its slew limit and a hold, fail its sensor, and restart the service. It runs the
-# same checks against the simulated board and against the real one.
+# The B14 fan-control rehearsal, in two phases. The FILE phase checks the controller's curve, slew, hold,
+# sensor fault, disable, restart and stop against a file-backed thermal zone: the script writes the zone's
+# `temp` file in millidegrees, so every temperature is exact. The REAL phase runs the controller on the
+# board's real thermal zone under a bounded CPU load, and checks that the fan's duty follows the curve at the
+# temperature the zone reports. Every check line says which zone it used: [file] or [real].
 #
 #   testing/fan-control/b14.sh sim [--out DIR]
-#       Starts lemnosd --sim on testing/fan-control/sim-board.toml, in a scratch directory. The fan
-#       and the thermal zone are fakes (testing/crates/fake-devices). The zone's temperature is the
-#       `temp` file in its directory, which this script writes. Stops its own lemnosd by PID on exit.
-#       Needs lemnosd built with --features fake-devices.
+#       Runs both phases on lemnosd --sim: the FILE phase on sim-board.toml (a thermal-zone on the script's
+#       directory), then the REAL phase on sim-board-real.toml (a fake thermal zone standing in for the real
+#       one, which the script's load stand-in drives). Needs lemnosd built with --features fake-devices.
 #
-#   testing/fan-control/b14.sh board --socket PATH --temp-hook CMD --restart-hook CMD --stop-hook CMD \
-#       --baseline-pwm N --baseline-enable N --baseline-state N [--out DIR]
-#       Runs against the board's service, which must be running testing/fan-control/board.toml. Takes
-#       the board lock first (AGENTS.md). CMD for --temp-hook is run with the target temperature in
-#       millidegrees as its one argument; the operator makes the CPU reach it (load, or cool). CMD for
-#       --restart-hook restarts the service. CMD for --stop-hook stops it with SIGTERM and returns once
-#       the process has exited; the service is then left stopped, for the run's restore. The three
-#       --baseline options are the fan's pwm1, pwm1_enable and its cooling device's cur_state, recorded
-#       by the run before any write (B14 step 1). The fan is the hwmon device named pwmfan, and its
-#       cooling device is the one whose type is pwm-fan. Build on NVMe or SSD, not the HDD.
+#   testing/fan-control/b14.sh board --phase file|real --socket PATH [--restart-hook CMD] [--stop-hook CMD]
+#       --baseline-pwm N --baseline-enable N --baseline-state N [--load-hook CMD] [--out DIR]
+#       Runs against the board's service, which must be running board.toml for --phase file, and
+#       board-real.toml for --phase real. The run takes the board lock first (AGENTS.md).
+#         --restart-hook CMD   restarts the service with the board file for the phase, and is called as
+#                              `CMD file` or `CMD real`; the operator's hook switches the board file.
+#         --stop-hook CMD      stops the service with SIGTERM and returns once the process has exited.
+#         --load-hook CMD      the bounded CPU load (the busybox board has no `timeout`, so the hook bounds
+#                              the load itself). It is called with no argument and returns when the load is
+#                              over. Used by the REAL phase only.
+#       The three --baseline options are the fan's pwm1, pwm1_enable and its cooling device's cur_state,
+#       recorded by the run before any write (B14 step 1). Build on NVMe or SSD, not the HDD.
 #
-# Checks 9 (disable) and 12 (stop) test the baseline return: the fan is back at the duty, mode and
-# cooling state it had before the controller took it. On the sim the baseline is the fake fan's
-# (702 per mille, pwm1 179) and its file is read; on the board it is the sysfs values.
+# Check 11 (write failure, the retry schedule) runs on the sim only: its fan's file is made read-only, as a
+# bind mount over pwm1 does on the board, and the fake logs each refused write with its time. On the board,
+# check 11 is still the hand step of B14.md, and this script says so.
+#
+# The heat latency (check 3) is bounded by the controller's own step period, which is the period at which
+# it reads its zone and steps its duty (drivers/fan-control/src/law.rs, PERIOD_NS = 1 s), plus the script's own
+# read interval. Rising duty is not slew-limited (drivers/fan-control/src/lib.rs: "Rising is immediate"), so no
+# slew term applies to a heat. A cool is slew-limited (check 4), which is the fall limit.
 #
 # Environment:
-#   LEMNOS_BIN   directory holding lemnosd and lemnos-ctl (default: ${CARGO_TARGET_DIR:-target}/debug
-#                in the repository).
+#   LEMNOS_BIN   directory holding lemnosd and lemnos-ctl (default: ${CARGO_TARGET_DIR:-target}/debug).
 #   TMPDIR       where the scratch directory and the socket go (sockets need short paths).
 #
-# Checks print PASS or FAIL. Each sample of the controller is written to OUT/samples.tsv. Exit status
-# is 0 only when every check passes. The timing in samples.tsv is the host's; on the sim it means
-# nothing, and the board's figures are bench-board numbers only.
+# Checks print PASS or FAIL with their zone. Samples go to OUT/samples.tsv (the zone's reading, in
+# millidegrees, is its eighth column on the REAL rows). Exit status is 0 only when every check passes.
 set -u
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -43,9 +49,10 @@ mode=${1:-}
 shift
 
 socket=${LEMNOSD_SOCKET:-}
-temp_hook=
+phase=
 restart_hook=
 stop_hook=
+load_hook=
 base_pwm=
 base_enable=
 base_state=
@@ -53,18 +60,22 @@ out=
 while [ $# -gt 0 ]; do
   case $1 in
     --socket) socket=${2:?--socket needs a path}; shift ;;
-    --temp-hook) temp_hook=${2:?--temp-hook needs a command}; shift ;;
+    --phase) phase=${2:?--phase needs file or real}; shift ;;
     --restart-hook) restart_hook=${2:?--restart-hook needs a command}; shift ;;
     --stop-hook) stop_hook=${2:?--stop-hook needs a command}; shift ;;
+    --load-hook) load_hook=${2:?--load-hook needs a command}; shift ;;
     --baseline-pwm) base_pwm=${2:?--baseline-pwm needs a number}; shift ;;
     --baseline-enable) base_enable=${2:?--baseline-enable needs a number}; shift ;;
     --baseline-state) base_state=${2:?--baseline-state needs a number}; shift ;;
     --out) out=${2:?--out needs a directory}; shift ;;
-    -h | --help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,33p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+if [ "$mode" = board ]; then
+  { [ "$phase" = file ] || [ "$phase" = real ]; } || die "board mode needs --phase file or real"
+fi
 
 bin=${LEMNOS_BIN:-${CARGO_TARGET_DIR:-$repo/target}/debug}
 lemnosd=$bin/lemnosd
@@ -76,12 +87,19 @@ out=${out:-$work/out}
 mkdir -p "$out"
 samples=$out/samples.tsv
 log=$out/run.log
-: > "$samples"
-printf 'ms\tcheck\tduty\tdemand\tdegraded\theld\thealth\n' > "$samples"
+: > "$log"
+printf 'ms\tcheck\tduty\tdemand\tdegraded\theld\thealth\tzone_mC\n' > "$samples"
+
+# The controller's constants (drivers/fan-control/src/law.rs) and the script's read interval.
+CTRL_PERIOD_MS=1000
+SAMPLE_MS=100
+# Check 3's bound: one controller step to read the zone, then one read interval for the script to see it.
+HEAT_BOUND_MS=$((CTRL_PERIOD_MS + SAMPLE_MS))
 
 pid=
 pass=0
 fail=0
+ZL=
 say() { printf '%s\n' "$*" | tee -a "$log"; }
 ok() { pass=$((pass + 1)); say "PASS $*"; }
 bad() { fail=$((fail + 1)); say "FAIL $*"; }
@@ -95,20 +113,19 @@ cleanup() {
     kill -TERM "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
   fi
+  [ -n "${load_pid:-}" ] && kill -TERM "$load_pid" 2>/dev/null
 }
 trap cleanup EXIT
 
-# The zone's temperature. The sim writes its zone file; the board's comes from the operator's hook.
+# The file phase's zone (the curve's temperature) is the script's `temp` file. The REAL phase's zone is the
+# board's, and the sim's stand-in is written by the sim load.
+zone_dir=
 set_temp() {
-  if [ "$mode" = sim ]; then
-    printf '%s\n' "$1" > "$zone/temp"
-  else
-    "$temp_hook" "$1" || die "the temperature hook failed for $1"
-  fi
+  printf '%s\n' "$1" > "$zone_dir/temp"
 }
 
-# expected MILLIDEGREES: the curve's duty for that temperature, from CURVE_SPEC ("value:duty,...", as
-# board.toml's curve_t0 has it), linear between points, flat beyond the first and the last.
+# expected MILLIDEGREES: the curve's duty for that temperature, from CURVE_SPEC ("value:duty,...", as the
+# board file's curve_t0 has it), linear between points, flat beyond the first and the last.
 expected() {
   awk -v t="$1" -v spec="$CURVE_SPEC" 'BEGIN {
     n = split(spec, p, ",");
@@ -173,11 +190,14 @@ at_baseline() {
   fi
 }
 
-# sample CHECK: one read, written to samples.tsv with the time and the health.
+# sample CHECK [ZONE_MC]: one read, written to samples.tsv with the time, the health and the zone's reading.
 sample() {
   state_now || return 1
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(now_ms)" "$1" "$DUTY" "$DEMAND" "$DEGRADED" "$HELD" "$(health_of)" >> "$samples"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(now_ms)" "$1" "$DUTY" "$DEMAND" "$DEGRADED" "$HELD" "$(health_of)" "${2:-}" >> "$samples"
 }
+
+# zone_mc: the real zone's reading in millidegrees, from the service (`ctl read`), or the file's.
+zone_mc() { ctl read cpu-thermal temperature | awk '{ printf "%d\n", $3 * 1000 + 0.5 }'; }
 
 # wait_until SECONDS COMMAND...: polls every half second until COMMAND succeeds.
 wait_until() {
@@ -196,86 +216,6 @@ at_duty() { state_now && [ "$DUTY" -eq "$1" ]; }
 degraded_full() { state_now && [ "$DEGRADED" = true ] && [ "$DUTY" -eq 1000 ]; }
 recovered() { state_now && [ "$DEGRADED" = false ] && [ $((DUTY - EXP)) -ge -1 ] && [ $((DUTY - EXP)) -le 1 ]; }
 
-# le32 N: N as four little-endian bytes in hex, the wire's form of an i32.
-le32() { printf '%08x' $(($1 & 0xffffffff)) | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/'; }
-# point VALUE DUTY: one curve point as the wire has it: a length word of 8, then value and duty.
-point() { printf '08000000%s%s' "$(le32 "$1")" "$(le32 "$2")"; }
-
-start_sim() {
-  "$lemnosd" --sim --board "$work/board.toml" --socket "$socket" >> "$out/lemnosd.log" 2>&1 &
-  pid=$!
-  wait_until 15 ctl list > /dev/null 2>&1 || die "lemnosd --sim did not come up; see $out/lemnosd.log"
-}
-
-stop_sim() {
-  kill -TERM "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
-  pid=
-}
-
-# --- set up -------------------------------------------------------------------------------------
-
-# The curve, and the points the run visits, per mode. The sim has the full range of the B14 curve. The
-# board's idles at 39 to 40 C and its four-core load plateaus at 58 to 60 C, so its curve is the one in
-# board.toml, 42 to 58 C, and its points are inside that range. Both cover every segment, the slew and
-# the hold. The mid point is 45 C in both.
-if [ "$mode" = sim ]; then
-  CURVE_SPEC=30000:300,60000:600,75000:1000
-  POINTS="30000 45000 60000 70000 75000 20000"
-  HEAT=61000
-  COOL=30000
-else
-  CURVE_SPEC=42000:300,50000:600,58000:1000
-  POINTS="42000 45000 50000 54000 56000"
-  HEAT=56000
-  COOL=42000
-fi
-MID=45000
-# The baseline the fan returns to (checks 9 and 12): 702 per mille, which is pwm1 179 on the board.
-BASE_DUTY=702
-
-if [ "$mode" = sim ]; then
-  zone=$work/zone
-  fan_file=$work/fan
-  socket=$work/lemnosd.sock
-  mkdir -p "$zone"
-  printf '45000\n' > "$zone/temp"
-  sed -e "s|@ZONE@|$zone|" -e "s|@FAN@|$fan_file|" "$here/sim-board.toml" > "$work/board.toml"
-  say "b14: sim, lemnosd from $bin, scratch $work"
-  start_sim
-else
-  [ -n "$socket" ] || die "board mode needs --socket PATH (or LEMNOSD_SOCKET)"
-  [ -n "$temp_hook" ] || die "board mode needs --temp-hook CMD"
-  [ -n "$restart_hook" ] || die "board mode needs --restart-hook CMD"
-  [ -n "$stop_hook" ] || die "board mode needs --stop-hook CMD"
-  [ -n "$base_pwm" ] && [ -n "$base_enable" ] && [ -n "$base_state" ] \
-    || die "board mode needs --baseline-pwm, --baseline-enable and --baseline-state (recorded before any write)"
-  exec 9> /run/lock/board-gpu.lock
-  flock -n 9 || die "the board lock /run/lock/board-gpu.lock is held elsewhere"
-  say "b14: board, socket $socket"
-  ctl list > /dev/null || die "no service answers on $socket"
-fi
-
-# --- 1 bind -------------------------------------------------------------------------------------
-
-describe=$(ctl describe fan-control 2>&1)
-expect "1 fan-control describes duty and demand" bash -c '[[ $1 == *duty* && $1 == *demand* ]]' _ "$describe"
-expect "1 fan-control is listed running and ok" bind_running
-expect "1 the fan and the zone are listed" devices_listed
-ctl_list_health=$(health_of)
-say "b14: fan-control health at bind is $ctl_list_health"
-
-# --- 2 curve ------------------------------------------------------------------------------------
-
-# A fall is slewed at 50 per second, so from full duty to 300 takes 14 s: the limit allows for it.
-for t in $POINTS; do
-  EXP=$(expected "$t")
-  set_temp "$t"
-  expect "2 $t mC: duty $EXP within 1 of the curve" wait_until 25 at_expected
-  expect "2 $t mC: the fan's duty equals the commanded duty" fan_matches
-  expect "2 $t mC: the duty is at least the floor of 300" [ "$DUTY" -ge 300 ]
-done
-
 # A window of samples whose label matches PATTERN falls by at most 52 in any one second.
 fall_limit_ok() {
   awk -F'\t' -v pat="$1" '$2 ~ pat { n++; t[n] = $1; d[n] = $3 }
@@ -289,143 +229,364 @@ fall_limit_ok() {
     }' "$samples"
 }
 
-# --- 3 heat -------------------------------------------------------------------------------------
+# le32 N: N as four little-endian bytes in hex, the wire's form of an i32.
+le32() { printf '%08x' $(($1 & 0xffffffff)) | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/'; }
+# point VALUE DUTY: one curve point as the wire has it: a length word of 8, then value and duty.
+point() { printf '08000000%s%s' "$(le32 "$1")" "$(le32 "$2")"; }
 
-# The duty reaches the curve within 1.1 s of the temperature passing the point (the B14 check 4).
-EXP=$(expected "$HEAT")
-set_temp "$HEAT"
-heat_t0=$(now_ms)
-heat_ok=false
-while [ $(($(now_ms) - heat_t0)) -le 1100 ]; do
-  if sample "3 heat" && [ $((DUTY - EXP)) -ge -1 ] && [ $((DUTY - EXP)) -le 1 ]; then
-    heat_ok=true
-    break
-  fi
-  sleep 0.1
-done
-expect "3 heat to $HEAT mC: the duty reaches the curve within 1.1 s" $heat_ok
-say "b14: heat latency $(($(now_ms) - heat_t0)) ms (host clock, to the first read at the curve)"
-
-# --- 4 cool (slew) -------------------------------------------------------------------------------
-
-EXP=$(expected "$COOL")
-set_temp "$COOL"
-settled=false
-end=$(($(now_ms) + 40000))
-while [ "$(now_ms)" -lt "$end" ]; do
-  sample "4 cool" || break
-  if [ "$DUTY" -le "$EXP" ]; then settled=true; break; fi
-  sleep 0.25
-done
-expect "4 cooling falls at most 50 per second" fall_limit_ok '^4 '
-expect "4 cooling settles at the curve's duty at $COOL mC" $settled
-
-# --- 5 hold -------------------------------------------------------------------------------------
-
-ctl call fan-control hold 900 10000 > /dev/null || bad "5 hold refused"
-state_now
-expect "5 hold: the duty reads 900 at once, held" bash -c '[ "$1" -eq 900 ] && [ "$2" = true ]' _ "$DUTY" "$HELD"
-hold_t0=$(now_ms)
-end=$((hold_t0 + 13000))
-while [ "$(now_ms)" -lt "$end" ]; do
-  sample "5 hold" || break
-  [ "$HELD" = true ] || break
-  sleep 0.25
-done
-held_span=$(awk -F'\t' '$2 == "5 hold" && $6 == "true" { if (!n) first = $1; last = $1; n++ } END { print n ? last - first : 0 }' "$samples")
-# hold_ok SPAN: the held samples cover at least 9.5 s and every one reads 900.
-hold_ok() {
-  awk -F'\t' -v span="$1" 'BEGIN { bad = 0 }
-    $2 == "5 hold" && $6 == "true" && $3 != 900 { bad = 1 }
-    END { exit !(span >= 9500 && !bad) }' "$samples"
+start_service() { # start_service BOARD_FILE (sim only)
+  "$lemnosd" --sim --board "$1" --socket "$socket" >> "$out/lemnosd.log" 2>&1 &
+  pid=$!
+  wait_until 15 ctl list > /dev/null 2>&1 || die "lemnosd --sim did not come up; see $out/lemnosd.log"
 }
-expect "5 hold: the duty is 900 and held for the 10 s" hold_ok "$held_span"
 
-# After the hold: from 900 down at the slew rate, to the curve at the cool point.
-EXP=$(expected "$COOL")
-settled=false
-end=$(($(now_ms) + 40000))
-while [ "$(now_ms)" -lt "$end" ]; do
-  sample "5 after" || break
-  if [ "$DUTY" -le "$EXP" ] && [ "$HELD" = false ]; then settled=true; break; fi
-  sleep 0.25
-done
-expect "5 after the hold the duty falls at most 50 per second" fall_limit_ok '^5 '
-expect "5 after the hold the duty settles at the curve at $COOL mC" $settled
-
-# --- 6 failed sensor ----------------------------------------------------------------------------
-
-EXP=$(expected "$MID")
-set_temp "$MID"
-expect "6 back to $MID mC on the curve before the fault" wait_until 25 at_expected
-last=$DUTY
-fault_t0=$(now_ms)
-ctl off cpu-thermal > /dev/null || bad "6 off refused"
-hold_ok=true
-full_ok=true
-end=$((fault_t0 + 8000))
-while [ "$(now_ms)" -lt "$end" ]; do
-  sleep 0.5
-  elapsed=$(($(now_ms) - fault_t0))
-  if ! sample "6 fault"; then
-    hold_ok=false
-    continue
+stop_service() {
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    pid=
   fi
-  if [ "$elapsed" -le 2500 ] && [ "$DUTY" -ne "$last" ]; then hold_ok=false; fi
-  if [ "$elapsed" -ge 4000 ] && { [ "$DUTY" -ne 1000 ] || [ "$DEGRADED" != true ]; }; then full_ok=false; fi
-done
-expect "6 the failed sensor holds the last duty for the first 2.5 s" $hold_ok
-expect "6 from the fourth second the duty is 1000 and degraded" $full_ok
-hv=$(health_of)
-say "b14: health while the zone is off: $hv"
-expect "6 the host reports the controller degraded or failed" bash -c '[[ "$1" == degraded || "$1" == failed ]]' _ "$hv"
+}
 
-ctl on cpu-thermal > /dev/null || bad "6 on refused"
-# The duty falls to the curve at the slew rate: from 1000 to 450 is about 11 s.
-expect "6 the zone back on: the duty comes back to the curve within 20 s" wait_until 20 recovered
-expect "6 the zone back on: the controller is healthy" healthy
+# --- the FILE phase -----------------------------------------------------------------------------
 
-# --- 9 disable (B14 check 9) --------------------------------------------------------------------
+phase_file() {
+  ZL="[file]"
+  say "b14: FILE phase: the curve, slew, hold, fault, disable, restart and stop checks use the file-backed zone"
+  if [ "$mode" = sim ]; then
+    zone_dir=$work/zone
+    fan_file=$work/fan
+    socket=$work/lemnosd.sock
+    mkdir -p "$zone_dir"
+    printf '45000\n' > "$zone_dir/temp"
+    sed -e "s|@ZONE@|$zone_dir|" -e "s|@FAN@|$fan_file|" "$here/sim-board.toml" > "$work/board.toml"
+    start_service "$work/board.toml"
+  else
+    zone_dir=/run/lemnos-b14/zone
+    mkdir -p "$zone_dir" || die "cannot make $zone_dir"
+    printf '45000\n' > "$zone_dir/temp"
+    ctl list > /dev/null || die "no service answers on $socket"
+  fi
 
-# Disabling hands the fan back to its baseline at once; a disabled controller writes nothing.
-ctl call fan-control set_enabled false > /dev/null || bad "9 set_enabled(false) refused"
-expect "9 disable: the fan is back at its baseline within a second" wait_until 1 at_baseline
-sleep 3
-expect "9 disable: the fan stays at its baseline while disabled" at_baseline
-ctl call fan-control set_enabled true > /dev/null || bad "9 set_enabled(true) refused"
-EXP=$(expected "$MID")
-expect "9 enabled again: the controller takes the fan back to the curve" wait_until 20 at_expected
+  # 1 bind
+  describe=$(ctl describe fan-control 2>&1)
+  expect "$ZL 1 fan-control describes duty and demand" bash -c '[[ $1 == *duty* && $1 == *demand* ]]' _ "$describe"
+  expect "$ZL 1 fan-control is listed running and ok" bind_running
+  expect "$ZL 1 the fan and the zone are listed" devices_listed
+  say "b14: fan-control health at bind is $(health_of)"
 
-# --- 7 restart ----------------------------------------------------------------------------------
+  # 2 curve
+  CURVE_SPEC=30000:300,60000:600,75000:1000
+  POINTS="30000 45000 60000 70000 75000 20000"
+  HEAT=61000
+  COOL=30000
+  if [ "$mode" = board ]; then
+    CURVE_SPEC=42000:300,50000:600,58000:1000
+    POINTS="42000 45000 50000 54000 56000"
+    HEAT=56000
+    COOL=42000
+  fi
+  MID=45000
+  BASE_DUTY=702
+  for t in $POINTS; do
+    EXP=$(expected "$t")
+    set_temp "$t"
+    expect "$ZL 2 $t mC: duty $EXP within 1 of the curve" wait_until 25 at_expected
+    expect "$ZL 2 $t mC: the fan's duty equals the commanded duty" fan_matches
+    expect "$ZL 2 $t mC: the duty is at least the floor of 300" [ "$DUTY" -ge 300 ]
+  done
 
-EXP=$(expected "$MID")
-set_temp "$MID"
-ctl call fan-control set_curve 0 "$(point 30000 900)$(point 75000 900)" > /dev/null \
-  || bad "7 set_curve refused"
-expect "7 the changed curve is in force (900 at $MID mC)" wait_until 10 at_duty 900
+  # 3 heat: the duty reaches the curve within HEAT_BOUND_MS of the temperature passing the point.
+  EXP=$(expected "$HEAT")
+  set_temp "$HEAT"
+  heat_t0=$(now_ms)
+  heat_ok=false
+  while [ $(($(now_ms) - heat_t0)) -le "$HEAT_BOUND_MS" ]; do
+    if sample "3 heat" && [ $((DUTY - EXP)) -ge -1 ] && [ $((DUTY - EXP)) -le 1 ]; then
+      heat_ok=true
+      break
+    fi
+    sleep 0.1
+  done
+  expect "$ZL 3 heat to $HEAT mC: the duty reaches the curve within $HEAT_BOUND_MS ms ($CTRL_PERIOD_MS ms step + $SAMPLE_MS ms read)" $heat_ok
+  say "b14: $ZL heat latency $(($(now_ms) - heat_t0)) ms (host clock, to the first read at the curve; bound $HEAT_BOUND_MS ms)"
+
+  # 4 cool (slew)
+  EXP=$(expected "$COOL")
+  set_temp "$COOL"
+  settled=false
+  end=$(($(now_ms) + 40000))
+  while [ "$(now_ms)" -lt "$end" ]; do
+    sample "4 cool" || break
+    if [ "$DUTY" -le "$EXP" ]; then settled=true; break; fi
+    sleep 0.25
+  done
+  expect "$ZL 4 cooling falls at most 50 per second" fall_limit_ok '^4 '
+  expect "$ZL 4 cooling settles at the curve's duty at $COOL mC" $settled
+
+  # 5 hold
+  ctl call fan-control hold 900 10000 > /dev/null || bad "$ZL 5 hold refused"
+  state_now
+  expect "$ZL 5 hold: the duty reads 900 at once, held" bash -c '[ "$1" -eq 900 ] && [ "$2" = true ]' _ "$DUTY" "$HELD"
+  hold_t0=$(now_ms)
+  end=$((hold_t0 + 13000))
+  while [ "$(now_ms)" -lt "$end" ]; do
+    sample "5 hold" || break
+    [ "$HELD" = true ] || break
+    sleep 0.25
+  done
+  held_span=$(awk -F'\t' '$2 == "5 hold" && $6 == "true" { if (!n) first = $1; last = $1; n++ } END { print n ? last - first : 0 }' "$samples")
+  hold_ok() {
+    awk -F'\t' -v span="$1" 'BEGIN { bad = 0 }
+      $2 == "5 hold" && $6 == "true" && $3 != 900 { bad = 1 }
+      END { exit !(span >= 9500 && !bad) }' "$samples"
+  }
+  expect "$ZL 5 hold: the duty is 900 and held for the 10 s" hold_ok "$held_span"
+  EXP=$(expected "$COOL")
+  settled=false
+  end=$(($(now_ms) + 40000))
+  while [ "$(now_ms)" -lt "$end" ]; do
+    sample "5 after" || break
+    if [ "$DUTY" -le "$EXP" ] && [ "$HELD" = false ]; then settled=true; break; fi
+    sleep 0.25
+  done
+  expect "$ZL 5 after the hold the duty falls at most 50 per second" fall_limit_ok '^5 '
+  expect "$ZL 5 after the hold the duty settles at the curve at $COOL mC" $settled
+
+  # 6 failed sensor
+  EXP=$(expected "$MID")
+  set_temp "$MID"
+  expect "$ZL 6 back to $MID mC on the curve before the fault" wait_until 25 at_expected
+  last=$DUTY
+  fault_t0=$(now_ms)
+  ctl off cpu-thermal > /dev/null || bad "$ZL 6 off refused"
+  hold_ok=true
+  full_ok=true
+  end=$((fault_t0 + 8000))
+  while [ "$(now_ms)" -lt "$end" ]; do
+    sleep 0.5
+    elapsed=$(($(now_ms) - fault_t0))
+    if ! sample "6 fault"; then
+      hold_ok=false
+      continue
+    fi
+    if [ "$elapsed" -le 2500 ] && [ "$DUTY" -ne "$last" ]; then hold_ok=false; fi
+    if [ "$elapsed" -ge 4000 ] && { [ "$DUTY" -ne 1000 ] || [ "$DEGRADED" != true ]; }; then full_ok=false; fi
+  done
+  expect "$ZL 6 the failed sensor holds the last duty for the first 2.5 s" $hold_ok
+  expect "$ZL 6 from the fourth second the duty is 1000 and degraded" $full_ok
+  hv=$(health_of)
+  say "b14: $ZL health while the zone is off: $hv"
+  expect "$ZL 6 the host reports the controller degraded or failed" bash -c '[[ "$1" == degraded || "$1" == failed ]]' _ "$hv"
+  ctl on cpu-thermal > /dev/null || bad "$ZL 6 on refused"
+  expect "$ZL 6 the zone back on: the duty comes back to the curve within 20 s" wait_until 20 recovered
+  expect "$ZL 6 the zone back on: the controller is healthy" healthy
+
+  # 9 disable
+  ctl call fan-control set_enabled false > /dev/null || bad "$ZL 9 set_enabled(false) refused"
+  expect "$ZL 9 disable: the fan is back at its baseline within a second" wait_until 1 at_baseline
+  sleep 3
+  expect "$ZL 9 disable: the fan stays at its baseline while disabled" at_baseline
+  ctl call fan-control set_enabled true > /dev/null || bad "$ZL 9 set_enabled(true) refused"
+  expect "$ZL 9 enabled again: the controller takes the fan back to the curve" wait_until 20 at_expected_mid
+
+  # 7 restart
+  set_temp "$MID"
+  ctl call fan-control set_curve 0 "$(point 30000 900)$(point 75000 900)" > /dev/null \
+    || bad "$ZL 7 set_curve refused"
+  expect "$ZL 7 the changed curve is in force (900 at $MID mC)" wait_until 10 at_duty 900
+  if [ "$mode" = sim ]; then
+    stop_service
+    start_service "$work/board.toml"
+  else
+    "$restart_hook" file || die "the restart hook failed"
+    wait_until 30 ctl list > /dev/null 2>&1 || die "no service after the restart"
+  fi
+  expect "$ZL 7 after the restart the board file's curve is in force at $MID mC" wait_until 10 at_expected_mid
+  expect "$ZL 7 after the restart the controller is not held" state_not_held
+
+  # 12 stop
+  if [ "$mode" = sim ]; then
+    stop_service
+  else
+    "$stop_hook" || die "the stop hook failed"
+  fi
+  expect "$ZL 12 stop: the fan is back at its baseline once the service has exited" at_baseline
+
+  # 11 write failure and its retry schedule. It runs on its own service start, after 12: in the sim, the refused
+  # writes of check 11 left the controller in a state that broke the baseline return of check 12 when they ran
+  # before it (not isolated; B14-CURVE). On the board, check 11 is the hand step, so the start is the operator's.
+  if [ "$mode" = sim ]; then
+    start_service "$work/board.toml"
+    check11
+    stop_service
+  else
+    check11
+  fi
+}
+
+at_expected_mid() { EXP=$(expected "$MID"); at_expected; }
+
+# check 11: the fan's writes are refused for a while, and the retries are timed. The controller waits 1, 2, 4
+# and 8 s between attempts and then stays at 8 s (law.rs, RETRY_FIRST_NS and RETRY_CAP_NS); each wait ends at the
+# first controller step after it, so an interval is the wait or the wait plus up to one step.
+check11() {
+  if [ "$mode" != sim ]; then
+    say "b14: $ZL 11 write failure: not run by the script on the board (B14.md, the bind-mount step); its retry times are the operator's"
+    return
+  fi
+  local failures=$fan_file.failures
+  rm -f "$failures"
+  set_temp "$MID"
+  chmod 444 "$fan_file"
+  local t0 reason_seen=false end
+  t0=$(now_ms)
+  ctl call fan-control hold 900 30000 > /dev/null || bad "$ZL 11 hold refused"
+  end=$((t0 + 26000))
+  while [ "$(now_ms)" -lt "$end" ]; do
+    sample "11 fault" || break
+    ctl list | grep -q "fan write failed" && reason_seen=true
+    sleep 0.25
+  done
+  chmod 644 "$fan_file"
+  local attempts=()
+  [ -f "$failures" ] && mapfile -t attempts < "$failures"
+  say "b14: $ZL 11 refused writes (unix ms): ${attempts[*]:-none}"
+  expect "$ZL 11 the refused writes are retried: at least 5 attempts in 26 s" [ "${#attempts[@]}" -ge 5 ]
+  local waits=(1000 2000 4000 8000)
+  local i gap ok=true
+  for ((i = 1; i < ${#attempts[@]} && i <= 4; i++)); do
+    gap=$((attempts[i] - attempts[i - 1]))
+    local w=${waits[i - 1]}
+    say "b14: $ZL 11 retry $i after $gap ms (wait $w ms, bound $((w + CTRL_PERIOD_MS)) ms)"
+    if [ "$gap" -lt "$w" ] || [ "$gap" -gt $((w + CTRL_PERIOD_MS + 250)) ]; then ok=false; fi
+  done
+  expect "$ZL 11 the retry waits are 1, 2, 4 and 8 s, each ended by the first step after it" $ok
+  expect "$ZL 11 the health names the failed write" $reason_seen
+  EXP=$(expected "$MID")
+  expect "$ZL 11 once the writes work again the duty is back on the curve" wait_until 25 at_expected
+}
+
+# --- the REAL phase -----------------------------------------------------------------------------
+
+# The sim's stand-in load: the fake zone's temperature climbs from 45 C to 62 C over 10 s, holds 4 s, and
+# falls to 35 C over 10 s. The board's load is the bounded load hook, which the sampler watches in the same way.
+sim_load() {
+  local t
+  for t in $(seq 45000 1000 62000); do set_zone "$t"; sleep 0.5; done
+  sleep 4
+  for t in $(seq 62000 -1000 35000); do set_zone "$t"; sleep 0.5; done
+}
+set_zone() { printf '%s\n' "$1" > "$real_dir/temp"; }
+
+# sample_real: one row for the REAL phase, with the zone's reading.
+sample_real() {
+  local t
+  t=$(zone_mc) || return 1
+  sample "r$1" "$t"
+}
+
+# real_follows: no REAL sample's duty is below the curve's duty for the zone's readings of the last second (the
+# fan never under-cools; the controller steps once a second). A fall is slew-limited (50 per mille a second), so a duty may stand above the curve while the
+# zone falls; the rise is immediate. Once the zone has held still for the last 5 s of the run, the duty is on the
+# curve, within 1 per mille.
+real_follows() {
+  awk -F'\t' -v spec="$CURVE_SPEC" 'function curve(t,   n, p, q, i, v, d) {
+      n = split(spec, p, ","); for (i = 1; i <= n; i++) { split(p[i], q, ":"); v[i] = q[1] + 0; d[i] = q[2] + 0 }
+      if (t <= v[1]) return d[1]; if (t >= v[n]) return d[n];
+      for (i = 1; i < n; i++) if (t <= v[i + 1]) return d[i] + (t - v[i]) * (d[i + 1] - d[i]) / (v[i + 1] - v[i]);
+      return d[n] }
+    $2 ~ /^r/ { n++; duty[n] = $3; zone[n] = $8 }
+    END {
+      if (n < 20) exit 1
+      for (i = 1; i <= n; i++) {
+        # The controller steps once a second, so the duty is the curve at a reading up to one second old.
+        m = curve(zone[i])
+        for (j = (i - 4 > 1 ? i - 4 : 1); j <= i; j++) if (curve(zone[j]) < m) m = curve(zone[j])
+        if (duty[i] < int(m + 0.5) - 1) exit 1
+      }
+      for (i = n - 19; i <= n; i++) {
+        e = int(curve(zone[i]) + 0.5)
+        if (zone[i] != zone[n]) exit 1
+        if (duty[i] - e < -1 || duty[i] - e > 1) exit 1
+      }
+      exit 0
+    }' "$samples"
+}
+real_rose() { awk -F'\t' '$2 ~ /^r/ && $8 != "" { if (!n || $8 + 0 > hi) hi = $8 + 0; if (!n || $8 + 0 < lo) lo = $8 + 0; n++ } END { exit !(n && hi - lo >= 3000) }' "$samples"; }
+
+phase_real() {
+  ZL="[real]"
+  say "b14: REAL phase: the controller reads the real thermal zone under the bounded load"
+  if [ "$mode" = sim ]; then
+    real_dir=$work/real
+    fan_file=$work/fan
+    socket=$work/lemnosd.sock
+    mkdir -p "$real_dir"
+    printf '45000\n' > "$real_dir/temp"
+    sed -e "s|@FAN@|$fan_file|" -e "s|@REAL@|$real_dir|" "$here/sim-board-real.toml" > "$work/board-real.toml"
+    start_service "$work/board-real.toml"
+  else
+    ctl list > /dev/null || die "no service answers on $socket"
+  fi
+  describe=$(ctl describe fan-control 2>&1)
+  expect "$ZL 1 fan-control describes duty and demand" bash -c '[[ $1 == *duty* && $1 == *demand* ]]' _ "$describe"
+  expect "$ZL 1 fan-control is listed running and ok" bind_running
+  expect "$ZL 1 the fan and the real zone are listed" devices_listed
+  CURVE_SPEC=30000:300,60000:600,75000:1000
+  if [ "$mode" = board ]; then
+    CURVE_SPEC=42000:300,50000:600,58000:1000
+  fi
+
+  start_zone=$(zone_mc)
+  say "b14: $ZL zone at the start of the load: $start_zone mC"
+
+  # The sampler runs while the load does, one row per read, and the load is bounded.
+  (
+    end=$(($(now_ms) + 60000))
+    while [ "$(now_ms)" -lt "$end" ]; do
+      sample_real "load" || true
+      sleep 0.25
+    done
+  ) &
+  sampler_pid=$!
+  if [ "$mode" = sim ]; then
+    sim_load &
+    load_pid=$!
+    wait "$load_pid"
+    load_pid=
+  else
+    "$load_hook" || die "the load hook failed"
+  fi
+  wait "$sampler_pid" 2>/dev/null
+  expect "$ZL r2 the duty never falls below the curve at the zone's reading, and is on the curve once the zone holds" real_follows
+  expect "$ZL r2 the zone rose at least 3 C under the load" real_rose
+  end_zone=$(zone_mc)
+  say "b14: $ZL zone after the load: $end_zone mC"
+  expect "$ZL r3 the duty falls at most 50 per second after the load" fall_limit_ok '^rload'
+  if [ "$mode" = sim ]; then
+    stop_service
+  fi
+}
+
+# --- run ----------------------------------------------------------------------------------------
 
 if [ "$mode" = sim ]; then
-  stop_sim
-  start_sim
+  say "b14: sim, lemnosd from $bin, scratch $work"
+  phase_file
+  phase_real
 else
-  "$restart_hook" || die "the restart hook failed"
-  wait_until 30 ctl list > /dev/null 2>&1 || die "no service after the restart"
+  [ -n "$socket" ] || die "board mode needs --socket PATH (or LEMNOSD_SOCKET)"
+  [ -n "$restart_hook" ] || [ "$phase" = real ] || die "board mode file phase needs --restart-hook CMD"
+  [ -n "$stop_hook" ] || [ "$phase" = real ] || die "board mode file phase needs --stop-hook CMD"
+  [ "$phase" = file ] && { [ -n "$base_pwm" ] && [ -n "$base_enable" ] && [ -n "$base_state" ] \
+    || die "board mode file phase needs --baseline-pwm, --baseline-enable and --baseline-state (recorded before any write)"; }
+  [ "$phase" = real ] && [ -z "$load_hook" ] && die "board mode real phase needs --load-hook CMD (the bounded load)"
+  exec 9> /run/lock/board-gpu.lock
+  flock -n 9 || die "the board lock /run/lock/board-gpu.lock is held elsewhere"
+  say "b14: board, phase $phase, socket $socket"
+  if [ "$phase" = file ]; then phase_file; else phase_real; fi
 fi
 
-# After the restart: the board file's curve, not the one that was set, and a fresh start.
-expect "7 after the restart the board file's curve is in force at $MID mC" wait_until 10 at_expected
-expect "7 after the restart the controller is not held" state_not_held
-
-# --- 12 stop (B14 check 12) ---------------------------------------------------------------------
-
-# SIGTERM hands the fan back to its baseline. The sim's fan is read from its file after the stop; the
-# board's from sysfs, after the operator's stop hook has returned with the process gone.
-if [ "$mode" = sim ]; then
-  stop_sim
-else
-  "$stop_hook" || die "the stop hook failed"
-fi
-expect "12 stop: the fan is back at its baseline once the service has exited" at_baseline
-
-say "b14: $pass passed, $fail failed; samples in $samples"
+say "b14: $pass passed, $fail failed; samples in $samples; checks with the file-backed zone are [file], with the real zone [real]"
 [ "$fail" -eq 0 ]
