@@ -156,19 +156,43 @@ pub static COUNTER_BINDS: AtomicU32 = AtomicU32::new(0);
 #[driver("fake-counter", provides = [Counter])]
 pub struct FakeCounter {
     value: u32,
+    /// When it bound: the clock the two `again` windows below are measured on.
+    started: std::time::Instant,
+    /// `again_until_ms`: `get` answers `AGAIN` for this long after the bind, as a sensor does while
+    /// it powers up. Zero (the default) means never.
+    again_until_ms: u64,
+    /// `again_from_ms`: `get` answers `AGAIN` from this long after the bind on, as a sensor that
+    /// stops answering does. Unset means never.
+    again_from_ms: Option<u64>,
+}
+
+impl FakeCounter {
+    /// Whether `get` answers `AGAIN` now: inside the power-up window, or past the point where the
+    /// device stops answering.
+    fn answering_again(&self) -> bool {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        elapsed < self.again_until_ms || self.again_from_ms.is_some_and(|from| elapsed >= from)
+    }
 }
 
 impl Lifecycle for FakeCounter {
     type Needs = FakeCounterNeeds;
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        cfg.check_keys(&[Key::optional("start", Kind::Int)])
+        cfg.check_keys(&[
+            Key::optional("start", Kind::Int),
+            Key::optional("again_until_ms", Kind::Int),
+            Key::optional("again_from_ms", Kind::Int),
+        ])
     }
 
     fn start(_needs: FakeCounterNeeds, cfg: &Config<'_>) -> Result<Self> {
         COUNTER_BINDS.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             value: cfg.int("start").unwrap_or(0) as u32,
+            started: std::time::Instant::now(),
+            again_until_ms: cfg.int("again_until_ms").unwrap_or(0).max(0) as u64,
+            again_from_ms: cfg.int("again_from_ms").map(|ms| ms.max(0) as u64),
         })
     }
 
@@ -189,6 +213,9 @@ impl Lifecycle for FakeCounter {
 
 impl Counter for FakeCounter {
     fn get(&mut self) -> Result<u32> {
+        if self.answering_again() {
+            return Err(Status::AGAIN);
+        }
         self.value += 1;
         Ok(self.value)
     }
