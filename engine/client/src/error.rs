@@ -94,6 +94,10 @@ pub enum Error {
         /// The buffer, as the producer numbers it.
         buffer: u32,
     },
+    /// The reader holds as many buffers as it is granted, and a frame came that it could not hold:
+    /// the frame is skipped (counted in `skipped`). Nothing is read until the reader gives one of
+    /// its held frames back. Not "no frame": the reader is at its limit. Status `BUSY`.
+    StreamAtLimit,
 }
 
 impl core::fmt::Display for Error {
@@ -172,6 +176,9 @@ impl core::fmt::Display for Error {
                 f,
                 "buffer {buffer} was reused while the frame was read: the bytes are dropped, not returned"
             ),
+            Self::StreamAtLimit => f.write_str(
+                "the reader holds as many buffers as it is granted: give a frame back to read on",
+            ),
             Self::StreamUnsupported => {
                 f.write_str("the frame stream's buffers are dma-bufs, which can't be mapped here")
             }
@@ -232,6 +239,7 @@ impl From<Error> for Status {
             Error::Stream(RingError::Layout { .. }) => Status::LAYOUT_MISMATCH,
             Error::Stream(_) | Error::StreamWait(_) => Status::IO,
             Error::StreamTorn { .. } => Status::TORN,
+            Error::StreamAtLimit => Status::BUSY,
             Error::StreamUnsupported | Error::StreamUnmapped => Status::NOT_SUPPORTED,
             Error::StreamReadOnly | Error::StreamBuffersReadOnly => Status::ACCESS,
         }

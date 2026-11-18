@@ -27,7 +27,7 @@ use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::stream::ProducerEndpoint;
 use lemnos_linux_sys::scm::{recv_with_fds, send_with_fds};
-use lemnos_wire::ring::{Gone, Layout, TicketReader, ticket::fds};
+use lemnos_wire::ring::{Gone, Layout, Pop, TicketReader, ticket::fds};
 use lemnos_wire::{Frame, VERSION, append, decode};
 use lemnosd::DmaHeaps;
 use shm_ring::{FieldId, MemMut, Reader, WriteMap};
@@ -1088,8 +1088,8 @@ fn reader_role() {
             say("waiting");
             loop {
                 match reader.pop() {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
+                    Ok(Pop::Frame(_)) => {}
+                    Ok(Pop::Empty | Pop::AtLimit) => {
                         reader.wait(Duration::from_millis(100)).ok();
                     }
                     Err(Gone::Ended(state)) => {
@@ -1111,7 +1111,7 @@ fn reader_role() {
 fn wait_for_frame(reader: &mut TicketReader) -> u32 {
     let start = Instant::now();
     loop {
-        if let Some(frame) = reader.pop().expect("a frame, not a stop") {
+        if let Pop::Frame(frame) = reader.pop().expect("a frame, not a stop") {
             return frame.buffer;
         }
         assert!(start.elapsed() < Duration::from_secs(10), "no frame came");
@@ -1124,7 +1124,7 @@ fn read_frames(reader: &mut TicketReader, wanted: usize) {
     let mut got = 0;
     while got < wanted && start.elapsed() < Duration::from_secs(10) {
         match reader.pop() {
-            Ok(Some(frame)) => {
+            Ok(Pop::Frame(frame)) => {
                 let mut bytes = [0_u8; PAYLOAD];
                 let read = reader.read(frame.buffer, 0, &mut bytes);
                 let valid = reader.validate(frame.buffer).is_ok();
@@ -1138,7 +1138,7 @@ fn read_frames(reader: &mut TicketReader, wanted: usize) {
                 reader.release(frame.buffer);
                 got += 1;
             }
-            Ok(None) => {
+            Ok(Pop::Empty | Pop::AtLimit) => {
                 reader.wait(Duration::from_millis(50)).ok();
             }
             Err(gone) => {

@@ -132,10 +132,12 @@ pub trait StreamPlatform: Debug + Send + Sync {
     fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool>;
 }
 
-/// What the ring held next: a frame, or a job's end.
+/// What the ring held next: a frame, a job's end, or the reader's hold limit reached (a frame the
+/// reader could not hold, skipped: see [`Error::StreamAtLimit`]).
 enum Taken {
     Frame(HeldFrame),
     JobEnd { identity: u64, reason: JobReason },
+    AtLimit,
 }
 
 /// One frame taken from a stream, held until it's given back with [`FrameStream::release`]. Only
@@ -372,6 +374,11 @@ pub enum Next {
     Frame(HeldFrame),
     /// The time passed with the stream still running and no frame.
     TimedOut,
+    /// The reader holds as many buffers as it is granted (`reader_held_max` for the stream, or
+    /// its own request, whichever is less), and a frame came that it could not hold: that frame
+    /// is skipped and counted in [`FrameStream::skipped`]. Nothing is read until the reader gives
+    /// one of its held frames back with [`FrameStream::release`] (or by dropping it).
+    AtLimit,
     /// The stream ended and every frame it had is read.
     Ended(StreamEnd),
 }
@@ -699,11 +706,16 @@ impl FrameStream {
     /// pending, and a caller that sleeps on the stream's doorbell afterwards sleeps only with
     /// nothing to read (`docs/streams.md`, "Waiting on the doorbell"). The losses are counted in
     /// [`skipped`](Self::skipped).
+    ///
+    /// At the reader's hold limit a frame is skipped and this returns
+    /// [`Error::StreamAtLimit`], not `None`: the reader has to give a frame back before it can
+    /// read on.
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
         loop {
             match self.take()? {
                 Some(Taken::Frame(frame)) => return Ok(Some(frame)),
                 Some(Taken::JobEnd { .. }) => self.job_ends += 1,
+                Some(Taken::AtLimit) => return Err(Error::StreamAtLimit),
                 None => return Ok(None),
             }
         }
@@ -763,7 +775,10 @@ impl FrameStream {
                 NextBatch::Empty => break None,
                 // Lost before this reader read them, and counted by the reader: look again for the
                 // frame parked behind them, or for nothing.
-                NextBatch::Skipped(_) | NextBatch::Limited => {}
+                NextBatch::Skipped(_) => {}
+                // A frame the reader could not hold, skipped by the ring: the reader is at its limit
+                // and has to give a frame back. Named, not passed over as nothing.
+                NextBatch::Limited => break Some(Taken::AtLimit),
                 NextBatch::PoolChanged { .. } | NextBatch::CutOff => {
                     return Err(Error::Stream(RingError::Broken));
                 }
@@ -801,6 +816,7 @@ impl FrameStream {
             match self.next_or_end(left)? {
                 Next::Frame(frame) => return Ok(Some(frame)),
                 Next::TimedOut | Next::Ended(_) => return Ok(None),
+                Next::AtLimit => return Err(Error::StreamAtLimit),
                 // A job's end is not a frame, and a change of the producer is not one either: the
                 // wait goes on.
                 Next::JobEnded { .. } => self.job_ends += 1,
@@ -841,6 +857,7 @@ impl FrameStream {
                 Some(Taken::JobEnd { identity, reason }) => {
                     return Ok(Next::JobEnded { identity, reason });
                 }
+                Some(Taken::AtLimit) => return Ok(Next::AtLimit),
                 None => {}
             }
             if let Some(end) = end {

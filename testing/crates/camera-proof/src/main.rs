@@ -234,6 +234,14 @@ fn next_through_stall(stream: &mut FrameStream, tracker: &mut Tracker) -> Result
                 ));
                 continue;
             }
+            // Only a ticketed reader has a hold limit; this is the stream's own consumer. Said, and
+            // read as a second with nothing, so a reader that did reach it does not spin.
+            Next::AtLimit => {
+                out(format_args!(
+                    "[{now} ns] at the hold limit: a frame was skipped until one is given back"
+                ));
+                return Ok(Got::Silent);
+            }
             Next::Ended(kind) => Event::Ended(kind.to_string()),
         };
         let ended = matches!(event, Event::Ended(_));
