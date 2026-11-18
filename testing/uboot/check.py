@@ -17,6 +17,7 @@
 #   check.py ... --mutant NAME     (fail-before: the named mutation of boot.cmd must fail its named case)
 import argparse
 import concurrent.futures
+import functools
 import hashlib
 import os
 import pathlib
@@ -423,16 +424,16 @@ class Harness:
             disk.write(part.read())
         return root
 
-    def qemu_args(self, root):
+    def qemu_args(self, img):
         # raspi3b: the firmware's device tree is passed with -dtb (U-Boot's OF_BOARD takes it from x0), the mini UART
         # (the second serial) is the console, and the disk is the SD card.
         return [str(self.qemu), "-M", "raspi3b", "-m", "1024", "-display", "none",
                 "-serial", "null", "-serial", "stdio", "-dtb", str(self.dtb),
-                "-kernel", str(self.uboot), "-drive", "if=sd,format=raw,file=" + str(root / "disk.img")]
+                "-kernel", str(self.uboot), "-drive", "if=sd,format=raw,file=" + str(img)]
 
-    def session(self, root):
-        """A U-Boot run on the case's disk: stops the autoboot countdown, and returns at the prompt."""
-        c = Console(self.qemu_args(root), root)
+    def session(self, root, img=None):
+        """A U-Boot run on the case's disk (or on the image given): stops the autoboot countdown, and returns at the prompt."""
+        c = Console(self.qemu_args(img or root / "disk.img"), root)
         c.until(b"Hit any key", "the autoboot prompt")
         c.send("")
         c.until(b"U-Boot> ", "the U-Boot prompt")
@@ -451,8 +452,8 @@ class Harness:
         finally:
             c.close()
 
-    def env(self, root):
-        c = self.session(root)
+    def env(self, root, img=None):
+        c = self.session(root, img)
         try:
             c.send("printenv")
             text = c.until(b"U-Boot> ", "printenv")
@@ -507,49 +508,73 @@ def env_partition_bytes(root):
     return (root / "disk.img").read_bytes()[start:start + 1024 * 1024]
 
 
+def env_snapshot(h, root, pool, tag):
+    """The environment of the disk as it is now, read by U-Boot in the background on a copy of the disk. The copy
+    is what the read sees, so the next boot can use the disk while it goes on. The next boot's "before" is this same
+    state: nothing writes the disk between two boots."""
+    img = root / f"env-{tag}.img"
+    shutil.copyfile(root / "disk.img", img)
+    return pool.submit(h.env, root, img)
+
+
 def check_case(h, case, root, report):
     root.mkdir(parents=True, exist_ok=True)
     h.disk(case, root)
     if case.seed:
         h.seed(root, case.seed)
+    # The problems come in the order of the boots, as they were found. The environment checks of a boot wait for
+    # its reads, which run in the background: they are entries that are called when the problems are collected.
+    entries = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        before = env_snapshot(h, root, pool, "seed") if case.env_part else None
+        for number, boot in enumerate(case.boots, 1):
+            before_disk = h.disk_head(root)
+            ram = {**BOOT_VARS, **case.ram} if not case.env_part else dict(case.ram)
+            result, pick, lines = h.boot(root, ram)
+            report.append(f"    boot {number}: result={result} pick={pick}")
+            if boot.download:
+                if result != "download":
+                    entries.append(f"boot {number}: expected download mode, got {result} ({pick})")
+            elif boot.pick is None:
+                entries.append(f"boot {number}: expected no slot to start, got {result} {pick}")
+            elif pick != boot.pick or result != "started":
+                entries.append(f"boot {number}: expected {boot.pick}, got {pick} ({result})")
+            for want in boot.lines:
+                if not any(want in line for line in lines):
+                    entries.append(f"boot {number}: no line containing {want!r}")
+            for want, count in boot.counts.items():
+                got = sum(want in line for line in lines)
+                if got != count:
+                    entries.append(f"boot {number}: {want!r} printed {got} times, expected {count}")
+            if case.env_part:
+                after = env_snapshot(h, root, pool, number)
+                entries.append(functools.partial(env_problems, number, boot, before, after))
+                before = after
+            if boot.partition_has:
+                part = env_partition_bytes(root)
+                for want in boot.partition_has:
+                    if want.encode() not in part:
+                        entries.append(f"boot {number}: {want!r} is not in the uboot-env partition after the boot")
+            if boot.disk_same and h.disk_head(root) != before_disk:
+                entries.append(f"boot {number}: the disk outside the environment was written")
+        problems = []
+        for entry in entries:
+            problems.extend(entry() if callable(entry) else [entry])
+    return problems
+
+
+def env_problems(number, boot, before, after):
+    """The environment checks of one boot: its variables after the boot, and whether an env_same boot changed nothing."""
     problems = []
-    for number, boot in enumerate(case.boots, 1):
-        before_env = h.env(root) if case.env_part else {}
-        before_disk = h.disk_head(root)
-        ram = {**BOOT_VARS, **case.ram} if not case.env_part else dict(case.ram)
-        result, pick, lines = h.boot(root, ram)
-        report.append(f"    boot {number}: result={result} pick={pick}")
-        if boot.download:
-            if result != "download":
-                problems.append(f"boot {number}: expected download mode, got {result} ({pick})")
-        elif boot.pick is None:
-            problems.append(f"boot {number}: expected no slot to start, got {result} {pick}")
-        elif pick != boot.pick or result != "started":
-            problems.append(f"boot {number}: expected {boot.pick}, got {pick} ({result})")
-        for want in boot.lines:
-            if not any(want in line for line in lines):
-                problems.append(f"boot {number}: no line containing {want!r}")
-        for want, count in boot.counts.items():
-            got = sum(want in line for line in lines)
-            if got != count:
-                problems.append(f"boot {number}: {want!r} printed {got} times, expected {count}")
-        if case.env_part:
-            after_env = h.env(root)
-            for key, value in boot.env.items():
-                got = after_env.get(key, "")
-                if got != value:
-                    problems.append(f"boot {number}: {key} is {got!r} after the boot, expected {value!r}")
-            if boot.env_same and after_env != before_env:
-                changed = sorted(k for k in set(before_env) | set(after_env)
-                                 if before_env.get(k) != after_env.get(k))
-                problems.append(f"boot {number}: the environment changed: {changed}")
-        if boot.partition_has:
-            part = env_partition_bytes(root)
-            for want in boot.partition_has:
-                if want.encode() not in part:
-                    problems.append(f"boot {number}: {want!r} is not in the uboot-env partition after the boot")
-        if boot.disk_same and h.disk_head(root) != before_disk:
-            problems.append(f"boot {number}: the disk outside the environment was written")
+    before_env, after_env = before.result(), after.result()
+    for key, value in boot.env.items():
+        got = after_env.get(key, "")
+        if got != value:
+            problems.append(f"boot {number}: {key} is {got!r} after the boot, expected {value!r}")
+    if boot.env_same and after_env != before_env:
+        changed = sorted(k for k in set(before_env) | set(after_env)
+                         if before_env.get(k) != after_env.get(k))
+        problems.append(f"boot {number}: the environment changed: {changed}")
     return problems
 
 
