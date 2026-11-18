@@ -109,7 +109,7 @@ Refusals and what they mean are listed in `lemnos.h`.
 
 The stream is Rust: `rs/stream_file.rs` (the stream, its file and its ioctls), `rs/stream_ring.rs`
 (the frame ring and the readers' holds), `rs/stream_frame.rs` (jobs and buffers), `rs/stream_producer.rs`
-(the calls a block makes, with the C names and signatures of `lemnos_internal.h`),
+(the calls a block makes; the blocks are Rust and call them there),
 `rs/stream_region.rs` (dma-bufs on the block, and the lend) and `rs/stream_reader.rs` (a reader's
 marks page and the doorbell). The frame path, the ring publish, the lend and its release allocate
 nothing.

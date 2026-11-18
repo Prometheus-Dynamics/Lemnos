@@ -78,16 +78,6 @@ struct vm_area_struct;
 bool lem_block_owned(struct device *dev);
 
 long lem_stream_create(struct device *dev, struct lemnos_stream_create *c);
-/*
- * lem_stream_create() for a block whose jobs are its own: the producer is
- * attached, with a frame of the whole buffer, before the fd exists, so the
- * consumer never holds a stream without it. *out is set before the fd is
- * installed. On failure there's no stream and producer->priv is still the
- * caller's; on success the stream owns it, through producer->release.
- */
-long lem_stream_create_producer(struct device *dev, struct lemnos_stream_create *c,
-				const struct lem_stream_producer *producer,
-				struct lem_stream **out);
 void lem_streams_block_gone(struct device *dev);
 
 /* A device address a block is programmed with is aligned this much. */
@@ -161,37 +151,10 @@ struct lem_stream_producer {
 };
 
 /*
- * The calls only the Rust blocks make (the stream of a file, attach, detach, next, the range reads,
- * cpu_read_enable) have no prototype here: rs/stream_producer.rs and rs/stream_file.rs define them.
+ * The calls a block makes on its stream (attach, next, complete, the job calls and the rest) are
+ * Rust called from Rust: rs/stream_producer.rs and rs/stream_file.rs define them, and rs/stream.rs
+ * names them for the blocks. Only the two calls lemnos_core.c makes have a prototype, above.
  */
-/* Done with a slot: publish `bytes` of it, or 0 to say the frame went wrong. */
-void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
-			 u64 sequence, u64 timestamp_ns);
-/* As lem_stream_complete(), with the frame's end time (0 when the block stamps none). */
-void lem_stream_complete_at(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
-			    u64 sequence, u64 timestamp_ns, u64 end_ns);
-/* Done with a slot that was never written. */
-void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot);
-/* The block's DMA can't be shown to have stopped: keep everything pinned for good. */
-void lem_stream_wedge(struct lem_stream *s);
-/*
- * For a producer with job_bytes set. Reads the job at the front of the ring
- * into `job` (job_bytes), once: 1 with a job, 0 with none, -errno for a lying
- * consumer. Doesn't take it: the block copies and checks what it names first.
- */
-int lem_stream_job_peek(struct lem_stream *s, void *job, size_t bytes);
-/*
- * The job at the front of the ring passed the block's checks. Resolves every
- * range against job's buffer and the registered regions and, only if all
- * resolve and the buffer is free, takes the job and holds them, in one step:
- * nothing can be unregistered between the check and the hold. `slot` is then
- * as from lem_stream_next() and ends with lem_stream_complete() or _cancel().
- */
-int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
-			const struct lemnos_stream_range *range, u32 count,
-			struct lem_stream_slot *slot);
-/* The block found it can't go on: the consumer learns with `err` and the stream ends. */
-void lem_stream_fault(struct lem_stream *s, int err);
 
 struct platform_device;
 struct lem_pb;
