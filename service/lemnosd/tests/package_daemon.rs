@@ -56,6 +56,12 @@ fn fixture() -> &'static Path {
     BUILT.get_or_init(|| {
         let exe = std::env::current_exe().unwrap();
         let target = exe.ancestors().nth(3).unwrap().join("package-fixture");
+        // The loader's own tests build this crate in this directory too, with other features, and
+        // tests run as separate processes at once: the build and the copy are one step under the
+        // lock file they share (engine/package/tests/common).
+        std::fs::create_dir_all(&target).unwrap();
+        let lock = std::fs::File::create(target.join(".building")).unwrap();
+        lock.lock().unwrap();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut command = Command::new(cargo);
         command
@@ -74,7 +80,11 @@ fn fixture() -> &'static Path {
             String::from_utf8_lossy(&output.stderr)
         );
         let kept = target.join("for-the-daemon.so");
-        std::fs::copy(target.join("debug/liblemnos_package_fixture.so"), &kept).unwrap();
+        // Renamed into place, so a process reading it meanwhile never sees a part of the file.
+        let part = target.join(format!("for-the-daemon.so.{}", std::process::id()));
+        std::fs::copy(target.join("debug/liblemnos_package_fixture.so"), &part).unwrap();
+        std::fs::rename(&part, &kept).unwrap();
+        drop(lock);
         kept
     })
 }

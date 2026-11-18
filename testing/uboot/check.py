@@ -16,6 +16,7 @@
 #   check.py --uboot DIR/u-boot.bin --mkimage DIR/tools/mkimage --work DIR/work [--qemu BIN] [--case NAME] [--script FILE]
 #   check.py ... --mutant NAME     (fail-before: the named mutation of boot.cmd must fail its named case)
 import argparse
+import concurrent.futures
 import hashlib
 import os
 import pathlib
@@ -562,6 +563,8 @@ def main(argv=None):
     ap.add_argument("--script", type=pathlib.Path, default=DEFAULT_SCRIPT)
     ap.add_argument("--case", action="append", default=[])
     ap.add_argument("--mutant", choices=sorted(MUTANTS))
+    ap.add_argument("--jobs", type=int, default=min(len(CASES), os.cpu_count() or 1),
+                    help="cases run at once (default: all of them, up to the core count)")
     args = ap.parse_args(argv)
 
     script = args.script
@@ -580,8 +583,9 @@ def main(argv=None):
     h = Harness(args.uboot.resolve(), args.mkimage.resolve(), args.work.resolve(), script.resolve(),
                 shutil.which(str(args.qemu)) or str(args.qemu), args.dtb.resolve())
     h.build_tools()
-    failed = {}
-    for case in cases:
+    # Each case has its own directory and its own QEMU, so the cases run side by side (--jobs), and are
+    # reported in their listed order.
+    def one(case):
         root = (args.work / case.name).resolve()
         if root.exists():
             shutil.rmtree(root)
@@ -590,6 +594,12 @@ def main(argv=None):
             problems = check_case(h, case, root, report)
         except Failure as e:
             problems = [str(e)]
+        return case, report, problems
+
+    failed = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.jobs, len(cases) or 1))) as pool:
+        results = list(pool.map(one, cases))
+    for case, report, problems in results:
         status = "ok" if not problems else "FAIL"
         print(f"{status}: {case.name}: {case.about}")
         if problems:

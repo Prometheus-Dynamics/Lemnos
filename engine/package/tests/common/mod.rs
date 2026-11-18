@@ -31,14 +31,18 @@ fn target_dir() -> PathBuf {
 /// Builds the package crate in `tests/<krate>` with cargo and returns the file it made, kept
 /// under the name `keep_as`.
 fn build(krate: &str, library: &str, features: &[&str], keep_as: &str) -> PathBuf {
-    // One cargo at a time on the shared target directory, whichever test binary gets there.
-    static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    // One build at a time on the shared target directory, whichever test process gets there. The
+    // tests of this crate may run as separate processes at once (one per test), and two feature sets
+    // build the same library file, so the build and the copy are one step under a lock on a file
+    // beside them: a lock in this process alone would not hold the others back.
+    let target = target_dir().join("package-fixture");
+    std::fs::create_dir_all(&target).unwrap();
+    let lock = std::fs::File::create(target.join(".building")).unwrap();
+    lock.lock().unwrap();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(krate)
         .join("Cargo.toml");
-    let target = target_dir().join("package-fixture");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
     command
@@ -62,7 +66,12 @@ fn build(krate: &str, library: &str, features: &[&str], keep_as: &str) -> PathBu
     );
     let built = target.join(format!("debug/lib{library}.so"));
     let kept = target.join(keep_as);
-    std::fs::copy(&built, &kept).unwrap();
+    // Copied under another name and renamed into place: a process loading `kept` meanwhile (it took
+    // the lock before this one) sees the whole old file or the whole new one, never a part.
+    let part = target.join(format!("{keep_as}.{}", std::process::id()));
+    std::fs::copy(&built, &part).unwrap();
+    std::fs::rename(&part, &kept).unwrap();
+    drop(lock);
     kept
 }
 
