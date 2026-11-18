@@ -454,6 +454,96 @@ fn case_3_writes_and_reads_both_fail_the_duty_is_absent_and_control_resumes_when
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The controller's attempt count, from its row's reason (`retrying: attempt N, ...`), or `None` when it is not
+/// retrying.
+fn attempt_of(client: &Client) -> Option<u32> {
+    let reason = client
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.name == "fan-control")?
+        .reason;
+    let rest = reason.split("attempt ").nth(1)?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The board's flap (B14 check 11, BOARD-4), through the daemon: a fan whose writes are refused is bound out by
+/// the host and bound again a second later, while its writes are still refused, because binding it makes no write.
+/// The controller's attempt count goes on from where it was: a rebind does not start its backoff again.
+/// Fails on the fake fan from before this change, whose refusal refused the bind too: the fan stayed out, so the
+/// sim never flapped as the board does.
+#[test]
+fn a_refused_fan_is_bound_again_while_its_writes_are_still_refused_and_the_backoff_goes_on() {
+    let dir = scratch("flap");
+    let zone = dir.join("zone");
+    set_temp(&zone, 45_000);
+    let fan_file = dir.join("fan");
+    let refusal = dir.join("fan.refuse");
+    let drop_refusal = dir.join("fan.refuse-drop");
+    let mut running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+
+    fs::write(&refusal, "").unwrap();
+    fs::write(&drop_refusal, "").unwrap();
+    wait_up_to(45, "the host binds the fan out", || {
+        health_of(&client, "fan") == DeviceHealth::Failed
+    });
+    let at_bind_out = attempt_of(&client).expect("the controller is retrying");
+    assert!(
+        at_bind_out >= 4,
+        "bound out at the fourth attempt (the waits of 1, 2 and 4 s): attempt {at_bind_out}"
+    );
+    wait_up_to(
+        10,
+        "the host binds the fan again while its writes are refused",
+        || health_of(&client, "fan") == DeviceHealth::Ok,
+    );
+    assert!(refusal.exists(), "the writes are still refused");
+    // The next attempts: the read that finds the fan in, then the write, which is refused again. The count
+    // goes on, and at no sample has it gone back. Between that read and that write the row says the fan is
+    // bound again, with no count.
+    let mut least = at_bind_out;
+    wait_up_to(
+        30,
+        "the controller's next attempt, after the rebind",
+        || {
+            let Some(now) = attempt_of(&client) else {
+                return false;
+            };
+            least = least.min(now);
+            now > at_bind_out
+        },
+    );
+    assert_eq!(
+        least, at_bind_out,
+        "the attempt count went back after the rebind: the backoff started again"
+    );
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        "450",
+        "the refused fan has not moved"
+    );
+
+    fs::remove_file(&refusal).unwrap();
+    fs::remove_file(&drop_refusal).unwrap();
+    wait_up_to(30, "control resumes on the curve", || {
+        state_duty(&mut control) == Some(450)
+            && health_of(&client, "fan-control") == DeviceHealth::Ok
+    });
+    running.service.take().unwrap().stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn disabling_the_controller_hands_the_fan_back_to_its_baseline() {
     let dir = scratch("disable");
