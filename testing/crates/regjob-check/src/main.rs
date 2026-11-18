@@ -80,7 +80,7 @@ const ADDR_BYTES: usize = 24;
 const WRITE_BYTES: usize = 8;
 const _: () = assert!(ADDR_BYTES == 24 && WRITE_BYTES == 8);
 
-// The encoder's registers (kernel/lemnos_regjob_a733.c).
+// The encoder's registers (kernel/rs/regjob_ve.rs).
 const MODE: u32 = 0x800;
 const TOP_RESET: u32 = 0x804;
 const IN_SIZE: u32 = 0xa00;
