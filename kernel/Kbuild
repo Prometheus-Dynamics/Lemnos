@@ -11,7 +11,7 @@ obj-m += lemnos.o
 else
 obj-$(CONFIG_LEMNOS) += lemnos.o
 endif
-lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o
+lemnos-y := lemnos_core.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o
 # With a Rust kernel (CONFIG_RUST, kernel/lemnos_entry.rs), the Rust half owns the module entry and
 # lemnos_core.c keeps its init and exit as lem_core_init and lem_core_exit (LEMNOS_RUST_OWNER). Without
 # one, lemnos_core.c keeps module_init and module_exit, as before.
@@ -49,9 +49,7 @@ lem_bindgen_items := \
 	--allowlist-type 'lemnos_regjob_.*' \
 	--allowlist-type 'lemnos_stream_.*' \
 	--allowlist-var 'LEMNOS_(STREAM|RING_STATE|REFUSED|LAYOUT)_.*' \
-	--allowlist-type 'lem_(stream|geom|frame|ctl|stream_region|reader|bell|stream_buf|reader_handle)' \
-	--allowlist-var 'LEM_STREAM_.*' \
-	--with-derive-custom-struct 'lem_(stream_region|reader|stream_buf)=Copy,Clone' \
+	--allowlist-function 'anon_inode_getfile|vmalloc_user_noprof|remap_vmalloc_range|vfree|vunmap|shmem_mapping' \
 	--allowlist-var 'LEMNOS_REGJOB_.*' \
 	--with-derive-custom-struct 'lemnos_.*=Copy,Clone' \
 	$(foreach t,$(lem_bindgen_opaque),--allowlist-type '$(t)' --opaque-type '$(t)')
@@ -61,7 +59,7 @@ quiet_cmd_lem_bindgen = BINDGEN $@
 		--no-layout-tests --no-debug '.*' --no-doc-comments --enable-function-attribute-detection \
 		--no-recursive-allowlist $(lem_bindgen_items) \
 		-o $@ -- $(filter-out $(CC_FLAGS_LTO),$(c_flags)) -fno-builtin -D__BINDGEN__ -DMODULE
-$(obj)/lemnos_bindings_generated.rs: $(src)/rs/bindings.h $(src)/lemnos.h $(src)/lemnos_stream_priv.h FORCE
+$(obj)/lemnos_bindings_generated.rs: $(src)/rs/bindings.h $(src)/lemnos.h FORCE
 	$(call if_changed_dep,lem_bindgen)
 targets += lemnos_bindings_generated.rs
 clean-files += lemnos_bindings_generated.rs

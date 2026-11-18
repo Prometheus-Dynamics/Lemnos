@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-//! The frame stream's side of the block ports (stage 1k of the port): what the graphics DMA engine
-//! (rs/gsdma.rs) and the VIP9000 (rs/vip.rs) share with it. The stream itself is lemnos_stream.c and
-//! stays C; this file holds the types its interface (lemnos_internal.h) names, the calls the ports make
-//! on it, and the kernel's waitqueue, delayed work and workqueue the two blocks run their jobs on.
+//! What the frame stream shares with the blocks: the types its interface (lemnos_internal.h) names,
+//! the calls the block ports make on it (`Handle`), and the kernel's waitqueue, delayed work and
+//! workqueue that the stream and the blocks run their work on.
+//!
+//! The stream itself is rs/stream_file.rs (the stream and its file), rs/stream_ring.rs (the frame
+//! ring and the hold table), rs/stream_frame.rs (the frame path), rs/stream_producer.rs (the calls of
+//! lemnos_internal.h), rs/stream_region.rs (dma-bufs on the block, and the lend) and
+//! rs/stream_reader.rs (the readers' marks pages and the doorbell).
 //!
 //! The layouts of `struct lem_job_range`, `struct lem_job`, `struct lem_stream_slot` and
-//! `struct lem_stream_producer` are the C ones, checked below. Everything else is the kernel's.
+//! `struct lem_stream_producer` are the C ones the blocks still in C use, checked below. Everything
+//! else is the kernel's.
 
 use crate::bindings as lb;
 use crate::stream_producer::{
@@ -57,8 +62,8 @@ pub(crate) struct Slot {
     pub(crate) bytes: u32,
 }
 
-/// `struct lem_stream`: only the stream's code reads it (lemnos_stream_priv.h while its file is C).
-pub(crate) type Stream = lb::lem_stream;
+/// `struct lem_stream`, for the blocks: only the stream's code reads it (rs/stream_file.rs).
+pub(crate) use crate::stream_file::{Stream, lem_stream_create_producer};
 
 /// `struct lem_stream_producer`: what a block that takes its jobs from the ring provides. The stream
 /// calls `stop` once, `kick`, `ioctl`, `mmap` and `release` as the C interface says.
@@ -75,22 +80,16 @@ pub(crate) struct Producer {
     pub(crate) release: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
+impl Producer {
+    /// No producer: every callback unset.
+    pub(crate) const NONE: Producer =
+        Producer { stop: None, private: ptr::null_mut(), job_bytes: 0, kick: None, ioctl: None, mmap: None, release: None };
+}
+
 const _: () = assert!(core::mem::size_of::<JobRange>() == 24);
 const _: () = assert!(core::mem::size_of::<Job>() == 328);
 const _: () = assert!(core::mem::size_of::<Slot>() == 344);
 const _: () = assert!(core::mem::size_of::<Producer>() == 56);
-
-// The stream is named through a pointer only; its C layout holds kernel types bindgen makes empty.
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    /// lemnos_stream.c: makes the stream the producer drives, and the file for it (`out`).
-    pub(crate) fn lem_stream_create_producer(
-        dev: *mut c_void,
-        c: *mut lb::lemnos_stream_create,
-        producer: *const Producer,
-        out: *mut *mut Stream,
-    ) -> c_long;
-}
 
 /// A stream the block drives: the pointer the stream's calls take. Valid while the stream exists, and
 /// the block calls it only inside the producer's callbacks, which the stream makes while it is alive.
@@ -424,6 +423,12 @@ impl Work {
     pub(crate) fn cancel_sync(&self) {
         // SAFETY: as queue.
         unsafe { bindings::cancel_work_sync(self.w.get()) };
+    }
+
+    /// flush_work(this): if it is queued or running, it has run when this returns.
+    pub(crate) fn flush(&self) {
+        // SAFETY: as queue.
+        unsafe { bindings::flush_work(self.w.get()) };
     }
 }
 

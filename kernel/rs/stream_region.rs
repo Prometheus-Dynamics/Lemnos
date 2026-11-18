@@ -17,36 +17,88 @@
 //! lock; the table itself changes only under both.
 
 use crate::bindings as lb;
-use crate::stream_frame::{DMA_ALIGN, POOL, REGIONS, Region};
+use crate::stream_file::test_stream_source;
+use crate::stream_frame::{DMA_ALIGN, POOL, REGIONS};
 use crate::stream_producer::St;
 use crate::stream_ring::{BUF_ABSENT, BUF_ACTIVE, BUF_FREE, BUF_QUEUED, Frame, Geom};
-use crate::stream::Stream;
-use core::ffi::{c_int, c_long};
+use core::{ffi::c_int, ptr};
 use kernel::{
     bindings,
     error::{code::*, from_err_ptr, to_result},
     prelude::*,
 };
 
-/// What the stream's control mutex guards beside the order of registration and teardown.
-pub(crate) type Ctl = lb::lem_ctl;
-
 /// Unregistered lent regions kept pinned for the next register of the same dma-buf.
-pub(crate) const PINS: usize = lb::LEM_STREAM_PINS as usize;
+pub(crate) const PINS: usize = 8;
 
-unsafe extern "C" {
-    /// lemnos_stream.c: the test_stream_source parameter, until the file's port takes it.
-    #[link_name = "test_stream_source"]
-    static TEST_STREAM_SOURCE: bool;
+/// A dma-buf pinned and mapped for the block: the pool, a registered region, or a buffer's own memory.
+#[derive(Clone, Copy)]
+pub(crate) struct Region {
+    /// Null: empty.
+    pub(crate) buf: *mut bindings::dma_buf,
+    att: *mut bindings::dma_buf_attachment,
+    sgt: *mut bindings::sg_table,
+    /// How the block may use it; the map and the unmap agree.
+    dir: bindings::dma_data_direction,
+    /// A read-only input lent to the block (LEMNOS_STREAM_IOC_REGISTER_LENT).
+    pub(crate) lent: bool,
+    /// Lent: the memory generation it was registered with.
+    generation: u32,
+    /// The kernel's mapping: only with test_stream_source, or for a block that reads its jobs' ranges.
+    map: bindings::iosys_map,
+    /// Device addresses, addr < end.
+    pub(crate) addr: u64,
+    pub(crate) end: u64,
+    pub(crate) size: u64,
+    /// Job ranges not finished.
+    pub(crate) users: u32,
 }
 
-/// Whether the test source is allowed, and with it the kernel mapping of every region it fills.
-fn test_stream_source() -> bool {
-    // SAFETY: a 0444 parameter: written by the kernel's parser before init, only read after.
-    unsafe { TEST_STREAM_SOURCE }
+impl Default for Region {
+    /// An empty slot.
+    fn default() -> Self {
+        Self {
+            buf: ptr::null_mut(),
+            att: ptr::null_mut(),
+            sgt: ptr::null_mut(),
+            dir: bindings::dma_data_direction::DMA_BIDIRECTIONAL,
+            lent: false,
+            generation: 0,
+            map: bindings::iosys_map::default(),
+            addr: 0,
+            end: 0,
+            size: 0,
+            users: 0,
+        }
+    }
+}
+
+/// What the stream's control mutex guards beside the order of registration and teardown.
+pub(crate) struct Ctl {
+    /// Lent regions unregistered and kept pinned, by memory generation; see `register_lent`.
+    pub(crate) pins: [Region; PINS],
+    /// The pin a full cache gives up next.
+    pin_next: u32,
+    /// Registered regions keep a kernel mapping.
+    cpu_read: bool,
+}
+
+// SAFETY: the raw pointers in its regions are to dma-bufs the stream holds references on.
+unsafe impl Send for Ctl {}
+
+impl Ctl {
+    pub(crate) fn new() -> Self {
+        Self { pins: [Region::default(); PINS], pin_next: 0, cpu_read: false }
+    }
 }
 
 impl Region {
+    /// The kernel's mapping of the region, or null when it has none.
+    pub(crate) fn vaddr(&self) -> *mut u8 {
+        // SAFETY: both members of the union are one pointer; a mapping that is iomem is never kept.
+        unsafe { self.map.__bindgen_anon_1.vaddr }.cast()
+    }
+
     /// Unmaps and unpins whatever part of the region was made, and leaves it empty. Sleeps.
     pub(crate) fn unmap(&mut self) {
         if self.buf.is_null() {
@@ -214,10 +266,10 @@ fn pin_keep(c: &mut Ctl, r: Region) {
 pub(crate) fn register_lent(st: St<'_>, c: &mut Ctl, a: &mut lb::lemnos_stream_register_lent) -> Result {
     // SAFETY: takes a reference on the dma-buf `fd` names, or answers an error pointer.
     let buf = from_err_ptr(unsafe { bindings::dma_buf_get(a.fd) })?;
-    for pin in c.pins.iter_mut().filter(|p| !p.buf.is_null() && p.gen_ != a.generation) {
+    for pin in c.pins.iter_mut().filter(|p| !p.buf.is_null() && p.generation != a.generation) {
         core::mem::take(pin).unmap();
     }
-    let r = match c.pins.iter().rposition(|p| p.buf == buf && p.gen_ == a.generation) {
+    let r = match c.pins.iter().rposition(|p| p.buf == buf && p.generation == a.generation) {
         Some(hit) => {
             // SAFETY: the reference dma_buf_get took above; the pin keeps the one it was mapped with.
             unsafe { bindings::dma_buf_put(buf) };
@@ -226,7 +278,7 @@ pub(crate) fn register_lent(st: St<'_>, c: &mut Ctl, a: &mut lb::lemnos_stream_r
         None => {
             let mut r = Region::attach(st.dev(), buf, bindings::dma_data_direction::DMA_TO_DEVICE)?;
             r.lent = true;
-            r.gen_ = a.generation;
+            r.generation = a.generation;
             r
         }
     };
@@ -330,80 +382,4 @@ pub(crate) fn cpu_read_enable(st: St<'_>, c: &mut Ctl) -> Result {
         st.lock().region[i].map = r.map;
     }
     Ok(())
-}
-
-// What lemnos_stream.c still calls until its file is ported: the C names and signatures it had
-// (lemnos_stream_priv.h). Each sleeps, so none is called under the stream's lock.
-
-fn errno(r: Result) -> c_long {
-    r.err().map_or(0, |e| c_long::from(e.to_errno()))
-}
-
-/// # Safety
-/// `r` is a region no one else can reach (taken out of its table, or not yet in one).
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_region_unmap(r: *mut Region) {
-    // SAFETY: the caller's contract.
-    unsafe { &mut *r }.unmap();
-}
-
-/// # Safety
-/// `dev` is the stream's block; `r` is the caller's to write, and is left empty on a refusal.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_region_map(dev: *mut bindings::device, fd: c_int, r: *mut Region) -> c_int {
-    let (region, ret) = match Region::map(dev, fd) {
-        Ok(region) => (region, 0),
-        Err(e) => (Region::default(), e.to_errno()),
-    };
-    // SAFETY: the caller's contract: `r` is valid for a write.
-    unsafe { r.write(region) };
-    ret
-}
-
-/// # Safety
-/// `s` is a live stream whose control mutex the caller holds; `a` is the caller's copy of the request.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_register(s: *mut Stream, a: *mut lb::lemnos_stream_register) -> c_long {
-    // SAFETY: the caller's contract; the mutex makes this the only reference to what it guards.
-    errno(register(unsafe { St::new(s) }, unsafe { &mut (*s).c }, unsafe { &mut *a }))
-}
-
-/// # Safety
-/// As `lem_stream_register`.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_register_lent(s: *mut Stream, a: *mut lb::lemnos_stream_register_lent) -> c_long {
-    // SAFETY: the caller's contract; the mutex makes this the only reference to what it guards.
-    errno(register_lent(unsafe { St::new(s) }, unsafe { &mut (*s).c }, unsafe { &mut *a }))
-}
-
-/// # Safety
-/// `s` is a live stream whose control mutex the caller holds.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_unregister(s: *mut Stream, region: u32) -> c_long {
-    // SAFETY: the caller's contract; the mutex makes this the only reference to what it guards.
-    errno(unregister(unsafe { St::new(s) }, unsafe { &mut (*s).c }, region))
-}
-
-/// # Safety
-/// As `lem_stream_register`.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_set_buffer(s: *mut Stream, a: *mut lb::lemnos_stream_buffer) -> c_long {
-    // SAFETY: the caller's contract.
-    errno(set_buffer(unsafe { St::new(s) }, unsafe { &mut *a }))
-}
-
-/// Registered regions keep a kernel mapping from here on, so a block can read through
-/// `lem_stream_range_read()`. Takes the control mutex, so never under the block's locks.
-///
-/// # Safety
-/// `s` is a live stream.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_stream_cpu_read_enable(s: *mut Stream) -> c_int {
-    // SAFETY: the caller's contract: the stream's own mutex, initialised at creation.
-    unsafe { bindings::mutex_lock(&raw mut (*s).ctl) };
-    // SAFETY: the caller's contract; the mutex, held, makes this the only reference to what it guards.
-    let ret = cpu_read_enable(unsafe { St::new(s) }, unsafe { &mut (*s).c });
-    // SAFETY: the mutex taken above.
-    unsafe { bindings::mutex_unlock(&raw mut (*s).ctl) };
-    ret.err().map_or(0, |e| e.to_errno())
 }
