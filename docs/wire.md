@@ -64,6 +64,11 @@ closes the connection on a larger length, without reading it.
 | 32 | EndpointsOpen | id u32, device u32 | to host |
 | 33 | Endpoints | id u32 | to client, with two descriptors |
 | 34 | EndpointsClose | id u32, device u32 | to host |
+| 35 | StreamTicket | id u32, device u32, name str, held u32, hold_ms u32, import bool | to host |
+| 36 | StreamTicketRings | id u32, slot u32, buffers u32, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32, held u32, hold_ms u32, tail_bytes u32, rights u8, descriptors u8, plane_bytes bytes, with the reader's descriptors | to client |
+| 37 | StreamUnticket | id u32, device u32, name str, slot u32 | to host |
+| 38 | StreamTicketState | id u32, device u32, name str, slot u32 | to host |
+| 39 | StreamTicketInfo | id u32, slot u32, live bool, reason u64, cut_at_ns u64, cuts u64 | to client |
 | 40 | EndpointsOpenEnd | id u32, device u32 | to host |
 | 41 | EndpointsEnd | id u32, with three descriptors | to client |
 
@@ -618,6 +623,9 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   Those five are the last fields of the block. A host from before
   the unit state sends none of them, and its item's state is decided by its unit string: unknown when
   the string is empty, known otherwise. An item with no real range reads the integer one.
+  A float reply (the item's method returns a float, by the manifest's contract, or the named field of
+  a record reply does) at a nonzero exponent is refused at bind, as a real declaration at a nonzero
+  exponent is; an item whose contract the manifest does not provide is judged by its description alone.
 
 A reading code this build does not know reads as no reading. Every i64 is in the item's exponent
 (`raw * 10^exponent`, in its unit), like `min` and `max`. The identity is an addition (a `Tail` in

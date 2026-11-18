@@ -404,8 +404,9 @@ Measured figures are in [`testing/board-runs/I1.md`](../testing/board-runs/I1.md
 `scripts/check-libraries.sh` builds, lints and tests the eight crates a program takes as a library
 (`shm-sample-time`, `shm-ring`, `shm-ring-latest`, `shm-ring-time`, `shm-ring-doorbell`,
 `shm-ring-buffers`, `shm-ring-holds`, `shm-fdpass`) with no default features. It fails if any of
-their normal dependencies is a `lemnos` crate. It does not check the external crate list: that is
-the `[dependencies]` table of each `Cargo.toml`.
+their normal dependencies is a `lemnos` crate, and that each crate's direct normal dependencies are
+`libc`, `serde` (optionally) and the shm crates, nothing else (`shm_direct` in the script). The
+`[dependencies]` table of each `Cargo.toml` is what it reads; a new external dependency fails it.
 
 ## Layout values
 
