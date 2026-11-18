@@ -169,6 +169,14 @@ struct lem_frame {
 	u64 reader_ids;			/* the last registration id given out */
 };
 
+/* What s->ctl guards beside the order of registration and teardown. */
+struct lem_ctl {
+	/* Lent regions unregistered and kept pinned, by memory generation; see rs/stream_region.rs. */
+	struct lem_stream_region pins[LEM_STREAM_PINS];
+	u32 pin_next;			/* the pin a full cache gives up next */
+	bool cpu_read;			/* registered regions keep a kernel mapping */
+};
+
 struct lem_stream {
 	struct list_head node;		/* on lem_streams */
 	struct device *dev;		/* held until the stream is freed */
@@ -178,10 +186,7 @@ struct lem_stream {
 	struct eventfd_ctx *doorbell;
 	struct lem_geom g;
 	struct lem_frame f;
-	/* Lent regions unregistered and kept pinned, by memory generation; see lem_stream_register_lent(). Under ctl. */
-	struct lem_stream_region pins[LEM_STREAM_PINS];
-	u32 pin_next;			/* the pin a full cache gives up next */
-	bool cpu_read;			/* registered regions keep a kernel mapping */
+	struct lem_ctl c;
 
 	struct delayed_work source;	/* test source */
 	u32 period_us;
@@ -219,5 +224,13 @@ int lem_stream_resolve(struct lem_stream *s, u32 buffer, u64 addr, u64 len, stru
 void lem_stream_init_ring(struct lem_stream *s);
 /* rs/stream_producer.rs, beside the calls of lemnos_internal.h. Never with s->lock held. */
 void lem_stream_wake(struct lem_stream *s);
+/* rs/stream_region.rs: the dma-bufs on the block. The first two sleep; the rest are called with s->ctl held. */
+extern bool test_stream_source;
+void lem_region_unmap(struct lem_stream_region *r);
+int lem_region_map(struct device *dev, int fd, struct lem_stream_region *r);
+long lem_stream_register(struct lem_stream *s, struct lemnos_stream_register *a);
+long lem_stream_register_lent(struct lem_stream *s, struct lemnos_stream_register_lent *a);
+long lem_stream_unregister(struct lem_stream *s, u32 region);
+long lem_stream_set_buffer(struct lem_stream *s, struct lemnos_stream_buffer *a);
 
 #endif
