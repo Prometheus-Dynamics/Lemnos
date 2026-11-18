@@ -7,7 +7,41 @@
 #   KERNEL  its bootable image (default: this machine's kernel)
 #   CC      a compiler that can link static binaries (default: gcc)
 #   JOBS    parallel jobs for the module build (default: 2)
+#
+# With no argument it is the whole run: one guest, every stanza of the guest's init
+# (testing/crates/init, STANZAS) in order. That is the run that says a branch is good, and the only
+# one a landing uses. The two arguments below are for the work before it:
+#
+#   run.sh --only <names>      one guest that runs the named stanzas (and the ones they start from):
+#                              a failing check looked at alone, or a fail-before on the check a
+#                              change is about. Names are separated by commas.
+#   run.sh --split <names>...  the whole list of stanzas dealt out over guests that boot side by
+#                              side: one guest per argument, and one more with every stanza no
+#                              argument names. Every stanza runs, in fewer seconds; what it does not
+#                              show is the stanzas one after another in one boot.
 set -euo pipefail
+
+mode=whole
+groups=()
+case "${1:-}" in
+  "") ;;
+  --only)
+    mode=only
+    [[ $# -eq 2 && -n "$2" ]] || { echo "usage: run.sh --only <stanza>[,<stanza>...]" >&2; exit 2; }
+    groups=("$2")
+    ;;
+  --split)
+    mode=split
+    shift
+    [[ $# -ge 1 ]] || { echo "usage: run.sh --split <stanza>[,<stanza>...] ..." >&2; exit 2; }
+    groups=("$@")
+    ;;
+  *) echo "usage: run.sh [--only <names> | --split <names>...]" >&2; exit 2 ;;
+esac
+for group in ${groups[@]+"${groups[@]}"}; do
+  # The names go on the kernel command line as one word.
+  [[ "$group" =~ ^[a-z0-9,-]+$ ]] || { echo "run.sh: stanza names are lower-case words separated by commas, not '$group'" >&2; exit 2; }
+done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -138,26 +172,80 @@ done
 
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
-log="$work/console.log"
-status=0
-timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
-  -kernel "$KERNEL" -initrd "$work/initramfs" \
-  -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000 lemnos.serial=0123456789abcdef" | tee "$log" || status=$?
 
-# Only what happened after the guest started the checks counts.
-after="$(sed -n '/lemnos-qemu: start/,$p' "$log")"
-if [[ $status -ne 0 ]]; then
-  echo "qemu: exited with status $status" >&2
-  exit 1
+# boot [<word for the kernel command line>]: one guest, its console on standard output.
+boot() {
+  timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
+    -kernel "$KERNEL" -initrd "$work/initramfs" \
+    -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000 lemnos.serial=0123456789abcdef${1:+ $1}"
+}
+
+# verdict <console log> <QEMU's status> <what the guest was asked for>: fails unless the guest's
+# checks passed and the kernel reported nothing wrong while they ran.
+verdict() {
+  local log="$1" status="$2" asked="$3" after
+  # Only what happened after the guest started the checks counts.
+  after="$(sed -n '/lemnos-qemu: start/,$p' "$log")"
+  if [[ $status -ne 0 ]]; then
+    echo "qemu: exited with status $status" >&2
+    return 1
+  fi
+  if ! grep -q 'lemnos-qemu: passed' <<<"$after"; then
+    echo "qemu: the checks did not pass" >&2
+    return 1
+  fi
+  # The guest says which stanzas it ran when it was not all of them. A whole run with that line is
+  # not a whole run, and a selected run without it ran something else than it was asked for.
+  if [[ -z "$asked" ]] && grep -q 'lemnos-qemu: only ' <<<"$after"; then
+    echo "qemu: the guest ran a selection, and this is the whole run" >&2
+    return 1
+  fi
+  if [[ -n "$asked" ]] && ! grep -q 'lemnos-qemu: only ' <<<"$after"; then
+    echo "qemu: the guest did not take its selection ($asked)" >&2
+    return 1
+  fi
+  # dev_warn from the module's test parameters is expected, and says "test_".
+  # The kernel's UBI says so on any error it finds (the first-flash check reads what its UBI attaches).
+  if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace|UBI error|bad VID header|corrupted' <<<"$after" >&2; then
+    echo "qemu: the kernel reported a problem during the checks" >&2
+    return 1
+  fi
+}
+
+if [[ "$mode" == whole ]]; then
+  log="$work/console.log"
+  status=0
+  boot "" | tee "$log" || status=$?
+  verdict "$log" "$status" "" || exit 1
+  echo "qemu: passed on $accel"
+  exit 0
 fi
-if ! grep -q 'lemnos-qemu: passed' <<<"$after"; then
-  echo "qemu: the checks did not pass" >&2
-  exit 1
+
+# One guest per group, side by side. A split adds the guest that runs every stanza no group names,
+# so between them the guests run the whole list.
+words=()
+for group in "${groups[@]}"; do words+=("lemnos-qemu.only=$group"); done
+if [[ "$mode" == split ]]; then
+  all="$(IFS=,; echo "${groups[*]}")"
+  words+=("lemnos-qemu.except=$all")
 fi
-# dev_warn from the module's test parameters is expected, and says "test_".
-# The kernel's UBI says so on any error it finds (the first-flash check reads what its UBI attaches).
-if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace|UBI error|bad VID header|corrupted' <<<"$after" >&2; then
-  echo "qemu: the kernel reported a problem during the checks" >&2
-  exit 1
+pids=()
+for i in "${!words[@]}"; do
+  boot "${words[$i]}" >"$work/console-$i.log" 2>&1 </dev/null &
+  pids+=($!)
+done
+failed=0
+for i in "${!words[@]}"; do
+  status=0
+  wait "${pids[$i]}" || status=$?
+  echo "==> guest $((i + 1)) of ${#words[@]}: ${words[$i]}"
+  cat "$work/console-$i.log"
+  echo
+  verdict "$work/console-$i.log" "$status" "${words[$i]}" || { echo "qemu: guest $((i + 1)) (${words[$i]}) failed" >&2; failed=1; }
+done
+[[ $failed -eq 0 ]] || exit 1
+if [[ "$mode" == only ]]; then
+  echo "qemu: passed on $accel, only ${groups[0]}: not the whole run"
+else
+  echo "qemu: passed on $accel, split over ${#words[@]} guests: every stanza, not in one boot"
 fi
-echo "qemu: passed on $accel"
