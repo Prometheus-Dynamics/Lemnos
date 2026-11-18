@@ -9,7 +9,9 @@ extern crate std;
 
 use super::*;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
-use lemnos_contract_accelerometer::Sample as AccelSample;
+use lemnos_contract_accelerometer::{
+    STAMPED_RECORD_LEN, Sample as AccelSample, Stamp as AccelStamp, Stamped as AccelStamped,
+};
 use lemnos_core::{
     Config, ConfigValue, Decode, Driver, Held, HostClock, LocalCaller, Provider, Reader, Resources,
     Tag,
@@ -240,10 +242,23 @@ impl Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Delivered {
     pub(crate) seq: u64,
-    /// The stamp's time, without the mode bit.
+    /// The stamp's time: the plain `at_ns`, which is the time in every mode.
     pub(crate) at_ns: u64,
-    /// The record was stamped from tick time (its mode bit is set).
+    /// The record was stamped from tick time, as `read_batch_stamped` says it. A batch from `read_batch`
+    /// (the reader from before the stamped batch) carries no mode, so `tick` is false in those.
     pub(crate) tick: bool,
+}
+
+/// The accelerometer's record as a `Delivered`: its sequence number is recovered from its value's low
+/// 16 bits, against the newest sequence number.
+fn accel_delivered(newest: u64, sample: &AccelSample, tick: bool) -> Delivered {
+    let x = (sample.value.x as f64 / SCALE).round() as i64 as u16;
+    let back = (newest.wrapping_sub(1).wrapping_sub(u64::from(x))) & 0xffff;
+    Delivered {
+        seq: newest - 1 - back,
+        at_ns: sample.at_ns,
+        tick,
+    }
 }
 
 /// The records stamped from the sample clock's model: the ones the stamp checks apply to.
@@ -348,6 +363,12 @@ impl Harness {
     /// sensor time, then a batch read takes what the ring holds. Returns what the batch delivered.
     pub(crate) fn step(&mut self, plan: Plan) -> Vec<Delivered> {
         self.fill_and_tick(plan);
+        self.take_stamped(160)
+    }
+
+    /// A drain, then a batch read through `read_batch`: the reader from before the stamped batch.
+    pub(crate) fn step_plain(&mut self, plan: Plan) -> Vec<Delivered> {
+        self.fill_and_tick(plan);
         self.take(160)
     }
 
@@ -407,24 +428,31 @@ impl Harness {
         self.batch += 1;
     }
 
-    /// A batch read of at most `records` records: what the ring holds that the caller has not had.
+    /// A batch read through `read_batch` of at most `records` records: what the ring holds that the
+    /// caller has not had. The reader from before the stamped batch: its stamps are the plain `at_ns`.
     pub(crate) fn take(&mut self, records: usize) -> Vec<Delivered> {
-        let mut delivered = Vec::new();
         let mut buf = std::vec![0u8; RECORD_LEN * records];
         let n = Accelerometer::read_batch(&mut self.dev, &mut buf).unwrap();
         let newest = self.seq;
+        let mut delivered = Vec::new();
         for record in buf[..n].as_chunks::<RECORD_LEN>().0 {
             let sample = AccelSample::decode(&mut Reader::new(record)).unwrap();
-            // The value carries the sequence number's low 16 bits: the newest one it can be is the
-            // last pushed, so the number is the nearest one at or below it.
-            let x = (sample.value.x as f64 / SCALE).round() as i64 as u16;
-            let back = (newest.wrapping_sub(1).wrapping_sub(u64::from(x))) & 0xffff;
-            let seq = newest - 1 - back;
-            delivered.push(Delivered {
-                seq,
-                at_ns: sample.time_ns(),
-                tick: sample.from_tick_time(),
-            });
+            delivered.push(accel_delivered(newest, &sample, false));
+        }
+        delivered
+    }
+
+    /// A batch read through `read_batch_stamped` of at most `records` records: the same samples as
+    /// `take`, each with the mode its record carries.
+    pub(crate) fn take_stamped(&mut self, records: usize) -> Vec<Delivered> {
+        let mut buf = std::vec![0u8; STAMPED_RECORD_LEN * records];
+        let n = Accelerometer::read_batch_stamped(&mut self.dev, &mut buf).unwrap();
+        let newest = self.seq;
+        let mut delivered = Vec::new();
+        for record in buf[..n].as_chunks::<STAMPED_RECORD_LEN>().0 {
+            let stamped = AccelStamped::decode(&mut Reader::new(record)).unwrap();
+            let tick = stamped.stamp == AccelStamp::TickTime;
+            delivered.push(accel_delivered(newest, &stamped.sample, tick));
         }
         delivered
     }
@@ -934,6 +962,9 @@ fn a_drain_reads_the_sensor_time_around_the_fifo_length_and_before_the_data() {
 // checked against the true time of each sample, as the accelerometer's are.
 
 use lemnos_contract_gyroscope::RECORD_LEN as GYRO_RECORD_LEN;
+use lemnos_contract_gyroscope::{
+    STAMPED_RECORD_LEN as GYRO_STAMPED_LEN, Stamp as GyroStamp, Stamped as GyroStamped,
+};
 
 /// The gyroscope's sample clock as the chip keeps it: `rate` samples per second at its nominal
 /// rate, `eps` fast at the start, and its rate changing by `drift` per second.
@@ -1111,6 +1142,11 @@ impl GyroHarness {
         // rest; the frames it dropped still take their numbers.
         let produced =
             (self.osc.count(read as f64 * 1e-9).floor() as u64).saturating_sub(self.base);
+        // The FIFO is in stream mode (`GYR_CONFIG_1_STREAM` in the reference driver): when it is full
+        // the newest frames are kept and the oldest are overwritten. So only the newest `GYRO_FIFO_FRAMES`
+        // of the frames made since the last drain are in it. The overwritten ones still take their numbers.
+        let kept = produced.saturating_sub(crate::chip::GYRO_FIFO_FRAMES as u64);
+        self.seq = self.seq.max(kept);
         let mut bytes = Vec::new();
         while self.seq < produced {
             bytes.extend_from_slice(&(self.seq as i16).to_le_bytes());
@@ -1139,29 +1175,54 @@ impl GyroHarness {
     /// A drain, then a batch read of at most `records` records.
     pub(crate) fn step(&mut self, plan: Plan) -> Vec<Delivered> {
         self.fill_and_tick(plan);
+        self.take_stamped(160)
+    }
+
+    /// A drain, then a batch read through `read_batch`: the reader from before the stamped batch.
+    pub(crate) fn step_plain(&mut self, plan: Plan) -> Vec<Delivered> {
+        self.fill_and_tick(plan);
         self.take(160)
     }
 
-    /// A batch read of at most `records` gyroscope records: what the ring holds that the caller has
-    /// not had. A record's sequence number is the chip's, from the frame's X value.
+    /// A batch read through `read_batch` of at most `records` gyroscope records: the reader from before
+    /// the stamped batch. A record's sequence number is the chip's, from the frame's X value.
     pub(crate) fn take(&mut self, records: usize) -> Vec<Delivered> {
-        let mut delivered = Vec::new();
         let mut buf = std::vec![0u8; GYRO_RECORD_LEN * records];
         let n = Gyroscope::read_batch(&mut self.dev, &mut buf).unwrap();
         let newest = self.seq;
-        let scale = chip::gyro_setting(2000, GYRO_RATE).unwrap().scale as f64;
+        let mut delivered = Vec::new();
         for record in buf[..n].as_chunks::<GYRO_RECORD_LEN>().0 {
             let sample = GyroSample::decode(&mut Reader::new(record)).unwrap();
-            let raw = (sample.value.x as f64 / scale).round() as i64 as u16;
-            let back = (newest.wrapping_sub(1).wrapping_sub(u64::from(raw))) & 0xffff;
-            let seq = newest - 1 - back;
-            delivered.push(Delivered {
-                seq,
-                at_ns: sample.time_ns(),
-                tick: sample.from_tick_time(),
-            });
+            delivered.push(gyro_delivered(newest, &sample, false));
         }
         delivered
+    }
+
+    /// A batch read through `read_batch_stamped` of at most `records` gyroscope records: the same samples
+    /// as `take`, each with the mode its record carries.
+    pub(crate) fn take_stamped(&mut self, records: usize) -> Vec<Delivered> {
+        let mut buf = std::vec![0u8; GYRO_STAMPED_LEN * records];
+        let n = Gyroscope::read_batch_stamped(&mut self.dev, &mut buf).unwrap();
+        let newest = self.seq;
+        let mut delivered = Vec::new();
+        for record in buf[..n].as_chunks::<GYRO_STAMPED_LEN>().0 {
+            let stamped = GyroStamped::decode(&mut Reader::new(record)).unwrap();
+            let tick = stamped.stamp == GyroStamp::TickTime;
+            delivered.push(gyro_delivered(newest, &stamped.sample, tick));
+        }
+        delivered
+    }
+}
+
+/// The gyroscope's record as a `Delivered` (see `accel_delivered`).
+fn gyro_delivered(newest: u64, sample: &GyroSample, tick: bool) -> Delivered {
+    let scale = chip::gyro_setting(2000, GYRO_RATE).unwrap().scale as f64;
+    let raw = (sample.value.x as f64 / scale).round() as i64 as u16;
+    let back = (newest.wrapping_sub(1).wrapping_sub(u64::from(raw))) & 0xffff;
+    Delivered {
+        seq: newest - 1 - back,
+        at_ns: sample.at_ns,
+        tick,
     }
 }
 
@@ -1467,12 +1528,12 @@ fn a_gyroscope_fifo_overflow_re_anchors_its_clock_and_says_so() {
 }
 
 // ---- Stamping from the first batch: tick time, the switch to the model, re-anchoring, and the
-// ---- wide-bracket fallback. A record's mode bit says which it is.
+// ---- wide-bracket fallback. A stamped record's mode says which it is.
 
 /// A tick-time stamp's error bound. Measured on the board-shaped runs (9 ms tick outliers): the
 /// accelerometer's tick-time records were at most 8.3 ms off, and the gyroscope's at most 5.0 ms (clean
 /// runs: 5.2 ms and 4.9 ms). Rounded up to 10 ms.
-pub(crate) const TICK_TIME_BOUND_NS: f64 = 10_000_000.0;
+pub(crate) const TICK_BOUND_NS: f64 = 10_000_000.0;
 
 /// A plan with narrow brackets and 0.3 ms of tick jitter, and no outliers: the switch's clean case.
 fn narrow_plan(jitter: &mut Jitter) -> Plan {
@@ -1512,8 +1573,8 @@ fn check_switch(delivered: &[(u64, Delivered)], truth: &dyn Fn(u64) -> f64, labe
         let err = (d.at_ns as f64 - truth(d.seq)).abs();
         if d.tick {
             assert!(
-                err <= TICK_TIME_BOUND_NS,
-                "{label}: batch {b}, a tick-time stamp {err} ns from its true time (bound {TICK_TIME_BOUND_NS} ns)"
+                err <= TICK_BOUND_NS,
+                "{label}: batch {b}, a tick-time stamp {err} ns from its true time (bound {TICK_BOUND_NS} ns)"
             );
         } else if *b >= switch + 2 {
             assert!(
@@ -1760,4 +1821,172 @@ fn a_gyroscope_visibly_wide_bracket_stress_is_no_worse_than_tick_time() {
             "seed {seed}: a stamp was {worst} ns from its true time (bound {VISIBLE_STRESS_ERR_NS} ns)"
         );
     }
+}
+
+/// The accelerometer's run through every mode, read two ways on identical seeds: `read_batch`, the
+/// reader from before the stamped batch, and `read_batch_stamped`. The plain reader's stamps are the
+/// stamped reader's, so a consumer that uses only `at_ns` gets the same times. The run covers tick time
+/// before the switch, the model, a wide-bracket drain (batch 60) and an overflow that re-anchors the
+/// model (batch 100, back to tick time until it reconverges). The plain stamps never go back, and each
+/// is within the tick-time bound of its true time. The stamped reader names the mode of each batch.
+#[test]
+fn a_plain_reader_gets_monotonic_plausible_stamps_in_every_mode_accelerometer() {
+    let osc = Oscillator {
+        eps: 0.015,
+        drift: 0.0,
+    };
+    let mut plain = Harness::new(osc, 200);
+    let mut stamped = Harness::new(osc, 200);
+    let mut plain_jitter = Jitter::new(0x5157_0001);
+    let mut stamped_jitter = Jitter::new(0x5157_0001);
+    let mut plain_out = Vec::new();
+    let mut stamped_out: Vec<(u32, Delivered)> = Vec::new();
+    for b in 0..160u32 {
+        let mut plan = narrow_plan(&mut plain_jitter);
+        let mut same = narrow_plan(&mut stamped_jitter);
+        if b == 60 {
+            plan.pre_ns = -3_000_000;
+            plan.post_ns = 3_000_000;
+            same.pre_ns = -3_000_000;
+            same.post_ns = 3_000_000;
+        }
+        if b == 100 {
+            plan.fault = Some(Fault::Overflow(3));
+            same.fault = Some(Fault::Overflow(3));
+        }
+        plain_out.extend(plain.step_plain(plan));
+        stamped_out.extend(stamped.step(same).into_iter().map(|d| (b, d)));
+    }
+    let plain_stamps: Vec<Delivered> = plain_out.clone();
+    assert_eq!(
+        plain_stamps.len(),
+        stamped_out.len(),
+        "the two readers delivered different counts"
+    );
+    for (p, (_, s)) in plain_stamps.iter().zip(&stamped_out) {
+        assert_eq!(
+            (p.seq, p.at_ns),
+            (s.seq, s.at_ns),
+            "the plain reader's stamp is not the stamped reader's"
+        );
+    }
+    assert!(
+        no_going_back(&plain_stamps).is_none(),
+        "a plain stamp went back in time: {:?}",
+        no_going_back(&plain_stamps)
+    );
+    let worst = plain_stamps
+        .iter()
+        .map(|d| (d.at_ns as f64 - plain.truth(d.seq)).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= TICK_BOUND_NS,
+        "a plain stamp was {worst} ns from its true time (bound {TICK_BOUND_NS} ns)"
+    );
+    // The stamped reader names each batch's mode.
+    let all_tick = |batch: u32| {
+        let ds: Vec<&Delivered> = stamped_out
+            .iter()
+            .filter(|(b, _)| *b == batch)
+            .map(|(_, d)| d)
+            .collect();
+        !ds.is_empty() && ds.iter().all(|d| d.tick)
+    };
+    let all_model = |batch: u32| {
+        let ds: Vec<&Delivered> = stamped_out
+            .iter()
+            .filter(|(b, _)| *b == batch)
+            .map(|(_, d)| d)
+            .collect();
+        !ds.is_empty() && ds.iter().all(|d| !d.tick)
+    };
+    assert!(all_tick(0), "the first batch is not all tick time");
+    assert!(all_tick(60), "the wide-bracket batch is not all tick time");
+    assert!(
+        (101..=140).any(all_tick),
+        "no tick-time batch after the overflow re-anchored the model"
+    );
+    assert!(all_model(159), "the last batch is not from the model");
+    let tick_stamps = stamped_out.iter().filter(|(_, d)| d.tick).count();
+    assert!(
+        tick_stamps > 0 && tick_stamps < stamped_out.len(),
+        "one mode only"
+    );
+}
+
+/// The gyroscope's run through every mode, the same way: `read_batch` and `read_batch_stamped` on identical
+/// seeds, the same stamps, monotonic and within the tick-time bound. Its overflow is a drain 700 ms late
+/// (batch 100) and its wide bracket is batch 110, as in its own re-anchor test.
+#[test]
+fn a_plain_reader_gets_monotonic_plausible_stamps_in_every_mode_gyroscope() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut plain = GyroHarness::new(osc);
+    let mut stamped = GyroHarness::new(osc);
+    let mut plain_jitter = Jitter::new(0x6b6b_0001);
+    let mut stamped_jitter = Jitter::new(0x6b6b_0001);
+    let mut plain_out = Vec::new();
+    let mut stamped_out: Vec<(u32, Delivered)> = Vec::new();
+    for b in 0..200u32 {
+        if b == 100 {
+            plain.due_ns = plain.t_ns + 700_000_000;
+            stamped.due_ns = stamped.t_ns + 700_000_000;
+        }
+        let mut plan = narrow_plan(&mut plain_jitter);
+        let mut same = narrow_plan(&mut stamped_jitter);
+        if b == 110 {
+            plan.pre_ns = -3_000_000;
+            plan.post_ns = 3_000_000;
+            same.pre_ns = -3_000_000;
+            same.post_ns = 3_000_000;
+        }
+        plain_out.extend(plain.step_plain(plan));
+        stamped_out.extend(stamped.step(same).into_iter().map(|d| (b, d)));
+    }
+    assert_eq!(
+        plain_out.len(),
+        stamped_out.len(),
+        "the two readers delivered different counts"
+    );
+    for (p, (_, s)) in plain_out.iter().zip(&stamped_out) {
+        assert_eq!(
+            (p.seq, p.at_ns),
+            (s.seq, s.at_ns),
+            "the plain reader's stamp is not the stamped reader's"
+        );
+    }
+    assert!(
+        no_going_back(&plain_out).is_none(),
+        "a plain stamp went back in time: {:?}",
+        no_going_back(&plain_out)
+    );
+    let worst = plain_out
+        .iter()
+        .map(|d| (d.at_ns as f64 - plain.truth(d.seq)).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= TICK_BOUND_NS,
+        "a plain stamp was {worst} ns from its true time (bound {TICK_BOUND_NS} ns)"
+    );
+    let batch_is = |batch: u32, tick: bool| {
+        let ds: Vec<&Delivered> = stamped_out
+            .iter()
+            .filter(|(b, _)| *b == batch)
+            .map(|(_, d)| d)
+            .collect();
+        !ds.is_empty() && ds.iter().all(|d| d.tick == tick)
+    };
+    assert!(batch_is(0, true), "the first batch is not all tick time");
+    assert!(
+        batch_is(110, true),
+        "the wide-bracket batch is not all tick time"
+    );
+    assert!(
+        (101..=190).any(|b| batch_is(b, true)),
+        "no tick-time batch after the late drain re-anchored the clock"
+    );
+    assert!(batch_is(199, false), "the last batch is not from the model");
 }

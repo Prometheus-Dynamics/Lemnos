@@ -6,8 +6,14 @@ extern crate std;
 use super::*;
 use crate::clock_tests::{Harness, Jitter, Oscillator, Plan, model_only};
 use chip::{Frame, scan_accel};
-use lemnos_contract_accelerometer::{RECORD_LEN as ACCEL_RECORD, Sample as AccelSample};
-use lemnos_contract_gyroscope::RECORD_LEN as GYRO_RECORD;
+use lemnos_contract_accelerometer::{
+    RECORD_LEN as ACCEL_RECORD, STAMPED_RECORD_LEN as ACCEL_STAMPED, Sample as AccelSample,
+    Stamp as AccelStamp, Stamped as AccelStamped,
+};
+use lemnos_contract_gyroscope::{
+    RECORD_LEN as GYRO_RECORD, STAMPED_RECORD_LEN as GYRO_STAMPED, Stamp as GyroStamp,
+    Stamped as GyroStamped,
+};
 use lemnos_core::{
     Config, Decode, Description, Driver, Reader, RefusalKind, RefusalSink, Resources, Writer,
 };
@@ -848,6 +854,57 @@ fn a_record_is_the_contract_size_and_the_driver_agrees() {
     assert_eq!(out.len(), ACCEL_RECORD);
 }
 
+/// The plain record is the bytes it was before `read_batch_stamped` was added: the block length (24),
+/// the stamp, then the vector's block (12). A reader from before the addition decodes these bytes, and
+/// the stamped record is its mode byte and these same bytes.
+#[test]
+fn a_plain_record_keeps_its_bytes_and_a_stamped_record_is_its_mode_then_the_same_bytes() {
+    let mut plain = [0u8; ACCEL_RECORD];
+    crate::accel_record(
+        &mut Writer::new(&mut plain),
+        0x0102_0304_0506_0708,
+        Vector3 {
+            x: 1.0,
+            y: -2.0,
+            z: 9.5,
+        },
+    )
+    .unwrap();
+    let expected: [u8; ACCEL_RECORD] = [
+        24, 0, 0, 0, // the sample's block length
+        8, 7, 6, 5, 4, 3, 2, 1, // at_ns, little-endian
+        12, 0, 0, 0, // the vector's block length
+        0, 0, 0x80, 0x3f, // 1.0
+        0, 0, 0, 0xc0, // -2.0
+        0, 0, 0x18, 0x41, // 9.5
+    ];
+    assert_eq!(plain, expected);
+    assert_eq!(ACCEL_STAMPED, 1 + ACCEL_RECORD);
+    assert_eq!(GYRO_STAMPED, 1 + GYRO_RECORD);
+}
+
+/// The stamped record's mode byte is 0 for the model and 1 for tick time, and any other value is refused.
+#[test]
+fn a_stamped_record_decodes_its_mode_and_refuses_an_unknown_one() {
+    let mut record = [0u8; ACCEL_STAMPED];
+    record[0] = 1;
+    crate::accel_record(
+        &mut Writer::new(&mut record[1..]),
+        42,
+        Vector3 {
+            x: 0.0,
+            y: 0.0,
+            z: 9.8,
+        },
+    )
+    .unwrap();
+    let stamped = AccelStamped::decode(&mut Reader::new(&record)).unwrap();
+    assert_eq!(stamped.stamp, AccelStamp::TickTime);
+    assert_eq!(stamped.sample.at_ns, 42);
+    record[0] = 2;
+    assert!(AccelStamped::decode(&mut Reader::new(&record)).is_err());
+}
+
 #[test]
 fn read_batch_needs_the_fifo_and_waits_for_power_up() {
     let (mut board, _sim) = chip();
@@ -1134,7 +1191,7 @@ fn a_fifo_length_above_the_fifo_is_clamped_to_it() {
 }
 
 /// A gyroscope batch from before its sample clock converges is delivered at once, from tick time, and
-/// says so in each record's mode bit (`clock_tests.rs` runs the switch to the model).
+/// says so in each record's mode (`read_batch_stamped`; `clock_tests.rs` runs the switch to the model).
 #[test]
 fn a_gyroscope_batch_before_convergence_is_delivered_from_tick_time_and_says_so() {
     let (_board, sim, mut dev) = fifo_chip();
@@ -1147,17 +1204,18 @@ fn a_gyroscope_batch_before_convergence_is_delivered_from_tick_time_and_says_so(
     sim.fifo_push(GYRO, &bytes);
     let now = 3_000_000_000;
     Driver::tick(&mut dev, now);
-    let mut buf = [0u8; GYRO_RECORD * 16];
-    let n = Gyroscope::read_batch(&mut dev, &mut buf).unwrap();
-    assert_eq!(n, 10 * GYRO_RECORD, "the first batch is held back");
-    for (i, record) in buf[..n].as_chunks::<GYRO_RECORD>().0.iter().enumerate() {
-        let sample = GyroSample::decode(&mut Reader::new(record)).unwrap();
-        assert!(
-            sample.from_tick_time(),
+    let mut buf = [0u8; GYRO_STAMPED * 16];
+    let n = Gyroscope::read_batch_stamped(&mut dev, &mut buf).unwrap();
+    assert_eq!(n, 10 * GYRO_STAMPED, "the first batch is held back");
+    for (i, record) in buf[..n].as_chunks::<GYRO_STAMPED>().0.iter().enumerate() {
+        let stamped = GyroStamped::decode(&mut Reader::new(record)).unwrap();
+        assert_eq!(
+            stamped.stamp,
+            GyroStamp::TickTime,
             "record {i} is not marked as tick time"
         );
-        // 2000 Hz: 0.5 ms apart, the newest at the tick.
-        assert_eq!(sample.time_ns(), now - (9 - i as u64) * 500_000);
+        // 2000 Hz: 0.5 ms apart, the newest at the tick. The stamp is the plain time.
+        assert_eq!(stamped.sample.at_ns, now - (9 - i as u64) * 500_000);
     }
 }
 

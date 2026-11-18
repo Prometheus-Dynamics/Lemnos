@@ -723,6 +723,11 @@ impl Accelerometer for GenericAccelerometer {
     fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
         Err(Status::NOT_SUPPORTED)
     }
+
+    /// A description has no FIFO, so there are no stamped batches either.
+    fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 impl Gyroscope for GenericGyroscope {
@@ -732,6 +737,11 @@ impl Gyroscope for GenericGyroscope {
 
     /// A description has no FIFO, so there are no batches.
     fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    /// A description has no FIFO, so there are no stamped batches either.
+    fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
         Err(Status::NOT_SUPPORTED)
     }
 }
@@ -769,6 +779,11 @@ impl Accelerometer for ModbusAccelerometer {
     fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
         Err(Status::NOT_SUPPORTED)
     }
+
+    /// A description has no FIFO, so there are no stamped batches either.
+    fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 impl Gyroscope for ModbusGyroscope {
@@ -778,6 +793,11 @@ impl Gyroscope for ModbusGyroscope {
 
     /// A description has no FIFO, so there are no batches.
     fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    /// A description has no FIFO, so there are no stamped batches either.
+    fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
         Err(Status::NOT_SUPPORTED)
     }
 }

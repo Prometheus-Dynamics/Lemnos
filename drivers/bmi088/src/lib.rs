@@ -79,9 +79,11 @@
 //! tick-time stamps were within 8.3 ms of the true time on the board-shaped run (9 ms tick outliers),
 //! and the model's within 0.13 ms (accelerometer) and 0.31 ms (gyroscope) on the same runs.
 //!
-//! Mode. A record's `at_ns` has bit 63 set when it was stamped from tick time: `TICK_TIME` in the
-//! contract crates. A record without it is stamped from the model. A reader takes the time with
-//! `time_ns()` and the mode with `from_tick_time()`. Health says a die is in tick time while it is.
+//! Mode. `at_ns` is always a plain time: no flag bits. A reader that uses only `at_ns` gets monotonic,
+//! plausible times in every mode. The mode of each record is carried beside it, by
+//! `read_batch_stamped` (method 3 of each contract, an addition): one byte before each record, 1 for
+//! tick time and 0 for the model. `read_batch` takes the same samples with the same bytes as before the
+//! addition, so a consumer built before it is unchanged. Health says a die is in tick time while it is.
 //!
 //! Measured on the same chip. Under 9 ms of error on both readings of a bracket, equal on each reading
 //! (which no bracket shows), the gyroscope's stamps were 14.9 ms off and 24.6 ms apart at worst over
@@ -117,7 +119,7 @@ mod tests;
 
 use chip::{Failure, Frame, Kind, Setting};
 use gyro_clock::GyroClock;
-use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample, TICK_TIME};
+use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample};
 use lemnos_contract_gyroscope::{Gyroscope, Sample as GyroSample};
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Encode, Health, HostClock, HostClockHandle, I2c,
@@ -144,6 +146,8 @@ const KEYS: &[Key] = &[
 
 /// Bytes of one batch record (see the contract crates).
 const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
+/// Bytes of one stamped batch record: the mode, then a batch record (`read_batch_stamped`).
+const STAMPED_LEN: usize = 1 + RECORD_LEN;
 /// Ring slots: each die's FIFO depth in frames.
 const ACC_RING: usize = chip::ACC_FIFO_FRAMES;
 const GYRO_RING: usize = chip::GYRO_FIFO_FRAMES;
@@ -249,7 +253,7 @@ struct Entry {
     raw: [i16; 3],
     /// Stamped: a batch may take it. An unstamped sample holds the batch until it is stamped.
     ready: bool,
-    /// Stamped from the tick's time, not the sample clock's model (the record's mode bit).
+    /// Stamped from the tick's time, not the sample clock's model (a stamped batch's mode for the record).
     tick: bool,
 }
 
@@ -640,15 +644,18 @@ impl<const RING: usize> Die<RING> {
         }
     }
 
-    /// Writes the next samples a batch has not taken, oldest first, as records of `RECORD_LEN` bytes
-    /// into `into`. Returns the bytes written. A record's time is never earlier than the last one
-    /// written, and a tick-time record carries the mode bit (see `TICK_TIME`).
+    /// Writes the next samples a batch has not taken, oldest first, into `into`: records of `RECORD_LEN`
+    /// bytes, or with `stamped`, records of `STAMPED_LEN` bytes, each led by its mode (1 for tick time,
+    /// 0 for the model). Returns the bytes written. A record's time is never earlier than the last one
+    /// written, and `at_ns` is always a plain time.
     fn deliver(
         &mut self,
         into: &mut [u8],
         record: fn(&mut Writer<'_>, u64, Vector3) -> Result<()>,
+        stamped: bool,
     ) -> usize {
-        let capacity = into.len() / RECORD_LEN;
+        let len = if stamped { STAMPED_LEN } else { RECORD_LEN };
+        let capacity = into.len() / len;
         let oldest = self.seq.saturating_sub(RING as u64);
         if self.batch_next < oldest {
             // The ring overwrote samples nobody took. A loss the drains already named (an overflow) is
@@ -663,13 +670,15 @@ impl<const RING: usize> Die<RING> {
         while self.batch_next < self.seq {
             let entry = self.ring[(self.batch_next % RING as u64) as usize];
             if entry.seq == self.batch_next {
-                if !entry.ready || written == capacity {
+                if !entry.ready || written == capacity || writer.remaining() < len {
                     break;
                 }
                 let at = entry.at_ns.max(self.delivered);
-                let mode = if entry.tick { TICK_TIME } else { 0 };
                 let value = chip::to_vector(entry.raw, self.setting.scale);
-                if record(&mut writer, at | mode, value).is_err() {
+                if stamped && writer.write(&[u8::from(entry.tick)]).is_err() {
+                    break;
+                }
+                if record(&mut writer, at, value).is_err() {
                     break;
                 }
                 self.delivered = at;
@@ -814,12 +823,13 @@ fn read_die<const RING: usize>(die: &mut Die<RING>, bus: &mut I2c) -> Result<Vec
 }
 
 /// A batch read of one die: drains the FIFO, then writes the samples the batch
-/// has not taken. `AGAIN` while the die powers up.
+/// has not taken, stamped (with their mode) or not. `AGAIN` while the die powers up.
 fn batch_die<const RING: usize>(
     die: &mut Die<RING>,
     bus: &mut I2c,
     into: &mut [u8],
     record: fn(&mut Writer<'_>, u64, Vector3) -> Result<()>,
+    stamped: bool,
 ) -> Result<usize> {
     let out = if !die.fifo {
         Err(Status::NOT_SUPPORTED)
@@ -830,7 +840,7 @@ fn batch_die<const RING: usize>(
         } else {
             match die.drain(bus, None, None) {
                 Err(failure) => Err(die.fail(&failure)),
-                Ok(()) => Ok(die.deliver(into, record)),
+                Ok(()) => Ok(die.deliver(into, record, stamped)),
             }
         }
     };
@@ -1046,7 +1056,11 @@ impl Accelerometer for Bmi088 {
     }
 
     fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
-        batch_die(&mut self.accel, &mut self.bus, into, accel_record)
+        batch_die(&mut self.accel, &mut self.bus, into, accel_record, false)
+    }
+
+    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
+        batch_die(&mut self.accel, &mut self.bus, into, accel_record, true)
     }
 }
 
@@ -1056,7 +1070,11 @@ impl Gyroscope for Bmi088 {
     }
 
     fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
-        batch_die(&mut self.gyro, &mut self.bus, into, gyro_record)
+        batch_die(&mut self.gyro, &mut self.bus, into, gyro_record, false)
+    }
+
+    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
+        batch_die(&mut self.gyro, &mut self.bus, into, gyro_record, true)
     }
 }
 
