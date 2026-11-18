@@ -9,6 +9,14 @@ for the boot ROM's 471 and 472 entries, with the stage's own regions and build i
 (E, 1a, 1b, 2, 3, 4, 5). It is not a product host and is not linked into anything. The stand-in's timing is the plan's
 numbers, not a measurement.
 
+## Board state on 2026-11-18 (read-only, see [`BOARD-USB0.md`](BOARD-USB0.md))
+
+Same board (serial `b3d1ffecafae5cec`), boot_id `033d48d0-cced-4528-88f6-ea2fe8bd695e`. The
+reboot-mode register reads `0x5242C300`. First 16 MiB of `mmcblk0` and `uboot-env` hash to the
+anchors below. The board's ssh host key is now a persistent one (the earlier one was per boot).
+No board step was run: step E is still the next one, and it waits for the coordinator's go and
+for the PC-side host.
+
 ### Rehearsal results (PC, same rev as this commit)
 
 | Check | Command | Result |

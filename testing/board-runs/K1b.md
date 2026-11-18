@@ -41,3 +41,9 @@ start bit itself, last.
   The builder checks the encoded picture only, so a run passes only if the block stays inside it.
 
 Record each result with the kernel version and the board's device tree compatible string.
+
+## The ZERO 3E (RK3566) is not a board for this record (2026-11-18)
+
+Asked on the board: its only encoder is `rockchip,rk3568-vepu` at `0xfdee0000` (vendor name
+`rockchip,vpu-encoder-v2`), not the VPU720 class, and its mainline image has no `/dev/mpp_service`.
+Wrong board; nothing was run. Details: see [`BOARD-USB0.md`](BOARD-USB0.md).

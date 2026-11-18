@@ -136,3 +136,11 @@ Record the raw output lines under Results.
 ## Results
 
 Not yet run.
+
+## A second candidate board: the ZERO 3E (RK3566), needs an image (2026-11-18)
+
+The RK356x has a decoder with the same compatible (`jpegd@fded0000`, `rockchip,rkv-jpeg-decoder-v1`,
+with `iommu@fded0480`, in the vendor `rk356x.dtsi`). The bench ZERO 3E runs a mainline image with no
+node, driver or service for it, so the probe was not run there, and the block's version word was not
+read: "same block" rests on the compatible only. With a vendor-kernel image the probe could run on
+it. Details: see [`BOARD-USB0.md`](BOARD-USB0.md).
