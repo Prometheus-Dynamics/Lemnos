@@ -37,12 +37,12 @@
 
 use crate::bindings as lb;
 use crate::pisp_fe::{
-    lem_pisp_fe_create, lem_pisp_fe_csi_fs, lem_pisp_fe_destroy, lem_pisp_fe_ioctl, lem_pisp_fe_isr,
-    lem_pisp_fe_stop, lem_pisp_fe_streaming,
+    lem_pisp_fe_create, lem_pisp_fe_csi_fs, lem_pisp_fe_destroy, lem_pisp_fe_ioctl,
+    lem_pisp_fe_isr, lem_pisp_fe_stop, lem_pisp_fe_streaming,
 };
 use crate::stream::{
-    Handle, Producer, Slot, Stream, lem_stream_attach, lem_stream_complete_at, lem_stream_detach,
-    lem_stream_create, lem_stream_from_file, lem_stream_next, lem_streams_block_gone,
+    Handle, Producer, Slot, Stream, lem_stream_attach, lem_stream_complete_at, lem_stream_create,
+    lem_stream_detach, lem_stream_from_file, lem_stream_next, lem_streams_block_gone,
     msecs_to_jiffies, usleep_range,
 };
 use core::{

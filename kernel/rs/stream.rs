@@ -13,11 +13,6 @@
 //! else is the kernel's.
 
 use crate::bindings as lb;
-use crate::stream_producer::{
-    lem_stream_cancel, lem_stream_complete, lem_stream_fault, lem_stream_job_peek,
-    lem_stream_job_take, lem_stream_range_addr, lem_stream_range_poke, lem_stream_range_read,
-    lem_stream_wedge,
-};
 /// The stream's calls a block makes by the stream's pointer (the receiver and the front end): one
 /// definition each, in rs/stream_producer.rs and rs/stream_file.rs.
 pub(crate) use crate::stream_file::{
@@ -25,6 +20,11 @@ pub(crate) use crate::stream_file::{
 };
 pub(crate) use crate::stream_producer::{
     lem_stream_attach, lem_stream_complete_at, lem_stream_detach, lem_stream_next,
+};
+use crate::stream_producer::{
+    lem_stream_cancel, lem_stream_complete, lem_stream_fault, lem_stream_job_peek,
+    lem_stream_job_take, lem_stream_range_addr, lem_stream_range_poke, lem_stream_range_read,
+    lem_stream_wedge,
 };
 use core::{
     ffi::{c_int, c_long, c_uint, c_void},
@@ -91,8 +91,15 @@ pub(crate) struct Producer {
 
 impl Producer {
     /// No producer: every callback unset.
-    pub(crate) const NONE: Producer =
-        Producer { stop: None, private: ptr::null_mut(), job_bytes: 0, kick: None, ioctl: None, mmap: None, release: None };
+    pub(crate) const NONE: Producer = Producer {
+        stop: None,
+        private: ptr::null_mut(),
+        job_bytes: 0,
+        kick: None,
+        ioctl: None,
+        mmap: None,
+        release: None,
+    };
 }
 
 const _: () = assert!(core::mem::size_of::<JobRange>() == 24);
