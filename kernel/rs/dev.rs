@@ -180,7 +180,11 @@ unsafe extern "C" {
     /// lemnos_helpers.c: the three static inlines and macros of a register mapping.
     fn lemnos_vm_flags_set(vma: *mut bindings::vm_area_struct, flags: bindings::vm_flags_t);
     fn lemnos_vma_noncached(vma: *mut bindings::vm_area_struct);
-    fn lemnos_io_remap_pfn_range(vma: *mut bindings::vm_area_struct, pfn: c_ulong, size: c_ulong) -> c_int;
+    fn lemnos_io_remap_pfn_range(
+        vma: *mut bindings::vm_area_struct,
+        pfn: c_ulong,
+        size: c_ulong,
+    ) -> c_int;
 }
 
 /// One bound block. Zeroed memory is a valid, empty one.
@@ -301,7 +305,11 @@ impl Drop for Writing {
 fn block<'a>(_held: &'a Reading, id: c_ulong) -> Option<&'a Block> {
     // SAFETY: the table is initialised; an entry is a bound block, which stays until its removal takes
     // the semaphore for writing.
-    unsafe { bindings::xa_load(BLOCKS.0.get(), id).cast::<Block>().as_ref() }
+    unsafe {
+        bindings::xa_load(BLOCKS.0.get(), id)
+            .cast::<Block>()
+            .as_ref()
+    }
 }
 
 fn errno(e: Error) -> c_long {
@@ -360,7 +368,13 @@ fn wait_ready() -> c_long {
     unsafe { bindings::init_wait_entry(entry, 0) };
     loop {
         // SAFETY: the queue is initialised and the entry is the one made above.
-        let intr = unsafe { bindings::prepare_to_wait_event(WAIT.get(), entry, bindings::TASK_INTERRUPTIBLE as c_int) };
+        let intr = unsafe {
+            bindings::prepare_to_wait_event(
+                WAIT.get(),
+                entry,
+                bindings::TASK_INTERRUPTIBLE as c_int,
+            )
+        };
         if any_ready() {
             break;
         }
@@ -376,7 +390,12 @@ fn wait_ready() -> c_long {
     0
 }
 
-unsafe extern "C" fn read(file: *mut bindings::file, ubuf: *mut c_char, len: usize, _ppos: *mut bindings::loff_t) -> isize {
+unsafe extern "C" fn read(
+    file: *mut bindings::file,
+    ubuf: *mut c_char,
+    len: usize,
+    _ppos: *mut bindings::loff_t,
+) -> isize {
     const EVENT: usize = size_of::<lb::lemnos_event>();
     // SAFETY: a struct lemnos_event of zeroes is an event.
     let mut ev: [lb::lemnos_event; READ_BATCH] = unsafe { core::mem::zeroed() };
@@ -419,13 +438,19 @@ unsafe extern "C" fn read(file: *mut bindings::file, ubuf: *mut c_char, len: usi
     }
     // SAFETY: the first `n` events, as bytes: a struct lemnos_event has no padding.
     let bytes = unsafe { core::slice::from_raw_parts(ev.as_ptr().cast::<u8>(), n * EVENT) };
-    match UserSlice::new(UserPtr::from_addr(ubuf as usize), bytes.len()).writer().write_slice(bytes) {
+    match UserSlice::new(UserPtr::from_addr(ubuf as usize), bytes.len())
+        .writer()
+        .write_slice(bytes)
+    {
         Ok(()) => bytes.len() as isize,
         Err(_) => EFAULT.to_errno() as isize,
     }
 }
 
-unsafe extern "C" fn poll(file: *mut bindings::file, wait: *mut bindings::poll_table_struct) -> bindings::__poll_t {
+unsafe extern "C" fn poll(
+    file: *mut bindings::file,
+    wait: *mut bindings::poll_table_struct,
+) -> bindings::__poll_t {
     // SAFETY: the VFS's file and table; the queue is a static.
     unsafe { bindings::poll_wait(file, WAIT.get(), wait) };
     if any_ready() {
@@ -472,7 +497,11 @@ unsafe fn map_region(l: &Block, index: u32, vma: *mut bindings::vm_area_struct) 
     // SAFETY: the caller's mapping.
     let (start, end, flags) = unsafe {
         let v = &*vma;
-        (v.__bindgen_anon_1.__bindgen_anon_1.vm_start, v.__bindgen_anon_1.__bindgen_anon_1.vm_end, v.__bindgen_anon_2.vm_flags)
+        (
+            v.__bindgen_anon_1.__bindgen_anon_1.vm_start,
+            v.__bindgen_anon_1.__bindgen_anon_1.vm_end,
+            v.__bindgen_anon_2.vm_flags,
+        )
     };
     let len = end - start;
     // SAFETY: asks about the calling task.
@@ -493,7 +522,12 @@ unsafe fn map_region(l: &Block, index: u32, vma: *mut bindings::vm_area_struct) 
         return EINVAL.to_errno();
     }
     // SAFETY: the caller's mapping, not yet in use (vm_flags_set).
-    unsafe { lemnos_vm_flags_set(vma, bindings::VM_IO | bindings::VM_DONTEXPAND | bindings::VM_DONTDUMP) };
+    unsafe {
+        lemnos_vm_flags_set(
+            vma,
+            bindings::VM_IO | bindings::VM_DONTEXPAND | bindings::VM_DONTDUMP,
+        )
+    };
     // SAFETY: as above (vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot)).
     unsafe { lemnos_vma_noncached(vma) };
     // SAFETY: as above; the range is the block's own register region, checked above.
@@ -517,7 +551,14 @@ unsafe extern "C" fn mmap(_file: *mut bindings::file, vma: *mut bindings::vm_are
 fn next(held: &Reading, n: &mut lb::lemnos_next) -> c_long {
     let mut id = n.after as c_ulong;
     // SAFETY: the table is initialised; BLOCKS_SEM is held, so the entry found stays.
-    let l = unsafe { bindings::xa_find_after(BLOCKS.0.get(), &raw mut id, c_ulong::MAX, bindings::XA_PRESENT) };
+    let l = unsafe {
+        bindings::xa_find_after(
+            BLOCKS.0.get(),
+            &raw mut id,
+            c_ulong::MAX,
+            bindings::XA_PRESENT,
+        )
+    };
     let _ = held;
     // SAFETY: an entry is a bound block (see `block`).
     let Some(l) = (unsafe { l.cast::<Block>().as_ref() }) else {
@@ -538,7 +579,10 @@ fn next(held: &Reading, n: &mut lb::lemnos_next) -> c_long {
 /// fls64(dma_get_mask(dev)): the bits of the device's DMA addresses.
 fn dma_bits(dev: *mut bindings::device) -> u32 {
     // SAFETY: the bound device; its mask pointer is NULL or the device's own mask.
-    let mask = unsafe { (*dev).dma_mask.as_ref() }.copied().filter(|&m| m != 0).unwrap_or(u32::MAX as u64);
+    let mask = unsafe { (*dev).dma_mask.as_ref() }
+        .copied()
+        .filter(|&m| m != 0)
+        .unwrap_or(u32::MAX as u64);
     u64::BITS - mask.leading_zeros()
 }
 
@@ -549,8 +593,15 @@ fn block_request(l: &Block, cmd: u32, u: &mut Args) -> c_long {
             u.info = lb::lemnos_info {
                 block: l.id,
                 abi: lb::LEMNOS_ABI,
-                flags: (if l.mappable { lb::LEMNOS_INFO_MMIO_MAPPABLE } else { 0 })
-                    | (if l.unconfined { lb::LEMNOS_INFO_MMIO_UNCONFINED } else { 0 }),
+                flags: (if l.mappable {
+                    lb::LEMNOS_INFO_MMIO_MAPPABLE
+                } else {
+                    0
+                }) | (if l.unconfined {
+                    lb::LEMNOS_INFO_MMIO_UNCONFINED
+                } else {
+                    0
+                }),
                 regions: l.regions,
                 irqs: l.nirqs,
                 dma_bits: dma_bits(l.dev),
@@ -586,7 +637,9 @@ fn block_request(l: &Block, cmd: u32, u: &mut Args) -> c_long {
         // SAFETY: the block's accelerator, live while the block is bound.
         IOC_VIP_CREATE => unsafe { lem_vip_create(l.vip, l.dev, args) },
         // A block the module drives keeps its own clocks.
-        IOC_POWER if !(l.pb.is_null() && l.gd.is_null() && l.rj.is_null() && l.vip.is_null()) => errno(ENOTTY),
+        IOC_POWER if !(l.pb.is_null() && l.gd.is_null() && l.rj.is_null() && l.vip.is_null()) => {
+            errno(ENOTTY)
+        }
         // SAFETY: the block's power state, live while the block is bound.
         IOC_POWER => unsafe { lem_power_request(l.power, args) },
         IOC_TEST_IRQ => {
@@ -599,8 +652,13 @@ fn block_request(l: &Block, cmd: u32, u: &mut Args) -> c_long {
                 return errno(EINVAL);
             }
             // SAFETY: a requested line of the bound block.
-            (unsafe { bindings::irq_set_irqchip_state(l.line[index as usize], bindings::irqchip_irq_state_IRQCHIP_STATE_PENDING, true) })
-                as c_long
+            (unsafe {
+                bindings::irq_set_irqchip_state(
+                    l.line[index as usize],
+                    bindings::irqchip_irq_state_IRQCHIP_STATE_PENDING,
+                    true,
+                )
+            }) as c_long
         }
         _ => errno(ENOTTY),
     }
@@ -644,9 +702,15 @@ unsafe extern "C" fn ioctl(_file: *mut bindings::file, cmd: c_uint, arg: c_ulong
     // SAFETY: every request is plain data, and zeroes are valid for each.
     let mut u: Args = unsafe { core::mem::zeroed() };
     // SAFETY: the first `size` bytes of the request, which is at least that large.
-    let bytes = unsafe { core::slice::from_raw_parts_mut(ptr::from_mut(&mut u).cast::<u8>(), size) };
+    let bytes =
+        unsafe { core::slice::from_raw_parts_mut(ptr::from_mut(&mut u).cast::<u8>(), size) };
     let user = UserPtr::from_addr(arg as usize);
-    if dir & bindings::_IOC_WRITE != 0 && UserSlice::new(user, size).reader().read_slice(bytes).is_err() {
+    if dir & bindings::_IOC_WRITE != 0
+        && UserSlice::new(user, size)
+            .reader()
+            .read_slice(bytes)
+            .is_err()
+    {
         return errno(EFAULT);
     }
 
@@ -668,7 +732,13 @@ unsafe extern "C" fn ioctl(_file: *mut bindings::file, cmd: c_uint, arg: c_ulong
     // A failed copy leaves what was made to the close: the caller has lost it.
     // SAFETY: as above.
     let bytes = unsafe { core::slice::from_raw_parts(ptr::from_ref(&u).cast::<u8>(), size) };
-    if ret == 0 && dir & bindings::_IOC_READ != 0 && UserSlice::new(user, size).writer().write_slice(bytes).is_err() {
+    if ret == 0
+        && dir & bindings::_IOC_READ != 0
+        && UserSlice::new(user, size)
+            .writer()
+            .write_slice(bytes)
+            .is_err()
+    {
         return errno(EFAULT);
     }
     ret
@@ -692,7 +762,14 @@ unsafe extern "C" fn release(_inode: *mut bindings::inode, _file: *mut bindings:
         MAPPING.store(ptr::null_mut(), Ordering::Release);
         let mut id: c_ulong = 0;
         // SAFETY: the table is initialised (xa_for_each: the first entry).
-        let mut l = unsafe { bindings::xa_find(BLOCKS.0.get(), &raw mut id, c_ulong::MAX, bindings::XA_PRESENT) };
+        let mut l = unsafe {
+            bindings::xa_find(
+                BLOCKS.0.get(),
+                &raw mut id,
+                c_ulong::MAX,
+                bindings::XA_PRESENT,
+            )
+        };
         // SAFETY: an entry is a bound block, which stays while the semaphore is held.
         while let Some(b) = unsafe { l.cast::<Block>().as_ref() } {
             // The block may still be running what the driver set up: stop listening first.
@@ -700,7 +777,14 @@ unsafe extern "C" fn release(_inode: *mut bindings::inode, _file: *mut bindings:
             // SAFETY: the block's table; no request runs while the semaphore is held for writing.
             unsafe { dmabuf::lem_imports_free_all(b.imports.get()) };
             // SAFETY: the table is initialised (xa_for_each: the next entry).
-            l = unsafe { bindings::xa_find_after(BLOCKS.0.get(), &raw mut id, c_ulong::MAX, bindings::XA_PRESENT) };
+            l = unsafe {
+                bindings::xa_find_after(
+                    BLOCKS.0.get(),
+                    &raw mut id,
+                    c_ulong::MAX,
+                    bindings::XA_PRESENT,
+                )
+            };
         }
     }
     // SAFETY: the event queue is initialised at load.
@@ -752,17 +836,18 @@ static MISC: Registered<bindings::miscdevice> = Registered(UnsafeCell::new(bindi
 }));
 
 /// The platform driver. No match table: bound only through driver_override.
-static DRIVER: Registered<bindings::platform_driver> = Registered(UnsafeCell::new(bindings::platform_driver {
-    probe: Some(probe),
-    remove: Some(remove),
-    driver: bindings::device_driver {
-        name: c"lemnos".as_ptr().cast(),
-        // SAFETY: the rest of a struct device_driver is pointers, integers and flags, zero by default.
+static DRIVER: Registered<bindings::platform_driver> =
+    Registered(UnsafeCell::new(bindings::platform_driver {
+        probe: Some(probe),
+        remove: Some(remove),
+        driver: bindings::device_driver {
+            name: c"lemnos".as_ptr().cast(),
+            // SAFETY: the rest of a struct device_driver is pointers, integers and flags, zero by default.
+            ..unsafe { core::mem::zeroed() }
+        },
+        // SAFETY: every other callback absent (null) and no id table.
         ..unsafe { core::mem::zeroed() }
-    },
-    // SAFETY: every other callback absent (null) and no id table.
-    ..unsafe { core::mem::zeroed() }
-}));
+    }));
 
 /// The node's descriptor, for misc_register and misc_deregister (lemnos_entry.rs).
 pub(crate) fn misc() -> *mut bindings::miscdevice {
@@ -780,7 +865,11 @@ pub(crate) fn driver() -> *mut bindings::platform_driver {
 ///
 /// # Safety
 /// `dev` is the device being probed.
-unsafe fn probe_err(dev: *mut bindings::device, err: c_int, what: &'static core::ffi::CStr) -> c_int {
+unsafe fn probe_err(
+    dev: *mut bindings::device,
+    err: c_int,
+    what: &'static core::ffi::CStr,
+) -> c_int {
     // SAFETY: the caller's device; the format is a static string with no conversions.
     unsafe { bindings::dev_err_probe(dev, err, what.as_ptr().cast()) }
 }
@@ -799,11 +888,23 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
     // SAFETY: as above.
     if !unsafe { List::Owned.has(dev) } {
         // SAFETY: as above.
-        return unsafe { probe_err(dev, ENODEV.to_errno(), c"not a block Lemnos owns (see owned=)\n") };
+        return unsafe {
+            probe_err(
+                dev,
+                ENODEV.to_errno(),
+                c"not a block Lemnos owns (see owned=)\n",
+            )
+        };
     }
     // SAFETY: device-managed memory of the device being probed, zeroed (devm_kzalloc).
-    let l = unsafe { bindings::devm_kmalloc(dev, size_of::<Block>(), bindings::GFP_KERNEL | bindings::__GFP_ZERO) }
-        .cast::<Block>();
+    let l = unsafe {
+        bindings::devm_kmalloc(
+            dev,
+            size_of::<Block>(),
+            bindings::GFP_KERNEL | bindings::__GFP_ZERO,
+        )
+    }
+    .cast::<Block>();
     if l.is_null() {
         return ENOMEM.to_errno();
     }
@@ -825,7 +926,10 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
     if !b.mappable && unsafe { List::Unconfined.has(dev) } {
         // SAFETY: the device being probed, live across the call.
         let d: &Device = unsafe { Device::from_raw(dev) };
-        dev_warn!(d, "unconfined: registers mappable though no IOMMU confines this block's DMA\n");
+        dev_warn!(
+            d,
+            "unconfined: registers mappable though no IOMMU confines this block's DMA\n"
+        );
         b.mappable = true;
         b.unconfined = true;
     }
@@ -840,12 +944,22 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
     b.power = unsafe { lem_power_create(dev.cast()) };
     let mut ret = ptr_err(b.power);
     if ret == 0 {
-        let limit = bindings::xa_limit { max: MAX_BLOCK, min: 1 };
+        let limit = bindings::xa_limit {
+            max: MAX_BLOCK,
+            min: 1,
+        };
         // SAFETY: the table is initialised; its lock is held across __xa_alloc_cyclic, which may drop it
         // to allocate (xa_alloc_cyclic). NEXT_ID is only used here, under that lock.
         ret = unsafe {
             bindings::xa_lock(BLOCKS.0.get());
-            let ret = bindings::__xa_alloc_cyclic(BLOCKS.0.get(), &raw mut b.id, l.cast(), limit, NEXT_ID.as_ptr(), bindings::GFP_KERNEL);
+            let ret = bindings::__xa_alloc_cyclic(
+                BLOCKS.0.get(),
+                &raw mut b.id,
+                l.cast(),
+                limit,
+                NEXT_ID.as_ptr(),
+                bindings::GFP_KERNEL,
+            );
             bindings::xa_unlock(BLOCKS.0.get());
             ret
         };
@@ -891,7 +1005,11 @@ unsafe extern "C" fn probe(pdev: *mut bindings::platform_device) -> c_int {
 ///
 /// # Safety
 /// `pdev` and `dev` are the device being probed and `b` its record, not yet published.
-unsafe fn probe_kind(pdev: *mut bindings::platform_device, dev: *mut bindings::device, b: &mut Block) -> c_int {
+unsafe fn probe_kind(
+    pdev: *mut bindings::platform_device,
+    dev: *mut bindings::device,
+    b: &mut Block,
+) -> c_int {
     // The module drives this block itself: nothing of it reaches user space.
     // SAFETY: the device being probed.
     if unsafe { List::PispBe.has(dev) } {
@@ -943,7 +1061,10 @@ unsafe fn probe_kind(pdev: *mut bindings::platform_device, dev: *mut bindings::d
     if lists::test_irq_inject() {
         // SAFETY: the device being probed, live across the call.
         let d: &Device = unsafe { Device::from_raw(dev) };
-        dev_warn!(d, "test_irq_inject: interrupts can be raised from user space\n");
+        dev_warn!(
+            d,
+            "test_irq_inject: interrupts can be raised from user space\n"
+        );
     }
 
     // Clocked while bound, as the stock driver keeps it.
@@ -1000,7 +1121,14 @@ unsafe extern "C" fn remove(pdev: *mut bindings::platform_device) {
         let mapping = MAPPING.load(Ordering::Acquire);
         if !mapping.is_null() {
             // SAFETY: the open file's mapping, which stays while the semaphore is held for writing.
-            unsafe { bindings::unmap_mapping_range(mapping, region_offset(l.id, 0), (1i64 << REGION_BITS) << PAGE_SHIFT, 1) };
+            unsafe {
+                bindings::unmap_mapping_range(
+                    mapping,
+                    region_offset(l.id, 0),
+                    (1i64 << REGION_BITS) << PAGE_SHIFT,
+                    1,
+                )
+            };
         }
         for i in 0..l.nirqs {
             let q = l.irq(i);
