@@ -7,19 +7,24 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The units' security exposure, from `systemd-analyze security --offline=true`. A unit stays at or
 # below max_exposure (the baseline, as Orion's node unit does), in tenths of a point. The one
-# exception is a board's optional fragment (packaging/systemd/lemnosd.service.d/gadget.conf), checked
-# with the base unit it extends: it may add exactly the items in `additions`, each at the score
-# systemd-analyze gives it. An addition the unit no longer has fails the check, so the list cannot
-# outlive what it names, and any other exposure fails it.
+# exception is a board's optional fragment (the files in packaging/systemd/lemnosd.service.d/), each
+# checked with the base unit it extends: it may add exactly its items in `additions`, each at the
+# score systemd-analyze gives it. An addition the unit no longer has fails the check, so the list
+# cannot outlive what it names, and any other exposure fails it.
 max_exposure=2.5
 max_tenths=25
-# name as systemd-analyze prints it | score in tenths | reason
-additions=(
-  "CapabilityBoundingSet=~CAP_SYS_ADMIN|3|the root phase's FunctionFS mount: mount(2) of functionfs needs CAP_SYS_ADMIN. The daemon drops it with the rest after the root phase"
-  "SystemCallFilter=~@mount|2|the root phase's FunctionFS mount and its unmount. Without CAP_SYS_ADMIN they fail with EPERM"
+# the fragment | the base unit with it, as checked
+fragments=(
+  "packaging/systemd/lemnosd.service.d/gadget.conf|lemnosd-gadget.service"
+  "packaging/systemd/lemnosd.service.d/health-tcp.conf|lemnosd-health-tcp.service"
 )
-fragment=packaging/systemd/lemnosd.service.d/gadget.conf
-combined=lemnosd-gadget.service
+# the unit it is in ; name as systemd-analyze prints it ; score in tenths ; reason
+# (a semicolon between the fields: a name may hold a bar)
+additions=(
+  "lemnosd-gadget.service;CapabilityBoundingSet=~CAP_SYS_ADMIN;3;the root phase's FunctionFS mount: mount(2) of functionfs needs CAP_SYS_ADMIN. The daemon drops it with the rest after the root phase"
+  "lemnosd-gadget.service;SystemCallFilter=~@mount;2;the root phase's FunctionFS mount and its unmount. Without CAP_SYS_ADMIN they fail with EPERM"
+  "lemnosd-health-tcp.service;RestrictAddressFamilies=~AF_(INET|INET6);3;a tcp: health source is a TCP connect the daemon makes to a port on the board. It listens on nothing"
+)
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/lemnos-packaging.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -74,14 +79,18 @@ if [[ "$systemd_major" -ge 254 ]]; then
     echo "$verified" >&2
     exit 1
   }
-  # The base unit with the gadget fragment inserted after its [Service] line: the unit a gadget
-  # board runs. Checked as one unit, against the additions.
-  [[ -f "$fragment" ]] || { echo "packaging: $fragment is missing"; exit 1; }
-  awk -v frag="$fragment" '
-    { print }
-    /^\[Service\]/ { while ((getline line < frag) > 0) if (line !~ /^\[Service\]/ && line !~ /^#/) print line }
-  ' "$work/lemnosd.service" >"$work/$combined"
-  sed -i '/^$/d' "$work/$combined"
+  # The base unit with one fragment inserted after its [Service] line: the unit a board with that
+  # fragment runs. Each is checked as one unit, against its additions.
+  for entry in "${fragments[@]}"; do
+    fragment="${entry%%|*}"
+    combined="${entry#*|}"
+    [[ -f "$fragment" ]] || { echo "packaging: $fragment is missing"; exit 1; }
+    awk -v frag="$fragment" '
+      { print }
+      /^\[Service\]/ { while ((getline line < frag) > 0) if (line !~ /^\[Service\]/ && line !~ /^#/) print line }
+    ' "$work/lemnosd.service" >"$work/$combined"
+    sed -i '/^$/d' "$work/$combined"
+  done
   verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service 2>&1)" || {
     echo "$verified" >&2
     exit 1
@@ -93,14 +102,30 @@ if [[ "$systemd_major" -ge 254 ]]; then
     out="$(systemd-analyze security --offline=true "$unit" 2>&1)"
     score="$(awk '/Overall exposure level/ { print $7 }' <<<"$out")"
     [[ -n "$score" ]] || { echo "packaging: no exposure level read for $name"; exit 1; }
-    rows="$(awk '/^✗/ { print $2 "|" $NF }' <<<"$out")"
+    rows="$(awk '/^✗/ { print $2 ";" $NF }' <<<"$out")"
     limit=$max_tenths
-    if [[ "$name" == "$combined" ]]; then
+    home=""
+    for entry in "${fragments[@]}"; do
+      if [[ "${entry#*|}" == "$name" ]]; then home="${entry%%|*}"; fi
+    done
+    # The additions that belong to another unit must not be in this one.
+    while IFS=';' read -r item found; do
       for entry in "${additions[@]}"; do
-        item="${entry%%|*}"
-        rest="${entry#*|}"
-        listed="${rest%%|*}"
-        found="$(grep -F "$item|" <<<"$rows" | head -1 | cut -d'|' -f2 || true)"
+        rest="${entry#*;}"
+        if [[ "${rest%%;*}" == "$item" && "${entry%%;*}" != "$name" ]]; then
+          echo "packaging: $item is an addition of ${entry%%;*}, so it belongs in that unit's fragment, not in $name"
+          bad=1
+        fi
+      done
+    done <<<"$rows"
+    if [[ -n "$home" ]]; then
+      for entry in "${additions[@]}"; do
+        [[ "${entry%%;*}" == "$name" ]] || continue
+        rest="${entry#*;}"
+        item="${rest%%;*}"
+        rest="${rest#*;}"
+        listed="${rest%%;*}"
+        found="$(grep -F "$item;" <<<"$rows" | head -1 | cut -d';' -f2 || true)"
         if [[ -z "$found" ]]; then
           echo "packaging: $item is listed as an addition but $name no longer has it: remove it from additions"
           bad=1
@@ -113,15 +138,6 @@ if [[ "$systemd_major" -ge 254 ]]; then
         fi
         limit=$((limit + listed))
       done
-    else
-      while IFS='|' read -r item found; do
-        for entry in "${additions[@]}"; do
-          if [[ "${entry%%|*}" == "$item" ]]; then
-            echo "packaging: $item is an addition, so it belongs in $fragment, not in $name"
-            bad=1
-          fi
-        done
-      done <<<"$rows"
     fi
     got="$(awk -v s="$score" 'BEGIN { printf "%d", s * 10 + 0.5 }')"
     if [[ "$got" -gt "$limit" ]]; then

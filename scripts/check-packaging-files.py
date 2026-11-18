@@ -12,7 +12,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIST = os.path.join(ROOT, "packaging", "files.txt")
-VOCAB = {"always", "systemd", "busybox", "udev", "orion", "gadget", "kmod", "uboot", "ubi", "never"}
+VOCAB = {"always", "systemd", "busybox", "udev", "orion", "gadget", "health-tcp", "kmod", "uboot", "ubi", "never"}
 MODES = {"0644", "0755", "append"}
 ALTERNATIVES = {frozenset({"uboot", "ubi"})}  # install paths two lines may share, by their `when`
 

@@ -71,7 +71,9 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
-# AF_UNIX: the socket. AF_NETLINK: the kernel's uevent socket for hotplug. Nothing else.
+# AF_UNIX: the socket. AF_NETLINK: the kernel's uevent socket for hotplug. Nothing else. A board
+# with a `tcp:` health source takes the optional fragment lemnosd.service.d/health-tcp.conf, which
+# adds the two Internet families for that connect.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 # The root phase's calls on top of @system-service: the id changes (@setuid), the owner of the
 # runtime directory (@chown), and prctl for the capability and no_new_privs settings. A gadget board's
