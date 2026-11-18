@@ -55,13 +55,22 @@ pub(crate) mod tests {
     impl TempDir {
         pub fn new(label: &str) -> Self {
             static NEXT: AtomicU32 = AtomicU32::new(0);
+            // The time keeps the name apart from one an earlier run with the same process id left.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
             let dir = std::env::temp_dir().join(format!(
-                "lemnos-slot-store-{label}-{}-{}",
+                "lemnos-slot-store-{label}-{}-{nanos}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            // Whatever is at the name is not ours to keep: clear it, then make the directory.
+            if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+                let _ = fs::remove_dir_all(&dir);
+            } else {
+                let _ = fs::remove_file(&dir);
+            }
+            fs::create_dir(&dir).unwrap();
             Self(dir)
         }
     }

@@ -311,7 +311,8 @@ fn only_the_offline_node_is_opened() {
     let refused = Node::open_in(&other, Path::new("/dev/null"));
     let plain = sys.join(format!("dev/char/{major}:{minor}/name"));
     let not_a_device = Node::open_in(&sys, &plain);
-    let empty = std::env::temp_dir().join("rkvpss-sys-nothing-here");
+    let empty =
+        std::env::temp_dir().join(format!("rkvpss-sys-nothing-here-{}", std::process::id()));
     let unnamed = Node::open_in(&empty, Path::new("/dev/null"));
     fs::remove_dir_all(&sys).expect("clean up");
     fs::remove_dir_all(&other).expect("clean up");

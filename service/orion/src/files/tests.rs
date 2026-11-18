@@ -7,7 +7,12 @@ static NEXT: AtomicU32 = AtomicU32::new(0);
 fn dir() -> PathBuf {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("lo-files-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+    if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        let _ = fs::remove_dir_all(&dir);
+    } else {
+        let _ = fs::remove_file(&dir);
+    }
     fs::create_dir_all(&dir).unwrap();
     dir
 }
