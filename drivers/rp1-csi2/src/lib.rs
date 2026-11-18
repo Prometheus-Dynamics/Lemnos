@@ -59,9 +59,10 @@
 //! nothing, and the sequence skips it. Its buffers are the board's, dma-bufs like `frames`'s.
 //! Asked for only where the sensor sends embedded lines. Untested on a board.
 //!
-//! The module's stream is created by `start` and ends at `stop`. Nothing of it is kept across a
-//! restart: `start` opens the node, makes the module's stream, gives it the buffers the driver
-//! holds, and starts the block from nothing.
+//! The module's stream is created by `start` and ends at `stop`. A recovery restart makes a new
+//! module stream the same way (below); none of the module's state is kept across it, but the
+//! frame sequence is (see "Frame sequence"). `start` opens the node, makes the module's stream,
+//! gives it the buffers the driver holds, and starts the block from nothing.
 //!
 //! Frame starts. `frame_starts` reads the kernel's count of the block's frame starts since `start`,
 //! with the time of the latest one (CLOCK_MONOTONIC). A start is counted when the block raises its
@@ -73,8 +74,14 @@
 //! buffer armed (every buffer held by the consumer, or none given yet): then the block makes no frame
 //! start, the count cannot move, and a sensor watching it must not read that as the sensor going
 //! quiet. The kernel module answers `valid = 0` then, and the count is read again once a buffer is
-//! armed (`kernel/lemnos_rp1_csi2.c`, `lrc_frame_starts`). A recovery restart is a new
-//! start: the count begins again at zero, so a read lower than the one before means a restart.
+//! armed (`kernel/lemnos_rp1_csi2.c`, `lrc_frame_starts`). A recovery restart makes a new module
+//! stream, whose count begins again at zero, so a read lower than the one before means a restart.
+//!
+//! Frame sequence. A published frame's sequence only goes up, across a recovery restart too: the
+//! restart carries on from the sequence of the next frame after the last one finished, so the
+//! consumer sees a gap where the stall was and never a reset to zero. Only a fresh `start` after
+//! `stop` numbers from zero again. The first frame after a restart is therefore numbered above the
+//! last one delivered.
 //!
 //! Failures. While streaming, every millisecond the driver moves finished frames and returned
 //! buffers, and every second it reads the module's state. A stream that has ended or faulted, or
@@ -95,8 +102,17 @@
 //! are not yet measured. The nominal period is width times height at the link's pixel rate, and it
 //! leaves out blanking and exposure, so it is only the fallback. The judgement is made only while the
 //! block has a buffer armed (`frame_starts` is `Some`): with every buffer held by the consumer no
-//! frame can reach it, and that is no stop. A stop restarts the receiver under the failure rule
-//! above, and health is failed with a reason that names the stop. Unmeasured on a board.
+//! frame can reach it, and that is no stop.
+//!
+//! Starvation by the consumer. The no-frame clock does not run while the driver holds no buffer of
+//! the `frames` stream: every buffer is with the consumer (held, or published and not yet returned),
+//! so the block is starved by its consumer, not stalled by the sensor. The clock starts when the
+//! driver gets a buffer back, so a stall that begins while buffers are held is judged one bound
+//! after one is released, and a stall with a buffer free is judged one bound after the last frame,
+//! as before. While starved, health is degraded and names the count of buffers the consumer holds.
+//!
+//! A stop restarts the receiver under the failure rule above, and health is failed with a reason
+//! that names the stop. Unmeasured on a board.
 
 mod hw;
 pub mod relay;
@@ -159,6 +175,21 @@ const FIRST_FRAME_NS: u64 = 3_000_000_000;
 const STREAM: &str = "frames";
 /// The stream of the embedded data, when the board declares one on the device.
 const EMBEDDED: &str = "embedded";
+
+/// Health reasons, one per count of buffers the consumer holds (`0` to `MAX_BUFFERS`). A reason is
+/// a static text, so the count is written into one of these rather than formatted.
+macro_rules! starved_reasons {
+    ($($count:literal)*) => {
+        [$(concat!(
+            "the producer is waiting for buffers the consumer holds (", $count, " held): ",
+            "no frame stop is counted while every buffer is out"
+        ),)*]
+    };
+}
+const STARVED: [&str; relay::MAX_BUFFERS + 1] = starved_reasons!(
+    0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33
+    34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64
+);
 
 /// The version of the resume record's layout: a record of another version is not restored.
 const RESUME_VERSION: u8 = 1;
@@ -595,6 +626,9 @@ impl Lifecycle for Rp1Csi2 {
                 "the frames stream's buffers are not memory the block can take \
                  (smaller than a frame?): no frame can reach its consumer",
             ),
+            State::Streaming { .. } if self.starved() => Health::Degraded(
+                STARVED[self.relay.consumer_held().min(relay::MAX_BUFFERS as u32) as usize],
+            ),
             _ => Health::Ok,
         }
     }
@@ -617,7 +651,9 @@ impl Lifecycle for Rp1Csi2 {
                     };
                     return self.tick(now_ns);
                 }
-                if self.frames_moved != moved || self.last_frame_ns.is_none() {
+                if self.frames_moved != moved || self.last_frame_ns.is_none() || self.starved() {
+                    // Starved by the consumer's holds: no frame is due, so the clock is held at
+                    // now, and a stall is judged one bound after a buffer comes back.
                     self.last_frame_ns = Some(now_ns);
                 }
                 if due && self.frame_stop_judged(now_ns) {
@@ -658,7 +694,7 @@ impl Lifecycle for Rp1Csi2 {
                 Some(at)
             }
             State::Recovering { due: Some(at), .. } if now_ns < at => Some(at),
-            State::Recovering { attempt, .. } => match self.begin() {
+            State::Recovering { attempt, .. } => match self.restart() {
                 Ok(()) => {
                     self.frame_stopped = false;
                     self.last_frame_ns = Some(now_ns);
@@ -684,6 +720,28 @@ impl Lifecycle for Rp1Csi2 {
 }
 
 impl Rp1Csi2 {
+    /// Whether the driver is waiting on the consumer: the stream has buffers and holds none of
+    /// them, so no frame can reach the block while the consumer keeps what it has.
+    fn starved(&self) -> bool {
+        self.frames.is_some() && self.relay.buffers() > 0 && self.relay.producer_held() == 0
+    }
+
+    /// A recovery restart: the sequence goes on from where it was, then the module's stream is
+    /// made again (`begin`). Only a recovery does this; a fresh `start` begins its numbering again.
+    fn restart(&mut self) -> Result<()> {
+        self.carry_sequences();
+        self.begin()
+    }
+
+    /// Carries each stream's frame sequence on from the next one, so the numbering the consumer
+    /// sees goes up across the restart whatever the new module stream numbers its frames from.
+    fn carry_sequences(&mut self) {
+        let next = self.relay.next_sequence();
+        self.relay.continue_sequence(next);
+        let next = self.embedded_relay.next_sequence();
+        self.embedded_relay.continue_sequence(next);
+    }
+
     /// Whether no frame has moved for the bound of the configured mode, while the block has a
     /// buffer armed. Asks the block's count only past the bound, so a streaming tick costs nothing
     /// extra. An unknown count (`None`, or an error) is no judgement.
