@@ -1878,6 +1878,7 @@ dependencies = [
  "lemnos-contract-magnetometer",
  "lemnos-contract-orientation",
  "lemnos-core",
+ "lemnos-sim",
 ]
 
 [[package]]

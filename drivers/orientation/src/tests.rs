@@ -1,13 +1,18 @@
 //! The driver on fake devices. Each input is a slot in a [`Bench`] that holds a
-//! reading, or fails while it holds none, and counts the reads it serves.
+//! reading, or fails while it holds none, and counts the reads it serves. The
+//! bench's host clock is the sim clock: a test moves time by hand, so the same
+//! reads always give the same answers.
 
 use super::*;
-use lemnos_core::{ConfigValue, Encode, LocalCaller, Router, Writer};
+use lemnos_core::{ConfigValue, Encode, HostClock, HostClockHandle, LocalCaller, Router, Writer};
+use lemnos_sim::SimClock;
 use std::boxed::Box;
 use std::format;
+use std::time::Duration;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::vec;
 use std::vec::Vec;
 
 /// The router's device numbers.
@@ -19,11 +24,17 @@ const G: f32 = 9.80665;
 /// The Earth's field for the heading tests: 50 µT at a 60° dip.
 const FIELD_UT: f32 = 50.0;
 const DIP: f32 = 60.0 * core::f32::consts::PI / 180.0;
+/// One millisecond, in nanoseconds.
+const MS: u64 = 1_000_000;
+/// The tolerance on an angle the time tests check, rad (0.006 degrees). A constant turn's error
+/// is the first-order step's own: (ω·dt)³/12 per step, about 1e-5 rad over two seconds at 50 Hz.
+const TURN_TOL: f32 = 1e-4;
 
-/// Three fake devices behind the host's router.
+/// Three fake devices behind the host's router, and the host clock.
 struct Bench {
     slots: Mutex<[Option<Vector3>; 3]>,
     reads: [AtomicU32; 3],
+    clock: SimClock,
 }
 
 impl Router for Bench {
@@ -47,11 +58,18 @@ impl Router for Bench {
     }
 }
 
+impl HostClock for Bench {
+    fn now_ns(&self) -> u64 {
+        self.clock.now_ns()
+    }
+}
+
 /// A bench that lives for the test (the driver borrows it for `'static`).
 fn bench() -> &'static Bench {
     Box::leak(Box::new(Bench {
         slots: Mutex::new([None; 3]),
         reads: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+        clock: SimClock::new(),
     }))
 }
 
@@ -64,6 +82,13 @@ impl Bench {
     fn reads(&self, device: u32) -> u32 {
         self.reads[device as usize].load(Ordering::SeqCst)
     }
+
+    /// Moves the clock to `ns`. The sim clock only moves forward.
+    fn move_to(&self, ns: u64) {
+        let now = self.clock.now_ns();
+        assert!(ns >= now, "the clock went back: {now} to {ns}");
+        self.clock.advance(Duration::from_nanos(ns - now));
+    }
 }
 
 fn vec3(x: f32, y: f32, z: f32) -> Vector3 {
@@ -73,6 +98,15 @@ fn vec3(x: f32, y: f32, z: f32) -> Vector3 {
 /// The accelerometer's reading for a board at rest, rolled by `roll` rad.
 fn tilted(roll: f32) -> Vector3 {
     vec3(0.0, G * roll.sin(), G * roll.cos())
+}
+
+/// The accelerometer's reading for a board at rest with roll and pitch, rad.
+fn posed(roll: f32, pitch: f32) -> Vector3 {
+    vec3(
+        -G * pitch.sin(),
+        G * roll.sin() * pitch.cos(),
+        G * roll.cos() * pitch.cos(),
+    )
 }
 
 /// A driver bound to `bench`, with a magnetometer when `mag` is set.
@@ -85,6 +119,7 @@ fn start(
         accel: Dev::new(LocalCaller::new(bench, ACCEL, 0)),
         gyro: Dev::new(LocalCaller::new(bench, GYRO, 0)),
         mag: mag.then(|| Dev::new(LocalCaller::new(bench, MAG, 0))),
+        clock: HostClockHandle::shared(bench),
     };
     Orientation::start(needs, &Config::new(entries))
 }
@@ -103,6 +138,47 @@ fn level_bench() -> &'static Bench {
     b.set(ACCEL, Some(vec3(0.0, 0.0, G)));
     b.set(GYRO, Some(vec3(0.0, 0.0, 0.0)));
     b
+}
+
+/// One read at `t` ns, with the given inputs.
+fn read_at(b: &Bench, o: &mut Orientation, t: u64, accel: Vector3, gyro: Vector3) -> Vector3 {
+    b.move_to(t);
+    b.set(ACCEL, Some(accel));
+    b.set(GYRO, Some(gyro));
+    o.read().expect("the read reads")
+}
+
+/// Reads at each instant in `times` (ns, ascending) while the board turns about its x axis at
+/// `rate` rad/s from level at time zero. Returns the last reading.
+fn turn_x(b: &Bench, o: &mut Orientation, rate: f32, times: &[u64]) -> Vector3 {
+    let mut last = vec3(0.0, 0.0, 0.0);
+    for &t in times {
+        let roll = rate * (t as f32 * 1e-9);
+        last = read_at(b, o, t, tilted(roll), vec3(rate, 0.0, 0.0));
+    }
+    last
+}
+
+/// Read instants every `step_ns` from zero to `end_ns`, both included.
+fn regular(step_ns: u64, end_ns: u64) -> Vec<u64> {
+    (0..=end_ns / step_ns).map(|i| i * step_ns).collect()
+}
+
+/// Read instants from zero to `end_ns` with intervals of 2 to 18 ms (10 ms on average), from a
+/// fixed sequence. The last read lands on `end_ns`.
+fn jittered(end_ns: u64) -> Vec<u64> {
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut t = 0;
+    let mut out = vec![0];
+    while t < end_ns {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let step = (2 + (seed >> 33) % 17) * MS;
+        t = (t + step).min(end_ns);
+        out.push(t);
+    }
+    out
 }
 
 #[test]
@@ -132,84 +208,297 @@ fn the_first_read_starts_from_the_tilt_the_accelerometer_shows() {
 }
 
 #[test]
-fn a_rate_gyro_turns_the_yaw_by_its_rate_times_the_read_period() {
-    // 101 reads at 100 Hz: 100 steps of 10 ms at 0.1 rad/s is 0.1 rad.
+fn the_first_read_takes_the_tilt_and_integrates_no_time() {
+    // The clock is at 7 s when the first read comes, and the board is turning about z at 1 rad/s.
+    // The first read starts the filter, so it shows no yaw. The next read, 50 ms later, integrates
+    // those 50 ms. (A 50 ms step is 0.05 rad at this rate; the integrator's first-order error on
+    // it is (ω·dt)³/12, about 1e-5 rad, inside TURN_TOL.)
+    let b = level_bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 1.0)));
+    b.move_to(7_000 * MS);
+    let mut o = driver(b, false, &[]);
+    let first = o.read().expect("the first read reads");
+    assert!(
+        first.z.abs() < 1e-6,
+        "the first read integrated: yaw {}",
+        first.z
+    );
+    let second = read_at(
+        b,
+        &mut o,
+        7_050 * MS,
+        vec3(0.0, 0.0, G),
+        vec3(0.0, 0.0, 1.0),
+    );
+    assert!(
+        (second.z - 0.05).abs() < TURN_TOL,
+        "yaw {} after 50 ms at 1 rad/s",
+        second.z
+    );
+}
+
+#[test]
+fn a_rate_gyro_turns_the_yaw_by_its_rate_times_the_time_between_reads() {
+    // 101 reads at 100 Hz over 1 s: 0.1 rad/s for 1 s is 0.1 rad.
     let b = level_bench();
     b.set(GYRO, Some(vec3(0.0, 0.0, 0.1)));
     let mut o = driver(b, false, &[]);
     let mut last = 0.0;
-    for _ in 0..101 {
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
         last = o.read().expect("reads").z;
     }
     assert!(
-        (last - 0.1).abs() < 2e-3,
+        (last - 0.1).abs() < TURN_TOL,
         "yaw {last} after 1 s at 0.1 rad/s"
     );
 }
 
 #[test]
-fn the_configured_rate_is_the_time_step_of_each_read() {
-    // The same 0.1 rad/s, read 51 times at 50 Hz: 50 steps of 20 ms, the same 0.1 rad.
-    let b = level_bench();
-    b.set(GYRO, Some(vec3(0.0, 0.0, 0.1)));
-    let mut o = driver(b, false, &[("sample_rate_hz", ConfigValue::Int(50))]);
-    let mut last = 0.0;
-    for _ in 0..51 {
-        last = o.read().expect("reads").z;
+fn a_constant_turn_reads_its_analytic_angle_at_any_read_rate() {
+    // 0.5 rad/s for 2 s is one radian of roll. Read every 20 ms (50 Hz) and every 5 ms (200 Hz).
+    let end = 2_000 * MS;
+    let mut rolls = Vec::new();
+    for step in [20 * MS, 5 * MS] {
+        let b = level_bench();
+        let mut o = driver(b, false, &[]);
+        let r = turn_x(b, &mut o, 0.5, &regular(step, end));
+        assert!(
+            (r.x - 1.0).abs() < TURN_TOL,
+            "roll {} at {} ms reads, want 1.0",
+            r.x,
+            step / MS
+        );
+        rolls.push(r.x);
     }
-    assert!((last - 0.1).abs() < 2e-3, "yaw {last} at 50 Hz");
+    assert!(
+        (rolls[0] - rolls[1]).abs() < TURN_TOL,
+        "50 Hz {} and 200 Hz {}",
+        rolls[0],
+        rolls[1]
+    );
 }
 
 #[test]
-fn a_failed_read_reports_and_the_filter_resumes_where_it_stopped() {
-    // Reference: a bench that never fails, read at each successful step k.
-    let inputs = |k: u32| {
-        let k = k as f32;
-        (
-            vec3(0.2 * (0.07 * k).sin(), 0.1, G),
-            vec3(0.0, 0.05 * (0.05 * k).sin(), 0.15),
-        )
-    };
-    let steps = 60;
-    let reference = bench();
-    let mut expected = Vec::new();
-    let mut r = driver(reference, false, &[]);
-    for k in 0..steps {
-        let (a, g) = inputs(k);
-        reference.set(ACCEL, Some(a));
-        reference.set(GYRO, Some(g));
-        expected.push(r.read().expect("reads"));
+fn a_tilt_held_still_reads_the_same_tilt_at_any_read_rate() {
+    // Held still, the attitude is the first read's tilt at every rate. Nothing turns, so a read
+    // rate cannot change it: this passes on any clock, and it checks the first read's tilt.
+    for step in [20 * MS, 5 * MS] {
+        let b = bench();
+        b.set(ACCEL, Some(posed(0.3, -0.2)));
+        b.set(GYRO, Some(vec3(0.0, 0.0, 0.0)));
+        let mut o = driver(b, false, &[]);
+        let mut r = vec3(0.0, 0.0, 0.0);
+        for t in regular(step, 2_000 * MS) {
+            b.move_to(t);
+            r = o.read().expect("reads");
+        }
+        assert!(
+            (r.x - 0.3).abs() < TURN_TOL,
+            "roll {} at {} ms",
+            r.x,
+            step / MS
+        );
+        assert!(
+            (r.y + 0.2).abs() < TURN_TOL,
+            "pitch {} at {} ms",
+            r.y,
+            step / MS
+        );
     }
+}
 
-    // The same inputs, but the gyroscope fails on five attempts in the middle.
+#[test]
+fn irregular_read_intervals_give_the_answer_of_regular_ones() {
+    let end = 2_000 * MS;
+    let b1 = bench();
+    let mut o1 = driver(b1, false, &[]);
+    let regular_r = turn_x(b1, &mut o1, 0.5, &regular(10 * MS, end));
+
+    let times = jittered(end);
+    let gaps: Vec<u64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        gaps.iter().any(|&g| g != gaps[0]),
+        "the intervals are not irregular"
+    );
+    let b2 = bench();
+    let mut o2 = driver(b2, false, &[]);
+    let jitter_r = turn_x(b2, &mut o2, 0.5, &times);
+
+    assert!(
+        (jitter_r.x - regular_r.x).abs() < TURN_TOL,
+        "jittered roll {} against regular {}",
+        jitter_r.x,
+        regular_r.x
+    );
+    assert!((jitter_r.x - 1.0).abs() < TURN_TOL, "roll {}", jitter_r.x);
+}
+
+#[test]
+fn a_gap_within_the_bound_integrates_its_whole_length() {
+    // Yaw alone: the accelerometer is level, so only the gyroscope moves the heading. The clock
+    // reads 0.4 s after the last read, under the 0.5 s bound: the step is integrated in full.
+    let b = level_bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 0.2)));
+    let mut o = driver(b, false, &[]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        o.read().expect("reads");
+    }
+    let r = read_at(
+        b,
+        &mut o,
+        1_400 * MS,
+        vec3(0.0, 0.0, G),
+        vec3(0.0, 0.0, 0.2),
+    );
+    assert!(
+        (r.z - 0.28).abs() < TURN_TOL,
+        "yaw {} after a 0.4 s gap",
+        r.z
+    );
+}
+
+#[test]
+fn a_gap_beyond_the_bound_is_held_and_steps_resume_after_it() {
+    // A 2 s gap at 0.2 rad/s: the gap is not integrated, so the heading does not move on the read
+    // that ends it. The reads after it integrate again, from that read on.
+    let b = level_bench();
+    b.set(GYRO, Some(vec3(0.0, 0.0, 0.2)));
+    let mut o = driver(b, false, &[]);
+    let mut before = 0.0;
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        before = o.read().expect("reads").z;
+    }
+    let at_gap = read_at(
+        b,
+        &mut o,
+        3_000 * MS,
+        vec3(0.0, 0.0, G),
+        vec3(0.0, 0.0, 0.2),
+    );
+    assert!(
+        (at_gap.z - before).abs() < 1e-6,
+        "the gap was integrated: yaw {} after {}",
+        at_gap.z,
+        before
+    );
+    let next = read_at(
+        b,
+        &mut o,
+        3_010 * MS,
+        vec3(0.0, 0.0, G),
+        vec3(0.0, 0.0, 0.2),
+    );
+    assert!(
+        (next.z - before - 0.002).abs() < TURN_TOL,
+        "yaw {} after one 10 ms step",
+        next.z - before
+    );
+}
+
+#[test]
+fn after_a_gap_the_tilt_reconverges_from_the_accelerometer_without_a_jump() {
+    // Level and still, then the board is rolled by 0.4 rad during a 2 s gap. The read that ends
+    // the gap does not move the attitude. Reads at 50 Hz after it pull the tilt to the accelerometer
+    // (0.4 rad): within 0.01 rad by 3 s, and within 0.02 rad by 10 s. The integral term (ki) makes
+    // the approach overshoot by about 0.015 rad for a step this size, and that tail settles slowly;
+    // the measured curve is 0.004 rad at 3 s, -0.0145 at 5 s, -0.014 at 10 s.
+    let b = level_bench();
+    let mut o = driver(b, false, &[]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.move_to(t);
+        o.read().expect("reads");
+    }
+    let at_gap = read_at(b, &mut o, 3_000 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+    assert!(
+        at_gap.x.abs() < 1e-6,
+        "the gap moved the roll to {}",
+        at_gap.x
+    );
+    let mut at_3s = None;
+    let mut r = at_gap;
+    for t in regular(20 * MS, 10_000 * MS)
+        .into_iter()
+        .filter(|&t| t > 3_000 * MS)
+    {
+        r = read_at(b, &mut o, t, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
+        if t == 6_000 * MS {
+            at_3s = Some(r.x);
+        }
+    }
+    let at_3s = at_3s.expect("a read at 6 s");
+    assert!(
+        (at_3s - 0.4).abs() < 0.01,
+        "roll {at_3s} at 3 s after the gap, want 0.4"
+    );
+    assert!(
+        (r.x - 0.4).abs() < 0.02,
+        "roll {} at 10 s after the gap, want 0.4",
+        r.x
+    );
+}
+
+#[test]
+fn a_failed_read_leaves_the_attitude_and_the_next_read_integrates_its_time() {
+    // Reads every 10 ms of a steady turn. Five attempts in the middle fail; each still takes its
+    // 10 ms of clock. The read that follows integrates the whole 60 ms, so the final roll is the
+    // analytic angle.
+    let rate = 0.5;
     let b = bench();
     let mut o = driver(b, false, &[]);
-    let (mut k, mut attempt, mut failures) = (0u32, 0u32, 0u32);
-    while k < steps {
-        let (a, g) = inputs(k);
+    let mut last = None;
+    for attempt in 0..100u64 {
+        let t = attempt * 10 * MS;
         let fail = (20..25).contains(&attempt);
-        b.set(ACCEL, Some(a));
-        b.set(GYRO, if fail { None } else { Some(g) });
+        b.move_to(t);
+        b.set(ACCEL, Some(tilted(rate * (t as f32 * 1e-9))));
+        b.set(
+            GYRO,
+            if fail {
+                None
+            } else {
+                Some(vec3(rate, 0.0, 0.0))
+            },
+        );
         match o.read() {
-            Ok(got) => {
+            Ok(r) => {
                 assert!(!fail, "a read with a failed gyroscope succeeded");
-                let want = expected[k as usize];
-                assert!(
-                    (got.x - want.x).abs() < 1e-6
-                        && (got.y - want.y).abs() < 1e-6
-                        && (got.z - want.z).abs() < 1e-6,
-                    "step {k}: {got:?} != {want:?}"
-                );
-                k += 1;
+                last = Some(r);
             }
             Err(status) => {
-                assert!(fail, "step {k} failed without a fault: {status:?}");
-                failures += 1;
+                assert!(fail, "attempt {attempt} failed without a fault: {status:?}");
+                assert_eq!(status, Status::TIMED_OUT);
             }
         }
-        attempt += 1;
     }
-    assert_eq!(failures, 5);
+    let r = last.expect("the reads succeeded");
+    assert!(
+        (r.x - rate * 0.99).abs() < TURN_TOL,
+        "roll {} at 0.99 s",
+        r.x
+    );
+}
+
+#[test]
+fn the_configured_sample_rate_does_not_change_the_attitude() {
+    // The same 1 s turn, read every 5 ms: a driver configured at 50 Hz and one at 200 Hz must
+    // agree, and both must be the analytic 0.5 rad.
+    let end = 1_000 * MS;
+    let mut rolls = Vec::new();
+    for hz in [50, 200] {
+        let b = bench();
+        let mut o = driver(b, false, &[("sample_rate_hz", ConfigValue::Int(hz))]);
+        rolls.push(turn_x(b, &mut o, 0.5, &regular(5 * MS, end)).x);
+    }
+    assert!(
+        (rolls[0] - rolls[1]).abs() < TURN_TOL,
+        "50 Hz config {} against 200 Hz config {}",
+        rolls[0],
+        rolls[1]
+    );
+    assert!((rolls[1] - 0.5).abs() < TURN_TOL, "roll {}", rolls[1]);
 }
 
 #[test]
