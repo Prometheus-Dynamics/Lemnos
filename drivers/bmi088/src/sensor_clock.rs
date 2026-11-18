@@ -34,8 +34,10 @@ const WRAP: u32 = 1 << 24;
 const WRAP_MASK: u32 = WRAP - 1;
 
 /// A read is paired with host time only when the two readings around it are at most this far
-/// apart. A wider bracket means the host was preempted inside the read, so its time is not used.
-pub(crate) const MAX_BRACKET_NS: u64 = 2_000_000;
+/// apart: the phase's budget (`PHASE_WIDTH_NS`). A wider bracket could move the phase by more than
+/// the budget (the host was preempted inside the read, or its clock was read late), so the drain
+/// takes no host time from it, and stamps its samples from the tick (see `lib.rs`).
+pub(crate) const MAX_BRACKET_NS: u64 = 1_000_000;
 /// Host-timed batches (ticks that read the sensor time with a clean bracket) before the model
 /// publishes: the rate's fit has at least this many points. At 200 Hz a batch is about 365 ms, so
 /// this is about 6 s.
