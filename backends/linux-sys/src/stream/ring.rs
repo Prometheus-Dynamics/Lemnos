@@ -126,6 +126,23 @@ pub struct Ring {
     holds: Option<Holds>,
 }
 
+/// What a passing reader ([`Ring::hold_passing`]) does when the module has written over frames
+/// it had not read. The driver says which, because only it knows what a frame on its ring is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overrun {
+    /// The frames come from a source that runs on whether or not it is read (a camera receiver):
+    /// the reader held none of the ones it missed, so they are dropped and counted in
+    /// [`Ring::dropped`], and it reads on. Each frame carries the module's own sequence, so the
+    /// drop shows as a gap in it.
+    Drops,
+    /// Each frame is the result of a job the reader posted, and it keeps something for every job
+    /// in flight (the buffer it posted on, what it lent). A result it never reads leaves that
+    /// unaccounted, and it cannot happen while the module keeps step: no more results are unread
+    /// than jobs are in flight, and the ring has a slot for each. So an overrun is a stream out of
+    /// step: an error, and the driver makes the stream again.
+    Fails,
+}
+
 /// A consumer's holds on the pool's buffers: its marks page, the module's registration of it, how
 /// many frames it holds in each buffer, and how many it may have in hand at once.
 struct Holds {
@@ -137,9 +154,9 @@ struct Holds {
     held: u32,
     /// Of `held`, the frames passed on.
     passed_on: u32,
-    /// A relay ([`Ring::hold_passing`]): a reader of a source that runs on whether or not it is
-    /// read, so frames it was too late for are frames dropped, not a broken stream.
-    relay: bool,
+    /// The reader was given [`Overrun::Drops`]: frames it was too late for are frames dropped,
+    /// not a broken stream.
+    late_drops: bool,
     /// The frames this consumer may have in hand: held and not passed on.
     max_held: u32,
 }
@@ -256,18 +273,15 @@ impl Ring {
     /// told this consumer may hold every buffer, because how many frames stay held after they are
     /// passed on is up to that reader, and holding all of them stops the block without a fault.
     ///
-    /// A relay reads a source that does not wait for it. When it falls more than the ring's frame
-    /// slots behind (it was not scheduled for that many frame periods), the module has written over
-    /// the frames it had not taken. It held none of them, so nothing it holds is touched: they are
-    /// dropped and counted in [`dropped`](Self::dropped), exactly as frames that go by at the limit
-    /// are, and [`next_frame`](Self::next_frame) goes on with the frames still on the ring. Each
-    /// frame carries the module's own sequence, so the drop shows as a gap in it. A reader without
-    /// this (a job's results) is out of step when it is overrun, and that stays an error.
+    /// `overrun` is what happens when this reader falls more than the ring's frame slots behind
+    /// (it was not run for that long) and the module wrote over frames it had not taken: see
+    /// [`Overrun`].
     pub fn hold_passing(
         &mut self,
         stream: BorrowedFd<'_>,
         buffers: u32,
         max_in_hand: u32,
+        overrun: Overrun,
     ) -> io::Result<()> {
         if self.holds.is_some() || max_in_hand == 0 {
             return Err(io::Error::new(
@@ -287,7 +301,25 @@ impl Ring {
         let registration = crate::stream::add_reader(stream, page.as_fd(), buffers, 0)
             .map_err(|e| io::Error::other(format!("give the module the marks page: {e}")))?;
         marks.set_slot(registration.slot);
-        self.attach_holds(marks, registration, buffers, max_in_hand, true)
+        self.attach_passing(marks, registration, buffers, max_in_hand, overrun)
+    }
+
+    /// Starts holding for a passing reader whose marks the module has as `registration`.
+    fn attach_passing(
+        &mut self,
+        marks: Marks,
+        registration: Registration,
+        buffers: u32,
+        max_in_hand: u32,
+        overrun: Overrun,
+    ) -> io::Result<()> {
+        self.attach_holds(
+            marks,
+            registration,
+            buffers,
+            max_in_hand,
+            overrun == Overrun::Drops,
+        )
     }
 
     /// Starts holding with `marks` already given to the module as `registration`.
@@ -297,7 +329,7 @@ impl Ring {
         registration: Registration,
         buffers: u32,
         max_held: u32,
-        relay: bool,
+        late_drops: bool,
     ) -> io::Result<()> {
         if self.holds.is_some() {
             return Err(io::Error::new(
@@ -312,7 +344,7 @@ impl Ring {
             passed: vec![0; buffers as usize],
             held: 0,
             passed_on: 0,
-            relay,
+            late_drops,
             max_held,
         });
         Ok(())
@@ -430,9 +462,9 @@ impl Ring {
     }
 
     /// The next frame published, or `None` when there is none yet. `InvalidData` for an entry
-    /// that is not a buffer entry, or when a reader that is not a relay fell behind and skipped
-    /// frames. A relay ([`hold_passing`](Self::hold_passing)) that fell behind drops the frames it
-    /// missed, counts them, and takes the next one still on the ring.
+    /// that is not a buffer entry, or when the reader fell behind and skipped frames, unless it was
+    /// given [`Overrun::Drops`]: then it drops the frames it missed, counts them, and takes the next
+    /// one still on the ring.
     pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
         if self.holds.as_ref().is_some_and(Holds::at_limit) {
             // Taking another would exceed the limit. The frames go by unheld and are counted as
@@ -455,7 +487,8 @@ impl Ring {
     }
 
     /// Frames that went by untaken, since the ring was mapped: discarded at the hold limit, and, for
-    /// a relay, written over before it read them or reused before it could hold them.
+    /// a reader given [`Overrun::Drops`], written over before it read them or reused before it could
+    /// hold them.
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped
@@ -464,13 +497,13 @@ impl Ring {
     /// One sample off the ring. With holds, its buffer is marked first and then checked, so a
     /// buffer the module reused before the mark is skipped, not read.
     fn take_one(&mut self) -> io::Result<Option<Frame>> {
-        let relay = self.holds.as_ref().is_some_and(|holds| holds.relay);
+        let late_drops = self.holds.as_ref().is_some_and(|holds| holds.late_drops);
         loop {
             let sample = match self.reader.next() {
                 Next::Sample(sample) => sample,
                 Next::Empty => return Ok(None),
-                // A relay that was overrun lost frames it never held: dropped, and on to the next.
-                Next::Skipped(n) if relay => {
+                // Overrun, and told to drop: it held none of them. Counted, and on to the next.
+                Next::Skipped(n) if late_drops => {
                     self.dropped = self.dropped.saturating_add(n);
                     continue;
                 }
@@ -505,8 +538,8 @@ impl Ring {
                     holds.counts[index as usize] -= 1;
                     holds.held -= 1;
                     holds.marks.unmark(buffer);
-                    if holds.relay {
-                        // The relay was late for this one too: dropped, and on to the next, so the
+                    if holds.late_drops {
+                        // The reader was late for this one too: dropped, and on to the next, so the
                         // frames behind it do not wait for another wake.
                         self.dropped = self.dropped.saturating_add(1);
                         continue;
@@ -678,6 +711,11 @@ mod tests {
     /// A reader allowed one frame in hand, on a pool of four, with its marks as `hold_passing`
     /// makes them: the page allows every buffer, the limit is on what is in hand.
     fn passing_ring() -> (OwnedFd, Ring) {
+        passing_ring_that(Overrun::Drops)
+    }
+
+    /// The same, with what the reader does when it is overrun.
+    fn passing_ring_that(overrun: Overrun) -> (OwnedFd, Ring) {
         let (fd, bytes, layout) = module_ring(8, 4);
         let mut ring = Ring::map(fd.as_fd(), bytes, &layout).expect("the ring maps");
         let marks = Marks::create(4, 0, 4).expect("marks");
@@ -685,7 +723,7 @@ mod tests {
             slot: 0,
             file: crate::dma_buf::memfd(c"lemnos-registration-test").expect("memfd"),
         };
-        ring.attach_holds(marks, dummy, 4, 1, true)
+        ring.attach_passing(marks, dummy, 4, 1, overrun)
             .expect("holds attach");
         (fd, ring)
     }
@@ -733,6 +771,39 @@ mod tests {
         assert_eq!(
             (holds.counts[0], holds.held),
             (1, 2),
+            "frame 0 is still held"
+        );
+    }
+
+    /// A passing reader whose frames are job results (the PiSP front end: one job per output
+    /// buffer, and a config buffer kept busy for each) is out of step when it is overrun. It must
+    /// get the error, so the driver makes the stream again and clears what it kept for the jobs
+    /// whose results it will never read; dropping them would leave those buffers posted for good.
+    /// What it held before is still held, and nothing is counted as dropped.
+    #[test]
+    fn a_passing_reader_of_job_results_fails_when_overrun_and_keeps_its_holds() {
+        let (_fd, mut ring) = passing_ring_that(Overrun::Fails);
+        publish(&ring, 0, 0);
+        let kept = ring.next_frame().expect("reads").expect("frame 0");
+        ring.pass_on(kept.buffer).expect("the frame goes on");
+        for sequence in 1..11 {
+            publish(&ring, 1 + (sequence % 3) as u32, sequence);
+        }
+        let error = ring
+            .next_frame()
+            .expect_err("an overrun reader of job results is out of step");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("the reader was overrun: 2 frames skipped"),
+            "{error}"
+        );
+        assert_eq!(ring.dropped(), 0);
+        let holds = ring.holds.as_ref().expect("holds");
+        assert_eq!(
+            (holds.counts[0], holds.held),
+            (1, 1),
             "frame 0 is still held"
         );
     }

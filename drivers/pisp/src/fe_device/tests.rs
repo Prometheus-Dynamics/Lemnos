@@ -40,6 +40,9 @@ struct Mock {
     fail_make: Option<Status>,
     fail_check: Option<Status>,
     fail_post: Option<Status>,
+    /// What the next read of the module's ring answers, once: the ring's error when the reader
+    /// was overrun (`Overrun::Fails`).
+    fail_finished: Option<Status>,
     fail_register: bool,
     /// Each configuration slot, as the driver last wrote it.
     configs: Vec<[u8; CONFIG_BYTES]>,
@@ -67,6 +70,7 @@ impl Default for Mock {
             fail_make: None,
             fail_check: None,
             fail_post: None,
+            fail_finished: None,
             fail_register: false,
             configs: vec![[0; CONFIG_BYTES]; 8],
             posted: Vec::with_capacity(64),
@@ -188,6 +192,9 @@ impl Hardware for Hw {
     }
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {
+        if let Some(status) = self.with(|m| m.fail_finished.take()) {
+            return Err(status);
+        }
         Ok(self.with(|m| {
             // The driver's limit in hand: nothing is taken, and the frames go by.
             if m.holds.at_limit(m.plans.last().map_or(0, |p| p.buffers)) {
@@ -689,6 +696,53 @@ fn a_refused_job_ends_the_stream_and_everything_is_made_again() {
     r.post(&job(2, 0, 0, NO_BUFFER));
     r.fe.tick(11 + backoff_ns(0));
     assert_eq!(r.hw.with(|m| m.posted.len()), 1);
+}
+
+/// The module's ring answers that the reader was overrun: results were written over before the
+/// driver read them, so it will never see those jobs finish. The front end's reader fails on it
+/// (`Overrun::Fails` in `pisp-fe-sys`), and this is why: the stream is made again, and the
+/// restart lets go of everything the driver kept for the jobs in flight. The output buffers they
+/// were posted on and the config buffers they held busy take jobs again; none is left posted.
+#[test]
+fn an_overrun_ends_the_stream_and_the_restart_clears_what_the_jobs_in_flight_held() {
+    let mut r = rig();
+    r.fill(0, &config(0));
+    r.fill(1, &config(0));
+    CameraIsp::start(&mut r.fe).unwrap();
+    r.post(&job(1, 0, 0, NO_BUFFER));
+    r.post(&job(2, 1, 1, NO_BUFFER));
+    r.fe.tick(1);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 2, "two jobs in flight");
+    // While they are in flight their buffers take no other job.
+    r.post(&job(3, 0, 0, NO_BUFFER));
+    r.fe.tick(2);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 2);
+    assert_eq!(r.fe.counters.dropped, 1);
+
+    r.hw.with(|m| m.fail_finished = Some(Status::IO));
+    assert_eq!(r.fe.tick(10), Some(10 + backoff_ns(0)));
+    assert!(matches!(r.fe.health(), Health::Failed(_)));
+    r.fe.tick(10 + backoff_ns(0));
+    assert!(matches!(r.fe.health(), Health::Ok));
+    assert_eq!(r.hw.with(|m| m.plans.len()), 2, "the stream was made again");
+
+    // The same output buffers and config buffers, each free for a job again.
+    r.post(&job(4, 0, 0, NO_BUFFER));
+    r.post(&job(5, 1, 1, NO_BUFFER));
+    r.fe.tick(11 + backoff_ns(0));
+    assert_eq!(
+        r.hw.with(|m| m.posted.iter().map(|j| j.identity).collect::<Vec<_>>()),
+        [1, 2, 4, 5],
+        "nothing the lost jobs held is still held"
+    );
+    assert_eq!(
+        r.fe.counters.dropped, 1,
+        "no job was dropped after the restart"
+    );
+    // And they finish and are published as any job is.
+    r.hw.with(|m| m.finished.push(done(0, 4)));
+    r.fe.tick(12 + backoff_ns(0));
+    assert_eq!(r.frames.take_frame().unwrap().identity, 4);
 }
 
 #[test]
