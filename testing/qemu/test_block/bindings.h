@@ -7,7 +7,9 @@
  */
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
+#include <linux/irq_sim.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
+#include <linux/reset-controller.h>
 #include <linux/spi/spi.h>
 #include <linux/thermal.h>
