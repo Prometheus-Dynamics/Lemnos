@@ -919,6 +919,150 @@ hypothesis, written before the run).**
   `b'reset\r'`); and the stand-in's failing case, a banner and then silence, which the script ends as `LIMIT`
   with exit 1. The SPL itself cannot be rehearsed on the PC.
 
+**A, the run (2026-11-18 16:48; one run; lock held; no hands): PASS. The board came back to ROM USB by itself.**
+Records `K230R/bench/A-load.txt`, `A-console.log` (every byte received and sent, stamped), `run-A.out`.
+- Loaded and started as written above (216,920 bytes, sha256 `686d659c…`, at `0x80300000`), at 1795045688.735.
+- Console (`ttyACM1`, the adapter's second port): `U-Boot SPL 2022.10 (Nov 16 2026 - 19:39:27 -0700)`; the DDR
+  training lines (`PMU Major Msg: … Firmware run has completed 2667`); `NONE_SECURITY`; `imge: uboot load to 0
+  compress =1 …`; `U-Boot 2022.10 (Nov 16 2026 - 19:39:27 -0700)`; `CPU: rv64imafdcvsu`; `Model: kendryte k230d canmv
+  junroc ai cam`; `DRAM: 128 MiB`; `MMC: mmc0@91580000: 0, mmc1@91581000: 1`; `Loading Environment from MMC... OK`;
+  `Hit any key to stop autoboot:  3`.
+- Sent: `b' '` at the countdown; the prompt `K230# ` came; sent `b'reset\r'`. Nothing else was sent.
+- After `reset`: `reboot system`, then the ROM's `boot failed with exit code 13`; `29f1:0230` back at Dev 112
+  0.4 s after the command.
+- **Proven:** this image's SPL and U-Boot run from a ROM USB load with the card as it is; U-Boot's countdown can
+  be stopped from the PC; `reset` at its prompt returns the board to ROM USB with the no-boot card.
+
+**B: what this U-Boot offers, read only (hypothesis, written before the run).** The same load; at the prompt,
+one command per prompt, then `reset`: `version`, `help`, `bdinfo`, `printenv`, `mmc list`, `mmc dev 1`, `mmc info`,
+`wdt list`, `help wdt`, `help bootcount`, `help reset`, `dm tree`, `reset`. None writes storage or saves the
+environment (`mmc dev 1` selects the device for `mmc info` in RAM only). Hypothesis: each prints or says
+`Unknown command`; `reset` returns the board as in A. A hang is called as in A (limit 150 s here). The answer
+sought: a watchdog U-Boot can arm before `boot`, or anything else that returns a hung kernel without hands.
+
+**B, the run (2026-11-18 16:48; one run; lock held; no hands): PASS; the board back at Dev 113 0.5 s after
+`reset`.** Record `K230R/bench/B-console.log`. Bytes sent: `b' '`, then each of the thirteen commands above
+followed by `\r`, in that order; nothing else.
+- `version`: `U-Boot 2022.10 (Nov 16 2026 - 19:39:27 -0700)`, `riscv64-linux-gcc.br_real (Buildroot
+  2021.11-18033-g83947c7bb6) 14.3.0`, `GNU ld (GNU Binutils) 2.43.1`.
+- `help`: no `wdt` and no `bootcount` (`wdt list`, `help wdt`, `help bootcount`: `Unknown command`). `dm tree`:
+  no watchdog device (clocks, five serial ports, the two `snps_sdhci` controllers, `dwc2_usb`, the pinctrl, the
+  timer). `reset` is there (`reset -w` for a warm reset). The memory commands are there (`md`, `mw`, `mm`,
+  `nm`), also `k230_dfu` and `reboot_to_upgrade` ("k230 reboot and enter burn mode"), `usb`, `loadb/x/y`, `gzwrite`,
+  `mmc`.
+- `printenv`: `bootargs=root=/dev/mmcblk0p1 rootwait rw rootfstype=ext4 console=ttyS0,115200 earlycon=sbi`;
+  `bootcmd=mmc dev 1 && mmc read 0x3000000 0x1c00 0x400 && ext4load mmc 1:1 0x200000 /boot/Image && ext4load mmc
+  1:1 0x2200000 /boot/k230d-ai-cam.dtb && bootm 0x3000000 - 0x2200000`; `bootdelay=3`; the three consoles on
+  `serial@91400000`; `Environment size: 371/8187 bytes`. The boot command only reads the card.
+- `mmc list`: `mmc0@91580000: 0`, `mmc1@91581000: 1 (SD)`. `mmc info` on device 1: manufacturer 3, OEM `5344`, name
+  `SR64G`, SD High Speed (50 MHz), four data lines, SD version 3.0, 59.5 GiB: U-Boot sees the card this session
+  flashed.
+- `bdinfo`: one DRAM bank, `0x0` to `0x8000000` (128 MiB); `relocaddr 0x7f47000`.
+- **Answer:** this U-Boot has no watchdog command, no watchdog driver and no boot counter. What it does have is
+  `mw`: the watchdog block's registers can be written from the prompt, the three writes the stage's entry makes
+  (`TORR`, the restart key to `CRR`, enable in `CR`: `wdt.rs`, `drv_wdt.c`).
+
+**C1: the watchdog armed from the prompt by register writes, with nothing booted (hypothesis, written before
+the run).** A test of the mechanism while U-Boot is still there to type `reset` at.
+- *Sent at the prompt:* `md.l 0x91106000 4` (read), `mw.l 0x91106004 0xbb` (TORR: TOP 11, the stage's own value),
+  `mw.l 0x9110600c 0x76` (the restart key), `mw.l 0x91106000 0x1` (enable, reset on the first timeout),
+  `md.l 0x91106000 4` (read). Memory-mapped registers only; nothing stored anywhere.
+- *Hypothesis:* the second read shows CR `1` and a counter that runs; with nothing feeding it, the board resets
+  after one period of TOP 11 and comes back as `29f1:0230` by itself. The time from the enable to the reset is the
+  period under U-Boot's clocks, which sets the TOP for a 60 s capture (each TOP step doubles it; TOP 15 is 16
+  times TOP 11).
+- *If it does not fire:* the script types `reset` 60 s after the last command (U-Boot is alive at its prompt),
+  and the answer is that this watchdog cannot be armed this way: stop and report.
+- *Rehearsal:* the command list and the fallback on the pty stand-in (the stand-in received exactly these bytes,
+  then `reset\r` from the fallback).
+
+**C1, the run (2026-11-18 16:50; one run; lock held; no hands): the watchdog was armed and counting, and did not
+fire within the 60 s before the fallback.** Record `K230R/bench/C1-console.log`.
+- Before: `91106000: 0000000c 00000000 0000ffff 00000000` (CR, TORR, CCVR as the ROM and SPL leave them).
+- After the three writes: `91106000: 00000001 0000000b 07ffeba2 00000000`: enabled, TOP 11, and the counter
+  already down by `0x145d` (5213) from `0x7ffffff`, at most 16 ms after the enable.
+- No reset in 60 s. The script then typed `reset` (the fallback), and the board came back at Dev 114.
+- *Reading:* the counter runs at some 0.3 to 0.6 MHz here (5213 counts in 9 to 16 ms), so TOP 11 (`2^27` counts)
+  is minutes under U-Boot's clocks, not the seconds assumed from the stage's runs. The hypothesis's period was
+  wrong; whether the timeout resets the board from U-Boot is still not shown.
+
+**C1b: the same test with the rate measured and a TOP that fits it (hypothesis, written before the run).**
+- *Sent at the prompt:* `mw.l 0x91106004 0x66` (TOP 6: `2^22` counts), `mw.l 0x9110600c 0x76`, `mw.l 0x91106000
+  0x1`, `md.l 0x91106008 1`, `sleep 2`, `md.l 0x91106008 1`. Nothing booted.
+- *Hypothesis:* the two counter reads two seconds apart give the rate (about 0.3 to 0.6 MHz); the board resets
+  7 to 13 s after the enable and comes back as `29f1:0230` by itself. Fallback: `reset` typed 40 s after the last
+  command; then the watchdog's timeout does not reset the board from here, and C2 is off.
+
+**C1b, the run (2026-11-18 16:52; one run; lock held; no hands): the watchdog armed from the prompt reset the
+board, and the ROM came back by itself.** Record `K230R/bench/C1b-console.log`. Bytes sent: `b' '`, then the six
+commands above, each with `\r`; the fallback was not used.
+- Enable written at 1795045929.013. Counter `003ff892` at .016, `0028fb00` at 1795045931.025 after `sleep 2`:
+  1,506,706 counts in 2.009 s, **750 kHz**. TOP 6 (`2^22` counts) is then 5.59 s.
+- The ROM's `boot failed with exit code 13` at 1795045934.638 (the ROM prints it about 0.35 s after a reset), so
+  the reset came about 5.3 s after the enable; `29f1:0230` back at Dev 115 4.0 s after the last command.
+- **Under this U-Boot's clocks the watchdog counts at 750 kHz, its timeout resets the SoC, and the reset returns to
+  ROM USB with the no-boot card.** Periods: TOP 9 is 44.7 s, TOP 10 is 89.5 s, TOP 11 is 179 s (which is why C1
+  saw nothing in 60 s).
+
+**C2: the kernel booted under the armed watchdog, a 60 s capture (the word given 2026-11-18; written before the
+run).**
+- *What is known about this kernel and the watchdog (read on the PC from the image file, read only):*
+  - The device tree U-Boot's `bootcmd` loads, `/boot/k230d-ai-cam.dtb` in the image's first partition (4863
+    bytes, sha256 `1e75347b…`): **it has no watchdog node at all.** Its nodes are the PLIC and CLINT, the reset
+    controller (`canaan,k230-rst`), the pinctrl, the clock controller (`canaan,k230-clk`), five `snps,dw-apb-uart`
+    (only `serial@91400000` is `okay`), the USB PHY, `snps,dwc2` (disabled), and `mmc@91581000`
+    (`canaan,k230-sdio`). `chosen` has the same `bootargs` as U-Boot's environment.
+  - The kernel, `/boot/Image` (31,796,736 bytes, sha256 `85536fa3…`, `Linux version 7.3.3`), carries its
+    config: `CONFIG_WATCHDOG=y`, `CONFIG_WATCHDOG_CORE=y`, `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y`, and no
+    DesignWare watchdog driver (no such option set; the strings `dw_wdt` and `snps,dw-wdt` are not in the image).
+    **So no driver binds the watchdog: nothing in this kernel feeds it, stops it or takes it over.**
+  - What could still stop it: the clock driver (`CONFIG_COMMON_CLK_K230=y`) turning off clocks nobody claimed,
+    which the kernel does late in its start; a kernel that hangs before then never gets there. This record's B3:
+    "Gaia's kernel hang before earlycon is Gaia's; it is not a precondition here". A change of the watchdog's
+    clock rate by that driver would change the period; not known.
+- *Sent at the prompt:* `mw.l 0x91106004 0xaa` (TOP 10), `mw.l 0x9110600c 0x76`, `mw.l 0x91106000 0x1`,
+  `md.l 0x91106000 4`, `boot`. After `boot` nothing is sent, whatever appears.
+- *The period chosen:* TOP 10, `2^26` counts, **89.5 s** at the 750 kHz measured in C1b: the first value past the
+  60 s capture (TOP 9 is 44.7 s), with the reset about half a minute after the capture ends.
+- *Hypothesis:* `boot` reads the card and starts the kernel; whatever it prints is captured with a stamp on each
+  line; about 89.5 s after the enable the watchdog resets the board and `29f1:0230` comes back by itself.
+- *Stop:* not back within the period plus 30 s (the script's limit is 125 s from its start): nothing more is
+  done to the board, no load, no reset attempt, no byte to the console; the coordinator is told at once with the
+  last console lines. One RST press by a person is the accepted worst case.
+- *Not used:* `reboot_to_upgrade`, `k230_dfu`, `saveenv`, any `mmc write`.
+- *Rehearsal:* the command list on the pty stand-in with a hold; the script sends nothing after its last
+  command (it has no fallback in this run).
+
+**C2, the run (2026-11-18 16:54; one run; lock held): the kernel did not hang, it booted to a login prompt; the
+watchdog did not bring the board back. STOPPED; nothing done to the board since.** Records
+`K230R/bench/C2-console.log` (345 lines, each stamped), `C2-load.txt`, `run-C2.out`.
+- Bytes sent: `b' '`, `mw.l 0x91106004 0xaa\r`, `mw.l 0x9110600c 0x76\r`, `mw.l 0x91106000 0x1\r`, `md.l 0x91106000
+  4\r` (answer `91106000: 00000001 0000000a 03fff878 00000000`: enabled, TOP 10, counting), `boot\r` at
+  1795046041.772. Nothing after.
+- U-Boot: `MMC read: dev # 1, block # 7168, count 1024 … OK`, `31796736 bytes read in 955 ms`, `4863 bytes read`,
+  `## Booting kernel from Legacy Image at 03000000`. Then `OpenSBI v1.7`, `Linux version 7.3.3`, `Machine model: K230D
+  CanMV Junroc AI Cam`, `earlycon: sbi0`, `printk: console [ttyS0] enabled`, `mmc0: new high speed SDXC card at address
+  aaaa`, `mmcblk0: mmc0:aaaa SR64G 59.5 GiB`, `mmcblk0: p1 p2`, **`[    1.974241] clk: Disabling unused clocks`**,
+  `EXT4-fs (mmcblk0p1): mounted filesystem … r/w`, `Run /sbin/init as init process`, `Starting syslogd: OK`,
+  `Starting klogd: OK`, `Running sysctl: OK`, `usb0: no USB device controller`, `Starting crond: OK`, `Starting dropbear
+  sshd: OK`, `Welcome to the CanMV K230D AI-CAM`.
+- *The last line:* `k230d-ai-cam login: ` at 1795046047.169, 5.4 s after `boot`. Nothing after it in the 119 s to the
+  script's limit.
+- *The watchdog:* no reset within its 89.5 s plus 30 s. The kernel passed `clk: Disabling unused clocks` two
+  seconds into its start; with no driver holding the watchdog's clock, that is the step that fits a counter that
+  stopped. Not proven: the counter was not read after it.
+- *The board now:* running Linux at a serial login prompt. On the PC, `3-4.2.1.4.1` still lists `29f1:0230` at
+  Dev 115, the number from before the load, with no disconnect in the PC's kernel log: the ROM's enumeration left
+  standing, not a ROM that answers. It has not been opened.
+- **The card has been written by the booted system.** It mounted `/dev/mmcblk0p1` read-write and started its
+  services, so the first partition (sectors 8,192..249,856) no longer holds exactly what was flashed, and the
+  16:44 hash is no longer true of it. Sectors 2048 and 3072 are outside both partitions and still zero as far as
+  anything run here goes; the ROM still cannot boot the card.
+- *B3, as this run saw it:* this image's kernel did not hang before earlycon when started this way (SPL over ROM
+  USB, U-Boot's own `boot`). Why a boot from the card's own headers would differ is not looked at here.
+- *Ways back (none taken; they wait for a word):* a login on the console and `reboot` (the SoC reset, then the
+  ROM with a card it does not boot, as `reset` did from U-Boot three times today); or one press of RST.
+
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 
 **The capture (read only).** A separate unit reads both CH342 ports from before R0 to the end and writes no byte to
