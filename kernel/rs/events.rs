@@ -5,7 +5,7 @@
 //!
 //! The queue is a fixed ring of LEM_EVENTS under one interrupt-safe spinlock: posting allocates nothing
 //! and may come from any context. When it is full the newest is lost, and the sequence gap says so. The
-//! wait queue readers sleep on, `lem_wait`, stays the core's; a post wakes it.
+//! wait queue readers sleep on is the core's (rs/dev.rs, `WAIT`); a post wakes it.
 //!
 //! A watch is one of LEMNOS_MAX_THERMAL_WATCHES static slots, each with its own delayed work, which
 //! reads the zone every period and posts LEMNOS_EVENT_TEMPERATURE when it crosses. The kernel's thermal
@@ -46,11 +46,6 @@ kernel::sync::global_lock! {
     unsafe(uninit) static QUEUE: SpinLockIrq<Queue> = Queue { events: [EMPTY; LEM_EVENTS], head: 0, count: 0, seq: 0 };
 }
 
-unsafe extern "C" {
-    /// lemnos_core.c: the wait queue readers of /dev/lemnos sleep on.
-    static mut lem_wait: bindings::wait_queue_head;
-}
-
 /// The event stream's post: queues one event and wakes the readers. Full: the newest is lost, and the
 /// sequence gap says so. Any context; allocates nothing.
 pub(crate) fn post(kind: u32, block: u32, index: u32, value: i64) {
@@ -66,8 +61,8 @@ pub(crate) fn post(kind: u32, block: u32, index: u32, value: i64) {
             q.count += 1;
         }
     }
-    // SAFETY: wake_up_interruptible(&lem_wait): the core's wait queue, a static that lives for ever.
-    unsafe { bindings::__wake_up(&raw mut lem_wait, bindings::TASK_INTERRUPTIBLE, 1, ptr::null_mut()) };
+    // SAFETY: wake_up_interruptible(&lem_wait): the core's wait queue (rs/dev.rs), a static made at load.
+    unsafe { bindings::__wake_up(crate::dev::WAIT.get(), bindings::TASK_INTERRUPTIBLE, 1, ptr::null_mut()) };
 }
 
 /// `lem_event_post` of lemnos_internal.h, for the C still calling it.

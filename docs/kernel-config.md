@@ -227,7 +227,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_CPU_BIG_ENDIAN` | unset | must be unset | A constant assertion on `target_endian` in `rs/stream_ring.rs`. The module builds only for little-endian kernels |
 | `CONFIG_LEMNOS` | `y` or `m` | optional | The in-tree switch in `kernel/Kbuild`; set by the image builder for the built-in route. Not in the out-of-tree build |
 | `CONFIG_RP1_PIO` | `m` or `y` | optional | The RP1 PIO part (`lemnos_pio.c`, claim `pio-0`), compiled when set. Needs `<linux/pio_rp1.h>` from the board kernel. Must be `y` when lemnos is built in |
-| `CONFIG_IOMMU_SUPPORT` | `y` | optional | `device_iommu_mapped()` in `lemnos_core.c`: without an IOMMU the `confined=` list maps nothing, and only `unconfined=` blocks can be mapped |
+| `CONFIG_IOMMU_SUPPORT` | `y` | optional | the IOMMU group test (`device_iommu_mapped()`) in `rs/dev.rs`: without an IOMMU the `confined=` list maps nothing, and only `unconfined=` blocks can be mapped |
 | `CONFIG_CMA` | `y` | optional | Large contiguous allocations that `dma_alloc_attrs` serves from CMA |
 | `CONFIG_DMA_CMA` | `y` | optional | As `CONFIG_CMA`, for the DMA allocator |
 

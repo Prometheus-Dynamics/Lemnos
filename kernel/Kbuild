@@ -11,18 +11,13 @@ obj-m += lemnos.o
 else
 obj-$(CONFIG_LEMNOS) += lemnos.o
 endif
-lemnos-y := lemnos_core.o
-# With a Rust kernel (CONFIG_RUST, kernel/lemnos_entry.rs), the Rust half owns the module entry and
-# lemnos_core.c keeps its init and exit as lem_core_init and lem_core_exit (LEMNOS_RUST_OWNER). Without
-# one, lemnos_core.c keeps module_init and module_exit, as before.
-# The Rust half is required (CONFIG_RUST): the module entry, the claims and, from later stages, the rest
-# of the port. lemnos_core.c keeps its C entry only as LEMNOS_RUST_OWNER's callee; the C claims are gone.
+# The Rust half is required (CONFIG_RUST): the module entry (kernel/lemnos_entry.rs), the core
+# (/dev/lemnos and the blocks behind it, rs/dev.rs) and every ported part are Rust.
 ifeq ($(CONFIG_RUST),)
 $(error lemnos needs CONFIG_RUST=y: the module entry and the claims are Rust, see docs/kernel-config.md)
 endif
-ccflags-y += -DLEMNOS_RUST_OWNER
 # The Rust half is one crate: lemnos_entry.o (its ports and the shared ABI are its modules, kernel/rs/).
-lemnos-y += lemnos_entry.o lemnos_helpers.o
+lemnos-y := lemnos_entry.o lemnos_helpers.o
 
 # Bindings for what the kernel crate's own bindings leave out (rs/bindings.h): the SPI and thermal cores, and the
 # module's uAPI structs, so their layouts come from the headers and are never written by hand. Made the
