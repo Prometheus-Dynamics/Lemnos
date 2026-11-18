@@ -6,12 +6,15 @@
 #
 #   testing/crates/bmi088-batch/rehearsal.sh [--seconds N] [--out DIR]
 #
+# Each accelerometer case also writes its capture file (--out) and replays it (--replay): a replay of a
+# case that gave 0 or 5 must give the same exit code, so the file reads back to the same verdicts.
+#
 # Cases (45 s each, as B8's check 3, unless --seconds):
 #   accel-model        exact model stamps, the chip exact: every check passes (0)
 #   accel-chip-fast    the chip 1.5% fast, the model stamps it: every check passes (0)
 #   accel-prefix-tick  the pre-fix stamping (tick time, every stamp taken at the previous tick), the chip
 #                      1.5% fast: check (a) fails (5)
-#   accel-planted      the model's stamps planted 1.5% fast: checks (a) and (b) fail (5)
+#   accel-planted      the model's stamps planted 1.5% fast: checks (a), (b) and (d) fail (5)
 #   accel-torn         a torn batch: a data fault (4)
 #   gyro-model         the gyroscope 0.8% slow on its own oscillator, the accelerometer exact: every check
 #                      passes on both dies, and check 7's spread is printed (0)
@@ -100,7 +103,9 @@ case_run() {
     echo "FAIL $name: lemnosd did not come up; see $out/$name.lemnosd.log"
     stop; fails=$((fails + 1)); return
   fi
-  "$tool" --socket "$sock" "$@" --seconds "$seconds" > "$out/$name.txt" 2>&1
+  local rec=()
+  case $name in accel-*) rec=(--out "$out/$name.tsv") ;; esac
+  "$tool" --socket "$sock" "$@" "${rec[@]}" --seconds "$seconds" > "$out/$name.txt" 2>&1
   local rc=$?
   stop
   if [ "$rc" = "$expect" ]; then
@@ -109,7 +114,17 @@ case_run() {
     echo "FAIL $name: exit $rc, expected $expect; see $out/$name.txt"
     fails=$((fails + 1))
   fi
-  grep -E "^b8\.(status|a\.|b\.|c\.|verdict|accel\.verdict|check7\.)" "$out/$name.txt" | sed 's/^/    /'
+  grep -E "^b8\.(status|a\.|b\.|c\.|d\.|verdict|accel\.verdict|check7\.)" "$out/$name.txt" | sed 's/^/    /'
+  if [ "${#rec[@]}" -gt 0 ] && { [ "$rc" = 0 ] || [ "$rc" = 5 ]; }; then
+    "$tool" --replay "$out/$name.tsv" --elapsed-s "$seconds" --poll-ms 50 > "$out/$name.replay.txt" 2>&1
+    local rr=$?
+    if [ "$rr" = "$rc" ]; then
+      echo "PASS $name replay: exit $rr, the same as the live run"
+    else
+      echo "FAIL $name replay: exit $rr, live run gave $rc; see $out/$name.replay.txt"
+      fails=$((fails + 1))
+    fi
+  fi
 }
 
 accel=(--device imu --contract accel)
