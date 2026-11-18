@@ -17,8 +17,8 @@
 use crate::bindings as lb;
 use crate::param::param;
 use crate::stream::{
-    module_hold, ktime_add_ms, ktime_now, msecs_to_jiffies, usleep_range, DelayedWork, Handle, Producer,
-    Slot, Stream, WaitQueue, Wq,
+    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Wq, ktime_add_ms, ktime_now,
+    module_hold, msecs_to_jiffies, usleep_range,
 };
 use core::{
     ffi::{c_int, c_long, c_void},
@@ -30,7 +30,7 @@ use kernel::{
     alloc::KBox,
     bindings,
     device::Device,
-    error::{code::*, from_err_ptr, to_result, Error, Result},
+    error::{Error, Result, code::*, from_err_ptr, to_result},
     ffi::{c_uint, c_ulong},
     ioctl::_IOR,
     new_mutex, new_spinlock_irq,
@@ -83,7 +83,8 @@ const GD_STILL_HOLD_MS: i64 = 10;
 const GD_STILL_GAP_US: u64 = 500;
 const GD_STILL_MS: u64 = 100;
 /// The longest a job can be given, with its stopping, and a margin.
-const GD_STOP_WAIT_MS: u64 = GD_TIMEOUT_MS as u64 + ((2 * GD_DDR_END) >> GD_TIMEOUT_SHIFT) + 2 * GD_STILL_MS + 1000;
+const GD_STOP_WAIT_MS: u64 =
+    GD_TIMEOUT_MS as u64 + ((2 * GD_DDR_END) >> GD_TIMEOUT_SHIFT) + 2 * GD_STILL_MS + 1000;
 
 // Errnos the checks return that the kernel crate does not name.
 const ENOTUNIQ: i32 = 76;
@@ -124,16 +125,86 @@ const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
 }
 
 const FORMATS: [Format; 10] = [
-    Format { fourcc: fourcc(b'A', b'R', b'1', b'5'), planes: 1, bytes: [2, 0], code: [GD_PIXEL_16, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'A', b'R', b'1', b'2'), planes: 1, bytes: [2, 0], code: [GD_PIXEL_16, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'R', b'G', b'1', b'6'), planes: 1, bytes: [2, 0], code: [GD_PIXEL_16, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'R', b'G', b'2', b'4'), planes: 1, bytes: [3, 0], code: [GD_PIXEL_24, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'B', b'G', b'2', b'4'), planes: 1, bytes: [3, 0], code: [GD_PIXEL_24, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'A', b'R', b'2', b'4'), planes: 1, bytes: [4, 0], code: [GD_PIXEL_32, 0], across: [1, 0], down: [1, 0] },
-    Format { fourcc: fourcc(b'N', b'V', b'1', b'2'), planes: 2, bytes: [1, 2], code: [GD_PIXEL_8, GD_PIXEL_16], across: [1, 2], down: [1, 2] },
-    Format { fourcc: fourcc(b'N', b'V', b'2', b'1'), planes: 2, bytes: [1, 2], code: [GD_PIXEL_8, GD_PIXEL_16], across: [1, 2], down: [1, 2] },
-    Format { fourcc: fourcc(b'N', b'V', b'1', b'6'), planes: 2, bytes: [1, 2], code: [GD_PIXEL_8, GD_PIXEL_16], across: [1, 2], down: [1, 1] },
-    Format { fourcc: fourcc(b'N', b'V', b'6', b'1'), planes: 2, bytes: [1, 2], code: [GD_PIXEL_8, GD_PIXEL_16], across: [1, 2], down: [1, 1] },
+    Format {
+        fourcc: fourcc(b'A', b'R', b'1', b'5'),
+        planes: 1,
+        bytes: [2, 0],
+        code: [GD_PIXEL_16, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'A', b'R', b'1', b'2'),
+        planes: 1,
+        bytes: [2, 0],
+        code: [GD_PIXEL_16, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'R', b'G', b'1', b'6'),
+        planes: 1,
+        bytes: [2, 0],
+        code: [GD_PIXEL_16, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'R', b'G', b'2', b'4'),
+        planes: 1,
+        bytes: [3, 0],
+        code: [GD_PIXEL_24, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'B', b'G', b'2', b'4'),
+        planes: 1,
+        bytes: [3, 0],
+        code: [GD_PIXEL_24, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'A', b'R', b'2', b'4'),
+        planes: 1,
+        bytes: [4, 0],
+        code: [GD_PIXEL_32, 0],
+        across: [1, 0],
+        down: [1, 0],
+    },
+    Format {
+        fourcc: fourcc(b'N', b'V', b'1', b'2'),
+        planes: 2,
+        bytes: [1, 2],
+        code: [GD_PIXEL_8, GD_PIXEL_16],
+        across: [1, 2],
+        down: [1, 2],
+    },
+    Format {
+        fourcc: fourcc(b'N', b'V', b'2', b'1'),
+        planes: 2,
+        bytes: [1, 2],
+        code: [GD_PIXEL_8, GD_PIXEL_16],
+        across: [1, 2],
+        down: [1, 2],
+    },
+    Format {
+        fourcc: fourcc(b'N', b'V', b'1', b'6'),
+        planes: 2,
+        bytes: [1, 2],
+        code: [GD_PIXEL_8, GD_PIXEL_16],
+        across: [1, 2],
+        down: [1, 1],
+    },
+    Format {
+        fourcc: fourcc(b'N', b'V', b'6', b'1'),
+        planes: 2,
+        bytes: [1, 2],
+        code: [GD_PIXEL_8, GD_PIXEL_16],
+        across: [1, 2],
+        down: [1, 1],
+    },
 ];
 
 /// A job, checked: what is built into descriptors.
@@ -228,7 +299,14 @@ impl LemGd {
 
     fn channel(&self, on: bool) {
         let v = self.rd(GD_CH_EN);
-        self.wr(GD_CH_EN, if on { v | GD_CH_EN_BIT } else { v & !GD_CH_EN_BIT });
+        self.wr(
+            GD_CH_EN,
+            if on {
+                v | GD_CH_EN_BIT
+            } else {
+                v & !GD_CH_EN_BIT
+            },
+        );
     }
 
     /// The descriptor word at `i`, written once it is complete (WRITE_ONCE in the C).
@@ -242,7 +320,10 @@ impl LemGd {
         if !st.wedged {
             // SAFETY: the device is live while the block is.
             let d: &Device = unsafe { Device::from_raw(self.dev) };
-            dev_crit!(d, "engine did not stop: its job's buffers stay held until a reboot\n");
+            dev_crit!(
+                d,
+                "engine did not stop: its job's buffers stay held until a reboot\n"
+            );
         }
         st.wedged = true;
         if !st.module_held {
@@ -301,7 +382,6 @@ impl LemGd {
             usleep_range(GD_STILL_GAP_US, 2 * GD_STILL_GAP_US);
         }
     }
-
 }
 
 /// The ISR: a done interrupt on the job's stream ends it (the watchdog's end, when it stops the engine,
@@ -329,7 +409,12 @@ unsafe extern "C" fn lgd_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
 /// A job outstanding too long: stop the channel, and only let go once it is seen stopped.
 unsafe extern "C" fn lgd_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: the work is the watchdog's, and the block is the container of the watchdog.
-    let g = unsafe { &*(work.cast::<u8>().sub(offset_of!(LemGd, watchdog)).cast::<LemGd>()) };
+    let g = unsafe {
+        &*(work
+            .cast::<u8>()
+            .sub(offset_of!(LemGd, watchdog))
+            .cast::<LemGd>())
+    };
     let mut st = g.state.lock();
     if !st.running || st.aborting || st.wedged {
         return;
@@ -382,7 +467,10 @@ fn overlap(a: &lb::lemnos_stream_range, b: &lb::lemnos_stream_range) -> bool {
 
 /// Checks the kernel's copy of a job. Touches nothing.
 fn validate(reach: u64, job: &lb::lemnos_gsdma_job) -> Result<Plan> {
-    let f = FORMATS.iter().find(|f| f.fourcc == job.fourcc).ok_or(EINVAL)?;
+    let f = FORMATS
+        .iter()
+        .find(|f| f.fourcc == job.fourcc)
+        .ok_or(EINVAL)?;
     if job.planes != f.planes {
         return Err(EINVAL);
     }
@@ -403,7 +491,10 @@ fn validate(reach: u64, job: &lb::lemnos_gsdma_job) -> Result<Plan> {
         }
     }
 
-    let mut plan = Plan { planes: f.planes as usize, ..Plan::default() };
+    let mut plan = Plan {
+        planes: f.planes as usize,
+        ..Plan::default()
+    };
     for i in 0..f.planes as usize {
         let p = &job.plane[i];
         let width = (job.width as u64).div_ceil(f.across[i] as u64);
@@ -454,7 +545,9 @@ fn build(g: &LemGd, s: Handle, plan: &Plan, slot: &Slot) -> Result {
         let src = s.range_addr(&slot.job.range[2 * i])?;
         let dst = s.range_addr(&slot.job.range[2 * i + 1])?;
         let src_end = src.checked_add(slot.job.range[2 * i].len).ok_or(ENXIO)?;
-        let dst_end = dst.checked_add(slot.job.range[2 * i + 1].len).ok_or(ENXIO)?;
+        let dst_end = dst
+            .checked_add(slot.job.range[2 * i + 1].len)
+            .ok_or(ENXIO)?;
         if src_end > g.reach || dst_end > g.reach {
             return Err(ENXIO);
         }
@@ -465,7 +558,11 @@ fn build(g: &LemGd, s: Handle, plan: &Plan, slot: &Slot) -> Result {
         d[3] = plan.src_pitch[i] | plan.dst_pitch[i] << 16;
         d[4] = dst as u32;
         // The chain was proved inside the engine's reach at probe.
-        d[5] = if last { 0 } else { (g.chain_dma as u64 + (i as u64 + 1) * GD_DESC_BYTES) as u32 };
+        d[5] = if last {
+            0
+        } else {
+            (g.chain_dma as u64 + (i as u64 + 1) * GD_DESC_BYTES) as u32
+        };
     }
     for (i, v) in desc.iter().enumerate() {
         g.put_desc_word(i, *v);
@@ -484,7 +581,11 @@ impl LgdStream {
         {
             let st = g.state.lock();
             if st.wedged || st.stopping {
-                return if st.wedged { EIO.to_errno() as c_long } else { ENODEV.to_errno() as c_long };
+                return if st.wedged {
+                    EIO.to_errno() as c_long
+                } else {
+                    ENODEV.to_errno() as c_long
+                };
             }
             // One job at a time; the next is collected when it ends.
             if st.running {
@@ -502,7 +603,12 @@ impl LgdStream {
             Err(e) => return refuse(g, e),
         };
         let mut slot = Slot::default();
-        if let Err(e) = s.job_take(job.buffer, job.identity, &plan.range[..2 * plan.planes], &mut slot) {
+        if let Err(e) = s.job_take(
+            job.buffer,
+            job.identity,
+            &plan.range[..2 * plan.planes],
+            &mut slot,
+        ) {
             return refuse(g, e);
         }
         // Nothing runs on the engine: the chain is the collector's to write.
@@ -515,7 +621,11 @@ impl LgdStream {
 
         let mut st = g.state.lock();
         if st.wedged || st.stopping {
-            let e = if st.wedged { EIO.to_errno() as c_long } else { ENODEV.to_errno() as c_long };
+            let e = if st.wedged {
+                EIO.to_errno() as c_long
+            } else {
+                ENODEV.to_errno() as c_long
+            };
             drop(st);
             s.cancel(&slot);
             return e;
@@ -538,7 +648,6 @@ fn refuse(g: &LemGd, e: Error) -> c_long {
     e.to_errno() as c_long
 }
 
-
 // SAFETY: the status is a plain struct of integers, with no padding the kernel reads.
 unsafe impl AsBytes for lb::lemnos_gsdma_status {}
 
@@ -555,7 +664,12 @@ unsafe extern "C" fn lgd_kick(priv_: *mut c_void) -> c_long {
 /// After a job ends: pick up what the consumer posted since, without a kick.
 unsafe extern "C" fn lgd_collect_work(work: *mut bindings::work_struct) {
     // SAFETY: the work is the stream's collect work, which lives in its stream.
-    let ps = unsafe { &*(work.cast::<u8>().sub(offset_of!(LgdStream, collect)).cast::<LgdStream>()) };
+    let ps = unsafe {
+        &*(work
+            .cast::<u8>()
+            .sub(offset_of!(LgdStream, collect))
+            .cast::<LgdStream>())
+    };
     let stopped = ps.collect_lock.lock();
     let ret = ps.collect_locked(*stopped);
     drop(stopped);
@@ -583,10 +697,11 @@ unsafe extern "C" fn lgd_stop(priv_: *mut c_void, s: *mut Stream) {
     }
 
     // The stream's last job, if it is on the engine, is ended by the engine or the watchdog.
-    ps.idle.wait_until(msecs_to_jiffies(GD_STOP_WAIT_MS as u32), || {
-        let st = g.state.lock();
-        !st.running || st.wedged
-    });
+    ps.idle
+        .wait_until(msecs_to_jiffies(GD_STOP_WAIT_MS as u32), || {
+            let st = g.state.lock();
+            !st.running || st.wedged
+        });
 
     let mut st = g.state.lock();
     let busy = st.running && !st.wedged;
@@ -629,9 +744,12 @@ unsafe extern "C" fn lgd_ioctl(priv_: *mut c_void, cmd: c_uint, arg: *mut c_void
         timeouts: st.timeouts,
     };
     drop(st);
-    match UserSlice::new(UserPtr::from_addr(arg as usize), core::mem::size_of::<lb::lemnos_gsdma_status>())
-        .writer()
-        .write_slice(status.as_bytes())
+    match UserSlice::new(
+        UserPtr::from_addr(arg as usize),
+        core::mem::size_of::<lb::lemnos_gsdma_status>(),
+    )
+    .writer()
+    .write_slice(status.as_bytes())
     {
         Ok(()) => 0,
         Err(_) => EFAULT.to_errno() as c_long,
@@ -656,7 +774,11 @@ impl LgdStream {
 /// `g` is a block from `lem_gd_probe` that has not been removed; `dev` is its device; `args` is a
 /// `struct lemnos_gsdma_create` the caller owns.
 #[no_mangle]
-pub(crate) unsafe extern "C" fn lem_gd_create(g: *const LemGd, dev: *mut bindings::device, args: *mut c_void) -> c_long {
+pub(crate) unsafe extern "C" fn lem_gd_create(
+    g: *const LemGd,
+    dev: *mut bindings::device,
+    args: *mut c_void,
+) -> c_long {
     // SAFETY: the caller's contract: a `struct lemnos_gsdma_create` in memory the core owns.
     let a = unsafe { &mut *(args as *mut lb::lemnos_gsdma_create) };
     // SAFETY: the block is alive while its probe reference is held (the caller's contract).
@@ -710,7 +832,9 @@ pub(crate) unsafe extern "C" fn lem_gd_create(g: *const LemGd, dev: *mut binding
     // SAFETY: the stream's own pointer is set by the core before the file exists; `ps` is the private data.
     let s_slot = unsafe { &*ps }.s.as_ptr();
     // SAFETY: the create arguments are the core's copy; the producer is live for the call.
-    let ret = unsafe { crate::stream::lem_stream_create_producer(dev.cast(), &raw mut a.stream, &producer, s_slot) };
+    let ret = unsafe {
+        crate::stream::lem_stream_create_producer(dev.cast(), &raw mut a.stream, &producer, s_slot)
+    };
     if ret != 0 {
         block.state.lock().attached = ptr::null_mut();
         // SAFETY: the stream was not made, so only this call holds the private data.
@@ -740,7 +864,15 @@ pub(crate) unsafe extern "C" fn lem_gd_remove(g: *const LemGd) {
     // A wedged engine may still read its chain.
     if !wedged {
         // SAFETY: the chain made by probe, freed once here; the engine is masked and not running.
-        unsafe { bindings::dma_free_attrs(g.dev, GD_PLANES * GD_DESC_BYTES as usize, g.chain.cast(), g.chain_dma, 0) };
+        unsafe {
+            bindings::dma_free_attrs(
+                g.dev,
+                GD_PLANES * GD_DESC_BYTES as usize,
+                g.chain.cast(),
+                g.chain_dma,
+                0,
+            )
+        };
     }
 }
 
@@ -778,7 +910,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
     let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
     let regs: *mut c_void = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
-        let mem = from_err_ptr(unsafe { bindings::devm_memremap(dev, start, size as usize, bindings::MEMREMAP_WB as c_ulong) })?;
+        let mem = from_err_ptr(unsafe {
+            bindings::devm_memremap(dev, start, size as usize, bindings::MEMREMAP_WB as c_ulong)
+        })?;
         // SAFETY: the device being probed.
         let d: &Device = unsafe { Device::from_raw(dev) };
         dev_warn!(d, "test_gsdma_fake_regs: registers are ordinary memory\n");
@@ -803,14 +937,22 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
     let mut chain_dma: bindings::dma_addr_t = 0;
     // SAFETY: the device being probed; the chain's size and handle are the C's.
     let chain = unsafe {
-        bindings::dma_alloc_attrs(dev, GD_PLANES * GD_DESC_BYTES as usize, &raw mut chain_dma, bindings::GFP_KERNEL, 0)
+        bindings::dma_alloc_attrs(
+            dev,
+            GD_PLANES * GD_DESC_BYTES as usize,
+            &raw mut chain_dma,
+            bindings::GFP_KERNEL,
+            0,
+        )
     };
     if chain.is_null() {
         return Err(ENOMEM);
     }
     let free_chain = || {
         // SAFETY: the chain allocated above, freed once on the error path.
-        unsafe { bindings::dma_free_attrs(dev, GD_PLANES * GD_DESC_BYTES as usize, chain, chain_dma, 0) };
+        unsafe {
+            bindings::dma_free_attrs(dev, GD_PLANES * GD_DESC_BYTES as usize, chain, chain_dma, 0)
+        };
     };
     if chain_dma as u64 + GD_PLANES as u64 * GD_DESC_BYTES > GD_DDR_END {
         // SAFETY: the device being probed.
@@ -852,12 +994,16 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
     let raw = Arc::into_raw(block);
     // The reference's devres comes first, so it is released after the queue (registered below) and the interrupt.
     // SAFETY: the device being probed; `raw` is the probe's reference, given up by lgd_put.
-    if let Err(e) = to_result(unsafe { bindings::devm_add_action_or_reset(dev, Some(lgd_put), raw as *mut c_void) }) {
+    if let Err(e) = to_result(unsafe {
+        bindings::devm_add_action_or_reset(dev, Some(lgd_put), raw as *mut c_void)
+    }) {
         free_chain();
         return Err(e);
     }
     // SAFETY: the device being probed; the queue is destroyed by its devres, after the work.
-    if let Err(e) = to_result(unsafe { bindings::devm_add_action_or_reset(dev, Some(lgd_destroy_wq), wq.0.cast()) }) {
+    if let Err(e) = to_result(unsafe {
+        bindings::devm_add_action_or_reset(dev, Some(lgd_destroy_wq), wq.0.cast())
+    }) {
         free_chain();
         return Err(e);
     }
@@ -874,7 +1020,15 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
 
     // SAFETY: the device being probed; the block is the handler's data, released after the handler.
     if let Err(e) = to_result(unsafe {
-        bindings::devm_request_threaded_irq(dev, irq as c_uint, Some(lgd_isr), None, 0, bindings::dev_name(dev), raw as *mut c_void)
+        bindings::devm_request_threaded_irq(
+            dev,
+            irq as c_uint,
+            Some(lgd_isr),
+            None,
+            0,
+            bindings::dev_name(dev),
+            raw as *mut c_void,
+        )
     }) {
         free_chain();
         return Err(e);

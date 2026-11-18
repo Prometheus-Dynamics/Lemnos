@@ -19,8 +19,8 @@
 use crate::bindings as lb;
 use crate::param::param;
 use crate::stream::{
-    ktime_add_ms, ktime_now, module_hold, msecs_to_jiffies, udelay, usleep_range, DelayedWork, Handle,
-    Producer, Slot, Stream, WaitQueue, Work, Wq,
+    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Work, Wq, ktime_add_ms, ktime_now,
+    module_hold, msecs_to_jiffies, udelay, usleep_range,
 };
 use core::{
     ffi::{c_int, c_long, c_uint, c_void},
@@ -29,11 +29,11 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
 use kernel::{
-    alloc::{flags::GFP_KERNEL, KBox, KVVec},
+    alloc::{KBox, KVVec, flags::GFP_KERNEL},
     bindings,
     device::Device,
-    error::{code::*, from_err_ptr, to_result, Error, Result},
-    ffi::{c_ulong},
+    error::{Error, Result, code::*, from_err_ptr, to_result},
+    ffi::c_ulong,
     ioctl::{_IOR, _IOW, _IOWR},
     new_mutex, new_spinlock_irq,
     prelude::*,
@@ -153,8 +153,12 @@ const _: () = assert!(core::mem::size_of::<lb::lemnos_vip_create>() == 64);
 const _: () = assert!(core::mem::size_of::<lb::lemnos_vip_load>() == 24);
 const _: () = assert!(core::mem::size_of::<lb::lemnos_vip_status>() == 48);
 const _: () = assert!(LVIP_SLOTS <= crate::stream::JOB_HOLDS);
-const _: () = assert!(lb::LEMNOS_VIP_PROGRAM_ADDR as u64 + LVIP_CMD_BYTES <= 1u64 << LVIP_MTLB_SHIFT);
-const _: () = assert!(((LVIP_PRE_WORDS + LVIP_TAIL_WORDS) * 4) as u64 + lb::LEMNOS_VIP_MAX_PROGRAM_BYTES as u64 <= 65535 * 8);
+const _: () =
+    assert!(lb::LEMNOS_VIP_PROGRAM_ADDR as u64 + LVIP_CMD_BYTES <= 1u64 << LVIP_MTLB_SHIFT);
+const _: () = assert!(
+    ((LVIP_PRE_WORDS + LVIP_TAIL_WORDS) * 4) as u64 + lb::LEMNOS_VIP_MAX_PROGRAM_BYTES as u64
+        <= 65535 * 8
+);
 
 /// The chips the vendor's feature table lists with an MMU, and how each is pointed at it.
 const LVIP_CHIPS: [(u32, u32); 3] = [
@@ -344,7 +348,10 @@ impl LemVip {
     /// The block can't be given up safely. `state` held.
     fn wedge(&self, st: &mut VipState, ps: *mut LvipStream, err: c_int) {
         if !st.wedged {
-            dev_crit!(self.device(), "block did not reset: its job's buffers stay held until a reboot\n");
+            dev_crit!(
+                self.device(),
+                "block did not reset: its job's buffers stay held until a reboot\n"
+            );
         }
         st.wedged = true;
         if !st.module_held {
@@ -377,7 +384,12 @@ fn pte(addr: u64, writable: bool) -> u32 {
 
 /// Copies one word of a program: native order, as the C copied the user's bytes.
 fn word(words: &[u8], i: usize) -> u32 {
-    u32::from_ne_bytes([words[4 * i], words[4 * i + 1], words[4 * i + 2], words[4 * i + 3]])
+    u32::from_ne_bytes([
+        words[4 * i],
+        words[4 * i + 1],
+        words[4 * i + 2],
+        words[4 * i + 3],
+    ])
 }
 
 /// Whether a program may run: whole commands to its end, each one of those the header names. `Err`
@@ -420,26 +432,38 @@ fn scan(words: &[u8]) -> core::result::Result<(), (Error, u32)> {
 }
 
 fn copy_in_user<T: FromBytes>(arg: *mut c_void) -> Result<T> {
-    UserSlice::new(UserPtr::from_addr(arg as usize), core::mem::size_of::<T>()).reader().read::<T>()
+    UserSlice::new(UserPtr::from_addr(arg as usize), core::mem::size_of::<T>())
+        .reader()
+        .read::<T>()
 }
 
 fn copy_out_user<T: AsBytes>(arg: *mut c_void, v: &T) -> Result {
-    UserSlice::new(UserPtr::from_addr(arg as usize), core::mem::size_of::<T>()).writer().write(v)
+    UserSlice::new(UserPtr::from_addr(arg as usize), core::mem::size_of::<T>())
+        .writer()
+        .write(v)
 }
 
 /// LEMNOS_VIP_IOC_LOAD: copies the program, checks it once, and keeps the copy the stream holds.
 fn load(ps: &LvipStream, arg: *mut c_void) -> Result<c_long> {
     let mut a: lb::lemnos_vip_load = copy_in_user(arg)?;
-    if a.reserved != 0 || a.bytes == 0 || a.bytes % 8 != 0 || a.bytes > lb::LEMNOS_VIP_MAX_PROGRAM_BYTES {
+    if a.reserved != 0
+        || a.bytes == 0
+        || a.bytes % 8 != 0
+        || a.bytes > lb::LEMNOS_VIP_MAX_PROGRAM_BYTES
+    {
         return Err(EINVAL);
     }
     let mut words = KVVec::<u8>::with_capacity(a.bytes as usize, GFP_KERNEL)?;
     words.resize(a.bytes as usize, 0, GFP_KERNEL)?;
     // The copy is what is checked, and what runs.
-    UserSlice::new(UserPtr::from_addr(a.data as usize), a.bytes as usize).reader().read_slice(&mut words)?;
+    UserSlice::new(UserPtr::from_addr(a.data as usize), a.bytes as usize)
+        .reader()
+        .read_slice(&mut words)?;
     if let Err((e, at)) = scan(&words) {
         let at_addr = arg as usize + offset_of!(lb::lemnos_vip_load, refused_at);
-        UserSlice::new(UserPtr::from_addr(at_addr), 4).writer().write_slice(&at.to_ne_bytes())?;
+        UserSlice::new(UserPtr::from_addr(at_addr), 4)
+            .writer()
+            .write_slice(&at.to_ne_bytes())?;
         return Err(e);
     }
     let mut prog = ps.prog.lock();
@@ -507,7 +531,15 @@ fn map_slot(l: &LemVip, s: usize, addr: u64, len: u64) -> Result {
         if t.stlb[s][k].is_null() {
             let mut dma: bindings::dma_addr_t = 0;
             // SAFETY: the device being probed; the table's size, and its handle written to `dma`.
-            let p = unsafe { bindings::dma_alloc_attrs(l.dev, LVIP_STLB_BYTES, &raw mut dma, bindings::GFP_KERNEL, 0) };
+            let p = unsafe {
+                bindings::dma_alloc_attrs(
+                    l.dev,
+                    LVIP_STLB_BYTES,
+                    &raw mut dma,
+                    bindings::GFP_KERNEL,
+                    0,
+                )
+            };
             if p.is_null() {
                 return Err(ENOMEM);
             }
@@ -517,7 +549,10 @@ fn map_slot(l: &LemVip, s: usize, addr: u64, len: u64) -> Result {
         // SAFETY: the root table's entry for this table; `first + k` is below the root's size, since the
         // slot's span fits its MTLB range (checked by the build).
         unsafe {
-            ptr::write_volatile(t.mtlb.add(first + k), (t.stlb_dma[s][k] as u32 | LVIP_MTLB_PRESENT).to_le())
+            ptr::write_volatile(
+                t.mtlb.add(first + k),
+                (t.stlb_dma[s][k] as u32 | LVIP_MTLB_PRESENT).to_le(),
+            )
         };
     }
     for p in 0..pages {
@@ -626,11 +661,7 @@ fn reset(l: &LemVip) -> Result {
     l.wr(VR_POWER, 0x00ff_ffff);
     l.wr(VR_REORDER, l.rd(VR_REORDER) & !(1 << 6));
     l.resets.fetch_add(1, Ordering::Relaxed);
-    if all_idle(l) {
-        Ok(())
-    } else {
-        Err(EIO)
-    }
+    if all_idle(l) { Ok(()) } else { Err(EIO) }
 }
 
 /// Whether the front end has taken its start (the fake's test form), and whether it is idle.
@@ -646,7 +677,10 @@ fn fe_idle(l: &LemVip) -> bool {
 fn mmu_on(l: &LemVip) -> Result {
     let t = l.tables();
     if l.mmu == lb::LEMNOS_VIP_MMU_PD {
-        l.wr(VR_PD_ENTRY, ((t.mtlb_dma >> 12) as u32) << 4 | LVIP_PD_MODE_1K);
+        l.wr(
+            VR_PD_ENTRY,
+            ((t.mtlb_dma >> 12) as u32) << 4 | LVIP_PD_MODE_1K,
+        );
         l.wr(VR_MMU_CONTROL, VR_MMU_PD | VR_MMU_ENABLE);
         return Ok(());
     }
@@ -741,7 +775,12 @@ unsafe extern "C" fn lvip_isr(_irq: c_int, data: *mut c_void) -> bindings::irqre
 /// A job outstanding too long, or a stream ending under one: its end is queued, which stops the block.
 unsafe extern "C" fn lvip_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: the work is the watchdog's, and the block is the container of the watchdog.
-    let l = unsafe { &*(work.cast::<u8>().sub(offset_of!(LemVip, watchdog)).cast::<LemVip>()) };
+    let l = unsafe {
+        &*(work
+            .cast::<u8>()
+            .sub(offset_of!(LemVip, watchdog))
+            .cast::<LemVip>())
+    };
     let mut s = l.state.lock();
     if s.running && !s.ending && !s.wedged {
         s.timed_out = true;
@@ -755,7 +794,12 @@ unsafe extern "C" fn lvip_watchdog(work: *mut bindings::work_struct) {
 /// and only a block seen reset lets go of the job's memory.
 unsafe extern "C" fn lvip_end(work: *mut bindings::work_struct) {
     // SAFETY: the work is the block's end, and the block is its container.
-    let l = unsafe { &*(work.cast::<u8>().sub(offset_of!(LemVip, end)).cast::<LemVip>()) };
+    let l = unsafe {
+        &*(work
+            .cast::<u8>()
+            .sub(offset_of!(LemVip, end))
+            .cast::<LemVip>())
+    };
     let s = l.state.lock();
     if !s.running || !s.ending || s.wedged {
         return;
@@ -788,7 +832,11 @@ unsafe extern "C" fn lvip_end(work: *mut bindings::work_struct) {
         dev_warn!(l.device(), "job faulted (0x{:08x}); block reset\n", status);
     } else {
         s.timeouts += 1;
-        dev_warn!(l.device(), "job stopped after {} ms; block reset\n", l.timeout_ms);
+        dev_warn!(
+            l.device(),
+            "job stopped after {} ms; block reset\n",
+            l.timeout_ms
+        );
     }
     s.running = false;
     s.ending = false;
@@ -811,7 +859,11 @@ unsafe extern "C" fn lvip_end(work: *mut bindings::work_struct) {
 
 /// The kernel's copy of a job: what it names, before anything is held.
 fn validate(job: &lb::lemnos_vip_job) -> Result {
-    if job.reserved != 0 || job.slots as usize > LVIP_SLOTS || job.program == 0 || job.program as usize > LVIP_PROGRAMS {
+    if job.reserved != 0
+        || job.slots as usize > LVIP_SLOTS
+        || job.program == 0
+        || job.program as usize > LVIP_PROGRAMS
+    {
         return Err(EINVAL);
     }
     for i in 0..LVIP_SLOTS {
@@ -822,7 +874,11 @@ fn validate(job: &lb::lemnos_vip_job) -> Result {
             }
             continue;
         }
-        if r.len == 0 || r.len > lb::LEMNOS_VIP_SLOT_SPAN as u64 || r.len & (PAGE - 1) != 0 || r.addr & (PAGE - 1) != 0 {
+        if r.len == 0
+            || r.len > lb::LEMNOS_VIP_SLOT_SPAN as u64
+            || r.len & (PAGE - 1) != 0
+            || r.addr & (PAGE - 1) != 0
+        {
             return Err(EINVAL);
         }
     }
@@ -839,7 +895,11 @@ fn collect_locked(ps: &LvipStream, stopped: bool) -> c_long {
     {
         let st = l.state.lock();
         if st.wedged || st.stopping {
-            return if st.wedged { EIO.to_errno() as c_long } else { ENODEV.to_errno() as c_long };
+            return if st.wedged {
+                EIO.to_errno() as c_long
+            } else {
+                ENODEV.to_errno() as c_long
+            };
         }
         // One job at a time; the next is collected when it ends.
         if st.running {
@@ -861,7 +921,12 @@ fn collect_locked(ps: &LvipStream, stopped: bool) -> c_long {
         return refuse(l, EINVAL);
     }
     let mut slot = Slot::default();
-    if let Err(e) = s.job_take(job.buffer, job.identity, &job.slot[..job.slots as usize], &mut slot) {
+    if let Err(e) = s.job_take(
+        job.buffer,
+        job.identity,
+        &job.slot[..job.slots as usize],
+        &mut slot,
+    ) {
         drop(prog);
         return refuse(l, e);
     }
@@ -919,7 +984,12 @@ unsafe extern "C" fn lvip_kick(priv_: *mut c_void) -> c_long {
 /// After a job ends: pick up what the consumer posted since, without a kick.
 unsafe extern "C" fn lvip_collect_work(work: *mut bindings::work_struct) {
     // SAFETY: the work is the stream's collect work, which lives in its stream.
-    let ps = unsafe { &*(work.cast::<u8>().sub(offset_of!(LvipStream, collect)).cast::<LvipStream>()) };
+    let ps = unsafe {
+        &*(work
+            .cast::<u8>()
+            .sub(offset_of!(LvipStream, collect))
+            .cast::<LvipStream>())
+    };
     let stopped = ps.collect_lock.lock();
     let ret = collect_locked(ps, *stopped);
     drop(stopped);
@@ -975,7 +1045,10 @@ unsafe extern "C" fn lvip_stop(priv_: *mut c_void, s: *mut Stream) {
     drop(st);
 
     if wedged {
-        dev_crit!(l.device(), "stream wedged: keeping its buffers until a reboot\n");
+        dev_crit!(
+            l.device(),
+            "stream wedged: keeping its buffers until a reboot\n"
+        );
         Handle(s).wedge();
     }
 }
@@ -1036,7 +1109,11 @@ impl LvipStream {
 /// `l` is a block from `lem_vip_probe` that has not been removed; `dev` is its device; `args` is a
 /// `struct lemnos_vip_create` the caller owns.
 #[no_mangle]
-pub(crate) unsafe extern "C" fn lem_vip_create(l: *const LemVip, dev: *mut bindings::device, args: *mut c_void) -> c_long {
+pub(crate) unsafe extern "C" fn lem_vip_create(
+    l: *const LemVip,
+    dev: *mut bindings::device,
+    args: *mut c_void,
+) -> c_long {
     // SAFETY: the caller's contract: a `struct lemnos_vip_create` in memory the core owns.
     let a = unsafe { &mut *(args as *mut lb::lemnos_vip_create) };
     // SAFETY: the block is alive while its probe reference is held (the caller's contract).
@@ -1090,7 +1167,9 @@ pub(crate) unsafe extern "C" fn lem_vip_create(l: *const LemVip, dev: *mut bindi
     // SAFETY: the stream's own pointer is set by the core before the file exists; `ps` is the private data.
     let s_slot = unsafe { &*ps }.s.as_ptr();
     // SAFETY: the create arguments are the core's copy; the producer is live for the call.
-    let ret = unsafe { crate::stream::lem_stream_create_producer(dev.cast(), &raw mut a.stream, &producer, s_slot) };
+    let ret = unsafe {
+        crate::stream::lem_stream_create_producer(dev.cast(), &raw mut a.stream, &producer, s_slot)
+    };
     if ret != 0 {
         block.state.lock().attached = ptr::null_mut();
         // SAFETY: the stream was not made, so only this call holds the private data.
@@ -1108,7 +1187,15 @@ fn free_tables(dev: *mut bindings::device, t: &Tables) {
         for k in 0..LVIP_PER_SLOT {
             if !t.stlb[s][k].is_null() {
                 // SAFETY: the table allocated for this slot, freed once here.
-                unsafe { bindings::dma_free_attrs(dev, LVIP_STLB_BYTES, t.stlb[s][k].cast(), t.stlb_dma[s][k], 0) };
+                unsafe {
+                    bindings::dma_free_attrs(
+                        dev,
+                        LVIP_STLB_BYTES,
+                        t.stlb[s][k].cast(),
+                        t.stlb_dma[s][k],
+                        0,
+                    )
+                };
             }
         }
     }
@@ -1118,7 +1205,9 @@ fn free_tables(dev: *mut bindings::device, t: &Tables) {
     }
     if !t.cmd.is_null() {
         // SAFETY: the command buffer allocated by probe, freed once here.
-        unsafe { bindings::dma_free_attrs(dev, LVIP_CMD_BYTES as usize, t.cmd.cast(), t.cmd_dma, 0) };
+        unsafe {
+            bindings::dma_free_attrs(dev, LVIP_CMD_BYTES as usize, t.cmd.cast(), t.cmd_dma, 0)
+        };
     }
     if !t.stlb0.is_null() {
         // SAFETY: the window's table allocated by probe, freed once here.
@@ -1216,7 +1305,12 @@ fn alloc_tables(dev: *mut bindings::device, t: &mut Tables) -> Result {
         let idx = (lb::LEMNOS_VIP_PROGRAM_ADDR as u64 >> 12) + p;
         // SAFETY: the window's table has LVIP_STLB_ENTRIES entries, and the command buffer's pages index
         // within them (the program address is below 16 MiB, checked by the build).
-        unsafe { ptr::write(t.stlb0.add(idx as usize), pte(t.cmd_dma + p * PAGE, false).to_le()) };
+        unsafe {
+            ptr::write(
+                t.stlb0.add(idx as usize),
+                pte(t.cmd_dma + p * PAGE, false).to_le(),
+            )
+        };
     }
     Ok(())
 }
@@ -1236,7 +1330,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
     let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
     let regs: *mut c_void = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
-        let mem = from_err_ptr(unsafe { bindings::devm_memremap(dev, start, size as usize, bindings::MEMREMAP_WB as c_ulong) })?;
+        let mem = from_err_ptr(unsafe {
+            bindings::devm_memremap(dev, start, size as usize, bindings::MEMREMAP_WB as c_ulong)
+        })?;
         // SAFETY: the device being probed.
         let d: &Device = unsafe { Device::from_raw(dev) };
         dev_warn!(d, "test_vip_fake_regs: registers are ordinary memory\n");
@@ -1274,7 +1370,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
         return Err(Error::from_errno(n));
     }
     // SAFETY: the device being probed; its optional exclusive reset.
-    let rst = from_err_ptr(unsafe { devm_reset_control_array_get(dev.cast(), RESET_CONTROL_OPTIONAL_EXCLUSIVE) })?;
+    let rst = from_err_ptr(unsafe {
+        devm_reset_control_array_get(dev.cast(), RESET_CONTROL_OPTIONAL_EXCLUSIVE)
+    })?;
     // SAFETY: the reset the device owns.
     to_result(unsafe { reset_control_deassert(rst) })?;
     // SAFETY: the device being probed; enabled as devm.
@@ -1289,7 +1387,11 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
     let Some(mmu) = chip_mmu(cid) else {
         // SAFETY: the device being probed.
         let d: &Device = unsafe { Device::from_raw(dev) };
-        dev_err!(d, "chip 0x{:08x}: not one whose MMU is known; refused\n", cid);
+        dev_err!(
+            d,
+            "chip 0x{:08x}: not one whose MMU is known; refused\n",
+            cid
+        );
         return Err(ENODEV);
     };
 
@@ -1328,7 +1430,14 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
     // queue (destroyed after its work), then the interrupt, which is requested last. devm_add_action does
     // not run an action that fails to register, so each failure is undone here.
     // SAFETY: the device being probed; `raw` is the probe's reference, given up by lvip_put.
-    if let Err(e) = to_result(unsafe { bindings::__devm_add_action(dev, Some(lvip_put), raw as *mut c_void, c"lem_vip".as_char_ptr()) }) {
+    if let Err(e) = to_result(unsafe {
+        bindings::__devm_add_action(
+            dev,
+            Some(lvip_put),
+            raw as *mut c_void,
+            c"lem_vip".as_char_ptr(),
+        )
+    }) {
         // SAFETY: the reference made above, not yet owned by devres.
         let b = unsafe { Arc::from_raw(raw) };
         free_tables(dev, b.tables());
@@ -1336,7 +1445,14 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
         return Err(e);
     }
     // SAFETY: the device being probed; the queue is destroyed by its devres, after the work.
-    if let Err(e) = to_result(unsafe { bindings::__devm_add_action(dev, Some(lvip_destroy_wq), wq.0.cast(), c"lem_vip".as_char_ptr()) }) {
+    if let Err(e) = to_result(unsafe {
+        bindings::__devm_add_action(
+            dev,
+            Some(lvip_destroy_wq),
+            wq.0.cast(),
+            c"lem_vip".as_char_ptr(),
+        )
+    }) {
         // SAFETY: the reference devres holds (lvip_put, registered above) keeps the block alive.
         free_tables(dev, unsafe { &*raw }.tables());
         wq.destroy();
@@ -1354,7 +1470,15 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
     }
     // SAFETY: the device being probed; the block is the handler's data, released after the handler.
     if let Err(e) = to_result(unsafe {
-        bindings::devm_request_threaded_irq(dev, irq as c_uint, Some(lvip_isr), None, 0, bindings::dev_name(dev), raw as *mut c_void)
+        bindings::devm_request_threaded_irq(
+            dev,
+            irq as c_uint,
+            Some(lvip_isr),
+            None,
+            0,
+            bindings::dev_name(dev),
+            raw as *mut c_void,
+        )
     }) {
         wr_reg(regs, VR_INT_ENABLE, 0);
         free_tables(dev, block_ref.tables());
@@ -1362,7 +1486,11 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
     }
     // SAFETY: the device being probed.
     let d: &Device = unsafe { Device::from_raw(dev) };
-    let set_up = if mmu == lb::LEMNOS_VIP_MMU_PD { "by page directory" } else { "by command" };
+    let set_up = if mmu == lb::LEMNOS_VIP_MMU_PD {
+        "by page directory"
+    } else {
+        "by command"
+    };
     dev_info!(d, "chip 0x{:08x}, MMU set up {}\n", cid, set_up);
     Ok(raw)
 }
@@ -1372,7 +1500,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemVip> {
 /// # Safety
 /// `pdev` is the platform device being probed.
 #[no_mangle]
-pub(crate) unsafe extern "C" fn lem_vip_probe(pdev: *mut bindings::platform_device) -> *const LemVip {
+pub(crate) unsafe extern "C" fn lem_vip_probe(
+    pdev: *mut bindings::platform_device,
+) -> *const LemVip {
     match probe(pdev) {
         Ok(l) => l,
         Err(e) => e.to_ptr(),
