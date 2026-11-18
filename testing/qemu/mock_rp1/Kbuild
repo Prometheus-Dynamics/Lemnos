@@ -1,4 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0
 
-ccflags-y := -Werror -I$(src)
+# Rust: one crate, rp1_pio_mock.rs, with the fixtures' shared module (../test_block/fixture.rs).
 obj-m += rp1_pio_mock.o
+
+# The argument layouts the stand-in reads come from linux/pio_rp1.h, by the kernel's bindgen with this
+# directory's C flags, as the fixtures' own bindings are made (../test_block/Kbuild).
+quiet_cmd_mock_bindgen = BINDGEN $@
+      cmd_mock_bindgen = \
+	$(BINDGEN) $< --rust-target 1.85 --use-core --with-derive-default --ctypes-prefix ffi \
+		--no-layout-tests --no-debug '.*' --no-doc-comments --no-recursive-allowlist \
+		--allowlist-type 'rp1_pio_sm_(put|get)_args' \
+		-o $@ -- $(filter-out $(CC_FLAGS_LTO),$(c_flags)) -fno-builtin -D__BINDGEN__ -DMODULE
+$(obj)/fixture_bindings_generated.rs: $(src)/linux/pio_rp1.h FORCE
+	$(call if_changed_dep,mock_bindgen)
+targets += fixture_bindings_generated.rs
+clean-files += fixture_bindings_generated.rs
+$(obj)/rp1_pio_mock.o: $(obj)/fixture_bindings_generated.rs
+# fixture.rs includes the generated file by this path: the object directory.
+export LEMNOS_FIXTURE_BINDINGS := $(abspath $(obj)/fixture_bindings_generated.rs)
