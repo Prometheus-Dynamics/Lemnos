@@ -7,7 +7,10 @@
  * - SPI controller 40, with its data output wired to its input. Chip select 0
  *   is for the module; 1 is left unbound (the harness does not run the kernel's
  *   spi-loopback-test: it tests the kernel's SPI core, not this code, and its
- *   timing check fails under host load).
+ *   timing check fails under host load). The device at 1 ("spi-lemnos-test-twin")
+ *   can be given another chip select through the parameter spi_twin_cs while it
+ *   is unbound, so a check can offer the module two devices at one bus and chip
+ *   select, which the SPI core itself never allows.
  * - A two-channel PWM chip that stores what it is told, under the platform
  *   device lemnos-test-parent.
  * - For the block lemnos-test-block: a supply "vdd" that can be made to report
@@ -133,6 +136,12 @@ static const struct property_entry tb_spi_props[] = {
 /* The SPI core names a device with a software node after the node: "spi-lemnos-test". */
 static const struct software_node tb_spi_node = {
 	.name = "lemnos-test",
+	.properties = tb_spi_props,
+};
+
+/* The device at chip select 1: the same compatible, so the module may be asked to bind it. */
+static const struct software_node tb_spi_twin_node = {
+	.name = "lemnos-test-twin",
 	.properties = tb_spi_props,
 };
 
@@ -281,6 +290,42 @@ static void tb_power_teardown(void)
 static struct spi_controller *tb_ctlr;
 static struct spi_device *tb_spi[2];
 
+/*
+ * spi_twin_cs: the chip select the second device says it is at. Only the device's own field
+ * changes (what a driver's probe reads); the controller is not told, and nothing transfers on
+ * the device. Refused while a driver is bound to it.
+ */
+static int tb_twin_cs_set(const char *val, const struct kernel_param *kp)
+{
+	u8 cs;
+	int ret = kstrtou8(val, 0, &cs);
+
+	if (ret)
+		return ret;
+	if (!tb_spi[1])
+		return -ENODEV;
+	if (cs >= tb_ctlr->num_chipselect)
+		return -EINVAL;
+	device_lock(&tb_spi[1]->dev);
+	if (tb_spi[1]->dev.driver)
+		ret = -EBUSY;
+	else
+		spi_set_chipselect(tb_spi[1], 0, cs);
+	device_unlock(&tb_spi[1]->dev);
+	return ret;
+}
+
+static int tb_twin_cs_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "%u\n", tb_spi[1] ? spi_get_chipselect(tb_spi[1], 0) : 1);
+}
+
+static const struct kernel_param_ops tb_twin_cs_ops = {
+	.set = tb_twin_cs_set,
+	.get = tb_twin_cs_get,
+};
+module_param_cb(spi_twin_cs, &tb_twin_cs_ops, NULL, 0644);
+
 static void tb_spi_teardown(void)
 {
 	for (int i = 0; i < 2; i++)
@@ -295,6 +340,7 @@ static void tb_spi_teardown(void)
 		spi_unregister_controller(tb_ctlr);
 	if (!IS_ERR_OR_NULL(tb_parent))
 		platform_device_unregister(tb_parent);
+	software_node_unregister(&tb_spi_twin_node);
 	software_node_unregister(&tb_spi_node);
 }
 
@@ -309,6 +355,9 @@ static int tb_spi_setup(void)
 	};
 	int ret = software_node_register(&tb_spi_node);
 
+	if (ret)
+		return ret;
+	ret = software_node_register(&tb_spi_twin_node);
 	if (ret)
 		return ret;
 	tb_parent = platform_device_register_simple("lemnos-test-parent", -1, NULL, 0);
@@ -350,7 +399,7 @@ static int tb_spi_setup(void)
 		return -ENODEV;
 	strscpy(info.modalias, "spi-loopback-test", sizeof(info.modalias));
 	info.chip_select = 1;
-	info.swnode = NULL;
+	info.swnode = &tb_spi_twin_node;
 	tb_spi[1] = spi_new_device(tb_ctlr, &info);
 	return tb_spi[1] ? 0 : -ENODEV;
 }
