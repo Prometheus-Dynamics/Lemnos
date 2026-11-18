@@ -36,3 +36,8 @@ buffer size. Until then the job refuses nothing beyond what it refuses now.
 ## Owner
 
 K1b board session (`testing/board-runs/K1b.md`, "Not checked here"). Not on the PC.
+
+## The ZERO 3E (RK3566) cannot decide this (2026-11-18)
+
+It has no VPU720-class encoder, so the K1b probe does not apply there. Still parked for the CM5 or
+the ROCK board. Details: see [`BOARD-USB0.md`](BOARD-USB0.md).
