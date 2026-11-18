@@ -177,6 +177,11 @@ one that says a branch is good. Two arguments are for the work before it:
   that boot side by side: one per argument, and one more with every stanza no argument names. Every
   stanza runs. What it does not show is the stanzas one after another in one boot.
 
+`LEMNOS_QEMU_MODULES` names a directory that keeps the modules `run.sh` builds, under the hash of
+everything they are built from (the module's sources, the harness's, the kernel tree, the
+compilers). A run whose hash is there takes them and builds none; a changed source is built. It is
+for repeated runs of one tree. Unset, every run builds its modules, and a landing leaves it unset.
+
 CI runs it against a kernel built with lock and memory checking on. That kernel is built by:
 
 ```sh needs:a-download-and-a-full-kernel-build
