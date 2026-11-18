@@ -2926,6 +2926,298 @@ fn a_socket_whose_backlog_is_full_is_busy_and_never_blocks_a_look() {
     );
 }
 
+/// A loopback port for a `tcp:` test, held for as long as the returned listener lives. The
+/// listener is on 127.0.0.2, so no other process can take the port on every address while a test
+/// uses it on its own loopback address (each test names a different one), and nothing listens
+/// there until the test binds it: once, with no gap in which the port is free.
+fn held_port() -> (std::net::TcpListener, u16) {
+    let hold = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    let port = hold.local_addr().unwrap().port();
+    (hold, port)
+}
+
+fn tcp_source(text: &str) -> Vec<Source> {
+    vec![Source::parse(text).unwrap_or_else(|refused| panic!("{}", refused.sentence))]
+}
+
+fn look(sources: &[Source], probes: &mut Vec<crate::trial::Probe>, secs: u64) -> Option<String> {
+    crate::trial::source_unmet(
+        sources,
+        probes,
+        &[],
+        std::time::SystemTime::now(),
+        secs * 1_000_000_000,
+    )
+}
+
+#[test]
+fn a_tcp_source_with_a_listener_is_good_and_sends_nothing() {
+    use std::io::Read;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sources = tcp_source(&format!("tcp:127.0.0.1:{port}"));
+    let mut probes = Vec::new();
+    // Never a wait here: a look that made no connection fails the test, it does not hang it.
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(look(&sources, &mut probes, 0), None);
+    // The connection the look made is closed already, and carried no byte.
+    let (mut taken, _) = listener.accept().expect("the look made a connection");
+    taken
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    assert_eq!(taken.read_to_end(&mut bytes).unwrap(), 0);
+    assert!(listener.accept().is_err(), "one connection for one look");
+    // Each look is a new connection.
+    assert_eq!(look(&sources, &mut probes, 1), None);
+    assert!(listener.accept().is_ok());
+}
+
+#[test]
+fn a_tcp_source_with_no_listener_is_refused_and_good_once_one_listens() {
+    let (_hold, port) = held_port();
+    let sources = tcp_source(&format!("tcp:127.0.0.3:{port}"));
+    let mut probes = Vec::new();
+    let refused = look(&sources, &mut probes, 0).expect("no listener is not good");
+    assert_eq!(
+        refused,
+        format!(
+            "health source tcp:127.0.0.3:{port} doesn't accept a connection: {}",
+            std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
+        )
+    );
+    assert!(look(&sources, &mut probes, 1).is_some(), "asked again");
+    let _listener = std::net::TcpListener::bind(("127.0.0.3", port)).unwrap();
+    assert_eq!(look(&sources, &mut probes, 2), None);
+}
+
+/// A TCP listener whose accept queue is full drops the connect's first packet, so the connect
+/// stays on its way: the look must come back at once, busy, be not good at the deadline, and be
+/// good once the listener takes its connections.
+#[test]
+fn a_tcp_source_whose_connect_is_not_answered_is_busy_and_never_blocks_a_look() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use lemnos_linux_sys::tcp::{Connect, connect_nonblocking};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Nothing accepts, so connections queue until the accept queue is full.
+    let mut queued = 0;
+    let mut kept = Vec::new();
+    loop {
+        match connect_nonblocking(&addr).unwrap() {
+            Connect::Connected => queued += 1,
+            // Kept open, so the listener's queue cannot drain by a give-up.
+            Connect::Pending(fd) => {
+                kept.push(fd);
+                break;
+            }
+        }
+        assert!(queued < 100_000, "the accept queue never filled");
+    }
+    let sources = tcp_source(&format!("tcp:{addr}"));
+    let (tx, rx) = mpsc::channel();
+    let looked = sources.clone();
+    std::thread::spawn(move || {
+        let mut probes = Vec::new();
+        let busy = look(&looked, &mut probes, 0);
+        tx.send((busy, probes)).unwrap();
+    });
+    let (busy, mut probes) = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a look at an unanswered connect returned: it did not block");
+    let busy = busy.expect("busy is not good");
+    assert_eq!(
+        busy,
+        format!("health source tcp:{addr} is busy: its connect has no answer yet")
+    );
+    assert_eq!(probes.len(), 1, "one probe per source, kept between looks");
+    // Still busy before the deadline, and not good at it.
+    let still = look(&sources, &mut probes, 1).unwrap();
+    assert!(still.contains("is busy"), "{still}");
+    let late = look(&sources, &mut probes, 2).unwrap();
+    assert_eq!(
+        late,
+        format!(
+            "health source tcp:{addr} did not accept a connection within 2 s (its connect stays unanswered)"
+        )
+    );
+    // Once the listener takes its connections, the same source is good: the look after the
+    // deadline makes a new connect, which is answered at once.
+    listener.set_nonblocking(true).unwrap();
+    while listener.accept().is_ok() {}
+    assert_eq!(look(&sources, &mut probes, 3), None);
+    drop(kept);
+}
+
+/// An address that is not on the machine (TEST-NET-1, which is never routed), and a zone whose
+/// interface does not exist: not good, at once, at every look, and never an error.
+#[test]
+fn a_tcp_source_whose_address_is_not_up_yet_is_not_good_and_is_asked_again() {
+    let sources = tcp_source("tcp:192.0.2.1:22");
+    let mut probes = Vec::new();
+    for secs in 0..6 {
+        let began = std::time::Instant::now();
+        let reason = look(&sources, &mut probes, secs).expect("not good");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(1),
+            "a look never waits"
+        );
+        // With no route the kernel refuses the connect; with a default route the connect goes
+        // out and is never answered. Both are this look's answer only.
+        assert!(
+            reason.starts_with("health source tcp:192.0.2.1:22 "),
+            "{reason}"
+        );
+        if secs >= 2 && !reason.contains("doesn't accept a connection: ") {
+            assert!(
+                reason.contains("did not accept a connection within 2 s"),
+                "{reason}"
+            );
+        }
+    }
+
+    let zoned = tcp_source("tcp:[fe80::1%lemnosnone0]:22");
+    let mut probes = Vec::new();
+    for secs in 0..3 {
+        assert_eq!(
+            look(&zoned, &mut probes, secs).expect("not good"),
+            format!(
+                "health source tcp:[fe80::1%lemnosnone0]:22 doesn't accept a connection: {}",
+                std::io::Error::from_raw_os_error(libc::ENODEV)
+            )
+        );
+    }
+}
+
+/// The bracketed form reaches a listener on the IPv6 loopback, on a machine that has one.
+#[test]
+fn a_tcp_source_with_a_bracketed_ipv6_address_parses_and_connects() {
+    assert!(Source::parse("tcp:[::1]:22").is_ok());
+    assert!(Source::parse("tcp:[fe80::1%lemnos0]:22").is_ok());
+    assert!(Source::parse("tcp:[2001:db8::7]:65535").is_ok());
+    assert!(Source::parse("tcp:10.55.0.1:1").is_ok());
+    // A machine with no IPv6 loopback runs the parsing above only.
+    let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+        return;
+    };
+    let port = listener.local_addr().unwrap().port();
+    let sources = tcp_source(&format!("tcp:[::1]:{port}"));
+    assert_eq!(look(&sources, &mut Vec::new(), 0), None);
+}
+
+#[test]
+fn a_malformed_tcp_source_is_refused_with_its_sentence() {
+    use lemnos_core::{Config, ConfigValue, Lifecycle};
+
+    use crate::trial;
+
+    let cases: &[(&'static str, &'static str)] = &[
+        ("tcp:10.55.0.1:0", trial::TCP_PORT),
+        ("tcp:10.55.0.1:65536", trial::TCP_PORT),
+        ("tcp:10.55.0.1:ssh", trial::TCP_PORT),
+        ("tcp:10.55.0.1:+22", trial::TCP_PORT),
+        ("tcp:10.55.0.1:", trial::TCP_PORT),
+        ("tcp:[::1]:", trial::TCP_PORT),
+        ("tcp:10.55.0.1", trial::TCP_SHAPE),
+        ("tcp::22", trial::TCP_SHAPE),
+        ("tcp:[::1]", trial::TCP_SHAPE),
+        ("tcp:[::1]22", trial::TCP_SHAPE),
+        ("tcp:fe80::1:22", trial::TCP_BRACKETS),
+        ("tcp:::1:22", trial::TCP_BRACKETS),
+        ("tcp:fe80::1%lemnos0:22", trial::TCP_BRACKETS),
+        ("tcp:[::1:22", trial::TCP_NOT_V6),
+        ("tcp:[10.55.0.1]:22", trial::TCP_NOT_V6),
+        ("tcp:[board.local]:22", trial::TCP_NOT_V6),
+        ("tcp:localhost:22", trial::TCP_HOST_NAME),
+        ("tcp:board.local:22", trial::TCP_HOST_NAME),
+        ("tcp:10.55.0:22", trial::TCP_HOST_NAME),
+        ("tcp:010.55.0.1:22", trial::TCP_HOST_NAME),
+        ("tcp:[fe80::1]:22", trial::TCP_NEEDS_ZONE),
+        ("tcp:[fe80::1%]:22", trial::TCP_ZONE),
+        ("tcp:[fe80::1%averyveryverylongname0]:22", trial::TCP_ZONE),
+        ("tcp:[fe80::1%a/b]:22", trial::TCP_ZONE),
+        ("tcp:[::1%lo]:22", trial::TCP_ZONE_NOT_LINK_LOCAL),
+        ("udp:10.55.0.1:22", trial::NOT_A_SOURCE),
+    ];
+    for (text, reason) in cases {
+        let refused = Source::parse(text).expect_err(text);
+        assert_eq!(refused.reason, *reason, "{text}");
+        assert!(refused.sentence.contains(text), "{}", refused.sentence);
+        // The board-file check (`lemnosd --check`, `lemnos-ctl validate`) says the same.
+        let health: &[&str] = &[*text];
+        let lists: &[(&str, &[&str])] = &[
+            ("health", health),
+            ("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"]),
+        ];
+        let entries: &[(&str, ConfigValue<'_>)] = &[];
+        let error =
+            <SystemSlots as Lifecycle>::check_config(&Config::new(entries).with_lists(lists))
+                .expect_err(text);
+        assert_eq!((error.key, error.reason), ("health", *reason), "{text}");
+    }
+    assert!(trial::TCP_HOST_NAME.contains("no name is looked up"));
+    assert!(trial::TCP_PORT.contains("1 to 65535"));
+    assert!(trial::TCP_BRACKETS.contains("tcp:[<address>]:<port>"));
+    // A zone whose interface does not exist is not the check's to refuse: it may appear later.
+    let lists: &[(&str, &[&str])] = &[
+        (
+            "health",
+            &["tcp:[fe80::1%lemnosnone0]:22", "tcp:192.0.2.1:22"],
+        ),
+        ("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"]),
+    ];
+    let entries: &[(&str, ConfigValue<'_>)] = &[];
+    assert!(
+        <SystemSlots as Lifecycle>::check_config(&Config::new(entries).with_lists(lists)).is_ok()
+    );
+}
+
+/// A trial whose `health` names a TCP port confirms only once the port listens, and until then
+/// the reason `list` shows names the source and the refusal.
+#[test]
+fn a_trial_with_a_tcp_source_confirms_only_after_the_listener_appears() {
+    let (_hold, port) = held_port();
+    let text = format!("tcp:127.0.0.4:{port}");
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.slots.policy.health = vec![text.clone()];
+    board.slots.sources = tcp_source(&text);
+    assert_eq!(board.next_boot(1), "b");
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    assert!(board.settle_at(31, &view).is_some(), "waits for the port");
+    assert!(board.settle_at(40, &view).is_some(), "and is asked again");
+    assert_eq!(
+        board.state().trial,
+        "b",
+        "no confirm with nothing listening"
+    );
+    let reason = Log::load(board.layout()).unwrap().reason;
+    assert_eq!(
+        reason,
+        format!(
+            "health source {text} doesn't accept a connection: {}",
+            std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
+        )
+    );
+    let mut list = vec![0u8; 64 * 1024];
+    let len = board.slots.list(&mut list).unwrap();
+    let shown = String::from_utf8_lossy(&list[..len]).into_owned();
+    assert!(
+        shown.contains(&format!("health source {text} doesn't accept")),
+        "{shown}"
+    );
+
+    let _listener = std::net::TcpListener::bind(("127.0.0.4", port)).unwrap();
+    assert_eq!(board.settle_at(41, &view), None);
+    let state = board.state();
+    assert_eq!((state.default.as_str(), state.trial.as_str()), ("b", ""));
+    assert_eq!(resolved(&board).outcome, "confirmed");
+}
+
 /// The boot history's entries as `lemnos/boots` reads them.
 fn history(board: &Board) -> Vec<lemnos_slot_store::boots::Entry> {
     lemnos_slot_store::boots::load(board.layout())

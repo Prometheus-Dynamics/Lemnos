@@ -43,6 +43,7 @@ pub mod spi;
 pub mod statfs;
 pub mod stderr;
 pub mod stream;
+pub mod tcp;
 pub mod time;
 pub mod ubi;
 pub mod udmabuf;

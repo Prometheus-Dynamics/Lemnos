@@ -10,6 +10,8 @@
 
 use std::fs;
 use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -57,14 +59,143 @@ pub enum Source {
     File(PathBuf),
     /// `socket:<path>`: a Unix socket that accepts a connection.
     Socket(PathBuf),
+    /// `tcp:<address>:<port>`: a TCP port that accepts a connection.
+    Tcp(Tcp),
+}
+
+/// A `tcp:` source: an address and a port, never a name (nothing here looks a name up).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tcp {
+    /// The entry after `tcp:`, as written: what a reason names.
+    text: String,
+    addr: TcpAddr,
+    port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TcpAddr {
+    V4(Ipv4Addr),
+    /// With the zone of a link-local address: an interface's name, which is looked up at each
+    /// look, since the interface may appear after the daemon starts.
+    V6(Ipv6Addr, Option<String>),
+}
+
+/// Why an entry of the `health` list is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The sentence, naming the entry.
+    pub sentence: String,
+    /// The same without the entry, in words that follow the key `health`: what the board-file
+    /// check says.
+    pub reason: &'static str,
+}
+
+impl Refused {
+    fn new(text: &str, reason: &'static str) -> Self {
+        Self {
+            sentence: format!("health entry `{text}` is refused: `health` {reason}"),
+            reason,
+        }
+    }
+}
+
+/// The refusal of an entry that is none of the sources, or a device or path source gone wrong.
+pub const NOT_A_SOURCE: &str =
+    "entries must be device:<id>, file:<path>, socket:<path> or tcp:<address>:<port>";
+/// The refusals of a `tcp:` entry.
+pub const TCP_SHAPE: &str = "has a tcp entry that is not tcp:<address>:<port>";
+pub const TCP_PORT: &str = "has a tcp entry whose port is not a number from 1 to 65535";
+pub const TCP_BRACKETS: &str =
+    "has a tcp entry whose IPv6 address is not in brackets: tcp:[<address>]:<port>";
+pub const TCP_NOT_V6: &str = "has a tcp entry whose brackets do not hold an IPv6 address";
+pub const TCP_HOST_NAME: &str = "has a tcp entry that names a host: only an IPv4 address or an IPv6 address in brackets is taken, no name is looked up";
+pub const TCP_ZONE: &str =
+    "has a tcp entry whose zone is not an interface name (1 to 15 characters after the %)";
+pub const TCP_NEEDS_ZONE: &str = "has a tcp entry with a link-local IPv6 address and no zone: tcp:[<address>%<interface>]:<port>";
+pub const TCP_ZONE_NOT_LINK_LOCAL: &str =
+    "has a tcp entry with a zone on an address that is not link-local (fe80::/10)";
+
+/// The longest interface name the kernel takes (`IFNAMSIZ` less its NUL).
+const ZONE_MAX: usize = 15;
+
+impl Tcp {
+    /// Reads what follows `tcp:`. Only the shape is checked: whether the address is on the
+    /// board, and whether a zone's interface exists, is found at each look.
+    fn parse(rest: &str) -> Result<Self, &'static str> {
+        let (addr, port) = if let Some(inner) = rest.strip_prefix('[') {
+            let (inner, after) = inner.split_once(']').ok_or(TCP_NOT_V6)?;
+            let port = after.strip_prefix(':').ok_or(TCP_SHAPE)?;
+            let (ip, zone) = match inner.split_once('%') {
+                Some((ip, zone)) => (ip, Some(zone)),
+                None => (inner, None),
+            };
+            let ip: Ipv6Addr = ip.parse().map_err(|_| TCP_NOT_V6)?;
+            let link_local = ip.segments()[0] & 0xffc0 == 0xfe80;
+            let zone = match zone {
+                None if link_local => return Err(TCP_NEEDS_ZONE),
+                None => None,
+                Some(_) if !link_local => return Err(TCP_ZONE_NOT_LINK_LOCAL),
+                Some(zone) => {
+                    let named = !zone.is_empty()
+                        && zone.len() <= ZONE_MAX
+                        && zone
+                            .bytes()
+                            .all(|b| b.is_ascii_graphic() && b != b'/' && b != b'%');
+                    if !named {
+                        return Err(TCP_ZONE);
+                    }
+                    Some(zone.to_string())
+                }
+            };
+            (TcpAddr::V6(ip, zone), port)
+        } else {
+            let (host, port) = rest.rsplit_once(':').ok_or(TCP_SHAPE)?;
+            if host.is_empty() {
+                return Err(TCP_SHAPE);
+            }
+            match host.parse::<Ipv4Addr>() {
+                Ok(ip) => (TcpAddr::V4(ip), port),
+                // More colons: an IPv6 address written bare, where its last group would be
+                // read as the port.
+                Err(_) if host.contains(':') || host.contains('%') => return Err(TCP_BRACKETS),
+                Err(_) => return Err(TCP_HOST_NAME),
+            }
+        };
+        let digits = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+        let port = match port.parse::<u16>() {
+            Ok(port) if digits && port != 0 => port,
+            _ => return Err(TCP_PORT),
+        };
+        Ok(Self {
+            text: rest.to_string(),
+            addr,
+            port,
+        })
+    }
+
+    /// The address to connect to now. A zone is looked up here, at each look: an interface that
+    /// is not there yet is an error for this look only.
+    fn resolve(&self) -> io::Result<SocketAddr> {
+        Ok(match &self.addr {
+            TcpAddr::V4(ip) => SocketAddr::V4(SocketAddrV4::new(*ip, self.port)),
+            TcpAddr::V6(ip, None) => SocketAddr::V6(SocketAddrV6::new(*ip, self.port, 0, 0)),
+            TcpAddr::V6(ip, Some(zone)) => {
+                let scope = lemnos_linux_sys::tcp::interface_index(zone)?;
+                SocketAddr::V6(SocketAddrV6::new(*ip, self.port, 0, scope))
+            }
+        })
+    }
 }
 
 impl Source {
     /// Reads one entry of the `health` list. Anything else is refused by name.
-    pub fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, Refused> {
         if let Some(id) = text.strip_prefix("device:") {
             if id.is_empty() {
-                return Err(format!("`{text}` names no device"));
+                return Err(Refused {
+                    sentence: format!("`{text}` names no device"),
+                    reason: NOT_A_SOURCE,
+                });
             }
             return Ok(Self::Device(id.to_string()));
         }
@@ -72,7 +203,10 @@ impl Source {
             if rest.starts_with('/') {
                 Ok(PathBuf::from(rest))
             } else {
-                Err(format!("`{text}` needs an absolute path"))
+                Err(Refused {
+                    sentence: format!("`{text}` needs an absolute path"),
+                    reason: NOT_A_SOURCE,
+                })
             }
         };
         if let Some(rest) = text.strip_prefix("file:") {
@@ -81,9 +215,17 @@ impl Source {
         if let Some(rest) = text.strip_prefix("socket:") {
             return path(rest).map(Self::Socket);
         }
-        Err(format!(
-            "`{text}` is not a health source: device:<id>, file:<path> or socket:<path>"
-        ))
+        if let Some(rest) = text.strip_prefix("tcp:") {
+            return Tcp::parse(rest)
+                .map(Self::Tcp)
+                .map_err(|reason| Refused::new(text, reason));
+        }
+        Err(Refused {
+            sentence: format!(
+                "`{text}` is not a health source: device:<id>, file:<path>, socket:<path> or tcp:<address>:<port>"
+            ),
+            reason: NOT_A_SOURCE,
+        })
     }
 }
 
@@ -211,20 +353,24 @@ fn device_unmet(sources: &[Source], now: &[Dev]) -> Option<String> {
     })
 }
 
-/// How long a `socket:` source may stay busy (its listener's backlog full) before it is not good.
+/// How long a `socket:` source may stay busy (its listener's backlog full), or a `tcp:` source's
+/// connect stay unanswered, before it is not good.
 pub const SOCKET_DEADLINE_NS: u64 = 2_000_000_000;
 
-/// What a `socket:` source's check remembers between looks: since when it has been busy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What a `socket:` or `tcp:` source's check remembers between looks: since when it has been
+/// busy, and for `tcp:` the connect a look left on its way, with when it began.
+#[derive(Debug, Default)]
 pub struct Probe {
     busy_since: Option<u64>,
+    pending: Option<(OwnedFd, u64)>,
 }
 
 /// The first source that isn't good now, as the reason: device health from the board view, file
 /// and socket checks made here. `boot` is when this boot began. `probes` holds one entry per
 /// source, kept between looks; `now_ns` is the monotonic clock. A socket that takes no connection
 /// right away is busy, and only that look's answer is not good: it is asked again at the next
-/// look, and it is not good for good once it has been busy for [`SOCKET_DEADLINE_NS`].
+/// look, and it is not good for good once it has been busy for [`SOCKET_DEADLINE_NS`]. A TCP
+/// port is the same, see [`tcp_unmet`].
 pub fn source_unmet(
     sources: &[Source],
     probes: &mut Vec<Probe>,
@@ -235,7 +381,7 @@ pub fn source_unmet(
     if let Some(reason) = device_unmet(sources, now) {
         return Some(reason);
     }
-    probes.resize(sources.len(), Probe::default());
+    probes.resize_with(sources.len(), Probe::default);
     sources
         .iter()
         .zip(probes.iter_mut())
@@ -243,6 +389,7 @@ pub fn source_unmet(
             Source::Device(_) => None,
             Source::File(path) => file_unmet(path, boot),
             Source::Socket(path) => socket_unmet(path, probe, now_ns),
+            Source::Tcp(tcp) => tcp_unmet(tcp, probe, now_ns),
         })
 }
 
@@ -291,6 +438,67 @@ fn socket_unmet(path: &Path, probe: &mut Probe, now_ns: u64) -> Option<String> {
                 path.display()
             ))
         }
+    }
+}
+
+/// One look at a TCP port: a connect that does not wait, and no byte sent. A connect to an
+/// address of this board is answered at once, taken or refused. One that is not (the address is
+/// not on the board yet, so the connect went out on a link) is busy: it is kept, and the next
+/// look asks it again. A connect is given up [`SOCKET_DEADLINE_NS`] after it began and the next
+/// look makes a new one, so a port that comes up later is seen at the next look, not at the
+/// kernel's next retry. Every error (refused, no route, no such address, a zone whose interface
+/// is not there yet) is this look's answer only.
+fn tcp_unmet(tcp: &Tcp, probe: &mut Probe, now_ns: u64) -> Option<String> {
+    use lemnos_linux_sys::tcp::{Connect, connect_nonblocking, finished};
+
+    let answer = match probe.pending.take() {
+        Some((fd, began)) => match finished(fd.as_fd()) {
+            Ok(true) => Ok(Connect::Connected),
+            Ok(false) if now_ns.saturating_sub(began) >= SOCKET_DEADLINE_NS => {
+                // Given up: closed here, and the next look connects again.
+                return Some(tcp_busy(tcp, probe, now_ns));
+            }
+            Ok(false) => {
+                probe.pending = Some((fd, began));
+                return Some(tcp_busy(tcp, probe, now_ns));
+            }
+            Err(error) => Err(error),
+        },
+        None => tcp.resolve().and_then(|addr| connect_nonblocking(&addr)),
+    };
+    match answer {
+        Ok(Connect::Connected) => {
+            probe.busy_since = None;
+            None
+        }
+        Ok(Connect::Pending(fd)) => {
+            probe.pending = Some((fd, now_ns));
+            Some(tcp_busy(tcp, probe, now_ns))
+        }
+        Err(error) => {
+            probe.busy_since = None;
+            Some(format!(
+                "health source tcp:{} doesn't accept a connection: {error}",
+                tcp.text
+            ))
+        }
+    }
+}
+
+/// The reason for a `tcp:` source whose connect has no answer yet, by how long that has been so.
+fn tcp_busy(tcp: &Tcp, probe: &mut Probe, now_ns: u64) -> String {
+    let since = *probe.busy_since.get_or_insert(now_ns);
+    if now_ns.saturating_sub(since) >= SOCKET_DEADLINE_NS {
+        format!(
+            "health source tcp:{} did not accept a connection within {} s (its connect stays unanswered)",
+            tcp.text,
+            SOCKET_DEADLINE_NS / 1_000_000_000
+        )
+    } else {
+        format!(
+            "health source tcp:{} is busy: its connect has no answer yet",
+            tcp.text
+        )
     }
 }
 
