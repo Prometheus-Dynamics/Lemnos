@@ -118,7 +118,6 @@ pub(crate) unsafe extern "C" fn lem_stream_next(s: *mut Stream, slot: *mut Slot)
 ///
 /// # Safety
 /// `s` is a live stream; `slot` is one it gave and has not had back.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_complete(s: *mut Stream, slot: *const Slot, bytes: u32, sequence: u64, timestamp_ns: u64) {
     // SAFETY: the caller's contract.
     unsafe { lem_stream_complete_at(s, slot, bytes, sequence, timestamp_ns, 0) };
@@ -128,7 +127,6 @@ pub(crate) unsafe extern "C" fn lem_stream_complete(s: *mut Stream, slot: *const
 ///
 /// # Safety
 /// `s` is a live stream; `slot` is one it gave and has not had back.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_complete_at(
     s: *mut Stream,
     slot: *const Slot,
@@ -157,7 +155,6 @@ pub(crate) unsafe extern "C" fn lem_stream_complete_at(
 ///
 /// # Safety
 /// `s` is a live stream; `slot` is one it gave and has not had back.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_cancel(s: *mut Stream, slot: *const Slot) {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -255,7 +252,6 @@ pub(crate) unsafe extern "C" fn lem_stream_range_poke(s: *mut Stream, r: *const 
 ///
 /// # Safety
 /// `s` is a live stream.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_wedge(s: *mut Stream) {
     // SAFETY: the caller's contract.
     unsafe { &*s }.lock().wedged = true;
@@ -267,7 +263,6 @@ pub(crate) unsafe extern "C" fn lem_stream_wedge(s: *mut Stream) {
 ///
 /// # Safety
 /// `s` is a live stream; `job` is valid for `bytes` bytes.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_job_peek(s: *mut Stream, job: *mut c_void, bytes: usize) -> c_int {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };
@@ -304,7 +299,6 @@ pub(crate) unsafe extern "C" fn lem_stream_job_peek(s: *mut Stream, job: *mut c_
 ///
 /// # Safety
 /// `s` is a live stream; `range` holds `count` entries; `slot` is the caller's to write.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_job_take(
     s: *mut Stream,
     buffer: u32,
@@ -360,7 +354,6 @@ pub(crate) unsafe extern "C" fn lem_stream_job_take(
 ///
 /// # Safety
 /// `s` is a live stream.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_fault(s: *mut Stream, err: c_int) {
     // SAFETY: the caller's contract.
     let st = unsafe { &*s };

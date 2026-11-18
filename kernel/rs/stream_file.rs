@@ -863,7 +863,6 @@ pub(crate) unsafe extern "C" fn lem_stream_create(dev: *mut bindings::device, c:
 ///
 /// # Safety
 /// As `lem_stream_create`; `producer` is valid for the call; `out` is null or the caller's to write.
-#[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_create_producer(
     dev: *mut bindings::device,
     c: *mut lb::lemnos_stream_create,
