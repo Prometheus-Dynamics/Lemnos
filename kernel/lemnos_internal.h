@@ -68,8 +68,7 @@ static inline long lem_pio_config_xfer(const struct lemnos_pio_config_xfer *c) {
 static inline long lem_pio_xfer(const struct lemnos_pio_xfer *x) { return -ENOTTY; }
 #endif
 
-int lem_bus_init(void);
-void lem_bus_exit(void);
+/* rs/bus.rs */
 long lem_i2c_transfer(const struct lemnos_i2c_transfer *t);
 long lem_i2c_smbus(struct lemnos_i2c_smbus *s);
 long lem_spi_transfer(const struct lemnos_spi_transfer *t);

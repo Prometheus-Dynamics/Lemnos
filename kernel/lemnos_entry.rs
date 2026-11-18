@@ -3,7 +3,7 @@
 //!
 //! The Rust half owns `module_init` and `module_exit`, the module's name, description, license and
 //! imports, and the registrations of the module's platform driver and its `/dev/lemnos` node. The
-//! bus, the csi2 receiver and the descriptors the registrations take (`lem_driver`, `lem_misc`) are
+//! csi2 receiver and the descriptors the registrations take (`lem_driver`, `lem_misc`) are
 //! still C in this stage: lemnos_core.c exports them with the Rust owner. Built only with
 //! CONFIG_RUST; without it lemnos_core.c keeps `module_init`, as before.
 //!
@@ -23,6 +23,10 @@ mod gpio;
 mod power;
 #[path = "rs/irq.rs"]
 mod irq;
+#[path = "rs/bindings.rs"]
+mod bindings;
+#[path = "rs/bus.rs"]
+mod bus;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
@@ -31,9 +35,6 @@ use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 unsafe extern "C" {
     static lem_driver: [u8; 0];
     static lem_misc: [u8; 0];
-    /// lemnos_bus.c: the I2C and SPI bus glue. Its exit undoes its init.
-    fn lem_bus_init() -> c_int;
-    fn lem_bus_exit();
     /// lemnos_rp1_csi2.c: the csi2 receiver's platform driver and its node.
     fn lem_rp1_csi2_register() -> c_int;
     fn lem_rp1_csi2_unregister();
@@ -58,33 +59,30 @@ impl kernel::Module for LemnosEntry {
         // SAFETY: THIS_MODULE is `module`, live for the module's life; the claim table is made once here,
         // before any claim can be made.
         unsafe { lem_claims_init(module.as_ptr().cast()) };
-        // SAFETY: the bus is initialised once, here, at module load; its exit is paired below.
-        to_result(unsafe { lem_bus_init() })?;
+        // The bus glue (rs/bus.rs), initialised once, here; its exit is paired below.
+        bus::lem_bus_init(module)?;
         // SAFETY: THIS_MODULE is `module`; the name is the module's, the same string KBUILD_MODNAME gives.
         if let Err(e) = to_result(unsafe {
             __platform_driver_register(driver, module.as_ptr().cast(), c"lemnos".as_ptr().cast())
         }) {
-            // SAFETY: undoes lem_bus_init, which succeeded above.
-            unsafe { lem_bus_exit() };
+            bus::lem_bus_exit();
             return Err(e);
         }
         // SAFETY: registers the csi2 receiver; undone in the error path below and in Drop.
         if let Err(e) = to_result(unsafe { lem_rp1_csi2_register() }) {
-            // SAFETY: undoes the platform driver and the bus, both registered above.
-            unsafe {
-                platform_driver_unregister(driver);
-                lem_bus_exit();
-            }
+            // SAFETY: undoes the platform driver, registered above; then the bus.
+            unsafe { platform_driver_unregister(driver) };
+            bus::lem_bus_exit();
             return Err(e);
         }
         // SAFETY: registers /dev/lemnos from the C descriptor; undone in the error path and in Drop.
         if let Err(e) = to_result(unsafe { misc_register(misc) }) {
-            // SAFETY: undoes the csi2 receiver, the platform driver and the bus, all registered above.
+            // SAFETY: undoes the csi2 receiver and the platform driver, registered above; then the bus.
             unsafe {
                 lem_rp1_csi2_unregister();
                 platform_driver_unregister(driver);
-                lem_bus_exit();
             }
+            bus::lem_bus_exit();
             return Err(e);
         }
         Ok(LemnosEntry)
@@ -100,8 +98,8 @@ impl Drop for LemnosEntry {
             misc_deregister(misc);
             lem_rp1_csi2_unregister();
             platform_driver_unregister(driver);
-            lem_bus_exit();
         }
+        bus::lem_bus_exit();
     }
 }
 

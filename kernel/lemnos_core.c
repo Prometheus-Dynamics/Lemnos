@@ -47,13 +47,6 @@
 #else
 #define LEM_STATIC static
 #endif
-#ifdef LEMNOS_RUST_OWNER
-#define LEM_INIT
-#define LEM_EXIT
-#else
-#define LEM_INIT __init
-#define LEM_EXIT __exit
-#endif
 #include "lemnos_pisp_be.h"
 #include "lemnos_gsdma.h"
 #include "lemnos_regjob_priv.h"
@@ -961,48 +954,3 @@ LEM_STATIC struct platform_driver lem_driver = {
 		.name = LEM_NAME,
 	},
 };
-
-#ifndef LEMNOS_RUST_OWNER
-static int LEM_INIT lem_init(void)
-{
-	int ret = lem_bus_init();
-
-	if (ret)
-		return ret;
-	ret = platform_driver_register(&lem_driver);
-	if (ret)
-		goto bus;
-	ret = lem_rp1_csi2_register();
-	if (ret)
-		goto driver;
-	ret = misc_register(&lem_misc);
-	if (ret)
-		goto csi2;
-	return 0;
-csi2:
-	lem_rp1_csi2_unregister();
-driver:
-	platform_driver_unregister(&lem_driver);
-bus:
-	lem_bus_exit();
-	return ret;
-}
-
-static void LEM_EXIT lem_exit(void)
-{
-	misc_deregister(&lem_misc);
-	lem_rp1_csi2_unregister();
-	platform_driver_unregister(&lem_driver);
-	lem_bus_exit();
-}
-
-#endif
-
-#ifndef LEMNOS_RUST_OWNER
-module_init(lem_init);
-module_exit(lem_exit);
-
-MODULE_DESCRIPTION("Lemnos: platform blocks for drivers in user space");
-MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("DMA_BUF");
-#endif

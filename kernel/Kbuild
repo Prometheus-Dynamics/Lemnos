@@ -11,7 +11,7 @@ obj-m += lemnos.o
 else
 obj-$(CONFIG_LEMNOS) += lemnos.o
 endif
-lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_regjob_k230isp.o lemnos_bus.o lemnos_events.o
+lemnos-y := lemnos_core.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_gsdma.o lemnos_vip.o lemnos_regjob.o lemnos_regjob_a733.o lemnos_regjob_k230isp.o lemnos_events.o
 # With a Rust kernel (CONFIG_RUST, kernel/lemnos_entry.rs), the Rust half owns the module entry and
 # lemnos_core.c keeps its init and exit as lem_core_init and lem_core_exit (LEMNOS_RUST_OWNER). Without
 # one, lemnos_core.c keeps module_init and module_exit, as before.
@@ -23,6 +23,37 @@ endif
 ccflags-y += -DLEMNOS_RUST_OWNER
 # The Rust half is one crate: lemnos_entry.o (its ports and the shared ABI are its modules, kernel/rs/).
 lemnos-y += lemnos_entry.o lemnos_helpers.o
+
+# Bindings for what the kernel crate's own bindings leave out (rs/bindings.h): the SPI core, and the
+# module's uAPI structs, so their layouts come from the headers and are never written by hand. Made the
+# way rust/Makefile makes the kernel's: the same bindgen, with the C flags of this directory (a Rust
+# kernel is built with clang, LLVM=1, so they are clang's as they are). Only the listed items are
+# generated; every type they name otherwise is the kernel crate's (rs/bindings.rs imports it).
+# Types the generated structs name only through pointers, and the kernel crate's bindings lack: opaque.
+lem_bindgen_opaque := spi_statistics spi_device_id spi_controller_mem_ops spi_controller_mem_caps \
+	spi_offload_config spi_offload dma_chan ptp_system_timestamp
+lem_bindgen_items := \
+	--allowlist-type 'spi_(device|controller|transfer|message|driver|delay)' \
+	--allowlist-type 'spi_(device|controller|transfer|message|driver)__bindgen_.*' \
+	--allowlist-function '__spi_register_driver|spi_setup|spi_sync' \
+	--allowlist-type 'lemnos_(i2c_segment|i2c_transfer|i2c_smbus|spi_segment|spi_transfer|spi_info)' \
+	--allowlist-var 'LEMNOS_(BUS_MAX_SEGMENTS|I2C_READ|I2C_TEN_BIT)' \
+	--allowlist-var 'SPI_DELAY_UNIT_USECS' \
+	--with-derive-custom-struct 'lemnos_.*=Copy,Clone' \
+	$(foreach t,$(lem_bindgen_opaque),--allowlist-type '$(t)' --opaque-type '$(t)')
+quiet_cmd_lem_bindgen = BINDGEN $@
+      cmd_lem_bindgen = \
+	$(BINDGEN) $< --rust-target 1.85 --use-core --with-derive-default --ctypes-prefix ffi \
+		--no-layout-tests --no-debug '.*' --no-doc-comments --enable-function-attribute-detection \
+		--no-recursive-allowlist $(lem_bindgen_items) \
+		-o $@ -- $(filter-out $(CC_FLAGS_LTO),$(c_flags)) -fno-builtin -D__BINDGEN__ -DMODULE
+$(obj)/lemnos_bindings_generated.rs: $(src)/rs/bindings.h $(src)/lemnos.h FORCE
+	$(call if_changed_dep,lem_bindgen)
+targets += lemnos_bindings_generated.rs
+clean-files += lemnos_bindings_generated.rs
+$(obj)/lemnos_entry.o: $(obj)/lemnos_bindings_generated.rs
+# rs/bindings.rs includes the generated file by this path: the object directory, in tree or out of it.
+export LEMNOS_BINDINGS := $(abspath $(obj)/lemnos_bindings_generated.rs)
 # The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
 # A built-in lemnos needs RP1_PIO=y as well: a built-in object cannot link to a module's symbols.
 ifneq ($(CONFIG_RP1_PIO),)
