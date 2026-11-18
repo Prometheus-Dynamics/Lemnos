@@ -252,8 +252,7 @@ const PAGE_SIZE: u64 = kernel::page::PAGE_SIZE as u64;
 /// # Safety
 /// `dev` is the bound block's device and `bufs` its count, both live until the count is zero again; `a`
 /// is the request, in kernel memory.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_alloc(
+pub(crate) unsafe fn lem_alloc(
     dev: *mut bindings::device,
     bufs: *const AtomicI32,
     a: *mut lb::lemnos_alloc,
@@ -321,8 +320,7 @@ pub(crate) unsafe extern "C" fn lem_alloc(
 ///
 /// # Safety
 /// `dev` is the device being unbound and `bufs` its block's count.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_bufs_wait(dev: *mut bindings::device, bufs: *const AtomicI32) {
+pub(crate) unsafe fn lem_bufs_wait(dev: *mut bindings::device, bufs: *const AtomicI32) {
     // SAFETY: the caller's count, live until this returns.
     let bufs = unsafe { &*bufs };
     while !DRAINED.wait_timeout(10 * bindings::HZ as c_ulong, || bufs.load(Ordering::Acquire) == 0) {
@@ -362,8 +360,7 @@ unsafe fn import_free(im: *mut Import) {
 ///
 /// # Safety
 /// `imports` is the block's table (an allocating xarray of `Import`), with no request running on it.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_imports_free_all(imports: *mut bindings::xarray) {
+pub(crate) unsafe fn lem_imports_free_all(imports: *mut bindings::xarray) {
     let mut handle: c_ulong = 0;
     // SAFETY: the caller's table (xa_for_each: the first entry).
     let mut im = unsafe { bindings::xa_find(imports, &raw mut handle, c_ulong::MAX, bindings::XA_PRESENT) };
@@ -411,8 +408,7 @@ unsafe fn import_map(dev: *mut bindings::device, fd: c_int) -> Result<Import> {
 ///
 /// # Safety
 /// `dev` is the bound block's device and `imports` its table; `a` is the request, in kernel memory.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_import(
+pub(crate) unsafe fn lem_import(
     dev: *mut bindings::device,
     imports: *mut bindings::xarray,
     a: *mut lb::lemnos_import,
@@ -482,8 +478,7 @@ pub(crate) unsafe extern "C" fn lem_import(
 ///
 /// # Safety
 /// `imports` is the bound block's table.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_release_import(imports: *mut bindings::xarray, handle: u32) -> c_long {
+pub(crate) unsafe fn lem_release_import(imports: *mut bindings::xarray, handle: u32) -> c_long {
     // SAFETY: the caller's table.
     let im = unsafe { bindings::xa_erase(imports, handle as c_ulong) };
     if im.is_null() {
