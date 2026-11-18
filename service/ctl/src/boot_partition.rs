@@ -12,7 +12,9 @@
 //! smallest `--size` (bytes) for the board, and writes nothing; with `--payload DIR` it prints one
 //! line per role, `role stored_bytes bay_bytes`, and exits non-zero naming any role whose payload is
 //! bigger than its bay. `--verify FILE` checks an image, or a dump of a real partition, read-only:
-//! one line per finding, and a non-zero exit when any finding fails.
+//! one line per finding, and a non-zero exit when any finding fails. `--add-to DUMP` adds the board's
+//! files to a dump of a partition another system boots from, and `--undo` takes them out
+//! ([`crate::boot_add`]).
 
 use crate::boot_dir::{self, with_fragment};
 use lemnos_host::board::{BoardFile, BootSpec};
@@ -299,16 +301,28 @@ struct Options {
     out: Option<String>,
     min_size: bool,
     verify: Option<String>,
+    add_to: Option<String>,
+    set: Option<String>,
+    replace_trial: bool,
+    changed_out: Option<String>,
+    undo_out: Option<String>,
+    undo: Option<String>,
+    of: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR [--firmware DIR] --size BYTES --out FILE] | --min-size [--payload DIR [--firmware DIR]] | --verify FILE [--layout-of BOARD [--socs DIR]] [--dtmerge TOOL]";
+    let usage = "usage: lemnos-ctl boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR [--firmware DIR] --size BYTES --out FILE] | --min-size [--payload DIR [--firmware DIR]] | --verify FILE [--layout-of BOARD [--socs DIR]] [--dtmerge TOOL] | --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR [--firmware DIR] [--set N] [--replace-trial] --out FILE --changed-out LIST --undo-out UNDO | --undo UNDO --of FILE --out FILE";
     let mut o = Options::default();
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
         if flag == "--min-size" {
             o.min_size = true;
+            i += 1;
+            continue;
+        }
+        if flag == "--replace-trial" {
+            o.replace_trial = true;
             i += 1;
             continue;
         }
@@ -323,6 +337,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--size" => o.size = Some(value),
             "--out" => o.out = Some(value),
             "--verify" => o.verify = Some(value),
+            "--add-to" => o.add_to = Some(value),
+            "--set" => o.set = Some(value),
+            "--changed-out" => o.changed_out = Some(value),
+            "--undo-out" => o.undo_out = Some(value),
+            "--undo" => o.undo = Some(value),
+            "--of" => o.of = Some(value),
             _ => return Err(usage.to_string()),
         }
         i += 2;
@@ -341,6 +361,25 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     if let Some(file) = &o.verify {
         return verify_file(&o, file, out);
     }
+    if let Some(undo) = &o.undo {
+        let of =
+            o.of.as_deref()
+                .ok_or("--undo needs --of FILE, the dump the files were added to")?;
+        let to = o.out.as_deref().ok_or("--undo needs --out FILE")?;
+        return crate::boot_add::undo(undo, of, to, out);
+    }
+    if o.add_to.is_none()
+        && (o.set.is_some()
+            || o.replace_trial
+            || o.changed_out.is_some()
+            || o.undo_out.is_some()
+            || o.of.is_some())
+    {
+        return Err(
+            "--set, --replace-trial, --changed-out and --undo-out go with --add-to, and --of with --undo"
+                .to_string(),
+        );
+    }
     let board_path = o
         .layout_of
         .as_deref()
@@ -353,6 +392,32 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let parts = board_parts(&board, &generated.boot).map_err(|e| format!("{board_path}: {e}"))?;
     if o.min_size {
         return min_size(&parts, o.payload.as_deref(), o.firmware.as_deref(), out);
+    }
+    if let Some(dump) = &o.add_to {
+        if o.size.is_some() {
+            return Err("--size goes with a new image: --add-to keeps the dump's size".to_string());
+        }
+        return crate::boot_add::add(
+            &parts,
+            &crate::boot_add::Args {
+                dump,
+                slot: o.slot.as_deref().ok_or("--add-to needs --slot ID")?,
+                payload: o.payload.as_deref().ok_or("--add-to needs --payload DIR")?,
+                firmware: o.firmware.as_deref(),
+                set: o.set.as_deref(),
+                replace_trial: o.replace_trial,
+                out: o.out.as_deref().ok_or("--add-to needs --out FILE")?,
+                changed_out: o
+                    .changed_out
+                    .as_deref()
+                    .ok_or("--add-to needs --changed-out LIST")?,
+                undo_out: o
+                    .undo_out
+                    .as_deref()
+                    .ok_or("--add-to needs --undo-out UNDO")?,
+            },
+            out,
+        );
     }
     let slot = o.slot.as_deref().ok_or("--out needs --slot ID")?;
     let payload_dir = o.payload.as_deref().ok_or("--out needs --payload DIR")?;

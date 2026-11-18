@@ -13,6 +13,7 @@ use lemnos_wire::text::{
 };
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
+mod boot_add;
 mod boot_dir;
 #[cfg(test)]
 mod boot_dir_tests;
@@ -61,10 +62,17 @@ lemnos-ctl [--socket PATH] COMMAND
                                  daemon; with a `soc`, also check the live device tree against it
   boot-partition --layout-of BOARD [--socs DIR] [--slot ID --payload DIR --size BYTES --out FILE]
                  | --min-size [--payload DIR] | --verify FILE [--dtmerge TOOL]
+                 | --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR
+                   [--firmware DIR] [--set N] [--replace-trial] --out FILE --changed-out LIST
+                   --undo-out UNDO | --undo UNDO --of FILE --out FILE
                                   write the boot partition image of a board (its payload bays and
                                   the firmware text), print its minimum size, or verify an image
                                   or a dump of a real partition, read-only; --dtmerge TOOL also
                                   applies the declared overlays on this host, not loaded by firmware
+                                  --add-to adds the board's files to a dump of a FAT16 boot
+                                  partition another system boots from (never a device), beside
+                                  that system's files, and writes the changed sector ranges and
+                                  an undo file; --undo puts those ranges back
   bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE
          --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT]
          [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
