@@ -22,17 +22,23 @@
 //!   The integrator's error on a step is about (ω·dt)²/12 of the step: 2% at
 //!   1 rad/s over 0.5 s, and far less over the few milliseconds of a normal
 //!   interval. The bound is where a step is still short enough for that.
-//! - **A gap over 0.5 s** holds the attitude: the read that ends the gap does not
-//!   move it, and nothing is integrated across the gap. The rate over a span that
-//!   long is unknown, and a stall can be seconds, so no rate is extrapolated. The
-//!   reads after it integrate normally, and the sensors pull the attitude back:
-//!   the tilt to the accelerometer, the heading to the magnetometer. The output
-//!   does not jump at the gap, but a turn made during it is lost until then. At
-//!   the default gains a 0.4 rad tilt error falls to 0.004 rad in 3 s, and then
-//!   the integral term (`ki`) overshoots by about 0.015 rad, a tail that is still
-//!   about 0.01 rad at 15 s. In six-axis mode yaw has no reference, so the part of
-//!   a lost turn that is yaw stays lost. A client that reads slower than 2 Hz is
-//!   in this case on every read.
+//! - **A gap over 0.5 s** integrates nothing across it: the gyroscope's rate over
+//!   a span that long is unknown, and a stall can be seconds. The sample re-seeds
+//!   the attitude from the sensors, as the first usable sample does: the tilt from
+//!   gravity, and in 9-axis the heading from the magnetometer when it is fresh and
+//!   usable. In 6-axis the yaw is kept, since nothing measures it, so it is the
+//!   yaw from before the gap. A client that reads slower than 2 Hz gets the best
+//!   direct estimate on every read: a current tilt, and in 9-axis a current
+//!   heading. The attitude changes at the gap read itself, by the difference
+//!   between the old tilt and the one gravity shows. Until the next normal step,
+//!   the health says it was re-seeded.
+//! - **A gap whose accelerometer is unusable** (shaken, or far from 1 g) cannot
+//!   seed the tilt. As the first read does for an unusable sample, that read says
+//!   AGAIN and the attitude is not changed; the next usable sample is still a gap
+//!   and re-seeds. "Usable" is the same test the first read uses (within 0.5 of
+//!   1 g, weighted by its distance from 1 g). A sample near that edge is still
+//!   accepted at full weight for the tilt, so a board shaken only lightly at the
+//!   gap read gets a slightly wrong tilt until the next sample.
 //! - **A failed read** takes no sample. Its time is part of the next step, so an
 //!   outage under 0.5 s is integrated as one step, and a longer one is a gap.
 //! - **No clock.** The clock is a required need. A backend with no host clock
@@ -201,6 +207,16 @@ impl Lifecycle for Orientation {
     }
 
     fn health(&self) -> Health {
+        if self.sampled && self.filter.waiting_for_accel() {
+            return Health::Degraded("waiting for a usable accelerometer sample");
+        }
+        if self.filter.reseeded() {
+            return Health::Degraded(if self.nine_axis {
+                "re-seeded after a gap: tilt and heading from the sensors"
+            } else {
+                "re-seeded after a gap: tilt from gravity, yaw kept"
+            });
+        }
         if !self.nine_axis {
             return Health::Degraded("six-axis: yaw is relative");
         }
@@ -234,15 +250,16 @@ impl OrientationContract for Orientation {
         if let Some(field) = field {
             let field = [field.x * UT_PER_T, field.y * UT_PER_T, field.z * UT_PER_T];
             // The magnetometer goes first, so a heading set on this sample is
-            // used by it.
-            self.filter.update_mag(t, field, true);
+            // used by it. Its dip check takes this sample's gravity and gyro.
+            self.filter.update_mag_with_imu(t, field, true, gyro, accel);
         }
         self.filter.update_imu(t, gyro, accel);
         self.sampled = true;
 
         let out = self.filter.output();
-        if !out.valid {
-            // The first usable accelerometer sample starts the filter.
+        if !out.valid || self.filter.waiting_for_accel() {
+            // The first usable accelerometer sample starts the filter, and a gap's first usable one
+            // re-seeds it; until then there is no tilt to report.
             return Err(Status::AGAIN);
         }
         Ok(Vector3 {
