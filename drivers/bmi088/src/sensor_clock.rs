@@ -10,12 +10,15 @@
 //!   FIFO. The newest sample `m` the length counted was made before the second read, so
 //!   `after - grid * m` is an upper bound on the phase; sample `m + 1` was not yet made at the
 //!   first read (the length, read after it, would have counted it), so `before - grid * (m + 1)`
-//!   is a lower bound. The phase is the middle of the tightest bounds seen. The drains are aimed at
-//!   that middle on the sample grid (`aim`): each lands either just after a sample, and lowers the
-//!   upper bound to about the aim, or just before one, and raises the lower bound to about it, so
-//!   the bounds close by about half each drain, down to the time between the two reads (the length
-//!   read: about 0.1 ms at 400 kHz, under 0.5 ms at 100 kHz). The FIFO's own read, which takes
-//!   milliseconds, is after both.
+//!   is a lower bound. The phase is the middle of the tightest bounds seen. The drains are aimed so
+//!   that the length read falls at that middle on the sample grid (`aim`, and the lead in
+//!   `Die::tick`): a sample made before the length read lowers the upper bound to the second sensor
+//!   read, one made after it raises the lower bound to the first, so the bounds close by about half
+//!   each drain, down to the time between the two sensor reads (the length's transfer and one sensor
+//!   time transfer: about 0.3 ms at 400 kHz, about 1 ms at 100 kHz). The FIFO's own read, which
+//!   takes milliseconds, is after both. The aim must be at the length read: a drain whose length
+//!   read falls a fixed time after the middle finds the sample on the same side every time, and the
+//!   bounds stop at about twice that time (B8, the BOARD-4 run).
 //! - the rate: each second read is paired with the host time at its middle (between two reads of
 //!   the host clock around it). A least-squares line through the pairs maps sensor ticks to host
 //!   time, with exponentially forgetting weights: O(1) state, no stored history, and it follows a
@@ -40,10 +43,12 @@ const WRAP_MASK: u32 = WRAP - 1;
 pub(crate) const MAX_BRACKET_NS: u64 = 1_000_000;
 /// Host-timed batches (ticks that read the sensor time with a clean bracket) before the model
 /// publishes: the rate's fit has at least this many points. At 200 Hz a batch is about 365 ms, so
-/// this is about 6 s.
+/// this is about 6 s when every bracket is clean. A drain whose bracket is too wide is not counted,
+/// so each one adds a drain period. The model publishes once this and `PHASE_WIDTH_NS` both hold.
 pub(crate) const BATCHES: u32 = 16;
 /// The widest the phase's bounds may be for the model to publish: 1 ms, so the phase taken from
-/// their middle is within 0.5 ms. The aimed drains close them to this well inside `BATCHES`.
+/// their middle is within 0.5 ms. The aimed drains close them to this well inside `BATCHES` when
+/// the drain's two sensor time reads are under 1 ms apart; on a slower bus they never do.
 pub(crate) const PHASE_WIDTH_NS: f64 = 1_000_000.0;
 /// Each read's weight is `1 / FORGET_BATCHES`: the fit remembers about this many reads, about
 /// 23 s at 200 Hz, short enough to follow the oscillator as it drifts with temperature.
@@ -261,8 +266,9 @@ impl SensorClock {
         self.fit.slope().unwrap_or(TICK_NS)
     }
 
-    /// When to start the next drain: the first host time at or after `earliest` at which the sensor
-    /// time is at the phase's middle on the sample grid, so the drain splits the phase's bounds.
+    /// The first host time at or after `earliest` at which the sensor time is at the phase's middle
+    /// on the sample grid. A drain whose FIFO length read falls there splits the phase's bounds, so
+    /// the caller gives `earliest` plus its lead and starts the drain the lead before the answer.
     /// `None` until the model has both bounds and a host-timed read to map them with.
     pub(crate) fn aim(&self, earliest: u64) -> Option<u64> {
         let phase = self.phase()?;

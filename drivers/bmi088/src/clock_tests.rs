@@ -46,6 +46,17 @@ pub(crate) const SCALE: f64 = 6.0 * 9.806_65 / 32_768.0;
 /// that and its second sensor time read: one short transfer each.
 pub(crate) const LEAD_NS: u64 = 150_000;
 pub(crate) const LATENCY_NS: u64 = 150_000;
+
+/// When a drain's three reads fall after its tick starts: the first sensor time read `first_ns`
+/// after the tick, the FIFO's length `lead_ns` after that, and the second sensor time read
+/// `latency_ns` after the length. The default is the first read at the tick and one short transfer
+/// between each (`LEAD_NS`, `LATENCY_NS`); a slower bus has all three later.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BusTimes {
+    pub(crate) first_ns: u64,
+    pub(crate) lead_ns: u64,
+    pub(crate) latency_ns: u64,
+}
 /// Where the harness starts, on the chip's own clock. The first batch is one batch later.
 pub(crate) const START_NS: u64 = 100_000_000;
 
@@ -283,6 +294,8 @@ pub(crate) struct Harness {
     pub(crate) batch: u64,
     /// Health after the last tick, before its read: the note a batch raised.
     pub(crate) note: Option<&'static str>,
+    /// When each drain's reads fall after its tick.
+    pub(crate) bus: BusTimes,
 }
 
 impl Harness {
@@ -351,6 +364,11 @@ impl Harness {
             accel_due_ns: START_NS + BATCH_NS,
             batch: 0,
             note: None,
+            bus: BusTimes {
+                first_ns: 0,
+                lead_ns: LEAD_NS,
+                latency_ns: LATENCY_NS,
+            },
         }
     }
 
@@ -378,9 +396,10 @@ impl Harness {
         // tick's drain reads the FIFO's length a short transfer later: the chip has made every
         // sample up to that time.
         let tick = self.accel_due_ns.max(self.t_ns + 1) + plan.tick_jitter_ns.unsigned_abs();
-        let drain = tick + LEAD_NS;
+        let first = tick + self.bus.first_ns;
+        let drain = first + self.bus.lead_ns;
         self.t_ns = drain;
-        let read = drain + LATENCY_NS;
+        let read = drain + self.bus.latency_ns;
         let produced = (self.chip.osc.ticks(drain as f64 * 1e-9) / GRID).floor() as u64;
         let mut fifo = Vec::new();
         match plan.fault {
@@ -412,7 +431,7 @@ impl Harness {
         }
         // The drain reads the sensor time just before the FIFO's length (which counts what the
         // chip made by `drain`), then again just after it, between two host clock readings.
-        self.chip.drain_ns.store(tick, Ordering::SeqCst);
+        self.chip.drain_ns.store(first, Ordering::SeqCst);
         self.chip.reads.store(0, Ordering::SeqCst);
         self.chip.at_ns.store(read, Ordering::SeqCst);
         self.chip.pre.store(plan.pre_ns, Ordering::SeqCst);
@@ -1989,4 +2008,57 @@ fn a_plain_reader_gets_monotonic_plausible_stamps_in_every_mode_gyroscope() {
         "no tick-time batch after the late drain re-anchored the clock"
     );
     assert!(batch_is(199, false), "the last batch is not from the model");
+}
+
+/// A host that ticks to within 20 us of when a drain is due, and a clean bracket 160 us wide.
+fn quiet_plan(jitter: &mut Jitter) -> Plan {
+    Plan {
+        tick_jitter_ns: jitter.next(20_000),
+        pre_ns: jitter.next(20_000) - 80_000,
+        post_ns: jitter.next(20_000) + 80_000,
+        report_early_ns: 0,
+        fault: None,
+    }
+}
+
+/// The batch at which the accelerometer's stamps switch to the model, on a chip 0.75 % fast (the
+/// board's die, BOARD-4) plus `k` steps of rate (so each `k` is another phase of the sample grid
+/// against the drains), a quiet host, and the bus's times. `None`: not in 150 batches (55 s).
+fn switch_batch(k: u64, bus: BusTimes) -> Option<u64> {
+    let osc = Oscillator {
+        eps: 0.0075 + k as f64 * 1.37e-4,
+        drift: 0.0,
+    };
+    let mut h = Harness::new(osc, 200);
+    h.bus = bus;
+    let mut jitter = Jitter::new(0x2468_ace0 + k);
+    (0..150).find(|_| h.step(quiet_plan(&mut jitter)).iter().any(|d| !d.tick))
+}
+
+/// The accelerometer's model publishes on time whatever the bus's speed, on a host that ticks on
+/// time. Each drain's reads are 0.15 ms to 0.3 ms apart, the first that long after the tick: at
+/// 0.2 ms and over, the FIFO's length is read 0.4 ms or more after the tick. Every phase of the
+/// sample grid against the drains converges by batch 16.
+///
+/// Fails on the driver before this change, which aimed the tick's time at the middle of the phase's
+/// bounds: the length read then fell the same 0.4 ms or more after the middle on every drain, the
+/// drains stopped splitting the bounds once they were about twice that wide, and the model did not
+/// publish in 150 batches for most phases (the BOARD-4 run on the board's bus published at batch 44,
+/// with every bracket taken, where the simulated chip's 0.15 ms gave 14).
+#[test]
+fn the_accelerometers_model_publishes_on_time_on_a_slower_bus_with_a_quiet_host() {
+    for spacing in [150_000, 200_000, 250_000, 300_000] {
+        let bus = BusTimes {
+            first_ns: spacing,
+            lead_ns: spacing,
+            latency_ns: spacing,
+        };
+        for k in 0..24 {
+            let switch = switch_batch(k, bus);
+            assert!(
+                switch.is_some_and(|b| b <= 16),
+                "reads {spacing} ns apart, phase {k}: the model published at {switch:?}, not by batch 16"
+            );
+        }
+    }
 }

@@ -58,8 +58,14 @@
 //!   both (`sensor_clock.rs`). The two reads bound the phase of the sample grid from both sides, and
 //!   the next drain is aimed at the middle of the bounds. A least-squares line from sensor ticks to
 //!   host time, through the second reads, maps a sample to host time, and it forgets old reads with
-//!   exponential weights (O(1) state). The model converges after 16 host-timed batches (about 6 s at
-//!   200 Hz) with the phase's bounds within 1 ms.
+//!   exponential weights (O(1) state). The model publishes at the first drain at which two things
+//!   hold: 16 host-timed batches have been taken (a drain whose bracket is too wide is not one), and
+//!   the phase's bounds are within 1 ms. With every bracket taken that is the 16th drain, about 6 s
+//!   at 200 Hz; each drain without a host time adds one drain period (365 ms) to it. The bounds
+//!   close to the time between the drain's two sensor time reads (two transfers: about 0.3 ms at
+//!   400 kHz), so on a bus where that is over 1 ms the model does not publish and the stamps stay
+//!   tick time. The drain is due early by the lead its last host-timed drain measured, so that the
+//!   FIFO's length read, which is what splits the bounds, falls at their middle (see `Die::tick`).
 //! - The gyroscope has no sensor time, so its clock is its own FIFO's fill, read between two host
 //!   clock readings (`gyro_clock.rs`). The count is exact, and the phase is bounded by the two
 //!   readings, as the accelerometer's is. The model converges after 64 reads (about 16 s at 200 Hz)
@@ -83,7 +89,9 @@
 //! plausible times in every mode. The mode of each record is carried beside it, by
 //! `read_batch_stamped` (method 3 of each contract, an addition): one byte before each record, 1 for
 //! tick time and 0 for the model. `read_batch` takes the same samples with the same bytes as before the
-//! addition, so a consumer built before it is unchanged. Health says a die is in tick time while it is.
+//! addition, so a consumer built before it is unchanged. Health does not name tick time: a die in tick
+//! time with nothing else wrong is `Ok`, and the mode byte is where a reader sees it. Health names a
+//! re-anchor (see Re-anchor) for one call.
 //!
 //! Measured on the same chip. Under 9 ms of error on both readings of a bracket, equal on each reading
 //! (which no bracket shows), the gyroscope's stamps were 14.9 ms off and 24.6 ms apart at worst over
@@ -297,6 +305,9 @@ struct Die<const RING: usize> {
     spread: u32,
     /// The gyroscope's offset of its last drain, in ns, which the next drain takes back (see `tick`).
     spread_applied: u64,
+    /// The accelerometer's lead: how long after a tick's time its drain read the FIFO's length, ns,
+    /// as the last host-timed drain measured it (see `tick`). Zero until one has.
+    lead_ns: u64,
     /// A loss a drain or batch found, not yet shown to a read.
     pending: Option<Note>,
     /// The loss a read shows in health.
@@ -331,6 +342,7 @@ impl<const RING: usize> Die<RING> {
             due: None,
             spread: 0,
             spread_applied: 0,
+            lead_ns: 0,
             pending: None,
             shown: None,
             up_due: None,
@@ -483,7 +495,19 @@ impl<const RING: usize> Die<RING> {
                     let event = self.clock.before(raw);
                     self.note_event(event);
                     counted = Some(chip::accel_fifo_bytes(bus, self.address)?);
-                    sensed = Some(sense(bus, self.address, clock)?);
+                    let (raw, host) = sense(bus, self.address, clock)?;
+                    if let (Some((middle, width)), Some(now)) = (host, now) {
+                        // The length was read one transfer before the second sensor time read, and
+                        // the bracket's width is one transfer: the lead is the rest of the way back
+                        // to the tick's time. Bounded by a drain period, so a tick the host held up
+                        // cannot push the next drain's aim out of reach.
+                        let half_depth = RING as u64 * self.setting.period_ns / 2;
+                        self.lead_ns = middle
+                            .saturating_sub(now)
+                            .saturating_sub(width)
+                            .min(half_depth);
+                    }
+                    sensed = Some((raw, host.map(|(middle, _)| middle)));
                 }
                 Kind::Gyro => {
                     // The FIFO's fill is read between two host clock readings (see `gyro_clock.rs`).
@@ -709,9 +733,17 @@ impl<const RING: usize> Die<RING> {
             let spread = self.spread();
             let next = match self.kind {
                 // Aimed at the sample clock's phase once it has one, so the drain splits its bounds.
+                // What splits them is the FIFO's length read: a sample made before it raises the
+                // count and lowers the upper bound, one made after it raises the lower bound. So the
+                // length read is what is put at the middle of the bounds, and the drain is due the
+                // lead earlier. Aiming the tick itself there puts the length read a fixed time after
+                // the middle, every drain on the same side of the sample, and on a bus where that
+                // time is over a quarter of the phase's budget the bounds stop above the budget and
+                // the model never publishes (B8, the BOARD-4 run: batch 44, not 14).
                 Kind::Accel => self
                     .clock
-                    .aim(earliest)
+                    .aim(earliest.saturating_add(self.lead_ns))
+                    .map(|at| at.saturating_sub(self.lead_ns))
                     .unwrap_or(earliest.saturating_add(spread)),
                 // Not aimed: the fill's bounds close on the spread of the drains' fractions.
                 // The offset is not carried into the next drain: each drain's offset replaces the
@@ -799,14 +831,18 @@ fn gyro_fill(
 }
 
 /// The accelerometer's sensor time, and the host time of the read: the middle of the two host clock
-/// readings around it. A bracket wider than `MAX_BRACKET_NS` (the host was preempted inside the
-/// read) gives no host time.
-fn sense(bus: &mut I2c, address: u8, clock: &dyn HostClock) -> chip::Step<(u32, Option<u64>)> {
+/// readings around it, and how far apart they were. A bracket wider than `MAX_BRACKET_NS` (the host
+/// was preempted inside the read) gives no host time.
+fn sense(
+    bus: &mut I2c,
+    address: u8,
+    clock: &dyn HostClock,
+) -> chip::Step<(u32, Option<(u64, u64)>)> {
     let before = clock.now_ns();
     let raw = chip::accel_sensortime(bus, address)?;
     let after = clock.now_ns();
     let host = (after >= before && after - before <= MAX_BRACKET_NS)
-        .then(|| before + (after - before) / 2);
+        .then(|| (before + (after - before) / 2, after - before));
     Ok((raw, host))
 }
 
