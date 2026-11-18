@@ -555,6 +555,17 @@ fn refusal_marker(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.refuse", path.display()))
 }
 
+/// The marker file that makes the fan's drop refuse too while it is there: `<file>.refuse-drop`. With it, the
+/// drop's full-duty write is refused as the controller's writes are, which is what the board does.
+fn drop_refusal_marker(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.refuse-drop", path.display()))
+}
+
+/// The marker file that makes the fan's reads fail while it is there: `<file>.unreadable`.
+fn unreadable_marker(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.unreadable", path.display()))
+}
+
 fn recorded_baseline(path: &Path) -> Option<u16> {
     let records = BASELINES
         .lock()
@@ -590,9 +601,14 @@ fn forget_baseline(path: &Path) {
 /// goes to full duty, as hwmon does. A write is refused with `IO`, as hwmon's write is when the kernel says no. The
 /// host counts five `IO`s in a row as a device gone and binds the fan out: its drop leaves full duty on the fan,
 /// and a bind takes the fan again. `fail = true` refuses every write; a file named `<file>.refuse` makes the fan
-/// refuse its writes while it is there (the drop and the bind still write), so a test can refuse and then let the
-/// writes work again. The first write takes the fan over and records its baseline, per file, so a bind after a
-/// drop keeps the first baseline. For the B14 fan-control rehearsal (`testing/fan-control`) and its daemon tests.
+/// refuse its writes while it is there (its drop still lands, unless `<file>.refuse-drop` is there too). A refused write
+/// refuses the release and the hand-back as well, and the bind, so a test can refuse and then let the writes work
+/// again. `<file>.refuse-drop` makes the drop's full-duty write refused as well, as hwmon's is when the kernel refuses
+/// the writes: the duty then stays where it was. `<file>.unreadable` makes the duty read fail with `IO` while it is
+/// there, which is a fan whose attribute will not read. A read is never refused by `fail` or `<file>.refuse`: a
+/// refused fan still reads its duty, as hwmon does. The first write takes the fan over and records its baseline,
+/// per file, so a bind after a drop keeps the first baseline. For the B14 fan-control rehearsal
+/// (`testing/fan-control`) and its daemon tests.
 #[driver("fake-fan", provides = [Fan])]
 pub struct FakeFan {
     duty: u16,
@@ -637,6 +653,16 @@ impl FakeFan {
                 .file
                 .as_ref()
                 .is_some_and(|path| refusal_marker(path).exists())
+    }
+
+    /// Whether the drop's full-duty write is refused: when the fan refuses everything (`fail`), or while
+    /// `<file>.refuse-drop` is there.
+    fn refusing_drop(&self) -> bool {
+        self.fail
+            || self
+                .file
+                .as_ref()
+                .is_some_and(|path| drop_refusal_marker(path).exists())
     }
 }
 
@@ -743,6 +769,13 @@ impl Fan for FakeFan {
     }
 
     fn duty(&mut self) -> Result<u16> {
+        if self
+            .file
+            .as_ref()
+            .is_some_and(|path| unreadable_marker(path).exists())
+        {
+            return Err(Status::IO);
+        }
         Ok(self.duty)
     }
 
@@ -782,9 +815,9 @@ impl Fan for FakeFan {
 
 impl Drop for FakeFan {
     fn drop(&mut self) {
-        // As hwmon-fan: a fan a driver took and let go of is left at full duty. Nothing can report
-        // an error from here.
-        if self.baseline.is_some() {
+        // As hwmon-fan: a fan a driver took and let go of is left at full duty, if the write goes through. A
+        // refused write leaves the duty where it was, and nothing can report an error from here.
+        if self.baseline.is_some() && !self.refusing_drop() {
             let _ = self.put(FAN_MAX);
         }
     }

@@ -26,12 +26,24 @@ const NS_PER_MS: u64 = 1_000_000;
 
 /// The health reason while an input is missing or stale.
 pub const DEGRADED: &str = "a temperature input is missing or stale: the fan is at full duty";
-/// The health reason after a failed fan write.
+/// The health reason after a failed fan write, before its duty has been read back, and the retry reason
+/// while writes are refused.
 pub const WRITE_FAILED: &str = "the fan write failed: released to full duty, retrying";
-/// The health reason while the host has bound the fan out (after refused writes): the fan is at its failure
-/// safe state (full duty, which the drop leaves), and the controller retries until the fan is bound again.
+/// The fan refuses its writes and reads full duty back: the safe state is applied.
+pub const REFUSED_SAFE: &str = "the fan refuses its writes; the safe state (full duty) is applied, and the duty item reads it back; retrying";
+/// The fan refuses its writes and reads back below full duty: the safe state could not be applied.
+pub const REFUSED: &str = "the fan refuses its writes and the safe state could not be applied: the duty item is the fan's read-back; retrying";
+/// The fan refuses its writes and its reads fail too: its duty is unknown.
+pub const REFUSED_UNKNOWN: &str = "the fan refuses its writes, the safe state could not be applied, and its duty is unknown (its reads fail too); retrying";
+/// The host has bound the fan out. The host answers every call to it, reads included, until it is bound again,
+/// so its duty is unknown meanwhile.
 pub const BOUND_OUT: &str =
-    "the fan is bound out by the host: full duty, retrying until it is bound again";
+    "the fan is bound out by the host: its duty is unknown until it is bound again; retrying";
+/// The fan is bound again and reads full duty: the host's drop applied the safe state. Control resumes at the next step.
+pub const REBOUND_SAFE: &str = "the fan is bound again and reads full duty: the host's drop applied the safe state; control resumes at the next step";
+/// The fan is bound again at a duty below full. Control resumes at the next step.
+pub const REBOUND: &str =
+    "the fan is bound again and reads back its duty; control resumes at the next step";
 
 /// One input's curve: 1 to [`MAX_POINTS`] points, values strictly ascending, duties 0 to 1000.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +149,15 @@ struct Input {
     peak: Option<i32>,
 }
 
+/// What the fan's duty is known to be while its writes fail. `Unread`: the failure has not been read back yet.
+/// `Duty`: the duty the fan reads back. `Unknown`: its reads fail too, or the host has it bound out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readback {
+    Unread,
+    Duty(i32),
+    Unknown,
+}
+
 /// A timed hold: the duty it asks for, and when it ends (ns).
 #[derive(Debug, Clone, Copy)]
 struct Hold {
@@ -178,6 +199,10 @@ pub struct Control {
     /// When the fan is due to be released (ns). Set when the controller is disabled, and
     /// kept until the release works.
     release_at_ns: Option<u64>,
+    /// What the fan reads back while a write fails (see [`Readback`]).
+    readback: Readback,
+    /// The fan was bound out and is bound again, and its duty was read back on the way.
+    rebound: bool,
 }
 
 fn hold_peak(peak: &mut Option<i32>, value: i32, hysteresis: i32) -> i32 {
@@ -228,6 +253,8 @@ impl Control {
             fault: false,
             bound_out: false,
             release_at_ns: None,
+            readback: Readback::Unread,
+            rebound: false,
         })
     }
 
@@ -268,14 +295,28 @@ impl Control {
         Ok(())
     }
 
-    pub fn state(&self) -> State {
-        State {
+    /// The duty the fan is known to be at, for the duty item and for `state`: the duty the controller
+    /// commanded while its writes work, and the duty the fan reads back while they are refused. `None` when
+    /// that is unknown (the reads fail, or the host has the fan bound out).
+    pub fn duty_known(&self) -> Option<i32> {
+        if !self.fault {
+            return Some(self.duty);
+        }
+        match self.readback {
+            Readback::Duty(duty) => Some(duty),
+            Readback::Unread | Readback::Unknown => None,
+        }
+    }
+
+    /// The state, or `None` while the fan's duty is unknown (see [`Control::duty_known`]).
+    pub fn state(&self) -> Option<State> {
+        Some(State {
             demand: self.demand,
-            duty: self.duty,
+            duty: self.duty_known()?,
             degraded: self.degraded,
             source: self.source,
             held: self.hold.is_some(),
-        }
+        })
     }
 
     /// Asks for `duty` for `ms`. It starts at the next tick. Refused while disabled.
@@ -315,6 +356,8 @@ impl Control {
         self.fault = false;
         self.attempts = 0;
         self.retry_at_ns = None;
+        self.readback = Readback::Unread;
+        self.rebound = false;
         if enabled {
             self.release_at_ns = None;
             self.next_step_ns = 0;
@@ -441,11 +484,13 @@ impl Control {
     /// Spin-up kick, then the slew limit on the way down. A hold's duty is taken at once.
     fn next_duty(&mut self, now_ms: u64, dt_ms: u64, target: i32, immediate: bool) -> i32 {
         let s = self.settings;
-        if s.floor == 0
-            && self.duty == 0
-            && target > 0
-            && s.kick_ms > 0
-            && self.kick_until_ms.is_none()
+        // The duty the fan is at: the duty it reads back while its writes are refused (the commanded one is not
+        // what it is at then), and the commanded one otherwise.
+        let from = match (self.fault, self.readback) {
+            (true, Readback::Duty(duty)) => duty,
+            _ => self.duty,
+        };
+        if s.floor == 0 && from == 0 && target > 0 && s.kick_ms > 0 && self.kick_until_ms.is_none()
         {
             self.kick_until_ms = Some(now_ms.saturating_add(u64::from(s.kick_ms)));
         }
@@ -453,12 +498,12 @@ impl Control {
             return FULL;
         }
         self.kick_until_ms = None;
-        if immediate || target >= self.duty {
+        if immediate || target >= from {
             return target;
         }
         let dt = i64::try_from(dt_ms).unwrap_or(i64::MAX);
         let allowed = i64::from(s.slew_per_s.max(0)).saturating_mul(dt) / 1000;
-        let lowest = i64::from(self.duty) - allowed;
+        let lowest = i64::from(from) - allowed;
         i64::from(target).max(lowest) as i32
     }
 
@@ -467,6 +512,8 @@ impl Control {
         self.fault = false;
         self.bound_out = false;
         self.attempts = 0;
+        self.readback = Readback::Unread;
+        self.rebound = false;
     }
 
     /// The fan write failed. The fan is asked for its safe state (full duty: the driver releases
@@ -479,8 +526,41 @@ impl Control {
         let wait = (RETRY_FIRST_NS << shift).min(RETRY_CAP_NS);
         self.retry_at_ns = Some(now_ns.saturating_add(wait));
         self.fault = true;
-        self.duty = FULL;
+        self.rebound = false;
+        // Bound out, the host answers the duty read too, so nothing is known of the fan until it is bound again.
+        if bound_out {
+            self.readback = Readback::Unknown;
+        }
         self.kick_until_ms = None;
+    }
+
+    /// Whether the driver should read the fan's duty back now: the first failed write of a run of them, while
+    /// the fan is bound in. Read once per run, not per retry: a read that works resets the host's count of
+    /// failures in a row, and the host binds the fan out after five.
+    pub fn wants_readback(&self) -> bool {
+        self.fault && !self.bound_out && self.readback == Readback::Unread
+    }
+
+    /// The fan's duty, read back after a failed write. `None` when the read failed.
+    pub fn read_back(&mut self, duty: Option<i32>) {
+        self.readback = duty.map_or(Readback::Unknown, Readback::Duty);
+        if let Some(duty) = duty {
+            self.duty = duty;
+        }
+    }
+
+    /// Whether the host has the fan bound out: its last write answered `NO_DEVICE`.
+    pub fn is_bound_out(&self) -> bool {
+        self.bound_out
+    }
+
+    /// The fan is bound again, and its duty read back as `duty`. Writes resume at the next step.
+    pub fn rebound(&mut self, duty: i32) {
+        self.bound_out = false;
+        self.readback = Readback::Duty(duty);
+        self.duty = duty;
+        self.rebound = true;
+        self.retry_at_ns = None;
     }
 
     /// While writes are refused: the failed attempts in a row, and when the next attempt is due
@@ -508,8 +588,19 @@ impl Control {
             Health::Ok
         } else if self.fault && self.bound_out {
             Health::Degraded(BOUND_OUT)
+        } else if self.fault && self.rebound {
+            Health::Degraded(if self.duty == FULL {
+                REBOUND_SAFE
+            } else {
+                REBOUND
+            })
         } else if self.fault {
-            Health::Degraded(WRITE_FAILED)
+            Health::Degraded(match self.readback {
+                Readback::Duty(FULL) => REFUSED_SAFE,
+                Readback::Duty(_) => REFUSED,
+                Readback::Unknown => REFUSED_UNKNOWN,
+                Readback::Unread => WRITE_FAILED,
+            })
         } else if self.degraded {
             Health::Degraded(DEGRADED)
         } else {

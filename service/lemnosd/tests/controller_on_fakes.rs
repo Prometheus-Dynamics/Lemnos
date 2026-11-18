@@ -257,12 +257,17 @@ fn wait_up_to(secs: u64, what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// The state the controller reports, or `None` when its duty is unknown (the state read fails).
+fn state_duty(control: &mut dyn FanControl) -> Option<i32> {
+    control.state().ok().map(|state| state.duty)
+}
+
 #[test]
-fn a_fan_refusing_writes_is_bound_out_at_full_duty_and_control_resumes_when_it_is_bound_again() {
-    // The fan refuses writes for a while. The host binds it out after five refusals in a row (its rule for a
-    // device that stops answering), and the drop leaves full duty on the fan. The controller reports that and
-    // retries until the fan is bound again. When writes work the fan is bound and control resumes; a stop then
-    // hands the fan back to the baseline it had before the controller took it.
+fn case_1_writes_refused_and_the_drop_lands_the_duty_is_read_back_then_unknown_then_read_again_on_rebind()
+ {
+    // The fan refuses its writes and its release, so the fan stays at 450 and the duty reads back 450. The host
+    // binds it out after five refusals; the drop (the fake's default: its drop lands) puts it at full duty. While it is
+    // out nothing can be read, so the duty is unknown. Bound again, it is at full duty, and control resumes.
     let dir = scratch("boundout");
     let zone = dir.join("zone");
     set_temp(&zone, 45_000);
@@ -279,17 +284,30 @@ fn a_fan_refusing_writes_is_bound_out_at_full_duty_and_control_resumes_when_it_i
     wait_for("45 C at 450", || control.state().unwrap().duty == 450);
 
     fs::write(&refusal, "").unwrap();
+    wait_up_to(20, "the refused writes degrade the controller", || {
+        health_of(&client, "fan-control") == DeviceHealth::Degraded
+    });
+    assert_eq!(
+        state_duty(&mut control),
+        Some(450),
+        "the refused writes are read back: the fan is at 450"
+    );
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        "450",
+        "the fan has not moved"
+    );
+
     wait_up_to(45, "the host binds the fan out", || {
         health_of(&client, "fan") == DeviceHealth::Failed
     });
-    // The fan's drop leaves full duty on it (the file is writable here), and the controller reports full duty.
-    wait_up_to(5, "the drop leaves full duty on the fan", || {
+    wait_up_to(5, "the drop lands: the fan is at full duty", || {
         fs::read_to_string(&fan_file).unwrap().trim() == "1000"
     });
     assert_eq!(
-        control.state().unwrap().duty,
-        1000,
-        "while the fan is out the duty reported is the failure safe state, never zero"
+        state_duty(&mut control),
+        None,
+        "bound out: the duty cannot be read, so it is unknown, never a number"
     );
 
     fs::remove_file(&refusal).unwrap();
@@ -297,15 +315,141 @@ fn a_fan_refusing_writes_is_bound_out_at_full_duty_and_control_resumes_when_it_i
         health_of(&client, "fan") == DeviceHealth::Ok
     });
     wait_up_to(20, "control resumes on the curve", || {
-        control.state().unwrap().duty == 450
+        state_duty(&mut control) == Some(450)
+            && health_of(&client, "fan-control") == DeviceHealth::Ok
     });
-    assert_eq!(health_of(&client, "fan-control"), DeviceHealth::Ok);
 
     running.service.take().unwrap().stop();
     assert_eq!(
         fs::read_to_string(&fan_file).unwrap().trim(),
         BASELINE.to_string(),
         "a stop after the fan was bound out and bound again hands it back to its baseline"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn case_2_writes_refused_and_the_drop_refused_too_the_duty_is_the_last_duty_and_control_resumes_on_rebind()
+ {
+    // The fan refuses its writes, its release and its drop: it stays at 600 all through, and the duty reads back 600.
+    // Bound out, the duty is unknown. Bound again, it reads 600 and control resumes.
+    let dir = scratch("refuse-drop");
+    let zone = dir.join("zone");
+    set_temp(&zone, 60_000);
+    let fan_file = dir.join("fan");
+    let refusal = dir.join("fan.refuse");
+    let drop_refusal = dir.join("fan.refuse-drop");
+    let mut running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("60 C at 600", || control.state().unwrap().duty == 600);
+
+    fs::write(&refusal, "").unwrap();
+    fs::write(&drop_refusal, "").unwrap();
+    wait_up_to(20, "the refused writes degrade the controller", || {
+        health_of(&client, "fan-control") == DeviceHealth::Degraded
+    });
+    assert_eq!(
+        state_duty(&mut control),
+        Some(600),
+        "the refused writes are read back: the fan is at 600"
+    );
+
+    wait_up_to(45, "the host binds the fan out", || {
+        health_of(&client, "fan") == DeviceHealth::Failed
+    });
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        "600",
+        "the drop was refused: the fan stays at 600"
+    );
+    assert_eq!(state_duty(&mut control), None, "bound out: unknown");
+
+    fs::remove_file(&refusal).unwrap();
+    fs::remove_file(&drop_refusal).unwrap();
+    wait_up_to(60, "the fan is bound again", || {
+        health_of(&client, "fan") == DeviceHealth::Ok
+    });
+    wait_up_to(20, "control resumes on the curve", || {
+        state_duty(&mut control) == Some(600)
+            && health_of(&client, "fan-control") == DeviceHealth::Ok
+    });
+
+    running.service.take().unwrap().stop();
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        BASELINE.to_string(),
+        "a stop hands the fan back to its baseline"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn case_3_writes_and_reads_both_fail_the_duty_is_absent_and_control_resumes_when_bound_again() {
+    // The fan refuses its writes, its release and its drop, and its reads fail too. The duty is unknown from the first
+    // failure, and stays unknown when the host binds the fan out. Bound again, the reads still fail: the controller's
+    // write takes, and control resumes.
+    let dir = scratch("unreadable");
+    let zone = dir.join("zone");
+    set_temp(&zone, 45_000);
+    let fan_file = dir.join("fan");
+    let refusal = dir.join("fan.refuse");
+    let drop_refusal = dir.join("fan.refuse-drop");
+    let unreadable = dir.join("fan.unreadable");
+    let mut running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+
+    fs::write(&refusal, "").unwrap();
+    fs::write(&drop_refusal, "").unwrap();
+    fs::write(&unreadable, "").unwrap();
+    wait_up_to(
+        20,
+        "the refused writes degrade the controller, and the duty is unknown",
+        || {
+            health_of(&client, "fan-control") == DeviceHealth::Degraded
+                && state_duty(&mut control).is_none()
+        },
+    );
+
+    wait_up_to(45, "the host binds the fan out", || {
+        health_of(&client, "fan") == DeviceHealth::Failed
+    });
+    assert_eq!(state_duty(&mut control), None, "bound out: unknown");
+
+    fs::remove_file(&refusal).unwrap();
+    fs::remove_file(&drop_refusal).unwrap();
+    wait_up_to(60, "the fan is bound again", || {
+        health_of(&client, "fan") == DeviceHealth::Ok
+    });
+    wait_up_to(
+        20,
+        "the controller's write takes, and control is back",
+        || health_of(&client, "fan-control") == DeviceHealth::Ok,
+    );
+    assert_eq!(
+        state_duty(&mut control),
+        Some(450),
+        "the duty the controller wrote: the reads still fail, so it is the written one"
+    );
+
+    fs::remove_file(&unreadable).unwrap();
+    running.service.take().unwrap().stop();
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        BASELINE.to_string(),
+        "a stop hands the fan back to its baseline"
     );
     let _ = fs::remove_dir_all(&dir);
 }

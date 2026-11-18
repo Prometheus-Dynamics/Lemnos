@@ -23,10 +23,10 @@
 #       The three --baseline options are the fan's pwm1, pwm1_enable and its cooling device's cur_state,
 #       recorded by the run before any write (B14 step 1). Build on NVMe or SSD, not the HDD.
 #
-# Check 11 (write failure, the bind-out and the retry schedule) runs on the sim only: a marker file
-# (`<fan>.refuse`) makes the fake fan refuse the controller's writes, the host binds the fan out after five
-# refusals, and the controller's health row names its attempts. On the board, check 11 is the hand step of
-# B14.md, and this script says so.
+# Check 11 (write failure, the bind-out, the read-back and the retry schedule) runs on the sim only: a marker file
+# (`<fan>.refuse`) makes the fake fan refuse the controller's writes, `<fan>.refuse-drop` refuses its drop too (as the
+# board's fan does), the host binds the fan out after five refusals, and the controller's health row names its attempts.
+# On the board, check 11 is the refusal step of B14.md, and this script says so.
 #
 # The heat latency (check 3) is bounded by the controller's own step period, which is the period at which
 # it reads its zone and steps its duty (drivers/fan-control/src/law.rs, PERIOD_NS = 1 s), plus the script's own
@@ -428,34 +428,47 @@ no_zero_while_refused() { ! awk -F'\t' '$2 == "11 fault" && $3 == 0 { found = 1 
 # check 11: the fan's writes are refused for a while, and the retries are timed. The controller waits 1, 2, 4
 # and 8 s between attempts and then stays at 8 s (law.rs, RETRY_FIRST_NS and RETRY_CAP_NS); each wait ends at the
 # first controller step after it, so an interval is the wait or the wait plus up to one step.
+#
+# The refusal is the board's: the fan refuses the controller's writes, its release and its drop (`<fan>.refuse` and
+# `<fan>.refuse-drop`), so the fan stays where it was. While the fan is in, the duty the controller reports is the
+# fan's own read-back, and it must equal pwm1 (the fake's file): the two are compared at each sample. Five refusals
+# bind the fan out, and while it is out the duty is unknown, so the controller's state read fails and the duty item
+# is absent. Once the markers are gone the fan is bound again and control resumes.
 check11() {
   if [ "$mode" != sim ]; then
-    say "b14: $ZL 11 write failure: not run by the script on the board (B14.md, the bind-out step); its retry times are the operator's"
+    say "b14: $ZL 11 write failure: not run by the script on the board (B14.md, the refusal step); its retry times and read-back are the operator's"
     return
   fi
   set_temp "$MID"
-  # The fan refuses the controller's writes while the marker is there. Five refusals in a row bind the fan out
-  # (the host's rule for a device that stops answering); the drop leaves full duty on it; the controller retries
-  # on 1, 2, 4 and then 8 s until the fan is bound again, which happens once the marker is gone.
-  : > "$fan_file.refuse"
-  local t0 end now_row row="" bound_seen=false full_seen=false n
-  local -A first_at=()
-  t0=$(now_ms)
   ctl call fan-control hold 900 30000 > /dev/null || bad "$ZL 11 hold refused"
+  local t0 end row reply file_duty
+  local bound_seen=false absent_seen=false known_seen=false agree=true
+  local -A first_at=()
+  : > "$fan_file.refuse"
+  : > "$fan_file.refuse-drop"
+  t0=$(now_ms)
   end=$((t0 + 36000))
   while [ "$(now_ms)" -lt "$end" ]; do
-    sample "11 fault" || break
-    now_row=$(ctl list | grep "^fan-control " | head -1)
-    [ -n "$now_row" ] && row=$now_row
-    if [[ "$now_row" =~ attempt\ ([0-9]+) ]]; then
+    row=$(ctl list | grep "^fan-control " | head -1)
+    if [[ "$row" =~ attempt\ ([0-9]+) ]]; then
       n=${BASH_REMATCH[1]}
       [ -z "${first_at[$n]:-}" ] && first_at[$n]=$(now_ms)
     fi
-    [[ "$now_row" == *"bound out"* ]] && bound_seen=true
-    [ "$(cat "$fan_file")" = 1000 ] && full_seen=true
+    [[ "$row" == *"bound out"* ]] && bound_seen=true
+    if state_now; then
+      known_seen=true
+      file_duty=$(cat "$fan_file")
+      if [ "$DUTY" -ne "$file_duty" ]; then
+        agree=false
+        say "b14: $ZL 11 mismatch at $(now_ms) ms: the controller reports $DUTY, pwm1 reads $file_duty"
+      fi
+      sample "11 fault" || break
+    else
+      absent_seen=true
+    fi
     sleep 0.25
   done
-  rm -f "$fan_file.refuse"
+  rm -f "$fan_file.refuse" "$fan_file.refuse-drop"
   say "b14: $ZL 11 health row at the end of the fault: ${row:-none}"
   local count=0 k
   for k in "${!first_at[@]}"; do count=$((count > k ? count : k)); done
@@ -470,10 +483,11 @@ check11() {
     if [ "$gap" -lt $((w - 500)) ] || [ "$gap" -gt $((w + CTRL_PERIOD_MS + 500)) ]; then ok=false; fi
   done
   expect "$ZL 11 the host binds the fan out, and the health row says so (bound out)" $bound_seen
-  expect "$ZL 11 the fan is at full duty after the drop (the file reads 1000)" $full_seen
+  expect "$ZL 11 while the fan is in, the duty the controller reports is the read-back, and pwm1 agrees with it" bash -c '[ "$1" = true ] && [ "$2" = true ]' _ "$known_seen" "$agree"
+  expect "$ZL 11 while the fan is bound out the duty is unknown: the state read fails and the duty item is absent" $absent_seen
+  expect "$ZL 11 the drop was refused: pwm1 stays at the duty the fan had (900)" bash -c '[ "$(cat "$1")" = 900 ]' _ "$fan_file"
   expect "$ZL 11 the controller retries past the cap: at least 6 attempts in 36 s" [ "$count" -ge 6 ]
   expect "$ZL 11 the attempts wait 1, 2, 4 and then 8 s, each ended by the first step after it" $ok
-  expect "$ZL 11 the duty while the fan is out is never zero" no_zero_while_refused
   EXP=$(expected "$MID")
   expect "$ZL 11 once the fan is bound again control resumes on the curve" wait_until 40 at_expected
 }

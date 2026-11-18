@@ -1,7 +1,7 @@
 //! The control law, on explicit times. Dev's `fan_control` tests carried over, in nanoseconds.
 
 use crate::law::{
-    BOUND_OUT, Control, Curve, DEGRADED, FULL, WRITE_FAILED, check_settings, parse_curve,
+    BOUND_OUT, Control, Curve, DEGRADED, FULL, REFUSED, WRITE_FAILED, check_settings, parse_curve,
 };
 use lemnos_contract_fan_control::{Point, Settings};
 use lemnos_core::{Config, ConfigValue, Driver, Health, Status};
@@ -133,11 +133,11 @@ fn a_missing_required_input_forces_full_duty_and_degrades() {
     // No reading: the last good one still counts for max_age_ms.
     c.observe(0, None, S);
     assert_eq!(c.step(S), Some(700));
-    assert!(!c.state().degraded);
+    assert!(!c.state().unwrap().degraded);
     // Older than 3 s: stale.
     c.observe(0, None, 4 * S);
     assert_eq!(c.step(4 * S), Some(FULL));
-    let state = c.state();
+    let state = c.state().unwrap();
     assert!(state.degraded);
     assert_eq!(c.health(), Health::Degraded(DEGRADED));
 }
@@ -167,7 +167,7 @@ fn an_input_that_is_not_wired_is_not_counted() {
     assert!(!c.present(1));
     c.observe(1, Some(90_000), 0);
     assert_eq!(step_with(&mut c, 0, 30_000), Some(700));
-    assert_eq!(c.state().source, Some(0));
+    assert_eq!(c.state().unwrap().source, Some(0));
     assert_eq!(c.health(), Health::Ok);
     assert_eq!(c.curve(1), Err(Status::NOT_FOUND));
 }
@@ -186,7 +186,7 @@ fn the_hottest_input_wins_and_is_reported() {
     c.observe(0, Some(50_000), 0);
     c.observe(1, Some(9_000), 0);
     assert_eq!(c.step(0), Some(900));
-    let state = c.state();
+    let state = c.state().unwrap();
     assert_eq!(state.source, Some(1));
     assert_eq!(state.demand, 900);
 }
@@ -209,13 +209,13 @@ fn a_hold_overrides_the_curve_for_its_time_then_the_curve_takes_over() {
     c.hold(900, 3_000).unwrap();
     c.begin(0);
     assert_eq!(step_with(&mut c, 0, 40_000), Some(900));
-    assert!(c.state().held);
+    assert!(c.state().unwrap().held);
     assert_eq!(step_with(&mut c, S, 40_000), Some(900));
     assert_eq!(step_with(&mut c, 2 * S, 40_000), Some(900));
     // At 3 s the hold has run out: the duty comes down from 900 at the slew rate.
     c.begin(3 * S);
     assert_eq!(step_with(&mut c, 3 * S, 40_000), Some(850));
-    assert!(!c.state().held);
+    assert!(!c.state().unwrap().held);
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn a_hold_does_not_outrank_the_failsafe_or_the_floor() {
     c.begin(0);
     // No reading at all: stale, so full duty whatever the hold asks.
     assert_eq!(c.step(0), Some(FULL));
-    assert!(c.state().held);
+    assert!(c.state().unwrap().held);
 
     let mut c = one(tuned());
     c.hold(0, 5_000).unwrap();
@@ -283,9 +283,9 @@ fn a_failed_write_retries_with_a_backoff_capped_at_8_seconds() {
 
 #[test]
 fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
-    // Sim time, one step a second for two minutes. Writes are refused until 120 s. Each refusal asks
-    // for the safe state (full duty), counts one more attempt, and waits 1, 2, 4 and then 8 s, which
-    // is the cap: the attempts go on at 8 s, they do not stop.
+    // Sim time, one step a second for two minutes. Writes are refused until 120 s, and the fan stays at 400,
+    // where its duty reads back (its release is refused too). Each refusal counts one more attempt, and waits
+    // 1, 2, 4 and then 8 s, which is the cap: the attempts go on at 8 s, they do not stop.
     let mut c = one(tuned());
     let mut attempts = Vec::new();
     let mut failing = false;
@@ -296,9 +296,16 @@ fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
             if t < 120 {
                 attempts.push(t);
                 c.write_failed(now, false);
+                if c.wants_readback() {
+                    c.read_back(Some(400));
+                }
                 failing = true;
-                assert_eq!(c.state().duty, FULL, "t={t}: the safe state, not zero");
-                assert_eq!(c.health(), Health::Degraded(WRITE_FAILED));
+                assert_eq!(
+                    c.state().unwrap().duty,
+                    400,
+                    "t={t}: the duty the fan reads back"
+                );
+                assert_eq!(c.health(), Health::Degraded(REFUSED));
                 assert_eq!(c.retry().map(|r| r.0), Some(attempts.len() as u32));
             } else {
                 c.wrote();
@@ -306,7 +313,7 @@ fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
         }
         if failing {
             assert_ne!(
-                c.state().duty,
+                c.state().unwrap().duty,
                 0,
                 "t={t}: duty never settles at zero while writes are refused"
             );
@@ -354,10 +361,9 @@ fn a_fan_bound_out_is_retried_past_the_cap_on_sim_time_and_resumes_when_bound_ag
             }
         }
         if failing {
-            assert_eq!(
-                c.state().duty,
-                FULL,
-                "t={t}: the failure safe state while bound out"
+            assert!(
+                c.state().is_none(),
+                "t={t}: the duty is unknown while bound out"
             );
         }
     }
@@ -396,7 +402,7 @@ fn a_disabled_controller_is_not_gated_on_stepping() {
 fn a_degraded_or_retrying_controller_still_counts_as_stepping() {
     let mut c = one(tuned());
     c.step(0);
-    assert!(c.state().degraded);
+    assert!(c.state().unwrap().degraded);
     assert!(c.stepping(2 * S), "degraded still steps");
 
     let mut c = one(tuned());
@@ -415,7 +421,7 @@ fn disabling_releases_the_fan_once_and_enabling_starts_from_a_stop() {
     let mut c = one(tuned());
     c.step(0);
     c.set_enabled(false);
-    assert_eq!(c.state().duty, 0);
+    assert_eq!(c.state().unwrap().duty, 0);
     assert!(c.release_due(0));
     assert_eq!(c.next_due(), Some(0), "the release is due now");
     c.released();
