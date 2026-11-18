@@ -19,6 +19,9 @@ const SOFT_RESET: u8 = 0xb6;
 
 const ACC_CHIP_ID: u16 = 0x00;
 const ACC_DATA: u16 = 0x12;
+/// The accelerometer's sensor time: three bytes, little-endian, one tick per 39.0625 us, wrapping at
+/// 2^24. The chip's own clock, which its samples are taken on.
+const ACC_SENSORTIME: u16 = 0x18;
 const ACC_FIFO_LENGTH_0: u16 = 0x24;
 const ACC_FIFO_DATA: u16 = 0x26;
 const ACC_CONF: u16 = 0x40;
@@ -347,6 +350,13 @@ pub(crate) fn read_axes(bus: &mut I2c, address: u8, kind: Kind) -> Step<[i16; 3]
     let mut bytes = [0u8; 6];
     bus_regs(bus, address).read_burst(kind.data_register(), &mut bytes)?;
     Ok(axes(&bytes))
+}
+
+/// Reads the accelerometer's sensor time, in ticks of 39.0625 us (24 bits).
+pub(crate) fn accel_sensortime(bus: &mut I2c, address: u8) -> Step<u32> {
+    let mut raw = [0u8; 3];
+    bus_regs(bus, address).read_burst(ACC_SENSORTIME, &mut raw)?;
+    Ok(u32::from(raw[0]) | (u32::from(raw[1]) << 8) | (u32::from(raw[2]) << 16))
 }
 
 /// The accelerometer FIFO's fill, in bytes, at most the FIFO's capacity. The

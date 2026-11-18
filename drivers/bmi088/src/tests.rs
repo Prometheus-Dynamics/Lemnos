@@ -4,6 +4,7 @@
 extern crate std;
 
 use super::*;
+use crate::clock_tests::{Harness, Jitter, Oscillator, Plan};
 use chip::{Frame, scan_accel};
 use lemnos_contract_accelerometer::{RECORD_LEN as ACCEL_RECORD, Sample as AccelSample};
 use lemnos_contract_gyroscope::{RECORD_LEN as GYRO_RECORD, Sample as GyroSample};
@@ -802,6 +803,21 @@ fn powered(dev: &mut Bmi088) {
     panic!("the device never came up");
 }
 
+/// A clean 200 Hz chip, converged: twenty batches, each one read.
+fn converged_clean() -> Harness {
+    let mut h = Harness::new(
+        Oscillator {
+            eps: 0.0,
+            drift: 0.0,
+        },
+        200,
+    );
+    for _ in 0..20 {
+        h.step(Plan::clean());
+    }
+    h
+}
+
 /// Pushes accelerometer frames `from..from + count`, with X the frame's number.
 fn push_numbered(sim: &SimI2c, from: i16, count: i16) {
     let mut bytes = Vec::new();
@@ -809,18 +825,6 @@ fn push_numbered(sim: &SimI2c, from: i16, count: i16) {
         bytes.extend(frame(n, 0, 0));
     }
     sim.fifo_push(ACCEL, &bytes);
-}
-
-/// Takes one batch of accelerometer records, decoded.
-fn accel_batch(dev: &mut Bmi088, buf: &mut [u8]) -> Vec<AccelSample> {
-    let n = Accelerometer::read_batch(dev, buf).unwrap();
-    assert_eq!(n % ACCEL_RECORD, 0, "whole records only");
-    buf[..n]
-        .as_chunks::<ACCEL_RECORD>()
-        .0
-        .iter()
-        .map(|record| AccelSample::decode(&mut Reader::new(record)).unwrap())
-        .collect()
 }
 
 #[test]
@@ -861,29 +865,45 @@ fn read_batch_needs_the_fifo_and_waits_for_power_up() {
 
 #[test]
 fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    let mut buf = [0u8; ACCEL_RECORD * 146];
-    let mut next = 0i16;
-    let mut delivered = 0;
-    for drain in 1..=6u64 {
-        let now = 1_000_000_000 + drain * TICK_NS;
-        push_numbered(&sim, next, 73);
-        Driver::tick(&mut dev, now);
-        let batch = accel_batch(&mut dev, &mut buf);
-        assert_eq!(batch.len(), 73, "drain {drain}");
-        for (i, sample) in batch.iter().enumerate() {
-            // The newest is stamped at the tick; each older one a period back.
-            let back = (72 - i) as u64;
-            assert_eq!(sample.at_ns, now - back * 5_000_000, "drain {drain}");
-            close(sample.value.x, f32::from(next + i as i16) * ACC6, 1e-3);
+    // A clean 200 Hz chip. The clock publishes once it has converged, which is batch 15 (sixteen
+    // host-timed batches); until then the batches hold their samples, and the ring keeps the newest
+    // 146 of them. From the first delivery on, every sample is delivered once, in order, with its
+    // stamp within a millisecond of its true time, and the newest is the last one delivered.
+    let mut h = Harness::new(
+        Oscillator {
+            eps: 0.0,
+            drift: 0.0,
+        },
+        200,
+    );
+    let mut delivered = Vec::new();
+    let mut first = None;
+    for batch in 0..40 {
+        let got = h.step(Plan::clean());
+        if !got.is_empty() && first.is_none() {
+            first = Some(batch);
         }
-        next += 73;
-        delivered += batch.len();
+        delivered.extend(got);
     }
-    assert_eq!(delivered, 6 * 73);
-    assert_eq!(sim.fifo_len(ACCEL), 0);
-    assert_eq!(Driver::health(&dev), Health::Ok);
+    let first = first.expect("the clock never converged");
+    assert!(first <= 20, "the first delivery is batch {first}");
+    for pair in delivered.windows(2) {
+        assert_eq!(pair[1].seq, pair[0].seq + 1, "in order, once each");
+    }
+    assert_eq!(
+        delivered.last().unwrap().seq,
+        h.seq - 1,
+        "the newest is last"
+    );
+    for d in &delivered {
+        let err = d.at_ns as f64 - h.truth(d.seq);
+        assert!(
+            err.abs() <= 1_000_000.0,
+            "sample {} was {err} ns off",
+            d.seq
+        );
+    }
+    assert_eq!(Driver::health(&h.dev), Health::Ok);
 }
 
 #[test]
@@ -909,7 +929,7 @@ fn ticks_alone_keep_the_fifo_from_overflowing() {
 fn a_tick_drains_only_when_due_and_says_when_next() {
     let (_board, sim, mut dev) = fifo_device_at(200);
     assert!(
-        dev.accel.tick(5, &mut dev.bus).is_some(),
+        dev.accel.tick(5, &mut dev.bus, &*dev.clock).is_some(),
         "not powered: its power-up is due"
     );
     // Power the accelerometer up with its own ticks. The tick that finds it ready drains the
@@ -917,7 +937,7 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
     let mut t0 = 5;
     while dev.accel.phase != Phase::Ready {
         t0 += 1_000_000;
-        dev.accel.tick(t0, &mut dev.bus);
+        dev.accel.tick(t0, &mut dev.bus, &*dev.clock);
     }
     let due = t0 + TICK_NS;
     assert_eq!(
@@ -929,7 +949,10 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
     // Counts are relative: the chip's FIFO may already hold frames the stream put there.
     let base = sim.fifo_len(ACCEL);
     push_numbered(&sim, 0, 3);
-    assert_eq!(dev.accel.tick(t0 + 1_000, &mut dev.bus), Some(due));
+    assert_eq!(
+        dev.accel.tick(t0 + 1_000, &mut dev.bus, &*dev.clock),
+        Some(due)
+    );
     assert_eq!(
         sim.fifo_len(ACCEL),
         base + 21,
@@ -937,7 +960,7 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
     );
     push_numbered(&sim, 3, 3);
     assert_eq!(
-        dev.accel.tick(due - 1, &mut dev.bus),
+        dev.accel.tick(due - 1, &mut dev.bus, &*dev.clock),
         Some(due),
         "early tick"
     );
@@ -946,72 +969,74 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
         base + 42,
         "an early tick takes nothing"
     );
-    assert_eq!(dev.accel.tick(due, &mut dev.bus), Some(due + TICK_NS));
+    assert_eq!(
+        dev.accel.tick(due, &mut dev.bus, &*dev.clock),
+        Some(due + TICK_NS)
+    );
     assert_eq!(sim.fifo_len(ACCEL), 0, "due: the FIFO is drained");
 }
 
 #[test]
 fn a_read_after_a_tick_returns_the_newest_and_stamps_the_rest_on_the_grid() {
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    let t = 1_000_000_000;
-    push_numbered(&sim, 1, 1);
-    Driver::tick(&mut dev, t);
-    // Two more samples arrive after the tick, and a read takes them.
-    push_numbered(&sim, 2, 2);
-    let newest = Accelerometer::read(&mut dev).unwrap();
-    close(newest.x, 3.0 * ACC6, 1e-3);
-    assert_eq!(Accelerometer::read(&mut dev), Ok(newest), "no new sample");
-
-    let mut buf = [0u8; ACCEL_RECORD * 8];
-    let batch = accel_batch(&mut dev, &mut buf);
-    assert_eq!(
-        batch.iter().map(|s| s.at_ns).collect::<Vec<_>>(),
-        [t, t + 5_000_000, t + 10_000_000]
-    );
-    close(batch[0].value.x, ACC6, 1e-3);
-    close(batch[2].value.x, 3.0 * ACC6, 1e-3);
+    // Once converged, a tick drains a batch. A read returns its newest sample, again until one more
+    // arrives, and the batch returns the samples with stamps one sample period apart.
+    let mut h = converged_clean();
+    h.fill_and_tick(Plan::clean());
+    let (value, seq) = h.read_newest();
+    assert_eq!(seq, h.seq - 1, "the read returns the newest sample");
+    close(value as f32, seq as f32 * ACC6, 1e-3);
+    assert_eq!(h.read_newest().1, seq, "no new sample: the same one again");
+    let batch = h.take(160);
+    assert_eq!(batch.len(), 73);
+    for pair in batch.windows(2) {
+        let period = pair[1].at_ns - pair[0].at_ns;
+        // The sensor's tick is 39 us, so a period is only as exact as its quantisation: 50 ns here.
+        assert!(
+            period.abs_diff(5_000_000) <= 50,
+            "{period} ns between samples"
+        );
+    }
+    for d in &batch {
+        assert!((d.at_ns as f64 - h.truth(d.seq)).abs() <= 1_000_000.0);
+    }
 }
 
 #[test]
 fn a_batch_takes_what_fits_and_keeps_the_rest() {
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    push_numbered(&sim, 0, 5);
-    Driver::tick(&mut dev, 1_000_000_000);
-    let mut buf = [0u8; ACCEL_RECORD * 2];
+    // A batch takes what its buffer holds and keeps the rest for the next call.
+    let mut h = converged_clean();
+    h.fill_and_tick(Plan::clean());
     let mut seen = Vec::new();
-    for _ in 0..3 {
-        seen.extend(accel_batch(&mut dev, &mut buf));
+    for _ in 0..40 {
+        let got = h.take(2);
+        assert!(got.len() <= 2, "a batch of two took {}", got.len());
+        seen.extend(got);
     }
-    assert_eq!(seen.len(), 5);
-    for (i, sample) in seen.iter().enumerate() {
-        close(sample.value.x, i as f32 * ACC6, 1e-3);
+    assert_eq!(seen.len(), 73);
+    for pair in seen.windows(2) {
+        assert_eq!(pair[1].seq, pair[0].seq + 1, "the rest is kept, in order");
     }
-    assert!(accel_batch(&mut dev, &mut buf).is_empty());
+    assert!(h.take(2).is_empty());
 }
 
 #[test]
 fn a_batch_the_ring_overwrote_is_reported_and_the_newest_are_kept() {
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    // Two drains of a full FIFO each: the ring (146 frames) keeps only the second.
-    push_numbered(&sim, 0, 146);
-    Driver::tick(&mut dev, 1_000_000_000);
-    push_numbered(&sim, 146, 146);
-    Driver::tick(&mut dev, 1_000_000_000 + TICK_NS);
-    let mut buf = [0u8; ACCEL_RECORD * 146];
-    let batch = accel_batch(&mut dev, &mut buf);
+    // Three batches with no batch read: the ring (146 frames) keeps only the newest 146, the
+    // overwritten ones are reported by the read that finds them, and the next read has nothing new.
+    let mut h = converged_clean();
+    for _ in 0..3 {
+        h.fill_and_tick(Plan::clean());
+    }
+    let batch = h.take(146);
     assert_eq!(batch.len(), 146);
-    close(batch[0].value.x, 146.0 * ACC6, 1e-3);
+    assert_eq!(batch.last().unwrap().seq, h.seq - 1, "the newest are kept");
     assert_eq!(
-        Driver::health(&dev),
+        Driver::health(&h.dev),
         Health::Degraded("accelerometer: batch missed samples")
     );
-    // Reported by that read; the next one has nothing new to report.
-    assert!(accel_batch(&mut dev, &mut buf).is_empty());
+    assert!(h.take(146).is_empty());
     assert_ne!(
-        Driver::health(&dev),
+        Driver::health(&h.dev),
         Health::Degraded("accelerometer: batch missed samples")
     );
 }
@@ -1035,11 +1060,11 @@ fn an_overflow_found_by_a_tick_is_reported_until_the_read_after_it() {
 
 #[test]
 fn the_batch_method_writes_records_into_the_callers_reply() {
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    push_numbered(&sim, 7, 2);
-    let now = 2_000_000_000;
-    Driver::tick(&mut dev, now);
+    // The batch method writes whole records into the caller's reply, oldest first, and the rest
+    // stays for the next call.
+    let mut h = converged_clean();
+    h.fill_and_tick(Plan::clean());
+    let oldest = h.seq - 73;
     let mut buf = [0u8; 64];
     let args = 64u32.to_le_bytes();
     let len = {
@@ -1049,7 +1074,7 @@ fn the_batch_method_writes_records_into_the_callers_reply() {
             method: 2,
         };
         assert_eq!(
-            Driver::dispatch(&mut dev, method, &args, &mut reply),
+            Driver::dispatch(&mut h.dev, method, &args, &mut reply),
             Status::OK
         );
         reply.len()
@@ -1057,9 +1082,10 @@ fn the_batch_method_writes_records_into_the_callers_reply() {
     assert_eq!(len, 2 * ACCEL_RECORD);
     let first = AccelSample::decode(&mut Reader::new(&buf[..ACCEL_RECORD])).unwrap();
     let second = AccelSample::decode(&mut Reader::new(&buf[ACCEL_RECORD..len])).unwrap();
-    assert_eq!((first.at_ns, second.at_ns), (now - 5_000_000, now));
-    close(first.value.x, 7.0 * ACC6, 1e-3);
-    close(second.value.x, 8.0 * ACC6, 1e-3);
+    close(first.value.x, oldest as f32 * ACC6, 1e-3);
+    close(second.value.x, (oldest + 1) as f32 * ACC6, 1e-3);
+    assert!(second.at_ns.abs_diff(first.at_ns + 5_000_000) <= 50);
+    assert!((first.at_ns as f64 - h.truth(oldest)).abs() <= 1_000_000.0);
 }
 
 #[test]
@@ -1120,70 +1146,44 @@ fn gyro_batches_are_stamped_at_the_gyro_rate() {
 /// once the period is measured, the older ones stay within a period plus their
 /// age times the measurement's error.
 #[test]
-fn stamps_stay_within_a_period_and_the_measured_period_tracks_the_die() {
-    const NOMINAL: u64 = 5_000_000;
-    const DIE: u64 = 4_950_500;
-    let (_board, sim, mut dev) = fifo_device_at(200);
-    powered(&mut dev);
-    let base = 1_000_000_000u64;
-    let mut now = base;
-    let mut taken = 0u64;
-    let mut buf = [0u8; ACCEL_RECORD * 146];
-    let mut first_newest = None;
-    let mut worst_old = 0i128;
-    for drain in 0..10u64 {
-        now += TICK_NS + drain * 10_000;
-        // Samples the die has taken by now: sample k at base + k * DIE.
-        let produced = (now - base) / DIE + 1;
-        let mut bytes = Vec::new();
-        for k in taken..produced {
-            bytes.extend(frame(k as i16, 0, 0));
-        }
-        sim.fifo_push(ACCEL, &bytes);
-        taken = produced;
-        Driver::tick(&mut dev, now);
-        let batch = accel_batch(&mut dev, &mut buf);
-        let newest_k = taken - 1;
-        let newest_true = base + newest_k * DIE;
-        let newest_at = batch.last().unwrap().at_ns;
-        assert_eq!(newest_at, now);
-        assert!(newest_true <= now && now - newest_true < DIE, "one period");
-        let first = *first_newest.get_or_insert(newest_k);
-        let span = newest_k - first;
-        if drain >= 1 {
-            // Each stamp's error is the newest's phase (below one period) plus its
-            // age times the measured period's error, which is below DIE / span. So
-            // the spread across the batch is the ages times that error, and the
-            // stamps of a batch are no further than one period from the truth.
-            let ages = batch.len() as i128 - 1;
-            let spread_bound = ages * DIE as i128 / span as i128 + 2;
-            let mut errors = Vec::new();
-            for (i, sample) in batch.iter().enumerate() {
-                let k = newest_k - (batch.len() - 1 - i) as u64;
-                let truth = (base + k * DIE) as i128;
-                errors.push(sample.at_ns as i128 - truth);
-            }
-            let (lo, hi) = (*errors.iter().min().unwrap(), *errors.iter().max().unwrap());
-            assert!(
-                hi - lo <= spread_bound,
-                "drain {drain}: spread {} > {spread_bound}",
-                hi - lo
-            );
-            assert!(
-                lo >= -(DIE as i128) && hi <= DIE as i128,
-                "drain {drain}: {lo}..{hi}"
-            );
-            worst_old = worst_old.max(hi - lo);
-        }
-    }
-    assert!(worst_old > 0, "batches were checked");
-    let measured = dev.accel.timing.measured.expect("the period is measured");
-    let span = (taken - 1) - first_newest.unwrap();
-    assert!(
-        measured.abs_diff(DIE) * span <= DIE,
-        "measured {measured} for a die of {DIE} over {span} samples"
+fn stamps_follow_a_die_1_5_percent_fast_within_a_millisecond() {
+    // A die 1.5 % fast takes its samples every 4.926 ms of host time, not 5. The stamps follow it
+    // to within a millisecond, under host jitter of a few hundred microseconds.
+    let mut h = Harness::new(
+        Oscillator {
+            eps: 0.015,
+            drift: 0.0,
+        },
+        200,
     );
-    assert_ne!(measured, NOMINAL);
+    let mut jitter = Jitter::new(0x1357_9bdf);
+    let mut delivered = Vec::new();
+    for _ in 0..60 {
+        let host = jitter.next(50_000);
+        delivered.extend(h.step(Plan {
+            tick_jitter_ns: jitter.next(300_000),
+            pre_ns: host - 100_000,
+            post_ns: host + 100_000,
+            fault: None,
+        }));
+    }
+    assert!(delivered.len() > 2_000, "only {} samples", delivered.len());
+    let first = delivered.first().unwrap();
+    let last = delivered.last().unwrap();
+    let mean = (last.at_ns - first.at_ns) as f64 / (last.seq - first.seq) as f64;
+    let true_mean = 5_000_000.0 / 1.015;
+    assert!(
+        (mean - true_mean).abs() <= 1_000.0,
+        "a period of {mean} ns, not {true_mean}"
+    );
+    for d in &delivered {
+        let err = d.at_ns as f64 - h.truth(d.seq);
+        assert!(
+            err.abs() <= 1_000_000.0,
+            "sample {} was {err} ns off",
+            d.seq
+        );
+    }
 }
 
 #[test]
