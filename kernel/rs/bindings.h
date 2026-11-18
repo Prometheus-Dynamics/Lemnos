@@ -6,5 +6,6 @@
  * the Kbuild allowlists are generated: every other type they name is the kernel crate's.
  */
 #include <linux/spi/spi.h>
+#include <linux/thermal.h>
 
 #include "../lemnos.h"

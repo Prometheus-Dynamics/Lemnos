@@ -27,6 +27,8 @@ mod irq;
 mod bindings;
 #[path = "rs/bus.rs"]
 mod bus;
+#[path = "rs/events.rs"]
+mod events;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
@@ -51,6 +53,8 @@ struct LemnosEntry;
 
 impl kernel::Module for LemnosEntry {
     fn init(module: &'static ThisModule) -> Result<Self> {
+        // The event queue and the watches' locks (rs/events.rs), first: binding a block posts an event.
+        events::lem_events_init();
         // SAFETY: called once, before any block can be bound or any interrupt requested.
         unsafe { irq::lem_irq_setup() };
         // The descriptors are statics the C module defines (LEM_STATIC, lemnos_core.c). Only their
