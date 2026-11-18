@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * What the receiver (lemnos_rp1_csi2.c) and the front end on the same block
+ * What the receiver (rs/rp1_csi2.rs) and the front end on the same block
  * (lemnos_pisp_fe.c) share. Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef LEMNOS_RP1_CSI2_PRIV_H
@@ -29,7 +29,7 @@ struct lrc_frame {
 /*
  * The embedded data channel (CSI-2 data type 0x12 on the image's virtual
  * channel): its own stream, its own buffers, its own frame accounting. See
- * lemnos_rp1_csi2.c, "Embedded data".
+ * rs/rp1_csi2.rs (START, and the emb_ functions of the frame path).
  */
 struct lrc_emb {
 	int req_fd;			/* asked for before START; -1: none */
@@ -79,7 +79,7 @@ struct lrc_dev {
 	struct lemnos_rp1_csi2_start start;
 	struct lrc_emb emb;
 	u64 frames, written, dropped, errors;
-	/* Arms again while nothing is armed and no buffer was free; see lrc_arm(). */
+	/* Arms again while nothing is armed and no buffer was free; see Frame::arm (rs/rp1_csi2.rs). */
 	struct delayed_work retry;
 };
 

@@ -47,6 +47,8 @@ mod stream;
 mod gsdma;
 #[path = "rs/vip.rs"]
 mod vip;
+#[path = "rs/rp1_csi2.rs"]
+mod rp1_csi2;
 
 use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 
@@ -55,7 +57,7 @@ use kernel::{error::to_result, ffi::{c_char, c_int, c_void}, prelude::*};
 unsafe extern "C" {
     static lem_driver: [u8; 0];
     static lem_misc: [u8; 0];
-    /// lemnos_rp1_csi2.c: the csi2 receiver's platform driver and its node.
+    /// rs/rp1_csi2.rs: the csi2 receiver's platform driver and its node.
     fn lem_rp1_csi2_register() -> c_int;
     fn lem_rp1_csi2_unregister();
     /// `platform_driver_register` is a macro over this, with THIS_MODULE and KBUILD_MODNAME.

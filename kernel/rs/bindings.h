@@ -12,3 +12,5 @@
 #include "../lemnos_regjob.h"
 #include "../lemnos_gsdma.h"
 #include "../lemnos_vip.h"
+#include "../lemnos_pisp_fe.h"
+#include "../lemnos_rp1_csi2_priv.h"

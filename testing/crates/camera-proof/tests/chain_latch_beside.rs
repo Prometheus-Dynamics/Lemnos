@@ -1,7 +1,7 @@
 //! The sensor latch cannot run beside the chain, here as on a board.
 //!
 //! The kernel module refuses the receiver's raw `frames` stream while the front end streams
-//! (`kernel/lemnos_rp1_csi2.c`, `lrc_start`: `EBUSY`), because in front-end mode the CSI-2
+//! (`kernel/rs/rp1_csi2.rs`, `start`: `EBUSY`), because in front-end mode the CSI-2
 //! channel feeds the front end instead of memory. `lemnos-sensor-proof latch` takes that stream,
 //! so `lemnos-chain-proof --latch-trials` beside a running chain fails on a board. The simulated
 //! receiver makes the same refusal (`lemnos_camera_sim::EXCLUSIVE`), so this is a test with a

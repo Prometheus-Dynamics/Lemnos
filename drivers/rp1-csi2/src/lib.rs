@@ -2,7 +2,7 @@
 //! DMA channel, delivering frames on the board's `frames` stream. It only receives: the sensor is
 //! set up by its own driver, and the consumer asks this one for the link.
 //!
-//! Everything that touches the block happens in the kernel (`kernel/lemnos_rp1_csi2.c`); this crate
+//! Everything that touches the block happens in the kernel (`kernel/rs/rp1_csi2.rs`); this crate
 //! configures it and watches it, through the node `/dev/lemnos-rp1-csi2-<device>`. A frame's bytes
 //! never cross this crate, and it never names a memory address: the block writes each frame
 //! straight into a buffer of the `frames` stream, the memory its consumer reads.
@@ -74,7 +74,7 @@
 //! buffer armed (every buffer held by the consumer, or none given yet): then the block makes no frame
 //! start, the count cannot move, and a sensor watching it must not read that as the sensor going
 //! quiet. The kernel module answers `valid = 0` then, and the count is read again once a buffer is
-//! armed (`kernel/lemnos_rp1_csi2.c`, `lrc_frame_starts`). A recovery restart makes a new module
+//! armed (`kernel/rs/rp1_csi2.rs`, `frame_starts`). A recovery restart makes a new module
 //! stream, whose count begins again at zero, so a read lower than the one before means a restart.
 //!
 //! Frame sequence. A published frame's sequence only goes up, across a recovery restart too: the
@@ -1025,7 +1025,7 @@ impl CameraReceiver for Rp1Csi2 {
 
     /// The name of the stream the embedded data goes to: `embedded`, when the board declares
     /// one on the device. One buffer per frame, carrying that frame's sequence, on the image's
-    /// virtual channel with data type 0x12 (`kernel/lemnos_rp1_csi2.c`). 0 when none.
+    /// virtual channel with data type 0x12 (`kernel/rs/rp1_csi2.rs`). 0 when none.
     fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
         if self.embedded.is_none() {
             return Ok(0);
