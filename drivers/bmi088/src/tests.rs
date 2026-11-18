@@ -866,9 +866,10 @@ fn read_batch_needs_the_fifo_and_waits_for_power_up() {
 #[test]
 fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
     // A clean 200 Hz chip. The clock publishes once it has converged, which is batch 15 (sixteen
-    // host-timed batches); until then the batches hold their samples, and the ring keeps the newest
-    // 146 of them. From the first delivery on, every sample is delivered once, in order, with its
-    // stamp within a millisecond of its true time, and the newest is the last one delivered.
+    // host-timed batches); until then the batches hold their samples, the ring keeps the newest 146
+    // of them, and the older ones are dropped with no loss reported. From the first delivery on,
+    // every sample is delivered once, in order, with its stamp within a millisecond of its true
+    // time, and the newest is the last one delivered.
     let mut h = Harness::new(
         Oscillator {
             eps: 0.0,
@@ -878,14 +879,26 @@ fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
     );
     let mut delivered = Vec::new();
     let mut first = None;
+    let mut newest_then = 0;
     for batch in 0..40 {
         let got = h.step(Plan::clean());
         if !got.is_empty() && first.is_none() {
             first = Some(batch);
+            newest_then = h.seq;
         }
         delivered.extend(got);
+        assert_ne!(
+            Driver::health(&h.dev),
+            Health::Degraded("accelerometer: batch missed samples"),
+            "batch {batch}: the convergence's dropped samples are not a batch miss"
+        );
     }
     let first = first.expect("the clock never converged");
+    assert_eq!(
+        delivered[0].seq,
+        newest_then - ACC_RING as u64,
+        "the first records are the ring's worth before the convergence"
+    );
     assert!(first <= 20, "the first delivery is batch {first}");
     for pair in delivered.windows(2) {
         assert_eq!(pair[1].seq, pair[0].seq + 1, "in order, once each");
@@ -939,11 +952,12 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
         t0 += 1_000_000;
         dev.accel.tick(t0, &mut dev.bus, &*dev.clock);
     }
-    let due = t0 + TICK_NS;
-    assert_eq!(
-        dev.accel.due,
-        Some(due),
-        "the ready tick set the first drain"
+    // The first drains wait a little more than a half FIFO, by less than one sample period, so
+    // they fall at every point of the sample grid (`Die::spread`).
+    let due = dev.accel.due.expect("the ready tick set the first drain");
+    assert!(
+        (t0 + TICK_NS..t0 + TICK_NS + 5_000_000).contains(&due),
+        "the first drain is a half FIFO and less than a period later: {due}"
     );
 
     // Counts are relative: the chip's FIFO may already hold frames the stream put there.
@@ -969,9 +983,10 @@ fn a_tick_drains_only_when_due_and_says_when_next() {
         base + 42,
         "an early tick takes nothing"
     );
-    assert_eq!(
-        dev.accel.tick(due, &mut dev.bus, &*dev.clock),
-        Some(due + TICK_NS)
+    let next = dev.accel.tick(due, &mut dev.bus, &*dev.clock).unwrap();
+    assert!(
+        (due + TICK_NS..due + TICK_NS + 5_000_000).contains(&next),
+        "the next drain is a half FIFO and less than a period later: {next}"
     );
     assert_eq!(sim.fifo_len(ACCEL), 0, "due: the FIFO is drained");
 }
@@ -981,13 +996,14 @@ fn a_read_after_a_tick_returns_the_newest_and_stamps_the_rest_on_the_grid() {
     // Once converged, a tick drains a batch. A read returns its newest sample, again until one more
     // arrives, and the batch returns the samples with stamps one sample period apart.
     let mut h = converged_clean();
+    let from = h.seq;
     h.fill_and_tick(Plan::clean());
     let (value, seq) = h.read_newest();
     assert_eq!(seq, h.seq - 1, "the read returns the newest sample");
     close(value as f32, seq as f32 * ACC6, 1e-3);
     assert_eq!(h.read_newest().1, seq, "no new sample: the same one again");
     let batch = h.take(160);
-    assert_eq!(batch.len(), 73);
+    assert_eq!(batch.len() as u64, h.seq - from, "the whole drain");
     for pair in batch.windows(2) {
         let period = pair[1].at_ns - pair[0].at_ns;
         // The sensor's tick is 39 us, so a period is only as exact as its quantisation: 50 ns here.
@@ -1005,6 +1021,7 @@ fn a_read_after_a_tick_returns_the_newest_and_stamps_the_rest_on_the_grid() {
 fn a_batch_takes_what_fits_and_keeps_the_rest() {
     // A batch takes what its buffer holds and keeps the rest for the next call.
     let mut h = converged_clean();
+    let from = h.seq;
     h.fill_and_tick(Plan::clean());
     let mut seen = Vec::new();
     for _ in 0..40 {
@@ -1012,7 +1029,7 @@ fn a_batch_takes_what_fits_and_keeps_the_rest() {
         assert!(got.len() <= 2, "a batch of two took {}", got.len());
         seen.extend(got);
     }
-    assert_eq!(seen.len(), 73);
+    assert_eq!(seen.len() as u64, h.seq - from);
     for pair in seen.windows(2) {
         assert_eq!(pair[1].seq, pair[0].seq + 1, "the rest is kept, in order");
     }
@@ -1063,8 +1080,8 @@ fn the_batch_method_writes_records_into_the_callers_reply() {
     // The batch method writes whole records into the caller's reply, oldest first, and the rest
     // stays for the next call.
     let mut h = converged_clean();
+    let oldest = h.seq;
     h.fill_and_tick(Plan::clean());
-    let oldest = h.seq - 73;
     let mut buf = [0u8; 64];
     let args = 64u32.to_le_bytes();
     let len = {
@@ -1164,6 +1181,7 @@ fn stamps_follow_a_die_1_5_percent_fast_within_a_millisecond() {
             tick_jitter_ns: jitter.next(300_000),
             pre_ns: host - 100_000,
             post_ns: host + 100_000,
+            report_early_ns: 0,
             fault: None,
         }));
     }

@@ -5,15 +5,21 @@
 //! and makes a sample every `grid` ticks: at 200 Hz that is every 128 ticks. A stamp is therefore
 //! a function of two things, both read on the host's side of the bus:
 //!
-//! - the phase: sample `n` was taken at sensor tick `phase + grid * n`. A read of the sensor time
-//!   after the newest sample `m` gives `phase + grid * m + age`, with `age` in `[0, grid)` plus
-//!   the time the FIFO read took, so the running minimum of `read - grid * m` is the phase plus the
-//!   smallest age seen. Its error shrinks with the number of batches, and only the phase is taken
-//!   that way.
-//! - the rate: each read is paired with the host time at its middle (between two reads of the host
-//!   clock around it). A least-squares line through the pairs maps sensor ticks to host time, with
-//!   exponentially forgetting weights: O(1) state, no stored history, and it follows a slow drift
-//!   of the oscillator without lag (a line is fitted exactly, whatever its history).
+//! - the phase: sample `n` is taken at sensor tick `phase + grid * n`. Each drain reads the sensor
+//!   time twice, just before it reads the FIFO's length and just after, and only then reads the
+//!   FIFO. The newest sample `m` the length counted was made before the second read, so
+//!   `after - grid * m` is an upper bound on the phase; sample `m + 1` was not yet made at the
+//!   first read (the length, read after it, would have counted it), so `before - grid * (m + 1)`
+//!   is a lower bound. The phase is the middle of the tightest bounds seen. The drains are aimed at
+//!   that middle on the sample grid (`aim`): each lands either just after a sample, and lowers the
+//!   upper bound to about the aim, or just before one, and raises the lower bound to about it, so
+//!   the bounds close by about half each drain, down to the time between the two reads (the length
+//!   read: about 0.1 ms at 400 kHz, under 0.5 ms at 100 kHz). The FIFO's own read, which takes
+//!   milliseconds, is after both.
+//! - the rate: each second read is paired with the host time at its middle (between two reads of
+//!   the host clock around it). A least-squares line through the pairs maps sensor ticks to host
+//!   time, with exponentially forgetting weights: O(1) state, no stored history, and it follows a
+//!   slow drift of the oscillator without lag (a line is fitted exactly, whatever its history).
 //!
 //! The model is published only once it has converged, and a stamp is never earlier than the last
 //! one published. A chip reset, a sensor time that jumps, or a FIFO overflow restarts the model
@@ -31,10 +37,12 @@ const WRAP_MASK: u32 = WRAP - 1;
 /// apart. A wider bracket means the host was preempted inside the read, so its time is not used.
 pub(crate) const MAX_BRACKET_NS: u64 = 2_000_000;
 /// Host-timed batches (ticks that read the sensor time with a clean bracket) before the model
-/// publishes. The phase is the minimum over the reads, which is within about one sample period
-/// over this many of the true phase (under 0.3 ms at 200 Hz), and the rate's fit has this many
-/// points. At 200 Hz a batch is 365 ms, so this is about 6 s.
+/// publishes: the rate's fit has at least this many points. At 200 Hz a batch is about 365 ms, so
+/// this is about 6 s.
 pub(crate) const BATCHES: u32 = 16;
+/// The widest the phase's bounds may be for the model to publish: 1 ms, so the phase taken from
+/// their middle is within 0.5 ms. The aimed drains close them to this well inside `BATCHES`.
+const PHASE_WIDTH_NS: f64 = 1_000_000.0;
 /// Each read's weight is `1 / FORGET_BATCHES`: the fit remembers about this many reads, about
 /// 23 s at 200 Hz, short enough to follow the oscillator as it drifts with temperature.
 const FORGET_BATCHES: f64 = 64.0;
@@ -98,8 +106,11 @@ pub(crate) struct SensorClock {
     ticks: u64,
     /// The sensor ticks and host time of the last read that had host time.
     last_host: Option<(u64, u64)>,
-    /// The phase: the least sensor tick any batch's newest sample could have, given its read.
-    phase: Option<i64>,
+    /// The sensor ticks of the read before the drain in progress.
+    before: Option<u64>,
+    /// The phase's bounds: below it (`lo`), and at or above it (`hi`), in unwrapped sensor ticks.
+    lo: Option<i64>,
+    hi: Option<i64>,
     /// Host-timed batches since the last restart.
     batches: u32,
     /// The sensor ticks and host time of the first host-timed read since the last restart: the
@@ -119,7 +130,9 @@ impl SensorClock {
             last_raw: None,
             ticks: 0,
             last_host: None,
-            phase: None,
+            before: None,
+            lo: None,
+            hi: None,
             batches: 0,
             origin: None,
             fit: Fit::default(),
@@ -131,20 +144,17 @@ impl SensorClock {
     /// time's unwrapping and the last stamp published.
     pub(crate) fn restart(&mut self) {
         self.last_host = None;
-        self.phase = None;
+        self.before = None;
+        self.lo = None;
+        self.hi = None;
         self.batches = 0;
         self.origin = None;
         self.fit = Fit::default();
     }
 
-    /// Reads the chip's sensor time, `raw`, after the newest sample `newest` (`None` before any
-    /// sample), and the host time of the read if it has one. Returns the restart it caused, if any.
-    pub(crate) fn observe(
-        &mut self,
-        raw: u32,
-        newest: Option<u64>,
-        host: Option<u64>,
-    ) -> Option<Event> {
+    /// Takes a reading of the sensor time into the unwrapped count. A step back of half a wrap or
+    /// more is a reset: the model restarts, and the count goes on from the new reading.
+    fn unwrap(&mut self, raw: u32) -> Option<Event> {
         let raw = raw & WRAP_MASK;
         let mut event = None;
         match self.last_raw {
@@ -160,6 +170,33 @@ impl SensorClock {
             }
         }
         self.last_raw = Some(raw);
+        if event.is_some() {
+            self.restart();
+        }
+        event
+    }
+
+    /// The sensor time `raw`, read just before a drain reads the FIFO's length. Returns the restart
+    /// it caused, if any.
+    pub(crate) fn before(&mut self, raw: u32) -> Option<Event> {
+        let event = self.unwrap(raw);
+        self.before = Some(self.ticks);
+        event
+    }
+
+    /// The sensor time `raw`, read just after the drain read the FIFO's length; given once the
+    /// drain has read the FIFO. `newest` is then the newest sample taken so far (`None` before
+    /// any), `whole` says the drain read all the length counted, and `host` is the host time of
+    /// the read, if it has one. Returns the restart it caused, if any.
+    pub(crate) fn after(
+        &mut self,
+        raw: u32,
+        newest: Option<u64>,
+        whole: bool,
+        host: Option<u64>,
+    ) -> Option<Event> {
+        let before = self.before.take();
+        let mut event = self.unwrap(raw);
         if event.is_none()
             && let (Some((t0, h0)), Some(h1)) = (self.last_host, host)
         {
@@ -167,14 +204,31 @@ impl SensorClock {
             let actual = h1 as f64 - h0 as f64;
             if (actual - expect).abs() > JUMP_FLOOR_NS.max(JUMP_FRACTION * expect.abs()) {
                 event = Some(Event::Jump);
+                self.restart();
             }
         }
-        if event.is_some() {
-            self.restart();
-        }
-        if let Some(newest) = newest {
-            let candidate = self.ticks as i64 - self.grid * newest as i64;
-            self.phase = Some(self.phase.map_or(candidate, |p| p.min(candidate)));
+        if let Some(m) = newest {
+            let m = m as i64;
+            let hi = self.ticks as i64 - self.grid * m;
+            let mut lo = None;
+            // The lower bound holds only when nothing moved the count between the two reads.
+            if event.is_none()
+                && whole
+                && let Some(before) = before
+            {
+                lo = Some(before as i64 - self.grid * (m + 1));
+            }
+            self.hi = Some(self.hi.map_or(hi, |h| h.min(hi)));
+            if let Some(lo) = lo {
+                self.lo = Some(self.lo.map_or(lo, |l| l.max(lo)));
+            }
+            if let (Some(l), Some(h)) = (self.lo, self.hi)
+                && l >= h
+            {
+                // Bounds that cross say a reading was wrong. Keep the newest pair only.
+                self.hi = Some(hi);
+                self.lo = lo.filter(|l| *l < hi);
+            }
         }
         if let Some(h) = host {
             let (t0, h0) = *self.origin.get_or_insert((self.ticks, h));
@@ -187,9 +241,51 @@ impl SensorClock {
         event
     }
 
+    /// The phase: the middle of its bounds, in unwrapped sensor ticks.
+    fn phase(&self) -> Option<f64> {
+        match (self.lo, self.hi) {
+            (Some(l), Some(h)) => Some((l + h) as f64 / 2.0),
+            _ => None,
+        }
+    }
+
+    /// Host ns per sensor tick: the fit's, or the nominal one before the fit has a slope.
+    fn slope(&self) -> f64 {
+        self.fit.slope().unwrap_or(TICK_NS)
+    }
+
+    /// When to start the next drain: the first host time at or after `earliest` at which the sensor
+    /// time is at the phase's middle on the sample grid, so the drain splits the phase's bounds.
+    /// `None` until the model has both bounds and a host-timed read to map them with.
+    pub(crate) fn aim(&self, earliest: u64) -> Option<u64> {
+        let phase = self.phase()?;
+        let (t0, h0) = self.origin?;
+        let slope = self.slope();
+        let (mx, my) = (self.fit.mx, self.fit.my);
+        // Sensor ticks (from the origin) at `earliest`, then the first grid point at or after it.
+        let x = mx + (earliest as f64 - h0 as f64 - my) / slope;
+        let from_phase = x - (phase - t0 as f64);
+        let grid = self.grid as f64;
+        // The ceiling, by hand: `f64::ceil` needs `std`. A cast truncates toward zero.
+        let q = from_phase / grid;
+        let truncated = q as i64 as f64;
+        let steps = if truncated < q {
+            truncated + 1.0
+        } else {
+            truncated
+        };
+        let target = phase - t0 as f64 + steps * grid;
+        let at = h0 as f64 + my + slope * (target - mx);
+        (at.is_finite() && at >= earliest as f64).then_some(at as u64)
+    }
+
     /// Whether the model is good enough to publish stamps.
     pub(crate) fn converged(&self) -> bool {
-        self.batches >= BATCHES && self.fit.slope().is_some() && self.phase.is_some()
+        let width = match (self.lo, self.hi) {
+            (Some(l), Some(h)) => (h - l) as f64 * TICK_NS,
+            _ => return false,
+        };
+        self.batches >= BATCHES && self.fit.slope().is_some() && width <= PHASE_WIDTH_NS
     }
 
     /// Sample `n`'s host time from the model, or `None` before it converges.
@@ -197,10 +293,10 @@ impl SensorClock {
         if !self.converged() {
             return None;
         }
-        let phase = self.phase?;
+        let phase = self.phase()?;
         let (t0, h0) = self.origin?;
         let slope = self.fit.slope()?;
-        let x = (phase + self.grid * n as i64 - t0 as i64) as f64;
+        let x = phase + (self.grid * n as i64 - t0 as i64) as f64;
         let at = h0 as f64 + self.fit.my + slope * (x - self.fit.mx);
         Some(if at <= 0.0 { 0 } else { (at + 0.5) as u64 })
     }
@@ -240,11 +336,10 @@ mod tests {
     #[test]
     fn a_reset_is_a_step_back_of_half_a_wrap_or_more() {
         let mut clock = SensorClock::new(5_000_000);
-        assert_eq!(clock.observe(1_000, Some(0), Some(0)), None);
-        assert_eq!(clock.observe(1_500, Some(1), Some(19_531_250)), None);
-        assert_eq!(
-            clock.observe(10, Some(2), Some(39_062_500)),
-            Some(Event::Reset)
-        );
+        assert_eq!(clock.before(990), None);
+        assert_eq!(clock.after(1_000, Some(0), true, Some(0)), None);
+        assert_eq!(clock.before(1_490), None);
+        assert_eq!(clock.after(1_500, Some(1), true, Some(19_531_250)), None);
+        assert_eq!(clock.before(5), Some(Event::Reset));
     }
 }

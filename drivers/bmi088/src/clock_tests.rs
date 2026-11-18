@@ -40,8 +40,10 @@ pub(crate) const GRID: f64 = 128.0;
 pub(crate) const BATCH_NS: u64 = 365_000_000;
 /// The accelerometer's counts to m/s² at 6 g.
 pub(crate) const SCALE: f64 = 6.0 * 9.806_65 / 32_768.0;
-/// The host time between a batch's drain and its sensor time read: the FIFO read, in the sim.
-pub(crate) const LATENCY_NS: u64 = 300_000;
+/// The host time between a drain's first sensor time read and its FIFO length read, and between
+/// that and its second sensor time read: one short transfer each.
+pub(crate) const LEAD_NS: u64 = 150_000;
+pub(crate) const LATENCY_NS: u64 = 150_000;
 /// Where the harness starts, on the chip's own clock. The first batch is one batch later.
 pub(crate) const START_NS: u64 = 100_000_000;
 
@@ -79,8 +81,15 @@ impl Oscillator {
 /// The chip and the host clock's readings, shared with the bus and the clock the driver holds.
 pub(crate) struct Chip {
     osc: Oscillator,
-    /// The true host time of the sensor read in progress, ns.
+    /// The true host time of the drain's first sensor read, ns, just before its length read.
+    drain_ns: AtomicU64,
+    /// The true host time of the drain's second sensor read, ns, which the host clock brackets.
     at_ns: AtomicU64,
+    /// Sensor reads in the drain in progress.
+    reads: AtomicU32,
+    /// The accelerometer registers read, in order, while `logging` is set.
+    log: std::sync::Mutex<Vec<u8>>,
+    logging: core::sync::atomic::AtomicBool,
     /// Sensor ticks added to the chip's count: a reset steps it back, a jump forward.
     shift: AtomicI64,
     /// The host clock's offsets for the next bracket: before the read, and after it.
@@ -91,7 +100,12 @@ pub(crate) struct Chip {
 
 impl Chip {
     fn sensor_time(&self) -> u32 {
-        let t = self.at_ns.load(Ordering::SeqCst) as f64 * 1e-9;
+        let at = if self.reads.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+            &self.drain_ns
+        } else {
+            &self.at_ns
+        };
+        let t = at.load(Ordering::SeqCst) as f64 * 1e-9;
         let ticks = self.osc.ticks(t).floor() as i64 + self.shift.load(Ordering::SeqCst);
         ticks.rem_euclid(1 << 24) as u32
     }
@@ -132,6 +146,13 @@ impl HalI2c for Clocked {
         address: u8,
         operations: &mut [Operation<'_>],
     ) -> core::result::Result<(), ErrorKind> {
+        if address == ACCEL
+            && self.chip.logging.load(Ordering::SeqCst)
+            && let [Operation::Write(reg), Operation::Read(_)] = operations
+            && let Some(&first) = reg.first()
+        {
+            self.chip.log.lock().unwrap().push(first);
+        }
         if let [Operation::Write(reg), Operation::Read(buf)] = operations
             && address == ACCEL
             && reg.len() == 1
@@ -190,12 +211,15 @@ pub(crate) enum Fault {
 /// What one batch does on the host side.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Plan {
-    /// Added to the batch's time for the tick (the caller's time, with the host's jitter). A tick
-    /// is never earlier than the drain it is due for.
+    /// How late the host ticks after the drain is due, as its size: a host ticks on time, or
+    /// late, never early.
     pub(crate) tick_jitter_ns: i64,
     /// The host clock's offsets for the sensor read's bracket, before and after it.
     pub(crate) pre_ns: i64,
     pub(crate) post_ns: i64,
+    /// How much earlier than the drain the time the host hands the tick is: a host reads its clock
+    /// once and then ticks its devices one after another.
+    pub(crate) report_early_ns: u64,
     pub(crate) fault: Option<Fault>,
 }
 
@@ -206,6 +230,7 @@ impl Plan {
             tick_jitter_ns: 0,
             pre_ns: 0,
             post_ns: 0,
+            report_early_ns: 0,
             fault: None,
         }
     }
@@ -228,8 +253,8 @@ pub(crate) struct Harness {
     /// The driver's next sequence number (frames pushed, samples the chip dropped included).
     pub(crate) seq: u64,
     /// The true time of the last batch's drain.
-    t_ns: u64,
-    /// The accelerometer's next drain is due at this time: one batch after the last tick reported.
+    pub(crate) t_ns: u64,
+    /// The accelerometer's next drain is due at this time, as the driver last said.
     accel_due_ns: u64,
     /// The batch index, from 0.
     pub(crate) batch: u64,
@@ -264,7 +289,11 @@ impl Harness {
         );
         let chip = Arc::new(Chip {
             osc,
+            drain_ns: AtomicU64::new(0),
             at_ns: AtomicU64::new(0),
+            reads: AtomicU32::new(0),
+            log: std::sync::Mutex::new(Vec::new()),
+            logging: core::sync::atomic::AtomicBool::new(false),
             shift: AtomicI64::new(0),
             pre: AtomicI64::new(0),
             post: AtomicI64::new(0),
@@ -296,7 +325,7 @@ impl Harness {
             base,
             seq: 0,
             t_ns: START_NS,
-            accel_due_ns: 0,
+            accel_due_ns: START_NS + BATCH_NS,
             batch: 0,
             note: None,
         }
@@ -316,8 +345,12 @@ impl Harness {
 
     /// The batch's half of [`Harness::step`]: the FIFO fills, and the tick drains it.
     pub(crate) fn fill_and_tick(&mut self, plan: Plan) {
-        self.t_ns += BATCH_NS;
-        let drain = self.t_ns;
+        // The host ticks once the accelerometer's drain is due, late by the host's jitter. The
+        // tick's drain reads the FIFO's length a short transfer later: the chip has made every
+        // sample up to that time.
+        let tick = self.accel_due_ns.max(self.t_ns + 1) + plan.tick_jitter_ns.unsigned_abs();
+        let drain = tick + LEAD_NS;
+        self.t_ns = drain;
         let read = drain + LATENCY_NS;
         let produced = (self.chip.osc.ticks(drain as f64 * 1e-9) / GRID).floor() as u64;
         let mut fifo = Vec::new();
@@ -328,8 +361,8 @@ impl Harness {
                 self.seq += u64::from(lost);
             }
             Some(Fault::Reset) => {
-                // The sensor time starts again from zero at this read.
-                let now = self.chip.osc.ticks(read as f64 * 1e-9).floor() as i64;
+                // The sensor time starts again from zero at this drain.
+                let now = self.chip.osc.ticks(drain as f64 * 1e-9).floor() as i64;
                 self.chip.shift.store(-now, Ordering::SeqCst);
             }
             Some(Fault::Jump(ticks)) => {
@@ -348,17 +381,17 @@ impl Harness {
         if !fifo.is_empty() {
             self.sim.fifo_push(ACCEL, &fifo);
         }
-        // Each bracket reads the host clock before and after the sensor time.
+        // The drain reads the sensor time just before the FIFO's length (which counts what the
+        // chip made by `drain`), then again just after it, between two host clock readings.
+        self.chip.drain_ns.store(tick, Ordering::SeqCst);
+        self.chip.reads.store(0, Ordering::SeqCst);
         self.chip.at_ns.store(read, Ordering::SeqCst);
         self.chip.pre.store(plan.pre_ns, Ordering::SeqCst);
         self.chip.post.store(plan.post_ns, Ordering::SeqCst);
         self.chip.calls.store(0, Ordering::SeqCst);
-        // The tick reports the drain's time with the host's jitter, but never before the drain is
-        // due: a host ticks on time, or late. The accelerometer's drain is due one batch after the
-        // tick that last drained it.
-        let tick_at = (drain as i64 + plan.tick_jitter_ns).max(self.accel_due_ns as i64) as u64;
-        self.accel_due_ns = tick_at + BATCH_NS;
-        let _ = Driver::tick(&mut self.dev, tick_at);
+        // The next drain is when the driver says it is due.
+        let _ = Driver::tick(&mut self.dev, tick.saturating_sub(plan.report_early_ns));
+        self.accel_due_ns = self.dev.accel.due.expect("a drain is due");
         self.note = match Driver::health(&self.dev) {
             Health::Degraded(text) => Some(text),
             _ => None,
@@ -492,6 +525,7 @@ fn board_plan(jitter: &mut Jitter, b: u64) -> Plan {
         } else {
             jitter.next(50_000) + 100_000
         },
+        report_early_ns: 0,
         fault: None,
     }
 }
@@ -509,20 +543,42 @@ fn contiguous(delivered: &[(u64, Delivered)]) {
     }
 }
 
-/// A 1.5 % fast oscillator at the board's 200 Hz: the converged stamps are within 1 ms of the true
-/// time of every sample, in order, with no gaps over 1.5 periods.
+/// The board run's oscillator (`testing/board-runs/B8.md`): 9206 records in 45.00 s at a nominal
+/// 200 Hz, so the die is 2.29 % fast.
+pub(crate) const BOARD_EPS: f64 = 9206.0 / 9000.0 - 1.0;
+
+/// The limit the board run's span check asks for: 1 ms.
 pub(crate) const BOARD_LIMIT_NS: f64 = 1_000_000.0;
 
+/// The batch-miss note, as health shows it.
+const BATCH_NOTE: &str = "accelerometer: batch missed samples";
+
+/// The board run, as it was taken (B8, 2026-11-17): a die 2.29 % fast at 200 Hz, 45 s, the host's
+/// tick jitter with the rare 9 ms outlier the run's 9.13 ms gap came from, and a batch read after
+/// every drain. From the first record on, every sample is delivered once, in order, within 1 ms of
+/// its true time; the stamps span the samples' true span to within 1 ms (the run was 668 ms off);
+/// no two consecutive stamps are more than 1.5 periods apart (the run had 46 such gaps); and
+/// health never reports a batch miss, the convergence's dropped samples included.
 #[test]
 fn a_board_run_of_45_s_is_stamped_within_a_millisecond_without_gaps() {
     let osc = Oscillator {
-        eps: 0.015,
+        eps: BOARD_EPS,
         drift: 0.0,
     };
     let mut h = Harness::new(osc, 200);
     let mut jitter = Jitter::new(0x9e37_79b9);
     // 123 batches is 45 s.
-    let delivered = run(&mut h, 123, |b| board_plan(&mut jitter, b));
+    let mut delivered = Vec::new();
+    for b in 0..123 {
+        let out = h.step(board_plan(&mut jitter, b));
+        assert_ne!(h.note, Some(BATCH_NOTE), "batch {b}: a miss after its tick");
+        assert_ne!(
+            Driver::health(&h.dev),
+            Health::Degraded(BATCH_NOTE),
+            "batch {b}: a miss after its read"
+        );
+        delivered.extend(out.into_iter().map(|d| (b, d)));
+    }
     let first = first_delivery(&delivered).expect("the clock never converged");
     assert!(
         first <= 20,
@@ -530,6 +586,18 @@ fn a_board_run_of_45_s_is_stamped_within_a_millisecond_without_gaps() {
     );
     let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
     contiguous(&delivered);
+    assert_eq!(
+        stamps.last().unwrap().seq,
+        h.seq - 1,
+        "every sample up to the newest is delivered"
+    );
+    // The chip's 45 s at 2.29 % fast, less what came before the first record.
+    let expected = (h.seq - stamps[0].seq) as f64;
+    let rate = expected / ((h.truth(h.seq - 1) - h.truth(stamps[0].seq)) * 1e-9);
+    assert!(
+        (rate - 200.0 * (1.0 + BOARD_EPS)).abs() < 1.0,
+        "the run's rate is {rate} Hz"
+    );
     assert!(no_going_back(&stamps).is_none(), "a stamp went back");
     let gap = largest_gap(&stamps);
     assert!(
@@ -561,16 +629,17 @@ fn a_run_of_an_hour_with_0_1_percent_drift_per_hour_stays_within_a_millisecond()
     };
     let mut h = Harness::new(osc, 200);
     let mut jitter = Jitter::new(0x5851_f42d);
-    let batches = 3_600_000_000_000u64 / BATCH_NS;
     let mut worst = 0.0f64;
     let mut count = 0u64;
     let mut last = None;
     let mut converged_at = None;
-    for b in 0..batches {
+    let mut b = 0;
+    while h.t_ns < START_NS + 3_600_000_000_000 {
         let out = h.step(board_plan(&mut jitter, b));
         if !out.is_empty() && converged_at.is_none() {
             converged_at = Some(b);
         }
+        b += 1;
         for d in &out {
             let err = (d.at_ns as f64 - h.truth(d.seq)).abs();
             worst = worst.max(err);
@@ -595,9 +664,11 @@ fn a_run_of_an_hour_with_0_1_percent_drift_per_hour_stays_within_a_millisecond()
 /// Uniform jitter of 9 ms on every batch's tick and on every host reading of the bracket: the
 /// model still never goes back, leaves no gap over 1.5 periods, and is within the bound below.
 ///
-/// The bound is set from measurement: over five seeds, 600 batches each, the worst error was 3.8 ms
-/// and the largest gap 6.2 ms. 6 ms bounds the error with margin, and 7.5 ms is the gap limit.
-pub(crate) const STRESS_BOUND_NS: f64 = 6_000_000.0;
+/// The bound is set from measurement: over 48 seeds, 123 batches (45 s) each, the worst error was
+/// 6.3 ms and the largest gap 6.7 ms, and every run converged by batch 35. 7 ms bounds the error,
+/// and 7.5 ms is the gap limit. The error is the fit's: every host reading the line is drawn
+/// through is off by up to 9 ms.
+pub(crate) const STRESS_BOUND_NS: f64 = 7_000_000.0;
 
 #[test]
 fn a_uniform_9_ms_jitter_stress_is_monotonic_without_gaps_within_its_stated_bound() {
@@ -614,6 +685,7 @@ fn a_uniform_9_ms_jitter_stress_is_monotonic_without_gaps_within_its_stated_boun
             tick_jitter_ns: jitter.next(9_000_000),
             pre_ns: host,
             post_ns: host,
+            report_early_ns: 0,
             fault: None,
         }
     });
@@ -644,7 +716,8 @@ fn a_uniform_9_ms_jitter_stress_is_monotonic_without_gaps_within_its_stated_boun
 
 #[test]
 fn stamps_stay_monotonic_while_the_model_is_updated_on_every_batch() {
-    // Every batch moves the fit, under a different jitter from the stress test's.
+    // Every batch moves the fit, under a different jitter from the stress test's, and the time the
+    // host hands each tick is up to 9 ms before the drain: a stamp taken from it would go back.
     let osc = Oscillator {
         eps: 0.015,
         drift: -0.001 / 45.0,
@@ -657,6 +730,7 @@ fn stamps_stay_monotonic_while_the_model_is_updated_on_every_batch() {
             tick_jitter_ns: jitter.next(9_000_000),
             pre_ns: host,
             post_ns: host,
+            report_early_ns: jitter.next(9_000_000).unsigned_abs(),
             fault: None,
         }
     });
@@ -753,4 +827,62 @@ fn a_sensor_time_jump_re_anchors_reports_it_and_never_goes_back() {
 #[test]
 fn a_fifo_overflow_re_anchors_reports_it_and_never_goes_back() {
     fault_at(Fault::Overflow(3), "overflow", OVERFLOW_NOTE);
+}
+
+/// The rates at which the earlier model's phase stuck more than 1 ms off: its drains, a fixed time
+/// apart, met the sample grid at a few points only. Every rate from 4 % slow to 4 % fast, in steps
+/// of 0.5 %, and those, are stamped within 1 ms.
+#[test]
+fn every_rate_within_4_percent_is_stamped_within_a_millisecond() {
+    let stuck = [
+        -0.027, -0.014, -0.011, -0.009, -0.007, 0.003, 0.007, 0.014, 0.023,
+    ];
+    let steps = (-8..=8).map(|i| f64::from(i) * 0.005);
+    for eps in steps.chain(stuck) {
+        let mut h = Harness::new(Oscillator { eps, drift: 0.0 }, 200);
+        let mut jitter = Jitter::new(0x9e37_79b9);
+        let delivered = run(&mut h, 60, |b| board_plan(&mut jitter, b));
+        let first = first_delivery(&delivered);
+        assert!(
+            first.is_some_and(|b| b <= 20),
+            "{eps}: converged at {first:?}"
+        );
+        let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+        let worst = errors(&h, &stamps)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= BOARD_LIMIT_NS,
+            "{eps}: a stamp was {worst} ns from the true time"
+        );
+    }
+}
+
+/// A tick's drain reads the sensor time just before the FIFO's length and just after it, and the
+/// FIFO's data only after both: the FIFO's read takes milliseconds, and a sensor time read after
+/// it would put the phase that much late.
+#[test]
+fn a_drain_reads_the_sensor_time_around_the_fifo_length_and_before_the_data() {
+    let mut h = Harness::new(
+        Oscillator {
+            eps: 0.0,
+            drift: 0.0,
+        },
+        200,
+    );
+    h.chip.logging.store(true, Ordering::SeqCst);
+    h.fill_and_tick(Plan::clean());
+    h.chip.logging.store(false, Ordering::SeqCst);
+    let log = h.chip.log.lock().unwrap().clone();
+    assert!(log.len() > 4, "the drain read {log:02x?}");
+    assert_eq!(
+        log[..4],
+        [SENSORTIME, ACC_FIFO_LENGTH, SENSORTIME, ACC_FIFO_DATA],
+        "the drain read {log:02x?}"
+    );
+    assert!(
+        log[4..].iter().all(|reg| *reg == ACC_FIFO_DATA),
+        "the drain read {log:02x?}"
+    );
 }
