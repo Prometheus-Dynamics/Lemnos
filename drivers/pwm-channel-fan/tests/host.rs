@@ -66,6 +66,7 @@ const SET_DUTY: u16 = 1;
 const DUTY: u16 = 2;
 const RPM: u16 = 3;
 const RELEASE: u16 = 4;
+const HAND_BACK: u16 = 5;
 
 impl Rig {
     fn call(&self, method: u16, args: &[u8]) -> Vec<u8> {
@@ -112,6 +113,10 @@ impl Rig {
     fn rpm(&self) -> Option<u32> {
         let bytes = self.call(RPM, &[]);
         <Option<u32>>::decode(&mut Reader::new(&bytes)).unwrap()
+    }
+
+    fn hand_back(&self) {
+        self.call(HAND_BACK, &[]);
     }
 
     fn release(&self) {
@@ -248,6 +253,19 @@ fn a_failed_write_is_retried_on_the_backoff_and_capped_at_eight_seconds() {
         matches!(rig.health(), Health::Ok),
         "healthy again after the good write"
     );
+}
+
+#[test]
+fn hand_back_is_full_duty_too_as_the_channel_has_no_baseline_to_return_to() {
+    let rig = rig("", false);
+    rig.set(100).unwrap();
+    rig.hand_back();
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        PERIOD,
+        "hand-back is the safe state here"
+    );
+    assert_eq!(rig.duty(), 1000);
 }
 
 #[test]

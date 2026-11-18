@@ -79,12 +79,15 @@ pub trait FanKnob {
     /// The duty last written.
     #[method(2)]
     fn last(&mut self) -> Result<u32>;
-    /// Hand-backs so far.
+    /// Releases (the safe state, full duty) so far.
     #[method(3)]
     fn releases(&mut self) -> Result<u32>;
     /// The next `n` writes fail.
     #[method(4)]
     fn fail_next(&mut self, n: u32) -> Result<()>;
+    /// Hand-backs (the baseline put back) so far.
+    #[method(5)]
+    fn hand_backs(&mut self) -> Result<u32>;
 }
 
 #[driver("sim-fan", provides = [Fan, FanKnob])]
@@ -92,6 +95,7 @@ pub struct SimFan {
     calls: u32,
     last: u16,
     releases: u32,
+    hand_backs: u32,
     failing: u32,
 }
 
@@ -103,6 +107,7 @@ impl Lifecycle for SimFan {
             calls: 0,
             last: 0,
             releases: 0,
+            hand_backs: 0,
             failing: 0,
         })
     }
@@ -131,6 +136,11 @@ impl Fan for SimFan {
         self.releases += 1;
         Ok(())
     }
+
+    fn hand_back(&mut self) -> Result<()> {
+        self.hand_backs += 1;
+        Ok(())
+    }
 }
 
 impl FanKnob for SimFan {
@@ -144,6 +154,10 @@ impl FanKnob for SimFan {
 
     fn releases(&mut self) -> Result<u32> {
         Ok(self.releases)
+    }
+
+    fn hand_backs(&mut self) -> Result<u32> {
+        Ok(self.hand_backs)
     }
 
     fn fail_next(&mut self, n: u32) -> Result<()> {
@@ -231,6 +245,10 @@ impl Rig {
 
     fn releases(&self) -> u32 {
         self.knob("fan", 3)
+    }
+
+    fn hand_backs(&self) -> u32 {
+        self.knob("fan", 5)
     }
 
     fn fail_fan(&self, n: u32) {
@@ -355,13 +373,22 @@ fn a_failed_write_releases_the_fan_and_retries_on_a_backoff_capped_at_8_seconds(
 }
 
 #[test]
-fn disabling_releases_the_fan_and_enabling_takes_it_again() {
+fn disabling_hands_the_fan_back_and_enabling_takes_it_again() {
     let mut rig = start_rig(&board(40_000, false));
     rig.host.tick();
     assert_eq!(rig.calls(), 1);
 
     rig.ctl(8, &enc(&false));
-    assert_eq!(rig.releases(), 1, "the fan is released");
+    assert_eq!(
+        rig.hand_backs(),
+        1,
+        "the fan is handed back to its baseline"
+    );
+    assert_eq!(
+        rig.releases(),
+        0,
+        "a disable is not a failure: no full-duty release"
+    );
     assert_eq!(rig.state().duty, 0);
     rig.second();
     rig.second();
@@ -438,9 +465,10 @@ fn the_hotter_of_two_temperatures_drives_the_fan() {
 }
 
 #[test]
-fn stopping_the_controller_releases_the_fan() {
+fn stopping_the_controller_hands_the_fan_back() {
     let rig = start_rig(&board(40_000, false));
     rig.host.tick();
     rig.host.off("ctl").unwrap();
-    assert_eq!(rig.releases(), 1);
+    assert_eq!(rig.hand_backs(), 1);
+    assert_eq!(rig.releases(), 0);
 }

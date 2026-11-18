@@ -355,14 +355,34 @@ const FAN_RELEASE: MethodId = MethodId {
 };
 
 /// A fan on `fan/1` that takes a duty per mille and reports it back, the way `pwm-channel-fan`
-/// and `hwmon-fan` do. It starts at full duty, its safe state, unless `duty` says otherwise, and
-/// `release` puts it back there. `fail = true` refuses every write (`set_duty` and `release`)
-/// with `IO`, as a hwmon attribute refuses one when the kernel says no, and the duty stays where
-/// it was. For the B14 fan-control rehearsal (`testing/fan-control`) and its daemon test.
+/// and `hwmon-fan` do. It starts at its configured `duty`, the duty the fan was at before any driver
+/// took it (the baseline of a real hwmon fan, such as pwm1 179 on the B14 board, which is 702 per
+/// mille). The first write takes the fan over and records that baseline. `release` puts the fan at
+/// full duty, its safe state, as hwmon's and pwm-channel-fan's do; a hand-back puts back the baseline.
+/// `file`, when given, keeps the duty in that file as decimal per mille (as a sysfs attribute keeps
+/// its value), so a test can read it after the daemon has stopped. A fan that is not taken at drop
+/// goes to full duty, as hwmon does. `fail = true` refuses every write with `IO`, as a hwmon attribute
+/// refuses one when the kernel says no, and the duty stays where it was. For the B14 fan-control
+/// rehearsal (`testing/fan-control`) and its daemon tests.
 #[driver("fake-fan", provides = [Fan])]
 pub struct FakeFan {
     duty: u16,
+    /// The duty when the fan was taken over: `None` until the first write.
+    baseline: Option<u16>,
+    file: Option<PathBuf>,
     fail: bool,
+}
+
+impl FakeFan {
+    /// Sets the duty, and the file that keeps it. The file is written first, so a refused write
+    /// leaves the duty where it was.
+    fn put(&mut self, per_mille: u16) -> Result<()> {
+        if let Some(path) = &self.file {
+            std::fs::write(path, format!("{per_mille}\n")).map_err(|_| Status::IO)?;
+        }
+        self.duty = per_mille;
+        Ok(())
+    }
 }
 
 impl Lifecycle for FakeFan {
@@ -372,6 +392,7 @@ impl Lifecycle for FakeFan {
         cfg.check_keys(&[
             Key::optional("duty", Kind::Int),
             Key::optional("fail", Kind::Bool),
+            Key::optional("file", Kind::Str),
         ])?;
         if let Some(duty) = cfg.int("duty")
             && !(0..=i64::from(FAN_MAX)).contains(&duty)
@@ -382,11 +403,22 @@ impl Lifecycle for FakeFan {
     }
 
     fn start(_needs: FakeFanNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let duty = cfg.int("duty").unwrap_or(i64::from(FAN_MAX)) as u16;
-        Ok(Self {
+        let configured = cfg.int("duty").unwrap_or(i64::from(FAN_MAX)) as u16;
+        let file = cfg.str("file").map(PathBuf::from);
+        // A file that is there holds the fan's duty from before, as a sysfs attribute does.
+        let duty = match file.as_ref().map(std::fs::read_to_string) {
+            Some(Ok(text)) => text.trim().parse().unwrap_or(configured),
+            _ => configured,
+        };
+        let mut fan = Self {
             duty,
+            baseline: None,
+            file,
             fail: cfg.bool("fail").unwrap_or(false),
-        })
+        };
+        let at = fan.duty;
+        fan.put(at)?;
+        Ok(fan)
     }
 
     fn describe(&self, out: &mut Description) {
@@ -416,8 +448,8 @@ impl Fan for FakeFan {
         if self.fail {
             return Err(Status::IO);
         }
-        self.duty = per_mille;
-        Ok(())
+        self.baseline.get_or_insert(self.duty);
+        self.put(per_mille)
     }
 
     fn duty(&mut self) -> Result<u16> {
@@ -433,8 +465,33 @@ impl Fan for FakeFan {
         if self.fail {
             return Err(Status::IO);
         }
-        self.duty = FAN_MAX;
+        if self.baseline.is_none() {
+            return Ok(());
+        }
+        self.put(FAN_MAX)
+    }
+
+    fn hand_back(&mut self) -> Result<()> {
+        if self.fail {
+            return Err(Status::IO);
+        }
+        // Nothing taken, nothing to put back. The baseline is forgotten once it is back.
+        let Some(baseline) = self.baseline else {
+            return Ok(());
+        };
+        self.put(baseline)?;
+        self.baseline = None;
         Ok(())
+    }
+}
+
+impl Drop for FakeFan {
+    fn drop(&mut self) {
+        // As hwmon-fan: a fan a driver took and let go of is left at full duty. Nothing can report
+        // an error from here.
+        if self.baseline.is_some() {
+            let _ = self.put(FAN_MAX);
+        }
     }
 }
 

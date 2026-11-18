@@ -49,11 +49,11 @@ python3 scripts/generate-builtins.py --check
 | Driver | Provides | Needs | State |
 |---|---|---|---|
 | `orientation` | `orientation/1` | `accel`, `gyro`, optional `mag`: devices | Serves its contract. No calibration: that is the caller's |
-| `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
+| `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract. A failed fan write puts the fan at full duty (`release`) and is retried with a backoff capped at 8 s. Stopped or disabled, it hands the fan back to the duty and mode it had before the take-over (`hand_back`) |
 | `status-light` | `light/1` | `pixels`: a device | Serves its contract |
 | `indicator` | `indicator/1`, `self-test/1` | `pixels`: a device (the LED strip, or a GPIO LED driver that provides `pixels/1`); `brightness` and `state.<name>` patterns in `config` | Serves its contract: named states (`idle`, `receiving`, `writing`, `verifying`, `done`, `failed`), each drawn with the pattern the board gives it (`solid`, `blink`, `chase`, `bar`, `off`), as a frame on the device's tick. An unknown state is refused. Allocates nothing once started |
-| `pwm-channel-fan` | `fan/1` | `pwm`: a PWM channel, and optional `tach`: a GPIO line | Serves its contract. Drives the PWM directly, with no kernel fan driver between. Full duty at start, on release, and when stopped |
-| `hwmon-fan` | `fan/1`, `self-test/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`. `release`, and dropping the driver, put the fan at full duty; nothing is handed to the kernel's thermal governor. A killed daemon runs no code, so the fan keeps the last duty |
+| `pwm-channel-fan` | `fan/1` | `pwm`: a PWM channel, and optional `tach`: a GPIO line | Serves its contract. Drives the PWM directly, with no kernel fan driver between. Full duty at start, on release, on hand-back (it records no baseline), and when stopped |
+| `hwmon-fan` | `fan/1`, `self-test/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`, recording `pwm1` and `pwm1_enable` first. `hand_back` puts both back, the value first; `release` puts the fan at full duty (the safe state for a failure), and dropping the driver does the same if it still holds the fan. A killed daemon runs no code, so the fan keeps the last duty |
 | `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
 | `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
@@ -258,7 +258,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `temperature/1` | 1 read | `thermal-zone`, `generic-temperature`, `modbus-temperature` |
 | `power-monitor/1` | 1 read | `ina2xx`, `generic-power-monitor`, `modbus-power-monitor` |
 | `power-switch/1` | 1 set, 2 is_on, 3 fault | `gpio-power-switch` |
-| `fan/1` | 1 set_duty, 2 duty, 3 rpm, 4 release | `hwmon-fan` |
+| `fan/1` | 1 set_duty, 2 duty, 3 rpm, 4 release, 5 hand_back (added) | `hwmon-fan`, `pwm-channel-fan` |
 | `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
 | `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
 | `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |

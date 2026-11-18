@@ -53,8 +53,9 @@ What it does while it runs:
 - **Ends everything a connection held when the connection closes**: subscriptions, streams and
   whatever a driver was holding for that caller.
 - **Stops on `SIGTERM` or `SIGINT`.** Stopping drops every driver. Each one leaves its hardware in
-  its safe state (a fan at full duty), and the hardware watchdog then resets the board if the stop
-  is not followed by a start.
+  its safe state: a fan that a controller drove goes back to the duty and mode it had before the
+  controller took it (its baseline, FAN-RELEASE), and a fan with no baseline goes to full duty. The
+  hardware watchdog then resets the board if the stop is not followed by a start.
 
 It writes nothing to its standard output. Its error output gets what could not be used, what
 became of each driver package, and a driver's panic message.

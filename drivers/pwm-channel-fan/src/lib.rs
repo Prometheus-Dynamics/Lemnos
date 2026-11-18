@@ -49,8 +49,10 @@
 //! # Safe state
 //!
 //! The driver starts at full duty and writes it at its first tick. `release` and dropping the
-//! driver both set full duty. Nothing hands the fan to anything else: a stopped driver leaves the
-//! fan at full. A controller that wants the fan stopped must ask for it.
+//! driver both set full duty. `hand_back` is the same: this driver records no baseline, since its
+//! channel is its own from the start, and full duty is the state it is handed back in. Nothing hands
+//! the fan to anything else: a stopped driver leaves the fan at full. A controller that wants the fan
+//! stopped must ask for it.
 //!
 //! What a temperature failure does is the controller's to decide. `fan-control` runs the fan at
 //! full duty when an input is missing or stale, and reports `Degraded`.
@@ -365,6 +367,12 @@ impl Fan for PwmChannelFan {
     fn release(&mut self) -> Result<()> {
         self.target = FULL;
         Ok(())
+    }
+
+    /// There is no baseline to put back: the driver starts the channel at full duty and nothing
+    /// else is recorded, so a hand-back is the safe state.
+    fn hand_back(&mut self) -> Result<()> {
+        self.release()
     }
 }
 
