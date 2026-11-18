@@ -679,19 +679,25 @@ impl LemPispFe {
     fn rd(&self, offset: usize) -> u32 {
         // SAFETY: the window is LEM_PISP_FE_WINDOW bytes (the receiver's probe checked its resource),
         // and every offset read is a constant below it.
-        unsafe { bindings::readl(self.base.cast::<u8>().add(offset).cast()) }
+        let reg = unsafe { self.base.cast::<u8>().add(offset) };
+        // SAFETY: a register inside the mapped window.
+        unsafe { bindings::readl(reg.cast()) }
     }
 
     fn wr(&self, offset: usize, value: u32) {
         self.trace(offset as u32, value);
         // SAFETY: as rd.
-        unsafe { bindings::writel(value, self.base.cast::<u8>().add(offset).cast()) };
+        let reg = unsafe { self.base.cast::<u8>().add(offset) };
+        // SAFETY: a register inside the mapped window.
+        unsafe { bindings::writel(value, reg.cast()) };
     }
 
     fn wr_relaxed(&self, offset: usize, value: u32) {
         self.trace(offset as u32, value);
         // SAFETY: as rd; the offsets are FE_CONFIG_BASE up to the window's end (asserted above).
-        unsafe { bindings::writel_relaxed(value, self.base.cast::<u8>().add(offset).cast()) };
+        let reg = unsafe { self.base.cast::<u8>().add(offset) };
+        // SAFETY: a register inside the mapped window.
+        unsafe { bindings::writel_relaxed(value, reg.cast()) };
     }
 
     /// The receiver's device, for the log.
@@ -738,9 +744,11 @@ impl LemPispFe {
     fn program(&self, cfg: &lb::pisp_fe_config) {
         let words = ptr::from_ref(cfg).cast::<u32>();
         for i in 0..FE_CONFIG_BYTES / 4 {
-            // SAFETY: word `i` lies inside the configuration (FE_CONFIG_BYTES is below its size); the
-            // struct is packed, so the read is unaligned.
-            let word = unsafe { words.add(i).read_unaligned() };
+            // SAFETY: word `i` lies inside the configuration (FE_CONFIG_BYTES is below its size).
+            let at = unsafe { words.add(i) };
+            // SAFETY: a word of the configuration, as above; the struct is packed, so the read is
+            // unaligned.
+            let word = unsafe { at.read_unaligned() };
             self.wr_relaxed(FE_CONFIG_BASE + 4 * i, word);
         }
         self.wr(FE_CONTROL, FE_CONTROL_QUEUE);
@@ -1161,12 +1169,9 @@ impl LemPispFe {
 unsafe extern "C" fn lpf_retry(work: *mut bindings::work_struct) {
     // SAFETY: the work is the `retry` field of a LemPispFe (its delayed work begins with its work), which
     // lives until lem_pisp_fe_destroy has cancelled it.
-    let fe = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LemPispFe, retry))
-            .cast::<LemPispFe>())
-    };
+    let fe = unsafe { work.cast::<u8>().sub(offset_of!(LemPispFe, retry)) }.cast::<LemPispFe>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let fe = unsafe { &*fe };
     let mut st = fe.state.lock();
     fe.arm(&mut st);
 }
@@ -1281,7 +1286,9 @@ fn create(l: *mut LrcDev, window: *mut c_void) -> Result<*mut LemPispFe> {
         None
     };
     // SAFETY: the window the receiver mapped and checked: LEM_PISP_FE_WINDOW bytes, FE_VERSION its first word.
-    let hw_version = unsafe { bindings::readl(window.cast::<u8>().add(FE_VERSION).cast()) };
+    let reg = unsafe { window.cast::<u8>().add(FE_VERSION) };
+    // SAFETY: a register inside the mapped window.
+    let hw_version = unsafe { bindings::readl(reg.cast()) };
     let fe = KBox::pin_init(
         pin_init!(LemPispFe {
             l,

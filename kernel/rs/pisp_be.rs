@@ -485,12 +485,16 @@ unsafe impl Sync for LemPb {}
 fn rd_reg(regs: *mut c_void, off: usize) -> u32 {
     // SAFETY: the register window is mapped for LPB_WINDOW bytes (probe checked the resource's size),
     // and every offset read is below it.
-    unsafe { bindings::readl(regs.cast::<u8>().add(off).cast()) }
+    let reg = unsafe { regs.cast::<u8>().add(off) };
+    // SAFETY: a register inside the mapped window.
+    unsafe { bindings::readl(reg.cast()) }
 }
 
 fn wr_reg(regs: *mut c_void, off: usize, val: u32) {
     // SAFETY: as rd_reg.
-    unsafe { bindings::writel(val, regs.cast::<u8>().add(off).cast()) };
+    let reg = unsafe { regs.cast::<u8>().add(off) };
+    // SAFETY: a register inside the mapped window.
+    unsafe { bindings::writel(val, reg.cast()) };
 }
 
 // --- the checks ---
@@ -722,9 +726,11 @@ fn compression_sized(bayer: u32, bit: u32, f: &Image) -> bool {
 /// Whether every byte of `bytes` bytes at `offset` of the config is zero.
 fn config_zero(c: &lb::pisp_be_config, offset: usize, bytes: usize) -> bool {
     let base = ptr::from_ref(c).cast::<u8>();
+    // SAFETY: `offset + bytes` is within the config at every call (constants of its own layout).
+    let first = unsafe { base.add(offset) };
     // SAFETY: the config is a packed struct of integers with no padding, so each of its bytes is
-    // initialised; `offset + bytes` is within it at every call (constants of its own layout).
-    let all = unsafe { core::slice::from_raw_parts(base.add(offset), bytes) };
+    // initialised; the range is within it, as above.
+    let all = unsafe { core::slice::from_raw_parts(first, bytes) };
     all.iter().all(|b| *b == 0)
 }
 
@@ -1023,9 +1029,10 @@ impl LemPb {
         // `validate`, so what is written here is what was proved.
         let words = ptr::from_ref(&job.cfg.config).cast::<u32>();
         for u in LPB_FIRST_WORD..LPB_END_WORD {
-            // SAFETY: word `u` lies inside the config (LPB_END_WORD is its size in words); the struct is
-            // packed, so the read is unaligned.
-            let word = unsafe { words.add(u).read_unaligned() };
+            // SAFETY: word `u` lies inside the config (LPB_END_WORD is its size in words).
+            let at = unsafe { words.add(u) };
+            // SAFETY: a word of the config, as above; the struct is packed, so the read is unaligned.
+            let word = unsafe { at.read_unaligned() };
             self.wr(BE_CONFIG_BASE_REG + 4 * u, word);
         }
 
@@ -1190,12 +1197,9 @@ unsafe extern "C" fn lpb_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
 unsafe extern "C" fn lpb_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: the work is the watchdog's (its delayed work begins with its work), and the block is the
     // container of the watchdog; the block outlives its work (lem_pb_remove cancels it).
-    let l = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LemPb, watchdog))
-            .cast::<LemPb>())
-    };
+    let l = unsafe { work.cast::<u8>().sub(offset_of!(LemPb, watchdog)) }.cast::<LemPb>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let l = unsafe { &*l };
     let mut st = l.state.lock();
     let ps = st.attached;
     if ps.is_null() || st.wedged {
@@ -1325,12 +1329,9 @@ unsafe extern "C" fn lpb_kick(priv_: *mut c_void) -> c_long {
 unsafe extern "C" fn lpb_collect_work(work: *mut bindings::work_struct) {
     // SAFETY: the work is the collect's (its delayed work begins with its work), and the stream is the
     // container of the collect; lpb_stop cancels it before the stream can be released.
-    let ps = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LpbStream, collect))
-            .cast::<LpbStream>())
-    };
+    let ps = unsafe { work.cast::<u8>().sub(offset_of!(LpbStream, collect)) }.cast::<LpbStream>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let ps = unsafe { &*ps };
     let ret = ps.kick();
     if ret != 0 && ret != ENODEV.to_errno() as c_long {
         ps.handle().fault(ret as c_int);
@@ -1689,7 +1690,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
         return Err(EINVAL);
     }
     // SAFETY: as above.
-    let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
+    let start = unsafe { (*res).start };
+    // SAFETY: as above.
+    let size = unsafe { bindings::resource_size(res) };
     let regs: *mut c_void = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
         let mem = from_err_ptr(unsafe {
@@ -1779,6 +1782,8 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
         wq.destroy();
         return Err(e);
     }
+    // SAFETY: the device being probed, whose name lives as long as it.
+    let name = unsafe { bindings::dev_name(dev) };
     // SAFETY: the device being probed; the block is the handler's data, released after the handler.
     if let Err(e) = to_result(unsafe {
         bindings::devm_request_threaded_irq(
@@ -1787,7 +1792,7 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
             Some(lpb_isr),
             None,
             0,
-            bindings::dev_name(dev),
+            name,
             raw as *mut c_void,
         )
     }) {

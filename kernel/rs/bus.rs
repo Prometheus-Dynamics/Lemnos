@@ -300,13 +300,18 @@ unsafe extern "C" fn lem_i2c_check_mux_children(dev: *mut bindings::device, addr
 unsafe fn lem_i2c_check_held(adap: *mut bindings::i2c_adapter, addr: c_uint) -> c_int {
     let mut addr = addr;
     let addrp = (&raw mut addr).cast::<c_void>();
+    // SAFETY: the adapter is held, so it is live and its device is in bounds.
+    let dev = unsafe { &raw mut (*adap).dev };
     // SAFETY: the adapter is held, so its device is live; the callback reads `addr` only.
-    let mut ret = unsafe { bindings::device_for_each_child(&raw mut (*adap).dev, addrp, Some(lem_i2c_check_mux_children)) };
+    let mut ret =
+        unsafe { bindings::device_for_each_child(dev, addrp, Some(lem_i2c_check_mux_children)) };
     // SAFETY: the caller's contract.
     let mut parent = unsafe { parent_adapter(adap) };
     while !parent.is_null() && ret == 0 {
+        // SAFETY: a parent of a held adapter lives as long as it, so its device is in bounds.
+        let dev = unsafe { &raw mut (*parent).dev };
         // SAFETY: a parent of a held adapter lives as long as it; the callback reads `addr` only.
-        ret = unsafe { bindings::device_for_each_child(&raw mut (*parent).dev, addrp, Some(lem_i2c_check_addr)) };
+        ret = unsafe { bindings::device_for_each_child(dev, addrp, Some(lem_i2c_check_addr)) };
         // SAFETY: as above.
         parent = unsafe { parent_adapter(parent) };
     }
@@ -348,8 +353,10 @@ fn lem_i2c_target(claim: i32, bus: u32, addr: u16, flags: u16) -> Result<Adapter
 
 /// i2c_check_functionality(adap, I2C_FUNC_I2C).
 fn plain_i2c(adap: &Adapter) -> bool {
+    // SAFETY: the adapter is held, so it is live.
+    let algo = unsafe { (*adap.0).algo };
     // SAFETY: the adapter is held, so its algorithm is set and live.
-    let functionality = unsafe { (*(*adap.0).algo).functionality };
+    let functionality = unsafe { (*algo).functionality };
     // SAFETY: the algorithm's own callback, on its own held adapter.
     functionality.is_some_and(|f| unsafe { f(adap.0) } & bindings::I2C_FUNC_I2C == bindings::I2C_FUNC_I2C)
 }
@@ -657,8 +664,10 @@ pub(crate) unsafe extern "C" fn lem_spi_info(t: *mut lb::lemnos_spi_info) -> c_l
 /// # Safety
 /// `spi` is a live device.
 unsafe fn device_key(spi: *mut lb::spi_device) -> u64 {
-    // SAFETY: the caller's contract; a device's controller lives as long as it does.
-    let bus = unsafe { (*(*spi).controller).bus_num };
+    // SAFETY: the caller's contract.
+    let controller = unsafe { (*spi).controller };
+    // SAFETY: a device's controller lives as long as it does.
+    let bus = unsafe { (*controller).bus_num };
     // SAFETY: the caller's contract (spi_get_chipselect(spi, 0)).
     let cs = unsafe { (*spi).chip_select[0] };
     lem_spi_key(i32::from(bus) as u32, u32::from(cs))
@@ -757,8 +766,10 @@ pub(crate) fn lem_bus_init(module: &'static ThisModule) -> Result {
 /// The bus glue's exit: unregisters the SPI driver (which removes every bound device) and frees every
 /// adapter's buffers.
 pub(crate) fn lem_bus_exit() {
+    // SAFETY: the SPI driver is a static, so its `driver` is in bounds.
+    let driver = unsafe { &raw mut (*LEM_SPI_DRIVER.0.get()).driver };
     // SAFETY: the driver was registered by lem_bus_init (spi_unregister_driver's body).
-    unsafe { bindings::driver_unregister(&raw mut (*LEM_SPI_DRIVER.0.get()).driver) };
+    unsafe { bindings::driver_unregister(driver) };
     // No transfer runs once the module is unloading: the node is gone.
     *I2CS.lock() = None;
 }

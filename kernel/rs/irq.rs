@@ -65,20 +65,22 @@ kernel::sync::global_lock! {
 /// # Safety
 /// `q` is a live record of a bound block, and no other reference to it is in use.
 unsafe fn enqueue(queue: &mut Queue, q: *mut LemIrq) {
-    // SAFETY: the caller's guarantee; the record is not queued, so `next` and `queued` are ours to write.
-    unsafe {
-        if (*q).queued {
-            return;
-        }
-        (*q).queued = true;
-        (*q).next = null_mut();
-        if queue.tail.is_null() {
-            queue.head = q;
-        } else {
-            (*queue.tail).next = q;
-        }
-        queue.tail = q;
+    // SAFETY: the caller's guarantee: the record is live, and its fields are ours to read.
+    if unsafe { (*q).queued } {
+        return;
     }
+    // SAFETY: the record is live and not queued, so `queued` is ours to write.
+    unsafe { (*q).queued = true };
+    // SAFETY: as above, for `next`.
+    unsafe { (*q).next = null_mut() };
+    if queue.tail.is_null() {
+        queue.head = q;
+    } else {
+        // SAFETY: the tail is a queued record, live by this function's contract; the lock the
+        // caller holds makes its `next` ours to write.
+        unsafe { (*queue.tail).next = q };
+    }
+    queue.tail = q;
 }
 
 /// Unlinks `q` if it is queued. Lock held.
@@ -86,32 +88,36 @@ unsafe fn enqueue(queue: &mut Queue, q: *mut LemIrq) {
 /// # Safety
 /// Every queued record is live, as `enqueue` requires.
 unsafe fn unlink(queue: &mut Queue, q: *mut LemIrq) {
-    // SAFETY: the queue's records are live under the lock, by `enqueue`'s contract.
-    unsafe {
-        if !(*q).queued {
-            return;
-        }
-        let mut prev: *mut LemIrq = null_mut();
-        let mut cur = queue.head;
-        while !cur.is_null() && cur != q {
-            prev = cur;
-            cur = (*cur).next;
-        }
-        if cur.is_null() {
-            return;
-        }
-        let next = (*q).next;
-        if prev.is_null() {
-            queue.head = next;
-        } else {
-            (*prev).next = next;
-        }
-        if queue.tail == q {
-            queue.tail = prev;
-        }
-        (*q).next = null_mut();
-        (*q).queued = false;
+    // SAFETY: the caller's record, live, and read under the lock the caller holds.
+    if !unsafe { (*q).queued } {
+        return;
     }
+    let mut prev: *mut LemIrq = null_mut();
+    let mut cur = queue.head;
+    while !cur.is_null() && cur != q {
+        prev = cur;
+        // SAFETY: `cur` is not null and is on the queue, whose records are live under the lock, by
+        // `enqueue`'s contract.
+        cur = unsafe { (*cur).next };
+    }
+    if cur.is_null() {
+        return;
+    }
+    // SAFETY: `q` was found on the queue, so it is live and its link is the queue's, under the lock.
+    let next = unsafe { (*q).next };
+    if prev.is_null() {
+        queue.head = next;
+    } else {
+        // SAFETY: `prev` is the queued record before `q`, live under the lock.
+        unsafe { (*prev).next = next };
+    }
+    if queue.tail == q {
+        queue.tail = prev;
+    }
+    // SAFETY: `q` is live and off the queue now, so its link is ours to clear.
+    unsafe { (*q).next = null_mut() };
+    // SAFETY: as above, for `queued`.
+    unsafe { (*q).queued = false };
 }
 
 /// Sets up the lock, once, at module load, before any interrupt is requested.
@@ -159,18 +165,21 @@ pub(crate) unsafe extern "C" fn lem_irq_set_block(q: *mut LemIrq, block_id: u32)
 /// `q` is a requested record of a bound block, live for the request's life.
 pub(crate) unsafe extern "C" fn lem_irq_fired(q: *mut LemIrq, ns: u64) {
     // SAFETY: the record is live for the request's life, and its irq number never changes after init.
-    unsafe {
-        // Level interrupts stay masked until the driver has cleared the cause.
-        bindings::disable_irq_nosync((*q).irq as u32);
-    }
+    let irq = unsafe { (*q).irq };
+    // Level interrupts stay masked until the driver has cleared the cause.
+    // SAFETY: the line this record was requested for, which is the one that fired.
+    unsafe { bindings::disable_irq_nosync(irq as u32) };
     let mut queue = IRQ_LOCK.lock();
     // SAFETY: the record is live, and the lock makes this the only use of its fields.
-    unsafe {
-        (*q).masked = true;
-        (*q).count = (*q).count.wrapping_add(1);
-        (*q).ns = ns;
-        enqueue(&mut queue, q);
-    }
+    unsafe { (*q).masked = true };
+    // SAFETY: as above.
+    let count = unsafe { (*q).count };
+    // SAFETY: as above.
+    unsafe { (*q).count = count.wrapping_add(1) };
+    // SAFETY: as above.
+    unsafe { (*q).ns = ns };
+    // SAFETY: the record is live and the lock is held, which is `enqueue`'s contract.
+    unsafe { enqueue(&mut queue, q) };
 }
 
 /// Clears the mask state for an enable. True when the line was masked, so the caller enables it.
@@ -180,13 +189,12 @@ pub(crate) unsafe extern "C" fn lem_irq_fired(q: *mut LemIrq, ns: u64) {
 pub(crate) unsafe extern "C" fn lem_irq_unmask(q: *mut LemIrq) -> bool {
     let _queue = IRQ_LOCK.lock();
     // SAFETY: the record is live, and the lock makes this the only use of its fields.
-    unsafe {
-        if (*q).masked {
-            (*q).masked = false;
-            true
-        } else {
-            false
-        }
+    if unsafe { (*q).masked } {
+        // SAFETY: as above.
+        unsafe { (*q).masked = false };
+        true
+    } else {
+        false
     }
 }
 
@@ -196,13 +204,13 @@ pub(crate) unsafe extern "C" fn lem_irq_unmask(q: *mut LemIrq) -> bool {
 /// `q` is a live record of a bound block.
 pub(crate) unsafe extern "C" fn lem_irq_mask(q: *mut LemIrq) -> bool {
     let mut queue = IRQ_LOCK.lock();
-    // SAFETY: the record is live, and the lock covers its fields and the queue.
-    unsafe {
-        let was_unmasked = !(*q).masked;
-        (*q).masked = true;
-        unlink(&mut queue, q);
-        was_unmasked
-    }
+    // SAFETY: the record is live, and the lock covers its fields.
+    let was_unmasked = !unsafe { (*q).masked };
+    // SAFETY: as above.
+    unsafe { (*q).masked = true };
+    // SAFETY: the record is live, and the lock covers the queue.
+    unsafe { unlink(&mut queue, q) };
+    was_unmasked
 }
 
 /// Drops the record from the queue, for its block's removal.
@@ -225,16 +233,25 @@ pub(crate) unsafe extern "C" fn lem_irq_pop(e: *mut LemIrqEvent) -> bool {
     if q.is_null() {
         return false;
     }
-    // SAFETY: the queue's records are live under the lock; the event is the caller's.
+    // SAFETY: the queue's records are live under the lock.
+    unsafe { unlink(&mut queue, q) };
+    // SAFETY: `q` was on the queue, so it is live, and the lock is still held over its fields.
+    let block_id = unsafe { (*q).block_id };
+    // SAFETY: as above.
+    let index = unsafe { (*q).index };
+    // SAFETY: as above.
+    let count = unsafe { (*q).count };
+    // SAFETY: as above.
+    let ns = unsafe { (*q).ns };
+    // SAFETY: the event is the caller's, valid and writable.
     unsafe {
-        unlink(&mut queue, q);
         e.write(LemIrqEvent {
-            block_id: (*q).block_id,
-            index: (*q).index,
-            count: (*q).count,
-            ns: (*q).ns,
-        });
-    }
+            block_id,
+            index,
+            count,
+            ns,
+        })
+    };
     true
 }
 

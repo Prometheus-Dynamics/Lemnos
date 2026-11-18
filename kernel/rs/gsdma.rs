@@ -289,12 +289,16 @@ impl LemGd {
     fn rd(&self, off: usize) -> u32 {
         // SAFETY: the register window is mapped for GD_WINDOW bytes (probe checked the resource's size),
         // and every offset read is below it.
-        unsafe { bindings::readl(self.regs.cast::<u8>().add(off).cast()) }
+        let reg = unsafe { self.regs.cast::<u8>().add(off) };
+        // SAFETY: a register inside the mapped window.
+        unsafe { bindings::readl(reg.cast()) }
     }
 
     fn wr(&self, off: usize, val: u32) {
         // SAFETY: as rd.
-        unsafe { bindings::writel(val, self.regs.cast::<u8>().add(off).cast()) };
+        let reg = unsafe { self.regs.cast::<u8>().add(off) };
+        // SAFETY: a register inside the mapped window.
+        unsafe { bindings::writel(val, reg.cast()) };
     }
 
     fn channel(&self, on: bool) {
@@ -312,7 +316,9 @@ impl LemGd {
     /// The descriptor word at `i`, written once it is complete (WRITE_ONCE in the C).
     fn put_desc_word(&self, i: usize, v: u32) {
         // SAFETY: the chain is GD_PLANES * GD_DESC_WORDS words of coherent memory, `i` is below that.
-        unsafe { ptr::write_volatile(self.chain.add(i), v.to_le()) };
+        let word = unsafe { self.chain.add(i) };
+        // SAFETY: a word of the chain, which is the block's own coherent memory.
+        unsafe { ptr::write_volatile(word, v.to_le()) };
     }
 
     /// The block can't be given up safely. `state` held.
@@ -409,12 +415,9 @@ unsafe extern "C" fn lgd_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
 /// A job outstanding too long: stop the channel, and only let go once it is seen stopped.
 unsafe extern "C" fn lgd_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: the work is the watchdog's, and the block is the container of the watchdog.
-    let g = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LemGd, watchdog))
-            .cast::<LemGd>())
-    };
+    let g = unsafe { work.cast::<u8>().sub(offset_of!(LemGd, watchdog)) }.cast::<LemGd>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let g = unsafe { &*g };
     let mut st = g.state.lock();
     if !st.running || st.aborting || st.wedged {
         return;
@@ -663,12 +666,9 @@ unsafe extern "C" fn lgd_kick(priv_: *mut c_void) -> c_long {
 /// After a job ends: pick up what the consumer posted since, without a kick.
 unsafe extern "C" fn lgd_collect_work(work: *mut bindings::work_struct) {
     // SAFETY: the work is the stream's collect work, which lives in its stream.
-    let ps = unsafe {
-        &*(work
-            .cast::<u8>()
-            .sub(offset_of!(LgdStream, collect))
-            .cast::<LgdStream>())
-    };
+    let ps = unsafe { work.cast::<u8>().sub(offset_of!(LgdStream, collect)) }.cast::<LgdStream>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let ps = unsafe { &*ps };
     let stopped = ps.collect_lock.lock();
     let ret = ps.collect_locked(*stopped);
     drop(stopped);
@@ -904,7 +904,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
         return Err(EINVAL);
     }
     // SAFETY: as above.
-    let (start, size) = unsafe { ((*res).start, bindings::resource_size(res)) };
+    let start = unsafe { (*res).start };
+    // SAFETY: as above.
+    let size = unsafe { bindings::resource_size(res) };
     let regs: *mut c_void = if FAKE_REGS.get() {
         // SAFETY: the device's own resource; devres unmaps it at unbind.
         let mem = from_err_ptr(unsafe {
@@ -1015,6 +1017,8 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
     block_ref.wr(GD_CFG, GD_CFG_VALUE);
     block_ref.wr(GD_WEIGHT, GD_WEIGHT_VALUE);
 
+    // SAFETY: the device being probed, whose name lives as long as it.
+    let name = unsafe { bindings::dev_name(dev) };
     // SAFETY: the device being probed; the block is the handler's data, released after the handler.
     if let Err(e) = to_result(unsafe {
         bindings::devm_request_threaded_irq(
@@ -1023,7 +1027,7 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemGd> {
             Some(lgd_isr),
             None,
             0,
-            bindings::dev_name(dev),
+            name,
             raw as *mut c_void,
         )
     }) {

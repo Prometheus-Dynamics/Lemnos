@@ -299,13 +299,11 @@ impl Drop for Writing {
 
 /// The block numbered `id`, while BLOCKS_SEM is held.
 fn block<'a>(_held: &'a Reading, id: c_ulong) -> Option<&'a Block> {
-    // SAFETY: the table is initialised; an entry is a bound block, which stays until its removal takes
-    // the semaphore for writing.
-    unsafe {
-        bindings::xa_load(BLOCKS.0.get(), id)
-            .cast::<Block>()
-            .as_ref()
-    }
+    // SAFETY: the table is initialised.
+    let entry = unsafe { bindings::xa_load(BLOCKS.0.get(), id) }.cast::<Block>();
+    // SAFETY: an entry is null or a bound block, which stays until its removal takes the semaphore
+    // for writing.
+    unsafe { entry.as_ref() }
 }
 
 fn errno(e: Error) -> c_long {
@@ -315,9 +313,10 @@ fn errno(e: Error) -> c_long {
 // --- interrupts ---
 
 unsafe extern "C" fn isr(_irq: c_int, data: *mut c_void) -> bindings::irqreturn_t {
-    // SAFETY: `data` is the record this line was requested with, live until the line is freed; the clock
-    // may be read in any context (ktime_get_ns).
-    unsafe { irq::lem_irq_fired(data.cast(), bindings::ktime_get() as u64) };
+    // SAFETY: the clock may be read in any context (ktime_get_ns).
+    let now = unsafe { bindings::ktime_get() } as u64;
+    // SAFETY: `data` is the record this line was requested with, live until the line is freed.
+    unsafe { irq::lem_irq_fired(data.cast(), now) };
     // SAFETY: wake_up_interruptible(&lem_wait): the queue is a static, initialised at load.
     unsafe { bindings::__wake_up(WAIT.get(), bindings::TASK_INTERRUPTIBLE, 1, ptr::null_mut()) };
     bindings::irqreturn::IRQ_HANDLED
@@ -512,7 +511,9 @@ unsafe fn map_region(l: &Block, index: u32, vma: *mut bindings::vm_area_struct) 
         return EINVAL.to_errno();
     }
     // SAFETY: a resource of the bound device, which keeps it.
-    let (at, size) = unsafe { ((*res).start as u64, bindings::resource_size(res) as u64) };
+    let at = unsafe { (*res).start } as u64;
+    // SAFETY: as above.
+    let size = unsafe { bindings::resource_size(res) } as u64;
     if at & (PAGE_SIZE - 1) != 0 || len as u64 > (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1) {
         return EINVAL.to_errno();
     }
@@ -561,8 +562,10 @@ fn next(held: &Reading, n: &mut lb::lemnos_next) -> c_long {
     };
     n.block = id as u32;
     // strscpy(n->name, dev_name(l->dev), sizeof(n->name)): what fits, always terminated.
+    // SAFETY: the bound device.
+    let name = unsafe { bindings::dev_name(l.dev) };
     // SAFETY: the bound device's name, a NUL-terminated string that lives as long as the device.
-    let name = unsafe { core::ffi::CStr::from_ptr(bindings::dev_name(l.dev).cast()) }.to_bytes();
+    let name = unsafe { core::ffi::CStr::from_ptr(name.cast()) }.to_bytes();
     let len = core::cmp::min(name.len(), n.name.len() - 1);
     for (to, from) in n.name.iter_mut().zip(&name[..len]) {
         *to = *from as c_char;
@@ -573,8 +576,10 @@ fn next(held: &Reading, n: &mut lb::lemnos_next) -> c_long {
 
 /// fls64(dma_get_mask(dev)): the bits of the device's DMA addresses.
 fn dma_bits(dev: *mut bindings::device) -> u32 {
-    // SAFETY: the bound device; its mask pointer is NULL or the device's own mask.
-    let mask = unsafe { (*dev).dma_mask.as_ref() }
+    // SAFETY: the bound device.
+    let mask = unsafe { (*dev).dma_mask };
+    // SAFETY: the device's mask pointer is NULL or the device's own mask.
+    let mask = unsafe { mask.as_ref() }
         .copied()
         .filter(|&m| m != 0)
         .unwrap_or(u32::MAX as u64);
@@ -1100,6 +1105,8 @@ unsafe fn probe_kind(
         unsafe { irq::lem_irq_init(q, line, b.nirqs) };
         b.line[b.nirqs as usize] = line as c_uint;
         // Not shared: a forwarded interrupt is masked until user space clears it.
+        // SAFETY: the device being bound, whose name lives as long as it.
+        let name = unsafe { bindings::dev_name(dev) };
         // SAFETY: the record lives in the device-managed block, which outlives this device-managed
         // request (devm_request_irq); the name is the device's.
         let ret = unsafe {
@@ -1109,7 +1116,7 @@ unsafe fn probe_kind(
                 Some(isr),
                 None,
                 bindings::IRQF_NO_AUTOEN as c_ulong,
-                bindings::dev_name(dev),
+                name,
                 q.cast(),
             )
         };
@@ -1124,8 +1131,10 @@ unsafe fn probe_kind(
 unsafe extern "C" fn remove(pdev: *mut bindings::platform_device) {
     // SAFETY: the platform device being unbound, live across the call.
     let dev = unsafe { &raw mut (*pdev).dev };
-    // SAFETY: the record the probe set (platform_get_drvdata), device-managed: it outlives this call.
-    let l = unsafe { &*bindings::dev_get_drvdata(dev).cast::<Block>() };
+    // SAFETY: the device being unbound (platform_get_drvdata).
+    let l = unsafe { bindings::dev_get_drvdata(dev) }.cast::<Block>();
+    // SAFETY: the record the probe set, device-managed: it outlives this call.
+    let l = unsafe { &*l };
 
     {
         let _held = Writing::new();

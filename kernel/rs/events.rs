@@ -182,8 +182,14 @@ unsafe extern "C" fn lem_watch_tick(work: *mut bindings::work_struct) {
     let zone = unsafe { (*w).zone };
     // SAFETY: the watch's zone, found when the watch was made.
     if unsafe { lb::thermal_zone_get_temp(zone, &raw mut temp) } == 0 {
-        // SAFETY: as above; `above` is written by this work alone.
-        let (above, low, high, index) = unsafe { ((*w).above, (*w).low, (*w).high, (*w).index) };
+        // SAFETY: the slot is live; `above` is written by this work alone.
+        let above = unsafe { (*w).above };
+        // SAFETY: the slot's fields other than `above` are not written while its work runs.
+        let low = unsafe { (*w).low };
+        // SAFETY: as low.
+        let high = unsafe { (*w).high };
+        // SAFETY: as low.
+        let index = unsafe { (*w).index };
         let cross = if above { temp <= low } else { temp >= high };
         if cross {
             // SAFETY: as above.
@@ -193,8 +199,10 @@ unsafe extern "C" fn lem_watch_tick(work: *mut bindings::work_struct) {
     }
     // SAFETY: as above.
     let period = unsafe { (*w).period };
+    // SAFETY: the slot is a static, so its work is in bounds.
+    let work = unsafe { &raw mut (*w).work };
     // SAFETY: re-queues this slot's own delayed work.
-    unsafe { schedule(&raw mut (*w).work, period) };
+    unsafe { schedule(work, period) };
 }
 
 /// schedule_delayed_work: queue_delayed_work_on(WORK_CPU_UNBOUND, system_percpu_wq, ...).
@@ -239,28 +247,35 @@ fn thermal_watch(r: &mut lb::lemnos_thermal_watch) -> Result {
     // SAFETY: as above.
     unsafe { (*w).above = false };
     // INIT_DELAYED_WORK: the work, then its timer, as the kernel crate's DelayedWork::new.
+    // SAFETY: the slot is a static, so its delayed work's work is in bounds.
+    let work = unsafe { &raw mut (*w).work.work };
     // SAFETY: the slot's work is idle (as above) and lives for ever; the name and key are static.
     unsafe {
         bindings::init_work_with_key(
-            &raw mut (*w).work.work,
+            work,
             Some(lem_watch_tick),
             false,
             c"lem_watch".as_ptr().cast(),
             static_lock_class!().as_ptr(),
         )
     };
-    // SAFETY: as above; the timer is the delayed work's, so delayed_work_timer_fn is its function.
+    // SAFETY: the slot is a static, so its delayed work's timer is in bounds.
+    let timer = unsafe { &raw mut (*w).work.timer };
+    // SAFETY: the timer is idle, as the work; it is the delayed work's, so delayed_work_timer_fn is
+    // its function.
     unsafe {
         bindings::timer_init_key(
-            &raw mut (*w).work.timer,
+            timer,
             Some(bindings::delayed_work_timer_fn),
             bindings::TIMER_IRQSAFE,
             c"lem_watch.timer".as_ptr().cast(),
             static_lock_class!().as_ptr(),
         )
     };
+    // SAFETY: the slot is a static, so its work is in bounds.
+    let work = unsafe { &raw mut (*w).work };
     // SAFETY: the slot's work, initialised above.
-    unsafe { schedule(&raw mut (*w).work, 0) };
+    unsafe { schedule(work, 0) };
     used[i] = true;
     r.watch = i as u32;
     Ok(())
@@ -286,8 +301,10 @@ pub(crate) extern "C" fn lem_events_reset() {
             if !*u {
                 continue;
             }
+            // SAFETY: the slot is a static, so its work is in bounds.
+            let work = unsafe { &raw mut (*WATCH_SLOTS[i].0.get()).work };
             // SAFETY: the slot's work was initialised when it was made; this waits for it to stop.
-            unsafe { bindings::cancel_delayed_work_sync(&raw mut (*WATCH_SLOTS[i].0.get()).work) };
+            unsafe { bindings::cancel_delayed_work_sync(work) };
             *u = false;
         }
     }

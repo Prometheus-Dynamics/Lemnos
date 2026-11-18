@@ -391,9 +391,13 @@ mod port {
         if !args_ok(op, &c.args) {
             return Err(EINVAL);
         }
-        // SAFETY: `p` is attached to this claim and lives while `file` holds the claim open; the
-        // driver's call reads and writes the argument block, the struct of its own operation.
-        let r = unsafe { (op.call)((*p).client.0.load(Ordering::Relaxed), c.args.as_mut_ptr().cast()) };
+        // The operation's function is read before the client, as the one expression read them.
+        let call = op.call;
+        // SAFETY: `p` is attached to this claim and lives while `file` holds the claim open.
+        let client = unsafe { (*p).client.0.load(Ordering::Relaxed) };
+        // SAFETY: the client is the driver's, kept while `p` lives; the driver's call reads and
+        // writes the argument block, the struct of its own operation.
+        let r = unsafe { call(client, c.args.as_mut_ptr().cast()) };
         c.result = r as i64;
         Ok(0)
     }
