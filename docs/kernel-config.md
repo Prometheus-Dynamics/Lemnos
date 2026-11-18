@@ -217,7 +217,7 @@ the sources and the QEMU harness's configuration.
 | `CONFIG_GPIOLIB` | `y` | required | `gpiod_*`, `gpio_device_*` (`lemnos_gpio.c`), and `gpio_request` and `gpio_free`, which are in `gpiolib-legacy.c`; `GPIOLIB_LEGACY` is `def_bool y` in this tree |
 | `CONFIG_PWM` | `y` | required | `pwm_apply_might_sleep`, `pwm_put`, `of_pwm_xlate_with_flags` (`lemnos_pwm.c`) |
 | `CONFIG_REGULATOR` | `y` | required | `regulator_*` (`lemnos_power.c`) |
-| `CONFIG_THERMAL` | `y` | required | `thermal_zone_get_temp`, `thermal_zone_get_zone_by_name` (`lemnos_events.c`) |
+| `CONFIG_THERMAL` | `y` | required | `thermal_zone_get_temp`, `thermal_zone_get_zone_by_name` (`rs/events.rs`) |
 | `CONFIG_RESET_CONTROLLER` | `y` | required | `reset_control_*`, `__devm_reset_control_get` (`lemnos_power.c`, register jobs, VIP) |
 | `CONFIG_COMMON_CLK` | `y` | required | `clk_prepare`, `clk_unprepare`, `clk_bulk_*`, `devm_clk_*` (`lemnos_power.c`, register jobs, CSI-2). `HAVE_CLK` is selected by it |
 | `CONFIG_DMA_SHARED_BUFFER` | `y` | required | `dma_buf_*`: every stream and every register job (`lemnos_stream.c`, `lemnos_regjob.c`) |

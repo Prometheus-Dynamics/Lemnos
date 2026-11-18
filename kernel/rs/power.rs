@@ -9,8 +9,8 @@
 //! The kernel calls are the ones the C made. Two are static inline in the headers, so they are composed from
 //! their exported parts exactly as the inline bodies do: clk_prepare_enable (clk_prepare, then clk_enable, and
 //! clk_unprepare if that fails) and clk_disable_unprepare (clk_disable, then clk_unprepare). reset_control_get_
-//! exclusive is an inline over the exported __reset_control_get with the same flags. lem_event_post stays C
-//! until the events stage.
+//! exclusive is an inline over the exported __reset_control_get with the same flags. A supply fault is
+//! posted through the event queue (rs/events.rs).
 
 use crate::abi::{c_result, err_ptr, ret};
 use core::{ffi::c_void, mem::offset_of, ptr};
@@ -121,8 +121,6 @@ unsafe extern "C" {
     fn reset_control_assert(rstc: *mut c_void) -> c_int;
     fn reset_control_reset(rstc: *mut c_void) -> c_int;
     fn reset_control_status(rstc: *mut c_void) -> c_int;
-    /// lemnos_events.c: stays C until the events stage.
-    fn lem_event_post(kind: u32, block: u32, index: u32, value: i64);
 }
 
 /// IS_ERR of linux/err.h: an error pointer is an errno in the top 4095 addresses. Kernel pointers are high,
@@ -139,8 +137,7 @@ unsafe extern "C" fn lem_supply_event(nb: *mut bindings::notifier_block, event: 
     if faults != 0 {
         // SAFETY: the handle's power outlives its notifier (unregistered before the power is freed).
         let (block, index) = unsafe { ((*(*h).power).block, (*h).index) };
-        // SAFETY: lem_event_post takes plain values.
-        unsafe { lem_event_post(EVENT_SUPPLY_FAULT, block, index, faults as i64) };
+        crate::events::post(EVENT_SUPPLY_FAULT, block, index, faults as i64);
     }
     1 // NOTIFY_OK
 }
