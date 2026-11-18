@@ -16,7 +16,10 @@
 //! - each frame's bytes are one value throughout (the fake block fills a frame with one pattern),
 //!   and each frame carries the pattern its own sequence number names: the fake makes one pattern
 //!   step per frame it produces, so `pattern - sequence` is the same for every delivered frame,
-//!   even where frames were dropped (a gap in the sequence is allowed).
+//!   even where frames were dropped (a gap in the sequence is allowed);
+//! - a frame the client holds keeps its bytes: two frames held while the fake fires on read back
+//!   byte for byte what they were when they were taken, and so does a frame held through a stall
+//!   and the receiver's recovery restart.
 //!
 //! It prints one line per check and exits nonzero on any failure. Each step's failure is printed
 //! with its cause.
@@ -44,14 +47,16 @@ const DEVICE: &str = "receiver";
 const FRAMES: usize = 12;
 /// How long the whole take may run.
 const DEADLINE: Duration = Duration::from_secs(20);
-/// The frames the hold phase keeps: one reader's grant, `DEFAULT_HELD` in engine/host/src/stream/
-/// endpoint.rs (2). The shm form cuts a reader off past its granted count (docs/streams.md, the
-/// module's max_held), and a cut-off reader's buffers are reused, so the phase holds what it is
-/// granted and no more. With the producer's two buffers kept free, a reader can never hold every
-/// buffer, so the earlier "hold all four" phase is not a state this form reaches.
+/// The frames the hold phase keeps: two of the four buffers, so the receiver has two left to fill
+/// and frames go on arriving through the hold. That is what the phase is for: frames written
+/// beside the held ones, none into them. (A consumer may hold all four; that stops the producer
+/// without a fault and nothing is written at all, which the driver's own tests cover.)
 const HELD: usize = 2;
 /// How long the held buffers stay held while the fake keeps firing frames.
 const HOLD: Duration = Duration::from_millis(300);
+/// How long the fake receiver stays silent in the stall phase: past the frame-stop bound, and the
+/// one-second check that judges it, plus the first recovery delay.
+const STALL: Duration = Duration::from_secs(3);
 /// How long lemnosd has to make its socket.
 const SOCKET_WAIT: Duration = Duration::from_secs(10);
 /// The fake receiver's node, made by the test module.
@@ -173,13 +178,45 @@ fn fire_frames(stop: Arc<AtomicBool>) -> JoinHandle<Result<u64, String>> {
     })
 }
 
-/// A frame the client kept while the camera ran on: its sequence, its first byte, and whether
-/// every byte is that one value, all read after the hold.
+/// The next `wanted` frames of a stream the stall phase reads: each read and released, with its
+/// sequence and length. The bytes are checked by the phases before the stall.
+fn read_stalled(
+    stream: &mut lemnos_client::FrameStream,
+    wanted: usize,
+) -> Result<Vec<Taken>, String> {
+    let mut taken = Vec::new();
+    let deadline = Instant::now() + DEADLINE;
+    while taken.len() < wanted && Instant::now() < deadline {
+        let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? else {
+            continue;
+        };
+        let seen_ns = step("read the clock", monotonic_ns())?;
+        let bytes = stream.bytes(&frame);
+        let first = bytes.first().copied().unwrap_or(0);
+        taken.push(Taken {
+            sequence: frame.sequence(),
+            timestamp_ns: frame.timestamp_ns(),
+            bytes: bytes.len(),
+            first,
+            uniform: bytes.iter().all(|b| *b == first),
+            seen_ns,
+        });
+        step("release a frame", stream.release(frame))?;
+    }
+    Ok(taken)
+}
+
+/// A frame the client kept while the camera ran on: its sequence, its first byte and whether
+/// every byte is that one value, read after the hold, and whether the bytes read after the hold
+/// are the bytes copied out when the frame was taken.
 #[derive(Debug, Clone, Copy)]
 struct Held {
     sequence: u64,
+    /// The first byte when the frame was taken.
+    taken_first: u8,
     first: u8,
     uniform: bool,
+    unchanged: bool,
 }
 
 /// The frames the client takes, in order, then the frames it holds (`HELD`, its grant) through a run
@@ -209,28 +246,41 @@ fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held
         });
         step("release a frame", stream.release(frame))?;
     }
+    // Each kept frame with a copy of its bytes as they were when it was taken.
     let mut kept = Vec::new();
     let deadline = Instant::now() + DEADLINE;
     while kept.len() < HELD && Instant::now() < deadline {
         if let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? {
-            kept.push(frame);
+            let copy = stream.bytes(&frame).to_vec();
+            kept.push((frame, copy));
         }
     }
     std::thread::sleep(HOLD);
     let mut held = Vec::new();
-    for frame in &kept {
-        let bytes = stream.bytes(frame);
-        let first = bytes.first().copied().unwrap_or(0);
-        held.push(Held {
-            sequence: frame.sequence(),
-            first,
-            uniform: bytes.iter().all(|b| *b == first),
-        });
+    for (frame, copy) in &kept {
+        held.push(read_held(&stream, frame, copy));
     }
-    for frame in kept {
+    for (frame, _) in kept {
         step("release a held frame", stream.release(frame))?;
     }
     Ok((taken, held))
+}
+
+/// Reads a held frame again, against the copy of its bytes made when it was taken.
+fn read_held(
+    stream: &lemnos_client::FrameStream,
+    frame: &lemnos_client::HeldFrame,
+    copy: &[u8],
+) -> Held {
+    let bytes = stream.bytes(frame);
+    let first = bytes.first().copied().unwrap_or(0);
+    Held {
+        sequence: frame.sequence(),
+        taken_first: copy.first().copied().unwrap_or(0),
+        first,
+        uniform: bytes.iter().all(|b| *b == first),
+        unchanged: bytes == copy,
+    }
 }
 
 fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Result<(), String> {
@@ -273,6 +323,90 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     let (frames, held) = taken?;
     let size = layout.size as usize;
     let fired = fired?;
+
+    // The stall: the fake receiver fires nothing for STALL while the client holds one frame of the
+    // four buffers, so the driver's frame-stop judgement restarts the receiver's module stream (a
+    // real stall, not the consumer's doing: the driver has buffers to arm). Recovery is asserted by
+    // the receiver's frame-start count beginning again, and the numbering by the frames after the
+    // stall: each numbered above the last one read before. The frame held through the stall, the
+    // restart and the frames after it must read back as it was taken.
+    let stall_stop = Arc::new(AtomicBool::new(false));
+    let firing = fire_frames(stall_stop.clone());
+    let mut stalled = step(
+        "open the frame stream for the stall",
+        client.open_stream(index, &name, Arc::new(LinuxStreams)),
+    )?;
+    let before = read_stalled(&mut stalled, 4)?;
+    let mut through = None;
+    let deadline = Instant::now() + DEADLINE;
+    while through.is_none() && Instant::now() < deadline {
+        if let Some(frame) = step("next frame", stalled.next_frame(Duration::from_millis(500)))? {
+            let copy = stalled.bytes(&frame).to_vec();
+            through = Some((frame, copy));
+        }
+    }
+    stall_stop.store(true, Ordering::Release);
+    firing.join().map_err(|_| "the fire thread panicked")??;
+    let starts_before = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
+    let last_before = through
+        .as_ref()
+        .map(|(frame, _)| frame.sequence())
+        .or(before.last().map(|f| f.sequence))
+        .unwrap_or(0);
+    std::thread::sleep(STALL);
+    let starts_after = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
+    let resume_stop = Arc::new(AtomicBool::new(false));
+    let firing = fire_frames(resume_stop.clone());
+    let after = read_stalled(&mut stalled, 4)?;
+    resume_stop.store(true, Ordering::Release);
+    firing.join().map_err(|_| "the fire thread panicked")??;
+    let through = match through {
+        Some((frame, copy)) => {
+            let held = read_held(&stalled, &frame, &copy);
+            step(
+                "release the frame held through the stall",
+                stalled.release(frame),
+            )?;
+            Some(held)
+        }
+        None => None,
+    };
+    drop(stalled);
+    report.check(
+        before.len() == 4 && after.len() == 4,
+        format_args!(
+            "frames came before the stall ({}) and after it ({})",
+            before.len(),
+            after.len()
+        ),
+    );
+    report.check(
+        matches!((starts_before, starts_after), (Some(b), Some(a)) if a < b),
+        format_args!(
+            "the stall restarted the receiver: its frame-start count began again ({starts_before:?} to {starts_after:?})"
+        ),
+    );
+    report.check(
+        after.first().is_some_and(|f| f.sequence > last_before)
+            && after.windows(2).all(|w| w[0].sequence < w[1].sequence),
+        format_args!(
+            "after the stall the numbering goes on above the last frame before it ({last_before}): {:?}",
+            after.iter().map(|f| f.sequence).collect::<Vec<_>>()
+        ),
+    );
+    report.check(
+        through.is_some_and(|h| h.unchanged && h.uniform),
+        format_args!(
+            "a frame held through the stall and the restart reads back as it was taken ({})",
+            match &through {
+                Some(h) => format!(
+                    "sequence {}, first byte {} when taken and {} after, uniform {}",
+                    h.sequence, h.taken_first, h.first, h.uniform
+                ),
+                None => "no frame was held".to_owned(),
+            }
+        ),
+    );
     step("stop", camera.stop())?;
     let finished = step("read the clock", monotonic_ns())?;
 
@@ -358,6 +492,20 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
             held.len()
         ),
     );
+    // The hold itself: what the client reads after the hold is what it copied out at the take.
+    report.check(
+        held.len() == HELD && held.iter().all(|h| h.unchanged),
+        format_args!(
+            "the held frames read back byte for byte as they were taken ({})",
+            held.iter()
+                .map(|h| format!(
+                    "sequence {}: {} then {}",
+                    h.sequence, h.taken_first, h.first
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     let all: Vec<(u64, u8)> = frames
         .iter()
         .map(|f| (f.sequence, f.first))
@@ -369,10 +517,12 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         for h in &held {
             let _ = writeln!(
                 std::io::stdout(),
-                "held: sequence {} first {} uniform {}",
+                "held: sequence {} first {} (when taken {}) uniform {} unchanged {}",
                 h.sequence,
                 h.first,
-                h.uniform
+                h.taken_first,
+                h.uniform,
+                h.unchanged
             );
         }
         for f in &frames {
