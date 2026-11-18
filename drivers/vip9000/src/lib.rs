@@ -3,7 +3,7 @@
 //! The vendor's user-space runtime, its model tools and its compiled format are not used, read or
 //! followed.
 //!
-//! - [`claim`]: the block through `lemnos.ko` (`kernel/lemnos_vip.c`): a claim on its node,
+//! - [`claim`]: the block through `lemnos.ko` (`kernel/rs/vip.rs`): a claim on its node,
 //!   programs loaded into the module (which checks them), slots, and runs from the job stream;
 //!   [`claim::Served`], the contract on a claim and a stream.
 //! - `npu` (Linux): [`Vip9000Driver`], the `#[driver]` type the daemon runs, bound from the board

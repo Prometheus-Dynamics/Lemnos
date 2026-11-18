@@ -2,7 +2,7 @@
 //!
 //! # What confines a job
 //!
-//! The module does (`kernel/lemnos_vip.c`, `kernel/lemnos_vip.h`): the block's registers,
+//! The module does (`kernel/rs/vip.rs`, `kernel/lemnos_vip.h`): the block's registers,
 //! interrupt and MMU never reach user space; a program is copied into the module and checked once
 //! (state loads outside the block's control registers, NOP and STALL, nothing else); while a job
 //! runs the block's MMU maps the module's copy of the program, read-only, and the job's slots,

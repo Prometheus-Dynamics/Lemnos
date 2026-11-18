@@ -1,5 +1,5 @@
 //! The claim and the driver against a played module that keeps a job's memory the way
-//! `kernel/lemnos_vip.c` does: slot `n` at `(n + 1) << 28` for exactly the pages the job names,
+//! `kernel/rs/vip.rs` does: slot `n` at `(n + 1) << 28` for exactly the pages the job names,
 //! nothing else, and a program that reaches past them faults (the frame comes back empty). The
 //! played block runs one operation, the copy the QEMU harness's fake block runs (state 0x5000:
 //! source, destination, bytes), so a program here is the same command words. No device node is
