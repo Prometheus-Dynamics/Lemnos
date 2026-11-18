@@ -519,6 +519,21 @@ number. A rebound receiver that starts fresh (`Lost`) counts from zero again: a 
 the one before means a restart. A frame after a stall is identified by `Next::Resumed`, which comes
 before it.
 
+A frame-stop restart (`rp1-csi2` and `k230-capture`, below) carries the sequence on too: the new module
+stream's count from zero is added to the number after the last frame delivered, so the first frame after
+the restart is numbered above the last one delivered, and the gap shows the stall. Only a fresh `start`
+after `stop` numbers from zero again. Across such a restart the sequence is not a count of the sensor's
+frames: the frames the sensor made between the last frame delivered and the new stream's first are not
+numbered, so a consumer that matches frames to something the sensor counts (a pattern, a strobe) cannot
+carry that match over a restart by the sequence alone. `Next::Resumed` comes before the first frame after
+it.
+
+A frame held through a restart stays as it was taken. The restart makes a new module stream and gives it
+the memory of the buffers the driver holds; a buffer the consumer holds is not one of them, so the block
+has no way to write it until the consumer gives it back. `drivers/rp1-csi2/tests/frames.rs` and
+`engine/host/tests/stream_hold_restart.rs` hold frames across restarts and read them back, and the QEMU
+compose check does it on the module.
+
 The sensor that stops sending. The `ov9782` driver does not wait for a write to fail: while it
 streams it reads its linked receiver's frame-start count once a watch (100 ms), and when that known
 count has not moved for longer than `max(4 frame periods at the frame length in force, 250 ms), the period being the contract's `mode.period_ps(lines)`` it
@@ -540,9 +555,22 @@ bound". The measured period is the longest of the last four intervals between fr
 bound with it. Before two frames have given an interval the bound is `max(4 x the mode's nominal period,
 3 s)`, where the nominal period is `width x height` at the link's pixel rate (blanking and exposure left
 out). Unmeasured on a board.
-`rp1-csi2` judges only while a buffer is armed (its frame count is known); `k230-capture` counts frame
-ends whether or not a consumer holds a buffer. Unmeasured on a board. Named limit: `rkcif` and
-`sunxi-vin` cannot count frame starts (`NOT_SUPPORTED`), so they do not watch yet; that needs a
+`rp1-csi2` reads the module's stream as a relay: each frame it takes it publishes to the consumer at once,
+and the frame's buffer stays held from the module until the consumer has given it back. Only the frames
+it has taken and not yet published count against what it may have in hand (`max(B - 3, 1)`), so a
+consumer that keeps some of the frames gets the next ones in the buffers left, and the receiver is not
+restarted for it.
+`rp1-csi2` judges only while a buffer is armed (its frame count is known). Its no-frame clock does not run
+while the driver holds no buffer of the stream, every buffer being with the consumer (held, or published
+and not yet returned): the producer is starved by its consumer, not stalled by the sensor. The clock is
+held at now until a buffer comes back, so a real stall that begins while the consumer holds buffers is
+judged one bound after one is released, and a stall with a buffer free is judged one bound after the last
+frame, as before. While starved, health is degraded and names the count the consumer holds: `the producer
+is waiting for buffers the consumer holds (N held)`. `k230-capture` counts frame ends whether or not a
+consumer holds a buffer, so a consumer holding every buffer is never a stop there; its frames are dropped,
+and health names the drops: `N frame ends dropped with no buffer free`, where N counts the frame ends
+dropped since the last one delivered (`64 or more` from 64 on). Unmeasured on a board. Named limit: `rkcif`
+and `sunxi-vin` cannot count frame starts (`NOT_SUPPORTED`), so they do not watch yet; that needs a
 kernel-side frame count, which belongs to the CZ-MOD port.
 
 In Rust: `FrameStream::producer()` is `ProducerState::Running`, `Retrying { since_ns }` or
@@ -805,8 +833,21 @@ the ring and the buffers and never sends the daemon a frame. The frames are kind
 - **Who may import.** Under package mode `signed` (the daemon's default) the import right needs
   `reader_import = true` on the stream. Under package mode `open` every ticket gets both rights.
 - **Limits.** A ticket asks for `held` buffers at once and `hold_ms` for each; 0 asks for 2 and 500.
-  The grant is the request clamped to `reader_held_max` and `reader_hold_ms_max`. A grant that would
-  leave the producer fewer than two buffers after the consumer's one is refused by name (`BUSY`).
+  The hold rule, as the host applies it (`engine/host/src/stream/endpoint.rs`):
+  - The stream's ceiling is `reader_held_max` in `[devices.streams.NAME]`, default 4, clamped to the
+    buffer count. `reader_hold_ms_max` is the time ceiling, clamped the same way.
+  - A reader's grant is its request (default 2) clamped to that ceiling.
+  - A grant is refused `BUSY` when, after the consumer's own buffer (`CONSUMER_HELD` = 1) and the holds
+    already granted to the other readers, fewer than `MIN_PRODUCER_BUFFERS` = 2 buffers would be left
+    for the producer. The refusal's text gives what was asked and how many buffers are left.
+  - Worked case: 4 buffers, a consumer present, one reader. A request of 2 (the default) is refused:
+    4 - 1 = 3 are left, and 3 - 2 = 1 is under 2. A request of 1 is granted, and the producer keeps 2.
+  - At its grant a reader is told so: when a frame comes that the reader would need a buffer past its
+    grant for, the ring skips that frame and the reader's `TicketReader::pop` returns `Pop::AtLimit`,
+    not `Pop::Empty`. Giving a held frame back lets it read on. The client's `FrameStream` reports the
+    same as `Next::AtLimit` (from `next_or_end`) and `Error::StreamAtLimit` (from `try_next` and
+    `next_frame`). The client's own consumer carries no hold limit in its marks (`Consumer::attach_with`),
+    so only a ticketed reader reaches it; the consumer's holds are not counted by the grant.
 - **Cut-off.** A reader that holds more than its grant, or one buffer longer than its `hold_ms`, or
   whose marks stay mid-change, or whose liveness pipe hangs up, is cut off. Its marks stop counting and
   its buffers go back to the producer. The stream is **not** faulted. The reason is in the pool page
@@ -822,7 +863,7 @@ the ring and the buffers and never sends the daemon a frame. The frames are kind
 - **Tickets die with the stream.** When the consumer detaches, every ticket is cut off. A camera that
   leaves and comes back asks for new tickets.
 - **Reading.** `TicketReader` (`lemnos_wire::ring`) gives each frame its sequence, identity, bytes, and
-  its capture time (the ring entry's time). `validate` returns the cut-off reason first, then `Recycled`
+  its capture time (the ring entry's time). `pop` returns `Pop::Frame`, `Pop::Empty` or `Pop::AtLimit`. `validate` returns the cut-off reason first, then `Recycled`
   if a buffer changed its ticket. Bytes count only if validation passes after the read.
 
 Refusals, by status: `NOT_FOUND` (no such stream, or no consumer attached to it); `NOT_PERMITTED` (the
