@@ -135,8 +135,6 @@ crate::param::param!(
 );
 
 unsafe extern "C" {
-    /// lemnos_core.c: whether any of the device's compatibles is in the comma-separated pairs.
-    fn lem_device_listed(dev: *mut c_void, list: *const c_char) -> bool;
     /// lib/anon_inodes.c, exported. Not in the kernel crate's bindings.
     fn anon_inode_getfd(name: *const c_char, fops: *const c_void, priv_: *mut c_void, flags: c_int) -> c_int;
     /// drivers/reset/core.c, exported (reset.h is not in the kernel crate's bindings).
@@ -1109,11 +1107,11 @@ unsafe extern "C" fn lrj_event_isr(_irq: c_int, data: *mut c_void) -> bindings::
 
 fn profile_for(dev: *mut bindings::device) -> Option<&'static Profile> {
     // SAFETY: the bound device and a parameter's string, set before init.
-    if unsafe { lem_device_listed(dev.cast(), A733_VE.get()) } {
+    if unsafe { crate::lists::lem_device_listed(dev, A733_VE.get()) } {
         return Some(&crate::regjob_ve::PROFILE);
     }
     // SAFETY: as above.
-    if unsafe { lem_device_listed(dev.cast(), K230_ISP.get()) } {
+    if unsafe { crate::lists::lem_device_listed(dev, K230_ISP.get()) } {
         return Some(&crate::regjob_isp::PROFILE);
     }
     None
