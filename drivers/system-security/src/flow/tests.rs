@@ -51,7 +51,12 @@ impl Dir {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&path);
+        // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }

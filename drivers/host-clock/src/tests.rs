@@ -12,7 +12,12 @@ struct Tree(PathBuf);
 impl Tree {
     fn new(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!("host-clock-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+        if fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
+            let _ = fs::remove_dir_all(&root);
+        } else {
+            let _ = fs::remove_file(&root);
+        }
         fs::create_dir_all(&root).unwrap();
         Self(root)
     }

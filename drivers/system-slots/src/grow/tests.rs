@@ -31,7 +31,12 @@ const ENOSPC: i32 = 28;
 
 fn dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lemnos-grow-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
+    // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+    if fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir()) {
+        let _ = fs::remove_dir_all(&d);
+    } else {
+        let _ = fs::remove_file(&d);
+    }
     fs::create_dir_all(&d).unwrap();
     d
 }

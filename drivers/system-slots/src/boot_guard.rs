@@ -175,7 +175,12 @@ mod loader_tests {
     #[test]
     fn a_repoint_is_refused_before_anything_is_written_when_the_loader_cannot_read_the_record() {
         let dir = std::env::temp_dir().join(format!("lemnos-repoint-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+        if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            let _ = fs::remove_dir_all(&dir);
+        } else {
+            let _ = fs::remove_file(&dir);
+        }
         fs::create_dir_all(&dir).unwrap();
         let layout = Layout::new(dir.join("data"), dir.join("boot"));
         let state = State {

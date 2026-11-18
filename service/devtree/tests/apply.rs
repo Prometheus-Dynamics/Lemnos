@@ -40,7 +40,12 @@ fn tool(name: &str) -> bool {
 
 fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("apply-{name}"));
-    let _ = fs::remove_dir_all(&dir);
+    // Whatever is at the name is not ours to keep: a file left there would stop the directory.
+    if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        let _ = fs::remove_dir_all(&dir);
+    } else {
+        let _ = fs::remove_file(&dir);
+    }
     fs::create_dir_all(&dir).unwrap();
     dir
 }

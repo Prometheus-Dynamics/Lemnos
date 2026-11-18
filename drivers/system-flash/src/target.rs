@@ -276,7 +276,10 @@ mod tests {
 
     #[test]
     fn a_block_target_must_be_a_block_device_and_a_missing_one_is_said_so() {
-        let missing = std::env::temp_dir().join("lemnos-flash-no-such-target");
+        let missing = std::env::temp_dir().join(format!(
+            "lemnos-flash-no-such-target-{}",
+            std::process::id()
+        ));
         assert!(
             find(&missing, Kind::Block)
                 .unwrap_err()

@@ -106,12 +106,22 @@ pub fn start_board(
     buffers: Option<Arc<dyn BufferSource>>,
 ) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
+    // The time keeps the name apart from one an earlier run with the same process id left.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!(
-        "lemnosd-test-{}-{}",
+        "lemnosd-test-{}-{nanos}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Whatever is at the name is not ours to keep: clear it, then make the directory.
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        let _ = std::fs::remove_dir_all(&dir);
+    } else {
+        let _ = std::fs::remove_file(&dir);
+    }
+    std::fs::create_dir(&dir).unwrap();
     let socket = dir.join("sock");
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n{devices}");
