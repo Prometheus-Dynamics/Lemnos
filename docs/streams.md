@@ -560,6 +560,13 @@ and the frame's buffer stays held from the module until the consumer has given i
 it has taken and not yet published count against what it may have in hand (`max(B - 3, 1)`), so a
 consumer that keeps some of the frames gets the next ones in the buffers left, and the receiver is not
 restarted for it.
+A relay that is late is not restarted either. The module's ring holds as many finished frames as the
+stream has buffers (the next power of two) and the block does not wait: when the driver is not run for
+longer than that many frame periods, the oldest are written over or their buffers used again. The driver
+held none of them, so it drops them, counts each in the receiver's `counters().dropped`, and publishes the
+frames still on the ring; the consumer sees a gap in the sequence and no stall. Only a relay reads this
+way (`Ring::hold_passing` in `backends/linux-sys`): a reader of a job's results that is overrun is out of
+step, and that is still an error.
 `rp1-csi2` judges only while a buffer is armed (its frame count is known). Its no-frame clock does not run
 while the driver holds no buffer of the stream, every buffer being with the consumer (held, or published
 and not yet returned): the producer is starved by its consumer, not stalled by the sensor. The clock is

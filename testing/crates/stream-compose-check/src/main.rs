@@ -16,7 +16,14 @@
 //! - each frame's bytes are one value throughout (the fake block fills a frame with one pattern),
 //!   and each frame carries the pattern its own sequence number names: the fake makes one pattern
 //!   step per frame it produces, so `pattern - sequence` is the same for every delivered frame,
-//!   even where frames were dropped (a gap in the sequence is allowed);
+//!   even where frames were dropped (a gap in the sequence is allowed). That holds between
+//!   recoveries of the receiver, and only there: a recovery restart carries the sequence on from
+//!   the last frame delivered while the fake's pattern has stepped for every frame fired
+//!   meanwhile (`docs/streams.md`, "Sequence across a stall"), so the frames are checked in runs,
+//!   cut where the stream reported a recovery (`Next::Stalled`, the receiver's own health);
+//! - while frames are taken the receiver recovers from nothing but a frame stop (its own
+//!   judgement that no frame came within its bound, which here means the guest was paused): any
+//!   other recovery is a fault of the frame path and fails the check with the receiver's reason;
 //! - a frame the client holds keeps its bytes: two frames held while the fake fires on read back
 //!   byte for byte what they were when they were taken, and so does a frame held through a stall
 //!   and the receiver's recovery restart.
@@ -35,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lemnos_client::Client;
+use lemnos_client::{Client, FrameStream, HeldFrame, Next};
 use lemnos_contract_camera_receiver::{CameraReceiver, LinkConfig, MAX_STREAM_NAME, Packing};
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::test_csi2::{FE_ACK, FS, fire};
@@ -74,9 +81,78 @@ const LINK: LinkConfig = LinkConfig {
     link_rate_mbps: 800,
 };
 
+/// How the receiver's reason begins while it recovers from a frame stop (`drivers/rp1-csi2`,
+/// `Lifecycle::health`).
+const FRAME_STOP: &str = "no frame arrived within the bound";
+
+/// What the stream reported about its producer while the check read it: the receiver's own
+/// health, as the host passes it on (`Next::Stalled` and `Next::Resumed`).
+#[derive(Debug, Default)]
+struct Watch {
+    /// The run of frames being read: one more for each recovery reported. Frames of one run have
+    /// no recovery between them.
+    run: u32,
+    /// The receiver's reason at each recovery, read when the stream reported it.
+    reasons: Vec<String>,
+    /// The times the stream reported the producer back.
+    resumed: u32,
+}
+
+impl Watch {
+    /// Whether every recovery reported was a frame stop.
+    fn only_frame_stops(&self) -> bool {
+        self.reasons
+            .iter()
+            .all(|reason| reason.starts_with(FRAME_STOP))
+    }
+
+    fn describe(&self) -> String {
+        if self.reasons.is_empty() {
+            "none reported".to_owned()
+        } else {
+            format!("{} reported: {:?}", self.reasons.len(), self.reasons)
+        }
+    }
+}
+
+/// The receiver's reason as the daemon lists it now.
+fn reason(client: &Client) -> Result<String, String> {
+    Ok(step("list", client.list())?
+        .into_iter()
+        .find(|d| d.name == DEVICE)
+        .map_or_else(|| "the receiver is not listed".to_owned(), |d| d.reason))
+}
+
+/// The next frame within `timeout`, or `None`. A recovery the stream reports on the way is noted
+/// in `watch`: the frames after it are a new run.
+fn next(
+    stream: &mut FrameStream,
+    client: &Client,
+    watch: &mut Watch,
+    timeout: Duration,
+) -> Result<Option<HeldFrame>, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match step("next frame", stream.next_or_end(left))? {
+            Next::Frame(frame) => return Ok(Some(frame)),
+            Next::Stalled(_) => {
+                watch.run += 1;
+                watch.reasons.push(reason(client)?);
+            }
+            Next::Resumed { .. } => watch.resumed += 1,
+            Next::TimedOut | Next::Ended(_) => return Ok(None),
+            Next::AtLimit => return Err("the reader is at its hold limit".to_owned()),
+            Next::JobEnded { .. } => {}
+        }
+    }
+}
+
 /// One frame as the client saw it.
 #[derive(Debug, Clone, Copy)]
 struct Taken {
+    /// The run of frames it came in (`Watch::run`).
+    run: u32,
     sequence: u64,
     timestamp_ns: u64,
     bytes: usize,
@@ -181,19 +257,22 @@ fn fire_frames(stop: Arc<AtomicBool>) -> JoinHandle<Result<u64, String>> {
 /// The next `wanted` frames of a stream the stall phase reads: each read and released, with its
 /// sequence and length. The bytes are checked by the phases before the stall.
 fn read_stalled(
-    stream: &mut lemnos_client::FrameStream,
+    stream: &mut FrameStream,
+    client: &Client,
+    watch: &mut Watch,
     wanted: usize,
 ) -> Result<Vec<Taken>, String> {
     let mut taken = Vec::new();
     let deadline = Instant::now() + DEADLINE;
     while taken.len() < wanted && Instant::now() < deadline {
-        let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? else {
+        let Some(frame) = next(stream, client, watch, Duration::from_millis(500))? else {
             continue;
         };
         let seen_ns = step("read the clock", monotonic_ns())?;
         let bytes = stream.bytes(&frame);
         let first = bytes.first().copied().unwrap_or(0);
         taken.push(Taken {
+            run: watch.run,
             sequence: frame.sequence(),
             timestamp_ns: frame.timestamp_ns(),
             bytes: bytes.len(),
@@ -211,6 +290,8 @@ fn read_stalled(
 /// are the bytes copied out when the frame was taken.
 #[derive(Debug, Clone, Copy)]
 struct Held {
+    /// The run of frames it was taken in (`Watch::run`).
+    run: u32,
     sequence: u64,
     /// The first byte when the frame was taken.
     taken_first: u8,
@@ -222,21 +303,23 @@ struct Held {
 /// The frames the client takes, in order, then the frames it holds (`HELD`, its grant) through a run
 /// of frames while the fake keeps firing. Each held buffer must still carry its own frame's pattern
 /// when it is read again: the module may not reuse a buffer its reader holds within the grant.
-fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held>), String> {
+fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held>, Watch), String> {
     let mut stream = step(
         "open the frame stream",
         client.open_stream(index, name, Arc::new(LinuxStreams)),
     )?;
+    let mut watch = Watch::default();
     let mut taken = Vec::new();
     let deadline = Instant::now() + DEADLINE;
     while taken.len() < FRAMES && Instant::now() < deadline {
-        let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? else {
+        let Some(frame) = next(&mut stream, client, &mut watch, Duration::from_millis(500))? else {
             continue;
         };
         let seen_ns = step("read the clock", monotonic_ns())?;
         let bytes = stream.bytes(&frame);
         let first = bytes.first().copied().unwrap_or(0);
         taken.push(Taken {
+            run: watch.run,
             sequence: frame.sequence(),
             timestamp_ns: frame.timestamp_ns(),
             bytes: bytes.len(),
@@ -250,31 +333,28 @@ fn take(client: &Client, index: u32, name: &str) -> Result<(Vec<Taken>, Vec<Held
     let mut kept = Vec::new();
     let deadline = Instant::now() + DEADLINE;
     while kept.len() < HELD && Instant::now() < deadline {
-        if let Some(frame) = step("next frame", stream.next_frame(Duration::from_millis(500)))? {
+        if let Some(frame) = next(&mut stream, client, &mut watch, Duration::from_millis(500))? {
             let copy = stream.bytes(&frame).to_vec();
-            kept.push((frame, copy));
+            kept.push((frame, copy, watch.run));
         }
     }
     std::thread::sleep(HOLD);
     let mut held = Vec::new();
-    for (frame, copy) in &kept {
-        held.push(read_held(&stream, frame, copy));
+    for (frame, copy, run) in &kept {
+        held.push(read_held(&stream, frame, copy, *run));
     }
-    for (frame, _) in kept {
+    for (frame, _, _) in kept {
         step("release a held frame", stream.release(frame))?;
     }
-    Ok((taken, held))
+    Ok((taken, held, watch))
 }
 
 /// Reads a held frame again, against the copy of its bytes made when it was taken.
-fn read_held(
-    stream: &lemnos_client::FrameStream,
-    frame: &lemnos_client::HeldFrame,
-    copy: &[u8],
-) -> Held {
+fn read_held(stream: &FrameStream, frame: &HeldFrame, copy: &[u8], run: u32) -> Held {
     let bytes = stream.bytes(frame);
     let first = bytes.first().copied().unwrap_or(0);
     Held {
+        run,
         sequence: frame.sequence(),
         taken_first: copy.first().copied().unwrap_or(0),
         first,
@@ -320,29 +400,36 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     let taken = take(&client, index, &name);
     stop.store(true, Ordering::Release);
     let fired = firing.join().map_err(|_| "the fire thread panicked")?;
-    let (frames, held) = taken?;
+    let (frames, held, taking) = taken?;
     let size = layout.size as usize;
     let fired = fired?;
 
     // The stall: the fake receiver fires nothing for STALL while the client holds one frame of the
     // four buffers, so the driver's frame-stop judgement restarts the receiver's module stream (a
     // real stall, not the consumer's doing: the driver has buffers to arm). Recovery is asserted by
-    // the receiver's frame-start count beginning again, and the numbering by the frames after the
-    // stall: each numbered above the last one read before. The frame held through the stall, the
-    // restart and the frames after it must read back as it was taken.
+    // the receiver's frame-start count beginning again, by the stream reporting it to the reader
+    // (which reads on through the stall, as a consumer waiting for frames does), and the numbering
+    // by the frames after the stall: each numbered above the last one read before. The frame held
+    // through the stall, the restart and the frames after it must read back as it was taken.
     let stall_stop = Arc::new(AtomicBool::new(false));
     let firing = fire_frames(stall_stop.clone());
     let mut stalled = step(
         "open the frame stream for the stall",
         client.open_stream(index, &name, Arc::new(LinuxStreams)),
     )?;
-    let before = read_stalled(&mut stalled, 4)?;
+    let mut stalling = Watch::default();
+    let before = read_stalled(&mut stalled, &client, &mut stalling, 4)?;
     let mut through = None;
     let deadline = Instant::now() + DEADLINE;
     while through.is_none() && Instant::now() < deadline {
-        if let Some(frame) = step("next frame", stalled.next_frame(Duration::from_millis(500)))? {
+        if let Some(frame) = next(
+            &mut stalled,
+            &client,
+            &mut stalling,
+            Duration::from_millis(500),
+        )? {
             let copy = stalled.bytes(&frame).to_vec();
-            through = Some((frame, copy));
+            through = Some((frame, copy, stalling.run));
         }
     }
     stall_stop.store(true, Ordering::Release);
@@ -350,19 +437,23 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     let starts_before = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
     let last_before = through
         .as_ref()
-        .map(|(frame, _)| frame.sequence())
+        .map(|(frame, _, _)| frame.sequence())
         .or(before.last().map(|f| f.sequence))
         .unwrap_or(0);
-    std::thread::sleep(STALL);
+    // The reader waits through the stall: no frame comes, and the stream tells it why.
+    let before_stall = (stalling.reasons.len(), stalling.resumed);
+    let silent = next(&mut stalled, &client, &mut stalling, STALL)?;
+    let reported: Vec<String> = stalling.reasons[before_stall.0..].to_vec();
+    let resumed = stalling.resumed - before_stall.1;
     let starts_after = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
     let resume_stop = Arc::new(AtomicBool::new(false));
     let firing = fire_frames(resume_stop.clone());
-    let after = read_stalled(&mut stalled, 4)?;
+    let after = read_stalled(&mut stalled, &client, &mut stalling, 4)?;
     resume_stop.store(true, Ordering::Release);
     firing.join().map_err(|_| "the fire thread panicked")??;
     let through = match through {
-        Some((frame, copy)) => {
-            let held = read_held(&stalled, &frame, &copy);
+        Some((frame, copy, run)) => {
+            let held = read_held(&stalled, &frame, &copy, run);
             step(
                 "release the frame held through the stall",
                 stalled.release(frame),
@@ -384,6 +475,18 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         matches!((starts_before, starts_after), (Some(b), Some(a)) if a < b),
         format_args!(
             "the stall restarted the receiver: its frame-start count began again ({starts_before:?} to {starts_after:?})"
+        ),
+    );
+    report.check(
+        silent.is_none()
+            && reported.len() == 1
+            && reported[0].starts_with(FRAME_STOP)
+            && resumed == 1,
+        format_args!(
+            "the stream reported the stall to its reader, and the receiver back, before any frame after it \
+             ({} frames in the silence, {} stalls reported {reported:?}, {resumed} resumed)",
+            usize::from(silent.is_some()),
+            reported.len()
         ),
     );
     report.check(
@@ -467,10 +570,20 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         frames.iter().all(|f| f.uniform),
         "every frame's bytes are one pattern value",
     );
+    // What the receiver did while the frames were taken, by its own report. A frame stop is the
+    // guest paused for longer than the bound (the fake fires from this process); anything else is
+    // the frame path failing under a steady source.
+    report.check(
+        taking.only_frame_stops(),
+        format_args!(
+            "the receiver recovered from nothing but a frame stop while frames were taken ({})",
+            taking.describe()
+        ),
+    );
     let follows = pattern_follows_sequence(
         &frames
             .iter()
-            .map(|f| (f.sequence, f.first))
+            .map(|f| (f.run, f.sequence, f.first))
             .collect::<Vec<_>>(),
     );
     report.check(
@@ -478,7 +591,7 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         format_args!(
             "each frame carries the pattern its sequence names ({})",
             match &follows {
-                Ok(base) => format!("base {base}, {} frames", frames.len()),
+                Ok(bases) => format!("{}, {} frames", describe_bases(bases), frames.len()),
                 Err(why) => why.clone(),
             }
         ),
@@ -506,10 +619,10 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
                 .join(", ")
         ),
     );
-    let all: Vec<(u64, u8)> = frames
+    let all: Vec<(u32, u64, u8)> = frames
         .iter()
-        .map(|f| (f.sequence, f.first))
-        .chain(held.iter().map(|h| (h.sequence, h.first)))
+        .map(|f| (f.run, f.sequence, f.first))
+        .chain(held.iter().map(|h| (h.run, h.sequence, h.first)))
         .collect();
     let held_follow = pattern_follows_sequence(&all);
     if held_follow.is_err() {
@@ -517,7 +630,8 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         for h in &held {
             let _ = writeln!(
                 std::io::stdout(),
-                "held: sequence {} first {} (when taken {}) uniform {} unchanged {}",
+                "held: run {} sequence {} first {} (when taken {}) uniform {} unchanged {}",
+                h.run,
                 h.sequence,
                 h.first,
                 h.taken_first,
@@ -528,7 +642,8 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         for f in &frames {
             let _ = writeln!(
                 std::io::stdout(),
-                "taken: sequence {} first {} bytes {}",
+                "taken: run {} sequence {} first {} bytes {}",
+                f.run,
                 f.sequence,
                 f.first,
                 f.bytes
@@ -540,7 +655,7 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         format_args!(
             "the held frames still carry the pattern their sequence names ({})",
             match &held_follow {
-                Ok(base) => format!("base {base}, {} frames held", held.len()),
+                Ok(bases) => format!("{}, {} frames held", describe_bases(bases), held.len()),
                 Err(why) => why.clone(),
             }
         ),
@@ -577,16 +692,30 @@ fn main() -> ExitCode {
     }
 }
 
-/// Whether every frame carries the pattern its own sequence number names. The fake makes one step
-/// per frame produced, so `pattern - sequence` (mod 256) is one base for all frames; a gap in the
-/// sequence is a frame the driver dropped and is allowed. Returns the base, or the first frame that
-/// breaks it. An empty list is refused: nothing was checked.
-fn pattern_follows_sequence(frames: &[(u64, u8)]) -> Result<u8, String> {
-    let Some(&(first_seq, first)) = frames.first() else {
-        return Err("no frames to check".to_owned());
-    };
-    let base = first.wrapping_sub(first_seq as u8);
-    for &(sequence, pattern) in frames {
+/// Whether every frame carries the pattern its own sequence number names. Each frame is its run
+/// (the recoveries the stream had reported when it was read), its sequence and its pattern. The
+/// fake makes one step per frame produced, so within a run `pattern - sequence` (mod 256) is one
+/// base for all its frames; a gap in the sequence is a frame the driver dropped and is allowed.
+/// Across a reported recovery the base moves (the fake stepped for frames that were never
+/// numbered), so each run has its own. Returns each run with its base, or the first frame that
+/// breaks its run's. A run number that goes down, or an empty list, is refused: nothing sound was
+/// checked.
+fn pattern_follows_sequence(frames: &[(u32, u64, u8)]) -> Result<Vec<(u32, u8)>, String> {
+    let mut bases: Vec<(u32, u8)> = Vec::new();
+    for &(run, sequence, pattern) in frames {
+        let base = match bases.last() {
+            Some(&(last, base)) if last == run => base,
+            Some(&(last, _)) if last > run => {
+                return Err(format!(
+                    "sequence {sequence} is of run {run}, read after run {last}"
+                ));
+            }
+            _ => {
+                let base = pattern.wrapping_sub(sequence as u8);
+                bases.push((run, base));
+                base
+            }
+        };
         let expected = base.wrapping_add(sequence as u8);
         if pattern != expected {
             return Err(format!(
@@ -594,16 +723,27 @@ fn pattern_follows_sequence(frames: &[(u64, u8)]) -> Result<u8, String> {
             ));
         }
     }
-    Ok(base)
+    if bases.is_empty() {
+        return Err("no frames to check".to_owned());
+    }
+    Ok(bases)
+}
+
+/// The bases as the report prints them: one base, or one per run of frames.
+fn describe_bases(bases: &[(u32, u8)]) -> String {
+    match bases {
+        [(_, base)] => format!("base {base}"),
+        _ => format!("a base per run between recoveries {bases:?}"),
+    }
 }
 
 /// The old rule, kept for the test that shows it passes a stale frame across a gap.
 #[cfg(test)]
-fn consecutive_pairs_step_by_one(frames: &[(u64, u8)]) -> bool {
+fn consecutive_pairs_step_by_one(frames: &[(u32, u64, u8)]) -> bool {
     let pairs: Vec<bool> = frames
         .windows(2)
-        .filter(|w| w[1].0 == w[0].0 + 1)
-        .map(|w| w[1].1 == w[0].1.wrapping_add(1))
+        .filter(|w| w[1].1 == w[0].1 + 1)
+        .map(|w| w[1].2 == w[0].2.wrapping_add(1))
         .collect();
     !pairs.is_empty() && pairs.iter().all(|ok| *ok)
 }
@@ -616,8 +756,8 @@ mod tests {
     fn a_forced_drop_leaves_a_gap_and_every_frame_still_follows_its_sequence() {
         // Frames 0, 1, then frame 2 dropped by the driver (its sequence number is taken, its
         // pattern is advanced by the fake when it was produced), then 3 and 4.
-        let frames = [(0u64, 1u8), (1, 2), (3, 4), (4, 5)];
-        assert_eq!(pattern_follows_sequence(&frames), Ok(1));
+        let frames = [(0, 0u64, 1u8), (0, 1, 2), (0, 3, 4), (0, 4, 5)];
+        assert_eq!(pattern_follows_sequence(&frames), Ok(vec![(0, 1)]));
         // The old rule also passes this one: it only looks across consecutive sequence numbers.
         assert!(consecutive_pairs_step_by_one(&frames));
     }
@@ -626,7 +766,7 @@ mod tests {
     fn a_stale_frame_across_a_gap_is_caught_by_the_sequence_rule_and_not_the_old_one() {
         // Frame 3 was delivered with frame 1's pattern: its fill is missing. Its pair with frame 1
         // is across a gap, which the old rule never looked at, so the old rule passes it wrongly.
-        let frames = [(0u64, 1u8), (1, 2), (3, 2)];
+        let frames = [(0, 0u64, 1u8), (0, 1, 2), (0, 3, 2)];
         assert!(
             consecutive_pairs_step_by_one(&frames),
             "old rule: passes it wrongly"
@@ -637,7 +777,7 @@ mod tests {
 
     #[test]
     fn a_stale_frame_next_to_its_neighbour_is_caught_by_both_rules() {
-        let frames = [(0u64, 1u8), (1, 2), (2, 2)];
+        let frames = [(0, 0u64, 1u8), (0, 1, 2), (0, 2, 2)];
         assert!(!consecutive_pairs_step_by_one(&frames));
         assert!(pattern_follows_sequence(&frames).is_err());
     }
@@ -647,7 +787,7 @@ mod tests {
         // The old fake stepped the pattern only when a buffer was latched: frame 2 was dropped with
         // no step, so frame 3 carries 3. The new rule catches it; the old rule passes it, because
         // the pair is across the gap.
-        let frames = [(0u64, 1u8), (1, 2), (3, 3)];
+        let frames = [(0, 0u64, 1u8), (0, 1, 2), (0, 3, 3)];
         assert!(
             consecutive_pairs_step_by_one(&frames),
             "old rule: passes wrongly"
@@ -660,8 +800,64 @@ mod tests {
 
     #[test]
     fn the_base_may_be_any_value_and_wraps_at_256() {
-        let frames = [(255u64, 7u8), (256, 8), (257, 9)];
-        assert_eq!(pattern_follows_sequence(&frames), Ok(8));
+        let frames = [(0, 255u64, 7u8), (0, 256, 8), (0, 257, 9)];
+        assert_eq!(pattern_follows_sequence(&frames), Ok(vec![(0, 8)]));
+    }
+
+    /// The lander's failure (train 115), as the check read it: sequences 0 to 9 on base 20, then
+    /// two recovery restarts, each carrying the sequence on while the fake fired about 95 frames.
+    /// With the recoveries reported, each run is checked on its own base. Without them (the frames
+    /// all in one run, as the check read them before it listened to the stream) it is the failure
+    /// the lander printed: a base that moves with no recovery reported is a wrong frame.
+    #[test]
+    fn a_reported_recovery_starts_a_new_run_and_an_unreported_jump_is_a_wrong_frame() {
+        let reported = [
+            (0, 8u64, 28u8),
+            (0, 9, 29),
+            (1, 10, 125),
+            (2, 11, 224),
+            (2, 12, 225),
+        ];
+        assert_eq!(
+            pattern_follows_sequence(&reported),
+            Ok(vec![(0, 20), (1, 115), (2, 213)])
+        );
+        let unreported = reported.map(|(_, sequence, pattern)| (0, sequence, pattern));
+        let why = pattern_follows_sequence(&unreported).unwrap_err();
+        assert_eq!(
+            why,
+            "sequence 10 carries pattern 125, expected 30 (base 20)"
+        );
+    }
+
+    #[test]
+    fn a_wrong_frame_inside_a_run_after_a_recovery_is_still_caught() {
+        // Run 1 begins at sequence 10 on a new base; sequence 12 carries sequence 11's bytes.
+        let frames = [(0, 9u64, 29u8), (1, 10, 125), (1, 11, 126), (1, 12, 126)];
+        let why = pattern_follows_sequence(&frames).unwrap_err();
+        assert!(why.contains("sequence 12 carries pattern 126"), "{why}");
+    }
+
+    #[test]
+    fn a_run_read_out_of_order_is_refused() {
+        let frames = [(1, 10u64, 125u8), (0, 9, 29)];
+        assert!(pattern_follows_sequence(&frames).is_err());
+    }
+
+    #[test]
+    fn only_a_frame_stop_is_a_recovery_the_take_allows() {
+        let mut watch = Watch::default();
+        assert!(watch.only_frame_stops(), "no recovery at all");
+        watch.reasons.push(
+            "no frame arrived within the bound for the configured mode while buffers were armed: \
+             restarting the receiver"
+                .to_owned(),
+        );
+        assert!(watch.only_frame_stops());
+        watch
+            .reasons
+            .push("the receiver stopped while streaming: restarting it".to_owned());
+        assert!(!watch.only_frame_stops(), "the frame path failed");
     }
 
     #[test]
