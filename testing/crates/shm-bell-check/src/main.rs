@@ -225,15 +225,29 @@ fn first_wait(node: &str, block: &str, heap: &str, report: &mut Report) -> Resul
     let mut latencies = Vec::new();
     let mut skipped = 0_u64;
     drain(&mut reader, &mut consumed, &mut latencies, &mut skipped);
+    // The source goes on publishing, one frame every 20 ms, while this process attaches and
+    // reads, and it may not be run for several of those periods. So the count read is bounded by
+    // what the ring says, not by a guess at how long the attach took: every frame published
+    // before the wait was read, and nothing was read that the ring had not published by the end.
+    let published_after = head(&fx);
     report.check(
-        !latencies.is_empty() && consumed >= 1 && consumed <= published + 1,
-        format_args!("the first wait read {consumed} sample(s) published before it"),
+        !latencies.is_empty() && first_wait_read_all(published, consumed, published_after),
+        format_args!(
+            "the first wait read {consumed} sample(s): the {published} published before it, \
+             and no more than the {published_after} published by the end of the read"
+        ),
     );
     report.check(
         skipped == 0,
         format_args!("first wait: no samples skipped ({skipped})"),
     );
     Ok(())
+}
+
+/// Whether the first read took what it should: every sample published before the wait
+/// (`before`), and no sample the ring had not published when the read ended (`after`).
+fn first_wait_read_all(before: u64, consumed: u64, after: u64) -> bool {
+    before >= 1 && consumed >= before && consumed <= after
 }
 
 /// Reads every frame of the stream as it arrives, sleeping on the doorbell between them.
@@ -381,5 +395,38 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_wait_read_all;
+
+    #[test]
+    fn frames_published_while_the_reader_attached_are_read_too() {
+        // As a loaded harness run showed it: 4 published before the wait, and the process was not
+        // run for two more frame periods before it read, so it read 6. The old rule allowed one.
+        assert!(first_wait_read_all(4, 6, 6));
+        assert!(first_wait_read_all(4, 4, 4));
+        assert!(
+            first_wait_read_all(4, 5, 7),
+            "one published during the read itself"
+        );
+    }
+
+    #[test]
+    fn a_read_that_missed_a_published_frame_or_read_one_never_published_fails() {
+        assert!(
+            !first_wait_read_all(4, 3, 6),
+            "a frame published before the wait was not read"
+        );
+        assert!(
+            !first_wait_read_all(4, 7, 6),
+            "more read than the ring published"
+        );
+        assert!(
+            !first_wait_read_all(0, 0, 0),
+            "nothing was published before the wait"
+        );
     }
 }
