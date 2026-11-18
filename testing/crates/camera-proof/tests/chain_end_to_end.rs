@@ -11,12 +11,25 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use lemnos_camera_sim::profile;
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
 use lemnos_host::Options;
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
+
+/// A failing run's text: what failed, then the sim tick profile (where the time went).
+fn fail(what: &str) -> ! {
+    panic!("{}", profile::failure(what));
+}
+
+fn check(ok: bool, what: impl FnOnce() -> String) {
+    if !ok {
+        fail(&what());
+    }
+}
 
 fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("chain-end-to-end-{}", std::process::id()));
@@ -32,6 +45,7 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     let clock_dir = scratch();
     let clock = clock_dir.join("sim-clock");
     lemnos_camera_sim::time::install_file(&clock).unwrap();
+    profile::reset();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
     let socket = dir.join("lemnosd.sock");
@@ -62,7 +76,18 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     };
     // The latch is not run here: it is timed on the host's clock on a board, and runs in process
     // on the sim clock in `chain_latch_sim.rs`. The proof says so, and does not check it again.
-    let output = Command::new(env!("CARGO_BIN_EXE_lemnos-chain-proof"))
+    // The proof's output goes to files, so a proof that stops making progress can be cut off at
+    // the deadline (`CHAIN_TIMEOUT_S`, 300 by default) and the failure still shows what it printed.
+    let timeout = Duration::from_secs(
+        std::env::var("CHAIN_TIMEOUT_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300),
+    );
+    let stdout_path = dir.join("proof.stdout");
+    let stderr_path = dir.join("proof.stderr");
+    let started = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lemnos-chain-proof"))
         .args([
             "--socket",
             socket.to_str().unwrap(),
@@ -74,9 +99,25 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         .arg(&reference)
         .arg("--clock-file")
         .arg(&clock)
-        .output()
+        .stdout(std::fs::File::create(&stdout_path).unwrap())
+        .stderr(std::fs::File::create(&stderr_path).unwrap())
+        .spawn()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if started.elapsed() >= timeout {
+            // Our own child, stopped at the deadline: the proof is not going to finish.
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let wall = started.elapsed();
+    let text = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let errors = std::fs::read_to_string(&stderr_path).unwrap_or_default();
     // `CHAIN_SHOW=1 cargo test ... --nocapture` prints the proof's whole output.
     if std::env::var_os("CHAIN_SHOW").is_some() {
         let _ = writeln!(
@@ -84,13 +125,22 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
             "stream buffers: {kind}\nchain proof:\n{text}"
         );
     }
+    let Some(status) = status else {
+        fail(&format!(
+            "the chain proof did not finish within {} s (stopped after {} ms; stream buffers: {kind}):\nstdout:\n{text}\nstderr:\n{errors}",
+            timeout.as_secs(),
+            wall.as_millis()
+        ));
+    };
+    check(status.success(), || {
+        format!(
+            "the chain proof failed (stream buffers: {kind}, after {} ms):\n{text}\nstderr:\n{errors}",
+            wall.as_millis()
+        )
+    });
     service.stop();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        output.status.success(),
-        "the chain proof failed (stream buffers: {kind}):\n{text}"
-    );
-    assert!(text.contains("chain proof: pass"), "{text}");
+    check(text.contains("chain proof: pass"), || text.clone());
     // Exact counts, whatever the host's load: the sim clock moves only with frame starts, so
     // nothing is late, nothing is dropped and no placeholder is delivered in a steady run.
     for line in [
@@ -103,16 +153,18 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         "clock: sim clock file".to_string(),
         "sensor latch: checked in-process (sim clock)".to_string(),
     ] {
-        assert!(text.contains(&line), "missing {line:?} in:\n{text}");
+        check(text.contains(&line), || {
+            format!("missing {line:?} in:\n{text}")
+        });
     }
     // The back end's luma is made once for the sim's scene: the front end sends the same frame every
     // time, so the conversion runs on the first job and a job whose input is unchanged reuses it.
     // Before the change it ran once a job (`frames` times), which is most of the sim's cost.
-    assert_eq!(
-        lemnos_camera_sim::pisp::LUMA_CONVERSIONS.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "the back end converted its luma more than once for an unchanged input"
-    );
+    let conversions =
+        lemnos_camera_sim::pisp::LUMA_CONVERSIONS.load(std::sync::atomic::Ordering::Relaxed);
+    check(conversions == 1, || {
+        format!("the back end converted its luma {conversions} times for an unchanged input")
+    });
     // What a board run must show before it claims the path: both stages bound, the streams as
     // the host made them, and frames end to end. Which path ran depends on the host's buffers, and
     // the proof says which: a dma-buf host lends each frame; a host without a dma-heap copies them
@@ -143,18 +195,24 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         path.to_string(),
         format!("frames delivered end to end: {frames}"),
     ] {
-        assert!(text.contains(&line), "missing {line:?} in:\n{text}");
+        check(text.contains(&line), || {
+            format!("missing {line:?} in:\n{text}")
+        });
     }
     if dma {
-        assert!(text.contains("chain proof: pass (lent path"), "{text}");
+        check(text.contains("chain proof: pass (lent path"), || {
+            text.clone()
+        });
     } else {
         // The refusal is asserted for real: the one lent job on a memfd was refused bad-config, and
         // the run went on over the copy path.
-        assert!(
+        check(
             text.contains("lend probe: a lent job on a memfd frame (identity")
                 && text.contains("was refused: job end bad-config"),
-            "the memfd lend was not refused as bad-config:\n{text}"
+            || format!("the memfd lend was not refused as bad-config:\n{text}"),
         );
-        assert!(text.contains("chain proof: pass (copy path"), "{text}");
+        check(text.contains("chain proof: pass (copy path"), || {
+            text.clone()
+        });
     }
 }

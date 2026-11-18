@@ -11,6 +11,7 @@
 //! at a time, held until the holder's bus handle is dropped.
 
 pub mod pisp;
+pub mod profile;
 pub mod scene;
 pub mod time;
 
@@ -516,6 +517,13 @@ impl Lifecycle for SimReceiver {
         })
     }
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        profile::timed("sim-receiver", || self.step(now_ns))
+    }
+}
+
+impl SimReceiver {
+    /// One tick of the receiver: the sensor's starts since the last tick become frames.
+    fn step(&mut self, now_ns: u64) -> Option<u64> {
         if !self.running {
             return None;
         }
