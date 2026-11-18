@@ -989,6 +989,7 @@ dependencies = [
  "lemnos-contract-accelerometer",
  "lemnos-contract-gyroscope",
  "lemnos-core",
+ "rustix",
 ]
 
 [[package]]

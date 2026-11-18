@@ -222,105 +222,165 @@ impl Counter for FakeCounter {
     }
 }
 
-/// A fake accelerometer with a FIFO, as the bmi088 driver's batches are shaped: one record per
-/// sample, stamped with the host's clock, the sample period 5 ms, and the value from `config`.
-/// `torn = true` answers every batch one byte too long, so a batch is never whole records: the
-/// fault a capture must report. For the B8 tool's rehearsal (`testing/crates/bmi088-batch`).
-#[driver("fake-fifo-accelerometer", provides = [Accelerometer])]
-pub struct FakeFifoAccelerometer {
-    value: Vector3,
-    torn: bool,
-    next_at: Option<u64>,
-    queue: std::collections::VecDeque<lemnos_contract_accelerometer::Sample>,
-}
-
-const FIFO_PERIOD_NS: u64 = 5_000_000;
-/// The accelerometer contract's `read` (method 1).
+/// The accelerometer contract's `read` (method 1), which the gyroscope's read shares.
 const ACCEL_READ: MethodId = MethodId {
     contract: 0,
     method: 1,
 };
+
+/// The sample period of a FIFO at 200 Hz, in nanoseconds: what the stamps are spaced by.
+const FIFO_PERIOD_NS: u64 = 5_000_000;
+/// The drain period the driver's tick uses: half the FIFO's depth at 200 Hz (73 frames, 365 ms).
+const DRAIN_PERIOD_NS: u64 = 365_000_000;
 const FIFO_DEPTH: usize = 256;
 
-impl Lifecycle for FakeFifoAccelerometer {
-    type Needs = FakeFifoAccelerometerNeeds;
-    const TICKS: bool = true;
+/// How a fake FIFO stamps its samples.
+///
+/// `Model` stamps each sample at its own time on the chip's clock, as the driver's sample clock does
+/// once it has converged. `Tick` stamps the way the driver did before that model: each sample waits
+/// for the next tick, and takes the tick's host time less the nominal periods back from the newest
+/// sample, flagged as tick time (the record's mode byte is 1). Only the accelerometer has `Tick`: the
+/// gyroscope has no sensor time, and its stamps are always its own clock's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stamps {
+    Model,
+    Tick,
+}
 
-    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        cfg.check_keys(&[
-            Key::optional("x", Kind::Float),
-            Key::optional("y", Kind::Float),
-            Key::optional("z", Kind::Float),
-            Key::optional("torn", Kind::Bool),
-        ])
-    }
+/// One sample in a fake FIFO's queue.
+#[derive(Clone, Copy)]
+struct Queued {
+    /// Sequence number, counted from the first sample the chip took.
+    seq: u64,
+    /// The stamp, once it has one: the time and whether it is tick time.
+    stamp: Option<(u64, bool)>,
+}
 
-    fn start(_needs: FakeFifoAccelerometerNeeds, cfg: &Config<'_>) -> Result<Self> {
-        Ok(Self {
+/// A fake FIFO's sample stream, shared by the fake accelerometer and gyroscope.
+///
+/// The chip takes a sample every `FIFO_PERIOD_NS / (1 + oscillator_ppm / 1e6)` on its own oscillator, from
+/// the first tick. The FIFO is read at the time of the read (the samples up to the host's time, which
+/// is the last tick's time plus the time since, measured on the monotonic clock), as the driver's read
+/// does. `stamp_error_ppm` is a planted error on the model's stamps: a rate error the checks must catch,
+/// and 0 for a correct model. `torn` answers every batch one byte too long, and `fail` refuses every
+/// batch with `IO`: the faults a capture must report.
+struct Fifo {
+    value: Vector3,
+    torn: bool,
+    fail: bool,
+    stamps: Stamps,
+    true_period_ns: f64,
+    stamp_factor: f64,
+    /// The host time of the chip's first sample: the first tick's time (`None` until the first tick).
+    origin: Option<u64>,
+    /// Samples the chip has taken so far.
+    taken: u64,
+    queue: std::collections::VecDeque<Queued>,
+    /// The last tick's host time, and when the tick ran (to read the host time between ticks).
+    last_tick: Option<(u64, std::time::Instant)>,
+}
+
+impl Fifo {
+    fn new(cfg: &Config<'_>, stamps: Stamps) -> Self {
+        let ppm = cfg.float("oscillator_ppm").unwrap_or(0.0);
+        let planted = cfg.float("stamp_error_ppm").unwrap_or(0.0);
+        Self {
             value: vector(cfg, 1.0),
             torn: cfg.bool("torn").unwrap_or(false),
-            next_at: None,
+            fail: cfg.bool("fail").unwrap_or(false),
+            stamps,
+            true_period_ns: FIFO_PERIOD_NS as f64 / (1.0 + ppm / 1e6),
+            stamp_factor: 1.0 + planted / 1e6,
+            origin: None,
+            taken: 0,
             queue: std::collections::VecDeque::new(),
-        })
+            last_tick: None,
+        }
     }
 
-    fn describe(&self, out: &mut Description) {
-        out.add(
-            Item::value("acceleration.x", ACCEL_READ)
-                .unit(Unit::MetrePerSecondSquared, 0)
-                .field("x"),
-        );
+    /// The host's time now: the last tick, moved on by the time since it ran.
+    fn now_ns(&self) -> u64 {
+        self.last_tick
+            .map(|(at, ran)| at.saturating_add(ran.elapsed().as_nanos() as u64))
+            .unwrap_or(0)
     }
 
-    fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        let mut at = self.next_at.unwrap_or(now_ns);
-        while at <= now_ns {
+    /// The chip takes every sample up to `upto`, and each is stamped as the mode says.
+    fn take_until(&mut self, upto: u64) {
+        let Some(origin) = self.origin else { return };
+        loop {
+            let true_ns = origin + (self.taken as f64 * self.true_period_ns).round() as u64;
+            if true_ns > upto {
+                break;
+            }
             if self.queue.len() == FIFO_DEPTH {
                 self.queue.pop_front();
             }
-            self.queue.push_back(lemnos_contract_accelerometer::Sample {
-                at_ns: at,
-                value: self.value,
+            let stamp = match self.stamps {
+                Stamps::Model => {
+                    let at =
+                        origin + ((true_ns - origin) as f64 * self.stamp_factor).round() as u64;
+                    Some((at, false))
+                }
+                Stamps::Tick => None,
+            };
+            self.queue.push_back(Queued {
+                seq: self.taken,
+                stamp,
             });
-            at += FIFO_PERIOD_NS;
+            self.taken += 1;
         }
-        self.next_at = Some(at);
-        Some(at)
-    }
-}
-
-impl Accelerometer for FakeFifoAccelerometer {
-    fn read(&mut self) -> Result<Vector3> {
-        Ok(self.value)
     }
 
-    fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
-        self.drain(into, false)
+    /// A tick: the first tick sets the chip's origin, the samples due are taken, and in tick mode the
+    /// samples still waiting take this tick's time less the nominal periods back from the newest.
+    fn tick(&mut self, now_ns: u64) {
+        self.origin.get_or_insert(now_ns);
+        self.last_tick = Some((now_ns, std::time::Instant::now()));
+        self.take_until(now_ns);
+        if self.stamps == Stamps::Tick {
+            let Some(newest) = self.queue.back().map(|q| q.seq) else {
+                return;
+            };
+            for entry in self.queue.iter_mut().filter(|q| q.stamp.is_none()) {
+                let back = newest - entry.seq;
+                let at = now_ns.saturating_sub(back.saturating_mul(FIFO_PERIOD_NS));
+                entry.stamp = Some((at, true));
+            }
+        }
     }
 
-    /// A fake's stamps are its own clock's, never tick time, so every record's mode is the model's (0).
-    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
-        self.drain(into, true)
-    }
-}
-
-impl FakeFifoAccelerometer {
-    /// Writes the queued samples that fit, as records, or as stamped records (mode byte first).
-    fn drain(&mut self, into: &mut [u8], stamped: bool) -> Result<usize> {
+    /// Writes the stamped samples that fit, oldest first: records of `RECORD_LEN` bytes, or with `stamped`
+    /// records of `STAMPED_RECORD_LEN` bytes, each led by its mode byte (1 tick time, 0 the model).
+    /// The FIFO is taken up to the read's time first, as the driver's read takes it.
+    fn batch(&mut self, into: &mut [u8], stamped: bool) -> Result<usize> {
         use lemnos_core::{Encode, Writer};
+        if self.fail {
+            return Err(Status::IO);
+        }
+        let now = self.now_ns();
+        self.take_until(now);
         let record = if stamped {
             lemnos_contract_accelerometer::STAMPED_RECORD_LEN
         } else {
             lemnos_contract_accelerometer::RECORD_LEN
         };
         let mut used = 0;
-        while let Some(sample) = self.queue.front().copied() {
+        while let Some(entry) = self.queue.front().copied() {
+            // A sample waiting for the next tick ends the batch: the stamps are in order.
+            let Some((at_ns, tick)) = entry.stamp else {
+                break;
+            };
             if used + record > into.len() {
                 break;
             }
+            let sample = lemnos_contract_accelerometer::Sample {
+                at_ns,
+                value: self.value,
+            };
             let mut at = used;
             if stamped {
-                into[at] = 0;
+                into[at] = u8::from(tick);
                 at += 1;
             }
             let mut writer = Writer::new(&mut into[at..used + record]);
@@ -335,6 +395,139 @@ impl FakeFifoAccelerometer {
             used += 1;
         }
         Ok(used)
+    }
+}
+
+/// A fake accelerometer with a FIFO, as the bmi088 driver's batches are shaped: one record per
+/// sample, stamped from the host's clock, the sample period 5 ms nominal. Its config:
+///
+/// - `oscillator_ppm`: the chip's rate error, positive when the chip runs fast (default 0).
+/// - `stamp_error_ppm`: a planted rate error on the model's stamps (default 0; a check must catch it).
+/// - `stamps = "model"` (default) or `"tick"`: the driver's model, or the tick-time stamping it used
+///   before the model converged (the pre-fix behaviour; see [`Stamps`]).
+/// - `torn = true` and `fail = true`: as in [`Fifo`]. For the B8 tool's rehearsal
+///   (`testing/crates/bmi088-batch`).
+#[driver("fake-fifo-accelerometer", provides = [Accelerometer])]
+pub struct FakeFifoAccelerometer {
+    fifo: Fifo,
+}
+
+impl Lifecycle for FakeFifoAccelerometer {
+    type Needs = FakeFifoAccelerometerNeeds;
+    const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("x", Kind::Float),
+            Key::optional("y", Kind::Float),
+            Key::optional("z", Kind::Float),
+            Key::optional("torn", Kind::Bool),
+            Key::optional("fail", Kind::Bool),
+            Key::optional("oscillator_ppm", Kind::Float),
+            Key::optional("stamp_error_ppm", Kind::Float),
+            Key::optional("stamps", Kind::Str),
+        ])?;
+        match cfg.str("stamps") {
+            None | Some("model") | Some("tick") => Ok(()),
+            Some(_) => Err(ConfigError::new("stamps", "must be \"model\" or \"tick\"")),
+        }
+    }
+
+    fn start(_needs: FakeFifoAccelerometerNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let stamps = match cfg.str("stamps") {
+            Some("tick") => Stamps::Tick,
+            _ => Stamps::Model,
+        };
+        Ok(Self {
+            fifo: Fifo::new(cfg, stamps),
+        })
+    }
+
+    fn describe(&self, out: &mut Description) {
+        out.add(
+            Item::value("acceleration.x", ACCEL_READ)
+                .unit(Unit::MetrePerSecondSquared, 0)
+                .field("x"),
+        );
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        self.fifo.tick(now_ns);
+        Some(now_ns.saturating_add(DRAIN_PERIOD_NS))
+    }
+}
+
+impl Accelerometer for FakeFifoAccelerometer {
+    fn read(&mut self) -> Result<Vector3> {
+        Ok(self.fifo.value)
+    }
+
+    fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.fifo.batch(into, false)
+    }
+
+    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.fifo.batch(into, true)
+    }
+}
+
+/// A fake gyroscope with a FIFO, the same shape as the accelerometer's. It has no sensor time, so its
+/// stamps are its own clock's model (never tick time): the chip takes its samples on its own oscillator
+/// (`oscillator_ppm`), stamped on the host's clock, and a planted `stamp_error_ppm` is as for the
+/// accelerometer. `torn` and `fail` are as on the accelerometer. For the B8 gyroscope rehearsal, and check 7
+/// (the spread of the offset between the two dies' stamps).
+#[driver("fake-fifo-gyroscope", provides = [Gyroscope])]
+pub struct FakeFifoGyroscope {
+    fifo: Fifo,
+}
+
+impl Lifecycle for FakeFifoGyroscope {
+    type Needs = FakeFifoGyroscopeNeeds;
+    const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(&[
+            Key::optional("x", Kind::Float),
+            Key::optional("y", Kind::Float),
+            Key::optional("z", Kind::Float),
+            Key::optional("torn", Kind::Bool),
+            Key::optional("fail", Kind::Bool),
+            Key::optional("oscillator_ppm", Kind::Float),
+            Key::optional("stamp_error_ppm", Kind::Float),
+        ])
+    }
+
+    fn start(_needs: FakeFifoGyroscopeNeeds, cfg: &Config<'_>) -> Result<Self> {
+        Ok(Self {
+            fifo: Fifo::new(cfg, Stamps::Model),
+        })
+    }
+
+    fn describe(&self, out: &mut Description) {
+        out.add(
+            Item::value("angular_rate.x", ACCEL_READ)
+                .unit(Unit::RadianPerSecond, 0)
+                .field("x"),
+        );
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        self.fifo.tick(now_ns);
+        Some(now_ns.saturating_add(DRAIN_PERIOD_NS))
+    }
+}
+
+impl Gyroscope for FakeFifoGyroscope {
+    fn read(&mut self) -> Result<Vector3> {
+        Ok(self.fifo.value)
+    }
+
+    fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.fifo.batch(into, false)
+    }
+
+    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.fifo.batch(into, true)
     }
 }
 

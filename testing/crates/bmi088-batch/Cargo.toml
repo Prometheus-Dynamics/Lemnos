@@ -14,3 +14,4 @@ lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-contract-accelerometer = { path = "../../../contracts/accelerometer" }
 lemnos-contract-gyroscope = { path = "../../../contracts/gyroscope" }
+rustix = { version = "1", default-features = false, features = ["time"] }
