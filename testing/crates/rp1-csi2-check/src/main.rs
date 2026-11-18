@@ -1759,15 +1759,17 @@ fn run_wedge(c: &mut Ctx, node: &str, dev: &str, heap: &str) -> i32 {
         "late: one late FE_ACK armed"
     );
     busy(c, 0);
+    // Read once, before the check: `info` prints its own line, which would land inside this one.
+    let after = info(c);
     check!(
-        info(c).frames == before.frames
-            && info(c).written == before.written
-            && info(c).errors == before.errors
-            && info(c).dropped == before.dropped,
+        after.frames == before.frames
+            && after.written == before.written
+            && after.errors == before.errors
+            && after.dropped == before.dropped,
         "late: the late FE_ACK counts no frame (frames {} written {} errors {})",
-        info(c).frames,
-        info(c).written,
-        info(c).errors
+        after.frames,
+        after.written,
+        after.errors
     );
     check!(info(c).flags & INFO_WEDGED != 0, "wedged is reported");
     let Ok(s2) = stream_open(c, Some(&pool2)) else {
