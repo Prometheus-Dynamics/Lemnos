@@ -2636,6 +2636,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-k230-usbboot-stage",
  "rusb",
+ "rustix",
  "sha2 0.11.1",
 ]
 

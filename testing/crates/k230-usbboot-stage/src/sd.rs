@@ -143,6 +143,22 @@ impl core::fmt::Display for SdError {
     }
 }
 
+impl SdError {
+    /// The error as a fixed line and the command it names, for an image that has no formatting machinery
+    /// (the report prints the line, then the command as hex). Bench, 2026-11-18: the report said only "the
+    /// card did not answer or a read failed", which an empty slot and a host that cannot reach its card
+    /// both produce.
+    pub fn words(&self) -> (&'static str, Option<u8>) {
+        match self {
+            Self::Timeout(cmd) => ("no reply: the wait ran out", Some(*cmd)),
+            Self::Reply(cmd, what) => (what, Some(*cmd)),
+            Self::NotSdhc => ("the card is not SDHC or SDXC", None),
+            Self::Data(what) => (what, None),
+            Self::Refused(why) => (why, None),
+        }
+    }
+}
+
 /// The reply shape a command expects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expect {
@@ -564,6 +580,26 @@ mod tests {
             Card::init(fake).err().unwrap(),
             SdError::Reply(8, _)
         ));
+    }
+
+    #[test]
+    fn an_error_names_its_command_and_its_cause_in_fixed_words() {
+        assert_eq!(
+            SdError::Timeout(8).words(),
+            ("no reply: the wait ran out", Some(8))
+        );
+        assert_eq!(
+            SdError::Reply(41, "the card never became ready").words(),
+            ("the card never became ready", Some(41))
+        );
+        assert_eq!(SdError::NotSdhc.words().1, None);
+        // A dead card and a refused start are told apart by their words, not by one shared line.
+        assert_ne!(
+            SdError::Timeout(0).words().0,
+            SdError::Reply(0, "the controller reported an error")
+                .words()
+                .0
+        );
     }
 
     #[test]

@@ -13,3 +13,5 @@ workspace = true
 lemnos-k230-usbboot-stage = { path = "../k230-usbboot-stage" }
 sha2 = { version = "0.11", default-features = false }
 rusb = "0.9"
+# The console tty's line settings (speed, raw, echo off) through a safe API: no unsafe in this crate.
+rustix = { version = "1", features = ["termios", "pty", "fs"] }

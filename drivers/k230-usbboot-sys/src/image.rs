@@ -19,10 +19,10 @@ use lemnos_k230_usbboot_stage::medium::{Geometry, Medium, MediumError, NoMedium}
 use lemnos_k230_usbboot_stage::pads::{self, PadGuard};
 use lemnos_k230_usbboot_stage::probe::{Action, Clock, Probe};
 use lemnos_k230_usbboot_stage::report::{self, BootAreas, NoCard};
-use lemnos_k230_usbboot_stage::sd::SdController;
 use lemnos_k230_usbboot_stage::sd::{
     Card, SdMedium, boot_mode, controller_from_parameter, resolve_controller,
 };
+use lemnos_k230_usbboot_stage::sd::{SdController, SdError};
 use lemnos_k230_usbboot_stage::stage::Stage;
 use lemnos_k230_usbboot_stage::sysctl::{SOC_GLB_RST, SOC_RESET_VALUE};
 use lemnos_k230_usbboot_stage::uart;
@@ -32,7 +32,7 @@ use lemnos_k230_usbboot_stage::wdt::{self, Dog};
 
 use crate::Mmio;
 use crate::dwc2::Dwc2;
-use crate::sdhci::SdhciHost;
+use crate::sdhci::{self, SdhciHost};
 
 /// The mode block the host patches: magic, mode, !mode, SD parameter, !SD parameter. The host finds the
 /// magic and writes the rest. Unpatched, it is mode 0 (the spin) with no SD parameter.
@@ -359,6 +359,7 @@ fn hex8(value: u32) -> [u8; 8] {
 /// R1b: the watchdog registers the entry saved, as hex lines on the UART.
 fn say_diag<R: RegAccess>(regs: &mut R) {
     // A copy of the array: the entry wrote it before this run, and nothing writes it after.
+    // SAFETY: a read of this image's own static; the entry wrote it before this code ran and the image runs one thread.
     let d = unsafe { lemnos_diag };
     say_hex(regs, "diag wdt0 before arm CR", d[0]);
     say_hex(regs, "diag wdt0 before arm TORR", d[1]);
@@ -430,14 +431,24 @@ fn run_report() -> ! {
                 (None, NoCard::NotGiven)
             }
             Some(controller) => {
+                // R3c: the controller as the ROM left it, read before the stage resets it.
+                say_sd(&mut regs, "sd rom", controller.base());
                 say(&mut regs, "step 3: card read (CID, CSD, boot area)");
                 match read_card(controller, &mut cid, &mut blocks) {
                     Ok(areas) => (Some(areas), NoCard::Failed),
-                    Err(()) => {
+                    Err((at, error)) => {
                         say(
                             &mut regs,
                             "step 3: the card did not answer or a read failed",
                         );
+                        // R3c: where, which command and why, then the controller after the try.
+                        let (words, command) = error.words();
+                        say(&mut regs, at);
+                        say(&mut regs, words);
+                        if let Some(command) = command {
+                            say_hex(&mut regs, "sd error command", u32::from(command));
+                        }
+                        say_sd(&mut regs, "sd end", controller.base());
                         (None, NoCard::Failed)
                     }
                 }
@@ -508,16 +519,34 @@ fn run_report() -> ! {
 }
 
 /// The card's identity, capacity and boot area, read through the SD host the parameter names.
+/// Reads the card through `controller`. An error carries the step it came from.
 fn read_card(
     controller: SdController,
     cid: &mut [u8; 16],
     blocks: &mut u64,
-) -> Result<BootAreas, ()> {
-    let host = SdhciHost::new(controller.base()).map_err(|_| ())?;
-    let mut card = Card::init(host).map_err(|_| ())?;
+) -> Result<BootAreas, (&'static str, SdError)> {
+    let host =
+        SdhciHost::new(controller.base()).map_err(|e| ("sd error in: controller start", e))?;
+    let mut card = Card::init(host).map_err(|e| ("sd error in: card start", e))?;
     *cid = card.cid();
     *blocks = card.blocks();
-    report::read_boot_areas(&mut card).map_err(|_| ())
+    report::read_boot_areas(&mut card).map_err(|e| ("sd error in: boot area read", e))
+}
+
+/// R3c: the controller's status registers ([`sdhci::SNAPSHOT`]) as hex lines. Reads only.
+fn say_sd<R: RegAccess>(regs: &mut R, when: &str, base: usize) {
+    let values = sdhci::snapshot(base);
+    for (value, (_, name)) in values.iter().zip(sdhci::SNAPSHOT) {
+        if unsafe_gave_up() {
+            return;
+        }
+        let digits = hex8(*value);
+        let digits = core::str::from_utf8(&digits).unwrap_or("????????");
+        gave_up(uart::write_line_parts(
+            regs,
+            &[when, " ", name, " ", digits],
+        ));
+    }
 }
 
 fn run_probe(flags: u32) -> ! {

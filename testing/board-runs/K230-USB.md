@@ -1,8 +1,10 @@
 # K230-USB board run: the K230 stage on the FL1 flash wire
 
-Status: **untested on board.** This is the plan for review. Nothing in this change has opened, written,
-or reset any board. The stage is proven only in simulation (`testing/crates/k230-usbboot-stage/tests/fl1.rs`)
-and against a same-rev stand-in rehearsal (section "PC rehearsal").
+Status: **the read-only steps ran on the board (R0 to R3, 2026-11-16 to 2026-11-18); nothing has been written to a
+card.** The report image reads the card in the slot through the stage's own SD host (R3e): CID, capacity, and the
+two boot blocks, whose CRCs match the no-boot image. The FL1 stage's USB device path (blocker B2) and every write
+are untested on board. The runs are in "Board steps", in order; the entries before R3c read their "card did not
+answer" as an empty slot, which R3c showed to be the host's own fault.
 
 ## Hypothesis
 
@@ -402,6 +404,260 @@ reset (the R2 path) returned the board; no watchdog was involved.
 - Board at the end: `29f1:0230` at Dev 073, download mode. Lock released.
 - The records (`R3-sd1.txt`, `R3-sd0.txt`) carry every console line with CLOCK_REALTIME stamps.
 - Earlier, a failed script run (exit 127) made no USB contact: the probe binary was missing, not the board.
+
+**R3 again, the card's place not known (K230-USB-4, rev `abd1d51b` plus the probe's log line; hypothesis, written
+before the run; 2026-11-18).**
+- *State found, by sysfs and the kernel log only (nothing opened):* `29f1:0230` at `3-4.2.1.4.1`, the CH342
+  (`1a86:55d2`, serial `5B08068863`) at `3-4.2.1.3` with its two ttys. At 14:52:11 the board was still Dev 073, the
+  number the 2026-11-17 01:03 run left it at, so it had not reset since. At 14:53:13 the board and the CH342 left
+  the bus together and came back (board Dev 076, CH342 Dev 075). This runner had opened no device and no tty (it
+  was building the image), and software on the PC cannot drop both at once: it is a power cycle or a reset by a
+  person. The board came back in the ROM's download mode, so whatever is in the slot now does not boot.
+- *Image:* built at this rev by `check.sh`: 51,264 bytes, sha256 `9aa6f18a…`, byte-identical to the R1f/R2/R3
+  image. The report path issues CMD0, 8, 55/41, 2, 3, 9, 10, 7, 16 and 17 only (`sd.rs`, `report.rs`): no write
+  command. It does not feed the watchdog.
+- *Script:* `bench/run-R3.sh` of 2026-11-17 copied to the HDD scratch (`K230R/bench/run-R3.sh`; the NVMe is read only)
+  with three changes: the paths; the script takes `/run/user/1000/lemnos-k230d.lock` itself (flock, whole script);
+  a run that does not pass ends the script (this record's Stop rule, which the old loop did not enforce). The
+  consoles are found by the adapter's USB id through sysfs. Controller 1 then 0, one probe invocation each, the
+  probe the only reader of the consoles.
+- *Hypothesis A (the no-boot card is in the slot):* on controller 1 the report prints `card cid0` to `cid3`, the
+  block count, `verdict code`, the two block CRCs and the two 48-byte headers (sectors 2048 and 3072), then
+  `lemnos stage: end`; the board returns as `K230`. On controller 0: `the card did not answer or a read failed`.
+- *Hypothesis B (no card in the slot):* both controllers print `the card did not answer or a read failed` and
+  `no card report`, as on 2026-11-17. Then the card is not in the slot and a person has to move it.
+- *Hypothesis C (a card is there and the watchdog cuts the read):* the card's start (the ACMD41 loop) and the long
+  report outlast the watchdog (about 1.3 s after arming, R1b); the lines stop inside step 3 with no end line. The
+  board still returns as `K230` through the ROM's failed card boot; the probe says STOP by its watchdog bound, and
+  the script ends there.
+- *Risk named:* with a card that boots, the report's reset would boot it and the board would not return as
+  `29f1:0230`. Against it: the 14:53:13 return to download mode with the slot as it is now.
+- *Rehearsal (PC, same rev):* `cargo test -p lemnos-k230-usbboot -p lemnos-k230-usbboot-stage` (all pass; the
+  stand-ins that fail like the board: `a_card_that_stops_answering_mid_check_…`, `a_write_the_card_never_finishes_…`,
+  `a_card_that_stays_busy_is_called_not_ready_after_bounded_tries`), and the script in its dry mode (`DRY=1`: every
+  check runs, the two probe commands are printed, no device or tty is opened).
+
+**R3, run of 2026-11-18 14:56 (one script run; lock held; no reset by hand): STOP, the console was lost; the
+card's place is not established by this run.**
+- Controller 1: identify `K230` at +0.112 s; 51,264 bytes loaded (sent sha256 `1f793e11…`, the same bytes as the
+  2026-11-17 controller-1 run); start at t0 = +0.119 s; the board left at +1.124 s and came back as `K230` at
+  +1.556 s (Dev 077). **No console line at all**, not even the entry's raw `!BWKC`. With no end line the probe held
+  the run to the old watchdog bound: `STOP: the board left at 1.124 s, outside the step's bound 100..420 s`. The
+  script ended there; controller 0 did not run. Records `K230R/bench/run-R3.out`, `R3-sd1.txt`.
+- *Cause (established):* the tty was at 9600 baud, cooked, echo on (`stty -a` after the run). The probe's reader
+  never set the line; it had been relying on the 2026-11-16 capture scripts' `tcsetattr` to 115200, and the
+  adapter's re-enumeration at 14:53:13 put the tty back to its defaults. The rehearsal did not cover it: the dry
+  mode opened no tty and no test had a tty at another speed.
+- *Also found:* those capture scripts changed the speed only, so echo was on in every earlier run too: the kernel
+  sent each console byte the board printed back to the board's receive line. The record's "the console is never
+  written" held for the programs, not for the tty. No effect is known (the stage never reads its UART), but it
+  is a write, and it is closed now.
+- *What the run does say:* the return. Loaded with controller 1, the stage reset the board and it came back to
+  download mode at +1.556 s. The departure at +1.124 s is in the range of the two no-card runs (1.236 s, 1.133 s),
+  which fits hypothesis B but does not prove it: a watchdog cut (hypothesis C) lands near the same time.
+- *Fix:* `Console::open_readonly` sets 115200, raw, echo off before it reads (rustix termios, no unsafe), and
+  drops the carriage return raw mode leaves. Test `a_console_left_at_another_speed_with_echo_on_is_set_to_115200_raw_before_reading`
+  (a pty at 9600, cooked, echo on, held open as the adapter's tty is): fails on the R3 source (`left: 9600, right:
+  115200`), passes with the fix, and checks nothing is echoed back.
+
+**R3b: the same run with the console readable (hypothesis, written before the run; 2026-11-18).** The same script,
+image and bytes; the only change is the reader's line setting. Hypotheses A, B and C as above, unchanged. Added
+pass condition for the reader itself: the entry's raw `!BWKC` appears, whatever follows.
+
+**R3b, the run (2026-11-18 14:58; one script run; lock held; no reset by hand): both controllers PASS; the card
+did not answer on either.**
+- Controller 1 (SDIO1, the slot): `step 3: card read (CID, CSD, boot area)` at 1795039121.956, `step 3: the card
+  did not answer or a read failed` at 1795039122.273 (0.317 s later, the same wait as both no-card runs of
+  2026-11-17), `no card report`, `lemnos stage: end` at +0.697 s; the board left at +1.146 s and came back as `K230`
+  at +1.587 s. Sent sha256 `1f793e11…`.
+- Controller 0: the same lines (0.317 s), end at +0.697 s, left at +1.073 s, back as `K230` at +1.511 s.
+- **Hypothesis B holds as far as this image can tell: the result is the no-card result.** The limit: this host has
+  never read a card on this board (`sdhci.rs` marks its clock UNVERIFIED and sets no divider), and the report
+  prints one line for every failure, so an empty slot and a card the host cannot reach look the same here.
+- *The reader:* `!BWKC` and every line arrived; the fix holds on the real tty (`stty` after: 115200).
+- *LSR:* `L000000d9` where every earlier run read `L00000041`: data ready, framing error, break and FIFO error
+  are set, so bytes had arrived on the board's receive line. They are the 9600-baud echo of the ROM's `boot failed`
+  line from the 14:56 run. The echo did reach the board.
+- *The ROM's exit code:* `boot failed with exit code 13` on both returns. It was 13 on 2026-11-16 22:45 and today
+  (each after a power cycle) and 19 in every run after the RST of 2026-11-16 23:20. That pairing is an
+  observation; what 13 and 19 mean is still not established.
+- Board at the end: `29f1:0230`, Dev 079, download mode. Lock released by the script's exit. Records
+  `K230R/bench/run-R3b.out`, `R3b-sd1.txt`, `R3b-sd0.txt`, each console line stamped on CLOCK_REALTIME.
+
+**R3c: which failure it is (hypothesis, written before the run; 2026-11-18).** A diagnostic in the R1b to R1f
+pattern, under the same conditions; the image reads more and writes nothing more.
+- *Changes:* before its card read the report prints five of the controller's registers as the ROM left them
+  (`sd rom PRESENT_STATE`, `HOST_CONTROL_POWER`, `CLOCK_TIMEOUT_RESET`, `INT_STATUS`, `CAPABILITIES`: SDHCI
+  standard offsets 0x24, 0x28, 0x2c, 0x30, 0x40; status and setting registers whose read has no effect; the data
+  buffer is not read). After a failed read it prints the step (`sd error in: controller start`, `card start` or
+  `boot area read`), the cause in words, the command (`sd error command`), and the same five registers again
+  (`sd end …`). The card commands are unchanged: CMD0, 8, 55/41, 2, 3, 9, 10, 7, 16, 17.
+- *Image:* 53,216 bytes, sha256 `43d3f475…` before the patch; `check-entry.py`: `entry check holds`.
+- *Hypothesis A (the slot is empty):* PRESENT_STATE bit 16 (card inserted) is clear on controller 1 both times;
+  the error is in `card start`, at CMD0 or CMD8, with no reply.
+- *Hypothesis B (a card is there and the host does not reach it):* PRESENT_STATE bit 16 is set on controller 1,
+  and the error names the command that failed. Then no hands are needed and the host's setup is the work.
+- *Hypothesis C (the card-detect bit says nothing):* bit 16 reads the same on both controllers, or the same as it
+  will with the card's place known. The board's device tree enables `mmc1` with no card-detect property
+  (`tmp/K230-USB/aicam/k230d_canmv_junroc_ai_cam.dts:82`), so the line may not reach the controller. Then the bit is
+  recorded as the empty-or-unknown value, and it decides only against a run with the card's place known.
+- *Pass of the run:* the ten register lines and the three error lines on each controller, `lemnos stage: end`,
+  and the return as `K230`. About 16 more lines (60 ms at 115200), far inside the watchdog's window.
+- *Rehearsal (PC):* the image rebuilt and its entry checked; `an_error_names_its_command_and_its_cause_in_fixed_words`
+  and `the_snapshot_reads_only_aligned_registers_of_the_window_and_never_the_data_buffer`; all three crates' tests,
+  fmt, clippy (host, and the riscv target for the image, where a missing SAFETY comment on `lemnos_diag` was found
+  and added); the script in its dry mode with this image. The board's registers cannot be rehearsed on the PC.
+
+**R3c, the run (2026-11-18 15:05; one script run; lock held; no reset by hand): both controllers PASS, and the
+result overturns the reading of every R3 so far.** Sent 53,216 bytes (`43d3f475…` before the patch). Controller 1:
+end at +0.745 s, left at +1.145 s, back as `K230` at +1.582 s. Controller 0: end at +0.745 s, left at +1.129 s, back
+at +1.562 s. Records `K230R/bench/R3c-sd1.txt`, `R3c-sd0.txt`.
+
+| line | controller 1 (the slot) | controller 0 |
+|---|---|---|
+| `sd rom PRESENT_STATE` | `01f70000` | `03f700f0` |
+| `sd rom HOST_CONTROL_POWER` | `00000f02` | `00000000` |
+| `sd rom CLOCK_TIMEOUT_RESET` | `000e022f` | `00000000` |
+| `sd rom INT_STATUS` | `00000000` | `00000000` |
+| `sd rom CAPABILITIES` | `276a6481` | `256ec881` |
+| the error | `sd error in: card start`, `no reply: the wait ran out`, `sd error command 00000000` | the same |
+| `sd end PRESENT_STATE` | `01f70001` | `03f700f1` |
+| `sd end HOST_CONTROL_POWER` | `00000f00` | `00000f00` |
+| `sd end CLOCK_TIMEOUT_RESET` | `00000007` | `00000007` |
+| `sd end INT_STATUS` | `00000000` | `00000000` |
+
+- **Our host never got a command out (established).** The failure is CMD0 on both controllers. CMD0 expects no
+  reply, so a controller whose card clock runs completes it with or without a card. Here the wait of a million
+  status reads ran out with the command inhibit still set (`PRESENT_STATE` bit 0) and no status bit. The host had
+  written `CLOCK_CONTROL` 0x0005: no divider, no PLL enable, no programmable-clock bit. **So "the card did not
+  answer" in R3 (2026-11-17) and R3b was the host, not the slot: those runs say nothing about a card.**
+- **The ROM reached a card on the slot's controller (likely, not proven).** As the ROM left it, controller 1 has
+  bus power on at 3.3 V and the 4-bit data width (`0f02`), and its clock at divider field 2 with the PLL and
+  programmable bits (`022f`): 25 MHz from the 100 MHz base the capabilities give. A host goes to four data lines
+  and 25 MHz only after a card has answered its start. Controller 0 was left untouched (all zero). The ROM then
+  printed `boot failed with exit code 13`: it read the card and refused to boot it, which is what the no-boot card
+  is for. Not proven: there is no such snapshot from a slot known to be empty.
+- **Hypothesis C held for the card-detect bit:** bit 16 reads 1 on both controllers, so it decides nothing.
+- *LSR* is `L00000040` in both runs: the receive line is clean now that nothing echoes.
+
+**R3d: the host's clock, the long reply, the error statuses (hypothesis, written before the run; 2026-11-18).**
+- *Changes (`drivers/k230-usbboot-sys/src/sdhci.rs`), each from the SDK's RT-Smart driver
+  (`src/big/rt-smart/kernel/bsp/maix3/board/interdrv/sdio/drv_sdhci.c`, SDK `7e302f733`) or from the ROM's state
+  above:*
+  1. The clock. Divider field for 400 kHz from the capabilities' base clock (100 MHz gives 125, 200 MHz gives
+     250; `drv_sdhci.c:726-737`, `:844`, `:894`), with the programmable-clock bit as the SDK sets it and the PLL
+     enable as the ROM left it, in the standard's order (divider and internal clock, stable, PLL, stable, card
+     clock). The timeout register takes the ROM's 0x0e. A short settle before the first command.
+  2. The 136-bit reply is moved up one byte (`drv_sdhci.c:320-328`): the controller does not store the CRC byte.
+     Unmoved, an SDHC card's CSD structure reads 0 and the stage would call it "not SDHC". No card had answered,
+     so no run had shown it.
+  3. The error statuses are enabled (`drv_sdhci.c:568`), and an error's bits are left for the report to print. With
+     none enabled a command with no reply could only run out its wait.
+- *Not changed:* the card commands (CMD0, 8, 55/41, 2, 3, 9, 10, 7, 16, 17), one data line, no write command, the
+  entry, the watchdog (not fed), the report's own reset.
+- *Image:* 52,051 bytes, sha256 `875455ae…` before the patch; `entry check holds`.
+- *Hypothesis A (the card is in the slot and the host reaches it):* controller 1 prints `card cid0` to `cid3`, the
+  block count, `verdict code`, the two CRCs and the two 48-byte headers, then the end. Controller 0 (the WiFi
+  module's bus, no card) fails in `card start` at CMD8 with the controller's error, `sd end INT_STATUS 00018000`
+  (command timeout).
+- *Hypothesis B (the slot is empty):* controller 1 fails in `card start` at CMD8 with the controller's error and
+  `INT_STATUS 00018000`. This time it means an empty slot: CMD0 completed and CMD8 got no reply.
+- *Hypothesis C (still no command out):* CMD0 runs out its wait again; `sd end CLOCK_TIMEOUT_RESET` shows the word
+  that did not do it.
+- *Hypothesis D (the card answers and a later step fails):* the error names it: 41 (never ready), 2, 9 or 10 (the
+  long reply), 17 (the data path), `not SDHC`; or the lines stop with no end line because the card's start outlasts
+  the watchdog, and the board still returns as `K230`.
+- *Pass of the run:* the end line and the return on each controller, and controller 1 decided between A and B.
+- *Fail-before (the stand-in):* `sdhci.rs` now has a register model that fails like the board did: a command
+  completes only when the clock word has what the ROM's word had, a status appears only when enabled. On the
+  first host's start and reply three tests fail (`left: 5, right: 32045` on the clock word, `Timeout(0)` at CMD0,
+  `left: 0, right: 1` on the CSD structure); with the changes all six pass. `K230R/sdhci-fail-before.log`.
+- *Rehearsal (PC):* fmt, clippy (host and riscv), the three crates' tests, the boundary check, the image's entry
+  check, the script's dry mode with this image. The board's controller cannot be rehearsed past its model.
+
+**R3d, the run (2026-11-18 15:12; one script run; lock held; no reset by hand): both controllers PASS; the clock
+runs now, and CMD0 ends as a command-line conflict.** Sent 52,051 bytes (`875455ae…` before the patch). Controller 1:
+end at +0.437 s, left at +0.894 s, back as `K230` at +1.333 s. Controller 0: end at +0.437 s, left at +0.852 s, back at
++1.319 s. Records `K230R/bench/R3d-sd1.txt`, `R3d-sd0.txt`.
+- Both controllers: `sd error in: card start`, `the controller reported an error`, `sd error command 00000000`, 14 ms
+  after the read began (0.317 s before: the wait no longer runs out).
+- Controller 1: `sd end CLOCK_TIMEOUT_RESET 000e7d2f` (the 400 kHz word, stable), `sd end INT_STATUS 00038100`.
+  Controller 0: `000efa2f`, `00038000`. Bits 16 and 17 together (command timeout and command CRC) are the
+  standard's report of a conflict on the command line; bit 8 on controller 1 is the card-interrupt status.
+- **Hypothesis C's premise is gone (a command now ends in the controller, at once), and none of A, B, D is
+  reached:** CMD0 itself fails, before any card could answer. Still no evidence either way about the slot.
+- *Cause (from the SDK, to be decided by R3e):* the first `sdhci.rs` and R3d reset the controller and never write
+  its vendor control byte. The SDK's driver writes `MSHC_CTRL_R` (0x508) to 0 after every full reset of a controller
+  without a PHY (`drv_sdhci.c:271-284`), and the slot's controller is that kind (`:889`, `have_phy = 0`).
+
+**R3e: the vendor control byte after the reset (hypothesis, written before the run; 2026-11-18).**
+- *Change:* `start` writes 0 to the byte at 0x508 after the reset, as the SDK does. The report prints that word
+  too (`sd rom MSHC_CTRL`, `sd end MSHC_CTRL`). Nothing else changes; the commands are the same, with no write
+  command.
+- *Image:* 52,115 bytes, sha256 `e4346650…` before the patch; `entry check holds`.
+- *Hypothesis A (a card is in the slot):* controller 1 prints the card report (CID, blocks, verdict, CRCs, the two
+  headers) and the end. `sd rom MSHC_CTRL` has bit 0 clear (the ROM cleared it too).
+- *Hypothesis B (the slot is empty):* controller 1 fails in `card start` at CMD8 with `INT_STATUS 00018000` (command
+  timeout alone): CMD0 completed, CMD8 got no reply.
+- *Hypothesis C (the byte is not the cause):* CMD0 ends as a conflict again (`00038000`).
+- *Hypothesis D (the card answers and a later step fails):* as R3d's D.
+- *Controller 0* has a PHY the SDK sets up after a reset (`drv_sdhci.c:209-240`) and this host does not: it is
+  expected to fail, and its result decides nothing about the slot.
+- *Fail-before:* the model now puts the conflict check on at a full reset and ends every command as a conflict
+  while it is on. Without the write two tests fail (`Err(Reply(0, "the controller reported an error"))` where
+  `Ok(None)` is expected); with it all seven pass. `K230R/sdhci-conflict-fail-before.log`.
+- *Rehearsal (PC):* as R3d (fmt, clippy on both targets, the three crates' tests, boundaries, entry check, dry mode).
+
+**R3e, the run (2026-11-18 15:14; one script run; lock held; no reset by hand): the card is in the slot and was
+read. Hypothesis A holds.** Sent 52,115 bytes (`e4346650…` before the patch). Records `K230R/bench/run-R3e.out`,
+`R3e-sd1.txt`, `R3e-sd0.txt`, every console line stamped on CLOCK_REALTIME.
+- *Controller 1 (SDIO1, the slot):* identify `K230`; start at t0 = +0.156 s. Console:
+  - `1795040096.377503 sd rom MSHC_CTRL 000f0000`: the ROM had cleared bit 0 on this controller.
+  - `1795040096.379077 step 3: card read (CID, CSD, boot area)`
+  - `1795040096.582201 card cid0 03534453`, `cid1 52363447`, `cid2 8014a7c9`, `cid3 ab015100`: manufacturer 0x03,
+    OEM `SD`, product `SR64G`, revision 8.0, serial `14a7c9ab`, date 2021-01.
+  - `card blocks hi 00000000`, `card blocks lo 076f5000`: 124,735,488 sectors, 59.5 GiB.
+  - `1795040096.584626 verdict code 00000003`: no firmware header, and the blocks hold other bytes.
+  - `1795040096.609471 copy0 block crc32 89148991`, `copy1 block crc32 89148991`; the first 48 bytes of each
+    header (sectors 2048 and 3072) are zero.
+  - `1795040096.647766 lemnos stage: end` (+0.667 s). The board left at +1.087 s and came back as `K230` at
+    +1.519 s. **PASS.** The card's start, the two long replies, and sixteen sectors took 0.2 s.
+- *Which card:* the CRC32 of the 4 KiB blocks at sectors 2048 and 3072 of the no-boot image
+  (`tmp/K230-USB/card-b/k230d-ai-cam-varA-noboot.img`, sha256 `49a61489…`) is `89148991` for both, computed on the
+  PC. The card in the slot holds that image's boot blocks: the firmware header zeroed, the payload left.
+- *Controller 0:* `sd rom MSHC_CTRL 000f0001` (untouched by the ROM). CMD0 completed; `sd error in: card start`,
+  `the controller reported an error`, `sd error command 00000008`, `sd end INT_STATUS 00018001` (command timeout,
+  after a completed command). Nothing on that bus answers as an SD card. End at +0.443 s, left at +0.916 s, back
+  as `K230` at +1.354 s. **PASS.**
+- *The ROM:* `boot failed with exit code 13` after each return, with this card in the slot.
+- *Closed by this run:* the vendor control byte is the conflict check (the bench decided it); the clock setup;
+  the long reply's byte offset (the capacity and the CID read sensibly); the one-line data path (two block CRCs
+  match the image). The return through a card that does not boot: five scripts, ten returns today, each back to
+  `29f1:0230`.
+- *What every R3 before this one said about the slot:* nothing. The 2026-11-17 entry "R3 with no card" and R3b
+  reported the host's own failure.
+- Writes: none, to the card, the boot settings or the stored environment. Board at the end: `29f1:0230`, Dev 086.
+
+**R3f and R0 with the card in: what else runs on this path without a write (hypothesis, written before the runs;
+2026-11-18).**
+- *R3f:* R3e again, the same script and the same bytes. Hypothesis: the same CID, block count, verdict code 3 and
+  both CRCs `89148991` on controller 1; the same CMD8 error on controller 0; both PASS. A difference in any card
+  line is a read fault to chase before any write is ever reviewed.
+- *R0 with the card in* (`bench/run-R0.sh`: the probe once, mode `soc`, no SD controller, the R3e image; the
+  same lock and checks, and a dry mode): the entry's SoC reset right after the start, with a card that does not
+  boot in the slot. Hypothesis: `!S` on the console, the board gone within 2 s and back as `K230` within 10 s, the
+  ROM's `boot failed with exit code 13` in between. Stop: no return, or another identity.
+- *Rehearsal:* both scripts in dry mode; the image and probe are the ones R3e rehearsed.
+
+**R3f and R0 with the card in, the runs (2026-11-18 15:16; one script run each; lock held; no reset by hand).**
+- *R3f:* every console line of both controllers is the same text as R3e's (`diff` of the two records' console
+  lines without their stamps: identical): the CID, 124,735,488 sectors, verdict code 3, both CRCs `89148991`.
+  Controller 1: end at +0.668 s, left at +1.097 s, back as `K230` at +1.532 s. Controller 0: end at +0.443 s, left
+  at +0.794 s, back at +1.230 s. Both **PASS**. Records `K230R/bench/R3f-sd1.txt`, `R3f-sd0.txt`.
+- *R0 with the card in:* identify `K230`; 52,115 bytes loaded; start at t0 = +0.138 s; console
+  `1795040204.875268 !B!Sboot failed with exit code 13`; gone at +0.429 s, back as `K230` at +0.661 s. **PASS.**
+  Record `K230R/bench/R0-soc.txt`.
+- Board at the end: `29f1:0230`, Dev 089, download mode, as found. The lock is released at each script's exit.
 
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 
