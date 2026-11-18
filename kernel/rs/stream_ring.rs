@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//! The frame ring and the hold table (the stream port, slice 1): the words the module writes into the
+//! The frame ring and the hold table (the stream port): the words the module writes into the
 //! memory its consumer maps, and what it reads of the consumers' marks pages.
 //!
 //! The frame ring is shm/README.md's ring (layout 2), one field, one sample per frame, with the pool
