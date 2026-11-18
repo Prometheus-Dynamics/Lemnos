@@ -564,9 +564,12 @@ A relay that is late is not restarted either. The module's ring holds as many fi
 stream has buffers (the next power of two) and the block does not wait: when the driver is not run for
 longer than that many frame periods, the oldest are written over or their buffers used again. The driver
 held none of them, so it drops them, counts each in the receiver's `counters().dropped`, and publishes the
-frames still on the ring; the consumer sees a gap in the sequence and no stall. Only a relay reads this
-way (`Ring::hold_passing` in `backends/linux-sys`): a reader of a job's results that is overrun is out of
-step, and that is still an error.
+frames still on the ring; the consumer sees a gap in the sequence and no stall. The driver asks for this
+when it makes its reader (`Ring::hold_passing` with `Overrun::Drops`, in `backends/linux-sys`). A reader
+of job results asks for `Overrun::Fails`, as the PiSP front end does: it keeps a posted buffer and a
+config buffer for each job in flight, so a result it never read is a stream out of step, an error, and the
+restart clears what it kept. That cannot happen while the module keeps step (no more results are unread
+than jobs are in flight, and the ring has a slot for each).
 `rp1-csi2` judges only while a buffer is armed (its frame count is known). Its no-frame clock does not run
 while the driver holds no buffer of the stream, every buffer being with the consumer (held, or published
 and not yet returned): the producer is starved by its consumer, not stalled by the sensor. The clock is

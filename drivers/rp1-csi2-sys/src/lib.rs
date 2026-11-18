@@ -18,7 +18,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use lemnos_linux_sys::stream::ring::{Layout, Ring};
+use lemnos_linux_sys::stream::ring::{Layout, Overrun, Ring};
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// `LEMNOS_RP1_CSI2_ABI`: the node's interface revision this crate speaks.
@@ -385,7 +385,8 @@ impl Stream {
     /// pool size.
     pub fn add_marks(&mut self, buffers: u32, max_in_hand: u32) -> io::Result<()> {
         self.ring
-            .hold_passing(self.fd.as_fd(), buffers, max_in_hand)
+            // A camera's frames come whether or not the driver reads them: late is a drop.
+            .hold_passing(self.fd.as_fd(), buffers, max_in_hand, Overrun::Drops)
     }
 
     /// The frame held in `buffer` went on to the driver's own consumer: it stays held until
