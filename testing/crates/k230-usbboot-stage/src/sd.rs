@@ -26,8 +26,12 @@ use crate::medium::{Geometry, Medium, MediumError};
 pub const BLOCK: usize = 512;
 /// The ACMD41 tries before the card is called not ready (each try is a CMD55 and an ACMD41).
 pub const READY_TRIES: u32 = 1000;
-/// The READY_FOR_DATA polls after a write before the card is called busy (CMD13).
-pub const BUSY_POLLS: u32 = 1000;
+/// Status polls after a write before the card is called stuck. A poll is one CMD13, so its length is the
+/// card clock's: about 0.3 ms at 400 kHz and under 10 microseconds at 25 MHz. A card may take up to half a
+/// second to finish a write, so the count has to cover that at the fastest clock. Bench, 2026-11-18 (W4):
+/// with 1000 polls the stage gave up about 15 ms after a write at 25 MHz, while the card was still
+/// programming, and the next CMD24 got no reply.
+pub const BUSY_POLLS: u32 = 200_000;
 /// The argument for CMD8: 2.7-3.6 V and the check pattern 0xAA.
 const CMD8_ARG: u32 = 0x0000_01aa;
 /// The host capacity bit (HCS) and the voltage window, for ACMD41.
@@ -300,6 +304,11 @@ impl<H: SdHost> Card<H> {
     /// The card's capacity in 512-byte blocks.
     pub fn blocks(&self) -> u64 {
         self.blocks
+    }
+
+    /// The host under the card, for a setting the card protocol does not carry (the data clock).
+    pub fn host_mut(&mut self) -> &mut H {
+        &mut self.host
     }
 
     /// Reads block `lba`.

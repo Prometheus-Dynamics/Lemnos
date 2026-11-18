@@ -40,6 +40,11 @@ pub const STAGE: u32 = 1 << 3;
 /// records answered over USB. It writes nothing and feeds nothing; the armed watchdog returns the board.
 pub const REPORT: u32 = 1 << 4;
 
+/// Mode flag: one piece of a card flash ([`crate::piece`]): the job loaded beside the image is done on
+/// the card the SD parameter names, the outcome is printed, and the SoC reset returns the board. It
+/// writes the card.
+pub const PIECE: u32 = 1 << 5;
+
 /// The mode word of a named run: the five probe runs and the stage.
 pub fn mode_word(name: &str) -> Option<u32> {
     match name {
@@ -50,6 +55,7 @@ pub fn mode_word(name: &str) -> Option<u32> {
         "soc" => Some(SOC_AT_ONCE),
         "stage" => Some(STAGE | WDT0 | WDT1),
         "report" => Some(REPORT | WDT0),
+        "piece" => Some(PIECE | WDT0),
         _ => None,
     }
 }
