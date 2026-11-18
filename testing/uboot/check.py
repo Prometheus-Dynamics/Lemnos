@@ -55,7 +55,13 @@ NO_PARTITION = "lemnos: no uboot-env partition on mmc 0: the environment is not 
 RESCUE = "lemnos: rescue after"
 DOWNLOAD = "lemnos: no slot started: offering download mode"
 STARTED = re.compile(r"^lemnos: (trial|default|previous): (\S+) did not start, going on$")
-TIMEOUT = 60
+# The bounds follow progress, not the clock. A wait fails when the console has been silent for STALL seconds
+# (a hang: nothing is printed), or when the wait has run for CAP seconds in all (a boot that keeps printing and
+# never arrives). A slow boot under load keeps printing, so it is not cut short; a stuck one is. COMMAND bounds a
+# host tool that prints nothing until it finishes. The environment overrides exist so the proofs can run them short.
+STALL = float(os.environ.get("LEMNOS_UBOOT_STALL", 120))
+CAP = float(os.environ.get("LEMNOS_UBOOT_CAP", 900))
+COMMAND = float(os.environ.get("LEMNOS_UBOOT_COMMAND", 300))
 
 
 @dataclass
@@ -294,44 +300,52 @@ def _wait_state(pid):
 
 class Console:
     """One QEMU run with its serial console on a pipe. Output is read in bounded steps; the process is killed
-    (ours) when the case is done with it, which is the board's reset."""
+    (ours) when the case is done with it, which is the board's reset. `progress` is the last time a byte came."""
 
     def __init__(self, args, cwd):
         self.proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, bufsize=0)
         self.fd = self.proc.stdout.fileno()
         self.buf = b""
+        self.progress = time.monotonic()
 
-    def fill(self, deadline, what):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise Failure(f"no output for {what} within {TIMEOUT} s; process state: {_wait_state(self.proc.pid)}")
-        ready, _, _ = select.select([self.fd], [], [], min(0.2, remaining))
+    def fill(self, cap, what):
+        """Reads what is there, at most a step. Raises when the console is silent for STALL s, or `cap` (a
+        monotonic time, the wait's CAP) has passed."""
+        now = time.monotonic()
+        if now >= cap:
+            raise Failure(f"{what} did not end within {CAP:g} s (cap; the console still printed); "
+                          f"process state: {_wait_state(self.proc.pid)}")
+        silent = now - self.progress
+        if silent >= STALL:
+            raise Failure(f"no output for {what} for {STALL:g} s (stalled); process state: {_wait_state(self.proc.pid)}")
+        ready, _, _ = select.select([self.fd], [], [], min(0.2, cap - now, STALL - silent))
         if ready:
             chunk = os.read(self.fd, 65536)
             if not chunk:
                 raise Failure(f"the U-Boot console ended while waiting for {what}")
             self.buf += chunk
+            self.progress = time.monotonic()
         return True
 
-    def until(self, pattern, what, timeout=TIMEOUT):
+    def until(self, pattern, what):
         """Reads up to and including `pattern`; returns the text read."""
-        deadline = time.monotonic() + timeout
+        cap = time.monotonic() + CAP
         while True:
             i = self.buf.find(pattern)
             if i >= 0:
                 text = self.buf[:i + len(pattern)]
                 self.buf = self.buf[i + len(pattern):]
                 return text.decode(errors="replace").replace("\r", "")
-            self.fill(deadline, what)
+            self.fill(cap, what)
 
     def send(self, line):
         self.proc.stdin.write(line.encode() + b"\n")
         self.proc.stdin.flush()
 
-    def lines(self, stop, timeout=TIMEOUT):
-        """Yields complete console lines until stop(line) is true or the timeout passes."""
-        deadline = time.monotonic() + timeout
+    def lines(self, stop):
+        """Yields complete console lines until stop(line) is true, or the bounds above run out."""
+        cap = time.monotonic() + CAP
         while True:
             while b"\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\n", 1)
@@ -339,7 +353,7 @@ class Console:
                 yield line
                 if stop(line):
                     return
-            self.fill(deadline, "a line of the boot script")
+            self.fill(cap, "a line of the boot script")
 
     def close(self):
         if self.proc.poll() is None:
@@ -359,9 +373,10 @@ class Harness:
         self.qemu = qemu
         self.scr = None
 
-    def run(self, args, cwd, timeout=TIMEOUT):
-        """A bounded external command. A command that does not finish in `timeout` s is not waited on: its state is
-        read from /proc and it is killed, and the case fails with that state in the message."""
+    def run(self, args, cwd, timeout=COMMAND):
+        """A bounded external command: it prints nothing until it finishes, so its bound is COMMAND. One that does
+        not finish in time is not waited on: its state is read from /proc and it is killed, and the case fails
+        with that state in the message."""
         proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
         try:
@@ -370,7 +385,7 @@ class Harness:
             state = _wait_state(proc.pid)
             proc.kill()
             proc.wait()
-            raise Failure(f"{args[0]} did not finish in {timeout} s (bounded; killed): {state}")
+            raise Failure(f"{args[0]} did not finish in {timeout:g} s (bounded; killed): {state}")
         return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
     def build_tools(self):
