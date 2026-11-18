@@ -479,9 +479,9 @@ impl Lifecycle for K230Capture {
             State::Recovering { .. } => {
                 Health::Failed("the frame path failed while streaming: restarting it")
             }
-            State::Streaming if self.waiting_drops > 0 => Health::Degraded(
-                WAITING[self.waiting_drops.min(WAITING_TOP) as usize],
-            ),
+            State::Streaming if self.waiting_drops > 0 => {
+                Health::Degraded(WAITING[self.waiting_drops.min(WAITING_TOP) as usize])
+            }
             _ => Health::Ok,
         }
     }

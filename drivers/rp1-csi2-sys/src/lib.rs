@@ -18,7 +18,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use lemnos_linux_sys::stream::ring::{Layout, Marks, Ring};
+use lemnos_linux_sys::stream::ring::{Layout, Ring};
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// `LEMNOS_RP1_CSI2_ABI`: the node's interface revision this crate speaks.
@@ -38,7 +38,6 @@ pub const EMBEDDED_MAX: u32 = 65_520;
 pub const MAX_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
 const CREATE_BUFFERS: u32 = 1;
-
 
 /// `struct lemnos_rp1_csi2_info`.
 #[repr(C)]
@@ -379,12 +378,21 @@ impl Stream {
     }
 
     /// Turns the stream's buffer holds on: from now on each frame [`next_frame`](Self::next_frame)
-    /// takes is held until [`release`](Self::release) gives it back. `max_held` frames at most may
-    /// be held at once. `buffers` is the stream's pool size.
-    pub fn add_marks(&mut self, buffers: u32, max_held: u32) -> io::Result<()> {
-        let marks = Marks::create(buffers, 0, max_held)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("marks: {e:?}")))?;
-        self.ring.add_marks(self.fd.as_fd(), marks, buffers, max_held)
+    /// takes is held until [`release`](Self::release) gives it back. `max_in_hand` frames at most
+    /// may be in hand at once: taken, and not yet passed on to the driver's own consumer
+    /// ([`pass_on`](Self::pass_on)). A frame passed on stays held and is not counted, so a consumer
+    /// that keeps frames does not stop the next one from being taken. `buffers` is the stream's
+    /// pool size.
+    pub fn add_marks(&mut self, buffers: u32, max_in_hand: u32) -> io::Result<()> {
+        self.ring
+            .hold_passing(self.fd.as_fd(), buffers, max_in_hand)
+    }
+
+    /// The frame held in `buffer` went on to the driver's own consumer: it stays held until
+    /// [`release`](Self::release), and no longer counts as in hand. `InvalidInput` when the stream
+    /// holds no frame in hand in `buffer`.
+    pub fn pass_on(&mut self, buffer: u32) -> io::Result<()> {
+        self.ring.pass_on(buffer)
     }
 
     /// The next frame published, if any. With holds on, the frame's buffer is held until

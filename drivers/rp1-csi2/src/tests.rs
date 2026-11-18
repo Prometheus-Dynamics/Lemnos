@@ -42,6 +42,10 @@ struct Mock {
     given_back: Vec<(u32, u32)>,
     /// Buffers taken by `next_frame` and not yet given back: the stream's holds, as the shm ring keeps them.
     held: Vec<u32>,
+    /// Of `held`, the buffers whose frame was handed on to the consumer: not in the driver's hand.
+    handed: Vec<u32>,
+    /// Frames the ring let go by because the driver had its limit in hand.
+    dropped_at_limit: u64,
     /// Whether the block is receiving, and the frame starts it has counted since it went.
     receiving: bool,
     starts: FrameStarts,
@@ -52,6 +56,7 @@ struct Mock {
     emb_finished: Vec<Finished>,
     emb_given_back: Vec<(u32, u32)>,
     emb_held: Vec<u32>,
+    emb_handed: Vec<u32>,
 }
 
 impl Mock {
@@ -90,6 +95,11 @@ impl Hardware for Hw {
                 m.made.push(*params);
                 m.set.clear();
                 m.emb_set.clear();
+                // A new module stream has a new marks page: nothing is held on it.
+                m.held.clear();
+                m.handed.clear();
+                m.emb_held.clear();
+                m.emb_handed.clear();
                 Ok(())
             }
         })
@@ -128,36 +138,63 @@ impl Hardware for Hw {
 
     fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>> {
         Ok(self.with(|m| {
-            let finished = match channel {
-                Channel::Image => &mut m.finished,
-                Channel::Embedded => &mut m.emb_finished,
+            // The limit the real ring keeps (`LinuxHardware`: `max(B - 3, 1)` frames in hand, taken
+            // and not handed on). At it nothing is taken: the frames go by and are counted.
+            let buffers = m.made.last().map_or(0, |p| match channel {
+                Channel::Image => p.buffers,
+                Channel::Embedded => p.embedded_buffers,
+            });
+            let limit = buffers.saturating_sub(3).max(1) as usize;
+            let (finished, held, handed) = match channel {
+                Channel::Image => (&mut m.finished, &mut m.held, &m.handed),
+                Channel::Embedded => (&mut m.emb_finished, &mut m.emb_held, &m.emb_handed),
             };
+            if held.len() - handed.len() >= limit {
+                m.dropped_at_limit += finished.len() as u64;
+                finished.clear();
+                return None;
+            }
             if finished.is_empty() {
                 None
             } else {
                 let f = finished.remove(0);
-                match channel {
-                    Channel::Image => m.held.push(f.buffer),
-                    Channel::Embedded => m.emb_held.push(f.buffer),
-                }
+                held.push(f.buffer);
                 Some(f)
             }
         }))
+    }
+
+    /// Only a frame in hand can be handed on, as the real ring refuses any other.
+    fn handed_on(&mut self, channel: Channel, buffer: u32) -> Result<()> {
+        self.with(|m| {
+            let (held, handed) = match channel {
+                Channel::Image => (&m.held, &mut m.handed),
+                Channel::Embedded => (&m.emb_held, &mut m.emb_handed),
+            };
+            if !held.contains(&buffer) || handed.contains(&buffer) {
+                return Err(Status::INVALID_ARGUMENT);
+            }
+            handed.push(buffer);
+            Ok(())
+        })
     }
 
     /// A release of a buffer the channel does not hold is refused, as the real ring refuses it:
     /// a double release, or a buffer never taken.
     fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
         self.with(|m| {
-            let (held, given) = match channel {
-                Channel::Image => (&mut m.held, &mut m.given_back),
-                Channel::Embedded => (&mut m.emb_held, &mut m.emb_given_back),
+            let (held, handed, given) = match channel {
+                Channel::Image => (&mut m.held, &mut m.handed, &mut m.given_back),
+                Channel::Embedded => (&mut m.emb_held, &mut m.emb_handed, &mut m.emb_given_back),
             };
             let at = held
                 .iter()
                 .position(|&b| b == buffer)
                 .ok_or(Status::INVALID_ARGUMENT)?;
             held.swap_remove(at);
+            if let Some(at) = handed.iter().position(|&b| b == buffer) {
+                handed.swap_remove(at);
+            }
             given.push((buffer, fence));
             Ok(())
         })
@@ -200,6 +237,8 @@ fn driver_on(frames: &MockStream) -> (Rp1Csi2, Hw) {
         m.finished.reserve(64);
         m.given_back.reserve(4096);
         m.set.reserve(4096);
+        m.held.reserve(64);
+        m.handed.reserve(64);
     });
     let frames: StreamHandle = lemnos_core::Held::boxed(Box::new(frames.clone()));
     let driver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames));
@@ -220,6 +259,8 @@ fn driver_with_bell(frames: &MockStream) -> (Rp1Csi2, Hw) {
         m.finished.reserve(64);
         m.given_back.reserve(4096);
         m.set.reserve(4096);
+        m.held.reserve(64);
+        m.handed.reserve(64);
     });
     let frames: StreamHandle = lemnos_core::Held::boxed(Box::new(frames.clone()));
     let driver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames));
@@ -1391,13 +1432,33 @@ fn a_double_release_and_a_release_of_a_buffer_never_taken_are_refused() {
 #[test]
 fn a_frame_whose_buffer_wait_ends_after_a_newer_frame_is_dropped_not_published_late() {
     use crate::relay::Relay;
-    let mut frames = stream(2);
+    // Five buffers: the driver may have two frames in hand (`max(B - 3, 1)`), which this needs:
+    // frame 5 waits in hand while frame 6 is taken. On a smaller pool the ring takes no second
+    // frame while one waits, so the order cannot turn.
+    let mut frames = stream(5);
     let hw = Hw::default();
     let mut h = hw.clone();
+    h.make(&StartParams {
+        lanes: 2,
+        mbps: 800,
+        vc: 0,
+        data_type: 0x2b,
+        width: 1280,
+        height: 800,
+        stride: 1600,
+        size: 1_280_000,
+        unpack16: false,
+        buffers: 5,
+        frame_slots: 8,
+        embedded_buffers: 0,
+        embedded_frame_slots: 0,
+        embedded_bytes: 0,
+    })
+    .unwrap();
     // Buffer 0 is the block's until its wait ends; buffer 1 settles at once.
     hw.with(|m| m.answer = Some((0, Set::Busy)));
     let mut relay = Relay::new(Channel::Image);
-    relay.restart(2);
+    relay.restart(5);
     relay.take(&mut frames, &mut h).unwrap();
     let frame = |buffer, sequence| Finished {
         buffer,
@@ -1521,7 +1582,11 @@ fn a_stall_that_begins_while_buffers_are_held_is_judged_one_bound_after_one_is_r
         d.health()
     );
     tick_to(&mut d, 6_000_000_000, 6_500_000_000);
-    assert_eq!(hw.with(|m| m.made.len()), 2, "and the receiver is restarted");
+    assert_eq!(
+        hw.with(|m| m.made.len()),
+        2,
+        "and the receiver is restarted"
+    );
     assert_eq!(d.health(), Health::Ok);
 }
 
@@ -1535,9 +1600,15 @@ fn a_real_stall_with_a_buffer_free_is_still_judged_while_the_consumer_holds_othe
     d.start().unwrap();
     d.tick(0).unwrap();
     for sequence in 0..2 {
-        hw.with(|m| m.finished.push(frame(sequence as u32, sequence, sequence as u32)));
+        hw.with(|m| {
+            m.finished
+                .push(frame(sequence as u32, sequence, sequence as u32))
+        });
         d.tick(0).unwrap();
-        assert!(frames.take_frame().is_some(), "the consumer keeps frame {sequence}");
+        assert!(
+            frames.take_frame().is_some(),
+            "the consumer keeps frame {sequence}"
+        );
     }
     tick_to(&mut d, 0, 1_000_000_000);
     assert!(
@@ -1558,7 +1629,10 @@ fn a_recovery_restart_carries_the_frame_sequence_on() {
     d.start().unwrap();
     d.tick(0).unwrap();
     for sequence in 0..3u64 {
-        hw.with(|m| m.finished.push(frame(sequence as u32, sequence, sequence as u32)));
+        hw.with(|m| {
+            m.finished
+                .push(frame(sequence as u32, sequence, sequence as u32))
+        });
         d.tick(0).unwrap();
         let got = frames.take_frame().expect("published");
         assert_eq!(got.sequence, sequence);
