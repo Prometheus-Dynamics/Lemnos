@@ -161,7 +161,7 @@ pub fn extlinux_text(cmdline: &[u8]) -> Result<Vec<u8>, String> {
 
 /// The volume's tree for `parts`, with the sets' payloads as zeros of their bay sizes (the
 /// installer writes the real bytes into them).
-fn tree(parts: &Parts) -> Vec<Node> {
+pub(crate) fn tree(parts: &Parts) -> Vec<Node> {
     let pad_file = |name: &'static str, size: u64, pad: u8| Node::File {
         name,
         data: vec![pad; size as usize],

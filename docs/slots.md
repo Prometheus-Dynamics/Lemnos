@@ -1329,6 +1329,105 @@ Board checks that cannot be made on this PC (how the firmware reads a pointer fi
 whether `os_prefix=slots/bayN/` applies to every file it reads, U-Boot reading `slots/<bay>/` through
 `sysboot`) are in `testing/board-runs/I5i8.md`, each marked untested on board.
 
+### Adding to an existing boot partition
+
+`lemnos-ctl boot-partition --add-to DUMP` is for a board that runs another system from a FAT16 boot
+partition: it adds this system's boot files beside that system's, so a slot can be started once by the
+firmware's tryboot, and it changes nothing the existing system boots from. It works on a dump of the
+partition, a regular file. A block device is refused: the caller writes the result back.
+
+```text
+lemnos-ctl boot-partition --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR
+    [--firmware DIR] [--set N] [--replace-trial] --out FILE --changed-out LIST --undo-out UNDO
+lemnos-ctl boot-partition --undo UNDO --of FILE --out RESTORED
+```
+
+`DUMP` is never written. The three outputs are new files (an existing one is refused), and the same inputs
+give the same three files.
+
+**What it adds.** Every file the image builder emits for the board, taken from the builder's own tree
+(`bootimage::tree`), except `default.txt` and `config.txt`. Those two are the existing system's: they are
+never created, replaced or resized. For a Pi firmware board that is `slot-layout.toml`,
+`firmware-overlays.txt` when the board declares overlays or config lines, `previous.txt`, the records
+(`trial.rec`, `reason.rec`, `episodes.rec`, `count.rec`, `SECURE.REC`), and under `slots/` the three bay
+sets `bay0` to `bay2` with every bay file, `overlays/README`, each firmware overlay's bay and
+`bayinfo.rec`. `--slot` is installed into bay set `--set N` (0 when not given) by the installer's write
+part (`bays::stage_with`: the payloads in place, read back by hash, then the set's record), which moves no
+pointer. The command works on the Pi firmware form only.
+
+**`trial.txt` and `tryboot.txt`.** A partition that has neither gets ours. One that has them in another
+form keeps them unless `--replace-trial` is given. With it, each is replaced: a new run is allocated and
+written, the file's directory entry is rewritten in place (its first cluster and size, nothing else), and
+its old clusters are freed, which is done only when no other entry's chain holds them. The old clusters
+are not handed out in the same run, so the old bytes stay where they were. The output names each replaced
+file with the size and SHA-256 it had. `trial.txt` written here names the set of `--set`.
+
+**A second slot.** On a dump that already holds every one of these files (the result of an earlier run),
+the command adds nothing and installs the slot into the set of `--set`, which must be empty; the slot must
+not be in another set. The other sets are not written. A dump that holds some of the files and not others
+is refused.
+
+**`bayinfo.rec` has no place in it.** The record is a two-copy record of kind `BAY_INFO` whose payload is
+the slot id and each member's stored length and SHA-256 (a firmware overlay also by its path under the
+set). It carries no set number and no sector address, so the same slot in `bay0` of one volume and `bay2`
+of another has the same record bytes, and a set's files and record copied to another set's place are that
+set, committed.
+
+**Allocation.** The free map is read from the FAT: a cluster is free only when its entry is 0 in every
+FAT copy, and a volume whose copies differ is refused. Each file is one contiguous run, first fit: the
+lowest-numbered free run that holds it, files in the builder's order. A file is never split. When a file
+has no run, the command refuses before anything is written, naming the file and the longest free run.
+A directory that is missing is made (its own cluster, `.` and `..`); one that exists gains entries after
+its last one. Names are the builder's: an 8.3 name as it is, any other as long-name entries and a
+`BASE~N` short name no entry of the directory has.
+
+**What it refuses**, each with nothing written:
+
+- a block device, or anything that is not a regular file;
+- a file that is not a FAT16 volume with 512-byte sectors: FAT12 and FAT32 are named;
+- a dump that is not the size its boot sector says;
+- FAT copies that differ, and a volume that is not sound (a chain that leaves the volume, runs through a
+  free cluster or shares a cluster with another entry; a file whose chain is not the length its size
+  needs; bytes after a directory's end marker);
+- a name of ours that is already there and is not a file of ours (other than the two `--replace-trial`
+  handles);
+- a file with no run long enough, a full volume, a full root directory (512 entries, fixed) or a full
+  existing directory;
+- a set that already holds a slot, a payload bigger than its bay.
+
+**The guard.** Before any output is written, every sector that differs from the dump is classified, and
+the run is refused if one of them is in a cluster that was allocated before (other than a directory that
+gained entries, or, for a second slot, the files of its own set), if an existing FAT entry or directory
+entry changed (other than the two of `--replace-trial`), or if the boot sector changed. The volume is then
+read again: every earlier entry must be where and what it was. Last, the command runs `--verify`'s checks
+on the result and refuses unless exactly the expected lines are `BAD`: one for `default.txt` and one for
+`config.txt`, and one each for `trial.txt` and `tryboot.txt` when they were left in the existing system's
+form. The expected set is printed (`expected BAD: ...`), followed by the verify lines.
+
+**The outputs.**
+
+- `FILE`: the dump with the files added.
+- `LIST`: every changed range of sectors, one line each, in sector order:
+  `first-sector sector-count class sha256-before sha256-after`. Sectors are 512 bytes, counted from the
+  partition's start. The classes are `fat1`, `fat2`, `root-dir`, `dir` (an existing directory that gained
+  entries), `new-dir`, `new-file` and `own-file` (a second slot's bay files). A sector is listed if and only
+  if its bytes differ.
+- `UNDO`: the bytes every listed range held before. `--undo UNDO --of FILE --out RESTORED` gives the dump
+  back, byte for byte; it refuses a file whose listed ranges do not hold what the run left there.
+- On the output: one line per added file, `added PATH SIZE FIRST-CLUSTER CLUSTERS` (`added-dir` for a
+  directory), `replaced ...` and `left ...` for the trial pair, the free map before and after, and the
+  SHA-256 of the dump and of `FILE`.
+
+**Writing it back** is the caller's step, not this command's: dump the partition, run `--add-to`, check the
+dump's SHA-256 is still the partition's, then write each range of `LIST` from `FILE` to the partition at
+the same sectors, read each range back and compare it with the `sha256-after` of its line. Writing the
+`new-file` and `new-dir` ranges first, then the FAT copies, then `dir` and `root-dir` keeps every state
+between two writes one the existing system reads as before: a FAT entry without a directory entry is
+only an unused cluster. To undo, write the same ranges from the original dump (or from `RESTORED`) and
+compare with `sha256-before`. The undo puts back every sector the add changed; a sector of a new file that
+the add left as it was (zeros over zeros) and that was written later by the running slot keeps those
+bytes, in clusters that are free again.
+
 ### Previous before flashing mode
 
 When the board's loader cannot start the default, the previous slot is tried before the board offers

@@ -150,6 +150,10 @@ lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --paylo
 lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
 ```
 
+`boot-partition --add-to DUMP` adds the same files, without `default.txt` and `config.txt`, to a dump of a
+FAT16 boot partition another system boots from, and writes the changed sector ranges and an undo file
+([Slots](slots.md#adding-to-an-existing-boot-partition)).
+
 The reference board's `--min-size` is 38244864 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
 `--payload DIR` (five files named for the roles: `kernel`, `initramfs`, `device-tree`, `cmdline`,
 `board-overlay`, and nothing else: a file of any other name is refused by name, `<dir>: the payload directory holds "x", which this board's boot partition does not store (it stores: kernel, initramfs, device-tree, cmdline, board-overlay): nothing was written`, in `--min-size` and in the image build alike, the same rule the install applies to a slot bundle's `boot.files`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds

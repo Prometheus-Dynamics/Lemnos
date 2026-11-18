@@ -351,7 +351,7 @@ fn place<D: ReadAt>(
 }
 
 /// The file attribute bits the reader looks at.
-const ATTR_DIR: u8 = 0x10;
+pub(crate) const ATTR_DIR: u8 = 0x10;
 const ATTR_VOLUME: u8 = 0x08;
 const ATTR_LFN: u8 = 0x0F;
 /// Where the 13 UCS-2 characters of a long-name entry sit in its 32 bytes.
@@ -366,10 +366,39 @@ enum Dir {
 
 /// A directory entry that matched.
 #[derive(Debug, Clone, Copy)]
-struct Hit {
-    attr: u8,
-    first: u64,
-    size: u32,
+pub(crate) struct Hit {
+    pub(crate) attr: u8,
+    pub(crate) first: u64,
+    pub(crate) size: u32,
+}
+
+/// One live entry of a directory, as the reader sees it: its place, its names and what it points at.
+#[derive(Debug, Clone)]
+pub(crate) struct Listed {
+    /// The index of its short entry among the directory's 32-byte entries.
+    pub(crate) index: usize,
+    /// The long name, when valid long-name entries precede the short entry.
+    pub(crate) long: Option<String>,
+    /// The 8.3 name as text (`NAME.EXT`).
+    pub(crate) short: String,
+    /// The 8.3 name's eleven bytes.
+    pub(crate) raw: [u8; 11],
+    /// The attribute byte.
+    pub(crate) attr: u8,
+    /// The first cluster.
+    pub(crate) first: u64,
+    /// The size in bytes.
+    pub(crate) size: u32,
+}
+
+impl Listed {
+    /// Whether a lookup of `want` finds this entry: its long or its short name, ASCII case-insensitive.
+    pub(crate) fn is_named(&self, want: &str) -> bool {
+        self.long
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(want))
+            || self.short.eq_ignore_ascii_case(want)
+    }
 }
 
 /// Follows a FAT chain from `first`, at most `limit` clusters. A free, bad or out-of-range
@@ -481,13 +510,15 @@ fn long_name(parts: &[(u8, [u16; 13])]) -> Option<String> {
     Some(String::from_utf16_lossy(&units))
 }
 
-/// The first directory entry in `dir` whose long or short name is `want` (ASCII case-insensitive).
-fn find_entry(dir: &[u8], want: &str) -> Option<Hit> {
+/// Calls `each` for every live entry of a directory's bytes, in order, up to the end marker: deleted
+/// entries, long-name entries and volume labels are not entries of their own. `each` returns `true`
+/// to stop. This is the one reading of a directory: every lookup and every listing goes through it.
+pub(crate) fn each_entry(dir: &[u8], mut each: impl FnMut(&Listed) -> bool) {
     let mut parts: Vec<(u8, [u16; 13])> = Vec::new();
     let mut sum: Option<u8> = None;
-    for e in dir.as_chunks::<32>().0 {
+    for (index, e) in dir.as_chunks::<32>().0.iter().enumerate() {
         if e[0] == 0x00 {
-            return None;
+            return;
         }
         if e[0] == 0xE5 {
             parts.clear();
@@ -521,19 +552,39 @@ fn find_entry(dir: &[u8], want: &str) -> Option<Hit> {
             Some(s) if s == short_checksum(&e[0..11]) && !run.is_empty() => long_name(&run),
             _ => None,
         };
-        let matched = long.is_some_and(|l| l.eq_ignore_ascii_case(want))
-            || short_name(e).eq_ignore_ascii_case(want);
-        if matched {
-            let hi = u64::from(u16::from_le_bytes([e[20], e[21]]));
-            let lo = u64::from(u16::from_le_bytes([e[26], e[27]]));
-            return Some(Hit {
-                attr: e[11],
-                first: (hi << 16) | lo,
-                size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
-            });
+        let mut raw = [0u8; 11];
+        raw.copy_from_slice(&e[0..11]);
+        let hi = u64::from(u16::from_le_bytes([e[20], e[21]]));
+        let lo = u64::from(u16::from_le_bytes([e[26], e[27]]));
+        let listed = Listed {
+            index,
+            long,
+            short: short_name(e),
+            raw,
+            attr: e[11],
+            first: (hi << 16) | lo,
+            size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
+        };
+        if each(&listed) {
+            return;
         }
     }
-    None
+}
+
+/// The first directory entry in `dir` whose long or short name is `want` (ASCII case-insensitive).
+pub(crate) fn find_entry(dir: &[u8], want: &str) -> Option<Hit> {
+    let mut hit = None;
+    each_entry(dir, |e| {
+        if e.is_named(want) {
+            hit = Some(Hit {
+                attr: e.attr,
+                first: e.first,
+                size: e.size,
+            });
+        }
+        hit.is_some()
+    });
+    hit
 }
 
 /// Reads the file at `path` (`/`-separated, relative to the root; a component is a long or short

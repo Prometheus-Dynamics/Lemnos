@@ -143,7 +143,7 @@ pub enum Node {
 }
 
 /// Whether `name` is a valid 8.3 name (so no long-name entry is needed).
-fn is_83(name: &str) -> bool {
+pub(crate) fn is_83(name: &str) -> bool {
     let (base, ext) = match name.rsplit_once('.') {
         Some((b, e)) => (b, e),
         None => (name, ""),
@@ -158,7 +158,7 @@ fn is_83(name: &str) -> bool {
 }
 
 /// The 11-byte short name of `name`: the 8.3 form when it fits, else `BASE~1EXT`.
-fn short_name(name: &str) -> [u8; 11] {
+pub(crate) fn short_name(name: &str) -> [u8; 11] {
     let (base, ext) = match name.rsplit_once('.') {
         Some((b, e)) => (b, e),
         None => (name, ""),
@@ -183,13 +183,13 @@ fn short_name(name: &str) -> [u8; 11] {
 }
 
 /// The FAT short-name checksum that every long-name entry carries.
-fn short_checksum(sfn: &[u8; 11]) -> u8 {
+pub(crate) fn short_checksum(sfn: &[u8; 11]) -> u8 {
     sfn.iter()
         .fold(0u8, |sum, &b| sum.rotate_right(1).wrapping_add(b))
 }
 
 /// The long-name entries for `name` (on disk: last part first), for the short name `sfn`.
-fn long_entries(name: &str, sfn: &[u8; 11]) -> Vec<[u8; 32]> {
+pub(crate) fn long_entries(name: &str, sfn: &[u8; 11]) -> Vec<[u8; 32]> {
     // The byte offsets of the 13 UCS-2 characters in a long-name entry (as bootfat reads them).
     const AT: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
     let chars: Vec<u16> = name.encode_utf16().collect();
@@ -216,7 +216,7 @@ fn long_entries(name: &str, sfn: &[u8; 11]) -> Vec<[u8; 32]> {
 }
 
 /// The short entry for `sfn`, with its first cluster and size.
-fn short_entry(sfn: &[u8; 11], attr: u8, first: u32, size: u32) -> [u8; 32] {
+pub(crate) fn short_entry(sfn: &[u8; 11], attr: u8, first: u32, size: u32) -> [u8; 32] {
     let mut e = [0u8; 32];
     e[0..11].copy_from_slice(sfn);
     e[11] = attr;
@@ -370,4 +370,103 @@ pub fn volume(root: &[Node], total: u64) -> Vec<u8> {
 /// The small test volume: 16,384 sectors (8 MiB), the cluster rule gives one sector per cluster.
 pub fn tree(root: &[Node]) -> Vec<u8> {
     volume(root, 16_384)
+}
+
+/// The id of the slot the stand-in of [`foreign_system`] boots: a long name, so its directory has
+/// long-name entries, as the real one's has.
+pub const FOREIGN_SLOT: &str = "system-2026.2.0-dev.993-abcd-e1097ec7";
+
+/// Pseudo-random bytes from a fixed seed (xorshift64): the same `seed` and `len` give the same bytes.
+pub fn seeded(seed: u64, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+/// A stand-in for the boot partition of a board that runs another system, for the tests of adding
+/// to one ([`crate::bootadd`]): the geometry of the reference board's partition (161,792 sectors:
+/// FAT16, 4 sectors per cluster, two FATs of 158 sectors, 512 root entries, 40,360 clusters) holding
+/// 44 files of the sizes such a partition was seen with. The names are stand-ins of the same
+/// lengths; the contents are [`seeded`], except the pointers, which are one `os_prefix` line as
+/// that system writes them (55 bytes). Nothing here is a board's data.
+pub fn foreign_system() -> Vec<u8> {
+    let mut seed = 0u64;
+    let mut file = |name: &'static str, len: usize| {
+        seed += 1;
+        Node::File {
+            name,
+            data: seeded(seed, len),
+        }
+    };
+    let pointer = || format!("os_prefix=slots/{FOREIGN_SLOT}/\n").into_bytes();
+    const OVERLAYS: [(&str, usize); 13] = [
+        ("bcm2712d0.dtbo", 1363),
+        ("disable-bt-pi5.dtbo", 271),
+        ("disable-wifi-pi5.dtbo", 267),
+        ("hat_map.dtb", 2297),
+        ("overlay_map.dtb", 6331),
+        ("dwc2.dtbo", 801),
+        ("i2c1-pi5.dtbo", 935),
+        ("ramoops-pi5.dtbo", 745),
+        ("vc4-kms-v3d-pi5.dtbo", 3306),
+        ("ws2812-pio.dtbo", 1336),
+        ("sensor.dtbo", 3770),
+        ("unit-fan.dtbo", 1180),
+        ("unit-usb-power.dtbo", 926),
+    ];
+    let mut overlays: Vec<Node> = OVERLAYS.iter().map(|(n, len)| file(n, *len)).collect();
+    let mut slot_overlays: Vec<Node> = OVERLAYS.iter().map(|(n, len)| file(n, *len)).collect();
+    slot_overlays.insert(10, file("README", 91));
+    let root = vec![
+        file("bcm2712-rpi-mod-modio.dtb", 79_751),
+        file("bcm2712-rpi-modl-modio.dtb", 79_792),
+        file("cmdline.txt", 232),
+        file("config.txt", 405),
+        Node::File {
+            name: "default.txt",
+            data: pointer(),
+        },
+        file("initramfs", 339_948),
+        file("kernel8.img", 6_706_733),
+        Node::Dir {
+            name: "overlays",
+            children: std::mem::take(&mut overlays),
+        },
+        file("unit-device.txt", 2873),
+        Node::Dir {
+            name: "slots",
+            children: vec![Node::Dir {
+                name: FOREIGN_SLOT,
+                children: vec![
+                    file("bcm2712-rpi-mod-modio.dtb", 79_751),
+                    file("bcm2712-rpi-modl-modio.dtb", 79_792),
+                    Node::Dir {
+                        name: "overlays",
+                        children: slot_overlays,
+                    },
+                    file("cmdline.txt", 232),
+                    file("kernel8.img", 6_706_733),
+                    file("slot.json", 2671),
+                    file("initramfs", 339_948),
+                ],
+            }],
+        },
+        Node::File {
+            name: "trial.txt",
+            data: pointer(),
+        },
+        file("tryboot.txt", 318),
+        Node::Dir {
+            name: "board",
+            children: vec![file("authorized_keys", 105)],
+        },
+    ];
+    volume(&root, 161_792)
 }
