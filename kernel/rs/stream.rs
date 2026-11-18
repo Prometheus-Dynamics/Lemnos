@@ -12,6 +12,7 @@ use core::{
     ffi::{c_int, c_long, c_uint, c_void},
     mem::MaybeUninit,
     ptr,
+    sync::atomic::{AtomicI64, AtomicU32, Ordering},
 };
 use kernel::{
     bindings,
@@ -444,3 +445,66 @@ pub(crate) fn udelay(us: u64) {
     // SAFETY: the kernel's delay: a busy wait, valid in process and interrupt context.
     unsafe { bindings::udelay(us as c_ulong) };
 }
+
+/// The kernel's default rate limit (DEFAULT_RATELIMIT_INTERVAL and _BURST): ten lines in five seconds.
+const RATE_INTERVAL_NS: i64 = 5_000_000_000;
+const RATE_BURST: u32 = 10;
+
+/// What `dev_warn_ratelimited` keeps for one call site: the window's start, the lines it has let
+/// through and the lines it has dropped. The kernel's own (`struct ratelimit_state` and
+/// `___ratelimit`) is a static the C macro makes per call site, with a lock in it that only a C
+/// initialiser can make, so this is kept here: three atomics, no lock and no allocation. Two callers
+/// racing at a window's edge may let one line more or fewer through, which a rate limit can take.
+pub(crate) struct RateLimit {
+    start: AtomicI64,
+    passed: AtomicU32,
+    missed: AtomicU32,
+}
+
+impl RateLimit {
+    pub(crate) const fn new() -> Self {
+        Self {
+            start: AtomicI64::new(0),
+            passed: AtomicU32::new(0),
+            missed: AtomicU32::new(0),
+        }
+    }
+
+    /// Whether this line may be printed. `Some(n)`: yes, and `n` lines were dropped in the window
+    /// before this one (reported once, as the kernel does). `None`: the window is full.
+    pub(crate) fn pass(&self) -> Option<u32> {
+        let now = ktime_now().max(1);
+        let start = self.start.load(Ordering::Relaxed);
+        let mut missed = 0;
+        if (start == 0 || now - start >= RATE_INTERVAL_NS)
+            && self
+                .start
+                .compare_exchange(start, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.passed.store(0, Ordering::Relaxed);
+            missed = self.missed.swap(0, Ordering::Relaxed);
+        }
+        if self.passed.load(Ordering::Relaxed) < RATE_BURST {
+            self.passed.fetch_add(1, Ordering::Relaxed);
+            Some(missed)
+        } else {
+            self.missed.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// `dev_warn_ratelimited`: `dev_warn!`, at most ten lines in five seconds for each call site.
+macro_rules! dev_warn_ratelimited {
+    ($dev:expr, $($arg:tt)*) => {{
+        static LIMIT: $crate::stream::RateLimit = $crate::stream::RateLimit::new();
+        if let Some(missed) = LIMIT.pass() {
+            if missed != 0 {
+                dev_warn!($dev, "{} warnings suppressed\n", missed);
+            }
+            dev_warn!($dev, $($arg)*);
+        }
+    }};
+}
+pub(crate) use dev_warn_ratelimited;

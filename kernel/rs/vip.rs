@@ -19,8 +19,8 @@
 use crate::bindings as lb;
 use crate::param::param;
 use crate::stream::{
-    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Work, Wq, ktime_add_ms, ktime_now,
-    module_hold, msecs_to_jiffies, udelay, usleep_range,
+    DelayedWork, Handle, Producer, Slot, Stream, WaitQueue, Work, Wq, dev_warn_ratelimited,
+    ktime_add_ms, ktime_now, module_hold, msecs_to_jiffies, udelay, usleep_range,
 };
 use core::{
     ffi::{c_int, c_long, c_uint, c_void},
@@ -829,10 +829,10 @@ unsafe extern "C" fn lvip_end(work: *mut bindings::work_struct) {
     } else if fault {
         s.faults += 1;
         s.last_fault = status;
-        dev_warn!(l.device(), "job faulted (0x{:08x}); block reset\n", status);
+        dev_warn_ratelimited!(l.device(), "job faulted (0x{:08x}); block reset\n", status);
     } else {
         s.timeouts += 1;
-        dev_warn!(
+        dev_warn_ratelimited!(
             l.device(),
             "job stopped after {} ms; block reset\n",
             l.timeout_ms

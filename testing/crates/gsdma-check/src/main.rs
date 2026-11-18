@@ -208,6 +208,28 @@ fn put_sys(c: &Ctx, name: &str, text: &str) -> bool {
     f.write(text.as_bytes()).is_ok_and(|n| n == text.len())
 }
 
+/// The kernel log's lines that hold `needle`, counted from the start of the log (`/dev/kmsg`, one
+/// record a read, until none is left); None when the log can't be read.
+fn log_lines(needle: &[u8]) -> Option<u32> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open("/dev/kmsg")
+        .ok()?;
+    let mut record = [0u8; 8192];
+    let mut lines = 0;
+    loop {
+        match f.read(&mut record) {
+            Ok(0) => return Some(lines),
+            Ok(n) => lines += u32::from(find(&record[..n], needle).is_some()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Some(lines),
+            // EPIPE: records were overwritten under the reader; the next read goes on from the oldest left.
+            Err(e) if errno_of(&e) == libc::EPIPE => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// What the fake engine has run (its `ran` attribute): the chains it ran, the unreachable addresses
 /// it saw, and the first words of the last chain.
 #[derive(Default, Clone, Copy)]
@@ -911,6 +933,47 @@ fn run_all(c: &Ctx) {
         );
         check!(put_sys(c, "hang", "0"), "!put_sys(\"hang\", \"0\")");
         good_argb(c, &mut st, ROTATE_0, 5);
+        check!(
+            status_of(&st).state == RING_OPEN,
+            "status_of(&st).state == LEMNOS_RING_STATE_OPEN"
+        );
+
+        // A stuck engine doesn't flood the log: the module's warning for a job that timed out is rate
+        // limited (ten lines in five seconds), so a run of such jobs prints fewer lines than it had jobs.
+        const STUCK: u64 = 24;
+        const WARNING: &[u8] = b"job timed out; engine stopped and ready again";
+        let t0 = block_status(&st).timeouts;
+        check!(put_sys(c, "hang", "20"), "!put_sys(\"hang\", \"20\")");
+        let mut stopped = 0u64;
+        for n in 0..STUCK {
+            let mut j = argb_job(&st, 8, 4, ROTATE_0);
+            j.identity = 100 + n;
+            post(&mut st, &j);
+            let mut got = 0u64;
+            if kick(&st) == 0 && wait_frame(&mut st, &mut got, 3000) == 0 && got == 100 + n {
+                stopped += 1;
+            }
+        }
+        check!(put_sys(c, "hang", "0"), "!put_sys(\"hang\", \"0\")");
+        let timeouts = block_status(&st).timeouts;
+        check!(
+            stopped == STUCK,
+            "every stuck job was stopped and published empty"
+        );
+        check!(
+            timeouts == t0 + STUCK,
+            "block_status(&st).timeouts == t0 + STUCK"
+        );
+        match log_lines(WARNING) {
+            Some(lines) if lines >= 1 && u64::from(lines) < timeouts => say(&format!(
+                "ok   {timeouts} jobs timed out, {lines} warnings in the log: rate limited"
+            )),
+            Some(lines) => fail(&format!(
+                "FAIL {timeouts} jobs timed out and the log has {lines} warnings: not rate limited"
+            )),
+            None => fail("FAIL the kernel log can't be read"),
+        }
+        good_argb(c, &mut st, ROTATE_0, 6);
         check!(
             status_of(&st).state == RING_OPEN,
             "status_of(&st).state == LEMNOS_RING_STATE_OPEN"
