@@ -47,7 +47,9 @@ pub(crate) fn over(f: &Frame) -> Option<c_int> {
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_attach(s: *mut Stream, producer: *const Producer, bytes: u32) -> c_int {
     // SAFETY: the caller's contract.
-    let (st, producer) = unsafe { (&*s, &*producer) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let producer = unsafe { &*producer };
     let (g, mut f) = (st.geom(), st.lock());
     if let Some(e) = over(&f) {
         return e;
@@ -84,7 +86,9 @@ pub(crate) unsafe extern "C" fn lem_stream_detach(s: *mut Stream) -> bool {
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_next(s: *mut Stream, slot: *mut Slot) -> c_int {
     // SAFETY: the caller's contract.
-    let (st, slot) = unsafe { (&*s, &mut *slot) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let slot = unsafe { &mut *slot };
     let g = st.geom();
     let mut next = |f: &mut Frame| -> Result<(), c_int> {
         if let Some(e) = over(f) {
@@ -137,7 +141,9 @@ pub(crate) unsafe extern "C" fn lem_stream_complete_at(
     end_ns: u64,
 ) {
     // SAFETY: the caller's contract.
-    let (st, slot) = unsafe { (&*s, &*slot) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let slot = unsafe { &*slot };
     let g = st.geom();
     if slot.job.buffer >= g.buffers {
         return;
@@ -157,7 +163,9 @@ pub(crate) unsafe extern "C" fn lem_stream_complete_at(
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_cancel(s: *mut Stream, slot: *const Slot) {
     // SAFETY: the caller's contract.
-    let (st, slot) = unsafe { (&*s, &*slot) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let slot = unsafe { &*slot };
     if slot.job.buffer >= st.geom().buffers {
         return;
     }
@@ -191,7 +199,10 @@ fn range_region<'a>(f: &'a Frame, r: &JobRange) -> Option<&'a Region> {
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_read(s: *mut Stream, r: *const JobRange, dst: *mut c_void, bytes: usize) -> c_int {
     // SAFETY: the caller's contract.
-    let (f, r) = unsafe { ((*s).lock(), &*r) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let r = unsafe { &*r };
+    let f = st.lock();
     let Some(reg) = range_region(&f, r).filter(|reg| !reg.vaddr().is_null()) else {
         return EFAULT.to_errno();
     };
@@ -211,7 +222,10 @@ pub(crate) unsafe extern "C" fn lem_stream_range_read(s: *mut Stream, r: *const 
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_addr(s: *mut Stream, r: *const JobRange, addr: *mut u64) -> c_int {
     // SAFETY: the caller's contract.
-    let (f, r) = unsafe { ((*s).lock(), &*r) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let r = unsafe { &*r };
+    let f = st.lock();
     match range_region(&f, r).and_then(|reg| reg.addr.checked_add(r.offset)) {
         Some(a) => {
             // SAFETY: the caller's contract: `addr` is valid for a write.
@@ -229,7 +243,10 @@ pub(crate) unsafe extern "C" fn lem_stream_range_addr(s: *mut Stream, r: *const 
 #[no_mangle]
 pub(crate) unsafe extern "C" fn lem_stream_range_poke(s: *mut Stream, r: *const JobRange, offset: usize, val: u32) {
     // SAFETY: the caller's contract.
-    let (f, r) = unsafe { ((*s).lock(), &*r) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let r = unsafe { &*r };
+    let f = st.lock();
     let Some(reg) = range_region(&f, r).filter(|reg| !reg.vaddr().is_null()) else {
         return;
     };
@@ -306,7 +323,9 @@ pub(crate) unsafe extern "C" fn lem_stream_job_take(
         return EINVAL.to_errno();
     }
     // SAFETY: the caller's contract.
-    let (st, slot) = unsafe { (&*s, &mut *slot) };
+    let st = unsafe { &*s };
+    // SAFETY: the caller's contract.
+    let slot = unsafe { &mut *slot };
     let g = st.geom();
     // SAFETY: the caller's contract: `count` entries, or none (a null `range` is never read).
     let ranges = if count == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(range, count as usize) } };

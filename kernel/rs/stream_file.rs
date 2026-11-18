@@ -575,7 +575,9 @@ unsafe extern "C" fn stream_mmap(file: *mut bindings::file, vma: *mut bindings::
     // SAFETY: called by the VFS on one of our files.
     let st = unsafe { stream_of(file) };
     // SAFETY: the VFS passes a new mapping being set up, which is ours to read and adjust here.
-    let (area, pgoff) = unsafe { (VmaNew::from_raw(vma), (*vma).vm_pgoff) };
+    let area = unsafe { VmaNew::from_raw(vma) };
+    // SAFETY: as above; reads one field.
+    let pgoff = unsafe { (*vma).vm_pgoff };
     let producer = st.lock().producer;
     if let (true, Some(mmap)) = (pgoff != 0, producer.mmap) {
         // SAFETY: the producer's own callback and private data, no lock held, as the interface says.
@@ -868,8 +870,11 @@ pub(crate) unsafe extern "C" fn lem_stream_create_producer(
     producer: *const Producer,
     out: *mut *mut Stream,
 ) -> core::ffi::c_long {
-    // SAFETY: the caller's contract.
-    errno(create(dev, unsafe { &mut *c }, unsafe { producer.as_ref() }, out)) as core::ffi::c_long
+    // SAFETY: the caller's contract: the caller's copy of the request.
+    let c = unsafe { &mut *c };
+    // SAFETY: the caller's contract: valid for the call.
+    let producer = unsafe { producer.as_ref() };
+    errno(create(dev, c, producer, out)) as core::ffi::c_long
 }
 
 /// The stream open as `file`, if it was created on `dev`; an ERR_PTR otherwise.
