@@ -230,22 +230,46 @@ const ACCEL_READ: MethodId = MethodId {
 
 /// The sample period of a FIFO at 200 Hz, in nanoseconds: what the stamps are spaced by.
 const FIFO_PERIOD_NS: u64 = 5_000_000;
-/// The drain period the driver's tick uses: half the FIFO's depth at 200 Hz (73 frames, 365 ms).
-const DRAIN_PERIOD_NS: u64 = 365_000_000;
+/// The drain periods the driver's tick uses at 200 Hz: half each die's FIFO depth. The accelerometer's
+/// FIFO holds 146 frames (73 frames, 365 ms) and the gyroscope's 100 (50 frames, 250 ms).
+const ACCEL_DRAIN_PERIOD_NS: u64 = 365_000_000;
+const GYRO_DRAIN_PERIOD_NS: u64 = 250_000_000;
+/// The tick drains before each die's model publishes, as the driver's: 16 host-timed batches for the
+/// accelerometer and 64 reads for the gyroscope (the least the driver takes; see `drivers/bmi088`).
+const ACCEL_CONVERGE_TICKS: u32 = 16;
+const GYRO_CONVERGE_TICKS: u32 = 64;
 const FIFO_DEPTH: usize = 256;
 
 /// How a fake FIFO stamps its samples.
 ///
-/// `Model` stamps each sample at its own time on the chip's clock, as the driver's sample clock does
-/// once it has converged. `Tick` stamps the way the driver did before that model: each sample waits
-/// for the next tick, and takes the tick's host time less the nominal periods back from the newest
-/// sample, flagged as tick time (the record's mode byte is 1). Only the accelerometer has `Tick`: the
-/// gyroscope has no sensor time, and its stamps are always its own clock's.
+/// `Model` stamps each sample at its own time on the chip's clock from the first sample, as the driver's
+/// sample clock does once it has converged. `Tick` stamps the way the driver did before that model: each
+/// sample waits for the next tick, and takes the tick's host time less the nominal periods back from the
+/// newest sample, flagged as tick time (the record's mode byte is 1). `Bind` is the driver from its bind:
+/// tick time until the model converges (`converge_ticks` tick drains), then the model, and a record is
+/// never earlier than the one delivered before it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Stamps {
     Model,
     Tick,
+    Bind,
 }
+
+/// A fault planted in the stamps, which a capture's checks must catch (`fault` in the config).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Planted {
+    None,
+    /// The third tick's samples are stamped three periods early, so its oldest is earlier than the record
+    /// before it: a backwards stamp in tick time. Inside the tick-time bound, so only the order fails.
+    TickBackwards,
+    /// Every tick-time stamp is two drain periods old: beyond what tick time can be held to. In order.
+    TickStale,
+    /// One sample is lost once the model stamps: a gap of two periods between two model records.
+    ModelGap,
+}
+
+/// The model sample at which `Planted::ModelGap` loses one: 2 s of model records in.
+const MODEL_GAP_AT: u64 = 400;
 
 /// One sample in a fake FIFO's queue.
 #[derive(Clone, Copy)]
@@ -254,105 +278,241 @@ struct Queued {
     seq: u64,
     /// The stamp, once it has one: the time and whether it is tick time.
     stamp: Option<(u64, bool)>,
+    /// A planted stamp: delivered as it is, not held to the record before it.
+    planted: bool,
 }
 
 /// A fake FIFO's sample stream, shared by the fake accelerometer and gyroscope.
 ///
 /// The chip takes a sample every `FIFO_PERIOD_NS / (1 + oscillator_ppm / 1e6)` on its own oscillator, from
 /// the first tick. The FIFO is read at the time of the read (the samples up to the host's time, which
-/// is the last tick's time plus the time since, measured on the monotonic clock), as the driver's read
-/// does. `stamp_error_ppm` is a planted error on the model's stamps: a rate error the checks must catch,
-/// and 0 for a correct model. `torn` answers every batch one byte too long, and `fail` refuses every
-/// batch with `IO`: the faults a capture must report.
+/// is the ticks' clock carried on by the monotonic clock), as the driver's read does. `stamp_error_ppm` is a planted error on the model's stamps: a rate error the checks must catch,
+/// and 0 for a correct model. `stamp_offset_ms` is a planted constant offset on the model's stamps.
+/// `fault` plants one of [`Planted`]. `torn` answers every batch one byte too long, and `fail` refuses
+/// every batch with `IO`: the faults a capture must report.
 struct Fifo {
     value: Vector3,
     torn: bool,
     fail: bool,
     stamps: Stamps,
+    planted: Planted,
     true_period_ns: f64,
     stamp_factor: f64,
+    /// The planted constant offset of the model's stamps, ns.
+    stamp_offset_ns: i64,
+    /// The tick's drain period, and the tick drains before the model publishes (`Stamps::Bind`).
+    drain_period_ns: u64,
+    converge_ticks: u32,
+    /// Tick drains so far, and when the next is due: the host may tick sooner (after a call, or for
+    /// another device), and a tick before the drain is due drains nothing, as the driver's does not.
+    ticks: u32,
+    due: Option<u64>,
+    /// Samples the model has stamped so far.
+    modelled: u64,
     /// The host time of the chip's first sample: the first tick's time (`None` until the first tick).
     origin: Option<u64>,
     /// Samples the chip has taken so far.
     taken: u64,
     queue: std::collections::VecDeque<Queued>,
-    /// The last tick's host time, and when the tick ran (to read the host time between ticks).
-    last_tick: Option<(u64, std::time::Instant)>,
+    /// When this FIFO was made, and the host's time then, as the ticks give it: the host's time now is this
+    /// offset plus the time since. A host that ticks late hands over a time that is already old, so the offset
+    /// is the largest any tick gave: the tick that came soonest after the host read its clock.
+    made: std::time::Instant,
+    offset_ns: Option<u64>,
+    /// The last stamp a batch wrote: no later record is earlier, as the driver holds it.
+    delivered: u64,
+}
+
+/// The keys every fake FIFO reads.
+const FIFO_KEYS: &[Key] = &[
+    Key::optional("x", Kind::Float),
+    Key::optional("y", Kind::Float),
+    Key::optional("z", Kind::Float),
+    Key::optional("torn", Kind::Bool),
+    Key::optional("fail", Kind::Bool),
+    Key::optional("oscillator_ppm", Kind::Float),
+    Key::optional("stamp_error_ppm", Kind::Float),
+    Key::optional("stamp_offset_ms", Kind::Float),
+    Key::optional("stamps", Kind::Str),
+    Key::optional("converge_ticks", Kind::Int),
+    Key::optional("fault", Kind::Str),
+];
+
+/// Checks a fake FIFO's settings: the keys, and the names `stamps` and `fault` take.
+fn check_fifo<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+    cfg.check_keys(FIFO_KEYS)?;
+    match cfg.str("stamps") {
+        None | Some("model") | Some("tick") | Some("bind") => {}
+        Some(_) => {
+            return Err(ConfigError::new(
+                "stamps",
+                "must be \"model\", \"tick\" or \"bind\"",
+            ));
+        }
+    }
+    match cfg.str("fault") {
+        None | Some("tick-backwards") | Some("tick-stale") | Some("model-gap") => {}
+        Some(_) => {
+            return Err(ConfigError::new(
+                "fault",
+                "must be \"tick-backwards\", \"tick-stale\" or \"model-gap\"",
+            ));
+        }
+    }
+    if cfg.int("converge_ticks").is_some_and(|n| n < 1) {
+        return Err(ConfigError::new("converge_ticks", "must be at least 1"));
+    }
+    Ok(())
 }
 
 impl Fifo {
-    fn new(cfg: &Config<'_>, stamps: Stamps) -> Self {
+    fn new(cfg: &Config<'_>, drain_period_ns: u64, converge_ticks: u32) -> Self {
         let ppm = cfg.float("oscillator_ppm").unwrap_or(0.0);
         let planted = cfg.float("stamp_error_ppm").unwrap_or(0.0);
         Self {
             value: vector(cfg, 1.0),
             torn: cfg.bool("torn").unwrap_or(false),
             fail: cfg.bool("fail").unwrap_or(false),
-            stamps,
+            stamps: match cfg.str("stamps") {
+                Some("tick") => Stamps::Tick,
+                Some("bind") => Stamps::Bind,
+                _ => Stamps::Model,
+            },
+            planted: match cfg.str("fault") {
+                Some("tick-backwards") => Planted::TickBackwards,
+                Some("tick-stale") => Planted::TickStale,
+                Some("model-gap") => Planted::ModelGap,
+                _ => Planted::None,
+            },
             true_period_ns: FIFO_PERIOD_NS as f64 / (1.0 + ppm / 1e6),
             stamp_factor: 1.0 + planted / 1e6,
+            stamp_offset_ns: (cfg.float("stamp_offset_ms").unwrap_or(0.0) * 1e6) as i64,
+            drain_period_ns,
+            converge_ticks: cfg
+                .int("converge_ticks")
+                .map_or(converge_ticks, |n| n.clamp(1, i64::from(u32::MAX)) as u32),
+            ticks: 0,
+            due: None,
+            modelled: 0,
             origin: None,
             taken: 0,
             queue: std::collections::VecDeque::new(),
-            last_tick: None,
+            made: std::time::Instant::now(),
+            offset_ns: None,
+            delivered: 0,
         }
     }
 
-    /// The host's time now: the last tick, moved on by the time since it ran.
+    /// The host's time now, on the clock the ticks are given on: the offset the ticks have shown, moved on by the
+    /// time since this FIFO was made. Zero before the first tick.
     fn now_ns(&self) -> u64 {
-        self.last_tick
-            .map(|(at, ran)| at.saturating_add(ran.elapsed().as_nanos() as u64))
+        self.offset_ns
+            .map(|offset| offset.saturating_add(self.made.elapsed().as_nanos() as u64))
             .unwrap_or(0)
+    }
+
+    /// Whether the model stamps the samples now: always in `Model`, never in `Tick`, and in `Bind` once
+    /// `converge_ticks` ticks have drained.
+    fn model_now(&self) -> bool {
+        match self.stamps {
+            Stamps::Model => true,
+            Stamps::Tick => false,
+            Stamps::Bind => self.ticks >= self.converge_ticks,
+        }
+    }
+
+    /// The model's stamp of a sample taken at `true_ns`: its own time, with the planted rate error and
+    /// offset.
+    fn model_stamp(&self, origin: u64, true_ns: u64) -> u64 {
+        let at = origin + ((true_ns - origin) as f64 * self.stamp_factor).round() as u64;
+        at.saturating_add_signed(self.stamp_offset_ns)
+    }
+
+    /// The true time of sample `seq`.
+    fn true_ns(&self, origin: u64, seq: u64) -> u64 {
+        origin + (seq as f64 * self.true_period_ns).round() as u64
     }
 
     /// The chip takes every sample up to `upto`, and each is stamped as the mode says.
     fn take_until(&mut self, upto: u64) {
         let Some(origin) = self.origin else { return };
         loop {
-            let true_ns = origin + (self.taken as f64 * self.true_period_ns).round() as u64;
+            let true_ns = self.true_ns(origin, self.taken);
             if true_ns > upto {
                 break;
             }
+            let seq = self.taken;
+            self.taken += 1;
+            let stamp = if self.model_now() {
+                self.modelled += 1;
+                if self.planted == Planted::ModelGap && self.modelled == MODEL_GAP_AT {
+                    // The planted loss: the chip took the sample, and it never reaches a batch.
+                    continue;
+                }
+                Some((self.model_stamp(origin, true_ns), false))
+            } else {
+                None
+            };
             if self.queue.len() == FIFO_DEPTH {
                 self.queue.pop_front();
             }
-            let stamp = match self.stamps {
-                Stamps::Model => {
-                    let at =
-                        origin + ((true_ns - origin) as f64 * self.stamp_factor).round() as u64;
-                    Some((at, false))
-                }
-                Stamps::Tick => None,
-            };
             self.queue.push_back(Queued {
-                seq: self.taken,
+                seq,
                 stamp,
+                planted: false,
             });
-            self.taken += 1;
         }
     }
 
-    /// A tick: the first tick sets the chip's origin, the samples due are taken, and in tick mode the
-    /// samples still waiting take this tick's time less the nominal periods back from the newest.
-    fn tick(&mut self, now_ns: u64) {
-        self.origin.get_or_insert(now_ns);
-        self.last_tick = Some((now_ns, std::time::Instant::now()));
+    /// A tick: the first tick sets the chip's origin. A tick at or after the drain's due time is a tick
+    /// drain: the samples due are taken, and the samples still waiting for a stamp take the model's, on
+    /// the drain the model converges at, or else this tick's time less the nominal periods back from the
+    /// newest, as tick time. Returns when the next drain is due.
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let origin = *self.origin.get_or_insert(now_ns);
+        let offset = now_ns.saturating_sub(self.made.elapsed().as_nanos() as u64);
+        self.offset_ns = Some(self.offset_ns.map_or(offset, |known| known.max(offset)));
+        if self.due.is_some_and(|due| now_ns < due) {
+            return self.due;
+        }
+        self.due = Some(now_ns.saturating_add(self.drain_period_ns));
+        self.ticks = self.ticks.saturating_add(1);
+        let model = self.model_now();
         self.take_until(now_ns);
-        if self.stamps == Stamps::Tick {
-            let Some(newest) = self.queue.back().map(|q| q.seq) else {
-                return;
-            };
-            for entry in self.queue.iter_mut().filter(|q| q.stamp.is_none()) {
+        let Some(newest) = self.queue.back().map(|q| q.seq) else {
+            return self.due;
+        };
+        let (shift, planted) = match self.planted {
+            Planted::TickBackwards if self.ticks == 3 => (3 * FIFO_PERIOD_NS, true),
+            Planted::TickStale => (2 * self.drain_period_ns, false),
+            _ => (0, false),
+        };
+        for i in 0..self.queue.len() {
+            let entry = self.queue[i];
+            if entry.stamp.is_some() {
+                continue;
+            }
+            let stamp = if model {
+                (
+                    self.model_stamp(origin, self.true_ns(origin, entry.seq)),
+                    false,
+                )
+            } else {
                 let back = newest - entry.seq;
                 let at = now_ns.saturating_sub(back.saturating_mul(FIFO_PERIOD_NS));
-                entry.stamp = Some((at, true));
-            }
+                (at.saturating_sub(shift), true)
+            };
+            self.queue[i].stamp = Some(stamp);
+            self.queue[i].planted = planted && stamp.1;
         }
+        self.due
     }
 
     /// Writes the stamped samples that fit, oldest first: records of `RECORD_LEN` bytes, or with `stamped`
     /// records of `STAMPED_RECORD_LEN` bytes, each led by its mode byte (1 tick time, 0 the model).
-    /// The FIFO is taken up to the read's time first, as the driver's read takes it.
+    /// The FIFO is taken up to the read's time first, as the driver's read takes it. A record is never
+    /// earlier than the one written before it, as the driver holds it, unless its stamp is a planted one or
+    /// the stamping is the pre-fix `Tick`, which did not hold.
     fn batch(&mut self, into: &mut [u8], stamped: bool) -> Result<usize> {
         use lemnos_core::{Encode, Writer};
         if self.fail {
@@ -374,6 +534,12 @@ impl Fifo {
             if used + record > into.len() {
                 break;
             }
+            // The driver holds a record to the one before it. The pre-fix stamping (`Tick`) did not.
+            let at_ns = if entry.planted || self.stamps == Stamps::Tick {
+                at_ns
+            } else {
+                at_ns.max(self.delivered)
+            };
             let sample = lemnos_contract_accelerometer::Sample {
                 at_ns,
                 value: self.value,
@@ -387,6 +553,7 @@ impl Fifo {
             sample
                 .encode(&mut writer)
                 .map_err(|_| Status::INVALID_ARGUMENT)?;
+            self.delivered = at_ns;
             self.queue.pop_front();
             used += record;
         }
@@ -399,12 +566,16 @@ impl Fifo {
 }
 
 /// A fake accelerometer with a FIFO, as the bmi088 driver's batches are shaped: one record per
-/// sample, stamped from the host's clock, the sample period 5 ms nominal. Its config:
+/// sample, stamped from the host's clock, the sample period 5 ms nominal, a tick drain every 365 ms.
+/// Its config:
 ///
 /// - `oscillator_ppm`: the chip's rate error, positive when the chip runs fast (default 0).
-/// - `stamp_error_ppm`: a planted rate error on the model's stamps (default 0; a check must catch it).
-/// - `stamps = "model"` (default) or `"tick"`: the driver's model, or the tick-time stamping it used
-///   before the model converged (the pre-fix behaviour; see [`Stamps`]).
+/// - `stamps = "model"` (default), `"tick"` or `"bind"`: the model from the first sample; the tick-time
+///   stamping from before the model (every sample waits for a tick); or the driver from its bind, tick
+///   time for `converge_ticks` tick drains (default 16) and the model after (see [`Stamps`]).
+/// - `stamp_error_ppm` and `stamp_offset_ms`: a planted rate error and a planted constant offset on the
+///   model's stamps (default 0; a check must catch them).
+/// - `fault = "tick-backwards"`, `"tick-stale"` or `"model-gap"`: a planted stamp fault (see [`Planted`]).
 /// - `torn = true` and `fail = true`: as in [`Fifo`]. For the B8 tool's rehearsal
 ///   (`testing/crates/bmi088-batch`).
 #[driver("fake-fifo-accelerometer", provides = [Accelerometer])]
@@ -417,29 +588,12 @@ impl Lifecycle for FakeFifoAccelerometer {
     const TICKS: bool = true;
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        cfg.check_keys(&[
-            Key::optional("x", Kind::Float),
-            Key::optional("y", Kind::Float),
-            Key::optional("z", Kind::Float),
-            Key::optional("torn", Kind::Bool),
-            Key::optional("fail", Kind::Bool),
-            Key::optional("oscillator_ppm", Kind::Float),
-            Key::optional("stamp_error_ppm", Kind::Float),
-            Key::optional("stamps", Kind::Str),
-        ])?;
-        match cfg.str("stamps") {
-            None | Some("model") | Some("tick") => Ok(()),
-            Some(_) => Err(ConfigError::new("stamps", "must be \"model\" or \"tick\"")),
-        }
+        check_fifo(cfg)
     }
 
     fn start(_needs: FakeFifoAccelerometerNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let stamps = match cfg.str("stamps") {
-            Some("tick") => Stamps::Tick,
-            _ => Stamps::Model,
-        };
         Ok(Self {
-            fifo: Fifo::new(cfg, stamps),
+            fifo: Fifo::new(cfg, ACCEL_DRAIN_PERIOD_NS, ACCEL_CONVERGE_TICKS),
         })
     }
 
@@ -452,8 +606,7 @@ impl Lifecycle for FakeFifoAccelerometer {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        self.fifo.tick(now_ns);
-        Some(now_ns.saturating_add(DRAIN_PERIOD_NS))
+        self.fifo.tick(now_ns)
     }
 }
 
@@ -471,11 +624,11 @@ impl Accelerometer for FakeFifoAccelerometer {
     }
 }
 
-/// A fake gyroscope with a FIFO, the same shape as the accelerometer's. It has no sensor time, so its
-/// stamps are its own clock's model (never tick time): the chip takes its samples on its own oscillator
-/// (`oscillator_ppm`), stamped on the host's clock, and a planted `stamp_error_ppm` is as for the
-/// accelerometer. `torn` and `fail` are as on the accelerometer. For the B8 gyroscope rehearsal, and check 7
-/// (the spread of the offset between the two dies' stamps).
+/// A fake gyroscope with a FIFO, the same shape as the accelerometer's, with the gyroscope's drain period
+/// (250 ms) and, for `stamps = "bind"`, its convergence (64 tick drains by default). The chip takes its
+/// samples on its own oscillator (`oscillator_ppm`), stamped on the host's clock. The other settings are
+/// the accelerometer's. For the B8 gyroscope rehearsal, and check 7 (the two dies' stamps against each
+/// other).
 #[driver("fake-fifo-gyroscope", provides = [Gyroscope])]
 pub struct FakeFifoGyroscope {
     fifo: Fifo,
@@ -486,20 +639,12 @@ impl Lifecycle for FakeFifoGyroscope {
     const TICKS: bool = true;
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
-        cfg.check_keys(&[
-            Key::optional("x", Kind::Float),
-            Key::optional("y", Kind::Float),
-            Key::optional("z", Kind::Float),
-            Key::optional("torn", Kind::Bool),
-            Key::optional("fail", Kind::Bool),
-            Key::optional("oscillator_ppm", Kind::Float),
-            Key::optional("stamp_error_ppm", Kind::Float),
-        ])
+        check_fifo(cfg)
     }
 
     fn start(_needs: FakeFifoGyroscopeNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
-            fifo: Fifo::new(cfg, Stamps::Model),
+            fifo: Fifo::new(cfg, GYRO_DRAIN_PERIOD_NS, GYRO_CONVERGE_TICKS),
         })
     }
 
@@ -512,8 +657,7 @@ impl Lifecycle for FakeFifoGyroscope {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        self.fifo.tick(now_ns);
-        Some(now_ns.saturating_add(DRAIN_PERIOD_NS))
+        self.fifo.tick(now_ns)
     }
 }
 
