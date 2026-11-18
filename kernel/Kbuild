@@ -49,7 +49,7 @@ lem_bindgen_items := \
 	--allowlist-type 'lemnos_regjob_.*' \
 	--allowlist-type 'lemnos_stream_.*' \
 	--allowlist-var 'LEMNOS_(STREAM|RING_STATE|REFUSED|LAYOUT)_.*' \
-	--allowlist-type 'lem_(stream|geom|frame|stream_region|reader|bell|stream_buf|reader_handle)' \
+	--allowlist-type 'lem_(stream|geom|frame|ctl|stream_region|reader|bell|stream_buf|reader_handle)' \
 	--allowlist-var 'LEM_STREAM_.*' \
 	--with-derive-custom-struct 'lem_(stream_region|reader|stream_buf)=Copy,Clone' \
 	--allowlist-var 'LEMNOS_REGJOB_.*' \

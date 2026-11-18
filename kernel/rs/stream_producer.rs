@@ -52,7 +52,6 @@ impl<'a> St<'a> {
     }
 
     /// The stream's block.
-    #[allow(dead_code)] // the regions' port uses it
     pub(crate) fn dev(self) -> *mut bindings::device {
         // SAFETY: the stream is live (new's contract); the device is set at creation and never changes.
         unsafe { (*self.0).dev }
