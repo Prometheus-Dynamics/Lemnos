@@ -222,6 +222,32 @@ sensors with no client and needs `running ok` within 250 ms of bind on simulated
 transfers for their waits (`SimI2c::set_settle`). Every other driver with timed bring-up must get
 the same test (its list is in `testing/board-runs/M41.md`).
 
+### The host clock
+
+A driver that stamps what it reads with time needs the backend's clock, not its own. It declares a
+`HostClockHandle` need (`lemnos_core::HostClockHandle`, which derefs to `HostClock`) and reads it
+with `now_ns()`:
+
+```rust
+#[driver("stamper", provides = [Stamps])]
+pub struct Stamper {
+    #[needs]
+    clock: HostClockHandle,
+}
+```
+
+The need is `BusKind::HostClock`. It is not hardware: no board file names it, and a board's `bus` or
+`uses` never reaches it. The backend supplies it through `Provider::host_clock`: a sim board hands
+over its simulated clock, so a test moves time by hand; a Linux board hands over `CLOCK_MONOTONIC`,
+the clock `tick(now_ns)` and every stream stamp is on. A backend with no clock refuses the bind,
+and the refusal names the need (`this backend has no host clock for "clock"`). Declared `Option`,
+the need is `None` on such a backend, and the driver says what it does without a clock.
+
+The handle is shared, not copied: `now_ns()` allocates nothing, and the driver keeps the handle for
+as long as it runs. A driver that doesn't declare the need is unchanged, and the host gives it
+nothing. A driver package can't take the clock yet: the package boundary has no take for it, so a
+packaged driver that needs it is refused at bind, and the follow-up is listed in the PR report.
+
 ### Watching the board
 
 A driver that needs to know the rest of the board sets `WATCHES_BOARD` and implements `board(view)`.
@@ -829,6 +855,7 @@ When you add a method or field, classify it in the PR:
 | `camera.sensor` methods 13 and 14 (`post_values_at`, `applied_landing`), `camera.receiver` method 12 (`frame_starts`) | additive | appended methods and their types; an old driver answers `NOT_SUPPORTED` and an old caller never calls them |
 | `camera.receiver` methods 13 and 14 (`inputs`, `input`) and the `Input` record | additive | appended methods and a record layout a caller reads with `read_input`; an old driver answers `NOT_SUPPORTED`, and a receiver without a V4L2 node always does |
 | `camera.sensor` methods 15 to 18 (`in_force`, `set_exposure`, `set_analogue_gain`, `set_frame_length`) and `InForce` | additive | appended methods and their type; the three setters are posts, so a driver without a landing answers `NOT_SUPPORTED` as `post_values_at` does |
+| `BusKind::HostClock` (the host clock need, appended to the bus kinds as code 17) | additive | a driver that doesn't declare it is unchanged; an older host refuses a driver that does, by name (`a need of a kind this host does not know`) |
 | `Unit::Line` (`"line"`) | additive | a new unit symbol on the description's unit string; an item with it reads as unit-less to a client that does not know it |
 | `camera.isp` methods 13 and 14 (`input_layout`, `output_layout`) | additive | appended methods, marked `#[added]` in T1d (U1b added them without the mark) |
 | `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |

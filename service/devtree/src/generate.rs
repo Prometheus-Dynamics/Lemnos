@@ -771,9 +771,12 @@ fn check_hardware_needs(
 }
 
 /// Whether a need is hardware a board file names: every bus kind but a stream, which the host
-/// makes from the device's own `streams`.
+/// makes from the device's own `streams`, and the host clock, which the backend hands over.
 fn is_hardware(kind: NeedKind) -> bool {
-    !matches!(kind, NeedKind::Bus(BusKind::Stream) | NeedKind::Device(_))
+    !matches!(
+        kind,
+        NeedKind::Bus(BusKind::Stream | BusKind::HostClock) | NeedKind::Device(_)
+    )
 }
 
 /// A watchdog by its number, `watchdogN`: the number is the kernel's, as it probes.
