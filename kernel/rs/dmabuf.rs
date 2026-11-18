@@ -40,9 +40,15 @@ impl StaticWq {
     ///
     /// # Safety
     /// Called once, at module load, before any other use.
-    pub(crate) unsafe fn init(&self, name: &'static core::ffi::CStr, key: Pin<&'static LockClassKey>) {
+    pub(crate) unsafe fn init(
+        &self,
+        name: &'static core::ffi::CStr,
+        key: Pin<&'static LockClassKey>,
+    ) {
         // SAFETY: initialises the queue in place, before any use; the name and the class are static.
-        unsafe { bindings::__init_waitqueue_head(self.0.get(), name.as_ptr().cast(), key.as_ptr()) };
+        unsafe {
+            bindings::__init_waitqueue_head(self.0.get(), name.as_ptr().cast(), key.as_ptr())
+        };
     }
 
     /// The queue, for the kernel's calls.
@@ -69,7 +75,13 @@ impl StaticWq {
         let mut left = timeout as c_long;
         let held = loop {
             // SAFETY: the queue is initialised and the entry is the one made above.
-            unsafe { bindings::prepare_to_wait_event(self.get(), entry, bindings::TASK_UNINTERRUPTIBLE as c_int) };
+            unsafe {
+                bindings::prepare_to_wait_event(
+                    self.get(),
+                    entry,
+                    bindings::TASK_UNINTERRUPTIBLE as c_int,
+                )
+            };
             if done() {
                 break true;
             }
@@ -148,7 +160,10 @@ unsafe extern "C" fn buf_map(
     // SAFETY: the dma-buf core calls this with a live attachment of one of our dma-bufs.
     let b = unsafe { buf_of((*att).dmabuf) };
     // SAFETY: a struct sg_table of zeroes is an empty table.
-    let sgt = match KBox::new(unsafe { core::mem::zeroed::<bindings::sg_table>() }, GFP_KERNEL) {
+    let sgt = match KBox::new(
+        unsafe { core::mem::zeroed::<bindings::sg_table>() },
+        GFP_KERNEL,
+    ) {
         Ok(t) => KBox::into_raw(t),
         Err(e) => return Error::from(e).to_ptr(),
     };
@@ -184,7 +199,10 @@ unsafe extern "C" fn buf_unmap(
     unsafe { table_free(sgt) };
 }
 
-unsafe extern "C" fn buf_mmap(buf: *mut bindings::dma_buf, vma: *mut bindings::vm_area_struct) -> c_int {
+unsafe extern "C" fn buf_mmap(
+    buf: *mut bindings::dma_buf,
+    vma: *mut bindings::vm_area_struct,
+) -> c_int {
     // SAFETY: the dma-buf core calls this with one of our dma-bufs.
     let b = unsafe { buf_of(buf) };
     // SAFETY: the buffer's memory, as dma_alloc_attrs gave it for this device (dma_mmap_coherent).
@@ -263,7 +281,13 @@ pub(crate) unsafe fn lem_alloc(
         return EINVAL.to_errno() as c_long;
     }
     let size = ((a.size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)) as usize;
-    let b = Buf { bufs, dev, cpu: ptr::null_mut(), addr: 0, size };
+    let b = Buf {
+        bufs,
+        dev,
+        cpu: ptr::null_mut(),
+        addr: 0,
+        size,
+    };
     let b = match KBox::new(b, GFP_KERNEL) {
         Ok(b) => KBox::into_raw(b),
         Err(_) => return ENOMEM.to_errno() as c_long,
@@ -271,7 +295,9 @@ pub(crate) unsafe fn lem_alloc(
     // SAFETY: the caller's device; the reference is put by buf_free, or below.
     unsafe { bindings::get_device(dev) };
     // SAFETY: the device is bound, so its DMA is set up; `b` is ours (dma_alloc_coherent).
-    let cpu = unsafe { bindings::dma_alloc_attrs(dev, size, &raw mut (*b).addr, bindings::GFP_KERNEL, 0) };
+    let cpu = unsafe {
+        bindings::dma_alloc_attrs(dev, size, &raw mut (*b).addr, bindings::GFP_KERNEL, 0)
+    };
     if cpu.is_null() {
         // SAFETY: the reference taken above.
         unsafe { bindings::put_device(dev) };
@@ -323,10 +349,16 @@ pub(crate) unsafe fn lem_alloc(
 pub(crate) unsafe fn lem_bufs_wait(dev: *mut bindings::device, bufs: *const AtomicI32) {
     // SAFETY: the caller's count, live until this returns.
     let bufs = unsafe { &*bufs };
-    while !DRAINED.wait_timeout(10 * bindings::HZ as c_ulong, || bufs.load(Ordering::Acquire) == 0) {
+    while !DRAINED.wait_timeout(10 * bindings::HZ as c_ulong, || {
+        bufs.load(Ordering::Acquire) == 0
+    }) {
         // SAFETY: the caller's device, live across the unbind.
         let d: &Device = unsafe { Device::from_raw(dev) };
-        dev_warn!(d, "unbind waits for {} DMA buffers still held\n", bufs.load(Ordering::Acquire));
+        dev_warn!(
+            d,
+            "unbind waits for {} DMA buffers still held\n",
+            bufs.load(Ordering::Acquire)
+        );
     }
 }
 
@@ -363,14 +395,17 @@ unsafe fn import_free(im: *mut Import) {
 pub(crate) unsafe fn lem_imports_free_all(imports: *mut bindings::xarray) {
     let mut handle: c_ulong = 0;
     // SAFETY: the caller's table (xa_for_each: the first entry).
-    let mut im = unsafe { bindings::xa_find(imports, &raw mut handle, c_ulong::MAX, bindings::XA_PRESENT) };
+    let mut im =
+        unsafe { bindings::xa_find(imports, &raw mut handle, c_ulong::MAX, bindings::XA_PRESENT) };
     while !im.is_null() {
         // SAFETY: the caller's table; the entry at `handle` is `im`.
         unsafe { bindings::xa_erase(imports, handle) };
         // SAFETY: an entry is an Import from lem_import, and it is out of the table now.
         unsafe { import_free(im.cast()) };
         // SAFETY: the caller's table (xa_for_each: the next entry).
-        im = unsafe { bindings::xa_find_after(imports, &raw mut handle, c_ulong::MAX, bindings::XA_PRESENT) };
+        im = unsafe {
+            bindings::xa_find_after(imports, &raw mut handle, c_ulong::MAX, bindings::XA_PRESENT)
+        };
     }
 }
 
@@ -391,7 +426,9 @@ unsafe fn import_map(dev: *mut bindings::device, fd: c_int) -> Result<Import> {
         }
     };
     // SAFETY: the attachment made above.
-    let sgt = match from_err_ptr(unsafe { bindings::dma_buf_map_attachment_unlocked(att, BIDIRECTIONAL) }) {
+    let sgt = match from_err_ptr(unsafe {
+        bindings::dma_buf_map_attachment_unlocked(att, BIDIRECTIONAL)
+    }) {
         Ok(sgt) => sgt,
         Err(e) => {
             // SAFETY: the attachment made above.
@@ -455,11 +492,20 @@ pub(crate) unsafe fn lem_import(
     }
     let mut handle = 0u32;
     // xa_alloc: any free handle of 32 bits (the table starts at 1).
-    let limit = bindings::xa_limit { max: u32::MAX, min: 0 };
+    let limit = bindings::xa_limit {
+        max: u32::MAX,
+        min: 0,
+    };
     // SAFETY: the caller's table; its lock is held across __xa_alloc, which may drop it to allocate.
     let ret = unsafe {
         bindings::xa_lock(imports);
-        let ret = bindings::__xa_alloc(imports, &raw mut handle, im.cast(), limit, bindings::GFP_KERNEL);
+        let ret = bindings::__xa_alloc(
+            imports,
+            &raw mut handle,
+            im.cast(),
+            limit,
+            bindings::GFP_KERNEL,
+        );
         bindings::xa_unlock(imports);
         ret
     };
