@@ -41,13 +41,20 @@
 //!   stale and the fan runs at full duty and the driver reports `Degraded`. A reading comes back
 //!   and the curves take over again.
 //! - A failed fan write asks the fan for its safe state (`release`, full duty), and the next attempt waits
-//!   1 s, then 2 s, 4 s, then 8 s, and stays at 8 s. Each failure asks for the safe state again, so the
-//!   duty is full, never zero, while writes are refused. The driver reports `Degraded` with the attempt
-//!   count (`retrying`) meanwhile. It never gives up.
-//! - A write that answers `NO_DEVICE` means the host has bound the fan out (after five refused writes in a
-//!   row, its rule for a device that stops answering). The controller keeps the same schedule, reports
-//!   `Degraded` with the bound-out reason, and takes the fan back at the first write that works after the fan
-//!   is bound again. The drop that bound the fan out leaves full duty on it, which is the state reported.
+//!   1 s, then 2 s, 4 s, then 8 s, and stays at 8 s. The controller reports `Degraded` with the attempt count
+//!   (`retrying`) meanwhile, and it never gives up.
+//! - While the writes are refused the duty item is the fan's read-back. The controller reads the duty once, at the
+//!   first failed write of a run of them, and keeps it while the fan is bound in: nothing changes the fan while its
+//!   writes are refused, and a read that works resets the host's count of failures in a row, which must reach five
+//!   for the host to bind the fan out. Health says whether the safe state is applied (the read-back is full duty)
+//!   or not (the fan is at the read-back duty). If the read fails too, the duty is unknown: the duty item is absent,
+//!   and health says so.
+//! - A call that answers `NO_DEVICE` means the host has bound the fan out (after five refused writes in a row), and
+//!   its drop has run. The host answers every call to the fan while it is out, reads included, so the duty cannot be
+//!   read: it is unknown, the duty item is absent and `state` fails. The controller keeps the same schedule meanwhile,
+//!   and each attempt is a read of the fan. The first read that works means the fan is bound again: the duty it reads
+//!   back is the duty the controller reports (full duty if the drop's write landed), and writes resume at the next
+//!   step. If the reads still fail but the writes take, control resumes on the writes.
 //! - A disabled controller hands the fan back (`hand_back`) to the duty and mode it had before the
 //!   controller took it, and makes no writes until it is enabled. A failed hand-back is tried again
 //!   each second.
@@ -201,14 +208,17 @@ impl Lifecycle for FanController {
     }
 
     fn describe(&self, out: &mut Description) {
-        // Per mille, from 0 to FULL, as the law's duty and demand are: a count, exponent 0.
-        out.add(
-            Item::value("duty", STATE)
-                .unit(Unit::One, 0)
-                .field("duty")
-                .range(0, i64::from(law::FULL))
-                .step(1),
-        );
+        // Per mille, from 0 to FULL, as the law's duty and demand are: a count, exponent 0. Absent while the
+        // fan's duty is unknown (its writes are refused and its reads fail, or the host has it bound out).
+        if self.control.duty_known().is_some() {
+            out.add(
+                Item::value("duty", STATE)
+                    .unit(Unit::One, 0)
+                    .field("duty")
+                    .range(0, i64::from(law::FULL))
+                    .step(1),
+            );
+        }
         out.add(
             Item::value("demand", STATE)
                 .unit(Unit::One, 0)
@@ -249,21 +259,7 @@ impl Lifecycle for FanController {
                 }
             }
             if let Some(duty) = self.control.step(now_ns) {
-                let written = u16::try_from(duty)
-                    .map_err(|_| Status::INVALID_ARGUMENT)
-                    .and_then(|per_mille| self.fan.set_duty(per_mille));
-                match written {
-                    Ok(()) => self.control.wrote(),
-                    Err(status) => {
-                        // The safe state for a failure: full duty. The next attempt is the write's own
-                        // retry, below, so a failed release is not kept as a retry of its own.
-                        let _ = self.fan.release();
-                        // NO_DEVICE: the host has bound the fan out (after refused writes, five in a row). It
-                        // is retried the same way, until the fan is bound again and the writes go through.
-                        self.control
-                            .write_failed(now_ns, status == Status::NO_DEVICE);
-                    }
-                }
+                self.attempt(duty, now_ns);
             }
         }
         self.control.next_due()
@@ -279,6 +275,46 @@ impl FanController {
             2 => self.t2.as_mut()?.read().ok(),
             3 => self.t3.as_mut()?.read().ok(),
             _ => None,
+        }
+    }
+
+    /// One attempt at the fan, which the control law has said is due.
+    fn attempt(&mut self, duty: i32, now_ns: u64) {
+        // The host has the fan bound out, and answers the duty read the same way it answers a write. The attempt is
+        // a read: when it works the fan is bound again, and what it reads back is the duty it is at.
+        if self.control.is_bound_out() {
+            match self.fan.duty() {
+                Ok(read) => {
+                    self.control.rebound(i32::from(read));
+                    return;
+                }
+                Err(status) if status == Status::NO_DEVICE => {
+                    self.control.write_failed(now_ns, true);
+                    return;
+                }
+                // Bound in, but its duty will not read: the write below says whether the fan takes it.
+                Err(_) => {}
+            }
+        }
+        let written = u16::try_from(duty)
+            .map_err(|_| Status::INVALID_ARGUMENT)
+            .and_then(|per_mille| self.fan.set_duty(per_mille));
+        match written {
+            Ok(()) => self.control.wrote(),
+            Err(status) => {
+                // The safe state for a failure: full duty. A refused release leaves the fan where it is, and the
+                // read below says where that is.
+                let released = self.fan.release();
+                // NO_DEVICE from the write or from the release: the host has bound the fan out (after refused
+                // writes, five in a row), and the drop ran with it. The attempts go on until the fan is bound
+                // again, and the duty is unknown meanwhile. The release answers NO_DEVICE in the same attempt when
+                // the fifth refusal was the write, so the controller learns of the bind-out at once.
+                let out = status == Status::NO_DEVICE || released.err() == Some(Status::NO_DEVICE);
+                self.control.write_failed(now_ns, out);
+                if self.control.wants_readback() {
+                    self.control.read_back(self.fan.duty().ok().map(i32::from));
+                }
+            }
         }
     }
 
@@ -302,7 +338,8 @@ impl Drop for FanController {
 
 impl FanControl for FanController {
     fn state(&mut self) -> Result<State> {
-        Ok(self.control.state())
+        // While the fan's duty is unknown there is no state to give: the duty item is absent the same way.
+        self.control.state().ok_or(Status::NOT_FOUND)
     }
 
     fn settings(&mut self) -> Result<Settings> {
