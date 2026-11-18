@@ -1,8 +1,8 @@
 use lemnos_core::{
-    ClocksHandle, Description, DmaHandle, Health, HostClock, I2c, InterruptHandle, Line,
-    LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle,
-    ResetHandle, Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
-    UsbFunctionHandle,
+    BusKind, ClocksHandle, Description, DmaHandle, Health, HostClock, HostClockHandle, I2c,
+    InterruptHandle, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm, RawSpiBus,
+    RegistersHandle, ResetHandle, Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart,
+    UsbDeviceHandle, UsbFunctionHandle,
 };
 
 use crate::Entry;
@@ -306,6 +306,13 @@ struct Binding<'a> {
 }
 
 impl Binding<'_> {
+    /// Whether the driver declares `need` as the host clock.
+    fn is_host_clock(&self, need: &str) -> bool {
+        self.entry.manifest().needs.iter().any(|declared| {
+            declared.name == need && declared.kind == NeedKind::Bus(BusKind::HostClock)
+        })
+    }
+
     fn bus_name(&self, need: &str) -> Result<&'static str> {
         let spec = self.entry.spec();
         spec.used(need)
@@ -341,6 +348,10 @@ macro_rules! buses {
 
 impl Provider for Binding<'_> {
     fn provided(&self, need: &str) -> bool {
+        // The host clock is the table's own, and always there: a firmware's clock is its static.
+        if self.is_host_clock(need) {
+            return true;
+        }
         let spec = self.entry.spec();
         match spec.used(need) {
             // A name that isn't a bus is a device.
@@ -354,6 +365,13 @@ impl Provider for Binding<'_> {
                 .bus_for(need)
                 .is_some_and(|bus| self.buses.provided(bus)),
         }
+    }
+
+    fn host_clock(&mut self, need: &str) -> Result<HostClockHandle> {
+        if !self.is_host_clock(need) {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(HostClockHandle::shared(self.table.clock))
     }
 
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller> {
