@@ -532,9 +532,25 @@ fn the_install_writes_fourteen_sectors_nine_payload_one_record_two_previous_two_
 /// of the set being installed, each sector of its record and of both pointers), and a deterministic
 /// stride through the other payload writes, every cut torn four ways. The uncut install's writes are
 /// the candidates: the cut indices are chosen from its log, so the sample follows the install.
-#[allow(clippy::print_stdout)] // the sweep prints its counts as proof
-#[test]
-fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary() {
+///
+/// The cut list is split into `REAL_SWEEP_PARTS` contiguous parts, each a test of its own, so nextest
+/// runs them side by side. Every part derives the same list (the uncut install is deterministic) and runs
+/// its share; `real_size_parts_cover_every_cut` checks that the shares tile the whole list.
+const REAL_SWEEP_PARTS: usize = 8;
+
+/// The real bay sizes' sweep's plan: the disk before the install, the install's payloads, the write count of
+/// the uncut install, and the cut points in order (boundary writes, then the stride through the payload).
+struct RealSweep {
+    pre: Vec<u8>,
+    c: [Vec<u8>; 5],
+    writes: usize,
+    cuts: Vec<usize>,
+    boundary_count: usize,
+    payload_len: usize,
+    stride: usize,
+}
+
+fn real_size_sweep_plan() -> RealSweep {
     let layout = board_layout();
     let pre = volume_image(&layout, None);
     let c = stored(&payloads_c(), &layout);
@@ -571,6 +587,35 @@ fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary() 
     cuts.extend(payload.iter().step_by(stride));
     cuts.sort_unstable();
     cuts.dedup();
+    RealSweep {
+        pre,
+        c,
+        writes: n,
+        cuts,
+        boundary_count,
+        payload_len: payload.len(),
+        stride,
+    }
+}
+
+/// The cut points `from..to` of a part: the parts are contiguous and cover all `total` of them.
+fn real_size_part_range(total: usize, part: usize) -> (usize, usize) {
+    (
+        part * total / REAL_SWEEP_PARTS,
+        (part + 1) * total / REAL_SWEEP_PARTS,
+    )
+}
+
+/// One part of the real bay sizes' sweep: each of its cut points, torn four ways, is run as the other
+/// sweeps are: the cut must report failure, the disk must be bootable and the metadata as it was, and the
+/// install run again must succeed and leave slot `c` as the default.
+#[allow(clippy::print_stdout)] // the sweep prints its counts as proof
+fn real_size_sweep_part(part: usize) {
+    let layout = board_layout();
+    let plan = real_size_sweep_plan();
+    let (from, to) = real_size_part_range(plan.cuts.len(), part);
+    let pre = &plan.pre;
+    let c = &plan.c;
     let variants = |k: usize| {
         [
             Torn::Old,
@@ -580,18 +625,18 @@ fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary() 
         ]
     };
     let mut runs = 0usize;
-    for &k in &cuts {
+    for &k in &plan.cuts[from..to] {
         for torn in variants(k) {
             let mut dev = Dev::new(pre.clone());
             dev.cut = Some((k, torn));
             assert!(
-                install(&mut dev, &layout, 2, "c", &refs(&c)).is_err(),
+                install(&mut dev, &layout, 2, "c", &refs(c)).is_err(),
                 "cut {k} {torn:?}: reported success"
             );
             check_bootable(&dev.img, &layout).unwrap_or_else(|e| panic!("cut {k} {torn:?}: {e}"));
-            check_metadata(&pre, &dev, &layout).unwrap_or_else(|e| panic!("cut {k} {torn:?}: {e}"));
+            check_metadata(pre, &dev, &layout).unwrap_or_else(|e| panic!("cut {k} {torn:?}: {e}"));
             let mut again = Dev::new(dev.img.clone());
-            install(&mut again, &layout, 2, "c", &refs(&c))
+            install(&mut again, &layout, 2, "c", &refs(c))
                 .unwrap_or_else(|e| panic!("cut {k} {torn:?}: re-run failed: {e}"));
             let placed = place(&mut again, &layout).unwrap();
             assert_eq!(
@@ -602,13 +647,79 @@ fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary() 
         }
     }
     println!(
-        "real-size power-cut sweep: {n} writes in the install; {boundary_count} boundary cut points, \
-         {} stride cut points ({} payload writes, stride {stride}); {} cut points x 4 torn variants = {runs} runs, all outcomes as required",
-        cuts.len() - boundary_count,
-        payload.len(),
-        cuts.len()
+        "real-size power-cut sweep part {} of {REAL_SWEEP_PARTS}: cut points {from}..{to} of {} ({} writes in the install; {} boundary cut points, {} stride cut points of {} payload writes, stride {}); {} cut points x 4 torn variants = {runs} runs, all outcomes as required",
+        part + 1,
+        plan.cuts.len(),
+        plan.writes,
+        plan.boundary_count,
+        plan.cuts.len() - plan.boundary_count,
+        plan.payload_len,
+        plan.stride,
+        to - from
     );
-    assert_eq!(runs, cuts.len() * 4);
+    assert_eq!(runs, (to - from) * 4);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_1_of_8() {
+    real_size_sweep_part(0);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_2_of_8() {
+    real_size_sweep_part(1);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_3_of_8() {
+    real_size_sweep_part(2);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_4_of_8() {
+    real_size_sweep_part(3);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_5_of_8() {
+    real_size_sweep_part(4);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_6_of_8() {
+    real_size_sweep_part(5);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_7_of_8() {
+    real_size_sweep_part(6);
+}
+
+#[test]
+fn power_cut_sweep_at_the_real_bay_sizes_is_sampled_and_covers_every_boundary_part_8_of_8() {
+    real_size_sweep_part(7);
+}
+
+/// The parts of the real bay sizes' sweep tile its whole cut list, in order and once each: no cut point is
+/// left out of the sweep.
+#[test]
+fn real_size_parts_cover_every_cut() {
+    let plan = real_size_sweep_plan();
+    let mut next = 0;
+    for part in 0..REAL_SWEEP_PARTS {
+        let (from, to) = real_size_part_range(plan.cuts.len(), part);
+        assert_eq!(
+            from, next,
+            "part {part} starts where the one before it stops"
+        );
+        assert!(to >= from);
+        next = to;
+    }
+    assert_eq!(next, plan.cuts.len(), "the parts cover every cut point");
+    assert!(
+        plan.cuts.windows(2).all(|w| w[0] < w[1]),
+        "the cut points are in order, once each"
+    );
 }
 
 // ---- The driver path (item 1). The operations the driver makes (install, the default switch, the
