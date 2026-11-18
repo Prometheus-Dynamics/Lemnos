@@ -7,7 +7,7 @@
 //! Static musl.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
@@ -36,6 +36,11 @@ const SMBUS_I2C_BLOCK_DATA: u16 = 8;
 
 const NAME_MAX: usize = 64;
 
+// The test buses' second SPI device (lemnos_test_bus.c): its name, and the parameter that says which
+// chip select it is at.
+const TWIN: &str = "spi-lemnos-test-twin";
+const TWIN_CS: &str = "/sys/module/lemnos_test_bus/parameters/spi_twin_cs";
+
 fn say(line: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
@@ -62,6 +67,41 @@ fn put64(b: &mut [u8], at: usize, v: u64) {
 
 fn get32(b: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+
+/// The kernel log's lines that hold `needle`, counted from the start of the log (`/dev/kmsg`, one
+/// record a read, until none is left); None when the log can't be read.
+fn log_lines(needle: &[u8]) -> Option<u32> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open("/dev/kmsg")
+        .ok()?;
+    let mut record = [0u8; 8192];
+    let mut lines = 0;
+    loop {
+        match f.read(&mut record) {
+            Ok(0) => return Some(lines),
+            Ok(n) => {
+                lines += u32::from(record[..n].windows(needle.len()).any(|w| w == needle));
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Some(lines),
+            // EPIPE: records were overwritten under the reader; the next read goes on from the oldest left.
+            Err(e) if e.raw_os_error() == Some(libc::EPIPE) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Writes `text` to a sysfs file: 0, or -errno.
+fn put(path: &str, text: &str) -> i32 {
+    match OpenOptions::new().write(true).open(path) {
+        Ok(mut f) => match f.write(text.as_bytes()) {
+            Ok(_) => 0,
+            Err(e) => -e.raw_os_error().unwrap_or(libc::EIO),
+        },
+        Err(e) => -e.raw_os_error().unwrap_or(libc::EIO),
+    }
 }
 
 /// The address of a buffer, as the kernel is given it: a pointer the kernel reads or writes.
@@ -339,10 +379,26 @@ fn check_i2c(bus: &Bus, failures: &mut u32) {
     drop(other.file);
     drop(wrong.file);
 
+    // The module refuses a transfer of no segments itself. The I2C core refuses one too, with the
+    // same errno, but it warns as it does; so the errno alone doesn't show the module's guard.
+    let warnings = log_lines(b"WARNING:");
     check(
         failures,
         bus.i2c(cn, TEST_BUS, MEM_ADDR, addr(&write), 0) == -libc::EINVAL,
         "no segments: EINVAL",
+    );
+    let after = log_lines(b"WARNING:");
+    check(
+        failures,
+        warnings.is_some() && after == warnings,
+        &format!(
+            "no segments: the transfer never reached the I2C core (kernel warnings {warnings:?} -> {after:?})"
+        ),
+    );
+    check(
+        failures,
+        bus.i2c(-1, TEST_BUS, MEM_ADDR, addr(&write), 0) == -libc::EINVAL,
+        "no segments and no claim: EINVAL, before the claim is looked at",
     );
     check(
         failures,
@@ -410,6 +466,53 @@ fn check_i2c(bus: &Bus, failures: &mut u32) {
         "an address past 7 bits: EINVAL",
     );
     drop(c.file);
+}
+
+/// A second device at the bound device's bus and chip select. The SPI core never registers two, so
+/// the test buses' second device is told to say it is at chip select 0, and the module is asked to
+/// bind it: it must refuse, and the device bound first must stay the one transfers reach.
+fn check_spi_twin(
+    bus: &Bus,
+    failures: &mut u32,
+    cn: i32,
+    one: &[u8],
+    tx: &[u8; 8],
+    rx: &mut [u8; 8],
+) {
+    let over = format!("/sys/bus/spi/devices/{TWIN}/driver_override");
+    let bound = format!("/sys/bus/spi/devices/{TWIN}/driver");
+    check(
+        failures,
+        put(TWIN_CS, "0") == 0 && put(&over, "lemnos") == 0,
+        "the second device says it is at chip select 0, and may be bound to the module",
+    );
+    let r = put("/sys/bus/spi/drivers/lemnos/bind", TWIN);
+    check(
+        failures,
+        r == -libc::EBUSY && fs::symlink_metadata(&bound).is_err(),
+        &format!("a second device at a bound bus and chip select is refused: EBUSY ({r})"),
+    );
+    rx.fill(0);
+    let r = bus.spi(cn, 0, 0, addr(one), 1);
+    let mut info = [0u8; 16];
+    put32(&mut info, 0, TEST_BUS);
+    let i = bus.call(SPI_INFO, &mut info);
+    check(
+        failures,
+        r == 0 && rx == tx && i == 0,
+        &format!("the device bound first still transfers (transfer {r}, info {i})"),
+    );
+    // Back as it was, whatever happened: unbound, no override, at chip select 1.
+    if fs::symlink_metadata(&bound).is_ok() {
+        let _ = put("/sys/bus/spi/drivers/lemnos/unbind", TWIN);
+    }
+    let cleared = put(&over, "\n") == 0 && put(TWIN_CS, "1") == 0;
+    put32(&mut info, 4, 1);
+    check(
+        failures,
+        cleared && bus.call(SPI_INFO, &mut info) == -libc::ENODEV,
+        "the second device is back at chip select 1, unbound",
+    );
 }
 
 fn check_spi(bus: &Bus, failures: &mut u32) {
@@ -482,6 +585,27 @@ fn check_spi(bus: &Bus, failures: &mut u32) {
         bus.spi(cn, 0, 0, addr(&one), 0) == -libc::EINVAL,
         "no segments: EINVAL",
     );
+    // The SPI core refuses an empty message with the same errno, so the errno alone doesn't show the
+    // module's guard. What does: the module applies a transfer's mode before it hands the message
+    // on, and a transfer of no segments must not get that far.
+    put32(&mut info, 4, 0);
+    let r = bus.call(SPI_INFO, &mut info);
+    let mode = get32(&info, 8);
+    let r2 = bus.spi(cn, 0, mode ^ 1, addr(&one), 0);
+    let r3 = bus.call(SPI_INFO, &mut info);
+    check(
+        failures,
+        r == 0 && r2 == -libc::EINVAL && r3 == 0 && get32(&info, 8) == mode,
+        &format!(
+            "no segments, another mode: EINVAL ({r2}), and the device keeps its mode ({mode} -> {})",
+            get32(&info, 8)
+        ),
+    );
+    check(
+        failures,
+        bus.spi(-1, 0, 0, addr(&one), 0) == -libc::EINVAL,
+        "no segments and no claim: EINVAL, before the claim is looked at",
+    );
     let huge = spi_segment(addr(&big), 0, (BUFFER + 1) as u32, 0);
     check(
         failures,
@@ -500,6 +624,7 @@ fn check_spi(bus: &Bus, failures: &mut u32) {
         bus.spi(cn, 0, 0, addr(&bad), 1) == -libc::EFAULT,
         "a bad pointer: EFAULT",
     );
+    check_spi_twin(bus, failures, cn, &one, &tx, &mut rx);
     drop(c.file);
 
     let c = bus.claim("spi-40.1");
