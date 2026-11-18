@@ -256,7 +256,7 @@ their source in its header.
 
 ## The PiSP front end
 
-`lemnos_pisp_fe.c` drives the PiSP front end, the block's other half. It has no device of its own:
+`rs/pisp_fe.rs` drives the PiSP front end, the block's other half. It has no device of its own:
 it shares the receiver's platform device, node and interrupt, and adds `LEMNOS_PISP_FE_IOC_*`
 (`lemnos_pisp_fe.h`). A stream is made on the node as for the receiver and handed to `START` along
 with the receiver's link and frame; the channel then feeds the front end instead of memory, so the

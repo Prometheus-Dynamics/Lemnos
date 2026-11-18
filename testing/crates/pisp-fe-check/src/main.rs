@@ -199,7 +199,7 @@ const CH_CTRL_FORCE: u32 = 1 << 3;
 const CH_CTRL_AUTO_ARM: u32 = 1 << 4;
 const CH_CTRL_MODE_FE: u32 = 3 << 1;
 
-// The fake front end's registers, relative to its window (lemnos_pisp_fe.c writes them so).
+// The fake front end's registers, relative to its window (rs/pisp_fe.rs writes them so).
 const FE_CONTROL: u32 = 0x004;
 const FE_STATUS: u32 = 0x008;
 const FE_INT_EN: u32 = 0x018;

@@ -1,6 +1,6 @@
 //! The PiSP front end as `camera.isp/1` and `isp.pisp/1`.
 //!
-//! Everything that touches the block happens in the kernel (`kernel/lemnos_pisp_fe.c`): this driver
+//! Everything that touches the block happens in the kernel (`kernel/rs/pisp_fe.rs`): this driver
 //! hands the module the clients' memory, posts jobs on the module's ring and watches it. It does no
 //! 3A and holds no tuning. Each job's configuration is the caller's, in the layout
 //! [`LAYOUT_FRONT_END`](lemnos_contract_isp_pisp::LAYOUT_FRONT_END); the driver reads it only to
