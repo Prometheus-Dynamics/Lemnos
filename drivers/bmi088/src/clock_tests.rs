@@ -886,3 +886,539 @@ fn a_drain_reads_the_sensor_time_around_the_fifo_length_and_before_the_data() {
         "the drain read {log:02x?}"
     );
 }
+
+// The gyroscope. It has no sensor time: its clock is the count of samples its FIFO holds, read
+// between two host clock readings. The chip's own oscillator makes the samples, so its stamps are
+// checked against the true time of each sample, as the accelerometer's are.
+
+use lemnos_contract_gyroscope::RECORD_LEN as GYRO_RECORD_LEN;
+
+/// The gyroscope's sample clock as the chip keeps it: `rate` samples per second at its nominal
+/// rate, `eps` fast at the start, and its rate changing by `drift` per second.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GyroOsc {
+    pub(crate) rate: f64,
+    pub(crate) eps: f64,
+    pub(crate) drift: f64,
+}
+
+impl GyroOsc {
+    /// Samples made by host time `t` seconds, as a real number.
+    fn count(&self, t: f64) -> f64 {
+        self.rate * ((1.0 + self.eps) * t + 0.5 * self.drift * t * t)
+    }
+
+    /// The host time (seconds) at which `count` samples have been made.
+    fn time_of(&self, count: f64) -> f64 {
+        let c = count / self.rate;
+        let r = 1.0 + self.eps;
+        if self.drift == 0.0 {
+            c / r
+        } else {
+            (-r + (r * r + 2.0 * self.drift * c).sqrt()) / self.drift
+        }
+    }
+
+    /// The true host time, ns, of the chip's sample `n` (counted from the chip's start): the time
+    /// its count reaches `n + 1`.
+    pub(crate) fn sample_ns(&self, n: u64) -> f64 {
+        self.time_of((n + 1) as f64) * 1e9
+    }
+}
+
+/// The batch by which the gyroscope's clock has converged in these runs: its model publishes after
+/// 64 reads (`gyro_clock.rs`), and a drain every 250 ms at 200 Hz makes that about 16 s, batch 64,
+/// plus the drains the window takes to close. The run measured 70 (board, 2 %) and 75 (hour, 2 %
+/// drifting), so 80 is the bound the runs are checked against.
+const GYRO_CONVERGED_BY: u64 = 80;
+
+/// The gyroscope rate the board run uses: 200 Hz, as the accelerometer's (B8).
+pub(crate) const GYRO_RATE: i64 = 200;
+/// A gyroscope drain's frames are read at the tick's time plus this (one short transfer).
+const GYRO_LEAD_NS: u64 = 150_000;
+/// The gyroscope's board-run gap limit: 1.5 sample periods at 200 Hz.
+const GYRO_GAP_NS: u64 = 7_500_000;
+
+/// Binds the driver to a simulated chip whose accelerometer is nominal and idle (its FIFO is never
+/// fed), and whose gyroscope runs on `osc`. The driver's gyroscope drains are driven by hand.
+pub(crate) struct GyroHarness {
+    pub(crate) dev: Bmi088,
+    sim: SimI2c,
+    chip: Arc<Chip>,
+    pub(crate) osc: GyroOsc,
+    /// The chip's sample count at the start of the harness: the driver's sequence number 0.
+    pub(crate) base: u64,
+    /// The next sequence number to make a frame for (samples the chip dropped included).
+    pub(crate) seq: u64,
+    /// The true time of the last drain's tick.
+    pub(crate) t_ns: u64,
+    /// The gyroscope's next drain is due at this time, as the driver last said.
+    due_ns: u64,
+    /// The batch index, from 0.
+    pub(crate) batch: u64,
+    /// Health after the last tick.
+    pub(crate) note: Option<&'static str>,
+}
+
+impl GyroHarness {
+    pub(crate) fn new(osc: GyroOsc) -> Self {
+        let nominal = Oscillator {
+            eps: 0.0,
+            drift: 0.0,
+        };
+        let board = SimBoard::new();
+        let sim = board.add_i2c("bus");
+        sim.attach(ACCEL, Layout::Bytes);
+        sim.set_bytes(ACCEL, ACC_ID, &[0x1e]);
+        sim.attach(GYRO, Layout::Bytes);
+        sim.set_bytes(GYRO, GYR_ID, &[0x0f]);
+        sim.add_fifo(
+            ACCEL,
+            ACC_FIFO_DATA,
+            FifoLevel::Bytes(ACC_FIFO_LENGTH),
+            1024,
+        );
+        sim.add_fifo(
+            GYRO,
+            GYR_FIFO_DATA,
+            FifoLevel::Frames {
+                register: GYR_FIFO_STATUS,
+                frame: 6,
+            },
+            600,
+        );
+        let chip = Arc::new(Chip {
+            osc: nominal,
+            drain_ns: AtomicU64::new(0),
+            at_ns: AtomicU64::new(0),
+            reads: AtomicU32::new(0),
+            log: std::sync::Mutex::new(Vec::new()),
+            logging: core::sync::atomic::AtomicBool::new(false),
+            shift: AtomicI64::new(0),
+            pre: AtomicI64::new(0),
+            post: AtomicI64::new(0),
+            calls: AtomicU32::new(0),
+        });
+        let mut rig = Rig {
+            _board: board,
+            sim: sim.clone(),
+            chip: Arc::clone(&chip),
+        };
+        let entries = [
+            ("fifo", ConfigValue::Bool(true)),
+            ("gyro_rate", ConfigValue::Int(GYRO_RATE)),
+        ];
+        let mut res = Resources::new(&mut rig, None);
+        let mut dev = Bmi088::bind(&mut res, &Config::new(&entries)).unwrap();
+        // The chip's count is since its configuration, at time 0: during the bind every tick reads
+        // the FIFO at its own true time, with the frames the chip has made by then. A drain's count
+        // is then the chip's count, as it is on a board.
+        let mut seq = 0u64;
+        let mut step = 0u64;
+        while Driver::health(&dev) != Health::Ok {
+            let t = step * 1_000_000;
+            let produced = osc.count(t as f64 * 1e-9).floor() as u64;
+            let mut bytes = Vec::new();
+            while seq < produced {
+                bytes.extend_from_slice(&(seq as i16).to_le_bytes());
+                bytes.extend_from_slice(&[0, 0, 0, 0]);
+                seq += 1;
+            }
+            if !bytes.is_empty() {
+                sim.fifo_push(GYRO, &bytes);
+            }
+            chip.drain_ns.store(t, Ordering::SeqCst);
+            chip.reads.store(0, Ordering::SeqCst);
+            chip.at_ns.store(t, Ordering::SeqCst);
+            chip.pre.store(0, Ordering::SeqCst);
+            chip.post.store(0, Ordering::SeqCst);
+            chip.calls.store(0, Ordering::SeqCst);
+            Driver::tick(&mut dev, t);
+            step += 1;
+            assert!(step < 10_000, "the device never came up");
+        }
+        let t_ns = (step - 1) * 1_000_000;
+        let due_ns = dev.gyro.due.unwrap_or(t_ns);
+        Self {
+            dev,
+            sim,
+            chip,
+            osc,
+            base: 0,
+            seq,
+            t_ns,
+            due_ns,
+            batch: 0,
+            note: None,
+        }
+    }
+
+    /// The true host time of driver sequence number `seq`.
+    pub(crate) fn truth(&self, seq: u64) -> f64 {
+        self.osc.sample_ns(self.base + seq)
+    }
+
+    /// One gyroscope drain: the chip makes its samples up to the drain's read, the host ticks late
+    /// by the plan's jitter, and the driver reads the FIFO's fill between two host readings (the
+    /// plan's bracket), then drains it.
+    pub(crate) fn fill_and_tick(&mut self, plan: Plan) {
+        let tick = self.due_ns.max(self.t_ns + 1) + plan.tick_jitter_ns.unsigned_abs();
+        let read = tick + GYRO_LEAD_NS;
+        self.t_ns = tick;
+        // The chip has made every sample up to the read. The FIFO holds 100 frames and drops the
+        // rest; the frames it dropped still take their numbers.
+        let produced =
+            (self.osc.count(read as f64 * 1e-9).floor() as u64).saturating_sub(self.base);
+        let mut bytes = Vec::new();
+        while self.seq < produced {
+            bytes.extend_from_slice(&(self.seq as i16).to_le_bytes());
+            bytes.extend_from_slice(&[0, 0, 0, 0]);
+            self.seq += 1;
+        }
+        if !bytes.is_empty() {
+            self.sim.fifo_push(GYRO, &bytes);
+        }
+        // The accelerometer's sensor time is read too, but its FIFO is empty and it is not checked.
+        self.chip.drain_ns.store(read, Ordering::SeqCst);
+        self.chip.reads.store(0, Ordering::SeqCst);
+        self.chip.at_ns.store(read, Ordering::SeqCst);
+        self.chip.pre.store(plan.pre_ns, Ordering::SeqCst);
+        self.chip.post.store(plan.post_ns, Ordering::SeqCst);
+        self.chip.calls.store(0, Ordering::SeqCst);
+        let _ = Driver::tick(&mut self.dev, tick.saturating_sub(plan.report_early_ns));
+        self.due_ns = self.dev.gyro.due.expect("a gyroscope drain is due");
+        self.note = match Driver::health(&self.dev) {
+            Health::Degraded(text) => Some(text),
+            _ => None,
+        };
+        self.batch += 1;
+    }
+
+    /// A drain, then a batch read of at most `records` records.
+    pub(crate) fn step(&mut self, plan: Plan) -> Vec<Delivered> {
+        self.fill_and_tick(plan);
+        self.take(160)
+    }
+
+    /// A batch read of at most `records` gyroscope records: what the ring holds that the caller has
+    /// not had. A record's sequence number is the chip's, from the frame's X value.
+    pub(crate) fn take(&mut self, records: usize) -> Vec<Delivered> {
+        let mut delivered = Vec::new();
+        let mut buf = std::vec![0u8; GYRO_RECORD_LEN * records];
+        let n = Gyroscope::read_batch(&mut self.dev, &mut buf).unwrap();
+        let newest = self.seq;
+        let scale = chip::gyro_setting(2000, GYRO_RATE).unwrap().scale as f64;
+        for record in buf[..n].as_chunks::<GYRO_RECORD_LEN>().0 {
+            let sample = GyroSample::decode(&mut Reader::new(record)).unwrap();
+            let raw = (sample.value.x as f64 / scale).round() as i64 as u16;
+            let back = (newest.wrapping_sub(1).wrapping_sub(u64::from(raw))) & 0xffff;
+            let seq = newest - 1 - back;
+            delivered.push(Delivered {
+                seq,
+                at_ns: sample.at_ns,
+            });
+        }
+        delivered
+    }
+}
+
+/// The error of each gyroscope stamp, in ns, against the true time of its sample.
+pub(crate) fn gyro_errors(h: &GyroHarness, delivered: &[Delivered]) -> Vec<f64> {
+    delivered
+        .iter()
+        .map(|d| d.at_ns as f64 - h.truth(d.seq))
+        .collect()
+}
+
+/// Uniform jitter of `spread` ns on every tick.
+fn gyro_plan(jitter: &mut Jitter, b: u64, spread: i64, bracket: i64) -> Plan {
+    let wide = b % 37 == 18;
+    Plan {
+        tick_jitter_ns: jitter.next(spread),
+        pre_ns: if wide {
+            -2_500_000
+        } else {
+            jitter.next(bracket) - bracket / 2
+        },
+        post_ns: if wide {
+            2_500_000
+        } else {
+            jitter.next(bracket) + bracket / 2
+        },
+        report_early_ns: 0,
+        fault: None,
+    }
+}
+
+/// A board-shaped plan: 0.3 ms of tick jitter with a 9 ms outlier every 37th tick, and a bracket
+/// about 0.1 ms wide, with a wide one (the host was preempted inside the read) every 37th.
+fn gyro_board_plan(jitter: &mut Jitter, b: u64) -> Plan {
+    let mut plan = gyro_plan(jitter, b, 300_000, 100_000);
+    if b % 37 == 36 {
+        plan.tick_jitter_ns = jitter.next(9_000_000);
+    }
+    plan
+}
+
+/// The gyroscope's board run, as B8 would take it on the same chip: 45 s at 200 Hz with the die 2 %
+/// fast, the host's tick jitter and outliers as the accelerometer's run had them.
+#[test]
+fn a_gyroscope_board_run_of_45_s_is_stamped_from_its_clock_within_a_millisecond_without_gaps() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x9e37_79b9);
+    let mut delivered = Vec::new();
+    // 45 s at a drain every 250 ms.
+    for b in 0..180 {
+        let out = h.step(gyro_board_plan(&mut jitter, b));
+        delivered.extend(out.into_iter().map(|d| (b, d)));
+    }
+    let first = delivered
+        .first()
+        .map(|(b, _)| *b)
+        .expect("the clock never converged");
+    assert!(
+        first <= GYRO_CONVERGED_BY,
+        "the clock converges at batch {first}, past {GYRO_CONVERGED_BY}"
+    );
+    let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+    assert!(no_going_back(&stamps).is_none(), "a stamp went back");
+    let gap = largest_gap(&stamps);
+    assert!(
+        gap <= GYRO_GAP_NS,
+        "a gap of {gap} ns between gyroscope samples (limit 7.5 ms)"
+    );
+    let worst = gyro_errors(&h, &stamps)
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= BOARD_LIMIT_NS,
+        "a stamp was {worst} ns from its true time"
+    );
+    let span = stamps.last().unwrap().at_ns as f64 - stamps[0].at_ns as f64;
+    let true_span = h.truth(stamps.last().unwrap().seq) - h.truth(stamps[0].seq);
+    assert!(
+        (span - true_span).abs() <= BOARD_LIMIT_NS,
+        "the stamps span {span} ns, the samples {true_span} ns"
+    );
+}
+
+#[test]
+fn a_gyroscope_run_of_an_hour_with_0_1_percent_drift_per_hour_stays_within_a_millisecond() {
+    // 2 % fast at the start, and drifting by 0.1 % per hour as the die warms.
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.001 / 3600.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x5851_f42d);
+    let mut worst = 0.0f64;
+    let mut count = 0u64;
+    let mut last = None;
+    let mut converged_at = None;
+    let mut b = 0;
+    while h.t_ns < START_NS + 3_600_000_000_000 {
+        let out = h.step(gyro_board_plan(&mut jitter, b));
+        if !out.is_empty() && converged_at.is_none() {
+            converged_at = Some(b);
+        }
+        b += 1;
+        for d in &out {
+            let err = (d.at_ns as f64 - h.truth(d.seq)).abs();
+            worst = worst.max(err);
+            count += 1;
+            if let Some(prev) = last {
+                assert!(d.at_ns >= prev, "a stamp went back at batch {b}");
+            }
+            last = Some(d.at_ns);
+        }
+    }
+    assert!(
+        converged_at.is_some_and(|b| b <= GYRO_CONVERGED_BY),
+        "converged at {converged_at:?}, past {GYRO_CONVERGED_BY}"
+    );
+    assert!(
+        count > 600_000,
+        "only {count} gyroscope samples were delivered"
+    );
+    assert!(
+        worst <= BOARD_LIMIT_NS,
+        "a stamp was {worst} ns from its true time over the hour"
+    );
+}
+
+/// The gyroscope's stress bounds under 9 ms of host error, from measurement over 12 seeds of 45 s
+/// each (`GYRO_STRESS_SEEDS`). Its phase is read against the host clock at each bracket, so a
+/// reading 9 ms off moves that read's window by 9 ms, and the worst stamp in the 12 runs was 14.9 ms
+/// off, with a largest gap of 24.6 ms at a window's jump. The tick-time stamping this replaces is
+/// 4.8 ms and 9.7 ms under the same runs (it reads the host clock once per tick, not at the bracket),
+/// so under this stress the clock is the worse of the two. The bounds are the measured values,
+/// rounded up: 16 ms and 25 ms. They are not 1 ms and 7.5 ms, which the board-shaped runs hold.
+pub(crate) const GYRO_STRESS_BOUND_NS: f64 = 16_000_000.0;
+pub(crate) const GYRO_STRESS_GAP_NS: u64 = 25_000_000;
+/// The seeds the stress runs: each is 45 s with its own host errors.
+const GYRO_STRESS_SEEDS: u64 = 12;
+
+#[test]
+fn a_gyroscope_uniform_9_ms_jitter_stress_is_monotonic_within_its_stated_bounds() {
+    for seed in 0..GYRO_STRESS_SEEDS {
+        let osc = GyroOsc {
+            rate: 200.0,
+            eps: 0.015,
+            drift: 0.0,
+        };
+        let mut h = GyroHarness::new(osc);
+        let mut jitter = Jitter::new(0x1234_5678 ^ (seed * 7919));
+        let mut stamps = Vec::new();
+        for _ in 0..180 {
+            // Both readings of the bracket are off by the same amount: the host's error, not its wait.
+            let host = jitter.next(9_000_000);
+            stamps.extend(h.step(Plan {
+                tick_jitter_ns: jitter.next(9_000_000),
+                pre_ns: host,
+                post_ns: host,
+                report_early_ns: 0,
+                fault: None,
+            }));
+        }
+        assert!(!stamps.is_empty(), "seed {seed}: the clock never converged");
+        assert!(
+            no_going_back(&stamps).is_none(),
+            "seed {seed}: a stamp went back under jitter"
+        );
+        let gap = largest_gap(&stamps);
+        assert!(
+            gap <= GYRO_STRESS_GAP_NS,
+            "seed {seed}: a gap of {gap} ns under jitter (bound {GYRO_STRESS_GAP_NS} ns)"
+        );
+        let worst = gyro_errors(&h, &stamps)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= GYRO_STRESS_BOUND_NS,
+            "seed {seed}: a stamp was {worst} ns from its true time under 9 ms jitter (bound {GYRO_STRESS_BOUND_NS} ns)"
+        );
+    }
+}
+
+#[test]
+fn a_gyroscope_rate_sweep_from_minus_4_to_plus_4_percent_is_stamped_within_a_millisecond() {
+    // 17 rates, from 4 % slow to 4 % fast, each a 45 s board-shaped run.
+    for step in -8i64..=8 {
+        let eps = step as f64 * 0.005;
+        let osc = GyroOsc {
+            rate: 200.0,
+            eps,
+            drift: 0.0,
+        };
+        let mut h = GyroHarness::new(osc);
+        let mut jitter = Jitter::new(0x0bad_cafe ^ step as u64);
+        let mut stamps = Vec::new();
+        for b in 0..180 {
+            for d in h.step(gyro_board_plan(&mut jitter, b)) {
+                stamps.push(d);
+            }
+        }
+        assert!(!stamps.is_empty(), "eps {eps}: the clock never converged");
+        assert!(
+            no_going_back(&stamps).is_none(),
+            "eps {eps}: a stamp went back"
+        );
+        let worst = gyro_errors(&h, &stamps)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= BOARD_LIMIT_NS,
+            "eps {eps}: a stamp was {worst} ns from its true time"
+        );
+        let gap = largest_gap(&stamps);
+        assert!(gap <= GYRO_GAP_NS, "eps {eps}: a gap of {gap} ns");
+    }
+}
+
+#[test]
+fn gyroscope_stamps_stay_monotonic_while_the_model_is_updated_on_every_drain() {
+    // Every drain moves the fit, under jitter that puts the tick up to 9 ms before the read.
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.015,
+        drift: -0.001 / 45.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0xdead_beef);
+    let mut stamps = Vec::new();
+    for _ in 0..180 {
+        let host = jitter.next(9_000_000);
+        stamps.extend(h.step(Plan {
+            tick_jitter_ns: jitter.next(9_000_000),
+            pre_ns: host,
+            post_ns: host,
+            report_early_ns: jitter.next(9_000_000).unsigned_abs(),
+            fault: None,
+        }));
+    }
+    assert!(!stamps.is_empty(), "the clock never converged");
+    assert!(
+        no_going_back(&stamps).is_none(),
+        "a gyroscope stamp went back as the model was updated"
+    );
+}
+
+/// An overflow of the gyroscope's FIFO re-anchors its clock, says so by name, and the stamps after
+/// it converge again within the limit, without going back.
+#[test]
+fn a_gyroscope_fifo_overflow_re_anchors_its_clock_and_says_so() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x7777_1111);
+    let mut stamps = Vec::new();
+    for b in 0..80 {
+        stamps.extend(h.step(gyro_board_plan(&mut jitter, b)));
+    }
+    assert!(
+        !stamps.is_empty(),
+        "the clock never converged before the overflow"
+    );
+    // The next drain comes 700 ms late: the chip makes about 140 frames, and the FIFO holds 100.
+    let before = h.seq;
+    h.due_ns = h.t_ns + 700_000_000;
+    stamps.extend(h.step(gyro_board_plan(&mut jitter, 80)));
+    let flooded = h.seq - before;
+    assert!(flooded >= 100, "the flood made only {flooded} frames");
+    let note = match Driver::health(&h.dev) {
+        Health::Degraded(text) => text,
+        other => panic!("after the overflow health is {other:?}"),
+    };
+    assert_eq!(
+        note, "gyroscope: FIFO overflowed, samples lost; its sample clock was re-anchored",
+        "the overflow was not reported by name"
+    );
+    for b in 81..180 {
+        stamps.extend(h.step(gyro_board_plan(&mut jitter, b)));
+    }
+    assert!(
+        no_going_back(&stamps).is_none(),
+        "a stamp went back across the overflow"
+    );
+    let tail: Vec<Delivered> = stamps.iter().rev().take(60).rev().copied().collect();
+    let worst = gyro_errors(&h, &tail)
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= BOARD_LIMIT_NS,
+        "after re-anchoring a stamp was {worst} ns from its true time"
+    );
+}

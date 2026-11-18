@@ -7,7 +7,7 @@ use super::*;
 use crate::clock_tests::{Harness, Jitter, Oscillator, Plan};
 use chip::{Frame, scan_accel};
 use lemnos_contract_accelerometer::{RECORD_LEN as ACCEL_RECORD, Sample as AccelSample};
-use lemnos_contract_gyroscope::{RECORD_LEN as GYRO_RECORD, Sample as GyroSample};
+use lemnos_contract_gyroscope::RECORD_LEN as GYRO_RECORD;
 use lemnos_core::{
     Config, Decode, Description, Driver, Reader, RefusalKind, RefusalSink, Resources, Writer,
 };
@@ -585,7 +585,9 @@ fn gyroscope_fifo_full_reports_lost_samples() {
     gyro_up(&mut dev);
     assert_eq!(
         Driver::health(&dev),
-        Health::Degraded("gyroscope: FIFO overflowed, samples lost")
+        Health::Degraded(
+            "gyroscope: FIFO overflowed, samples lost; its sample clock was re-anchored"
+        )
     );
 }
 
@@ -1130,8 +1132,11 @@ fn a_fifo_length_above_the_fifo_is_clamped_to_it() {
     );
 }
 
+/// A gyroscope batch is stamped from its own sample clock, not from the tick: before the clock has
+/// converged (`clock_tests.rs` runs it to convergence against the chip's oscillator), a drain's
+/// samples are held, and no record carries a tick's time.
 #[test]
-fn gyro_batches_are_stamped_at_the_gyro_rate() {
+fn gyro_batches_wait_for_the_gyroscope_sample_clock_and_carry_no_tick_time() {
     let (_board, sim, mut dev) = fifo_chip();
     assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
     powered(&mut dev);
@@ -1140,21 +1145,15 @@ fn gyro_batches_are_stamped_at_the_gyro_rate() {
         bytes.extend(gyro_frame(n, 0, 0));
     }
     sim.fifo_push(GYRO, &bytes);
-    let now = 3_000_000_000;
-    Driver::tick(&mut dev, now);
+    Driver::tick(&mut dev, 3_000_000_000);
     let mut buf = [0u8; GYRO_RECORD * 16];
     let n = Gyroscope::read_batch(&mut dev, &mut buf).unwrap();
-    assert_eq!(n, 10 * GYRO_RECORD);
-    for (i, record) in buf[..n].as_chunks::<GYRO_RECORD>().0.iter().enumerate() {
-        let sample = GyroSample::decode(&mut Reader::new(record)).unwrap();
-        // 2000 Hz: 0.5 ms apart, the newest at the tick.
-        assert_eq!(sample.at_ns, now - (9 - i as u64) * 500_000);
-        close(
-            sample.value.x,
-            (i as f32 + 1.0) * 2000.0 / 32_768.0 * DPS,
-            1e-4,
-        );
-    }
+    assert_eq!(
+        n, 0,
+        "a batch was delivered before the sample clock converged"
+    );
+    // A read still returns the newest sample, which needs no time.
+    assert!(Gyroscope::read(&mut dev).is_ok());
 }
 
 /// A die 1 % fast of its 5 ms nominal period, drained every 365 ms (with up to

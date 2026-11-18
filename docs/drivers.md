@@ -25,7 +25,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C; `clock`: host clock | Serves its contract. Batches only with `fifo = true`. Accelerometer batches are stamped from the chip's sensor time (`clock` reads the bracket around it); gyroscope batches from the tick's time |
+| `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C; `clock`: host clock | Serves its contract. Batches only with `fifo = true`. Accelerometer batches are stamped from the chip's sensor time, and gyroscope batches from its FIFO's fill (`clock` reads the bracket around each); a batch's samples wait for their die's clock to converge |
 | `bmm150` | `magnetometer/1`, `self-test/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
 | `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
 | `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. `read` only: no batches, a description has no FIFO |

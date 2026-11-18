@@ -42,10 +42,10 @@ pub(crate) const MAX_BRACKET_NS: u64 = 2_000_000;
 pub(crate) const BATCHES: u32 = 16;
 /// The widest the phase's bounds may be for the model to publish: 1 ms, so the phase taken from
 /// their middle is within 0.5 ms. The aimed drains close them to this well inside `BATCHES`.
-const PHASE_WIDTH_NS: f64 = 1_000_000.0;
+pub(crate) const PHASE_WIDTH_NS: f64 = 1_000_000.0;
 /// Each read's weight is `1 / FORGET_BATCHES`: the fit remembers about this many reads, about
 /// 23 s at 200 Hz, short enough to follow the oscillator as it drifts with temperature.
-const FORGET_BATCHES: f64 = 64.0;
+pub(crate) const FORGET_BATCHES: f64 = 64.0;
 /// A jump is a sensor time step whose host time disagrees by more than this, or by a tenth of
 /// the step, whichever is more. Host jitter of a few ms on a 365 ms batch is never a jump.
 const JUMP_FLOOR_NS: f64 = 2_000_000.0;
@@ -64,16 +64,22 @@ pub(crate) enum Event {
 /// covariance about them are kept, each updated with the same weight, so a point on a line keeps
 /// the line exact whatever came before it.
 #[derive(Debug, Clone, Copy, Default)]
-struct Fit {
+pub(crate) struct Fit {
     count: u32,
-    mx: f64,
-    my: f64,
+    pub(crate) mx: f64,
+    pub(crate) my: f64,
     sxx: f64,
     sxy: f64,
 }
 
 impl Fit {
-    fn update(&mut self, x: f64, y: f64) {
+    pub(crate) fn update(&mut self, x: f64, y: f64) {
+        self.update_weighted(x, y, 1.0 / FORGET_BATCHES);
+    }
+
+    /// Adds a point with weight `w`. With `w = 1 / n` for the n-th point the fit is the plain
+    /// least-squares fit of the points so far, which is what a fit of few points needs.
+    pub(crate) fn update_weighted(&mut self, x: f64, y: f64, w: f64) {
         if self.count == 0 {
             self.count = 1;
             self.mx = x;
@@ -81,7 +87,6 @@ impl Fit {
             return;
         }
         self.count = self.count.saturating_add(1);
-        let w = 1.0 / FORGET_BATCHES;
         let keep = 1.0 - w;
         let (dx, dy) = (x - self.mx, y - self.my);
         self.mx += w * dx;
@@ -91,7 +96,7 @@ impl Fit {
     }
 
     /// The slope, once the points spread along `x`.
-    fn slope(&self) -> Option<f64> {
+    pub(crate) fn slope(&self) -> Option<f64> {
         (self.count >= 2 && self.sxx > 1e-9).then(|| self.sxy / self.sxx)
     }
 }
