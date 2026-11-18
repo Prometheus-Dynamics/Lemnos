@@ -244,9 +244,10 @@ and the refusal names the need (`this backend has no host clock for "clock"`). D
 the need is `None` on such a backend, and the driver says what it does without a clock.
 
 The handle is shared, not copied: `now_ns()` allocates nothing, and the driver keeps the handle for
-as long as it runs. A driver that doesn't declare the need is unchanged, and the host gives it
-nothing. A driver package can't take the clock yet: the package boundary has no take for it, so a
-packaged driver that needs it is refused at bind, and the follow-up is listed in the PR report.
+as long as it runs. A driver that doesn't declare the need is unchanged: the host never asks the backend
+for a clock on its behalf. The package boundary doesn't carry the clock, as it doesn't carry a
+watchdog or a PIO block: a packaged driver that declares it is refused at bind, whether it declares
+the need required or `Option`.
 
 ### Watching the board
 
