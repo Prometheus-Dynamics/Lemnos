@@ -101,6 +101,7 @@ struct Said {
     sha256: Option<String>,
     before: Option<String>,
     after: Option<String>,
+    retries: u32,
     trouble: Vec<String>,
 }
 
@@ -113,6 +114,8 @@ fn read_said(lines: &[String]) -> Said {
             said.end = true;
         } else if let Some(d) = line.strip_prefix("piece sha256 ") {
             said.sha256 = Some(d.to_string());
+        } else if let Some(d) = line.strip_prefix("piece retries ") {
+            said.retries = u32::from_str_radix(d, 16).unwrap_or(0);
         } else if let Some(d) = line.strip_prefix("piece before ") {
             said.before = Some(d.to_string());
         } else if let Some(d) = line.strip_prefix("piece after ") {
@@ -310,7 +313,8 @@ impl Run {
             ));
         }
         self.note(&format!(
-            "piece {n}: ok in {took:.3} s, card sha256 {}{}",
+            "piece {n}: ok in {took:.3} s, {} transfers tried again, card sha256 {}{}",
+            said.retries,
             said.sha256.clone().unwrap_or_default(),
             if expect.is_some() { " = expected" } else { "" }
         ));

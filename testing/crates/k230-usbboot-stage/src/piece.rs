@@ -27,6 +27,8 @@ pub const HEADER_LEN: usize = 64;
 pub const MAGIC: u32 = 0x3143_504c;
 /// The most sectors a [`Op::Test`] job may name: their original content is held on the stack.
 pub const TEST_SECTORS: usize = 8;
+/// The most times one sector's write or read is tried.
+pub const TRIES: u32 = 3;
 /// Flag: raise the card clock to the data rate after the card has started.
 pub const FAST: u32 = 1 << 0;
 
@@ -157,6 +159,8 @@ pub struct Outcome {
     /// For the write test: SHA-256 of the range before the test, and of the range read back after the
     /// original content was written back.
     pub before_after: Option<([u8; 32], [u8; 32])>,
+    /// Transfers that failed and were tried again (each ended in a sector that verified).
+    pub retries: u32,
 }
 
 /// Refuses a card that is not the one the job names, a range past it, and a payload that is not what
@@ -185,16 +189,45 @@ pub fn check<H: SdHost>(card: &Card<H>, job: &Job, data: &[u8]) -> Result<(), Pi
     Ok(())
 }
 
+/// Tries a card operation up to [`TRIES`] times. After an error the host and the card are brought back
+/// ([`Card::recover`]) before the next try; each failed try is counted. Bench, 2026-11-18: at 25 MHz on one data line a write's
+/// data phase failed its CRC about once in 14,000 sectors; the card drops such a block, so it is sent again.
+fn tried<H: SdHost, T>(
+    card: &mut Card<H>,
+    lba: u64,
+    retries: &mut u32,
+    mut op: impl FnMut(&mut Card<H>) -> Result<T, SdError>,
+) -> Result<T, PieceError> {
+    let mut last = None;
+    for _ in 0..TRIES {
+        match op(card) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                *retries += 1;
+                last = Some(e);
+                if let Err(e) = card.recover() {
+                    return Err(PieceError::Card(lba, e));
+                }
+            }
+        }
+    }
+    Err(PieceError::Card(
+        lba,
+        last.unwrap_or(SdError::Data("no try was made")),
+    ))
+}
+
+/// Writes a sector and reads it back. A sector that reads back different is not tried again: that is a
+/// failure of the card, not of a transfer.
 fn write_checked<H: SdHost>(
     card: &mut Card<H>,
     lba: u64,
     block: &[u8; BLOCK],
+    retries: &mut u32,
 ) -> Result<(), PieceError> {
-    card.write(lba, block)
-        .map_err(|e| PieceError::Card(lba, e))?;
+    tried(card, lba, retries, |c| c.write(lba, block))?;
     let mut back = [0u8; BLOCK];
-    card.read(lba, &mut back)
-        .map_err(|e| PieceError::Card(lba, e))?;
+    tried(card, lba, retries, |c| c.read(lba, &mut back))?;
     if back != *block {
         return Err(PieceError::Mismatch(lba));
     }
@@ -218,6 +251,7 @@ pub fn run<H: SdHost>(
     check(card, job, data)?;
     let mut hasher = Sha256::new();
     let mut before_after = None;
+    let mut retries = 0;
     match job.op {
         Op::Hash => {
             for i in 0..job.count {
@@ -237,7 +271,7 @@ pub fn run<H: SdHost>(
                 } else {
                     [0u8; BLOCK]
                 };
-                write_checked(card, lba, &block)?;
+                write_checked(card, lba, &block, &mut retries)?;
                 hasher.update(block);
                 fed(i + 1);
             }
@@ -248,14 +282,14 @@ pub fn run<H: SdHost>(
             let mut before = Sha256::new();
             for (i, slot) in kept.iter_mut().enumerate().take(count) {
                 let lba = job.lba + i as u64;
-                card.read(lba, slot).map_err(|e| PieceError::Card(lba, e))?;
+                tried(card, lba, &mut retries, |c| c.read(lba, slot))?;
                 before.update(*slot);
                 fed(i as u32 + 1);
             }
             let mut failed = None;
             for i in 0..count {
                 let block = sector(data, i);
-                match write_checked(card, job.lba + i as u64, &block) {
+                match write_checked(card, job.lba + i as u64, &block, &mut retries) {
                     Ok(()) => {
                         hasher.update(block);
                         fed(i as u32 + 1);
@@ -270,7 +304,7 @@ pub fn run<H: SdHost>(
             // reported: a failed restore after a failed write would hide the cause.
             let mut after = Sha256::new();
             for (i, slot) in kept.iter().enumerate().take(count) {
-                match write_checked(card, job.lba + i as u64, slot) {
+                match write_checked(card, job.lba + i as u64, slot, &mut retries) {
                     Ok(()) => {
                         after.update(*slot);
                         fed(i as u32 + 1);
@@ -289,6 +323,7 @@ pub fn run<H: SdHost>(
     Ok(Outcome {
         digest: hasher.finalize().into(),
         before_after,
+        retries,
     })
 }
 

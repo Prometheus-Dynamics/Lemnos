@@ -1,9 +1,11 @@
 # K230-USB board run: the K230 stage on the FL1 flash wire
 
-Status: **the read-only steps ran on the board (R0 to R3, 2026-11-16 to 2026-11-18); nothing has been written to a
-card.** The report image reads the card in the slot through the stage's own SD host (R3e): CID, capacity, and the
-two boot blocks, whose CRCs match the no-boot image. The FL1 stage's USB device path (blocker B2) and every write
-are untested on board. The runs are in "Board steps", in order; the entries before R3c read their "card did not
+Status: **run on the board, 2026-11-16 to 2026-11-18: the read-only steps (R0 to R3), the bounded write test, and a
+whole image written and verified on the card over the boot ROM's USB path, one load per piece.** The stage's own SD
+host reads and writes the slot's card; the image region's SHA-256, computed on the board, equals the source's with
+its two boot-header sectors held as zero (those two sectors are not written in this session, so the card does not
+boot). The FL1 stage's USB device path (blocker B2) is still untested on board: the bytes went through the ROM's
+load-and-run instead. The runs are in "Board steps", in order; the entries before R3c read their "card did not
 answer" as an empty slot, which R3c showed to be the host's own fault.
 
 ## Hypothesis
@@ -821,6 +823,101 @@ before the run).**
   each. Then one `hash` job over sectors 0..415,744 prints `49a61489…b616`.
 - *Stop:* the first piece that fails, by the tool. The card then holds the image up to that piece and the no-boot
   image's content after it (the two are the same bytes there); it still does not boot.
+
+**FLASH, first run (2026-11-18 16:06 to 16:07): 14 pieces verified, then STOP at piece 15.** Record
+`K230R/bench/FLASH.txt`.
+- Pieces 1 to 14 (sectors 0..20,320): each `piece ok` with the digest of what was sent, the ROM back after each;
+  a 1016-sector `write` piece takes 5.6 to 6.1 s from the load to the ROM answering again.
+- Piece 15 (`write`, sectors 20,320..21,336): `piece FAILED: card error at sector 00004f60`, `the controller
+  reported an error`, `sd error command 00000018`, `sd end INT_STATUS 00608100`: the data CRC and data end-bit
+  errors on CMD24's data, at the piece's first sector. The card drops a block whose CRC fails, so nothing of
+  piece 15 was written. The tool stopped; the progress file says 20,320; the ROM was back as `K230`.
+- *What it is:* one failed data transfer in about 14,000 sector writes at 25 MHz on one data line with no delay
+  tuning. The stage treated any transfer error as final.
+- *Also seen:* the payload's CRC was checked twice (0.78 s each for 508 KiB, unfed), once more than needed; the
+  second check is removed, so the longest unfed stretch is back under one second.
+- *Fix and fail-before:* a sector's write or read is tried up to three times; after an error the controller's
+  command and data lines are reset (`SOFTWARE_RESET` bits 1 and 2, the standard's recovery); every extra try is
+  counted and printed (`piece retries`). A sector that reads back different is still final. The model's card can
+  fail a write's data CRC a set number of times, holding the data line until it is reset. With one try
+  `a_write_whose_data_fails_its_crc_is_sent_again_and_counted` fails (`Card(41, Reply(24, "the controller reported
+  an error"))`); with three it passes, and a sector that fails every try still ends the piece.
+  `K230R/retry-fail-before.log`.
+
+**FLASH, resumed (hypothesis, written before the run).** Image 64,632 bytes, sha256 `02da42a6…`. The same
+command; the tool resumes at sector 20,320 from the progress file. Hypothesis: the remaining pieces end `piece
+ok`; a few report a transfer tried again. Stop: a sector that fails three tries, or reads back different.
+
+**FLASH, resumed (2026-11-18 16:10): 3 more pieces verified (to sector 23,368), then STOP again.** Piece 4 of the
+run (`write`, sectors 23,368..24,384): the first sector failed all three tries; the last try's status is `sd end
+INT_STATUS 00018100`, a command timeout: the card did not answer CMD24. Nothing of the piece was written; the
+progress file says 23,368; the ROM was back.
+- *What it is:* both failures are a piece's first write, after the 0.78 s payload check with the fast clock
+  already running; no sector in the middle of a piece has failed in about 17,000. After the first failed data
+  phase the card was left waiting in its transfer and answered no further data command, so the two extra tries
+  could not work. Why the first write after that pause fails about one piece in eight is not established.
+- *Fix and fail-before:* the recovery now also stops the card's transfer (CMD12; no answer to it is not an
+  error) and polls its status until it is ready, then tries again (`Card::recover`). The model's card waits for
+  the stop after a failed data phase and answers no data command until it comes. With the R-only recovery the
+  retry test fails (`Card(41, Reply(24, …))`); with the stop it passes. `K230R/stop-fail-before.log`.
+
+**FLASH, resumed again (hypothesis, written before the run).** Image 64,712 bytes, sha256 `2da8d976…`. Resumes at
+sector 23,368. Hypothesis: the pieces end `piece ok`, and about one `write` piece in eight reports one transfer
+tried again. Stop: as before.
+
+**FLASH, resumed again (2026-11-18 16:11 to 16:33): done. Every sector 0..415,744 written and read back.**
+Record `K230R/bench/FLASH.txt` (all three runs; every console line stamped), `run-FLASH.out`.
+- This run: sectors 23,368..415,744 in 91 pieces, 35,790,848 bytes from the source and 165,105,664 bytes of
+  zeros, 1344.1 s; `verdict: PASS`.
+- **In all three runs: 108 pieces `piece ok`, each with the SHA-256 of what was sent: 83 `write` pieces carrying
+  43,073,536 bytes from the source and 25 `zero` runs covering 169,787,392 bytes: 212,860,928 bytes, sectors
+  0..415,744, 1458.7 s of tool time.** Sectors 2048 and 3072 were written as zeros (inside their pieces), not as
+  the source has them. The ROM answered `K230` after every piece.
+- *Transfers tried again:* 11 in all, each one a `write` piece's first sector, each followed by a sector that
+  verified (`piece retries 00000001`). No sector failed three tries; none read back different.
+- *Rates seen:* a 1016-sector `write` piece is about 5 s from load to the ROM answering again (0.3 s of load and
+  entry, 0.8 s for the payload's CRC, about 3 ms a sector written and read back, 0.9 s for the return); a
+  16,384-sector `zero` run is about 50 s.
+
+**HASH: the whole image region read back on the board (2026-11-18 16:34 to 16:44): VERIFIED.** One `hash` job
+over sectors 0..415,744 (212,860,928 bytes), 25 MHz, one data line, the watchdog fed after each sector read and
+hashed. The stage printed `piece retries 00000000`, **`piece sha256
+49a61489aa1adbefa6878458b8640c15a9564983557459ad136838530c63b616`**, `piece ok`, `lemnos stage: end`; 628.2 s; the ROM
+back as `K230` (Dev 111). That is the SHA-256 the tool computed from the source with sectors 2048 and 3072 zero,
+and it is the no-boot image's (`card-b/SHA256`). Record `K230R/bench/HASH.txt`.
+- **So the card holds the whole of `k230d-ai-cam-varA.img` (sha256 `033903a1…`) except the 1024 bytes of sectors
+  2048 and 3072, which are zero. It does not boot; the ROM still falls back to USB.**
+- *Everything written to the card in this session:* sectors 0..415,744 (bytes 0 to 212,860,928) once, as above;
+  and the write tests inside sectors 1,048,576..1,048,584, left as zeros. Nothing else, and nothing but this card.
+
+**A: the image's own SPL over ROM USB, the card still no-boot (the coordinator's word given 2026-11-18;
+hypothesis, written before the run).**
+- *What is loaded:* `/mnt/ssd-samsung/gaia/boards/k230d-ai-cam/test-A/k230d-ai-cam-varA.img` (sha256 `033903a1…`),
+  file offset 1,049,108 (sector 2048, after the 528-byte firmware header and the payload's 4-byte version word),
+  216,920 bytes, sha256 `686d659c…5f28`, loaded at `0x80300000` and started there. The first word is `732540f1`
+  (`csrr a0, mhartid`, U-Boot's first instruction). Provenance: the SDK's defconfig links the SPL at
+  `CONFIG_SPL_TEXT_BASE=0x80300000` (`configs/k230d_canmv_defconfig:9`) with its BSS at `0x80380000` (`:42`), and its
+  image code skips a 4-byte version word before the image (`board/canaan/common/k230_img.c:296`). The load ends at
+  `0x80334f58`, inside the ROM's range.
+- *Nothing of ours runs in this step:* no stage, so **no watchdog is armed**. The SPL brings up the DDR and reads
+  U-Boot from the card (sector 4096; its header and payload are intact on the no-boot card).
+- *The console:* `K230R/bench/uboot-console.py` is the only reader and writer of both ttys (raw, no echo). It sends
+  one space when `Hit any key to stop autoboot` appears, then at the `K230# ` prompt the one command `reset`, and
+  nothing else. Every byte received and sent is logged with a stamp.
+- *Hypothesis:* SPL lines appear within a few seconds of the start, then U-Boot's banner and its countdown
+  (`bootdelay=5` is in the image); the key stops it; `reset` takes the SoC reset; the ROM finds a card it does
+  not boot and comes back as `29f1:0230`, by itself.
+- *What a hang looks like, and when it is called one:* no countdown line within 60 s of the start, or no return
+  as `29f1:0230` within 60 s of `reset`; the script's limit is 90 s in all. The board is then off the bus with
+  nothing armed. The coordinator is told at once, nothing else is done to the board, and one press of RST by a
+  person brings the ROM back (the card does not boot).
+- *If the countdown never comes but U-Boot boots on:* it loads the kernel from the card and the board stays
+  wherever that ends; the same hands ask.
+- *Rehearsal (PC):* the load through the tool's dry mode (file, offset, size, digest, address checked against the
+  ROM's range, nothing opened); the console script against a pty stand-in (`fake-uboot.py`) that prints a banner
+  and the countdown, takes the key, gives the prompt and ends on `reset` (the script sent exactly `b' '`,
+  `b'reset\r'`); and the stand-in's failing case, a banner and then silence, which the script ends as `LIMIT`
+  with exit 1. The SPL itself cannot be rehearsed on the PC.
 
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 

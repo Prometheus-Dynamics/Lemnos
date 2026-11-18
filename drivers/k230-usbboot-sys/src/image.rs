@@ -641,9 +641,6 @@ fn piece_job<R: RegAccess>(regs: &mut R) -> Result<(), PieceError> {
     } else {
         &[]
     };
-    // The card, the range and the payload are checked here as well as in the run, so a refusal is
-    // printed before the clock is raised.
-    piece::check(&card, &job, data)?;
     if job.flags & piece::FAST != 0 {
         card.host_mut()
             .data_clock()
@@ -661,6 +658,7 @@ fn piece_job<R: RegAccess>(regs: &mut R) -> Result<(), PieceError> {
             say_hex(regs, "piece at", n);
         }
     })?;
+    say_hex(regs, "piece retries", done.retries);
     say_digest(regs, "piece sha256", &done.digest);
     if let Some((before, after)) = done.before_after {
         say_digest(regs, "piece before", &before);
