@@ -25,6 +25,75 @@ const ENODEV: i32 = libc::ENODEV;
 const ENOENT: i32 = libc::ENOENT;
 const EPERM: i32 = libc::EPERM;
 const EAGAIN: i32 = libc::EAGAIN;
+const ENOTTY: i32 = libc::ENOTTY;
+const EFAULT: i32 = libc::EFAULT;
+
+/// A request number, as `_IOC(dir, type, nr, size)` makes it: `dir` is 1 for a request the kernel
+/// reads, 2 for one it writes back, 3 for both.
+const fn request(dir: u32, kind: u8, nr: u32, size: u32) -> u32 {
+    (dir << 30) | (size << 16) | ((kind as u32) << 8) | nr
+}
+
+/// The errno of a request made with `N` bytes whose first four are `block`.
+fn refused<const N: usize>(fd: &OwnedFd, request: u32, block: u32) -> Option<i32> {
+    let mut arg = [0u8; N];
+    arg[..4].copy_from_slice(&block.to_ne_bytes());
+    guest::ioctl_bytes(fd.as_fd(), request, &mut arg)
+        .err()
+        .as_ref()
+        .and_then(errno)
+}
+
+/// The node's request entry: what it refuses before any block or part of the module is asked, and
+/// the requests a block of another kind refuses.
+fn check_entry(failures: &mut u32, fd: &OwnedFd, block: u32) {
+    // LEMNOS_IOC_INFO is _IOWR('L', 0xd0, 32 bytes).
+    check(
+        failures,
+        refused::<32>(fd, request(3, b'M', 0xd0, 32), block) == Some(ENOTTY),
+        "a request of another type: ENOTTY",
+    );
+    check(
+        failures,
+        refused::<4>(fd, request(1, b'L', 0xd0, 2), block) == Some(ENOTTY),
+        "a request smaller than a block number: ENOTTY",
+    );
+    check(
+        failures,
+        refused::<8192>(fd, request(3, b'L', 0xd0, 8192), block) == Some(ENOTTY),
+        "a request larger than any the node takes: ENOTTY",
+    );
+    check(
+        failures,
+        refused::<8>(fd, request(3, b'L', 0x01, 8), block) == Some(ENOTTY),
+        "a request the node does not know, for a bound block: ENOTTY",
+    );
+    check(
+        failures,
+        refused::<8>(fd, request(3, b'L', 0x01, 8), block.wrapping_add(1000)) == Some(ENODEV),
+        "a request the node does not know, for a block not bound: ENODEV",
+    );
+    let nowhere = guest::ioctl_at(fd.as_fd(), request(3, b'L', 0xd0, 32), 1);
+    check(
+        failures,
+        nowhere.as_ref().err().and_then(errno) == Some(EFAULT),
+        "a request at an address with nothing mapped: EFAULT",
+    );
+    // The requests of the blocks the module drives itself, on a block it does not drive: the PiSP
+    // back end (create, version), the graphics DMA engine, the VIP9000 and register jobs.
+    let kinds = [
+        refused::<80>(fd, request(3, b'L', 0xb0, 80), block),
+        refused::<8>(fd, request(3, b'L', 0xb2, 8), block),
+        refused::<64>(fd, request(3, b'L', 0xe8, 64), block),
+        refused::<64>(fd, request(3, b'L', 0xe0, 64), block),
+        refused::<24>(fd, request(3, b'L', 0xf0, 24), block),
+    ];
+    check(
+        failures,
+        kinds.iter().all(|e| *e == Some(ENOTTY)),
+        &format!("the requests of a kind of block this is not: ENOTTY ({kinds:?})"),
+    );
+}
 
 fn say(line: &str) {
     let mut out = io::stdout().lock();
@@ -105,6 +174,7 @@ fn main() -> ExitCode {
         gone.as_ref().err().and_then(errno) == Some(ENODEV),
         "a block not bound: ENODEV",
     );
+    check_entry(&mut failures, &fd, block);
     let info = module::block_info(fd.as_fd(), block).ok();
     let (abi, flags, regions, irqs, dma_bits) = info.as_ref().map_or((0, 0, 0, 0, 0), |i| {
         (i.abi, i.flags, i.regions, i.irqs, i.dma_bits)
