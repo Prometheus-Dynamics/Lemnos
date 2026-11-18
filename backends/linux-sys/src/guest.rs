@@ -570,6 +570,22 @@ pub fn ioctl_bytes<const N: usize>(
     Ok(())
 }
 
+/// Issues `request` with `addr` as its argument, whatever is there: for the kernel's answer to an
+/// argument it cannot read or write (an address with nothing mapped).
+///
+/// # Errors
+///
+/// The kernel refuses the request; its errno is the error's.
+pub fn ioctl_at(node: BorrowedFd<'_>, request: u32, addr: usize) -> io::Result<()> {
+    // SAFETY: the argument is an integer to this process; only the kernel follows it, with its own
+    // checks, and a request that takes no memory it can reach changes nothing here. `node` is live.
+    let rc = unsafe { libc::ioctl(node.as_raw_fd(), request as _, addr) };
+    if rc < 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
 /// Reads up to `buf.len()` bytes from `fd`, as `read(2)`.
 ///
 /// # Errors
