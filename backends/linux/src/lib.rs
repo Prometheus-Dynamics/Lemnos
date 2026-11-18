@@ -10,6 +10,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod clock;
 mod gadget;
 mod gpio;
 pub mod hotplug;
@@ -251,6 +252,12 @@ fn exists(path: Option<PathBuf>) -> bool {
 }
 
 impl Provider for LinuxBoard {
+    fn host_clock(&mut self, _need: &str) -> Result<lemnos_core::HostClockHandle> {
+        Ok(lemnos_core::HostClockHandle::boxed(Box::new(
+            clock::MonotonicClock::new(),
+        )))
+    }
+
     fn provided(&self, need: &str) -> bool {
         pio_i2c::provided(&self.dev, need)
             || pio_out::provided(&self.dev, need)
