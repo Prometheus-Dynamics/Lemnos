@@ -33,7 +33,9 @@
 //!
 //! The vendor driver never sets a frame's sequence or time. Each published frame carries the
 //! driver's own count of frame ends since `start` (frames dropped included, so a gap shows a
-//! loss), the time the kernel's interrupt handler ran for its frame end (`ktime_get_ns`, the
+//! loss). A recovery restart goes on counting from where it was, so the sequence only goes up: a
+//! consumer sees a gap across a stall, never a reset to zero. Only a fresh `start` begins again.
+//! Each published frame carries the time the kernel's interrupt handler ran for its frame end (`ktime_get_ns`, the
 //! monotonic clock), and identity 0: this receiver takes no jobs. A frame end the kernel's event
 //! queue dropped (it keeps ten) is not counted.
 //!
@@ -289,6 +291,9 @@ pub struct K230Capture {
     chunk: Vec<u8>,
     /// Frame ends the block raised, delivered or not: the frame-stop watch counts these.
     frame_ends: u64,
+    /// Frame ends since the last one delivered that found no stream buffer free: every buffer is
+    /// with the consumer. Health names the count (the producer is waiting on the consumer's holds).
+    waiting_drops: u64,
     /// When a frame end last came while streaming, or the first tick after a start. `None` until then.
     last_frame_ns: Option<u64>,
     /// Set while recovering from a frame stop, so health names it.
@@ -296,6 +301,30 @@ pub struct K230Capture {
     /// The frame-end times the block reports, for the measured frame period.
     clock: FrameClock,
 }
+
+/// Health reasons, one per count of frame ends dropped with no buffer free, from 0 to `WAITING_TOP`.
+/// The last one says that count or more. A reason is a static text, so the count is written into it.
+macro_rules! waiting_reasons {
+    ($($count:literal)* ; $top:literal) => {
+        [
+            $(concat!(
+                "the producer is waiting for buffers the consumer holds: ", $count,
+                " frame ends dropped with no buffer free"
+            ),)*
+            concat!(
+                "the producer is waiting for buffers the consumer holds: ", $top,
+                " or more frame ends dropped with no buffer free"
+            ),
+        ]
+    };
+}
+/// The largest count a waiting reason names, and the reason for it and above.
+const WAITING_TOP: u64 = 64;
+const WAITING: [&str; 65] = waiting_reasons!(
+    0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33
+    34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+    ; 64
+);
 
 /// The shortest no-frame bound: frame stop is judged after this much at least.
 const FRAME_STOP_MIN_NS: u64 = 200_000_000;
@@ -450,6 +479,9 @@ impl Lifecycle for K230Capture {
             State::Recovering { .. } => {
                 Health::Failed("the frame path failed while streaming: restarting it")
             }
+            State::Streaming if self.waiting_drops > 0 => Health::Degraded(
+                WAITING[self.waiting_drops.min(WAITING_TOP) as usize],
+            ),
             _ => Health::Ok,
         }
     }
@@ -544,6 +576,7 @@ impl K230Capture {
             sequence: 0,
             chunk: vec![0; COPY_CHUNK],
             frame_ends: 0,
+            waiting_drops: 0,
             last_frame_ns: None,
             frame_stopped: false,
             clock: FrameClock::default(),
@@ -587,7 +620,6 @@ impl K230Capture {
         }
         self.counters = Counters::default();
         self.ring = Ring::START;
-        self.sequence = 0;
         Ok(())
     }
 
@@ -655,7 +687,12 @@ impl K230Capture {
         };
         let buffer = match self.frames.next_buffer() {
             Ok(Some(buffer)) => buffer,
-            Ok(None) | Err(_) => return Delivery::Dropped,
+            Ok(None) => {
+                // Every stream buffer is with the consumer: the frame has nowhere to go.
+                self.waiting_drops = self.waiting_drops.saturating_add(1);
+                return Delivery::Dropped;
+            }
+            Err(_) => return Delivery::Dropped,
         };
         let frame = StreamFrame {
             buffer,
@@ -696,7 +733,10 @@ impl K230Capture {
             ..frame
         });
         match published {
-            Ok(()) => Delivery::Published,
+            Ok(()) => {
+                self.waiting_drops = 0;
+                Delivery::Published
+            }
             Err(_) => Delivery::Dropped,
         }
     }
@@ -767,6 +807,9 @@ impl CameraReceiver for K230Capture {
         if self.state != State::Stopped {
             return Err(Status::BUSY);
         }
+        // A fresh start numbers its frames from zero again. A recovery restart does not (`begin`).
+        self.sequence = 0;
+        self.waiting_drops = 0;
         self.begin()?;
         self.state = State::Streaming;
         Ok(())

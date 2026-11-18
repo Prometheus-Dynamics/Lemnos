@@ -136,6 +136,27 @@ impl Relay {
         self.lost
     }
 
+    /// Buffers the stream has, as the module was made with them.
+    pub const fn buffers(&self) -> u32 {
+        self.count
+    }
+
+    /// Buffers the driver holds on the stream: its own, to arm or to have in flight. Zero while
+    /// every buffer is with the consumer, held or published and not yet returned: then no frame
+    /// can reach the block, and the wait is the consumer's.
+    pub fn producer_held(&self) -> u32 {
+        let held = self.slots[..self.count as usize]
+            .iter()
+            .filter(|slot| slot.held)
+            .count();
+        u32::try_from(held).unwrap_or(u32::MAX)
+    }
+
+    /// Buffers the consumer holds: every buffer the driver does not.
+    pub fn consumer_held(&self) -> u32 {
+        self.count - self.producer_held()
+    }
+
     fn slot(&mut self, buffer: u32) -> Option<&mut Slot> {
         if buffer < self.count {
             self.slots.get_mut(buffer as usize)
