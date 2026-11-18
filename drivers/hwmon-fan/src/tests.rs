@@ -193,6 +193,27 @@ fn hand_back_puts_back_the_value_then_the_mode_the_take_over_found() {
 }
 
 #[test]
+fn a_rebind_after_a_drop_keeps_the_baseline_the_first_take_over_recorded() {
+    // A fan taken over, then let go of by a drop (its safe state is full duty), then bound again. The second
+    // take-over must not record the drop's full duty as the baseline: a hand-back gives the first one back.
+    let tree = Tree::new("rebind");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    fan.set_duty(900).unwrap();
+    drop(fan);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "255");
+    let mut again = pwm_fan(root);
+    again.set_duty(400).unwrap();
+    again.hand_back().unwrap();
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "the first baseline, not the drop's full duty"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+}
+
+#[test]
 fn a_failed_hand_back_keeps_the_baseline_and_is_tried_again() {
     let tree = Tree::new("handback-retry");
     let root = tree.root();

@@ -248,6 +248,71 @@ fn a_fan_that_refuses_its_writes_is_degraded_and_keeps_its_duty() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Waits up to `secs` for `done`, stepping in real time. Panics on `what` when it does not hold in time.
+fn wait_up_to(secs: u64, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The number of lines in `path`: the refused writes the fake fan logged. Zero while it is not there.
+fn lines(path: &Path) -> usize {
+    fs::read_to_string(path).map_or(0, |text| text.lines().count())
+}
+
+#[test]
+fn a_fan_refusing_writes_past_the_host_limit_is_retried_and_handed_back_to_its_baseline() {
+    // The fan refuses writes for a while: more refusals than the host allows a gone device in a row. The
+    // fan stays bound, the controller keeps retrying at the 8 s cap, and when writes work again the duty
+    // follows the curve. A stop then hands the fan back to the baseline it had before the controller took
+    // it, not to the duty the controller last wrote.
+    let dir = scratch("recover");
+    let zone = dir.join("zone");
+    set_temp(&zone, 45_000);
+    let fan_file = dir.join("fan");
+    let refusal = dir.join("fan.refuse");
+    let refused = dir.join("fan.failures");
+    let mut running = start_board(
+        &board(&zone, "", "", 3000),
+        drivers(),
+        SimBoard::new(),
+        None,
+    );
+    let client = Client::connect(&running.socket, "t").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+
+    fs::write(&refusal, "").unwrap();
+    wait_up_to(45, "six refused writes", || lines(&refused) >= 6);
+    assert_ne!(
+        health_of(&client, "fan"),
+        DeviceHealth::Failed,
+        "a refused write is not a gone device: the fan stays bound"
+    );
+    assert_eq!(health_of(&client, "fan-control"), DeviceHealth::Degraded);
+    assert_eq!(
+        control.state().unwrap().duty,
+        1000,
+        "while writes are refused the duty is the safe state, never zero"
+    );
+
+    fs::remove_file(&refusal).unwrap();
+    wait_up_to(20, "the duty back on the curve", || {
+        control.state().unwrap().duty == 450
+    });
+    assert_eq!(health_of(&client, "fan-control"), DeviceHealth::Ok);
+
+    running.service.take().unwrap().stop();
+    assert_eq!(
+        fs::read_to_string(&fan_file).unwrap().trim(),
+        BASELINE.to_string(),
+        "a stop after refused writes and a recovery hands the fan back to its baseline"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn disabling_the_controller_hands_the_fan_back_to_its_baseline() {
     let dir = scratch("disable");

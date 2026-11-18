@@ -162,6 +162,36 @@ struct Baseline {
     mode: i64,
 }
 
+/// The baselines this process has recorded, by the `pwm` attribute they belong to. A driver instance is
+/// let go of by the host when it faults, and its drop leaves full duty on the fan: a bind after that must
+/// not take that as the baseline. Cleared when the baseline is handed back.
+static RECORDS: std::sync::Mutex<Vec<(PathBuf, Baseline)>> = std::sync::Mutex::new(Vec::new());
+
+fn recorded(pwm: &Path) -> Option<Baseline> {
+    let records = RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records
+        .iter()
+        .find(|(path, _)| path == pwm)
+        .map(|(_, base)| *base)
+}
+
+fn remember(pwm: &Path, base: Baseline) {
+    let mut records = RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records.retain(|(path, _)| path != pwm);
+    records.push((pwm.to_path_buf(), base));
+}
+
+fn forget(pwm: &Path) {
+    let mut records = RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records.retain(|(path, _)| path != pwm);
+}
+
 /// The board file's settings for the `spin` test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TestSettings {
@@ -480,10 +510,20 @@ impl HwmonFan {
             return Err(Status::NOT_PERMITTED);
         }
         if !self.manual {
-            // The take-over records what the fan is at now, before its first write.
-            let mode = sysfs::read_number::<i64>(&self.enable)?;
-            let pwm = sysfs::read_number::<u32>(&self.pwm)?;
-            self.baseline = Some(Baseline { pwm, mode });
+            // The take-over records what the fan is at now, before its first write. A fan this process
+            // took over and let go of by a drop keeps the record of its first take-over: a drop leaves the
+            // safe state (full duty) on the fan, which is not its baseline.
+            let base = match recorded(&self.pwm) {
+                Some(base) => base,
+                None => {
+                    let mode = sysfs::read_number::<i64>(&self.enable)?;
+                    let pwm = sysfs::read_number::<u32>(&self.pwm)?;
+                    let base = Baseline { pwm, mode };
+                    remember(&self.pwm, base);
+                    base
+                }
+            };
+            self.baseline = Some(base);
             sysfs::write_number(&self.enable, MODE_MANUAL)?;
             self.manual = true;
         }
@@ -493,11 +533,14 @@ impl HwmonFan {
     /// Puts the fan back as the take-over found it: `pwm1` in manual mode first, then the mode. The
     /// baseline is kept until both writes have worked, so a failed one is tried again on the next call.
     fn hand_back_fan(&mut self) -> Result<()> {
-        if !self.manual {
-            return Ok(());
-        }
-        let Some(base) = self.baseline else {
-            return self.put_at_safe_state();
+        // A bind after a drop took nothing itself, but the record of the take-over before it says what the
+        // fan goes back to.
+        let Some(base) = self.baseline.or_else(|| recorded(&self.pwm)) else {
+            return if self.manual {
+                self.put_at_safe_state()
+            } else {
+                Ok(())
+            };
         };
         sysfs::write_number(&self.pwm, base.pwm)?;
         if base.mode != i64::from(MODE_MANUAL) {
@@ -505,6 +548,7 @@ impl HwmonFan {
         }
         self.manual = false;
         self.baseline = None;
+        forget(&self.pwm);
         Ok(())
     }
 

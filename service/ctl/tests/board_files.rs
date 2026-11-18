@@ -140,7 +140,17 @@ const TABLE: &[Row] = &[
         daemon: Daemon::Pass,
     },
     Row {
+        file: "testing/fan-control/board-real.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
         file: "testing/fan-control/board.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
+        file: "testing/fan-control/sim-board-real.toml",
         validate: Validate::Pass,
         daemon: Daemon::Pass,
     },

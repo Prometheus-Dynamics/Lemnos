@@ -280,11 +280,49 @@ fn a_failed_write_retries_with_a_backoff_capped_at_8_seconds() {
 }
 
 #[test]
-fn a_failed_write_reports_zero_duty_while_the_fan_is_released() {
+fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
+    // Sim time, one step a second for two minutes. Writes are refused until 120 s. Each refusal asks
+    // for the safe state (full duty), counts one more attempt, and waits 1, 2, 4 and then 8 s, which
+    // is the cap: the attempts go on at 8 s, they do not stop.
     let mut c = one(tuned());
-    c.step(0);
-    c.write_failed(0);
-    assert_eq!(c.state().duty, 0);
+    let mut attempts = Vec::new();
+    let mut failing = false;
+    for t in 0..=130u64 {
+        let now = t * S;
+        c.observe(0, Some(40_000), now);
+        if c.step(now).is_some() {
+            if t < 120 {
+                attempts.push(t);
+                c.write_failed(now);
+                failing = true;
+                assert_eq!(c.state().duty, FULL, "t={t}: the safe state, not zero");
+                assert_eq!(c.health(), Health::Degraded(WRITE_FAILED));
+                assert_eq!(c.retry().map(|r| r.0), Some(attempts.len() as u32));
+            } else {
+                c.wrote();
+            }
+        }
+        if failing {
+            assert_ne!(
+                c.state().duty,
+                0,
+                "t={t}: duty never settles at zero while writes are refused"
+            );
+        }
+    }
+    assert_eq!(
+        attempts,
+        [
+            0, 1, 3, 7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95, 103, 111, 119
+        ],
+        "1, 2, 4 and 8 s, then 8 s for as long as the writes are refused"
+    );
+    assert_eq!(
+        c.health(),
+        Health::Ok,
+        "the write that works at 127 s clears the fault"
+    );
+    assert_eq!(c.retry(), None);
 }
 
 #[test]

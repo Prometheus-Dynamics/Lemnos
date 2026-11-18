@@ -547,6 +547,34 @@ const FAN_RELEASE: MethodId = MethodId {
     method: 4,
 };
 
+/// The baselines this process has recorded, by the file that keeps each fan's duty.
+static BASELINES: std::sync::Mutex<Vec<(PathBuf, u16)>> = std::sync::Mutex::new(Vec::new());
+
+fn recorded_baseline(path: &PathBuf) -> Option<u16> {
+    let records = BASELINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records
+        .iter()
+        .find(|(p, _)| p == path)
+        .map(|(_, base)| *base)
+}
+
+fn remember_baseline(path: &PathBuf, base: u16) {
+    let mut records = BASELINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records.retain(|(p, _)| p != path);
+    records.push((path.clone(), base));
+}
+
+fn forget_baseline(path: &PathBuf) {
+    let mut records = BASELINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    records.retain(|(p, _)| p != path);
+}
+
 /// A fan on `fan/1` that takes a duty per mille and reports it back, the way `pwm-channel-fan`
 /// and `hwmon-fan` do. It starts at its configured `duty`, the duty the fan was at before any driver
 /// took it (the baseline of a real hwmon fan, such as pwm1 179 on the B14 board, which is 702 per
@@ -554,8 +582,10 @@ const FAN_RELEASE: MethodId = MethodId {
 /// full duty, its safe state, as hwmon's and pwm-channel-fan's do; a hand-back puts back the baseline.
 /// `file`, when given, keeps the duty in that file as decimal per mille (as a sysfs attribute keeps
 /// its value), so a test can read it after the daemon has stopped. A fan that is not taken at drop
-/// goes to full duty, as hwmon does. `fail = true` refuses every write with `IO`, as a hwmon attribute
-/// refuses one when the kernel says no, and the duty stays where it was. For the B14 fan-control
+/// goes to full duty, as hwmon does. A write is refused with `AGAIN` (a refusal, not a gone device: the host
+/// counts `IO` five times in a row as gone, and a hwmon attribute's refused write is the same), and the duty
+/// stays where it was. `fail = true` refuses every write; a file named `<file>.refuse` makes the fan refuse
+/// while it is there, so a test can refuse and then let the writes work again. For the B14 fan-control
 /// rehearsal (`testing/fan-control`) and its daemon tests.
 #[driver("fake-fan", provides = [Fan])]
 pub struct FakeFan {
@@ -571,10 +601,36 @@ impl FakeFan {
     /// leaves the duty where it was.
     fn put(&mut self, per_mille: u16) -> Result<()> {
         if let Some(path) = &self.file {
-            std::fs::write(path, format!("{per_mille}\n")).map_err(|_| Status::IO)?;
+            std::fs::write(path, format!("{per_mille}\n")).map_err(|_| Status::AGAIN)?;
         }
         self.duty = per_mille;
         Ok(())
+    }
+
+    /// The take-over: the first write records the baseline. A fan this process took over before, and let go of
+    /// by a drop (which leaves full duty on it), keeps the record of that first take-over, as hwmon does.
+    fn take_over(&mut self) {
+        if self.baseline.is_some() {
+            return;
+        }
+        let base = match &self.file {
+            Some(path) => recorded_baseline(path).unwrap_or(self.duty),
+            None => self.duty,
+        };
+        self.baseline = Some(base);
+        if let Some(path) = &self.file {
+            remember_baseline(path, base);
+        }
+    }
+
+    /// Whether this fan refuses writes now: `fail` says so for good, and `<file>.refuse` says so while it
+    /// is there.
+    fn refusing(&self) -> bool {
+        self.fail
+            || self
+                .file
+                .as_ref()
+                .is_some_and(|path| PathBuf::from(format!("{}.refuse", path.display())).exists())
     }
 }
 
@@ -586,7 +642,11 @@ impl FakeFan {
         use std::io::Write;
         let Some(path) = &self.file else { return };
         let log = format!("{}.failures", path.display());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
             let ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
@@ -656,10 +716,11 @@ impl Fan for FakeFan {
         if per_mille > FAN_MAX {
             return Err(Status::INVALID_ARGUMENT);
         }
-        if self.fail {
-            return Err(Status::IO);
+        if self.refusing() {
+            self.log_refused();
+            return Err(Status::AGAIN);
         }
-        self.baseline.get_or_insert(self.duty);
+        self.take_over();
         let written = self.put(per_mille);
         if written.is_err() {
             self.log_refused();
@@ -677,8 +738,8 @@ impl Fan for FakeFan {
     }
 
     fn release(&mut self) -> Result<()> {
-        if self.fail {
-            return Err(Status::IO);
+        if self.refusing() {
+            return Err(Status::AGAIN);
         }
         if self.baseline.is_none() {
             return Ok(());
@@ -687,15 +748,20 @@ impl Fan for FakeFan {
     }
 
     fn hand_back(&mut self) -> Result<()> {
-        if self.fail {
-            return Err(Status::IO);
+        if self.refusing() {
+            return Err(Status::AGAIN);
         }
-        // Nothing taken, nothing to put back. The baseline is forgotten once it is back.
-        let Some(baseline) = self.baseline else {
+        // Nothing taken by this instance, nothing to put back, unless an earlier take-over recorded one: a bind
+        // after a drop says what the fan goes back to. The baseline is forgotten once it is back.
+        let file_base = self.file.as_ref().and_then(recorded_baseline);
+        let Some(baseline) = self.baseline.or(file_base) else {
             return Ok(());
         };
         self.put(baseline)?;
         self.baseline = None;
+        if let Some(path) = &self.file {
+            forget_baseline(path);
+        }
         Ok(())
     }
 }

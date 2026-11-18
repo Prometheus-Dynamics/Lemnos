@@ -98,8 +98,21 @@ pub fn write_number(path: &Path, value: impl fmt::Display) -> Result<()> {
         .write(true)
         .truncate(true)
         .open(path)
-        .map_err(|e| io_status(&e))?;
-    io::Write::write_all(&mut file, &stack.buf[..stack.len]).map_err(|e| io_status(&e))
+        .map_err(|e| refusal(io_status(&e)))?;
+    io::Write::write_all(&mut file, &stack.buf[..stack.len]).map_err(|e| refusal(io_status(&e)))
+}
+
+/// A write the kernel refuses (its status is `IO`) is a refusal, not a gone device. The host counts
+/// `IO` five times in a row as a device that is gone, and then binds it again: that drops the
+/// driver's record of the take-over, and the next take-over would record the controller's last duty
+/// as the baseline. A refused write is `AGAIN` instead: the fan is there, it said no, and the write is
+/// tried again under the failure rule.
+fn refusal(status: Status) -> Status {
+    if status == Status::IO {
+        Status::AGAIN
+    } else {
+        status
+    }
 }
 
 /// The entries of a directory, sorted. A missing directory has none.
