@@ -43,6 +43,10 @@ mod regjob_isp;
 mod pio;
 #[path = "rs/stream.rs"]
 mod stream;
+#[path = "rs/stream_ring.rs"]
+mod stream_ring;
+#[path = "rs/stream_frame.rs"]
+mod stream_frame;
 #[path = "rs/gsdma.rs"]
 mod gsdma;
 #[path = "rs/vip.rs"]

@@ -17,5 +17,8 @@
 
 #[allow(unused_imports)]
 use kernel::{bindings::*, ffi};
+// The stream's private layouts name these; they are the Rust half's own (rs/stream.rs).
+#[allow(unused_imports)]
+use crate::stream::{Job as lem_job, JobRange as lem_job_range, Producer as lem_stream_producer};
 
 include!(env!("LEMNOS_BINDINGS"));
