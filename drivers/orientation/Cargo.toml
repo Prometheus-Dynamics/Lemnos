@@ -15,5 +15,8 @@ lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
 lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
 lemnos-contract-orientation = { path = "../../contracts/orientation" }
 
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+
 [package.metadata.lemnos]
 driver = "Orientation"

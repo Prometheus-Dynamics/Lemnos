@@ -3,13 +3,45 @@
 //!
 //! # Time
 //!
-//! A driver has no clock here, so the filter counts time itself: each `read`
-//! is one sample, taken `1 / sample_rate_hz` after the one before it. The
-//! caller must read at that rate. A caller that reads faster or slower than
-//! the configured rate gets the wrong integration (gyro angles scale with the
-//! ratio of the two rates), so `sample_rate_hz` is part of the board's
-//! configuration, not a hint. A read that fails does not advance the count, so
-//! a missing input leaves no gap in the filter's time.
+//! The filter's time is the host's clock, not the caller's pace. A `read` takes
+//! one sample of each input, reads the host clock once they are in hand, and
+//! advances the filter by the time since its last successful sample. So the
+//! output follows the motion, not the read pattern: the same turn read at 50 Hz,
+//! at 200 Hz or at irregular intervals gives the same attitude. Each step is the
+//! difference of two clock readings, so the steps add up to the elapsed time
+//! whatever their lengths, and a read's own timing jitter does not bias an angle.
+//!
+//! The cases a clock can't settle are decided here:
+//!
+//! - **The first read.** The first usable accelerometer sample sets the attitude
+//!   from gravity (and, in 9-axis, the heading from the magnetometer). No step
+//!   exists yet, so nothing is integrated: the first read shows the tilt the
+//!   sensors show, whatever the clock read before it.
+//! - **A step of up to 0.5 s** is integrated as measured. The gyroscope's rate is
+//!   known only at a read, so a step integrates that rate over its whole length.
+//!   The integrator's error on a step is about (ω·dt)²/12 of the step: 2% at
+//!   1 rad/s over 0.5 s, and far less over the few milliseconds of a normal
+//!   interval. The bound is where a step is still short enough for that.
+//! - **A gap over 0.5 s** holds the attitude: the read that ends the gap does not
+//!   move it, and nothing is integrated across the gap. The rate over a span that
+//!   long is unknown, and a stall can be seconds, so no rate is extrapolated. The
+//!   reads after it integrate normally, and the sensors pull the attitude back:
+//!   the tilt to the accelerometer, the heading to the magnetometer. The output
+//!   does not jump at the gap, but a turn made during it is lost until then. At
+//!   the default gains a 0.4 rad tilt error falls to 0.004 rad in 3 s, and then
+//!   the integral term (`ki`) overshoots by about 0.015 rad, a tail that is still
+//!   about 0.01 rad at 15 s. In six-axis mode yaw has no reference, so the part of
+//!   a lost turn that is yaw stays lost. A client that reads slower than 2 Hz is
+//!   in this case on every read.
+//! - **A failed read** takes no sample. Its time is part of the next step, so an
+//!   outage under 0.5 s is integrated as one step, and a longer one is a gap.
+//! - **No clock.** The clock is a required need. A backend with no host clock
+//!   refuses the bind, and the refusal names the `clock` need. A board file never
+//!   names it.
+//!
+//! The sensors' own sample stamps are not used: `accel` and `gyro` are read by
+//! single `read` calls, which carry no stamp, so the read's host time is the time
+//! of each sample.
 //!
 //! # Calibration
 //!
@@ -20,7 +52,7 @@
 //!
 //! | Key | Default | Meaning |
 //! |---|---|---|
-//! | `sample_rate_hz` | 100 | Reads per second the caller makes (10 to 1000). |
+//! | `sample_rate_hz` | not used | Checked (10 to 1000) and then ignored: the clock sets the time, not the rate. Kept so existing board files still bind. |
 //! | `mode` | by `uses` | `"9axis"` when a magnetometer is wired in, else `"6axis"`. `"9axis"` refuses to bind without one, and `"6axis"` ignores one. |
 //! | `algorithm` | `"mahony"` | or `"madgwick"`. |
 //! | `kp`, `ki` | 1.0, 0.05 | Mahony gains. |
@@ -53,8 +85,8 @@ use lemnos_contract_gyroscope::Gyroscope;
 use lemnos_contract_magnetometer::Magnetometer;
 use lemnos_contract_orientation::Orientation as OrientationContract;
 use lemnos_core::{
-    Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId, Result,
-    Status, Unit, Vector3, driver,
+    Config, ConfigError, Description, Dev, Health, HostClockHandle, Item, Key, Kind, Lifecycle,
+    MethodId, Result, Status, Unit, Vector3, driver,
 };
 
 const READ: MethodId = MethodId {
@@ -62,12 +94,9 @@ const READ: MethodId = MethodId {
     method: 1,
 };
 
-/// Reads per second when `sample_rate_hz` is not set.
-const DEFAULT_SAMPLE_HZ: f64 = 100.0;
-/// The slowest rate: the filter clamps each step to 0.1 s, so a slower period
-/// would integrate too little.
+/// The range `sample_rate_hz` is checked against. The setting no longer sets the time step, so
+/// the range only refuses nonsense values in existing board files.
 const SLOWEST_SAMPLE_HZ: f64 = 10.0;
-/// The fastest rate, one sample per millisecond.
 const FASTEST_SAMPLE_HZ: f64 = 1000.0;
 /// Degrees to radians.
 const DEG: f32 = core::f32::consts::PI / 180.0;
@@ -81,11 +110,12 @@ pub struct Orientation {
     gyro: Dev<dyn Gyroscope>,
     #[needs(optional)]
     mag: Option<Dev<dyn Magnetometer>>,
+    /// The host clock the time between reads is measured on.
+    #[needs]
+    clock: HostClockHandle,
     filter: Filter,
-    /// The time between two reads, microseconds.
-    period_us: u64,
-    /// The filter's time of the last successful read, microseconds.
-    now_us: u64,
+    /// Whether a read has reached the sensors (so the device is not waiting for its first read).
+    sampled: bool,
     /// Whether the magnetometer is read and used.
     nine_axis: bool,
 }
@@ -129,7 +159,6 @@ impl Lifecycle for Orientation {
     }
 
     fn start(needs: OrientationNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let hz = sample_rate(cfg)?;
         let nine_axis = match setting_text(cfg, "mode")? {
             None => needs.mag.is_some(),
             Some("6axis") => false,
@@ -146,9 +175,9 @@ impl Lifecycle for Orientation {
             accel: needs.accel,
             gyro: needs.gyro,
             mag: needs.mag,
+            clock: needs.clock,
             filter,
-            period_us: (1_000_000.0 / hz + 0.5) as u64,
-            now_us: 0,
+            sampled: false,
             nine_axis,
         })
     }
@@ -176,8 +205,8 @@ impl Lifecycle for Orientation {
             return Health::Degraded("six-axis: yaw is relative");
         }
         let out = self.filter.output();
-        // `now_us` moves on each successful read, so a device nobody has read yet isn't degraded.
-        if self.now_us > 0 && !out.valid {
+        // A device nobody has read yet isn't degraded.
+        if self.sampled && !out.valid {
             return Health::Degraded("waiting for a usable accelerometer sample");
         }
         if out.magnetic_disturbance {
@@ -198,7 +227,8 @@ impl OrientationContract for Orientation {
             _ => None,
         };
 
-        let t = self.now_us.saturating_add(self.period_us);
+        // The sample's time: the host clock, read once the inputs are in hand. Microseconds.
+        let t = self.clock.now_ns() / 1_000;
         let accel = [accel.x, accel.y, accel.z];
         let gyro = [gyro.x, gyro.y, gyro.z];
         if let Some(field) = field {
@@ -208,7 +238,7 @@ impl OrientationContract for Orientation {
             self.filter.update_mag(t, field, true);
         }
         self.filter.update_imu(t, gyro, accel);
-        self.now_us = t;
+        self.sampled = true;
 
         let out = self.filter.output();
         if !out.valid {
@@ -220,15 +250,6 @@ impl OrientationContract for Orientation {
             y: out.pitch,
             z: out.yaw,
         })
-    }
-}
-
-/// The sample rate from `sample_rate_hz`, or the default when it is not set. Its range is
-/// checked by `check_config`.
-fn sample_rate(cfg: &Config<'_>) -> Result<f64> {
-    match cfg.get("sample_rate_hz") {
-        None => Ok(DEFAULT_SAMPLE_HZ),
-        Some(_) => cfg.float("sample_rate_hz").ok_or(Status::INVALID_ARGUMENT),
     }
 }
 

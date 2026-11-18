@@ -109,10 +109,9 @@ pub struct Output {
 
 /// A magnetometer sample is fresh for this long (µs).
 const MAG_FRESH_US: u64 = 500_000;
-/// A longer gap between IMU samples re-anchors the clock (µs).
+/// The longest step integrated as one step (µs). A longer gap between IMU samples holds the attitude
+/// for that sample and integrates nothing across it: its rate is unknown.
 const GAP_US: u64 = 500_000;
-/// dt is clamped to this (s).
-const DT_MAX: f32 = 0.1;
 /// Integral term limit (rad/s).
 const INTEGRAL_MAX: f32 = 0.5;
 /// Accelerometer trust: full within this relative error of gravity...
@@ -217,11 +216,11 @@ impl Orientation {
         let dt_us = t_us.saturating_sub(self.last_t);
         self.last_t = t_us;
         if dt_us == 0 || dt_us > GAP_US {
-            // A gap: keep the attitude and do not integrate across it.
+            // No time since the last sample, or a gap: keep the attitude and do not integrate across it.
             self.refresh_output();
             return;
         }
-        let dt = math::min(dt_us as f32 * 1e-6, DT_MAX);
+        let dt = dt_us as f32 * 1e-6;
 
         let mag_fresh = self.mag_fresh();
         let mag = if self.config.mode == Mode::NineAxis && mag_fresh && self.mag_ok {
@@ -339,7 +338,10 @@ impl Orientation {
     }
 
     fn update_mahony(&mut self, dt: f32, gyro: Vec3, mag: Option<Vec3>) {
-        let q = self.q;
+        // The correction compares the sensors at this sample with the attitude at this sample, so the
+        // gyroscope's step to it is taken first. Comparing with the attitude one step back leaves the
+        // estimate one step ahead of a steady turn, by gyro * dt: a rate-dependent error.
+        let q = integrate(self.q, gyro, dt);
         let v = q.conj().rotate([0.0, 0.0, 1.0]);
         let mut e = [0.0_f32; 3];
         if self.accel_w > 0.0 {
@@ -356,12 +358,15 @@ impl Orientation {
             }
         }
         let omega = math::add(math::add(gyro, scale(e, cfg.kp)), self.integral);
-        self.q = integrate(q, omega, dt);
+        self.q = integrate(self.q, omega, dt);
     }
 
     fn update_madgwick(&mut self, dt: f32, gyro: Vec3, mag: Option<Vec3>) {
         let q = self.q;
-        let (q0, q1, q2, q3) = (q.w, q.x, q.y, q.z);
+        // The gradient is taken at the attitude after this sample's gyroscope step, for the same reason
+        // as Mahony's: at the attitude one step back it would hold the estimate one step ahead.
+        let p = integrate(q, gyro, dt);
+        let (q0, q1, q2, q3) = (p.w, p.x, p.y, p.z);
         let mut f = [0.0_f32; 6];
         let mut j = [[0.0_f32; 4]; 6];
         let mut rows = 3;
@@ -378,10 +383,10 @@ impl Orientation {
 
         if let Some(m) = mag {
             rows = 6;
-            let h = q.rotate(m);
+            let h = p.rotate(m);
             let bx = sqrt(h[0] * h[0] + h[1] * h[1]);
             let bz = h[2];
-            let w = Self::mag_reference(q, m);
+            let w = Self::mag_reference(p, m);
             f[3] = w[0] - m[0];
             f[4] = w[1] - m[1];
             f[5] = w[2] - m[2];
