@@ -13,4 +13,6 @@ lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-contract-accelerometer = { path = "../../../contracts/accelerometer" }
 lemnos-contract-gyroscope = { path = "../../../contracts/gyroscope" }
 lemnos-contract-magnetometer = { path = "../../../contracts/magnetometer" }
+lemnos-contract-fan = { path = "../../../contracts/fan" }
+lemnos-contract-temperature = { path = "../../../contracts/temperature" }
 lemnos-contract-self-test = { path = "../../../contracts/self-test" }

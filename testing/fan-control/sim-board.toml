@@ -1,0 +1,27 @@
+# The B14 fan-control rehearsal's board for `lemnosd --sim`. The fakes stand in for the board's fan and
+# thermal zone (testing/fan-control/board.toml): the same contracts, the same device ids, the same
+# controller wiring, so the same checks run on both. testing/fan-control/b14.sh replaces @ZONE@ with the
+# zone's directory. The zone's temperature is the `temp` file in it, in millidegrees Celsius.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "b14-sim"
+
+# A fan that takes a duty per mille and reports it back. It starts at full duty, its safe state.
+[[devices]]
+id = "fan"
+driver = "fake-fan"
+config = { duty = 1000 }
+
+# A thermal zone read from the `temp` file in @ZONE@. A missing file fails its reads, as a missing zone does.
+[[devices]]
+id = "cpu-thermal"
+driver = "fake-thermal-zone"
+config = { path = "@ZONE@" }
+
+[[devices]]
+id = "fan-control"
+driver = "fan-control"
+uses = { fan = "fan", t0 = "cpu-thermal" }
+config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }

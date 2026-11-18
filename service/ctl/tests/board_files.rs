@@ -139,6 +139,16 @@ const TABLE: &[Row] = &[
         validate: Validate::Pass,
         daemon: Daemon::Pass,
     },
+    Row {
+        file: "testing/fan-control/board.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
+        file: "testing/fan-control/sim-board.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
 ];
 
 fn repo() -> PathBuf {

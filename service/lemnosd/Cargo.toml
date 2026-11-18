@@ -85,6 +85,9 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 
 [dev-dependencies]
 lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
+lemnos-contract-fan = { path = "../../contracts/fan" }
+lemnos-contract-fan-control = { path = "../../contracts/fan-control" }
+lemnos-contract-temperature = { path = "../../contracts/temperature" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }

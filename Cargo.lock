@@ -2442,9 +2442,11 @@ name = "lemnos-fake-devices"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-accelerometer",
+ "lemnos-contract-fan",
  "lemnos-contract-gyroscope",
  "lemnos-contract-magnetometer",
  "lemnos-contract-self-test",
+ "lemnos-contract-temperature",
  "lemnos-core",
 ]
 
@@ -2963,6 +2965,9 @@ version = "2.0.1-dev"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "lemnos-client",
+ "lemnos-contract-fan",
+ "lemnos-contract-fan-control",
+ "lemnos-contract-temperature",
  "lemnos-contract-usb-function",
  "lemnos-core",
  "lemnos-devtree",
