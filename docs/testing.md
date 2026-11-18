@@ -165,6 +165,18 @@ its image. `CC` names a compiler that can link static binaries. Left out, it is 
 the static C library installed; `zig cc` with a musl target needs nothing more. The harness also
 needs QEMU, `cpio`, and the Rust target `x86_64-unknown-linux-musl`.
 
+The guest's first process (`testing/crates/init`) runs the checks as a list of stanzas, each one
+load of the module with the checks that need it loaded that way, and prints how long each took.
+With no argument `run.sh` boots one guest that runs them all in order. That is the whole run, the
+one that says a branch is good. Two arguments are for the work before it:
+
+- `testing/qemu/run.sh --only pisp-fe,nand` boots one guest that runs the named stanzas, and the
+  ones they start from. It is for a failing check looked at alone, and for showing that a check
+  fails without the change it is about. Its last line says it is not the whole run.
+- `testing/qemu/run.sh --split orion-link stream gadget,nand` deals the whole list out over guests
+  that boot side by side: one per argument, and one more with every stanza no argument names. Every
+  stanza runs. What it does not show is the stanzas one after another in one boot.
+
 CI runs it against a kernel built with lock and memory checking on. That kernel is built by:
 
 ```sh needs:a-download-and-a-full-kernel-build

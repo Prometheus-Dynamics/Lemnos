@@ -3,6 +3,10 @@
 //! path with its arguments, prints one summary line and powers off. Static musl, so the image needs
 //! nothing else.
 //!
+//! The run is a list of stanzas (`STANZAS`), each one module load with its checks. A boot runs them
+//! all, in order. `lemnos-qemu.only=<names>` or `lemnos-qemu.except=<names>` on the kernel command
+//! line runs some of them (see `Stanza`); run.sh gives those words only when asked to.
+//!
 //! Port of `testing/qemu/init.c` (CZ-GUEST-3). Every step runs in the C file's order, every check
 //! keeps its text, and the lines run.sh greps for are printed as before: `lemnos-qemu: start`, the
 //! `ok`/`FAIL` lines, and `lemnos-qemu: passed|FAILED`. Modules load with `finit_module(2)` from the
@@ -13,6 +17,8 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, chown};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use lemnos_linux_sys::guest;
 
@@ -335,35 +341,27 @@ fn backend_check(sim: &GpioSim, route: &str, spi_route: &str) -> bool {
     ]) == 0
 }
 
-fn main() -> ExitCode {
-    let _ = guest::mount("devtmpfs", "/dev", "devtmpfs");
-    let _ = guest::mount("sysfs", "/sys", "sysfs");
-    let _ = guest::mount("proc", "/proc", "proc");
-    let _ = guest::mount("debugfs", "/sys/kernel/debug", "debugfs");
-    // /work holds the images the checks write (nand-check's 7.5 MB UBI image). The root is a tmpfs
-    // that the initramfs fills (about 188 MB of check binaries in a 191 MB root), so it has no room
-    // for them: give /work its own tmpfs, sized for the largest image. (From I2b2-6, carried here.)
-    let _ = std::fs::create_dir("/work");
-    match guest::mount_data("tmpfs", "/work", "tmpfs", "size=64M") {
-        Err(e) if e.raw_os_error() != Some(libc::EBUSY) => {
-            say(&format!("lemnos-qemu: /work tmpfs not mounted: {e}"));
-        }
-        _ => {}
+/// What the gadget and link checks start from: configfs, the FunctionFS mount point, and the module's
+/// nodes given to the daemon's group. Done once, by whichever of the two runs first.
+fn usb_ready(c: &mut Checks) {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
     }
-    let _ = guest::dup_console_stdio();
-    say("lemnos-qemu: start");
+    let _ = mkdir("/sys/kernel/config");
+    if let Err(e) = guest::mount("configfs", "/sys/kernel/config", "configfs")
+        && errno_of(&e) != EBUSY
+    {
+        c.check(false, "configfs mounted");
+    }
+    let _ = mkdir("/dev/usb-ffs");
+    give_module_nodes_to_daemon_group(c);
+    give_to_daemon_group(c, cma_heap());
+}
 
-    let mut c = Checks::default();
-    let mut sim = GpioSim::default();
-
-    c.check(
-        load("/rp1_pio_mock.ko", "") == 0,
-        "stand-in PIO driver loaded",
-    );
-    c.check(
-        load("/lemnos_test_block.ko", "csi2_phys=0x20000000") == 0,
-        "test block module loaded",
-    );
+/// The module's first load: the control node, the Rust skeleton, the refusals, the block check, and
+/// the stream check with no test source.
+fn block(c: &mut Checks) {
     c.check(
         load("/lemnos.ko", "owned=lemnos,test-block,lemnos,test-spi") == 0,
         "module loaded",
@@ -404,7 +402,12 @@ fn main() -> ExitCode {
         "overrides cleared",
     );
     c.check(unload("lemnos") == 0, "module unloaded");
+}
 
+/// The interrupt, unbind and claim checks, then the buses, GPIO, power and PIO, and the real backend
+/// with and without the module.
+fn buses(c: &mut Checks) {
+    let mut sim = GpioSim::default();
     c.check(
         load(
             "/lemnos.ko",
@@ -510,7 +513,10 @@ fn main() -> ExitCode {
     gpio_sim_down();
     c.check(unload("lemnos_test_bus") == 0, "test buses unloaded");
     c.check(unload("i2c_stub") == 0, "i2c-stub unloaded");
+}
 
+/// The shm ring, holds and bell checks and the stream check, on the module's test stream source.
+fn stream(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -576,7 +582,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded with every stream released",
     );
+}
 
+/// The receiver check.
+fn csi2(c: &mut Checks) {
     c.check(
         load("/lemnos.ko", "owned=lemnos,test-block,lemnos,test-csi2") == 0,
         "module loaded owning the receiver",
@@ -603,9 +612,11 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded after the receiver checks",
     );
+}
 
-    // The frame path end to end: the receiver's frames through the module's stream, the rp1-csi2
-    // driver, the host's endpoint and the shm ring, read by a client through lemnosd.
+/// The frame path end to end: the receiver's frames through the module's stream, the rp1-csi2
+/// driver, the host's endpoint and the shm ring, read by a client through lemnosd.
+fn compose(c: &mut Checks) {
     c.check(
         load("/lemnos.ko", "owned=lemnos,test-block,lemnos,test-csi2") == 0,
         "module loaded for the composition check",
@@ -635,7 +646,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded after the composition check",
     );
+}
 
+/// The receiver's stuck-DMA check.
+fn csi2_wedge(c: &mut Checks) {
     c.check(
         load("/lemnos.ko", "owned=lemnos,test-block,lemnos,test-csi2") == 0,
         "module loaded for the stuck-DMA check",
@@ -656,7 +670,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded with a wedged stream pinned",
     );
+}
 
+/// The receiver's stuck-DMA check on its own buffers.
+fn csi2_wedge_own(c: &mut Checks) {
     c.check(
         load("/lemnos.ko", "owned=lemnos,test-block,lemnos,test-csi2") == 0,
         "module loaded for the stuck-DMA check on own buffers",
@@ -677,7 +694,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded with a wedged stream's own buffers pinned",
     );
+}
 
+/// The front end check.
+fn pisp_fe(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -706,7 +726,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded after the front end checks",
     );
+}
 
+/// The front end's stuck-DMA check.
+fn pisp_fe_wedge(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -730,17 +753,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded with a wedged front end stream pinned",
     );
-    c.check(
-        unload("lemnos_test_block") == 0,
-        "test block module unloaded",
-    );
+}
 
-    c.check(
-        load("/lemnos_test_block.ko", "") == 0,
-        "test block module loaded for the PiSP back end",
-    );
-
-    // The graphics DMA engine on its fake engine.
+/// The graphics DMA engine on its fake engine.
+fn gsdma(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -794,8 +810,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded after the reach check",
     );
+}
 
-    // The VIP9000 on its fake block: a chip pointed at its tables by register.
+/// The VIP9000 on its fake block: a chip pointed at its tables by register.
+fn vip(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -859,8 +877,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded after the VIP9000 checks",
     );
+}
 
-    // The PiSP back end on its fake block.
+/// The PiSP back end on its fake block.
+fn pisp_be(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -908,8 +928,10 @@ fn main() -> ExitCode {
         unload("lemnos") == 0,
         "module unloaded with the back end idle",
     );
+}
 
-    // A block whose version register is a foreign version is refused at probe: it does not bind.
+/// A block whose version register is a foreign version is refused at probe: it does not bind.
+fn pisp_be_foreign(c: &mut Checks) {
     c.check(
         unload("lemnos_test_block") == 0,
         "test block module unloaded before the foreign version",
@@ -945,8 +967,10 @@ fn main() -> ExitCode {
         load("/lemnos_test_block.ko", "") == 0,
         "test block module reloaded with the family's version",
     );
+}
 
-    // Register jobs on a fake video engine and a fake ISP. The first check unbinds its block.
+/// Register jobs on a fake video engine and a fake ISP. The first check unbinds its block.
+fn regjob(c: &mut Checks) {
     c.check(
         load("/lemnos_test_regjob.ko", "") == 0,
         "fake register-job blocks loaded",
@@ -988,7 +1012,10 @@ fn main() -> ExitCode {
         unload("lemnos_test_regjob") == 0,
         "fake register-job blocks unloaded",
     );
+}
 
+/// The wedge checks. They leave the module loaded: a wedged block keeps it.
+fn wedge(c: &mut Checks) {
     c.check(
         load(
             "/lemnos.ko",
@@ -1051,33 +1078,285 @@ fn main() -> ExitCode {
     );
     c.check(put(UNBIND, VIP) == 0, "wedged VIP9000 unbound");
     // The stand-in PIO driver stays: the wedged module above depends on it.
+}
 
-    // The USB gadget end to end: the daemon's root phase, FunctionFS on dummy_hcd, and a host.
-    let _ = mkdir("/sys/kernel/config");
-    if let Err(e) = guest::mount("configfs", "/sys/kernel/config", "configfs")
-        && errno_of(&e) != EBUSY
-    {
-        c.check(false, "configfs mounted");
-    }
-    let _ = mkdir("/dev/usb-ffs");
-    give_module_nodes_to_daemon_group(&mut c);
-    give_to_daemon_group(&mut c, cma_heap());
+/// The USB gadget end to end: the daemon's root phase, FunctionFS on dummy_hcd, and a host.
+fn gadget(c: &mut Checks) {
+    usb_ready(c);
     c.check(run(&["/lemnos-gadget-check"]) == 0, "lemnos_gadget_check");
+}
 
-    // The first flash on raw NAND: the driver's writer on the kernel's own NAND simulator, with its
-    // bad blocks, a weak erase block and bit flips injected by the kernel, under the kernel's MTD and
-    // UBI.
+/// The first flash on raw NAND: the driver's writer on the kernel's own NAND simulator, with its
+/// bad blocks, a weak erase block and bit flips injected by the kernel, under the kernel's MTD and
+/// UBI.
+fn nand(c: &mut Checks) {
     c.check(load("/nandsim.ko", NANDSIM) == 0, "NAND simulator loaded");
     c.check(run(&["/lemnos-nand-check"]) == 0, "lemnos-nand-check");
     c.check(unload("nandsim") == 0, "NAND simulator unloaded");
+}
 
-    // The USB link end to end, last because it leaves processes running (the daemon, the bridge,
-    // the comm core) that only the power-off ends: the real lemnosd and lemnos-orion on the dummy
-    // controller, a comm core, and a host session over the emulated bus.
+/// The USB link end to end, last because it leaves processes running (the daemon, the bridge,
+/// the comm core) that only the power-off ends: the real lemnosd and lemnos-orion on the dummy
+/// controller, a comm core, and a host session over the emulated bus.
+fn orion_link(c: &mut Checks) {
+    usb_ready(c);
     c.check(
         run(&["/lemnos-orion-link-check"]) == 0,
         "lemnos_orion_link_check",
     );
+}
+
+/// The test block module's parameters while the receiver and front end stanzas run: the fake
+/// receiver's registers sit in the memory the kernel command line reserves.
+const BLOCK_WITH_RECEIVER: &str = "csi2_phys=0x20000000";
+/// Its parameters from the graphics DMA stanza on: none.
+const BLOCK_PLAIN: &str = "";
+
+/// The kernel command line word that names the stanzas to run, and the one that names those to
+/// leave out. Each takes names separated by commas.
+const ONLY: &str = "lemnos-qemu.only=";
+const EXCEPT: &str = "lemnos-qemu.except=";
+
+/// One part of the run: it loads the module the way its checks need, runs them, and unloads it (the
+/// wedge stanza cannot). The whole run is every stanza, in order, in one boot: that is what a boot
+/// with neither word on its command line does, and what says a branch is good. A boot with one of
+/// the words runs some of the stanzas, in the same order: for a failing check looked at alone, or
+/// for the stanzas dealt out over several guests (testing/qemu/run.sh).
+struct Stanza {
+    name: &'static str,
+    /// The parameters the test block module is loaded with while the stanza runs. `None`: it does
+    /// not use the test block, and runs with whatever is loaded.
+    block: Option<&'static str>,
+    /// The stanzas whose leavings this one starts from. They come before it in `STANZAS`, and a
+    /// selection that has this stanza runs them too.
+    needs: &'static [&'static str],
+    run: fn(&mut Checks),
+}
+
+/// Loads the test block module with `want`, unloading it first when it is loaded with something
+/// else. `loaded` is what it is loaded with now.
+fn test_block(c: &mut Checks, loaded: &mut Option<&'static str>, want: &'static str) {
+    if *loaded == Some(want) {
+        return;
+    }
+    if loaded.is_some() {
+        c.check(
+            unload("lemnos_test_block") == 0,
+            "test block module unloaded",
+        );
+    }
+    let what = if want == BLOCK_PLAIN {
+        "test block module loaded for the PiSP back end"
+    } else {
+        "test block module loaded"
+    };
+    c.check(load("/lemnos_test_block.ko", want) == 0, what);
+    *loaded = Some(want);
+}
+
+/// Which stanzas this boot runs, one flag per entry of `STANZAS`, from the kernel command line.
+/// `None` when the line has neither word: the whole run. A name that is no stanza, or both words at
+/// once, is a failed check, so a selection that is not what was asked for never passes.
+fn selection(c: &mut Checks, cmdline: &str) -> Option<Vec<bool>> {
+    let word = |key: &str| {
+        cmdline
+            .split_ascii_whitespace()
+            .find_map(|word| word.strip_prefix(key))
+    };
+    let (names, named_run) = match (word(ONLY), word(EXCEPT)) {
+        (None, None) => return None,
+        (Some(names), None) => (names, true),
+        (None, Some(names)) => (names, false),
+        (Some(_), Some(_)) => {
+            c.check(false, "one of lemnos-qemu.only and lemnos-qemu.except");
+            return Some(vec![false; STANZAS.len()]);
+        }
+    };
+    let mut picked = vec![!named_run; STANZAS.len()];
+    for name in names.split(',') {
+        match STANZAS.iter().position(|stanza| stanza.name == name) {
+            Some(at) => picked[at] = named_run,
+            None => c.check(false, &format!("a stanza named {name:?}")),
+        }
+    }
+    // What a stanza needs comes before it, so one pass from the end takes in what the needed ones need.
+    for at in (0..STANZAS.len()).rev() {
+        if !picked[at] {
+            continue;
+        }
+        for need in STANZAS[at].needs {
+            if let Some(needed) = STANZAS.iter().position(|stanza| stanza.name == *need) {
+                picked[needed] = true;
+            }
+        }
+    }
+    Some(picked)
+}
+
+/// Every stanza, in the order the whole run takes them.
+const STANZAS: &[Stanza] = &[
+    Stanza {
+        name: "block",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: block,
+    },
+    Stanza {
+        name: "buses",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: buses,
+    },
+    Stanza {
+        name: "stream",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: stream,
+    },
+    Stanza {
+        name: "csi2",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: csi2,
+    },
+    Stanza {
+        name: "compose",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: compose,
+    },
+    Stanza {
+        name: "csi2-wedge",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: csi2_wedge,
+    },
+    Stanza {
+        name: "csi2-wedge-own",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: csi2_wedge_own,
+    },
+    Stanza {
+        name: "pisp-fe",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: pisp_fe,
+    },
+    Stanza {
+        name: "pisp-fe-wedge",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: pisp_fe_wedge,
+    },
+    Stanza {
+        name: "gsdma",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: gsdma,
+    },
+    Stanza {
+        name: "vip",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: vip,
+    },
+    Stanza {
+        name: "pisp-be",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: pisp_be,
+    },
+    Stanza {
+        name: "pisp-be-foreign",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: pisp_be_foreign,
+    },
+    Stanza {
+        name: "regjob",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: regjob,
+    },
+    Stanza {
+        name: "wedge",
+        block: Some(BLOCK_PLAIN),
+        needs: &[],
+        run: wedge,
+    },
+    Stanza {
+        name: "gadget",
+        block: None,
+        needs: &["wedge"],
+        run: gadget,
+    },
+    Stanza {
+        name: "nand",
+        block: None,
+        needs: &[],
+        run: nand,
+    },
+    Stanza {
+        name: "orion-link",
+        block: None,
+        needs: &["wedge"],
+        run: orion_link,
+    },
+];
+
+fn main() -> ExitCode {
+    let _ = guest::mount("devtmpfs", "/dev", "devtmpfs");
+    let _ = guest::mount("sysfs", "/sys", "sysfs");
+    let _ = guest::mount("proc", "/proc", "proc");
+    let _ = guest::mount("debugfs", "/sys/kernel/debug", "debugfs");
+    // /work holds the images the checks write (nand-check's 7.5 MB UBI image). The root is a tmpfs
+    // that the initramfs fills (about 188 MB of check binaries in a 191 MB root), so it has no room
+    // for them: give /work its own tmpfs, sized for the largest image. (From I2b2-6, carried here.)
+    let _ = std::fs::create_dir("/work");
+    match guest::mount_data("tmpfs", "/work", "tmpfs", "size=64M") {
+        Err(e) if e.raw_os_error() != Some(libc::EBUSY) => {
+            say(&format!("lemnos-qemu: /work tmpfs not mounted: {e}"));
+        }
+        _ => {}
+    }
+    let _ = guest::dup_console_stdio();
+    say("lemnos-qemu: start");
+
+    let mut c = Checks::default();
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let picked = selection(&mut c, &cmdline);
+    if let Some(picked) = &picked {
+        // Said before anything runs: run.sh refuses this line in a whole run.
+        let names: Vec<&str> = STANZAS
+            .iter()
+            .zip(picked)
+            .filter_map(|(stanza, on)| on.then_some(stanza.name))
+            .collect();
+        say(&format!("lemnos-qemu: only {}", names.join(",")));
+        c.check(!names.is_empty(), "the selection has a stanza");
+    }
+
+    c.check(
+        load("/rp1_pio_mock.ko", "") == 0,
+        "stand-in PIO driver loaded",
+    );
+    let mut block = None;
+    for (at, stanza) in STANZAS.iter().enumerate() {
+        if picked.as_ref().is_some_and(|picked| !picked[at]) {
+            continue;
+        }
+        let start = Instant::now();
+        if let Some(want) = stanza.block {
+            test_block(&mut c, &mut block, want);
+        }
+        (stanza.run)(&mut c);
+        say(&format!(
+            "lemnos-qemu: {} took {} ms",
+            stanza.name,
+            start.elapsed().as_millis()
+        ));
+    }
 
     say(&format!(
         "lemnos-qemu: {} ({} failed)",
@@ -1086,4 +1365,85 @@ fn main() -> ExitCode {
     ));
     let _ = guest::power_off();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(picked: &[bool]) -> Vec<&'static str> {
+        STANZAS
+            .iter()
+            .zip(picked)
+            .filter_map(|(stanza, on)| on.then_some(stanza.name))
+            .collect()
+    }
+
+    #[test]
+    fn a_command_line_without_the_words_is_the_whole_run() {
+        let mut c = Checks::default();
+        let line = "console=ttyS0 panic=-1 lemnos.serial=0123456789abcdef";
+        assert!(selection(&mut c, line).is_none());
+        assert_eq!(c.failures, 0);
+    }
+
+    #[test]
+    fn only_runs_the_named_stanzas_in_the_order_of_the_whole_run() {
+        let mut c = Checks::default();
+        let picked = selection(&mut c, "console=ttyS0 lemnos-qemu.only=nand,stream").unwrap();
+        assert_eq!(names(&picked), ["stream", "nand"]);
+        assert_eq!(c.failures, 0);
+    }
+
+    #[test]
+    fn a_stanza_brings_the_ones_it_starts_from() {
+        let mut c = Checks::default();
+        let picked = selection(&mut c, "lemnos-qemu.only=orion-link").unwrap();
+        assert_eq!(names(&picked), ["wedge", "orion-link"]);
+        // Left out by name, and still run: the gadget stanza starts from what it leaves.
+        let picked = selection(&mut c, "lemnos-qemu.except=wedge,stream").unwrap();
+        assert!(names(&picked).contains(&"wedge"));
+        assert!(!names(&picked).contains(&"stream"));
+        assert_eq!(c.failures, 0);
+    }
+
+    #[test]
+    fn except_and_only_of_the_same_names_cover_every_stanza_between_them() {
+        let mut c = Checks::default();
+        let some = "stream,orion-link";
+        let only = selection(&mut c, &format!("lemnos-qemu.only={some}")).unwrap();
+        let rest = selection(&mut c, &format!("lemnos-qemu.except={some}")).unwrap();
+        assert!(only.iter().zip(&rest).all(|(a, b)| *a || *b));
+        assert_eq!(c.failures, 0);
+    }
+
+    #[test]
+    fn a_name_that_is_no_stanza_fails_and_so_do_both_words_at_once() {
+        let mut c = Checks::default();
+        selection(&mut c, "lemnos-qemu.only=stream,strem").unwrap();
+        assert_eq!(c.failures, 1);
+        let picked = selection(&mut c, "lemnos-qemu.only=nand lemnos-qemu.except=nand").unwrap();
+        assert_eq!(c.failures, 2);
+        assert!(names(&picked).is_empty());
+        selection(&mut c, "lemnos-qemu.only=").unwrap();
+        assert_eq!(c.failures, 3);
+    }
+
+    #[test]
+    fn names_are_unique_and_what_a_stanza_needs_comes_before_it() {
+        for (at, stanza) in STANZAS.iter().enumerate() {
+            assert_eq!(
+                STANZAS
+                    .iter()
+                    .filter(|other| other.name == stanza.name)
+                    .count(),
+                1
+            );
+            assert!(!stanza.name.contains([',', ' ']));
+            for need in stanza.needs {
+                let needed = STANZAS.iter().position(|other| other.name == *need);
+                assert!(needed.is_some_and(|needed| needed < at), "{}", stanza.name);
+            }
+        }
+    }
 }
