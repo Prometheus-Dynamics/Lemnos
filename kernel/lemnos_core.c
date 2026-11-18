@@ -113,17 +113,10 @@ struct lem_block {
 	struct lem_gd *gd;		/* the K230 graphics DMA engine, or NULL */
 	struct lem_rj *rj;		/* run through register jobs, or NULL */
 	struct lem_vip *vip;		/* the VIP9000, or NULL */
-	struct xarray imports;		/* handle -> struct lem_import */
+	struct xarray imports;		/* handle -> an import (rs/dmabuf.rs) */
 	atomic_t bufs;			/* DMA buffers not yet freed */
 	struct lem_power *power;
 	struct lem_irq irq[LEMNOS_MAX_IRQS];
-};
-
-/* An imported dma-buf. */
-struct lem_import {
-	struct dma_buf *buf;
-	struct dma_buf_attachment *att;
-	struct sg_table *sgt;
 };
 
 static DECLARE_RWSEM(lem_blocks_sem);
@@ -132,8 +125,6 @@ static u32 lem_next_id;
 static struct address_space *lem_mapping;	/* the open file's; NULL when closed */
 static atomic_t lem_opened = ATOMIC_INIT(0);
 DECLARE_WAIT_QUEUE_HEAD(lem_wait);
-/* Global: the last buffer's free may race the block being freed. */
-static DECLARE_WAIT_QUEUE_HEAD(lem_drained);
 
 /* --- interrupts --- */
 
@@ -215,217 +206,13 @@ static __poll_t lem_poll(struct file *file, poll_table *wait)
 	return lem_any_ready() ? EPOLLIN | EPOLLRDNORM : 0;
 }
 
-/* --- DMA buffers exported as dma-bufs --- */
+/* --- DMA memory: rs/dmabuf.rs --- */
 
-struct lem_buf {
-	struct lem_block *l;
-	struct device *dev;
-	void *cpu;
-	dma_addr_t addr;
-	size_t size;
-};
-
-static struct sg_table *lem_buf_map(struct dma_buf_attachment *att,
-				    enum dma_data_direction dir)
-{
-	struct lem_buf *b = att->dmabuf->priv;
-	struct sg_table *sgt;
-	int ret;
-
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
-	if (!sgt)
-		return ERR_PTR(-ENOMEM);
-	ret = dma_get_sgtable(b->dev, sgt, b->cpu, b->addr, b->size);
-	if (ret)
-		goto free;
-	ret = dma_map_sgtable(att->dev, sgt, dir, 0);
-	if (ret)
-		goto table;
-	return sgt;
-table:
-	sg_free_table(sgt);
-free:
-	kfree(sgt);
-	return ERR_PTR(ret);
-}
-
-static void lem_buf_unmap(struct dma_buf_attachment *att, struct sg_table *sgt,
-			  enum dma_data_direction dir)
-{
-	dma_unmap_sgtable(att->dev, sgt, dir, 0);
-	sg_free_table(sgt);
-	kfree(sgt);
-}
-
-static int lem_buf_mmap(struct dma_buf *buf, struct vm_area_struct *vma)
-{
-	struct lem_buf *b = buf->priv;
-
-	return dma_mmap_coherent(b->dev, vma, b->cpu, b->addr, b->size);
-}
-
-/* The stream test source writes through this; nothing else in the kernel needs it. */
-static int lem_buf_vmap(struct dma_buf *buf, struct iosys_map *map)
-{
-	struct lem_buf *b = buf->priv;
-
-	iosys_map_set_vaddr(map, b->cpu);
-	return 0;
-}
-
-static void lem_buf_free(struct lem_buf *b)
-{
-	struct lem_block *l = b->l;
-
-	dma_free_coherent(b->dev, b->size, b->cpu, b->addr);
-	put_device(b->dev);
-	kfree(b);
-	/* The last touch of l: once this reaches zero the unbind may free it. */
-	if (atomic_dec_and_test(&l->bufs))
-		wake_up_all(&lem_drained);
-}
-
-static void lem_buf_release(struct dma_buf *buf)
-{
-	lem_buf_free(buf->priv);
-}
-
-static const struct dma_buf_ops lem_buf_ops = {
-	.map_dma_buf = lem_buf_map,
-	.unmap_dma_buf = lem_buf_unmap,
-	.mmap = lem_buf_mmap,
-	.vmap = lem_buf_vmap,
-	.release = lem_buf_release,
-};
-
-static long lem_alloc(struct lem_block *l, struct lemnos_alloc *a)
-{
-	DEFINE_DMA_BUF_EXPORT_INFO(info);
-	struct dma_buf *buf;
-	struct lem_buf *b;
-	int fd;
-
-	if (a->flags || !a->size || a->size > SZ_1G)
-		return -EINVAL;
-	b = kzalloc(sizeof(*b), GFP_KERNEL);
-	if (!b)
-		return -ENOMEM;
-	b->l = l;
-	b->dev = get_device(l->dev);
-	b->size = PAGE_ALIGN(a->size);
-	b->cpu = dma_alloc_coherent(b->dev, b->size, &b->addr, GFP_KERNEL);
-	if (!b->cpu) {
-		put_device(b->dev);
-		kfree(b);
-		return -ENOMEM;
-	}
-	atomic_inc(&l->bufs);
-	info.exp_name = LEM_NAME;
-	info.owner = THIS_MODULE;
-	info.ops = &lem_buf_ops;
-	info.size = b->size;
-	info.flags = O_RDWR;
-	info.priv = b;
-	buf = dma_buf_export(&info);
-	if (IS_ERR(buf)) {
-		lem_buf_free(b);
-		return PTR_ERR(buf);
-	}
-	fd = dma_buf_fd(buf, O_CLOEXEC);
-	if (fd < 0) {
-		dma_buf_put(buf);	/* releases b */
-		return fd;
-	}
-	a->size = b->size;
-	a->fd = fd;
-	a->addr = b->addr;
-	return 0;
-}
-
-/* --- dma-bufs imported to device addresses --- */
-
-static void lem_import_free(struct lem_import *im)
-{
-	dma_buf_unmap_attachment_unlocked(im->att, im->sgt, DMA_BIDIRECTIONAL);
-	dma_buf_detach(im->buf, im->att);
-	dma_buf_put(im->buf);
-	kfree(im);
-}
-
-static void lem_imports_free_all(struct lem_block *l)
-{
-	struct lem_import *im;
-	unsigned long handle;
-
-	xa_for_each(&l->imports, handle, im) {
-		xa_erase(&l->imports, handle);
-		lem_import_free(im);
-	}
-}
-
-static long lem_import(struct lem_block *l, struct lemnos_import *a)
-{
-	struct lem_import *im;
-	struct scatterlist *sg;
-	dma_addr_t next;
-	u64 size = 0;
-	u32 handle;
-	int ret, i;
-
-	im = kzalloc(sizeof(*im), GFP_KERNEL);
-	if (!im)
-		return -ENOMEM;
-	im->buf = dma_buf_get(a->fd);
-	if (IS_ERR(im->buf)) {
-		ret = PTR_ERR(im->buf);
-		kfree(im);
-		return ret;
-	}
-	im->att = dma_buf_attach(im->buf, l->dev);
-	if (IS_ERR(im->att)) {
-		ret = PTR_ERR(im->att);
-		dma_buf_put(im->buf);
-		kfree(im);
-		return ret;
-	}
-	im->sgt = dma_buf_map_attachment_unlocked(im->att, DMA_BIDIRECTIONAL);
-	if (IS_ERR(im->sgt)) {
-		ret = PTR_ERR(im->sgt);
-		dma_buf_detach(im->buf, im->att);
-		dma_buf_put(im->buf);
-		kfree(im);
-		return ret;
-	}
-	/* One contiguous range in the block's address space, or refused. */
-	next = sg_dma_address(im->sgt->sgl);
-	for_each_sgtable_dma_sg(im->sgt, sg, i) {
-		if (sg_dma_address(sg) != next) {
-			lem_import_free(im);
-			return -EINVAL;
-		}
-		next += sg_dma_len(sg);
-		size += sg_dma_len(sg);
-	}
-	ret = xa_alloc(&l->imports, &handle, im, xa_limit_32b, GFP_KERNEL);
-	if (ret) {
-		lem_import_free(im);
-		return ret;
-	}
-	a->handle = handle;
-	a->addr = sg_dma_address(im->sgt->sgl);
-	a->size = size;
-	return 0;
-}
-
-static long lem_release_import(struct lem_block *l, u32 handle)
-{
-	struct lem_import *im = xa_erase(&l->imports, handle);
-
-	if (!im)
-		return -ENOENT;
-	lem_import_free(im);
-	return 0;
-}
+long lem_alloc(struct device *dev, atomic_t *bufs, struct lemnos_alloc *a);
+void lem_bufs_wait(struct device *dev, atomic_t *bufs);
+long lem_import(struct device *dev, struct xarray *imports, struct lemnos_import *a);
+long lem_release_import(struct xarray *imports, u32 handle);
+void lem_imports_free_all(struct xarray *imports);
 
 /* --- registers --- */
 
@@ -549,11 +336,11 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 	case LEMNOS_IOC_REGION:
 		return lem_region(l, &u->region);
 	case LEMNOS_IOC_ALLOC:
-		return lem_alloc(l, &u->alloc);
+		return lem_alloc(l->dev, &l->bufs, &u->alloc);
 	case LEMNOS_IOC_IMPORT:
-		return lem_import(l, &u->import);
+		return lem_import(l->dev, &l->imports, &u->import);
 	case LEMNOS_IOC_RELEASE:
-		return lem_release_import(l, u->release.handle);
+		return lem_release_import(&l->imports, u->release.handle);
 	case LEMNOS_IOC_IRQ_ENABLE:
 		return lem_irq_enable(l, u->irq.index);
 	case LEMNOS_IOC_STREAM_CREATE:
@@ -692,7 +479,7 @@ static int lem_release(struct inode *inode, struct file *file)
 	xa_for_each(&lem_blocks, id, l) {
 		/* The block may still be running what the driver set up: stop listening first. */
 		lem_irq_mask_all(l);
-		lem_imports_free_all(l);
+		lem_imports_free_all(&l->imports);
 	}
 	up_write(&lem_blocks_sem);
 	lem_events_reset();
@@ -845,7 +632,7 @@ static void lem_remove(struct platform_device *pdev)
 		devm_free_irq(dev, q->irq, q);
 		lem_irq_forget(q);
 	}
-	lem_imports_free_all(l);
+	lem_imports_free_all(&l->imports);
 	xa_destroy(&l->imports);
 	/* A stream pins its dma-bufs mapped to this device. */
 	lem_streams_block_gone(dev);
@@ -867,9 +654,7 @@ static void lem_remove(struct platform_device *pdev)
 	 * and mappings of it may exist in user space, so the unbind waits for
 	 * them. Killing their holder ends the wait.
 	 */
-	while (!wait_event_timeout(lem_drained, !atomic_read(&l->bufs), 10 * HZ))
-		dev_warn(dev, "unbind waits for %d DMA buffers still held\n",
-			 atomic_read(&l->bufs));
+	lem_bufs_wait(dev, &l->bufs);
 }
 
 /* No match table: bound only through driver_override. */
