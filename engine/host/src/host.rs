@@ -2738,6 +2738,17 @@ impl Binding<'_> {
         self.slot.spec.owner == Owner::Host
     }
 
+    /// The kind of bus the driver declares for `need`, if it declares a bus need by that name.
+    fn kind_of(&self, need: &str) -> Option<BusKind> {
+        let entry = self.slot.entry?;
+        entry.manifest.needs.iter().find_map(|declared| {
+            match (declared.name == need, declared.kind) {
+                (true, NeedKind::Bus(bus)) => Some(bus),
+                _ => None,
+            }
+        })
+    }
+
     fn bus_name(&self, need: &str) -> Result<String> {
         self.slot
             .spec
@@ -2853,6 +2864,11 @@ impl Provider for Binding<'_> {
         if self.slot.spec.streams.contains_key(need) {
             return true;
         }
+        // The host clock is the backend's, whatever the board names: it is provided when the backend
+        // gives one, and a board's `bus` or `uses` never reaches it.
+        if self.kind_of(need) == Some(BusKind::HostClock) {
+            return lock(&self.inner.backend).host_clock(need).is_ok();
+        }
         // A lend need is provided when the board names the stream it reads (`lend`), and no other way:
         // an optional lend need is not a bus, so the name rules below never reach it.
         let lend_need = self.slot.entry.is_some_and(|entry| {
@@ -2876,6 +2892,18 @@ impl Provider for Binding<'_> {
             Ok(bus) => lock(&self.inner.backend).provided(&bus),
             Err(_) => false,
         }
+    }
+
+    fn host_clock(&mut self, need: &str) -> Result<lemnos_core::HostClockHandle> {
+        lock(&self.inner.backend).host_clock(need).inspect_err(|_| {
+            let mut refused = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+            if refused.is_none() {
+                *refused = Some((
+                    RefusalKind::Absent,
+                    format!("this backend has no host clock for {need:?}"),
+                ));
+            }
+        })
     }
 
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller> {

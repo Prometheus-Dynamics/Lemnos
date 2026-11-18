@@ -225,6 +225,14 @@ impl Provider for SimBoard {
         self.with(|s| resolve(s, need).is_ok())
     }
 
+    /// The board's simulated clock, the one its faults and buses already run on. Two copies of
+    /// it read the same time, so a driver's stamps and the host's agree and tests stay deterministic.
+    fn host_clock(&mut self, _need: &str) -> Result<lemnos_core::HostClockHandle> {
+        Ok(lemnos_core::HostClockHandle::boxed(Box::new(
+            self.clock.clone(),
+        )))
+    }
+
     /// Every resource by its own name, for a name that is one, and for a USB pattern every USB
     /// device added with [`SimBoard::add_usb_device_as`] that fits it.
     fn find(&self, pattern: &str, found: &mut dyn FnMut(&str)) -> Result<()> {

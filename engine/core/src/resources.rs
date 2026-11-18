@@ -7,7 +7,7 @@ use lemnos_hal::{
     UsbDevice, UsbFunction,
 };
 
-use crate::{Contract, Dev, LocalCaller, Result, Status, Tag};
+use crate::{Contract, Dev, HostClock, LocalCaller, Result, Status, Tag};
 
 pub use crate::held::{Held, Home, Lock};
 
@@ -30,6 +30,11 @@ pub enum BusKind {
     Watchdog,
     /// A stream's buffers lent to a block that only reads them (see `lemnos_hal::LendSource`).
     Lend,
+    /// The host's monotonic clock, handed over by the backend (see [`HostClock`]). It is the one
+    /// bus kind no board names: the backend gives it without a bus, so [`Provider::provided`] and
+    /// a board's `bus`/`uses` never apply to it. A board check that asks which kinds need hardware
+    /// must leave it out.
+    HostClock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,47 @@ pub type DmaHandle = Held<dyn DmaBuffers<Error = ErrorKind> + Send>;
 pub type ClocksHandle = Held<dyn Clocks<Error = ErrorKind> + Send>;
 pub type ResetHandle = Held<dyn Reset<Error = ErrorKind> + Send>;
 pub type StreamHandle = Held<dyn StreamEndpoint<Error = ErrorKind> + Send>;
+/// The host's clock, as the backend hands it over (see [`HostClock`]). A driver holds it and calls
+/// `now_ns()` on it (it derefs to the clock): it is shared, not copied, and reading it allocates
+/// nothing. A host that has no allocator gives a `'static` clock; one with an allocator may box it.
+pub enum HostClockHandle {
+    /// A clock that lives for good, such as a firmware's static.
+    Shared(&'static dyn HostClock),
+    /// A clock the handle owns.
+    #[cfg(feature = "alloc")]
+    Boxed(alloc::boxed::Box<dyn HostClock>),
+}
+
+impl HostClockHandle {
+    /// A clock that lives for good.
+    pub fn shared(clock: &'static dyn HostClock) -> Self {
+        Self::Shared(clock)
+    }
+
+    /// A clock the handle owns.
+    #[cfg(feature = "alloc")]
+    pub fn boxed(clock: alloc::boxed::Box<dyn HostClock>) -> Self {
+        Self::Boxed(clock)
+    }
+}
+
+impl core::ops::Deref for HostClockHandle {
+    type Target = dyn HostClock;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(clock) => *clock,
+            #[cfg(feature = "alloc")]
+            Self::Boxed(clock) => &**clock,
+        }
+    }
+}
+
+impl core::fmt::Debug for HostClockHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HostClockHandle")
+    }
+}
 
 /// A stream's buffers lent to the block that reads them: the upstream device's output, by its link.
 pub type LendHandle = Held<dyn lemnos_hal::LendSource<Error = ErrorKind> + Send>;
@@ -251,6 +297,13 @@ pub trait Provider {
     fn watchdog(&mut self, _need: &str) -> Result<Watchdog> {
         Err(Status::NOT_SUPPORTED)
     }
+    /// The backend's monotonic host clock, for a driver that declares a `HostClock` need. The
+    /// same clock the host times the device with, so a stamp a driver takes compares with the
+    /// host's own. A backend without one refuses with `NOT_SUPPORTED`, and the bind is refused by
+    /// name. Sim backends hand over their simulated clock, so tests stay deterministic.
+    fn host_clock(&mut self, _need: &str) -> Result<HostClockHandle> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Everything a driver can ask for while it binds.
@@ -352,6 +405,7 @@ resources! {
     LendHandle => Lend, lend;
     Pio => Pio, pio;
     Watchdog => Watchdog, watchdog;
+    HostClockHandle => HostClock, host_clock;
 }
 
 impl<C: Contract + ?Sized> Resource for Dev<C> {
