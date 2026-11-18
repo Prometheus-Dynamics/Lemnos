@@ -137,6 +137,9 @@ struct Holds {
     held: u32,
     /// Of `held`, the frames passed on.
     passed_on: u32,
+    /// A relay ([`Ring::hold_passing`]): a reader of a source that runs on whether or not it is
+    /// read, so frames it was too late for are frames dropped, not a broken stream.
+    relay: bool,
     /// The frames this consumer may have in hand: held and not passed on.
     max_held: u32,
 }
@@ -244,7 +247,7 @@ impl Ring {
         let registration = crate::stream::add_reader(stream, page.as_fd(), max_held, 0)
             .map_err(|e| io::Error::other(format!("give the module the marks page: {e}")))?;
         marks.set_slot(registration.slot);
-        self.attach_holds(marks, registration, buffers, max_held)
+        self.attach_holds(marks, registration, buffers, max_held, false)
     }
 
     /// Starts holding for a consumer that passes its frames on ([`pass_on`](Self::pass_on)): a
@@ -252,6 +255,14 @@ impl Ring {
     /// with it. `max_in_hand` bounds only the frames taken and not yet passed on. The module is
     /// told this consumer may hold every buffer, because how many frames stay held after they are
     /// passed on is up to that reader, and holding all of them stops the block without a fault.
+    ///
+    /// A relay reads a source that does not wait for it. When it falls more than the ring's frame
+    /// slots behind (it was not scheduled for that many frame periods), the module has written over
+    /// the frames it had not taken. It held none of them, so nothing it holds is touched: they are
+    /// dropped and counted in [`dropped`](Self::dropped), exactly as frames that go by at the limit
+    /// are, and [`next_frame`](Self::next_frame) goes on with the frames still on the ring. Each
+    /// frame carries the module's own sequence, so the drop shows as a gap in it. A reader without
+    /// this (a job's results) is out of step when it is overrun, and that stays an error.
     pub fn hold_passing(
         &mut self,
         stream: BorrowedFd<'_>,
@@ -276,7 +287,7 @@ impl Ring {
         let registration = crate::stream::add_reader(stream, page.as_fd(), buffers, 0)
             .map_err(|e| io::Error::other(format!("give the module the marks page: {e}")))?;
         marks.set_slot(registration.slot);
-        self.attach_holds(marks, registration, buffers, max_in_hand)
+        self.attach_holds(marks, registration, buffers, max_in_hand, true)
     }
 
     /// Starts holding with `marks` already given to the module as `registration`.
@@ -286,6 +297,7 @@ impl Ring {
         registration: Registration,
         buffers: u32,
         max_held: u32,
+        relay: bool,
     ) -> io::Result<()> {
         if self.holds.is_some() {
             return Err(io::Error::new(
@@ -300,6 +312,7 @@ impl Ring {
             passed: vec![0; buffers as usize],
             held: 0,
             passed_on: 0,
+            relay,
             max_held,
         });
         Ok(())
@@ -417,7 +430,9 @@ impl Ring {
     }
 
     /// The next frame published, or `None` when there is none yet. `InvalidData` for an entry
-    /// that is not a buffer entry, or when the reader fell behind and skipped frames.
+    /// that is not a buffer entry, or when a reader that is not a relay fell behind and skipped
+    /// frames. A relay ([`hold_passing`](Self::hold_passing)) that fell behind drops the frames it
+    /// missed, counts them, and takes the next one still on the ring.
     pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
         if self.holds.as_ref().is_some_and(Holds::at_limit) {
             // Taking another would exceed the limit. The frames go by unheld and are counted as
@@ -439,7 +454,8 @@ impl Ring {
         }
     }
 
-    /// Frames discarded at the hold limit, since the ring was mapped.
+    /// Frames that went by untaken, since the ring was mapped: discarded at the hold limit, and, for
+    /// a relay, written over before it read them or reused before it could hold them.
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped
@@ -448,59 +464,75 @@ impl Ring {
     /// One sample off the ring. With holds, its buffer is marked first and then checked, so a
     /// buffer the module reused before the mark is skipped, not read.
     fn take_one(&mut self) -> io::Result<Option<Frame>> {
-        let sample = match self.reader.next() {
-            Next::Sample(sample) => sample,
-            Next::Empty => return Ok(None),
-            Next::Skipped(n) => {
-                return Err(invalid(&format!(
-                    "the reader was overrun: {n} frames skipped"
-                )));
-            }
-        };
-        let timestamp_ns = sample.time.as_nanos();
-        let Some(entry::Read::Buffers(e)) = entry::read(sample.payload) else {
-            return Err(invalid("a frame entry that names no buffer"));
-        };
-        let (buffer, ticket) = e.buffers[0];
-        if let Some(holds) = &mut self.holds {
-            let index = buffer.0;
-            let count = holds
-                .counts
-                .get_mut(index as usize)
-                .ok_or_else(|| invalid("a frame naming a buffer outside the pool"))?;
-            if !holds.marks.mark(buffer) {
-                return Err(invalid("the marks page refused a hold below its limit"));
-            }
-            *count += 1;
-            holds.held += 1;
-            let page = Words {
-                map: Arc::clone(&self.map),
-                base: self.page_at,
+        let relay = self.holds.as_ref().is_some_and(|holds| holds.relay);
+        loop {
+            let sample = match self.reader.next() {
+                Next::Sample(sample) => sample,
+                Next::Empty => return Ok(None),
+                // A relay that was overrun lost frames it never held: dropped, and on to the next.
+                Next::Skipped(n) if relay => {
+                    self.dropped = self.dropped.saturating_add(n);
+                    continue;
+                }
+                Next::Skipped(n) => {
+                    return Err(invalid(&format!(
+                        "the reader was overrun: {n} frames skipped"
+                    )));
+                }
             };
-            if !page::still(&page, buffer, ticket) {
-                // Reused before the mark: the frame's bytes are gone. Let the mark go and skip it.
-                holds.counts[index as usize] -= 1;
-                holds.held -= 1;
-                holds.marks.unmark(buffer);
-                return Ok(None);
+            let timestamp_ns = sample.time.as_nanos();
+            let Some(entry::Read::Buffers(e)) = entry::read(sample.payload) else {
+                return Err(invalid("a frame entry that names no buffer"));
+            };
+            let (buffer, ticket) = e.buffers[0];
+            if let Some(holds) = &mut self.holds {
+                let index = buffer.0;
+                let count = holds
+                    .counts
+                    .get_mut(index as usize)
+                    .ok_or_else(|| invalid("a frame naming a buffer outside the pool"))?;
+                if !holds.marks.mark(buffer) {
+                    return Err(invalid("the marks page refused a hold below its limit"));
+                }
+                *count += 1;
+                holds.held += 1;
+                let page = Words {
+                    map: Arc::clone(&self.map),
+                    base: self.page_at,
+                };
+                if !page::still(&page, buffer, ticket) {
+                    // Reused before the mark: the frame's bytes are gone. Let the mark go and skip it.
+                    holds.counts[index as usize] -= 1;
+                    holds.held -= 1;
+                    holds.marks.unmark(buffer);
+                    if holds.relay {
+                        // The relay was late for this one too: dropped, and on to the next, so the
+                        // frames behind it do not wait for another wake.
+                        self.dropped = self.dropped.saturating_add(1);
+                        continue;
+                    }
+                    return Ok(None);
+                }
             }
+            let meta = e
+                .meta
+                .get(..META_BYTES)
+                .ok_or_else(|| invalid("a frame entry with no metadata"))?;
+            let u64_at =
+                |at: usize| u64::from_le_bytes(meta[at..at + 8].try_into().unwrap_or([0; 8]));
+            let u32_at =
+                |at: usize| u32::from_le_bytes(meta[at..at + 4].try_into().unwrap_or([0; 4]));
+            self.frames_tail += 1;
+            return Ok(Some(Frame {
+                buffer: buffer.0,
+                sequence: u64_at(0),
+                identity: u64_at(8),
+                bytes: u32_at(16),
+                fence: u32_at(20),
+                timestamp_ns,
+                end_ns: u64_at(24),
+            }));
         }
-        let meta = e
-            .meta
-            .get(..META_BYTES)
-            .ok_or_else(|| invalid("a frame entry with no metadata"))?;
-        let u64_at = |at: usize| u64::from_le_bytes(meta[at..at + 8].try_into().unwrap_or([0; 8]));
-        let u32_at = |at: usize| u32::from_le_bytes(meta[at..at + 4].try_into().unwrap_or([0; 4]));
-        self.frames_tail += 1;
-        Ok(Some(Frame {
-            buffer: buffer.0,
-            sequence: u64_at(0),
-            identity: u64_at(8),
-            bytes: u32_at(16),
-            fence: u32_at(20),
-            timestamp_ns,
-            end_ns: u64_at(24),
-        }))
     }
 
     /// Frames taken so far by [`next_frame`](Self::next_frame).
@@ -587,7 +619,8 @@ mod tests {
             slot: 0,
             file: crate::dma_buf::memfd(c"lemnos-registration-test").expect("memfd"),
         };
-        ring.attach_holds(marks, dummy, 2, 2).expect("holds attach");
+        ring.attach_holds(marks, dummy, 2, 2, false)
+            .expect("holds attach");
         ring.hold_for_test(0).expect("a frame's buffer is held");
         ring.release(0).expect("the hold is let go once");
         assert_eq!(
@@ -652,8 +685,71 @@ mod tests {
             slot: 0,
             file: crate::dma_buf::memfd(c"lemnos-registration-test").expect("memfd"),
         };
-        ring.attach_holds(marks, dummy, 4, 1).expect("holds attach");
+        ring.attach_holds(marks, dummy, 4, 1, true)
+            .expect("holds attach");
         (fd, ring)
+    }
+
+    /// The driver was not scheduled for eleven frame periods on a ring of eight slots: the module
+    /// wrote over the three oldest frames before the relay read them. It held none of them, so they
+    /// are dropped and counted, and the eight still on the ring are taken in order, each with the
+    /// module's own sequence (the gap shows the drop). Before, this was `InvalidData`, which the
+    /// receiver driver took as the end of the module's stream: a recovery restart, 250 ms of
+    /// backoff and every frame fired in it lost, for a relay that was late by a few frames.
+    #[test]
+    fn a_relay_that_was_overrun_drops_what_it_missed_and_reads_on() {
+        let (_fd, mut ring) = passing_ring();
+        for sequence in 0..11 {
+            publish(&ring, (sequence % 4) as u32, sequence);
+        }
+        for sequence in 3..11 {
+            let frame = ring
+                .next_frame()
+                .expect("an overrun relay reads on")
+                .unwrap_or_else(|| panic!("frame {sequence} is still on the ring"));
+            assert_eq!(frame.sequence, sequence);
+            ring.pass_on(frame.buffer).expect("the frame goes on");
+            ring.release(frame.buffer).expect("and comes back");
+        }
+        assert_eq!(ring.dropped(), 3, "the frames written over are counted");
+        assert!(ring.next_frame().expect("reads").is_none());
+    }
+
+    /// Overrun by one frame, the smallest case (the one the QEMU trace caught): one frame dropped,
+    /// the rest read, and a frame held from before the overrun is still held after it.
+    #[test]
+    fn an_overrun_by_one_frame_costs_one_frame_and_no_hold() {
+        let (_fd, mut ring) = passing_ring();
+        publish(&ring, 0, 0);
+        let kept = ring.next_frame().expect("reads").expect("frame 0");
+        ring.pass_on(kept.buffer).expect("the frame goes on");
+        for sequence in 1..10 {
+            publish(&ring, 1 + (sequence % 3) as u32, sequence);
+        }
+        let next = ring.next_frame().expect("reads on").expect("frame 2");
+        assert_eq!(next.sequence, 2);
+        assert_eq!(ring.dropped(), 1);
+        let holds = ring.holds.as_ref().expect("holds");
+        assert_eq!(
+            (holds.counts[0], holds.held),
+            (1, 2),
+            "frame 0 is still held"
+        );
+    }
+
+    /// A reader that is not a relay (a job's results) is out of step when it is overrun: that is
+    /// still an error, as it was.
+    #[test]
+    fn a_reader_that_is_not_a_relay_still_fails_when_overrun() {
+        let (fd, bytes, layout) = module_ring(8, 4);
+        let mut ring = Ring::map(fd.as_fd(), bytes, &layout).expect("the ring maps");
+        for sequence in 0..11 {
+            publish(&ring, (sequence % 4) as u32, sequence);
+        }
+        assert_eq!(
+            ring.next_frame().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     /// A relay's reader hands each frame on to its own consumer and keeps the buffer held until

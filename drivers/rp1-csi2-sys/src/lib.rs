@@ -413,6 +413,13 @@ impl Stream {
         self.ring.release(buffer)
     }
 
+    /// Frames that went by untaken since the stream was made: at the in-hand limit, or written over
+    /// or reused before the driver read them (it was late). Each is a gap in the frames' sequence.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.ring.dropped()
+    }
+
     /// How the stream is doing.
     pub fn status(&self) -> io::Result<StreamStatus> {
         let mut status = StreamStatus::default();

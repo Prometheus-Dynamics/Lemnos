@@ -83,6 +83,14 @@
 //! `stop` numbers from zero again. The first frame after a restart is therefore numbered above the
 //! last one delivered.
 //!
+//! A driver that is late. The module's ring keeps as many finished frames as the stream has buffers
+//! (the next power of two), and the block does not wait for the driver. A driver that is not run
+//! for longer than that many frame periods finds the oldest of them written over, or their buffers
+//! used again. It held none of them, so they are dropped frames and nothing else: each is counted
+//! in `counters().dropped` and shows as a gap in the sequence, the frames still on the ring are
+//! published, and the receiver is not restarted. (It was restarted for this once: 250 ms and more
+//! without frames, for being a few frames late.)
+//!
 //! Failures. While streaming, every millisecond the driver moves finished frames and returned
 //! buffers, and every second it reads the module's state. A stream that has ended or faulted, or
 //! a receiver that has stopped, starts recovery: the next ticks stop what's left, make a new
