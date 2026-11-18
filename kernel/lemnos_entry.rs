@@ -47,6 +47,8 @@ mod stream;
 mod stream_ring;
 #[path = "rs/stream_frame.rs"]
 mod stream_frame;
+#[path = "rs/stream_producer.rs"]
+mod stream_producer;
 #[path = "rs/gsdma.rs"]
 mod gsdma;
 #[path = "rs/vip.rs"]

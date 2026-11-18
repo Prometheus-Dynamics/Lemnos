@@ -8,6 +8,10 @@
 //! `struct lem_stream_producer` are the C ones, checked below. Everything else is the kernel's.
 
 use crate::bindings as lb;
+use crate::stream_producer::{
+    lem_stream_cancel, lem_stream_complete, lem_stream_fault, lem_stream_job_peek,
+    lem_stream_job_take, lem_stream_range_addr, lem_stream_wedge,
+};
 use core::{
     ffi::{c_int, c_long, c_uint, c_void},
     mem::MaybeUninit,
@@ -53,12 +57,13 @@ pub(crate) struct Slot {
     pub(crate) bytes: u32,
 }
 
-/// `struct lem_stream`, opaque: only the stream's code reads it.
-pub(crate) enum Stream {}
+/// `struct lem_stream`: only the stream's code reads it (lemnos_stream_priv.h while its file is C).
+pub(crate) type Stream = lb::lem_stream;
 
 /// `struct lem_stream_producer`: what a block that takes its jobs from the ring provides. The stream
 /// calls `stop` once, `kick`, `ioctl`, `mmap` and `release` as the C interface says.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Producer {
     pub(crate) stop: Option<unsafe extern "C" fn(*mut c_void, *mut Stream)>,
     pub(crate) private: *mut c_void,
@@ -75,6 +80,8 @@ const _: () = assert!(core::mem::size_of::<Job>() == 328);
 const _: () = assert!(core::mem::size_of::<Slot>() == 344);
 const _: () = assert!(core::mem::size_of::<Producer>() == 56);
 
+// The stream is named through a pointer only; its C layout holds kernel types bindgen makes empty.
+#[allow(improper_ctypes)]
 unsafe extern "C" {
     /// lemnos_stream.c: makes the stream the producer drives, and the file for it (`out`).
     pub(crate) fn lem_stream_create_producer(
@@ -83,26 +90,6 @@ unsafe extern "C" {
         producer: *const Producer,
         out: *mut *mut Stream,
     ) -> c_long;
-    fn lem_stream_fault(s: *mut Stream, err: c_int);
-    fn lem_stream_complete(
-        s: *mut Stream,
-        slot: *const Slot,
-        bytes: u32,
-        sequence: u64,
-        timestamp_ns: u64,
-    );
-    fn lem_stream_cancel(s: *mut Stream, slot: *const Slot);
-    fn lem_stream_wedge(s: *mut Stream);
-    fn lem_stream_range_addr(s: *mut Stream, r: *const JobRange, addr: *mut u64) -> c_int;
-    fn lem_stream_job_peek(s: *mut Stream, job: *mut c_void, bytes: usize) -> c_int;
-    fn lem_stream_job_take(
-        s: *mut Stream,
-        buffer: u32,
-        identity: u64,
-        range: *const lb::lemnos_stream_range,
-        count: u32,
-        slot: *mut Slot,
-    ) -> c_int;
 }
 
 /// A stream the block drives: the pointer the stream's calls take. Valid while the stream exists, and
