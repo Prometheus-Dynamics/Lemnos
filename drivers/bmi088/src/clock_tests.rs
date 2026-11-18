@@ -240,7 +240,15 @@ impl Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Delivered {
     pub(crate) seq: u64,
+    /// The stamp's time, without the mode bit.
     pub(crate) at_ns: u64,
+    /// The record was stamped from tick time (its mode bit is set).
+    pub(crate) tick: bool,
+}
+
+/// The records stamped from the sample clock's model: the ones the stamp checks apply to.
+pub(crate) fn model_only(delivered: &[Delivered]) -> Vec<Delivered> {
+    delivered.iter().filter(|d| !d.tick).copied().collect()
 }
 
 /// The driver on the simulated chip, driven one batch at a time.
@@ -414,7 +422,8 @@ impl Harness {
             let seq = newest - 1 - back;
             delivered.push(Delivered {
                 seq,
-                at_ns: sample.at_ns,
+                at_ns: sample.time_ns(),
+                tick: sample.from_tick_time(),
             });
         }
         delivered
@@ -479,6 +488,20 @@ pub(crate) fn largest_gap(delivered: &[Delivered]) -> u64 {
     delivered
         .windows(2)
         .map(|w| w[1].at_ns.saturating_sub(w[0].at_ns))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The largest gap per sample between consecutive model records, ns: the time between two records
+/// divided by the samples between them. A tick-time batch between two model batches widens the time
+/// but not the rate, so this is the check on the model's stamps.
+pub(crate) fn per_sample_gap(delivered: &[Delivered]) -> u64 {
+    delivered
+        .windows(2)
+        .map(|w| {
+            let samples = w[1].seq.saturating_sub(w[0].seq).max(1);
+            w[1].at_ns.saturating_sub(w[0].at_ns) / samples
+        })
         .max()
         .unwrap_or(0)
 }
@@ -579,12 +602,24 @@ fn a_board_run_of_45_s_is_stamped_within_a_millisecond_without_gaps() {
         );
         delivered.extend(out.into_iter().map(|d| (b, d)));
     }
-    let first = first_delivery(&delivered).expect("the clock never converged");
+    // Delivery starts at the first batch, from tick time; the model's records follow once it converges.
+    assert_eq!(
+        first_delivery(&delivered),
+        Some(0),
+        "delivery must start at the first batch"
+    );
+    let switch = delivered
+        .iter()
+        .find(|(_, d)| !d.tick)
+        .map(|(b, _)| *b)
+        .expect("the clock never converged");
     assert!(
-        first <= 20,
-        "the clock converges at batch {first}, which is past the 20 the run allows"
+        switch <= 20,
+        "the clock converges at batch {switch}, which is past the 20 the run allows"
     );
     let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+    // The stamp checks apply to the model's records: a tick-time record is checked on its own bound.
+    let model = model_only(&stamps);
     contiguous(&delivered);
     assert_eq!(
         stamps.last().unwrap().seq,
@@ -599,12 +634,12 @@ fn a_board_run_of_45_s_is_stamped_within_a_millisecond_without_gaps() {
         "the run's rate is {rate} Hz"
     );
     assert!(no_going_back(&stamps).is_none(), "a stamp went back");
-    let gap = largest_gap(&stamps);
+    let gap = per_sample_gap(&model);
     assert!(
         gap <= 7_500_000,
         "a gap of {gap} ns between samples (limit 7.5 ms)"
     );
-    let worst = errors(&h, &stamps)
+    let worst = errors(&h, &model)
         .into_iter()
         .map(f64::abs)
         .fold(0.0f64, f64::max);
@@ -612,8 +647,8 @@ fn a_board_run_of_45_s_is_stamped_within_a_millisecond_without_gaps() {
         worst <= BOARD_LIMIT_NS,
         "a stamp was {worst} ns from the true time once converged"
     );
-    let span = stamps.last().unwrap().at_ns as f64 - stamps[0].at_ns as f64;
-    let true_span = h.truth(stamps.last().unwrap().seq) - h.truth(stamps[0].seq);
+    let span = model.last().unwrap().at_ns as f64 - model[0].at_ns as f64;
+    let true_span = h.truth(model.last().unwrap().seq) - h.truth(model[0].seq);
     assert!(
         (span - true_span).abs() <= BOARD_LIMIT_NS,
         "the stamps span {span} ns, the samples {true_span} ns"
@@ -636,11 +671,11 @@ fn a_run_of_an_hour_with_0_1_percent_drift_per_hour_stays_within_a_millisecond()
     let mut b = 0;
     while h.t_ns < START_NS + 3_600_000_000_000 {
         let out = h.step(board_plan(&mut jitter, b));
-        if !out.is_empty() && converged_at.is_none() {
+        if out.iter().any(|d| !d.tick) && converged_at.is_none() {
             converged_at = Some(b);
         }
         b += 1;
-        for d in &out {
+        for d in out.iter().filter(|d| !d.tick) {
             let err = (d.at_ns as f64 - h.truth(d.seq)).abs();
             worst = worst.max(err);
             count += 1;
@@ -699,12 +734,12 @@ fn a_uniform_9_ms_jitter_stress_is_monotonic_without_gaps_within_its_stated_boun
         no_going_back(&stamps).is_none(),
         "a stamp went back under jitter"
     );
-    let gap = largest_gap(&stamps);
+    let gap = per_sample_gap(&model_only(&stamps));
     assert!(
         gap <= 7_500_000,
         "a gap of {gap} ns under jitter (limit 7.5 ms)"
     );
-    let worst = errors(&h, &stamps)
+    let worst = errors(&h, &model_only(&stamps))
         .into_iter()
         .map(f64::abs)
         .fold(0.0f64, f64::max);
@@ -793,16 +828,23 @@ fn fault_at(fault: Fault, label: &str, note: &str) {
     // BATCHES host-timed batches must pass first.
     let resumed = delivered
         .iter()
-        .find(|(b, _)| *b > fault_batch)
+        .find(|(b, d)| *b > fault_batch && !d.tick)
         .map(|(b, _)| *b)
         .expect("the clock never converged again");
     assert!(
         resumed >= fault_batch + 16,
         "{label}: stamps resumed at batch {resumed}, before the model had reconverged"
     );
+    // Between the fault and the model's return, the stamps are tick time, and say so.
+    assert!(
+        delivered
+            .iter()
+            .any(|(b, d)| *b > fault_batch && *b < resumed && d.tick),
+        "{label}: no tick-time stamps while the model reconverges"
+    );
     let after: Vec<&(u64, Delivered)> = delivered
         .iter()
-        .filter(|(b, _)| *b >= resumed + 2)
+        .filter(|(b, d)| *b >= resumed + 2 && !d.tick)
         .collect();
     let worst = after
         .iter()
@@ -848,7 +890,7 @@ fn every_rate_within_4_percent_is_stamped_within_a_millisecond() {
             "{eps}: converged at {first:?}"
         );
         let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
-        let worst = errors(&h, &stamps)
+        let worst = errors(&h, &model_only(&stamps))
             .into_iter()
             .map(f64::abs)
             .fold(0.0f64, f64::max);
@@ -1115,7 +1157,8 @@ impl GyroHarness {
             let seq = newest - 1 - back;
             delivered.push(Delivered {
                 seq,
-                at_ns: sample.at_ns,
+                at_ns: sample.time_ns(),
+                tick: sample.from_tick_time(),
             });
         }
         delivered
@@ -1187,12 +1230,12 @@ fn a_gyroscope_board_run_of_45_s_is_stamped_from_its_clock_within_a_millisecond_
     );
     let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
     assert!(no_going_back(&stamps).is_none(), "a stamp went back");
-    let gap = largest_gap(&stamps);
+    let gap = per_sample_gap(&model_only(&stamps));
     assert!(
         gap <= GYRO_GAP_NS,
         "a gap of {gap} ns between gyroscope samples (limit 7.5 ms)"
     );
-    let worst = gyro_errors(&h, &stamps)
+    let worst = gyro_errors(&h, &model_only(&stamps))
         .into_iter()
         .map(f64::abs)
         .fold(0.0f64, f64::max);
@@ -1225,11 +1268,11 @@ fn a_gyroscope_run_of_an_hour_with_0_1_percent_drift_per_hour_stays_within_a_mil
     let mut b = 0;
     while h.t_ns < START_NS + 3_600_000_000_000 {
         let out = h.step(gyro_board_plan(&mut jitter, b));
-        if !out.is_empty() && converged_at.is_none() {
+        if out.iter().any(|d| !d.tick) && converged_at.is_none() {
             converged_at = Some(b);
         }
         b += 1;
-        for d in &out {
+        for d in out.iter().filter(|d| !d.tick) {
             let err = (d.at_ns as f64 - h.truth(d.seq)).abs();
             worst = worst.max(err);
             count += 1;
@@ -1292,12 +1335,12 @@ fn a_gyroscope_uniform_9_ms_jitter_stress_is_monotonic_within_its_stated_bounds(
             no_going_back(&stamps).is_none(),
             "seed {seed}: a stamp went back under jitter"
         );
-        let gap = largest_gap(&stamps);
+        let gap = per_sample_gap(&model_only(&stamps));
         assert!(
             gap <= GYRO_STRESS_GAP_NS,
             "seed {seed}: a gap of {gap} ns under jitter (bound {GYRO_STRESS_GAP_NS} ns)"
         );
-        let worst = gyro_errors(&h, &stamps)
+        let worst = gyro_errors(&h, &model_only(&stamps))
             .into_iter()
             .map(f64::abs)
             .fold(0.0f64, f64::max);
@@ -1331,7 +1374,7 @@ fn a_gyroscope_rate_sweep_from_minus_4_to_plus_4_percent_is_stamped_within_a_mil
             no_going_back(&stamps).is_none(),
             "eps {eps}: a stamp went back"
         );
-        let worst = gyro_errors(&h, &stamps)
+        let worst = gyro_errors(&h, &model_only(&stamps))
             .into_iter()
             .map(f64::abs)
             .fold(0.0f64, f64::max);
@@ -1339,7 +1382,7 @@ fn a_gyroscope_rate_sweep_from_minus_4_to_plus_4_percent_is_stamped_within_a_mil
             worst <= BOARD_LIMIT_NS,
             "eps {eps}: a stamp was {worst} ns from its true time"
         );
-        let gap = largest_gap(&stamps);
+        let gap = per_sample_gap(&model_only(&stamps));
         assert!(gap <= GYRO_GAP_NS, "eps {eps}: a gap of {gap} ns");
     }
 }
@@ -1413,7 +1456,7 @@ fn a_gyroscope_fifo_overflow_re_anchors_its_clock_and_says_so() {
         "a stamp went back across the overflow"
     );
     let tail: Vec<Delivered> = stamps.iter().rev().take(60).rev().copied().collect();
-    let worst = gyro_errors(&h, &tail)
+    let worst = gyro_errors(&h, &model_only(&tail))
         .into_iter()
         .map(f64::abs)
         .fold(0.0f64, f64::max);
@@ -1421,4 +1464,300 @@ fn a_gyroscope_fifo_overflow_re_anchors_its_clock_and_says_so() {
         worst <= BOARD_LIMIT_NS,
         "after re-anchoring a stamp was {worst} ns from its true time"
     );
+}
+
+// ---- Stamping from the first batch: tick time, the switch to the model, re-anchoring, and the
+// ---- wide-bracket fallback. A record's mode bit says which it is.
+
+/// A tick-time stamp's error bound. Measured on the board-shaped runs (9 ms tick outliers): the
+/// accelerometer's tick-time records were at most 8.3 ms off, and the gyroscope's at most 5.0 ms (clean
+/// runs: 5.2 ms and 4.9 ms). Rounded up to 10 ms.
+pub(crate) const TICK_TIME_BOUND_NS: f64 = 10_000_000.0;
+
+/// A plan with narrow brackets and 0.3 ms of tick jitter, and no outliers: the switch's clean case.
+fn narrow_plan(jitter: &mut Jitter) -> Plan {
+    Plan {
+        tick_jitter_ns: jitter.next(300_000),
+        pre_ns: jitter.next(50_000) - 50_000,
+        post_ns: jitter.next(50_000) + 50_000,
+        report_early_ns: 0,
+        fault: None,
+    }
+}
+
+/// Delivery starts in the first batch, in tick time; the stamps then switch to the model, and a
+/// record never goes back across the switch. Tick-time records are within their bound, and the
+/// model's records within the board's bound once the switch has settled.
+fn check_switch(delivered: &[(u64, Delivered)], truth: &dyn Fn(u64) -> f64, label: &str) -> u64 {
+    assert_eq!(
+        first_delivery(delivered),
+        Some(0),
+        "{label}: nothing was delivered in the first batch"
+    );
+    assert!(
+        delivered[0].1.tick,
+        "{label}: the first batch is not marked as tick time"
+    );
+    let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+    assert!(
+        no_going_back(&stamps).is_none(),
+        "{label}: a stamp went back at the switch"
+    );
+    let switch = delivered
+        .iter()
+        .find(|(_, d)| !d.tick)
+        .map(|(b, _)| *b)
+        .unwrap_or_else(|| panic!("{label}: never switched to the model"));
+    for (b, d) in delivered {
+        let err = (d.at_ns as f64 - truth(d.seq)).abs();
+        if d.tick {
+            assert!(
+                err <= TICK_TIME_BOUND_NS,
+                "{label}: batch {b}, a tick-time stamp {err} ns from its true time (bound {TICK_TIME_BOUND_NS} ns)"
+            );
+        } else if *b >= switch + 2 {
+            assert!(
+                err <= BOARD_LIMIT_NS,
+                "{label}: batch {b}, a model stamp {err} ns from its true time"
+            );
+        }
+    }
+    switch
+}
+
+#[test]
+fn an_accelerometer_is_delivered_from_its_first_batch_in_tick_time_then_switches_to_the_model() {
+    let osc = Oscillator {
+        eps: 0.015,
+        drift: 0.0,
+    };
+    let mut h = Harness::new(osc, 200);
+    let mut jitter = Jitter::new(0x2468_ace0);
+    let mut delivered = Vec::new();
+    for b in 0..60 {
+        for d in h.step(narrow_plan(&mut jitter)) {
+            delivered.push((b, d));
+        }
+    }
+    let switch = check_switch(&delivered, &|seq| h.truth(seq), "accelerometer");
+    assert!(
+        (10..=20).contains(&switch),
+        "accelerometer: switched at batch {switch}, outside 10 to 20"
+    );
+}
+
+#[test]
+fn a_gyroscope_is_delivered_from_its_first_batch_in_tick_time_then_switches_to_the_model() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x1357_9bdf);
+    let mut delivered = Vec::new();
+    for b in 0..120 {
+        for d in h.step(narrow_plan(&mut jitter)) {
+            delivered.push((b, d));
+        }
+    }
+    let switch = check_switch(&delivered, &|seq| h.truth(seq), "gyroscope");
+    assert!(
+        (60..=80).contains(&switch),
+        "gyroscope: switched at batch {switch}, outside 60 to 80"
+    );
+}
+
+/// An overflow re-anchors the accelerometer: its stamps go back to tick time until the model has
+/// reconverged, then the model's come back, and never go back across either switch.
+#[test]
+fn an_accelerometer_re_anchored_by_an_overflow_goes_back_to_tick_time_until_it_reconverges() {
+    let osc = Oscillator {
+        eps: 0.015,
+        drift: 0.0,
+    };
+    let mut h = Harness::new(osc, 200);
+    let mut jitter = Jitter::new(0x0f0f_0f0f);
+    let mut delivered = Vec::new();
+    for b in 0..120 {
+        let mut plan = narrow_plan(&mut jitter);
+        if b == 40 {
+            plan.fault = Some(Fault::Overflow(3));
+        }
+        for d in h.step(plan) {
+            delivered.push((b, d));
+        }
+    }
+    let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+    assert!(
+        no_going_back(&stamps).is_none(),
+        "a stamp went back across the re-anchor"
+    );
+    assert!(
+        delivered.iter().any(|(b, d)| *b > 40 && d.tick),
+        "no tick-time stamps while the accelerometer re-anchored"
+    );
+    let back = delivered
+        .iter()
+        .find(|(b, d)| *b > 40 && !d.tick)
+        .map(|(b, _)| *b)
+        .expect("the model never came back");
+    // The overflow's own batch is observed (its sensor time is read), so the sixteen reads are the
+    // batches after it, less that one.
+    assert!(
+        back >= 40 + 15,
+        "the model came back at batch {back}, before it could have reconverged"
+    );
+    let worst = delivered
+        .iter()
+        .filter(|(b, d)| *b >= back + 2 && !d.tick)
+        .map(|(_, d)| (d.at_ns as f64 - h.truth(d.seq)).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= BOARD_LIMIT_NS,
+        "after the re-anchor a model stamp was {worst} ns from its true time"
+    );
+}
+
+/// A gyroscope overflow re-anchors its clock the same way.
+#[test]
+fn a_gyroscope_re_anchored_by_an_overflow_goes_back_to_tick_time_until_it_reconverges() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x7777_1111);
+    let mut delivered = Vec::new();
+    for b in 0..200 {
+        if b == 100 {
+            // The next drain comes 700 ms late: the chip makes about 140 frames and the FIFO holds 100.
+            h.due_ns = h.t_ns + 700_000_000;
+        }
+        for d in h.step(narrow_plan(&mut jitter)) {
+            delivered.push((b, d));
+        }
+    }
+    let stamps: Vec<Delivered> = delivered.iter().map(|(_, d)| *d).collect();
+    assert!(
+        no_going_back(&stamps).is_none(),
+        "a stamp went back across the re-anchor"
+    );
+    assert!(
+        delivered.iter().any(|(b, d)| *b > 100 && d.tick),
+        "no tick-time stamps while the gyroscope re-anchored"
+    );
+    let back = delivered
+        .iter()
+        .find(|(b, d)| *b > 100 && !d.tick)
+        .map(|(b, _)| *b)
+        .expect("the model never came back");
+    assert!(
+        back >= 100 + 64,
+        "the model came back at batch {back}, too soon"
+    );
+}
+
+/// A bracket visibly wide (the host was preempted inside the read) stamps that drain from tick time,
+/// and gives the model nothing from it. The records of that batch are all tick time.
+#[test]
+fn an_accelerometer_drain_with_a_wide_bracket_is_stamped_from_tick_time() {
+    let osc = Oscillator {
+        eps: 0.015,
+        drift: 0.0,
+    };
+    let mut h = Harness::new(osc, 200);
+    let mut jitter = Jitter::new(0x5a5a_5a5a);
+    let mut in_batch = Vec::new();
+    for b in 0..80 {
+        let mut plan = narrow_plan(&mut jitter);
+        if b == 50 {
+            plan.pre_ns = -3_000_000;
+            plan.post_ns = 3_000_000;
+        }
+        let out = h.step(plan);
+        if b == 50 {
+            in_batch = out;
+        }
+    }
+    assert!(!in_batch.is_empty(), "the wide batch delivered nothing");
+    assert!(
+        in_batch.iter().all(|d| d.tick),
+        "a record of the wide-bracket batch is not marked as tick time"
+    );
+}
+
+#[test]
+fn a_gyroscope_drain_with_a_wide_bracket_is_stamped_from_tick_time() {
+    let osc = GyroOsc {
+        rate: 200.0,
+        eps: 0.02,
+        drift: 0.0,
+    };
+    let mut h = GyroHarness::new(osc);
+    let mut jitter = Jitter::new(0x6b6b_6b6b);
+    let mut in_batch = Vec::new();
+    for b in 0..140 {
+        let mut plan = narrow_plan(&mut jitter);
+        if b == 110 {
+            plan.pre_ns = -3_000_000;
+            plan.post_ns = 3_000_000;
+        }
+        let out = h.step(plan);
+        if b == 110 {
+            in_batch = out;
+        }
+    }
+    assert!(!in_batch.is_empty(), "the wide batch delivered nothing");
+    assert!(
+        in_batch.iter().all(|d| d.tick),
+        "a record of the wide-bracket batch is not marked as tick time"
+    );
+}
+
+/// The visible-bracket stress: each reading of the bracket off by up to 9 ms on its own, so the
+/// brackets are visibly wide, and the driver stamps those drains from tick time. Measured against the
+/// tick-time base code's bound (4.8 ms error, 9.7 ms gap on the same runs).
+pub(crate) const VISIBLE_STRESS_ERR_NS: f64 = 5_000_000.0;
+pub(crate) const VISIBLE_STRESS_GAP_NS: u64 = 10_000_000;
+
+#[test]
+fn a_gyroscope_visibly_wide_bracket_stress_is_no_worse_than_tick_time() {
+    for seed in 0..GYRO_STRESS_SEEDS {
+        let osc = GyroOsc {
+            rate: 200.0,
+            eps: 0.015,
+            drift: 0.0,
+        };
+        let mut h = GyroHarness::new(osc);
+        let mut jitter = Jitter::new(0x2222_3333 ^ (seed * 104_729));
+        let mut stamps = Vec::new();
+        for _ in 0..180 {
+            stamps.extend(h.step(Plan {
+                tick_jitter_ns: jitter.next(9_000_000),
+                pre_ns: jitter.next(9_000_000),
+                post_ns: jitter.next(9_000_000),
+                report_early_ns: 0,
+                fault: None,
+            }));
+        }
+        assert!(
+            no_going_back(&stamps).is_none(),
+            "seed {seed}: a stamp went back under visibly wide brackets"
+        );
+        let gap = largest_gap(&stamps);
+        assert!(
+            gap <= VISIBLE_STRESS_GAP_NS,
+            "seed {seed}: a gap of {gap} ns (bound {VISIBLE_STRESS_GAP_NS} ns)"
+        );
+        let worst = gyro_errors(&h, &stamps)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= VISIBLE_STRESS_ERR_NS,
+            "seed {seed}: a stamp was {worst} ns from its true time (bound {VISIBLE_STRESS_ERR_NS} ns)"
+        );
+    }
 }

@@ -4,7 +4,7 @@
 extern crate std;
 
 use super::*;
-use crate::clock_tests::{Harness, Jitter, Oscillator, Plan};
+use crate::clock_tests::{Harness, Jitter, Oscillator, Plan, model_only};
 use chip::{Frame, scan_accel};
 use lemnos_contract_accelerometer::{RECORD_LEN as ACCEL_RECORD, Sample as AccelSample};
 use lemnos_contract_gyroscope::RECORD_LEN as GYRO_RECORD;
@@ -867,11 +867,11 @@ fn read_batch_needs_the_fifo_and_waits_for_power_up() {
 
 #[test]
 fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
-    // A clean 200 Hz chip. The clock publishes once it has converged, which is batch 15 (sixteen
-    // host-timed batches); until then the batches hold their samples, the ring keeps the newest 146
-    // of them, and the older ones are dropped with no loss reported. From the first delivery on,
-    // every sample is delivered once, in order, with its stamp within a millisecond of its true
-    // time, and the newest is the last one delivered.
+    // A clean 200 Hz chip. Delivery starts in the first batch, from tick time (marked in each record),
+    // and the clock's model takes over once it has converged, at batch 15 (sixteen host-timed batches).
+    // From the first delivery on, every sample is delivered once, in order, the newest last. The
+    // model's stamps are within a millisecond of the samples' true times, and the tick-time stamps
+    // within the tick's bound.
     let mut h = Harness::new(
         Oscillator {
             eps: 0.0,
@@ -880,43 +880,44 @@ fn batches_deliver_every_sample_once_in_order_with_its_stamp() {
         200,
     );
     let mut delivered = Vec::new();
-    let mut first = None;
-    let mut newest_then = 0;
     for batch in 0..40 {
         let got = h.step(Plan::clean());
-        if !got.is_empty() && first.is_none() {
-            first = Some(batch);
-            newest_then = h.seq;
-        }
-        delivered.extend(got);
         assert_ne!(
             Driver::health(&h.dev),
             Health::Degraded("accelerometer: batch missed samples"),
             "batch {batch}: the convergence's dropped samples are not a batch miss"
         );
+        delivered.extend(got.into_iter().map(|d| (batch, d)));
     }
-    let first = first.expect("the clock never converged");
-    assert_eq!(
-        delivered[0].seq,
-        newest_then - ACC_RING as u64,
-        "the first records are the ring's worth before the convergence"
-    );
-    assert!(first <= 20, "the first delivery is batch {first}");
+    assert_eq!(delivered[0].0, 0, "delivery must start in the first batch");
+    assert!(delivered[0].1.tick, "the first records are tick time");
     for pair in delivered.windows(2) {
-        assert_eq!(pair[1].seq, pair[0].seq + 1, "in order, once each");
+        assert_eq!(pair[1].1.seq, pair[0].1.seq + 1, "in order, once each");
     }
     assert_eq!(
-        delivered.last().unwrap().seq,
+        delivered.last().unwrap().1.seq,
         h.seq - 1,
         "the newest is last"
     );
-    for d in &delivered {
+    let switch = delivered
+        .iter()
+        .find(|(_, d)| !d.tick)
+        .map(|(b, _)| *b)
+        .expect("the clock never converged");
+    assert!(switch <= 20, "the model's first record is batch {switch}");
+    for (b, d) in &delivered {
         let err = d.at_ns as f64 - h.truth(d.seq);
-        assert!(
-            err.abs() <= 1_000_000.0,
-            "sample {} was {err} ns off",
-            d.seq
-        );
+        if d.tick {
+            assert!(
+                err.abs() <= 10_000_000.0,
+                "batch {b}: a tick-time stamp {err} ns off"
+            );
+        } else if *b >= switch + 2 {
+            assert!(
+                err.abs() <= 1_000_000.0,
+                "batch {b}: a model stamp {err} ns off"
+            );
+        }
     }
     assert_eq!(Driver::health(&h.dev), Health::Ok);
 }
@@ -1132,11 +1133,10 @@ fn a_fifo_length_above_the_fifo_is_clamped_to_it() {
     );
 }
 
-/// A gyroscope batch is stamped from its own sample clock, not from the tick: before the clock has
-/// converged (`clock_tests.rs` runs it to convergence against the chip's oscillator), a drain's
-/// samples are held, and no record carries a tick's time.
+/// A gyroscope batch from before its sample clock converges is delivered at once, from tick time, and
+/// says so in each record's mode bit (`clock_tests.rs` runs the switch to the model).
 #[test]
-fn gyro_batches_wait_for_the_gyroscope_sample_clock_and_carry_no_tick_time() {
+fn a_gyroscope_batch_before_convergence_is_delivered_from_tick_time_and_says_so() {
     let (_board, sim, mut dev) = fifo_chip();
     assert_eq!(Gyroscope::read(&mut dev), Err(Status::AGAIN));
     powered(&mut dev);
@@ -1145,15 +1145,20 @@ fn gyro_batches_wait_for_the_gyroscope_sample_clock_and_carry_no_tick_time() {
         bytes.extend(gyro_frame(n, 0, 0));
     }
     sim.fifo_push(GYRO, &bytes);
-    Driver::tick(&mut dev, 3_000_000_000);
+    let now = 3_000_000_000;
+    Driver::tick(&mut dev, now);
     let mut buf = [0u8; GYRO_RECORD * 16];
     let n = Gyroscope::read_batch(&mut dev, &mut buf).unwrap();
-    assert_eq!(
-        n, 0,
-        "a batch was delivered before the sample clock converged"
-    );
-    // A read still returns the newest sample, which needs no time.
-    assert!(Gyroscope::read(&mut dev).is_ok());
+    assert_eq!(n, 10 * GYRO_RECORD, "the first batch is held back");
+    for (i, record) in buf[..n].as_chunks::<GYRO_RECORD>().0.iter().enumerate() {
+        let sample = GyroSample::decode(&mut Reader::new(record)).unwrap();
+        assert!(
+            sample.from_tick_time(),
+            "record {i} is not marked as tick time"
+        );
+        // 2000 Hz: 0.5 ms apart, the newest at the tick.
+        assert_eq!(sample.time_ns(), now - (9 - i as u64) * 500_000);
+    }
 }
 
 /// A die 1 % fast of its 5 ms nominal period, drained every 365 ms (with up to
@@ -1185,15 +1190,17 @@ fn stamps_follow_a_die_1_5_percent_fast_within_a_millisecond() {
         }));
     }
     assert!(delivered.len() > 2_000, "only {} samples", delivered.len());
-    let first = delivered.first().unwrap();
-    let last = delivered.last().unwrap();
+    // The period is measured over the model's records: a tick-time record is off by its tick's jitter.
+    let model = model_only(&delivered);
+    let first = model.first().unwrap();
+    let last = model.last().unwrap();
     let mean = (last.at_ns - first.at_ns) as f64 / (last.seq - first.seq) as f64;
     let true_mean = 5_000_000.0 / 1.015;
     assert!(
         (mean - true_mean).abs() <= 1_000.0,
         "a period of {mean} ns, not {true_mean}"
     );
-    for d in &delivered {
+    for d in model_only(&delivered) {
         let err = d.at_ns as f64 - h.truth(d.seq);
         assert!(
             err.abs() <= 1_000_000.0,

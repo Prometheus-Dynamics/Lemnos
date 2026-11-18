@@ -47,70 +47,49 @@
 //!   crates). A batch that does not fit the caller's buffer keeps the rest for
 //!   the next call.
 //!
-//! Stamps. The accelerometer's samples are stamped from the chip's own sensor
-//! time (`sensor_clock.rs`), not from the tick. A tick's drain reads the sensor
-//! time just before the FIFO's length and again just after it, the second time
-//! between two host clock readings, and reads the FIFO's data only then. The
-//! two reads bound the sample grid's phase from both sides, and the next drain
-//! is aimed at the middle of the bounds on the grid, so they close in a few
-//! drains to the time between the two reads (one short transfer). A sample's
-//! stamp is the host time of its sensor tick: the phase, then a least-squares
-//! line from sensor ticks to host time through the second reads, which forgets
-//! old reads with exponential weights (O(1) state, no stored history), so a
-//! slow drift of the chip's oscillator is followed without lag. A read whose
-//! bracket is wider than 2 ms is not used for host time: the host was
-//! preempted inside it. A stamp is never earlier than one already published.
-//! Until the bounds exist, each drain waits up to one sample period more than
-//! a half FIFO, on a golden-ratio sequence, so the first drains meet the grid
-//! at different points whatever the chip's rate.
+//! Stamps. Every sample is stamped when the drain that takes it runs, so no batch waits for a clock.
+//! A tick's drain stamps its samples from the die's sample clock once that has converged. Until then,
+//! and for a drain whose brackets are too wide to use, it stamps them from the tick's time: the tick's
+//! host time, less the sample periods back from the newest sample, flagged as tick time (see Mode).
+//! The two clocks, and the reads they take:
 //!
-//! The model publishes only once it has converged: 16 host-timed batches, about
-//! 6 s at 200 Hz (a batch drains about every 365 ms), and the phase's bounds
-//! within 1 ms of each other. A batch holds its samples until then. The ring
-//! keeps the newest of them (146 frames, 0.73 s at 200 Hz), and the older ones
-//! are dropped without a loss in health: they never had a time, so they were
-//! never part of a batch, as a sample taken before the first tick never was. A
-//! batch's records therefore start at most one ring's worth of samples before
-//! the model converged, and from there every sample is delivered. On the
-//! simulated chip, with host jitter of 0.3 ms and rare 9 ms outliers, the
-//! converged stamps were within 0.23 ms of the true time at every rate from 4 %
-//! slow to 4 % fast, on 45 s runs and on a run of an hour with the oscillator
-//! drifting 0.1 % per hour. Under 9 ms of uniform error on every host clock
-//! reading the worst error over 48 runs was 6.3 ms and no gap was over 6.7 ms
-//! (the test's bound is 7 ms, and its gap limit is 1.5 periods, 7.5 ms).
+//! - The accelerometer reads its sensor time just before the FIFO's length and again just after it.
+//!   The second read is bracketed by two host clock readings, and the FIFO's data is read only after
+//!   both (`sensor_clock.rs`). The two reads bound the phase of the sample grid from both sides, and
+//!   the next drain is aimed at the middle of the bounds. A least-squares line from sensor ticks to
+//!   host time, through the second reads, maps a sample to host time, and it forgets old reads with
+//!   exponential weights (O(1) state). The model converges after 16 host-timed batches (about 6 s at
+//!   200 Hz) with the phase's bounds within 1 ms.
+//! - The gyroscope has no sensor time, so its clock is its own FIFO's fill, read between two host
+//!   clock readings (`gyro_clock.rs`). The count is exact, and the phase is bounded by the two
+//!   readings, as the accelerometer's is. The model converges after 64 reads (about 16 s at 200 Hz)
+//!   with the phase's window within 1 ms.
 //!
-//! A chip reset (the sensor time steps back), a sensor time that jumps by more
-//! than the host clock agrees with (more than a tenth of the step, and 2 ms),
-//! and a FIFO overflow each restart the model. Health names the first two, and
-//! the overflow keeps its own message. The stamps keep going forward: nothing
-//! is published between the restart and the next convergence.
+//! Wide brackets. A bracket wider than 1 ms (`MAX_BRACKET_NS`, the phase's own budget: a wider reading
+//! could move the phase by more than that) gives its drain no host time. The model is given nothing
+//! from that drain, and its samples are stamped from the tick, flagged. A bracket that is narrow and
+//! wrong (both readings off by the same amount) cannot be seen, and the model's phase takes that error.
 //!
-//! The gyroscope has no sensor time, so its clock is its own FIFO's fill
-//! (`gyro_clock.rs`). Each tick's drain reads the fill between two host clock
-//! readings, and a bracket wider than 2 ms gives no host time. The count of
-//! samples made is then exact, and the phase is bounded by the two readings: a
-//! read's window, one sample wide, is intersected with the windows of the last
-//! 16 reads, each recomputed against the current line, so it narrows to about
-//! the bracket. The rate is a least-squares line from the counts to the
-//! brackets' midpoints. The drains are spread by a golden-ratio offset that does
-//! not accumulate, so their fractions of a sample spread out. The model
-//! publishes after 64 reads (about 16 s at 200 Hz) and once a window exists, and
-//! stays published. A read whose window disagrees with the others (its host
-//! reading was off) is left out of the fit and the windows; 16 disagreeing reads
-//! in a row restart the windows from the newest.
+//! Re-anchor. A chip reset, a sensor time that jumps, a FIFO overflow or a failed transfer restarts the
+//! model. Its samples are tick-stamped until it has converged again, and health names the restart (a
+//! chip reset or a jump by name, an overflow with its loss). A restart is never a withholding.
 //!
-//! On the simulated gyroscope, 2 % fast at 200 Hz with the board's jitter and
-//! outliers, 45 s gave a worst error of 0.31 ms, a span within 0.18 ms of the
-//! true span, and a largest gap of 5.17 ms. A sweep from 4 % slow to 4 % fast
-//! gave at most 0.56 ms, and an hour with 0.1 % per hour of drift stayed under
-//! 1 ms. Under 9 ms of host error on every reading (12 runs of 45 s) the worst
-//! error was 14.9 ms and the largest gap 24.6 ms: that error is the host
-//! clock's, and under it tick-time stamping (4.8 ms and 9.7 ms on the same runs)
-//! is the better of the two (`clock_tests.rs`).
+//! Monotone. A record's time is never earlier than the last record a batch wrote: a switch between
+//! tick time and the model holds the stamp rather than moving it back. On the simulated chip the
+//! tick-time stamps were within 8.3 ms of the true time on the board-shaped run (9 ms tick outliers),
+//! and the model's within 0.13 ms (accelerometer) and 0.31 ms (gyroscope) on the same runs.
 //!
-//! A read's drain has no time of its own, and reads no clock. Its samples are
-//! stamped by the die's model once it has converged, as a tick's are, and a
-//! sample drained before the model converges waits for it, as a tick's do.
+//! Mode. A record's `at_ns` has bit 63 set when it was stamped from tick time: `TICK_TIME` in the
+//! contract crates. A record without it is stamped from the model. A reader takes the time with
+//! `time_ns()` and the mode with `from_tick_time()`. Health says a die is in tick time while it is.
+//!
+//! Measured on the same chip. Under 9 ms of error on both readings of a bracket, equal on each reading
+//! (which no bracket shows), the gyroscope's stamps were 14.9 ms off and 24.6 ms apart at worst over
+//! 12 runs of 45 s. With the two readings off independently, so that the brackets are visibly wide,
+//! the worst was 4.8 ms and the largest gap 6.0 ms: no worse than tick time (4.8 ms and 9.7 ms).
+//!
+//! A read's drain has no tick, so it has no time of its own: its samples take the model's stamp once it
+//! has converged, or wait for the next tick, which stamps them from tick time.
 //!
 //! A loss (a FIFO overflow, or a batch that the ring overwrote before it was
 //! read) is reported in health from the call that found it, and until the read
@@ -138,7 +117,7 @@ mod tests;
 
 use chip::{Failure, Frame, Kind, Setting};
 use gyro_clock::GyroClock;
-use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample};
+use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample, TICK_TIME};
 use lemnos_contract_gyroscope::{Gyroscope, Sample as GyroSample};
 use lemnos_core::{
     Config, ConfigError, ConfigValue, Description, Encode, Health, HostClock, HostClockHandle, I2c,
@@ -270,6 +249,8 @@ struct Entry {
     raw: [i16; 3],
     /// Stamped: a batch may take it. An unstamped sample holds the batch until it is stamped.
     ready: bool,
+    /// Stamped from the tick's time, not the sample clock's model (the record's mode bit).
+    tick: bool,
 }
 
 const EMPTY: Entry = Entry {
@@ -277,6 +258,7 @@ const EMPTY: Entry = Entry {
     at_ns: 0,
     raw: [0; 3],
     ready: false,
+    tick: false,
 };
 
 /// One die: its address, settings, power-up phase, FIFO ring and newest sample.
@@ -295,6 +277,9 @@ struct Die<const RING: usize> {
     ring: [Entry; RING],
     /// The next sample a batch takes.
     batch_next: u64,
+    /// The last stamp a batch wrote: no later record is earlier (the switch between tick time and
+    /// the model may move a stamp back, and this holds it).
+    delivered: u64,
     /// The accelerometer's sample clock.
     clock: SensorClock,
     /// The gyroscope's sample clock, from its FIFO's fill.
@@ -335,6 +320,7 @@ impl<const RING: usize> Die<RING> {
             seq: 0,
             ring: [EMPTY; RING],
             batch_next: 0,
+            delivered: 0,
             clock: SensorClock::new(setting.period_ns),
             gyro_clock: GyroClock::default(),
             stamped: 0,
@@ -463,18 +449,22 @@ impl<const RING: usize> Die<RING> {
             return Ok(None);
         }
         if self.fifo {
-            self.drain(bus, None)?;
+            self.drain(bus, None, None)?;
             Ok(self.last)
         } else {
             chip::read_axes(bus, self.address, self.kind).map(Some)
         }
     }
 
-    /// Drains the FIFO into the ring, stamps what it took, and records any loss. `clock` is the
-    /// host clock a tick reads the die's count against: a tick's drain reads the count between two
-    /// host clock readings (the accelerometer's sensor time, the gyroscope's FIFO fill). A read's
-    /// drain has no clock, and its samples wait for the model.
-    fn drain(&mut self, bus: &mut I2c, clock: Option<&dyn HostClock>) -> chip::Step<()> {
+    /// Drains the FIFO into the ring, stamps what it took, and records any loss. A tick's drain
+    /// (`clock` and `now` given) reads the die's count between two host clock readings. A read's
+    /// drain has neither, and its samples wait for a tick or the model.
+    fn drain(
+        &mut self,
+        bus: &mut I2c,
+        clock: Option<&dyn HostClock>,
+        now: Option<u64>,
+    ) -> chip::Step<()> {
         let first = self.seq;
         let mut sensed = None;
         let mut counted = None;
@@ -499,11 +489,18 @@ impl<const RING: usize> Die<RING> {
                 }
             }
         }
+        // A tick's drain with no usable bracket takes no host time: its samples are stamped from the
+        // tick, and the model is given nothing from it.
+        let wide = clock.is_some()
+            && match self.kind {
+                Kind::Accel => sensed.as_ref().is_some_and(|(_, host)| host.is_none()),
+                Kind::Gyro => bracket.is_none(),
+            };
         let (overflow, result) = self.pull(bus, counted);
         if overflow {
             self.pending = Some(Note::Overflow);
             // The skipped frames keep their numbers, but the sample clock is not trusted across a
-            // loss: it is restarted, and its samples wait for it (see `publish`).
+            // loss: it is restarted, and its samples are stamped from the tick until it converges.
             match self.kind {
                 Kind::Accel => self.clock.restart(),
                 Kind::Gyro => self.gyro_clock.restart(),
@@ -528,8 +525,9 @@ impl<const RING: usize> Die<RING> {
                 }
             }
         }
-        // A read's drain has no time of its own: its samples wait for the model, or take it.
-        self.publish();
+        // The model stamps the new samples while it has converged; otherwise, and for a drain with a
+        // wide bracket, the tick's time does (see `stamp_new`).
+        self.stamp_new(now, !wide);
         result
     }
 
@@ -543,30 +541,43 @@ impl<const RING: usize> Die<RING> {
         }
     }
 
-    /// Stamps the samples the clock can now stamp, in order, from the first unstamped one. Stops at
-    /// the first it cannot stamp yet, which holds it and every later sample for the batches.
-    fn publish(&mut self) {
+    /// Stamps the samples not yet stamped, in order. The sample clock's model stamps them once it has
+    /// converged, and `use_model` says whether this drain may use it (not for a wide bracket). Before
+    /// that, or when the model may not be used, a tick's samples take the tick's time less the sample
+    /// periods, flagged as tick time, so nothing waits for the model. A read's drain has no tick, so
+    /// its samples wait for the model, or for the next tick.
+    fn stamp_new(&mut self, now: Option<u64>, use_model: bool) {
         let oldest = self.seq.saturating_sub(RING as u64);
         if self.stamped < oldest {
-            // The ring overwrote samples the clock never stamped. They were never part of a batch,
-            // so a batch that had taken everything stamped skips them without a loss: the loss is
-            // the restart's, which said so (an overflow, a reset, a jump), or the first
-            // convergence's, before which no sample has a time.
+            // The ring overwrote samples that were never stamped. A batch that had taken everything
+            // stamped skips them without a loss: the loss is the restart's (an overflow, a reset, a
+            // jump) or the first convergence's, before which no sample had a time.
             if self.batch_next >= self.stamped {
                 self.batch_next = self.batch_next.max(oldest);
             }
             self.stamped = oldest;
         }
+        let Some(newest) = self.seq.checked_sub(1) else {
+            return;
+        };
+        let period = self.setting.period_ns;
         let mut n = self.stamped;
         while n < self.seq {
-            let stamp = match self.kind {
-                Kind::Accel => self.clock.publish(n),
-                Kind::Gyro => self.gyro_clock.publish(n),
+            let model = match (use_model, self.kind) {
+                (false, _) => None,
+                (true, Kind::Accel) => self.clock.publish(n),
+                (true, Kind::Gyro) => self.gyro_clock.publish(n),
             };
-            match stamp {
-                Some(at_ns) => self.set_stamp(n, at_ns),
-                None => break,
-            }
+            let (at_ns, tick) = match (model, now) {
+                (Some(at_ns), _) => (at_ns, false),
+                (None, Some(now)) => {
+                    let back = newest - n;
+                    (now.saturating_sub(back.saturating_mul(period)), true)
+                }
+                // A read's sample with no model yet: it waits for a tick.
+                (None, None) => break,
+            };
+            self.set_stamp(n, at_ns, tick);
             n += 1;
         }
         self.stamped = n;
@@ -614,25 +625,24 @@ impl<const RING: usize> Die<RING> {
             at_ns: 0,
             raw,
             ready: false,
+            tick: false,
         };
         self.seq = self.seq.saturating_add(1);
     }
 
-    /// Sets sample `n`'s stamp, or unqueues it when `at_ns` is `u64::MAX`.
-    fn set_stamp(&mut self, n: u64, at_ns: u64) {
+    /// Sets sample `n`'s stamp, and whether it is tick time.
+    fn set_stamp(&mut self, n: u64, at_ns: u64, tick: bool) {
         let slot = &mut self.ring[(n % RING as u64) as usize];
         if slot.seq == n {
-            if at_ns == u64::MAX {
-                *slot = EMPTY;
-            } else {
-                slot.at_ns = at_ns;
-                slot.ready = true;
-            }
+            slot.at_ns = at_ns;
+            slot.ready = true;
+            slot.tick = tick;
         }
     }
 
-    /// Writes the next samples a batch has not taken, oldest first, as records
-    /// of `RECORD_LEN` bytes into `into`. Returns the bytes written.
+    /// Writes the next samples a batch has not taken, oldest first, as records of `RECORD_LEN` bytes
+    /// into `into`. Returns the bytes written. A record's time is never earlier than the last one
+    /// written, and a tick-time record carries the mode bit (see `TICK_TIME`).
     fn deliver(
         &mut self,
         into: &mut [u8],
@@ -641,8 +651,11 @@ impl<const RING: usize> Die<RING> {
         let capacity = into.len() / RECORD_LEN;
         let oldest = self.seq.saturating_sub(RING as u64);
         if self.batch_next < oldest {
-            // The ring overwrote samples nobody took.
-            self.pending = Some(Note::Batch);
+            // The ring overwrote samples nobody took. A loss the drains already named (an overflow) is
+            // the one health shows.
+            if self.pending.is_none() {
+                self.pending = Some(Note::Batch);
+            }
             self.batch_next = oldest;
         }
         let mut writer = Writer::new(into);
@@ -653,10 +666,13 @@ impl<const RING: usize> Die<RING> {
                 if !entry.ready || written == capacity {
                     break;
                 }
+                let at = entry.at_ns.max(self.delivered);
+                let mode = if entry.tick { TICK_TIME } else { 0 };
                 let value = chip::to_vector(entry.raw, self.setting.scale);
-                if record(&mut writer, entry.at_ns, value).is_err() {
+                if record(&mut writer, at | mode, value).is_err() {
                     break;
                 }
+                self.delivered = at;
                 written += 1;
             }
             self.batch_next += 1;
@@ -675,7 +691,7 @@ impl<const RING: usize> Die<RING> {
             return None;
         }
         if self.due.is_none_or(|due| now >= due) {
-            if let Err(failure) = self.drain(bus, Some(clock)) {
+            if let Err(failure) = self.drain(bus, Some(clock), Some(now)) {
                 self.fail(&failure);
                 return self.retry_at(now);
             }
@@ -812,7 +828,7 @@ fn batch_die<const RING: usize>(
         if die.phase != Phase::Ready {
             Err(die.not_ready())
         } else {
-            match die.drain(bus, None) {
+            match die.drain(bus, None, None) {
                 Err(failure) => Err(die.fail(&failure)),
                 Ok(()) => Ok(die.deliver(into, record)),
             }
