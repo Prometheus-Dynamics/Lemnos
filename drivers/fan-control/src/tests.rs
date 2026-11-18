@@ -1,6 +1,8 @@
 //! The control law, on explicit times. Dev's `fan_control` tests carried over, in nanoseconds.
 
-use crate::law::{Control, Curve, DEGRADED, FULL, WRITE_FAILED, check_settings, parse_curve};
+use crate::law::{
+    BOUND_OUT, Control, Curve, DEGRADED, FULL, WRITE_FAILED, check_settings, parse_curve,
+};
 use lemnos_contract_fan_control::{Point, Settings};
 use lemnos_core::{Config, ConfigValue, Driver, Health, Status};
 use std::vec::Vec;
@@ -267,7 +269,7 @@ fn a_failed_write_retries_with_a_backoff_capped_at_8_seconds() {
             attempts.push(t);
             if fails < 5 {
                 fails += 1;
-                c.write_failed(now);
+                c.write_failed(now, false);
                 assert_eq!(c.health(), Health::Degraded(WRITE_FAILED));
             } else {
                 c.wrote();
@@ -293,7 +295,7 @@ fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
         if c.step(now).is_some() {
             if t < 120 {
                 attempts.push(t);
-                c.write_failed(now);
+                c.write_failed(now, false);
                 failing = true;
                 assert_eq!(c.state().duty, FULL, "t={t}: the safe state, not zero");
                 assert_eq!(c.health(), Health::Degraded(WRITE_FAILED));
@@ -326,6 +328,55 @@ fn a_refused_write_is_retried_past_the_cap_on_sim_time_and_recovers() {
 }
 
 #[test]
+fn a_fan_bound_out_is_retried_past_the_cap_on_sim_time_and_resumes_when_bound_again() {
+    // Sim time. The host has bound the fan out, so every write answers NO_DEVICE until 120 s (the fan is bound
+    // again then). The schedule is the refused one: 1, 2, 4 and then 8 s, for as long as it stays out. Reported
+    // while out: full duty (the fan's failure safe state, which the drop leaves), never zero, and the bound-out
+    // reason with its attempt count and next try.
+    let mut c = one(tuned());
+    let mut attempts = Vec::new();
+    let mut failing = false;
+    for t in 0..=130u64 {
+        let now = t * S;
+        c.observe(0, Some(40_000), now);
+        if c.step(now).is_some() {
+            if t < 120 {
+                attempts.push(t);
+                c.write_failed(now, true);
+                failing = true;
+                assert_eq!(c.health(), Health::Degraded(BOUND_OUT), "t={t}");
+                let (n, next, bound) = c.retry().unwrap();
+                assert_eq!((n, bound), (attempts.len() as u32, true));
+                assert!(next > now, "t={t}: the next try is after this attempt");
+            } else {
+                c.wrote();
+                failing = false;
+            }
+        }
+        if failing {
+            assert_eq!(
+                c.state().duty,
+                FULL,
+                "t={t}: the failure safe state while bound out"
+            );
+        }
+    }
+    assert_eq!(
+        attempts,
+        [
+            0, 1, 3, 7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95, 103, 111, 119
+        ],
+        "1, 2, 4 and 8 s, then 8 s for as long as the fan is out"
+    );
+    assert_eq!(
+        c.health(),
+        Health::Ok,
+        "the fan is bound again and the writes go through"
+    );
+    assert_eq!(c.retry(), None);
+}
+
+#[test]
 fn stepping_counts_steps_within_three_periods() {
     let mut c = one(tuned());
     assert!(!c.stepping(0), "never stepped");
@@ -350,9 +401,9 @@ fn a_degraded_or_retrying_controller_still_counts_as_stepping() {
 
     let mut c = one(tuned());
     c.step(0);
-    c.write_failed(0);
+    c.write_failed(0, false);
     c.step(S);
-    c.write_failed(S);
+    c.write_failed(S, false);
     // Steps at 2 s fall in the retry wait: they are not writes, but they are steps.
     assert_eq!(c.step(2 * S), None);
     assert!(c.stepping(4 * S), "a step in the wait counts");

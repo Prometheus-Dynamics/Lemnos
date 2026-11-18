@@ -28,6 +28,10 @@ const NS_PER_MS: u64 = 1_000_000;
 pub const DEGRADED: &str = "a temperature input is missing or stale: the fan is at full duty";
 /// The health reason after a failed fan write.
 pub const WRITE_FAILED: &str = "the fan write failed: released to full duty, retrying";
+/// The health reason while the host has bound the fan out (after refused writes): the fan is at its failure
+/// safe state (full duty, which the drop leaves), and the controller retries until the fan is bound again.
+pub const BOUND_OUT: &str =
+    "the fan is bound out by the host: full duty, retrying until it is bound again";
 
 /// One input's curve: 1 to [`MAX_POINTS`] points, values strictly ascending, duties 0 to 1000.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +173,8 @@ pub struct Control {
     attempts: u32,
     /// The last write failed.
     fault: bool,
+    /// The fan was bound out by the host (its call answered `NO_DEVICE`), not just refused.
+    bound_out: bool,
     /// When the fan is due to be released (ns). Set when the controller is disabled, and
     /// kept until the release works.
     release_at_ns: Option<u64>,
@@ -220,6 +226,7 @@ impl Control {
             retry_at_ns: None,
             attempts: 0,
             fault: false,
+            bound_out: false,
             release_at_ns: None,
         })
     }
@@ -458,13 +465,15 @@ impl Control {
     /// The fan write worked.
     pub fn wrote(&mut self) {
         self.fault = false;
+        self.bound_out = false;
         self.attempts = 0;
     }
 
     /// The fan write failed. The fan is asked for its safe state (full duty: the driver releases
     /// it), and the next attempt waits 1 s, then 2, 4 and 8 s, and stays at 8 s. Every failure
     /// asks again, so the duty reported while writes are refused is the safe state, never zero.
-    pub fn write_failed(&mut self, now_ns: u64) {
+    pub fn write_failed(&mut self, now_ns: u64, bound_out: bool) {
+        self.bound_out = bound_out;
         self.attempts = self.attempts.saturating_add(1);
         let shift = (self.attempts - 1).min(3);
         let wait = (RETRY_FIRST_NS << shift).min(RETRY_CAP_NS);
@@ -476,11 +485,12 @@ impl Control {
 
     /// While writes are refused: the failed attempts in a row, and when the next attempt is due
     /// (ns). `None` when no write is failing.
-    pub fn retry(&self) -> Option<(u32, u64)> {
+    pub fn retry(&self) -> Option<(u32, u64, bool)> {
         if !self.fault {
             return None;
         }
-        self.retry_at_ns.map(|at| (self.attempts, at))
+        self.retry_at_ns
+            .map(|at| (self.attempts, at, self.bound_out))
     }
 
     /// Whether the controller is running and completing its steps: true while it is disabled
@@ -496,6 +506,8 @@ impl Control {
     pub fn health(&self) -> Health {
         if !self.enabled {
             Health::Ok
+        } else if self.fault && self.bound_out {
+            Health::Degraded(BOUND_OUT)
         } else if self.fault {
             Health::Degraded(WRITE_FAILED)
         } else if self.degraded {

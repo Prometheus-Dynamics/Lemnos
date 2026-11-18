@@ -23,9 +23,10 @@
 #       The three --baseline options are the fan's pwm1, pwm1_enable and its cooling device's cur_state,
 #       recorded by the run before any write (B14 step 1). Build on NVMe or SSD, not the HDD.
 #
-# Check 11 (write failure, the retry schedule) runs on the sim only: its fan's file is made read-only, as a
-# bind mount over pwm1 does on the board, and the fake logs each refused write with its time. On the board,
-# check 11 is still the hand step of B14.md, and this script says so.
+# Check 11 (write failure, the bind-out and the retry schedule) runs on the sim only: a marker file
+# (`<fan>.refuse`) makes the fake fan refuse the controller's writes, the host binds the fan out after five
+# refusals, and the controller's health row names its attempts. On the board, check 11 is the hand step of
+# B14.md, and this script says so.
 #
 # The heat latency (check 3) is bounded by the controller's own step period, which is the period at which
 # it reads its zone and steps its duty (drivers/fan-control/src/law.rs, PERIOD_NS = 1 s), plus the script's own
@@ -429,48 +430,52 @@ no_zero_while_refused() { ! awk -F'\t' '$2 == "11 fault" && $3 == 0 { found = 1 
 # first controller step after it, so an interval is the wait or the wait plus up to one step.
 check11() {
   if [ "$mode" != sim ]; then
-    say "b14: $ZL 11 write failure: not run by the script on the board (B14.md, the bind-mount step); its retry times are the operator's"
+    say "b14: $ZL 11 write failure: not run by the script on the board (B14.md, the bind-out step); its retry times are the operator's"
     return
   fi
-  local failures=$fan_file.failures
-  rm -f "$failures"
   set_temp "$MID"
-  chmod 444 "$fan_file"
-  local t0 reason_seen=false end row=""
+  # The fan refuses the controller's writes while the marker is there. Five refusals in a row bind the fan out
+  # (the host's rule for a device that stops answering); the drop leaves full duty on it; the controller retries
+  # on 1, 2, 4 and then 8 s until the fan is bound again, which happens once the marker is gone.
+  : > "$fan_file.refuse"
+  local t0 end now_row row="" bound_seen=false full_seen=false n
+  local -A first_at=()
   t0=$(now_ms)
   ctl call fan-control hold 900 30000 > /dev/null || bad "$ZL 11 hold refused"
-  end=$((t0 + 26000))
+  end=$((t0 + 36000))
   while [ "$(now_ms)" -lt "$end" ]; do
     sample "11 fault" || break
-    local now_row
     now_row=$(ctl list | grep "^fan-control " | head -1)
-    [[ "$now_row" == *"fan write failed"* ]] && reason_seen=true
     [ -n "$now_row" ] && row=$now_row
+    if [[ "$now_row" =~ attempt\ ([0-9]+) ]]; then
+      n=${BASH_REMATCH[1]}
+      [ -z "${first_at[$n]:-}" ] && first_at[$n]=$(now_ms)
+    fi
+    [[ "$now_row" == *"bound out"* ]] && bound_seen=true
+    [ "$(cat "$fan_file")" = 1000 ] && full_seen=true
     sleep 0.25
   done
+  rm -f "$fan_file.refuse"
   say "b14: $ZL 11 health row at the end of the fault: ${row:-none}"
-  local seen_duty
-  seen_duty=$(awk -F'\t' '$2 == "11 fault" { print $3 }' "$samples" | sort -u | tr '\n' ' ')
-  say "b14: $ZL 11 duty values seen while refused (per mille): ${seen_duty:-none}"
-  expect "$ZL 11 the duty while writes are refused is never zero" no_zero_while_refused
-  
-  chmod 644 "$fan_file"
-  local attempts=()
-  [ -f "$failures" ] && mapfile -t attempts < "$failures"
-  say "b14: $ZL 11 refused writes (unix ms): ${attempts[*]:-none}"
-  expect "$ZL 11 the refused writes are retried: at least 5 attempts in 26 s" [ "${#attempts[@]}" -ge 5 ]
-  local waits=(1000 2000 4000 8000)
-  local i gap ok=true
-  for ((i = 1; i < ${#attempts[@]} && i <= 4; i++)); do
-    gap=$((attempts[i] - attempts[i - 1]))
-    local w=${waits[i - 1]}
-    say "b14: $ZL 11 retry $i after $gap ms (wait $w ms, bound $((w + CTRL_PERIOD_MS)) ms)"
-    if [ "$gap" -lt "$w" ] || [ "$gap" -gt $((w + CTRL_PERIOD_MS + 250)) ]; then ok=false; fi
+  local count=0 k
+  for k in "${!first_at[@]}"; do count=$((count > k ? count : k)); done
+  local ok=true
+  for ((n = 1; n < count; n++)); do
+    local w=$((1000 << (n - 1)))
+    [ "$w" -gt 8000 ] && w=8000
+    local gap=$(( ${first_at[$((n + 1))]:-0} - ${first_at[$n]:-0} ))
+    say "b14: $ZL 11 attempt $n to $((n + 1)): $gap ms (wait $w ms, bound $((w + CTRL_PERIOD_MS)) ms)"
+    # Each attempt is first seen at a 250 ms sample, so each end of a gap is off by up to 250 ms; the first
+    # controller step after the wait bounds the gap from above.
+    if [ "$gap" -lt $((w - 500)) ] || [ "$gap" -gt $((w + CTRL_PERIOD_MS + 500)) ]; then ok=false; fi
   done
-  expect "$ZL 11 the retry waits are 1, 2, 4 and 8 s, each ended by the first step after it" $ok
-  expect "$ZL 11 the health names the failed write" $reason_seen
+  expect "$ZL 11 the host binds the fan out, and the health row says so (bound out)" $bound_seen
+  expect "$ZL 11 the fan is at full duty after the drop (the file reads 1000)" $full_seen
+  expect "$ZL 11 the controller retries past the cap: at least 6 attempts in 36 s" [ "$count" -ge 6 ]
+  expect "$ZL 11 the attempts wait 1, 2, 4 and then 8 s, each ended by the first step after it" $ok
+  expect "$ZL 11 the duty while the fan is out is never zero" no_zero_while_refused
   EXP=$(expected "$MID")
-  expect "$ZL 11 once the writes work again the duty is back on the curve" wait_until 25 at_expected
+  expect "$ZL 11 once the fan is bound again control resumes on the curve" wait_until 40 at_expected
 }
 
 # --- the REAL phase -----------------------------------------------------------------------------

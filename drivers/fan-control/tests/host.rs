@@ -88,6 +88,10 @@ pub trait FanKnob {
     /// Hand-backs (the baseline put back) so far.
     #[method(5)]
     fn hand_backs(&mut self) -> Result<u32>;
+    /// The fan is bound out for the next `n` writes: each answers `NO_DEVICE`, as a host does for a device it has
+    /// bound out. Releases answer the same while it is out.
+    #[method(6)]
+    fn bound_out_next(&mut self, n: u32) -> Result<()>;
 }
 
 #[driver("sim-fan", provides = [Fan, FanKnob])]
@@ -97,6 +101,7 @@ pub struct SimFan {
     releases: u32,
     hand_backs: u32,
     failing: u32,
+    bound_out: u32,
 }
 
 impl Lifecycle for SimFan {
@@ -109,6 +114,7 @@ impl Lifecycle for SimFan {
             releases: 0,
             hand_backs: 0,
             failing: 0,
+            bound_out: 0,
         })
     }
 }
@@ -116,6 +122,10 @@ impl Lifecycle for SimFan {
 impl Fan for SimFan {
     fn set_duty(&mut self, per_mille: u16) -> Result<()> {
         self.calls += 1;
+        if self.bound_out > 0 {
+            self.bound_out -= 1;
+            return Err(Status::NO_DEVICE);
+        }
         if self.failing > 0 {
             self.failing -= 1;
             return Err(Status::IO);
@@ -134,6 +144,9 @@ impl Fan for SimFan {
 
     fn release(&mut self) -> Result<()> {
         self.releases += 1;
+        if self.bound_out > 0 {
+            return Err(Status::NO_DEVICE);
+        }
         Ok(())
     }
 
@@ -162,6 +175,11 @@ impl FanKnob for SimFan {
 
     fn fail_next(&mut self, n: u32) -> Result<()> {
         self.failing = n;
+        Ok(())
+    }
+
+    fn bound_out_next(&mut self, n: u32) -> Result<()> {
+        self.bound_out = n;
         Ok(())
     }
 }
@@ -253,6 +271,10 @@ impl Rig {
 
     fn fail_fan(&self, n: u32) {
         self.call("fan", 1, 4, &enc(&n));
+    }
+
+    fn bind_out(&self, n: u32) {
+        self.call("fan", 1, 6, &enc(&n));
     }
 
     fn set_temp(&self, milli: i32) {
@@ -379,6 +401,53 @@ fn a_failed_write_releases_the_fan_and_retries_on_a_backoff_capped_at_8_seconds(
     }
     assert_eq!(rig.duty(), 400, "the curve is reached by falling");
     assert_eq!(rig.health(), Health::Ok);
+}
+
+#[test]
+fn a_fan_bound_out_by_the_host_is_retried_past_the_cap_and_resumes_when_bound_again() {
+    // The host has bound the fan out: its next 12 writes answer NO_DEVICE. The controller retries on 1, 2, 4 and
+    // then 8 s, for as long as it is out, reports full duty (the failure safe state the drop leaves) and the
+    // bound-out reason, and takes the fan back at the first write after the fan is bound again (the 13th attempt).
+    let mut rig = start_rig(&board(40_000, false));
+    rig.bind_out(12);
+    rig.host.tick();
+    let mut attempts = Vec::new();
+    let mut seen = 0;
+    for t in 0..=90u32 {
+        if t > 0 {
+            rig.second();
+        }
+        if rig.calls() != seen {
+            seen = rig.calls();
+            attempts.push(t);
+            // The attempts that found the fan out (the first 12) report full duty and the bound-out reason.
+            if seen <= 12 {
+                assert_eq!(
+                    rig.state().duty,
+                    1000,
+                    "t={t}: full duty while the fan is out"
+                );
+                assert_eq!(
+                    rig.health(),
+                    Health::Degraded(lemnos_driver_fan_control::law::BOUND_OUT),
+                    "t={t}"
+                );
+            }
+        }
+    }
+    // Twelve attempts found the fan out; the thirteenth, at 79 s, is the first write that works, the resume.
+    // From then on the controller writes on every step.
+    assert_eq!(
+        &attempts[..13],
+        [0, 1, 3, 7, 15, 23, 31, 39, 47, 55, 63, 71, 79],
+        "1, 2, 4 and 8 s, then 8 s, and the write that works at 79 s is the resume"
+    );
+    assert_eq!(
+        rig.health(),
+        Health::Ok,
+        "control is back once the fan is bound again"
+    );
+    assert_eq!(rig.duty(), 400, "the curve at 40 C");
 }
 
 #[test]

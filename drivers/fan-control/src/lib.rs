@@ -44,6 +44,10 @@
 //!   1 s, then 2 s, 4 s, then 8 s, and stays at 8 s. Each failure asks for the safe state again, so the
 //!   duty is full, never zero, while writes are refused. The driver reports `Degraded` with the attempt
 //!   count (`retrying`) meanwhile. It never gives up.
+//! - A write that answers `NO_DEVICE` means the host has bound the fan out (after five refused writes in a
+//!   row, its rule for a device that stops answering). The controller keeps the same schedule, reports
+//!   `Degraded` with the bound-out reason, and takes the fan back at the first write that works after the fan
+//!   is bound again. The drop that bound the fan out leaves full duty on it, which is the state reported.
 //! - A disabled controller hands the fan back (`hand_back`) to the duty and mode it had before the
 //!   controller took it, and makes no writes until it is enabled. A failed hand-back is tried again
 //!   each second.
@@ -219,11 +223,17 @@ impl Lifecycle for FanController {
     }
 
     fn retrying(&self) -> Option<Retry> {
-        self.control.retry().map(|(attempts, next_ns)| Retry {
-            attempts,
-            next_ns,
-            reason: law::WRITE_FAILED,
-        })
+        self.control
+            .retry()
+            .map(|(attempts, next_ns, bound_out)| Retry {
+                attempts,
+                next_ns,
+                reason: if bound_out {
+                    law::BOUND_OUT
+                } else {
+                    law::WRITE_FAILED
+                },
+            })
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
@@ -244,11 +254,14 @@ impl Lifecycle for FanController {
                     .and_then(|per_mille| self.fan.set_duty(per_mille));
                 match written {
                     Ok(()) => self.control.wrote(),
-                    Err(_) => {
+                    Err(status) => {
                         // The safe state for a failure: full duty. The next attempt is the write's own
                         // retry, below, so a failed release is not kept as a retry of its own.
                         let _ = self.fan.release();
-                        self.control.write_failed(now_ns);
+                        // NO_DEVICE: the host has bound the fan out (after refused writes, five in a row). It
+                        // is retried the same way, until the fan is bound again and the writes go through.
+                        self.control
+                            .write_failed(now_ns, status == Status::NO_DEVICE);
                     }
                 }
             }
