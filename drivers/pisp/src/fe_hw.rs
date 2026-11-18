@@ -9,7 +9,6 @@ use lemnos_driver_pisp_fe_sys::{self as sys, Node, Stream, StreamParams};
 pub use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
-use lemnos_linux_sys::stream::ring::Marks;
 
 use crate::fe_job::{ALIGN, CONFIG_BYTES};
 
@@ -108,6 +107,11 @@ pub trait Hardware: Send {
     fn post(&mut self, job: &Job) -> Result<()>;
     /// The next finished job.
     fn next_finished(&mut self) -> Result<Option<Finished>>;
+    /// The finished job's frame in `buffer` was published to the `output0` stream's consumer. The
+    /// buffer is still held from the block until [`give_back`](Self::give_back), which comes when
+    /// the consumer has returned it; it no longer counts against the frames the driver may have in
+    /// hand, so a consumer that keeps frames does not stop the driver taking the next one.
+    fn handed_on(&mut self, buffer: u32) -> Result<()>;
     /// Gives a finished job's buffer back.
     fn give_back(&mut self, buffer: u32) -> Result<()>;
     /// Whether the stream is still running.
@@ -214,6 +218,13 @@ pub const fn slot_bytes(bytes: u32) -> u64 {
     (bytes as u64 + ALIGN - 1) & !(ALIGN - 1)
 }
 
+/// Frames the driver may have in hand at once on a stream of `buffers`: taken from the module's
+/// stream and not yet handed on or given back.
+const fn in_hand_limit(buffers: u32) -> u32 {
+    let limit = buffers.saturating_sub(2);
+    if limit == 0 { 1 } else { limit }
+}
+
 struct Running {
     // Declared first, so it goes first: the module stops the block when the stream ends.
     stream: Stream,
@@ -255,12 +266,13 @@ impl LinuxHardware {
             frame_slots: plan.buffers.next_power_of_two(),
             job_slots: plan.job_slots,
         })?;
-        // A taken frame is held until give_back: the marks page, at most B - 2 at once (docs/streams.md,
-        // the margin: N = B - 1 - W - held, with W = 1 for a producer that asks while it fills one).
-        let max_held = plan.buffers.saturating_sub(2).max(1);
-        let marks = Marks::create(plan.buffers, 0, max_held)
-            .map_err(|e| io::Error::other(format!("make the marks page: {e:?}")))?;
-        stream.add_marks(marks, plan.buffers, max_held)?;
+        // A taken frame is held until give_back. At most B - 2 may be in hand at once: taken, and
+        // not yet handed on to the `output0` stream's consumer (docs/streams.md, the margin:
+        // N = B - 1 - W - held, with W = 1 for a producer that asks while it fills one). A frame
+        // handed on is still held from the module until its buffer comes back, and is not counted:
+        // how many of those there are is the consumer's doing, and a consumer keeping frames is not
+        // a reason to stop taking the block's next one.
+        stream.add_marks(plan.buffers, in_hand_limit(plan.buffers))?;
         let config_bytes = page_align(u64::from(plan.buffers) * slot_bytes(CONFIG_BYTES as u32));
         let fd = dma_heap::allocate(heap.as_fd(), config_bytes)?;
         let config = stream.register(fd.as_fd())?;
@@ -384,6 +396,11 @@ impl Hardware for LinuxHardware {
             timestamp_ns: frame.timestamp_ns,
             end_ns: frame.end_ns,
         }))
+    }
+
+    fn handed_on(&mut self, buffer: u32) -> Result<()> {
+        let r = self.running()?;
+        r.stream.pass_on(buffer).map_err(|e| status(&e))
     }
 
     fn give_back(&mut self, buffer: u32) -> Result<()> {

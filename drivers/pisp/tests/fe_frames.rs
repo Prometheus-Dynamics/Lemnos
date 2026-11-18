@@ -187,8 +187,8 @@ fn same_file(a: &File, b: &File) -> bool {
 }
 
 struct Block {
-    /// Frames taken and not yet given back, per buffer (the real ring's hold).
-    holds: Vec<u32>,
+    /// Frames taken and not yet given back, and which of them were handed on (the real ring's holds).
+    holds: Holds,
     /// The configuration slots the driver writes: the module was given this memory at `make`.
     configs: Option<Region>,
     /// What was registered; a slot let go of is `None` and is used again.
@@ -216,7 +216,7 @@ struct Block {
 impl Default for Block {
     fn default() -> Self {
         Self {
-            holds: Vec::new(),
+            holds: Holds::default(),
             configs: None,
             regions: Vec::with_capacity(MAX_REGIONS),
             buffers: Vec::with_capacity(BUFFERS as usize),
@@ -360,6 +360,7 @@ impl Hardware for Hw {
             });
             b.regions.clear();
             b.buffers = (0..plan.buffers).map(|_| None).collect();
+            b.holds.clear();
             b.output0_bytes = plan.output0_bytes;
             b.pending.clear();
         });
@@ -469,17 +470,24 @@ impl Hardware for Hw {
     fn next_finished(&mut self) -> Result<Option<Finished>> {
         Ok(self.with(|b| {
             b.run();
+            // The driver's limit in hand: nothing is taken, and the frames go by.
+            if b.holds.at_limit(b.buffers.len() as u32) {
+                b.holds.dropped_at_limit += b.finished.len() as u64;
+                b.finished.clear();
+                return None;
+            }
             let frame = b.finished.pop_front()?;
-            hold_take(&mut b.holds, frame.buffer);
+            b.holds.take(frame.buffer);
             Some(frame)
         }))
     }
 
+    fn handed_on(&mut self, buffer: u32) -> Result<()> {
+        self.with(|b| b.holds.hand_on(buffer))
+    }
+
     fn give_back(&mut self, buffer: u32) -> Result<()> {
-        self.with(|b| {
-            hold_release(&mut b.holds, buffer)?;
-            Ok(())
-        })
+        self.with(|b| b.holds.release(buffer))
     }
 
     fn check(&mut self) -> Result<()> {
@@ -1181,22 +1189,67 @@ fn an_unread_statistics_result_is_never_replaced_by_a_later_job() {
     assert_eq!(hw.with(|b| b.lost), 0);
 }
 
-/// The real ring's hold, per buffer: a frame taken from the stream holds its buffer until it is
-/// given back, and a release with no hold is refused (`INVALID_ARGUMENT`), as `Ring::release` is.
-fn hold_take(holds: &mut Vec<u32>, buffer: u32) {
-    let at = buffer as usize;
-    if holds.len() <= at {
-        holds.resize(at + 1, 0);
-    }
-    holds[at] += 1;
+/// The real ring's holds, as `LinuxHardware` asks for them (`Ring::hold_passing`): a frame taken from
+/// the stream holds its buffer until it is given back; one handed on to the consumer stays held and
+/// is no longer in the driver's hand; and while the driver has its limit in hand (`max(B - 2, 1)`),
+/// nothing is taken: the frames go by and are counted. A release or a hand-on with no hold is refused
+/// (`INVALID_ARGUMENT`), as `Ring::release` and `Ring::pass_on` refuse it.
+struct Holds {
+    held: Vec<u32>,
+    handed: Vec<u32>,
+    dropped_at_limit: u64,
 }
 
-fn hold_release(holds: &mut [u32], buffer: u32) -> Result<()> {
-    match holds.get_mut(buffer as usize) {
-        Some(held) if *held > 0 => {
-            *held -= 1;
-            Ok(())
+impl Default for Holds {
+    fn default() -> Self {
+        Self {
+            held: vec![0; 64],
+            handed: vec![0; 64],
+            dropped_at_limit: 0,
         }
-        _ => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
+impl Holds {
+    /// A new module stream has a new marks page: nothing is held on it.
+    fn clear(&mut self) {
+        self.held.fill(0);
+        self.handed.fill(0);
+    }
+
+    fn at_limit(&self, buffers: u32) -> bool {
+        let in_hand = self.held.iter().sum::<u32>() - self.handed.iter().sum::<u32>();
+        in_hand >= buffers.saturating_sub(2).max(1)
+    }
+
+    fn take(&mut self, buffer: u32) {
+        if let Some(held) = self.held.get_mut(buffer as usize) {
+            *held += 1;
+        }
+    }
+
+    fn hand_on(&mut self, buffer: u32) -> Result<()> {
+        let at = buffer as usize;
+        match (self.held.get(at), self.handed.get_mut(at)) {
+            (Some(held), Some(handed)) if *held > *handed => {
+                *handed += 1;
+                Ok(())
+            }
+            _ => Err(Status::INVALID_ARGUMENT),
+        }
+    }
+
+    fn release(&mut self, buffer: u32) -> Result<()> {
+        let at = buffer as usize;
+        match self.held.get_mut(at) {
+            Some(held) if *held > 0 => {
+                *held -= 1;
+                if let Some(handed) = self.handed.get_mut(at) {
+                    *handed = handed.saturating_sub(1);
+                }
+                Ok(())
+            }
+            _ => Err(Status::INVALID_ARGUMENT),
+        }
     }
 }

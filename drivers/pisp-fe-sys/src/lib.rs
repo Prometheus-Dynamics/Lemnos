@@ -18,7 +18,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use lemnos_linux_sys::stream::ring::{Layout, Marks, Ring};
+use lemnos_linux_sys::stream::ring::{Layout, Ring};
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// A job's words on the ring: its structure, in 64-bit words.
@@ -364,11 +364,22 @@ impl Stream {
         self.fd.as_raw_fd()
     }
 
-    /// Gives the stream its consumer's marks page, so each frame's buffer is held from the take
-    /// until [`return_buffer`](Self::return_buffer). `max_held` frames at most may be held.
-    pub fn add_marks(&mut self, marks: Marks, buffers: u32, max_held: u32) -> io::Result<()> {
+    /// Turns the stream's buffer holds on: from now on each frame [`next_frame`](Self::next_frame)
+    /// takes is held until [`return_buffer`](Self::return_buffer) gives it back. `max_in_hand`
+    /// frames at most may be in hand at once: taken, and not yet passed on to the driver's own
+    /// consumer ([`pass_on`](Self::pass_on)). A frame passed on stays held and is not counted, so a
+    /// consumer that keeps frames does not stop the next one from being taken. `buffers` is the
+    /// stream's pool size.
+    pub fn add_marks(&mut self, buffers: u32, max_in_hand: u32) -> io::Result<()> {
         self.ring
-            .add_marks(self.fd.as_fd(), marks, buffers, max_held)
+            .hold_passing(self.fd.as_fd(), buffers, max_in_hand)
+    }
+
+    /// The frame held in `buffer` went on to the driver's own consumer: it stays held until
+    /// [`return_buffer`](Self::return_buffer), and no longer counts as in hand. `InvalidInput`
+    /// when the stream holds no frame in hand in `buffer`.
+    pub fn pass_on(&mut self, buffer: u32) -> io::Result<()> {
+        self.ring.pass_on(buffer)
     }
 
     /// Pins a dma-buf the block may be sent to. Its device address.
