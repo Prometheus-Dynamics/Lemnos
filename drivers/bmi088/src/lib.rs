@@ -48,24 +48,36 @@
 //!   the next call.
 //!
 //! Stamps. The accelerometer's samples are stamped from the chip's own sensor
-//! time (`sensor_clock.rs`), not from the tick. Each drain reads the sensor
-//! time between two host clock readings, and the host time of that read is the
-//! middle of the two. A sample's stamp is the host time of its sensor tick, from
-//! a least-squares line through the reads, which forgets old reads with
-//! exponential weights (O(1) state, no stored history), so a slow drift of the
-//! chip's oscillator is followed without lag. The sample grid's phase is the
-//! least sensor time any read saw for its newest sample. A read whose bracket
-//! is wider than 2 ms is not used for host time: the host was preempted inside
-//! it. A stamp is never earlier than one already published.
+//! time (`sensor_clock.rs`), not from the tick. A tick's drain reads the sensor
+//! time just before the FIFO's length and again just after it, the second time
+//! between two host clock readings, and reads the FIFO's data only then. The
+//! two reads bound the sample grid's phase from both sides, and the next drain
+//! is aimed at the middle of the bounds on the grid, so they close in a few
+//! drains to the time between the two reads (one short transfer). A sample's
+//! stamp is the host time of its sensor tick: the phase, then a least-squares
+//! line from sensor ticks to host time through the second reads, which forgets
+//! old reads with exponential weights (O(1) state, no stored history), so a
+//! slow drift of the chip's oscillator is followed without lag. A read whose
+//! bracket is wider than 2 ms is not used for host time: the host was
+//! preempted inside it. A stamp is never earlier than one already published.
+//! Until the bounds exist, each drain waits up to one sample period more than
+//! a half FIFO, on a golden-ratio sequence, so the first drains meet the grid
+//! at different points whatever the chip's rate.
 //!
 //! The model publishes only once it has converged: 16 host-timed batches, about
-//! 6 s at 200 Hz (a batch drains every 365 ms). A batch holds its samples until
-//! then, and the ring may overwrite the oldest of them, which is reported. Once
-//! converged, the error against the true time was under 0.6 ms on a 45 s run
-//! and on a run of an hour with the oscillator drifting 0.1 % per hour, with
-//! host jitter of 0.3 ms and rare 9 ms outliers. Under 9 ms of uniform host
-//! jitter on every read the worst error was 3.8 ms and no gap was over 6.2 ms
-//! (the test's bound is 6 ms, and its gap limit is 1.5 periods, 7.5 ms).
+//! 6 s at 200 Hz (a batch drains about every 365 ms), and the phase's bounds
+//! within 1 ms of each other. A batch holds its samples until then. The ring
+//! keeps the newest of them (146 frames, 0.73 s at 200 Hz), and the older ones
+//! are dropped without a loss in health: they never had a time, so they were
+//! never part of a batch, as a sample taken before the first tick never was. A
+//! batch's records therefore start at most one ring's worth of samples before
+//! the model converged, and from there every sample is delivered. On the
+//! simulated chip, with host jitter of 0.3 ms and rare 9 ms outliers, the
+//! converged stamps were within 0.23 ms of the true time at every rate from 4 %
+//! slow to 4 % fast, on 45 s runs and on a run of an hour with the oscillator
+//! drifting 0.1 % per hour. Under 9 ms of uniform error on every host clock
+//! reading the worst error over 48 runs was 6.3 ms and no gap was over 6.7 ms
+//! (the test's bound is 7 ms, and its gap limit is 1.5 periods, 7.5 ms).
 //!
 //! A chip reset (the sensor time steps back), a sensor time that jumps by more
 //! than the host clock agrees with (more than a tenth of the step, and 2 ms),
@@ -78,8 +90,9 @@
 //! back by the measured period. Its error is the tick's own jitter (`Timing`).
 //! Stamping it from its own clock is a follow-up.
 //!
-//! A read's drain has no time of its own. The accelerometer's samples from a
-//! read are stamped by the same model, and the gyroscope's from the last tick's
+//! A read's drain has no time of its own, and reads no sensor time. The
+//! accelerometer's samples from a read are stamped by the same model once it
+//! has converged, and the gyroscope's from the last tick's
 //! stamp on its grid. A gyroscope sample drained before any tick has no stamp,
 //! and is not queued for a batch.
 //!
@@ -310,6 +323,9 @@ struct Die<const RING: usize> {
     stamped: u64,
     /// When the next tick drain is due, host ns (`None`: not draining).
     due: Option<u64>,
+    /// The accelerometer's last extra wait before a drain, in 2^-32 of a sample period (see
+    /// `spread`).
+    spread: u32,
     /// A loss a drain or batch found, not yet shown to a read.
     pending: Option<Note>,
     /// The loss a read shows in health.
@@ -341,6 +357,7 @@ impl<const RING: usize> Die<RING> {
             clock: SensorClock::new(setting.period_ns),
             stamped: 0,
             due: None,
+            spread: 0,
             pending: None,
             shown: None,
             up_due: None,
@@ -481,7 +498,23 @@ impl<const RING: usize> Die<RING> {
         clock: Option<&dyn HostClock>,
     ) -> chip::Step<()> {
         let first = self.seq;
-        let (overflow, result) = self.pull(bus);
+        // A tick's accelerometer drain is timed: the sensor time is read just before the FIFO's
+        // length and again just after it, the second time between two host clock readings, and
+        // only then is the FIFO read (see `sensor_clock.rs`).
+        let timed = match clock {
+            Some(clock) if self.kind == Kind::Accel => Some(clock),
+            _ => None,
+        };
+        let mut sensed = None;
+        let mut counted = None;
+        if let Some(clock) = timed {
+            let raw = chip::accel_sensortime(bus, self.address)?;
+            let event = self.clock.before(raw);
+            self.note_event(event);
+            counted = Some(chip::accel_fifo_bytes(bus, self.address)?);
+            sensed = Some(sense(bus, self.address, clock)?);
+        }
+        let (overflow, result) = self.pull(bus, counted);
         if overflow {
             self.pending = Some(Note::Overflow);
             // The skipped frames keep their numbers, but the sample clock is not trusted across a
@@ -494,23 +527,23 @@ impl<const RING: usize> Die<RING> {
             self.stamp(first, now);
             return result;
         }
-        // The accelerometer's stamps come from its own sensor time, read after the drain.
-        match sense(bus, self.address, clock) {
-            Ok((raw, host)) => {
-                let newest = self.seq.checked_sub(1);
-                if let Some(event) = self.clock.observe(raw, newest, host) {
-                    self.pending = Some(match event {
-                        Event::Reset => Note::Reset,
-                        Event::Jump => Note::Jump,
-                    });
-                }
-                self.publish();
-                result
-            }
-            Err(failure) => match result {
-                Ok(()) => Err(failure),
-                failed => failed,
-            },
+        if let Some((raw, host)) = sensed {
+            let newest = self.seq.checked_sub(1);
+            let event = self.clock.after(raw, newest, result.is_ok(), host);
+            self.note_event(event);
+        }
+        // A read's drain has no time of its own: its samples wait for the model, or take it.
+        self.publish();
+        result
+    }
+
+    /// Records a restart of the sample clock, by name.
+    fn note_event(&mut self, event: Option<Event>) {
+        if let Some(event) = event {
+            self.pending = Some(match event {
+                Event::Reset => Note::Reset,
+                Event::Jump => Note::Jump,
+            });
         }
     }
 
@@ -518,7 +551,17 @@ impl<const RING: usize> Die<RING> {
     /// the first it cannot stamp yet, which holds it and every later sample for the batches.
     fn publish(&mut self) {
         let oldest = self.seq.saturating_sub(RING as u64);
-        let mut n = self.stamped.max(oldest);
+        if self.stamped < oldest {
+            // The ring overwrote samples the clock never stamped. They were never part of a batch,
+            // so a batch that had taken everything stamped skips them without a loss: the loss is
+            // the restart's, which said so (an overflow, a reset, a jump), or the first
+            // convergence's, before which no sample has a time.
+            if self.batch_next >= self.stamped {
+                self.batch_next = self.batch_next.max(oldest);
+            }
+            self.stamped = oldest;
+        }
+        let mut n = self.stamped;
         while n < self.seq {
             match self.clock.publish(n) {
                 Some(at_ns) => self.set_stamp(n, at_ns),
@@ -531,11 +574,16 @@ impl<const RING: usize> Die<RING> {
 
     /// Takes the FIFO's frames into the ring. Returns whether the FIFO
     /// overflowed, and the transfer's result: what was taken is kept either way.
-    fn pull(&mut self, bus: &mut I2c) -> (bool, chip::Step<()>) {
+    /// `counted` is the accelerometer FIFO's length when the drain has read it already.
+    fn pull(&mut self, bus: &mut I2c, counted: Option<usize>) -> (bool, chip::Step<()>) {
         let (address, kind) = (self.address, self.kind);
         let mut overflow = false;
         let result = match kind {
-            Kind::Accel => chip::accel_fifo_bytes(bus, address).and_then(|bytes| {
+            Kind::Accel => match counted {
+                Some(bytes) => Ok(bytes),
+                None => chip::accel_fifo_bytes(bus, address),
+            }
+            .and_then(|bytes| {
                 chip::drain_accel(bus, address, bytes, &mut |frame| match frame {
                     Frame::Skipped(count) => {
                         // The dropped frames are older than the next ones, so
@@ -665,9 +713,36 @@ impl<const RING: usize> Die<RING> {
                 return self.retry_at(now);
             }
             let half_depth = RING as u64 * self.setting.period_ns / 2;
-            self.due = Some(now.saturating_add(half_depth));
+            let earliest = now.saturating_add(half_depth);
+            let spread = self.spread();
+            let next = match self.kind {
+                // Aimed at the sample clock's phase once it has one, so the drain splits its bounds.
+                Kind::Accel => self
+                    .clock
+                    .aim(earliest)
+                    .unwrap_or(earliest.saturating_add(spread)),
+                Kind::Gyro => earliest,
+            };
+            self.due = Some(next);
         }
         self.due
+    }
+
+    /// The accelerometer's extra wait before its next drain, in `[0, period)`, until the sample
+    /// clock has the bounds to aim its drains with; none for the gyroscope. The first bounds come
+    /// from drains at any point of the sample grid, and drains a fixed time apart cycle through a
+    /// few points when that time is close to a simple fraction of periods. Drain `j` waits `j * golden`
+    /// (mod one period) more, so after `k` drains the offset on the grid has moved by
+    /// `golden * k * (k + 1) / 2` periods plus the beat: a quadratic with an irrational step,
+    /// spread evenly over the period whatever the chip's rate is.
+    fn spread(&mut self) -> u64 {
+        if self.kind != Kind::Accel {
+            return 0;
+        }
+        /// 2^32 / the golden ratio.
+        const GOLDEN: u32 = 2_654_435_769;
+        self.spread = self.spread.wrapping_add(GOLDEN);
+        (u64::from(self.spread) * self.setting.period_ns) >> 32
     }
 
     /// Records a failure. A wrong chip, or a failure while measuring, sends the
@@ -716,19 +791,13 @@ impl<const RING: usize> Die<RING> {
 
 /// The accelerometer's sensor time, and the host time of the read: the middle of the two host clock
 /// readings around it. A bracket wider than `MAX_BRACKET_NS` (the host was preempted inside the
-/// read) gives no host time. With no clock (a read's drain), only the chip's time is read.
-fn sense(
-    bus: &mut I2c,
-    address: u8,
-    clock: Option<&dyn HostClock>,
-) -> chip::Step<(u32, Option<u64>)> {
-    let before = clock.map(|c| c.now_ns());
+/// read) gives no host time.
+fn sense(bus: &mut I2c, address: u8, clock: &dyn HostClock) -> chip::Step<(u32, Option<u64>)> {
+    let before = clock.now_ns();
     let raw = chip::accel_sensortime(bus, address)?;
-    let after = clock.map(|c| c.now_ns());
-    let host = match (before, after) {
-        (Some(b), Some(a)) if a >= b && a - b <= MAX_BRACKET_NS => Some(b + (a - b) / 2),
-        _ => None,
-    };
+    let after = clock.now_ns();
+    let host = (after >= before && after - before <= MAX_BRACKET_NS)
+        .then(|| before + (after - before) / 2);
     Ok((raw, host))
 }
 
