@@ -49,7 +49,7 @@ as soon as the module loads.
 | `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |
 | `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
 | `test_pisp_fe` | Test only. Enables the PiSP front end's write log and post-copy overwrite ioctls. |
-| `gsdma` | Compatibles driven as the graphics DMA engine (`lemnos_gsdma.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
+| `gsdma` | Compatibles driven as the graphics DMA engine (`rs/gsdma.rs`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_gsdma_fake_regs` | Test only. The graphics DMA engine's register window is ordinary memory, for the fake engine in QEMU. |
 | `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
 | `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`rs/regjob_ve.rs`). Must also be in `owned`. Empty by default. |
@@ -207,7 +207,7 @@ descriptors are held until a reboot, `lemnos.ko` can't be unloaded, new streams 
 `EIO`, and the kernel log says so. `LEMNOS_GSDMA_IOC_STATUS` on the stream reports `wedged`,
 `finished`, `refused` and `timeouts`.
 
-`lemnos_gsdma.c` holds no vendor code; the register map, descriptor layout, probe values and
+`rs/gsdma.rs` holds no vendor code; the register map, descriptor layout, probe values and
 formats it uses are facts, with their source in its header.
 
 ## The VIP9000 neural accelerator

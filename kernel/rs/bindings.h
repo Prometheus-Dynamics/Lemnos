@@ -10,3 +10,4 @@
 
 #include "../lemnos.h"
 #include "../lemnos_regjob.h"
+#include "../lemnos_gsdma.h"
