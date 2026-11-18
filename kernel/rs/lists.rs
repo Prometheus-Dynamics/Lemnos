@@ -157,28 +157,3 @@ pub(crate) unsafe extern "C" fn lem_block_owned(dev: *mut bindings::device) -> b
     // SAFETY: the caller's device.
     unsafe { List::Owned.has(dev) }
 }
-
-/// For lemnos_core.c while its probe is C: the device's place in the list numbered `which` (the order of
-/// `List`), and the test switch.
-///
-/// # Safety
-/// `dev` is a live device.
-#[no_mangle]
-pub(crate) unsafe extern "C" fn lem_list_has(dev: *mut bindings::device, which: u32) -> bool {
-    let list = match which {
-        0 => List::Owned,
-        1 => List::Confined,
-        2 => List::Unconfined,
-        3 => List::PispBe,
-        4 => List::Gsdma,
-        _ => List::Vip9000,
-    };
-    // SAFETY: the caller's device.
-    unsafe { list.has(dev) }
-}
-
-/// For lemnos_core.c while its requests are C: test_irq_inject=.
-#[no_mangle]
-pub(crate) extern "C" fn lem_test_irq_inject() -> bool {
-    test_irq_inject()
-}

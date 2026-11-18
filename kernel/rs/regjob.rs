@@ -34,7 +34,7 @@
 //! collection and every register write; `irqs` (a spinlock, interrupts off) the completion, the job's
 //! reads and slots the handler uses, and the event queue, and is the only lock the handlers take.
 //!
-//! The core (lemnos_core.c) holds a block as `struct lem_rj *`, which is the probe's reference to the
+//! The core (rs/dev.rs) holds a block as `struct lem_rj *`, which is the probe's reference to the
 //! `Arc<Rj>`; each session file holds another, so a block unbound while a session is open lives until
 //! it closes. Buffers belong to the frames role, one session at a time, and sit in the block; the copy
 //! of a job (its writes, slots and reads) is made once, at probe, so a job allocates nothing.

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The interrupt notifications of the Lemnos blocks (stage 1f): the lock, the ready queue in fire order
-//! and each interrupt's mask state, all guarded by IRQ_LOCK. The C side keeps the handler's wake-up, the
-//! requests and frees of each block's interrupts, and the read and poll paths, which call these.
+//! and each interrupt's mask state, all guarded by IRQ_LOCK. The core (rs/dev.rs) keeps the handler's
+//! wake-up, the requests and frees of each block's interrupts, and the read and poll paths, which call
+//! these.
 //!
-//! `LemIrq` mirrors `struct lem_irq` (lemnos_core.c) field for field; both sides assert its size. The
+//! A `LemIrq` lives in its block's record (rs/dev.rs). The
 //! fields are read and written only under IRQ_LOCK, except the ones lem_irq_init and the probe set while
 //! the line is still masked and not requested.
 use core::ptr::null_mut;
@@ -37,10 +38,10 @@ const _: () = assert!(core::mem::size_of::<LemIrq>() == 40);
 /// The event one read returns, `struct lem_irq_event` (C).
 #[repr(C)]
 pub(crate) struct LemIrqEvent {
-    block_id: u32,
-    index: u32,
-    count: u32,
-    ns: u64,
+    pub(crate) block_id: u32,
+    pub(crate) index: u32,
+    pub(crate) count: u32,
+    pub(crate) ns: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<LemIrqEvent>() == 24);
