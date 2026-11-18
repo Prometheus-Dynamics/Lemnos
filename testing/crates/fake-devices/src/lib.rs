@@ -121,6 +121,9 @@ fake_vector!(
         fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
             Err(Status::NOT_SUPPORTED)
         }
+        fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
+            Err(Status::NOT_SUPPORTED)
+        }
     }
 );
 fake_vector!(
@@ -131,6 +134,9 @@ fake_vector!(
     RadianPerSecond,
     {
         fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
+            Err(Status::NOT_SUPPORTED)
+        }
+        fn read_batch_stamped(&mut self, _into: &mut [u8]) -> Result<usize> {
             Err(Status::NOT_SUPPORTED)
         }
     }
@@ -289,14 +295,35 @@ impl Accelerometer for FakeFifoAccelerometer {
     }
 
     fn read_batch(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.drain(into, false)
+    }
+
+    /// A fake's stamps are its own clock's, never tick time, so every record's mode is the model's (0).
+    fn read_batch_stamped(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.drain(into, true)
+    }
+}
+
+impl FakeFifoAccelerometer {
+    /// Writes the queued samples that fit, as records, or as stamped records (mode byte first).
+    fn drain(&mut self, into: &mut [u8], stamped: bool) -> Result<usize> {
         use lemnos_core::{Encode, Writer};
-        let record = lemnos_contract_accelerometer::RECORD_LEN;
+        let record = if stamped {
+            lemnos_contract_accelerometer::STAMPED_RECORD_LEN
+        } else {
+            lemnos_contract_accelerometer::RECORD_LEN
+        };
         let mut used = 0;
         while let Some(sample) = self.queue.front().copied() {
             if used + record > into.len() {
                 break;
             }
-            let mut writer = Writer::new(&mut into[used..used + record]);
+            let mut at = used;
+            if stamped {
+                into[at] = 0;
+                at += 1;
+            }
+            let mut writer = Writer::new(&mut into[at..used + record]);
             sample
                 .encode(&mut writer)
                 .map_err(|_| Status::INVALID_ARGUMENT)?;

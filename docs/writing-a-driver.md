@@ -868,6 +868,7 @@ When you add a method or field, classify it in the PR:
 | The stateless-decode stamp, a whole number of microseconds (`drivers/m2m-decode`) | not a change | the rule and its check are unchanged since T1b; the T1c change to `codec-block` is to byte sizes only |
 | `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |
 | `MethodInfo.job` set on an existing method | breaking | a client that calls it as a call would now get `NOT_SUPPORTED` |
+| `accelerometer/1` and `gyroscope/1` method 3 (`read_batch_stamped`, the batch records with each record's stamp mode) | additive | appended method, marked `#[added]`: the base hash is unchanged. `read_batch` and its records are byte-for-byte what they were, so an older consumer that reads `at_ns` is unchanged. A record's stride is kept by never changing `read_batch`'s records: a mode carried inside them (a longer record) would be a breaking change the hash does not see, since a batch is an opaque byte buffer |
 | `system.identity/1` (new contract) | additive | a new contract is only bound by a client that asks for it |
 | Package boundary: `DriverTable.resume_record` and `DriverTable.resume` (the resume entries) | additive | appended to the driver table. A package without them has the layout the boundary had before (`PACKAGE_EXTRAS_LAYOUT_HASH`), loads, and keeps nothing across a rebind (`Lost`). The layout hash changes (`PACKAGE_LAYOUT_HASH`); no version bump |
 

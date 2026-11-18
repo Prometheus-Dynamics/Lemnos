@@ -451,7 +451,7 @@ each out-buffer method's largest reply, from its contract's own bounds:
 
 | contract | method | largest reply | through the bridge |
 |---|---|---|---|
-| `accelerometer/1`, `gyroscope/1` | `read_batch` | the caller's buffer | whole; samples that do not fit wait for the next batch |
+| `accelerometer/1`, `gyroscope/1` | `read_batch`, `read_batch_stamped` | the caller's buffer | whole; samples that do not fit wait for the next batch |
 | `camera-frames/1` | `frame_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
 | `camera-isp/1` | `config_stream`, `statistics_stream`, `input_stream`, `output_stream` | 32 bytes each | whole |
 | `camera-receiver/1` | `frame_stream`, `embedded_stream` | 32 bytes each | whole |
@@ -779,13 +779,14 @@ Orion core and lemnosd, every out-buffer method the simulated board can host, an
 SPI and UART (`i2c_transfer`, `spi_transfer`, `uart_read`), `gadget` (`data_stream`, and `control_out`
 refused with no request pending, `INVALID_ARGUMENT`), the fake accelerometer and gyroscope (`read_batch`
 refused as `NOT_SUPPORTED`: a fake has no FIFO), and `lights` (`states`, an indicator on a WS2812
-strip). That is 13 of the 33 out-buffer methods. The success path of `read_batch` and of `control_out`
+strip). That is 13 of the 35 out-buffer methods. The success path of `read_batch` and of `control_out`
 is not reached through the bridge, since neither has a simulated FIFO or a stream consumer to give
 the request.
 
-The other 20 are covered by the text path only (`every_out_buffer_method_of_every_contract_is_callable_through_the_text_path`
+The other 22 are covered by the text path only (`every_out_buffer_method_of_every_contract_is_callable_through_the_text_path`
 in `service/ctl/tests/out_buffers.rs`), because no simulated device can host them:
 
+- `accelerometer` and `gyroscope` `read_batch_stamped`: the simulated devices have no FIFO;
 - `camera-frames` `frame_stream`; `camera-isp` `config_stream`, `statistics_stream`, `input_stream`,
   `output_stream`; `camera-receiver` `frame_stream`, `feeds`, `embedded_stream`, `source`; `camera-sensor`
   `identity`: the simulator has no camera, ISP or image sensor;

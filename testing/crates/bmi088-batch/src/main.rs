@@ -2,8 +2,13 @@
 //! 4 KiB buffer, for a fixed time, and prints the rows the record's checks read.
 //!
 //! ```text
-//! lemnos-bmi088-batch --socket SOCK --device imu --seconds 45 --period-ms 50 --out records.tsv
+//! lemnos-bmi088-batch --socket SOCK --device imu --contract accel --seconds 45 --period-ms 50 --out records.tsv
 //! ```
+//!
+//! `--contract` picks the die: `accel` (the default, `accelerometer/1`) or `gyro` (`gyroscope/1`). Each
+//! die is measured on its own run, and the rows say which die they are for. Batches are read with
+//! `read_batch_stamped`, so the rows also say how many records were stamped from tick time and the batch
+//! at which the stamping mode changed.
 //!
 //! Exit codes: 0 measured; 2 usage; 3 NOT MEASURED (the daemon is not reachable, the device is not an
 //! accelerometer, or it refuses batches: a device with `fifo = false` answers `NOT_SUPPORTED`, as the
@@ -25,11 +30,23 @@ use std::time::{Duration, Instant};
 use lemnos_bmi088_batch::{BatchError, Report, rows};
 use lemnos_client::Client;
 use lemnos_contract_accelerometer::Accelerometer;
+use lemnos_contract_gyroscope::Gyroscope;
 use lemnos_core::Status;
+
+/// Which die to read: the accelerometer's `read_batch_stamped`, or the gyroscope's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Die {
+    Accel,
+    Gyro,
+}
+
+/// One stamped batch read: fills the buffer, returns the bytes written.
+type BatchRead = Box<dyn FnMut(&mut [u8]) -> Result<usize, Status>>;
 
 struct Args {
     socket: String,
     device: String,
+    die: Die,
     seconds: u64,
     period_ms: u64,
     sample_period_ms: u64,
@@ -38,7 +55,7 @@ struct Args {
 
 fn usage() -> ! {
     err(
-        "usage: lemnos-bmi088-batch --socket SOCK [--device imu] [--seconds 45] [--period-ms 50] [--out FILE]",
+        "usage: lemnos-bmi088-batch --socket SOCK [--device imu] [--contract accel|gyro] [--seconds 45] [--period-ms 50] [--out FILE]",
     );
     std::process::exit(2);
 }
@@ -47,6 +64,7 @@ fn parse() -> Args {
     let mut args = Args {
         socket: String::new(),
         device: "imu".into(),
+        die: Die::Accel,
         seconds: 45,
         period_ms: 50,
         sample_period_ms: 5,
@@ -58,6 +76,13 @@ fn parse() -> Args {
         match flag.as_str() {
             "--socket" => args.socket = value,
             "--device" => args.device = value,
+            "--contract" => {
+                args.die = match value.as_str() {
+                    "accel" => Die::Accel,
+                    "gyro" => Die::Gyro,
+                    _ => usage(),
+                }
+            }
             "--seconds" => args.seconds = value.parse().unwrap_or_else(|_| usage()),
             "--period-ms" => args.period_ms = value.parse().unwrap_or_else(|_| usage()),
             "--sample-period-ms" => {
@@ -96,14 +121,31 @@ fn main() {
             args.socket
         ))
     });
-    let mut accel = client
-        .open::<dyn Accelerometer>(&args.device)
-        .unwrap_or_else(|e| {
-            not_measured(&format!(
-                "{:?} is not an accelerometer the daemon serves: {e}",
-                args.device
-            ))
-        });
+    // Each die's client reads its stamped batches into the same buffer shape.
+    let mut read: BatchRead = match args.die {
+        Die::Accel => {
+            let mut accel = client
+                .open::<dyn Accelerometer>(&args.device)
+                .unwrap_or_else(|e| {
+                    not_measured(&format!(
+                        "{:?} is not an accelerometer the daemon serves: {e}",
+                        args.device
+                    ))
+                });
+            Box::new(move |buf| accel.read_batch_stamped(buf))
+        }
+        Die::Gyro => {
+            let mut gyro = client
+                .open::<dyn Gyroscope>(&args.device)
+                .unwrap_or_else(|e| {
+                    not_measured(&format!(
+                        "{:?} is not a gyroscope the daemon serves: {e}",
+                        args.device
+                    ))
+                });
+            Box::new(move |buf| gyro.read_batch_stamped(buf))
+        }
+    };
 
     let period = Duration::from_millis(args.period_ms);
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -113,7 +155,7 @@ fn main() {
     let mut fault: Option<String> = None;
     let mut next = started;
     while Instant::now() < deadline {
-        match accel.read_batch(&mut buf) {
+        match read(&mut buf) {
             Ok(bytes) => {
                 if let Err(e) = report.add_batch(&buf[..bytes]) {
                     fault.get_or_insert(match e {
@@ -177,6 +219,7 @@ mod tests {
         let args = Args {
             socket: String::new(),
             device: String::new(),
+            die: Die::Accel,
             seconds: 1,
             period_ms: 50,
             sample_period_ms: 5,
@@ -184,5 +227,19 @@ mod tests {
         };
         assert_eq!(sample_period_ns(&args), 5_000_000);
         assert_ne!(sample_period_ns(&args), 50_000_000);
+    }
+
+    /// The tool decodes both dies' stamped batches with one decoder (`lib.rs`), so the two contracts'
+    /// stamped records must be the same bytes: the same length, and the same stamp and value layout.
+    #[test]
+    fn both_dies_stamped_records_are_the_same_length() {
+        assert_eq!(
+            lemnos_contract_accelerometer::STAMPED_RECORD_LEN,
+            lemnos_contract_gyroscope::STAMPED_RECORD_LEN
+        );
+        assert_eq!(
+            lemnos_contract_accelerometer::RECORD_LEN,
+            lemnos_contract_gyroscope::RECORD_LEN
+        );
     }
 }

@@ -25,7 +25,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C; `clock`: host clock | Serves its contract. Batches only with `fifo = true`. Accelerometer batches are stamped from the chip's sensor time, and gyroscope batches from its FIFO's fill (`clock` reads the bracket around each); every sample is delivered from the first batch: tick-time stamps (bit 63 of `at_ns` set) until the die's clock converges, then the clock's (bit clear), and tick time again after a re-anchor or a wide bracket |
+| `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C; `clock`: host clock | Serves its contract. Batches only with `fifo = true`. Accelerometer batches are stamped from the chip's sensor time, and gyroscope batches from its FIFO's fill (`clock` reads the bracket around each); every sample is delivered from the first batch: tick-time stamps until the die's clock converges, then the clock's, and tick time again after a re-anchor or a wide bracket (`at_ns` is always a plain time; `read_batch_stamped` says each record's mode) |
 | `bmm150` | `magnetometer/1`, `self-test/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
 | `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
 | `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. `read` only: no batches, a description has no FIFO |
@@ -251,8 +251,8 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 
 | Tag | Methods | Served by |
 |---|---|---|
-| `accelerometer/1` | 1 read, 2 read_batch | `bmi088`, `generic-accelerometer`, `modbus-accelerometer` |
-| `gyroscope/1` | 1 read, 2 read_batch | `bmi088`, `generic-gyroscope`, `modbus-gyroscope` |
+| `accelerometer/1` | 1 read, 2 read_batch, 3 read_batch_stamped (added) | `bmi088`, `generic-accelerometer`, `modbus-accelerometer` |
+| `gyroscope/1` | 1 read, 2 read_batch, 3 read_batch_stamped (added) | `bmi088`, `generic-gyroscope`, `modbus-gyroscope` |
 | `magnetometer/1` | 1 read | `bmm150`, `generic-magnetometer`, `modbus-magnetometer` |
 | `orientation/1` | 1 read | `orientation` |
 | `temperature/1` | 1 read | `thermal-zone`, `generic-temperature`, `modbus-temperature` |
