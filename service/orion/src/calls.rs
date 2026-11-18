@@ -168,8 +168,12 @@ struct Running {
     job: u64,
     /// The caller the run came from: the key of its lemnosd connection.
     caller: String,
-    /// When the run's deadline passes, if it has one ([`Job::deadline_ms`]).
+    /// When the run's deadline passes, if it has one ([`Job::deadline_ms`]). Once the run is
+    /// cancelling, the bound of its wait for lemnosd's answer (see [`begin_cancel`]).
     due: Option<Instant>,
+    /// A cancel was sent to lemnosd and the run is open until lemnosd says how the job ended. The run
+    /// is reported as that end, never as a cancel of its own.
+    cancelling: bool,
 }
 
 /// A session's lemnosd connection, and when its session last had a request: a run, a run's end or a
@@ -500,8 +504,50 @@ pub(crate) fn cancel_words(reason: u8) -> &'static str {
     }
 }
 
-/// Stops run `call`. A long job is cancelled on lemnosd, and the run ends as cancelled at once:
-/// nothing else would answer it. The caller's connection is kept, and its lease starts from now. The
+/// How long a cancelling run waits for lemnosd to say how its job ended. Past it the run ends as
+/// failed, and never as cancelled: the bridge does not know whether the install stopped or finished.
+pub const CANCEL_WAIT: Duration = Duration::from_secs(5);
+
+/// Sends the cancel of run `r`'s job to lemnosd, and leaves the run open: lemnosd's own end of the job
+/// is the run's report, so the run says what really happened (the driver's contract: a job cancelled
+/// stops and ends as cancelled, one that got there first ends as it really ended). `Err` is the
+/// reason the run ends now, as failed: there is no connection to ask, or lemnosd refused the cancel.
+/// `NOT_FOUND` is not a refusal: the job is over in lemnosd and its end is on its way.
+fn begin_cancel(clients: &mut Callers, r: &mut Running, now: Instant) -> Result<(), String> {
+    let Some(lemnosd) = clients.get_mut(&r.caller) else {
+        return Err("lemnosd is not there: the job ended with its connection, and it is not known how it ended".to_owned());
+    };
+    lemnosd.seen = now;
+    match lemnosd.client.cancel_job(r.job) {
+        Ok(()) => {}
+        Err(Error::Refused { status, .. }) if status == Status::NOT_FOUND => {}
+        Err(error) => {
+            return Err(format!(
+                "lemnosd did not take the cancel ({error}): it is not known how the job ended"
+            ));
+        }
+    }
+    r.cancelling = true;
+    r.due = Some(now + CANCEL_WAIT);
+    Ok(())
+}
+
+/// The run ends as failed, because its cancel could not be carried out or answered: never as cancelled.
+fn failed_cancel(r: &Running, ended: &mut Vec<CallerKey>, detail: String) -> Done {
+    let (detail, session_note) = noted(ended, &r.caller, detail);
+    Done {
+        session: r.session,
+        call: r.call,
+        ending: Ending::FAILED,
+        output: String::new(),
+        detail,
+        session_note,
+    }
+}
+
+/// Stops run `call`. A long job is cancelled on lemnosd, and the run ends as lemnosd says the job did:
+/// cancelled when the cancel stopped it, or as it really ended when the job got there first (see
+/// [`begin_cancel`] and [`follow`]). The run is never reported as cancelled before lemnosd answers. The
 /// reason (Orion's `CancelReason`) is logged and does not change the run: the session's end comes as
 /// `CallerGone`, which releases the holds (see [`caller_gone`]). A cancel carries no session: the
 /// node's number for the run is unique, so the call alone names it.
@@ -516,22 +562,17 @@ fn cancel(
     let Some(at) = running.iter().position(|r| r.call == call) else {
         return;
     };
-    let r = running.remove(at);
     log(&format!("run {call} cancelled: {}", cancel_words(reason)));
-    if let Some(lemnosd) = clients.get_mut(&r.caller) {
-        // Its end, cancelled or not, comes as the job's news, which finds no run and is dropped.
-        let _ = lemnosd.client.cancel_job(r.job);
-        lemnosd.seen = Instant::now();
+    if running[at].cancelling {
+        return;
     }
-    let (detail, session_note) = noted(ended, &r.caller, "cancelled".to_owned());
-    shared.finished(Done {
-        session: r.session,
-        call: r.call,
-        ending: Ending::CANCELLED,
-        output: String::new(),
-        detail,
-        session_note,
-    });
+    match begin_cancel(clients, &mut running[at], Instant::now()) {
+        Ok(()) => {}
+        Err(detail) => {
+            let r = running.remove(at);
+            shared.finished(failed_cancel(&r, ended, detail));
+        }
+    }
 }
 
 /// Ends the runs whose deadline has passed at `now`: each is cancelled on lemnosd and ends
@@ -552,6 +593,21 @@ fn expire_runs(
             continue;
         }
         let r = running.remove(at);
+        if r.cancelling {
+            log(&format!(
+                "run {} cancelled, and lemnosd did not say how it ended",
+                r.call
+            ));
+            replies.push(failed_cancel(
+                &r,
+                ended,
+                format!(
+                    "lemnosd did not say how the job ended within {} s: it is not reported as cancelled",
+                    CANCEL_WAIT.as_secs()
+                ),
+            ));
+            continue;
+        }
         log(&format!("run {} ran out of time", r.call));
         if let Some(lemnosd) = clients.get_mut(&r.caller) {
             let _ = lemnosd.client.cancel_job(r.job);
@@ -627,6 +683,7 @@ fn run_one(
                 caller: caller.to_owned(),
                 due: (job.deadline_ms != 0)
                     .then(|| Instant::now() + Duration::from_millis(job.deadline_ms)),
+                cancelling: false,
             });
             return;
         }
@@ -798,25 +855,17 @@ fn end_attached(
     caller: &str,
     shared: &Shared,
 ) {
+    let now = Instant::now();
     let mut kept = Vec::with_capacity(running.len());
-    for r in running.drain(..) {
-        if r.caller != caller || r.detached {
+    for mut r in running.drain(..) {
+        if r.caller != caller || r.detached || r.cancelling {
             kept.push(r);
             continue;
         }
-        if let Some(lemnosd) = clients.get_mut(&r.caller) {
-            let _ = lemnosd.client.cancel_job(r.job);
-            lemnosd.seen = Instant::now();
+        match begin_cancel(clients, &mut r, now) {
+            Ok(()) => kept.push(r),
+            Err(detail) => shared.finished(failed_cancel(&r, ended, detail)),
         }
-        let (detail, session_note) = noted(ended, &r.caller, "cancelled".to_owned());
-        shared.finished(Done {
-            session: r.session,
-            call: r.call,
-            ending: Ending::CANCELLED,
-            output: String::new(),
-            detail,
-            session_note,
-        });
     }
     *running = kept;
 }
@@ -834,7 +883,10 @@ enum Departure {
 /// kept while a detached run of the caller is in flight, which the request said goes on, and released
 /// otherwise. A run of another session does not keep this one.
 fn departure(running: &[Running], caller: &str) -> Departure {
-    if running.iter().any(|r| r.caller == caller && r.detached) {
+    if running
+        .iter()
+        .any(|r| r.caller == caller && (r.detached || r.cancelling))
+    {
         Departure::Keep
     } else {
         Departure::Release
@@ -1094,6 +1146,7 @@ mod departure_tests {
             job: call,
             caller: caller.to_owned(),
             due: None,
+            cancelling: false,
         }
     }
 
@@ -1138,6 +1191,7 @@ mod deadline_tests {
             job: call + 100,
             caller: caller_key(2),
             due,
+            cancelling: false,
         }
     }
 
@@ -1199,6 +1253,7 @@ mod ending_tests {
             detached: false,
             caller: caller_key(2),
             due: None,
+            cancelling: false,
         }
     }
 
@@ -1330,5 +1385,83 @@ mod ending_tests {
                 "{status:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    fn run(call: u64) -> Running {
+        Running {
+            session: 1,
+            token: 2,
+            detached: false,
+            call,
+            job: call + 100,
+            caller: caller_key(2),
+            due: None,
+            cancelling: false,
+        }
+    }
+
+    #[test]
+    fn a_cancel_with_no_connection_is_refused_and_the_run_is_not_marked_cancelling() {
+        let mut clients: Callers = HashMap::new();
+        let mut r = run(3);
+        let why = begin_cancel(&mut clients, &mut r, Instant::now()).unwrap_err();
+        assert!(why.contains("not known how it ended"), "{why}");
+        assert!(!r.cancelling);
+    }
+
+    #[test]
+    fn a_cancelling_run_is_left_open_until_its_bound() {
+        let mut clients: Callers = HashMap::new();
+        let now = Instant::now();
+        let mut ended = Vec::new();
+        let mut r = run(3);
+        r.cancelling = true;
+        r.due = Some(now + CANCEL_WAIT);
+        let mut running = vec![r];
+        assert!(expire_runs(&mut clients, &mut running, &mut ended, now).is_empty());
+        assert_eq!(running.len(), 1);
+    }
+
+    #[test]
+    fn a_cancelling_run_past_its_bound_ends_failed_and_never_as_cancelled() {
+        let mut clients: Callers = HashMap::new();
+        let now = Instant::now();
+        let mut ended = Vec::new();
+        let mut r = run(3);
+        r.cancelling = true;
+        r.due = Some(now - Duration::from_millis(1));
+        let mut running = vec![r];
+        let done = expire_runs(&mut clients, &mut running, &mut ended, now);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].ending, Ending::FAILED);
+        assert_ne!(done[0].ending.outcome, Outcome::Cancelled);
+        assert!(
+            done[0].detail.contains("not reported as cancelled"),
+            "{}",
+            done[0].detail
+        );
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn a_session_with_a_cancel_in_flight_keeps_its_connection_until_lemnosd_answers() {
+        let mut r = run(3);
+        r.cancelling = true;
+        assert_eq!(departure(&[r], &caller_key(2)), Departure::Keep);
+    }
+
+    #[test]
+    fn a_job_cancelled_by_lemnosd_is_cancelled_and_one_that_finished_is_its_result() {
+        let r = run(3);
+        assert_eq!(
+            job_done(&r, Status::CANCELLED, &[]).ending.outcome,
+            Outcome::Cancelled
+        );
+        assert_eq!(job_done(&r, Status::OK, b"os-3").ending, Ending::SUCCEEDED);
     }
 }

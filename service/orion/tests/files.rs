@@ -393,30 +393,83 @@ fn a_bundle_pushed_through_orion_installs_through_the_install_file_action() {
     );
 }
 
+/// A cancel of a run, and the install it cancels, always agree: when the run says it was cancelled,
+/// the slot is not installed; when it says it completed, the slot is. The driver decides which, and
+/// the run reports what lemnosd says the job did, so the two can't disagree. Each round cancels at a
+/// different point: at once, after the install's first progress, and after the slot is in place (so
+/// the install may already have finished). Either outcome passes; a mix does not.
 #[test]
-fn cancelling_the_run_cancels_the_install() {
-    let s = setup("cancel", 0);
-    let bundle = bundle("os-3", 8 * 1024);
-    assert_eq!(s.push("big.tar", &bundle).state, FileState::Committed);
-    let mut run = s.start("install_file big.tar false false");
-    wait_for("the install under way", || {
-        matches!(
-            run.wait(Duration::from_millis(100)),
-            Ok(Some(Update::Doing(_)))
-        )
-        .then_some(())
-    });
-    run.cancel().expect("cancel");
-    let finished = loop {
-        if let Some(Update::Finished(finished)) = run.wait(WAIT).expect("news") {
-            break finished;
+fn a_cancelled_run_and_its_install_always_agree() {
+    const ROUNDS: u32 = 12;
+    for round in 0..ROUNDS {
+        let s = setup(&format!("agree{round}"), 0);
+        let bundle = bundle("os-3", 8 * 1024);
+        assert_eq!(s.push("big.tar", &bundle).state, FileState::Committed);
+        let slot = s.dir.join("data/slots/os-3.erofs");
+        let mut run = s.start("install_file big.tar false false");
+        let mut progressed = false;
+        let mut finished = None;
+        let deadline = Instant::now() + WAIT;
+        loop {
+            assert!(Instant::now() < deadline, "round {round}: timed out");
+            if finished.is_some() {
+                break;
+            }
+            let ready = match round % 3 {
+                0 => true,
+                1 => progressed,
+                _ => slot.exists(),
+            };
+            if ready {
+                break;
+            }
+            match run.wait(Duration::from_millis(5)).expect("news") {
+                Some(Update::Doing(_)) => progressed = true,
+                Some(Update::Finished(f)) => finished = Some(f),
+                None => {}
+            }
         }
-    };
-    assert_eq!(finished.outcome, Outcome::Cancelled, "{}", finished.detail);
-    assert!(!s.dir.join("data/slots/os-3.erofs").exists());
-    wait_for("the cancelled file deleted", || {
-        entries(&s.incoming()).is_empty().then_some(())
-    });
+        let finished = match finished {
+            // The run ended before the cancel: its end is the answer.
+            Some(finished) => finished,
+            None => {
+                run.cancel().expect("cancel");
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "round {round}: the run never ended"
+                    );
+                    if let Some(Update::Finished(f)) =
+                        run.wait(Duration::from_millis(50)).expect("news")
+                    {
+                        break f;
+                    }
+                }
+            }
+        };
+        let installed = slot.exists();
+        match finished.outcome {
+            Outcome::Cancelled => {
+                assert!(
+                    !installed,
+                    "round {round}: the run says cancelled and os-3 is installed: {}",
+                    finished.detail
+                );
+                wait_for("the cancelled file deleted", || {
+                    entries(&s.incoming()).is_empty().then_some(())
+                });
+            }
+            Outcome::Succeeded => assert!(
+                installed,
+                "round {round}: the run says it completed and os-3 is not there: {}",
+                finished.detail
+            ),
+            other => panic!(
+                "round {round}: unexpected outcome {other:?}: {}",
+                finished.detail
+            ),
+        }
+    }
 }
 
 #[test]

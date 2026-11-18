@@ -928,12 +928,21 @@ status and so code zero:
 | The bridge's ending | Orion outcome | Code | When |
 |---|---|---|---|
 | succeeded | `Succeeded` | 0 | a call's reply, or a job's result |
-| failed | `Failed` | 0 | lemnosd is not there, a job ran and ended with a status that is not in the table (a job's `Rejected` reading does not apply: it ran), the lease ran out or the session ended while the run was in flight |
+| failed | `Failed` | 0 | lemnosd is not there, a job ran and ended with a status that is not in the table (a job's `Rejected` reading does not apply: it ran), the lease ran out or the session ended while the run was in flight, or a cancel was not carried out or not answered in 5 s (its detail says so: the job's end is then not known, and the run is never reported as cancelled) |
 | refused | `Rejected` | 0 | the bridge refused the arguments before any call: not what the device takes, no such item, a read-only item |
-| cancelled | `Cancelled` | 0 | the caller cancelled the run, or its session ended (Orion's reason 2) |
+| cancelled | `Cancelled` | 0 | lemnosd says the job was cancelled: the caller cancelled the run, or its session ended (Orion's reason 2), and the cancel stopped the job |
 
 A long job that ends takes the table's endings for `CANCELLED` and `TIMED_OUT` (its job was cancelled or timed
 out on lemnosd), and `Failed` with code zero for any other status: it ran, so a refusal does not apply.
+
+**A cancel reports what lemnosd says the job did.** The bridge sends the cancel to lemnosd and keeps the run open
+until lemnosd's own end of the job arrives. The run then ends as that end says: `Cancelled` when the cancel stopped
+the job, or as the job really ended (`Succeeded` with its result, or `Failed`) when it got there first, the
+driver's own rule. The run is never reported as cancelled before lemnosd answers, so an install that completed
+is never reported as cancelled, and a cancelled one is never left installed. A cancel that lemnosd refuses (other
+than `NOT_FOUND`, which means the job is already over and its end is on its way) ends the run as `Failed` at once.
+Lemnosd has up to 5 s to answer; past that the run ends `Failed`, with words that say it is not known how the job
+ended.
 
 
 **What bounds a run.** Each kind of run has its own bound, and the lease does not bound any run: a caller with a
@@ -945,7 +954,7 @@ run in flight is never dropped for silence (see "Only silence expires a lease").
 | a long job, its start | the same call deadline | lemnosd | `TimedOut`, code 110 |
 | a long job, once started: its stall bound | the bound its method declares (see "The stall bound of each job method"), renewed by each progress report. lemnosd ends a job silent past it as `TIMED_OUT`, and its driver is told to stop it | lemnosd host | `TimedOut`, code 110, words `it went too long without progress` |
 | a long job, its caller's deadline | `Run.deadline_ms`: the bridge cancels the job when it passes, and so does Orion's node. The earlier of the deadline and the stall bound ends the run | the bridge (and Orion's node) | `TimedOut`, code 110, words `it ran out of time` |
-| a long job, cancelled | the caller's cancel, or its session ending (Orion cancels its attached runs) | caller, Orion | `Cancelled`, code 0 |
+| a long job, cancelled | the caller's cancel, or its session ending (Orion cancels its attached runs). The run ends as lemnosd says the job ended (see "A cancel reports what lemnosd says") | caller, Orion | `Cancelled` when the cancel stopped the job, else the job's own ending; `Failed` when lemnosd does not answer within 5 s |
 | file install | a partial file is deleted after 600 s with no chunk | the bridge | the sender is answered `Rejected` with words `ran out of time` (see below) |
 | flash stream | the stream's write is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the sender is answered `Rejected` with words `ran out of time` |
 
