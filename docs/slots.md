@@ -2164,7 +2164,29 @@ keeps its attempts until it confirms or runs out.
   was written since this boot began, `socket:<path>` accepts a connection. A socket is connected
   without waiting: a listener whose backlog is full answers busy, the look is not good, and the
   next look tries again. A socket still busy after 2 s is not good for good, and the reason says
-  so. Nothing on a tick waits on another process;
+  so. Nothing on a tick waits on another process.
+
+  `tcp:<address>:<port>` is the same rule for a TCP port: `tcp:10.55.0.1:22`, or with an IPv6
+  address in brackets, `tcp:[fe80::1%usb0]:22`. The address is an IPv4 address or a bracketed
+  IPv6 address, never a name (nothing here looks a name up), and the port is 1 to 65535. A
+  link-local IPv6 address (`fe80::/10`) carries its interface's name after a `%`, and only such
+  an address does. An IPv4 address takes no interface: the board's routes pick it, and an
+  address of the board itself is delivered on the board whichever interface holds it. Each look
+  makes one connect that does not wait, sends no byte and closes the connection as soon as it is
+  taken. A port on an address of the board answers at once, taken or refused. Every failure is
+  that look's answer only, and the next look connects again: refused, no route, an address the
+  board does not have yet, a zone whose interface does not exist yet (it is looked up at each
+  look, so an interface that appears after the daemon starts is found then). The reason names
+  the source and the kernel's sentence (`health source tcp:10.55.0.1:22 doesn't accept a
+  connection: Connection refused (os error 111)`). A connect with no answer (the address is not
+  on the board, so the connect went out on a link) is busy; it is kept and asked again at the
+  next look, given up 2 s after it began (the look after that makes a new one), and a source
+  busy for 2 s is not good for good, as a socket is. A good `tcp:` source proves that the port
+  takes a connection made on the board itself. It does not prove the route from another machine:
+  not the cable, the other side's address or a filter between them. Under the packaged systemd
+  unit the daemon may open no TCP socket (`RestrictAddressFamilies=AF_UNIX AF_NETLINK`), and
+  every look says `Address family not supported by protocol`: a board with a `tcp:` source
+  installs the drop-in `lemnosd.service.d/health-tcp.conf` (`packaging/README.md`);
 - the state and the boot record can be written.
 
 Each of these is looked at each second while the trial waits, and the reason it is still waiting

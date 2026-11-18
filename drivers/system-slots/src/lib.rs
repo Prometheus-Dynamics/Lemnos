@@ -65,8 +65,9 @@
 //! - The trial settings, which [`trial`] and [`resolve`] apply: `auto_confirm` (true: the board
 //!   confirms a healthy trial itself), `confirm_uptime_s` (30), `confirm_deadline_s` (600),
 //!   `reboot_at_deadline` (true), `trial_attempts` (3, from 1 to 3) and `health`, a list of
-//!   `device:<id>`, `file:<path>` and `socket:<path>` sources the trial must see good. The keys and
-//!   defaults are in `docs/boards.md`; `docs/slots.md`, "How a trial resolves", says how they work.
+//!   `device:<id>`, `file:<path>`, `socket:<path>` and `tcp:<address>:<port>` sources the trial
+//!   must see good. The keys and defaults are in `docs/boards.md`; `docs/slots.md`, "How a trial
+//!   resolves", says how they work.
 //!
 //! A bundle comes in two ways: streamed by its starter (`install`, then `write`), or as a file
 //! a sender put in `<data>/slots/.incoming/` after asking `accept` whether it fits
@@ -1435,12 +1436,7 @@ fn health_sources(texts: &[String]) -> core::result::Result<Vec<Source>, ConfigE
     texts
         .iter()
         .map(|text| {
-            Source::parse(text).map_err(|_| {
-                ConfigError::new(
-                    "health",
-                    "entries must be device:<id>, file:<path> or socket:<path>",
-                )
-            })
+            Source::parse(text).map_err(|refused| ConfigError::new("health", refused.reason))
         })
         .collect()
 }
@@ -1741,7 +1737,11 @@ impl Lifecycle for SystemSlots {
         slots.policy = trial_policy(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         slots.sources =
             health_sources(&slots.policy.health).map_err(|_| Status::INVALID_ARGUMENT)?;
-        slots.probes = vec![trial::Probe::default(); slots.sources.len()];
+        slots.probes = slots
+            .sources
+            .iter()
+            .map(|_| trial::Probe::default())
+            .collect();
         slots.boot = read_boot_id();
         slots.indicator = needs.indicator;
         slots.partuuid = cfg

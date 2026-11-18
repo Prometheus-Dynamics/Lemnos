@@ -194,10 +194,26 @@ optional and keeps its default when left out:
 | `confirm_deadline_s` | `600` | at least `confirm_uptime_s` | The time, from the daemon's start, by which every condition must hold |
 | `reboot_at_deadline` | `true` | `true`, `false` | At the deadline with a condition unmet: record why, and restart into the default. Ignored with `auto_confirm = false` |
 | `trial_attempts` | `3` | 1 to 3 | Boots in a row that may fail to reach a running daemon before a trial falls back. A boot that reaches the daemon gives its attempt back |
-| `health` | `[]` | a list of strings | Extra conditions for a trial to confirm. Each is `device:<id>` (that device's health is Ok), `file:<path>` (the file exists and was modified since this boot began) or `socket:<path>` (the Unix socket accepts a connection, checked without waiting: a full backlog is busy, and busy for 2 s is not good). A checked path must be absolute |
+| `health` | `[]` | a list of strings | Extra conditions for a trial to confirm. Each is `device:<id>` (that device's health is Ok), `file:<path>` (the file exists and was modified since this boot began) `socket:<path>` (the Unix socket accepts a connection, checked without waiting: a full backlog is busy, and busy for 2 s is not good) or `tcp:<address>:<port>` (the TCP port accepts a connection, checked the same way; see below). A checked path must be absolute |
 
 `health` is an array of strings in the device's `config` (`health = ["device:x", "file:/run/y"]`).
 Only the built-in drivers see it; other arrays in a device's `config` are refused.
+
+A `tcp:` source names a TCP port by address: an IPv4 address (`tcp:10.55.0.1:22`) or an IPv6 address
+in brackets, with the interface's name after a `%` when the address is link-local
+(`tcp:[fe80::1%usb0]:22`); the port is 1 to 65535. A host name is refused: no name is looked up. The
+interface in a zone need not exist when the board file is checked, since it is looked up at each look.
+
+```toml
+health = ["device:imu", "tcp:10.55.0.1:22"]
+```
+
+It is good when a connect made on the board to that address and port is taken (the connection is closed
+at once, with nothing sent), so it proves that the port answers on the board itself. It does not prove
+the route from another machine to the board. A board that runs the packaged systemd unit and names a
+`tcp:` source installs the drop-in `lemnosd.service.d/health-tcp.conf` (`packaging/README.md`), which
+lets the daemon open a TCP socket; without it the source is never good.
+[How a trial resolves](slots.md#how-a-trial-resolves) has the whole rule.
 
 ## Boot history (`system-slots`, `system-reboot`)
 
