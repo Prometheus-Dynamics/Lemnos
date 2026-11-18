@@ -725,7 +725,7 @@ whole. A method whose reply can exceed 60 KiB needs a paged form to be called th
 | device's state | `device` record | `live` | `contract` and `method` records | `item` records | `address` and `location` |
 |---|---|---|---|---|---|
 | `running` (driver bound) | yes, with `state=running`, `reason=""` | `true` | from the driver's manifest | from the running driver | from the running driver |
-| `off` (switched off by the operator) | yes, with `state=off` and the reason | `false` | from the manifest | none | `none` and empty |
+| `off` (switched off by the operator, or by the board) | yes, with `state=off` and the reason: `disabled` (`disabled = true` in the board file), `manual` (an operator's `off`), `policy` (the board's auto-off), or `failed(status(N))` (a driver that keeps its hardware could not be switched off; `N` is the status its `off` returned) | `false` | from the manifest | none | `none` and empty |
 | `retrying` (the bind failed or missed, or its settings were refused) | yes, with `state=retrying` and the reason the bind gave | `false` | from the manifest | none | `none` and empty |
 | `unknown` (no state given) | yes, with `state=unknown` | `false` | from the manifest | none | `none` and empty |
 

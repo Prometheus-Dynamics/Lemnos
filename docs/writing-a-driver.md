@@ -156,7 +156,8 @@ whether that list is current. Chip drivers are `no_std` over `embedded-hal`. The
 closest examples are `drivers/bmm150` (a magnetometer on I2C, with its power-up sequence in Rust) and
 `drivers/ina2xx` (a power monitor with its chip layer in a separate module).
 
-A driver implements `Lifecycle` (its `start`, `describe` and `health`) and its contract trait.
+A driver implements `Lifecycle` (its `start`, `describe` and `health`) and its contract trait. `off` and
+`on` are optional on `Lifecycle` (with the `HOLDS_OFF` switch; see [Switching off and on](#switching-off-and-on)).
 `#[driver("name", provides = [...])]` generates the bind function. Every driver follows the failure
 rule: it never gives up, it reports the fault, and the next read tries again. Pacing between
 attempts, capped at 8 s, is the host's job, because the host decides how often it reads. A driver
@@ -404,7 +405,9 @@ switch means depends on whether the driver sets `HOLDS_OFF`.
   off state and hold it there: a line that is only released does not turn off on most chips. The power switch
   (`gpio-power-switch`) drives its off level and holds the line this way.
 - **When `off` fails.** If `off` returns an error, or panics, the host drops the instance as an off without
-  `HOLDS_OFF` does, and the device's state reads `off` with the reason `Failed` and the status. A driver
+  `HOLDS_OFF` does, and the device's state reads `off` with the reason `failed(status(N))`, where `N` is
+  the status `off` returned (the host's `OffReason::Failed`; the description shows it in
+  lowercase). A driver
   that panics is never trusted again.
 - **What never calls `off`.** A rebind, a device gone for good, a panic in a call, a fault and the daemon's
   shutdown do not. Only an explicit off request reaches `off`. A device that is switched off and then the daemon
