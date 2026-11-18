@@ -160,18 +160,10 @@ struct lem_stream_producer {
 	void (*release)(void *priv);
 };
 
-/* The stream open as `file`, if it was created on `dev`; an ERR_PTR otherwise. */
-struct lem_stream *lem_stream_from_file(struct file *file, struct device *dev);
 /*
- * One producer per stream. `bytes` is what it may write per buffer. The stream
- * knows bytes only: a producer whose frames are lines or planes checks that
- * they fit in `bytes` itself, before attaching.
+ * The calls only the Rust blocks make (the stream of a file, attach, detach, next, the range reads,
+ * cpu_read_enable) have no prototype here: rs/stream_producer.rs and rs/stream_file.rs define them.
  */
-int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 bytes);
-/* Removes the producer; true when it was there and this call took it off. */
-bool lem_stream_detach(struct lem_stream *s);
-/* The next frame's buffer, any context: 0, or -ENOBUFS when none is free. */
-int lem_stream_next(struct lem_stream *s, struct lem_stream_slot *slot);
 /* Done with a slot: publish `bytes` of it, or 0 to say the frame went wrong. */
 void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
 			 u64 sequence, u64 timestamp_ns);
@@ -182,20 +174,6 @@ void lem_stream_complete_at(struct lem_stream *s, const struct lem_stream_slot *
 void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot);
 /* The block's DMA can't be shown to have stopped: keep everything pinned for good. */
 void lem_stream_wedge(struct lem_stream *s);
-/*
- * Reads a job's range through the kernel's mapping of its registered region,
- * any context, exactly `bytes`. The pool and a buffer's own dma-buf aren't
- * readable here. Needs a stream
- * that has had lem_stream_cpu_read_enable() and a job still held.
- */
-int lem_stream_range_read(struct lem_stream *s, const struct lem_job_range *r, void *dst,
-			  size_t bytes);
-/* A held job's range as a device address, computed here. The pool and a buffer's own dma-buf are refused. */
-int lem_stream_range_addr(struct lem_stream *s, const struct lem_job_range *r, u64 *addr);
-/* Test only: writes a word through a held range's kernel mapping, for the module's checks. */
-void lem_stream_range_poke(struct lem_stream *s, const struct lem_job_range *r, size_t offset, u32 val);
-int lem_stream_cpu_read_enable(struct lem_stream *s);
-
 /*
  * For a producer with job_bytes set. Reads the job at the front of the ring
  * into `job` (job_bytes), once: 1 with a job, 0 with none, -errno for a lying
