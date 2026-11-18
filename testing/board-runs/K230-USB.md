@@ -659,6 +659,169 @@ read. Hypothesis A holds.** Sent 52,115 bytes (`e4346650…` before the patch). 
   Record `K230R/bench/R0-soc.txt`.
 - Board at the end: `29f1:0230`, Dev 089, download mode, as found. The lock is released at each script's exit.
 
+**The write half (reviewed 2026-11-18: approved for this card only; sectors 2048 and 3072 are not written in
+this session).** The card is the bench no-boot card read in R3e (CID `0353445352363447 8014a7c9ab015100`,
+124,735,488 sectors). Nothing but this card is written.
+- *How the bytes reach the stage.* Not the stage's own USB device path: that is blocker B2 and has not run on
+  hardware. The ROM's load-and-run is used as it is: each load carries the stage image in `piece` mode at
+  `0x80360000` and one job at `0x80380000` (a 64-byte header with its CRC, then up to 1016 sectors of payload at
+  `0x80381000`; the load ends inside the ROM's range, `0x80400000`). The stage arms `wdt0` first, starts the card on
+  controller 1, refuses unless the CID and the size are the job's, checks the payload's CRC, does the one job,
+  prints the outcome, and takes its SoC reset. `testing/crates/k230-usbboot-stage/src/piece.rs`,
+  `run_piece` in `drivers/k230-usbboot-sys/src/image.rs`, host `k230-card` (`testing/crates/k230-usbboot/src/bin`).
+- *Jobs.* `write`: each sector written (CMD24), read back (CMD17) and compared. `zero`: the same with zero
+  sectors and no payload. `hash`: sectors read and hashed (SHA-256), nothing written. `test`: the bounded write
+  test: the range's content kept in the stage, the pattern written and read back, the content written back and
+  read back.
+- *The watchdog* is fed after a sector that was written and read back equal, or read and hashed, and nowhere
+  else. A sector that reads back different ends the piece unfed.
+- *The proof of a flash.* Each written sector is compared at write time, the stage prints the SHA-256 of what it
+  read back and the host compares it with the SHA-256 of what it sent, and at the end one `hash` job over the
+  whole image region must print the image's SHA-256.
+- *The host* reads the outcome on the consoles (read only), waits for the ROM to answer `K230` again before the
+  next piece, and stops at the first piece that does not end `piece ok` with the expected digest. A progress
+  file holds the first sector not yet verified, so a cut run resumes.
+- *Rehearsal (the register model, `sdhci.rs` tests):* the model has a card now (commands, the data buffer both
+  ways, busy after a write). Through the real host code: a written sector reads back and is fed once; a card that
+  takes the data and keeps its old content is a mismatch and is not fed; a card that stays busy is an error;
+  the write test leaves the range as found; another card, a range past the card and a damaged payload are refused
+  with no write. *Mutation proof for the write path* (no defect in it is known yet, so there is no true
+  fail-before): with CMD24's transfer direction set to read, four of those tests fail
+  (`K230R/write-mutation.log`). A real fail-before is added if the board shows a defect.
+- *Image:* 62,520 bytes, sha256 `af32b725…`; footprint `0x1f470`, below the job address (checked by `check.sh`).
+
+**W0 and W1: the card confirmed again, then the bounded write test (hypothesis, written before the runs).**
+All at the 400 kHz clock R3e proved, one data line. Script `K230R/bench/run-card.sh` (the lock, the same checks, a
+dry mode); one tool run per line below.
+- *W0:* `hash` of sectors 2048..2056 and of 3072..3080. Hypothesis: the stage prints the CID and size of R3e and
+  each SHA-256 equals that of the same 4 KiB of the no-boot image (`f30463e7…` for both, computed by the tool from the file).
+  Also the first `piece` load: the job header at `0x80380000`. Stop: any other card, or a digest that differs.
+- *W1:* the range is sectors 1,048,576..1,048,584 (the 512 MiB mark; the image ends at sector 415,744, so the
+  image never covers it). `hash` it (the content before), `test` it with a 4 KiB pattern
+  (`K230R/bench/pattern.bin`), `hash` it again. Hypothesis: the test prints the pattern's SHA-256 for what it
+  read back, `piece before` equal to `piece after`, and both `hash` runs print the same digest as `piece before`.
+  Stop: a mismatch, a card error, a missing end line (the watchdog cut it), or a restore that differs.
+- *If W1 stops with the pattern left on the card:* eight sectors past the image hold the pattern; nothing the
+  image or the ROM reads. It is reported, not hidden.
+
+**W0 and W1, the runs (2026-11-18 15:56; lock held per run; no reset by hand): all PASS.** Records
+`K230R/bench/W0a.txt`, `W0b.txt`, `W1a.txt`, `W1b.txt`, `W1c.txt` (every console line stamped).
+- *W0:* the stage printed `card cid0 03534453`, `cid1 52363447`, `cid2 8014a7c9`, `cid3 ab015100`, `card blocks lo
+  076f5000`. Sectors 2048..2056: `piece sha256 f30463e7…9da4`, equal to the no-boot image's; sectors 3072..3080: the
+  same. The same card. The load of 131,136 bytes (the job header at `0x80380000`) ran; one piece is 1.3 to 1.5 s
+  from the load to the ROM answering again.
+- *W1a:* sectors 1,048,576..1,048,584 before: `ad7facb2…2ca7` (the SHA-256 of 4096 zero bytes).
+- *W1b, the write test:* load 139,264 bytes; `piece sha256 f918d54c…6865`, the pattern's, for what the stage read
+  back after writing it; `piece before ad7facb2…2ca7`, `piece after ad7facb2…2ca7`; `piece ok`; end; the ROM back.
+  **The first bytes this path has written to a card: 4096 bytes of pattern to sectors 1,048,576..1,048,584, then the
+  4096 bytes that were there before, each sector read back and equal.**
+- *W1c:* the range again: `ad7facb2…2ca7`. The range is as it was found.
+- *Rate at 400 kHz:* the test's 40 sector operations took about 0.55 s, 14 ms each. The whole image at that rate
+  is hours of card time, so the data clock is next.
+
+**W2: the data clock (hypothesis, written before the runs).** With `--fast` the stage raises the card clock after
+the card has started to the word the ROM leaves (`CLOCK_CONTROL` divider field 2: 25 MHz from the 100 MHz base), one
+data line. In order: `hash` of sectors 2048..2056 (read only; must print `f30463e7…`); `hash` of sectors 0..1016
+against the no-boot image (a rate for reads); the write test again on the W1 range; `hash` of that range.
+Hypothesis: the same digests as at 400 kHz, and a sector operation well under a millisecond of card time. Stop: a
+digest that differs (a data path that does not hold at this clock: stay at 400 kHz), a card error, a missing end.
+
+**W2, the runs (2026-11-18 15:57): the digests hold, the rate did not change.** Records `K230R/bench/W2a.txt` to
+`W2d.txt`.
+- `hash` 2048..2056 with `--fast`: `piece clock: data rate`, `f30463e7…` as expected. `hash` 0..1016: `645fbfa0…c9ed`,
+  equal to the no-boot image's first 1016 sectors. The write test: pattern `f918d54c…`, before and after
+  `ad7facb2…`. The range after: `ad7facb2…`. All PASS.
+- **The rate:** 1016 sectors hashed in 12.0 s, 11.9 ms a sector: the 400 kHz figure. The card clock had not
+  changed. *Cause (to be decided by W3):* `data_clock` wrote the new divider with the PLL enable left on; the
+  standard's order for a change is card clock and PLL off, divider, stable, PLL on, stable, card clock on.
+- *Fail-before:* the model takes a divider only from a clock write with the PLL enable off. On the W2 code
+  `the_data_clock_is_the_word_the_rom_leaves_and_the_card_still_answers` fails (`left: 125, right: 2`: the card
+  still runs at the old rate); with the order fixed it passes. `K230R/dataclock-fail-before.log`.
+
+**W3: the data clock with the order fixed (hypothesis, written before the runs).** Image 62,552 bytes, sha256
+`c5a6c028…`. The same four runs as W2. Hypothesis: the same digests, and the 1016-sector hash in well under the
+12 s of W2. If the digests differ at the real 25 MHz (one data line, no delay tuning), the flash stays at 400 kHz.
+
+**W3, the runs (2026-11-18 15:59): the rate is still the old one, and the write test failed at this setting; the
+range was put back.** Records `K230R/bench/W3a.txt` to `W3f.txt`.
+- `hash` 2048..2056: `f30463e7…`, PASS, 102 ms for the eight sectors (102 ms at 400 kHz in W0). `hash` 0..1016:
+  `645fbfa0…`, PASS, 12.0 s again. So the card clock was still at the old rate.
+- **The write test (`W3c`): STOP.** `piece FAILED: card error at sector 00100000`, `the controller reported an
+  error`, `sd error command 00000018` (CMD24), 121 ms after the clock change (the eight reads of the content
+  first). The stage then wrote the kept content back as its code does; the error printed is the first.
+- `hash` of the range after (`W3d`): `ec7736d7…`, not the `ad7facb2…` of before. **Eight sectors past the image
+  (1,048,576..1,048,584) held other bytes than before the test.**
+- *Put back (`W3e`, `W3f`, at the 400 kHz setting, no `--fast`):* a `zero` job over the eight sectors (their
+  content before was zeros: `ad7facb2…` is the SHA-256 of 4096 zero bytes), each read back: `piece sha256
+  ad7facb2…`, `piece ok`; then `hash`: `ad7facb2…`. The range is as it was found. Eight write-and-read-back
+  sectors took 202 ms at 400 kHz: 25 ms a sector.
+- *What W3 says:* cycling the PLL enable did not change the rate, and with it CMD24 failed. The cause of the
+  failure is not established (the error bits were not printed; W4 prints them).
+
+**W4: the SDK driver's own order for the frequency change (hypothesis, written before the runs).** Image 62,808
+bytes, sha256 `693d2c8b…`. `data_clock` now does what `drv_sdhci.c:714-743` does: card clock and
+programmable-clock bit off, then the new divider with both on, then stable; the PLL enable is left as it is.
+After the change the stage prints the clock word, and after a card error the controller's registers (`sd end …`).
+The model's rule is now "a divider is taken when the programmable-clock bit rises", which the W2 and W3 code both
+fail. Runs: `hash` 2048..2056 and 0..1016 with `--fast` (read only), and only if the rate is up and the digests
+hold, the write test and the range's hash. Hypothesis: `piece clock word` with divider field 2, the 1016 sectors
+in a small part of 12 s, the same digests. If the digests differ or the write test fails, the flash runs at
+400 kHz and the data clock is left as an open item.
+
+**W4, the runs (2026-11-18 16:02): reads run at the data clock; the write test failed again, and its cause is
+found; the range was put back.** Records `K230R/bench/W4a.txt` to `W4f.txt`.
+- `piece clock word 000e022f`: the ROM's own word. `hash` 2048..2056: `f30463e7…`. `hash` 0..1016: `645fbfa0…` in
+  1.51 s, 1.5 ms a sector (11.9 ms before). **Reads hold at 25 MHz on one data line, eight times faster.**
+- **The write test (`W4c`): STOP.** `piece FAILED: card error at sector 00100000`, `the controller reported an
+  error`, `sd error command 00000018`, `sd end INT_STATUS 00018111` (command timeout on a CMD24), `sd end
+  PRESENT_STATE 01f70400`. The range after: `ec7736d7…` again.
+- *What was on the card:* `ec7736d7…` is the SHA-256 of the pattern's first sector followed by seven zero
+  sectors (computed on the PC). So the first pattern sector was written, and the failure came after it.
+- *Cause (established by the code and these lines):* after a write the stage polls the card's status with CMD13
+  up to `BUSY_POLLS` = 1000 times. A poll lasts as long as the card clock makes it: 1000 polls are about 0.3 s
+  at 400 kHz and about 15 ms at 25 MHz, and the card was still programming. The stage gave up (CMD13, "the card
+  stayed busy"), then tried to write the kept content back; a card that is programming does not answer CMD24,
+  which is the command timeout printed. The restore's error replaced the first one in the report: that is
+  fixed too (the first failure is the one reported).
+- *Put back (`W4e`, `W4f`, 400 kHz):* `zero` over the eight sectors, read back, `ad7facb2…`; `hash`:
+  `ad7facb2…`. The range is as it was found.
+- *Fix and fail-before:* `BUSY_POLLS` is 200,000 (half a second and more at the fastest clock). The model's card
+  is now busy for a time, not a count of polls (a poll at divider 2 uses up 1/62 of what one at 125 does). On
+  the W4 code `a_write_at_the_data_clock_waits_out_the_cards_busy_time` fails with `Card(40, Reply(13, "the card
+  stayed busy after the write"))`; with the fix it passes. `K230R/busy-fail-before.log`. This is the write
+  path's true fail-before.
+
+**W5: the write test at the data clock (hypothesis, written before the runs).** Image 63,048 bytes, sha256
+`b4fe9a9f…`. `test` on the W1 range with `--fast`, then `hash` of it at 400 kHz. Hypothesis: the pattern's digest
+read back, before and after `ad7facb2…`, the range `ad7facb2…`. Stop as W1. If it fails again, the flash runs at
+400 kHz, where W1 passed.
+
+**W5, the runs (2026-11-18 16:05): the write test passes at the data clock.** `W5a`: `piece clock word 000e022f`;
+`piece sha256 f918d54c…6865` (the pattern, read back); `piece before ad7facb2…`, `piece after ad7facb2…`; `piece
+ok`; the ROM back. The test's 40 sector operations took about 80 ms, 2 ms each. `W5b` (400 kHz): the range is
+`ad7facb2…`. **The range 1,048,576..1,048,584 is as it was found (zeros), and nothing else has been written.**
+
+**What the write test wrote, in all (W1 to W5), all inside sectors 1,048,576..1,048,584 (bytes 536,870,912 to
+536,875,008 of the card):** the 4096-byte pattern (sha256 `f918d54c…`) in W1b, W2c and W5a, each followed by the
+4096 zero bytes that were there; the pattern's first 512 bytes in W3c and in W4c (the failed tests); 4096 zero
+bytes in W3e and W4e (the put-backs). Final content: 4096 zero bytes (`ad7facb2…`), as before the first test.
+
+**FLASH: the whole image except its two header sectors, then the hash on the board (hypothesis, written
+before the run).**
+- *Source:* `/mnt/ssd-samsung/gaia/boards/k230d-ai-cam/test-A/k230d-ai-cam-varA.img`, read in place, 212,860,928
+  bytes (415,744 sectors), sha256 `033903a1…c6cd` (checked). Sectors 2048 and 3072 (the first sector of each SPL
+  copy's header) are written as zeros, never as the source has them: the card stays one the ROM does not boot.
+  With those two sectors zero the source's SHA-256 is `49a61489…b616`, which is the no-boot image's (computed by
+  the tool, equal to `card-b/SHA256`).
+- *Plan (the tool's dry run):* 108 pieces: 83 `write` pieces carrying 43,073,536 bytes, and 25 `zero` runs
+  covering 169,787,392 bytes (a run is at most 16,384 sectors). Every sector 0..415,744 is written. `--fast`
+  (25 MHz, one data line). A progress file (`K230R/bench/FLASH.progress`) holds the first sector not yet
+  verified; the run is a systemd user unit under the bench lock, and stopping between pieces is safe.
+- *Hypothesis:* every piece ends `piece ok` with the SHA-256 of what was sent, and the ROM answers `K230` after
+  each. Then one `hash` job over sectors 0..415,744 prints `49a61489…b616`.
+- *Stop:* the first piece that fails, by the tool. The card then holds the image up to that piece and the no-boot
+  image's content after it (the two are the same bytes there); it still does not boot.
+
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 
 **The capture (read only).** A separate unit reads both CH342 ports from before R0 to the end and writes no byte to

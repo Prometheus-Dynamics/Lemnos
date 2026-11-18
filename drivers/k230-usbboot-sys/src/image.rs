@@ -14,9 +14,10 @@
 //! The image is linked at `LOAD_ADDRESS` (`drivers/k230-usbboot-image/image.ld`), so it is not
 //! position-independent: the host loads it there and only there.
 
-use lemnos_k230_usbboot_stage::image::{BLOCK_MAGIC, REPORT, SD_NONE, STAGE, read_block};
+use lemnos_k230_usbboot_stage::image::{BLOCK_MAGIC, PIECE, REPORT, SD_NONE, STAGE, read_block};
 use lemnos_k230_usbboot_stage::medium::{Geometry, Medium, MediumError, NoMedium};
 use lemnos_k230_usbboot_stage::pads::{self, PadGuard};
+use lemnos_k230_usbboot_stage::piece::{self, Job, PieceError};
 use lemnos_k230_usbboot_stage::probe::{Action, Clock, Probe};
 use lemnos_k230_usbboot_stage::report::{self, BootAreas, NoCard};
 use lemnos_k230_usbboot_stage::sd::{
@@ -264,7 +265,9 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
 /// medium, its device path and its state machine) or a probe (telemetry and the deadline).
 #[unsafe(no_mangle)]
 pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
-    if flags & REPORT != 0 {
+    if flags & PIECE != 0 {
+        run_piece()
+    } else if flags & REPORT != 0 {
         run_report()
     } else if flags & STAGE != 0 {
         run_stage()
@@ -519,6 +522,153 @@ fn run_report() -> ! {
 }
 
 /// The card's identity, capacity and boot area, read through the SD host the parameter names.
+/// The job header the host loaded at the job address.
+fn job_header() -> [u8; piece::HEADER_LEN] {
+    // SAFETY: the job address is SRAM inside the ROM's load range, above this image's footprint (the
+    // link check holds that), readable whether or not the host loaded a job there.
+    unsafe {
+        core::ptr::read_volatile(piece::JOB_ADDRESS as usize as *const [u8; piece::HEADER_LEN])
+    }
+}
+
+/// The job's payload: `sectors` sectors after the header. The caller passes a count the header's parse
+/// has bounded to the load range.
+fn job_payload(sectors: u32) -> &'static [u8] {
+    let len = sectors.min(piece::MAX_SECTORS) as usize * 512;
+    // SAFETY: the range starts at the payload offset above the job address and ends inside the ROM's
+    // load range (`MAX_SECTORS` bounds it); it is SRAM this image never writes, so the bytes do not
+    // change while the slice lives.
+    unsafe {
+        core::slice::from_raw_parts(
+            (piece::JOB_ADDRESS as usize + piece::DATA_OFFSET) as *const u8,
+            len,
+        )
+    }
+}
+
+/// Feeds `wdt0`, the watchdog the piece mode arms. Called only for a verified sector.
+fn feed_wdt0() {
+    Mmio.write32(wdt::BASES[0] + wdt::CRR, wdt::KICK);
+}
+
+fn say_digest<R: RegAccess>(regs: &mut R, label: &str, digest: &[u8; 32]) {
+    if unsafe_gave_up() {
+        return;
+    }
+    let mut text = [0u8; 64];
+    for (i, byte) in digest.iter().enumerate() {
+        text[2 * i] = b"0123456789abcdef"[(byte >> 4) as usize];
+        text[2 * i + 1] = b"0123456789abcdef"[(byte & 0xf) as usize];
+    }
+    let text = core::str::from_utf8(&text).unwrap_or("?");
+    gave_up(uart::write_line_parts(regs, &[label, " ", text]));
+}
+
+/// One piece of a card flash ([`lemnos_k230_usbboot_stage::piece`]): the job at the job address, on the
+/// card the SD parameter names. Everything it does is printed; then the SoC reset returns the board.
+fn run_piece() -> ! {
+    let mut regs = PadGuard::new(Mmio);
+    uart::clear_programmable_thre(&mut regs);
+    uart::configure_if_unset(&mut regs);
+    say(
+        &mut regs,
+        "lemnos stage: piece (writes the card; watchdog armed before this line)",
+    );
+    let outcome = piece_job(&mut regs);
+    match outcome {
+        Ok(()) => say(&mut regs, "piece ok"),
+        Err(PieceError::Refused(why)) => say(&mut regs, why),
+        Err(PieceError::Mismatch(lba)) => {
+            say_hex(
+                &mut regs,
+                "piece FAILED: read back differs at sector",
+                lba as u32,
+            );
+        }
+        Err(PieceError::Card(lba, error)) => {
+            let (words, command) = error.words();
+            say_hex(&mut regs, "piece FAILED: card error at sector", lba as u32);
+            say(&mut regs, words);
+            if let Some(command) = command {
+                say_hex(&mut regs, "sd error command", u32::from(command));
+            }
+            if let Some(controller) =
+                read_sd_parameter().and_then(|v| controller_from_parameter(v).ok())
+            {
+                say_sd(&mut regs, "sd end", controller.base());
+            }
+        }
+    }
+    say(&mut regs, "lemnos stage: end");
+    let mut n = 0x200000u32;
+    while n != 0 {
+        n -= 1;
+        core::hint::spin_loop();
+    }
+    soc_reset()
+}
+
+fn piece_job<R: RegAccess>(regs: &mut R) -> Result<(), PieceError> {
+    let job = Job::parse(&job_header()).map_err(PieceError::Refused)?;
+    say_hex(regs, "piece op", job.op as u32);
+    say_hex(regs, "piece lba", job.lba as u32);
+    say_hex(regs, "piece count", job.count);
+    let pad_words = pads::dump(regs);
+    if pads::sd_pads_on_sd_function(&pad_words).is_err() {
+        return Err(PieceError::Refused(
+            "piece refused: an SD pad is not on the SD function",
+        ));
+    }
+    let controller = read_sd_parameter()
+        .and_then(|v| controller_from_parameter(v).ok())
+        .ok_or(PieceError::Refused("piece refused: no SD controller given"))?;
+    let host = SdhciHost::new(controller.base()).map_err(|e| PieceError::Card(0, e))?;
+    let mut card = Card::init(host).map_err(|e| PieceError::Card(0, e))?;
+    let cid = card.cid();
+    for (i, label) in ["card cid0", "card cid1", "card cid2", "card cid3"]
+        .iter()
+        .enumerate()
+    {
+        say_hex(
+            regs,
+            label,
+            u32::from_be_bytes([cid[4 * i], cid[4 * i + 1], cid[4 * i + 2], cid[4 * i + 3]]),
+        );
+    }
+    say_hex(regs, "card blocks lo", card.blocks() as u32);
+    let data = if job.has_payload() {
+        job_payload(job.count)
+    } else {
+        &[]
+    };
+    // The card, the range and the payload are checked here as well as in the run, so a refusal is
+    // printed before the clock is raised.
+    piece::check(&card, &job, data)?;
+    if job.flags & piece::FAST != 0 {
+        card.host_mut()
+            .data_clock()
+            .map_err(|e| PieceError::Card(0, e))?;
+        say(regs, "piece clock: data rate");
+        say_hex(
+            regs,
+            "piece clock word",
+            sdhci::snapshot(controller.base())[2],
+        );
+    }
+    let done = piece::run(&mut card, &job, data, &mut |n| {
+        feed_wdt0();
+        if n % 0x4000 == 0 {
+            say_hex(regs, "piece at", n);
+        }
+    })?;
+    say_digest(regs, "piece sha256", &done.digest);
+    if let Some((before, after)) = done.before_after {
+        say_digest(regs, "piece before", &before);
+        say_digest(regs, "piece after", &after);
+    }
+    Ok(())
+}
+
 /// Reads the card through `controller`. An error carries the step it came from.
 fn read_card(
     controller: SdController,

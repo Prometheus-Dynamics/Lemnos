@@ -76,6 +76,8 @@ const CLOCK_PLL_EN: u16 = 0x0008;
 const CLOCK_PROG: u16 = 0x0020;
 /// The identification clock's ceiling, in kHz.
 const IDENT_KHZ: u32 = 400;
+/// The data clock's ceiling, in kHz: the default-speed rate of an SD card.
+const DATA_KHZ: u32 = 25_000;
 /// The capabilities register: its bits 15:8 are the base clock in MHz (`drv_sdhci.h:193`). Read on the
 /// bench: 100 on the slot's controller, 200 on the other, as `drv_sdhci.c:844` and `:894` set them.
 const CAPABILITIES: usize = 0x40;
@@ -146,7 +148,7 @@ impl<R: SdhciRegs> SdhciHost<R> {
         host.set8(MSHC_CTRL, 0)?;
         host.set8(POWER_CONTROL, 0x0f)?;
         host.set8(TIMEOUT_CONTROL, 0x0e)?;
-        let clock = ident_divider(host.read(CAPABILITIES))? | CLOCK_PROG | CLOCK_INT_EN;
+        let clock = divider(host.read(CAPABILITIES), IDENT_KHZ)? | CLOCK_PROG | CLOCK_INT_EN;
         host.set16(CLOCK_CONTROL, clock)?;
         host.wait_set16(CLOCK_CONTROL, CLOCK_INT_STABLE)?;
         host.set16(CLOCK_CONTROL, clock | CLOCK_PLL_EN)?;
@@ -157,6 +159,28 @@ impl<R: SdhciRegs> SdhciHost<R> {
             let _ = host.read(PRESENT_STATE);
         }
         Ok(host)
+    }
+
+    /// Raises the card clock to the data rate, 25 MHz or less, after the card has started. From the 100 MHz
+    /// base this is the word the boot ROM leaves on the slot's controller (divider field 2). One data line,
+    /// as before.
+    ///
+    /// The order is the SDK driver's (`drv_sdhci.c:714-743`): the card clock and the programmable-clock bit
+    /// off, then the new divider with both on, then stable. Bench, 2026-11-18: a divider written with the
+    /// programmable-clock bit left on was not taken, whatever the PLL enable did (W2: the old rate; W3, with
+    /// the PLL enable cycled: the old rate, and CMD24 failed).
+    pub fn data_clock(&mut self) -> Result<(), SdError> {
+        let field = divider(self.read(CAPABILITIES), DATA_KHZ)?;
+        let old = self.read(CLOCK_CONTROL) as u16 & !CLOCK_INT_STABLE;
+        let off = old & !(CLOCK_CARD_EN | CLOCK_PROG);
+        self.set16(CLOCK_CONTROL, off)?;
+        let on = (off & 0x003f) | field | CLOCK_CARD_EN | CLOCK_PROG;
+        self.set16(CLOCK_CONTROL, on)?;
+        self.wait_set16(CLOCK_CONTROL, CLOCK_INT_STABLE)?;
+        for _ in 0..SETTLE {
+            let _ = self.read(PRESENT_STATE);
+        }
+        Ok(())
     }
 
     fn read(&self, offset: usize) -> u32 {
@@ -252,17 +276,17 @@ impl<R: SdhciRegs> SdhciHost<R> {
     }
 }
 
-/// The clock control's divider field for the identification clock, from the capabilities' base clock:
+/// The clock control's divider field for a card clock of `khz` or less, from the capabilities' base clock:
 /// the card clock is the base over twice the division (`drv_sdhci.c:726-737`), so the division is the
-/// smallest that gives 400 kHz or less. Its low eight bits sit at bit 8 and its two upper bits at bit 6.
-fn ident_divider(capabilities: u32) -> Result<u16, SdError> {
+/// smallest that gives `khz` or less. Its low eight bits sit at bit 8 and its two upper bits at bit 6.
+fn divider(capabilities: u32, khz: u32) -> Result<u16, SdError> {
     let base_khz = ((capabilities >> 8) & 0xff) * 1000;
     if base_khz == 0 {
         return Err(SdError::Refused(
             "the controller's capabilities give no base clock",
         ));
     }
-    let division = base_khz.div_ceil(2 * IDENT_KHZ);
+    let division = base_khz.div_ceil(2 * khz);
     if division > 0x3ff {
         return Err(SdError::Refused(
             "the base clock is too fast for the divider",
@@ -365,7 +389,16 @@ impl<R: SdhciRegs> SdHost for SdhciHost<R> {
 mod tests {
     use super::*;
 
-    use core::cell::Cell;
+    extern crate std;
+
+    use core::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::vec;
+    use std::vec::Vec;
+
+    use lemnos_k230_usbboot_stage::format::crc32;
+    use lemnos_k230_usbboot_stage::piece::{Job, Op, PieceError, run};
+    use lemnos_k230_usbboot_stage::sd::Card;
 
     /// The stand-in for the controller as the bench found it on 2026-11-18. The internal clock reports
     /// stable when it is enabled. A command completes only when the clock word has what the ROM's working
@@ -373,17 +406,78 @@ mod tests {
     /// Without them the command inhibit stays set and no interrupt comes, which is what the first host
     /// got on both controllers. The stand-in holds no card: a command that expects a reply ends in the
     /// controller's timeout error.
+    /// The card in the stand-in's slot: an SDHC card of 2048 sectors that follows the protocol, with a
+    /// knob for each way the write path can fail on a real card.
+    struct ModelCard {
+        bytes: Vec<u8>,
+        acmd: bool,
+        /// Words the host has still to read from the buffer.
+        to_read: VecDeque<u32>,
+        /// The sector a CMD24 addressed, and the words written to the buffer for it.
+        writing: Option<(usize, Vec<u32>)>,
+        /// Card-clock time the card is still busy after a write, in units of one status poll at the
+        /// identification clock. A poll at a faster clock uses up less of it.
+        busy_left: u32,
+        /// The card takes the data and keeps its old content (a worn or protected card).
+        drops_writes: bool,
+        /// The card never leaves the busy state after a write.
+        stays_busy: bool,
+        writes: u32,
+    }
+
+    const MODEL_SECTORS: usize = 2048;
+    const MODEL_CID: u128 = 0x0353_4453_5236_3447_8014_a7c9_ab01_5100;
+    const MODEL_RCA: u32 = 0x1234;
+
+    impl ModelCard {
+        fn new() -> Self {
+            let bytes = (0..MODEL_SECTORS * BLOCK)
+                .map(|i| (i / BLOCK + i) as u8)
+                .collect();
+            Self {
+                bytes,
+                acmd: false,
+                to_read: VecDeque::new(),
+                writing: None,
+                busy_left: 0,
+                drops_writes: false,
+                stays_busy: false,
+                writes: 0,
+            }
+        }
+    }
+
+    /// The stand-in for the controller as the bench found it on 2026-11-18. The internal clock reports
+    /// stable when it is enabled. A command completes only when the clock word has what the ROM's working
+    /// state had: internal clock, card clock, PLL enable and the programmable-clock bit, with a divider.
+    /// Without them the command inhibit stays set and no interrupt comes, which is what the first host
+    /// got on both controllers. A full reset puts the conflict check on, and with it on every command
+    /// ends as a conflict. A status appears only when its enable is set. With no card, a command that
+    /// expects a reply ends in the controller's timeout error. With a card, a data command whose
+    /// direction or block size is not set up ends in the data timeout error.
     struct Model {
         words: [Cell<u32>; 0x150],
+        card: RefCell<Option<ModelCard>>,
+        /// The divider the card clock runs at: taken from a clock write in which the programmable-clock
+        /// bit rises (W2 and W3 on the bench: a divider written with that bit left on was not taken).
+        divider_in_effect: Cell<u32>,
     }
 
     impl Model {
         fn new() -> Self {
             let model = Self {
                 words: [const { Cell::new(0) }; 0x150],
+                card: RefCell::new(None),
+                divider_in_effect: Cell::new(0),
             };
             // The slot's controller, as read on the bench: a 100 MHz base.
             model.words[CAPABILITIES / 4].set(0x276a_6481);
+            model
+        }
+
+        fn with_card() -> Self {
+            let model = Self::new();
+            *model.card.borrow_mut() = Some(ModelCard::new());
             model
         }
 
@@ -395,6 +489,99 @@ mod tests {
             let need = CLOCK_INT_EN | CLOCK_CARD_EN | CLOCK_PLL_EN | CLOCK_PROG;
             self.clock() & need == need && self.clock() >> 8 != 0
         }
+
+        /// Sets the statuses that are enabled, and the error summary with an enabled error.
+        fn raise(&self, raw: u32) {
+            let mut status = raw & self.words[INT_ENABLE / 4].get();
+            if status >> 16 != 0 {
+                status |= INT_ERROR;
+            }
+            let word = &self.words[INT_STATUS / 4];
+            word.set(word.get() | status);
+        }
+
+        fn reply(&self, value: u32) {
+            self.words[RESPONSE / 4].set(value);
+            self.raise(INT_CMD_DONE);
+        }
+
+        fn long_reply(&self, value: u128) {
+            let held = value >> 8;
+            for i in 0..4 {
+                self.words[RESPONSE / 4 + i].set((held >> (32 * i)) as u32);
+            }
+            self.raise(INT_CMD_DONE);
+        }
+
+        fn issue(&self, value: u32) {
+            if !self.card_clock_runs() {
+                self.words[PRESENT_STATE / 4].set(CMD_INHIBIT);
+                return;
+            }
+            if self.words[MSHC_CTRL / 4].get() & 1 != 0 {
+                self.raise(0x3 << 16);
+                return;
+            }
+            let expects_reply = (value >> 16) & 0x03 != 0;
+            let mut slot = self.card.borrow_mut();
+            let Some(card) = slot.as_mut() else {
+                self.raise(if expects_reply { 1 << 16 } else { INT_CMD_DONE });
+                return;
+            };
+            let index = (value >> 24) & 0x3f;
+            let data_flag = (value >> 16) & 0x20 != 0;
+            let reads = value & 0x10 != 0;
+            let one_block = self.words[BLOCK_SIZE / 4].get() == (1 << 16) | BLOCK as u32;
+            let arg = self.words[ARGUMENT / 4].get();
+            let acmd = core::mem::replace(&mut card.acmd, false);
+            match index {
+                0 => self.raise(INT_CMD_DONE),
+                8 => self.reply(arg),
+                55 => {
+                    card.acmd = true;
+                    self.reply(0x120);
+                }
+                41 if acmd => self.reply(0xc0ff_8000),
+                2 | 10 => self.long_reply(MODEL_CID),
+                3 => self.reply(MODEL_RCA << 16),
+                9 => self.long_reply((1u128 << 126) | (((MODEL_SECTORS as u128 / 1024) - 1) << 48)),
+                7 | 16 => self.reply(0x900),
+                13 => {
+                    let ready = !card.stays_busy && card.busy_left == 0;
+                    // A poll lasts as long as the card clock makes it: the divider in effect, against
+                    // the identification clock's 125.
+                    card.busy_left = card
+                        .busy_left
+                        .saturating_sub(self.divider_in_effect.get().max(1));
+                    self.reply(if ready { 0x900 } else { 0xe00 });
+                }
+                17 | 24
+                    if !data_flag
+                        || !one_block
+                        || reads != (index == 17)
+                        || arg as usize >= MODEL_SECTORS =>
+                {
+                    self.raise(INT_CMD_DONE | (1 << 20));
+                }
+                17 => {
+                    let at = arg as usize * BLOCK;
+                    card.to_read = card.bytes[at..at + BLOCK]
+                        .chunks(4)
+                        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                        .collect();
+                    self.words[PRESENT_STATE / 4].set(DAT_INHIBIT);
+                    self.reply(0x900);
+                    self.raise(INT_READ_READY);
+                }
+                24 => {
+                    card.writing = Some((arg as usize, Vec::new()));
+                    self.words[PRESENT_STATE / 4].set(DAT_INHIBIT);
+                    self.reply(0x900);
+                    self.raise(INT_WRITE_READY);
+                }
+                _ => self.raise(1 << 16),
+            }
+        }
     }
 
     impl SdhciRegs for Model {
@@ -403,6 +590,16 @@ mod tests {
             match offset {
                 CLOCK_CONTROL if word & u32::from(CLOCK_INT_EN) != 0 => {
                     word | u32::from(CLOCK_INT_STABLE)
+                }
+                BUFFER => {
+                    let mut slot = self.card.borrow_mut();
+                    let Some(card) = slot.as_mut() else { return 0 };
+                    let value = card.to_read.pop_front().unwrap_or(0);
+                    if card.to_read.is_empty() {
+                        self.words[PRESENT_STATE / 4].set(0);
+                        self.raise(INT_XFER_DONE);
+                    }
+                    value
                 }
                 _ => word,
             }
@@ -416,6 +613,10 @@ mod tests {
                     if value & (1 << 24) != 0 {
                         self.words[MSHC_CTRL / 4].set(1);
                     }
+                    let was = self.words[offset / 4].get();
+                    if value & !was & u32::from(CLOCK_PROG) != 0 {
+                        self.divider_in_effect.set((value >> 8) & 0xff);
+                    }
                     self.words[offset / 4].set(value & 0x00ff_ffff);
                 }
                 // Write one to clear.
@@ -423,37 +624,190 @@ mod tests {
                     let word = &self.words[offset / 4];
                     word.set(word.get() & !value);
                 }
-                TRANSFER_MODE => {
-                    if !self.card_clock_runs() {
-                        self.words[PRESENT_STATE / 4].set(CMD_INHIBIT);
+                TRANSFER_MODE => self.issue(value),
+                BUFFER => {
+                    let mut slot = self.card.borrow_mut();
+                    let Some(card) = slot.as_mut() else { return };
+                    let Some((sector, words)) = card.writing.as_mut() else {
                         return;
-                    }
-                    let expects_reply = (value >> 16) & 0x03 != 0;
-                    // A status appears only when its enable is set, and the error summary only with
-                    // an enabled error.
-                    let enabled = self.words[INT_ENABLE / 4].get();
-                    // With the conflict check on, every command ends as a conflict (R3d on the bench):
-                    // the command timeout and CRC errors together.
-                    let conflict = self.words[MSHC_CTRL / 4].get() & 1 != 0;
-                    let raw = if conflict {
-                        0x3 << 16
-                    } else if expects_reply {
-                        1 << 16
-                    } else {
-                        INT_CMD_DONE
                     };
-                    let mut status = raw & enabled;
-                    if status >> 16 != 0 {
-                        status |= INT_ERROR;
+                    words.push(value);
+                    if words.len() == BLOCK / 4 {
+                        let at = *sector * BLOCK;
+                        if !card.drops_writes {
+                            for (i, word) in words.iter().enumerate() {
+                                card.bytes[at + 4 * i..at + 4 * i + 4]
+                                    .copy_from_slice(&word.to_le_bytes());
+                            }
+                        }
+                        card.writing = None;
+                        card.writes += 1;
+                        // Busy for twenty polls at the identification clock (about 5 ms): 1250 polls at
+                        // the data clock's divider 2.
+                        card.busy_left = 20 * 125;
+                        self.words[PRESENT_STATE / 4].set(0);
+                        self.raise(INT_XFER_DONE);
                     }
-                    if status == 0 {
-                        self.words[PRESENT_STATE / 4].set(CMD_INHIBIT);
-                    }
-                    self.words[INT_STATUS / 4].set(status);
                 }
                 _ => self.words[offset / 4].set(value),
             }
         }
+    }
+
+    fn model_card(model: Model) -> Card<SdhciHost<Model>> {
+        Card::init(SdhciHost::start(model).unwrap()).unwrap()
+    }
+
+    fn job(op: Op, lba: u64, count: u32, data: &[u8]) -> Job {
+        let mut cid = MODEL_CID.to_be_bytes();
+        cid[15] = 0;
+        Job {
+            op,
+            lba,
+            count,
+            data_crc: if data.is_empty() { 0 } else { crc32(data) },
+            flags: 0,
+            card_blocks: MODEL_SECTORS as u64,
+            cid,
+        }
+    }
+
+    fn held(card: &mut Card<SdhciHost<Model>>, lba: usize, count: usize) -> Vec<u8> {
+        let slot = card.host_mut().regs.card.borrow();
+        slot.as_ref().unwrap().bytes[lba * BLOCK..(lba + count) * BLOCK].to_vec()
+    }
+
+    #[test]
+    fn the_card_in_the_model_starts_and_a_sector_reads_as_the_card_holds_it() {
+        let mut card = model_card(Model::with_card());
+        assert_eq!(card.blocks(), MODEL_SECTORS as u64);
+        assert_eq!(card.cid()[..15], MODEL_CID.to_be_bytes()[..15]);
+        let mut block = [0u8; BLOCK];
+        card.read(700, &mut block).unwrap();
+        assert_eq!(block.to_vec(), held(&mut card, 700, 1));
+    }
+
+    #[test]
+    fn written_sectors_read_back_and_the_watchdog_is_fed_once_per_verified_sector() {
+        let mut card = model_card(Model::with_card());
+        let data: Vec<u8> = (0..3 * BLOCK).map(|i| (i * 7 + 3) as u8).collect();
+        let mut fed = Vec::new();
+        let wrote = run(&mut card, &job(Op::Write, 100, 3, &data), &data, &mut |n| {
+            fed.push(n)
+        })
+        .unwrap();
+        assert_eq!(fed, [1, 2, 3]);
+        assert_eq!(held(&mut card, 100, 3), data);
+        // The hash of the range read back is the hash the write reported.
+        let hashed = run(&mut card, &job(Op::Hash, 100, 3, &[]), &[], &mut |_| {}).unwrap();
+        assert_eq!(hashed.digest, wrote.digest);
+        // A zero fill is a write too.
+        run(&mut card, &job(Op::Zero, 101, 1, &[]), &[], &mut |_| {}).unwrap();
+        assert_eq!(held(&mut card, 101, 1), vec![0; BLOCK]);
+    }
+
+    #[test]
+    fn a_write_the_card_does_not_keep_is_a_mismatch_and_the_watchdog_is_not_fed_for_it() {
+        let model = Model::with_card();
+        model.card.borrow_mut().as_mut().unwrap().drops_writes = true;
+        let mut card = model_card(model);
+        let data = vec![0xa5; BLOCK];
+        let mut fed = 0;
+        assert_eq!(
+            run(&mut card, &job(Op::Write, 5, 1, &data), &data, &mut |_| {
+                fed += 1
+            }),
+            Err(PieceError::Mismatch(5))
+        );
+        assert_eq!(fed, 0);
+    }
+
+    #[test]
+    fn a_card_that_stays_busy_after_a_write_is_an_error_not_a_hang() {
+        let model = Model::with_card();
+        model.card.borrow_mut().as_mut().unwrap().stays_busy = true;
+        let mut card = model_card(model);
+        let data = vec![0x5a; BLOCK];
+        assert!(matches!(
+            run(&mut card, &job(Op::Write, 5, 1, &data), &data, &mut |_| {}),
+            Err(PieceError::Card(5, SdError::Reply(13, _)))
+        ));
+    }
+
+    #[test]
+    fn the_write_test_leaves_the_range_as_it_found_it() {
+        let mut card = model_card(Model::with_card());
+        let original = held(&mut card, 1000, 8);
+        let pattern: Vec<u8> = (0..8 * BLOCK)
+            .map(|i| (i ^ (i >> 8)) as u8 ^ 0x5a)
+            .collect();
+        let done = run(
+            &mut card,
+            &job(Op::Test, 1000, 8, &pattern),
+            &pattern,
+            &mut |_| {},
+        )
+        .unwrap();
+        let (before, after) = done.before_after.unwrap();
+        assert_eq!(before, after);
+        assert_ne!(
+            done.digest, before,
+            "the pattern was on the card in between"
+        );
+        assert_eq!(held(&mut card, 1000, 8), original);
+        // 8 pattern writes and 8 restores.
+        assert_eq!(
+            card.host_mut().regs.card.borrow().as_ref().unwrap().writes,
+            16
+        );
+    }
+
+    #[test]
+    fn another_card_a_range_past_the_card_and_a_damaged_payload_are_refused_before_any_write() {
+        let mut card = model_card(Model::with_card());
+        let data = vec![1u8; BLOCK];
+        let mut other = job(Op::Write, 5, 1, &data);
+        other.cid[9] ^= 1;
+        let mut smaller = job(Op::Write, 5, 1, &data);
+        smaller.card_blocks -= 1024;
+        let past = job(Op::Zero, MODEL_SECTORS as u64 - 1, 2, &[]);
+        let mut damaged = job(Op::Write, 5, 1, &data);
+        damaged.data_crc ^= 1;
+        for bad in [other, smaller, past, damaged] {
+            assert!(matches!(
+                run(&mut card, &bad, &data, &mut |_| {}),
+                Err(PieceError::Refused(_))
+            ));
+        }
+        assert_eq!(
+            card.host_mut().regs.card.borrow().as_ref().unwrap().writes,
+            0
+        );
+    }
+
+    #[test]
+    fn a_write_at_the_data_clock_waits_out_the_cards_busy_time() {
+        // W4 on the bench: the busy poll was counted, not timed, and ran out at 25 MHz.
+        let mut card = model_card(Model::with_card());
+        card.host_mut().data_clock().unwrap();
+        let data: Vec<u8> = (0..2 * BLOCK).map(|i| (i * 5 + 1) as u8).collect();
+        run(&mut card, &job(Op::Write, 40, 2, &data), &data, &mut |_| {}).unwrap();
+        assert_eq!(held(&mut card, 40, 2), data);
+    }
+
+    #[test]
+    fn the_data_clock_is_the_word_the_rom_leaves_and_the_card_still_answers() {
+        let mut card = model_card(Model::with_card());
+        card.host_mut().data_clock().unwrap();
+        assert_eq!(card.host_mut().regs.clock() & 0xff2d, 0x022d);
+        assert_eq!(
+            card.host_mut().regs.divider_in_effect.get(),
+            2,
+            "the card still runs at the old rate"
+        );
+        let mut block = [0u8; BLOCK];
+        card.read(3, &mut block).unwrap();
+        assert_eq!(divider(0x256e_c881, DATA_KHZ), Ok(4 << 8));
     }
 
     #[test]
@@ -508,11 +862,11 @@ mod tests {
     #[test]
     fn the_identification_divider_follows_the_base_clock_the_controller_reports() {
         // 100 MHz over 2 x 125 and 200 MHz over 2 x 250 are both 400 kHz.
-        assert_eq!(ident_divider(0x276a_6481), Ok(125 << 8));
-        assert_eq!(ident_divider(0x256e_c881), Ok(250 << 8));
+        assert_eq!(divider(0x276a_6481, IDENT_KHZ), Ok(125 << 8));
+        assert_eq!(divider(0x256e_c881, IDENT_KHZ), Ok(250 << 8));
         // A division past eight bits puts its upper bits at bit 6: 255 MHz needs 319 (0x13f).
-        assert_eq!(ident_divider(0x0000_ff00), Ok((0x3f << 8) | (1 << 6)));
-        assert!(matches!(ident_divider(0), Err(SdError::Refused(_))));
+        assert_eq!(divider(0x0000_ff00, IDENT_KHZ), Ok((0x3f << 8) | (1 << 6)));
+        assert!(matches!(divider(0, IDENT_KHZ), Err(SdError::Refused(_))));
     }
 
     #[test]

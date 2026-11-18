@@ -53,5 +53,6 @@ fail=0
 [ $((load_start)) -eq $((0x80360000)) ] || { echo "FAIL: the load segment is not at the load address"; fail=1; }
 [ $((end)) -le $((0x80400000)) ] || { echo "FAIL: the image runs past 0x80400000"; fail=1; }
 [ "$footprint" -le $((0xA0000)) ] || { echo "FAIL: the footprint is over 0xA0000"; fail=1; }
+[ $((end)) -le $((0x80380000)) ] || { echo "FAIL: the image runs into the piece job's address 0x80380000"; fail=1; }
 [ "$relocs" = "0" ] || { echo "FAIL: the image has relocations"; fail=1; }
 [ "$fail" = "0" ] && echo "image link checks hold" || exit 1
