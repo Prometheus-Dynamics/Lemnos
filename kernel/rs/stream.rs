@@ -15,7 +15,7 @@ use core::{
 };
 use kernel::{
     bindings,
-    error::{to_result, Result},
+    error::{Result, to_result},
     ffi::{c_char, c_ulong},
     prelude::*,
     types::Opaque,
@@ -64,7 +64,8 @@ pub(crate) struct Producer {
     pub(crate) job_bytes: u32,
     pub(crate) kick: Option<unsafe extern "C" fn(*mut c_void) -> c_long>,
     pub(crate) ioctl: Option<unsafe extern "C" fn(*mut c_void, c_uint, *mut c_void) -> c_long>,
-    pub(crate) mmap: Option<unsafe extern "C" fn(*mut c_void, *mut bindings::vm_area_struct) -> c_int>,
+    pub(crate) mmap:
+        Option<unsafe extern "C" fn(*mut c_void, *mut bindings::vm_area_struct) -> c_int>,
     pub(crate) release: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
@@ -82,7 +83,13 @@ unsafe extern "C" {
         out: *mut *mut Stream,
     ) -> c_long;
     fn lem_stream_fault(s: *mut Stream, err: c_int);
-    fn lem_stream_complete(s: *mut Stream, slot: *const Slot, bytes: u32, sequence: u64, timestamp_ns: u64);
+    fn lem_stream_complete(
+        s: *mut Stream,
+        slot: *const Slot,
+        bytes: u32,
+        sequence: u64,
+        timestamp_ns: u64,
+    );
     fn lem_stream_cancel(s: *mut Stream, slot: *const Slot);
     fn lem_stream_wedge(s: *mut Stream);
     fn lem_stream_range_addr(s: *mut Stream, r: *const JobRange, addr: *mut u64) -> c_int;
@@ -138,7 +145,9 @@ impl Handle {
     /// Reads the job at the front of the ring into `job`: 1 with a job, 0 with none, -errno.
     pub(crate) fn job_peek<T>(self, job: &mut T) -> c_long {
         // SAFETY: the stream is alive; `job` is `size_of::<T>()` bytes, which the stream writes whole.
-        unsafe { lem_stream_job_peek(self.0, (job as *mut T).cast(), core::mem::size_of::<T>()) as c_long }
+        unsafe {
+            lem_stream_job_peek(self.0, (job as *mut T).cast(), core::mem::size_of::<T>()) as c_long
+        }
     }
 
     /// Resolves the job's ranges and, if they all resolve, holds the job's frame in `slot`.
@@ -151,7 +160,14 @@ impl Handle {
     ) -> Result {
         // SAFETY: the stream is alive; `ranges` holds `count` entries and `slot` is written whole.
         to_result(unsafe {
-            lem_stream_job_take(self.0, buffer, identity, ranges.as_ptr(), ranges.len() as u32, slot)
+            lem_stream_job_take(
+                self.0,
+                buffer,
+                identity,
+                ranges.as_ptr(),
+                ranges.len() as u32,
+                slot,
+            )
         })
     }
 }
@@ -193,7 +209,9 @@ impl WaitQueue {
         let mut left: isize = timeout as isize;
         loop {
             // SAFETY: the queue and the entry above.
-            unsafe { bindings::prepare_to_wait_event(wq, entry, bindings::TASK_UNINTERRUPTIBLE as c_int) };
+            unsafe {
+                bindings::prepare_to_wait_event(wq, entry, bindings::TASK_UNINTERRUPTIBLE as c_int)
+            };
             if done() || left <= 0 {
                 break;
             }
@@ -246,7 +264,12 @@ impl DelayedWork {
     pub(crate) fn queue(&self, wq: Wq, delay: c_ulong) {
         // SAFETY: initialised (new), and lives as long as the owner; WORK_CPU_UNBOUND is the kernel's.
         unsafe {
-            bindings::queue_delayed_work_on(bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int, wq.0, self.dw.get(), delay)
+            bindings::queue_delayed_work_on(
+                bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int,
+                wq.0,
+                self.dw.get(),
+                delay,
+            )
         };
     }
 
@@ -254,7 +277,12 @@ impl DelayedWork {
     pub(crate) fn modify(&self, wq: Wq, delay: c_ulong) {
         // SAFETY: as queue.
         unsafe {
-            bindings::mod_delayed_work_on(bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int, wq.0, self.dw.get(), delay)
+            bindings::mod_delayed_work_on(
+                bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int,
+                wq.0,
+                self.dw.get(),
+                delay,
+            )
         };
     }
 
@@ -281,7 +309,12 @@ unsafe impl Sync for Wq {}
 
 unsafe extern "C" {
     /// alloc_workqueue, the variadic function behind alloc_ordered_workqueue (linux/workqueue.h).
-    fn alloc_workqueue_noprof(fmt: *const c_char, flags: c_uint, max_active: c_int, ...) -> *mut bindings::workqueue_struct;
+    fn alloc_workqueue_noprof(
+        fmt: *const c_char,
+        flags: c_uint,
+        max_active: c_int,
+        ...
+    ) -> *mut bindings::workqueue_struct;
     fn destroy_workqueue(wq: *mut bindings::workqueue_struct);
 }
 
@@ -326,7 +359,13 @@ pub(crate) fn msecs_to_jiffies(ms: u32) -> c_ulong {
 /// A sleep of between `min` and `max` microseconds, in process context.
 pub(crate) fn usleep_range(min: u64, max: u64) {
     // SAFETY: sleeps in TASK_UNINTERRUPTIBLE, which the kernel's usleep_range does; process context only.
-    unsafe { bindings::usleep_range_state(min as c_ulong, max as c_ulong, bindings::TASK_UNINTERRUPTIBLE) };
+    unsafe {
+        bindings::usleep_range_state(
+            min as c_ulong,
+            max as c_ulong,
+            bindings::TASK_UNINTERRUPTIBLE,
+        )
+    };
 }
 
 /// Holds a reference to the module while a block may still touch its memory (the wedge). Without
@@ -351,7 +390,6 @@ fn this_module() -> *mut bindings::module {
         ptr::null_mut()
     }
 }
-
 
 /// `struct work_struct`, initialised as INIT_WORK does: its function, on the kernel's name and class.
 #[pin_data]
@@ -385,7 +423,13 @@ impl Work {
     /// queue_work(wq, this): on the ordered queue, unless already queued.
     pub(crate) fn queue(&self, wq: Wq) {
         // SAFETY: initialised (new), and lives as long as its owner; WORK_CPU_UNBOUND is the kernel's.
-        unsafe { bindings::queue_work_on(bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int, wq.0, self.w.get()) };
+        unsafe {
+            bindings::queue_work_on(
+                bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int,
+                wq.0,
+                self.w.get(),
+            )
+        };
     }
 
     /// cancel_work_sync(this): off the queue, and not running, when it returns.
