@@ -62,13 +62,52 @@ trap 'rm -rf -- "$work"' EXIT
 cp -r "$repo/kernel" "$work/kernel"
 cp -r "$here/test_block" "$work/test_block"
 cp -r "$here/mock_rp1" "$work/mock_rp1"
-make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/test_block" modules
-# The real PIO driver only exists on one family of boards, so this guest gets a stand-in for it.
-make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
-make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel" CONFIG_RP1_PIO=m \
-  LEMNOS_EXTRA_CFLAGS="-I$work/mock_rp1" KBUILD_EXTRA_SYMBOLS="$work/mock_rp1/Module.symvers" modules
-# The Rust half's skeleton (kernel/rust): built beside the C module, loaded by lemnos-init.
-make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel/rust" modules
+# The modules built here, by their paths under the work directory.
+built_modules() {
+  (cd "$work" && ls kernel/lemnos.ko test_block/lemnos_test_*.ko mock_rp1/rp1_pio_mock.ko kernel/rust/lemnos_rs.ko)
+}
+# LEMNOS_QEMU_MODULES names a directory that keeps the built modules under the hash of everything
+# they are built from: every source file copied above, this script, the kernel tree they are built
+# against and the compilers. A run whose hash is there takes those modules and builds none: the
+# same sources against the same kernel, built before. A changed source file is another hash, and
+# is built. Left unset (the whole run a landing uses leaves it unset), every run builds its modules.
+kept=""
+if [[ -n "${LEMNOS_QEMU_MODULES:-}" ]]; then
+  key="$({
+    cat "$here/run.sh"
+    (cd "$work" && find kernel test_block mock_rp1 -type f -print0 | sort -z | xargs -0 sha256sum)
+    realpath "$KDIR"
+    cat "$KDIR/.config" "$KDIR/Module.symvers"
+    # The kernel build's own stamp, where the tree has one (a distribution's headers may not).
+    cat "$KDIR/include/generated/compile.h" "$KDIR/include/generated/utsrelease.h" 2>/dev/null || true
+    echo "${llvm[*]-}"
+    env | LC_ALL=C sort | grep -E '^(ARCH|CC|CROSS_COMPILE|HOSTCC|KBUILD_[A-Z_]*|KCFLAGS|KRUSTFLAGS|LEMNOS_[A-Z_]*|LLVM|RUSTFLAGS)=' || true
+    for tool in clang rustc bindgen gcc; do "$tool" --version 2>&1 || echo "no $tool"; done
+  } | sha256sum | cut -c1-32)"
+  kept="$LEMNOS_QEMU_MODULES/$key"
+fi
+if [[ -n "$kept" && -f "$kept/complete" ]]; then
+  cp -r "$kept/kernel" "$kept/test_block" "$kept/mock_rp1" "$work/"
+  echo "qemu: modules taken from $kept"
+else
+  make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/test_block" modules
+  # The real PIO driver only exists on one family of boards, so this guest gets a stand-in for it.
+  make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
+  make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel" CONFIG_RP1_PIO=m \
+    LEMNOS_EXTRA_CFLAGS="-I$work/mock_rp1" KBUILD_EXTRA_SYMBOLS="$work/mock_rp1/Module.symvers" modules
+  # The Rust half's skeleton (kernel/rust): built beside the C module, loaded by lemnos-init.
+  make -s -j"$JOBS" -C "$KDIR" ${llvm[@]+"${llvm[@]}"} M="$work/kernel/rust" modules
+  if [[ -n "$kept" ]]; then
+    # Written beside its place and moved there whole, so a run never takes half of one.
+    part="$kept.$$"
+    rm -rf -- "$part"
+    mkdir -p "$part"
+    built_modules | (cd "$work" && cpio --quiet -pdm "$part")
+    touch "$part/complete"
+    mv -T "$part" "$kept" 2>/dev/null || rm -rf -- "$part"
+    echo "qemu: modules built and kept in $kept"
+  fi
+fi
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
