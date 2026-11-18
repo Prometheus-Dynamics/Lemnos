@@ -310,6 +310,18 @@ impl core::fmt::Debug for TicketReader {
     }
 }
 
+/// What [`TicketReader::pop`] found.
+#[derive(Debug)]
+pub enum Pop {
+    /// A frame, held until it is released.
+    Frame(TicketFrame),
+    /// No frame is waiting.
+    Empty,
+    /// A frame came that this reader could not hold: it holds as many buffers as its ticket
+    /// grants. The frame was skipped; release a held frame to read on.
+    AtLimit,
+}
+
 impl TicketReader {
     /// Attaches from the descriptors of a ticket, in the order of [`ticket::fds`]: the six fixed ones,
     /// then the pool's descriptors. `planes` is each plane's length as the ticket gave it (empty for one
@@ -382,13 +394,15 @@ impl TicketReader {
         self.slot
     }
 
-    /// Takes the next frame and holds its buffers until [`release`](Self::release). `Ok(None)` when no
-    /// frame is waiting, or when this reader is at its granted limit of held buffers.
+    /// Takes the next frame and holds its buffers until [`release`](Self::release). [`Pop::Empty`]
+    /// when no frame is waiting. [`Pop::AtLimit`] when a frame came that this reader could not hold
+    /// because it holds as many buffers as its ticket grants: that frame is skipped, and the reader
+    /// gives a held frame back before it reads on. Not an empty ring.
     ///
     /// # Errors
     ///
     /// [`Gone`] when the reader must stop: cut off, the stream ended, or its memory was replaced.
-    pub fn pop(&mut self) -> Result<Option<TicketFrame>, Gone> {
+    pub fn pop(&mut self) -> Result<Pop, Gone> {
         let reason = self.frames.pool().cut_off_reason(self.slot);
         if reason != 0 {
             return Err(Gone::CutOff(reason));
@@ -402,13 +416,13 @@ impl TicketReader {
         match self.frames.next() {
             shm_ring_buffers::NextBatch::Frame(batch) => {
                 let Some(info) = FrameInfo::decode(batch.meta) else {
-                    return Ok(None);
+                    return Ok(Pop::Empty);
                 };
                 let Some(first) = batch.held.buffer(0) else {
-                    return Ok(None);
+                    return Ok(Pop::Empty);
                 };
                 if info.bytes > buffer_bytes * planes {
-                    return Ok(None);
+                    return Ok(Pop::Empty);
                 }
                 let buffer = first.0 / planes;
                 let mut tickets = [(0, 0); shm_ring_buffers::MAX_PER_FRAME];
@@ -435,12 +449,12 @@ impl TicketReader {
                         count,
                     });
                 }
-                Ok(Some(frame))
+                Ok(Pop::Frame(frame))
             }
             shm_ring_buffers::NextBatch::NoBuffers(_)
             | shm_ring_buffers::NextBatch::Empty
-            | shm_ring_buffers::NextBatch::Skipped(_)
-            | shm_ring_buffers::NextBatch::Limited => Ok(None),
+            | shm_ring_buffers::NextBatch::Skipped(_) => Ok(Pop::Empty),
+            shm_ring_buffers::NextBatch::Limited => Ok(Pop::AtLimit),
             shm_ring_buffers::NextBatch::PoolChanged { .. } => Err(Gone::PoolChanged),
             shm_ring_buffers::NextBatch::CutOff => {
                 let reason = self.frames.pool().cut_off_reason(self.slot);

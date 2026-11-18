@@ -15,7 +15,7 @@ use lemnos_host::stream::ProducerEndpoint;
 use lemnos_host::{Host, Options, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimFrameSource};
-use lemnos_wire::ring::{Consumer, TicketReader};
+use lemnos_wire::ring::{Consumer, Pop, TicketReader};
 use shm_measure::sched::{SystemCalls, without_system_calls};
 
 #[global_allocator]
@@ -124,8 +124,8 @@ impl Path {
             let mut empty = 0;
             loop {
                 let frame = match reader.pop() {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) if empty < 8 => {
+                    Ok(Pop::Frame(frame)) => frame,
+                    Ok(Pop::Empty | Pop::AtLimit) if empty < 8 => {
                         empty += 1;
                         continue;
                     }
