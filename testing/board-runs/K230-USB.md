@@ -1607,6 +1607,69 @@ had 278 entries, of which 160 were kept.
 Records: `run4-hypothesis.md`, `run4-dry.log`, `run4-run.log`, `run4-stdout.log`. The board is back at the ROM as
 found, and the lock is free.
 
+### B2 card writes: the card's layout read from the card, and the scratch range (2026-11-18, read only)
+
+The coordinator approved card writes under a scope that starts read-only: find a scratch range from the card itself,
+model the stages, and write the plan. No write run comes before the coordinator's go.
+
+**How the card was read.** Through the proven piece path:
+- `k230-card piece --op hash`, stage image `2da8d976…52d8`, `--fast`;
+- the bench lock held for the whole run;
+- port and product checked before each load;
+- one ROM load per region, `piece retries 0` on each;
+- the ROM back after each.
+
+Nothing was written. Records are `survey.out` and `survey-S1.txt` to `survey-S5.txt` in the session's K230B2 folder.
+
+The source image is `k230d-ai-cam-varA.img`, read on the PC: GPT with a protective MBR; first usable sector 34, last
+usable 415,710; p1 `rootfs` 8,192..249,855; p2 `data` 249,856..413,695; backup header at 415,743 with its entries
+from 415,711.
+
+The non-zero runs in its boot area:
+- 2,048..2,472: SPL copy 0;
+- 3,072..3,496: SPL copy 1;
+- 4,096..4,797: U-Boot;
+- 6,144..6,159 and 6,400..6,415: not attributed;
+- 7,168..7,488 and 7,680..7,701: inside U-Boot's `bootcmd` read of 7,168..8,191.
+
+| sectors | card sha256 | against the source |
+|---|---|---|
+| 0..33 (protective MBR, primary GPT) | `fda1a6cc…92e3` | equal |
+| 415,711..415,743 (backup GPT) | `e841d204…fa09` | equal |
+| 34..8,191 (boot area: both SPL copies, U-Boot) | `fa32a323…3c86` | equal, with 2048 and 3072 zero |
+| 124,735,455..124,735,487 (the card's end) | `72d7e12e…30b2` | not zeros: data from before this session that the GPT does not name. Kept as found. |
+| 1,048,576..1,050,623 | `30e14955…cb58` | all zeros |
+
+**Findings.**
+- The card's partition table and boot copies are the image's. Neither of the two Linux boots since the flash (C2,
+  C3) resized or moved them.
+- **Scratch range: sectors 1,048,576 to 1,050,623 (1 MiB at the 512 MiB mark).** The margins are:
+  - 632,832 sectors past the backup GPT;
+  - 634,880 past the end of p2;
+  - 123,684,864 before the card's end.
+  The range is the same mark as the write tests and the B2 window.
+
+**Model** (`tests/card_scratch.rs`; the cases are permanent).
+
+What today's stages do outside the range:
+- **The FL1 card profile** writes every sector from 61,440 up, marked or not: first-1, last+1, both straddles, the
+  backup GPT, and the card's end. It refuses 0, 1, 2048 and 3072 only without the compared mark.
+- **The card image's stage mode** (the pre-FL1 stage) writes every write on its 8-sector grid, 2048 and 3072
+  included. It refuses a plain write to sector 0, but it takes an erase of sectors 0..7, which wipes the primary
+  GPT.
+
+**The scratch stage** (`fl1::scratch::Scratch`) refuses every read and write outside the range, marked or not, and
+touches nothing. It writes the whole range, each write read back equal. With the range check removed, its two
+refusal tests fail.
+
+**Before a write run:**
+- the B2 path's card build with this storage, and the host's write mode;
+- their rehearsal in `b2sim`;
+- the coordinator's go on the plan (`PLAN-card.md`).
+
+The plan's one boot check needs a ruling. The card does not boot from its own headers, so reaching the login prompt
+means the C3 procedure, which types into U-Boot.
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
