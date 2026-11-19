@@ -1452,6 +1452,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-daemon-ready"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-devtree"
 version = "2.0.1-dev"
 dependencies = [
@@ -2494,6 +2498,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-core",
+ "lemnos-daemon-ready",
  "lemnos-hal",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
@@ -2822,6 +2827,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-ctl",
+ "lemnos-daemon-ready",
  "lemnos-host",
  "lemnos-linux-sys",
  "orion-connect",
@@ -3042,6 +3048,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-contract-camera-receiver",
+ "lemnos-daemon-ready",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
 ]

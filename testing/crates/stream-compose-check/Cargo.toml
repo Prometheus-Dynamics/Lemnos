@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 lemnos-client = { path = "../../../engine/client" }
+lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys", features = ["test-csi2"] }

@@ -8,13 +8,14 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Error, Session};
+use lemnos_daemon_ready::Ready;
 
 use crate::{GADGET_DIR, UDC};
 
 /// The user and group the daemon drops to. Numbers, so no account database is needed.
 pub const DAEMON_ID: &str = "999";
-/// How long the daemon has to make its socket.
-const SOCKET_WAIT: Duration = Duration::from_secs(20);
+/// How long the daemon has to say it is ready.
+const READY_WAIT: Duration = Duration::from_secs(20);
 
 /// One `lemnosd` process this check started, with the board and socket it runs on.
 pub struct Lemnosd {
@@ -25,7 +26,8 @@ pub struct Lemnosd {
 }
 
 impl Lemnosd {
-    /// Starts the daemon as root, which its privileged start needs, and waits for its socket.
+    /// Starts the daemon as root, which its privileged start needs, and waits until it says it is
+    /// ready (its socket listens).
     pub fn start(program: &Path, board: &Path, socket: &Path) -> Result<Self, String> {
         let mut daemon = Self {
             program: program.to_path_buf(),
@@ -41,7 +43,9 @@ impl Lemnosd {
         // The socket is the one this check's last daemon made, and that daemon is gone (or killed):
         // the new daemon binds the path itself.
         let _ = fs::remove_file(&self.socket);
-        let child = Command::new(&self.program)
+        let ready = Ready::new()?;
+        let mut command = Command::new(&self.program);
+        command
             .arg("--board")
             .arg(&self.board)
             .arg("--socket")
@@ -49,27 +53,14 @@ impl Lemnosd {
             .arg("--user")
             .arg(DAEMON_ID)
             .arg("--group")
-            .arg(DAEMON_ID)
-            .spawn()
-            .map_err(|error| format!("start lemnosd: {error}"))?;
-        self.child = Some(child);
-        let until = Instant::now() + SOCKET_WAIT;
-        loop {
-            if self.socket.exists() {
-                return Ok(());
-            }
-            if let Some(child) = self.child.as_mut()
-                && let Some(status) = child
-                    .try_wait()
-                    .map_err(|error| format!("poll lemnosd: {error}"))?
-            {
-                return Err(format!("lemnosd exited before its socket: {status}"));
-            }
-            if Instant::now() >= until {
-                return Err("lemnosd made no socket".into());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            .arg(DAEMON_ID);
+        ready.give(&mut command);
+        let child = self.child.insert(
+            command
+                .spawn()
+                .map_err(|error| format!("start lemnosd: {error}"))?,
+        );
+        ready.wait(child, READY_WAIT)
     }
 
     /// The PID of the daemon this check started, while it runs.
