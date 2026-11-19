@@ -487,7 +487,7 @@ each out-buffer method's largest reply, from its contract's own bounds:
 | `system-slots/1` | `info` | about 1.5 KiB (`last_attempt` adds up to about 0.8 KiB: a reason of 192 bytes appears in `reason` and again in `text`), plus the owner of the last signing key (the key file's text, under 2 KiB), plus one `key_ids` entry per held key (64 hex digits and its owner) | `BUFFER_TOO_SMALL`; a 4 KiB buffer holds any owner the key file allows in practice and a board's few keys |
 | `system-security/1` | `state`, `precheck`, `set`, `request_off` | 1024 bytes (`TEXT_MAX`) | whole |
 | `system-security-precondition/1` | `precondition` | 1024 bytes (`TEXT_MAX`) | whole |
-| `raw-bus/1` | `i2c_transfer`, `spi_transfer` (`read_len`), `uart_read` (`max_len`) | the caller's length, up to 4 GiB | a length above 61440 is refused before the transfer; ask for less and repeat |
+| `raw-bus/1` | `i2c_transfer`, `spi_transfer` (`read_len`), `uart_read` (`max_len`), `i2c_transactions` and `spi_transfers` (their reads, summed) | the caller's length, up to 4 GiB | a length above 61440 is refused before the transfer; ask for less and repeat. A list is at most 8 ops or transfers (`MAX_I2C_OPS`, `MAX_SPI_TRANSFERS`); more is `INVALID_ARGUMENT` |
 | `usb-function/1` | `control_out` | the pending request's `length`, up to 65535 | not checkable up front (no length argument). The USB driver refuses a buffer smaller than the pending request's `length` with `BUFFER_TOO_SMALL` before it asks the device, so nothing is transferred and the request stays pending; the bridge names the refusal. Tested on the mock (`drivers/usb-gadget/src/serve_tests.rs`) |
 | `usb-function/1` | `data_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
 

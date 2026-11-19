@@ -16,6 +16,8 @@ fn the_tag_and_numbers_are_stable() {
             ("pwm_set", 5),
             ("uart_write", 6),
             ("uart_read", 7),
+            ("i2c_transactions", 8),
+            ("spi_transfers", 9),
         ]
     );
 }

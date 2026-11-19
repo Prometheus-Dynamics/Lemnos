@@ -895,6 +895,7 @@ When you add a method or field, classify it in the PR:
 | `camera.isp` methods 13 and 14 (`input_layout`, `output_layout`) | additive | appended methods, marked `#[added]` in T1d (U1b added them without the mark) |
 | `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |
 | `raw-bus` methods 6 and 7 (`uart_write`, `uart_read`) | additive | appended methods |
+| `raw-bus` methods 8 and 9 (`i2c_transactions`, `spi_transfers`) | additive | appended methods, marked `#[added]`: the base hash does not move, and a device without them is checked per method |
 | `camera.sensor` `SensorInfo` delay fields (`Mode.exposure_delay`, `gain_delay`, `frame_length_delay`) | not a change | no delay is redefined: `SensorInfo` has none, and the three delays on `Mode` have the same type, place and timing rule as at T1b |
 | `camera.receiver` `layout` (method 11) against the stream's buffer length | additive | the method is appended, and its meaning did not change: `FrameLayout.size` is the bytes per frame at most, as at T1b, and the stream's buffer length is the stream's own, unchanged |
 | `FrameStream::bytes()` on a multi-plane stream | not a change | it returns plane 0, as at T1b (same code, same doc); the other planes are read with `plane` |
