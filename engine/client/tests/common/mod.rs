@@ -478,9 +478,22 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                         &mut out,
                     );
                 }
-                Frame::SetPower { id, .. } => {
+                Frame::SetPower { id, device, on } => {
                     control.power_calls.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);
+                    // The device's state changed, and the service tells its clients so.
+                    if !on {
+                        send(
+                            Frame::Event {
+                                device,
+                                state: state::OFF,
+                                health: health::OK,
+                                reason: "powered off",
+                                refusal: Tail(0),
+                            },
+                            &mut out,
+                        );
+                    }
                 }
                 _ => {}
             }

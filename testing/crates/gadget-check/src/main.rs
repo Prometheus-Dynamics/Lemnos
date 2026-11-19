@@ -211,26 +211,38 @@ fn main() -> ExitCode {
     );
     // 1b. The controller is not there: the daemon runs and serves, and the gadget retries.
     if late {
-        let list = |daemon: &Lemnosd| {
-            daemon
-                .connect()
-                .ok()
-                .and_then(|mut session| session.list().ok())
-                .unwrap_or_default()
+        // One connection, made after the daemon said it was ready: a failed connect or list is a
+        // failure here, never "not yet". What 1b waits for is the gadget's state changing, which
+        // the daemon tells its clients of as it happens: the list says where the gadget is, and
+        // the daemon's events after it say when it moves.
+        let mut watch = match daemon.connect() {
+            Ok(session) => session,
+            Err(error) => {
+                say!("FAIL connect to the daemon once it is ready: {error:?}");
+                return ExitCode::FAILURE;
+            }
         };
-        let retrying = daemon::wait_until(Duration::from_secs(20), || {
-            list(&daemon)
-                .iter()
-                .any(|e| e.name == "gadget" && e.reason.starts_with("retrying: attempt "))
-        });
-        let entries = list(&daemon);
+        let retrying = daemon::wait_for_device(
+            &mut watch,
+            "gadget",
+            Duration::from_secs(20),
+            |_, _, reason| reason.starts_with("retrying: attempt "),
+        );
+        let entries = watch.list();
+        if let Err(error) = &entries {
+            say!("FAIL list the daemon's devices while the gadget retries: {error:?}");
+        }
+        let entries = entries.unwrap_or_default();
         let gadget = entries.iter().find(|e| e.name == "gadget");
         say!(
             "     gadget while the controller is away: {:?}",
             gadget.map(|e| (&e.state, &e.health, &e.reason))
         );
+        if let Err(error) = &retrying {
+            say!("     waiting for the gadget to retry: {error}");
+        }
         check(
-            retrying,
+            retrying == Ok(true),
             "a gadget whose controller is not there yet is retrying, not refused: `retrying: attempt N, last reason: TEXT, next try in M ms`",
         );
         check(
@@ -280,20 +292,24 @@ fn main() -> ExitCode {
         // up by retry reports `ok` with no serial note and carries the serial; the late-serial case
         // (unreadable at the daemon's start) is the driver's unit test, which a command line cannot
         // stage.
-        let up_ok = daemon::wait_until(Duration::from_secs(20), || {
-            list(&daemon)
-                .iter()
-                .any(|e| e.name == "gadget" && e.health == lemnos_client::DeviceHealth::Ok)
-        });
+        let up_ok = daemon::wait_for_device(
+            &mut watch,
+            "gadget",
+            Duration::from_secs(20),
+            |_, health, _| health == lemnos_client::DeviceHealth::Ok,
+        );
+        if let Err(error) = &up_ok {
+            say!("     waiting for the gadget to report ok: {error}");
+        }
         say!(
             "     gadget after the retry: {:?}",
-            list(&daemon)
-                .iter()
+            watch.list().map(|entries| entries
+                .into_iter()
                 .find(|e| e.name == "gadget")
-                .map(|e| (&e.state, &e.health, &e.reason))
+                .map(|e| (e.state, e.health, e.reason)))
         );
         check(
-            up_ok,
+            up_ok == Ok(true),
             "the gadget made by retry reports health ok, with no serial note",
         );
     }

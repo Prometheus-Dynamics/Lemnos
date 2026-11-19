@@ -687,6 +687,27 @@ impl Session {
         self.shared.events.pop_front()
     }
 
+    /// The oldest change of a device's state, health or reason the service has told this session
+    /// of, waiting up to `timeout` for one. `None` when none came. A session that lost its
+    /// connection meanwhile connects again, as every call does: [`Session::generation`] says so.
+    pub fn wait_event(&mut self, timeout: Duration) -> Option<Event> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(event) = self.shared.events.pop_front() {
+                return Some(event);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let wait = match self.mode {
+                Mode::Blocking => Some(left),
+                Mode::Polled => self.wait_slice(),
+            };
+            self.turn(wait, &mut |_| false);
+        }
+    }
+
     /// The oldest thing that happened to a long job this session started, if any has.
     pub fn next_job_event(&mut self) -> Option<JobEvent> {
         self.shared.job_events.pop_front()

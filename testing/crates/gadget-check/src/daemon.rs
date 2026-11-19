@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use lemnos_client::{Error, Session};
+use lemnos_client::{DeviceHealth, DeviceState, Error, Session};
 use lemnos_daemon_ready::Ready;
 
 use crate::{GADGET_DIR, UDC};
@@ -92,6 +92,48 @@ impl Lemnosd {
 impl Drop for Lemnosd {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// Waits until the device called `name` is as `wanted` says, by the daemon's own word: the list says
+/// how it is now, and each change after that comes as an event on `session` (the daemon tells every
+/// client of a change of state, health or reason as it happens). `Ok(true)` when it held, `Ok(false)`
+/// when `within` ran out first. An error when the list fails, the device is not listed, or the
+/// session lost its connection: a reconnect would hide what happened meanwhile.
+pub fn wait_for_device(
+    session: &mut Session,
+    name: &str,
+    within: Duration,
+    wanted: impl Fn(DeviceState, DeviceHealth, &str) -> bool,
+) -> Result<bool, String> {
+    let until = Instant::now() + within;
+    let generation = session.generation();
+    let entries = session.list().map_err(|error| format!("list: {error:?}"))?;
+    let entry = entries
+        .iter()
+        .find(|e| e.name == name)
+        .ok_or_else(|| format!("the daemon lists no {name}"))?;
+    // Every event already here came before the list's answer: the list is newer than all of them.
+    while session.next_event().is_some() {}
+    if wanted(entry.state, entry.health, &entry.reason) {
+        return Ok(true);
+    }
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let event = session.wait_event(left);
+        if session.generation() != generation {
+            return Err("the connection to the daemon was lost".into());
+        }
+        match event {
+            Some(e) if e.device == entry.index && wanted(e.state, e.health, &e.reason) => {
+                return Ok(true);
+            }
+            Some(_) => {}
+            None => return Ok(false),
+        }
     }
 }
 
