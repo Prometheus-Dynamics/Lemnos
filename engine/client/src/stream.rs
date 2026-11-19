@@ -374,8 +374,9 @@ pub enum Next {
     Frame(HeldFrame),
     /// The time passed with the stream still running and no frame.
     TimedOut,
-    /// The reader holds as many buffers as it is granted (`reader_held_max` for the stream, or
-    /// its own request, whichever is less), and a frame came that it could not hold: that frame
+    /// The reader holds as many buffers as its ticket granted (what it asked for, or the default
+    /// of two when it asked for none, clamped to `reader_held_max` and to what the producer
+    /// leaves), and a frame came that it could not hold: that frame
     /// is skipped and counted in [`FrameStream::skipped`]. Nothing is read until the reader gives
     /// one of its held frames back with [`FrameStream::release`] (or by dropping it).
     AtLimit,

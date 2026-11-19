@@ -846,16 +846,21 @@ the ring and the buffers and never sends the daemon a frame. The frames are kind
   reader.
 - **Who may import.** Under package mode `signed` (the daemon's default) the import right needs
   `reader_import = true` on the stream. Under package mode `open` every ticket gets both rights.
-- **Limits.** A ticket asks for `held` buffers at once and `hold_ms` for each; 0 asks for 2 and 500.
+- **Limits.** A ticket asks for `held` buffers at once and `hold_ms` for each; 0 asks for 500 ms and for the default held count.
   The hold rule, as the host applies it (`engine/host/src/stream/endpoint.rs`):
   - The stream's ceiling is `reader_held_max` in `[devices.streams.NAME]`, default 4, clamped to the
     buffer count. `reader_hold_ms_max` is the time ceiling, clamped the same way.
-  - A reader's grant is its request (default 2) clamped to that ceiling.
-  - A grant is refused `BUSY` when, after the consumer's own buffer (`CONSUMER_HELD` = 1) and the holds
-    already granted to the other readers, fewer than `MIN_PRODUCER_BUFFERS` = 2 buffers would be left
-    for the producer. The refusal's text gives what was asked and how many buffers are left.
-  - Worked case: 4 buffers, a consumer present, one reader. A request of 2 (the default) is refused:
-    4 - 1 = 3 are left, and 3 - 2 = 1 is under 2. A request of 1 is granted, and the producer keeps 2.
+  - The default (`held` = 0) takes what fits: the most of 2, the stream's ceiling, and the buffers the
+    producer leaves over. It is refused `BUSY` only when that is 0. The grant says how many it got.
+  - An explicit `held` is all or refused: it is clamped to the ceiling, then granted only if, after
+    the consumer's own buffer (`CONSUMER_HELD` = 1) and the holds already granted to the other readers,
+    at least `MIN_PRODUCER_BUFFERS` = 2 buffers would be left for the producer. Otherwise it is refused
+    `BUSY`. The refusal's text gives what was asked and how many buffers are left.
+  - Worked case: 4 buffers, a consumer present, one reader. 4 - 1 = 3 are left, and the producer keeps
+    2 of them, so the default is granted 1. An explicit request of 2 is refused: 3 - 2 = 1 is under 2.
+    An explicit request of 1 is granted, and the producer keeps 2.
+  - Worked case: 4 buffers, a consumer, and a reader already granted 1. 4 - 1 - 1 = 2 are left, so the
+    producer has no room to spare: a default request is refused `BUSY`, and its text says so.
   - At its grant a reader is told so: when a frame comes that the reader would need a buffer past its
     grant for, the ring skips that frame and the reader's `TicketReader::pop` returns `Pop::AtLimit`,
     not `Pop::Empty`. Giving a held frame back lets it read on. The client's `FrameStream` reports the
