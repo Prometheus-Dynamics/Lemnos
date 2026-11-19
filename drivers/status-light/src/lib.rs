@@ -15,7 +15,7 @@
 //! board's default look (`default_look`, `status.ok` unless the board says otherwise) shows there.
 //! Nothing is blended ([`layers`]).
 //!
-//! `clear(layer)` empties a layer only when the caller owns it. `clear_all` empties every layer.
+//! `clear(layer)` and `clear_all` empty only the layers the caller owns; another caller's are left.
 //!
 //! # Callers
 //!
@@ -347,8 +347,9 @@ impl LightContract for StatusLight {
     }
 
     fn clear_all(&mut self) -> Result<()> {
-        self.layers.clear_all();
-        self.changed = true;
+        if self.layers.clear_all(self.calling) {
+            self.changed = true;
+        }
         Ok(())
     }
 

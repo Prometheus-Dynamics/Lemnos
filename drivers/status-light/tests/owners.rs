@@ -199,3 +199,30 @@ fn a_frame_on_a_layer_whose_index_is_out_of_range_is_refused() {
     let mut light = driver(fake, &plain(4));
     assert!(light.show_frame(4, 1, &frame(&[(0, RED)])).is_err());
 }
+
+#[test]
+fn one_owners_clear_all_does_not_clear_another_owners_look() {
+    let fake = FakePixels::leak(4);
+    let mut light = driver(fake, &plain(4));
+    by(&mut light, 5);
+    light.show(0, 10, &fill(RED)).unwrap();
+    settle(&mut light, 0, 1_000);
+
+    by(&mut light, 7);
+    light.clear_all().unwrap();
+    settle(&mut light, 100, 1_000);
+    assert_eq!(
+        fake.last(),
+        vec![rgb(RED); 4],
+        "caller 7's clear_all cleared caller 5's look"
+    );
+
+    by(&mut light, 5);
+    light.clear_all().unwrap();
+    settle(&mut light, 200, 1_000);
+    assert_eq!(
+        fake.last(),
+        vec![DEFAULT; 4],
+        "the owner's own clear_all empties its look"
+    );
+}

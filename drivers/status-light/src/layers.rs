@@ -108,11 +108,9 @@ impl Layers {
         }
     }
 
-    /// Empties every layer.
-    pub fn clear_all(&mut self) {
-        for layer in 0..LAYERS {
-            self.empty(layer);
-        }
+    /// Empties every layer that `owner` owns. Returns whether any layer changed.
+    pub fn clear_all(&mut self, owner: CallerId) -> bool {
+        self.drop_owner(owner)
     }
 
     /// Empties every layer whose owner is `owner`. Returns whether any layer changed.
