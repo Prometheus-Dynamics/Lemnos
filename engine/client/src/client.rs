@@ -33,6 +33,17 @@ impl Client {
         Self::from(Session::connecting(path, name))
     }
 
+    /// Connects, waiting up to `bound` for the service to appear. Retries on the same backoff as
+    /// [`Client::connecting`], capped at 8 s. Fails with `Error::TimedOut` once the bound passes;
+    /// a refusal by the service fails at once. A zero bound is [`Client::connect`].
+    pub fn connect_within(
+        path: impl AsRef<Path>,
+        name: &str,
+        bound: Duration,
+    ) -> Result<Self, Error> {
+        Ok(Self::from(Session::connect_within(path, name, bound)?))
+    }
+
     fn lock(&self) -> MutexGuard<'_, Session> {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
     }

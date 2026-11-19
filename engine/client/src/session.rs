@@ -616,6 +616,22 @@ impl Session {
         Self::new(path.as_ref(), name, Mode::Blocking)
     }
 
+    /// Connects, waiting up to `bound` for the service to answer. It retries on the schedule
+    /// [`Session::connecting`] uses (1 s, doubling, capped at 8 s). Fails with
+    /// [`Error::TimedOut`] when the bound passes first. A zero bound is [`Session::connect`].
+    pub fn connect_within(
+        path: impl AsRef<Path>,
+        name: &str,
+        bound: Duration,
+    ) -> Result<Self, Error> {
+        if bound.is_zero() {
+            return Self::connect(path, name);
+        }
+        let mut session = Self::new(path.as_ref(), name, Mode::Blocking);
+        session.settle_within(bound)?;
+        Ok(session)
+    }
+
     pub(crate) fn started(path: &Path, name: &str, mode: Mode) -> Result<Self, Error> {
         let mut session = Self::new(path, name, mode);
         session.settle()?;
@@ -956,6 +972,22 @@ impl Session {
             return Some(Ok(()));
         }
         (self.connection.is_none()).then_some(Err(Error::Disconnected))
+    }
+
+    /// Like `settle`, but a refused connect is tried again on the backoff, until `bound` passes.
+    /// Only a refusal from the service ends it early.
+    fn settle_within(&mut self, bound: Duration) -> Result<(), Error> {
+        let deadline = Instant::now() + bound;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Error::TimedOut);
+            }
+            match self.try_settle(Some(left)) {
+                None | Some(Err(Error::Disconnected)) => {}
+                Some(done) => return done,
+            }
+        }
     }
 
     fn settle(&mut self) -> Result<(), Error> {

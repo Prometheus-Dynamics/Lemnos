@@ -95,6 +95,23 @@ impl FakeHost {
         }
     }
 
+    /// A host whose socket appears `delay` after this returns, as a service that starts late does.
+    pub fn start_after(delay: Duration) -> Self {
+        let dir = temp_dir("host");
+        let path = dir.0.join("sock");
+        let control = Arc::new(Control::default());
+        let (later, later_control) = (path.clone(), Arc::clone(&control));
+        thread::spawn(move || {
+            thread::sleep(delay);
+            spawn(&later, later_control);
+        });
+        Self {
+            path,
+            control,
+            _dir: dir,
+        }
+    }
+
     /// Ends the current connection, as a service restart would.
     pub fn restart(&self) {
         self.control.kick.store(true, Ordering::SeqCst);
