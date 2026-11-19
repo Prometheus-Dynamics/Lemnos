@@ -264,6 +264,7 @@ impl<M: Medium, F: Feed> Stage<M, F> {
         if self.header_on_medium() && !(offset == 0 && len <= HEADER_BLOCK) {
             return Err("a valid boot header is on the medium: erase it first");
         }
+        self.medium.permits(offset, len).map_err(|e| e.0)?;
         Ok(())
     }
 

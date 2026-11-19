@@ -56,4 +56,9 @@ impl Medium for RamMedium<'_> {
         self.bytes[span].fill(0xff);
         Ok(())
     }
+
+    /// A RAM medium is not a card: it has no protected sectors, only its end.
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        self.span(offset, len as usize).map(|_| ())
+    }
 }

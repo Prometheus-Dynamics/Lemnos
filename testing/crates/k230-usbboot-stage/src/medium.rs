@@ -28,6 +28,10 @@ pub trait Medium {
     fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), MediumError>;
     /// Erases `len` bytes at `offset` (to the erased state, 0xff).
     fn erase(&mut self, offset: u64, len: u64) -> Result<(), MediumError>;
+    /// Whether `len` bytes at `offset` may be written or erased, checked whole before any of it is: a card's
+    /// declared range and protected sectors (`crate::bounds`). The stage asks before it takes a write or an erase,
+    /// so a range it may not touch is refused before its first piece.
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError>;
 }
 
 /// A medium that is not there: the stage runs with it when the card cannot be started, and every
@@ -52,6 +56,10 @@ impl Medium for NoMedium {
     }
 
     fn erase(&mut self, _offset: u64, _len: u64) -> Result<(), MediumError> {
+        Err(MediumError("there is no medium"))
+    }
+
+    fn permits(&self, _offset: u64, _len: u64) -> Result<(), MediumError> {
         Err(MediumError("there is no medium"))
     }
 }

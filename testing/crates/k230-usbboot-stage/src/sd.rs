@@ -20,6 +20,7 @@
 //! and the write's busy time. The protocol's own checks (the ACMD41 busy bit, the CMD8 echo, the
 //! CSD version) are tested with the fake card.
 
+use crate::bounds::{Bounds, Declared};
 use crate::medium::{Geometry, Medium, MediumError};
 
 /// One SD block.
@@ -387,15 +388,34 @@ fn short(reply: Reply, cmd: u8) -> Result<u32, SdError> {
 /// blocks; reads may start and end anywhere.
 pub struct SdMedium<H: SdHost> {
     card: Card<H>,
+    /// What this medium may write or erase: the declared range, less the protected sectors.
+    bounds: Bounds,
 }
 
 /// The erase unit the stage reports: the boot header block, so the header is one erase.
 pub const ERASE: u64 = 4096;
 
 impl<H: SdHost> SdMedium<H> {
-    /// A medium over an initialised card.
-    pub fn new(card: Card<H>) -> Self {
-        Self { card }
+    /// A medium over an initialised card that writes and erases only inside `declared`, and never a protected
+    /// sector ([`crate::bounds`]). The card's primary GPT header is read here; if it cannot be read, nothing is
+    /// ever written.
+    pub fn new(mut card: Card<H>, declared: Declared) -> Self {
+        let mut header = [0u8; BLOCK];
+        let bounds = match card.read(1, &mut header) {
+            Ok(()) => Bounds::new(declared, &header, card.blocks()),
+            Err(_) => Bounds::closed(declared, card.blocks()),
+        };
+        Self { card, bounds }
+    }
+
+    /// The whole-block range `len` bytes at `offset` cover, checked against the bounds.
+    fn check(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        if !offset.is_multiple_of(BLOCK as u64) || !len.is_multiple_of(BLOCK as u64) {
+            return Err(MediumError("a write or erase must cover whole blocks"));
+        }
+        self.bounds
+            .check(offset / BLOCK as u64, len / BLOCK as u64)
+            .map_err(|r| MediumError(r.text()))
     }
 
     fn fail(error: SdError) -> MediumError {
@@ -431,10 +451,12 @@ impl<H: SdHost> Medium for SdMedium<H> {
         Ok(())
     }
 
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        self.check(offset, len)
+    }
+
     fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), MediumError> {
-        if !offset.is_multiple_of(BLOCK as u64) || !data.len().is_multiple_of(BLOCK) {
-            return Err(MediumError("a write must cover whole blocks"));
-        }
+        self.check(offset, data.len() as u64)?;
         let mut block = [0u8; BLOCK];
         for (i, chunk) in data.chunks(BLOCK).enumerate() {
             block.copy_from_slice(chunk);
@@ -446,9 +468,7 @@ impl<H: SdHost> Medium for SdMedium<H> {
     }
 
     fn erase(&mut self, offset: u64, len: u64) -> Result<(), MediumError> {
-        if !offset.is_multiple_of(BLOCK as u64) || !len.is_multiple_of(BLOCK as u64) {
-            return Err(MediumError("an erase must cover whole blocks"));
-        }
+        self.check(offset, len)?;
         let ones = [0xffu8; BLOCK];
         for i in 0..len / BLOCK as u64 {
             self.card
@@ -563,9 +583,37 @@ mod tests {
         }
     }
 
-    /// A medium over a card of 1024 blocks (512 KiB, the SDHC capacity unit).
+    /// The range the medium tests may write: past the primary GPT, before the backup (958..990) and the card's
+    /// last 33 sectors.
+    const RANGE: Declared = Declared {
+        first: 64,
+        last: 127,
+    };
+    /// Where the medium tests write, in bytes: the first sector of [`RANGE`].
+    const AT: u64 = 64 * BLOCK as u64;
+
+    /// A card of 1024 blocks (512 KiB, the SDHC capacity unit) with a valid primary GPT header in sector 1 that
+    /// puts the backup at 958..990.
+    fn gpt_card() -> FakeCard {
+        let mut fake = FakeCard::new(1024);
+        let h = &mut fake.bytes[BLOCK..2 * BLOCK];
+        h[..8].copy_from_slice(b"EFI PART");
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&1u64.to_le_bytes());
+        h[32..40].copy_from_slice(&990u64.to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        let crc = crate::format::crc32(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        fake
+    }
+
+    /// A medium over that card, writing only inside [`RANGE`].
     fn medium() -> SdMedium<FakeCard> {
-        SdMedium::new(Card::init(FakeCard::new(1024)).expect("a healthy card initialises"))
+        SdMedium::new(
+            Card::init(gpt_card()).expect("a healthy card initialises"),
+            RANGE,
+        )
     }
 
     #[test]
@@ -573,30 +621,30 @@ mod tests {
         let card = Card::init(FakeCard::new(1024)).unwrap();
         assert_eq!(card.blocks(), 1024);
         assert_eq!(card.rca(), 0x1234);
-        assert_eq!(SdMedium::new(card).geometry().capacity, 1024 * 512);
+        assert_eq!(SdMedium::new(card, RANGE).geometry().capacity, 1024 * 512);
     }
 
     #[test]
     fn a_block_written_reads_back_and_a_partial_read_spans_blocks() {
         let mut m = medium();
         let data: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
-        m.write(512, &data).unwrap();
+        m.write(AT, &data).unwrap();
         let mut back = vec![0u8; 1024];
-        m.read(512, &mut back).unwrap();
+        m.read(AT, &mut back).unwrap();
         assert_eq!(back, data);
         // A read that starts mid-block and ends mid-block.
         let mut part = vec![0u8; 700];
-        m.read(700, &mut part).unwrap();
+        m.read(AT + 188, &mut part).unwrap();
         assert_eq!(part, data[188..888]);
     }
 
     #[test]
     fn an_erase_leaves_ones_and_the_medium_is_not_written_outside_it() {
         let mut m = medium();
-        m.write(0, &[7u8; 1024]).unwrap();
-        m.erase(0, 512).unwrap();
+        m.write(AT, &[7u8; 1024]).unwrap();
+        m.erase(AT, 512).unwrap();
         let mut back = vec![0u8; 1024];
-        m.read(0, &mut back).unwrap();
+        m.read(AT, &mut back).unwrap();
         assert!(back[..512].iter().all(|&b| b == 0xff));
         assert!(back[512..].iter().all(|&b| b == 7));
     }
@@ -652,9 +700,29 @@ mod tests {
     #[test]
     fn a_write_past_the_card_or_not_on_blocks_is_refused_before_it_goes() {
         let mut m = medium();
-        assert!(m.write(0, &[1u8; 100]).is_err());
+        assert!(m.write(AT, &[1u8; 100]).is_err());
         assert!(m.write(1024 * 512, &[1u8; 512]).is_err());
-        assert!(m.erase(100, 512).is_err());
+        assert!(m.erase(AT + 100, 512).is_err());
+    }
+
+    #[test]
+    fn the_medium_writes_and_erases_only_inside_its_range_and_never_a_protected_sector() {
+        let mut m = medium();
+        for lba in [0u64, 1, 33, 63, 128, 958, 990, 991, 1023] {
+            assert!(m.write(lba * 512, &[1u8; 512]).is_err(), "write {lba}");
+            assert!(m.erase(lba * 512, 512).is_err(), "erase {lba}");
+            assert!(m.permits(lba * 512, 512).is_err(), "permits {lba}");
+        }
+        assert!(m.write(63 * 512, &[1u8; 1024]).is_err(), "a straddle");
+        assert!(m.permits(AT, 64 * 512).is_ok());
+    }
+
+    #[test]
+    fn a_card_without_a_valid_gpt_header_is_never_written() {
+        let card = Card::init(FakeCard::new(1024)).unwrap();
+        let mut m = SdMedium::new(card, RANGE);
+        assert!(m.write(AT, &[1u8; 512]).is_err());
+        assert!(m.erase(AT, 512).is_err());
     }
 
     #[test]

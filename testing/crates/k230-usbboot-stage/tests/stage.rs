@@ -46,6 +46,9 @@ impl Medium for Halving<'_> {
     fn erase(&mut self, offset: u64, len: u64) -> Result<(), MediumError> {
         self.0.erase(offset, len)
     }
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        self.0.permits(offset, len)
+    }
 }
 
 const BLOCK: u64 = 512;
