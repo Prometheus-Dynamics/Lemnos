@@ -136,16 +136,19 @@ pub fn start_board_logged(
     let socket = dir.join("sock");
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n{devices}");
+    // Built the way docs ask a consumer to build it, so a later field doesn't break it.
     let config = Config {
-        socket: socket.clone(),
-        name: "test-host".to_string(),
-        board: parse(&text).unwrap(),
-        drivers,
-        backend: Box::new(sim),
         options: Options {
             call_deadline: Duration::from_millis(200),
             ..Options::default()
         },
+        ..Config::new(
+            socket.clone(),
+            "test-host".to_string(),
+            parse(&text).unwrap(),
+            drivers,
+            Box::new(sim),
+        )
     };
     let service = match (buffers, log) {
         (None, None) => Service::start(config),
