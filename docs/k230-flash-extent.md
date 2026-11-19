@@ -60,8 +60,8 @@ no extent check. Do not run a new host against an old stage image for a flash.
 ## The image
 
 - Load address `0x80360000` and job address `0x80380000`: unchanged.
-- The image's file size: 66,256 bytes (was 65,376; +880, the extent checks and their refusal texts).
-- The footprint's end: `0x80374300` (was `0x8037ff90`), so 23,808 bytes are spare below `0x80380000` (was 112).
+- The image's file size: 68,816 bytes (was 65,376; +3,440: the extent checks, and then the paint, canary and stack line).
+- The footprint's end: `0x80374d00` (was `0x8037ff90`), so 21,248 bytes are spare below `0x80380000` (was 112).
 - The one cut that made it fit: the stack reserve in `drivers/k230-usbboot-image/image.ld` goes from 64 KiB to 16 KiB.
   The deepest mode's frames, summed down the image's direct-call graph, are 3.5 KiB (the card write piece); the report
   is 1 KiB and the probe 0.7 KiB. The image's indirect calls are not counted, and they are small formatting calls.
@@ -81,3 +81,26 @@ in every piece. A host that wants to drive `piece` directly needs the same field
   `an_extent_that_runs_past_the_card_end_is_refused_before_any_write`, `an_empty_extent_is_refused`); the in-extent whole-image
   flash passed both before and after (`a_whole_image_flash_inside_its_declared_extent_passes_and_reads_back_equal`).
 - The same six are green after the change.
+
+## The stack: painted, guarded, measured
+
+The card image's reserve is 16 KiB (`drivers/k230-usbboot-image/image.ld`). Its use is measured, not estimated:
+
+- The entry paints the whole reserve with `0xa5a5a5a5` before its first call, then writes the canary `0x5ca1ab1e`
+  in the reserve's lowest word.
+- At every end that prints (the piece's end, the report's end), and at every piece's verified sector, the canary is
+  read. A changed canary prints `stack overflow` and takes the SoC reset at once; the run does not go on. The board's
+  ROM does not read a status word, so the printed line is the failure status the record keeps.
+- The end prints the high-water mark as a console line: `stack: <used> of 16384 bytes`. `used` is from the top of the
+  reserve down to the lowest word a run has written. The host's record file keeps every console line, so this line
+  is the figure in the record. The job's reply has no spare word for it.
+
+**Rule for the record:** a figure above 50% of the reserve (above 8192 bytes of 16384) means the reserve must be
+raised, and a size cut made elsewhere in the image to keep it below the job address `0x80380000`. Below that, the
+reserve stays as it is.
+
+**Status of the figure:** no real figure exists yet. Off-board, the real image cannot be run: it reads and writes the
+K230's registers, and the QEMU in this environment has no model of them. The paint, canary and high-water logic is
+tested on the host (`lemnos_k230_usbboot_stage::stack`), and the static estimate of the deepest mode is 3.5 KiB on the
+image's direct-call graph (indirect calls not counted). The first board use of this image must report the
+`stack:` line from a whole-image flash with refusals and a hash, and record it in `testing/board-runs/`.

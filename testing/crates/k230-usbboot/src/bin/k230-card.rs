@@ -142,6 +142,7 @@ fn read_said(lines: &[String]) -> Said {
             || line.contains("refused")
             || line.contains("sd error")
             || line.contains("no reply")
+            || line.contains("stack overflow")
         {
             said.trouble.push(line.clone());
         }

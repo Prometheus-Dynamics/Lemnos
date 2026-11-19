@@ -237,6 +237,18 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
         "50:",
         "mv a0, s0",
         "la sp, lemnos_stack_top",
+        // The stack discipline (lemnos_k230_usbboot_stage::stack): paint the whole reserve before the first call,
+        // then the canary in its lowest word. Only t0 to t2 are used, and no stack is touched.
+        "la t0, lemnos_stack_bottom",
+        "la t1, lemnos_stack_top",
+        "li t2, 0xa5a5a5a5",
+        "401:",
+        "sw t2, 0(t0)",
+        "addi t0, t0, 4",
+        "bltu t0, t1, 401b",
+        "la t0, lemnos_stack_bottom",
+        "li t2, 0x5ca1ab1e",
+        "sw t2, 0(t0)",
         "li t0, 0x91400000",
         "li t1, 0x43",
         "sw t1, 0x00(t0)",
@@ -353,6 +365,56 @@ fn say<R: RegAccess>(regs: &mut R, line: &str) {
 fn unsafe_gave_up() -> bool {
     // SAFETY: a read of this image's own flag; the image runs one thread.
     unsafe { GAVE_UP }
+}
+
+unsafe extern "C" {
+    /// The reserve's bounds, from `image.ld`: the lowest word and the top (the stack starts there and grows down).
+    static lemnos_stack_bottom: u8;
+    static lemnos_stack_top: u8;
+}
+
+/// The reserve's word `i`, word 0 at the bottom (the canary). Volatile, so the scan sees what the stack wrote.
+fn stack_word(i: usize) -> u32 {
+    // SAFETY: the reserve is `lemnos_stack_bottom..lemnos_stack_top`, painted by the entry, and `i` is below
+    // `stack_words()`, so the address is an aligned word inside it; the stack is written by code, not by a reference.
+    unsafe {
+        let base = &raw const lemnos_stack_bottom as usize;
+        core::ptr::read_volatile((base + 4 * i) as *const u32)
+    }
+}
+
+/// The reserve's size in words.
+fn stack_words() -> usize {
+    // SAFETY: the two addresses are the linker's symbols; only their addresses are taken.
+    let bytes = unsafe {
+        (&raw const lemnos_stack_top as usize) - (&raw const lemnos_stack_bottom as usize)
+    };
+    bytes / 4
+}
+
+/// The canary check, at any point of a run: a changed canary is an overflow. The line says so, and the SoC resets
+/// at once; the run does not go on. Nothing is returned on that path.
+fn stack_guard() {
+    if !lemnos_k230_usbboot_stage::stack::canary_ok(stack_word) {
+        let mut regs = Mmio;
+        say(&mut regs, "stack overflow");
+        soc_reset();
+    }
+}
+
+/// The stack check at an end: the canary, then the high-water line `stack: <used> of <reserved> bytes`.
+fn stack_check<R: RegAccess>(regs: &mut R) {
+    stack_guard();
+    let words = stack_words();
+    let used = lemnos_k230_usbboot_stage::stack::used_bytes(words, stack_word);
+    let (du, lu) = lemnos_k230_usbboot_stage::stack::decimal(used);
+    let (dr, lr) = lemnos_k230_usbboot_stage::stack::decimal(words * 4);
+    let used_text = core::str::from_utf8(&du[..lu]).unwrap_or("?");
+    let reserved_text = core::str::from_utf8(&dr[..lr]).unwrap_or("?");
+    gave_up(uart::write_line_parts(
+        regs,
+        &["stack: ", used_text, " of ", reserved_text, " bytes"],
+    ));
 }
 
 /// Writes a 32-bit value as eight hex digits on the UART (no formatting machinery in the image).
@@ -526,6 +588,7 @@ fn run_report() -> ! {
         &mut regs,
         "step 4: report printed on the console only; USB untouched; SoC reset now",
     );
+    stack_check(&mut regs);
     say(&mut regs, "lemnos stage: end");
     // Let the last characters leave the UART before the reset.
     let mut n = 0x200000u32;
@@ -614,6 +677,7 @@ fn run_piece() -> ! {
             }
         }
     }
+    stack_check(&mut regs);
     say(&mut regs, "lemnos stage: end");
     let mut n = 0x200000u32;
     while n != 0 {
@@ -668,6 +732,7 @@ fn piece_job<R: RegAccess>(regs: &mut R) -> Result<(), PieceError> {
         );
     }
     let done = piece::run(&mut card, &job, data, &mut |n| {
+        stack_guard();
         feed_wdt0();
         if n % 0x4000 == 0 {
             say_hex(regs, "piece at", n);

@@ -26,6 +26,7 @@ pub mod probe;
 pub mod ram;
 pub mod report;
 pub mod sd;
+pub mod stack;
 pub mod stage;
 pub mod sysctl;
 pub mod telemetry;
