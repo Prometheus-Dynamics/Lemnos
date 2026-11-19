@@ -776,3 +776,158 @@ fn the_duty_step_is_the_fans_resolution_and_every_duty_reads_back_within_half_of
         assert!(u32::from(pwm_to_duty(pwm + 1) - pwm_to_duty(pwm)) <= DUTY_STEP);
     }
 }
+
+/// Callers for the ownership tests: two clients and the daemon's own writes (`CallerId::LOCAL`).
+const CALLER_A: CallerId = CallerId(7);
+const CALLER_B: CallerId = CallerId(8);
+const SEC: u64 = 1_000_000_000;
+
+#[test]
+fn the_owner_going_hands_the_fan_back_to_its_baseline() {
+    let tree = Tree::new("owner-gone");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "230");
+
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "the baseline the take-over found"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+    assert!(matches!(Driver::health(&fan), Health::Ok));
+}
+
+#[test]
+fn an_older_caller_going_leaves_the_newer_owners_duty() {
+    let tree = Tree::new("owner-older");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    Lifecycle::caller(&mut fan, CALLER_B);
+    fan.set_duty(400).unwrap();
+
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "102",
+        "B's duty stays"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "1");
+
+    Lifecycle::caller_gone(&mut fan, CALLER_B);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+}
+
+#[test]
+fn a_controller_write_after_a_client_keeps_the_fan_when_the_client_goes() {
+    // The daemon's own controller writes as LOCAL. Its write after the client's makes it the owner, so the
+    // client going hands nothing back.
+    let tree = Tree::new("owner-local");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    Lifecycle::caller(&mut fan, CallerId::LOCAL);
+    fan.set_duty(500).unwrap();
+
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "128",
+        "the controller's duty stays"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "1");
+}
+
+#[test]
+fn a_release_makes_its_caller_the_owner() {
+    let tree = Tree::new("owner-release");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    Lifecycle::caller(&mut fan, CALLER_B);
+    fan.release().unwrap();
+
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "255",
+        "B's release stays"
+    );
+    Lifecycle::caller_gone(&mut fan, CALLER_B);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+}
+
+#[test]
+fn a_hand_back_owed_to_a_gone_owner_is_retried_from_the_tick_and_waits_longer_each_time() {
+    let tree = Tree::new("owner-retry");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    fan.set_duty(900).unwrap();
+    let pwm = root.join(PWM_FAN).join("pwm1");
+    fs::remove_file(&pwm).unwrap();
+
+    // The owner goes at 1 s: the first try fails, so it is owed. The next try is 1 s on.
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert!(matches!(Driver::health(&fan), Health::Degraded(_)));
+    assert_eq!(Lifecycle::tick(&mut fan, SEC), Some(2 * SEC));
+
+    // Not due at 1.5 s: nothing is tried, so a value written meanwhile stands.
+    write(root, &format!("{PWM_FAN}/pwm1"), "1");
+    assert_eq!(Lifecycle::tick(&mut fan, SEC + SEC / 2), Some(2 * SEC));
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "1");
+
+    // Due at 2 s, and the attribute is still missing: the second wait is 2 s, so the next try is at 4 s.
+    fs::remove_file(&pwm).unwrap();
+    assert_eq!(Lifecycle::tick(&mut fan, 2 * SEC), Some(4 * SEC));
+    assert!(matches!(Driver::health(&fan), Health::Degraded(_)));
+
+    // Due at 4 s with the attribute back: the baseline is written, and nothing is owed any more.
+    write(root, &format!("{PWM_FAN}/pwm1"), "1");
+    assert_eq!(Lifecycle::tick(&mut fan, 4 * SEC), None);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+    assert!(matches!(Driver::health(&fan), Health::Ok));
+}
+
+#[test]
+fn the_owed_hand_back_waits_1_2_4_then_8_seconds_and_never_longer() {
+    let waits: Vec<u64> = (1..=6).map(retry_wait_ns).collect();
+    assert_eq!(waits, [SEC, 2 * SEC, 4 * SEC, 8 * SEC, 8 * SEC, 8 * SEC]);
+    assert_eq!(retry_wait_ns(u32::MAX), RETRY_CAP_NS);
+}
+
+#[test]
+fn a_new_writer_takes_the_fan_over_from_an_owed_hand_back() {
+    let tree = Tree::new("owner-claim");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    let pwm = root.join(PWM_FAN).join("pwm1");
+    fs::remove_file(&pwm).unwrap();
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert!(matches!(Driver::health(&fan), Health::Degraded(_)));
+
+    // B writes before the owed hand-back is due. The fan is B's now, so nothing is handed back under it.
+    write(root, &format!("{PWM_FAN}/pwm1"), "1");
+    Lifecycle::caller(&mut fan, CALLER_B);
+    fan.set_duty(400).unwrap();
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "102");
+    assert_eq!(Lifecycle::tick(&mut fan, 100 * SEC), None);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "102");
+
+    // B's going hands back to the baseline, which is still the one the first take-over recorded.
+    Lifecycle::caller_gone(&mut fan, CALLER_B);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+}

@@ -54,6 +54,14 @@
 //! the fan to anything else: a stopped driver leaves the fan at full. A controller that wants the fan
 //! stopped must ask for it.
 //!
+//! # Ownership
+//!
+//! Each `set_duty` and `release` makes its caller the owner: the last writer owns the channel, and
+//! the daemon's own writes (`CallerId::LOCAL`) count too. When the owner goes (`caller_gone`: its
+//! connection closed or it died), the channel is handed back as `hand_back` does, to full duty. An
+//! older caller going changes nothing. The write itself is retried from the tick like any other, so a
+//! hand-back that fails is retried with the same backoff.
+//!
 //! What a temperature failure does is the controller's to decide. `fan-control` runs the fan at
 //! full duty when an input is missing or stale, and reports `Degraded`.
 //!
@@ -71,8 +79,8 @@ pub mod math;
 
 use lemnos_contract_fan::Fan;
 use lemnos_core::{
-    Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle, Line,
-    MethodId, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
+    CallerId, Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle,
+    Line, MethodId, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::raw::{EdgeDetect, LineConfig, Polarity, PwmConfig};
 use math::{FULL, Tach, backoff_ns, duty_ns, hardware_duty, period_ns};
@@ -141,6 +149,10 @@ pub struct PwmChannelFan {
     attempts: u32,
     /// The tachometer's pulses, if a line is wired to one.
     meter: Tach,
+    /// Who the method being run is for (see [`Lifecycle::caller`]).
+    calling: CallerId,
+    /// The caller whose write holds the channel. Its going hands the channel back (see the module's ownership).
+    owner: Option<CallerId>,
 }
 
 /// The settings a board file gives the fan.
@@ -160,6 +172,8 @@ impl Lifecycle for PwmChannelFan {
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     const TICKS: bool = true;
+    // Every write is a caller's, so the owner's going can hand the channel back.
+    const TRACKS_CALLERS: bool = true;
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
         cfg.check_keys(KEYS)?;
@@ -202,6 +216,8 @@ impl Lifecycle for PwmChannelFan {
             retry_at_ns: None,
             attempts: 0,
             meter: Tach::new(shape.pulses_per_rev),
+            calling: CallerId::LOCAL,
+            owner: None,
         })
     }
 
@@ -240,6 +256,17 @@ impl Lifecycle for PwmChannelFan {
             Health::Degraded(WRITE_FAILED)
         } else {
             Health::Ok
+        }
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+    }
+
+    /// The owner has gone: hand the channel back, as `hand_back` does. Another caller's channel is left alone.
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.owner == Some(caller) {
+            let _ = self.hand_back();
         }
     }
 
@@ -348,6 +375,7 @@ impl Fan for PwmChannelFan {
         if per_mille > FULL {
             return Err(Status::INVALID_ARGUMENT);
         }
+        self.owner = Some(self.calling);
         // The write is made by the tick the host runs after this call, at the host's time.
         self.target = per_mille;
         Ok(())
@@ -365,14 +393,17 @@ impl Fan for PwmChannelFan {
     }
 
     fn release(&mut self) -> Result<()> {
+        self.owner = Some(self.calling);
         self.target = FULL;
         Ok(())
     }
 
     /// There is no baseline to put back: the driver starts the channel at full duty and nothing
-    /// else is recorded, so a hand-back is the safe state.
+    /// else is recorded, so a hand-back is the safe state. It ends the owner too.
     fn hand_back(&mut self) -> Result<()> {
-        self.release()
+        self.owner = None;
+        self.target = FULL;
+        Ok(())
     }
 }
 
