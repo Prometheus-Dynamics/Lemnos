@@ -49,6 +49,13 @@
 //! single `read` calls, which carry no stamp, so the read's host time is the time
 //! of each sample.
 //!
+//! # Magnetometer
+//!
+//! The magnetometer's field is used only while its total is between 15 and 80 µT, the Earth's range.
+//! A field outside it (a magnet or steel near the chip) is ignored for that read: the heading is then
+//! the gyroscope's, the health says `magnetometer ignored: field magnitude implausible`, and the
+//! magnetometer's confidence is 0. The next plausible field is used at once; there is no hysteresis.
+//!
 //! # Calibration
 //!
 //! This driver doesn't calibrate anything. It uses what the sensor drivers report as it is,
@@ -226,7 +233,11 @@ impl Lifecycle for Orientation {
             return Health::Degraded("waiting for a usable accelerometer sample");
         }
         if out.magnetic_disturbance {
-            return Health::Degraded("magnetometer ignored: disturbed");
+            return Health::Degraded(if self.filter.magnetic_implausible() {
+                "magnetometer ignored: field magnitude implausible"
+            } else {
+                "magnetometer ignored: disturbed"
+            });
         }
         Health::Ok
     }

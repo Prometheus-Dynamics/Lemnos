@@ -390,3 +390,82 @@ fn disturbed_magnetometer_degrades_to_six_axis() {
     assert!((deg(n.roll) - 15.0).abs() < 0.5, "roll {}", deg(n.roll));
     assert!((deg(n.pitch) + 8.0).abs() < 0.5, "pitch {}", deg(n.pitch));
 }
+
+/// The field `FIELD` scaled to a total of `ut` µT: the same direction, so only the magnitude differs.
+fn field_of(ut: f32) -> Vec3 {
+    math::scale(FIELD, ut / math::norm(FIELD))
+}
+
+/// Whether one magnetometer sample of total `ut` µT, on a fresh nine-axis filter, is ignored.
+fn ignored_at(ut: f32) -> bool {
+    let mut o = Orientation::new(nine_axis(1.0, 0.01));
+    o.update_mag(0, field_of(ut), true);
+    o.output().magnetic_disturbance
+}
+
+#[test]
+fn a_field_of_50_microtesla_is_used() {
+    let mut o = Orientation::new(nine_axis(1.0, 0.01));
+    o.update_mag(0, field_of(50.0), true);
+    o.update_imu(0, [0.0; 3], [0.0, 0.0, G]);
+    assert!(!o.output().magnetic_disturbance);
+    assert_eq!(o.output().magnetometer_confidence, 1000);
+}
+
+#[test]
+fn the_field_magnitude_bounds_are_15_and_80_microtesla() {
+    // Edges 0.1 µT inside and outside: 15 and 80 µT are the Earth's field's plausible range.
+    assert!(ignored_at(14.9), "14.9 µT is below the range");
+    assert!(!ignored_at(15.1), "15.1 µT is in the range");
+    assert!(!ignored_at(79.9), "79.9 µT is in the range");
+    assert!(ignored_at(80.1), "80.1 µT is above the range");
+    assert!(ignored_at(360.0), "360 µT is above the range");
+}
+
+#[test]
+fn a_field_too_strong_from_the_first_sample_is_ignored_and_never_learned() {
+    // The board in the field from the start: the relative check alone would learn 360 µT as the
+    // reference and use it. The absolute bounds must refuse it on every sample.
+    let mut o = Orientation::new(nine_axis(1.0, 0.01));
+    let a = [0.0, 0.0, G];
+    for k in 0..=1000u64 {
+        let t_us = k * 10_000;
+        o.update_mag(t_us, field_of(360.0), true);
+        o.update_imu(t_us, [0.0; 3], a);
+        assert!(o.output().magnetic_disturbance, "flag at sample {k}");
+        assert_eq!(o.output().magnetometer_confidence, 0, "confidence at {k}");
+    }
+    assert_eq!(o.output().yaw, 0.0, "heading from an implausible field");
+}
+
+#[test]
+fn a_strong_field_stops_the_heading_and_its_recovery_resumes_it() {
+    let mut o = Orientation::new(nine_axis(1.0, 0.01));
+    let a = [0.0, 0.0, G];
+    for k in 0..=100u64 {
+        let t_us = k * 10_000;
+        o.update_mag(t_us, field_of(50.0), true);
+        o.update_imu(t_us, [0.0; 3], a);
+    }
+    // The 360 µT field now, turned by 0.5 rad about z: the heading must not follow it.
+    let (s, c) = math::sin_cos(0.5);
+    let f = field_of(360.0);
+    let strong: Vec3 = [c * f[0] - s * f[1], s * f[0] + c * f[1], f[2]];
+    for k in 101..=400u64 {
+        let t_us = k * 10_000;
+        o.update_mag(t_us, strong, true);
+        o.update_imu(t_us, [0.0; 3], a);
+        assert!(o.output().magnetic_disturbance, "flag at sample {k}");
+    }
+    assert!(
+        abs(o.output().yaw) < 0.01,
+        "yaw moved to {}",
+        o.output().yaw
+    );
+
+    // Back to 50 µT: used again on the very next sample.
+    o.update_mag(401 * 10_000, field_of(50.0), true);
+    o.update_imu(401 * 10_000, [0.0; 3], a);
+    assert!(!o.output().magnetic_disturbance);
+    assert_eq!(o.output().magnetometer_confidence, 1000);
+}
