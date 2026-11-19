@@ -237,6 +237,15 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
         "50:",
         "mv a0, s0",
         "la sp, lemnos_stack_top",
+        // The RAM below the guard band (BELOW_BASE up to the guard), painted with its own pattern: a change there at a
+        // check point means something else wrote below the image. Only t0 to t2 are used; no stack is touched.
+        "li t0, 0x80340000",
+        "la t1, lemnos_guard_bottom",
+        "li t2, 0x3c3c3c3c",
+        "403:",
+        "sw t2, 0(t0)",
+        "addi t0, t0, 4",
+        "bltu t0, t1, 403b",
         // The stack discipline (lemnos_k230_usbboot_stage::stack): the guard band below the reserve is painted with
         // the canary, the reserve with the pattern, before the first call. Only t0 to t2 are used; no stack is touched.
         "la t0, lemnos_guard_bottom",
@@ -433,6 +442,75 @@ pub fn before_card_write() {
     stack_guard();
 }
 
+/// The PMP line. The image does not read `pmpcfg0` and `pmpaddr0`: a read of a PMP CSR the core does not have is an
+/// illegal-instruction trap, and the boot ROM's trap handler is not known (its one observed use printed
+/// `CPU Exception: NO.2` and the board did not answer again: testing/board-runs/K230-USB.md). Recorded in
+/// docs/k230-flash-extent.md, "PMP".
+fn pmp_note<R: RegAccess>(regs: &mut R) {
+    say(
+        regs,
+        "pmp: not read (a read of an absent PMP CSR traps, and the boot ROM's trap handler is not known)",
+    );
+}
+
+/// The first address of the RAM span below the guard that the entry paints (`image.ld` places the guard at
+/// `0x8035bf00`; the span is 128 KiB below the load address, inside the SPL firmware window that the vendor's
+/// `platform.h` names: see docs/k230-flash-extent.md, "Below the guard").
+const BELOW_BASE: usize = 0x8034_0000;
+
+/// The span's word `i`, counted from `BELOW_BASE`.
+fn below_word(i: usize) -> u32 {
+    // SAFETY: `i` is below `below_words()`, which ends at the guard band's bottom: the address is an aligned word of
+    // the span the entry painted, below the image and the guard; volatile, as the span is written by code outside
+    // this image.
+    unsafe { core::ptr::read_volatile((BELOW_BASE + 4 * i) as *const u32) }
+}
+
+/// The span's size in words: from `BELOW_BASE` up to the guard band.
+fn below_words() -> usize {
+    // SAFETY: the guard's address from the linker script; only its address is taken.
+    let bytes = unsafe { (&raw const lemnos_guard_bottom as usize) - BELOW_BASE };
+    bytes / 4
+}
+
+/// The check on the span below the guard, at an end: `below-guard: unchanged`, or
+/// `below-guard: changed at 0x<address>, <count> words`. A change here means something other than this image wrote
+/// below it, and the stack placement must be revisited before any flash use.
+#[inline(never)]
+fn below_guard_report() {
+    let mut line = [0u8; 64];
+    let mut at = 0;
+    let head: &[u8] =
+        match lemnos_k230_usbboot_stage::stack::changed_span(below_words(), below_word) {
+            None => b"below-guard: unchanged",
+            Some((first, count)) => {
+                for text in [b"below-guard: changed at 0x".as_slice()] {
+                    line[at..at + text.len()].copy_from_slice(text);
+                    at += text.len();
+                }
+                at = lemnos_k230_usbboot_stage::stack::put_hex32(
+                    &mut line,
+                    at,
+                    (BELOW_BASE + 4 * first) as u32,
+                );
+                for text in [b", ".as_slice()] {
+                    line[at..at + text.len()].copy_from_slice(text);
+                    at += text.len();
+                }
+                at = lemnos_k230_usbboot_stage::stack::put_decimal(&mut line, at, count as u32);
+                b" words"
+            }
+        };
+    for text in [head] {
+        line[at..at + text.len()].copy_from_slice(text);
+        at += text.len();
+    }
+    // SAFETY: the buffer holds only ASCII (the words above, hex digits and digits), so it is valid UTF-8.
+    let text = unsafe { core::str::from_utf8_unchecked(&line[..at]) };
+    let mut regs = Mmio;
+    gave_up(uart::write_line(&mut regs, text));
+}
+
 /// The stack check at an end: the guard, then the high-water line `stack: <used> of <reserved> bytes`. One copy, out
 /// of line, on the UART the image's own writer uses (the same instance as the overflow line).
 #[inline(never)]
@@ -461,6 +539,7 @@ fn stack_check() {
     let text = unsafe { core::str::from_utf8_unchecked(&line[..at]) };
     let mut regs = Mmio;
     gave_up(uart::write_line(&mut regs, text));
+    below_guard_report();
 }
 
 /// Writes a 32-bit value as eight hex digits on the UART (no formatting machinery in the image).
@@ -518,6 +597,7 @@ fn run_report() -> ! {
         &mut regs,
         "lemnos stage: report (no writes; watchdog armed before this line)",
     );
+    pmp_note(&mut regs);
     let ctl = boot_ctl();
     say_hex(&mut regs, "step 1: boot mode soc_boot_ctl", ctl);
     let pad_words = pads::dump(&mut regs);
@@ -698,6 +778,7 @@ fn run_piece() -> ! {
         &mut regs,
         "lemnos stage: piece (writes the card; watchdog armed before this line)",
     );
+    pmp_note(&mut regs);
     let outcome = piece_job(&mut regs);
     match outcome {
         Ok(()) => say(&mut regs, "piece ok"),

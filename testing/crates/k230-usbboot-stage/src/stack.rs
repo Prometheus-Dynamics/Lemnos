@@ -25,6 +25,27 @@ pub fn used_bytes(words: usize, read: impl Fn(usize) -> u32) -> usize {
         .map_or(0, |i| (words - i) * 4)
 }
 
+/// What the entry paints the span below the guard band with (the RAM below the image, which no code of the image uses).
+pub const BELOW_PATTERN: u32 = 0x3c3c_3c3c;
+
+/// The span of words that do not hold [`BELOW_PATTERN`], as the first changed word and how many words changed, or
+/// `None` when the span is unchanged. `words` is the span's length.
+pub fn changed_span(words: usize, read: impl Fn(usize) -> u32) -> Option<(usize, usize)> {
+    let first = (0..words).find(|&i| read(i) != BELOW_PATTERN)?;
+    let count = (first..words).filter(|&i| read(i) != BELOW_PATTERN).count();
+    Some((first, count))
+}
+
+/// Writes `v` as eight hex digits into `line` from `at`, and returns the end.
+#[inline(never)]
+pub fn put_hex32(line: &mut [u8], at: usize, v: u32) -> usize {
+    for k in 0..8 {
+        let nibble = (v >> (28 - 4 * k)) & 0xf;
+        line[at + k] = b"0123456789abcdef"[nibble as usize];
+    }
+    at + 8
+}
+
 /// Writes `n` in decimal into `line` from `at`, and returns the end. Out of line, so one copy serves the image.
 /// The line must have room for ten digits past `at`: a `u32` has at most ten.
 #[inline(never)]
@@ -82,6 +103,35 @@ mod tests {
         g[0] = CANARY;
         g[63] = 0;
         assert!(!guard_ok(g.len(), |i| g[i]));
+    }
+
+    #[test]
+    fn the_span_below_the_guard_is_unchanged_until_a_word_of_it_changes() {
+        let mut v = vec![BELOW_PATTERN; 100];
+        assert_eq!(changed_span(v.len(), |i| v[i]), None);
+        v[37] = 0;
+        assert_eq!(changed_span(v.len(), |i| v[i]), Some((37, 1)));
+    }
+
+    #[test]
+    fn the_span_reports_the_first_changed_word_and_how_many_changed() {
+        let mut v = vec![BELOW_PATTERN; 100];
+        v[90] = 1;
+        v[12] = 2;
+        v[13] = 3;
+        // The first changed word is the lowest address, and the count covers every changed word, not just the first run.
+        assert_eq!(changed_span(v.len(), |i| v[i]), Some((12, 3)));
+        let mut last = [BELOW_PATTERN; 4];
+        last[3] = 0;
+        assert_eq!(changed_span(last.len(), |i| last[i]), Some((3, 1)));
+    }
+
+    #[test]
+    fn put_hex32_writes_the_address_in_eight_digits() {
+        let mut line = [b'#'; 12];
+        let end = put_hex32(&mut line, 2, 0x8035_bf00);
+        assert_eq!(&line[2..end], b"8035bf00");
+        assert_eq!(line[1], b'#');
     }
 
     #[test]

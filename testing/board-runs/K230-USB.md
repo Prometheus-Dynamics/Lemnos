@@ -1628,3 +1628,17 @@ UART captures on both ports, and the reset each return took. Written to NVMe, no
   `kburn_k230.h:31`, not in our SDK clone); the SDK's U-Boot burner links at `0x80300000` but is a different
   binary. `check.sh` and `tests/image_link.rs` fail if the linker origin differs.
 - The card's boot copy: the plan's earlier notes said the ROM reads sectors 2048 and 3072; not verified.
+
+## FLASH-EXTENT stack layout: the RAM below the guard (UNKNOWN)
+
+- **Question:** does the boot ROM, or its USB path, still use the RAM below the card image's guard band (`0x8035bf00`)
+  after handover? If it does, the stack placement must move before any flash use.
+- **Sources (SDK, read only):** `platform.h:47-54`, `configs/k230_canmv_defconfig:9,43`, `unzip.c:37-41,145-150` (U-Boot
+  overlay in the Linux SDK at `fc6cc21`). They give the SPL window `0x80300000..0x80380000` and U-Boot's SDMA buffers
+  in `0x80200000..0x80300000`. They say nothing about the boot ROM's memory. The k230_sdk clone at `7e302f7` has no U-Boot,
+  SPL or ROM.
+- **Board records:** GAHBCFG `0` as the ROM left it (`:1383`): the USB core was in slave mode. No record shows a ROM stack
+  or USB buffer address.
+- **Status:** UNKNOWN. The image paints `0x80340000..0x8035bf00` with `0x3c3c3c3c` at entry and prints
+  `below-guard: unchanged` or `below-guard: changed at 0x<addr>, <count> words` at each end. The first board run reports
+  that line. A `changed` line means the stack placement must be revisited before any flash use.

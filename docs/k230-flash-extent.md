@@ -110,11 +110,38 @@ the SoC resets at once; the run does not go on.
 happens between the last check and the write. The window is the code that runs between those two points. A hardware
 guard would close it; see the PMP note below.
 
-**PMP (not used).** A PMP region below the stack would fault an overflow at the store itself. Whether the K230's C908
-implements PMP, and in which mode the boot ROM hands over, are not on this machine: there is no vendor SDK or datasheet
-in the repository or on disk, so nothing can be cited. The board run that comes first can read `pmpcfg0` and `pmpaddr0`
-in M-mode (the trap capture in `testing/board-runs/K230-USB.md` shows the stage in machine mode). Until that is read,
-no PMP is configured.
+**PMP (not read).** A PMP region below the stack would fault an overflow at the store itself. The image does not
+configure PMP, and it does not read `pmpcfg0` or `pmpaddr0` either. A read of a PMP CSR on a core without PMP is an
+illegal-instruction trap, and the boot ROM's trap handler is not known: the one trap the board has shown printed
+`CPU Exception: NO.2` and the board did not answer identify again (testing/board-runs/K230-USB.md, the run-L2 entry).
+The only way to read safely would be to install a trap vector of our own first, and that vector would then be
+untested on the board. So the entry prints `pmp: not read (...)` and nothing else. The first board run may test the
+read by hand, on a scratch image, with the trap handler under its control.
+
+**Below the guard (the RAM under the image).** The entry paints `0x80340000`..`0x8035bf00` (113,408 bytes, from 128 KiB below the load address up to the
+guard) with `0x3c3c3c3c`. Each end scans it and prints `below-guard: unchanged`, or
+`below-guard: changed at 0x<addr>, <count> words` (the first changed word, and the words changed). The span is painted
+because the image's own stack, code and data do not reach it, so any change there is another agent's write. The span's
+bottom is a guess at the largest block that the entry can paint quickly; `0x80340000` is not a number from a source.
+
+What the sources say about that RAM (SDK facts, file:line in `git show <rev>:<path>`, the Linux SDK at `fc6cc21`, the U-Boot
+overlay under `buildroot-overlay/boot/uboot/u-boot-2022.10-overlay`):
+- `arch/riscv/cpu/k230/platform.h:47-54`: `USER_ALLOC_ADDR 0x80230000`, `PATCH_CODE_ADDR 0x80250000`,
+  `FIRMWARE_CODE_ADDR 0x80300000`, `FIRMWARE_CODE_MAX_LEN 512 KiB` (so the firmware window ends at `0x80380000`),
+  `SRAM_START_ADDRESS 0x80000000`.
+- `configs/k230_canmv_defconfig:9`: `CONFIG_SPL_TEXT_BASE=0x80300000`; `:43`: `CONFIG_SPL_BSS_START_ADDR=0x80380000`.
+  So the SPL's own code and data occupy the window from `0x80300000` (the SPL is not running in our download mode).
+- `arch/riscv/cpu/k230/unzip.c:37-41` and `:145-150`: the U-Boot SDMA ping-pong buffers are in SRAM at `0x80200000`
+  (write side, four 128 KiB slots, to `0x80280000`) and `0x80280000` (read side, two slots, to `0x80300000`). These
+  are U-Boot's, not the boot ROM's, and they end below the span.
+- The k230_sdk clone at `7e302f7` contains no U-Boot, SPL or boot ROM (only `src/big/mpp` and `src/common/cdk`).
+  The K230-USB record's `src/little/uboot` paths are not in that clone; its U-Boot is the Linux SDK's overlay above.
+- The record (`testing/board-runs/K230-USB.md:1383`): GAHBCFG read `0` as the ROM left it, so the USB core was in slave
+  mode at handover: the ROM's USB path was not using DMA on that run.
+
+**UNKNOWN:** the boot ROM's stack location and size, the addresses of its USB buffers, and whether the ROM or its USB
+path writes anywhere below the guard after handover. No source and no board record gives those. The span scan is the
+measurement that answers the last question on the board.
 
 **The high-water mark.** Each end prints `stack: <used> of 16384 bytes`: `used` is from the top of the reserve down to
 the lowest word a run has written. The host records every console line, so this line is the figure. The job's reply
