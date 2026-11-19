@@ -36,7 +36,7 @@ pub trait Light {
     /// as it is.
     #[method(3)]
     fn clear(&mut self, layer: u8) -> Result<()>;
-    /// Empties every layer.
+    /// Empties every layer the caller owns. Another caller's layers are left as they are.
     #[method(4)]
     fn clear_all(&mut self) -> Result<()>;
     /// Scales everything shown, 0 to 255.
