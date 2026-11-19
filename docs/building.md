@@ -117,7 +117,12 @@ library tests in exactly the shipped set (failing if a dev-dependency would pull
 then lints and builds every crate's `--no-default-features` and `--all-features` forms. A test that
 reaches the same code of the crate in both sets is not run again: the crate's tests are built in both
 sets with their LLVM IR, compared function by function, and only the tests that reach a difference run
-(`scripts/feature-tests.py`). `LIST=1` prints the sets without running them.
+(`scripts/feature-tests.py`). Each crate's result is kept under the target directory
+(`target/check-features`), keyed on everything that decides it (`scripts/features-cache.py`): the
+toolchain, the build configuration, the feature sets and every file of the workspace packages the
+crate can depend on. A crate whose key is unchanged reuses its pass and runs only its selected tests
+again; a changed one is checked again. The gate runs the step in a lane of its own, beside the tail
+lane. `LIST=1` prints the sets without running them.
 
 ## No C in the shipped programs
 

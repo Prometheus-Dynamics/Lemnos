@@ -14,12 +14,12 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 GATE_KILL_GRACE=3
 
 gate_out="$(mktemp -d "${TMPDIR:-/tmp}/gate-out.XXXXXX")"
-declare -A lane_pid=([c]=0 [s]=0 [t]=0)
+declare -A lane_pid=([c]=0 [s]=0 [t]=0 [f]=0)
 stop_lanes() {
   # Only the lanes this shell started, their children, and the steps still running. Each lane and each
   # step is its own process group; a running step's pid and token are in $gate_out/<key>.pid.
   local lane f pid token
-  for lane in c s t; do
+  for lane in c s t f; do
     [ "${lane_pid[$lane]}" = 0 ] || kill -TERM -- "-${lane_pid[$lane]}" 2>/dev/null || true
   done
   for f in "$gate_out"/*.pid; do
@@ -196,16 +196,17 @@ case "$part" in
   *) echo "GATE_PART=$part: expected all, checks or tests:K/N" >&2; exit 1 ;;
 esac
 
-# The steps run in three lanes at once. The cargo lane holds the lint, the workspace tests, and the
+# The steps run in four lanes at once. The cargo lane holds the lint, the workspace tests, and the
 # steps after them that build the programs the tests start (lemnosd, lemnos-ctl): cargo holds the
 # target directory's lock for the whole of each build, so those steps cannot overlap, and they run in
 # the order below. The side lane holds the steps that do not build: the U-Boot check (QEMU), the
 # packaging and kernel checks, and the cargo queries that read only the lock file. The tail lane
 # holds the cargo steps that touch nothing the workspace tests start or read: the doc tests, the
-# builds for other targets, the shipped programs (their own profile), the library crates and the
-# feature sets the workspace tests do not build (library tests and checks only, no programs). It
+# builds for other targets, the shipped programs (their own profile) and the library crates. It
 # starts once the workspace tests are built and running, when cargo's lock is free, and runs beside
-# them. Each step's output is kept whole and printed under its "==> label" line when it finishes,
+# them. The features lane holds the feature sets the workspace tests do not build (library tests and
+# checks only, no programs): it starts with the tail lane and runs beside it, and its result is kept
+# per crate under the target directory, so a crate nothing touched costs a lookup. Each step's output is kept whole and printed under its "==> label" line when it finishes,
 # with its "label: N s" line after it. A failing step's output is shown, the other lanes are
 # stopped, and the gate fails. A step past its bound is killed and named the same way.
 
@@ -307,9 +308,20 @@ tail_lane() {
   lane_step libraries 828 scripts/check-libraries.sh # lander green max 276 s
   # The shipped programs (packaging/shipped.txt) agree: see scripts/check-products.sh.
   lane_step products 582 scripts/check-products.sh # lander green max 194 s
-  # The sets the workspace tests never build: each crate's tests in the exact set it ships with,
-  # and each library option (no defaults, all features) linted and built. See the script.
-  # Bound: max(180, 3 x 106 s), the only green so far (lander train 139) is 106 s: 318 s.
+}
+
+# The sets the workspace tests never build: each crate's tests in the exact set it ships with, and
+# each library option (no defaults, all features) linted and built (scripts/check-features.sh). Its
+# results are cached per crate (target/check-features), so a gate where nothing a crate depends on
+# changed spends a lookup on it. It waits, like the tail lane, for cargo's lock to be free.
+features_lane() {
+  local n=0
+  # lane_step <label> <bound> <command...>
+  lane_step() { n=$((n + 1)); unit "f$(printf %03d "$n")" "$@"; }
+  if [ "$part" != checks ]; then
+    until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
+  fi
+  # Bound: max(180, 3 x 106 s), the only green so far (lander train 139, before the cache) is 106 s: 318 s.
   lane_step features 318 scripts/check-features.sh # lander green max 106 s (one green)
 }
 
@@ -346,8 +358,9 @@ set -m
 cargo_lane & lane_pid[c]=$!
 side_lane & lane_pid[s]=$!
 tail_lane & lane_pid[t]=$!
+features_lane & lane_pid[f]=$!
 set +m
-declare -A next=([c]=1 [s]=1 [t]=1) lane_name=([c]=cargo [s]=side [t]=tail)
+declare -A next=([c]=1 [s]=1 [t]=1 [f]=1) lane_name=([c]=cargo [s]=side [t]=tail [f]=features)
 show() { # shows the finished steps of lane $1 that are next in its order; a failing one stops the gate
   local lane="$1" key
   while :; do
@@ -357,9 +370,9 @@ show() { # shows the finished steps of lane $1 that are next in its order; a fai
     next[$lane]=$(( next[$lane] + 1 ))
   done
 }
-running=3
+running=4
 while [ "$running" -gt 0 ]; do
-  for lane in c s t; do
+  for lane in c s t f; do
     show "$lane"
     if [ "${lane_pid[$lane]}" != 0 ] && ! kill -0 "${lane_pid[$lane]}" 2>/dev/null; then
       rc=0; wait "${lane_pid[$lane]}" || rc=$?
