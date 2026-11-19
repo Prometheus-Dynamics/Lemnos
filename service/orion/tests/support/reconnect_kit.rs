@@ -73,7 +73,6 @@ pub fn dir(test: &str) -> Scratch {
 
 pub fn start_lemnosd(socket: &Path) -> Service {
     Service::start(LemnosdConfig {
-        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(BOARD).expect("board"),

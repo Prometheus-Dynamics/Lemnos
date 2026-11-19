@@ -70,7 +70,6 @@ fn config(socket: PathBuf, devices: &str) -> Config {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<FakeCounter>()],
         backend: Box::new(SimBoard::new()),
-        log: None,
         options: Options::default(),
     }
 }

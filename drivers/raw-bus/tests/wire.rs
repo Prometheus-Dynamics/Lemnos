@@ -73,7 +73,6 @@ fn start() -> Running {
         board: parse(BOARD).unwrap(),
         drivers: vec![entry::<RawBus>()],
         backend: Box::new(board),
-        log: None,
         options: Options {
             call_deadline: Duration::from_secs(30),
             ..Options::default()

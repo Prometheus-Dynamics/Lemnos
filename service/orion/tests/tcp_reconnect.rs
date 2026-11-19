@@ -80,7 +80,6 @@ fn board_options() -> BoardOptions {
 fn start_lemnosd(socket: &Path) -> Service {
     let board = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
     Service::start(LemnosdConfig {
-        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(&board).expect("board"),

@@ -49,7 +49,6 @@ fn running(text: &str) -> Result<Running, String> {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let config = Config {
-        log: None,
         socket: socket.clone(),
         name: "t".to_string(),
         board: parse(text).unwrap(),

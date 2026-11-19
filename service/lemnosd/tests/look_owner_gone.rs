@@ -130,7 +130,6 @@ fn start(dir: &Path) -> Service {
         board: parse(text).unwrap(),
         drivers: vec![entry::<StatusLight>(), entry::<PixelStandIn>()],
         backend: Box::new(SimBoard::new()),
-        log: None,
         options: Options::default(),
     })
     .unwrap()

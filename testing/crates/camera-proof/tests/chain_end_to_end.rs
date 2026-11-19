@@ -53,7 +53,6 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     let kind = buffers.kind();
     let service = Service::start_with_buffers(
         Config {
-            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

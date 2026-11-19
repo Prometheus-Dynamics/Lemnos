@@ -51,7 +51,6 @@ fn list(text: &str) -> String {
         board: parse(text).unwrap(),
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(SimBoard::new()),
-        log: None,
         options: Options::default(),
     })
     .expect("the daemon starts");

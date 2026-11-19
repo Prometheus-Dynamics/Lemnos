@@ -104,16 +104,15 @@ pub struct Config {
     /// How the host treats its drivers. What the board file's `[host]` section sets wins over
     /// these; `lemnosd` passes the defaults.
     pub options: Options,
-    /// Where the daemon's log lines go: the bring-up line of each device and the notes its drivers
-    /// report. `None` writes them to stderr.
-    pub log: Option<LogSink>,
 }
 
-/// Takes one log line, without its newline.
+/// Takes one log line, without its newline. The daemon's log lines are the bring-up line of each
+/// device and the notes its drivers report; they go to stderr unless the service was started with
+/// [`Service::start_with_buffers_logged`].
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub(crate) struct Core {
-    /// Where log lines go (see [`Config::log`]).
+    /// Where log lines go (see [`LogSink`]); `None` is stderr.
     pub(crate) log: Option<LogSink>,
     /// What became of the driver packages, for a client that asks.
     pub(crate) packages: PackageReport,
@@ -205,7 +204,7 @@ impl Service {
         config: Config,
         packages: PackageReport,
     ) -> Result<Self, StartError> {
-        Self::start_whole(config, Arc::new(DmaHeaps::default()), packages)
+        Self::start_whole(config, Arc::new(DmaHeaps::default()), packages, None)
     }
 
     /// [`Service::start`], with `buffers` giving the buffers of every stream the board file
@@ -214,13 +213,24 @@ impl Service {
         config: Config,
         buffers: Arc<dyn BufferSource>,
     ) -> Result<Self, StartError> {
-        Self::start_whole(config, buffers, PackageReport::default())
+        Self::start_whole(config, buffers, PackageReport::default(), None)
+    }
+
+    /// [`Service::start_with_buffers`], with the daemon's log lines going to `log` instead of
+    /// stderr.
+    pub fn start_with_buffers_logged(
+        config: Config,
+        buffers: Arc<dyn BufferSource>,
+        log: LogSink,
+    ) -> Result<Self, StartError> {
+        Self::start_whole(config, buffers, PackageReport::default(), Some(log))
     }
 
     fn start_whole(
         config: Config,
         buffers: Arc<dyn BufferSource>,
         packages: PackageReport,
+        log: Option<LogSink>,
     ) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
         // A board with a keep-alive device (a hardware watchdog) needs the daemon's liveness.
@@ -250,7 +260,7 @@ impl Service {
         // open packages are the one setting that lifts that.
         host.set_signed_mode(packages.mode != packages::PackageMode::Open);
         let core = Arc::new(Core {
-            log: config.log,
+            log,
             packages,
             host,
             liveness: Arc::clone(&liveness),

@@ -65,7 +65,6 @@ fn every_built_in_drivers_description_keeps_the_bounds_through_the_text_form() {
         board: parse(&text).unwrap(),
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(walked.board.clone()),
-        log: None,
         options: Options {
             call_deadline: Duration::from_millis(200),
             ..Options::default()
