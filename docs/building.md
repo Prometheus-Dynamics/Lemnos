@@ -114,8 +114,10 @@ The workspace tests build each crate with every feature any member asks of it, t
 so they never build the set a crate ships with when that set is smaller. `scripts/check-features.sh`,
 run by the gate, finds each workspace crate whose shipped set differs from its tested set and runs its
 library tests in exactly the shipped set (failing if a dev-dependency would pull a feature back in),
-then lints and builds every crate's `--no-default-features` and `--all-features` forms. `LIST=1`
-prints the sets without running them.
+then lints and builds every crate's `--no-default-features` and `--all-features` forms. A test that
+reaches the same code of the crate in both sets is not run again: the crate's tests are built in both
+sets with their LLVM IR, compared function by function, and only the tests that reach a difference run
+(`scripts/feature-tests.py`). `LIST=1` prints the sets without running them.
 
 ## No C in the shipped programs
 
