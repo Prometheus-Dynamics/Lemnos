@@ -28,7 +28,60 @@ stop_lanes() {
     stop_step "$pid" "$token"
   done
 }
-trap 'stop_lanes; rm -rf -- "$gate_out"' EXIT
+# Every step the gate runs gets a temp dir of its own, as its TMPDIR: empty when the step starts and
+# checked empty when it ends (in bounded, below). A step that leaves an entry there fails the gate, and
+# the output lists what was left. The dirs sit directly under the gate's TMPDIR and are named g<key>:
+# a socket path under TMPDIR must stay below 108 bytes, so the names stay short. The gate removes them
+# on exit, including a step killed at its bound (its dir is checked after the kill).
+step_dir() { echo "${TMPDIR:-/tmp}/$1"; }
+clean_step_dirs() {
+  local d
+  for d in "${TMPDIR:-/tmp}"/g[ctfs][0-9][0-9][0-9] "${TMPDIR:-/tmp}"/gtop; do
+    [ -e "$d" ] && rm -rf -- "$d"
+  done
+  return 0
+}
+
+# step_tmp_check <label> <dir>: lists what <dir> holds, removes it, and returns 1 if anything was there.
+step_tmp_check() {
+  local label="$1" dir="$2" e kib n=0
+  for e in "$dir"/* "$dir"/.[!.]*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    n=$((n + 1))
+    kib="$(du -sk -- "$e" 2>/dev/null | cut -f1 || true)"
+    echo "    ${e##*/}  ${kib:-?} KiB"
+  done
+  rm -rf -- "$dir"
+  if [ "$n" -gt 0 ]; then
+    echo "gate: $label left $n entries in its TMPDIR (listed above)"
+    return 1
+  fi
+}
+
+# The ccache temp dir is shared by every step, so it is not checked empty. A step is charged with
+# the entries that appeared in that dir during the step and are still there at its end; entries
+# present before the step are ccache's steady state and are not counted. The lanes run side by
+# side, so an entry another lane's compile left is charged here too: this is a note, not a failure.
+ccache_tmp="${CCACHE_TEMPDIR:-}"
+if [ -z "$ccache_tmp" ] && command -v ccache >/dev/null 2>&1; then
+  ccache_tmp="$(ccache -k temporary_dir 2>/dev/null || true)"
+fi
+ccache_names() {
+  if [ -n "$ccache_tmp" ] && [ -d "$ccache_tmp" ]; then ls -A -- "$ccache_tmp"; fi
+}
+# ccache_growth <label> <names before the step>
+ccache_growth() {
+  local label="$1" after new
+  [ -n "$ccache_tmp" ] || return 0
+  after="$(ccache_names || true)"
+  new="$(comm -13 <(printf '%s\n' "$2" | grep . | sort) <(printf '%s\n' "$after" | grep . | sort) || true)"
+  if [ -n "$new" ]; then
+    echo "note: $label: ccache's temp dir ($ccache_tmp) gained $(printf '%s\n' "$new" | wc -l) entries during the step and they remain at its end (lanes run side by side, so one may be another step's):"
+    printf '%s\n' "$new" | sed 's/^/    /'
+  fi
+}
+
+trap 'stop_lanes; rm -rf -- "$gate_out"; clean_step_dirs' EXIT
 
 # gate_sweep <token> <signal>: sends the signal to each process whose environment carries the token. A step's
 # processes all inherit its token, so this also finds those that left its process group (a new session, a
@@ -66,13 +119,16 @@ stop_step() {
 # or 124 when the bound ran out and the step was killed) and step_killed (1 when it was killed). Keys are unique
 # within a run, so the .done file is not there before the step writes it.
 bounded() {
-  local key="$1" bound="$2" token pid start=$SECONDS
+  local key="$1" bound="$2" token pid start=$SECONDS steptmp before
   shift 2
   token="gate.$$.$key.$RANDOM$RANDOM"
   step_rc=0 step_killed=0
+  steptmp="$(step_dir "g$key")"
+  rm -rf -- "$steptmp"; mkdir -p -- "$steptmp"
+  before="$(ccache_names || true)"
   set -m
   (
-    export GATE_STEP_TOKEN="$token"
+    export GATE_STEP_TOKEN="$token" TMPDIR="$steptmp"
     rc=0
     "$@" || rc=$?
     # The step's CPU: bash's times, whose second line is the children this subshell waited for (user, then
@@ -98,6 +154,10 @@ bounded() {
   fi
   wait "$pid" 2>/dev/null || true
   : >"$gate_out/$key.pid"
+  if ! step_tmp_check "$(cat "$gate_out/$key.label")" "$steptmp" >>"$gate_out/$key.out" 2>&1; then
+    [ "$step_rc" != 0 ] || step_rc=1
+  fi
+  ccache_growth "$(cat "$gate_out/$key.label")" "$before" >>"$gate_out/$key.out"
   return 0
 }
 
