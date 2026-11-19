@@ -1501,6 +1501,112 @@ Record, as it differs from run 2:
 Records: `run3-hypothesis.md`, `run3-dry.log`, `run3-run.log`, `run3-stdout.log`. The board is back at the ROM as
 found, and the lock is free.
 
+### B2 fix after run 3 (rev `ee6fd671`): the host waits for udev before the open
+
+The coordinator found that the rule for the stage is installed and `udevadm verify` passes. The likely cause of
+run 3's denial is a race: udev applies the uaccess ACL late in its rules, after the kernel has published the
+device, and the host tried the open 0.649 s after the load.
+
+- **Model first.** The rehearsal gets the fault `late_acl` and the permanent case `late-acl`. udev's database entry
+  and the node's ACL come 400 ms after the kernel publishes the stage; until then `access` is denied (mode 600, no
+  ACL). Against the old host the case failed as the board did: Stopped, "may not open"
+  (`rehearsal-late-acl-before-fix.log`).
+- **Host.** `Board` gets `udev_done`. On the board it reads the device's `dev` attribute (`189:<minor>`, the driver
+  core's attribute, no device lock) and checks that `/run/udev/data/c189:<minor>` exists.
+  - After the port, product and interface checks, and before any open, the host polls (100 ms) until udev is done
+    and `access(R|W)` is granted. The wait is bounded by `Bounds::udev`, 5 s.
+  - Past the bound it stops exactly as before and opens nothing. If access is granted but there is still no entry,
+    it stops with "udev has not finished the device".
+  - The other plan bounds are unchanged. The new 5 s bound ends at most about 6 s after the load, inside the
+    stage's 30 s idle limit.
+- **Tests:**
+  - the late ACL is waited for and then opened;
+  - an ACL after the bound stops the run unopened;
+  - access granted without udev's entry is not enough;
+  - `udev_done` reads the entry from `dev`, and is false with no `dev`, with no entry, or with a non-USB major.
+- **Checks.** All host and driver tests pass, and clippy is clean. All 15 rehearsal cases are AS IT MUST, with
+  `late-acl` granted 0.400 s after the checks.
+- **Read-only check on this host before run 4.** The ROM's node `/dev/bus/usb/003/125` (`189:380`) carried
+  `user:sozo:rw-`, and `/run/udev/data/c189:380` existed.
+
+### B2 run 4 (2026-11-18, rev `ee6fd671`): PASSED; the stage's USB device path works end to end
+
+Conditions are as in runs 1 to 3:
+- the lock was held by `k230-b2 run` for the whole run, and was free before and after;
+- the port showed `29f1:0230` devnum 125 before the load;
+- the checks came before the open;
+- there were no card writes, no request outside LBA 1048576..1048704, and no request outside the window;
+- the consoles were read only.
+
+Hypothesis first (`run4-hypothesis.md`). Dry run: access to the ROM node granted, nothing opened. The stage image
+is the same as run 3's (patched sha256 `9b79d8ec…cf79`).
+
+Times from the load (1795056961.124):
+- 0.000 s: loaded and started.
+- +0.53 s: the port was empty.
+- +0.860 s (1.009 s from the run's start): 1209:0001 devnum 126 at 3-4.2.1.4.1 with all its checks correct:
+  - speed 480 and configuration 1;
+  - product "Lemnos flash stage";
+  - interface "lemnos flash wire D0D1".
+
+  The kernel enumerated it on the first attempt, with no errors.
+- At the same moment: "access granted, udev done, 0.000 s after the checks".
+  - udev had finished by the time the host took the stage, so the race seen in run 3 did not recur here.
+  - The new wait was not exercised on the board. It stays as the guard, and the `late-acl` case covers it.
+  - Because this run went through, the read-only capture for a stop (`run4-access.txt`) was not triggered.
+- +1.056 s: interface 0 claimed.
+- EP0, all as expected:
+  - device descriptor 18 bytes;
+  - configuration descriptor 9 bytes, and 32 bytes in full;
+  - strings 0, 2 and 3 of 4, 38 and 46 bytes;
+  - GET_STATUS for the device and for endpoint 0x81;
+  - GET_CONFIGURATION;
+  - both unknown vendor requests stalled;
+  - GET_STATUS after the stalls.
+- Bulk:
+  - identify: the check build `0x4b32333042320001`, 104 bytes.
+  - Write and read at 1, 8, 9, 64, 127 and 128 sectors: status 0, CRC held both ways, read back equal.
+  - A chunk with a flipped bit: status 1, window unchanged.
+  - 65539 bytes: status 5, window unchanged.
+  - 129 sectors: status 5. 11 bytes: status 5.
+  - identify after the refusals: the same record.
+- +1.738 s: END status 0, and the verdict was **Passed**. The record over USB agreed with the console's stable words.
+- +3.061 s: the ROM was back at 3-4.2.1.4.1 as `29f1:0230` devnum 127, by the stage's own SoC reset after END.
+
+Record over USB:
+
+| word | value | reading |
+|---|---|---|
+| gsnpsid | `4f54430a` | v4.30a |
+| dsts | `0036e800` | high speed |
+| bus-resets / setups | 2 / 21 | one enumeration, then the host's EP0 checks |
+| set-address / dcfg-after-address | `0x11` / `0x110` | DCFG.DAD equals set-address |
+| address-status-in / ep0-status-out | 1 / 17 | every control read's status OUT completed |
+| stalls / configured | 2 / 1 | the two vendor requests |
+| out-frames / out-rearms | 31 / 31 | bulk OUT re-armed after every frame |
+| out-longest / out-oversize | 65539 / 0 | the oversize chunk arrived whole and was refused by status |
+| in-transfers / in-bytes / in-fifo-waits | 22 / 312056 / 0 | |
+| wdt-hz / wdt-top | 750000 / 10 | as runs 2 and 3 |
+| ticks-now-lo | 42,108,979 | 1.56 s at 27 MHz since the arm, as the console shows |
+| tb-cross | 7500 / 10001 us | |
+
+The console's later copy has out-frames 32 and in-transfers 24, because the USB read came before END. The trace
+had 278 entries, of which 160 were kept.
+
+**Findings.**
+1. B2's goal is met on the board. Through its own dwc2 device path on the v4.30a core, the stage:
+   - enumerates at high speed;
+   - answers every EP0 check, stalls included;
+   - serves the bulk wire in both directions at every planned size with CRCs;
+   - refuses the bad chunks as specified;
+   - reports a record that matches the console;
+   - resets back to the boot ROM on END.
+2. Run 3's denial is guarded by the bounded udev wait. In this run udev was already done when the stage was
+   taken, so the board did not exercise the wait.
+
+Records: `run4-hypothesis.md`, `run4-dry.log`, `run4-run.log`, `run4-stdout.log`. The board is back at the ROM as
+found, and the lock is free.
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
