@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, FrameStream, HeldFrame, Next};
 use lemnos_contract_camera_receiver::{CameraReceiver, LinkConfig, MAX_STREAM_NAME, Packing};
+use lemnos_daemon_ready::Ready;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::test_csi2::{FE_ACK, FS, fire};
 use lemnos_linux_sys::time::monotonic_ns;
@@ -64,8 +65,8 @@ const HOLD: Duration = Duration::from_millis(300);
 /// How long the fake receiver stays silent in the stall phase: past the frame-stop bound, and the
 /// one-second check that judges it, plus the first recovery delay.
 const STALL: Duration = Duration::from_secs(3);
-/// How long lemnosd has to make its socket.
-const SOCKET_WAIT: Duration = Duration::from_secs(10);
+/// How long lemnosd has to say it is ready.
+const READY_WAIT: Duration = Duration::from_secs(10);
 /// The fake receiver's node, made by the test module.
 const TEST_NODE: &str = "/dev/lemnos-test-csi2";
 /// Packed 16-bit, 256 by 4: a 512-byte line and a 2048-byte frame.
@@ -207,32 +208,23 @@ fn board(heap: &str, receiver: &str) -> String {
     )
 }
 
-/// Starts lemnosd on `board`, waits for its socket, and returns it with its path.
+/// Starts lemnosd on `board`, waits until it says it is ready (its socket listens), and returns it
+/// with its socket's path.
 fn start_daemon(lemnosd: &Path, dir: &Path, board: &str) -> Result<(Daemon, PathBuf), String> {
     let board_path = dir.join("board.toml");
     step("write the board", std::fs::write(&board_path, board))?;
     let socket = dir.join("sock");
     let _ = std::fs::remove_file(&socket);
-    let child = step(
-        "start lemnosd",
-        Command::new(lemnosd)
-            .arg("--board")
-            .arg(&board_path)
-            .arg("--socket")
-            .arg(&socket)
-            .spawn(),
-    )?;
-    let mut daemon = Daemon(child);
-    let started = Instant::now();
-    while !socket.exists() {
-        if let Some(status) = step("poll lemnosd", daemon.0.try_wait())? {
-            return Err(format!("lemnosd exited before its socket: {status}"));
-        }
-        if started.elapsed() > SOCKET_WAIT {
-            return Err("lemnosd made no socket".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let ready = Ready::new()?;
+    let mut command = Command::new(lemnosd);
+    command
+        .arg("--board")
+        .arg(&board_path)
+        .arg("--socket")
+        .arg(&socket);
+    ready.give(&mut command);
+    let mut daemon = Daemon(step("start lemnosd", command.spawn())?);
+    ready.wait(&mut daemon.0, READY_WAIT)?;
     Ok((daemon, socket))
 }
 

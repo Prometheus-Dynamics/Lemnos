@@ -8,23 +8,28 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Error, Session};
+use lemnos_daemon_ready::Ready;
 
 use crate::{GADGET_DIR, UDC};
 
 /// The user and group the daemon drops to. Numbers, so no account database is needed.
 const DAEMON_ID: &str = "999";
-const SOCKET_WAIT: Duration = Duration::from_secs(20);
+/// How long the daemon has to say it is ready.
+const READY_WAIT: Duration = Duration::from_secs(20);
 
 pub struct Lemnosd {
     socket: PathBuf,
-    child: Option<Child>,
+    /// The daemon this check started. Held, never stopped here: the power-off ends it.
+    _child: Child,
 }
 
 impl Lemnosd {
-    /// Starts the daemon and waits for its socket.
+    /// Starts the daemon and waits until it says it is ready (its socket listens).
     pub fn start(program: &Path, board: &Path, socket: &Path) -> Result<Self, String> {
         let _ = fs::remove_file(socket);
-        let child = Command::new(program)
+        let ready = Ready::new()?;
+        let mut command = Command::new(program);
+        command
             .arg("--board")
             .arg(board)
             .arg("--socket")
@@ -32,31 +37,16 @@ impl Lemnosd {
             .arg("--user")
             .arg(DAEMON_ID)
             .arg("--group")
-            .arg(DAEMON_ID)
+            .arg(DAEMON_ID);
+        ready.give(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("start lemnosd: {error}"))?;
-        let mut daemon = Self {
+        ready.wait(&mut child, READY_WAIT)?;
+        Ok(Self {
             socket: socket.to_path_buf(),
-            child: Some(child),
-        };
-        let until = Instant::now() + SOCKET_WAIT;
-        loop {
-            if socket.exists() {
-                return Ok(daemon);
-            }
-            if let Some(child) = daemon.child.as_mut()
-                && let Some(status) = child
-                    .try_wait()
-                    .map_err(|error| format!("poll lemnosd: {error}"))?
-            {
-                daemon.child = None;
-                return Err(format!("lemnosd exited before its socket: {status}"));
-            }
-            if Instant::now() >= until {
-                return Err("lemnosd made no socket".into());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            _child: child,
+        })
     }
 
     pub fn connect(&self, name: &str) -> Result<Session, Error> {

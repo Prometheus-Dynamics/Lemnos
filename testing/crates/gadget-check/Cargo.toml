@@ -13,6 +13,7 @@ workspace = true
 toml = { workspace = true }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-client = { path = "../../../engine/client" }
+lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-hal = { path = "../../../engine/hal" }
 lemnos-core = { path = "../../../engine/core" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }

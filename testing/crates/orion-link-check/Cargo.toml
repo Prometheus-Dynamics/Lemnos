@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 toml = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 lemnos-client = { path = "../../../engine/client" }
+lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-host = { path = "../../../engine/host" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
 # The setting the bridge is started with comes from the tool an image builder runs: `tree --bridge-env`.
