@@ -293,11 +293,16 @@ cargo_lane() {
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "c$(printf %03d "$n")" "$@"; }
   lane_step clippy 180 cargo clippy --workspace --all-targets -- -D warnings # lander green max 32 s
+  # The tail lane builds beside the running tests, so a thread per core oversubscribes the cores and
+  # the contention is paid in CPU time. Measured warm on 18 cores (lander, fcaae491, 2 runs each):
+  # 18 threads 133 s / 1538 CPU-s, 12 threads 143 s / 1363 CPU-s, 9 threads 159 s / 1299 CPU-s.
+  # Two thirds of the cores keeps most of the wall time and costs the fewest CPU-s that does.
+  test_jobs() { local n; n=$(( $(nproc) * 2 / 3 )); [ "$n" -ge 1 ] || n=1; echo "$n"; }
   # The workspace tests. `cargo test` runs the test programs one after another, so most cores sit idle;
   # cargo-nextest runs every test in its own process, across all programs at once. It does not run doc
   # tests, so those follow. Without cargo-nextest (or with GATE_TESTS=cargo) the plain form runs: the
-  # same tests, slower. GATE_TEST_JOBS caps how many tests run at once (default: every core this
-  # process may use).
+  # same tests, slower. GATE_TEST_JOBS caps how many tests run at once (default: test_jobs above,
+  # two thirds of the cores this process may use).
   # The tail lane waits for the tests to be built and running: nextest says "Starting N tests"
   # when its build is over and cargo's lock is free. tests.over is there once the step has ended,
   # whichever way, so the tail lane never waits on a build that failed.
@@ -307,7 +312,7 @@ cargo_lane() {
       (until grep -qE '^ *Starting [0-9]+ tests' "$unit_out" 2>/dev/null; do sleep 0.2; done
         touch "$gate_out/tests.running") &
       watcher=$!
-      cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(nproc)}" || rc=$?
+      cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(test_jobs)}" || rc=$?
       kill "$watcher" 2>/dev/null || true
     else
       cargo test --workspace || rc=$?
