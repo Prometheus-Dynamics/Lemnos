@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * The Lemnos module's only C: one-line shims for static inline kernel APIs with no exported symbol and
- * no rust_helper_* (7.3.3, rust/exports.c). Each is one line, commented with the API it wraps and why
+ * no rust_helper_* (7.3.3 and 7.3.5, rust/helpers and rust/exports.c). Each is one line, commented with the API it wraps and why
  * there is no Rust path. scripts/check-kernel-helpers.py checks that this file holds nothing else and
  * stays within its size cap.
  */
