@@ -321,8 +321,9 @@ features_lane() {
   if [ "$part" != checks ]; then
     until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
   fi
-  # Bound: max(180, 3 x 106 s), the only green so far (lander train 139, before the cache) is 106 s: 318 s.
-  lane_step features 318 scripts/check-features.sh # lander green max 106 s (one green)
+  # Bound: 3 x 408 s = 1224 s. 408 s is a full miss (every crate rebuilt), the step's slowest case.
+  # Full miss, debug info on, -j4 at load ~50, $H/NDF-CACHE logs; recompute from lander greens later.
+  lane_step features 1224 scripts/check-features.sh # lander green max 106 s (one green, before the cache)
 }
 
 side_lane() {
