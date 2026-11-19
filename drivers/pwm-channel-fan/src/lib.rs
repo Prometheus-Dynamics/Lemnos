@@ -54,7 +54,7 @@
 //! to full duty when none is: this driver records no baseline, since its channel is its own from the
 //! start, so the declared duty is the state it is handed back in. Nothing hands the fan to anything
 //! else: a stopped driver leaves the fan at full. A controller that wants the fan stopped must ask for it.
-//! [`PwmChannelFan::handed_back`] says which of the two a hand-back applied.
+//! Each hand-back pushes a note saying which of the two it applied (see [`HandBack::note`]).
 //!
 //! # Ownership
 //!
@@ -83,7 +83,7 @@ pub mod math;
 use lemnos_contract_fan::Fan;
 use lemnos_core::{
     CallerId, Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle,
-    Line, MethodId, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
+    Line, MethodId, Note, Notes, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::raw::{EdgeDetect, LineConfig, Polarity, PwmConfig};
 use math::{FULL, Tach, backoff_ns, duty_ns, hardware_duty, period_ns};
@@ -116,32 +116,29 @@ const MAX_KICK_MS: i64 = 10_000;
 /// The health reason after a failed PWM write.
 const WRITE_FAILED: &str = "the PWM write failed: retried with backoff, full duty is the goal";
 
-/// What `hand_back` gave the channel back to: the board's declared `default_duty`, or full duty when the
-/// board declares none. [`HandBack::note`] says which, in words.
+/// What a hand-back did, for the log: the board's declared `default_duty`, full duty when the board declares
+/// none, or the controller, when the owner that went had replaced the daemon's own writes and the channel is
+/// left to the controller's next step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandBack {
     /// The board file's `default_duty`, per mille.
     Declared(u16),
     /// Full duty: the board declares no `default_duty`.
     FullDuty,
+    /// The daemon's own writes (`CallerId::LOCAL`) come back: nothing is written.
+    Controller,
 }
 
 impl HandBack {
-    /// The duty the channel is handed back to.
-    pub fn duty(self) -> u16 {
+    /// The note the log shows for this hand-back.
+    pub const fn note(self) -> Note {
         match self {
-            Self::Declared(duty) => duty,
-            Self::FullDuty => FULL,
-        }
-    }
-
-    /// The hand-back in words, for a log line: which target applied, and the duty it went to.
-    pub fn note(self) -> String {
-        match self {
-            Self::Declared(duty) => {
-                format!("hand-back to the declared default duty {duty} per mille")
-            }
-            Self::FullDuty => "hand-back to full duty: no default duty is declared".to_string(),
+            Self::Declared(duty) => Note::with_value(
+                "handed back to the declared default duty, per mille",
+                duty as u32,
+            ),
+            Self::FullDuty => Note::new("handed back to full duty: no default duty is declared"),
+            Self::Controller => Note::new("handed back to the controller"),
         }
     }
 }
@@ -188,8 +185,11 @@ pub struct PwmChannelFan {
     calling: CallerId,
     /// The caller whose write holds the channel. Its going hands the channel back (see the module's ownership).
     owner: Option<CallerId>,
-    /// What the last hand-back applied, for the log line. `None` until one has happened.
-    handed_back: Option<HandBack>,
+    /// The owner before the current one. A client that replaced the daemon's own writes hands the channel back to
+    /// them, not to a default, when it goes (see the module's ownership).
+    prior: Option<CallerId>,
+    /// Notes for the log: what each hand-back did.
+    notes: Notes,
 }
 
 /// The settings a board file gives the fan.
@@ -257,7 +257,8 @@ impl Lifecycle for PwmChannelFan {
             meter: Tach::new(shape.pulses_per_rev),
             calling: CallerId::LOCAL,
             owner: None,
-            handed_back: None,
+            prior: None,
+            notes: Notes::new(),
         })
     }
 
@@ -305,9 +306,22 @@ impl Lifecycle for PwmChannelFan {
 
     /// The owner has gone: hand the channel back, as `hand_back` does. Another caller's channel is left alone.
     fn caller_gone(&mut self, caller: CallerId) {
-        if self.owner == Some(caller) {
-            let _ = self.hand_back();
+        if self.owner != Some(caller) {
+            return;
         }
+        if self.prior == Some(CallerId::LOCAL) {
+            // The override replaced the daemon's own writes: the controller is the owner again, and its next
+            // step writes the duty it wants. Nothing is written here.
+            self.owner = Some(CallerId::LOCAL);
+            self.prior = None;
+            self.notes.push(HandBack::Controller.note());
+            return;
+        }
+        let _ = self.hand_back();
+    }
+
+    fn notes(&mut self) -> Option<&mut Notes> {
+        Some(&mut self.notes)
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
@@ -322,10 +336,13 @@ impl Lifecycle for PwmChannelFan {
 }
 
 impl PwmChannelFan {
-    /// What the last hand-back applied: the board's `default_duty`, or full duty. `None` until one has happened.
-    /// The driver has no log of its own, so this is what a log line would say (see [`HandBack::note`]).
-    pub fn handed_back(&self) -> Option<HandBack> {
-        self.handed_back
+    /// Makes the caller of the method the owner. The owner before it is kept as `prior`, when it is a different
+    /// caller: that is how a client's going can tell it replaced the daemon's own writes.
+    fn claim(&mut self) {
+        if self.owner != Some(self.calling) {
+            self.prior = self.owner;
+        }
+        self.owner = Some(self.calling);
     }
 
     /// Reads the tachometer's pending edges, up to [`MAX_EDGES_PER_TICK`].
@@ -421,7 +438,7 @@ impl Fan for PwmChannelFan {
         if per_mille > FULL {
             return Err(Status::INVALID_ARGUMENT);
         }
-        self.owner = Some(self.calling);
+        self.claim();
         // The write is made by the tick the host runs after this call, at the host's time.
         self.target = per_mille;
         Ok(())
@@ -439,7 +456,7 @@ impl Fan for PwmChannelFan {
     }
 
     fn release(&mut self) -> Result<()> {
-        self.owner = Some(self.calling);
+        self.claim();
         self.target = FULL;
         Ok(())
     }
@@ -448,12 +465,16 @@ impl Fan for PwmChannelFan {
     /// none is declared. It ends the owner too.
     fn hand_back(&mut self) -> Result<()> {
         self.owner = None;
+        self.prior = None;
         let applied = self
             .shape
             .default_duty
             .map_or(HandBack::FullDuty, HandBack::Declared);
-        self.target = applied.duty();
-        self.handed_back = Some(applied);
+        self.target = match applied {
+            HandBack::Declared(duty) => duty,
+            HandBack::FullDuty | HandBack::Controller => FULL,
+        };
+        self.notes.push(applied.note());
         Ok(())
     }
 }

@@ -415,3 +415,26 @@ fn a_hand_back_goes_to_the_declared_default_duty_not_to_full_duty() {
         "the declared default, 300 of 1000, not full duty"
     );
 }
+
+#[test]
+fn a_client_that_replaced_the_controllers_write_leaves_the_channel_at_its_duty_and_logs_it() {
+    // The controller's write (LOCAL) is replaced by a client, which goes. No full-duty write follows: the
+    // controller's next step writes its own duty, and the note says the channel went back to it.
+    let rig = rig("frequency_hz = 25000", false);
+    rig.set(500).unwrap();
+    rig.set_as(CALLER_A, 300);
+    assert_eq!(rig.pwm.current().duty_ns, 12_000);
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        12_000,
+        "nothing is written when the controller is the owner"
+    );
+    let index = rig.host.device("fan").unwrap().index;
+    let mut notes = Vec::new();
+    rig.host.take_notes(index, &mut |note| notes.push(note));
+    assert_eq!(
+        notes,
+        vec![lemnos_core::Note::new("handed back to the controller")]
+    );
+}

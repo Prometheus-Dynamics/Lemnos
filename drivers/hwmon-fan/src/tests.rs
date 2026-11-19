@@ -932,24 +932,30 @@ fn a_new_writer_takes_the_fan_over_from_an_owed_hand_back() {
     assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
 }
 
+/// The note the driver pushed last, taken from its ring.
+fn last_note(fan: &mut HwmonFan) -> Option<lemnos_core::Note> {
+    let mut last = None;
+    while let Some(note) = Lifecycle::notes(fan).and_then(|notes| notes.pop()) {
+        last = Some(note);
+    }
+    last
+}
+
 #[test]
-fn a_hand_back_records_the_baseline_it_restored_and_nothing_when_it_had_none() {
+fn a_hand_back_notes_the_baseline_it_restored_and_nothing_when_it_had_none() {
     let tree = Tree::new("handback-record");
     let mut fan = pwm_fan(tree.root());
-    assert_eq!(fan.handed_back(), None);
+    assert_eq!(last_note(&mut fan), None);
     fan.set_duty(900).unwrap();
     fan.hand_back().unwrap();
     assert_eq!(
-        fan.handed_back(),
-        Some(HandBack::Baseline { pwm: 77, mode: 2 })
+        last_note(&mut fan),
+        Some(lemnos_core::Note::new("handed back to the governor")),
+        "mode 2 is the governor"
     );
-    assert_eq!(
-        HandBack::Baseline { pwm: 77, mode: 2 }.note(),
-        "hand-back to the baseline the take-over found: pwm1 77, pwm1_enable 2"
-    );
-    // A second hand-back has nothing to give back, so the record says so.
+    // A second hand-back has nothing to give back, so it notes nothing.
     fan.hand_back().unwrap();
-    assert_eq!(fan.handed_back(), None);
+    assert_eq!(last_note(&mut fan), None);
 }
 
 #[test]
@@ -970,16 +976,55 @@ fn a_fan_without_a_mode_attribute_is_never_taken_so_there_is_no_mode_to_lose() {
     );
     fan.hand_back().unwrap();
     assert_eq!(
-        fan.handed_back(),
+        last_note(&mut fan),
         None,
         "nothing was taken, so nothing is handed back"
     );
 }
 
 #[test]
-fn the_safe_state_hand_back_is_named_as_full_duty() {
+fn the_hand_back_notes_name_the_baseline_mode_the_safe_state_and_the_controller() {
+    assert_eq!(
+        HandBack::Baseline { pwm: 77, mode: 1 }.note(),
+        lemnos_core::Note::with_value("handed back to the baseline pwm1_enable mode", 1)
+    );
     assert_eq!(
         HandBack::SafeState.note(),
-        "hand-back to full duty: no baseline was recorded for this fan"
+        lemnos_core::Note::new("handed back to full duty: no baseline recorded")
     );
+    assert_eq!(
+        HandBack::Controller.note(),
+        lemnos_core::Note::new("handed back to the controller")
+    );
+}
+
+#[test]
+fn a_client_that_replaced_the_controllers_write_hands_the_fan_back_to_it_without_writing() {
+    // The daemon's write (LOCAL) is replaced by a client's, which goes: nothing is written, the controller owns
+    // the fan again, and its next step writes its duty.
+    let tree = Tree::new("owner-controller");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CallerId::LOCAL);
+    fan.set_duty(500).unwrap();
+    Lifecycle::caller(&mut fan, CALLER_A);
+    fan.set_duty(900).unwrap();
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "230",
+        "the client's duty is left for the controller's step"
+    );
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1_enable")),
+        "1",
+        "no baseline mode was written"
+    );
+    assert_eq!(
+        last_note(&mut fan),
+        Some(lemnos_core::Note::new("handed back to the controller"))
+    );
+    // The controller is the owner: the client's going again changes nothing.
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(last_note(&mut fan), None);
 }

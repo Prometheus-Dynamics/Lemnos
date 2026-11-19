@@ -24,7 +24,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::start_board;
+use std::sync::{Arc, Mutex};
+
+use common::{Running, start_board, start_board_logged};
 use lemnos_client::Client;
 use lemnos_contract_fan::Fan;
 use lemnos_contract_fan_control::FanControl;
@@ -312,5 +314,243 @@ fn a_killed_override_under_a_controller_leaves_the_controller_in_charge() {
     assert_eq!(read("pwm1"), "115");
     assert_eq!(control.state().unwrap().duty, 450);
     drop(running);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Starts `text` with the daemon's log going to a list, and returns the service and the list.
+fn logged(
+    text: &str,
+    drivers: Vec<lemnos_host::DriverEntry>,
+    sim: SimBoard,
+) -> (Running, Arc<Mutex<Vec<String>>>) {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&lines);
+    let running = start_board_logged(
+        text,
+        drivers,
+        sim,
+        None,
+        Some(Arc::new(move |line: &str| {
+            sink.lock().unwrap().push(line.to_string());
+        })),
+    );
+    (running, lines)
+}
+
+/// Waits until the log holds `line`.
+fn logs(lines: &Arc<Mutex<Vec<String>>>, line: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if lines.lock().unwrap().iter().any(|l| l == line) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the log never said {line:?}: {:?}",
+            lines.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A fake sysfs hwmon fan at `sys`, in automatic mode at pwm1 77: what a take-over records.
+fn write_hwmon(sys: &Path) -> PathBuf {
+    let fan_dir = sys.join("class/hwmon/hwmon2");
+    fs::create_dir_all(&fan_dir).unwrap();
+    fs::write(fan_dir.join("name"), "pwmfan\n").unwrap();
+    fs::write(fan_dir.join("pwm1"), "77\n").unwrap();
+    fs::write(fan_dir.join("pwm1_enable"), "2\n").unwrap();
+    fs::write(fan_dir.join("fan1_input"), "900\n").unwrap();
+    fan_dir
+}
+
+/// A thermal zone at 45 C, which the B14 curve asks for 450 per mille.
+fn write_zone(dir: &Path) -> PathBuf {
+    let zone = dir.join("zone");
+    fs::create_dir_all(&zone).unwrap();
+    fs::write(zone.join("temp"), "45000\n").unwrap();
+    zone
+}
+
+/// The controller's board over `fan_device`: the fan, a zone, and fan-control on them.
+fn controlled(fan: &str, zone: &Path) -> String {
+    format!(
+        "[[devices]]\nid = \"fan\"\n{fan}\
+         [[devices]]\nid = \"cpu-thermal\"\ndriver = \"fake-thermal-zone\"\n\
+         config = {{ path = \"{}\" }}\n\
+         [[devices]]\nid = \"fan-control\"\ndriver = \"fan-control\"\n\
+         uses = {{ fan = \"fan\", t0 = \"cpu-thermal\" }}\n\
+         config = {{ curve_t0 = \"30000:300,60000:600,75000:1000\", floor = 300, slew_per_s = 50, max_age_ms = 3000 }}\n",
+        zone.display()
+    )
+}
+
+#[test]
+fn a_client_killed_before_the_controllers_next_step_leaves_the_controller_in_charge() {
+    // The client is killed straight after its override, before the controller's next step. The fan must not
+    // go to its baseline (automatic mode, pwm1 77) on the way: the controller is still the owner and takes it
+    // back at its step.
+    let dir = scratch("ctl-hwmon");
+    let sys = dir.join("sys");
+    let fan_dir = write_hwmon(&sys);
+    let zone = write_zone(&dir);
+    let board = controlled(
+        &format!(
+            "driver = \"hwmon-fan\"\nconfig = {{ hwmon = \"hwmon2\", sys_root = \"{}\" }}\n",
+            sys.display()
+        ),
+        &zone,
+    );
+    let drivers = vec![
+        entry::<HwmonFan>(),
+        entry::<FanController>(),
+        entry::<FakeThermalZone>(),
+    ];
+    let (running, _lines) = logged(&board, drivers, SimBoard::new());
+    let client = Client::connect(&running.socket, "test").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    let read = |name: &str| {
+        fs::read_to_string(fan_dir.join(name))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    wait_for("the controller holds the fan at its curve", || {
+        read("pwm1") == "115" && control.state().map(|s| s.duty) == Ok(450)
+    });
+
+    let mut child = spawn_client(&running.socket, "fan");
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    // Every state the fan is in until the controller has it back, in order.
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let deadline = Instant::now() + CONTROLLER_BOUND;
+    loop {
+        let state = (read("pwm1"), read("pwm1_enable"));
+        if seen.last() != Some(&state) {
+            seen.push(state.clone());
+        }
+        if state == ("115".to_string(), "1".to_string()) || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !seen.iter().any(|(pwm, mode)| pwm == "77" && mode == "2"),
+        "the fan went to its baseline between the kill and the controller's step: {seen:?}"
+    );
+    assert_eq!(
+        seen.last(),
+        Some(&("115".to_string(), "1".to_string())),
+        "the controller did not take the fan back: {seen:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pwm_channel_under_a_controller_keeps_the_controllers_duty_when_the_client_is_killed() {
+    // The channel must not go to full duty when the client is killed: it stays at the client's duty until the
+    // controller's next step (18000 ns of 40000 is the curve's 450 per mille), which writes its own.
+    let dir = scratch("ctl-pwm");
+    let zone = write_zone(&dir);
+    let sim = SimBoard::new();
+    let pwm = sim.add_pwm("pwm0");
+    let board = controlled(
+        "driver = \"pwm-channel-fan\"\nuses = { pwm = \"pwm0\" }\nconfig = { frequency_hz = 25000 }\n",
+        &zone,
+    );
+    let drivers = vec![
+        entry::<PwmChannelFan>(),
+        entry::<FanController>(),
+        entry::<FakeThermalZone>(),
+    ];
+    let (running, lines) = logged(&board, drivers, sim);
+    let client = Client::connect(&running.socket, "test").unwrap();
+    let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
+    wait_for("the controller holds the channel at its curve", || {
+        pwm.current().duty_ns == 18_000 && control.state().map(|s| s.duty) == Ok(450)
+    });
+
+    let mut child = spawn_client(&running.socket, "fan");
+    wait_for("the client's override is on the channel", || {
+        pwm.current().duty_ns == 24_000
+    });
+    let before = pwm.history().len();
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(1500));
+    let after: Vec<u64> = pwm.history()[before..]
+        .iter()
+        .map(|config| config.duty_ns)
+        .collect();
+    assert!(
+        !after.contains(&40_000),
+        "the channel went to full duty when its client was killed: {after:?}"
+    );
+    assert!(
+        after.contains(&18_000),
+        "the controller's duty never came back: {after:?}"
+    );
+    logs(&lines, "lemnosd: fan: handed back to the controller");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hand_back_to_the_declared_default_names_it_in_the_log() {
+    let dir = scratch("log-default");
+    let sim = SimBoard::new();
+    let _pwm = sim.add_pwm("pwm0");
+    let board = "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\n\
+                 uses = { pwm = \"pwm0\" }\nconfig = { frequency_hz = 25000, default_duty = 300 }\n";
+    let (running, lines) = logged(board, vec![entry::<PwmChannelFan>()], sim);
+    let client = Client::connect(&running.socket, "test").unwrap();
+    wait_for("the fan is bound", || client.open::<dyn Fan>("fan").is_ok());
+    let mut child = spawn_client(&running.socket, "fan");
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    logs(
+        &lines,
+        "lemnosd: fan: handed back to the declared default duty, per mille: 300",
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hand_back_to_full_duty_names_that_no_default_is_declared() {
+    let dir = scratch("log-full");
+    let sim = SimBoard::new();
+    let _pwm = sim.add_pwm("pwm0");
+    let board = "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\n\
+                 uses = { pwm = \"pwm0\" }\nconfig = { frequency_hz = 25000 }\n";
+    let (running, lines) = logged(board, vec![entry::<PwmChannelFan>()], sim);
+    let client = Client::connect(&running.socket, "test").unwrap();
+    wait_for("the fan is bound", || client.open::<dyn Fan>("fan").is_ok());
+    let mut child = spawn_client(&running.socket, "fan");
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    logs(
+        &lines,
+        "lemnosd: fan: handed back to full duty: no default duty is declared",
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hand_back_to_the_governor_names_it_in_the_log() {
+    let dir = scratch("log-governor");
+    let sys = dir.join("sys");
+    write_hwmon(&sys);
+    let board = format!(
+        "[[devices]]\nid = \"fan\"\ndriver = \"hwmon-fan\"\n\
+         config = {{ hwmon = \"hwmon2\", sys_root = \"{}\" }}\n",
+        sys.display()
+    );
+    let (running, lines) = logged(&board, vec![entry::<HwmonFan>()], SimBoard::new());
+    let client = Client::connect(&running.socket, "test").unwrap();
+    wait_for("the fan is bound", || client.open::<dyn Fan>("fan").is_ok());
+    let mut child = spawn_client(&running.socket, "fan");
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    logs(&lines, "lemnosd: fan: handed back to the governor");
     let _ = fs::remove_dir_all(&dir);
 }
