@@ -24,6 +24,7 @@
 //! | `min_duty` | 0 | The lowest duty the hardware gets for any non-zero request, per-mille. Zero stays zero, so the fan can stop. |
 //! | `kick_ms` | 0 | From a stopped fan, full duty this long before the requested duty. |
 //! | `pulses_per_rev` | 2 | Rising edges of the tachometer per revolution, 1 to 64. Used only with `tach`. |
+//! | `default_duty` | none | The duty the channel is handed back to, per-mille, 0 to 1000. Left out, full duty. |
 //!
 //! # Duty
 //!
@@ -49,17 +50,19 @@
 //! # Safe state
 //!
 //! The driver starts at full duty and writes it at its first tick. `release` and dropping the
-//! driver both set full duty. `hand_back` is the same: this driver records no baseline, since its
-//! channel is its own from the start, and full duty is the state it is handed back in. Nothing hands
-//! the fan to anything else: a stopped driver leaves the fan at full. A controller that wants the fan
-//! stopped must ask for it.
+//! driver both set full duty. `hand_back` goes to the board's `default_duty` when one is declared, and
+//! to full duty when none is: this driver records no baseline, since its channel is its own from the
+//! start, so the declared duty is the state it is handed back in. Nothing hands the fan to anything
+//! else: a stopped driver leaves the fan at full. A controller that wants the fan stopped must ask for it.
+//! [`PwmChannelFan::handed_back`] says which of the two a hand-back applied.
 //!
 //! # Ownership
 //!
 //! Each `set_duty` and `release` makes its caller the owner: the last writer owns the channel, and
 //! the daemon's own writes (`CallerId::LOCAL`) count too. When the owner goes (`caller_gone`: its
-//! connection closed or it died), the channel is handed back as `hand_back` does, to full duty. An
-//! older caller going changes nothing. The write itself is retried from the tick like any other, so a
+//! connection closed or it died), the channel is handed back as `hand_back` does, to `default_duty` or
+//! full duty. An older caller going changes nothing. The write itself is retried from the tick like
+//! any other, so a
 //! hand-back that fails is retried with the same backoff.
 //!
 //! What a temperature failure does is the controller's to decide. `fan-control` runs the fan at
@@ -113,6 +116,36 @@ const MAX_KICK_MS: i64 = 10_000;
 /// The health reason after a failed PWM write.
 const WRITE_FAILED: &str = "the PWM write failed: retried with backoff, full duty is the goal";
 
+/// What `hand_back` gave the channel back to: the board's declared `default_duty`, or full duty when the
+/// board declares none. [`HandBack::note`] says which, in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandBack {
+    /// The board file's `default_duty`, per mille.
+    Declared(u16),
+    /// Full duty: the board declares no `default_duty`.
+    FullDuty,
+}
+
+impl HandBack {
+    /// The duty the channel is handed back to.
+    pub fn duty(self) -> u16 {
+        match self {
+            Self::Declared(duty) => duty,
+            Self::FullDuty => FULL,
+        }
+    }
+
+    /// The hand-back in words, for a log line: which target applied, and the duty it went to.
+    pub fn note(self) -> String {
+        match self {
+            Self::Declared(duty) => {
+                format!("hand-back to the declared default duty {duty} per mille")
+            }
+            Self::FullDuty => "hand-back to full duty: no default duty is declared".to_string(),
+        }
+    }
+}
+
 /// What the configuration sets, checked once at bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Shape {
@@ -124,6 +157,8 @@ struct Shape {
     /// The board's limits on the speed, in rpm (see `max_rpm` and `warn_below_rpm`).
     max_rpm: Option<i64>,
     warn_below_rpm: Option<i64>,
+    /// The duty a hand-back gives the channel, per mille, when the board declares one.
+    default_duty: Option<u16>,
 }
 
 #[driver("pwm-channel-fan", provides = [Fan])]
@@ -153,6 +188,8 @@ pub struct PwmChannelFan {
     calling: CallerId,
     /// The caller whose write holds the channel. Its going hands the channel back (see the module's ownership).
     owner: Option<CallerId>,
+    /// What the last hand-back applied, for the log line. `None` until one has happened.
+    handed_back: Option<HandBack>,
 }
 
 /// The settings a board file gives the fan.
@@ -164,6 +201,7 @@ const KEYS: &[Key] = &[
     Key::optional("pulses_per_rev", Kind::Int),
     Key::optional("max_rpm", Kind::Int),
     Key::optional("warn_below_rpm", Kind::Int),
+    Key::optional("default_duty", Kind::Int),
 ];
 
 impl Lifecycle for PwmChannelFan {
@@ -183,6 +221,7 @@ impl Lifecycle for PwmChannelFan {
         in_range(cfg, "pulses_per_rev", 1, 64, "must be 1 to 64")?;
         in_range(cfg, "max_rpm", 0, i64::MAX, "must not be negative")?;
         in_range(cfg, "warn_below_rpm", 0, i64::MAX, "must not be negative")?;
+        in_range(cfg, "default_duty", 0, i64::from(FULL), "must be 0 to 1000")?;
         Ok(())
     }
 
@@ -218,6 +257,7 @@ impl Lifecycle for PwmChannelFan {
             meter: Tach::new(shape.pulses_per_rev),
             calling: CallerId::LOCAL,
             owner: None,
+            handed_back: None,
         })
     }
 
@@ -282,6 +322,12 @@ impl Lifecycle for PwmChannelFan {
 }
 
 impl PwmChannelFan {
+    /// What the last hand-back applied: the board's `default_duty`, or full duty. `None` until one has happened.
+    /// The driver has no log of its own, so this is what a log line would say (see [`HandBack::note`]).
+    pub fn handed_back(&self) -> Option<HandBack> {
+        self.handed_back
+    }
+
     /// Reads the tachometer's pending edges, up to [`MAX_EDGES_PER_TICK`].
     fn read_edges(&mut self) {
         let Some(line) = self.tach.as_mut() else {
@@ -398,11 +444,16 @@ impl Fan for PwmChannelFan {
         Ok(())
     }
 
-    /// There is no baseline to put back: the driver starts the channel at full duty and nothing
-    /// else is recorded, so a hand-back is the safe state. It ends the owner too.
+    /// There is no baseline to put back: the channel goes to the board's `default_duty`, or to full duty when
+    /// none is declared. It ends the owner too.
     fn hand_back(&mut self) -> Result<()> {
         self.owner = None;
-        self.target = FULL;
+        let applied = self
+            .shape
+            .default_duty
+            .map_or(HandBack::FullDuty, HandBack::Declared);
+        self.target = applied.duty();
+        self.handed_back = Some(applied);
         Ok(())
     }
 }
@@ -428,9 +479,15 @@ fn shape(cfg: &Config<'_>) -> Result<Shape> {
     let pulses_per_rev = int(cfg, "pulses_per_rev", 2)? as u32;
     let max_rpm = optional_int(cfg, "max_rpm")?;
     let warn_below_rpm = optional_int(cfg, "warn_below_rpm")?;
+    // The range is checked by check_config, so only the conversion is left here.
+    let default_duty = match optional_int(cfg, "default_duty")? {
+        None => None,
+        Some(duty) => Some(u16::try_from(duty).map_err(|_| Status::INVALID_ARGUMENT)?),
+    };
     Ok(Shape {
         max_rpm,
         warn_below_rpm,
+        default_duty,
         period_ns: period_ns(frequency),
         polarity,
         min_duty,

@@ -401,3 +401,17 @@ fn a_controller_write_after_a_client_keeps_the_channel_when_the_client_goes() {
         "the controller's duty stays"
     );
 }
+
+#[test]
+fn a_hand_back_goes_to_the_declared_default_duty_not_to_full_duty() {
+    // The board declares 300 per mille as the fan's default. Its owner going hands the channel back to it.
+    let rig = rig("frequency_hz = 25000, default_duty = 300", false);
+    rig.set_as(CALLER_A, 800);
+    assert_eq!(rig.pwm.current().duty_ns, 32_000);
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        12_000,
+        "the declared default, 300 of 1000, not full duty"
+    );
+}

@@ -931,3 +931,55 @@ fn a_new_writer_takes_the_fan_over_from_an_owed_hand_back() {
     assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
     assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
 }
+
+#[test]
+fn a_hand_back_records_the_baseline_it_restored_and_nothing_when_it_had_none() {
+    let tree = Tree::new("handback-record");
+    let mut fan = pwm_fan(tree.root());
+    assert_eq!(fan.handed_back(), None);
+    fan.set_duty(900).unwrap();
+    fan.hand_back().unwrap();
+    assert_eq!(
+        fan.handed_back(),
+        Some(HandBack::Baseline { pwm: 77, mode: 2 })
+    );
+    assert_eq!(
+        HandBack::Baseline { pwm: 77, mode: 2 }.note(),
+        "hand-back to the baseline the take-over found: pwm1 77, pwm1_enable 2"
+    );
+    // A second hand-back has nothing to give back, so the record says so.
+    fan.hand_back().unwrap();
+    assert_eq!(fan.handed_back(), None);
+}
+
+#[test]
+fn a_fan_without_a_mode_attribute_is_never_taken_so_there_is_no_mode_to_lose() {
+    let tree = Tree::new("no-mode");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    fs::remove_file(root.join(PWM_FAN).join("pwm1_enable")).unwrap();
+    assert_eq!(
+        fan.set_duty(500),
+        Err(Status::NOT_FOUND),
+        "the take-over reads the mode first, and a fan without one is refused"
+    );
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "pwm1 is not written"
+    );
+    fan.hand_back().unwrap();
+    assert_eq!(
+        fan.handed_back(),
+        None,
+        "nothing was taken, so nothing is handed back"
+    );
+}
+
+#[test]
+fn the_safe_state_hand_back_is_named_as_full_duty() {
+    assert_eq!(
+        HandBack::SafeState.note(),
+        "hand-back to full duty: no baseline was recorded for this fan"
+    );
+}

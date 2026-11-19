@@ -784,7 +784,9 @@ keepalive = true
 config = { device = "watchdog0", timeout_s = 15 }
 
 # A fan on a PWM channel, driven directly: no kernel fan driver in between. `tach` is optional.
-# The duty is 0 to 1000; `min_duty` is the lowest duty the fan turns at.
+# The duty is 0 to 1000; `min_duty` is the lowest duty the fan turns at. `default_duty` (optional,
+# 0 to 1000) is where the fan goes when it is handed back, when its client goes or on `hand_back`;
+# left out, it goes to full duty. See drivers.md.
 [[devices]]
 id = "channel-fan"
 driver = "pwm-channel-fan"

@@ -212,3 +212,74 @@ fn check_config_refuses_a_wrong_kind_and_each_value_outside_its_range() {
         Some("pulses_per_rev")
     );
 }
+
+// The driver on a mock channel, for the hand-back target and the outcome it records.
+
+use lemnos_contract_fan::Fan;
+use lemnos_core::{Config, ConfigValue, Held, Lifecycle};
+use lemnos_sim::mock::MockPwm;
+
+use super::{HandBack, PwmChannelFanNeeds};
+
+/// A driver started on a mock channel with `config` as the board file's settings.
+fn fan_with(config: &[(&str, ConfigValue<'_>)]) -> PwmChannelFan {
+    let needs = PwmChannelFanNeeds {
+        pwm: Held::boxed(Box::new(MockPwm::new())),
+        tach: None,
+    };
+    <PwmChannelFan as Lifecycle>::start(needs, &Config::new(config)).unwrap()
+}
+
+#[test]
+fn a_hand_back_goes_to_the_declared_default_duty_and_to_full_duty_when_none_is_declared() {
+    let mut declared = fan_with(&[("default_duty", ConfigValue::Int(300))]);
+    declared.set_duty(800).unwrap();
+    declared.hand_back().unwrap();
+    assert_eq!(declared.duty().unwrap(), 300);
+    assert_eq!(declared.handed_back(), Some(HandBack::Declared(300)));
+
+    let mut undeclared = fan_with(&[]);
+    undeclared.set_duty(800).unwrap();
+    undeclared.hand_back().unwrap();
+    assert_eq!(undeclared.duty().unwrap(), 1000);
+    assert_eq!(undeclared.handed_back(), Some(HandBack::FullDuty));
+}
+
+#[test]
+fn a_release_is_still_full_duty_and_the_default_is_for_a_hand_back_only() {
+    let mut fan = fan_with(&[("default_duty", ConfigValue::Int(300))]);
+    fan.set_duty(800).unwrap();
+    fan.release().unwrap();
+    assert_eq!(
+        fan.duty().unwrap(),
+        1000,
+        "release is the safe state for a failure"
+    );
+    assert_eq!(fan.handed_back(), None, "nothing was handed back");
+}
+
+#[test]
+fn a_default_duty_outside_zero_to_full_is_refused_by_name_at_bind() {
+    for bad in [-1, 1001] {
+        let entries = [("default_duty", ConfigValue::Int(bad))];
+        let refused =
+            <PwmChannelFan as Lifecycle>::check_config(&Config::new(&entries)).unwrap_err();
+        assert_eq!(refused.key, "default_duty");
+    }
+    for ok in [0, 1000] {
+        let entries = [("default_duty", ConfigValue::Int(ok))];
+        assert!(<PwmChannelFan as Lifecycle>::check_config(&Config::new(&entries)).is_ok());
+    }
+}
+
+#[test]
+fn the_hand_back_note_names_which_target_applied_and_its_duty() {
+    assert_eq!(
+        HandBack::Declared(300).note(),
+        "hand-back to the declared default duty 300 per mille"
+    );
+    assert_eq!(
+        HandBack::FullDuty.note(),
+        "hand-back to full duty: no default duty is declared"
+    );
+}
