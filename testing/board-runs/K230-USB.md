@@ -1675,7 +1675,7 @@ The plan's one boot check was ruled on: the C3 procedure, approved as described,
 
 | build | check | file bytes | footprint | sha256 |
 |---|---|---|---|---|
-| scratch (`--b2-card`, the write run's image) | links only the scratch run: no piece, report, pre-FL1 stage, probe or RAM-window symbol; its own build id once, the check build's never | 36,856 | `0x49c30` | `6ff070bbe5fd01ef149e4f3eb82240d5c4c5967dd59e55c2c9a958769ba7b8f2` |
+| scratch (`--b2-card`, the write run's image) | links only the scratch run: no piece, report, pre-FL1 stage, probe or RAM-window symbol; its own build id once, the check build's never; the kick has exactly one caller, the gate | 36,360 | `0x49a40` | `c8de108f72a0e031b58c8a2669e47a465a86f4a28f249b868fb9ab263293d23c` (was `6ff070bb…` before the feed gate) |
 | check (`--b2`) | no SD host | 27,064 | `0x575f0` | `dafa94a67a176371056d542a4f29485c32232b5bb5fc0caa0503c80b7b884796` |
 | card (default: piece, report, stage) | ends below the piece job's address `0x80380000` | 65,376 | `0x1ff90` | `ce8c161e46bd062112300f3c0fa11df473e5006f8aef29de642f30e6357f2956` |
 
@@ -1693,8 +1693,8 @@ in `sdhci.rs` renamed the image's symbols and moved its code with no code change
 
 **What the scratch build does** (`drivers/k230-usbboot-sys/src/scratch.rs`; build id `0x4b32333042320002`):
 1. The entry arms both watchdogs. The timebase is started and checked and the watchdog clock is measured, as in the
-   check build. The same setting is chosen (covering 60 s at the measured clock), and the build feeds after each
-   verified round.
+   check build. The same setting is chosen (covering 60 s at the measured clock: 10, 89.5 s at 750 kHz). The build
+   feeds only after a verified write round (below).
 2. The card comes up before USB:
    - the SD pads must be on the SD function;
    - the host must have named a controller (the write run names `sdhci1`, as the piece path does);
@@ -1712,6 +1712,34 @@ in `sdhci.rs` renamed the image's symbols and moved its code with no code change
    - the check build runs its RAM window and identifies as itself, and the host then sends no write.
 5. The end prints `b2 card-cid0..3`, `b2 card-blocks-lo` and `b2 card-retries`, then the check build's record, the
    cause, and the SoC reset.
+
+**Feeding: from "never fed" to "fed only on verified progress" (coordinator's ruling A).** The check build is never
+fed: one period bounds its whole run. The write run can't be bounded that way. Its 4,098 writes each have a
+read-back on the card, plus a read-back over USB, and at the piece path's measured card speed that can take longer
+than one 89.5 s period. So the scratch build feeds, but only on verified progress:
+- **The rule.** The dogs are kicked once after each write round whose read-back compared equal, at the same setting.
+- **Where it is decided.** The shared loop calls the session watchdog after a write round's compare and after a read
+  round's send. In the scratch build that watchdog is a gate (`fl1::scratch::VerifiedFeed`). The gate kicks only when
+  the storage wrapper (`fl1::scratch::Watched`) saw, since the last kick, a write the storage took whole followed by a
+  read of the same sectors equal to it by CRC. So the gate holds the same evidence as the round's own compare.
+- **What never feeds:** a read round, a refusal, a failed or cut-off write, the idle wait, the USB poll. The build has
+  no interrupt and no timer.
+- **The kick sites in the image source**, from a grep of every watchdog restart-register write:
+  - `fl1::scratch::kick`: **the feed**, `#[inline(never)]`. Its only caller is the gate (`VerifiedFeed`'s
+    `Watchdog::feed`, also `#[inline(never)]`).
+  - The arming, before the session: the entry's assembly (two loads of the kick value, one per dog), and
+    `fl1::guard::Dogs::arm` and `set_top` through `guard::start`, inlined into `scratch::scratch` (four).
+  - Present in the source but not linked in the scratch image: `Dogs`'s own `Watchdog::feed` (the check build's
+    `Rounds`, which never feeds), `wdt::Dog::feed` and `fast_reset` (pre-FL1 stage), and `image.rs` `feed_wdt0`
+    (piece path).
+  - In the disassembly the kick value 0x76 is loaded in exactly these places: 2 in the entry, 4 in `scratch`, and 2 in
+    `kick`.
+- **The check.** `check.sh --b2-card` requires the kick to be one function, referenced by exactly one instruction,
+  and that instruction to be inside the gate. Today it is: `kick defined 1 time(s), referenced from 1 instruction(s)`.
+  It fails on a build with a second, direct call planted, as `kick has 2 callers` (`check-b2-card-planted-feed.log`).
+- **One consequence, as intended.** A read round still moves the session's own idle deadline: the shared loop counts
+  it as activity. It does not feed the dogs. A host that only reads keeps the session up, and the watchdog ends it
+  one period after the last verified write.
 
 **The host's write mode** (`k230-b2 write`, `testing/crates/k230-usbboot/src/b2/scratch.rs`):
 - It loads only the image whose sha256 is given (a wrong sha: STOP, nothing loaded).
@@ -1761,9 +1789,29 @@ Results:
 | `scratch-no-sd` | GaveUp | 0 | no controller named |
 | `scratch-pads-off` | GaveUp | 0 | an SD pad on another function |
 | `scratch-on-check-image` | Failed at identify | 0 | the check build answers; no write sent |
+| `scratch-stall-before-compare` | Failed, status 2 at the stalled write; then the watchdog | 2 + 5×128 + 1, all inside | see below |
 
-In the good case the watchdog setting is 10 at 750 kHz, as in runs 3 and 4. 116 rounds were counted: the verified
-writes and reads.
+In the good case the watchdog setting is 10 at 750 kHz, as in runs 3 and 4. The model logs every kick: **68 kicks
+after the card's ready line, 34 per dog, one per verified write round** (2 edges, 16 range writes, 16 zero writes),
+and the record's `rounds` is 34. Reads and refusals made none. (Before the gate the count was 116: the shared loop's
+read rounds fed too.)
+
+**`scratch-stall-before-compare`** (ruling A's case):
+- The card takes the sixth range write's first sector and then stays busy for good, so that round never reaches its
+  read-back and compare.
+- The host then does not send END. It keeps the session busy for up to 150 s with a read of a range sector and an
+  identify every 500 ms. This is rehearsal only (`Plan::keep_asking`); the board run never sets it.
+- **Fail-first:** a feed was planted in the shared poll loop (`serve::step`, every step) with the gate bypassed. The
+  case was **NOT AS IT MUST** (`rehearsal-scratch-stall-before-compare-planted-feed.log`):
+  - 1,802 kicks after the stall;
+  - no watchdog reset;
+  - the board stayed up until the host stopped and the session's idle end, a SoC reset at 180.8 s.
+- **With the plants removed: AS IT MUST** (`rehearsal-scratch-stall-before-compare.log`):
+  - 7 feeds (14 kicks), for the 2 edges and 5 range writes;
+  - **no kick after the stall** (stall at 0.941 s from the load, last kick at 0.906 s);
+  - **the watchdog reset at 90.370 s, 89.464 s after the last kick**, within one period (89.48 s at 750 kHz);
+  - the board came back;
+  - every region outside the range hashed as before.
 
 `tests/b2_card.rs` holds the same cases.
 
