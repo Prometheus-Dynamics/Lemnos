@@ -653,6 +653,10 @@ overwrote it or the producer took its buffer back before the reader read it, is 
 counted: `skipped()` says how many, in total. The frame still in the ring behind the losses comes
 back from the same call. So `None` from `try_next` means that no frame is pending.
 
+The doorbell wakes a consumer; it cannot make the system run it. A consumer that is not run while
+the producer goes past its margin loses the oldest frames, and that loss is counted as above, never
+silent.
+
 A program that sleeps on the doorbell descriptor itself follows the same rule. After any wake, and
 after any look at the ring, it must see the ring come up empty before it sleeps:
 
