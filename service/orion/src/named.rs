@@ -10,7 +10,7 @@
 //! ## The offer
 //!
 //! Orion serves a prefix through its offer API: `Files::offer(prefix)` (`crates/client/files/src/offer.rs`
-//! at the pinned rev fd7ceba4) gives an [`Offer`](orion::files::Offer) whose `next` gives each file asked
+//! at the pinned rev 927f704a) gives an [`Offer`](orion::files::Offer) whose `next` gives each file asked
 //! for, as an [`Asked`](orion::files::Asked). That file is answered with `refuse(why)`, or given with
 //! `give_known` and stepped to its end with `finish`. [`run`] is the loop that connects the offer to these
 //! snapshots. It runs on its own thread with its own Orion session, and it runs only when
