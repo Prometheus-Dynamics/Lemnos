@@ -420,6 +420,17 @@ fn a_client_killed_before_the_controllers_next_step_leaves_the_controller_in_cha
     });
 
     let mut child = spawn_client(&running.socket, "fan");
+    // The ordering under test: the override is on the fan, and the controller has not stepped since. A step
+    // that lands between the override and the kill would make this test pass for the wrong reason, so the
+    // test fails instead, loudly.
+    wait_for("the client's override is on the fan", || {
+        read("pwm1") == "153"
+    });
+    assert_eq!(
+        read("pwm1"),
+        "153",
+        "the controller stepped between the override and the kill: the ordering under test did not happen"
+    );
     let _ = child.0.kill();
     let _ = child.0.wait();
     // Every state the fan is in until the controller has it back, in order.
@@ -475,7 +486,23 @@ fn a_pwm_channel_under_a_controller_keeps_the_controllers_duty_when_the_client_i
     wait_for("the client's override is on the channel", || {
         pwm.current().duty_ns == 24_000
     });
+    // The ordering under test: the controller's last write came before the override, and nothing has been
+    // written since it. Otherwise the test would pass for the wrong reason, so it fails instead, loudly.
     let before = pwm.history().len();
+    let tail: Vec<u64> = pwm.history()[before.saturating_sub(2)..]
+        .iter()
+        .map(|config| config.duty_ns)
+        .collect();
+    assert_eq!(
+        tail,
+        [18_000, 24_000],
+        "the controller's last write is not the one before the override: the ordering under test did not happen"
+    );
+    assert_eq!(
+        pwm.history().len(),
+        before,
+        "the controller stepped between the override and the kill: the ordering under test did not happen"
+    );
     let _ = child.0.kill();
     let _ = child.0.wait();
     std::thread::sleep(Duration::from_millis(1500));
