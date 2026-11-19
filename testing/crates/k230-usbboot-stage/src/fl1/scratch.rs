@@ -4,16 +4,18 @@
 //! writes"): sectors [`SCRATCH_FIRST`] to [`SCRATCH_LAST`], far past the partition table, its backup and
 //! the boot copies. A request that names any sector outside it, in part or whole, read or write, is refused
 //! whole before the card is touched: the stage answers it as a storage failure (status 2), whatever the
-//! request's compared mark says. The shared region gating ([`crate::fl1::REGIONS`]) still applies inside,
-//! and nothing inside the range is a boot area or a header.
+//! request's compared mark says. The card storage under it ([`crate::fl1::storage::Sectors`]) holds the same
+//! range as its declared one and the protected sectors besides ([`crate::bounds`]); this limit adds reads, so
+//! the scratch build cannot read the card outside the range either.
 
+use crate::bounds::CARD_DECLARED;
 use lemnos_flash_stage::link::{IoError, Storage};
 use lemnos_flash_wire::frame::SECTOR;
 
-/// The first sector of the scratch range (the 512 MiB mark).
-pub const SCRATCH_FIRST: u32 = 1_048_576;
+/// The first sector of the scratch range (the 512 MiB mark): the card builds' declared range.
+pub const SCRATCH_FIRST: u32 = CARD_DECLARED.first as u32;
 /// The last sector of the scratch range, inclusive (2048 sectors, 1 MiB).
-pub const SCRATCH_LAST: u32 = 1_050_623;
+pub const SCRATCH_LAST: u32 = CARD_DECLARED.last as u32;
 
 /// Whether `bytes` bytes at `lba` are whole sectors, at least one, all inside the scratch range.
 pub fn inside(lba: u32, bytes: usize) -> bool {

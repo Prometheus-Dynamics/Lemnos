@@ -2,13 +2,10 @@
 //! scratch range and the regions the run must never change, served by the stage's real session step
 //! (`lemnos_flash_stage::serve::step`) over the real card adapter (`fl1::storage::Sectors`).
 //!
-//! Two stages are run against it:
-//! - **the current card stage**: the card adapter with the K230 regions and nothing else. The tests state what it
-//!   does with every write outside the range: the boot area and the header blocks are refused only without the
-//!   compared mark, and every other sector is written;
-//! - **the scratch stage**: the same with its storage limited to the scratch range (`fl1::scratch::Scratch`). Every
-//!   write outside the range is refused whole, marked or not, and the card is not touched; writes inside it are
-//!   written and read back equal.
+//! The scratch stage (`fl1::scratch::Scratch` over the bounded card storage) is run against it: every write and
+//! read outside the range is refused whole, marked or not, and the card is not touched; writes inside it are
+//! written and read back equal. What the card stages did before CARD-STAGE-BOUNDS, and its fail-before, is in
+//! `tests/card_bounds.rs`.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -21,9 +18,11 @@ use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::frame::{
     MAX_SECTORS, Request, SECTOR, STATUS_NOT_COMPARED, STATUS_OK, STATUS_STORAGE, payload_crc,
 };
+use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
 use lemnos_k230_usbboot_stage::fl1::scratch::{SCRATCH_FIRST, SCRATCH_LAST, Scratch};
 use lemnos_k230_usbboot_stage::fl1::storage::{Blocks, Sectors};
 use lemnos_k230_usbboot_stage::fl1::{IDENTITY, REGIONS};
+use lemnos_k230_usbboot_stage::format::crc32;
 use lemnos_k230_usbboot_stage::sd::BLOCK;
 
 /// The card's size of record (124,735,488 sectors).
@@ -59,6 +58,7 @@ impl ModelCard {
                     s.sectors.insert(lba, pattern(lba, 0x5a));
                 }
             }
+            s.sectors.insert(1, gpt_header());
         }
         card
     }
@@ -77,13 +77,24 @@ impl ModelCard {
     }
 
     fn protected_unchanged(&self) -> bool {
-        PROTECTED
-            .iter()
-            .all(|&(first, end)| (first..end).all(|lba| self.sector(lba) == pattern(lba, 0x5a)))
+        PROTECTED.iter().all(|&(first, end)| {
+            (first..end).all(|lba| {
+                let want = if lba == 1 {
+                    gpt_header()
+                } else {
+                    pattern(lba, 0x5a)
+                };
+                self.sector(lba) == want
+            })
+        })
     }
 }
 
 impl Blocks for ModelCard {
+    fn blocks(&self) -> u64 {
+        CARD_BLOCKS
+    }
+
     fn read_block(&mut self, lba: u64, out: &mut [u8; BLOCK]) -> Result<(), IoError> {
         if lba >= CARD_BLOCKS {
             return Err(IoError::Failed);
@@ -101,6 +112,20 @@ impl Blocks for ModelCard {
         s.sectors.insert(lba, *data);
         Ok(())
     }
+}
+
+/// The image's primary GPT header: the backup at 415,711..415,743.
+fn gpt_header() -> [u8; BLOCK] {
+    let mut h = [0u8; BLOCK];
+    h[..8].copy_from_slice(b"EFI PART");
+    h[12..16].copy_from_slice(&92u32.to_le_bytes());
+    h[24..32].copy_from_slice(&1u64.to_le_bytes());
+    h[32..40].copy_from_slice(&415_743u64.to_le_bytes());
+    h[80..84].copy_from_slice(&128u32.to_le_bytes());
+    h[84..88].copy_from_slice(&128u32.to_le_bytes());
+    let crc = crc32(&h[..92]);
+    h[16..20].copy_from_slice(&crc.to_le_bytes());
+    h
 }
 
 /// One sector's bytes: its number and a tag, so two sectors never compare equal by accident.
@@ -232,50 +257,8 @@ const OUTSIDE: [(&str, u32, u16); 10] = [
     ("card's last sector", (CARD_BLOCKS - 1) as u32, 1),
 ];
 
-fn current(card: &ModelCard) -> Sectors<ModelCard, Tick> {
-    Sectors::new(card.clone(), Tick::default())
-}
-
 fn limited(card: &ModelCard) -> Scratch<Sectors<ModelCard, Tick>> {
-    Scratch::new(current(card))
-}
-
-/// What the current card stage does with each write outside the range, unmarked then marked, on a fresh card each
-/// time: (status, sectors written).
-fn current_outcome(lba: u32, count: u16, compared: bool) -> (u8, Vec<u64>) {
-    let card = ModelCard::seeded();
-    let status = write(&mut current(&card), lba, count, compared, 0xc3);
-    (status, card.writes())
-}
-
-#[test]
-fn the_current_card_stage_writes_every_plain_sector_outside_the_range_marked_or_not() {
-    for (name, lba, count) in OUTSIDE {
-        if lba < 61_440 {
-            continue;
-        }
-        for compared in [false, true] {
-            let (status, writes) = current_outcome(lba, count, compared);
-            assert_eq!(status, STATUS_OK, "{name} compared {compared}: written");
-            let want: Vec<u64> = (0..u64::from(count)).map(|i| u64::from(lba) + i).collect();
-            assert_eq!(writes, want, "{name} compared {compared}");
-        }
-    }
-}
-
-#[test]
-fn the_current_card_stage_refuses_the_boot_area_only_without_the_compared_mark() {
-    for (name, lba, count) in OUTSIDE {
-        if lba >= 61_440 {
-            continue;
-        }
-        let (status, writes) = current_outcome(lba, count, false);
-        assert_eq!(status, STATUS_NOT_COMPARED, "{name} unmarked: refused");
-        assert!(writes.is_empty(), "{name} unmarked: nothing written");
-        let (status, writes) = current_outcome(lba, count, true);
-        assert_eq!(status, STATUS_OK, "{name} marked: written");
-        assert_eq!(writes, vec![u64::from(lba)], "{name} marked");
-    }
+    Scratch::new(Sectors::new(card.clone(), Tick::default(), CARD_DECLARED))
 }
 
 #[test]
@@ -341,140 +324,4 @@ fn the_scratch_stage_writes_the_whole_range_and_each_write_reads_back_equal() {
             .all(|&lba| (u64::from(SCRATCH_FIRST)..=u64::from(SCRATCH_LAST)).contains(&lba))
     );
     assert!(card.protected_unchanged());
-}
-
-mod legacy {
-    //! The stage the card image runs today in its `stage` mode (`stage::Stage`, the pre-FL1 protocol) over the same
-    //! card: what it does with each write outside the range. Its only rules on a range are the medium's end, the
-    //! erase grid (4096 bytes, eight sectors), and "no write under a valid header at offset 0". The card's sector 0 is
-    //! the protective MBR, not a header it accepts, so every aligned write on the card goes.
-
-    use super::*;
-    use lemnos_k230_usbboot_stage::format::{self, cmd, packet};
-    use lemnos_k230_usbboot_stage::medium::{Geometry, Medium, MediumError};
-    use lemnos_k230_usbboot_stage::sd::ERASE;
-    use lemnos_k230_usbboot_stage::stage::Stage;
-    use lemnos_k230_usbboot_stage::wdt::Feed;
-
-    /// The model card as the legacy stage's byte-addressed medium.
-    struct CardMedium(ModelCard);
-
-    impl Medium for CardMedium {
-        fn geometry(&self) -> Geometry {
-            Geometry {
-                capacity: CARD_BLOCKS * BLOCK as u64,
-                block: BLOCK as u64,
-                erase: ERASE,
-            }
-        }
-        fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<(), MediumError> {
-            for (i, sector) in out.chunks_mut(BLOCK).enumerate() {
-                let lba = offset / BLOCK as u64 + i as u64;
-                sector.copy_from_slice(&self.0.sector(lba)[..sector.len()]);
-            }
-            Ok(())
-        }
-        fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), MediumError> {
-            for (i, sector) in data.chunks(BLOCK).enumerate() {
-                let mut block = [0u8; BLOCK];
-                block.copy_from_slice(sector);
-                self.0
-                    .write_block(offset / BLOCK as u64 + i as u64, &block)
-                    .map_err(|_| MediumError("the model card refused"))?;
-            }
-            Ok(())
-        }
-        fn erase(&mut self, offset: u64, len: u64) -> Result<(), MediumError> {
-            self.write(offset, &vec![0xff; len as usize])
-        }
-    }
-
-    struct NoFeed;
-    impl Feed for NoFeed {
-        fn feed(&mut self) {}
-        fn fast_reset(&mut self) {}
-    }
-
-    fn words(values: &[u64]) -> Vec<u8> {
-        values.iter().flat_map(|v| v.to_le_bytes()).collect()
-    }
-
-    /// One write of `sectors` sectors at `lba` through the legacy protocol: whether the stage took it.
-    fn legacy_write(card: &ModelCard, lba: u64, sectors: u64) -> bool {
-        let mut stage = Stage::new(CardMedium(card.clone()), NoFeed);
-        let total = sectors * BLOCK as u64;
-        let _ = stage.on_out(&packet(
-            cmd::WRITE,
-            &words(&[lba * BLOCK as u64, total, 0, 0]),
-        ));
-        let mut out = [0u8; 60];
-        stage.on_in(&mut out).expect("the write start's reply");
-        if format::le16(&out, 2) != format::RESULT_OK {
-            return false;
-        }
-        for chunk in vec![0xc3u8; total as usize].chunks(format::CHUNK) {
-            let _ = stage.on_out(chunk);
-        }
-        stage.on_in(&mut out).expect("the write's end reply");
-        format::le16(&out, 2) == format::RESULT_OK
-    }
-
-    #[test]
-    fn the_legacy_stage_writes_every_aligned_sector_outside_the_range_header_blocks_included() {
-        // Aligned to its erase grid: sector 0, the header blocks, the GPTs' first aligned sectors, the card's last
-        // erase block, and eight sectors on each side of the range.
-        for (name, lba) in [
-            ("sector 2048", 2048),
-            ("sector 3072", 3072),
-            ("before the range", u64::from(SCRATCH_FIRST) - 8),
-            ("after the range", u64::from(SCRATCH_LAST) + 1),
-            ("the backup GPT's erase block", 415_736),
-            ("the card's last erase block", CARD_BLOCKS - 8),
-        ] {
-            let card = ModelCard::seeded();
-            assert!(legacy_write(&card, lba, 8), "{name}: taken");
-            assert_eq!(card.writes(), (lba..lba + 8).collect::<Vec<_>>(), "{name}");
-        }
-    }
-
-    /// Sector 0 is the legacy stage's own header block (it reads its boot header at offset 0, not at the K230's
-    /// sectors 2048 and 3072): a plain write there is refused, but an erase of it is taken, because what is there now
-    /// (the protective MBR and the GPT) is not a header it accepts. The erase wipes the primary GPT.
-    #[test]
-    fn the_legacy_stage_refuses_a_write_at_sector_0_but_takes_an_erase_of_it() {
-        let card = ModelCard::seeded();
-        assert!(
-            !legacy_write(&card, 0, 8),
-            "a plain write to the header block"
-        );
-        assert!(card.writes().is_empty());
-        let mut stage = Stage::new(CardMedium(card.clone()), NoFeed);
-        let _ = stage.on_out(&packet(cmd::ERASE, &words(&[0, ERASE])));
-        let mut out = [0u8; 60];
-        stage.on_in(&mut out).expect("the erase's reply");
-        assert_eq!(
-            format::le16(&out, 2),
-            format::RESULT_OK,
-            "the erase is taken"
-        );
-        assert_eq!(card.writes(), (0..8).collect::<Vec<_>>());
-        assert!(!card.protected_unchanged(), "the primary GPT is gone");
-    }
-
-    #[test]
-    fn the_legacy_stage_refuses_off_its_grid_and_past_the_card_only() {
-        let card = ModelCard::seeded();
-        for (name, lba, sectors) in [
-            ("first-1, off the grid", u64::from(SCRATCH_FIRST) - 1, 1),
-            (
-                "straddles first, off the grid",
-                u64::from(SCRATCH_FIRST) - 1,
-                2,
-            ),
-            ("past the card", CARD_BLOCKS, 8),
-        ] {
-            assert!(!legacy_write(&card, lba, sectors), "{name}: refused");
-        }
-        assert!(card.writes().is_empty());
-    }
 }
