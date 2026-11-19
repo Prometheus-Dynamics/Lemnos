@@ -1354,6 +1354,153 @@ Record (console only; USB never reached):
 Records: `run2-hypothesis.md`, `run2-dry.log`, `run2-run.log`, `run2-stdout.log`; rehearsals `rehearsal-*.log`
 (in the session's K230B2 folder). The board is back at the ROM as found; the lock is free.
 
+### B2 fix after run 2 (rev `4cd9318b`): EP0 trace, the status OUT arm, the scan bound, the address check
+
+**What the references say about EP0 on this core.** These are read-only facts. No code was copied.
+
+Linux `drivers/usb/dwc2/gadget.c`:
+- 1186-1191: the setup arm is EPENA without CNAK. "For Setup request do not clear NAK".
+- 2047-2079 (`dwc2_hsotg_program_zlp`): the status ZLP is armed with `MC(1)|PKTCNT(1)|XFERSIZE(0)`, then
+  CNAK|EPENA|USBACTEP. It is written unconditionally, with no EPENA test. Line 2076: "clear NAK set by core".
+- 2509-2521: some cores send no OUTDONE for the setup packet.
+- 2684-2770 (`dwc2_hsotg_complete_in`): after the IN data stage completes, the status OUT is armed
+  (`dwc2_hsotg_ep0_zlp(hsotg, false)` at 2767).
+
+Linux `core.h`: the newest revision named is `DWC2_CORE_REV_4_20a`. No rule specific to 4.30a was found in
+gadget.c, core.c, hw.h or params.c.
+
+SDK 7e302f7 U-Boot `drivers/usb/gadget/dwc2_udc_otg_xfer_dma.c:69-95` (`dwc2_ep0_complete_out`): it sets
+DOEPTSIZ0 = PKTCNT 1 | 8, then EPENA|CNAK. Its `dwc2_udc_otg.c` has two more relevant parts:
+- 461-487: GUSBCFG with TRDT 5 and PHYIF16;
+- 1112-1119: the kendryte part clears the DM/DP pulldowns at `USB0_TEST_CTL3` (0x9158507c).
+
+SDK rt-smart CherryUSB `port/dwc2/usb_dc_dwc2.c`:
+- 322-334 (`dwc2_ep0_start_read_setup`): in slave mode the endpoint is not enabled for the setup.
+- 845-975 (`usbd_ep_start_read`/`start_write`): EPENA|CNAK is written unconditionally.
+- 1128: TRDT is set on ENUMDONE.
+
+The other candidates were checked on this core:
+- DMA, descriptor DMA and thresholds: GAHBCFG was 0 as the ROM left it (run 2), so DMA is off. The stage runs in
+  slave mode and writes no threshold register.
+- The EP0 TxFIFO is number 0. Its size is set by the stage in GNPTXFSIZ, as before.
+
+**The stage's fault.** `arm_ep0_out` skipped the arm while DOEPCTL0.EPENA was set. After a SETUP the core
+leaves EP0 OUT enabled with NAK set, so the status OUT stayed NAKed. The fix:
+- the arm is written every time, with CNAK except for the setup arm;
+- the status OUT is armed after IN XferCompl, as in gadget.c 2684-2770 above.
+
+**Model.** `b2sim` gets `CoreRev::V430a` (the default; GSNPSID `4f54430a`). On each SETUP it sets NAK on EP0 IN
+and OUT and keeps EP0 OUT's EPENA. That is what gadget.c 1186-1189 and 2076 handle. It also models
+DIEPINT0/DOEPINT0 with write-1-to-clear.
+- Case `core-430a` against the old stage fails: GD(64) times out on all three tries. The trace shows the skipped
+  OUT arm (`…0106` with EPENA set), the 18-byte IN done, and no status (`rehearsal-core-430a-before-fix.log`).
+- With the fix it passes.
+- `rev-pre-420a` stays as a separate case.
+
+The model fails at the first GD(64), while the board in run 2 got to SET_ADDRESS. Not checked: Linux's
+`hub_port_init` may accept a valid 64-byte descriptor even when its status stage fails. The model's host does not.
+
+**Host scan.** Linux `usb/core/sysfs.c` (5.10 in the SDK) takes the device lock for two attributes:
+- `product` (`usb_string_attr`, 123-140);
+- `bConfigurationValue` (`usb_actconfig_show`, 24-45 and 90).
+
+These read without the lock: idVendor and idProduct (709-723), busnum and devnum (199-215), speed (144), and the
+interface string (1121-1132).
+
+The scan now reads only the lock-free attributes on every device. On the stage's or the ROM's ids it reads the two
+locking attributes on a thread with a 100 ms bound. A stalled read is kept pending, keyed by devnum, and is never
+waited on twice. Two tests use the `SlowTree` stand-in, whose attribute reads block. Both fail on the old scan
+("the scan blocked") and pass now (`scan-before-fix.log`):
+- the 15 s bound ends on time while the attributes block;
+- a stage whose attributes block for a while is taken once they read.
+
+**Address check.** Under xHCI the host controller picks the USB address, and the kernel's devnum is a separate
+count (run 2: address 0x11, devnum 119-122). The host cannot see the address, so the comparison with devnum is
+dropped. The record check keeps `set-address != 0` and DCFG.DAD (`(dcfg >> 4) & 0x7f`) == set-address.
+
+**Card image.** `check.sh` builds with one codegen unit. With 16 units the inlining moved and the card image grew
+to 66864 bytes, which ran past 0x80380000. With one unit it is 64824 bytes, with or without the trace code. The
+trace is a feature (`ep0-trace`), on only for `b2`.
+
+Rehearsal: all 14 cases AS IT MUST (`rehearsal-*.log`). 380 tests pass, and clippy is clean with and without the
+feature. Images:
+- B2: raw sha256 `deece853…3d76`, 27064 bytes; patched to `check`, `9b79d8ec…cf79`.
+- Card: `cf089a11…3c0e`, 64824 bytes.
+
+### B2 run 3 (2026-11-18, rev `4cd9318b`): EP0 works and the stage enumerates; the host may not open its node
+
+Conditions are as in runs 1 and 2:
+- the lock was held for the whole run, and was free before and after;
+- the port showed `29f1:0230` devnum 123 before the load;
+- the checks came before any open;
+- the image has no card code.
+
+Hypothesis first (`run3-hypothesis.md`). Dry run: access to the ROM node granted, nothing opened.
+
+Times from the load (1795056230.634):
+- 0.000 s: loaded and started.
+- +0.21 s: the banner. The timebase runs, as in run 2.
+- +0.648 s: kernel "new high-speed USB device number 124". It shows 1209:0001 with product "Lemnos flash stage" on
+  the first attempt, with no retries and no errors.
+- +0.649 s: the host saw the stage with all its checks correct:
+  - port 3-4.2.1.4.1;
+  - speed 480 and configuration 1;
+  - the product;
+  - interface "lemnos flash wire D0D1".
+- +0.649 s: the host's verdict was **Stopped**: `/dev/bus/usb/003/124` was mode 600, owner 0:0, with no ACL. The
+  host opened nothing and changed nothing on the host.
+- about +30.3 s (console): the record, the EP0 trace, "lemnos stage: end", then "the host sent no request before the
+  idle deadline", and the SoC reset.
+- +30.720 s: the ROM was back at the same port as `29f1:0230` devnum 125, on its own. The lock was free afterwards.
+
+Record, as it differs from run 2:
+- bus-resets 2, setups 9;
+- set-address 0x11, and dcfg-after-address 0x110 (DAD = 0x11, so the check holds);
+- address-status-in 1;
+- ep0-status-out 7;
+- stalls 0, configured 1;
+- no bulk traffic;
+- tb-cross 7500 counts / 10000 us, and wdt-hz 750,000.
+
+**The EP0 trace (127 entries).** It is decoded from the head word: kind, flag, and frame number.
+
+1. The first GET_DESCRIPTOR(device, 64) at address 0 (t 007-014):
+   - At the SETUP, DOEPCTL0 = `80028000`: EPENA, NAK and USBACTEP. This is the state the 4.30a model assumes,
+     now seen on the board.
+   - IN armed for 18 bytes (DIEPTSIZ0 `00080012`).
+   - SETUP_DONE: DOEPCTL0 `00028000`, DOEPTSIZ0 `40080038` (STUPCNT 2, 8 bytes taken), DOEPINT0 `08`.
+   - IN done.
+   - **status OUT armed** (`…0206`): DOEPCTL0 goes from `00028000` to `80008000`, so NAK is cleared.
+   - DOEPINT0 `2010`.
+   - OUT done: DOEPTSIZ0 `20000000`, XferCompl.
+   - setup re-armed.
+
+   This is the step the old stage never took.
+2. The bus reset (GINTSTS `04009c28`), ENUMDONE (DSTS `00070800`), SET_ADDRESS 0x11 (DCFG `110`), and its status IN
+   done.
+3. At the new address, each of these takes the same full sequence, and every status OUT completes:
+   - GD(device, 18);
+   - GD(config, 9);
+   - GD(config, 32);
+   - GD(string 0);
+   - GD(string 2);
+   - SET_CONFIGURATION 1, with its status IN;
+   - GD(string 3).
+4. After that there was no further EP0 traffic until the idle reset.
+
+**Findings.**
+1. Run 2's enumeration failure was the status OUT left NAKed by the old arm. The trace confirms the model's 4.30a
+   behaviour on the board. Enumeration and EP0 now work on the first attempt.
+2. The host was denied the stage's node 0.649 s after it appeared. The ROM's node, opened by the same host, is
+   granted.
+3. The coordinator reports two things: the udev rule for the stage is installed and verifies, and the likely cause is
+   a race. The uaccess ACL is applied late in udev's processing, after the host has already tried the open. That is
+   the next model case and host fix (wait for the udev database entry and W_OK, bounded at 5 s), then run 4.
+4. No bulk echo, negative case or USB record was reached in this run.
+
+Records: `run3-hypothesis.md`, `run3-dry.log`, `run3-run.log`, `run3-stdout.log`. The board is back at the ROM as
+found, and the lock is free.
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
