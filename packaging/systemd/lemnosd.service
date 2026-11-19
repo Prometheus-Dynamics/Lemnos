@@ -34,8 +34,11 @@ RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
 
 # Stop is for shutdown only. It drops every driver; the hardware watchdog then reboots a board that
-# is still running, so the unit is never stopped on a live board.
-TimeoutStopSec=30s
+# is still running, so the unit is never stopped on a live board. The stop bound is under the shortest
+# time the watchdog can leave after the daemon's last feed (15 s period, fed every 7.5 s: 7.5 s), so a
+# stop that hangs at shutdown is killed and the shutdown goes on, rather than the watchdog rebooting a
+# board that was powering off (see "The hardware watchdog" in packaging/README.md).
+TimeoutStopSec=5s
 
 # lemnosd must not stay down. It is restarted at once, with a constant delay: no growing delay, no
 # start limit. 1 s is the shortest delay that cannot spin on a daemon that dies at start. The

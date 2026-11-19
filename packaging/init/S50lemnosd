@@ -21,7 +21,7 @@ SELF=/etc/init.d/S50lemnosd
 DAEMON=/usr/bin/lemnosd
 BOARD=/etc/lemnos/board.toml
 ENVFILE=/etc/lemnos/lemnosd.env
-STOP_TIMEOUT=10
+STOP_TIMEOUT=5
 # Seconds between a daemon's exit and its next start. Constant, and well inside the hardware watchdog's
 # bound (15 s): a restart that takes longer than that reboots the board.
 RESTART_DELAY=1
