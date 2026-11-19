@@ -43,6 +43,13 @@
 //! tick, after 1 s, then 2, 4 and 8 s, and every 8 s after that, and it is never given up. The
 //! baseline is kept until the hand-back has worked.
 //!
+//! The baseline is the governor. What a take-over found is what a hand-back restores: `pwm1` and then
+//! `pwm1_enable`. In automatic mode (2) the kernel's governor drives the fan again, which is the usual
+//! case. There is always a baseline once this driver has taken a fan: a fan whose `pwm1_enable` cannot be
+//! read is not taken at all (the first write is refused), so there is no mode to restore that is missing.
+//! The board's `default_duty` of `pwm-channel-fan` therefore has no counterpart here. The last hand-back
+//! is kept for the log: [`HwmonFan::handed_back`].
+//!
 //! Dropping the driver puts the fan at full duty if it still holds it, as a device that stops or is
 //! rebound, or a call that panics, leaves it. A controller that is dropped in an orderly way hands the
 //! fan back first, so the drop then finds nothing held. The fan is not handed to the kernel's thermal
@@ -168,6 +175,8 @@ pub struct HwmonFan {
     calling: CallerId,
     /// The caller whose write holds the fan (see the module's ownership). Its going hands the fan back.
     owner: Option<CallerId>,
+    /// What the last hand-back applied, for the log line. `None` until one has happened.
+    handed_back: Option<HandBack>,
     /// A hand-back owed because its owner went and the write failed: when it is next tried, and how many
     /// times it has failed.
     owed: Option<Owed>,
@@ -205,6 +214,32 @@ fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 struct Baseline {
     pwm: u32,
     mode: i64,
+}
+
+/// What a hand-back gave the fan back to: the baseline the take-over recorded, or full duty when this driver
+/// has no baseline for a fan it holds. [`HandBack::note`] says which, in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandBack {
+    /// `pwm1` and `pwm1_enable` as the take-over found them.
+    Baseline { pwm: u32, mode: i64 },
+    /// Full duty, the safe state: the fan is held and no baseline was recorded for it.
+    SafeState,
+}
+
+impl HandBack {
+    /// The hand-back in words, for a log line: which target applied, and the values it wrote.
+    pub fn note(self) -> String {
+        match self {
+            Self::Baseline { pwm, mode } => {
+                format!(
+                    "hand-back to the baseline the take-over found: pwm1 {pwm}, pwm1_enable {mode}"
+                )
+            }
+            Self::SafeState => {
+                "hand-back to full duty: no baseline was recorded for this fan".to_string()
+            }
+        }
+    }
 }
 
 /// The baselines this process has recorded, by the `pwm` attribute they belong to. A driver instance is
@@ -540,6 +575,12 @@ impl Spin<'_> {
 }
 
 impl HwmonFan {
+    /// What the last hand-back applied: the baseline it restored, or full duty. `None` until one has happened, or
+    /// when the last one had nothing to give back. The driver has no log of its own; see [`HandBack::note`].
+    pub fn handed_back(&self) -> Option<HandBack> {
+        self.handed_back
+    }
+
     fn new(fan: &Path) -> Self {
         Self {
             pwm: fan.join("pwm1"),
@@ -559,6 +600,7 @@ impl HwmonFan {
             owner: None,
             owed: None,
             now_ns: 0,
+            handed_back: None,
         }
     }
 
@@ -639,11 +681,13 @@ impl HwmonFan {
         // A bind after a drop took nothing itself, but the record of the take-over before it says what the
         // fan goes back to.
         let Some(base) = self.baseline.or_else(|| recorded(&self.pwm)) else {
-            return if self.manual {
-                self.put_at_safe_state()
-            } else {
-                Ok(())
-            };
+            if !self.manual {
+                self.handed_back = None;
+                return Ok(());
+            }
+            self.put_at_safe_state()?;
+            self.handed_back = Some(HandBack::SafeState);
+            return Ok(());
         };
         sysfs::write_number(&self.pwm, base.pwm)?;
         if base.mode != i64::from(MODE_MANUAL) {
@@ -652,6 +696,10 @@ impl HwmonFan {
         self.manual = false;
         self.baseline = None;
         forget(&self.pwm);
+        self.handed_back = Some(HandBack::Baseline {
+            pwm: base.pwm,
+            mode: base.mode,
+        });
         Ok(())
     }
 
