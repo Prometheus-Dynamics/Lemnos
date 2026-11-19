@@ -58,6 +58,11 @@ pub const REPLY_OVERHEAD: usize = 32;
 /// so it has no hash of its own and is not in the `feature` module: a host sets it in Welcome
 /// beside [`feature::EVERY`], and a host without it refuses the request by name.
 pub const ENDPOINTS_END: u64 = 64;
+/// The feature bit that says the Welcome's `host` is the board file's `[board] id`, the service's
+/// board id. A host without it says nothing about its board: its `host` is only a name, and a client
+/// refuses to report a board id from it. It is not a part: it has no hash of its own and adds no
+/// frame, so it moves no hash.
+pub const BOARD_ID: u64 = 128;
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -451,6 +456,7 @@ frames! {
             lemnos: LemnosName<'a>,
             version: u16,
             features: u64,
+            /// The service's name. When [`BOARD_ID`] is set in `features`, the board file's `[board] id`.
             host: &'a str,
             parts: Tail<&'a [u8]>,
         }

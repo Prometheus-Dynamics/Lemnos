@@ -116,6 +116,12 @@ impl AsyncClient {
         self.wait(id, pick).await
     }
 
+    /// The board the service serves: the board file's `[board] id`. See [`Session::board_id`].
+    pub async fn board_id(&mut self) -> Result<String, Error> {
+        self.settle().await?;
+        self.session.known_board_id()
+    }
+
     /// What became of the service's driver packages: which were loaded, which refused and why.
     pub async fn packages(&mut self) -> Result<PackageList, Error> {
         self.settle().await?;

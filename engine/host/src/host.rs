@@ -3985,6 +3985,11 @@ impl Host {
     pub fn driver_names(&self) -> Vec<&'static str> {
         self.inner.drivers.keys().copied().collect()
     }
+
+    /// The board file's `[board] id`: the board this host serves.
+    pub fn board_id(&self) -> &str {
+        &self.inner.board
+    }
 }
 
 impl Drop for Host {

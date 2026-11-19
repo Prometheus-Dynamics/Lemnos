@@ -937,6 +937,31 @@ fn the_package_list_comes_through_the_surface() {
 
 // ---- The C smoke program, against the library built here ----
 
+/// The board the C surface reports is the board file's `[board] id`, as `lemnos_board_id` writes it.
+#[test]
+fn the_board_id_comes_through_the_surface() {
+    let (service, socket, dir) = service();
+    let client = open(&socket);
+    let mut out = [0u8; 64];
+    let mut len = 0usize;
+    // SAFETY: `out` is writable for its capacity and `len` is valid for a write.
+    let status = unsafe {
+        s::lemnos_board_id(
+            client,
+            out.as_mut_ptr().cast(),
+            out.len(),
+            &mut len,
+            MessageSink::NONE,
+        )
+    }
+    .0;
+    assert_eq!(status, OK);
+    assert_eq!(&out[..len], b"c", "the harness's board id is \"c\"");
+    assert_eq!(out[len], 0, "NUL-terminated");
+    drop(service);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn cc_available() -> bool {
     Command::new("cc")
         .arg("--version")

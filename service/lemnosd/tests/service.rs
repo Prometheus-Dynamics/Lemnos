@@ -631,8 +631,17 @@ fn a_client_whose_part_differs_is_refused_by_name_and_the_rest_works() {
         assert_eq!(core, lemnos_wire::CORE_HASH);
         assert_eq!(
             features,
-            (lemnos_wire::feature::EVERY | lemnos_wire::ENDPOINTS_END)
+            (lemnos_wire::feature::EVERY | lemnos_wire::ENDPOINTS_END | lemnos_wire::BOARD_ID)
                 & !lemnos_wire::feature::PACKAGES
         );
     });
+}
+
+/// The board id a client reads is the board file's `[board] id` (`t` in the harness), from the
+/// service's own answer: the socket test, not a read of the board file.
+#[test]
+fn the_client_reads_the_board_file_id_from_the_service() {
+    let running = start();
+    let client = Client::connect(&running.socket, "board-id-test").unwrap();
+    assert_eq!(client.board_id().unwrap(), "t");
 }

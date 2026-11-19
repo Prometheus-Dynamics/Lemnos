@@ -97,6 +97,7 @@ impl std::error::Error for StartError {}
 /// What a service is started with.
 pub struct Config {
     pub socket: PathBuf,
+    /// Not sent to clients: a client's board is the board file's `[board] id`, which the host reports.
     pub name: String,
     pub board: BoardFile,
     pub drivers: Vec<DriverEntry>,
@@ -143,7 +144,6 @@ pub(crate) struct Core {
     /// The daemon's liveness: the loop stamps it, and the host asks it (see [`liveness`]).
     pub(crate) liveness: Arc<DaemonLiveness>,
     pub(crate) clock: Arc<MonotonicClock>,
-    pub(crate) name: String,
     pub(crate) readers: Readers,
     pub(crate) clients: Mutex<Vec<Arc<Conn>>>,
     pub(crate) waker: Arc<Waker>,
@@ -288,7 +288,6 @@ impl Service {
             host,
             liveness: Arc::clone(&liveness),
             clock,
-            name: config.name,
             readers: Readers::new(),
             clients: Mutex::new(Vec::new()),
             waker: Arc::new(Waker::new(wake_tx)),

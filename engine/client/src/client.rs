@@ -286,6 +286,11 @@ impl Client {
     pub fn set_timeout(&self, timeout: Duration) {
         self.lock().set_timeout(timeout);
     }
+
+    /// The board the service serves: the board file's `[board] id`. See [`Session::board_id`].
+    pub fn board_id(&self) -> Result<String, Error> {
+        self.lock().board_id()
+    }
 }
 
 impl From<Session> for Client {

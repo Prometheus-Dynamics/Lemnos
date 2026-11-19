@@ -108,6 +108,14 @@ impl Client {
         })
     }
 
+    /// The board the service serves, as the board file's `[board] id`.
+    pub fn board_id(&self) -> Result<String, Status> {
+        text_of(|out, capacity, len| {
+            // SAFETY: `out` is valid for `capacity` bytes and `len` for a write.
+            unsafe { ffi::lemnos_board_id(self.handle, out, capacity, len, MessageSink::NONE) }
+        })
+    }
+
     /// What became of the service's driver packages.
     pub fn packages(&self) -> Result<PackageList, Status> {
         let mut mode = 0;
