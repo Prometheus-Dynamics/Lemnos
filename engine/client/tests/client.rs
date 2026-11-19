@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use common::{FakeHost, temp_dir};
 use lemnos_client::{
     Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, PackageEntry, PackageMode,
-    Session, follow,
+    Session, SubscriptionState, follow,
 };
 use lemnos_core::{
     Contract, ContractInfo, Decode, Encode, MethodInfo, Param, Result, Shape, Status, Tag, contract,
@@ -539,6 +539,189 @@ fn a_handle_finds_its_device_again_after_a_restart() {
     // The call in flight may fail. It comes back, with a new device number.
     eventually(|| echo.add(2) == Ok(2));
     assert!(host.control.connections.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
+fn a_subscribe_that_times_out_leaves_nothing_live_on_the_service() {
+    let host = FakeHost::start();
+    // The service answers 400 ms late; the caller gives up at 150 ms.
+    host.control.subscribe_delay_ms.store(400, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    client.set_timeout(Duration::from_millis(150));
+    let mut handle = client.open_tag("", TAG).unwrap();
+    assert_eq!(
+        client.subscribe(&mut handle, 1, 5000, false),
+        Err(Error::TimedOut)
+    );
+    // The late answer is read, and unsubscribed: no value reaches the caller, and the service
+    // ends with nothing live.
+    let mut into = [0; 8];
+    eventually(|| {
+        let value = client
+            .next_value(&mut into, Duration::from_millis(50))
+            .unwrap();
+        assert!(
+            value.is_none(),
+            "a value arrived for a subscribe that was cancelled"
+        );
+        host.control.answers.load(Ordering::SeqCst) >= 1 && host.control.live_subscriptions() == 0
+    });
+    assert_eq!(host.control.unsubscribed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_pending_subscribe_returns_before_its_answer_and_its_values_come_under_its_id() {
+    let host = FakeHost::start();
+    host.control.subscribe_delay_ms.store(400, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut handle = client.open_tag("", TAG).unwrap();
+    let started = Instant::now();
+    let id = client
+        .subscribe_pending(&mut handle, 1, 5000, false)
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "subscribe_pending waited for the answer"
+    );
+    assert_eq!(client.subscription_state(id), SubscriptionState::Pending);
+    let mut into = [0; 8];
+    let value = client
+        .next_value(&mut into, Duration::from_secs(5))
+        .unwrap()
+        .expect("no value after the answer");
+    assert_eq!(value.subscription, id);
+    assert_eq!(
+        client.subscription_state(id),
+        SubscriptionState::Live { period_us: 5000 }
+    );
+    assert_eq!(host.control.live_subscriptions(), 1);
+}
+
+#[test]
+fn a_refused_pending_subscribe_reports_refused_once_and_is_not_sent_again() {
+    let host = FakeHost::start();
+    host.control.refuse_subscribe.store(true, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut handle = client.open_tag("", TAG).unwrap();
+    let id = client
+        .subscribe_pending(&mut handle, 1, 5000, false)
+        .unwrap();
+    let mut into = [0; 8];
+    let mut seen = None;
+    eventually(|| {
+        client
+            .next_value(&mut into, Duration::from_millis(20))
+            .unwrap();
+        if seen.is_none() {
+            let state = client.subscription_state(id);
+            if state != SubscriptionState::Pending {
+                seen = Some(state);
+            }
+        }
+        seen.is_some()
+    });
+    assert_eq!(seen, Some(SubscriptionState::Refused(Status(-16))));
+    assert_eq!(client.subscription_state(id), SubscriptionState::Unknown);
+    host.control.refuse_subscribe.store(false, Ordering::SeqCst);
+    host.restart();
+    eventually(|| client.list().is_ok());
+    assert_eq!(host.control.subscribes.load(Ordering::SeqCst), 1);
+    assert_eq!(host.control.live_subscriptions(), 0);
+}
+
+#[test]
+fn unsubscribing_a_pending_subscribe_then_a_late_answer_leaves_nothing_live() {
+    let host = FakeHost::start();
+    host.control.subscribe_delay_ms.store(400, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut handle = client.open_tag("", TAG).unwrap();
+    let id = client
+        .subscribe_pending(&mut handle, 1, 5000, false)
+        .unwrap();
+    client.unsubscribe(id).unwrap();
+    assert_eq!(client.subscription_state(id), SubscriptionState::Unknown);
+    let mut into = [0; 8];
+    eventually(|| {
+        let value = client
+            .next_value(&mut into, Duration::from_millis(50))
+            .unwrap();
+        assert!(
+            value.is_none(),
+            "a value arrived for an unsubscribed subscribe"
+        );
+        host.control.answers.load(Ordering::SeqCst) >= 1 && host.control.live_subscriptions() == 0
+    });
+    assert_eq!(host.control.unsubscribed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_pending_subscription_is_sent_again_after_a_reconnect_and_is_live_once() {
+    let host = FakeHost::start();
+    host.control.subscribe_delay_ms.store(400, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut handle = client.open_tag("", TAG).unwrap();
+    let id = client
+        .subscribe_pending(&mut handle, 1, 5000, false)
+        .unwrap();
+    // The service has the subscribe and is still answering it when the connection ends.
+    let mut into = [0; 8];
+    eventually(|| {
+        let _ = client.next_value(&mut into, Duration::from_millis(20));
+        host.control.subscribes.load(Ordering::SeqCst) >= 1
+    });
+    assert_eq!(client.subscription_state(id), SubscriptionState::Pending);
+    host.restart();
+    let mut into = [0; 8];
+    let mut got = None;
+    eventually(|| {
+        if let Some(value) = client
+            .next_value(&mut into, Duration::from_millis(50))
+            .unwrap()
+        {
+            got = Some(value.subscription);
+        }
+        // Done once the service has it sent again, and live, after the reconnect.
+        got == Some(id)
+            && host.control.subscribes.load(Ordering::SeqCst) >= 2
+            && host.control.live_subscriptions() == 1
+    });
+    assert_eq!(got, Some(id));
+    assert_eq!(host.control.subscribes.load(Ordering::SeqCst), 2);
+    assert_eq!(host.control.live_subscriptions(), 1);
+}
+
+#[test]
+fn a_refused_subscribe_is_dropped_and_is_not_sent_again_after_a_reconnect() {
+    let host = FakeHost::start();
+    host.control.refuse_subscribe.store(true, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut handle = client.open_tag("", TAG).unwrap();
+    let error = client.subscribe(&mut handle, 1, 5000, false).unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    host.control.refuse_subscribe.store(false, Ordering::SeqCst);
+    host.restart();
+    eventually(|| client.list().is_ok());
+    assert_eq!(host.control.subscribes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_subscribe_that_timed_out_and_is_refused_late_is_dropped() {
+    let host = FakeHost::start();
+    host.control.subscribe_delay_ms.store(400, Ordering::SeqCst);
+    host.control.refuse_subscribe.store(true, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    client.set_timeout(Duration::from_millis(150));
+    let mut handle = client.open_tag("", TAG).unwrap();
+    assert_eq!(
+        client.subscribe(&mut handle, 1, 5000, false),
+        Err(Error::TimedOut)
+    );
+    // The refusal arrives with the next answer; it drops the subscription.
+    eventually(|| client.list().is_ok());
+    host.control.refuse_subscribe.store(false, Ordering::SeqCst);
+    host.restart();
+    eventually(|| client.list().is_ok());
+    assert_eq!(host.control.subscribes.load(Ordering::SeqCst), 1);
 }
 
 #[test]

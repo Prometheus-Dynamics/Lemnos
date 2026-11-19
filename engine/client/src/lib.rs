@@ -34,8 +34,8 @@ pub use lemnos_wire::DeviceDescription;
 pub use lemnos_wire::refusal::Refusal;
 pub use session::{
     DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, JobEvent, PackageEntry,
-    PackageList, PackageMode, Session, Subscription, UsbEndpoints, UsbEndpointsEnd, ValueInfo,
-    follow,
+    PackageList, PackageMode, Session, Subscription, SubscriptionState, UsbEndpoints,
+    UsbEndpointsEnd, ValueInfo, follow,
 };
 pub use stream::{
     Access, Carried, FrameStream, HeldFrame, JobReason, MemoryKind, Next, ProducerState, Region,

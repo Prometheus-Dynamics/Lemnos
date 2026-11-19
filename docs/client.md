@@ -76,6 +76,32 @@ What a client can do:
   a device from its description. Arguments and replies are bytes, encoded as the
   [protocol](wire.md) says.
 - **`subscribe`, `next_value`**: the daemon reads a method at a period and sends each value.
+  `subscribe` waits for the service's answer. On a timeout, or any failure other than a refusal, it
+  cancels what it sent: a late answer is unsubscribed at once, so nothing is left live on the
+  service and no value reaches the caller. A refusal is returned as `Refused`.
+  `subscribe_pending(handle, method, period_us, only_changes)` returns the subscription's local id
+  at once, without waiting for the service (on `Client`, `Session` and `AsyncClient`). The
+  subscription stands: it is sent again after a reconnect, and it ends only by `unsubscribe` or by a
+  refusal from the service. Its values come under the id (`ValueInfo::subscription`).
+  `subscription_state(id)` says where it stands, as of what the service has said so far (a call or
+  `next_value` reads what has arrived), as a `SubscriptionState` (`#[non_exhaustive]`):
+  - `Pending`: asked for, not answered yet, or waiting for a connection;
+  - `Live { period_us }`: the service is sending its values, at the period it granted;
+  - `Refused(status)`: the service refused it. Reported once: the next read says `Unknown`;
+  - `Unknown`: no such subscription (it never existed, it was unsubscribed, or its refusal was
+    reported).
+
+  `unsubscribe` takes the id of a live or a pending subscription. A pending one is forgotten
+  locally, so it is not sent again; if the service answers it later, the client unsubscribes it at
+  once. The client remembers up to 64 such cancelled requests, the oldest going first: past that, a
+  late answer for the oldest stands on the service. The record is cleared when the connection ends,
+  as the service answers nothing of a connection that ended. A refusal of a subscription that has
+  worked before is retried on the backoff, not reported: only a subscription that never worked is
+  refused for good. Refusals are remembered up to 64, the oldest going first.
+
+  Channel subsets are one method per subset: `next` subscribes a method at a period, with no
+  `name`, `prefix.*` or `*` selection of channels, so a consumer that needs a subset subscribes
+  each of its methods.
 - **`set_power`**: off and on.
 - **`start_job`, `wait_job`, `cancel_job`**: a long job. A typed handle's job method starts it and
   returns its number. `wait_job` passes each progress report to a closure and returns the job's

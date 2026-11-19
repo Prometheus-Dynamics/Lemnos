@@ -26,6 +26,11 @@ pub(crate) trait Pick<R>: FnMut(Frame<'_>) -> Option<Result<R, Error>> {}
 impl<R, F: FnMut(Frame<'_>) -> Option<Result<R, Error>>> Pick<R> for F {}
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
+/// Subscribes cancelled while their answer was in flight, kept until the answer comes. Past this
+/// many the oldest go, and a late answer for one of them stands on the service: see docs/client.md.
+const CANCELLED_MAX: usize = 64;
+/// Subscriptions the service refused and nothing has asked about yet. Past this the oldest go.
+const REFUSED_MAX: usize = 64;
 const RETRY_CAP: Duration = Duration::from_secs(8);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENTS: usize = 64;
@@ -167,6 +172,21 @@ impl Handle {
     }
 }
 
+/// Where a subscription made with [`Session::subscribe_pending`] stands. Read from what the
+/// service has said so far: a call, or `next_value`, reads what has arrived.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionState {
+    /// Asked for, not answered yet, or waiting for a connection (after a reconnect too).
+    Pending,
+    /// The service is sending its values; `period_us` is the period it granted.
+    Live { period_us: u64 },
+    /// The service refused it. Reported once: the next read says [`SubscriptionState::Unknown`].
+    Refused(Status),
+    /// No such subscription: it never existed, it was unsubscribed, or its refusal was reported.
+    Unknown,
+}
+
 /// A subscription. Its identity survives a reconnect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subscription {
@@ -263,6 +283,8 @@ struct Sub {
     state: SubState,
     /// Refused only stops a subscription that never worked.
     established: bool,
+    /// The period the service granted, once it answered.
+    granted_us: u64,
 }
 
 /// Everything a session knows apart from its socket.
@@ -278,6 +300,11 @@ struct Shared {
     /// Device events the queue dropped, unread, for want of room. Shared with the [`Client`](crate::Client)
     /// so it reads without waiting on the session.
     dropped_events: Arc<AtomicU64>,
+    /// Request ids of subscribes the caller cancelled while their answers were in flight: a late
+    /// answer is unsubscribed at once.
+    cancelled: Vec<u64>,
+    /// Subscriptions the service refused, by their local id, until someone asks about them.
+    refused: Vec<(u64, Status)>,
     /// Long jobs started on this connection and not over yet.
     jobs: Vec<u64>,
     /// Jobs that ended before their JobStarted was read, so it doesn't open them again.
@@ -379,6 +406,35 @@ impl Shared {
         self.job_events.push_back(event);
     }
 
+    fn cancel_request(&mut self, id: u32) {
+        if self.cancelled.len() == CANCELLED_MAX {
+            self.cancelled.remove(0);
+        }
+        self.cancelled.push(u64::from(id));
+    }
+
+    fn record_refusal(&mut self, local: u64, status: Status) {
+        if self.refused.len() == REFUSED_MAX {
+            self.refused.remove(0);
+        }
+        self.refused.push((local, status));
+    }
+
+    /// Takes a subscription off the books without waiting. Returns the service's id for it when it
+    /// is live there. One still waiting for its answer is cancelled: its late answer gets an
+    /// Unsubscribe when it comes.
+    fn take_sub(&mut self, local: u64) -> Option<u64> {
+        let at = self.subs.iter().position(|s| s.local == local)?;
+        match self.subs.remove(at).state {
+            SubState::Live(server) => Some(server),
+            SubState::Subscribing(id) => {
+                self.cancel_request(id);
+                None
+            }
+            SubState::Opening(_) | SubState::Waiting => None,
+        }
+    }
+
     fn sub_refused(&mut self) {
         let delay = self
             .sub_retry
@@ -453,8 +509,30 @@ impl Shared {
                 true
             }
             Frame::Subscribed {
-                id, subscription, ..
+                id,
+                subscription,
+                period_us,
             } => {
+                if let Some(at) = self
+                    .cancelled
+                    .iter()
+                    .position(|cancelled| *cancelled == u64::from(id))
+                {
+                    self.cancelled.remove(at);
+                    let unsubscribe = self.id();
+                    if append(
+                        &Frame::Unsubscribe {
+                            id: unsubscribe,
+                            subscription,
+                        },
+                        tx,
+                    )
+                    .is_ok()
+                    {
+                        self.unheard.push(unsubscribe);
+                    }
+                    return false;
+                }
                 if let Some(sub) = self
                     .subs
                     .iter_mut()
@@ -462,10 +540,19 @@ impl Shared {
                 {
                     sub.state = SubState::Live(subscription);
                     sub.established = true;
+                    sub.granted_us = period_us;
                 }
                 true
             }
             Frame::Refusal { id, status, text } => {
+                if let Some(at) = self
+                    .cancelled
+                    .iter()
+                    .position(|cancelled| *cancelled == u64::from(id))
+                {
+                    self.cancelled.remove(at);
+                    return false;
+                }
                 if !self.ready {
                     self.rejected = Some(Error::Refused {
                         status: Status(status),
@@ -477,13 +564,18 @@ impl Shared {
                 let matches = |s: &Sub| {
                     s.state == SubState::Opening(id) || s.state == SubState::Subscribing(id)
                 };
-                if let Some(sub) = self.subs.iter_mut().find(|s| matches(s))
-                    && sub.established
-                {
-                    sub.state = SubState::Waiting;
+                let Some(at) = self.subs.iter().position(matches) else {
+                    return true;
+                };
+                if self.subs[at].established {
+                    self.subs[at].state = SubState::Waiting;
                     self.sub_refused();
                     return false;
                 }
+                // A subscription that never worked and is refused is dropped, and remembered for
+                // one question about its state.
+                let sub = self.subs.remove(at);
+                self.record_refusal(sub.local, Status(status));
                 true
             }
             Frame::JobStarted { job, .. } => {
@@ -663,6 +755,8 @@ impl Session {
                 values: ValueQueue::new(),
                 events: VecDeque::new(),
                 dropped_events: Arc::new(AtomicU64::new(0)),
+                cancelled: Vec::with_capacity(CANCELLED_MAX),
+                refused: Vec::with_capacity(REFUSED_MAX),
                 jobs: Vec::new(),
                 ended_early: VecDeque::new(),
                 job_events: VecDeque::new(),
@@ -797,6 +891,8 @@ impl Session {
             });
         }
         self.shared.ended_early.clear();
+        // The service forgets the requests of a connection that ended, so nothing will answer them.
+        self.shared.cancelled.clear();
         self.connection = None;
         self.shared.ready = false;
         self.shared.features = 0;
@@ -1330,6 +1426,7 @@ impl Session {
             only_changes,
             state: SubState::Subscribing(id),
             established: false,
+            granted_us: 0,
         });
         Ok((id, local, move |frame: Frame<'_>| match frame {
             Frame::Subscribed { period_us, .. } => Some(Ok(Subscription {
@@ -1344,18 +1441,110 @@ impl Session {
         self.shared.subs.retain(|s| s.local != local);
     }
 
+    /// Takes a subscription off the books without waiting for the service. A live one is
+    /// unsubscribed there; one still being answered is cancelled, and its answer unsubscribed.
+    pub(crate) fn cancel_subscription(&mut self, local: u64) {
+        let Some(server) = self.shared.take_sub(local) else {
+            return;
+        };
+        let id = self.shared.id();
+        if self
+            .queue(&Frame::Unsubscribe {
+                id,
+                subscription: server,
+            })
+            .is_ok()
+        {
+            self.shared.unheard.push(id);
+        }
+    }
+
+    /// Asks for a subscription and returns its local id at once, without waiting for the service.
+    /// It stands until [`Session::unsubscribe`] or a refusal from the service: it is sent again
+    /// after a reconnect. Its values come under the id, from [`Session::next_value`].
+    pub fn subscribe_pending(
+        &mut self,
+        handle: &mut Handle,
+        method: u16,
+        period_us: u64,
+        only_changes: bool,
+    ) -> Result<u64, Error> {
+        if handle.generation != self.generation {
+            *handle = self.open(&handle.name.clone(), &handle.tag.clone())?;
+        }
+        self.subscribe_pending_on(handle, method, period_us, only_changes)
+    }
+
+    /// [`Session::subscribe_pending`] on a handle that is current, without reopening it.
+    pub(crate) fn subscribe_pending_on(
+        &mut self,
+        handle: &Handle,
+        method: u16,
+        period_us: u64,
+        only_changes: bool,
+    ) -> Result<u64, Error> {
+        if handle.generation != self.generation {
+            return Err(Error::Stale);
+        }
+        self.next_local += 1;
+        let local = self.next_local;
+        let mut sub = Sub {
+            local,
+            name: handle.name.clone(),
+            tag: handle.tag.clone(),
+            method,
+            period_us,
+            only_changes,
+            // Without a connection it waits: the next Welcome opens it and sends it again.
+            state: SubState::Waiting,
+            established: false,
+            granted_us: 0,
+        };
+        if self.shared.ready && self.connection.is_some() {
+            let id = self.shared.id();
+            self.queue(&Frame::Subscribe {
+                id,
+                device: handle.device,
+                contract: handle.contract,
+                method,
+                period_us,
+                only_changes,
+            })?;
+            sub.state = SubState::Subscribing(id);
+        }
+        self.shared.subs.push(sub);
+        Ok(local)
+    }
+
+    /// Where the subscription `id` stands, as of what the service has said so far. See
+    /// [`SubscriptionState`].
+    pub fn subscription_state(&mut self, id: u64) -> SubscriptionState {
+        if let Some(sub) = self.shared.subs.iter().find(|s| s.local == id) {
+            return match sub.state {
+                SubState::Live(_) => SubscriptionState::Live {
+                    period_us: sub.granted_us,
+                },
+                _ => SubscriptionState::Pending,
+            };
+        }
+        match self
+            .shared
+            .refused
+            .iter()
+            .position(|(local, _)| *local == id)
+        {
+            Some(at) => SubscriptionState::Refused(self.shared.refused.remove(at).1),
+            None => SubscriptionState::Unknown,
+        }
+    }
+
     /// Takes a subscription off the books. Returns the request to send, if it
     /// is live on this connection.
     pub(crate) fn op_unsubscribe(
         &mut self,
         local: u64,
     ) -> Result<Option<(u32, impl Pick<()> + use<>)>, Error> {
-        let live = self.shared.subs.iter().find_map(|s| match s.state {
-            SubState::Live(server) if s.local == local => Some(server),
-            _ => None,
-        });
-        self.forget(local);
-        let Some(subscription) = live else {
+        let Some(subscription) = self.shared.take_sub(local) else {
             return Ok(None);
         };
         let id = self.shared.id();
@@ -1441,7 +1630,8 @@ impl Session {
     }
 
     /// Asks for a method's result every `period_us`. The subscription is
-    /// restored after any reconnect.
+    /// restored after any reconnect. A timeout keeps it, and only a refusal from the service drops
+    /// it (see `docs/client.md`).
     pub fn subscribe(
         &mut self,
         handle: &mut Handle,
@@ -1457,8 +1647,11 @@ impl Session {
         }
         let (id, local, pick) = self.op_subscribe(handle, method, period_us, only_changes)?;
         let result = self.wait(id, pick);
-        if result.is_err() {
-            self.forget(local);
+        match result {
+            Ok(_) => {}
+            Err(Error::Refused { .. }) => self.forget(local),
+            // Nothing stands when the call fails: a late answer is unsubscribed.
+            Err(_) => self.cancel_subscription(local),
         }
         result
     }
