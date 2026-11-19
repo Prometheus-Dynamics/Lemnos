@@ -2675,6 +2675,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-lend-raw-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-contract-camera-isp",
+ "lemnos-contract-camera-receiver",
+ "lemnos-contract-isp-pisp",
+ "lemnos-core",
+ "lemnos-daemon-ready",
+ "lemnos-driver-pisp",
+ "lemnos-linux-stream",
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-line-hold"
 version = "2.0.1-dev"
 dependencies = [

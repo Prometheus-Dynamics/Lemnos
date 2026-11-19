@@ -648,6 +648,37 @@ fn compose(c: &mut Checks) {
     );
 }
 
+/// The lend check: the receiver's dma-bufs lent, with no copy, to the PiSP back end through
+/// lemnosd, while a consumer holds frames (`lemnos-lend-raw-check`).
+fn lend_raw(c: &mut Checks) {
+    c.check(
+        load(
+            "/lemnos.ko",
+            "owned=lemnos,test-block,lemnos,test-csi2,lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1",
+        ) == 0,
+        "module loaded for the lend check",
+    );
+    c.check(bind_block(PISP) == 0, "PiSP block bound for the lend check");
+    c.check(bind_csi2() == 0, "receiver bound for the lend check");
+    c.check(
+        run(&[
+            "/lemnos-lend-raw-check",
+            "/lemnosd",
+            CSI2,
+            PISP,
+            cma_heap(),
+        ]) == 0,
+        "lemnos-lend-raw-check",
+    );
+    c.check(put(CSI2_UNBIND, CSI2) == 0, "receiver unbound after the lend check");
+    c.check(put(UNBIND, PISP) == 0, "PiSP block unbound after the lend check");
+    c.check(
+        forget_override(PISP) == 0 && forget_override(CSI2) == 0,
+        "lend check overrides cleared",
+    );
+    c.check(unload("lemnos") == 0, "module unloaded after the lend check");
+}
+
 /// The receiver's stuck-DMA check.
 fn csi2_wedge(c: &mut Checks) {
     c.check(
@@ -1224,6 +1255,12 @@ const STANZAS: &[Stanza] = &[
         block: Some(BLOCK_WITH_RECEIVER),
         needs: &[],
         run: compose,
+    },
+    Stanza {
+        name: "lend-raw",
+        block: Some(BLOCK_WITH_RECEIVER),
+        needs: &[],
+        run: lend_raw,
     },
     Stanza {
         name: "csi2-wedge",

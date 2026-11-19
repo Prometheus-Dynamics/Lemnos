@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-lend-raw-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Lend check in the QEMU harness: a receiver's dma-bufs lent, with no copy, to the PiSP back end through lemnosd, while a consumer holds frames"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../../engine/client" }
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-daemon-ready = { path = "../daemon-ready" }
+lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
+lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
+lemnos-contract-isp-pisp = { path = "../../../contracts/isp-pisp" }
+lemnos-driver-pisp = { path = "../../../drivers/pisp", default-features = false, features = ["device"] }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys", features = ["test-csi2"] }
