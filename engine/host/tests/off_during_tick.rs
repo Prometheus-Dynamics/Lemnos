@@ -74,7 +74,12 @@ fn an_off_during_a_tick_still_drops_the_driver_once_the_tick_lets_go() {
         &[entry::<Gate>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        // A tick held here is longer than the default call deadline, which would mark the device
+        // hung. The deadline is set well past the hold, so the device is not hung.
+        Options {
+            call_deadline: Duration::from_secs(60),
+            ..Options::default()
+        },
     )
     .unwrap();
     assert_eq!(DROPS.load(Ordering::Acquire), 0);

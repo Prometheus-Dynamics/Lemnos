@@ -635,6 +635,25 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The instance of `slot`, once the tick or call holding it lets go. A teardown (a switch-off, or
+/// the host's shutdown) must not be skipped because a tick is running, so it waits. A call that
+/// never returns holds the instance for good; its deadline marks the device hung, and then there is
+/// nothing to wait for, so `None`. Polled, so a teardown waits no longer than the call it waits on.
+fn instance_for_teardown(slot: &Slot) -> Option<MutexGuard<'_, Option<Box<dyn Instance>>>> {
+    loop {
+        match slot.instance.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if slot.hung.load(Ordering::Acquire) {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 /// How many distinct callers a device keeps track of for [`Router::others_use`].
 const MAX_USERS: usize = 16;
 
@@ -3846,7 +3865,10 @@ impl Host {
         // `try_lock` that found it held skipped the switch-off altogether: the device reported
         // off, its END hung up, and the driver (and the hardware it held) stayed up. The request
         // is answered once the driver has been told, so the answer means the device is off.
-        let mut guard = lock(&slot.instance);
+        // A call that never returned holds the driver for good: there is nothing left to switch off.
+        let Some(mut guard) = instance_for_teardown(&slot) else {
+            return Ok(());
+        };
         let held = match guard.as_mut() {
             Some(instance) if instance.holds_off() => {
                 match catch_unwind(AssertUnwindSafe(|| instance.off())) {
@@ -3927,7 +3949,8 @@ impl Host {
             self.inner.end_jobs(slot, Status::INTERRUPTED);
             slot.end_close();
             slot.stop_wait();
-            if let Ok(mut guard) = slot.instance.try_lock() {
+            // Waited for: a tick running now must not keep the driver (and its hardware) up.
+            if let Some(mut guard) = instance_for_teardown(slot) {
                 let dead = guard.take();
                 drop(guard);
                 drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
