@@ -12,15 +12,15 @@ workspace = true
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
 # Orion's client, pinned to the revision the bridge uses. The precheck is Orion's `security_precheck`.
-orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "b76a039cb202f0506bc7b2272a62fe9b5d584795", default-features = false }
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd", default-features = false }
 
 [dev-dependencies]
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
-orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "b76a039cb202f0506bc7b2272a62fe9b5d584795", default-features = false }
-orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "b76a039cb202f0506bc7b2272a62fe9b5d584795" }
-orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "b76a039cb202f0506bc7b2272a62fe9b5d584795" }
-orion-comm-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "b76a039cb202f0506bc7b2272a62fe9b5d584795" }
+orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd", default-features = false }
+orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
+orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
+orion-comm-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [package.metadata.lemnos]
