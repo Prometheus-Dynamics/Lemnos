@@ -11,7 +11,10 @@
 //! 2. the timebase started and checked, then the watchdog clock measured, as the check build does; either
 //!    failing ends the run before the card or USB is touched;
 //! 3. the shared entry: arm at the longest setting, read back, lower to the smallest period covering
-//!    [`RUN_BUDGET_US`] at the measured clock (the check build's setting), fed after each verified round;
+//!    [`RUN_BUDGET_US`] at the measured clock (the check build's setting). The dogs are kicked only by the
+//!    session's feed after a verified write round: a write the storage took whole and its read-back equal
+//!    (`fl1::scratch::stage_scratch`, `VerifiedFeed`, `Watched`). A read round, a refusal, the idle wait and the
+//!    USB poll never feed;
 //! 4. the card, before USB: the SD pads must be on the SD function, the host must have named a controller,
 //!    the card must start and be the card of record (its CID and size), and the data clock must start. Any
 //!    of these failing ends the run with the card untouched by a write and USB never pulled up;
@@ -31,8 +34,10 @@ use lemnos_flash_stage::guard::Cause;
 use lemnos_flash_stage::wait::Clock;
 use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
 use lemnos_k230_usbboot_stage::fl1::check::{self, MAX_TOP, RUN_BUDGET_US};
-use lemnos_k230_usbboot_stage::fl1::run::{Profile, stage_with};
-use lemnos_k230_usbboot_stage::fl1::scratch::{SCRATCH_IDENTITY, Scratch, card_of_record};
+use lemnos_k230_usbboot_stage::fl1::run::Profile;
+use lemnos_k230_usbboot_stage::fl1::scratch::{
+    Progress, SCRATCH_IDENTITY, Scratch, Watched, card_of_record, stage_scratch,
+};
 use lemnos_k230_usbboot_stage::fl1::storage::{Retried, Sectors};
 use lemnos_k230_usbboot_stage::fl1::usb::Device;
 use lemnos_k230_usbboot_stage::pads;
@@ -164,39 +169,51 @@ where
         rounds: Some(&known.rounds),
     };
     let Buffers { buf, scratch, rx } = bufs;
-    let outcome = stage_with(regs, clock, buf, scratch, profile, |regs, clock| {
-        let mut refuse = |regs: &mut R, line: &str, step: u8| {
-            console.line(regs, &[line]);
-            Cause::Setup { step }
-        };
-        if pads::sd_pads_on_sd_function(&pads::dump(regs)).is_err() {
-            return Err(refuse(regs, PADS_LINE, step::PADS));
-        }
-        let Some(sd) = sd else {
-            return Err(refuse(regs, NO_CONTROLLER_LINE, step::NO_CONTROLLER));
-        };
-        let card = SdhciHost::start(sd).and_then(Card::init);
-        let Ok(mut card) = card else {
-            return Err(refuse(regs, NO_CARD_LINE, step::NO_CARD));
-        };
-        card_seen.cid.set(Some(card.cid()));
-        card_seen.blocks.set(card.blocks());
-        if !card_of_record(&card.cid(), card.blocks()) {
-            return Err(refuse(regs, NOT_THE_CARD_LINE, step::NOT_THE_CARD));
-        }
-        if card.host_mut().data_clock().is_err() {
-            return Err(refuse(regs, NO_DATA_CLOCK_LINE, step::NO_DATA_CLOCK));
-        }
-        let storage = Scratch::new(Sectors::new(
-            Retried::new(card, &card_seen.retries),
-            *clock,
-            CARD_DECLARED,
-        ));
-        console.line(regs, &[CARD_READY_LINE]);
-        let mut hw = Dwc2::with(dwc2, rx, stats);
-        hw.core_reset().map_err(|_| Cause::Setup { step: 1 })?;
-        Ok((Device::new(hw, *clock), storage))
-    });
+    let progress = Progress::new();
+    let outcome = stage_scratch(
+        regs,
+        clock,
+        buf,
+        scratch,
+        profile,
+        &progress,
+        |regs, clock| {
+            let mut refuse = |regs: &mut R, line: &str, step: u8| {
+                console.line(regs, &[line]);
+                Cause::Setup { step }
+            };
+            if pads::sd_pads_on_sd_function(&pads::dump(regs)).is_err() {
+                return Err(refuse(regs, PADS_LINE, step::PADS));
+            }
+            let Some(sd) = sd else {
+                return Err(refuse(regs, NO_CONTROLLER_LINE, step::NO_CONTROLLER));
+            };
+            let card = SdhciHost::start(sd).and_then(Card::init);
+            let Ok(mut card) = card else {
+                return Err(refuse(regs, NO_CARD_LINE, step::NO_CARD));
+            };
+            card_seen.cid.set(Some(card.cid()));
+            card_seen.blocks.set(card.blocks());
+            if !card_of_record(&card.cid(), card.blocks()) {
+                return Err(refuse(regs, NOT_THE_CARD_LINE, step::NOT_THE_CARD));
+            }
+            if card.host_mut().data_clock().is_err() {
+                return Err(refuse(regs, NO_DATA_CLOCK_LINE, step::NO_DATA_CLOCK));
+            }
+            let storage = Watched::new(
+                Scratch::new(Sectors::new(
+                    Retried::new(card, &card_seen.retries),
+                    *clock,
+                    CARD_DECLARED,
+                )),
+                &progress,
+            );
+            console.line(regs, &[CARD_READY_LINE]);
+            let mut hw = Dwc2::with(dwc2, rx, stats);
+            hw.core_reset().map_err(|_| Cause::Setup { step: 1 })?;
+            Ok((Device::new(hw, *clock), storage))
+        },
+    );
     match outcome {
         Ok(kind) => Cause::Ended(kind),
         Err(cause) => cause,

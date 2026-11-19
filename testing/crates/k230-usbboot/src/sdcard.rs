@@ -45,6 +45,11 @@ pub struct SimCard {
     /// Writes to this sector fail their data CRC this many times (the bench's once in 14,000 at 25 MHz): the
     /// block is dropped and the card waits for a stop (CMD12) before the next data command.
     pub crc_fails: Option<(u64, u32)>,
+    /// The card takes this sector's data, then stays busy for good: the write round that holds it never gets to
+    /// its read-back and compare.
+    pub stall_after_write: Option<u64>,
+    /// When the stall began.
+    pub stalled_at: Option<std::time::Instant>,
 }
 
 impl SimCard {
@@ -57,6 +62,8 @@ impl SimCard {
             writes: Vec::new(),
             drops_writes: false,
             crc_fails: None,
+            stall_after_write: None,
+            stalled_at: None,
         }
     }
 
@@ -203,6 +210,8 @@ pub struct SimSdhci {
     writing: RefCell<Option<(u64, Vec<u32>)>>,
     busy_left: Cell<u32>,
     waits_for_stop: Cell<bool>,
+    /// The card stalled (`SimCard::stall_after_write`): busy for good.
+    stuck: Cell<bool>,
 }
 
 impl SimSdhci {
@@ -217,6 +226,7 @@ impl SimSdhci {
             writing: RefCell::new(None),
             busy_left: Cell::new(0),
             waits_for_stop: Cell::new(false),
+            stuck: Cell::new(false),
         };
         model.words[CAPABILITIES / 4].set(0x276a_6481);
         model
@@ -298,6 +308,7 @@ impl SimSdhci {
             3 => self.reply(RCA << 16),
             9 => self.long_reply((1u128 << 126) | (u128::from(blocks / 1024 - 1) << 48)),
             7 | 16 => self.reply(0x900),
+            13 if self.stuck.get() => self.reply(0xe00),
             13 => {
                 let ready = self.busy_left.get() == 0;
                 self.busy_left.set(
@@ -362,8 +373,14 @@ impl SimSdhci {
             return;
         }
         card.store(sector, data);
+        let stalls = card.stall_after_write == Some(sector);
+        if stalls && card.stalled_at.is_none() {
+            card.stalled_at = Some(std::time::Instant::now());
+        }
         drop(card);
-        self.busy_left.set(BUSY_POLLS);
+        self.busy_left
+            .set(if stalls { u32::MAX } else { BUSY_POLLS });
+        self.stuck.set(self.stuck.get() || stalls);
         self.word(PRESENT_STATE).set(0);
         self.raise(INT_XFER_DONE);
     }

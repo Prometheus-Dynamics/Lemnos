@@ -219,6 +219,10 @@ pub struct Plan {
     pub outside_window: bool,
     /// The build the run is for.
     pub mode: Mode,
+    /// Rehearsal only, never on the board: after a failure the host does not send END but keeps the session busy
+    /// for this long (a read of one range sector and an identify, every 500 ms) or until the board leaves. A stage
+    /// that feeds on anything but verified progress stays up under it; one that does not is reset by its watchdog.
+    pub keep_asking: Option<Duration>,
 }
 
 impl Plan {
@@ -229,6 +233,7 @@ impl Plan {
             bounds: Bounds::BOARD,
             outside_window: false,
             mode: Mode::Check,
+            keep_asking: None,
         }
     }
 
@@ -471,7 +476,33 @@ fn claim_and_check(
         Mode::Check => bulk_checks(&mut *link, plan, seen, outcome, &mut failures, log),
         Mode::Scratch => scratch::checks(&mut *link, &plan.bounds, &mut failures, log),
     };
-    if !ended {
+    if let (false, Some(bound)) = (ended, plan.keep_asking) {
+        let from = Instant::now();
+        let mut asked = 0u32;
+        while from.elapsed() < bound {
+            let alive = matches!(
+                read_frames(
+                    &mut *link,
+                    &plan.bounds,
+                    lemnos_k230_usbboot_stage::fl1::scratch::SCRATCH_FIRST,
+                    1
+                ),
+                Ok(Ok(_))
+            ) && link
+                .bulk_out(&Request::identify().encode(), plan.bounds.bulk)
+                .and_then(|()| link.bulk_in(REPLY_MAX, plan.bounds.bulk))
+                .is_ok();
+            if !alive {
+                break;
+            }
+            asked += 1;
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        log(&format!(
+            "kept the session busy after the failure (rehearsal): {asked} rounds of a read and an identify over {:.1} s, no END",
+            from.elapsed().as_secs_f64()
+        ));
+    } else if !ended {
         // Ask for the end anyway: the stage resets on it. If it cannot be sent, the stage's idle limit and its
         // watchdog are the way back.
         match end(&mut *link, &plan.bounds) {

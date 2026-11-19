@@ -813,6 +813,11 @@ impl RegAccess for Bus {
 
     fn write32(&mut self, addr: usize, value: u32) {
         if (wdt::BASE0..wdt::BASE1 + 0x800).contains(&addr) {
+            if wdt::BASES.iter().any(|&base| addr == base + wdt::CRR) && value == wdt::KICK {
+                let at = self.started.elapsed().as_secs_f64();
+                let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                shared.kicks.push((at, addr));
+            }
             self.core.wdt_access(addr, Some(value));
             return;
         }
@@ -886,6 +891,8 @@ struct Shared {
     core: Option<Arc<Core>>,
     /// When the kernel published each device, by devnum.
     published: Vec<(u32, Instant)>,
+    /// Every watchdog kick (a CRR write of the kick value), with its time from the board's start and its address.
+    kicks: Vec<(f64, usize)>,
 }
 
 /// The card in the board's slot, if it has one.
@@ -977,6 +984,11 @@ impl SimBoard {
     /// What the kernel logged.
     pub fn kernel_log(&self) -> Vec<(f64, String)> {
         self.lock().kernel.clone()
+    }
+
+    /// Every watchdog kick so far: its time from the board's start and the register written.
+    pub fn kicks(&self) -> Vec<(f64, usize)> {
+        self.lock().kicks.clone()
     }
 
     /// The resets so far.
@@ -1365,6 +1377,12 @@ pub struct CardRun {
     pub resets: Vec<(f64, Reset)>,
     pub unexpected: Vec<String>,
     pub pad_writes_refused: u32,
+    /// Every watchdog kick, timed as the console is (from the load).
+    pub kicks: Vec<(f64, usize)>,
+    /// When the card stalled (`SimCard::stall_after_write`), timed as the console is.
+    pub stalled_at: Option<f64>,
+    /// The resets, timed as the console is.
+    pub resets_from_load: Vec<(f64, Reset)>,
 }
 
 /// Runs the plan's sequence against a board with `card` in its slot: the hashes before (step 1), the load and the
@@ -1385,6 +1403,7 @@ pub fn card_run(
     let mut board = SimBoard::with_card(faults, Some(card.clone()));
     let rom = board.rom();
     let started = board.load_and_start();
+    let load_after = started.duration_since(board.started).as_secs_f64();
     let outcome = crate::b2::run(&mut board, plan, rom.as_ref(), started, log);
     std::thread::sleep(Duration::from_millis(100));
     let run = CardRun {
@@ -1396,6 +1415,13 @@ pub fn card_run(
         resets: board.resets(),
         unexpected: board.unexpected(),
         pad_writes_refused: board.pad_writes_refused(),
+        kicks: board.kicks(),
+        stalled_at: None,
+        resets_from_load: board
+            .resets()
+            .into_iter()
+            .map(|(at, r)| (at - load_after, r))
+            .collect(),
     };
     board.stop();
     let held = lock(&card);
@@ -1406,6 +1432,9 @@ pub fn card_run(
     CardRun {
         after,
         writes: held.writes.clone(),
+        stalled_at: held
+            .stalled_at
+            .map(|at| at.duration_since(started).as_secs_f64()),
         ..run
     }
 }
@@ -1415,11 +1444,36 @@ impl CardRun {
     /// Empty when every region hashes as before (the scratch range too: it is zeroed at the end) and every write
     /// was inside the range.
     pub fn problems(&self) -> Vec<String> {
+        self.problems_where(true)
+    }
+
+    /// As [`CardRun::problems`], with the scratch range's own hash (R0) left out: for a run that stops before it
+    /// zeroes the range.
+    pub fn problems_outside(&self) -> Vec<String> {
+        self.problems_where(false)
+    }
+
+    /// The kicks made by the session's feeds: those after the card's ready line (the arming's kicks come before it).
+    pub fn feed_kicks(&self) -> Vec<(f64, usize)> {
+        let ready = self
+            .console
+            .iter()
+            .find(|(_, l)| l.starts_with(lemnos_driver_k230_usbboot_sys::scratch::CARD_READY_LINE))
+            .map_or(f64::INFINITY, |(at, _)| *at);
+        self.kicks
+            .iter()
+            .copied()
+            .filter(|(at, _)| *at > ready)
+            .collect()
+    }
+
+    fn problems_where(&self, range_too: bool) -> Vec<String> {
         use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
         let mut out: Vec<String> = self
             .before
             .iter()
             .zip(&self.after)
+            .filter(|(b, _)| range_too || !b.0.starts_with("R0"))
             .filter(|(b, a)| b.1 != a.1)
             .map(|(b, a)| format!("{} changed: {} before, {} after", b.0, b.1, a.1))
             .collect();
