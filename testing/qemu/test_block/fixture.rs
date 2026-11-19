@@ -212,6 +212,12 @@ unsafe extern "C" {
     pub(crate) fn lemnos_test_phys_to_virt(at: bindings::phys_addr_t) -> *mut c_void;
     /// `pfn_valid`.
     pub(crate) fn lemnos_test_pfn_valid(pfn: c_ulong) -> c_int;
+    /// `local_irq_save`: the flags it saved.
+    pub(crate) fn lemnos_test_local_irq_save() -> c_ulong;
+    /// `local_irq_restore`.
+    pub(crate) fn lemnos_test_local_irq_restore(flags: c_ulong);
+    /// `page_ref_count(pfn_to_page(pfn))`: the caller has checked `pfn` with `pfn_valid`.
+    pub(crate) fn lemnos_test_page_refcount(pfn: c_ulong) -> c_int;
 }
 
 /// A `struct attribute` of a name and a mode, as __ATTR fills one.
