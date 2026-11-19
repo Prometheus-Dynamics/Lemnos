@@ -1062,6 +1062,41 @@ watchdog did not bring the board back. STOPPED; nothing done to the board since.
   USB, U-Boot's own `boot`). Why a boot from the card's own headers would differ is not looked at here.
 - *Ways back (none taken; they wait for a word):* a login on the console and `reboot` (the SoC reset, then the
   ROM with a card it does not boot, as `reset` did from U-Boot three times today); or one press of RST.
+  (Later: (b) was taken and refuted; see the way back after C2 below.)
+
+**The way back after C2 (2026-11-18 17:2x; main session; rules: a word from the coordinator for each way).**
+- *(a) serial SysRq:* not possible. The image's kernel (embedded config, read on the PC) has
+  `# CONFIG_MAGIC_SYSRQ is not set`. Nothing sent.
+- *(b) login and `reboot`:* allowed because the image's own files give root no password (`/etc/shadow` root field
+  empty in the image's p1; the image recipe's os.fragment lines 39-43: root login on, getty on ttyS0 at 115200, no root
+  password set). Tool `K230R/bench/login-reboot.py`, rehearsed on three PC stand-ins (no password: back; a password
+  asked: stops after `root`; no prompt: stops). Typed: a CR, `root`, `reboot`; no password was asked. The shutdown
+  was clean (p1 remounted read-only), then `reboot: Restarting system` and nothing: no console output and no fresh
+  enumeration in 118 s. **Refuted:** Linux's restart does not reset this SoC with this image (most likely no SBI system
+  reset). Record `K230R/bench/WAYBACK-console.log`, `WAYBACK.md`.
+- *(c) one RST press* (the user, 17:42): the board came back as ROM USB under a fresh device number.
+
+**C3: C2 with `clk_ignore_unused` (hypothesis, written before the run, `K230R/bench/C3-plan.md`).** C2's watchdog
+stopped when Linux disabled its clock as unused; with `clk_ignore_unused` on the kernel command line the clock stays
+on, nothing in Linux feeds or stops the watchdog, so it resets the SoC about 89.5 s after the enable and the ROM
+comes back as 29f1:0230 under a new device number. Refuted if the command line carries the word and no reset comes.
+Commands at the prompt (no saveenv): `printenv bootcmd`, `printenv bootargs`,
+`setenv bootargs "${bootargs} clk_ignore_unused"`, `printenv bootargs`, the C2 watchdog writes (TOP 10, restart key,
+enable), `md.l`, `boot`. Rehearsed on the U-Boot stand-in (`C3-rehearsal.log`, 9 of 9 sent).
+
+**C3, the run (2026-11-18 17:42; one run; lock held; no hands): confirmed.** Record `K230R/bench/C3-console.log`,
+`run-C3.out`. U-Boot's `bootcmd` loads `/boot/Image` and the tree from the card and runs `bootm`; it does not set
+`bootargs`, so the appended word reached the kernel: `Kernel command line: root=/dev/mmcblk0p1 rootwait rw
+rootfstype=ext4 console=ttyS0,115200 earlycon=sbi clk_ignore_unused`. The login prompt came at about 6 s; 84 s
+later the console printed the ROM's `boot failed with exit code 13` (the card has no boot copy), and the board
+enumerated as 29f1:0230 dev 117 (was 116), 89.9 s after the last command: the watchdog's 89.5 s period.
+- *What it settles:* C2's missing reset was Linux gating the watchdog's clock. With `clk_ignore_unused` (or a kernel
+  that keeps the watchdog's clock, or a watchdog driver that owns it), a booted kernel under the armed watchdog comes
+  back by itself: the way back after a kernel boot no longer needs hands.
+- *Image requirement this gives (for the K230D image, via the coordinator):* either `clk_ignore_unused` on the command
+  line, or the watchdog's clock marked critical / the dw_wdt driver bound to it, so an armed watchdog survives the
+  kernel's unused-clock pass. And Linux's own `reboot` does not reset this board today; an image that needs `reboot`
+  must give the kernel a working system reset.
 
 **R2 is dropped** (no image exists for report-then-SoC-reset; the FL1 stage image gets its own review first).
 
