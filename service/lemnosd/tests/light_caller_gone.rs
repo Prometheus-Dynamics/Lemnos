@@ -6,6 +6,8 @@
 //! socket's end at once, then the connection is released) plus the driver's next frame, which is
 //! drawn on the lane in the same call that tells it.
 
+#![allow(clippy::print_stdout)]
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
