@@ -6,8 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use lemnos_driver_k230_usbboot_sys::b2::{NO_CLOCK_LINE, TIMEBASE_STOPPED_LINE};
 use lemnos_k230_usbboot::b2::{self, Access, Board, Bounds, Link, Plan, Seen, Verdict, usb::Sysfs};
-use lemnos_k230_usbboot::b2sim::{Faults, Reset, SimBoard};
+use lemnos_k230_usbboot::b2sim::{Faults, Reset, SimBoard, TimeCsr};
 
 fn quick() -> Bounds {
     Bounds {
@@ -132,6 +133,69 @@ fn the_model_cannot_enumerate_a_driver_that_never_rearms_endpoint_0_out() {
         "{:?}",
         board.kernel_log()
     );
+    board.stop();
+}
+
+/// B2 run 1's board: `time` reads 0 and stays there until the stage writes the system timer's enables.
+/// The stage starts it, checks it against the watchdog's counter, and the check passes.
+#[test]
+fn a_timebase_stopped_in_rom_state_is_started_and_checked_and_the_check_passes() {
+    let faults = Faults {
+        time: TimeCsr::StoppedUntilEnabled,
+        ..Faults::default()
+    };
+    let (outcome, resets, lines, board) = rehearse(faults, quick());
+    assert_eq!(outcome.verdict, Verdict::Passed, "{lines:#?}");
+    assert_eq!(resets.len(), 1);
+    assert_eq!(resets[0].1, Reset::Soc);
+    let console: Vec<String> = board.console().into_iter().map(|(_, l)| l).collect();
+    assert!(
+        !console
+            .iter()
+            .any(|l| l == NO_CLOCK_LINE || l == TIMEBASE_STOPPED_LINE)
+    );
+    let words = outcome.record.expect("the record was read");
+    let w = |name: &str| words[lemnos_k230_usbboot_stage::fl1::check::record::index(name)];
+    assert!(w("tb-cross-counts") >= lemnos_k230_usbboot_stage::fl1::check::CROSS_COUNTS);
+    assert_ne!(w("tb-cross-us"), 0);
+    board.stop();
+}
+
+/// A timebase the enables do not start: the stage says so on the console, never touches USB, and takes the
+/// SoC reset; the host gives up at its bound and sees the boot ROM back.
+#[test]
+fn a_timebase_that_never_moves_stops_the_stage_before_usb_and_resets() {
+    let faults = Faults {
+        time: TimeCsr::Dead,
+        ..Faults::default()
+    };
+    let bounds = Bounds {
+        back: Duration::from_secs(10),
+        ..quick()
+    };
+    let (outcome, resets, lines, board) = rehearse(faults, bounds);
+    assert!(matches!(outcome.verdict, Verdict::GaveUp(_)), "{lines:#?}");
+    assert!(outcome.stage.is_none());
+    assert!(outcome.back.is_some(), "{lines:#?}");
+    assert_eq!(resets.len(), 1);
+    assert_eq!(resets[0].1, Reset::Soc);
+    let console: Vec<String> = board.console().into_iter().map(|(_, l)| l).collect();
+    assert!(
+        console.iter().any(|l| l == TIMEBASE_STOPPED_LINE),
+        "{console:#?}"
+    );
+    board.stop();
+}
+
+/// A ROM that left `time` running: the enables change nothing and the check passes.
+#[test]
+fn a_timebase_already_running_passes_the_same_way() {
+    let faults = Faults {
+        time: TimeCsr::Running,
+        ..Faults::default()
+    };
+    let (outcome, _, lines, board) = rehearse(faults, quick());
+    assert_eq!(outcome.verdict, Verdict::Passed, "{lines:#?}");
     board.stop();
 }
 

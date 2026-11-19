@@ -33,7 +33,7 @@ use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::usb::LANGUAGE;
 use lemnos_k230_usbboot_stage::fl1::check::{TIMEBASE_HZ, WINDOW_LEN};
 use lemnos_k230_usbboot_stage::pads::PadGuard;
-use lemnos_k230_usbboot_stage::sysctl::{SOC_GLB_RST, SOC_RESET_VALUE};
+use lemnos_k230_usbboot_stage::sysctl::{SOC_GLB_RST, SOC_RESET_VALUE, STC_ENABLES};
 use lemnos_k230_usbboot_stage::wdt::{self, RegAccess};
 
 use crate::b2::{Access, Board, Link, LinkError, PORT, Seen};
@@ -72,9 +72,37 @@ pub struct Faults {
     pub rev_420a: bool,
     /// This user may not open the node (no udev rule grants it).
     pub access_denied: bool,
+    /// The core's `time` CSR. The board's boot ROM leaves it at 0, not moving (B2 run 1); the default is that.
+    pub time: TimeCsr,
     /// A driver fault for the model to catch: endpoint 0 OUT is never enabled again after the first
     /// time (the old driver's fault). The kernel cannot enumerate it.
     pub no_ep0_rearm: bool,
+}
+
+/// How the model's `time` CSR behaves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeCsr {
+    /// Reads 0 and does not move until the system timer's clock and its counter are enabled (the
+    /// writes the vendor's SPL makes first, `STC_ENABLES`); then counts at 27 MHz. The board's ROM state.
+    #[default]
+    StoppedUntilEnabled,
+    /// Reads 0 and never moves, enabled or not.
+    Dead,
+    /// Counts at 27 MHz from the start, enabled or not (a ROM that left it running).
+    Running,
+}
+
+/// The model's `time` CSR: 27 MHz from the moment it starts.
+struct Timebase {
+    started: std::sync::OnceLock<Instant>,
+}
+
+impl Timebase {
+    fn ticks(&self) -> u64 {
+        self.started
+            .get()
+            .map_or(0, |s| s.elapsed().as_nanos() as u64 * 27 / 1000)
+    }
 }
 
 /// What reset the board.
@@ -191,8 +219,8 @@ impl Core {
             moved: Condvar::new(),
             wdt: Mutex::new(Watchdogs {
                 dogs: [
-                    wdt::Model::new(wdt::BASE0, WDT_HZ, wdt::Fault::None),
-                    wdt::Model::new(wdt::BASE1, WDT_HZ, wdt::Fault::None),
+                    wdt::Model::new(wdt::BASE0, WDT_HZ, wdt::Fault::None).timed(),
+                    wdt::Model::new(wdt::BASE1, WDT_HZ, wdt::Fault::None).timed(),
                 ],
                 last: Instant::now(),
             }),
@@ -213,12 +241,19 @@ impl Core {
         }
         let mut w = self.wdt.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let us = now.duration_since(w.last).as_micros() as u64;
-        if us == 0 {
+        // Whole cycles of the 750 kHz clock, the part of a cycle carried to the next tick: a tick per read
+        // in a tight loop must not run the counter fast or slow.
+        let ns = now.duration_since(w.last).as_nanos();
+        let cycles = (ns * u128::from(WDT_HZ) / 1_000_000_000) as u64;
+        if cycles == 0 {
             return;
         }
-        w.last = now;
-        let fired = w.dogs.iter_mut().fold(false, |f, d| d.advance_us(us) | f);
+        w.last +=
+            Duration::from_nanos((u128::from(cycles) * 1_000_000_000 / u128::from(WDT_HZ)) as u64);
+        let fired = w
+            .dogs
+            .iter_mut()
+            .fold(false, |f, d| d.advance_cycles(cycles) | f);
         drop(w);
         if fired {
             resume_unwind(Box::new(Reset::Watchdog));
@@ -653,6 +688,10 @@ struct Bus {
     started: Instant,
     line: Vec<u8>,
     lcr: u32,
+    timebase: &'static Timebase,
+    time: TimeCsr,
+    /// The system timer writes seen, in order.
+    stc: Vec<(usize, u32)>,
 }
 
 impl RegAccess for Bus {
@@ -688,6 +727,16 @@ impl RegAccess for Bus {
             a if a == SOC_GLB_RST && value == SOC_RESET_VALUE => {
                 resume_unwind(Box::new(Reset::Soc))
             }
+            a if STC_ENABLES.iter().any(|&(at, _)| at == a) => {
+                self.stc.push((a, value));
+                // The hart's timer clock and the counter itself: both are needed for `time` to move.
+                if self.time == TimeCsr::StoppedUntilEnabled
+                    && self.stc.contains(&STC_ENABLES[0])
+                    && self.stc.contains(&STC_ENABLES[2])
+                {
+                    let _ = self.timebase.started.set(Instant::now());
+                }
+            }
             a if a == uart => {
                 if self.lcr & 0x80 != 0 {
                     return;
@@ -719,13 +768,13 @@ impl Bus {
     }
 }
 
-/// The stage's clock: the PC's, in microseconds since the board started the stage.
+/// The stage's clock, as the image has it: the `time` CSR over 27 (the image's `Micros`).
 #[derive(Clone, Copy)]
-struct Micros(Instant);
+struct Micros(&'static Timebase);
 
 impl Clock for Micros {
     fn now_us(&mut self) -> u64 {
-        self.0.elapsed().as_micros() as u64
+        self.0.ticks() / (TIMEBASE_HZ / 1_000_000)
     }
 }
 
@@ -796,8 +845,9 @@ impl SimBoard {
         let started = self.started;
         let done = Arc::new(AtomicBool::new(false));
         let stage_done = done.clone();
+        let time = self.faults.time;
         self.threads.push(std::thread::spawn(move || {
-            let reset = run_stage(stage_core, shared.clone(), at);
+            let reset = run_stage(stage_core, shared.clone(), at, time);
             let when = started.elapsed().as_secs_f64();
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             s.resets.push((when, reset));
@@ -862,13 +912,23 @@ fn rom_seen(devnum: u32) -> Seen {
 }
 
 /// The check build from its entry, to its reset.
-fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant) -> Reset {
+fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant, time: TimeCsr) -> Reset {
+    // One small leak per simulated boot: the stage's clock is `Copy`, as the image's is.
+    let timebase: &'static Timebase = Box::leak(Box::new(Timebase {
+        started: std::sync::OnceLock::new(),
+    }));
+    if time == TimeCsr::Running {
+        let _ = timebase.started.set(at);
+    }
     let bus = Bus {
         core: core.clone(),
         shared: shared.clone(),
         started: at,
         line: Vec::new(),
         lcr: 0x03,
+        timebase,
+        time,
+        stc: Vec::new(),
     };
     let refused = Arc::new(Mutex::new(0u32));
     let refused_out = refused.clone();
@@ -878,12 +938,12 @@ fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant) -> Reset 
         if wdt::arm(&mut regs).is_err() {
             resume_unwind(Box::new(Reset::Soc));
         }
-        let ticks = move || at.elapsed().as_micros() as u64 * (TIMEBASE_HZ / 1_000_000);
+        let ticks = move || timebase.ticks();
         let mut known = Known::new(ticks());
         let stats = Stats::new();
         let (mut buf, mut scratch) = (vec![0u8; BUFFER_LEN], vec![0u8; BUFFER_LEN]);
         let (mut rx, mut window) = (vec![0u8; RX_LEN], vec![0u8; WINDOW_LEN]);
-        let mut clock = Micros(at);
+        let mut clock = Micros(timebase);
         let cause = stage_b2::check(
             &mut regs,
             ModelRegs(core.clone()),
