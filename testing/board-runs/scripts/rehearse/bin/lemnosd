@@ -1,0 +1,83 @@
+#!/bin/bash
+# (#!/bin/bash, not env: the process name must be this file's, as the real program's is.)
+# Stand-in lemnosd: feeds the watchdog every half period, keeps a gadget tree while configfs, the
+# controller and the gadget device's power allow, lists devices (with [[each]] cameras when the
+# board file has usb:class:0e), runs the helper pair, tears the gadget down on SIGTERM.
+. "$(dirname "$0")/../world.sh"
+board=/etc/lemnos/board.toml
+while [ $# -gt 0 ]; do case $1 in --board) board=$2; shift ;; esac; shift; done
+[ "$board" = /etc/lemnos/board.toml ] && board=$CR/etc/lemnos/board.toml
+sock=$CR/run/lemnos/lemnosd.sock
+started=$(awk '{print $1}' /proc/uptime)
+journal lemnosd "lemnosd starting on $board"
+[ -n "${STANDIN_NO_HINTS:-}" ] && journal lemnosd "not watching for hardware coming and going: Address family not supported by protocol"
+"$STANDIN_BIN/lemnosd-gsuper" &
+gs=$!
+echo "$gs" >"$W/units/lemnosd.children"
+teardown() {
+  rm -f "$sock"
+  rm -rf "$GADGET_DIR"
+  del_mount "$FFS_LINE"
+  kill -KILL "$gs" $(cat "$W/gsuper.child" 2>/dev/null) 2>/dev/null
+  exit 0
+}
+trap teardown TERM
+mkdir -p "$(dirname "$sock")"; : >"$sock"
+feed; last_feed=$started
+cam_seen=()
+gadget_state=failed gadget_reason="" up_since=""
+while :; do
+  up=$(awk '{print $1}' /proc/uptime)
+  if awk -v a="$up" -v b="$last_feed" 'BEGIN{exit !(a-b>=7.5)}'; then feed; last_feed=$up; fi
+  ok=1 why=""
+  configfs_on || { ok=0; why="configfs is not mounted: ENOENT at setup"; }
+  [ -e "$CR/sys/class/udc/$UDC_NAME" ] || { ok=0; why="the controller is not there: retrying"; }
+  [ -e "$W/gadget.off" ] && { ok=0; why="switched off"; }
+  hp=$(cat "$W/gsuper.child" 2>/dev/null)
+  if [ "$ok" = 1 ]; then
+    [ -z "$up_since" ] && up_since=$up
+    # A uevent brings the attempt forward (0.3 s); configfs sends none: the timer (2 s).
+    delay=0.3; [ -e "$W/configfs.remounted" ] && delay=2
+    if awk -v a="$up" -v b="$up_since" -v d="$delay" 'BEGIN{exit !(a-b>=d)}'; then
+      if [ ! -d "$GADGET_DIR" ]; then
+        mkdir -p "$GADGET_DIR/configs/c.1" "$GADGET_DIR/strings/0x409" "$GADGET_DIR/functions/ffs.$UDC_NAME"
+        grep -q 'E36-0001' "$board" 2>/dev/null && echo E36-0001 >"$GADGET_DIR/strings/0x409/serialnumber"
+      elif [ "$gadget_state" != running ]; then
+        journal lemnosd "gadget: the tree that was there is the board file's: adopted"
+      fi
+      mkdir -p "$CR/dev/usb-ffs/$UDC_NAME"; add_mount "$FFS_LINE"
+      echo "$UDC_NAME" >"$GADGET_DIR/UDC"
+      gadget_state=running; gadget_reason=""; rm -f "$W/configfs.remounted"
+    fi
+  else
+    up_since=""
+    if [ "$gadget_state" = running ] || [ "$gadget_reason" != "$why" ]; then journal lemnosd "gadget: $why"; fi
+    [ -e "$GADGET_DIR/UDC" ] && : >"$GADGET_DIR/UDC"
+    gadget_state=failed; gadget_reason=$why
+  fi
+  {
+    printf 'identity  system-identity  running  ok  \n'
+    printf 'watchdog  hw-watchdog  running  ok  \n'
+    if [ "$gadget_state" = running ]; then printf 'gadget  usb-gadget  running  ok  \n'
+    else printf 'gadget  usb-gadget  retrying  failed    (retrying: attempt 1, last reason: %s, next try in 1000 ms)\n' "$gadget_reason"; fi
+    printf 'imu  bmi088  running  ok  \n'
+    if grep -q 'usb:class:0e' "$board" 2>/dev/null; then
+      for f in "$CR"/sys/bus/usb/devices/*:*/bInterfaceClass; do
+        [ -e "$f" ] && [ "$(cat "$f")" = 0e ] || continue
+        port=$(basename "$(dirname "$f")"); port=${port%%:*}
+        first=$(cat "$W/cam.$port" 2>/dev/null) || { echo "$up" >"$W/cam.$port"; first=$up; }
+        # Hints on: bound on the uevent. Off: at the next 8 s look of the retry cap.
+        if [ -n "${STANDIN_NO_HINTS:-}" ]; then
+          due=$(awk -v s="$started" -v f="$first" 'BEGIN{ n = int((f - s) / 8) + 1; print s + 8 * n }')
+        else
+          due=$(awk -v f="$first" 'BEGIN{ print f + 0.3 }')
+        fi
+        if awk -v a="$up" -v d="$due" 'BEGIN{exit !(a>=d)}'; then printf 'camera@usb:%s  uvc  running  ok  \n' "$port"
+        else printf 'camera@usb:%s  uvc  retrying  failed    (retrying: attempt 1)\n' "$port"; fi
+      done
+    fi
+  } >"$W/list.tmp"
+  mv "$W/list.tmp" "$W/list"
+  [ -e "$W/units/lemnosd.ready" ] || : >"$W/units/lemnosd.ready"
+  sleep 0.1
+done

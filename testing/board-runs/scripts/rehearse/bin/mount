@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/../world.sh"
+calls "mount $*"
+target=${!#}
+[ "$target" = "$CR/sys/kernel/config" ] || { echo "stand-in mount: $target not modelled" >&2; exit 1; }
+add_mount "configfs $CR/sys/kernel/config configfs rw 0 0"; : >"$W/configfs.remounted"

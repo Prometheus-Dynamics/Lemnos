@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/../world.sh"
+calls "umount $*"
+[ "$1" = "$CR/sys/kernel/config" ] || { echo "stand-in umount: $1 not modelled" >&2; exit 1; }
+# The kernel refuses while a gadget tree is in it.
+[ -d "$GADGET_DIR" ] && { echo "umount: $1: target is busy." >&2; exit 32; }
+del_mount " $CR/sys/kernel/config configfs "

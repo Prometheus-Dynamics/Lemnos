@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Stand-in ip: the link interface has its address while the gadget is bound.
+. "$(dirname "$0")/../world.sh"
+calls "ip $*"
+case "$*" in
+*"addr show"*)
+  [ -s "$GADGET_DIR/UDC" ] && echo "5: lemnos0    inet 10.55.0.1/24 brd 10.55.0.255 scope global lemnos0" ; exit 0 ;;
+*"addr add"*) exit 0 ;;
+esac

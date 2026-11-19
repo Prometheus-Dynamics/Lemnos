@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stand-in systemd-run: a transient unit is a new session; its pgid is recorded under the unit name.
+. "$(dirname "$0")/../world.sh"
+calls "systemd-run $*"
+unitname=""
+while [ $# -gt 0 ]; do
+  case $1 in
+  --unit=*) unitname=${1#--unit=} ;;
+  --collect | --quiet) ;;
+  -p) shift ;;
+  --) shift; break ;;
+  -*) ;;
+  *) break ;;
+  esac
+  shift
+done
+setsid "$@" </dev/null >>"$W/transient.log" 2>&1 &
+echo $! >"$W/units/$unitname.pgid"
+register $!
