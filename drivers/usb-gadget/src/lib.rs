@@ -74,8 +74,11 @@
 //! [`POLL_NS`], and every [`SERVE_NS`] while a consumer has the data stream open (at once
 //! when bytes moved and more wait). When enabling fails, or the function reports
 //! that its controller let go, the driver disables the function and enables it again after a
-//! backoff that starts at 1 s, doubles, and stops at 8 s. The backoff clears once the gadget
-//! has stayed up for 8 s. It never gives up and never switches itself off.
+//! backoff that starts at `retry_first_ms` (1 s when not set), doubles, and stops at
+//! `retry_cap_ms` (8 s when not set). The backoff clears once the gadget has stayed up for the cap.
+//! It never gives up and never switches itself off. Both settings are in the device's `config`
+//! table; [`check`] refuses, by key, a cap above 8 s (the failure rule's cap), a value below 1 ms
+//! (retrying never stops, so nothing means off), and a first wait longer than the cap.
 //!
 //! A host that is not there is not a failure: the gadget is up, waiting for it, and health is
 //! `Ok`. A reset or a pulled cable needs nothing from the driver: the function stays enabled
@@ -140,11 +143,24 @@ use serve::Serve;
 const NS_PER_MS: u64 = 1_000_000;
 /// How often an enabled function is asked for events.
 pub const POLL_NS: u64 = 20 * NS_PER_MS;
-/// The first wait after a failure. Each further failure doubles it.
+/// The first wait after a failure when the board file gives no `retry_first_ms`. Each further
+/// failure doubles it.
 pub const BACKOFF_FIRST_NS: u64 = 1_000 * NS_PER_MS;
-/// The longest wait after a failure, and how long the gadget must stay up to clear the
-/// backoff.
+/// The longest wait after a failure when the board file gives no `retry_cap_ms`, and how long the
+/// gadget must stay up to clear the backoff. It is also the most `retry_cap_ms` may be: the
+/// failure rule caps the wait at 8 s.
 pub const BACKOFF_CAP_NS: u64 = 8_000 * NS_PER_MS;
+/// The most `retry_cap_ms` may be, in milliseconds: [`BACKOFF_CAP_NS`].
+pub const MAX_RETRY_CAP_MS: i64 = (BACKOFF_CAP_NS / NS_PER_MS) as i64;
+/// Why `retry_cap_ms` is refused when it is not from 1 to [`MAX_RETRY_CAP_MS`].
+pub const RETRY_CAP_RANGE: &str = "must be from 1 to 8000: the failure rule caps the wait at 8 s, \
+                                   and retrying never stops, so 0 does not turn it off";
+/// Why `retry_first_ms` is refused when it is below 1.
+pub const RETRY_FIRST_ZERO: &str =
+    "must be at least 1: retrying never stops, so 0 does not turn it off";
+/// Why `retry_first_ms` is refused when it is longer than the cap it doubles to.
+pub const RETRY_FIRST_OVER_CAP: &str =
+    "must be at most retry_cap_ms (8000 when retry_cap_ms is not set)";
 /// How often the data stream is served while a consumer has it open.
 pub const SERVE_NS: u64 = NS_PER_MS;
 /// The most events dealt with in one tick, so a host that floods requests can't hold the
@@ -226,6 +242,11 @@ pub struct UsbGadget {
     suspended: bool,
     /// How long a control request waits for the caller's answer.
     control_timeout_ns: u64,
+    /// The first wait after a failure (`retry_first_ms`).
+    retry_first_ns: u64,
+    /// The longest wait, and how long the gadget must stay up to clear the backoff
+    /// (`retry_cap_ms`).
+    retry_cap_ns: u64,
     /// How many consumers had gone when the request that waits was reported: one more since
     /// means whoever was told of it is no longer there.
     request_gone: u32,
@@ -250,12 +271,11 @@ impl UsbGadget {
         self.configured
     }
 
-    /// The wait after one more failure: 1, 2, 4, 8, 8... s.
+    /// The wait after one more failure: the first wait, doubled for each failure before it, held
+    /// to the cap (1, 2, 4, 8, 8... s by default).
     fn backoff(&mut self, fault: &'static str, now_ns: u64) -> u64 {
         self.fault = fault;
-        let wait = BACKOFF_FIRST_NS
-            .saturating_mul(1 << self.attempts.min(3))
-            .min(BACKOFF_CAP_NS);
+        let wait = backoff_wait(self.retry_first_ns, self.retry_cap_ns, self.attempts);
         self.attempts = self.attempts.saturating_add(1);
         self.next_ns = now_ns.saturating_add(wait);
         self.next_ns
@@ -338,7 +358,7 @@ impl UsbGadget {
     }
 
     fn keep_up(&mut self, now_ns: u64) -> u64 {
-        if now_ns.saturating_sub(self.up_since_ns) >= BACKOFF_CAP_NS {
+        if now_ns.saturating_sub(self.up_since_ns) >= self.retry_cap_ns {
             self.attempts = 0;
         }
         // Whether a consumer has the data stream open. A stream that fails counts as nobody
@@ -611,6 +631,13 @@ impl Lifecycle for UsbGadget {
                 format_args!("the setting control_timeout_ms must be at least 1 millisecond"),
             ));
         }
+        let (retry_first_ns, retry_cap_ns) = retry(cfg).map_err(|error| {
+            cfg.refuse(
+                Status::INVALID_ARGUMENT,
+                RefusalKind::Failed,
+                format_args!("{error}"),
+            )
+        })?;
         // The set was built here, so it parses; one that didn't would name no endpoints.
         let serve = {
             let parsed = UsbDescriptors::parse(set.bytes()).ok();
@@ -635,6 +662,8 @@ impl Lifecycle for UsbGadget {
             configured: false,
             suspended: false,
             control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
+            retry_first_ns,
+            retry_cap_ns,
             request_gone: 0,
             request_out: None,
             serve,
@@ -702,6 +731,8 @@ const KEYS: &[Key] = &[
     Key::optional("max_power_ma", KeyKind::Int),
     Key::optional("self_powered", KeyKind::Bool),
     Key::optional("control_timeout_ms", KeyKind::Int),
+    Key::optional("retry_first_ms", KeyKind::Int),
+    Key::optional("retry_cap_ms", KeyKind::Int),
     Key::optional("interfaces", KeyKind::Str),
     Key::optional("interfaces_file", KeyKind::Str),
     Key::optional("identity", KeyKind::Str),
@@ -725,6 +756,45 @@ fn integer<'a>(
             .filter(|value| (0..=max).contains(value))
             .ok_or_else(range),
     }
+}
+
+/// The wait after a failure when `attempts` failed before it: `first` doubled that many times, held
+/// to `cap`. Never zero for a `first` of at least 1 ns, and never more than `cap`.
+pub const fn backoff_wait(first_ns: u64, cap_ns: u64, attempts: u32) -> u64 {
+    // 2^32 times the shortest first wait (1 ms) is past any cap, so the shift stops there.
+    let shift = if attempts < 32 { attempts } else { 32 };
+    let wait = first_ns.saturating_mul(1 << shift);
+    if wait < cap_ns { wait } else { cap_ns }
+}
+
+/// The backoff's first wait and cap in nanoseconds, from `retry_first_ms` and `retry_cap_ms`
+/// (1000 and 8000 when not given). Each is refused by key when it is out of its bounds: the cap
+/// from 1 to [`MAX_RETRY_CAP_MS`], the first wait from 1 to the cap. Nothing is clamped.
+///
+/// # Errors
+///
+/// The first of the two settings that is out of its bounds, by key.
+pub fn retry<'a>(cfg: &Config<'a>) -> core::result::Result<(u64, u64), ConfigError<'a>> {
+    let read = |key: &'static str, default: u64| -> core::result::Result<i64, ConfigError<'a>> {
+        match cfg.get(key) {
+            None => Ok((default / NS_PER_MS) as i64),
+            Some(_) => cfg
+                .int(key)
+                .ok_or_else(|| ConfigError::new(key, "must be a whole number")),
+        }
+    };
+    let cap = read("retry_cap_ms", BACKOFF_CAP_NS)?;
+    if !(1..=MAX_RETRY_CAP_MS).contains(&cap) {
+        return Err(ConfigError::new("retry_cap_ms", RETRY_CAP_RANGE));
+    }
+    let first = read("retry_first_ms", BACKOFF_FIRST_NS)?;
+    if first < 1 {
+        return Err(ConfigError::new("retry_first_ms", RETRY_FIRST_ZERO));
+    }
+    if first > cap {
+        return Err(ConfigError::new("retry_first_ms", RETRY_FIRST_OVER_CAP));
+    }
+    Ok((first as u64 * NS_PER_MS, cap as u64 * NS_PER_MS))
 }
 
 /// A string setting, if given.
@@ -822,7 +892,7 @@ mod alloc_or_str {
 }
 
 /// Checks the settings this driver takes, with no hardware: the key names and kinds, the identity,
-/// the control timeout, and the interfaces text, which must parse. What the board's serial gives
+/// the control timeout, the backoff's first wait and cap ([`retry`]), and the interfaces text, which must parse. What the board's serial gives
 /// (the addresses of a derived NCM function) is not known until the daemon reads it, so it is not
 /// checked here. The host runs this before it makes the device; the daemon runs it before the root
 /// phase makes the gadget.
@@ -836,6 +906,7 @@ pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> 
     if integer(cfg, "control_timeout_ms", 60_000, Some(1_000))? == 0 {
         return Err(ConfigError::new("control_timeout_ms", "must be 1 to 60000"));
     }
+    retry(cfg)?;
     let text = interfaces_text(cfg)?;
     description::build(&identity(cfg)?, text.as_str())
         .map(drop)
