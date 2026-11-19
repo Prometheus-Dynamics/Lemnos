@@ -99,6 +99,10 @@ Cache. Under `LAND_CC_CACHE`: `locks/<consumer>-<rev8>.names` (the Lemnos packag
 The `<tool8>` hash covers the driver, `cc.py`, `shims.tsv` and `consumers.tsv`, so a change to any of them
 recomputes the baseline.
 
+Kernel cache. `LAND_QK_DIR` holds QEMU kernel trees keyed by their inputs. A tree is per path: its build
+files carry absolute paths, so a copied tree silently builds against the original. Never copy a kernel cache
+dir; a new path builds its own tree from the tarball.
+
 Limits. A pre-existing break in a crate hides its dependents from cargo. The base shortfall is logged and
 named, and a candidate that hides members from the compile fails unless it is announced.
 
