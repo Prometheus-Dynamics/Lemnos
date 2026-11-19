@@ -12,7 +12,7 @@
 //! finished count staying put) and the good copies, without anything that needs the fake engine.
 //!
 //! Port of `kernel/test/lemnos_gsdma_check.c` (CZ-GUEST-4), in the shared-memory ring form of
-//! `kernel/test/shm_ring.h` (I2b2-6). The uAPI structures are laid out in bytes, sized as the C
+//! `kernel/rs/stream_ring.rs` (I2b2-6). The uAPI structures are laid out in bytes, sized as the C
 //! structures are: `lemnos_gsdma_create` (64 bytes), `lemnos_gsdma_job` (104), `lemnos_gsdma_status`
 //! (32), and the stream's `lemnos_stream_create` (56, inside the create), `lemnos_stream_register`
 //! (24) and `lemnos_stream_status` (40).
@@ -54,7 +54,7 @@ const _: () = assert!(GSDMA_STATUS == 0x8020_4ce9);
 const RING_OPEN: u32 = 0;
 const RING_FAULT: u32 = 2;
 
-// kernel/test/shm_ring.h (layout 2): the word numbers of the frame ring and the job block.
+// kernel/rs/stream_ring.rs (layout 2): the word numbers of the frame ring and the job block.
 const SHM_W_HEAD: usize = 8;
 const SHM_INDEX: usize = 17;
 const SHM_SLOT_WORDS: usize = 10;

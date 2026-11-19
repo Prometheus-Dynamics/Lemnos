@@ -152,7 +152,7 @@ block with nothing behind it, fake blocks for the module's register jobs (a regi
 ordinary memory, simulated interrupts and a counted reset line, one an encoder that finishes each
 job and one an ISP that runs continuously) and a stand-in for the RP1 PIO
 driver, boots a kernel with them as the
-whole image, and runs the checks in `kernel/test/` and `lemnos-module-check`, which drives the real
+whole image, and runs the guest checks (`testing/crates/*-check`) and `lemnos-module-check`, which drives the real
 Linux backend through the module and then through the stock interfaces. It fails unless every
 check passed and the kernel reported nothing wrong while they ran.
 

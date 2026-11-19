@@ -8,7 +8,7 @@
 //!
 //! Usage: `lemnos-stream-check /dev/lemnos <device name> <unbind path> <heap> [no-source]` (init runs
 //! it as `/lemnos_stream_check`). Port of `kernel/test/lemnos_stream_check.c` (CZ-GUEST-4), in the
-//! shared-memory ring form of `kernel/test/shm_ring.h` (I2b2-6): a frame is read through the index and
+//! shared-memory ring form of `kernel/rs/stream_ring.rs` (I2b2-6): a frame is read through the index and
 //! checked against its stamp, and a buffer is given back by the consumer's marks page, not by a ring
 //! word.
 //!
@@ -63,7 +63,7 @@ const MAX_OWN_BUFFERS: u32 = 64;
 /// `LEMNOS_STREAM_JOB_RANGES`.
 const JOB_RANGES: usize = 4;
 
-// kernel/test/shm_ring.h (layout 2): the word numbers of the frame ring and the job block. The
+// kernel/rs/stream_ring.rs (layout 2): the word numbers of the frame ring and the job block. The
 // frame index holds, for each frame slot, the lane slot the frame was published in (from bit 16).
 // A lane slot is SHM_SLOT_WORDS words: the stamp, the time, the meta, then the 48-byte entry from
 // SHM_ENTRY on (the buffer in the pair word, the identity at SHM_ENTRY + 3).
