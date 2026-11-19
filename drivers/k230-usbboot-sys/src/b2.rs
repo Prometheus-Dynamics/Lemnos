@@ -113,12 +113,12 @@ pub struct Buffers<'a> {
 }
 
 /// The console: one bounded wait at most, then nothing more is tried (a dead UART costs one wait).
-struct Console {
-    dead: bool,
+pub(crate) struct Console {
+    pub(crate) dead: bool,
 }
 
 impl Console {
-    fn line<R: RegAccess>(&mut self, regs: &mut R, parts: &[&str]) {
+    pub(crate) fn line<R: RegAccess>(&mut self, regs: &mut R, parts: &[&str]) {
         if !self.dead {
             self.dead = uart::write_line_parts(regs, parts).is_err();
         }
@@ -131,7 +131,7 @@ fn text(digits: &[u8]) -> &str {
 }
 
 /// Eight hex digits, no formatting machinery.
-fn hex8(value: u32) -> [u8; 8] {
+pub(crate) fn hex8(value: u32) -> [u8; 8] {
     let mut out = [b'0'; 8];
     for (i, digit) in out.iter_mut().enumerate() {
         let nibble = (value >> (28 - 4 * i)) & 0xf;

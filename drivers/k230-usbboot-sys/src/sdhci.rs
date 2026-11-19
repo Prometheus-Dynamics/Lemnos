@@ -392,6 +392,17 @@ impl<R: SdhciRegs> SdHost for SdhciHost<R> {
     }
 }
 
+// Placed after the other impl blocks: an impl block's place in the file is in its symbols' names, and an earlier
+// place would rename the card image's symbols and move its code (the card image would change with no code change).
+impl Window {
+    /// The registers of one of the two controllers the device tree gives: only those two bases.
+    pub fn of(controller: lemnos_k230_usbboot_stage::sd::SdController) -> Self {
+        Self {
+            base: controller.base(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

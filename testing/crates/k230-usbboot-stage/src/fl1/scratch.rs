@@ -9,8 +9,34 @@
 //! the scratch build cannot read the card outside the range either.
 
 use crate::bounds::CARD_DECLARED;
+use crate::fl1::REGIONS;
 use lemnos_flash_stage::link::{IoError, Storage};
 use lemnos_flash_wire::frame::SECTOR;
+use lemnos_flash_wire::identity::{IDENTITY_LEN, identity_record};
+
+/// The scratch build's id ("K230" "B2", serial 2): neither the check build's
+/// ([`crate::fl1::check::CHECK_BUILD_ID`], serial 1) nor the full card build's ([`crate::fl1::BUILD_ID`]), so a host
+/// tells the three apart before it sends anything but an identify.
+pub const SCRATCH_BUILD_ID: u64 = 0x4b32_3330_4232_0002;
+
+/// The identity record of the scratch build: its own id, the K230's regions.
+pub const SCRATCH_IDENTITY: [u8; IDENTITY_LEN] = identity_record(SCRATCH_BUILD_ID, &REGIONS);
+
+/// The card of record's CID, as the SD host reads it (the R2 reply's 128 bits with the CRC byte, which the
+/// controller does not keep, as 0): the card the survey read (`testing/board-runs/K230-USB.md`, "B2 card
+/// writes"). The scratch build writes no other card.
+pub const CARD_OF_RECORD_CID: [u8; 16] = [
+    0x03, 0x53, 0x44, 0x53, 0x52, 0x36, 0x34, 0x47, 0x80, 0x14, 0xa7, 0xc9, 0xab, 0x01, 0x51, 0x00,
+];
+
+/// The card of record's size in 512-byte blocks.
+pub const CARD_OF_RECORD_BLOCKS: u64 = 124_735_488;
+
+/// Whether a card is the card of record: its CID (the CRC byte not compared, as the piece path compares it)
+/// and its size.
+pub fn card_of_record(cid: &[u8; 16], blocks: u64) -> bool {
+    cid[..15] == CARD_OF_RECORD_CID[..15] && blocks == CARD_OF_RECORD_BLOCKS
+}
 
 /// The first sector of the scratch range (the 512 MiB mark): the card builds' declared range.
 pub const SCRATCH_FIRST: u32 = CARD_DECLARED.first as u32;
@@ -66,7 +92,41 @@ impl<S: Storage> Storage for Scratch<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fl1::REGIONS;
+    use crate::fl1::check::CHECK_IDENTITY;
+    use crate::fl1::{BUILD_ID, IDENTITY};
+    use lemnos_flash_wire::identity;
+
+    #[test]
+    fn the_scratch_identity_is_neither_the_check_builds_nor_the_card_builds() {
+        assert_ne!(SCRATCH_IDENTITY, CHECK_IDENTITY);
+        assert_ne!(SCRATCH_IDENTITY, IDENTITY);
+        assert_ne!(SCRATCH_BUILD_ID, BUILD_ID);
+        let peer = identity::check(&SCRATCH_IDENTITY).unwrap();
+        assert_eq!(peer.build_id, SCRATCH_BUILD_ID);
+    }
+
+    #[test]
+    fn only_the_card_of_record_is_taken() {
+        assert!(card_of_record(&CARD_OF_RECORD_CID, CARD_OF_RECORD_BLOCKS));
+        let mut crc = CARD_OF_RECORD_CID;
+        crc[15] = 0x5b;
+        assert!(
+            card_of_record(&crc, CARD_OF_RECORD_BLOCKS),
+            "the CRC byte is not kept"
+        );
+        for byte in 0..15 {
+            let mut other = CARD_OF_RECORD_CID;
+            other[byte] ^= 1;
+            assert!(
+                !card_of_record(&other, CARD_OF_RECORD_BLOCKS),
+                "byte {byte}"
+            );
+        }
+        assert!(!card_of_record(
+            &CARD_OF_RECORD_CID,
+            CARD_OF_RECORD_BLOCKS - 1024
+        ));
+    }
 
     #[test]
     fn the_range_is_past_every_region_and_excludes_the_header_blocks() {

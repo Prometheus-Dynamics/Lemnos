@@ -17,6 +17,11 @@
 //! it uses on the bench. A reset (the SoC reset the stage writes, or a watchdog) ends the stage's thread;
 //! the boot ROM then shows at the port again under a new device number.
 //!
+//! With [`Build::Scratch`] the board runs the scratch build's code instead (`lemnos_driver_k230_usbboot_sys::scratch`,
+//! the same `scratch` and `end` the scratch image runs), over the same models and the SD controller with a card
+//! in its slot ([`crate::sdcard`]). The card is the board's ([`SimBoard::with_card`]): it keeps what was written
+//! across loads, and the rehearsal reads it directly, as the piece path's hash jobs read the real one.
+//!
 //! What it is not: a timing model. The core accepts packets as fast as the threads run, the host's
 //! scheduling is the PC's, and the register read cost is the PC's, not the board's.
 
@@ -28,16 +33,18 @@ use std::time::{Duration, Instant};
 
 use lemnos_driver_k230_usbboot_sys::b2::{self as stage_b2, Buffers, Known, RX_LEN};
 use lemnos_driver_k230_usbboot_sys::dwc2::{Dwc2Regs, Stats, Trace, bits::*, reg::*};
+use lemnos_driver_k230_usbboot_sys::scratch::{self as stage_scratch, CardSeen};
 use lemnos_flash_stage::serve::BUFFER_LEN;
 use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::usb::LANGUAGE;
 use lemnos_k230_usbboot_stage::fl1::check::{TIMEBASE_HZ, WINDOW_LEN};
-use lemnos_k230_usbboot_stage::pads::PadGuard;
+use lemnos_k230_usbboot_stage::pads::{self, PadGuard};
 use lemnos_k230_usbboot_stage::sysctl::{SOC_GLB_RST, SOC_RESET_VALUE, STC_ENABLES};
 use lemnos_k230_usbboot_stage::wdt::{self, RegAccess};
 
 use crate::b2::{Access, Board, Link, LinkError, PORT, Seen};
 use crate::bootrom::{DOWNLOAD_PID, DOWNLOAD_VID};
+use crate::sdcard::{SimCard, SimSdhci};
 
 /// The watchdogs' clock in the model: the bench's C1b measurement.
 pub const WDT_HZ: u64 = 750_000;
@@ -95,6 +102,23 @@ pub struct Faults {
     /// A driver fault for the model to catch: endpoint 0 OUT is never enabled again after the first
     /// time (the old driver's fault). The kernel cannot enumerate it.
     pub no_ep0_rearm: bool,
+    /// The build the board runs.
+    pub build: Build,
+    /// The scratch build gets no SD controller (the host passed none).
+    pub no_sd_parameter: bool,
+    /// The SD pads are not on the SD function.
+    pub sd_pads_off: bool,
+}
+
+/// The build the board runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Build {
+    /// The check build: the USB device path over a RAM window (`lemnos_driver_k230_usbboot_sys::b2::check`).
+    #[default]
+    Check,
+    /// The scratch build: the USB device path over the card, only inside the scratch range
+    /// (`lemnos_driver_k230_usbboot_sys::scratch::scratch`).
+    Scratch,
 }
 
 /// How the model's `time` CSR behaves.
@@ -750,6 +774,8 @@ struct Bus {
     time: TimeCsr,
     /// The system timer writes seen, in order.
     stc: Vec<(usize, u32)>,
+    /// The SD pads read as another function.
+    sd_pads_off: bool,
 }
 
 impl RegAccess for Bus {
@@ -759,6 +785,17 @@ impl RegAccess for Bus {
         }
         self.core.tick();
         match addr {
+            // The pads, as the boot ROM leaves them after an SD boot: the SD pads on the SD function (unless the
+            // case says otherwise), the rest at 0.
+            a if pads::is_pad_address(a) => {
+                let on_sd = (0..pads::PAD_COUNT)
+                    .any(|n| pads::pad_register(n) == a && pads::SD_PADS.contains(&n));
+                if on_sd && !self.sd_pads_off {
+                    pads::SD_FUNCTION << pads::SEL_SHIFT
+                } else {
+                    0
+                }
+            }
             a if a == lemnos_k230_usbboot_stage::uart::BASE + 0x14 => 0x60,
             a if a == lemnos_k230_usbboot_stage::uart::BASE + 0x0c => self.lcr,
             a if (lemnos_k230_usbboot_stage::uart::BASE
@@ -851,17 +888,26 @@ struct Shared {
     published: Vec<(u32, Instant)>,
 }
 
+/// The card in the board's slot, if it has one.
+pub type SlotCard = Option<Arc<Mutex<SimCard>>>;
+
 /// The rehearsal's board.
 pub struct SimBoard {
     shared: Arc<Mutex<Shared>>,
     faults: Faults,
+    card: SlotCard,
     started: Instant,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl SimBoard {
-    /// A board at the boot ROM, at the board's port.
+    /// A board at the boot ROM, at the board's port, with no card.
     pub fn new(faults: Faults) -> Self {
+        Self::with_card(faults, None)
+    }
+
+    /// A board at the boot ROM, at the board's port, with `card` in its SD slot.
+    pub fn with_card(faults: Faults, card: SlotCard) -> Self {
         let shared = Shared {
             next_devnum: ROM_DEVNUM + 1,
             seen: vec![rom_seen(ROM_DEVNUM)],
@@ -870,6 +916,7 @@ impl SimBoard {
         Self {
             shared: Arc::new(Mutex::new(shared)),
             faults,
+            card,
             started: Instant::now(),
             threads: Vec::new(),
         }
@@ -905,9 +952,10 @@ impl SimBoard {
         let started = self.started;
         let done = Arc::new(AtomicBool::new(false));
         let stage_done = done.clone();
-        let time = self.faults.time;
+        let faults = self.faults.clone();
+        let card = self.card.clone();
         self.threads.push(std::thread::spawn(move || {
-            let reset = run_stage(stage_core, shared.clone(), at, time);
+            let reset = run_stage(stage_core, shared.clone(), at, &faults, card);
             let when = started.elapsed().as_secs_f64();
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             s.resets.push((when, reset));
@@ -971,8 +1019,15 @@ fn rom_seen(devnum: u32) -> Seen {
     }
 }
 
-/// The check build from its entry, to its reset.
-fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant, time: TimeCsr) -> Reset {
+/// The build from its entry, to its reset.
+fn run_stage(
+    core: Arc<Core>,
+    shared: Arc<Mutex<Shared>>,
+    at: Instant,
+    faults: &Faults,
+    card: SlotCard,
+) -> Reset {
+    let time = faults.time;
     // One small leak per simulated boot: the stage's clock is `Copy`, as the image's is.
     let timebase: &'static Timebase = Box::leak(Box::new(Timebase {
         started: std::sync::OnceLock::new(),
@@ -989,7 +1044,10 @@ fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant, time: Tim
         timebase,
         time,
         stc: Vec::new(),
+        sd_pads_off: faults.sd_pads_off,
     };
+    let build = faults.build;
+    let sd = card.filter(|_| !faults.no_sd_parameter).map(SimSdhci::new);
     let refused = Arc::new(Mutex::new(0u32));
     let refused_out = refused.clone();
     let outcome = catch_unwind(AssertUnwindSafe(move || {
@@ -1004,6 +1062,26 @@ fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant, time: Tim
         let (mut buf, mut scratch) = (vec![0u8; BUFFER_LEN], vec![0u8; BUFFER_LEN]);
         let (mut rx, mut window) = (vec![0u8; RX_LEN], vec![0u8; WINDOW_LEN]);
         let mut clock = Micros(timebase);
+        if build == Build::Scratch {
+            // The scratch image's run (`image.rs`, `run_scratch`): the same two calls over the same buses.
+            let card_seen = CardSeen::new();
+            let cause = stage_scratch::scratch(
+                &mut regs,
+                ModelRegs(core.clone()),
+                sd,
+                &mut clock,
+                stage_scratch::Buffers {
+                    buf: &mut buf,
+                    scratch: &mut scratch,
+                    rx: &mut rx,
+                },
+                &stats,
+                &mut known,
+                &card_seen,
+            );
+            *refused_out.lock().unwrap_or_else(|e| e.into_inner()) = regs.refused();
+            stage_scratch::end(&mut regs, &stats, &known, &card_seen, ticks(), cause)
+        }
         let cause = stage_b2::check(
             &mut regs,
             ModelRegs(core.clone()),
@@ -1268,5 +1346,100 @@ impl Board for SimBoard {
             core,
             addr: seen.devnum as u8,
         }))
+    }
+}
+
+/// One rehearsal of the card writes: the plan's sequence with the board's card read directly where the board run
+/// uses the piece path's hash jobs.
+#[derive(Debug)]
+pub struct CardRun {
+    /// The host run's outcome.
+    pub outcome: crate::b2::Outcome,
+    /// The plan's hashes before the load and after the board is back ([`crate::sdcard::plan_hashes`]).
+    pub before: Vec<(&'static str, String)>,
+    pub after: Vec<(&'static str, String)>,
+    /// Every block write the card took, by sector, in order.
+    pub writes: Vec<u64>,
+    /// The console's lines, the resets, the accesses outside the stage's windows, the pad writes refused.
+    pub console: Vec<(f64, String)>,
+    pub resets: Vec<(f64, Reset)>,
+    pub unexpected: Vec<String>,
+    pub pad_writes_refused: u32,
+}
+
+/// Runs the plan's sequence against a board with `card` in its slot: the hashes before (step 1), the load and the
+/// host run (step 2, `crate::b2::run` with `plan`), the hashes after (step 3), once the board is back or the
+/// run's bound has passed.
+pub fn card_run(
+    faults: Faults,
+    card: SimCard,
+    plan: &crate::b2::Plan,
+    log: &mut dyn FnMut(&str),
+) -> CardRun {
+    let card = card.shared();
+    let lock = |c: &Arc<Mutex<SimCard>>| c.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let before = crate::sdcard::plan_hashes(&lock(&card));
+    for (id, digest) in &before {
+        log(&format!("before: {id}: {digest}"));
+    }
+    let mut board = SimBoard::with_card(faults, Some(card.clone()));
+    let rom = board.rom();
+    let started = board.load_and_start();
+    let outcome = crate::b2::run(&mut board, plan, rom.as_ref(), started, log);
+    std::thread::sleep(Duration::from_millis(100));
+    let run = CardRun {
+        outcome,
+        before,
+        after: Vec::new(),
+        writes: Vec::new(),
+        console: board.console(),
+        resets: board.resets(),
+        unexpected: board.unexpected(),
+        pad_writes_refused: board.pad_writes_refused(),
+    };
+    board.stop();
+    let held = lock(&card);
+    let after = crate::sdcard::plan_hashes(&held);
+    for (id, digest) in &after {
+        log(&format!("after: {id}: {digest}"));
+    }
+    CardRun {
+        after,
+        writes: held.writes.clone(),
+        ..run
+    }
+}
+
+impl CardRun {
+    /// What the plan's step 3 would stop on, and any write the card took outside the scratch range: each a line.
+    /// Empty when every region hashes as before (the scratch range too: it is zeroed at the end) and every write
+    /// was inside the range.
+    pub fn problems(&self) -> Vec<String> {
+        use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
+        let mut out: Vec<String> = self
+            .before
+            .iter()
+            .zip(&self.after)
+            .filter(|(b, a)| b.1 != a.1)
+            .map(|(b, a)| format!("{} changed: {} before, {} after", b.0, b.1, a.1))
+            .collect();
+        let outside: Vec<u64> = self
+            .writes
+            .iter()
+            .copied()
+            .filter(|lba| !(CARD_DECLARED.first..=CARD_DECLARED.last).contains(lba))
+            .collect();
+        if !outside.is_empty() {
+            out.push(format!(
+                "{} card writes outside the scratch range, the first at sectors {:?}",
+                outside.len(),
+                &outside[..outside.len().min(8)]
+            ));
+        }
+        out.extend(self.unexpected.iter().map(|u| format!("unexpected: {u}")));
+        if self.pad_writes_refused != 0 {
+            out.push(format!("{} pad writes refused", self.pad_writes_refused));
+        }
+        out
     }
 }

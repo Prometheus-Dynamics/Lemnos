@@ -9,7 +9,8 @@
 //! - [`flash`]: the flasher. Its order never leaves a valid header over an incomplete payload.
 //! - [`usb`]: the host's USB transport over libusb (`rusb`). It opens a device only when asked.
 //! - [`b2`]: the host's side of the B2 run (the FL1 stage's own USB device path), over traits; [`b2sim`]
-//!   is the rehearsal's board for it (the check build's code over a register model of the dwc2 core).
+//!   is the rehearsal's board for it (the check build's code over a register model of the dwc2 core), with
+//!   [`sdcard`]'s SD controller and card for the scratch build.
 //! - [`sim`]: a simulated board. Its boot ROM, its stage (the `lemnos-k230-usbboot-stage` code)
 //!   and its watchdog model, with power cuts and the faults a real medium can show.
 //!
@@ -24,6 +25,7 @@ pub mod console;
 pub mod flash;
 pub mod packet;
 pub mod probe;
+pub mod sdcard;
 pub mod sim;
 pub mod stage_report;
 pub mod transport;

@@ -3,6 +3,8 @@
 //! runs slow ends the call as a storage failure, not as a hang. A block call is bounded by the SD
 //! host's own spin limits ([`crate::sd`]), so one sector can run past the budget by one such wait.
 
+use core::cell::Cell;
+
 use crate::bounds::{Bounds, Declared};
 use crate::sd::{BLOCK, Card, SdHost};
 use lemnos_flash_stage::link::{IoError, Storage};
@@ -31,6 +33,62 @@ impl<H: SdHost> Blocks for Card<H> {
     }
 }
 
+/// How many times [`Retried`] tries one block call.
+pub const TRIES: u32 = 3;
+
+/// The card with each block call tried up to [`TRIES`] times, the host and the card brought back
+/// ([`Card::recover`]) between tries, and every failed try counted. Bench, 2026-11-18 (the piece path's
+/// flash): at 25 MHz on one data line a write's data phase failed its CRC about once in 14,000 sectors and the
+/// card dropped the block; it took the same sector again after a stop (CMD12). The piece path tries the same
+/// way. A retry writes the same sector again, so it never widens what a request may reach: the bounds are
+/// checked before the first block call ([`Sectors`]), and the session compares what it reads back.
+pub struct Retried<'a, H: SdHost> {
+    card: Card<H>,
+    retries: &'a Cell<u32>,
+}
+
+impl<'a, H: SdHost> Retried<'a, H> {
+    /// The card, with its failed tries counted in `retries`.
+    pub fn new(card: Card<H>, retries: &'a Cell<u32>) -> Self {
+        Self { card, retries }
+    }
+
+    /// The card under the retries (for a test's look at it).
+    pub fn into_inner(self) -> Card<H> {
+        self.card
+    }
+
+    fn tried(
+        &mut self,
+        mut op: impl FnMut(&mut Card<H>) -> Result<(), crate::sd::SdError>,
+    ) -> Result<(), IoError> {
+        for _ in 0..TRIES {
+            if op(&mut self.card).is_ok() {
+                return Ok(());
+            }
+            self.retries.set(self.retries.get().saturating_add(1));
+            if self.card.recover().is_err() {
+                return Err(IoError::Failed);
+            }
+        }
+        Err(IoError::Failed)
+    }
+}
+
+impl<H: SdHost> Blocks for Retried<'_, H> {
+    fn blocks(&self) -> u64 {
+        self.card.blocks()
+    }
+
+    fn read_block(&mut self, lba: u64, out: &mut [u8; BLOCK]) -> Result<(), IoError> {
+        self.tried(|card| card.read(lba, out))
+    }
+
+    fn write_block(&mut self, lba: u64, data: &[u8; BLOCK]) -> Result<(), IoError> {
+        self.tried(|card| card.write(lba, data))
+    }
+}
+
 /// The card, with the clock its budgets are read on.
 pub struct Sectors<B: Blocks, K: Clock> {
     card: B,
@@ -55,6 +113,11 @@ impl<B: Blocks, K: Clock> Sectors<B, K> {
             clock,
             bounds,
         }
+    }
+
+    /// The card under the storage (for a test's look at it).
+    pub fn into_inner(self) -> B {
+        self.card
     }
 
     fn deadline(&mut self, budget_us: u64) -> u64 {
