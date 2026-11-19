@@ -13,5 +13,8 @@ lemnos-core = { path = "../../engine/core" }
 lemnos-contract-light = { path = "../../contracts/light" }
 lemnos-contract-pixels = { path = "../../contracts/pixels" }
 
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
 [package.metadata.lemnos]
 driver = "StatusLight"

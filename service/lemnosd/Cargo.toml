@@ -84,6 +84,8 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 # generated: end drivers
 
 [dev-dependencies]
+lemnos-contract-light = { path = "../../contracts/light" }
+lemnos-contract-pixels = { path = "../../contracts/pixels" }
 lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
 lemnos-contract-fan = { path = "../../contracts/fan" }
 lemnos-contract-fan-control = { path = "../../contracts/fan-control" }
