@@ -248,7 +248,8 @@ alone`).
 **How a gadget uses it.** The gadget's driver asks for the gadget's bind as before. Each time it enables,
 the gadget asks for `setup` first, and the step's errno decides what the driver reports (a missing
 controller is "not there", retried). A failure is retried on the driver's backoff: 1 s, then 2, 4 and 8 s,
-and every 8 s after, with no automatic off. A `udc:NAME` uevent (a controller coming up or switching to the
+and every 8 s after, with no automatic off. The first wait and the cap are the gadget's `retry_first_ms` and
+`retry_cap_ms` settings ([Board files](boards.md), the gadget's keys), 1000 and 8000 when not set. A `udc:NAME` uevent (a controller coming up or switching to the
 device role) brings the next attempt forward, so the gadget does not wait out its timer when the hardware
 changes. The gadget's state shows the driver's fixed text for that kind of failure. Each failed attempt is one
 line on the daemon's error output, with the step and the helper's reason. The gadget's state shows the attempt

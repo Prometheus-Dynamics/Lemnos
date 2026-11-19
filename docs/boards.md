@@ -1134,6 +1134,22 @@ root phase forks and which keeps root after the drop to user `lemnos` (see [the 
 The daemon then asks the helper to bind the gadget, and serves ep0 itself. A gadget whose controller is not
 there yet is retried, not refused.
 
+The gadget's driver retries a failed enable, and a controller's let-go, on its own backoff: the first wait,
+doubled after each failure in a row, held to the cap. The gadget stays up for the cap to start again from the
+first wait. Two keys of the gadget's `config` set it; each is a whole number of milliseconds:
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `retry_first_ms` | 1000 | 1 to the cap | The wait before the first retry. It doubles with each failure in a row |
+| `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long the gadget must stay up before its wait starts again from the first |
+
+Retrying never stops, so neither key has a value that means off. A value out of its range is refused by key,
+never clamped: `lemnos-ctl validate` and the daemon say `setting "retry_cap_ms" must be from 1 to 8000: the
+failure rule caps the wait at 8 s, and retrying never stops, so 0 does not turn it off`, `setting
+"retry_first_ms" must be at least 1: ...`, or `setting "retry_first_ms" must be at most retry_cap_ms (8000 when
+retry_cap_ms is not set)`. They are the gadget's own and do not follow `[host] retry_first_ms` and
+`retry_cap_ms`, which time the host's binds.
+
 The simulated board accepts it. Devices whose buses it does not have are listed as retrying:
 
 ```sh

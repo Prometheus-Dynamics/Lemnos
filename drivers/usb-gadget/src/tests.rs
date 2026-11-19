@@ -592,6 +592,150 @@ fn the_backoff_clears_once_the_gadget_has_stayed_up_for_8_seconds() {
     assert_eq!(rig.step(), SECOND);
 }
 
+/// The backoff's defaults are the failure rule's: 1 s first, 8 s at most. Changing either is a
+/// product change, not a tidy-up.
+#[test]
+fn the_backoff_defaults_are_1_second_first_and_8_seconds_at_most() {
+    assert_eq!(BACKOFF_FIRST_NS, SECOND);
+    assert_eq!(BACKOFF_CAP_NS, 8 * SECOND);
+    assert_eq!(MAX_RETRY_CAP_MS, 8_000);
+    let entries = settings();
+    assert_eq!(
+        crate::retry(&Config::new(&entries)),
+        Ok((SECOND, 8 * SECOND)),
+        "a board file that sets neither key gets 1 s and 8 s"
+    );
+}
+
+/// The wait doubles from the first, and is held to the cap: by default 1, 2, 4, 8, 8 s; with the
+/// shorter settings a test board gives, 100, 200, 400, 400 ms. It never reaches zero and never
+/// goes past the cap, however many failures.
+#[test]
+fn the_backoff_doubles_from_the_first_wait_to_the_cap() {
+    let ms = 1_000_000;
+    let waits = |first: u64, cap: u64| -> Vec<u64> {
+        (0..6).map(|n| backoff_wait(first, cap, n) / ms).collect()
+    };
+    assert_eq!(
+        waits(BACKOFF_FIRST_NS, BACKOFF_CAP_NS),
+        [1_000, 2_000, 4_000, 8_000, 8_000, 8_000]
+    );
+    assert_eq!(waits(100 * ms, 400 * ms), [100, 200, 400, 400, 400, 400]);
+    assert_eq!(
+        waits(300 * ms, 1_000 * ms),
+        [300, 600, 1_000, 1_000, 1_000, 1_000]
+    );
+    assert_eq!(waits(ms, ms), [1, 1, 1, 1, 1, 1]);
+    for attempts in [31, 32, 33, 64, u32::MAX] {
+        assert_eq!(backoff_wait(ms, BACKOFF_CAP_NS, attempts), BACKOFF_CAP_NS);
+    }
+}
+
+/// The settings carry through to the driver: a let-go waits the first wait, doubling to the cap,
+/// and the gadget that stays up for the cap starts from the first wait again.
+#[test]
+fn the_backoff_settings_set_the_driver_s_waits() {
+    let ms = 1_000_000;
+    let mut entries = settings();
+    entries.push(("retry_first_ms", ConfigValue::Int(100)));
+    entries.push(("retry_cap_ms", ConfigValue::Int(400)));
+    let host = MockUsbFunction::new();
+    let driver = bind(&host, &entries).map_err(|_| ()).expect("bind");
+    let mut rig = Rig {
+        driver,
+        host,
+        now: 0,
+    };
+    rig.host.refuse_enable(Some(ErrorKind::Failed));
+    let waits: Vec<u64> = (0..5).map(|_| rig.step() / ms).collect();
+    assert_eq!(waits, [100, 200, 400, 400, 400]);
+    rig.host.refuse_enable(None);
+    assert_eq!(rig.step(), POLL_NS);
+    let up_at = rig.now - POLL_NS;
+    while rig.now < up_at + 400 * ms {
+        rig.step();
+    }
+    rig.step();
+    rig.host.release();
+    assert_eq!(
+        rig.step(),
+        100 * ms,
+        "up for the cap: from the first wait again"
+    );
+}
+
+/// Each bound is refused by its key, never clamped: a cap past the failure rule's 8 s, a zero or
+/// negative wait (retrying never stops), and a first wait longer than the cap. The bind is
+/// refused the same way.
+#[test]
+fn backoff_settings_out_of_bounds_are_refused_by_key() {
+    let with = |pairs: &[(&'static str, i64)]| {
+        let mut entries = settings();
+        for &(key, value) in pairs {
+            entries.push((key, ConfigValue::Int(value)));
+        }
+        entries
+    };
+    type Refused = (&'static [(&'static str, i64)], &'static str, &'static str);
+    let refused: [Refused; 8] = [
+        (&[("retry_cap_ms", 8_001)], "retry_cap_ms", RETRY_CAP_RANGE),
+        (&[("retry_cap_ms", 60_000)], "retry_cap_ms", RETRY_CAP_RANGE),
+        (&[("retry_cap_ms", 0)], "retry_cap_ms", RETRY_CAP_RANGE),
+        (&[("retry_cap_ms", -1)], "retry_cap_ms", RETRY_CAP_RANGE),
+        (&[("retry_first_ms", 0)], "retry_first_ms", RETRY_FIRST_ZERO),
+        (
+            &[("retry_first_ms", -5)],
+            "retry_first_ms",
+            RETRY_FIRST_ZERO,
+        ),
+        (
+            &[("retry_first_ms", 8_001)],
+            "retry_first_ms",
+            RETRY_FIRST_OVER_CAP,
+        ),
+        (
+            &[("retry_first_ms", 500), ("retry_cap_ms", 400)],
+            "retry_first_ms",
+            RETRY_FIRST_OVER_CAP,
+        ),
+    ];
+    for (pairs, key, reason) in refused {
+        let entries = with(pairs);
+        assert_eq!(
+            crate::check(&Config::new(&entries)).map_err(|error| (error.key, error.reason)),
+            Err((key, reason)),
+            "{pairs:?}"
+        );
+        assert_eq!(
+            bind(&MockUsbFunction::new(), &entries).err(),
+            Some(Status::INVALID_ARGUMENT),
+            "{pairs:?}"
+        );
+    }
+    let text = with(&[("retry_cap_ms", 9_000)]);
+    let error = crate::check(&Config::new(&text)).unwrap_err();
+    assert_eq!(
+        std::format!("{error}"),
+        "setting \"retry_cap_ms\" must be from 1 to 8000: the failure rule caps the wait at 8 s, \
+         and retrying never stops, so 0 does not turn it off"
+    );
+    let mut float = settings();
+    float.push(("retry_first_ms", ConfigValue::Float(0.5)));
+    assert_eq!(
+        crate::check(&Config::new(&float)).map_err(|error| (error.key, error.reason)),
+        Err(("retry_first_ms", "must be a whole number"))
+    );
+    // The edges are accepted: 1 ms, and a first wait equal to the cap of 8 s.
+    for pairs in [
+        &[("retry_first_ms", 1), ("retry_cap_ms", 1)][..],
+        &[("retry_first_ms", 8_000), ("retry_cap_ms", 8_000)],
+        &[("retry_first_ms", 100), ("retry_cap_ms", 400)],
+    ] {
+        let entries = with(pairs);
+        assert_eq!(crate::check(&Config::new(&entries)), Ok(()), "{pairs:?}");
+    }
+}
+
 #[test]
 fn a_reset_or_a_pulled_cable_needs_no_new_enable() {
     let mut rig = Rig::new();

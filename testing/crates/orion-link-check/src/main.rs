@@ -46,6 +46,13 @@ use daemon::{Lemnosd, enabled, wait_until};
 
 /// The board: the gadget with the default composition (no `interfaces` key), deriving its addresses
 /// from the identity device, whose serial the kernel command line carries as `lemnos.serial=`.
+///
+/// The gadget's backoff is the product setting `retry_first_ms` / `retry_cap_ms`, set shorter here
+/// than its 1 s / 8 s defaults: each bounce below waits out the first step instead of 1, 2, 4, 8 s.
+/// The first step stays at 300 ms, three of the bridge's 100 ms samples of the gadget's state
+/// (`service/orion/src/links.rs`, the `subscribe` of `STATE`): the gadget is down for at least that
+/// long, so the bridge always sees it go down ("the bridge gives the hold up") whatever the
+/// emulated host's enumeration takes. The defaults themselves are the driver's unit tests'.
 const BOARD: &str = r#"
 format = "lemnos.board"
 schema_version = 1
@@ -62,7 +69,7 @@ config = { serial = "cmdline", serial_key = "lemnos.serial" }
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc:dummy_udc.0" }
-config = { manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity" }
+config = { manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity", retry_first_ms = 300, retry_cap_ms = 600 }
 "#;
 
 const DIR: &str = "/run/lemnos-link";
