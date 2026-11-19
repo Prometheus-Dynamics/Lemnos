@@ -174,6 +174,14 @@ Three rules follow, and the OS must keep them:
 - **The units set no `WatchdogSec=`.** A software timeout that restarts a hung daemon would race the
   hardware reboot with a second, shorter clock. Dropping it keeps one escalation, identical on both
   init systems. `Type=notify` stays, for readiness only.
+- **The stop bound is under the watchdog's shortest window.** The daemon feeds every half period
+  (7.5 s of 15 s), so after its last feed the watchdog can leave as little as 7.5 s. A stop is for
+  shutdown only; a stop that hangs is killed after 5 s (`TimeoutStopSec=5s`, `STOP_TIMEOUT=5` in
+  `S50lemnosd`) so the shutdown or power-off goes on. A bound above the window (it was 30 s) let the
+  watchdog reboot a board that was powering off, before the stop was even given up. A daemon that hangs
+  while the board runs is still the watchdog's to catch: nothing here restarts it sooner. A normal stop
+  takes well under that bound (0.4 to 2.5 s for the whole stop and start in the detached board checks'
+  rehearsal, `testing/board-runs/scripts`).
 
 The `lemnos` group can open the watchdog node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog`
 in the mdev fragment), so the daemon can open it as its own user. Nothing else should.
