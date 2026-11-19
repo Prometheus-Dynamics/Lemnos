@@ -1887,6 +1887,50 @@ C3 is not to be rerun until the coordinator says so.
 **Board state at the end:** the ROM, `29f1:0230` "K230 USB Boot Device", dev 37 at 3-4.2.1.4.1. Bench lock released.
 The card holds what it held before the run (every hash equal; the range zeros).
 
+### B2 card C3 rerun (2026-11-18 21:52:22 to 21:54:10, gate `559c7b9f`): booted as C3 did; the GPTs and boot area unchanged
+
+Approved by Helios through the coordinator. It was C3 alone, then O2 to O4, with nothing else and no recovery. One script,
+`card2.sh`, held the bench lock on descriptor 9 for the whole run, and the hypothesis was written first
+(`card2-hypothesis.md`).
+- Before the load the port showed `29f1:0230` "K230 USB Boot Device".
+- The gate script was `k230-card1-console.py` at `559c7b9f` (sha256 `5e518912…e721`), and its `--self-test` passed.
+- The load was C3's own: the same SPL source (sha256 `033903a1…c6cd`) and the same commands. There was no saveenv, and
+  nothing was typed after `boot`.
+- Wall time: 107.5 s.
+
+| step | at (s) | took (s) | result | ROM back as |
+|---|---|---|---|---|
+| SPL load | 1.6 | 1.4 | exit 0 | |
+| U-Boot, commands, gate, `boot`; the watchdog's return | 92.1 | 90.5 | gate passed; booted to the login prompt; wdt0 reset the SoC; console BACK | dev 38 |
+| O2 0..33 | 93.1 | 1.0 | `fda1a6cc…92e3` = before | dev 39 |
+| O3 415,711..415,743 | 94.2 | 1.1 | `e841d204…fa09` = before | dev 40 |
+| O4 34..8,191 | 107.5 | 13.3 | `fa32a323…3c86` = before | dev 41 |
+
+**The gate.** "2223 bytes since the SPL banner equal C3's record (counter 03fff89b masked, reference 03fff87d)".
+`md.l` read `00000001 0000000a`: wdt0 was enabled at TOP 10 before `boot`.
+
+**After `boot`.** All times are from the SPL load.
+- U-Boot read 1,024 blocks at 7,168, then `Image` (31,796,736 bytes in 955 ms) and the device tree.
+- "Booting kernel from Legacy Image", checksum OK.
+- "Kernel command line: root=/dev/mmcblk0p1 rootwait rw rootfstype=ext4 console=ttyS0,115200 earlycon=sbi
+  clk_ignore_unused".
+- p1 was mounted read-write at 2.04 s kernel time. "Welcome to the CanMV K230D AI-CAM" followed, then the login
+  prompt, 6.0 s after the load (C3: about 6 s).
+- Nothing was typed. "boot failed with exit code 13" (the ROM) came 89.5 s after `md.l`, and the ROM was back as dev 38
+  89.9 s after the last command (C3: 89.9 s).
+
+The console from `boot` on equals C3's, apart from timestamps and:
+- the xor/raid6 benchmark figures;
+- two probe lines in another order (`mmc0: SDHCI controller on 91581000.mmc`, `Btrfs loaded`);
+- one added line, `EXT4-fs (mmcblk0p1): recovery complete`. p1's journal was replayed: C3 ended with p1 mounted
+  read-write when the watchdog reset the SoC, and so does this run. p1 is not hashed in this step. Its content has
+  changed since the flash (O1 is recorded as found).
+
+Like C3's, this console prints the kernel's GPT notices (the card is larger than the image's GPT). They are notices
+only: O2 and O3 show nothing wrote either GPT.
+
+**Board state at the end:** the ROM, `29f1:0230` "K230 USB Boot Device", dev 41 at 3-4.2.1.4.1. Bench lock released.
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
