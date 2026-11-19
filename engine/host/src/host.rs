@@ -3842,29 +3842,32 @@ impl Host {
         slot.end_close();
         slot.stop_wait();
         let mut failed = None;
-        if let Ok(mut guard) = slot.instance.try_lock() {
-            let held = match guard.as_mut() {
-                Some(instance) if instance.holds_off() => {
-                    match catch_unwind(AssertUnwindSafe(|| instance.off())) {
-                        Ok(Ok(())) => true,
-                        Ok(Err(status)) => {
-                            failed = Some(status);
-                            false
-                        }
-                        // A driver that panics is never trusted again: it is dropped below.
-                        Err(_) => {
-                            failed = Some(Status::PANIC);
-                            false
-                        }
+        // The instance is waited for, not tried. A tick or a call holds it while it runs, and a
+        // `try_lock` that found it held skipped the switch-off altogether: the device reported
+        // off, its END hung up, and the driver (and the hardware it held) stayed up. The request
+        // is answered once the driver has been told, so the answer means the device is off.
+        let mut guard = lock(&slot.instance);
+        let held = match guard.as_mut() {
+            Some(instance) if instance.holds_off() => {
+                match catch_unwind(AssertUnwindSafe(|| instance.off())) {
+                    Ok(Ok(())) => true,
+                    Ok(Err(status)) => {
+                        failed = Some(status);
+                        false
+                    }
+                    // A driver that panics is never trusted again: it is dropped below.
+                    Err(_) => {
+                        failed = Some(Status::PANIC);
+                        false
                     }
                 }
-                _ => false,
-            };
-            if !held {
-                let dead = guard.take();
-                drop(guard);
-                drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
             }
+            _ => false,
+        };
+        if !held {
+            let dead = guard.take();
+            drop(guard);
+            drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
         }
         if let Some(status) = failed {
             *lock(&slot.state) = DeviceState::Off(OffReason::Failed(status));
