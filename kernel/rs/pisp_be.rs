@@ -94,6 +94,13 @@ const BE_VERSION_MINOR_BITS: u32 = 0xf;
 
 /// The window every register access stays inside; checked at probe.
 const LPB_WINDOW: usize = BE_CONFIG_BASE_REG + size_of::<lb::pisp_be_config>();
+/// Test only (`test_pb_fake_regs`): the fake block's control word, the first word past the window
+/// the real block has. The checks set it with a poke. 0 (the default) finishes each job the block is
+/// given, as the real block does; FAKE_HOLD keeps the job on the block until a check completes it by
+/// hand; FAKE_LOSE finishes it without raising the interrupt, so the watchdog has to.
+const LPB_FAKE_CTL: usize = LPB_WINDOW;
+const FAKE_HOLD: u32 = 1;
+const FAKE_LOSE: u32 = 2;
 const LPB_CONFIG_BYTES: usize = size_of::<lb::pisp_be_tiles_config>();
 const LPB_TILES_BYTES: usize = size_of::<[lb::pisp_tile; NUM_TILES]>();
 const NUM_TILES: usize = lb::PISP_BACK_END_NUM_TILES as usize;
@@ -512,6 +519,8 @@ struct PbState {
 pub(crate) struct LemPb {
     dev: *mut bindings::device,
     regs: *mut c_void,
+    /// The block's interrupt line, as probe requested it (the fake block raises it).
+    irq: c_uint,
     wq: Wq,
     hw_version: u32,
     /// One stream at a time.
@@ -530,8 +539,8 @@ unsafe impl Send for LemPb {}
 unsafe impl Sync for LemPb {}
 
 fn rd_reg(regs: *mut c_void, off: usize) -> u32 {
-    // SAFETY: the register window is mapped for LPB_WINDOW bytes (probe checked the resource's size),
-    // and every offset read is below it.
+    // SAFETY: the register window is mapped for LPB_WINDOW bytes (probe checked the resource's size;
+    // the fake block's control word is one word more), and every offset read is below it.
     let reg = unsafe { regs.cast::<u8>().add(off) };
     // SAFETY: a register inside the mapped window.
     unsafe { bindings::readl(reg.cast()) }
@@ -1098,7 +1107,49 @@ impl LemPb {
             BE_CONTROL_REG,
             BE_CONTROL_COPY_CONFIG | BE_CONTROL_QUEUE_JOB | be_control_num_tiles(job.num_tiles),
         );
+        self.fake_finish();
         Ok(())
+    }
+
+    /// Test only (`test_pb_fake_regs`): the fake block finishes the job it was given, as the real one
+    /// does. Its started and done counts go up in the batch register, the interrupt status says so, and
+    /// the interrupt is raised, so no check completes a job by hand. The control word can say otherwise
+    /// (LPB_FAKE_CTL): FAKE_HOLD leaves the job on the block, and FAKE_LOSE moves the counts but raises
+    /// nothing, which the watchdog then has to finish. Nothing here runs on a real block. `state` held.
+    fn fake_finish(&self) {
+        if !FAKE_REGS.get() {
+            return;
+        }
+        let control = self.rd(LPB_FAKE_CTL);
+        if control == FAKE_HOLD {
+            return;
+        }
+        let batch = self.rd(BE_BATCH_STATUS_REG);
+        let done = (batch as u8).wrapping_add(1);
+        let started = ((batch >> 8) as u8).wrapping_add(1);
+        self.wr(
+            BE_BATCH_STATUS_REG,
+            (batch & !0xffff) | u32::from(done) | u32::from(started) << 8,
+        );
+        if control == FAKE_LOSE {
+            return;
+        }
+        self.wr(BE_INTERRUPT_STATUS_REG, 1);
+        // SAFETY: the block's interrupt line, requested by probe and live while the block is; the
+        // pending state is set on a line the test block's simulated controller owns.
+        let raised = unsafe {
+            bindings::irq_set_irqchip_state(
+                self.irq,
+                bindings::irqchip_irq_state_IRQCHIP_STATE_PENDING,
+                true,
+            )
+        };
+        if raised != 0 {
+            dev_err!(
+                self.device(),
+                "test_pb_fake_regs: the fake block's interrupt was not raised\n"
+            );
+        }
     }
 
     /// Starts the next ready job if the block has room. `state` held.
@@ -1741,7 +1792,9 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
     // SAFETY: as above.
     let res = unsafe { bindings::platform_get_resource(pdev, bindings::IORESOURCE_MEM, 0) };
     // SAFETY: a resource of the device, checked non-null first.
-    if res.is_null() || (unsafe { bindings::resource_size(res) } as usize) < LPB_WINDOW {
+    // The fake block's control word is the one word past the window (see LPB_FAKE_CTL).
+    let window = if FAKE_REGS.get() { LPB_WINDOW + size_of::<u32>() } else { LPB_WINDOW };
+    if res.is_null() || (unsafe { bindings::resource_size(res) } as usize) < window {
         return Err(EINVAL);
     }
     // SAFETY: as above.
@@ -1783,6 +1836,7 @@ fn probe(pdev: *mut bindings::platform_device) -> Result<*const LemPb> {
         pin_init!(LemPb {
             dev,
             regs,
+            irq: irq as c_uint,
             wq,
             hw_version,
             create_lock <- new_mutex!(()),

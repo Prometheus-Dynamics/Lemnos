@@ -50,7 +50,7 @@ as soon as the module loads.
 | `unconfined` | Compatibles whose registers may be mapped though no IOMMU confines their DMA. The driver in user space alone then keeps the block's DMA inside its own memory, so list only a block whose driver points every address register only at memory the module allocated for it, and whose stock driver already gives user space the same access. `LEMNOS_IOC_INFO` reports such a block with `LEMNOS_INFO_MMIO_UNCONFINED`, and the kernel log says so when it binds. Empty by default. |
 | `test_irq_inject` | Test only. Enables `LEMNOS_IOC_TEST_IRQ`. |
 | `pisp_be` | Compatibles driven as the PiSP back end (`rs/pisp_be.rs`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
-| `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |
+| `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU, which finishes each job it is given and raises its interrupt. Its control word (`LPB_FAKE_CTL`, `rs/pisp_be.rs`) holds a job on the block or finishes it without the interrupt, for the wedge checks. |
 | `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
 | `test_pisp_fe` | Test only. Enables the PiSP front end's write log and post-copy overwrite ioctls. |
 | `gsdma` | Compatibles driven as the graphics DMA engine (`rs/gsdma.rs`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
