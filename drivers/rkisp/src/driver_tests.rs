@@ -750,6 +750,7 @@ fn a_job_carries_its_parameters_in_and_its_statistics_and_image_out() {
             dropped: 0,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
     // Every kernel buffer went back.
@@ -1267,6 +1268,7 @@ fn a_job_naming_a_config_buffer_still_in_flight_is_dropped_and_the_earlier_job_r
             dropped: 1,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
     let s = streams.statistics.take_frame().unwrap();
@@ -1350,6 +1352,7 @@ fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_cont
             dropped: 0,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
 }

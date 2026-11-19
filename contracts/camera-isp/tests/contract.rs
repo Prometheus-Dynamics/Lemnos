@@ -175,6 +175,14 @@ fn every_type_round_trips() {
         dropped: 2,
         errors: u64::MAX,
         lent: 0,
+        last_lent_inode: 0,
+    });
+    round_trip(Counters {
+        jobs: 3,
+        dropped: 0,
+        errors: 0,
+        lent: 3,
+        last_lent_inode: 0x1234_5678,
     });
 }
 
@@ -404,4 +412,48 @@ fn layouts_answer_what_was_set_and_none_until_then() {
     assert_eq!(c.output_layout(0), Ok(None));
     c.clear_output(1).unwrap();
     assert_eq!(c.output_layout(1), Ok(None));
+}
+
+/// `Counters` as a reader from before `last_lent_inode` has it: the base and `lent`, nothing more.
+#[derive(Encode, Decode, Debug, PartialEq)]
+struct CountersBefore {
+    jobs: u64,
+    dropped: u64,
+    errors: u64,
+    lent: u64,
+}
+
+#[test]
+fn a_reader_from_before_the_inode_field_decodes_counters_and_a_new_one_defaults_it() {
+    let new = Counters {
+        jobs: 5,
+        dropped: 1,
+        errors: 0,
+        lent: 4,
+        last_lent_inode: 0xABCD,
+    };
+    let mut buffer = [0; REPLY_INLINE];
+    let mut writer = Writer::new(&mut buffer);
+    new.encode(&mut writer).unwrap();
+    let used = writer.len();
+    let mut reader = Reader::new(&buffer[..used]);
+    let before = CountersBefore::decode(&mut reader).unwrap();
+    assert_eq!(
+        before,
+        CountersBefore {
+            jobs: 5,
+            dropped: 1,
+            errors: 0,
+            lent: 4
+        }
+    );
+
+    let mut buffer = [0; REPLY_INLINE];
+    let mut writer = Writer::new(&mut buffer);
+    before.encode(&mut writer).unwrap();
+    let used = writer.len();
+    let mut reader = Reader::new(&buffer[..used]);
+    let back = Counters::decode(&mut reader).unwrap();
+    assert_eq!(back.lent, 4);
+    assert_eq!(back.last_lent_inode, 0, "a reader from before the field gets 0");
 }

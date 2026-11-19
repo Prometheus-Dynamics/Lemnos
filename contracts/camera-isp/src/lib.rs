@@ -160,6 +160,11 @@ pub struct Counters {
     /// Jobs whose input was lent (counted whether or not they ran).
     #[added]
     pub lent: u64,
+    /// The inode of the dma-buf the last lent job queued as its input: the same inode as the
+    /// receiver's buffer that carried that frame, when the input was lent and not copied. `0` when
+    /// no lent job has run since `start`.
+    #[added]
+    pub last_lent_inode: u64,
 }
 
 #[contract("camera.isp", version = 1, kind = "camera")]

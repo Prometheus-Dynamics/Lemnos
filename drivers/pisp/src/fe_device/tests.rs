@@ -230,6 +230,7 @@ impl Hardware for Hw {
             dropped: 2,
             errors: 1,
             lent: 0,
+            last_lent_inode: 0,
         })
     }
 
