@@ -204,6 +204,29 @@ impl Client {
         self.lock().open_stream(device, name, platform)
     }
 
+    /// See [`Session::open_stream_held`].
+    pub fn open_stream_held(
+        &self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.lock().open_stream_held(device, name, hold, platform)
+    }
+
+    /// See [`Session::open_stream_writable_held`].
+    pub fn open_stream_writable_held(
+        &self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.lock()
+            .open_stream_writable_held(device, name, hold, platform)
+    }
+
     /// See [`Session::open_stream_writable`].
     pub fn open_stream_writable(
         &self,

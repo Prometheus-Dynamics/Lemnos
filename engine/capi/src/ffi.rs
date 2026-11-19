@@ -8,10 +8,10 @@ pub(crate) use crate::surface::{
     lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_package_info,
     lemnos_package_list, lemnos_package_text, lemnos_stream_buffer_handle, lemnos_stream_close,
     lemnos_stream_end, lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame,
-    lemnos_stream_open, lemnos_stream_plane, lemnos_stream_plane_handle, lemnos_stream_plane_len,
-    lemnos_stream_pool_page, lemnos_stream_post_job, lemnos_stream_producer, lemnos_stream_read,
-    lemnos_stream_region, lemnos_stream_release, lemnos_stream_skipped, lemnos_stream_write,
-    lemnos_subscribe,
+    lemnos_stream_open, lemnos_stream_open_held, lemnos_stream_plane, lemnos_stream_plane_handle,
+    lemnos_stream_plane_len, lemnos_stream_pool_page, lemnos_stream_post_job,
+    lemnos_stream_producer, lemnos_stream_read, lemnos_stream_region, lemnos_stream_release,
+    lemnos_stream_skipped, lemnos_stream_write, lemnos_subscribe,
 };
 
 #[cfg(feature = "shared")]
@@ -103,6 +103,15 @@ mod shared {
             client: Handle,
             device: u32,
             name: *const c_char,
+            flags: u32,
+            stream: *mut Handle,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_open_held(
+            client: Handle,
+            device: u32,
+            name: *const c_char,
+            hold: u32,
             flags: u32,
             stream: *mut Handle,
             sink: MessageSink,

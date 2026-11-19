@@ -3514,6 +3514,28 @@ impl Host {
         self.inner.streams.attach(device, name, caller)
     }
 
+    /// As [`stream_attach`](Self::stream_attach), for a consumer that declares it holds `hold`
+    /// buffers at once. The ticket math reserves exactly `hold` for it, and its own holds are
+    /// bounded by it. A declaration that does not fit (`hold` is 0, or it leaves the producer
+    /// fewer than the producer's two of the stream's buffers) is refused with
+    /// its reason in the text and nothing is attached. Nothing is trimmed.
+    ///
+    /// # Errors
+    ///
+    /// [`TicketRefused`]: `NOT_FOUND` (no such stream), `BUSY` (a consumer is attached, or the
+    /// declaration does not fit), `INVALID_ARGUMENT` (`hold` is 0).
+    pub fn stream_attach_declared(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        hold: u32,
+    ) -> core::result::Result<Lease, TicketRefused> {
+        self.inner
+            .streams
+            .attach_declared(device, name, caller, hold)
+    }
+
     /// Gives up a stream `caller` holds. `NOT_FOUND` if it doesn't hold it.
     pub fn stream_detach(
         &self,

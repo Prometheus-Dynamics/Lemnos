@@ -853,9 +853,10 @@ the ring and the buffers and never sends the daemon a frame. The frames are kind
   - The default (`held` = 0) takes what fits: the most of 2, the stream's ceiling, and the buffers the
     producer leaves over. It is refused `BUSY` only when that is 0. The grant says how many it got.
   - An explicit `held` is all or refused: it is clamped to the ceiling, then granted only if, after
-    the consumer's own buffer (`CONSUMER_HELD` = 1) and the holds already granted to the other readers,
-    at least `MIN_PRODUCER_BUFFERS` = 2 buffers would be left for the producer. Otherwise it is refused
-    `BUSY`. The refusal's text gives what was asked and how many buffers are left.
+    the consumer's reservation (its declared hold, or `CONSUMER_HELD` = 1 when it declared none: see
+    [The consumer's declared hold](#the-consumers-declared-hold)) and the holds already granted to the
+    other readers, at least `MIN_PRODUCER_BUFFERS` = 2 buffers would be left for the producer.
+    Otherwise it is refused `BUSY`. The refusal's text gives what was asked and how many buffers are left.
   - Worked case: 4 buffers, a consumer present, one reader. 4 - 1 = 3 are left, and the producer keeps
     2 of them, so the default is granted 1. An explicit request of 2 is refused: 3 - 2 = 1 is under 2.
     An explicit request of 1 is granted, and the producer keeps 2.
@@ -865,8 +866,9 @@ the ring and the buffers and never sends the daemon a frame. The frames are kind
     grant for, the ring skips that frame and the reader's `TicketReader::pop` returns `Pop::AtLimit`,
     not `Pop::Empty`. Giving a held frame back lets it read on. The client's `FrameStream` reports the
     same as `Next::AtLimit` (from `next_or_end`) and `Error::StreamAtLimit` (from `try_next` and
-    `next_frame`). The client's own consumer carries no hold limit in its marks (`Consumer::attach_with`),
-    so only a ticketed reader reaches it; the consumer's holds are not counted by the grant.
+    `next_frame`). A consumer that declared its hold is held to that number the same way
+    (see below). A consumer that declared none carries no hold limit in its marks, so only a ticketed
+    reader reaches it; its holds are not counted by the grant.
 - **Cut-off.** A reader that holds more than its grant, or one buffer longer than its `hold_ms`, or
   whose marks stay mid-change, or whose liveness pipe hangs up, is cut off. Its marks stop counting and
   its buffers go back to the producer. The stream is **not** faulted. The reason is in the pool page
@@ -889,6 +891,40 @@ Refusals, by status: `NOT_FOUND` (no such stream, or no consumer attached to it)
 connection is not the consumer, or a dma-buf ticket without the import right, or import asked with
 security on and `reader_import` false); `BUSY` (every slot taken, or a grant that would starve the
 producer); `NOT_SUPPORTED` (`readers` is 0, or a dma-buf stream whose buffers were allocated writable).
+
+### The consumer's declared hold
+
+A consumer may **declare** how many of the stream's buffers it holds at once, when it attaches:
+`Client::open_stream_held(device, name, hold, platform)` (on `Session` and `AsyncClient` too; the
+protocol frame is `StreamOpenHeld`, part `consumer-hold`, see [Wire](wire.md#streams)). Then:
+
+- The ticket math reserves exactly `hold` buffers for the consumer, in place of the one
+  (`CONSUMER_HELD`) it reserves without a declaration. Outside readers share what is left, less the
+  producer's `MIN_PRODUCER_BUFFERS` = 2, under the same rules as above.
+- The consumer's own holds are bounded by `hold`: a frame that would be its `hold + 1`th is skipped and
+  reported as `Next::AtLimit`, as a reader's is.
+- A declaration that does not fit is refused at attach, by name, with `BUSY` and the numbers. `hold`
+  must be at least 1, and `buffers - hold` must be at least 2. Nothing is attached, and nothing is
+  trimmed to fit. A service from before the declaration is refused by name by the client, too.
+- Without a declaration nothing changes: the consumer reserves 1, has no hold limit, and the default
+  grant is the one the rule above gives.
+
+Declared holds, and what outside readers get with a default request:
+
+| Buffers `B` | Consumer declares `C` | Left for readers (`B - C`) | Outside readers, default requests | Most readers can hold in all (`B - C - 2`) |
+|---|---|---|---|---|
+| 4 | none (reserves 1) | 3 | one reader gets 1 | 1 |
+| 4 | 2 | 2 | none: each is refused `BUSY` | 0 |
+| 4 | 3 | 1 | refused at attach (the producer would keep 1) | |
+| 6 | 3 | 3 | the first gets 1, the next is refused `BUSY` | 1 |
+| 6 | none (reserves 1) | 5 | the first gets 2, the next gets 1 | 3 |
+| 8 | 4 | 4 | the first gets 2, the next is refused `BUSY` | 2 |
+
+A writer (`open_stream_writable_held`) is bounded the same way. It holds the completion frames of its
+jobs' results through the frame marks a reader uses; its input buffers are not holds, since it writes
+them, posts the job, and the driver takes them back on completion. A main consumer that holds
+`C = B - max(B/2, 2)` (2 of 4, 3 of 6, 4 of 8) is the case the declared rows show. Nothing in this repository makes that declaration for a caller: a caller that does not
+declare still calls `open_stream` and `open_stream_writable`.
 
 ### Which buffers can have readers
 

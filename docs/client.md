@@ -114,6 +114,12 @@ What a client can do:
   `close_stream`
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing
   the client gives up every stream it holds.
+- **`open_stream_held(device, name, hold, platform)`**, and `open_stream_writable_held`: as
+  `open_stream` (or `open_stream_writable`), and the consumer declares it holds at most `hold` of the
+  stream's buffers at once. The host reserves that many for it and bounds
+  its own holds by it; a declaration that does not fit is refused at attach, by name. It needs the
+  service's `consumer-hold` part; an older service is refused by name, never sent the declaration. See
+  [The consumer's declared hold](streams.md#the-consumers-declared-hold).
 - **`packages`**: what became of the daemon's driver packages.
 - **`next_event`**: a device's state, reason or health changed. Events come when the client asked
   for them in its Hello (the default). They are read off the socket inside any call and in
@@ -249,6 +255,7 @@ function, struct and code is there with its rule.
 | `lemnos_set_power` | Off and on |
 | `lemnos_item_count`, `lemnos_item_info`, `lemnos_item_text` | What a device says about itself |
 | `lemnos_package_list`, `lemnos_package_info`, `lemnos_package_text` | What became of the daemon's driver packages |
+| `lemnos_stream_open_held` | `lemnos_stream_open` for a consumer that declares its hold: `hold` buffers at once, with `LEMNOS_STREAM_WRITABLE` for a writer and no other flag. A declaration that does not fit is `LEMNOS_E_BUSY` with its reason; a service without the part is `LEMNOS_E_NOT_SUPPORTED` |
 | `lemnos_stream_open`, `lemnos_stream_info`, `lemnos_stream_close` | Take a device's [frame stream](streams.md), read-only, `LEMNOS_STREAM_WRITABLE`, or `LEMNOS_STREAM_OPEN_UNMAPPED` (none of its buffers mapped), and give it back. Waits for the service's answer, up to the client's timeout. `lemnos_client_close` gives up every stream still open |
 | `lemnos_stream_next_frame`, `lemnos_stream_release` | Take the next frame, read in place, and give its buffer back |
 | `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |

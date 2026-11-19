@@ -70,6 +70,7 @@ closes the connection on a larger length, without reading it.
 | 38 | StreamTicketState | id u32, device u32, name str, slot u32 | to host |
 | 39 | StreamTicketInfo | id u32, slot u32, live bool, reason u64, cut_at_ns u64, cuts u64 | to client |
 | 40 | EndpointsOpenEnd | id u32, device u32 | to host |
+| 42 | StreamOpenHeld | id u32, device u32, name str, hold u32, handles bool | to host |
 | 41 | EndpointsEnd | id u32, with three descriptors | to client |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
@@ -152,7 +153,8 @@ hash.
   (StreamOpenHandles and StreamHandles, with their limits), packages (Packages, Package and
   PackagesDone, with the package modes), jobs (CallJob, JobStarted, JobProgress, JobDone and
   JobCancel), shared rings (the shared-memory descriptors of a stream, [Streams](#streams)) and
-  endpoints (EndpointsOpen and its answers, [Endpoints](#endpoints)). A part has its own hash,
+  endpoints (EndpointsOpen and its answers, [Endpoints](#endpoints)) and consumer-hold
+  (StreamOpenHeld, [Streams](#streams)). A part has its own hash,
   `PART_HASHES`. Hello and Welcome carry them in their tail, `parts`, as one record for each part the
   sender knows, keyed by the part's name (below). They are compared once the core agrees. A peer whose
   tail is empty has none to compare.
@@ -173,6 +175,8 @@ therefore keeps its hash. The values this build computes are:
 `shared-rings part hash: 0x981c6833e8330a91`
 
 `endpoints part hash: 0x0360342362a7f9d9`
+
+`consumer-hold part hash: 0xcde074f06510cd51`
 
 The hashes do not include the Lemnos version string. Two builds with the same core interoperate
 whatever their Lemnos versions. What a client sees when the cores differ: the connection is refused
@@ -756,20 +760,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the five part records }`
+`Hello { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the six part records }`
 
 <!-- vector: hello -->
 ```hex
-95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 91 0a 33 e8 33 68 1c 98 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+ab 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 72 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 91 0a 33 e8 33 68 1c 98 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03 0d 63 6f 6e 73 75 6d 65 72 2d 68 6f 6c 64 51 cd 10 65 f0 74 e0 cd
 ```
 
 ### welcome
 
-`Welcome { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the five part records }`
+`Welcome { core: 0x40b5b5290df32c80, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the six part records }`
 
 <!-- vector: welcome -->
 ```hex
-99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 91 0a 33 e8 33 68 1c 98 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
+af 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 72 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 91 0a 33 e8 33 68 1c 98 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03 0d 63 6f 6e 73 75 6d 65 72 2d 68 6f 6c 64 51 cd 10 65 f0 74 e0 cd
 ```
 
 ### list

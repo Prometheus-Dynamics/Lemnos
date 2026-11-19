@@ -237,7 +237,31 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::ReadOnly, platform)
+        self.open_stream_as(device, name, Mapping::ReadOnly, None, platform)
+            .await
+    }
+
+    /// See [`Session::open_stream_held`].
+    pub async fn open_stream_held(
+        &mut self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::ReadOnly, Some(hold), platform)
+            .await
+    }
+
+    /// See [`Session::open_stream_writable_held`].
+    pub async fn open_stream_writable_held(
+        &mut self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::Writable, Some(hold), platform)
             .await
     }
 
@@ -248,7 +272,7 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::Unmapped, platform)
+        self.open_stream_as(device, name, Mapping::Unmapped, None, platform)
             .await
     }
 
@@ -259,7 +283,7 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::Writable, platform)
+        self.open_stream_as(device, name, Mapping::Writable, None, platform)
             .await
     }
 
@@ -268,13 +292,14 @@ impl AsyncClient {
         device: u32,
         name: &str,
         mapping: Mapping,
+        hold: Option<u32>,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         self.settle().await?;
-        let (id, pick) = self.session.op_open_stream(device, name, &platform)?;
+        let (id, pick) = self.session.op_open_stream(device, name, hold, &platform)?;
         let ready = self.wait(id, pick).await;
         self.session
-            .finish_open_stream(ready, device, name, mapping, platform)
+            .finish_open_stream(ready, device, name, mapping, hold, platform)
     }
 
     /// See [`Session::close_stream`].

@@ -245,21 +245,44 @@ impl Lease {
         self.attach(true)
     }
 
+    /// As [`consumer`](Self::consumer), for a consumer that declared it holds `max_held` buffers at
+    /// once (see [`Streams::attach_declared`]): the consumer's own hold is bounded by it.
+    pub fn consumer_declared(
+        self,
+        max_held: u32,
+    ) -> Result<lemnos_wire::ring::Consumer, lemnos_wire::ring::RingError> {
+        self.attach_held(false, max_held)
+    }
+
     fn attach(
         self,
         writable: bool,
+    ) -> Result<lemnos_wire::ring::Consumer, lemnos_wire::ring::RingError> {
+        self.attach_held(writable, 0)
+    }
+
+    fn attach_held(
+        self,
+        writable: bool,
+        max_held: u32,
     ) -> Result<lemnos_wire::ring::Consumer, lemnos_wire::ring::RingError> {
         let lengths = if self.planes.count() == 1 {
             Vec::new()
         } else {
             self.planes.lengths().to_vec()
         };
-        lemnos_wire::ring::Consumer::attach(
+        let mapping = if writable {
+            lemnos_wire::ring::Mapping::Writable
+        } else {
+            lemnos_wire::ring::Mapping::ReadOnly
+        };
+        lemnos_wire::ring::Consumer::attach_held(
             self.descriptors,
             self.layout,
             &lengths,
             self.shared,
-            writable,
+            mapping,
+            max_held,
         )
     }
 }
@@ -412,6 +435,23 @@ impl Streams {
     ) -> Result<Lease, Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
         endpoint::lock(&core).attach(caller)
+    }
+
+    /// As [`attach`](Self::attach), for a consumer that declares it holds `hold` buffers at once.
+    pub(crate) fn attach_declared(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        hold: u32,
+    ) -> Result<Lease, TicketRefused> {
+        let Some(core) = self.core(device, name) else {
+            return Err(TicketRefused {
+                status: Status::NOT_FOUND,
+                text: format!("device {device} has no stream {name:?}"),
+            });
+        };
+        endpoint::lock(&core).attach_declared(caller, hold)
     }
 
     /// Gives up a stream `caller` holds.

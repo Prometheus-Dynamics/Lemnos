@@ -140,57 +140,105 @@ pub unsafe extern "C" fn lemnos_stream_open(
     stream: *mut Handle,
     sink: MessageSink,
 ) -> Status {
+    // SAFETY: the caller's contract, passed on unchanged.
+    guard(|| unsafe { open_stream(client, device, name, flags, None, stream, sink) })
+}
+
+/// `lemnos_stream_open` for a consumer that declares it holds `hold` of the stream's buffers at
+/// once (`Session::open_stream_held`, or `open_stream_writable_held` with `LEMNOS_STREAM_WRITABLE`
+/// in `flags`; no other flag). A declaration that does not fit is refused as `lemnos_stream_open` refuses a second consumer:
+/// `LEMNOS_E_BUSY`, with its reason in `sink`. A service without the `consumer-hold` part refuses
+/// it by name, as `LEMNOS_E_NOT_SUPPORTED`, and is never sent the declaration.
+///
+/// # Safety
+/// `name` is NUL-terminated; `stream` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_open_held(
+    client: Handle,
+    device: u32,
+    name: *const c_char,
+    hold: u32,
+    flags: u32,
+    stream: *mut Handle,
+    sink: MessageSink,
+) -> Status {
     guard(|| {
-        let known = STREAM_WRITABLE | STREAM_OPEN_UNMAPPED;
-        if stream.is_null() || flags & !known != 0 || flags & known == known {
+        if flags & !STREAM_WRITABLE != 0 {
             return Status::INVALID_ARGUMENT;
         }
-        // SAFETY: NUL-terminated by the contract, read only in this call.
-        let name = match unsafe { text(name) } {
-            Ok(name) => name,
-            Err(status) => return status,
+        // SAFETY: the caller's contract, passed on unchanged.
+        unsafe { open_stream(client, device, name, flags, Some(hold), stream, sink) }
+    })
+}
+
+/// The one open behind both: `hold` is the consumer's declaration, when it made one.
+///
+/// # Safety
+/// As `lemnos_stream_open`.
+unsafe fn open_stream(
+    client: Handle,
+    device: u32,
+    name: *const c_char,
+    flags: u32,
+    hold: Option<u32>,
+    stream: *mut Handle,
+    sink: MessageSink,
+) -> Status {
+    let known = STREAM_WRITABLE | STREAM_OPEN_UNMAPPED;
+    if stream.is_null() || flags & !known != 0 || flags & known == known {
+        return Status::INVALID_ARGUMENT;
+    }
+    // SAFETY: NUL-terminated by the contract, read only in this call.
+    let name = match unsafe { text(name) } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    let Some(platform) = platform() else {
+        return Status::NOT_SUPPORTED;
+    };
+    with_entry(client, |entry| {
+        entry.layout_refusal = None;
+        let Some(index) = entry.devices.get(device as usize).map(|d| d.index) else {
+            return Status::NOT_FOUND;
         };
-        let Some(platform) = platform() else {
-            return Status::NOT_SUPPORTED;
-        };
-        with_entry(client, |entry| {
-            entry.layout_refusal = None;
-            let Some(index) = entry.devices.get(device as usize).map(|d| d.index) else {
-                return Status::NOT_FOUND;
-            };
-            let taken = if flags & STREAM_WRITABLE != 0 {
+        let taken = match (hold, flags) {
+            (Some(hold), flags) if flags & STREAM_WRITABLE != 0 => entry
+                .session
+                .open_stream_writable_held(index, name, hold, platform),
+            (Some(hold), _) => entry.session.open_stream_held(index, name, hold, platform),
+            (None, flags) if flags & STREAM_WRITABLE != 0 => {
                 entry.session.open_stream_writable(index, name, platform)
-            } else if flags & STREAM_OPEN_UNMAPPED != 0 {
-                entry.session.open_stream_unmapped(index, name, platform)
-            } else {
-                entry.session.open_stream(index, name, platform)
-            };
-            let taken = match taken {
-                Ok(taken) => taken,
-                Err(error) => {
-                    entry.layout_refusal = layout_refusal(&error);
-                    return fail(error, sink);
-                }
-            };
-            let held = (0..taken.layout().buffers).map(|_| None).collect();
-            let slot = Arc::new(Mutex::new(Some(Stream {
-                stream: taken,
-                held,
-            })));
-            match entry.streams.insert(Arc::clone(&slot)) {
-                Ok(handle) => {
-                    // SAFETY: not null, and valid for a write by the contract.
-                    unsafe { stream.write(handle) };
-                    Status::OK
-                }
-                Err(status) => {
-                    if let Some(Stream { stream, .. }) = lock(&slot).take() {
-                        let _ = entry.session.close_stream(stream);
-                    }
-                    status
-                }
             }
-        })
+            (None, flags) if flags & STREAM_OPEN_UNMAPPED != 0 => {
+                entry.session.open_stream_unmapped(index, name, platform)
+            }
+            (None, _) => entry.session.open_stream(index, name, platform),
+        };
+        let taken = match taken {
+            Ok(taken) => taken,
+            Err(error) => {
+                entry.layout_refusal = layout_refusal(&error);
+                return fail(error, sink);
+            }
+        };
+        let held = (0..taken.layout().buffers).map(|_| None).collect();
+        let slot = Arc::new(Mutex::new(Some(Stream {
+            stream: taken,
+            held,
+        })));
+        match entry.streams.insert(Arc::clone(&slot)) {
+            Ok(handle) => {
+                // SAFETY: not null, and valid for a write by the contract.
+                unsafe { stream.write(handle) };
+                Status::OK
+            }
+            Err(status) => {
+                if let Some(Stream { stream, .. }) = lock(&slot).take() {
+                    let _ = entry.session.close_stream(stream);
+                }
+                status
+            }
+        }
     })
 }
 

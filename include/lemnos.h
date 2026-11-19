@@ -275,6 +275,14 @@ LemnosStatus lemnos_package_text(LemnosHandle client, uint32_t package, uint32_t
  * -EINVAL. */
 LemnosStatus lemnos_stream_open(LemnosHandle client, uint32_t device, const char *name,
                                 uint32_t flags, LemnosHandle *stream, LemnosMessageSink sink);
+/* lemnos_stream_open for a consumer that declares it holds `hold` of the stream's buffers at once
+ * (docs/streams.md, "The consumer's declared hold"). `flags` is 0, or LEMNOS_STREAM_WRITABLE for a
+ * writer; no other flag. A declaration that does not fit is LEMNOS_E_BUSY with its reason in the
+ * sink; a service without the consumer-hold part is LEMNOS_E_NOT_SUPPORTED, by name, and is never
+ * sent the declaration. */
+LemnosStatus lemnos_stream_open_held(LemnosHandle client, uint32_t device, const char *name,
+                                     uint32_t hold, uint32_t flags, LemnosHandle *stream,
+                                     LemnosMessageSink sink);
 /* LEMNOS_E_FAILED_PRECONDITION: the call is valid but the device is not yet in the state it needs (for a
  * camera sensor, no mode selected). Nothing was changed; take the step it names, then call again. */
 /* After a lemnos_stream_open that returned LEMNOS_E_LAYOUT_MISMATCH: which shared structure refused
