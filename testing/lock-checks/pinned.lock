@@ -1,0 +1,23 @@
+# A consumer lock that passes both checks: every Lemnos crate at the pinned rev, one copy of each shm-* crate.
+version = 4
+
+[[package]]
+name = "lemnos-ipc"
+version = "2.0.1-dev"
+source = "git+https://github.com/Prometheus-Dynamics/Lemnos.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "lemnos-client"
+version = "2.0.1-dev"
+source = "git+https://github.com/Prometheus-Dynamics/Lemnos.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "shm-ring"
+version = "0.1.0"
+source = "git+https://github.com/Prometheus-Dynamics/Lemnos.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "serde"
+version = "1.0.219"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0000000000000000000000000000000000000000000000000000000000000000"

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # The shipped programs' feature baseline (service/shipped-features): the same features whichever programs are built together.
-lemnos-shipped-features = { path = "../shipped-features" }
+lemnos-shipped-features = { path = "../shipped-features", features = ["orion"] }
 lemnos-client = { path = "../../engine/client" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
