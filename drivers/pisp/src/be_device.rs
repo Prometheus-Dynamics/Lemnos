@@ -949,6 +949,14 @@ impl PispBe {
             let _ = source.unlend(job.lent_buffer, job.identity);
             return Ok(Err(reason::SIZE_OR_STRIDE));
         }
+        // The dma-buf the block is given, by inode: the consumer checks it against the frame's own
+        // buffer. A descriptor that can't be read is refused before anything is registered.
+        let Ok((_, inode)) = lemnos_linux_sys::dma_buf::identity(frame.handle.fd()) else {
+            let _ = source.unlend(job.lent_buffer, job.identity);
+            return Ok(Err(reason::NOT_LENT));
+        };
+        self.counters.lent = self.counters.lent.saturating_add(1);
+        self.counters.last_lent_inode = inode;
         let registered = match self.hw.register_lent(frame.handle.fd(), frame.generation) {
             Ok(registered) => registered,
             // The kernel refuses a lent file that is not a dma-buf with EINVAL (`INVALID_ARGUMENT`):
@@ -1084,7 +1092,9 @@ impl CameraIsp for PispBe {
             config_layouts: 1,
             statistics_layout: 0,
             statistics_bytes: 0,
-            input_lend: false,
+            // A lend source is given exactly when the board links a front end whose stream it
+            // names (`lend`): without one a lent job could not be served.
+            input_lend: self.lend.is_some(),
         })
     }
 
