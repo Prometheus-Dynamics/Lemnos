@@ -192,6 +192,13 @@ on it) fails with `Disconnected` as soon as it is refused: the session's backoff
 8 s) spaces its own tries and is never added to a connect that has already failed, so a program
 that reconnects on a delay of its own waits that delay and no more.
 
+`Client::connect_within(path, name, bound)` is a first connect that waits. It tries on the same
+backoff as `connecting` (1 s, doubling, capped at 8 s), until the service answers or `bound` passes.
+A service that is refused at once (a version or part mismatch) still fails at once. When the bound
+passes first it fails with `TimedOut` (its text is "no answer in time"), at the bound, within the
+time one sleep takes over it. A zero bound is `connect`: it makes one try and fails with
+`Disconnected`.
+
 A call answers `BUSY` when the device's driver is in another call or a tick right then. The host
 never waits on a driver, because a driver may be stuck. Ask again.
 

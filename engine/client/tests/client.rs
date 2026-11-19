@@ -392,6 +392,59 @@ fn a_change_the_service_tells_of_ends_a_wait_for_events_and_none_is_none() {
     assert!(client.wait_event(Duration::from_millis(50)).is_none());
 }
 
+/// How much later than its bound a bounded connect may fail: the time one sleep may overrun.
+const BOUND_TOLERANCE: Duration = Duration::from_millis(250);
+
+#[test]
+fn a_bounded_connect_connects_when_the_service_appears_inside_the_bound() {
+    // The socket appears 300 ms after the connect starts: the first try is refused, and the
+    // next one, after the 1 s backoff, finds it.
+    let host = FakeHost::start_after(Duration::from_millis(300));
+    let bound = Duration::from_secs(5);
+    let started = Instant::now();
+    let client = Client::connect_within(&host.path, "t", bound).unwrap();
+    assert!(started.elapsed() < bound);
+    assert!(client.is_connected());
+    client.list().unwrap();
+}
+
+#[test]
+fn a_bounded_connect_fails_at_its_bound_when_the_service_never_appears() {
+    let dir = temp_dir("never");
+    let path = dir.0.join("sock");
+    let bound = Duration::from_millis(1500);
+    let started = Instant::now();
+    let error = Client::connect_within(&path, "t", bound).unwrap_err();
+    let took = started.elapsed();
+    assert_eq!(error, Error::TimedOut);
+    assert!(
+        took >= bound,
+        "failed after {took:?}, before the {bound:?} bound"
+    );
+    assert!(
+        took < bound + BOUND_TOLERANCE,
+        "failed after {took:?}, more than {BOUND_TOLERANCE:?} past the {bound:?} bound"
+    );
+}
+
+#[test]
+fn a_zero_bound_connects_as_connect_does() {
+    let dir = temp_dir("zero");
+    let path = dir.0.join("sock");
+    let started = Instant::now();
+    let bounded = Client::connect_within(&path, "t", Duration::ZERO).unwrap_err();
+    let plain = Client::connect(&path, "t").unwrap_err();
+    assert_eq!(
+        (&bounded, &plain),
+        (&Error::Disconnected, &Error::Disconnected)
+    );
+    assert!(started.elapsed() < BOUND_TOLERANCE, "a zero bound waited");
+
+    let host = FakeHost::start();
+    let client = Client::connect_within(&host.path, "t", Duration::ZERO).unwrap();
+    client.list().unwrap();
+}
+
 #[test]
 fn events_the_queue_drops_are_counted_and_the_oldest_are_the_ones_lost() {
     let host = FakeHost::start();
