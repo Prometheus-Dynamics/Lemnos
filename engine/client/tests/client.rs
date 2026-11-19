@@ -174,6 +174,73 @@ fn no_service_is_an_error_from_connect() {
     );
 }
 
+/// How long a refused connect may take to say so. The session has no clock of its own to read, so
+/// this is wall time: a refused `connect(2)` on a Unix socket returns in microseconds, and the fault
+/// this guards against is a whole retry backoff (one second, `RETRY_FIRST`). A quarter of that is
+/// far above any scheduling stall seen on a loaded machine and far below the fault.
+const REFUSED_AT_ONCE: Duration = Duration::from_millis(250);
+
+/// A socket path nothing listens on: absent (ENOENT), or left by a listener that is gone
+/// (ECONNREFUSED).
+fn refusing_paths(dir: &std::path::Path) -> [std::path::PathBuf; 2] {
+    let absent = dir.join("absent");
+    let stale = dir.join("stale");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    [absent, stale]
+}
+
+#[test]
+fn a_refused_connect_fails_at_once_not_a_backoff_later() {
+    let dir = temp_dir("refused");
+    for path in refusing_paths(&dir.0) {
+        let started = Instant::now();
+        assert_eq!(
+            Client::connect(&path, "t").unwrap_err(),
+            Error::Disconnected
+        );
+        let client = started.elapsed();
+        let started = Instant::now();
+        assert_eq!(
+            Session::connect(&path, "t").unwrap_err(),
+            Error::Disconnected
+        );
+        let session = started.elapsed();
+        assert!(
+            client < REFUSED_AT_ONCE && session < REFUSED_AT_ONCE,
+            "{}: Client::connect took {client:?}, Session::connect {session:?}",
+            path.display()
+        );
+    }
+}
+
+/// A caller that reconnects through `connect` with a delay of its own, and reports that delay as
+/// how long until it tries again, must be telling the truth: the time between its tries is its
+/// delay, with nothing of the session's added.
+#[test]
+fn a_callers_stated_reconnect_delay_is_the_real_wait_between_its_connects() {
+    const STATED: Duration = Duration::from_millis(50);
+    let dir = temp_dir("delay");
+    for path in refusing_paths(&dir.0) {
+        let mut tries = Vec::new();
+        for _ in 0..4 {
+            tries.push(Instant::now());
+            assert_eq!(
+                Client::connect(&path, "t").unwrap_err(),
+                Error::Disconnected
+            );
+            std::thread::sleep(STATED);
+        }
+        for pair in tries.windows(2) {
+            let real = pair[1] - pair[0];
+            assert!(
+                real >= STATED && real < STATED + REFUSED_AT_ONCE,
+                "{}: stated {STATED:?}, real {real:?}",
+                path.display()
+            );
+        }
+    }
+}
+
 #[test]
 fn a_service_from_another_lemnos_revision_is_refused_at_connect() {
     let host = FakeHost::start();
@@ -406,7 +473,14 @@ fn a_subscription_comes_back_after_a_restart_with_the_same_identity() {
 fn a_program_can_start_before_the_service() {
     let dir = temp_dir("late");
     let client = Client::connecting(dir.0.join("sock"), "t");
+    let started = Instant::now();
     assert_eq!(client.list().unwrap_err(), Error::Disconnected);
+    // The first call is the first try, and the refusal is its answer.
+    assert!(
+        started.elapsed() < REFUSED_AT_ONCE,
+        "{:?}",
+        started.elapsed()
+    );
     assert!(!client.is_connected());
 }
 

@@ -184,7 +184,10 @@ same as for any caller.
 The connection looks after itself. If the daemon restarts, the client reconnects, subscribes again
 and finds its handles again by name and tag. A call made while the daemon is away fails with
 `Disconnected`; the next one after it is back works. `Client::connecting` returns at once and
-connects whenever the daemon appears.
+connects whenever the daemon appears. A connect the system refuses (no socket, or nothing listening
+on it) fails with `Disconnected` as soon as it is refused: the session's backoff (1 s, doubling to
+8 s) spaces its own tries and is never added to a connect that has already failed, so a program
+that reconnects on a delay of its own waits that delay and no more.
 
 A call answers `BUSY` when the device's driver is in another call or a tick right then. The host
 never waits on a driver, because a driver may be stuck. Ask again.
