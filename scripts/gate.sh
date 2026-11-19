@@ -75,6 +75,9 @@ bounded() {
     export GATE_STEP_TOKEN="$token"
     rc=0
     "$@" || rc=$?
+    # The step's CPU: bash's times, whose second line is the children this subshell waited for (user, then
+    # system). Straight to a file: in a pipeline, times would run in a new subshell that has no children.
+    times >"$gate_out/$key.cpu"
     echo "$rc" >"$gate_out/$key.done"
   ) </dev/null >"$gate_out/$key.out" 2>&1 &
   pid=$!
@@ -128,7 +131,19 @@ finish() {
     stop_lanes
     exit 1
   fi
-  echo "    $label: $(cat "$gate_out/$key.secs") s"
+  echo "    $label: $(cat "$gate_out/$key.secs") s, $(step_cpu "$key") CPU-s"
+}
+
+# step_cpu <key>: the step's user plus system CPU in whole seconds, from bash's times ("0m1.234s 0m0.567s").
+step_cpu() {
+  local line m s total=0
+  line="$(sed -n 2p "$gate_out/$1.cpu" 2>/dev/null)"
+  [ -n "$line" ] || { echo "?"; return; }
+  for t in $line; do
+    m="${t%%m*}"; s="${t#*m}"; s="${s%s}"
+    total=$(awk -v t="$total" -v m="$m" -v s="$s" 'BEGIN { printf "%.3f", t + m * 60 + s }')
+  done
+  awk -v t="$total" 'BEGIN { printf "%d", t + 0.5 }'
 }
 
 # step <label> <bound> <command...>: a step run before the lanes, bounded and shown like a lane step.
